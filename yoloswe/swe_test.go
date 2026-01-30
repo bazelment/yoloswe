@@ -17,10 +17,10 @@ func TestNew(t *testing.T) {
 
 	tests := []struct {
 		name               string
-		config             Config
 		expectedBModel     string
 		expectedRModel     string
 		expectedRecDir     string
+		config             Config
 		expectedBudget     float64
 		expectedTimeout    int
 		expectedIterations int
@@ -123,9 +123,9 @@ func TestParseVerdict(t *testing.T) {
 	tests := []struct {
 		name             string
 		text             string
-		expectedAccepted bool
 		expectedSummary  string
 		expectedIssues   int
+		expectedAccepted bool
 		expectFeedback   bool
 	}{
 		{
@@ -467,19 +467,19 @@ func TestStats(t *testing.T) {
 func TestPrintSummary(t *testing.T) {
 	tests := []struct {
 		name       string
-		stats      Stats
 		shouldFind []string
+		stats      Stats
 	}{
 		{
 			name: "accepted with costs",
 			stats: Stats{
-				ExitReason:       ExitReasonAccepted,
-				IterationCount:   3,
-				TotalDurationMs:  45000,
-				BuilderCostUSD:   2.50,
-				BuilderTokensIn:  1000,
-				BuilderTokensOut: 2000,
-				ReviewerTokensIn: 500,
+				ExitReason:        ExitReasonAccepted,
+				IterationCount:    3,
+				TotalDurationMs:   45000,
+				BuilderCostUSD:    2.50,
+				BuilderTokensIn:   1000,
+				BuilderTokensOut:  2000,
+				ReviewerTokensIn:  500,
 				ReviewerTokensOut: 1500,
 			},
 			shouldFind: []string{
@@ -604,8 +604,8 @@ func TestTruncateString(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
-		maxLen   int
 		expected string
+		maxLen   int
 	}{
 		{
 			name:     "short string",
@@ -662,9 +662,9 @@ func TestExtractBalancedJSON(t *testing.T) {
 	tests := []struct {
 		name      string
 		text      string
+		expected  string
 		idx       int
 		startChar byte
-		expected  string
 	}{
 		{
 			name:      "simple object",
@@ -803,10 +803,10 @@ func TestParseVerdictEdgeCases(t *testing.T) {
 	swe := New(Config{})
 
 	tests := []struct {
+		checkFeedback    func(string) bool
 		name             string
 		text             string
 		expectedAccepted bool
-		checkFeedback    func(string) bool
 	}{
 		{
 			name:             "verdict with extra whitespace",
@@ -841,8 +841,8 @@ func TestParseVerdictEdgeCases(t *testing.T) {
 			checkFeedback:    nil,
 		},
 		{
-			name: "code block with extra markdown",
-			text: "Here's my review:\n```json\n{\"verdict\": \"accepted\", \"summary\": \"OK\", \"issues\": []}\n```\nThanks!",
+			name:             "code block with extra markdown",
+			text:             "Here's my review:\n```json\n{\"verdict\": \"accepted\", \"summary\": \"OK\", \"issues\": []}\n```\nThanks!",
 			expectedAccepted: true,
 			checkFeedback:    nil,
 		},
@@ -918,9 +918,9 @@ func TestParseVerdictEdgeCases(t *testing.T) {
 
 func TestFormatFeedbackEdgeCases(t *testing.T) {
 	tests := []struct {
+		validate func(string) bool
 		name     string
 		verdict  ReviewVerdictJSON
-		validate func(string) bool
 	}{
 		{
 			name: "issue without file",

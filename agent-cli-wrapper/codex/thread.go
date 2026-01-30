@@ -8,21 +8,16 @@ import (
 
 // Thread represents an active conversation thread.
 type Thread struct {
-	mu sync.RWMutex
-
-	client      *Client
-	id          string
-	info        *ThreadInfo
-	config      ThreadConfig
-	state       *threadStateManager
-	accumulator *threadAccumulator
-
-	// Current turn tracking
-	currentTurnID string
+	config        ThreadConfig
 	turnStartTime time.Time
-
-	// Completion waiters
-	turnWaiters map[string][]chan *TurnResult
+	client        *Client
+	info          *ThreadInfo
+	state         *threadStateManager
+	accumulator   *threadAccumulator
+	turnWaiters   map[string][]chan *TurnResult
+	id            string
+	currentTurnID string
+	mu            sync.RWMutex
 }
 
 func newThread(client *Client, id string, config ThreadConfig) *Thread {
@@ -293,10 +288,10 @@ func (t *Thread) setError(err error) {
 
 // TurnResult contains the result of a completed turn.
 type TurnResult struct {
-	TurnID     string
-	Success    bool
-	FullText   string
-	DurationMs int64
-	Usage      TurnUsage
 	Error      error
+	TurnID     string
+	FullText   string
+	Usage      TurnUsage
+	DurationMs int64
+	Success    bool
 }

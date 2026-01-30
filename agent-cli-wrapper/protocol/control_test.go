@@ -182,9 +182,9 @@ func TestPermissionResultDeny_JSONSerialization(t *testing.T) {
 func TestParseToolUseRequest(t *testing.T) {
 	tests := []struct {
 		name         string
+		expectedTool string
 		request      ControlRequest
 		expectNil    bool
-		expectedTool string
 	}{
 		{
 			name: "can_use_tool request",

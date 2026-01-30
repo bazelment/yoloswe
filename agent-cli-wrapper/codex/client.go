@@ -12,24 +12,19 @@ import (
 // Client manages the Codex app-server subprocess and provides
 // a high-level API for interacting with Codex.
 type Client struct {
-	mu sync.RWMutex
-
-	config      ClientConfig
+	pending     map[int64]chan *rpcResult
 	process     *processManager
 	state       *clientStateManager
 	threads     map[string]*Thread
 	idGen       *idGenerator
-	pending     map[int64]chan *rpcResult
 	events      chan Event
 	accumulator *streamAccumulator
-
-	// Client info (set after initialize)
-	info *ConnectionInfo
-
-	// Lifecycle
-	started  bool
-	stopping bool
-	done     chan struct{}
+	info        *ConnectionInfo
+	done        chan struct{}
+	config      ClientConfig
+	mu          sync.RWMutex
+	started     bool
+	stopping    bool
 }
 
 // ConnectionInfo contains connection metadata after initialization.
@@ -700,22 +695,6 @@ func (c *Client) handleItemCompleted(params json.RawMessage) {
 		ItemType: item.Type,
 		Text:     item.Text,
 	})
-}
-
-// sendRequest sends a JSON-RPC request without waiting for response.
-func (c *Client) sendRequest(method string, params interface{}) (int64, error) {
-	id := c.idGen.Next()
-
-	req, err := newRequest(id, method, params)
-	if err != nil {
-		return 0, err
-	}
-
-	if err := c.process.WriteJSON(req); err != nil {
-		return 0, err
-	}
-
-	return id, nil
 }
 
 // sendRequestAndWait sends a request and waits for the response.

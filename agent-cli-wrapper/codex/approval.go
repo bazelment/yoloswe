@@ -26,17 +26,17 @@ const (
 
 // ApprovalRequest contains data for an approval request.
 type ApprovalRequest struct {
+	Input    map[string]interface{}
 	ThreadID string
 	TurnID   string
 	ToolName string
-	Input    map[string]interface{}
 }
 
 // ApprovalResponse contains the response to an approval request.
 type ApprovalResponse struct {
-	Approved     bool
-	Message      string
 	UpdatedInput map[string]interface{}
+	Message      string
+	Approved     bool
 }
 
 // ApprovalHandler handles tool execution approval requests.

@@ -16,31 +16,6 @@ const (
 
 // SessionConfig holds session configuration.
 type SessionConfig struct {
-	// Model to use: "haiku", "sonnet", "opus"
-	Model string
-
-	// WorkDir is the working directory for file operations.
-	WorkDir string
-
-	// PermissionMode controls tool execution approval.
-	PermissionMode PermissionMode
-
-	// DangerouslySkipPermissions skips all permission prompts (use with caution).
-	// This is typically used with PermissionModePlan to enable plan mode without prompts.
-	DangerouslySkipPermissions bool
-
-	// CLIPath is the path to the Claude CLI binary (uses "claude" in PATH if empty).
-	CLIPath string
-
-	// DisablePlugins disables CLI plugins for faster startup.
-	DisablePlugins bool
-
-	// RecordMessages enables session recording.
-	RecordMessages bool
-
-	// RecordingDir is the directory for recordings (default: .claude-sessions).
-	RecordingDir string
-
 	// PermissionHandler handles permission requests in default mode.
 	PermissionHandler PermissionHandler
 
@@ -48,27 +23,52 @@ type SessionConfig struct {
 	// These tools require user input, not permission approval.
 	InteractiveToolHandler InteractiveToolHandler
 
-	// EventBufferSize is the event channel buffer size (default: 100).
-	EventBufferSize int
+	// MCPConfig configures MCP servers for custom tools.
+	MCPConfig *MCPConfig
 
 	// StderrHandler is an optional handler for CLI stderr output.
 	StderrHandler func([]byte)
 
-	// MCPConfig configures MCP servers for custom tools.
-	MCPConfig *MCPConfig
+	// Model to use: "haiku", "sonnet", "opus"
+	Model string
+
+	// RecordingDir is the directory for recordings (default: .claude-sessions).
+	RecordingDir string
+
+	// PermissionMode controls tool execution approval.
+	PermissionMode PermissionMode
+
+	// WorkDir is the working directory for file operations.
+	WorkDir string
+
+	// CLIPath is the path to the Claude CLI binary (uses "claude" in PATH if empty).
+	CLIPath string
 
 	// SystemPrompt overrides the default system prompt.
 	SystemPrompt string
+
+	// Resume is the session ID to resume. If set, the CLI will continue
+	// a previous session instead of starting a new one.
+	Resume string
+
+	// EventBufferSize is the event channel buffer size (default: 100).
+	EventBufferSize int
+
+	// DisablePlugins disables CLI plugins for faster startup.
+	DisablePlugins bool
+
+	// RecordMessages enables session recording.
+	RecordMessages bool
+
+	// DangerouslySkipPermissions skips all permission prompts (use with caution).
+	// This is typically used with PermissionModePlan to enable plan mode without prompts.
+	DangerouslySkipPermissions bool
 
 	// PermissionPromptToolStdio enables stdio-based permission prompts.
 	// When true, all permission prompts flow through the control protocol
 	// as can_use_tool control requests instead of CLI's interactive UI.
 	// This enables fully programmatic permission control.
 	PermissionPromptToolStdio bool
-
-	// Resume is the session ID to resume. If set, the CLI will continue
-	// a previous session instead of starting a new one.
-	Resume string
 }
 
 // SessionOption is a functional option for configuring a Session.

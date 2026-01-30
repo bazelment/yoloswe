@@ -3,9 +3,9 @@ package testutil
 import (
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
 	"github.com/bazelment/yoloswe/multiagent/subagent"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // Sample design response JSON for testing
@@ -139,13 +139,13 @@ func NewSampleProgressEvents() []subagent.Progress {
 			Message:   "Analyzing requirements",
 		},
 		{
-			Type:      subagent.MessageTypeProgress,
-			RequestID: "req-1",
-			Agent:     subagent.AgentTypeDesigner,
-			Timestamp: now.Add(100 * time.Millisecond),
-			Phase:     subagent.PhaseToolCall,
-			ToolName:  "Read",
-			ToolID:    "tool-1",
+			Type:        subagent.MessageTypeProgress,
+			RequestID:   "req-1",
+			Agent:       subagent.AgentTypeDesigner,
+			Timestamp:   now.Add(100 * time.Millisecond),
+			Phase:       subagent.PhaseToolCall,
+			ToolName:    "Read",
+			ToolID:      "tool-1",
 			ToolStarted: true,
 		},
 		{

@@ -10,8 +10,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/spf13/cobra"
+
+	"github.com/bazelment/yoloswe/yoloswe"
 )
 
 var (

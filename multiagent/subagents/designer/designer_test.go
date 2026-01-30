@@ -84,10 +84,10 @@ func TestFormatDesignPrompt(t *testing.T) {
 
 func TestParseDesignResponse(t *testing.T) {
 	tests := []struct {
+		check   func(*protocol.DesignResponse) bool
 		name    string
 		input   string
 		wantErr bool
-		check   func(*protocol.DesignResponse) bool
 	}{
 		{
 			name: "valid JSON",
@@ -102,16 +102,16 @@ func TestParseDesignResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "JSON in code block",
-			input: "```json\n{\"architecture\": \"Test\", \"files\": [], \"implementation_notes\": []}\n```",
+			name:    "JSON in code block",
+			input:   "```json\n{\"architecture\": \"Test\", \"files\": [], \"implementation_notes\": []}\n```",
 			wantErr: false,
 			check: func(r *protocol.DesignResponse) bool {
 				return r.Architecture == "Test"
 			},
 		},
 		{
-			name: "JSON with surrounding text",
-			input: "Here is the design:\n{\"architecture\": \"Design\", \"files\": [], \"implementation_notes\": []}\nDone.",
+			name:    "JSON with surrounding text",
+			input:   "Here is the design:\n{\"architecture\": \"Design\", \"files\": [], \"implementation_notes\": []}\nDone.",
 			wantErr: false,
 			check: func(r *protocol.DesignResponse) bool {
 				return r.Architecture == "Design"

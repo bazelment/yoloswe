@@ -141,10 +141,10 @@ func (m *clientStateManager) IsReady() bool {
 
 // threadStateManager manages thread-safe thread state transitions.
 type threadStateManager struct {
-	mu       sync.RWMutex
+	startErr error
 	cond     *sync.Cond
 	state    ThreadState
-	startErr error // Error from startup (e.g., MCP initialization failure)
+	mu       sync.RWMutex
 }
 
 func newThreadStateManager() *threadStateManager {

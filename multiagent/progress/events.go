@@ -80,12 +80,12 @@ func NewAgentStartEvent(role agent.AgentRole, taskID, taskDesc string) AgentStar
 // AgentCompleteEvent fires when an agent finishes.
 type AgentCompleteEvent struct {
 	ts       time.Time
+	Error    error
 	Role     agent.AgentRole
 	TaskID   string
-	Success  bool
 	CostUSD  float64
 	Duration time.Duration
-	Error    error
+	Success  bool
 }
 
 // Type returns the event type.
@@ -132,11 +132,11 @@ func NewAgentThinkingEvent(role agent.AgentRole, message string) AgentThinkingEv
 // ToolActivityEvent fires for tool usage.
 type ToolActivityEvent struct {
 	ts        time.Time
+	Input     map[string]interface{}
 	AgentRole agent.AgentRole
 	ToolName  string
 	ToolID    string
-	Input     map[string]interface{}
-	Started   bool // true = start, false = complete
+	Started   bool
 }
 
 // Type returns the event type.
@@ -176,9 +176,9 @@ func NewToolCompleteEvent(role agent.AgentRole, toolName, toolID string, input m
 // IterationEvent fires when a design-build-review cycle occurs.
 type IterationEvent struct {
 	ts            time.Time
+	Reason        string
 	Number        int
 	MaxIterations int
-	Reason        string
 }
 
 // Type returns the event type.
@@ -200,9 +200,9 @@ func NewIterationEvent(number, max int, reason string) IterationEvent {
 // CostUpdateEvent fires periodically with accumulated cost.
 type CostUpdateEvent struct {
 	ts           time.Time
+	AgentCosts   map[agent.AgentRole]float64
 	TotalCostUSD float64
 	BudgetUSD    float64
-	AgentCosts   map[agent.AgentRole]float64
 }
 
 // Type returns the event type.

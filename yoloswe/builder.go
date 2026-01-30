@@ -19,17 +19,17 @@ type BuilderConfig struct {
 	WorkDir         string
 	RecordingDir    string
 	SystemPrompt    string
+	ResumeSessionID string
 	Verbose         bool
-	RequireApproval bool   // Require user approval for tool executions (default: auto-approve)
-	ResumeSessionID string // Resume from a previous session ID
+	RequireApproval bool
 }
 
 // BuilderSession wraps a claude.Session for builder operations.
 type BuilderSession struct {
-	session  *claude.Session
-	config   BuilderConfig
 	output   io.Writer
+	session  *claude.Session
 	renderer *render.Renderer
+	config   BuilderConfig
 }
 
 // NewBuilderSession creates a new builder session with the given config.

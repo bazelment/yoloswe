@@ -41,15 +41,15 @@ import (
 // readLineWithContext reads a line from stdin with context cancellation support.
 //
 // Design notes:
-// - We read directly from os.Stdin byte-by-byte instead of using bufio.Reader
-//   to avoid buffering issues where input typed during one prompt leaks into
-//   the next prompt.
-// - We use SetReadDeadline with short timeouts to make the read interruptible,
-//   allowing clean cancellation when the context is cancelled (e.g., Ctrl+C).
-// - If SetReadDeadline isn't supported (e.g., pipes), we fall back to a goroutine
-//   approach with potential leak on cancellation.
-// - This approach trades some efficiency (byte-by-byte vs buffered) for
-//   correctness (no input leakage) and clean shutdown (no goroutine leaks).
+//   - We read directly from os.Stdin byte-by-byte instead of using bufio.Reader
+//     to avoid buffering issues where input typed during one prompt leaks into
+//     the next prompt.
+//   - We use SetReadDeadline with short timeouts to make the read interruptible,
+//     allowing clean cancellation when the context is cancelled (e.g., Ctrl+C).
+//   - If SetReadDeadline isn't supported (e.g., pipes), we fall back to a goroutine
+//     approach with potential leak on cancellation.
+//   - This approach trades some efficiency (byte-by-byte vs buffered) for
+//     correctness (no input leakage) and clean shutdown (no goroutine leaks).
 func (p *PlannerWrapper) readLineWithContext(ctx context.Context) (string, error) {
 	// Try to set deadline to test if it's supported
 	testErr := os.Stdin.SetReadDeadline(time.Now().Add(time.Millisecond))
@@ -97,8 +97,8 @@ func (p *PlannerWrapper) readLineWithContext(ctx context.Context) (string, error
 // Note: If context is cancelled, the goroutine may leak until stdin receives input.
 func (p *PlannerWrapper) readLineWithGoroutine(ctx context.Context) (string, error) {
 	type result struct {
-		line string
 		err  error
+		line string
 	}
 	ch := make(chan result, 1)
 
@@ -108,12 +108,12 @@ func (p *PlannerWrapper) readLineWithGoroutine(ctx context.Context) (string, err
 		for {
 			n, err := os.Stdin.Read(buf)
 			if err != nil {
-				ch <- result{"", err}
+				ch <- result{err, ""}
 				return
 			}
 			if n > 0 {
 				if buf[0] == '\n' {
-					ch <- result{strings.TrimSpace(line.String()), nil}
+					ch <- result{nil, strings.TrimSpace(line.String())}
 					return
 				}
 				line.WriteByte(buf[0])
@@ -165,13 +165,6 @@ type Config struct {
 	// SystemPrompt overrides the default system prompt.
 	SystemPrompt string
 
-	// Verbose enables detailed tool result output. When false, only errors are shown.
-	Verbose bool
-
-	// Simple enables non-interactive mode: auto-answers questions with first option
-	// and exports plan to markdown on completion.
-	Simple bool
-
 	// Prompt is the initial prompt, used for generating output filenames in simple mode.
 	Prompt string
 
@@ -188,6 +181,13 @@ type Config struct {
 	// If empty, uses Model for both planning and building.
 	// When set, planning uses Model and building uses BuildModel.
 	BuildModel string
+
+	// Verbose enables detailed tool result output. When false, only errors are shown.
+	Verbose bool
+
+	// Simple enables non-interactive mode: auto-answers questions with first option
+	// and exports plan to markdown on completion.
+	Simple bool
 }
 
 // SessionStats tracks cumulative token usage and cost for a session phase.
@@ -210,27 +210,15 @@ func (s *SessionStats) Add(usage claude.TurnUsage) {
 
 // PlannerWrapper wraps a claude.Session with planner-specific logic.
 type PlannerWrapper struct {
-	session  *claude.Session
-	renderer *Renderer
-	config   Config
-
-	// Path to the plan file written by Claude (detected from Write tool calls)
-	planFilePath string
-
-	// State tracking
-	waitingForUserInput bool // True when waiting for AskUserQuestion or ExitPlanMode response
-
-	// Usage tracking
-	planningStats SessionStats // Stats for the planning phase
-	buildingStats SessionStats // Stats for the building/implementation phase
-	inBuildPhase  bool         // True after transitioning from plan to build
-
-	// Build execution state
-	// When we start executing (current or new session), we set pendingBuildStart=true.
-	// The next TurnComplete (from the planning turn) will see this, finalize planning stats,
-	// then set inBuildPhase=true. Subsequent TurnCompletes accumulate build stats.
-	// We keep waitingForUserInput=true until the build turn completes.
-	pendingBuildStart bool
+	session             *claude.Session
+	renderer            *Renderer
+	planFilePath        string
+	config              Config
+	planningStats       SessionStats
+	buildingStats       SessionStats
+	waitingForUserInput bool
+	inBuildPhase        bool
+	pendingBuildStart   bool
 }
 
 // NewPlannerWrapper creates a new planner wrapper with the given configuration.

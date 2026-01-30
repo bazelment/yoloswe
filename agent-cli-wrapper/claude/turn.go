@@ -16,41 +16,41 @@ type TurnUsage struct {
 
 // TurnResult contains the result of a completed turn.
 type TurnResult struct {
-	TurnNumber int
-	Success    bool
-	DurationMs int64
-	Usage      TurnUsage
 	Error      error
-	Text       string // Full response text from the turn
-	Thinking   string // Extended thinking content (if enabled)
+	Text       string
+	Thinking   string
+	Usage      TurnUsage
+	TurnNumber int
+	DurationMs int64
+	Success    bool
 }
 
 // turnState tracks the state of a single turn.
 type turnState struct {
-	Number       int
-	UserMessage  interface{} // string or []ContentBlock
 	StartTime    time.Time
+	UserMessage  interface{}
+	Tools        map[string]*toolState
 	FullText     string
 	FullThinking string
-	Tools        map[string]*toolState
+	Number       int
 }
 
 // toolState tracks the state of a tool within a turn.
 type toolState struct {
+	StartTime    time.Time
+	Input        map[string]interface{}
 	ID           string
 	Name         string
 	PartialInput string
-	Input        map[string]interface{}
-	StartTime    time.Time
 }
 
 // turnManager manages turn state and completion tracking.
 type turnManager struct {
-	mu                sync.RWMutex
-	currentTurnNumber int
 	currentTurn       *turnState
-	turns             []*turnState
 	completionWaiters map[int][]chan *TurnResult
+	turns             []*turnState
+	currentTurnNumber int
+	mu                sync.RWMutex
 }
 
 // newTurnManager creates a new turn manager.

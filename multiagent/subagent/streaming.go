@@ -6,36 +6,30 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // StreamingSubAgent wraps an ephemeral Claude session with streaming progress.
 // It transforms Claude SDK events into protocol events and tracks file operations,
 // costs, and accumulated text automatically.
 type StreamingSubAgent struct {
-	config    agent.AgentConfig
-	sessionID string
-	requestID string
-	agentType AgentType
-
-	// Event streaming
-	events     chan interface{}
-	eventsDone chan struct{} // closed when processClaudeEvents goroutine exits
-
-	// Cancellation and close state
-	mu           sync.Mutex
-	cancelled    bool
-	eventsClosed bool
-	cancelFunc   context.CancelFunc
-
-	// Tracked state
+	events        chan interface{}
+	cancelFunc    context.CancelFunc
+	eventsDone    chan struct{}
+	fullText      string
+	agentType     AgentType
+	requestID     string
+	sessionID     string
 	filesCreated  []string
 	filesModified []string
-	fullText      string
+	config        agent.AgentConfig
 	totalCost     float64
 	inputTokens   int
 	outputTokens  int
+	mu            sync.Mutex
+	cancelled     bool
+	eventsClosed  bool
 }
 
 // NewStreamingSubAgent creates a new streaming sub-agent.

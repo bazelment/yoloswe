@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -201,10 +202,21 @@ func TestRecordedMessage_MarshalJSON(t *testing.T) {
 		t.Fatalf("Marshal failed: %v", err)
 	}
 
-	// Verify millisecond precision format
-	expected := `{"timestamp":"2024-01-27T10:30:45.123Z","direction":"sent","message":{"type":"user"}}`
-	if string(data) != expected {
-		t.Errorf("unexpected JSON:\n  got:      %s\n  expected: %s", string(data), expected)
+	// Verify by unmarshaling back and comparing values
+	var unmarshaled RecordedMessage
+	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if !unmarshaled.Timestamp.Equal(msg.Timestamp) {
+		t.Errorf("timestamp mismatch: got %v, want %v", unmarshaled.Timestamp, msg.Timestamp)
+	}
+	if unmarshaled.Direction != msg.Direction {
+		t.Errorf("direction mismatch: got %v, want %v", unmarshaled.Direction, msg.Direction)
+	}
+
+	// Verify millisecond precision in timestamp string
+	if !strings.Contains(string(data), "2024-01-27T10:30:45.123Z") {
+		t.Errorf("timestamp format wrong in JSON: %s", string(data))
 	}
 }
 

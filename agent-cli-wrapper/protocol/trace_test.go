@@ -14,8 +14,8 @@ type TraceEntry struct {
 	ID         string          `json:"id"`
 	Timestamp  string          `json:"timestamp"`
 	Direction  string          `json:"direction"`
-	TurnNumber int             `json:"turnNumber"`
 	Message    json.RawMessage `json:"message"`
+	TurnNumber int             `json:"turnNumber"`
 }
 
 // parseTraceEntry parses a trace entry and extracts the inner message.

@@ -11,25 +11,25 @@ import (
 
 // MockResponse represents a pre-configured response for mock sessions.
 type MockResponse struct {
+	Error   error
 	Text    string
 	Cost    float64
 	Success bool
-	Error   error
 }
 
 // MockLongRunningSession simulates a LongRunningSession for testing.
 // It returns pre-configured responses without making actual API calls.
 type MockLongRunningSession struct {
-	mu            sync.Mutex
-	config        MockSessionConfig
 	sessionDir    string
+	config        MockSessionConfig
 	responses     []MockResponse
+	messages      []string
 	responseIndex int
 	totalCost     float64
 	turnCount     int
+	mu            sync.Mutex
 	started       bool
 	stopped       bool
-	messages      []string // Records all messages sent
 }
 
 // MockSessionConfig configures mock session behavior.
@@ -153,14 +153,14 @@ func (m *MockLongRunningSession) IsStopped() bool {
 
 // MockEphemeralSession simulates an EphemeralSession for testing.
 type MockEphemeralSession struct {
-	mu             sync.Mutex
-	config         MockSessionConfig
 	baseSessionDir string
+	config         MockSessionConfig
 	responses      []MockResponse
+	prompts        []string
 	responseIndex  int
 	totalCost      float64
 	taskCount      int
-	prompts        []string // Records all prompts executed
+	mu             sync.Mutex
 }
 
 // NewMockEphemeralSession creates a new mock ephemeral session.

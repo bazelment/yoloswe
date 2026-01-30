@@ -4,8 +4,8 @@ import "sync"
 
 // streamAccumulator accumulates streaming text deltas into full responses.
 type streamAccumulator struct {
-	mu      sync.Mutex
 	threads map[string]*threadAccumulator
+	mu      sync.Mutex
 }
 
 func newStreamAccumulator() *streamAccumulator {
@@ -66,10 +66,10 @@ func (sa *streamAccumulator) RemoveThread(threadID string) {
 
 // threadAccumulator accumulates data for a single thread.
 type threadAccumulator struct {
-	mu            sync.Mutex
+	items         map[string]*itemAccumulator
 	currentTurnID string
 	fullText      string
-	items         map[string]*itemAccumulator
+	mu            sync.Mutex
 }
 
 func (ta *threadAccumulator) handleDelta(turnID, itemID, delta string) string {

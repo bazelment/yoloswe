@@ -158,18 +158,18 @@ func TestManager_FailedState(t *testing.T) {
 
 func TestCheckpoint_CanResume(t *testing.T) {
 	tests := []struct {
+		design    *protocol.DesignResponse
 		name      string
 		phase     Phase
-		design    *protocol.DesignResponse
 		canResume bool
 	}{
-		{"not started", PhaseNotStarted, nil, false},
-		{"designing", PhaseDesigning, nil, true},
-		{"building", PhaseBuilding, nil, true},
-		{"reviewing", PhaseReviewing, nil, true},
-		{"completed", PhaseCompleted, nil, false},
-		{"failed no design", PhaseFailed, nil, false},
-		{"failed with design", PhaseFailed, &protocol.DesignResponse{}, true},
+		{nil, "not started", PhaseNotStarted, false},
+		{nil, "designing", PhaseDesigning, true},
+		{nil, "building", PhaseBuilding, true},
+		{nil, "reviewing", PhaseReviewing, true},
+		{nil, "completed", PhaseCompleted, false},
+		{nil, "failed no design", PhaseFailed, false},
+		{&protocol.DesignResponse{}, "failed with design", PhaseFailed, true},
 	}
 
 	for _, tt := range tests {
@@ -188,46 +188,46 @@ func TestCheckpoint_CanResume(t *testing.T) {
 func TestCheckpoint_ResumePhase(t *testing.T) {
 	tests := []struct {
 		name        string
-		checkpoint  Checkpoint
 		resumePhase Phase
+		checkpoint  Checkpoint
 	}{
 		{
 			"from designing",
-			Checkpoint{Phase: PhaseDesigning},
 			PhaseDesigning,
+			Checkpoint{Phase: PhaseDesigning},
 		},
 		{
 			"from building no response",
-			Checkpoint{Phase: PhaseBuilding},
 			PhaseBuilding,
+			Checkpoint{Phase: PhaseBuilding},
 		},
 		{
 			"from building with response",
-			Checkpoint{Phase: PhaseBuilding, BuildResponse: &protocol.BuildResponse{}},
 			PhaseReviewing,
+			Checkpoint{Phase: PhaseBuilding, BuildResponse: &protocol.BuildResponse{}},
 		},
 		{
 			"from reviewing no critical",
-			Checkpoint{Phase: PhaseReviewing, ReviewResponse: &protocol.ReviewResponse{Summary: "OK", Issues: []protocol.Issue{}}},
 			PhaseReviewing,
+			Checkpoint{Phase: PhaseReviewing, ReviewResponse: &protocol.ReviewResponse{Summary: "OK", Issues: []protocol.Issue{}}},
 		},
 		{
 			"from reviewing with critical",
+			PhaseBuilding,
 			Checkpoint{Phase: PhaseReviewing, ReviewResponse: &protocol.ReviewResponse{
 				Summary: "Issues found",
 				Issues:  []protocol.Issue{{Severity: "critical", File: "main.go", Message: "error"}},
 			}},
-			PhaseBuilding,
 		},
 		{
 			"from failed with design only",
-			Checkpoint{Phase: PhaseFailed, DesignResponse: &protocol.DesignResponse{}},
 			PhaseBuilding,
+			Checkpoint{Phase: PhaseFailed, DesignResponse: &protocol.DesignResponse{}},
 		},
 		{
 			"from failed with build",
-			Checkpoint{Phase: PhaseFailed, DesignResponse: &protocol.DesignResponse{}, BuildResponse: &protocol.BuildResponse{}},
 			PhaseReviewing,
+			Checkpoint{Phase: PhaseFailed, DesignResponse: &protocol.DesignResponse{}, BuildResponse: &protocol.BuildResponse{}},
 		},
 	}
 

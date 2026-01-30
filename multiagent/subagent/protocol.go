@@ -74,24 +74,18 @@ type Cancel struct {
 
 // Progress streams incremental updates during task execution.
 type Progress struct {
-	Type      MessageType `json:"type"`
-	RequestID string      `json:"request_id"`
-	Agent     AgentType   `json:"agent"`
-	Timestamp time.Time   `json:"timestamp"`
-
-	// Progress details
-	Phase   Phase  `json:"phase"`
-	Message string `json:"message,omitempty"`
-
-	// Streaming text (when Phase == PhaseStreaming)
-	TextDelta string `json:"text_delta,omitempty"`
-	FullText  string `json:"full_text,omitempty"`
-
-	// Tool activity (when Phase == PhaseToolCall)
+	Timestamp   time.Time              `json:"timestamp"`
+	ToolInput   map[string]interface{} `json:"tool_input,omitempty"`
+	Type        MessageType            `json:"type"`
+	RequestID   string                 `json:"request_id"`
+	Agent       AgentType              `json:"agent"`
+	Phase       Phase                  `json:"phase"`
+	Message     string                 `json:"message,omitempty"`
+	TextDelta   string                 `json:"text_delta,omitempty"`
+	FullText    string                 `json:"full_text,omitempty"`
 	ToolName    string                 `json:"tool_name,omitempty"`
 	ToolID      string                 `json:"tool_id,omitempty"`
-	ToolInput   map[string]interface{} `json:"tool_input,omitempty"`
-	ToolStarted bool                   `json:"tool_started,omitempty"` // true=start, false=complete
+	ToolStarted bool                   `json:"tool_started,omitempty"`
 }
 
 // FileEvent reports file operations detected from tool calls.
@@ -108,40 +102,32 @@ type FileEvent struct {
 
 // CostUpdate reports accumulated cost during execution.
 type CostUpdate struct {
-	Type      MessageType `json:"type"`
-	RequestID string      `json:"request_id"`
-	Agent     AgentType   `json:"agent"`
-	Timestamp time.Time   `json:"timestamp"`
-
-	TurnCostUSD  float64 `json:"turn_cost_usd"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
+	Timestamp    time.Time   `json:"timestamp"`
+	Type         MessageType `json:"type"`
+	RequestID    string      `json:"request_id"`
+	Agent        AgentType   `json:"agent"`
+	TurnCostUSD  float64     `json:"turn_cost_usd"`
+	TotalCostUSD float64     `json:"total_cost_usd"`
+	InputTokens  int         `json:"input_tokens"`
+	OutputTokens int         `json:"output_tokens"`
 }
 
 // Result is the final response from a sub-agent.
 type Result struct {
-	Type      MessageType `json:"type"`
-	RequestID string      `json:"request_id"`
-	Agent     AgentType   `json:"agent"`
-	Timestamp time.Time   `json:"timestamp"`
-
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-
-	// Full response text for parsing
-	Text string `json:"text,omitempty"`
-
-	// Parsed response (one of these, based on agent type)
-	Design *protocol.DesignResponse `json:"design,omitempty"`
-	Build  *protocol.BuildResponse  `json:"build,omitempty"`
-	Review *protocol.ReviewResponse `json:"review,omitempty"`
-
-	// Aggregated data
-	FilesCreated  []string `json:"files_created"`
-	FilesModified []string `json:"files_modified"`
-	TotalCostUSD  float64  `json:"total_cost_usd"`
-	DurationMs    int64    `json:"duration_ms"`
+	Timestamp     time.Time                `json:"timestamp"`
+	Review        *protocol.ReviewResponse `json:"review,omitempty"`
+	Design        *protocol.DesignResponse `json:"design,omitempty"`
+	Build         *protocol.BuildResponse  `json:"build,omitempty"`
+	Agent         AgentType                `json:"agent"`
+	RequestID     string                   `json:"request_id"`
+	Error         string                   `json:"error,omitempty"`
+	Text          string                   `json:"text,omitempty"`
+	Type          MessageType              `json:"type"`
+	FilesCreated  []string                 `json:"files_created"`
+	FilesModified []string                 `json:"files_modified"`
+	TotalCostUSD  float64                  `json:"total_cost_usd"`
+	DurationMs    int64                    `json:"duration_ms"`
+	Success       bool                     `json:"success"`
 }
 
 // Error reports an error during task execution.

@@ -150,7 +150,7 @@ func TestMockEphemeralSession_Execute(t *testing.T) {
 	}
 
 	// Second execute
-	result, taskID, err = session.Execute(context.Background(), "build this")
+	_, taskID, err = session.Execute(context.Background(), "build this")
 	if err != nil {
 		t.Fatalf("Execute(2) error: %v", err)
 	}

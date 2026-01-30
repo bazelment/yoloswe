@@ -19,9 +19,9 @@ var (
 
 // ProtocolError represents a protocol-level error.
 type ProtocolError struct {
+	Cause   error
 	Message string
 	Line    string
-	Cause   error
 }
 
 func (e *ProtocolError) Error() string {
@@ -37,10 +37,10 @@ func (e *ProtocolError) Unwrap() error {
 
 // ProcessError represents a process-level error.
 type ProcessError struct {
-	Message  string
-	ExitCode int
-	Stderr   string
 	Cause    error
+	Message  string
+	Stderr   string
+	ExitCode int
 }
 
 func (e *ProcessError) Error() string {
@@ -56,9 +56,9 @@ func (e *ProcessError) Unwrap() error {
 
 // TurnError represents an error during turn execution.
 type TurnError struct {
-	TurnNumber int
-	Message    string
 	Cause      error
+	Message    string
+	TurnNumber int
 }
 
 func (e *TurnError) Error() string {

@@ -10,14 +10,14 @@ import (
 
 func TestClientState_String(t *testing.T) {
 	tests := []struct {
-		state    ClientState
 		expected string
+		state    ClientState
 	}{
-		{ClientStateUninitialized, "uninitialized"},
-		{ClientStateStarting, "starting"},
-		{ClientStateReady, "ready"},
-		{ClientStateClosed, "closed"},
-		{ClientState(99), "unknown"},
+		{"uninitialized", ClientStateUninitialized},
+		{"starting", ClientStateStarting},
+		{"ready", ClientStateReady},
+		{"closed", ClientStateClosed},
+		{"unknown", ClientState(99)},
 	}
 
 	for _, tt := range tests {
@@ -29,15 +29,15 @@ func TestClientState_String(t *testing.T) {
 
 func TestThreadState_String(t *testing.T) {
 	tests := []struct {
-		state    ThreadState
 		expected string
+		state    ThreadState
 	}{
-		{ThreadStateCreating, "creating"},
-		{ThreadStateStarting, "starting"},
-		{ThreadStateReady, "ready"},
-		{ThreadStateProcessing, "processing"},
-		{ThreadStateClosed, "closed"},
-		{ThreadState(99), "unknown"},
+		{"creating", ThreadStateCreating},
+		{"starting", ThreadStateStarting},
+		{"ready", ThreadStateReady},
+		{"processing", ThreadStateProcessing},
+		{"closed", ThreadStateClosed},
+		{"unknown", ThreadState(99)},
 	}
 
 	for _, tt := range tests {
@@ -96,12 +96,12 @@ func TestClientStateManager_Transitions(t *testing.T) {
 
 func TestClientStateManager_SetClosedFromAnyState(t *testing.T) {
 	states := []struct {
-		name  string
 		setup func(*clientStateManager)
+		name  string
 	}{
-		{"uninitialized", func(m *clientStateManager) {}},
-		{"starting", func(m *clientStateManager) { m.SetStarting() }},
-		{"ready", func(m *clientStateManager) { m.SetStarting(); m.SetReady() }},
+		{func(m *clientStateManager) {}, "uninitialized"},
+		{func(m *clientStateManager) { m.SetStarting() }, "starting"},
+		{func(m *clientStateManager) { m.SetStarting(); m.SetReady() }, "ready"},
 	}
 
 	for _, tt := range states {

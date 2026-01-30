@@ -2,6 +2,12 @@ package codex
 
 // ClientConfig holds client configuration.
 type ClientConfig struct {
+	// ApprovalHandler handles tool execution approval requests.
+	ApprovalHandler ApprovalHandler
+
+	// StderrHandler is an optional handler for app-server stderr output.
+	StderrHandler func([]byte)
+
 	// CodexPath is the path to the Codex CLI binary (uses "codex" in PATH if empty).
 	CodexPath string
 
@@ -11,18 +17,12 @@ type ClientConfig struct {
 	// ClientVersion is the client version string.
 	ClientVersion string
 
-	// EventBufferSize is the event channel buffer size (default: 100).
-	EventBufferSize int
-
-	// StderrHandler is an optional handler for app-server stderr output.
-	StderrHandler func([]byte)
-
-	// ApprovalHandler handles tool execution approval requests.
-	ApprovalHandler ApprovalHandler
-
 	// SessionLogPath is the path to write session logs (JSON messages).
 	// If empty, no session logging is performed.
 	SessionLogPath string
+
+	// EventBufferSize is the event channel buffer size (default: 100).
+	EventBufferSize int
 }
 
 func defaultClientConfig() ClientConfig {
@@ -88,6 +88,12 @@ func WithSessionLogPath(path string) ClientOption {
 
 // ThreadConfig holds thread-specific configuration.
 type ThreadConfig struct {
+	// Sandbox configures the sandbox settings.
+	Sandbox *SandboxConfig
+
+	// Config is additional configuration options.
+	Config map[string]interface{}
+
 	// Model to use (e.g., "gpt-4o", "o4-mini").
 	Model string
 
@@ -102,12 +108,6 @@ type ThreadConfig struct {
 
 	// ApprovalPolicy controls tool execution approval.
 	ApprovalPolicy ApprovalPolicy
-
-	// Sandbox configures the sandbox settings.
-	Sandbox *SandboxConfig
-
-	// Config is additional configuration options.
-	Config map[string]interface{}
 }
 
 func defaultThreadConfig() ThreadConfig {
@@ -168,11 +168,14 @@ func WithThreadConfig(cfg map[string]interface{}) ThreadOption {
 
 // TurnConfig holds turn-specific configuration.
 type TurnConfig struct {
-	// ApprovalPolicy overrides thread policy for this turn.
-	ApprovalPolicy ApprovalPolicy
-
 	// SandboxPolicy overrides sandbox for this turn.
 	SandboxPolicy interface{}
+
+	// OutputSchema for structured output.
+	OutputSchema interface{}
+
+	// ApprovalPolicy overrides thread policy for this turn.
+	ApprovalPolicy ApprovalPolicy
 
 	// Model overrides the thread model for this turn.
 	Model string
@@ -182,9 +185,6 @@ type TurnConfig struct {
 
 	// Summary provides context for the turn.
 	Summary string
-
-	// OutputSchema for structured output.
-	OutputSchema interface{}
 }
 
 func defaultTurnConfig() TurnConfig {

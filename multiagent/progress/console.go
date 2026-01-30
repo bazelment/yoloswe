@@ -26,16 +26,14 @@ const (
 
 // ConsoleReporter writes progress to the console.
 type ConsoleReporter struct {
-	mu           sync.Mutex
-	out          io.Writer
-	mode         OutputMode
 	startTime    time.Time
 	lastActivity time.Time
-
-	// Current state for context
+	out          io.Writer
 	currentPhase checkpoint.Phase
 	currentAgent agent.AgentRole
+	mode         OutputMode
 	toolsActive  int
+	mu           sync.Mutex
 }
 
 // ConsoleOption configures the console reporter.

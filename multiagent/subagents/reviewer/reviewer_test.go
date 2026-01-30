@@ -77,10 +77,10 @@ func TestFormatReviewPrompt(t *testing.T) {
 
 func TestParseReviewResponse(t *testing.T) {
 	tests := []struct {
+		check   func(*protocol.ReviewResponse) bool
 		name    string
 		input   string
 		wantErr bool
-		check   func(*protocol.ReviewResponse) bool
 	}{
 		{
 			name: "valid JSON with issues",
@@ -110,8 +110,8 @@ func TestParseReviewResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "JSON in code block",
-			input: "```json\n{\"summary\": \"OK\", \"issues\": [{\"severity\": \"critical\", \"file\": \"x.go\", \"message\": \"Bug\"}]}\n```",
+			name:    "JSON in code block",
+			input:   "```json\n{\"summary\": \"OK\", \"issues\": [{\"severity\": \"critical\", \"file\": \"x.go\", \"message\": \"Bug\"}]}\n```",
 			wantErr: false,
 			check: func(r *protocol.ReviewResponse) bool {
 				return len(r.Issues) == 1 && r.Issues[0].Severity == "critical"
@@ -149,8 +149,8 @@ func TestParseReviewResponse(t *testing.T) {
 
 func TestReviewResponseHasCriticalIssues(t *testing.T) {
 	tests := []struct {
-		name     string
 		response *protocol.ReviewResponse
+		name     string
 		want     bool
 	}{
 		{

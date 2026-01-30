@@ -4,11 +4,11 @@ import "encoding/json"
 
 // StreamEvent wraps streaming updates.
 type StreamEvent struct {
+	ParentToolUseID *string         `json:"parent_tool_use_id"`
 	Type            MessageType     `json:"type"`
-	Event           json.RawMessage `json:"event"`
 	SessionID       string          `json:"session_id"`
 	UUID            string          `json:"uuid"`
-	ParentToolUseID *string         `json:"parent_tool_use_id"`
+	Event           json.RawMessage `json:"event"`
 }
 
 // MsgType returns the message type.
@@ -43,8 +43,8 @@ func (e MessageStartEvent) EventType() StreamEventType { return StreamEventTypeM
 // ContentBlockStartEvent starts a content block.
 type ContentBlockStartEvent struct {
 	Type         StreamEventType `json:"type"`
-	Index        int             `json:"index"`
 	ContentBlock json.RawMessage `json:"content_block"`
+	Index        int             `json:"index"`
 }
 
 // EventType returns the stream event type.
@@ -53,8 +53,8 @@ func (e ContentBlockStartEvent) EventType() StreamEventType { return StreamEvent
 // ContentBlockDeltaEvent contains incremental content.
 type ContentBlockDeltaEvent struct {
 	Type  StreamEventType `json:"type"`
-	Index int             `json:"index"`
 	Delta json.RawMessage `json:"delta"`
+	Index int             `json:"index"`
 }
 
 // EventType returns the stream event type.

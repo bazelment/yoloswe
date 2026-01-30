@@ -36,32 +36,25 @@ type SessionInfo struct {
 	SessionID      string
 	Model          string
 	WorkDir        string
-	Tools          []string
 	PermissionMode PermissionMode
+	Tools          []string
 }
 
 // Session manages interaction with the Claude CLI.
 type Session struct {
-	mu sync.RWMutex
-
-	config            SessionConfig
+	recorder          *sessionRecorder
 	process           *processManager
 	accumulator       *streamAccumulator
 	turnManager       *turnManager
 	permissionManager *permissionManager
-	recorder          *sessionRecorder
 	state             *sessionState
-
-	// Event channel (read-only to consumers)
-	events chan Event
-
-	// Session info (set after init)
-	info *SessionInfo
-
-	// Lifecycle
-	started  bool
-	stopping bool
-	done     chan struct{}
+	events            chan Event
+	info              *SessionInfo
+	done              chan struct{}
+	config            SessionConfig
+	mu                sync.RWMutex
+	started           bool
+	stopping          bool
 }
 
 // NewSession creates a new Claude session with options.

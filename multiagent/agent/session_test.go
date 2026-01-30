@@ -142,11 +142,11 @@ func TestExecuteResultConcurrentAccess(t *testing.T) {
 // mockSessionRunner is a mock session that simulates the real session behavior
 // where Events() channel only closes when Stop() is called.
 type mockSessionRunner struct {
+	askErr      error
 	events      chan claude.Event
-	stopped     bool
 	stoppedChan chan struct{}
 	askResult   *claude.TurnResult
-	askErr      error
+	stopped     bool
 }
 
 func newMockSessionRunner() *mockSessionRunner {

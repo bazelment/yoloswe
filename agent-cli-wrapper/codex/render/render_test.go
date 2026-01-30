@@ -228,14 +228,14 @@ func TestColorMode(t *testing.T) {
 func TestTruncate(t *testing.T) {
 	tests := []struct {
 		input    string
-		max      int
 		expected string
+		max      int
 	}{
-		{"short", 10, "short"},
-		{"exactly10!", 10, "exactly10!"},
-		{"this is a long string", 10, "this is..."},
-		{"abc", 3, "abc"},
-		{"abcd", 3, "..."},
+		{"short", "short", 10},
+		{"exactly10!", "exactly10!", 10},
+		{"this is a long string", "this is...", 10},
+		{"abc", "abc", 3},
+		{"abcd", "...", 3},
 	}
 
 	for _, tt := range tests {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 
 	"github.com/bazelment/yoloswe/multiagent/protocol"
@@ -16,7 +15,6 @@ import (
 // MCPServer provides an HTTP MCP server that exposes designer, builder, and reviewer tools.
 // When Claude calls these tools, the server dispatches to the Planner's methods.
 type MCPServer struct {
-	mu       sync.Mutex
 	planner  *Planner
 	listener net.Listener
 	server   *http.Server
@@ -320,8 +318,8 @@ func (s *MCPServer) callBuilder(ctx context.Context, args json.RawMessage) (*too
 func (s *MCPServer) callReviewer(ctx context.Context, args json.RawMessage) (*toolCallResult, *jsonRPCError) {
 	var input struct {
 		Task   string   `json:"task"`
-		Files  []string `json:"files"`
 		Design string   `json:"design"`
+		Files  []string `json:"files"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return nil, &jsonRPCError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
@@ -405,16 +403,16 @@ type jsonRPCRequest struct {
 }
 
 type jsonRPCResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
 	ID      interface{}   `json:"id,omitempty"`
 	Result  interface{}   `json:"result,omitempty"`
 	Error   *jsonRPCError `json:"error,omitempty"`
+	JSONRPC string        `json:"jsonrpc"`
 }
 
 type jsonRPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
+	Message string      `json:"message"`
+	Code    int         `json:"code"`
 }
 
 // MCP types
@@ -449,11 +447,11 @@ type toolDefinition struct {
 }
 
 type jsonSchema struct {
+	Properties  map[string]jsonSchema `json:"properties,omitempty"`
+	Items       *jsonSchema           `json:"items,omitempty"`
 	Type        string                `json:"type"`
 	Description string                `json:"description,omitempty"`
-	Properties  map[string]jsonSchema `json:"properties,omitempty"`
 	Required    []string              `json:"required,omitempty"`
-	Items       *jsonSchema           `json:"items,omitempty"`
 }
 
 type toolsCallRequest struct {

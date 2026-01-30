@@ -5,25 +5,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelment/yoloswe/multiagent/subagent"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/multiagent/subagent"
 )
 
 // MockStreamingSubAgent is a mock implementation of StreamingSubAgent for testing.
 type MockStreamingSubAgent struct {
-	mu        sync.Mutex
-	events    chan interface{}
-	result    *subagent.Result
-	err       error
-	cancelled bool
-	executed  bool
-	prompt    string
-
-	// Configurable delays
-	executeDelay time.Duration
-
-	// Pre-configured events to emit during execution
+	err          error
+	events       chan interface{}
+	result       *subagent.Result
+	prompt       string
 	eventsToEmit []interface{}
+	executeDelay time.Duration
+	mu           sync.Mutex
+	cancelled    bool
+	executed     bool
 }
 
 // MockStreamingConfig configures the mock streaming sub-agent.

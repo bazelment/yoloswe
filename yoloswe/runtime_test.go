@@ -115,9 +115,9 @@ func TestConfigSanitizationEdgeCases(t *testing.T) {
 	t.Run("mixed zero and valid values", func(t *testing.T) {
 		config := Config{
 			BuilderModel:   "opus",
-			MaxBudgetUSD:   0,     // Should get default
-			MaxTimeSeconds: 1800,  // Should keep
-			MaxIterations:  0,     // Should get default
+			MaxBudgetUSD:   0,    // Should get default
+			MaxTimeSeconds: 1800, // Should keep
+			MaxIterations:  0,    // Should get default
 		}
 		SanitizeConfig(&config)
 

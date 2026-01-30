@@ -40,8 +40,8 @@ var (
 
 // RPCError represents a JSON-RPC error from the app-server.
 type RPCError struct {
-	Code    int
 	Message string
+	Code    int
 }
 
 func (e *RPCError) Error() string {
@@ -50,10 +50,10 @@ func (e *RPCError) Error() string {
 
 // ProcessError represents an error with the app-server subprocess.
 type ProcessError struct {
-	Message  string
-	ExitCode int
-	Stderr   string
 	Cause    error
+	Message  string
+	Stderr   string
+	ExitCode int
 }
 
 func (e *ProcessError) Error() string {
@@ -72,9 +72,9 @@ func (e *ProcessError) Unwrap() error {
 
 // ProtocolError represents a protocol-level error (e.g., malformed JSON).
 type ProtocolError struct {
+	Cause   error
 	Message string
 	Line    string
-	Cause   error
 }
 
 func (e *ProtocolError) Error() string {
@@ -90,10 +90,10 @@ func (e *ProtocolError) Unwrap() error {
 
 // TurnError represents an error that occurred during a turn.
 type TurnError struct {
+	Cause    error
 	ThreadID string
 	TurnID   string
 	Message  string
-	Cause    error
 }
 
 func (e *TurnError) Error() string {

@@ -40,8 +40,8 @@ func (r *Reader) ReadLine() ([]byte, error) {
 
 // Writer writes newline-delimited JSON to an io.Writer.
 type Writer struct {
-	mu sync.Mutex
 	w  io.Writer
+	mu sync.Mutex
 }
 
 // NewWriter creates a new NDJSON writer.

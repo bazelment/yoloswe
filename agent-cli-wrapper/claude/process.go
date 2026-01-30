@@ -14,17 +14,14 @@ import (
 
 // processManager manages the Claude CLI process.
 type processManager struct {
-	mu     sync.Mutex
-	config SessionConfig
-
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
-
-	reader *ndjson.Reader
-	writer *ndjson.Writer
-
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	cmd      *exec.Cmd
+	reader   *ndjson.Reader
+	writer   *ndjson.Writer
+	config   SessionConfig
+	mu       sync.Mutex
 	started  bool
 	stopping bool
 }

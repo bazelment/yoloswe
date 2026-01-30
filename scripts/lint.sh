@@ -28,7 +28,18 @@ if ! command -v golangci-lint &> /dev/null; then
     exit 1
 fi
 
-if golangci-lint run --timeout=10m ./...; then
+# Run golangci-lint on each module in go.work
+GO_LINT_FAILED=0
+for module in agent-cli-wrapper multiagent yoloswe; do
+    if [[ -d "${module}" ]]; then
+        echo "  Linting ${module}..."
+        if ! (cd "${module}" && golangci-lint run --timeout=10m ./...); then
+            GO_LINT_FAILED=1
+        fi
+    fi
+done
+
+if [[ ${GO_LINT_FAILED} -eq 0 ]]; then
     echo "✓ Go lint passed"
 else
     echo "✗ Go lint failed"

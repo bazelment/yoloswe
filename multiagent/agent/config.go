@@ -75,6 +75,9 @@ type ProgressReporter interface {
 
 // SwarmConfig configures the entire agent swarm.
 type SwarmConfig struct {
+	// Progress receives progress events during execution.
+	Progress ProgressReporter
+
 	// SessionID uniquely identifies this swarm session.
 	SessionID string
 
@@ -99,9 +102,6 @@ type SwarmConfig struct {
 
 	// EnableCheckpointing enables session state persistence for error recovery.
 	EnableCheckpointing bool
-
-	// Progress receives progress events during execution.
-	Progress ProgressReporter
 }
 
 // DefaultSwarmConfig returns a swarm config with sensible defaults.

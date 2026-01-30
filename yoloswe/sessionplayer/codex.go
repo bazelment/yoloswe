@@ -61,12 +61,12 @@ func DetectFormat(path string) (SessionFormat, error) {
 
 // CodexPlayer plays back Codex session logs.
 type CodexPlayer struct {
-	renderer       *codexrender.Renderer
-	verbose        bool
-	inputTokens    int64
-	outputTokens   int64
-	turnStartTime  string // ISO8601 timestamp from turn/started
-	lastTimestamp  string // Most recent entry timestamp
+	renderer      *codexrender.Renderer
+	turnStartTime string
+	lastTimestamp string
+	inputTokens   int64
+	outputTokens  int64
+	verbose       bool
 }
 
 // NewCodexPlayer creates a new Codex session player.
@@ -294,13 +294,13 @@ func (p *CodexPlayer) handleTokenCount(params json.RawMessage) {
 	}
 
 	var msg struct {
-		Type string `json:"type"`
 		Info *struct {
 			TotalTokenUsage struct {
 				InputTokens  int64 `json:"input_tokens"`
 				OutputTokens int64 `json:"output_tokens"`
 			} `json:"total_token_usage"`
 		} `json:"info"`
+		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(notif.Msg, &msg); err != nil {
 		return

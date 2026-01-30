@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -14,22 +13,17 @@ import (
 
 // processManager manages the codex app-server subprocess.
 type processManager struct {
-	mu     sync.Mutex
-	config ClientConfig
-
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
-
-	reader  *bufio.Reader
-	encoder *json.Encoder
-
-	// Session logging
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stderr     io.ReadCloser
+	cmd        *exec.Cmd
+	reader     *bufio.Reader
+	encoder    *json.Encoder
 	sessionLog *os.File
-
-	started  bool
-	stopping bool
+	config     ClientConfig
+	mu         sync.Mutex
+	started    bool
+	stopping   bool
 }
 
 func newProcessManager(config ClientConfig) *processManager {
@@ -233,11 +227,6 @@ func (pm *processManager) startStderrReader(handler func([]byte)) {
 			}
 		}
 	}()
-}
-
-// formatStderrLine formats a stderr line for logging.
-func formatStderrLine(data []byte) string {
-	return fmt.Sprintf("[codex stderr] %s", string(data))
 }
 
 // logMessage logs a message to the session log (acquires lock).

@@ -28,11 +28,11 @@ type ControlRequestData interface {
 
 // CanUseToolRequest asks permission for tool use.
 type CanUseToolRequest struct {
+	Input                 map[string]interface{} `json:"input"`
+	BlockedPath           *string                `json:"blocked_path,omitempty"`
 	SubtypeField          ControlRequestSubtype  `json:"subtype"`
 	ToolName              string                 `json:"tool_name"`
-	Input                 map[string]interface{} `json:"input"`
 	PermissionSuggestions []interface{}          `json:"permission_suggestions,omitempty"`
-	BlockedPath           *string                `json:"blocked_path,omitempty"`
 }
 
 // Subtype returns the control request subtype.
@@ -133,11 +133,11 @@ type PermissionResultDeny struct {
 // PermissionUpdate describes a permission rule update.
 type PermissionUpdate struct {
 	Type        string           `json:"type"`
-	Rules       []PermissionRule `json:"rules,omitempty"`
 	Behavior    string           `json:"behavior,omitempty"`
 	Mode        string           `json:"mode,omitempty"`
-	Directories []string         `json:"directories,omitempty"`
 	Destination string           `json:"destination,omitempty"`
+	Rules       []PermissionRule `json:"rules,omitempty"`
+	Directories []string         `json:"directories,omitempty"`
 }
 
 // PermissionRule describes a single permission rule.
@@ -148,9 +148,9 @@ type PermissionRule struct {
 
 // ControlRequestToSend is a control request we send to the CLI.
 type ControlRequestToSend struct {
+	Request   interface{} `json:"request"`
 	Type      string      `json:"type"`
 	RequestID string      `json:"request_id"`
-	Request   interface{} `json:"request"`
 }
 
 // SetPermissionModeRequestToSend is the request body for setting permission mode.
@@ -172,10 +172,10 @@ type SetModelRequestToSend struct {
 
 // ToolUseRequest contains parsed information about a tool use from a control request.
 type ToolUseRequest struct {
-	RequestID   string                 // The control request ID
-	ToolName    string                 // Name of the tool being used
-	Input       map[string]interface{} // Tool input parameters
-	BlockedPath *string                // Path that triggered permission (if any)
+	Input       map[string]interface{}
+	BlockedPath *string
+	RequestID   string
+	ToolName    string
 }
 
 // ParseToolUseRequest extracts tool use information from a control request.

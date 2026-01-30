@@ -4,8 +4,8 @@ import "testing"
 
 func TestReviewResponseHasCriticalIssues(t *testing.T) {
 	tests := []struct {
-		name     string
 		response *ReviewResponse
+		name     string
 		want     bool
 	}{
 		{

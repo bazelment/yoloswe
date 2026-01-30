@@ -24,16 +24,14 @@ func nextTaskID() string {
 // LongRunningSession wraps a claude.Session for long-running agents (Orchestrator, Planner).
 // It maintains a persistent session across multiple turns.
 type LongRunningSession struct {
-	mu         sync.Mutex
-	session    *claude.Session
-	config     AgentConfig
-	sessionDir string
-	totalCost  float64
-	turnCount  int
-	started    bool
-
-	// Additional session options (set before Start)
+	session      *claude.Session
+	sessionDir   string
 	extraOptions []claude.SessionOption
+	config       AgentConfig
+	totalCost    float64
+	turnCount    int
+	mu           sync.Mutex
+	started      bool
 }
 
 // NewLongRunningSession creates a new long-running session.
@@ -190,12 +188,12 @@ func (s *LongRunningSession) Recording() *claude.SessionRecording {
 // EphemeralSession creates fresh Claude sessions for each task (Designer, Builder, Reviewer).
 // Each Execute() call creates a new session, runs one interaction, and stops the session.
 type EphemeralSession struct {
-	config          AgentConfig
-	swarmSessionID  string
-	baseSessionDir  string
-	mu              sync.Mutex
-	totalCost       float64
-	taskCount       int
+	swarmSessionID string
+	baseSessionDir string
+	config         AgentConfig
+	totalCost      float64
+	taskCount      int
+	mu             sync.Mutex
 }
 
 // NewEphemeralSession creates a new ephemeral session factory.

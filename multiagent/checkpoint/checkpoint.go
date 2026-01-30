@@ -25,32 +25,19 @@ const (
 
 // Checkpoint captures the state of a mission for recovery.
 type Checkpoint struct {
-	// Version for future compatibility
-	Version string `json:"version"`
-
-	// Session identification
-	SessionID string `json:"session_id"`
-	Mission   string `json:"mission"`
-
-	// Current state
-	Phase          Phase     `json:"phase"`
-	IterationCount int       `json:"iteration_count"`
-	LastUpdated    time.Time `json:"last_updated"`
-
-	// Accumulated results
-	DesignResponse *protocol.DesignResponse `json:"design_response,omitempty"`
-	BuildResponse  *protocol.BuildResponse  `json:"build_response,omitempty"`
+	LastUpdated    time.Time                `json:"last_updated"`
 	ReviewResponse *protocol.ReviewResponse `json:"review_response,omitempty"`
-
-	// Files tracked
-	FilesCreated  []string `json:"files_created"`
-	FilesModified []string `json:"files_modified"`
-
-	// Cost tracking
-	TotalCost float64 `json:"total_cost"`
-
-	// Error information (if failed)
-	LastError string `json:"last_error,omitempty"`
+	BuildResponse  *protocol.BuildResponse  `json:"build_response,omitempty"`
+	DesignResponse *protocol.DesignResponse `json:"design_response,omitempty"`
+	Phase          Phase                    `json:"phase"`
+	Version        string                   `json:"version"`
+	Mission        string                   `json:"mission"`
+	SessionID      string                   `json:"session_id"`
+	LastError      string                   `json:"last_error,omitempty"`
+	FilesCreated   []string                 `json:"files_created"`
+	FilesModified  []string                 `json:"files_modified"`
+	IterationCount int                      `json:"iteration_count"`
+	TotalCost      float64                  `json:"total_cost"`
 }
 
 // CheckpointFileName is the standard checkpoint file name.
@@ -58,9 +45,9 @@ const CheckpointFileName = "checkpoint.json"
 
 // Manager handles checkpoint persistence.
 type Manager struct {
+	current    *Checkpoint
 	sessionDir string
 	filePath   string
-	current    *Checkpoint
 }
 
 // NewManager creates a new checkpoint manager.

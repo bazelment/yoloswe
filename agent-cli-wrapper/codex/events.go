@@ -95,13 +95,13 @@ func (e TurnStartedEvent) Type() EventType { return EventTypeTurnStarted }
 
 // TurnCompletedEvent fires when a turn finishes.
 type TurnCompletedEvent struct {
+	Error      error
 	ThreadID   string
 	TurnID     string
-	Success    bool
 	FullText   string
-	DurationMs int64
 	Usage      TurnUsage
-	Error      error
+	DurationMs int64
+	Success    bool
 }
 
 // Type returns the event type.
@@ -112,8 +112,8 @@ type TextDeltaEvent struct {
 	ThreadID string
 	TurnID   string
 	ItemID   string
-	Delta    string   // New text chunk
-	FullText string   // Accumulated text so far
+	Delta    string // New text chunk
+	FullText string // Accumulated text so far
 }
 
 // Type returns the event type.
@@ -144,10 +144,10 @@ func (e ItemCompletedEvent) Type() EventType { return EventTypeItemCompleted }
 
 // TokenUsageEvent contains token usage information.
 type TokenUsageEvent struct {
-	ThreadID   string
 	TotalUsage *TokenUsage
 	LastUsage  *TokenUsage
 	RateLimits *RateLimits
+	ThreadID   string
 }
 
 // Type returns the event type.
@@ -164,11 +164,11 @@ type TurnUsage struct {
 
 // ErrorEvent contains errors.
 type ErrorEvent struct {
+	Timestamp time.Time
+	Error     error
 	ThreadID  string
 	TurnID    string
-	Error     error
 	Context   string
-	Timestamp time.Time
 }
 
 // Type returns the event type.
@@ -189,9 +189,9 @@ type CommandStartEvent struct {
 	ThreadID  string
 	TurnID    string
 	CallID    string
-	Command   []string // e.g., ["/bin/zsh", "-lc", "ls"]
 	CWD       string
-	ParsedCmd string // Simplified command display
+	ParsedCmd string
+	Command   []string
 }
 
 // Type returns the event type.
@@ -214,9 +214,9 @@ type CommandEndEvent struct {
 	ThreadID   string
 	TurnID     string
 	CallID     string
-	ExitCode   int
 	Stdout     string
 	Stderr     string
+	ExitCode   int
 	DurationMs int64
 }
 

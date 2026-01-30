@@ -42,10 +42,10 @@ func (t ThinkingBlock) BlockType() ContentBlockType { return ContentBlockTypeThi
 
 // ToolUseBlock represents a tool invocation.
 type ToolUseBlock struct {
+	Input map[string]interface{} `json:"input"`
 	Type  ContentBlockType       `json:"type"`
 	ID    string                 `json:"id"`
 	Name  string                 `json:"name"`
-	Input map[string]interface{} `json:"input"`
 }
 
 // BlockType returns the content block type.
@@ -53,10 +53,10 @@ func (t ToolUseBlock) BlockType() ContentBlockType { return ContentBlockTypeTool
 
 // ToolResultBlock contains tool execution results.
 type ToolResultBlock struct {
+	Content   interface{}      `json:"content"`
+	IsError   *bool            `json:"is_error"`
 	Type      ContentBlockType `json:"type"`
 	ToolUseID string           `json:"tool_use_id"`
-	Content   interface{}      `json:"content"` // string or []ContentBlock
-	IsError   *bool            `json:"is_error"`
 }
 
 // BlockType returns the content block type.

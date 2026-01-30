@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/checkpoint"
 	"github.com/bazelment/yoloswe/multiagent/progress"
@@ -15,7 +16,6 @@ import (
 	"github.com/bazelment/yoloswe/multiagent/subagents/builder"
 	"github.com/bazelment/yoloswe/multiagent/subagents/designer"
 	"github.com/bazelment/yoloswe/multiagent/subagents/reviewer"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // ErrMaxIterationsExceeded is returned when the iteration count exceeds the limit.
@@ -23,57 +23,34 @@ var ErrMaxIterationsExceeded = errors.New("max iterations exceeded")
 
 // Planner is a long-running agent that coordinates Designer, Builder, and Reviewer.
 type Planner struct {
-	mu             sync.Mutex
-	session        *agent.LongRunningSession
-	config         agent.AgentConfig
-	swarmSessionID string
-
-	// Sub-agents (created fresh for each task)
-	designerConfig agent.AgentConfig
-	builderConfig  agent.AgentConfig
-	reviewerConfig agent.AgentConfig
-
-	// Iteration limits
-	maxIterations  int
-	iterationCount int
-
-	// Accumulated state
-	filesCreated  []string
-	filesModified []string
-	totalCost     float64
-
-	// Checkpointing for error recovery
+	progress          progress.Reporter
+	session           *agent.LongRunningSession
+	mcpServer         *MCPServer
 	checkpointMgr     *checkpoint.Manager
+	swarmSessionID    string
+	filesCreated      []string
+	filesModified     []string
+	designerConfig    agent.AgentConfig
+	reviewerConfig    agent.AgentConfig
+	builderConfig     agent.AgentConfig
+	config            agent.AgentConfig
+	iterationCount    int
+	maxIterations     int
+	totalCost         float64
+	mu                sync.Mutex
 	checkpointEnabled bool
-
-	// Progress reporting
-	progress progress.Reporter
-
-	// MCP server for exposing tools to Claude
-	mcpServer *MCPServer
 }
 
 // Config holds configuration for the Planner and its sub-agents.
 type Config struct {
-	// Planner's own config
-	PlannerConfig agent.AgentConfig
-
-	// Sub-agent configs
-	DesignerConfig agent.AgentConfig
-	BuilderConfig  agent.AgentConfig
-	ReviewerConfig agent.AgentConfig
-
-	// MaxIterations limits the number of sub-agent calls. 0 means unlimited.
-	MaxIterations int
-
-	// EnableCheckpointing enables session state persistence for error recovery.
+	Progress            progress.Reporter
+	SessionDir          string
+	PlannerConfig       agent.AgentConfig
+	DesignerConfig      agent.AgentConfig
+	BuilderConfig       agent.AgentConfig
+	ReviewerConfig      agent.AgentConfig
+	MaxIterations       int
 	EnableCheckpointing bool
-
-	// SessionDir is the directory for storing checkpoints.
-	SessionDir string
-
-	// Progress receives progress events.
-	Progress progress.Reporter
 }
 
 // New creates a new Planner agent.

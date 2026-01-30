@@ -26,12 +26,12 @@ const (
 
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
-	mu          sync.Mutex
 	out         io.Writer
+	commands    map[string]*commandState
+	mu          sync.Mutex
 	verbose     bool
 	noColor     bool
-	commands    map[string]*commandState
-	inReasoning bool // Track if last output was reasoning
+	inReasoning bool
 }
 
 // maxOutputBytes is the maximum size of command output to buffer (1MB).

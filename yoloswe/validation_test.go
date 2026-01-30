@@ -13,9 +13,9 @@ func TestValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		errorText string
 		config    Config
 		wantError bool
-		errorText string
 	}{
 		{
 			name: "valid minimal config",
@@ -126,8 +126,8 @@ func TestValidatePrompt(t *testing.T) {
 	tests := []struct {
 		name      string
 		prompt    string
-		wantError bool
 		errorText string
+		wantError bool
 	}{
 		{
 			name:      "valid prompt",

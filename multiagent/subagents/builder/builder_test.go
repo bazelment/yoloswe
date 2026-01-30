@@ -97,10 +97,10 @@ func TestFormatBuildPrompt(t *testing.T) {
 
 func TestParseBuildResponse(t *testing.T) {
 	tests := []struct {
+		check   func(*protocol.BuildResponse) bool
 		name    string
 		input   string
 		wantErr bool
-		check   func(*protocol.BuildResponse) bool
 	}{
 		{
 			name: "valid JSON",
@@ -118,8 +118,8 @@ func TestParseBuildResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "JSON in code block",
-			input: "```json\n{\"files_created\": [\"test.go\"], \"files_modified\": [], \"tests_run\": false, \"tests_passed\": false}\n```",
+			name:    "JSON in code block",
+			input:   "```json\n{\"files_created\": [\"test.go\"], \"files_modified\": [], \"tests_run\": false, \"tests_passed\": false}\n```",
 			wantErr: false,
 			check: func(r *protocol.BuildResponse) bool {
 				return len(r.FilesCreated) == 1 && r.FilesCreated[0] == "test.go"

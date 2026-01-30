@@ -17,11 +17,11 @@ type Config struct {
 	Model          string
 	WorkDir        string
 	Goal           string
-	SessionLogPath string               // Path to write session log (JSON messages)
-	Verbose        bool                 // Show progress information (tool use, etc.)
-	NoColor        bool                 // Disable ANSI color codes
-	ApprovalPolicy codex.ApprovalPolicy // Tool approval policy (default: on-failure)
-	JSONOutput     bool                 // Request JSON output format instead of text
+	SessionLogPath string
+	ApprovalPolicy codex.ApprovalPolicy
+	Verbose        bool
+	NoColor        bool
+	JSONOutput     bool
 }
 
 // BuildPrompt creates the review prompt from the config.
@@ -108,11 +108,11 @@ type ReviewResult struct {
 
 // Reviewer wraps the Codex SDK for code review operations.
 type Reviewer struct {
-	client   *codex.Client
-	thread   *codex.Thread // Persisted thread for follow-up reviews
-	config   Config
 	output   io.Writer
+	client   *codex.Client
+	thread   *codex.Thread
 	renderer *render.Renderer
+	config   Config
 }
 
 // New creates a new Reviewer with the given config.

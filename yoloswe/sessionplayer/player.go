@@ -212,19 +212,19 @@ func (p *Player) renderStreamEvent(raw json.RawMessage) {
 	}
 
 	var event struct {
-		Type         string `json:"type"`
-		Index        int    `json:"index"`
+		Delta struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
 		ContentBlock struct {
 			Type string `json:"type"`
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"content_block"`
-		Delta struct {
-			Type         string `json:"type"`
-			Text         string `json:"text"`
-			Thinking     string `json:"thinking"`
-			PartialJSON  string `json:"partial_json"`
-		} `json:"delta"`
+		Type  string `json:"type"`
+		Index int    `json:"index"`
 	}
 	if err := json.Unmarshal(msg.Event, &event); err != nil {
 		return
@@ -254,8 +254,8 @@ func (p *Player) renderStreamEvent(raw json.RawMessage) {
 func (p *Player) renderUserMessage(raw json.RawMessage) {
 	var msg struct {
 		Message struct {
-			Role    string `json:"role"`
 			Content interface{} `json:"content"`
+			Role    string      `json:"role"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(raw, &msg); err != nil {

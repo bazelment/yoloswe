@@ -19,7 +19,7 @@ const streamTextDelta = `{"type":"stream_event","event":{"type":"content_block_d
 
 const streamToolUseStart = `{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01W8o9N6gnPxzM5fB2R6g3mo","name":"WebSearch","input":{}}},"session_id":"c4e0fdb8-ea8e-4900-a07b-a7977627afb2","parent_tool_use_id":null,"uuid":"0f740272-aafb-40e0-a583-13903d1a3a61"}`
 
-const streamInputJsonDelta = `{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"US "}},"session_id":"c4e0fdb8-ea8e-4900-a07b-a7977627afb2","parent_tool_use_id":null,"uuid":"88e45d8e-6f5d-4338-a7bb-b5885c8e85ef"}`
+const streamInputJSONDelta = `{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"US "}},"session_id":"c4e0fdb8-ea8e-4900-a07b-a7977627afb2","parent_tool_use_id":null,"uuid":"88e45d8e-6f5d-4338-a7bb-b5885c8e85ef"}`
 
 const streamContentBlockStop = `{"type":"stream_event","event":{"type":"content_block_stop","index":1},"session_id":"c4e0fdb8-ea8e-4900-a07b-a7977627afb2","parent_tool_use_id":null,"uuid":"fced7ca2-11b1-435b-8efd-0cb11c9e2dd6"}`
 
@@ -191,10 +191,10 @@ func TestParseMessage_StreamEvent_ToolUseStart(t *testing.T) {
 
 	// Parse the content block
 	var block struct {
+		Input map[string]interface{} `json:"input"`
 		Type  string                 `json:"type"`
 		ID    string                 `json:"id"`
 		Name  string                 `json:"name"`
-		Input map[string]interface{} `json:"input"`
 	}
 	if err := json.Unmarshal(blockStart.ContentBlock, &block); err != nil {
 		t.Fatalf("failed to parse content_block: %v", err)
@@ -245,7 +245,7 @@ func TestParseMessage_StreamEvent_TextDelta(t *testing.T) {
 }
 
 func TestParseMessage_StreamEvent_InputJsonDelta(t *testing.T) {
-	msg, err := ParseMessage([]byte(streamInputJsonDelta))
+	msg, err := ParseMessage([]byte(streamInputJSONDelta))
 	if err != nil {
 		t.Fatalf("failed to parse: %v", err)
 	}

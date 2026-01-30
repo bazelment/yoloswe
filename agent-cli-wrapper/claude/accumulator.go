@@ -17,13 +17,13 @@ type streamAccumulator struct {
 
 // blockState tracks the state of a content block being accumulated.
 type blockState struct {
-	index       int
 	blockType   string
 	text        string
 	thinking    string
 	toolID      string
 	toolName    string
 	partialJSON string
+	index       int
 }
 
 // newStreamAccumulator creates a new stream accumulator.

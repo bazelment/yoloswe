@@ -8,10 +8,10 @@ import (
 
 // PermissionRequest contains the data for a permission request.
 type PermissionRequest struct {
-	RequestID   string
-	ToolName    string
 	Input       map[string]interface{}
 	BlockedPath *string
+	RequestID   string
+	ToolName    string
 }
 
 // PermissionResponse contains the response to a permission request.
@@ -24,11 +24,11 @@ type PermissionRequest struct {
 //   - UpdatedPermissions: Can be nil (will be omitted from wire format). Only set
 //     this when you want to add permission rules.
 type PermissionResponse struct {
+	UpdatedInput       map[string]interface{}
 	Behavior           PermissionBehavior
 	Message            string
-	Interrupt          bool
-	UpdatedInput       map[string]interface{}
 	UpdatedPermissions []protocol.PermissionUpdate
+	Interrupt          bool
 }
 
 // PermissionBehavior is the behavior for a permission response.

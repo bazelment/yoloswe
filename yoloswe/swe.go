@@ -94,7 +94,6 @@ type Config struct {
 	BuilderWorkDir  string
 	RecordingDir    string
 	SystemPrompt    string
-	RequireApproval bool   // Require user approval for tool executions (default: auto-approve)
 	ResumeSessionID string // Resume from a previous session ID instead of starting fresh
 
 	// Reviewer settings
@@ -106,29 +105,32 @@ type Config struct {
 	MaxTimeSeconds int     // Max wall-clock seconds
 	MaxIterations  int     // Max builder-reviewer iterations (safety limit)
 
+	// Other settings
+	RequireApproval bool // Require user approval for tool executions (default: auto-approve)
+
 	// Output settings
 	Verbose bool
 }
 
 // Stats tracks cumulative statistics for the SWE loop.
 type Stats struct {
-	BuilderCostUSD   float64
-	BuilderTokensIn  int
-	BuilderTokensOut int
+	ExitReason        ExitReason
+	BuilderCostUSD    float64
+	BuilderTokensIn   int
+	BuilderTokensOut  int
 	ReviewerTokensIn  int64
 	ReviewerTokensOut int64
-	IterationCount   int
-	TotalDurationMs  int64
-	ExitReason       ExitReason
+	IterationCount    int
+	TotalDurationMs   int64
 }
 
 // ReviewIssue represents a single issue found during review.
 type ReviewIssue struct {
 	Severity   string `json:"severity"`
 	File       string `json:"file"`
-	Line       int    `json:"line,omitempty"`
 	Message    string `json:"message"`
 	Suggestion string `json:"suggestion,omitempty"`
+	Line       int    `json:"line,omitempty"`
 }
 
 // ReviewVerdictJSON is the JSON structure returned by the reviewer.
@@ -140,21 +142,21 @@ type ReviewVerdictJSON struct {
 
 // ReviewVerdict represents the reviewer's decision.
 type ReviewVerdict struct {
-	Accepted bool
 	Summary  string
-	Issues   []ReviewIssue
 	Feedback string // Formatted feedback for builder
+	Issues   []ReviewIssue
+	Accepted bool
 }
 
 // SWEWrapper orchestrates the builder-reviewer loop.
 type SWEWrapper struct {
-	builder     *BuilderSession
-	reviewer    *reviewer.Reviewer
-	config      Config
-	stats       Stats
-	output      io.Writer
-	sessionLog  string // Session log file path
-	startTime   time.Time
+	startTime  time.Time
+	output     io.Writer
+	builder    *BuilderSession
+	reviewer   *reviewer.Reviewer
+	sessionLog string // Session log file path
+	config     Config
+	stats      Stats
 }
 
 // New creates a new SWEWrapper with the given configuration.
@@ -188,12 +190,12 @@ func New(config Config) *SWEWrapper {
 	rev := reviewer.New(reviewerConfig)
 
 	return &SWEWrapper{
-		builder:   builder,
-		reviewer:  rev,
-		config:    config,
-		output:    output,
+		builder:    builder,
+		reviewer:   rev,
+		config:     config,
+		output:     output,
 		sessionLog: "",
-		startTime: time.Now(),
+		startTime:  time.Now(),
 	}
 }
 
@@ -269,9 +271,9 @@ func (s *SWEWrapper) Run(ctx context.Context, prompt string) error {
 		}
 
 		// === Builder Phase ===
-		fmt.Fprintf(s.output, "\n"+strings.Repeat("=", 60)+"\n")
+		fmt.Fprint(s.output, "\n"+strings.Repeat("=", 60)+"\n")
 		fmt.Fprintf(s.output, "=== Iteration %d: BUILDER ===\n", iteration)
-		fmt.Fprintf(s.output, strings.Repeat("=", 60)+"\n\n")
+		fmt.Fprint(s.output, strings.Repeat("=", 60)+"\n\n")
 
 		builderUsage, err := s.builder.RunTurn(ctx, currentMessage)
 		if err != nil {
@@ -299,9 +301,9 @@ func (s *SWEWrapper) Run(ctx context.Context, prompt string) error {
 		}
 
 		// === Reviewer Phase ===
-		fmt.Fprintf(s.output, "\n"+strings.Repeat("=", 60)+"\n")
+		fmt.Fprint(s.output, "\n"+strings.Repeat("=", 60)+"\n")
 		fmt.Fprintf(s.output, "=== Iteration %d: REVIEWER ===\n", iteration)
-		fmt.Fprintf(s.output, strings.Repeat("=", 60)+"\n\n")
+		fmt.Fprint(s.output, strings.Repeat("=", 60)+"\n\n")
 
 		var reviewResult *reviewer.ReviewResult
 		if isFirstReview {
@@ -460,10 +462,10 @@ func truncateString(s string, maxLen int) string {
 // This function handles multiple formats commonly seen in LLM responses:
 //
 // Supported formats:
-//   1. JSON in markdown code blocks: ```json\n{...}\n```
-//   2. JSON in generic code blocks: ```\n{...}\n```
-//   3. Raw JSON embedded in text: "Here is the result: {...}"
-//   4. Plain JSON without surrounding text
+//  1. JSON in markdown code blocks: ```json\n{...}\n```
+//  2. JSON in generic code blocks: ```\n{...}\n```
+//  3. Raw JSON embedded in text: "Here is the result: {...}"
+//  4. Plain JSON without surrounding text
 //
 // The function prioritizes code blocks over inline JSON and returns the first
 // complete JSON structure found (either object {...} or array [...]).
@@ -647,13 +649,13 @@ func (s *SWEWrapper) initSessionLog(prompt string) error {
 
 	// Write initial log entry
 	entry := map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"event":     "session_started",
-		"goal":      s.config.Goal,
-		"builder":   s.config.BuilderModel,
-		"reviewer":  s.config.ReviewerModel,
-		"budget":    s.config.MaxBudgetUSD,
-		"timeout":   s.config.MaxTimeSeconds,
+		"timestamp":  time.Now().Format(time.RFC3339),
+		"event":      "session_started",
+		"goal":       s.config.Goal,
+		"builder":    s.config.BuilderModel,
+		"reviewer":   s.config.ReviewerModel,
+		"budget":     s.config.MaxBudgetUSD,
+		"timeout":    s.config.MaxTimeSeconds,
 		"iterations": s.config.MaxIterations,
 	}
 	return s.appendLogEntry(entry)

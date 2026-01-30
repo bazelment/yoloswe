@@ -34,29 +34,27 @@ type Plugin struct {
 
 // SystemMessage represents session initialization and system events.
 type SystemMessage struct {
+	ExitCode          *int        `json:"exit_code,omitempty"`
+	UUID              string      `json:"uuid"`
+	PermissionMode    string      `json:"permissionMode,omitempty"`
+	ClaudeCodeVersion string      `json:"claude_code_version,omitempty"`
+	CWD               string      `json:"cwd,omitempty"`
 	Type              MessageType `json:"type"`
 	Subtype           string      `json:"subtype"`
-	SessionID         string      `json:"session_id"`
-	UUID              string      `json:"uuid"`
-	CWD               string      `json:"cwd,omitempty"`
-	Tools             []string    `json:"tools,omitempty"`
-	MCPServers        []MCPServer `json:"mcp_servers,omitempty"`
 	Model             string      `json:"model,omitempty"`
-	PermissionMode    string      `json:"permissionMode,omitempty"`
-	SlashCommands     []string    `json:"slash_commands,omitempty"`
-	Agents            []string    `json:"agents,omitempty"`
-	Skills            []string    `json:"skills,omitempty"`
-	Plugins           []Plugin    `json:"plugins,omitempty"`
+	SessionID         string      `json:"session_id"`
+	Stderr            string      `json:"stderr,omitempty"`
+	Stdout            string      `json:"stdout,omitempty"`
+	HookEvent         string      `json:"hook_event,omitempty"`
+	HookName          string      `json:"hook_name,omitempty"`
 	APIKeySource      string      `json:"apiKeySource,omitempty"`
 	OutputStyle       string      `json:"output_style,omitempty"`
-	ClaudeCodeVersion string      `json:"claude_code_version,omitempty"`
-
-	// Hook response fields (when subtype === 'hook_response')
-	HookName  string `json:"hook_name,omitempty"`
-	HookEvent string `json:"hook_event,omitempty"`
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
+	Tools             []string    `json:"tools,omitempty"`
+	Plugins           []Plugin    `json:"plugins,omitempty"`
+	Skills            []string    `json:"skills,omitempty"`
+	Agents            []string    `json:"agents,omitempty"`
+	SlashCommands     []string    `json:"slash_commands,omitempty"`
+	MCPServers        []MCPServer `json:"mcp_servers,omitempty"`
 }
 
 // MsgType returns the message type.
@@ -64,12 +62,12 @@ func (m SystemMessage) MsgType() MessageType { return MessageTypeSystem }
 
 // Usage tracks token usage.
 type Usage struct {
+	ServiceTier              string        `json:"service_tier,omitempty"`
+	CacheCreation            CacheCreation `json:"cache_creation,omitempty"`
 	InputTokens              int           `json:"input_tokens"`
 	CacheCreationInputTokens int           `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int           `json:"cache_read_input_tokens"`
 	OutputTokens             int           `json:"output_tokens"`
-	ServiceTier              string        `json:"service_tier,omitempty"`
-	CacheCreation            CacheCreation `json:"cache_creation,omitempty"`
 }
 
 // CacheCreation contains cache creation timing details.
@@ -143,11 +141,11 @@ type MessageContent struct {
 
 // AssistantMessage is a complete message from Claude.
 type AssistantMessage struct {
-	Type            MessageType    `json:"type"`
-	Message         MessageContent `json:"message"`
 	ParentToolUseID *string        `json:"parent_tool_use_id"`
+	Type            MessageType    `json:"type"`
 	SessionID       string         `json:"session_id"`
 	UUID            string         `json:"uuid"`
+	Message         MessageContent `json:"message"`
 }
 
 // MsgType returns the message type.
@@ -155,11 +153,11 @@ func (m AssistantMessage) MsgType() MessageType { return MessageTypeAssistant }
 
 // UserMessage represents tool results echoed back.
 type UserMessage struct {
+	ParentToolUseID *string        `json:"parent_tool_use_id"`
 	Type            MessageType    `json:"type"`
-	Message         MessageContent `json:"message"`
 	SessionID       string         `json:"session_id"`
 	UUID            string         `json:"uuid"`
-	ParentToolUseID *string        `json:"parent_tool_use_id"`
+	Message         MessageContent `json:"message"`
 }
 
 // MsgType returns the message type.
@@ -173,13 +171,13 @@ type ServerToolUseStats struct {
 
 // UsageDetails is the extended usage in ResultMessage.
 type UsageDetails struct {
+	ServiceTier              string             `json:"service_tier,omitempty"`
+	ServerToolUse            ServerToolUseStats `json:"server_tool_use,omitempty"`
+	CacheCreation            CacheCreation      `json:"cache_creation,omitempty"`
 	InputTokens              int                `json:"input_tokens"`
 	CacheCreationInputTokens int                `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int                `json:"cache_read_input_tokens"`
 	OutputTokens             int                `json:"output_tokens"`
-	ServiceTier              string             `json:"service_tier,omitempty"`
-	ServerToolUse            ServerToolUseStats `json:"server_tool_use,omitempty"`
-	CacheCreation            CacheCreation      `json:"cache_creation,omitempty"`
 }
 
 // ModelUsage tracks usage per model.
@@ -196,19 +194,19 @@ type ModelUsage struct {
 
 // ResultMessage contains turn completion metrics.
 type ResultMessage struct {
-	Type              MessageType           `json:"type"`
-	Subtype           string                `json:"subtype"`
-	IsError           bool                  `json:"is_error"`
-	DurationMs        int64                 `json:"duration_ms"`
-	DurationAPIMs     int64                 `json:"duration_api_ms"`
-	NumTurns          int                   `json:"num_turns"`
-	Result            string                `json:"result"`
-	SessionID         string                `json:"session_id"`
-	TotalCostUSD      float64               `json:"total_cost_usd"`
-	Usage             UsageDetails          `json:"usage"`
 	ModelUsage        map[string]ModelUsage `json:"modelUsage,omitempty"`
-	PermissionDenials []interface{}         `json:"permission_denials,omitempty"`
+	SessionID         string                `json:"session_id"`
+	Subtype           string                `json:"subtype"`
 	UUID              string                `json:"uuid"`
+	Type              MessageType           `json:"type"`
+	Result            string                `json:"result"`
+	PermissionDenials []interface{}         `json:"permission_denials,omitempty"`
+	Usage             UsageDetails          `json:"usage"`
+	TotalCostUSD      float64               `json:"total_cost_usd"`
+	NumTurns          int                   `json:"num_turns"`
+	DurationAPIMs     int64                 `json:"duration_api_ms"`
+	DurationMs        int64                 `json:"duration_ms"`
+	IsError           bool                  `json:"is_error"`
 }
 
 // MsgType returns the message type.
@@ -216,14 +214,14 @@ func (m ResultMessage) MsgType() MessageType { return MessageTypeResult }
 
 // UserMessageToSend is what we send to the CLI.
 type UserMessageToSend struct {
-	Type    string                 `json:"type"`
 	Message UserMessageToSendInner `json:"message"`
+	Type    string                 `json:"type"`
 }
 
 // UserMessageToSendInner is the inner part of messages we send.
 type UserMessageToSendInner struct {
+	Content interface{} `json:"content"`
 	Role    string      `json:"role"`
-	Content interface{} `json:"content"` // string or []ContentBlock
 }
 
 // RawMessage is used for initial type discrimination.

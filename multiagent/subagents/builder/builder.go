@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // Builder is an ephemeral agent that implements code based on designs.

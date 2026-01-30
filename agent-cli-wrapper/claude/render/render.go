@@ -26,14 +26,12 @@ const (
 
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
-	mu      sync.Mutex
-	out     io.Writer
-	verbose bool // When false, only error tool results are shown
-	noColor bool // When true, ANSI color codes are suppressed
-
-	// State tracking
-	inToolOutput bool
+	out          io.Writer
 	lastToolName string
+	mu           sync.Mutex
+	verbose      bool
+	noColor      bool
+	inToolOutput bool
 }
 
 // NewRenderer creates a new renderer writing to the given output.

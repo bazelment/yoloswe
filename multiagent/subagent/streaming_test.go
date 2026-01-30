@@ -124,25 +124,25 @@ func TestStreamingSubAgent_TrackFileOperation(t *testing.T) {
 		wantModified int
 	}{
 		{
-			name:     "Write creates file",
-			toolName: "Write",
-			input:    map[string]interface{}{"file_path": "/tmp/new.go"},
+			name:         "Write creates file",
+			toolName:     "Write",
+			input:        map[string]interface{}{"file_path": "/tmp/new.go"},
 			wantAction:   FileActionCreate,
 			wantCreated:  1,
 			wantModified: 0,
 		},
 		{
-			name:     "Edit modifies file",
-			toolName: "Edit",
-			input:    map[string]interface{}{"file_path": "/tmp/existing.go"},
+			name:         "Edit modifies file",
+			toolName:     "Edit",
+			input:        map[string]interface{}{"file_path": "/tmp/existing.go"},
 			wantAction:   FileActionModify,
 			wantCreated:  1, // from previous test
 			wantModified: 1,
 		},
 		{
-			name:     "Read doesn't track",
-			toolName: "Read",
-			input:    map[string]interface{}{"file_path": "/tmp/read.go"},
+			name:         "Read doesn't track",
+			toolName:     "Read",
+			input:        map[string]interface{}{"file_path": "/tmp/read.go"},
 			wantAction:   FileActionRead,
 			wantCreated:  1,
 			wantModified: 1,

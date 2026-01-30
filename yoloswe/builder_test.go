@@ -17,9 +17,9 @@ func TestNewBuilderSession(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		config         BuilderConfig
 		expectedModel  string
 		expectedRecDir string
+		config         BuilderConfig
 	}{
 		{
 			name:           "default values",
@@ -70,9 +70,9 @@ func TestNewBuilderSession(t *testing.T) {
 
 func TestHandleAskUserQuestion(t *testing.T) {
 	tests := []struct {
+		expectedAnswers map[string]string
 		name            string
 		questions       []claude.Question
-		expectedAnswers map[string]string
 	}{
 		{
 			name:            "empty questions",
@@ -240,9 +240,9 @@ func TestBuilderStartWithInvalidWorkDir(t *testing.T) {
 
 func TestHandleAskUserQuestionEdgeCases(t *testing.T) {
 	tests := []struct {
+		expectedAnswers map[string]string
 		name            string
 		questions       []claude.Question
-		expectedAnswers map[string]string
 	}{
 		{
 			name: "multiSelect flag with multiple options - selects first",

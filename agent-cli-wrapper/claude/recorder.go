@@ -16,19 +16,19 @@ type RecordingMetadata struct {
 	SessionID         string   `json:"session_id"`
 	Model             string   `json:"model"`
 	WorkDir           string   `json:"cwd"`
-	Tools             []string `json:"tools"`
 	ClaudeCodeVersion string   `json:"claude_code_version,omitempty"`
 	PermissionMode    string   `json:"permission_mode"`
 	StartTime         string   `json:"start_time"`
+	Tools             []string `json:"tools"`
 	TotalTurns        int      `json:"total_turns"`
 }
 
 // TurnSummary contains a summary of a recorded turn.
 type TurnSummary struct {
-	Number      int       `json:"number"`
-	UserMessage string    `json:"user_message,omitempty"`
 	StartTime   time.Time `json:"start_time"`
 	EndTime     time.Time `json:"end_time,omitempty"`
+	UserMessage string    `json:"user_message,omitempty"`
+	Number      int       `json:"number"`
 	DurationMs  int64     `json:"duration_ms,omitempty"`
 	CostUSD     float64   `json:"cost_usd,omitempty"`
 	Success     bool      `json:"success"`
@@ -36,8 +36,8 @@ type TurnSummary struct {
 
 // SessionRecording contains a complete recording.
 type SessionRecording struct {
-	Metadata RecordingMetadata `json:"metadata"`
 	Turns    []TurnSummary     `json:"turns"`
+	Metadata RecordingMetadata `json:"metadata"`
 }
 
 // TotalCost returns the total cost of all turns.
@@ -53,16 +53,16 @@ func (r *SessionRecording) TotalCost() float64 {
 // Each message is wrapped with a timestamp and direction indicator.
 type RecordedMessage struct {
 	Timestamp time.Time   `json:"timestamp"`
-	Direction string      `json:"direction"` // "sent" or "received"
 	Message   interface{} `json:"message"`
+	Direction string      `json:"direction"`
 }
 
 // MarshalJSON implements custom JSON marshaling with millisecond timestamp precision.
 func (r RecordedMessage) MarshalJSON() ([]byte, error) {
 	type alias struct {
+		Message   interface{} `json:"message"`
 		Timestamp string      `json:"timestamp"`
 		Direction string      `json:"direction"`
-		Message   interface{} `json:"message"`
 	}
 	return json.Marshal(alias{
 		Timestamp: r.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -100,21 +100,15 @@ func (r *RecordedMessage) UnmarshalJSON(data []byte) error {
 
 // sessionRecorder records session messages to disk.
 type sessionRecorder struct {
-	mu sync.Mutex
-
-	baseDir   string
-	sessionID string
-	dirPath   string
-
-	metadata RecordingMetadata
-	turns    []TurnSummary
-
-	messagesFile *os.File // single file for all messages
-
-	initialized bool
-
-	// Buffer for messages before initialization (both directions)
+	messagesFile    *os.File
+	baseDir         string
+	sessionID       string
+	dirPath         string
+	turns           []TurnSummary
 	pendingMessages []RecordedMessage
+	metadata        RecordingMetadata
+	mu              sync.Mutex
+	initialized     bool
 }
 
 // newSessionRecorder creates a new session recorder.

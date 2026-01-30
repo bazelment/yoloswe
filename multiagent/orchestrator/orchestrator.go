@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/checkpoint"
 	"github.com/bazelment/yoloswe/multiagent/planner"
 	"github.com/bazelment/yoloswe/multiagent/progress"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // ErrBudgetExceeded is returned when the total cost exceeds the configured budget.
@@ -24,18 +24,14 @@ var ErrBudgetExceeded = errors.New("budget exceeded")
 
 // Orchestrator is the user-facing agent that triages requests and delegates to Planner.
 type Orchestrator struct {
-	mu             sync.Mutex
-	session        *agent.LongRunningSession
-	config         agent.AgentConfig
 	swarmConfig    agent.SwarmConfig
+	session        *agent.LongRunningSession
+	planner        *planner.Planner
 	swarmSessionID string
-
-	// The Planner agent (long-running, created once)
-	planner *planner.Planner
-
-	// State
-	started   bool
-	totalCost float64
+	config         agent.AgentConfig
+	totalCost      float64
+	mu             sync.Mutex
+	started        bool
 }
 
 // New creates a new Orchestrator agent.
@@ -338,11 +334,11 @@ func (o *Orchestrator) PlannerRecording() *claude.SessionRecording {
 
 // Summary generates a summary of the swarm session.
 type Summary struct {
+	AgentCosts        map[string]float64 `json:"agent_costs"`
 	SessionID         string             `json:"session_id"`
 	TotalCost         float64            `json:"total_cost"`
 	OrchestratorTurns int                `json:"orchestrator_turns"`
 	PlannerTurns      int                `json:"planner_turns"`
-	AgentCosts        map[string]float64 `json:"agent_costs"`
 }
 
 // GetSummary returns a summary of the session.
