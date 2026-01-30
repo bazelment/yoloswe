@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "claude",
+    srcs = [
+        "accumulator.go",
+        "doc.go",
+        "errors.go",
+        "events.go",
+        "interactive.go",
+        "mcp.go",
+        "permission.go",
+        "process.go",
+        "recorder.go",
+        "session.go",
+        "session_options.go",
+        "state.go",
+        "turn.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/claude",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/internal/ndjson",
+        "//agent-cli-wrapper/protocol",
+    ],
+)
+
+go_test(
+    name = "claude_test",
+    srcs = [
+        "accumulator_test.go",
+        "interactive_test.go",
+        "mcp_test.go",
+        "recorder_test.go",
+        "turn_test.go",
+    ],
+    embed = [":claude"],
+    deps = ["//agent-cli-wrapper/protocol"],
+)

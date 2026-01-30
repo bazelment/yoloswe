@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "orchestrator",
+    srcs = [
+        "orchestrator.go",
+        "prompts.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/orchestrator",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//multiagent/agent",
+        "//multiagent/checkpoint",
+        "//multiagent/planner",
+        "//multiagent/progress",
+        "//multiagent/protocol",
+    ],
+)
+
+go_test(
+    name = "orchestrator_test",
+    srcs = ["orchestrator_test.go"],
+    embed = [":orchestrator"],
+    deps = ["//multiagent/agent"],
+)

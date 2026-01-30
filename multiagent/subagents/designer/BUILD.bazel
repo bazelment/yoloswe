@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "designer",
+    srcs = [
+        "designer.go",
+        "prompts.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/subagents/designer",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//multiagent/agent",
+        "//multiagent/protocol",
+    ],
+)
+
+go_test(
+    name = "designer_test",
+    srcs = ["designer_test.go"],
+    embed = [":designer"],
+    deps = [
+        "//multiagent/agent",
+        "//multiagent/protocol",
+    ],
+)

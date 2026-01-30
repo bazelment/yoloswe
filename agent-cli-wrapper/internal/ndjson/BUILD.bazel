@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "ndjson",
+    srcs = ["ndjson.go"],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson",
+    visibility = ["//agent-cli-wrapper:__subpackages__"],
+)

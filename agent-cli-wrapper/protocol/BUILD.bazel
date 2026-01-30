@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "protocol",
+    srcs = [
+        "content.go",
+        "control.go",
+        "messages.go",
+        "parse.go",
+        "stream.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/protocol",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "protocol_test",
+    srcs = [
+        "control_test.go",
+        "parse_test.go",
+        "trace_test.go",
+    ],
+    embed = [":protocol"],
+)

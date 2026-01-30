@@ -1,0 +1,4 @@
+# Common Bazel configuration
+
+# Use Bzlmod for dependency management
+common --enable_bzlmod

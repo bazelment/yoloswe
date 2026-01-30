@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "planner_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/yoloswe/cmd/planner",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//yoloswe/planner",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_binary(
+    name = "planner",
+    embed = [":planner_lib"],
+    visibility = ["//visibility:public"],
+)

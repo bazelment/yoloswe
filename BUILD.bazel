@@ -1,0 +1,25 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/bazelment/yoloswe
+gazelle(name = "gazelle")
+
+# Update BUILD files with dependencies
+gazelle(
+    name = "gazelle-update-repos",
+    args = [
+        "-from_file=go.work",
+        "-to_macro=deps.bzl%go_dependencies",
+        "-prune",
+    ],
+    command = "update-repos",
+)
+
+# Tidy all go.mod files in the workspace
+sh_binary(
+    name = "tidy",
+    srcs = ["//scripts:tidy.sh"],
+    data = [
+        "go.work",
+        "@rules_go//go",
+    ],
+)

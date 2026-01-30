@@ -1,0 +1,26 @@
+# Bazel
+bazel-*
+.bazel-cache/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work.sum
+
+# IDEs
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

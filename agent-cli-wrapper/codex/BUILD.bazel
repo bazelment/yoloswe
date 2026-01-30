@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "codex",
+    srcs = [
+        "accumulator.go",
+        "approval.go",
+        "client.go",
+        "client_options.go",
+        "doc.go",
+        "errors.go",
+        "events.go",
+        "jsonrpc.go",
+        "process.go",
+        "session_log.go",
+        "state.go",
+        "thread.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/codex",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "codex_test",
+    srcs = [
+        "accumulator_test.go",
+        "approval_test.go",
+        "client_options_test.go",
+        "client_test.go",
+        "errors_test.go",
+        "events_test.go",
+        "process_test.go",
+        "state_test.go",
+        "thread_test.go",
+    ],
+    embed = [":codex"],
+)

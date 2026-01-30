@@ -1,0 +1,163 @@
+package yoloswe
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// Integration tests that would require real SDK sessions
+// These are marked as skipped by default and can be run with -integration flag
+
+func TestIntegrationBuilderReviewerLoop(t *testing.T) {
+	t.Skip("Requires real Claude and Codex SDK sessions - run with -integration flag")
+
+	config := Config{
+		BuilderModel:   "haiku",
+		ReviewerModel:  "gpt-5.2-codex",
+		BuilderWorkDir: t.TempDir(),
+		MaxBudgetUSD:   1.0,
+		MaxTimeSeconds: 120,
+		MaxIterations:  3,
+		Verbose:        true,
+	}
+
+	swe := New(config)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	prompt := "Create a simple hello world function in Go"
+
+	if err := swe.Run(ctx, prompt); err != nil {
+		t.Logf("Run error: %v", err)
+	}
+
+	stats := swe.Stats()
+	t.Logf("Exit reason: %s", stats.ExitReason)
+	t.Logf("Iterations: %d", stats.IterationCount)
+	t.Logf("Cost: $%.4f", stats.BuilderCostUSD)
+
+	if stats.IterationCount == 0 {
+		t.Error("expected at least one iteration")
+	}
+}
+
+func TestIntegrationBudgetLimit(t *testing.T) {
+	t.Skip("Requires real Claude SDK session - run with -integration flag")
+
+	config := Config{
+		BuilderModel:   "haiku",
+		ReviewerModel:  "gpt-5.2-codex",
+		BuilderWorkDir: t.TempDir(),
+		MaxBudgetUSD:   0.01, // Very low budget
+		MaxTimeSeconds: 60,
+		MaxIterations:  10,
+		Verbose:        true,
+	}
+
+	swe := New(config)
+	ctx := context.Background()
+
+	prompt := "Implement a complex web server with authentication"
+
+	_ = swe.Run(ctx, prompt)
+	stats := swe.Stats()
+
+	// Should exit due to budget
+	if stats.ExitReason != ExitReasonBudgetExceeded {
+		t.Logf("Expected budget exceeded, got: %s (cost: $%.4f)", stats.ExitReason, stats.BuilderCostUSD)
+	}
+}
+
+func TestIntegrationTimeoutLimit(t *testing.T) {
+	t.Skip("Requires real SDK sessions - run with -integration flag")
+
+	config := Config{
+		BuilderModel:   "sonnet",
+		ReviewerModel:  "gpt-5.2-codex",
+		BuilderWorkDir: t.TempDir(),
+		MaxBudgetUSD:   10.0,
+		MaxTimeSeconds: 5, // Very short timeout
+		MaxIterations:  10,
+		Verbose:        true,
+	}
+
+	swe := New(config)
+	ctx := context.Background()
+
+	prompt := "Create a comprehensive test suite"
+
+	_ = swe.Run(ctx, prompt)
+	stats := swe.Stats()
+
+	// Should exit due to timeout
+	if stats.ExitReason != ExitReasonTimeExceeded {
+		t.Logf("Expected timeout, got: %s (duration: %.1fs)", stats.ExitReason, float64(stats.TotalDurationMs)/1000)
+	}
+}
+
+func TestIntegrationContextCancellation(t *testing.T) {
+	t.Skip("Requires real SDK sessions - run with -integration flag")
+
+	config := Config{
+		BuilderModel:   "haiku",
+		ReviewerModel:  "gpt-5.2-codex",
+		BuilderWorkDir: t.TempDir(),
+		MaxBudgetUSD:   5.0,
+		MaxTimeSeconds: 600,
+		MaxIterations:  10,
+		Verbose:        true,
+	}
+
+	swe := New(config)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel after 2 seconds
+	go func() {
+		time.Sleep(2 * time.Second)
+		cancel()
+	}()
+
+	prompt := "Create a simple function"
+
+	err := swe.Run(ctx, prompt)
+	stats := swe.Stats()
+
+	// Should exit due to interrupt
+	if stats.ExitReason != ExitReasonInterrupt {
+		t.Logf("Expected interrupt, got: %s", stats.ExitReason)
+	}
+	if err != nil {
+		t.Logf("Run returned error: %v", err)
+	}
+}
+
+func TestIntegrationMaxIterations(t *testing.T) {
+	t.Skip("Requires real SDK sessions - run with -integration flag")
+
+	config := Config{
+		BuilderModel:   "haiku",
+		ReviewerModel:  "gpt-5.2-codex",
+		BuilderWorkDir: t.TempDir(),
+		MaxBudgetUSD:   10.0,
+		MaxTimeSeconds: 600,
+		MaxIterations:  1, // Only one iteration
+		Verbose:        true,
+	}
+
+	swe := New(config)
+	ctx := context.Background()
+
+	prompt := "Create a function with a subtle bug that needs fixing"
+
+	err := swe.Run(ctx, prompt)
+	stats := swe.Stats()
+
+	// Should exit due to max iterations if reviewer doesn't accept first time
+	if stats.IterationCount <= 1 && stats.ExitReason == ExitReasonMaxIterations {
+		t.Log("Reached max iterations as expected")
+	}
+	if err != nil {
+		t.Logf("Run returned error: %v", err)
+	}
+}

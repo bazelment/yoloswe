@@ -1,0 +1,91 @@
+package claude
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Sentinel errors for common error conditions.
+var (
+	ErrAlreadyStarted   = errors.New("session already started")
+	ErrNotStarted       = errors.New("session not started")
+	ErrStopping         = errors.New("session is stopping")
+	ErrSessionClosed    = errors.New("session is closed")
+	ErrTimeout          = errors.New("operation timed out")
+	ErrProcessExited    = errors.New("CLI process exited unexpectedly")
+	ErrInvalidState     = errors.New("invalid state transition")
+	ErrPermissionDenied = errors.New("permission denied")
+)
+
+// ProtocolError represents a protocol-level error.
+type ProtocolError struct {
+	Message string
+	Line    string
+	Cause   error
+}
+
+func (e *ProtocolError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("protocol error: %s: %v", e.Message, e.Cause)
+	}
+	return fmt.Sprintf("protocol error: %s", e.Message)
+}
+
+func (e *ProtocolError) Unwrap() error {
+	return e.Cause
+}
+
+// ProcessError represents a process-level error.
+type ProcessError struct {
+	Message  string
+	ExitCode int
+	Stderr   string
+	Cause    error
+}
+
+func (e *ProcessError) Error() string {
+	if e.ExitCode != 0 {
+		return fmt.Sprintf("process error: %s (exit code %d)", e.Message, e.ExitCode)
+	}
+	return fmt.Sprintf("process error: %s", e.Message)
+}
+
+func (e *ProcessError) Unwrap() error {
+	return e.Cause
+}
+
+// TurnError represents an error during turn execution.
+type TurnError struct {
+	TurnNumber int
+	Message    string
+	Cause      error
+}
+
+func (e *TurnError) Error() string {
+	return fmt.Sprintf("turn %d error: %s", e.TurnNumber, e.Message)
+}
+
+func (e *TurnError) Unwrap() error {
+	return e.Cause
+}
+
+// IsRecoverable returns true if the error is recoverable.
+func IsRecoverable(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	// Process exit errors are not recoverable
+	var procErr *ProcessError
+	if errors.As(err, &procErr) {
+		return false
+	}
+
+	// Session closed is not recoverable
+	if errors.Is(err, ErrSessionClosed) {
+		return false
+	}
+
+	// Most other errors are recoverable
+	return true
+}

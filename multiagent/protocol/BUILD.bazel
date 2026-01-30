@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "protocol",
+    srcs = ["types.go"],
+    importpath = "github.com/bazelment/yoloswe/multiagent/protocol",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "protocol_test",
+    srcs = ["types_test.go"],
+    embed = [":protocol"],
+)

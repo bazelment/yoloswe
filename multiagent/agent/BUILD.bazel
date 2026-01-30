@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agent",
+    srcs = [
+        "agent.go",
+        "config.go",
+        "session.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/agent",
+    visibility = ["//visibility:public"],
+    deps = ["//agent-cli-wrapper/claude"],
+)
+
+go_test(
+    name = "agent_test",
+    srcs = [
+        "config_test.go",
+        "session_test.go",
+    ],
+    embed = [":agent"],
+    deps = ["//agent-cli-wrapper/claude"],
+)

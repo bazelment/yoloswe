@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "sessionplayer",
+    srcs = [
+        "codex.go",
+        "player.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/yoloswe/sessionplayer",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/claude/render",
+        "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/codex/render",
+    ],
+)

@@ -1,0 +1,94 @@
+# golangci-lint configuration
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  # Timeout for analysis
+  timeout: 10m
+
+  # Include tests
+  tests: true
+
+  # Go version to use for analysis
+  go: "1.24.6"
+
+linters:
+  # Disable all linters by default, enable specific ones
+  disable-all: true
+  enable:
+    # Formatting
+    - gofmt      # Check gofmt formatting
+    - goimports  # Check imports formatting and ordering
+
+    # Bug detection
+    - govet       # Official Go vet tool
+    - staticcheck # Advanced static analysis
+    - errcheck    # Check error handling
+    - ineffassign # Detect ineffectual assignments
+    - typecheck   # Parse and type-check Go code
+
+    # Style
+    - misspell # Find misspelled English words
+    - unused   # Find unused code
+    - gosimple # Simplify code suggestions
+
+    # Best practices
+    - revive   # Fast, configurable, extensible linter (replaces golint)
+    - gocritic # Opinionated linter with many checks
+
+linters-settings:
+  gofmt:
+    # Simplify code (-s flag)
+    simplify: true
+
+  goimports:
+    # Put local imports after 3rd party
+    local-prefixes: github.com/bazelment/yoloswe
+
+  govet:
+    # Enable all analyzers
+    enable-all: true
+
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: indent-error-flow
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: var-declaration
+      - name: var-naming
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - whyNoLint # Allow nolint without explanation for now
+
+issues:
+  # Maximum issues per linter (0 = unlimited)
+  max-issues-per-linter: 0
+
+  # Maximum issues with same text (0 = unlimited)
+  max-same-issues: 0
+
+  # Exclude some linters from running on tests
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gocritic
+
+  # Exclude generated files
+  exclude-generated-strict: true

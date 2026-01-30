@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "reviewer",
+    srcs = [
+        "prompts.go",
+        "reviewer.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/subagents/reviewer",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//multiagent/agent",
+        "//multiagent/protocol",
+    ],
+)
+
+go_test(
+    name = "reviewer_test",
+    srcs = ["reviewer_test.go"],
+    embed = [":reviewer"],
+    deps = [
+        "//multiagent/agent",
+        "//multiagent/protocol",
+    ],
+)

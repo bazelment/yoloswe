@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "yoloswe",
+    srcs = [
+        "builder.go",
+        "swe.go",
+        "validation.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/yoloswe",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/claude/render",
+        "//yoloswe/reviewer",
+    ],
+)
+
+go_test(
+    name = "yoloswe_test",
+    srcs = [
+        "builder_test.go",
+        "integration_test.go",
+        "runtime_test.go",
+        "swe_test.go",
+        "validation_test.go",
+    ],
+    embed = [":yoloswe"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//yoloswe/reviewer",
+    ],
+)

@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "progress",
+    srcs = [
+        "console.go",
+        "events.go",
+        "reporter.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/progress",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//multiagent/agent",
+        "//multiagent/checkpoint",
+    ],
+)

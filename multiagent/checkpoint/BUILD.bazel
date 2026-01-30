@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "checkpoint",
+    srcs = [
+        "checkpoint.go",
+        "doc.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/checkpoint",
+    visibility = ["//visibility:public"],
+    deps = ["//multiagent/protocol"],
+)
+
+go_test(
+    name = "checkpoint_test",
+    srcs = [
+        "checkpoint_test.go",
+        "live_test.go",
+    ],
+    embed = [":checkpoint"],
+    deps = [
+        "//multiagent/agent",
+        "//multiagent/orchestrator",
+        "//multiagent/planner",
+        "//multiagent/protocol",
+    ],
+)

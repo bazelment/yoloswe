@@ -1,0 +1,11 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "render",
+    srcs = [
+        "options.go",
+        "render.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render",
+    visibility = ["//visibility:public"],
+)

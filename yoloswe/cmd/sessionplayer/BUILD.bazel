@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "sessionplayer_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/yoloswe/cmd/sessionplayer",
+    visibility = ["//visibility:private"],
+    deps = ["//yoloswe/sessionplayer"],
+)
+
+go_binary(
+    name = "sessionplayer",
+    embed = [":sessionplayer_lib"],
+    visibility = ["//visibility:public"],
+)

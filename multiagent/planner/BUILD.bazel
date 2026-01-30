@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "planner",
+    srcs = [
+        "mcp_tools.go",
+        "planner.go",
+        "prompts.go",
+        "streaming_integration.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/multiagent/planner",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//multiagent/agent",
+        "//multiagent/checkpoint",
+        "//multiagent/progress",
+        "//multiagent/protocol",
+        "//multiagent/subagent",
+        "//multiagent/subagents/builder",
+        "//multiagent/subagents/designer",
+        "//multiagent/subagents/reviewer",
+    ],
+)
+
+go_test(
+    name = "planner_test",
+    srcs = [
+        "mcp_tools_test.go",
+        "planner_test.go",
+        "streaming_integration_test.go",
+    ],
+    embed = [":planner"],
+    deps = [
+        "//multiagent/agent",
+        "//multiagent/protocol",
+    ],
+)

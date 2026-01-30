@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.6"
+          cache: true
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.63.4
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Install buildifier
+        run: |
+          BUILDIFIER_VERSION="8.0.3"
+          curl -sSL "https://github.com/bazelbuild/buildtools/releases/download/v${BUILDIFIER_VERSION}/buildifier-linux-amd64" -o buildifier
+          chmod +x buildifier
+          sudo mv buildifier /usr/local/bin/
+
+      - name: Run lint checks
+        run: ./scripts/lint.sh
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.10.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-build
+          repository-cache: true
+          bazelrc: |
+            common --enable_bzlmod
+
+      - name: Build all targets
+        run: bazel build //...
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.10.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-test
+          repository-cache: true
+          bazelrc: |
+            common --enable_bzlmod
+
+      - name: Test all targets
+        run: bazel test //... --test_output=errors
