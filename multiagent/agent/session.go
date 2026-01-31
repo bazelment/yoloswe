@@ -185,6 +185,99 @@ func (s *LongRunningSession) Recording() *claude.SessionRecording {
 	return s.session.Recording()
 }
 
+// SendMessageAsync sends a message without waiting for completion.
+// Use Events() to receive streaming updates and WaitForTurn() to get the result.
+// Returns the turn number that was started.
+func (s *LongRunningSession) SendMessageAsync(ctx context.Context, message string) (int, error) {
+	s.mu.Lock()
+	if !s.started {
+		s.mu.Unlock()
+		return 0, fmt.Errorf("session not started")
+	}
+
+	// Ensure the Claude session is started (lazy initialization)
+	if err := s.ensureSession(ctx); err != nil {
+		s.mu.Unlock()
+		return 0, err
+	}
+
+	session := s.session
+	s.mu.Unlock()
+
+	return session.SendMessage(ctx, message)
+}
+
+// WaitForTurn blocks until the current turn completes.
+// If no turn is in progress, it returns immediately with nil.
+func (s *LongRunningSession) WaitForTurn(ctx context.Context) (*claude.TurnResult, error) {
+	s.mu.Lock()
+	session := s.session
+	s.mu.Unlock()
+
+	if session == nil {
+		return nil, fmt.Errorf("session not started")
+	}
+
+	result, err := session.WaitForTurn(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if result == nil {
+		return nil, nil
+	}
+
+	// Update metrics
+	s.mu.Lock()
+	s.totalCost += result.Usage.CostUSD
+	s.turnCount++
+	s.mu.Unlock()
+
+	return result, nil
+}
+
+// SendToolResult sends a tool result for a specific tool use.
+// This is used when the SDK handles a tool locally (like AskUserQuestion).
+func (s *LongRunningSession) SendToolResult(ctx context.Context, toolUseID, content string) (int, error) {
+	s.mu.Lock()
+	if !s.started {
+		s.mu.Unlock()
+		return 0, fmt.Errorf("session not started")
+	}
+
+	if s.session == nil {
+		s.mu.Unlock()
+		return 0, fmt.Errorf("session not initialized")
+	}
+
+	session := s.session
+	s.mu.Unlock()
+
+	return session.SendToolResult(ctx, toolUseID, content)
+}
+
+// CurrentTurnNumber returns the current turn number.
+func (s *LongRunningSession) CurrentTurnNumber() int {
+	s.mu.Lock()
+	session := s.session
+	s.mu.Unlock()
+
+	if session == nil {
+		return 0
+	}
+
+	return session.CurrentTurnNumber()
+}
+
+// RecordUsage records turn usage for cost and turn count tracking.
+// This should be called when processing TurnCompleteEvent in streaming mode.
+func (s *LongRunningSession) RecordUsage(usage claude.TurnUsage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.totalCost += usage.CostUSD
+	s.turnCount++
+}
+
 // EphemeralSession creates fresh Claude sessions for each task (Designer, Builder, Reviewer).
 // Each Execute() call creates a new session, runs one interaction, and stops the session.
 type EphemeralSession struct {

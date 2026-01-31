@@ -3,9 +3,13 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "planner",
     srcs = [
+        "iteration.go",
         "mcp_tools.go",
+        "mission_events.go",
         "planner.go",
         "prompts.go",
+        "state.go",
+        "stats.go",
         "streaming_integration.go",
     ],
     importpath = "github.com/bazelment/yoloswe/multiagent/planner",

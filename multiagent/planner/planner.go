@@ -39,6 +39,20 @@ type Planner struct {
 	totalCost         float64
 	mu                sync.Mutex
 	checkpointEnabled bool
+
+	// State machine for multi-turn handling
+	stateMachine *StateMachine
+
+	// Phase-aware stats tracking (from yoloswe/planner pattern)
+	phaseStats PhaseStats
+
+	// Iteration configuration for builder-reviewer loops
+	iterConfig *IterationConfig
+
+	// Multi-turn state flags (from yoloswe/planner pattern)
+	waitingForUserInput bool
+	inBuildPhase        bool
+	pendingBuildStart   bool
 }
 
 // Config holds configuration for the Planner and its sub-agents.
@@ -71,6 +85,7 @@ func New(cfg Config, swarmSessionID string) *Planner {
 		filesCreated:      make([]string, 0),
 		filesModified:     make([]string, 0),
 		checkpointEnabled: cfg.EnableCheckpointing,
+		stateMachine:      NewStateMachine(),
 	}
 
 	// Initialize checkpoint manager if enabled
@@ -612,4 +627,291 @@ func formatReviewPrompt(req *protocol.ReviewRequest) string {
 		prompt += fmt.Sprintf("\nOriginal Design:\n%s\n", req.OriginalDesign.Architecture)
 	}
 	return prompt
+}
+
+// State returns the current Planner state.
+func (p *Planner) State() PlannerState {
+	if p.stateMachine == nil {
+		return StateIdle
+	}
+	return p.stateMachine.State()
+}
+
+// StateHistory returns the state transition history.
+func (p *Planner) StateHistory() []StateTransition {
+	if p.stateMachine == nil {
+		return nil
+	}
+	return p.stateMachine.History()
+}
+
+// PhaseStats returns the phase-aware statistics.
+func (p *Planner) PhaseStats() PhaseStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.phaseStats
+}
+
+// ExecuteMissionStreaming runs a mission with streaming event support.
+// Unlike ExecuteMission, this method returns a channel of events for real-time progress.
+func (p *Planner) ExecuteMissionStreaming(ctx context.Context, mission string) (<-chan MissionEvent, error) {
+	events := make(chan MissionEvent, 100)
+
+	go func() {
+		defer close(events)
+
+		// Track success/failure state
+		missionSuccess := true
+		var missionError error
+
+		// Emit start event
+		events <- NewMissionStartEvent(mission)
+
+		// Transition to planning
+		if p.stateMachine != nil {
+			if err := p.stateMachine.Transition(StatePlanning, "mission_received"); err == nil {
+				events <- NewStateChangeEvent(StateIdle, StatePlanning, "mission_received")
+			}
+		}
+
+		// Progress: Planner is thinking
+		if p.progress != nil {
+			p.progress.Event(progress.NewAgentThinkingEvent(agent.RolePlanner, "Analyzing mission and planning tasks"))
+		}
+
+		// Send message asynchronously
+		_, err := p.session.SendMessageAsync(ctx, formatMissionMessage(mission))
+		if err != nil {
+			events <- NewMissionErrorEvent(fmt.Errorf("failed to send mission: %w", err))
+			if p.stateMachine != nil {
+				_ = p.stateMachine.Transition(StateFailed, "send_failed")
+			}
+			return
+		}
+
+		// Process events from the session
+		sessionEvents := p.session.Events()
+		if sessionEvents == nil {
+			// No events channel - fall back to waiting for turn
+			result, waitErr := p.session.WaitForTurn(ctx)
+			if waitErr != nil {
+				events <- NewMissionErrorEvent(waitErr)
+				if p.stateMachine != nil {
+					_ = p.stateMachine.Transition(StateFailed, "wait_failed")
+				}
+				return
+			}
+
+			// Build result
+			p.mu.Lock()
+			plannerResult := &protocol.PlannerResult{
+				Success:       result.Success,
+				FilesCreated:  p.filesCreated,
+				FilesModified: p.filesModified,
+				TotalCost:     p.totalCost + p.session.TotalCost(),
+			}
+			p.mu.Unlock()
+
+			events <- NewMissionCompleteEvent(plannerResult)
+			if p.stateMachine != nil {
+				if result.Success {
+					_ = p.stateMachine.Transition(StateCompleted, "mission_complete")
+				} else {
+					_ = p.stateMachine.Transition(StateFailed, "mission_failed")
+				}
+			}
+			return
+		}
+
+		// Process streaming events
+		for {
+			select {
+			case <-ctx.Done():
+				events <- NewMissionErrorEvent(ctx.Err())
+				if p.stateMachine != nil {
+					_ = p.stateMachine.Transition(StateFailed, "context_cancelled")
+				}
+				return
+
+			case event, ok := <-sessionEvents:
+				if !ok {
+					// Session ended - build result with tracked success state
+					p.mu.Lock()
+					plannerResult := &protocol.PlannerResult{
+						Success:       missionSuccess,
+						FilesCreated:  p.filesCreated,
+						FilesModified: p.filesModified,
+						TotalCost:     p.totalCost + p.session.TotalCost(),
+					}
+					p.mu.Unlock()
+
+					if missionSuccess {
+						events <- NewMissionCompleteEvent(plannerResult)
+						if p.stateMachine != nil {
+							_ = p.stateMachine.Transition(StateCompleted, "mission_complete")
+						}
+					} else {
+						if missionError != nil {
+							events <- NewMissionErrorEvent(missionError)
+						}
+						if p.stateMachine != nil {
+							_ = p.stateMachine.Transition(StateFailed, "mission_failed")
+						}
+					}
+					return
+				}
+
+				// Handle the event and emit mission events
+				// Track failures from events
+				switch e := event.(type) {
+				case claude.ErrorEvent:
+					missionSuccess = false
+					missionError = e.Error
+					events <- NewMissionErrorEvent(e.Error)
+					// Terminate immediately on error events
+					if p.stateMachine != nil {
+						_ = p.stateMachine.Transition(StateFailed, "error_event")
+					}
+					return
+
+				case claude.TurnCompleteEvent:
+					if !e.Success {
+						missionSuccess = false
+						if e.Error != nil {
+							missionError = e.Error
+						}
+					}
+				}
+
+				p.handleSessionEventStreaming(event, events)
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+// handleSessionEventStreaming processes a Claude session event and emits mission events.
+func (p *Planner) handleSessionEventStreaming(event claude.Event, missionEvents chan<- MissionEvent) {
+	switch e := event.(type) {
+	case claude.TextEvent:
+		missionEvents <- NewTextStreamEvent(e.Text, e.FullText)
+
+	case claude.ThinkingEvent:
+		missionEvents <- NewThinkingStreamEvent(e.Thinking, e.FullThinking)
+
+	case claude.ToolStartEvent:
+		missionEvents <- NewToolStartEvent(e.Name, e.ID)
+
+	case claude.ToolCompleteEvent:
+		missionEvents <- NewToolCompleteEvent(e.Name, e.ID, e.Input)
+
+		// Track file operations
+		if filePath, ok := e.Input["file_path"].(string); ok && filePath != "" {
+			action := "modify"
+			if e.Name == "Write" {
+				action = "create"
+			}
+			missionEvents <- NewFileChangeEvent(filePath, action, agent.RolePlanner)
+
+			// Update internal file tracking
+			p.mu.Lock()
+			if e.Name == "Write" {
+				p.filesCreated = append(p.filesCreated, filePath)
+			} else if e.Name == "Edit" {
+				p.filesModified = append(p.filesModified, filePath)
+			}
+			p.mu.Unlock()
+		}
+
+	case claude.TurnCompleteEvent:
+		// Record usage in session for cost/turn tracking
+		p.session.RecordUsage(e.Usage)
+
+		// Phase-aware stats tracking (from yoloswe/planner pattern)
+		p.mu.Lock()
+		currentState := StateIdle
+		if p.stateMachine != nil {
+			currentState = p.stateMachine.State()
+		}
+
+		// Handle pending build start transition
+		if p.pendingBuildStart {
+			p.phaseStats.Planning.Add(e.Usage)
+			p.inBuildPhase = true
+			p.pendingBuildStart = false
+		} else if p.inBuildPhase {
+			p.phaseStats.AddForPhase(currentState, e.Usage)
+		} else {
+			p.phaseStats.Planning.Add(e.Usage)
+		}
+		p.mu.Unlock()
+
+		var turnErr error
+		if e.Error != nil {
+			turnErr = e.Error
+		}
+		missionEvents <- NewTurnCompleteEvent(e.TurnNumber, e.Success, e.Usage.CostUSD, turnErr)
+
+		// Emit cost update with updated totals
+		missionEvents <- NewCostUpdateEvent(p.TotalCost(), 0)
+
+	case claude.ErrorEvent:
+		missionEvents <- NewMissionErrorEvent(e.Error)
+	}
+}
+
+// IsWaitingForInput returns true if the Planner is waiting for user input.
+func (p *Planner) IsWaitingForInput() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waitingForUserInput
+}
+
+// SetWaitingForInput sets the waiting for input flag.
+func (p *Planner) SetWaitingForInput(waiting bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.waitingForUserInput = waiting
+}
+
+// IsInBuildPhase returns true if the Planner is in the build phase.
+func (p *Planner) IsInBuildPhase() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inBuildPhase
+}
+
+// SetInBuildPhase sets the build phase flag.
+func (p *Planner) SetInBuildPhase(inBuild bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inBuildPhase = inBuild
+}
+
+// SetPendingBuildStart sets the pending build start flag.
+// This is used during plan→build transitions to correctly attribute stats.
+func (p *Planner) SetPendingBuildStart(pending bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pendingBuildStart = pending
+}
+
+// Reset resets the Planner to its initial state for a new mission.
+func (p *Planner) Reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.filesCreated = make([]string, 0)
+	p.filesModified = make([]string, 0)
+	p.iterationCount = 0
+	p.totalCost = 0
+	p.phaseStats.Reset()
+	p.waitingForUserInput = false
+	p.inBuildPhase = false
+	p.pendingBuildStart = false
+
+	if p.stateMachine != nil {
+		p.stateMachine.Reset()
+	}
 }

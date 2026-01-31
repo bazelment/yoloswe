@@ -405,12 +405,31 @@ func (sp *StreamingPlanner) forwardSubAgentEvents(sub *subagent.StreamingSubAgen
 			}
 
 		case *subagent.FileEvent:
-			// Files are already tracked in the result, but we could emit events here
-			// if needed for real-time UI updates
+			// Forward file events for real-time UI updates
+			if sp.progress != nil {
+				sp.progress.Event(progress.NewFileChangeEvent(role, e.Path, string(e.Action)))
+			}
 
 		case *subagent.CostUpdate:
-			// Could emit cost update events for real-time budget tracking
-			// For now, costs are aggregated in the result
+			// Forward cost update events for real-time budget tracking
+			if sp.progress != nil {
+				// Get budget from iteration config if available
+				budget := 0.0
+				iterConfig := sp.GetIterationConfig()
+				if iterConfig.MaxBudgetUSD > 0 {
+					budget = iterConfig.MaxBudgetUSD
+				}
+
+				agentCosts := map[agent.AgentRole]float64{
+					role: e.TotalCostUSD,
+				}
+
+				sp.progress.Event(progress.NewCostUpdateEvent(
+					sp.TotalCost(),
+					budget,
+					agentCosts,
+				))
+			}
 		}
 	}
 }

@@ -20,6 +20,7 @@ const (
 	EventToolComplete
 	EventIteration
 	EventCostUpdate
+	EventFileChange
 	EventError
 )
 
@@ -240,5 +241,29 @@ func NewErrorEvent(err error, context string) ErrorEvent {
 		ts:      time.Now(),
 		Err:     err,
 		Context: context,
+	}
+}
+
+// FileChangeEvent fires when a file is created or modified.
+type FileChangeEvent struct {
+	ts        time.Time
+	AgentRole agent.AgentRole
+	Path      string
+	Action    string // "create" or "modify"
+}
+
+// Type returns the event type.
+func (e FileChangeEvent) Type() EventType { return EventFileChange }
+
+// Timestamp returns when the event occurred.
+func (e FileChangeEvent) Timestamp() time.Time { return e.ts }
+
+// NewFileChangeEvent creates a new file change event.
+func NewFileChangeEvent(role agent.AgentRole, path, action string) FileChangeEvent {
+	return FileChangeEvent{
+		ts:        time.Now(),
+		AgentRole: role,
+		Path:      path,
+		Action:    action,
 	}
 }
