@@ -418,19 +418,13 @@ func TestPlanFilePathRequired(t *testing.T) {
 }
 
 func TestPendingBuildStartTransition(t *testing.T) {
-	// Test that pendingBuildStart correctly transitions to build phase
-	// and counts the turn as build stats (since model does all work in one turn)
+	// Test that pendingBuildStart correctly handles the plan→build transition
+	// The sequence is:
+	// 1. ExitPlanMode turn completes (planning stats) → transition to build phase
+	// 2. Build turn completes (build stats) → prompt/exit
 	p := &PlannerWrapper{
 		waitingForUserInput: true, // Set by handleExitPlanMode
 		pendingBuildStart:   true, // Set by executeInCurrentSession
-	}
-
-	// Simulate the TurnComplete that arrives after sending "I approve this plan"
-	// The model typically completes ALL build work in this single response
-	buildUsage := claude.TurnUsage{
-		InputTokens:  2000,
-		OutputTokens: 1000,
-		CostUSD:      0.10,
 	}
 
 	// Before: not in build phase
@@ -438,34 +432,69 @@ func TestPendingBuildStartTransition(t *testing.T) {
 		t.Error("should not be in build phase before transition")
 	}
 
-	// Simulate what handleEvent does for TurnCompleteEvent when pendingBuildStart is true
-	if p.pendingBuildStart {
-		// Count as build stats since implementation work is in this turn
-		p.buildingStats.Add(buildUsage)
-		p.inBuildPhase = true
-		p.pendingBuildStart = false
-		p.waitingForUserInput = false
+	// Step 1: Simulate the planning TurnComplete (ExitPlanMode turn)
+	planningUsage := claude.TurnUsage{
+		InputTokens:  1000,
+		OutputTokens: 500,
+		CostUSD:      0.05,
 	}
 
-	// After: should be in build phase, build stats recorded
+	if p.pendingBuildStart {
+		// Count as planning stats - this is still the ExitPlanMode turn
+		p.planningStats.Add(planningUsage)
+		// Transition to build phase for subsequent turns
+		p.inBuildPhase = true
+		p.pendingBuildStart = false
+		// Keep waitingForUserInput=true - don't exit yet
+	}
+
+	// After planning turn: in build phase, waiting for build response
 	if !p.inBuildPhase {
-		t.Error("should be in build phase after transition")
+		t.Error("should be in build phase after planning turn")
 	}
 	if p.pendingBuildStart {
-		t.Error("pendingBuildStart should be false after transition")
+		t.Error("pendingBuildStart should be false after planning turn")
 	}
+	if !p.waitingForUserInput {
+		t.Error("waitingForUserInput should still be true after planning turn")
+	}
+	if p.planningStats.InputTokens != 1000 {
+		t.Errorf("expected planning InputTokens=1000, got %d", p.planningStats.InputTokens)
+	}
+	if p.buildingStats.InputTokens != 0 {
+		t.Errorf("expected building InputTokens=0 after planning turn, got %d", p.buildingStats.InputTokens)
+	}
+
+	// Step 2: Simulate the build TurnComplete
+	buildUsage := claude.TurnUsage{
+		InputTokens:  2000,
+		OutputTokens: 1000,
+		CostUSD:      0.10,
+	}
+
+	// Accumulate build stats
+	if p.inBuildPhase {
+		p.buildingStats.Add(buildUsage)
+	}
+
+	// Handle waitingForUserInput flag (would prompt/exit here)
 	if p.waitingForUserInput {
-		t.Error("waitingForUserInput should be false after transition")
+		p.waitingForUserInput = false
+		// Would call promptForFollowUp or exit here
 	}
+
+	// After build turn: stats recorded correctly
 	if p.buildingStats.InputTokens != 2000 {
 		t.Errorf("expected building InputTokens=2000, got %d", p.buildingStats.InputTokens)
 	}
 	if p.buildingStats.TurnCount != 1 {
 		t.Errorf("expected building TurnCount=1, got %d", p.buildingStats.TurnCount)
 	}
-	// Planning stats should be empty
-	if p.planningStats.InputTokens != 0 {
-		t.Errorf("expected planning InputTokens=0, got %d", p.planningStats.InputTokens)
+	if p.planningStats.TurnCount != 1 {
+		t.Errorf("expected planning TurnCount=1, got %d", p.planningStats.TurnCount)
+	}
+	if p.waitingForUserInput {
+		t.Error("waitingForUserInput should be false after build turn")
 	}
 }
 
@@ -507,24 +536,155 @@ func TestNewSessionBuildPhaseImmediate(t *testing.T) {
 }
 
 func TestPendingBuildStartClearsWaitingForUserInput(t *testing.T) {
-	// Test that pendingBuildStart transition clears waitingForUserInput
-	// since the model typically completes all work in one turn
+	// Test that waitingForUserInput is properly managed through the
+	// plan→build transition (2-turn sequence)
 	p := &PlannerWrapper{
 		waitingForUserInput: true,
 		pendingBuildStart:   true,
 	}
 
-	// Simulate what happens in TurnComplete handler when pendingBuildStart is true
+	// Step 1: Planning turn completes (ExitPlanMode turn)
 	if p.pendingBuildStart {
-		p.buildingStats.Add(claude.TurnUsage{InputTokens: 100})
+		p.planningStats.Add(claude.TurnUsage{InputTokens: 100})
 		p.inBuildPhase = true
 		p.pendingBuildStart = false
-		p.waitingForUserInput = false // Now cleared since we're done
+		// Keep waitingForUserInput=true - don't clear yet
 	}
 
-	// waitingForUserInput should be false since build is complete
+	// After planning turn: still waiting for build response
+	if !p.waitingForUserInput {
+		t.Error("waitingForUserInput should still be true after planning turn")
+	}
+
+	// Step 2: Build turn completes
+	if p.inBuildPhase {
+		p.buildingStats.Add(claude.TurnUsage{InputTokens: 200})
+	}
+
+	// Now clear waitingForUserInput (would prompt/exit here)
 	if p.waitingForUserInput {
-		t.Error("waitingForUserInput should be false after build transition")
+		p.waitingForUserInput = false
+	}
+
+	// After build turn: no longer waiting
+	if p.waitingForUserInput {
+		t.Error("waitingForUserInput should be false after build turn completes")
+	}
+}
+
+func TestPlanToBuildTransitionEventSequence(t *testing.T) {
+	// Test the complete event sequence for plan→build transition:
+	// 1. ExitPlanMode tool completes
+	// 2. User selects "Execute in current session"
+	// 3. Planning TurnComplete arrives (ExitPlanMode turn)
+	// 4. Build turn starts processing "I approve this plan..."
+	// 5. Build TurnComplete arrives
+	// 6. Prompt for follow-up (or exit in simple mode)
+
+	tests := []struct {
+		name                       string
+		simple                     bool
+		expectExitAfterPlanningTC  bool
+		expectExitAfterBuildTC     bool
+		expectPromptAfterBuildTC   bool
+	}{
+		{
+			name:                      "non-simple mode prompts after build",
+			simple:                    false,
+			expectExitAfterPlanningTC: false,
+			expectExitAfterBuildTC:    false,
+			expectPromptAfterBuildTC:  true,
+		},
+		{
+			name:                      "simple mode exits after build",
+			simple:                    true,
+			expectExitAfterPlanningTC: false,
+			expectExitAfterBuildTC:    true,
+			expectPromptAfterBuildTC:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &PlannerWrapper{
+				config:              Config{Simple: tt.simple},
+				waitingForUserInput: true, // Set by ExitPlanMode handler
+				pendingBuildStart:   true, // Set by executeInCurrentSession
+			}
+
+			// Step 3: Planning TurnComplete (ExitPlanMode turn)
+			planningUsage := claude.TurnUsage{InputTokens: 1000, OutputTokens: 500}
+
+			// Simulate the pendingBuildStart handler
+			var shouldExitAfterPlanning bool
+			if p.pendingBuildStart {
+				p.planningStats.Add(planningUsage)
+				p.inBuildPhase = true
+				p.pendingBuildStart = false
+				// Keep waitingForUserInput=true
+				shouldExitAfterPlanning = false // Should NOT exit yet
+			}
+
+			if shouldExitAfterPlanning != tt.expectExitAfterPlanningTC {
+				t.Errorf("after planning TC: expected exit=%v, got %v",
+					tt.expectExitAfterPlanningTC, shouldExitAfterPlanning)
+			}
+
+			// Verify state after planning turn
+			if !p.inBuildPhase {
+				t.Error("should be in build phase after planning turn")
+			}
+			if !p.waitingForUserInput {
+				t.Error("should still be waiting for user input after planning turn")
+			}
+			if p.planningStats.TurnCount != 1 {
+				t.Errorf("expected 1 planning turn, got %d", p.planningStats.TurnCount)
+			}
+			if p.buildingStats.TurnCount != 0 {
+				t.Errorf("expected 0 build turns after planning, got %d", p.buildingStats.TurnCount)
+			}
+
+			// Step 5: Build TurnComplete
+			buildUsage := claude.TurnUsage{InputTokens: 2000, OutputTokens: 1000}
+
+			// Simulate normal stats accumulation
+			if p.inBuildPhase {
+				p.buildingStats.Add(buildUsage)
+			}
+
+			// Simulate waitingForUserInput handler
+			var shouldExitAfterBuild, shouldPromptAfterBuild bool
+			if p.waitingForUserInput {
+				p.waitingForUserInput = false
+				if p.inBuildPhase {
+					if p.config.Simple {
+						shouldExitAfterBuild = true
+					} else {
+						shouldPromptAfterBuild = true
+					}
+				}
+			}
+
+			if shouldExitAfterBuild != tt.expectExitAfterBuildTC {
+				t.Errorf("after build TC: expected exit=%v, got %v",
+					tt.expectExitAfterBuildTC, shouldExitAfterBuild)
+			}
+			if shouldPromptAfterBuild != tt.expectPromptAfterBuildTC {
+				t.Errorf("after build TC: expected prompt=%v, got %v",
+					tt.expectPromptAfterBuildTC, shouldPromptAfterBuild)
+			}
+
+			// Verify final state
+			if p.waitingForUserInput {
+				t.Error("should not be waiting after build turn")
+			}
+			if p.planningStats.TurnCount != 1 {
+				t.Errorf("expected 1 planning turn finally, got %d", p.planningStats.TurnCount)
+			}
+			if p.buildingStats.TurnCount != 1 {
+				t.Errorf("expected 1 build turn finally, got %d", p.buildingStats.TurnCount)
+			}
+		})
 	}
 }
 

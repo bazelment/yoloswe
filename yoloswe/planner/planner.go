@@ -436,21 +436,18 @@ func (p *PlannerWrapper) handleEvent(ctx context.Context, event claude.Event) (b
 		p.renderer.TurnSummary(e)
 
 		// Handle the plan→build transition:
-		// When pendingBuildStart is true, this TurnComplete is from the turn that
-		// started after we sent "I approve this plan". The model typically completes
-		// ALL the build work in this single response, so we should prompt for follow-up.
+		// When pendingBuildStart is true, this TurnComplete is still from the
+		// ExitPlanMode planning turn. We need to count it as planning stats,
+		// transition to build phase, and continue waiting for the build response.
 		if p.pendingBuildStart {
-			// Count as build stats since implementation work is in this turn
-			p.buildingStats.Add(e.Usage)
+			// Count as planning stats - this is still the ExitPlanMode turn
+			p.planningStats.Add(e.Usage)
+			// Transition to build phase for subsequent turns
 			p.inBuildPhase = true
 			p.pendingBuildStart = false
-			p.waitingForUserInput = false
-			// In simple mode, exit cleanly
-			if p.config.Simple {
-				return true, nil
-			}
-			// In non-simple mode, prompt for follow-up
-			return p.promptForFollowUp(ctx)
+			// Keep waitingForUserInput=true so we don't exit yet
+			// The actual build turn will clear this flag
+			return false, nil
 		}
 
 		// Normal stats accumulation
@@ -460,21 +457,20 @@ func (p *PlannerWrapper) handleEvent(ctx context.Context, event claude.Event) (b
 			p.planningStats.Add(e.Usage)
 		}
 
-		// In simple mode, exit when build is done
-		if p.config.Simple && p.inBuildPhase {
-			return true, nil
-		}
-
 		// If we're waiting for user input (AskUserQuestion/ExitPlanMode response),
-		// clear the flag and continue. This happens when the build turn started
-		// by executeInCurrentSession completes.
+		// clear the flag and continue/prompt as appropriate.
 		if p.waitingForUserInput {
 			p.waitingForUserInput = false
 			// In non-simple mode with build phase complete, prompt for follow-up
 			if p.inBuildPhase {
+				// In simple mode, exit cleanly after build
+				if p.config.Simple {
+					return true, nil
+				}
+				// In non-simple mode, prompt for follow-up
 				return p.promptForFollowUp(ctx)
 			}
-			// Otherwise continue the event loop
+			// Otherwise continue the event loop (planning phase)
 			return false, nil
 		}
 
@@ -602,10 +598,13 @@ func (p *PlannerWrapper) executeInCurrentSession(ctx context.Context) (bool, err
 	}
 
 	// Signal that we're starting build execution.
-	// The next TurnComplete (from the planning turn that called ExitPlanMode) will:
-	// 1. Count that turn's stats as planning
-	// 2. Set inBuildPhase=true for subsequent turns
-	// waitingForUserInput stays true (set by handleExitPlanMode) so we don't exit early.
+	// The next TurnComplete will be from the ExitPlanMode planning turn, which will:
+	// 1. Count that turn's stats as planning (not build)
+	// 2. Set inBuildPhase=true to transition to build phase
+	// 3. Keep waitingForUserInput=true and continue waiting
+	// Then the build turn will start processing "I approve this plan..." message.
+	// When the build turn completes, waitingForUserInput will be cleared and we'll
+	// prompt for follow-up (or exit in simple mode).
 	p.pendingBuildStart = true
 	_, err := p.session.SendMessage(ctx, "I approve this plan. Please proceed with implementation.")
 	return false, err
