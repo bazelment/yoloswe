@@ -64,9 +64,9 @@ func (s PlannerState) IsActive() bool {
 
 // StateTransition represents a state change with its trigger.
 type StateTransition struct {
+	Trigger string
 	From    PlannerState
 	To      PlannerState
-	Trigger string
 }
 
 // validTransitions defines the legal state transitions.
@@ -88,13 +88,13 @@ var validTransitions = map[int]bool{
 	int(StateDesigning)*100 + int(StateFailed):   true,
 
 	// From Building
-	int(StateBuilding)*100 + int(StatePlanning): true,
+	int(StateBuilding)*100 + int(StatePlanning):  true,
 	int(StateBuilding)*100 + int(StateReviewing): true,
 	int(StateBuilding)*100 + int(StateFailed):    true,
 
 	// From Reviewing
-	int(StateReviewing)*100 + int(StatePlanning): true,
-	int(StateReviewing)*100 + int(StateBuilding): true,
+	int(StateReviewing)*100 + int(StatePlanning):  true,
+	int(StateReviewing)*100 + int(StateBuilding):  true,
 	int(StateReviewing)*100 + int(StateCompleted): true,
 	int(StateReviewing)*100 + int(StateFailed):    true,
 
@@ -114,9 +114,9 @@ func isValidTransition(from, to PlannerState) bool {
 
 // StateMachine manages the Planner's state transitions.
 type StateMachine struct {
-	state   PlannerState
 	history []StateTransition
 	mu      sync.RWMutex
+	state   PlannerState
 }
 
 // NewStateMachine creates a new state machine starting in Idle state.
@@ -146,9 +146,9 @@ func (sm *StateMachine) Transition(to PlannerState, trigger string) error {
 	}
 
 	transition := StateTransition{
+		Trigger: trigger,
 		From:    sm.state,
 		To:      to,
-		Trigger: trigger,
 	}
 
 	sm.history = append(sm.history, transition)
@@ -163,9 +163,9 @@ func (sm *StateMachine) ForceState(state PlannerState, reason string) {
 	defer sm.mu.Unlock()
 
 	transition := StateTransition{
+		Trigger: "force:" + reason,
 		From:    sm.state,
 		To:      state,
-		Trigger: "force:" + reason,
 	}
 
 	sm.history = append(sm.history, transition)

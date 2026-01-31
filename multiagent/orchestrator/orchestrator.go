@@ -25,12 +25,12 @@ var ErrBudgetExceeded = errors.New("budget exceeded")
 
 // Orchestrator is the user-facing agent that triages requests and delegates to Planner.
 type Orchestrator struct {
-	swarmConfig    agent.SwarmConfig
 	session        *agent.LongRunningSession
 	planner        *planner.Planner
 	controller     *control.Controller
 	swarmSessionID string
 	config         agent.AgentConfig
+	swarmConfig    agent.SwarmConfig
 	totalCost      float64
 	mu             sync.Mutex
 	started        bool

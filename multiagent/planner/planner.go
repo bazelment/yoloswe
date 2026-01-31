@@ -23,33 +23,25 @@ var ErrMaxIterationsExceeded = errors.New("max iterations exceeded")
 
 // Planner is a long-running agent that coordinates Designer, Builder, and Reviewer.
 type Planner struct {
-	progress          progress.Reporter
-	session           *agent.LongRunningSession
-	mcpServer         *MCPServer
-	checkpointMgr     *checkpoint.Manager
-	swarmSessionID    string
-	filesCreated      []string
-	filesModified     []string
-	designerConfig    agent.AgentConfig
-	reviewerConfig    agent.AgentConfig
-	builderConfig     agent.AgentConfig
-	config            agent.AgentConfig
-	iterationCount    int
-	maxIterations     int
-	totalCost         float64
-	mu                sync.Mutex
-	checkpointEnabled bool
-
-	// State machine for multi-turn handling
-	stateMachine *StateMachine
-
-	// Phase-aware stats tracking (from yoloswe/planner pattern)
-	phaseStats PhaseStats
-
-	// Iteration configuration for builder-reviewer loops
-	iterConfig *IterationConfig
-
-	// Multi-turn state flags (from yoloswe/planner pattern)
+	progress            progress.Reporter
+	session             *agent.LongRunningSession
+	iterConfig          *IterationConfig
+	stateMachine        *StateMachine
+	checkpointMgr       *checkpoint.Manager
+	mcpServer           *MCPServer
+	swarmSessionID      string
+	filesModified       []string
+	filesCreated        []string
+	reviewerConfig      agent.AgentConfig
+	config              agent.AgentConfig
+	designerConfig      agent.AgentConfig
+	builderConfig       agent.AgentConfig
+	phaseStats          PhaseStats
+	maxIterations       int
+	totalCost           float64
+	iterationCount      int
+	mu                  sync.Mutex
+	checkpointEnabled   bool
 	waitingForUserInput bool
 	inBuildPhase        bool
 	pendingBuildStart   bool
@@ -765,10 +757,9 @@ func (p *Planner) ExecuteMissionStreaming(ctx context.Context, mission string) (
 				// Track failures from events
 				switch e := event.(type) {
 				case claude.ErrorEvent:
-					missionSuccess = false
-					missionError = e.Error
+					// ErrorEvent terminates immediately - no need to track missionSuccess/missionError
+					// since we emit the error and return right after
 					events <- NewMissionErrorEvent(e.Error)
-					// Terminate immediately on error events
 					if p.stateMachine != nil {
 						_ = p.stateMachine.Transition(StateFailed, "error_event")
 					}

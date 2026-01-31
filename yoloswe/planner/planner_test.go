@@ -582,11 +582,11 @@ func TestPlanToBuildTransitionEventSequence(t *testing.T) {
 	// 6. Prompt for follow-up (or exit in simple mode)
 
 	tests := []struct {
-		name                       string
-		simple                     bool
-		expectExitAfterPlanningTC  bool
-		expectExitAfterBuildTC     bool
-		expectPromptAfterBuildTC   bool
+		name                      string
+		simple                    bool
+		expectExitAfterPlanningTC bool
+		expectExitAfterBuildTC    bool
+		expectPromptAfterBuildTC  bool
 	}{
 		{
 			name:                      "non-simple mode prompts after build",

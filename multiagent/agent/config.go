@@ -131,7 +131,7 @@ func DefaultSwarmConfig() SwarmConfig {
 		TotalBudgetUSD:      1.0,
 		MaxIterations:       50,
 		EnableCheckpointing: true,
-		MissionTimeout:      0,              // unlimited
+		MissionTimeout:      0,                // unlimited
 		HeartbeatInterval:   30 * time.Second, // emit heartbeat every 30s
 		StallTimeout:        10 * time.Minute, // warn if no progress for 10 minutes
 	}
