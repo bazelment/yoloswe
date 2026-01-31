@@ -19,6 +19,7 @@ go_library(
 go_test(
     name = "yoloswe_test",
     srcs = [
+        "build_integration_test.go",
         "builder_test.go",
         "integration_test.go",
         "runtime_test.go",
@@ -29,5 +30,23 @@ go_test(
     deps = [
         "//agent-cli-wrapper/claude",
         "//yoloswe/reviewer",
+    ],
+)
+
+go_test(
+    name = "integration_test",
+    srcs = [
+        "build_integration_test.go",
+        "integration_test.go",
+    ],
+    embed = [":yoloswe"],
+    tags = [
+        "integration",
+        "manual",
+    ],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//yoloswe/reviewer",
+        "//yoloswe/testutil",
     ],
 )

@@ -6,12 +6,11 @@ import (
 	"time"
 )
 
-// Integration tests that would require real SDK sessions
-// These are marked as skipped by default and can be run with -integration flag
+// Integration tests for the builder-reviewer loop.
+// These tests require real Claude and Codex SDK sessions.
+// Run with: bazel test //yoloswe:integration_test
 
 func TestIntegrationBuilderReviewerLoop(t *testing.T) {
-	t.Skip("Requires real Claude and Codex SDK sessions - run with -integration flag")
-
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
@@ -43,8 +42,6 @@ func TestIntegrationBuilderReviewerLoop(t *testing.T) {
 }
 
 func TestIntegrationBudgetLimit(t *testing.T) {
-	t.Skip("Requires real Claude SDK session - run with -integration flag")
-
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
@@ -70,8 +67,6 @@ func TestIntegrationBudgetLimit(t *testing.T) {
 }
 
 func TestIntegrationTimeoutLimit(t *testing.T) {
-	t.Skip("Requires real SDK sessions - run with -integration flag")
-
 	config := Config{
 		BuilderModel:   "sonnet",
 		ReviewerModel:  "gpt-5.2-codex",
@@ -97,8 +92,6 @@ func TestIntegrationTimeoutLimit(t *testing.T) {
 }
 
 func TestIntegrationContextCancellation(t *testing.T) {
-	t.Skip("Requires real SDK sessions - run with -integration flag")
-
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
@@ -133,8 +126,6 @@ func TestIntegrationContextCancellation(t *testing.T) {
 }
 
 func TestIntegrationMaxIterations(t *testing.T) {
-	t.Skip("Requires real SDK sessions - run with -integration flag")
-
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",

@@ -16,6 +16,7 @@ type Client struct {
 	process     *processManager
 	state       *clientStateManager
 	threads     map[string]*Thread
+	readyBefore map[string]struct{} // MCP startup received before thread registered
 	idGen       *idGenerator
 	events      chan Event
 	accumulator *streamAccumulator
@@ -49,6 +50,7 @@ func NewClient(opts ...ClientOption) *Client {
 		config:      config,
 		state:       newClientStateManager(),
 		threads:     make(map[string]*Thread),
+		readyBefore: make(map[string]struct{}),
 		idGen:       &idGenerator{},
 		pending:     make(map[int64]chan *rpcResult),
 		events:      make(chan Event, config.EventBufferSize),
@@ -233,10 +235,16 @@ func (c *Client) CreateThread(ctx context.Context, opts ...ThreadOption) (*Threa
 	thread := newThread(c, threadResp.Thread.ID, cfg)
 	thread.setInfo(&threadResp.Thread)
 
-	// Register thread
+	// Register thread and apply any early MCP startup signal
 	c.mu.Lock()
 	c.threads[thread.id] = thread
+	_, wasReadyBefore := c.readyBefore[thread.id]
+	delete(c.readyBefore, thread.id)
 	c.mu.Unlock()
+
+	if wasReadyBefore {
+		thread.setReady()
+	}
 
 	// Emit thread started event
 	c.emit(ThreadStartedEvent{
@@ -281,6 +289,7 @@ func (c *Client) CloseThread(threadID string) error {
 
 	thread.Close()
 	delete(c.threads, threadID)
+	delete(c.readyBefore, threadID)
 	c.accumulator.RemoveThread(threadID)
 	return nil
 }
@@ -574,17 +583,19 @@ func (c *Client) handleMCPStartupComplete(params json.RawMessage) {
 		return
 	}
 
-	// The conversation ID is the thread ID
 	threadID := notif.ConversationID
 
-	c.mu.RLock()
+	c.mu.Lock()
 	thread, ok := c.threads[threadID]
-	c.mu.RUnlock()
+	if !ok {
+		// Thread not registered yet - remember so CreateThread can apply it
+		c.readyBefore[threadID] = struct{}{}
+	}
+	c.mu.Unlock()
 
 	if ok {
 		thread.setReady()
 	}
-
 	c.emit(ThreadReadyEvent{ThreadID: threadID})
 }
 

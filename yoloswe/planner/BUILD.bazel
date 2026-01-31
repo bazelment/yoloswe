@@ -16,8 +16,25 @@ go_library(
 
 go_test(
     name = "planner_test",
-    srcs = ["planner_test.go"],
+    srcs = [
+        "planner_integration_test.go",
+        "planner_test.go",
+    ],
     embed = [":planner"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/claude/render",
+    ],
+)
+
+go_test(
+    name = "integration_test",
+    srcs = ["planner_integration_test.go"],
+    embed = [":planner"],
+    tags = [
+        "integration",
+        "manual",
+    ],
     deps = [
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",

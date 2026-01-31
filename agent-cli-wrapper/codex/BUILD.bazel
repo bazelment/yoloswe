@@ -32,6 +32,7 @@ go_test(
         "process_test.go",
         "state_test.go",
         "thread_test.go",
+        "turn_integration_test.go",
     ],
     embed = [":codex"],
 )

@@ -7,6 +7,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//yoloswe",
+        "//yoloswe/planner",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

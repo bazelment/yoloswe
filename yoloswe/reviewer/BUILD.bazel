@@ -13,7 +13,10 @@ go_library(
 
 go_test(
     name = "reviewer_test",
-    srcs = ["reviewer_test.go"],
+    srcs = [
+        "reviewer_integration_test.go",
+        "reviewer_test.go",
+    ],
     embed = [":reviewer"],
     deps = ["//agent-cli-wrapper/codex"],
 )
