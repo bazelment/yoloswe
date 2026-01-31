@@ -84,8 +84,7 @@ func (r *Renderer) Status(msg string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Use dim for status - visible on both light and dark backgrounds
-	fmt.Fprintf(r.out, "%s[Status] %s%s\n", r.color(ColorDim), msg, r.color(ColorReset))
+	fmt.Fprintf(r.out, "%s[Status]%s %s\n", r.color(ColorGray), r.color(ColorReset), msg)
 }
 
 // Text prints streaming text output.
@@ -106,8 +105,7 @@ func (r *Renderer) Reasoning(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Use italic + cyan for reasoning - readable on both light and dark backgrounds
-	fmt.Fprintf(r.out, "%s%s%s%s", r.color(ColorItalic), r.color(ColorCyan), text, r.color(ColorReset))
+	fmt.Fprintf(r.out, "%s%s%s%s", r.color(ColorDim), r.color(ColorItalic), text, r.color(ColorReset))
 	r.inReasoning = true
 }
 
