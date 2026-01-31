@@ -74,9 +74,9 @@ func NewMissionErrorEvent(err error) MissionErrorEvent {
 // StateChangeEvent fires when Planner state changes.
 type StateChangeEvent struct {
 	baseMissionEvent
+	Trigger string
 	From    PlannerState
 	To      PlannerState
-	Trigger string
 }
 
 func (StateChangeEvent) missionEvent() {}
@@ -85,9 +85,9 @@ func (StateChangeEvent) missionEvent() {}
 func NewStateChangeEvent(from, to PlannerState, trigger string) StateChangeEvent {
 	return StateChangeEvent{
 		baseMissionEvent: baseMissionEvent{ts: time.Now()},
+		Trigger:          trigger,
 		From:             from,
 		To:               to,
-		Trigger:          trigger,
 	}
 }
 
@@ -150,12 +150,12 @@ func NewSubAgentStartEvent(role agent.AgentRole, taskID, description string) Sub
 // SubAgentCompleteEvent fires when a sub-agent finishes.
 type SubAgentCompleteEvent struct {
 	baseMissionEvent
-	Role     agent.AgentRole
-	TaskID   string
-	Success  bool
-	CostUSD  float64
-	Duration time.Duration
 	Error    error
+	TaskID   string
+	Role     agent.AgentRole
+	Duration time.Duration
+	CostUSD  float64
+	Success  bool
 }
 
 func (SubAgentCompleteEvent) missionEvent() {}
@@ -164,12 +164,12 @@ func (SubAgentCompleteEvent) missionEvent() {}
 func NewSubAgentCompleteEvent(role agent.AgentRole, taskID string, success bool, costUSD float64, duration time.Duration, err error) SubAgentCompleteEvent {
 	return SubAgentCompleteEvent{
 		baseMissionEvent: baseMissionEvent{ts: time.Now()},
-		Role:             role,
-		TaskID:           taskID,
-		Success:          success,
-		CostUSD:          costUSD,
-		Duration:         duration,
 		Error:            err,
+		TaskID:           taskID,
+		Role:             role,
+		Duration:         duration,
+		CostUSD:          costUSD,
+		Success:          success,
 	}
 }
 
@@ -194,9 +194,9 @@ func NewToolStartEvent(toolName, toolID string) ToolStartEvent {
 // ToolCompleteEvent fires when a tool completes.
 type ToolCompleteEvent struct {
 	baseMissionEvent
+	Input    map[string]interface{}
 	ToolName string
 	ToolID   string
-	Input    map[string]interface{}
 }
 
 func (ToolCompleteEvent) missionEvent() {}
@@ -205,9 +205,9 @@ func (ToolCompleteEvent) missionEvent() {}
 func NewToolCompleteEvent(toolName, toolID string, input map[string]interface{}) ToolCompleteEvent {
 	return ToolCompleteEvent{
 		baseMissionEvent: baseMissionEvent{ts: time.Now()},
+		Input:            input,
 		ToolName:         toolName,
 		ToolID:           toolID,
-		Input:            input,
 	}
 }
 
@@ -252,10 +252,10 @@ func NewCostUpdateEvent(totalCost, budget float64) CostUpdateEvent {
 // TurnCompleteEvent fires when a conversation turn completes.
 type TurnCompleteEvent struct {
 	baseMissionEvent
+	Error      error
+	CostUSD    float64
 	TurnNumber int
 	Success    bool
-	CostUSD    float64
-	Error      error
 }
 
 func (TurnCompleteEvent) missionEvent() {}
@@ -264,10 +264,10 @@ func (TurnCompleteEvent) missionEvent() {}
 func NewTurnCompleteEvent(turnNumber int, success bool, costUSD float64, err error) TurnCompleteEvent {
 	return TurnCompleteEvent{
 		baseMissionEvent: baseMissionEvent{ts: time.Now()},
+		Error:            err,
+		CostUSD:          costUSD,
 		TurnNumber:       turnNumber,
 		Success:          success,
-		CostUSD:          costUSD,
-		Error:            err,
 	}
 }
 
@@ -290,9 +290,9 @@ func NewIterationStartEvent(iteration int) IterationStartEvent {
 // IterationCompleteEvent fires when a builder-reviewer iteration completes.
 type IterationCompleteEvent struct {
 	baseMissionEvent
+	ExitReason ExitReason
 	Iteration  int
 	Accepted   bool
-	ExitReason ExitReason
 }
 
 func (IterationCompleteEvent) missionEvent() {}
@@ -301,8 +301,8 @@ func (IterationCompleteEvent) missionEvent() {}
 func NewIterationCompleteEvent(iteration int, accepted bool, exitReason ExitReason) IterationCompleteEvent {
 	return IterationCompleteEvent{
 		baseMissionEvent: baseMissionEvent{ts: time.Now()},
+		ExitReason:       exitReason,
 		Iteration:        iteration,
 		Accepted:         accepted,
-		ExitReason:       exitReason,
 	}
 }

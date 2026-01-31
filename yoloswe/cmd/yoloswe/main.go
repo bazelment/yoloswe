@@ -45,11 +45,11 @@ type planFlags struct {
 	workDir         string
 	recordDir       string
 	systemPrompt    string
-	verbose         bool
-	simple          bool
 	build           string
 	externalBuilder string
 	buildModel      string
+	verbose         bool
+	simple          bool
 }
 
 func newPlanCmd() *cobra.Command {
@@ -173,14 +173,14 @@ type buildFlags struct {
 	builderModel    string
 	reviewerModel   string
 	dir             string
+	record          string
+	systemPrompt    string
+	resumeSession   string
 	budget          float64
 	timeout         int
 	maxIterations   int
-	record          string
 	verbose         bool
-	systemPrompt    string
 	requireApproval bool
-	resumeSession   string
 }
 
 func newBuildCmd() *cobra.Command {

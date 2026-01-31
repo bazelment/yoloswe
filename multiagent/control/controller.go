@@ -43,12 +43,12 @@ func (s State) String() string {
 
 // Controller provides control operations for a long-running mission.
 type Controller struct {
-	mu            sync.RWMutex
-	state         State
-	cancelFunc    context.CancelFunc
+	startTime      time.Time
+	lastProgress   time.Time
+	cancelFunc     context.CancelFunc
+	state          State
+	mu             sync.RWMutex
 	pauseRequested bool
-	startTime     time.Time
-	lastProgress  time.Time
 }
 
 // NewController creates a new mission controller.

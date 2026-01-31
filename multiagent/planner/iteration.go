@@ -63,29 +63,14 @@ func DefaultIterationConfig() IterationConfig {
 
 // IterationResult contains the outcome of an iteration loop.
 type IterationResult struct {
-	// ExitReason indicates why the loop exited.
-	ExitReason ExitReason
-
-	// IterationCount is the number of iterations completed.
+	FinalError     error
+	LastReview     *protocol.ReviewResponse
+	ExitReason     ExitReason
+	FilesCreated   []string
+	FilesModified  []string
+	TotalDuration  time.Duration
+	TotalCostUSD   float64
 	IterationCount int
-
-	// TotalCostUSD is the accumulated cost during iteration.
-	TotalCostUSD float64
-
-	// TotalDuration is the wall-clock time of the iteration loop.
-	TotalDuration time.Duration
-
-	// LastReview is the final review response (may be nil if no reviews completed).
-	LastReview *protocol.ReviewResponse
-
-	// FilesCreated is a list of files created during iteration.
-	FilesCreated []string
-
-	// FilesModified is a list of files modified during iteration.
-	FilesModified []string
-
-	// FinalError is the error that caused the loop to exit (if ExitReason is Error).
-	FinalError error
 }
 
 // RunIterationLoop executes the builder-reviewer cycle until an exit condition is met.
@@ -343,37 +328,4 @@ func FormatFeedbackForBuilder(review *protocol.ReviewResponse) string {
 	}
 
 	return feedback
-}
-
-// updateFilesFromBuild adds files from a build response to the planner's tracking.
-func (p *Planner) updateFilesFromBuild(buildResp *protocol.BuildResponse) {
-	if buildResp == nil {
-		return
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Use a map to avoid duplicates
-	createdSet := make(map[string]bool)
-	for _, f := range p.filesCreated {
-		createdSet[f] = true
-	}
-	for _, f := range buildResp.FilesCreated {
-		if !createdSet[f] {
-			createdSet[f] = true
-			p.filesCreated = append(p.filesCreated, f)
-		}
-	}
-
-	modifiedSet := make(map[string]bool)
-	for _, f := range p.filesModified {
-		modifiedSet[f] = true
-	}
-	for _, f := range buildResp.FilesModified {
-		if !modifiedSet[f] {
-			modifiedSet[f] = true
-			p.filesModified = append(p.filesModified, f)
-		}
-	}
 }
