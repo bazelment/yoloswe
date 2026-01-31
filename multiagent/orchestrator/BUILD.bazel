@@ -12,6 +12,7 @@ go_library(
         "//agent-cli-wrapper/claude",
         "//multiagent/agent",
         "//multiagent/checkpoint",
+        "//multiagent/control",
         "//multiagent/planner",
         "//multiagent/progress",
         "//multiagent/protocol",

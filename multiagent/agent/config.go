@@ -51,6 +51,10 @@ type AgentConfig struct {
 
 	// BudgetUSD is the cost budget for this agent (0 = unlimited).
 	BudgetUSD float64
+
+	// TaskTimeout is the maximum time for a single task execution (0 = unlimited).
+	// Only applies to ephemeral agents (Designer, Builder, Reviewer).
+	TaskTimeout time.Duration
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -63,6 +67,7 @@ func DefaultConfig(role AgentRole) AgentConfig {
 		MaxTurnsPerTask: 10,
 		TurnTimeout:     5 * time.Minute,
 		BudgetUSD:       0, // unlimited
+		TaskTimeout:     0, // unlimited
 	}
 }
 
@@ -102,6 +107,15 @@ type SwarmConfig struct {
 
 	// EnableCheckpointing enables session state persistence for error recovery.
 	EnableCheckpointing bool
+
+	// MissionTimeout is the maximum time for the entire mission (0 = unlimited).
+	MissionTimeout time.Duration
+
+	// HeartbeatInterval is how often to emit heartbeat events during long operations (0 = no heartbeats).
+	HeartbeatInterval time.Duration
+
+	// StallTimeout is how long without progress before considering the mission stalled (0 = no stall detection).
+	StallTimeout time.Duration
 }
 
 // DefaultSwarmConfig returns a swarm config with sensible defaults.
@@ -117,5 +131,8 @@ func DefaultSwarmConfig() SwarmConfig {
 		TotalBudgetUSD:      1.0,
 		MaxIterations:       50,
 		EnableCheckpointing: true,
+		MissionTimeout:      0,              // unlimited
+		HeartbeatInterval:   30 * time.Second, // emit heartbeat every 30s
+		StallTimeout:        10 * time.Minute, // warn if no progress for 10 minutes
 	}
 }

@@ -36,6 +36,7 @@ go_test(
     ],
     embed = [":planner"],
     deps = [
+        "//agent-cli-wrapper/claude",
         "//multiagent/agent",
         "//multiagent/protocol",
     ],

@@ -14,6 +14,7 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/checkpoint"
+	"github.com/bazelment/yoloswe/multiagent/control"
 	"github.com/bazelment/yoloswe/multiagent/planner"
 	"github.com/bazelment/yoloswe/multiagent/progress"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
@@ -27,6 +28,7 @@ type Orchestrator struct {
 	swarmConfig    agent.SwarmConfig
 	session        *agent.LongRunningSession
 	planner        *planner.Planner
+	controller     *control.Controller
 	swarmSessionID string
 	config         agent.AgentConfig
 	totalCost      float64
@@ -95,6 +97,7 @@ func New(swarmConfig agent.SwarmConfig) (*Orchestrator, error) {
 		swarmConfig:    swarmConfig,
 		swarmSessionID: sessionID,
 		planner:        planner.New(plannerCfg, sessionID),
+		controller:     control.NewController(),
 	}, nil
 }
 
