@@ -1,0 +1,626 @@
+// wt - Git worktree CLI for power users managing multiple concurrent branches.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/bazelment/yoloswe/wt"
+	"github.com/spf13/cobra"
+)
+
+var (
+	repoFlag string
+	wtRoot   string
+)
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+var rootCmd = &cobra.Command{
+	Use:   "wt",
+	Short: "Git worktree CLI for power users",
+	Long: `wt - Git worktree CLI for power users managing multiple concurrent branches.
+
+A CLI tool for managing Git worktrees with support for bare clones,
+branch management, GitHub PR integration, and shell navigation.
+
+Environment:
+  WT_ROOT     Base directory for worktrees (default: ~/worktrees)`,
+}
+
+func init() {
+	wtRoot = os.Getenv("WT_ROOT")
+	if wtRoot == "" {
+		home, _ := os.UserHomeDir()
+		wtRoot = filepath.Join(home, "worktrees")
+	}
+
+	rootCmd.PersistentFlags().StringVarP(&repoFlag, "repo", "R", "",
+		"Target repository (default: auto-detect from cwd)")
+
+	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(newCmd)
+	rootCmd.AddCommand(openCmd)
+	rootCmd.AddCommand(prCmd)
+	rootCmd.AddCommand(lsCmd)
+	rootCmd.AddCommand(rmCmd)
+	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(cdCmd)
+	rootCmd.AddCommand(pruneCmd)
+	rootCmd.AddCommand(shellenvCmd)
+}
+
+// getManager creates a Manager, resolving repo from flag or cwd.
+func getManager() (*wt.Manager, error) {
+	ctx := context.Background()
+	output := wt.DefaultOutput()
+
+	if repoFlag != "" {
+		barePath := filepath.Join(wtRoot, repoFlag, ".bare")
+		if _, err := os.Stat(barePath); os.IsNotExist(err) {
+			output.Error(fmt.Sprintf("Repository '%s' not found", repoFlag))
+			repos, _ := wt.ListAllRepos(wtRoot)
+			if len(repos) > 0 {
+				output.Info(fmt.Sprintf("Available: %s", strings.Join(repos, ", ")))
+			}
+			return nil, fmt.Errorf("repository not found")
+		}
+		return wt.NewManager(wtRoot, repoFlag), nil
+	}
+
+	repoName, err := wt.GetCurrentRepoName(ctx, &wt.DefaultGitRunner{}, wtRoot)
+	if err != nil {
+		output.Error("Not in a wt-managed repository. Use --repo to specify one.")
+		repos, _ := wt.ListAllRepos(wtRoot)
+		if len(repos) > 0 {
+			output.Info(fmt.Sprintf("Available: %s", strings.Join(repos, ", ")))
+		}
+		return nil, err
+	}
+
+	return wt.NewManager(wtRoot, repoName), nil
+}
+
+// initCmd: wt init <repo-url>
+var initCmd = &cobra.Command{
+	Use:   "init <repo-url>",
+	Short: "Initialize repo with bare clone",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		url := args[0]
+		repoName := wt.GetRepoNameFromURL(url)
+		m := wt.NewManager(wtRoot, repoName)
+		ctx := context.Background()
+
+		mainPath, err := m.Init(ctx, url)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("__WT_CD__:%s\n", mainPath)
+		return nil
+	},
+}
+
+// newCmd: wt new <branch> [--from X]
+var newCmd = &cobra.Command{
+	Use:   "new <branch>",
+	Short: "Create new branch worktree",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		branch := args[0]
+		baseBranch, _ := cmd.Flags().GetString("from")
+		ctx := context.Background()
+
+		path, err := m.New(ctx, branch, baseBranch)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("__WT_CD__:%s\n", path)
+		return nil
+	},
+}
+
+func init() {
+	newCmd.Flags().StringP("from", "f", "", "Base branch")
+}
+
+// openCmd: wt open <branch>
+var openCmd = &cobra.Command{
+	Use:   "open <branch>",
+	Short: "Open existing remote branch",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		branch := args[0]
+		ctx := context.Background()
+
+		path, err := m.Open(ctx, branch)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("__WT_CD__:%s\n", path)
+		return nil
+	},
+}
+
+// prCmd: wt pr <number>
+var prCmd = &cobra.Command{
+	Use:   "pr <number>",
+	Short: "Open GitHub PR in worktree",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		var prNumber int
+		if _, err := fmt.Sscanf(args[0], "%d", &prNumber); err != nil {
+			return fmt.Errorf("invalid PR number: %s", args[0])
+		}
+
+		ctx := context.Background()
+		path, err := m.OpenPR(ctx, prNumber)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("__WT_CD__:%s\n", path)
+		return nil
+	},
+}
+
+// lsCmd: wt ls [--json] [-a]
+var lsCmd = &cobra.Command{
+	Use:   "ls",
+	Short: "List all worktrees",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		allRepos, _ := cmd.Flags().GetBool("all")
+		jsonOutput, _ := cmd.Flags().GetBool("json")
+
+		// List all repos mode
+		if allRepos {
+			repos, err := wt.ListAllRepos(wtRoot)
+			if err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(repos)
+			}
+
+			if len(repos) == 0 {
+				wt.DefaultOutput().Info("No repositories found")
+				return nil
+			}
+
+			output := wt.DefaultOutput()
+			fmt.Printf("\n%-30s %s\n", "Repository", "Path")
+			fmt.Println(strings.Repeat("-", 70))
+			for _, repo := range repos {
+				repoStr := output.Colorize(wt.ColorCyan, repo)
+				path := filepath.Join(wtRoot, repo)
+				fmt.Printf("%-39s %s\n", repoStr, path)
+			}
+			fmt.Println()
+			return nil
+		}
+
+		// List worktrees for current repo
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		ctx := context.Background()
+		worktrees, err := m.List(ctx)
+		if err != nil {
+			return err
+		}
+
+		if jsonOutput {
+			data := make([]map[string]any, len(worktrees))
+			for i, w := range worktrees {
+				data[i] = map[string]any{
+					"branch":   w.Branch,
+					"path":     w.Path,
+					"commit":   w.Commit,
+					"detached": w.IsDetached,
+				}
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(data)
+		}
+
+		if len(worktrees) == 0 {
+			wt.DefaultOutput().Info("No worktrees found")
+			return nil
+		}
+
+		output := wt.DefaultOutput()
+		fmt.Printf("\n%-25s %-50s %-10s\n", "Branch", "Path", "Status")
+		fmt.Println(strings.Repeat("-", 85))
+
+		for _, w := range worktrees {
+			status, _ := m.GetStatus(ctx, w)
+			statusStr := output.Colorize(wt.ColorGreen, "clean")
+			if status.IsDirty {
+				statusStr = output.Colorize(wt.ColorYellow, "dirty")
+			}
+			branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 24))
+			fmt.Printf("%-34s %-50s %s\n", branchStr, w.Path, statusStr)
+		}
+		fmt.Println()
+
+		return nil
+	},
+}
+
+func init() {
+	lsCmd.Flags().BoolP("json", "j", false, "JSON output")
+	lsCmd.Flags().BoolP("all", "a", false, "List all repositories")
+}
+
+// rmCmd: wt rm <branch> [-D]
+var rmCmd = &cobra.Command{
+	Use:   "rm <branch>",
+	Short: "Remove worktree",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		branch := args[0]
+		deleteBranch, _ := cmd.Flags().GetBool("delete-branch")
+		ctx := context.Background()
+
+		return m.Remove(ctx, branch, deleteBranch)
+	},
+}
+
+func init() {
+	rmCmd.Flags().BoolP("delete-branch", "D", false, "Delete branch too")
+}
+
+// statusCmd: wt status [-a]
+var statusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show status dashboard",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		allRepos, _ := cmd.Flags().GetBool("all")
+		ctx := context.Background()
+		output := wt.DefaultOutput()
+
+		// Get list of repos to process
+		var repos []string
+		if allRepos {
+			var err error
+			repos, err = wt.ListAllRepos(wtRoot)
+			if err != nil {
+				return err
+			}
+			if len(repos) == 0 {
+				output.Info("No repositories found")
+				return nil
+			}
+		} else {
+			m, err := getManager()
+			if err != nil {
+				return err
+			}
+			repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
+		repos = []string{repoName}
+		}
+
+		first := true
+		for _, repoName := range repos {
+			m := wt.NewManager(wtRoot, repoName)
+			worktrees, err := m.List(ctx)
+			if err != nil {
+				continue
+			}
+			if len(worktrees) == 0 {
+				continue
+			}
+
+			if allRepos {
+				if !first {
+					fmt.Println()
+				}
+				fmt.Printf("%s\n", output.Colorize(wt.ColorBold, repoName))
+			}
+			first = false
+
+			fmt.Printf("\n%-20s %-15s %-10s %-15s %-10s\n", "Branch", "Sync", "Status", "Last Commit", "PR")
+			fmt.Println(strings.Repeat("-", 70))
+
+			for _, w := range worktrees {
+				status, _ := m.GetStatus(ctx, w)
+
+				// Sync status
+				var syncStr string
+				if w.IsDetached {
+					syncStr = output.Colorize(wt.ColorDim, "detached")
+				} else if status.Ahead == 0 && status.Behind == 0 {
+					syncStr = output.Colorize(wt.ColorGreen, "up to date")
+				} else {
+					var parts []string
+					if status.Ahead > 0 {
+						parts = append(parts, output.Colorize(wt.ColorGreen, fmt.Sprintf("↑%d", status.Ahead)))
+					}
+					if status.Behind > 0 {
+						parts = append(parts, output.Colorize(wt.ColorRed, fmt.Sprintf("↓%d", status.Behind)))
+					}
+					syncStr = strings.Join(parts, " ")
+				}
+
+				// Status
+				statusStr := output.Colorize(wt.ColorGreen, "clean")
+				if status.IsDirty {
+					statusStr = output.Colorize(wt.ColorYellow, "dirty")
+				}
+
+				// Last commit time
+				var timeStr string
+				if !status.LastCommitTime.IsZero() {
+					delta := time.Since(status.LastCommitTime)
+					if delta.Hours() >= 24 {
+						timeStr = fmt.Sprintf("%dd ago", int(delta.Hours()/24))
+					} else if delta.Hours() >= 1 {
+						timeStr = fmt.Sprintf("%dh ago", int(delta.Hours()))
+					} else {
+						timeStr = fmt.Sprintf("%dm ago", int(delta.Minutes()))
+					}
+				} else {
+					timeStr = "-"
+				}
+
+				// PR
+				prStr := "-"
+				if status.PRNumber > 0 {
+					prStr = fmt.Sprintf("#%d", status.PRNumber)
+				}
+
+				branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 19))
+				fmt.Printf("%-29s %-24s %-19s %-15s %s\n", branchStr, syncStr, statusStr, timeStr, prStr)
+			}
+		}
+		fmt.Println()
+
+		return nil
+	},
+}
+
+func init() {
+	statusCmd.Flags().BoolP("all", "a", false, "Show status for all repositories")
+}
+
+// syncCmd: wt sync [--rebase] [-a]
+var syncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync all worktrees",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		allRepos, _ := cmd.Flags().GetBool("all")
+		rebase, _ := cmd.Flags().GetBool("rebase")
+		ctx := context.Background()
+		output := wt.DefaultOutput()
+
+		// Get list of repos to process
+		var repos []string
+		if allRepos {
+			var err error
+			repos, err = wt.ListAllRepos(wtRoot)
+			if err != nil {
+				return err
+			}
+			if len(repos) == 0 {
+				output.Info("No repositories found")
+				return nil
+			}
+		} else {
+			m, err := getManager()
+			if err != nil {
+				return err
+			}
+			repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
+		repos = []string{repoName}
+		}
+
+		for i, repoName := range repos {
+			if allRepos {
+				if i > 0 {
+					fmt.Println()
+				}
+				fmt.Printf("%s\n", output.Colorize(wt.ColorBold, repoName))
+			}
+
+			m := wt.NewManager(wtRoot, repoName)
+			if err := m.Sync(ctx, rebase); err != nil {
+				output.Error(fmt.Sprintf("Failed to sync %s: %v", repoName, err))
+			}
+		}
+
+		return nil
+	},
+}
+
+func init() {
+	syncCmd.Flags().BoolP("rebase", "r", false, "Rebase on upstream")
+	syncCmd.Flags().BoolP("all", "a", false, "Sync all repositories")
+}
+
+// cdCmd: wt cd [branch]
+var cdCmd = &cobra.Command{
+	Use:   "cd [branch]",
+	Short: "Navigate to worktree",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		var branch string
+		if len(args) > 0 {
+			branch = args[0]
+		}
+
+		path, err := m.GetWorktreePath(branch)
+		if err != nil {
+			wt.DefaultOutput().Error(fmt.Sprintf("Worktree %s not found", branch))
+			return err
+		}
+
+		fmt.Printf("__WT_CD__:%s\n", path)
+		return nil
+	},
+}
+
+// pruneCmd: wt prune [--dry-run]
+var pruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: "Clean stale metadata",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		ctx := context.Background()
+
+		pruned, err := m.Prune(ctx, dryRun)
+		if err != nil {
+			return err
+		}
+
+		for _, line := range pruned {
+			fmt.Println(line)
+		}
+
+		return nil
+	},
+}
+
+func init() {
+	pruneCmd.Flags().BoolP("dry-run", "n", false, "Show what would be removed")
+}
+
+// shellenvCmd: wt shellenv
+var shellenvCmd = &cobra.Command{
+	Use:   "shellenv",
+	Short: "Print shell integration",
+	Run: func(cmd *cobra.Command, args []string) {
+		shell := os.Getenv("SHELL")
+		if strings.Contains(shell, "zsh") {
+			fmt.Print(zshScript)
+		} else {
+			fmt.Print(bashScript)
+		}
+	},
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+const bashScript = `# wt shell integration for bash
+# Add to ~/.bashrc: eval "$(wt shellenv)"
+
+wt() {
+    local output exit_code
+    output=$(command wt "$@")
+    exit_code=$?
+    echo "$output"
+    if [[ "$output" =~ __WT_CD__:([^[:space:]]+) ]]; then
+        cd "${BASH_REMATCH[1]}" || return 1
+    fi
+    return $exit_code
+}
+
+_wt_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    case "$prev" in
+        --repo|-R) COMPREPLY=($(compgen -W "$(ls ~/worktrees 2>/dev/null)" -- "$cur")) ;;
+        wt) COMPREPLY=($(compgen -W "--repo -R init new open pr ls rm status sync cd prune shellenv" -- "$cur")) ;;
+        rm|cd|open) COMPREPLY=($(compgen -W "$(command wt ls --json 2>/dev/null | grep -o '"branch": "[^"]*"' | cut -d'"' -f4)" -- "$cur")) ;;
+    esac
+}
+complete -F _wt_completions wt
+`
+
+const zshScript = `# wt shell integration for zsh
+# Add to ~/.zshrc: eval "$(wt shellenv)"
+
+wt() {
+    local output exit_code
+    output=$(command wt "$@")
+    exit_code=$?
+    echo "$output"
+    if [[ "$output" =~ '__WT_CD__:([^[:space:]]+)' ]]; then
+        cd "${match[1]}" || return 1
+    fi
+    return $exit_code
+}
+
+_wt_completions() {
+    local -a commands=(
+        'init:Initialize repo with bare clone'
+        'new:Create new branch worktree'
+        'open:Open existing remote branch'
+        'pr:Open GitHub PR in worktree'
+        'ls:List all worktrees'
+        'rm:Remove worktree'
+        'status:Show status dashboard'
+        'sync:Sync all worktrees'
+        'cd:Navigate to worktree'
+        'prune:Clean stale metadata'
+        'shellenv:Print shell integration'
+    )
+    local -a repos=($(ls ~/worktrees 2>/dev/null))
+    _arguments \
+        '--repo[Target repository]:repository:($repos)' \
+        '-R[Target repository]:repository:($repos)' \
+        '1: :->cmd' \
+        '*: :->args'
+    case "$state" in
+        cmd) _describe 'command' commands ;;
+        args)
+            case "${words[2]}" in
+                rm|cd|open) _values 'worktree' $(command wt ls --json 2>/dev/null | grep -o '"branch": "[^"]*"' | cut -d'"' -f4) ;;
+            esac ;;
+    esac
+}
+compdef _wt_completions wt
+`
