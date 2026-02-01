@@ -199,7 +199,7 @@ func TestWorktreeLifecycle(t *testing.T) {
 	require.DirExists(t, repo.manager.BareDir())
 
 	// New
-	featurePath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featurePath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	require.DirExists(t, featurePath)
 
@@ -244,7 +244,7 @@ func TestCascadingBranches(t *testing.T) {
 	repo.init()
 
 	// Create chain: main -> feature-a -> feature-b -> feature-c
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.pushWorktree(featureAPath, "feature-a")
 
@@ -252,7 +252,7 @@ func TestCascadingBranches(t *testing.T) {
 	require.NoError(t, err)
 	repo.pushWorktree(featureBPath, "feature-b")
 
-	featureCPath, err := repo.manager.New(repo.ctx,"feature-c", "feature-b", "")
+	featureCPath, err := repo.manager.New(repo.ctx, "feature-c", "feature-b", "")
 	require.NoError(t, err)
 
 	// Verify parent tracking (all branches now track their parent, including default)
@@ -309,10 +309,10 @@ func TestErrorCases(t *testing.T) {
 		repo := newTestRepo(t)
 		repo.init()
 
-		_, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+		_, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 		require.NoError(t, err)
 
-		_, err = repo.manager.New(repo.ctx,"feature-a", "main", "")
+		_, err = repo.manager.New(repo.ctx, "feature-a", "main", "")
 		require.ErrorIs(t, err, wt.ErrWorktreeExists)
 	})
 
@@ -332,7 +332,7 @@ func TestSyncRebasesWorktrees(t *testing.T) {
 
 	// Create feature-a from main with its own commit
 	t.Log("Creating worktree feature-a from main")
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
 	repo.pushWorktree(featureAPath, "feature-a")
@@ -367,7 +367,7 @@ func TestSyncMultipleWorktrees(t *testing.T) {
 
 	// Create chain: main -> feature-a -> feature-b
 	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
 	repo.pushWorktree(featureAPath, "feature-a")
@@ -413,7 +413,7 @@ func TestSyncConflictHandling(t *testing.T) {
 
 	// Create feature-a and add conflict.txt with one content
 	t.Log("Creating worktree feature-a with conflict.txt")
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.commitInWorktree(featureAPath, "conflict.txt", "local version\n", "add conflict.txt locally")
 	repo.pushWorktree(featureAPath, "feature-a")
@@ -453,7 +453,7 @@ func TestSyncSkipsChildrenOfFailedBranch(t *testing.T) {
 
 	// Create chain: main -> feature-a -> feature-b
 	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.commitInWorktree(featureAPath, "conflict.txt", "local version\n", "add conflict.txt locally")
 	repo.pushWorktree(featureAPath, "feature-a")
@@ -510,7 +510,7 @@ func TestSyncParentBranchDeleted(t *testing.T) {
 
 	// Create chain: main -> feature-a -> feature-b
 	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
 	repo.pushWorktree(featureAPath, "feature-a")
@@ -605,7 +605,7 @@ func TestSyncCascadingWithRemovedParentWorktree(t *testing.T) {
 
 	// Create chain: main -> feature-a -> feature-b
 	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
-	featureAPath, err := repo.manager.New(repo.ctx,"feature-a", "main", "")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main", "")
 	require.NoError(t, err)
 	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
 	repo.pushWorktree(featureAPath, "feature-a")
