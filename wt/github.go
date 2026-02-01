@@ -3,6 +3,7 @@ package wt
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strconv"
 )
@@ -41,10 +42,9 @@ type PRInfo struct {
 	URL            string `json:"url"`
 	HeadRefName    string `json:"headRefName"`
 	BaseRefName    string `json:"baseRefName"`
-	State          string `json:"state"`
+	State          string `json:"state"` // OPEN, CLOSED, MERGED
 	ReviewDecision string `json:"reviewDecision"`
 	Number         int    `json:"number"`
-	Merged         bool   `json:"merged"`
 }
 
 // StatusCheck represents a CI status check.
@@ -79,9 +79,12 @@ func GetPRForBranch(ctx context.Context, runner GHRunner, dir string) (*PRInfo, 
 func GetPRByBranch(ctx context.Context, runner GHRunner, branch, dir string) (*PRInfo, error) {
 	result, err := runner.Run(ctx, []string{
 		"pr", "view", branch,
-		"--json", "number,url,headRefName,baseRefName,state,merged,reviewDecision",
+		"--json", "number,url,headRefName,baseRefName,state,reviewDecision",
 	}, dir)
 	if err != nil {
+		if result != nil && result.Stderr != "" {
+			return nil, fmt.Errorf("%w: %s", err, result.Stderr)
+		}
 		return nil, err
 	}
 
@@ -127,7 +130,7 @@ func IsPRMerged(ctx context.Context, runner GHRunner, branch, dir string) (bool,
 	if err != nil {
 		return false, err
 	}
-	return info.Merged || info.State == "MERGED", nil
+	return info.State == "MERGED", nil
 }
 
 // CreatePR creates a new GitHub PR for the current branch.

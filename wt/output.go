@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // ANSI color codes.
@@ -82,4 +83,33 @@ func (o *Output) Print(msg string) {
 // Printf prints a formatted message without any prefix.
 func (o *Output) Printf(format string, args ...any) {
 	fmt.Fprintf(o.w, format, args...)
+}
+
+// Pad pads a string (which may contain ANSI codes) to the specified visible width.
+func Pad(s string, width int) string {
+	visible := visibleLen(s)
+	if visible >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visible)
+}
+
+// visibleLen returns the visible length of a string, ignoring ANSI escape codes.
+func visibleLen(s string) int {
+	length := 0
+	inEscape := false
+	for _, r := range s {
+		if r == '\033' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		length++
+	}
+	return length
 }

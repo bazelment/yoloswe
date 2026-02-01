@@ -152,11 +152,14 @@ type WorktreeStatus struct {
 	LastCommitTime time.Time
 	LastCommitMsg  string
 	PRURL          string
+	PRState        string // OPEN, MERGED, CLOSED
+	PRReviewStatus string // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, etc.
 	Worktree       Worktree
 	Ahead          int
 	Behind         int
 	PRNumber       int
 	IsDirty        bool
+	PRIsDraft      bool
 }
 
 // Manager handles worktree operations for a repository.
@@ -310,13 +313,13 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch string) (string, e
 
 	m.output.Success(fmt.Sprintf("Created worktree at %s", worktreePath))
 
-	// Track parent branch if not default branch
-	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
-	if baseBranch != defaultBranch {
-		description := "parent:" + baseBranch
-		if err := SetBranchDescription(ctx, m.git, branch, description, worktreePath); err != nil {
-			m.output.Warn(fmt.Sprintf("Failed to track parent branch: %v", err))
-		} else {
+	// Always track parent branch for proper sync behavior
+	description := "parent:" + baseBranch
+	if err := SetBranchDescription(ctx, m.git, branch, description, worktreePath); err != nil {
+		m.output.Warn(fmt.Sprintf("Failed to track parent branch: %v", err))
+	} else {
+		defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+		if baseBranch != defaultBranch {
 			m.output.Info(fmt.Sprintf("Tracking parent branch: %s", baseBranch))
 		}
 	}
@@ -362,6 +365,14 @@ func (m *Manager) Open(ctx context.Context, branch string) (string, error) {
 	}
 
 	m.output.Success(fmt.Sprintf("Created worktree at %s", worktreePath))
+
+	// Track default branch as parent for proper sync behavior
+	// (opened branches are assumed to be based on the default branch)
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+	description := "parent:" + defaultBranch
+	if err := SetBranchDescription(ctx, m.git, branch, description, worktreePath); err != nil {
+		m.output.Warn(fmt.Sprintf("Failed to track parent branch: %v", err))
+	}
 
 	// Run post-create hooks
 	config, _ := LoadRepoConfig(worktreePath)
@@ -485,15 +496,21 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 
 	// Get PR info
 	if !wt.IsDetached {
-		result, err := m.gh.Run(ctx, []string{"pr", "view", "--json", "number,url"}, wt.Path)
+		result, err := m.gh.Run(ctx, []string{"pr", "view", "--json", "number,url,state,isDraft,reviewDecision"}, wt.Path)
 		if err == nil && result.Stdout != "" {
 			var prData struct {
-				URL    string `json:"url"`
-				Number int    `json:"number"`
+				URL            string `json:"url"`
+				State          string `json:"state"`
+				ReviewDecision string `json:"reviewDecision"`
+				Number         int    `json:"number"`
+				IsDraft        bool   `json:"isDraft"`
 			}
 			if json.Unmarshal([]byte(result.Stdout), &prData) == nil {
 				status.PRNumber = prData.Number
 				status.PRURL = prData.URL
+				status.PRState = prData.State
+				status.PRIsDraft = prData.IsDraft
+				status.PRReviewStatus = prData.ReviewDecision
 			}
 		}
 	}
@@ -501,40 +518,66 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 	return status, nil
 }
 
-// Remove removes a worktree.
-func (m *Manager) Remove(ctx context.Context, branch string, deleteBranch bool) error {
+// Remove removes a worktree by name (directory) or branch name.
+func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool) error {
 	bareDir := m.BareDir()
-	worktreePath := filepath.Join(m.RepoDir(), branch)
+
+	// First try as directory name
+	worktreePath := filepath.Join(m.RepoDir(), nameOrBranch)
+	branchName := nameOrBranch
 
 	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		return ErrWorktreeNotFound
+		// Not found by directory name, try to find by branch name
+		worktrees, listErr := m.List(ctx)
+		if listErr != nil {
+			return ErrWorktreeNotFound
+		}
+
+		found := false
+		for _, wt := range worktrees {
+			if wt.Branch == nameOrBranch {
+				worktreePath = wt.Path
+				branchName = wt.Branch
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrWorktreeNotFound
+		}
+	} else {
+		// Found by directory name, get the actual branch name
+		result, err := m.git.Run(ctx, []string{"branch", "--show-current"}, worktreePath)
+		if err == nil && strings.TrimSpace(result.Stdout) != "" {
+			branchName = strings.TrimSpace(result.Stdout)
+		}
 	}
 
 	// Run post-remove hooks first
 	config, _ := LoadRepoConfig(worktreePath)
 	if len(config.PostRemove) > 0 {
-		RunHooks(config.PostRemove, worktreePath, branch, m.output)
+		RunHooks(config.PostRemove, worktreePath, branchName, m.output)
 	}
 
-	m.output.Info(fmt.Sprintf("Removing worktree %s...", branch))
+	m.output.Info(fmt.Sprintf("Removing worktree %s...", branchName))
 	if _, err := m.git.Run(ctx, []string{"worktree", "remove", worktreePath}, bareDir); err != nil {
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
-	m.output.Success(fmt.Sprintf("Removed worktree %s", branch))
+	m.output.Success(fmt.Sprintf("Removed worktree %s", branchName))
 
 	if deleteBranch {
-		m.output.Info(fmt.Sprintf("Deleting local branch %s...", branch))
-		if _, err := m.git.Run(ctx, []string{"branch", "-D", branch}, bareDir); err != nil {
-			m.output.Error(fmt.Sprintf("Failed to delete local branch %s", branch))
+		m.output.Info(fmt.Sprintf("Deleting local branch %s...", branchName))
+		if _, err := m.git.Run(ctx, []string{"branch", "-D", branchName}, bareDir); err != nil {
+			m.output.Error(fmt.Sprintf("Failed to delete local branch %s", branchName))
 		} else {
-			m.output.Success(fmt.Sprintf("Deleted local branch %s", branch))
+			m.output.Success(fmt.Sprintf("Deleted local branch %s", branchName))
 		}
 
-		m.output.Info(fmt.Sprintf("Deleting remote branch %s...", branch))
-		if _, err := m.git.Run(ctx, []string{"push", "origin", "--delete", branch}, bareDir); err != nil {
-			m.output.Warn(fmt.Sprintf("Remote branch %s may not exist", branch))
+		m.output.Info(fmt.Sprintf("Deleting remote branch %s...", branchName))
+		if _, err := m.git.Run(ctx, []string{"push", "origin", "--delete", branchName}, bareDir); err != nil {
+			m.output.Warn(fmt.Sprintf("Remote branch %s may not exist", branchName))
 		} else {
-			m.output.Success(fmt.Sprintf("Deleted remote branch %s", branch))
+			m.output.Success(fmt.Sprintf("Deleted remote branch %s", branchName))
 		}
 	}
 
@@ -593,13 +636,15 @@ func (m *Manager) Sync(ctx context.Context) error {
 			continue
 		}
 
-		// Determine rebase target
-		rebaseTarget := "origin/" + wt.Branch
+		// Determine rebase target based on parent branch
+		var rebaseTarget string
 
-		// Check if this is a cascading branch with merged parent
-		if parentBranch != "" && parentBranch != defaultBranch {
-			parentMerged := m.isParentBranchMerged(ctx, parentBranch, ghDir)
-			if parentMerged {
+		if parentBranch == "" || parentBranch == defaultBranch {
+			// No parent or parent is default branch: rebase onto default branch
+			rebaseTarget = "origin/" + defaultBranch
+		} else {
+			// Cascading branch: check if parent was merged
+			if m.isParentBranchMerged(ctx, parentBranch, ghDir) {
 				m.output.Info(fmt.Sprintf("Parent branch %s was merged, rebasing %s onto %s...",
 					parentBranch, wt.Branch, defaultBranch))
 				rebaseTarget = "origin/" + defaultBranch
@@ -617,6 +662,9 @@ func (m *Manager) Sync(ctx context.Context) error {
 				if err := SetBranchDescription(ctx, m.git, wt.Branch, "parent:"+defaultBranch, wt.Path); err != nil {
 					m.output.Warn(fmt.Sprintf("Failed to update branch description: %v", err))
 				}
+			} else {
+				// Parent not merged: rebase onto remote parent branch
+				rebaseTarget = "origin/" + parentBranch
 			}
 		}
 
@@ -638,7 +686,7 @@ func (m *Manager) isParentBranchMerged(ctx context.Context, parentBranch, ghDir 
 	// Method 1: Check if parent branch's PR is merged
 	prInfo, err := GetPRByBranch(ctx, m.gh, parentBranch, ghDir)
 	if err == nil && prInfo != nil {
-		if prInfo.Merged || prInfo.State == "MERGED" {
+		if prInfo.State == "MERGED" {
 			return true
 		}
 	}

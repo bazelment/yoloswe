@@ -255,12 +255,12 @@ func TestCascadingBranches(t *testing.T) {
 	featureCPath, err := repo.manager.New(repo.ctx, "feature-c", "feature-b")
 	require.NoError(t, err)
 
-	// Verify parent tracking
+	// Verify parent tracking (all branches now track their parent, including default)
 	parentA, _ := repo.manager.GetParentBranch(repo.ctx, "feature-a", featureAPath)
 	parentB, _ := repo.manager.GetParentBranch(repo.ctx, "feature-b", featureBPath)
 	parentC, _ := repo.manager.GetParentBranch(repo.ctx, "feature-c", featureCPath)
 
-	require.Empty(t, parentA, "feature-a should not have parent (based on default)")
+	require.Equal(t, "main", parentA, "feature-a should track main as parent")
 	require.Equal(t, "feature-a", parentB)
 	require.Equal(t, "feature-b", parentC)
 
@@ -318,7 +318,7 @@ func TestErrorCases(t *testing.T) {
 	})
 }
 
-// TestSyncRebasesWorktrees tests that Sync() fetches and rebases worktrees onto their remote tracking branch.
+// TestSyncRebasesWorktrees tests that Sync() fetches and rebases worktrees onto origin/main.
 func TestSyncRebasesWorktrees(t *testing.T) {
 	repo := newTestRepo(t)
 	repo.init()
@@ -330,28 +330,30 @@ func TestSyncRebasesWorktrees(t *testing.T) {
 	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
 	repo.pushWorktree(featureAPath, "feature-a")
 
-	// Add another commit to origin/feature-a remotely (simulating teammate push)
-	repo.addRemoteCommit("feature-a", "remote-update.txt", "remote update content\n", "teammate added remote update")
+	// Add a commit to origin/main (simulating another developer merging to main)
+	repo.addRemoteCommit("main", "main-update.txt", "main update content\n", "another developer merged to main")
 
-	// Before sync: local feature-a should NOT have the remote update
-	t.Log("Verifying local worktree does not have remote update yet")
-	require.False(t, fileExists(filepath.Join(featureAPath, "remote-update.txt")))
+	// Before sync: local feature-a should NOT have the main update
+	t.Log("Verifying local worktree does not have main update yet")
+	require.False(t, fileExists(filepath.Join(featureAPath, "main-update.txt")))
 
-	// Sync - should rebase local onto origin/feature-a
-	t.Log("Calling Sync() to rebase worktrees")
+	// Sync - should rebase local onto origin/main
+	t.Log("Calling Sync() to rebase worktrees onto origin/main")
 	err = repo.manager.Sync(repo.ctx)
 	require.NoError(t, err)
 
-	// After sync: feature-a should have the remote update (rebased)
-	t.Log("Verifying feature-a has remote update after sync")
-	require.True(t, fileExists(filepath.Join(featureAPath, "remote-update.txt")),
-		"feature-a should contain remote-update.txt after rebase")
+	// After sync: feature-a should have the main update (rebased onto origin/main)
+	t.Log("Verifying feature-a has main update after sync")
+	require.True(t, fileExists(filepath.Join(featureAPath, "main-update.txt")),
+		"feature-a should contain main-update.txt after rebase onto origin/main")
 	// And feature-a's own work should be preserved
 	require.True(t, fileExists(filepath.Join(featureAPath, "feature-a.txt")),
 		"feature-a should still have its own work")
 }
 
-// TestSyncMultipleWorktrees tests that Sync() handles multiple worktrees with remote updates.
+// TestSyncMultipleWorktrees tests that Sync() handles cascading worktrees correctly.
+// feature-a (based on main) rebases onto origin/main
+// feature-b (based on feature-a) rebases onto feature-a
 func TestSyncMultipleWorktrees(t *testing.T) {
 	repo := newTestRepo(t)
 	repo.init()
@@ -368,32 +370,31 @@ func TestSyncMultipleWorktrees(t *testing.T) {
 	repo.commitInWorktree(featureBPath, "feature-b.txt", "feature-b content\n", "add feature-b work")
 	repo.pushWorktree(featureBPath, "feature-b")
 
-	// Add remote commits to both branches (simulating teammate pushes)
-	t.Log("Simulating teammate pushes to both branches")
-	repo.addRemoteCommit("feature-a", "remote-a.txt", "remote a content\n", "teammate update to feature-a")
-	repo.addRemoteCommit("feature-b", "remote-b.txt", "remote b content\n", "teammate update to feature-b")
+	// Add a commit to origin/main (simulating another developer merging to main)
+	t.Log("Simulating commit to main")
+	repo.addRemoteCommit("main", "main-update.txt", "main update content\n", "another developer merged to main")
 
-	// Before sync: neither branch should have the remote updates
-	t.Log("Verifying local worktrees do not have remote updates yet")
-	require.False(t, fileExists(filepath.Join(featureAPath, "remote-a.txt")))
-	require.False(t, fileExists(filepath.Join(featureBPath, "remote-b.txt")))
+	// Before sync: neither branch should have the main update
+	t.Log("Verifying local worktrees do not have main update yet")
+	require.False(t, fileExists(filepath.Join(featureAPath, "main-update.txt")))
+	require.False(t, fileExists(filepath.Join(featureBPath, "main-update.txt")))
 
-	// Sync - should rebase both branches onto their respective remotes
+	// Sync - feature-a rebases onto origin/main, feature-b rebases onto feature-a
 	t.Log("Calling Sync() to rebase all worktrees")
 	err = repo.manager.Sync(repo.ctx)
 	require.NoError(t, err)
 
 	// After sync:
-	t.Log("Verifying both branches have their remote updates")
-	// - feature-a should have remote-a.txt
-	require.True(t, fileExists(filepath.Join(featureAPath, "remote-a.txt")),
-		"feature-a should contain remote-a.txt after rebase")
+	t.Log("Verifying cascading rebase behavior")
+	// - feature-a should have main-update.txt (rebased onto origin/main)
+	require.True(t, fileExists(filepath.Join(featureAPath, "main-update.txt")),
+		"feature-a should contain main-update.txt after rebase onto origin/main")
 	require.True(t, fileExists(filepath.Join(featureAPath, "feature-a.txt")),
 		"feature-a should still have its own work")
 
-	// - feature-b should have remote-b.txt
-	require.True(t, fileExists(filepath.Join(featureBPath, "remote-b.txt")),
-		"feature-b should contain remote-b.txt after rebase")
+	// - feature-b should have feature-a's work (rebased onto feature-a)
+	require.True(t, fileExists(filepath.Join(featureBPath, "feature-a.txt")),
+		"feature-b should contain feature-a.txt after rebase onto feature-a")
 	require.True(t, fileExists(filepath.Join(featureBPath, "feature-b.txt")),
 		"feature-b should still have its own work")
 }
@@ -410,24 +411,23 @@ func TestSyncConflictHandling(t *testing.T) {
 	repo.commitInWorktree(featureAPath, "conflict.txt", "local version\n", "add conflict.txt locally")
 	repo.pushWorktree(featureAPath, "feature-a")
 
-	// Create divergent history on remote by force pushing a conflicting change
-	t.Log("Force-pushing conflicting change to remote (simulating teammate)")
+	// Create conflicting change on origin/main (sync rebases onto origin/main)
+	t.Log("Adding conflicting change to origin/main")
 	tmpDir := repo.t.TempDir()
 	_, err = repo.git.Run(repo.ctx, []string{"clone", repo.remoteDir, tmpDir}, "")
 	require.NoError(t, err)
 	repo.git.Run(repo.ctx, []string{"config", "user.email", "test@test.com"}, tmpDir)
 	repo.git.Run(repo.ctx, []string{"config", "user.name", "Test"}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"checkout", "feature-a"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"checkout", "main"}, tmpDir)
 
-	// Reset to before our local commit, then create conflicting change
-	repo.git.Run(repo.ctx, []string{"reset", "--hard", "HEAD~1"}, tmpDir)
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conflict.txt"), []byte("remote version\n"), 0644))
+	// Add conflict.txt with different content on main
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conflict.txt"), []byte("main version\n"), 0644))
 	repo.git.Run(repo.ctx, []string{"add", "."}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"commit", "-m", "add conflict.txt on remote"}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"push", "--force", "origin", "feature-a"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"commit", "-m", "add conflict.txt on main"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"push", "origin", "main"}, tmpDir)
 
 	// Sync should not panic - it handles the conflict gracefully
-	t.Log("Calling Sync() - expecting conflict during rebase")
+	t.Log("Calling Sync() - expecting conflict during rebase onto origin/main")
 	_ = repo.manager.Sync(repo.ctx)
 
 	// Worktree should be in rebase state (conflict needs manual resolution)
@@ -460,22 +460,21 @@ func TestSyncSkipsChildrenOfFailedBranch(t *testing.T) {
 	t.Log("Recording feature-b commit hash before sync")
 	hashBefore := repo.getWorktreeCommit(featureBPath)
 
-	// Create conflict on origin/feature-a by force pushing a different change
-	t.Log("Force-pushing conflicting change to feature-a on remote")
+	// Create conflict on origin/main (sync rebases feature-a onto origin/main)
+	t.Log("Adding conflicting change to origin/main")
 	tmpDir := repo.t.TempDir()
 	_, err = repo.git.Run(repo.ctx, []string{"clone", repo.remoteDir, tmpDir}, "")
 	require.NoError(t, err)
 	repo.git.Run(repo.ctx, []string{"config", "user.email", "test@test.com"}, tmpDir)
 	repo.git.Run(repo.ctx, []string{"config", "user.name", "Test"}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"checkout", "feature-a"}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"reset", "--hard", "HEAD~1"}, tmpDir)
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conflict.txt"), []byte("remote version\n"), 0644))
+	repo.git.Run(repo.ctx, []string{"checkout", "main"}, tmpDir)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conflict.txt"), []byte("main version\n"), 0644))
 	repo.git.Run(repo.ctx, []string{"add", "."}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"commit", "-m", "conflicting change on remote"}, tmpDir)
-	repo.git.Run(repo.ctx, []string{"push", "--force", "origin", "feature-a"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"commit", "-m", "conflicting change on main"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"push", "origin", "main"}, tmpDir)
 
-	// Sync - feature-a will fail, feature-b should be skipped
-	t.Log("Calling Sync() - feature-a will conflict, feature-b should be skipped")
+	// Sync - feature-a will fail due to conflict with main, feature-b should be skipped
+	t.Log("Calling Sync() - feature-a will conflict with main, feature-b should be skipped")
 	_ = repo.manager.Sync(repo.ctx)
 
 	// Feature-a should be in rebase state (conflict)
@@ -549,4 +548,89 @@ func TestSyncParentBranchDeleted(t *testing.T) {
 	t.Log("Verifying feature-b parent updated to main")
 	newParent, _ := repo.manager.GetParentBranch(repo.ctx, "feature-b", featureBPath)
 	require.Equal(t, "main", newParent, "feature-b should now track main as parent")
+}
+
+// TestSyncOpenedBranchRebasesOntoMain tests that a branch opened with Open()
+// is rebased onto origin/main during sync.
+func TestSyncOpenedBranchRebasesOntoMain(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create remote branch 'foo' with a commit (simulating a branch created outside wt)
+	t.Log("Creating remote branch 'foo' with its own commit")
+	repo.pushBranch("foo")
+
+	// Add a commit to origin/main (main has diverged from foo)
+	t.Log("Adding a commit to main (main diverges from foo)")
+	repo.addRemoteCommit("main", "main-update.txt", "main update content\n", "main has a new commit")
+
+	// Open the existing remote branch foo (tracks main as parent)
+	t.Log("Opening existing remote branch 'foo' with wt.Open()")
+	fooPath, err := repo.manager.Open(repo.ctx, "foo")
+	require.NoError(t, err)
+
+	// Verify foo has its original content but not the main update
+	t.Log("Verifying foo has its content but not main update yet")
+	require.True(t, fileExists(filepath.Join(fooPath, "foo.txt")),
+		"foo should have its original content")
+	require.False(t, fileExists(filepath.Join(fooPath, "main-update.txt")),
+		"foo should NOT have main-update.txt before sync")
+
+	// Sync - should rebase foo onto origin/main
+	t.Log("Calling Sync() to rebase foo onto origin/main")
+	err = repo.manager.Sync(repo.ctx)
+	require.NoError(t, err)
+
+	// After sync: foo should have the main update (rebased onto origin/main)
+	t.Log("Verifying foo has main update after sync")
+	require.True(t, fileExists(filepath.Join(fooPath, "main-update.txt")),
+		"foo should contain main-update.txt after rebase onto origin/main")
+	// And foo's own work should be preserved
+	require.True(t, fileExists(filepath.Join(fooPath, "foo.txt")),
+		"foo should still have its own work")
+}
+
+// TestSyncCascadingWithRemovedParentWorktree tests that cascading branches correctly
+// rebase onto origin/parent even when the parent worktree has been removed.
+func TestSyncCascadingWithRemovedParentWorktree(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create chain: main -> feature-a -> feature-b
+	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
+	repo.pushWorktree(featureAPath, "feature-a")
+
+	featureBPath, err := repo.manager.New(repo.ctx, "feature-b", "feature-a")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureBPath, "feature-b.txt", "feature-b content\n", "add feature-b work")
+	repo.pushWorktree(featureBPath, "feature-b")
+
+	// Remove feature-a worktree (but keep the remote branch)
+	t.Log("Removing feature-a worktree")
+	err = repo.manager.Remove(repo.ctx, "feature-a", false)
+	require.NoError(t, err)
+
+	// Add a commit to origin/feature-a (simulating teammate push to parent)
+	t.Log("Adding commit to origin/feature-a (parent branch on remote)")
+	repo.addRemoteCommit("feature-a", "parent-update.txt", "parent update content\n", "teammate updated feature-a")
+
+	// Verify feature-b doesn't have the parent update yet
+	require.False(t, fileExists(filepath.Join(featureBPath, "parent-update.txt")),
+		"feature-b should NOT have parent-update.txt before sync")
+
+	// Sync - feature-b should rebase onto origin/feature-a (not stale local ref)
+	t.Log("Calling Sync() - feature-b should rebase onto origin/feature-a")
+	err = repo.manager.Sync(repo.ctx)
+	require.NoError(t, err)
+
+	// After sync: feature-b should have the parent update from origin/feature-a
+	t.Log("Verifying feature-b has parent update after sync")
+	require.True(t, fileExists(filepath.Join(featureBPath, "parent-update.txt")),
+		"feature-b should contain parent-update.txt after rebase onto origin/feature-a")
+	// And feature-b's own work should be preserved
+	require.True(t, fileExists(filepath.Join(featureBPath, "feature-b.txt")),
+		"feature-b should still have its own work")
 }

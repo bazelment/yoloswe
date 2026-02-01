@@ -333,8 +333,9 @@ var statusCmd = &cobra.Command{
 			}
 			first = false
 
-			fmt.Printf("\n%-20s %-15s %-10s %-15s %-10s\n", "Branch", "Sync", "Status", "Last Commit", "PR")
-			fmt.Println(strings.Repeat("-", 70))
+			fmt.Printf("\n%s %s %s %s %s\n",
+				wt.Pad("Branch", 41), wt.Pad("Sync", 12), wt.Pad("Status", 8), wt.Pad("Last Commit", 12), "PR")
+			fmt.Println(strings.Repeat("-", 91))
 
 			for _, w := range worktrees {
 				status, _ := m.GetStatus(ctx, w)
@@ -377,14 +378,29 @@ var statusCmd = &cobra.Command{
 					timeStr = "-"
 				}
 
-				// PR
+				// PR with status
 				prStr := "-"
 				if status.PRNumber > 0 {
-					prStr = fmt.Sprintf("#%d", status.PRNumber)
+					prNum := fmt.Sprintf("#%d", status.PRNumber)
+					switch {
+					case status.PRState == "MERGED":
+						prStr = output.Colorize(wt.ColorGreen, prNum+" merged")
+					case status.PRState == "CLOSED":
+						prStr = output.Colorize(wt.ColorDim, prNum+" closed")
+					case status.PRIsDraft:
+						prStr = output.Colorize(wt.ColorDim, prNum+" draft")
+					case status.PRReviewStatus == "APPROVED":
+						prStr = output.Colorize(wt.ColorGreen, prNum+" approved")
+					case status.PRReviewStatus == "CHANGES_REQUESTED":
+						prStr = output.Colorize(wt.ColorRed, prNum+" changes")
+					default:
+						prStr = prNum
+					}
 				}
 
-				branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 19))
-				fmt.Printf("%-29s %-24s %-19s %-15s %s\n", branchStr, syncStr, statusStr, timeStr, prStr)
+				branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 40))
+				fmt.Printf("%s %s %s %s %s\n",
+					wt.Pad(branchStr, 41), wt.Pad(syncStr, 12), wt.Pad(statusStr, 8), wt.Pad(timeStr, 12), prStr)
 			}
 		}
 		fmt.Println()
