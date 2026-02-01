@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = ["turn_test.go"],
+    tags = ["local"],
+    deps = ["//agent-cli-wrapper/codex"],
+)

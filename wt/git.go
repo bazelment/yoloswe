@@ -155,3 +155,34 @@ func ListAllRepos(root string) ([]string, error) {
 	err := findRepos(root, "")
 	return repos, err
 }
+
+// RemoteBranchExists checks if a branch exists on the remote.
+func RemoteBranchExists(ctx context.Context, runner GitRunner, branch, dir string) (bool, error) {
+	result, err := runner.Run(ctx, []string{
+		"ls-remote", "--heads", "origin", branch,
+	}, dir)
+	if err != nil {
+		return false, err
+	}
+	// If output is empty, branch doesn't exist
+	return strings.TrimSpace(result.Stdout) != "", nil
+}
+
+// SetBranchDescription sets the description for a branch.
+func SetBranchDescription(ctx context.Context, runner GitRunner, branch, description, dir string) error {
+	_, err := runner.Run(ctx, []string{
+		"config", "branch." + branch + ".description", description,
+	}, dir)
+	return err
+}
+
+// GetBranchDescription gets the description for a branch.
+func GetBranchDescription(ctx context.Context, runner GitRunner, branch, dir string) (string, error) {
+	result, err := runner.Run(ctx, []string{
+		"config", "branch." + branch + ".description",
+	}, dir)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}

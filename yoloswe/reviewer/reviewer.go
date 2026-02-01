@@ -168,7 +168,7 @@ func (r *Reviewer) Review(ctx context.Context, prompt string) error {
 // ReviewWithResult sends a review prompt and returns the result with response text.
 // Creates a new thread for each call (one-shot review).
 func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*ReviewResult, error) {
-	thread, err := r.createThread(ctx)
+	thread, err := r.CreateThread(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -185,8 +185,8 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	return r.runTurn(ctx, prompt)
 }
 
-// createThread creates a new thread and waits for it to be ready.
-func (r *Reviewer) createThread(ctx context.Context) (*codex.Thread, error) {
+// CreateThread creates a new thread and waits for it to be ready.
+func (r *Reviewer) CreateThread(ctx context.Context) (*codex.Thread, error) {
 	r.renderer.Status(fmt.Sprintf("Creating thread with model %s...", r.config.Model))
 
 	thread, err := r.client.CreateThread(ctx,

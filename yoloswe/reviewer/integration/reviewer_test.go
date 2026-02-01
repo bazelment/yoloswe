@@ -1,22 +1,24 @@
-package reviewer
+package integration
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
 // TestThreadCreation tests that thread creation and WaitReady completes
 // within a reasonable time. This test is designed to be run multiple times
 // to detect flakiness in the startup process.
 func TestThreadCreation(t *testing.T) {
-	config := Config{
+	config := reviewer.Config{
 		Model:   "gpt-5.2-codex",
 		WorkDir: t.TempDir(),
 		Verbose: true,
 	}
 
-	r := New(config)
+	r := reviewer.New(config)
 
 	// Start the client with a short timeout
 	startCtx, startCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -32,7 +34,7 @@ func TestThreadCreation(t *testing.T) {
 	defer createCancel()
 
 	start := time.Now()
-	thread, err := r.createThread(createCtx)
+	thread, err := r.CreateThread(createCtx)
 	elapsed := time.Since(start)
 
 	if err != nil {

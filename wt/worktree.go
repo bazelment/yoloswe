@@ -315,6 +315,17 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch string) (string, e
 
 	m.output.Success(fmt.Sprintf("Created worktree at %s", worktreePath))
 
+	// Track parent branch if not default branch
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+	if baseBranch != defaultBranch {
+		description := "parent:" + baseBranch
+		if err := SetBranchDescription(ctx, m.git, branch, description, worktreePath); err != nil {
+			m.output.Warn(fmt.Sprintf("Failed to track parent branch: %v", err))
+		} else {
+			m.output.Info(fmt.Sprintf("Tracking parent branch: %s", baseBranch))
+		}
+	}
+
 	// Run post-create hooks
 	config, _ := LoadRepoConfig(worktreePath)
 	if len(config.PostCreate) > 0 {
@@ -605,8 +616,8 @@ func (m *Manager) Remove(ctx context.Context, branch string, deleteBranch bool) 
 	return nil
 }
 
-// Sync fetches and optionally rebases all worktrees.
-func (m *Manager) Sync(ctx context.Context, rebase bool) error {
+// Sync fetches and rebases all worktrees, handling cascading branches.
+func (m *Manager) Sync(ctx context.Context) error {
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return ErrRepoNotInitialized
@@ -623,32 +634,348 @@ func (m *Manager) Sync(ctx context.Context, rebase bool) error {
 		return err
 	}
 
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+
+	// Find a worktree to run gh commands from
+	var ghDir string
 	for _, wt := range worktrees {
+		if !wt.IsDetached {
+			ghDir = wt.Path
+			break
+		}
+	}
+	if ghDir == "" {
+		ghDir = bareDir
+	}
+
+	// Build dependency graph and sort topologically
+	orderedWorktrees := m.buildDependencyOrder(ctx, worktrees)
+
+	// Track failed branches to skip their children
+	failedBranches := make(map[string]bool)
+
+	for _, wt := range orderedWorktrees {
 		if wt.IsDetached {
 			m.output.Info(fmt.Sprintf("Skipping detached worktree %s", wt.Name()))
 			continue
 		}
 
-		if rebase {
-			m.output.Info(fmt.Sprintf("Rebasing %s...", wt.Branch))
-			if _, err := m.git.Run(ctx, []string{"rebase", "origin/" + wt.Branch}, wt.Path); err != nil {
-				m.output.Error(fmt.Sprintf("Failed to rebase %s - resolve conflicts manually", wt.Branch))
-			} else {
-				m.output.Success(fmt.Sprintf("Rebased %s", wt.Branch))
+		// Check if any ancestor failed
+		parentBranch, _ := m.GetParentBranch(ctx, wt.Branch, wt.Path)
+		if parentBranch != "" && failedBranches[parentBranch] {
+			m.output.Warn(fmt.Sprintf("Skipping %s - ancestor branch %s failed to rebase", wt.Branch, parentBranch))
+			failedBranches[wt.Branch] = true
+			continue
+		}
+
+		// Determine rebase target
+		rebaseTarget := "origin/" + wt.Branch
+
+		// Check if this is a cascading branch with merged parent
+		if parentBranch != "" && parentBranch != defaultBranch {
+			parentMerged := m.isParentBranchMerged(ctx, parentBranch, ghDir)
+			if parentMerged {
+				m.output.Info(fmt.Sprintf("Parent branch %s was merged, rebasing %s onto %s...",
+					parentBranch, wt.Branch, defaultBranch))
+				rebaseTarget = "origin/" + defaultBranch
+
+				// Update PR base branch if PR exists
+				prInfo, err := GetPRByBranch(ctx, m.gh, wt.Branch, ghDir)
+				if err == nil && prInfo != nil && prInfo.Number > 0 {
+					m.output.Info(fmt.Sprintf("Updating PR #%d base to %s...", prInfo.Number, defaultBranch))
+					if err := UpdatePRBase(ctx, m.gh, prInfo.Number, defaultBranch, ghDir); err != nil {
+						m.output.Warn(fmt.Sprintf("Failed to update PR base: %v", err))
+					}
+				}
+
+				// Update branch description
+				if err := SetBranchDescription(ctx, m.git, wt.Branch, "parent:"+defaultBranch, wt.Path); err != nil {
+					m.output.Warn(fmt.Sprintf("Failed to update branch description: %v", err))
+				}
 			}
+		}
+
+		m.output.Info(fmt.Sprintf("Rebasing %s onto %s...", wt.Branch, rebaseTarget))
+		if _, err := m.git.Run(ctx, []string{"rebase", rebaseTarget}, wt.Path); err != nil {
+			m.output.Error(fmt.Sprintf("Failed to rebase %s - resolve conflicts manually:\n  cd %s\n  git rebase --continue  # after fixing conflicts\n  git rebase --abort      # to cancel",
+				wt.Branch, wt.Path))
+			failedBranches[wt.Branch] = true
 		} else {
-			status, _ := m.GetStatus(ctx, wt)
-			if status.Behind > 0 {
-				m.output.Info(fmt.Sprintf("%s: %d commits behind", wt.Branch, status.Behind))
-			} else if status.Ahead > 0 {
-				m.output.Info(fmt.Sprintf("%s: %d commits ahead", wt.Branch, status.Ahead))
-			} else {
-				m.output.Info(fmt.Sprintf("%s: up to date", wt.Branch))
-			}
+			m.output.Success(fmt.Sprintf("Rebased %s", wt.Branch))
 		}
 	}
 
 	return nil
+}
+
+// isParentBranchMerged checks if a parent branch has been merged to default.
+func (m *Manager) isParentBranchMerged(ctx context.Context, parentBranch, ghDir string) bool {
+	// Method 1: Check if parent branch's PR is merged
+	prInfo, err := GetPRByBranch(ctx, m.gh, parentBranch, ghDir)
+	if err == nil && prInfo != nil {
+		if prInfo.Merged || prInfo.State == "MERGED" {
+			return true
+		}
+	}
+
+	// Method 2: Check if branch no longer exists on remote
+	exists, err := RemoteBranchExists(ctx, m.git, parentBranch, m.BareDir())
+	if err == nil && !exists {
+		return true
+	}
+
+	return false
+}
+
+// buildDependencyOrder sorts worktrees topologically so parents come before children.
+func (m *Manager) buildDependencyOrder(ctx context.Context, worktrees []Worktree) []Worktree {
+	// Build parent map
+	parentMap := make(map[string]string)
+	wtMap := make(map[string]Worktree)
+
+	for _, wt := range worktrees {
+		wtMap[wt.Branch] = wt
+		if !wt.IsDetached {
+			parent, _ := m.GetParentBranch(ctx, wt.Branch, wt.Path)
+			if parent != "" {
+				parentMap[wt.Branch] = parent
+			}
+		}
+	}
+
+	// Topological sort using Kahn's algorithm
+	// Count incoming edges (children count for each parent)
+	childCount := make(map[string]int)
+	for branch, parent := range parentMap {
+		if _, exists := wtMap[parent]; exists {
+			childCount[branch]++
+		}
+	}
+
+	// Start with branches that have no parent in our worktree set
+	var result []Worktree
+	var queue []Worktree
+
+	for _, wt := range worktrees {
+		if childCount[wt.Branch] == 0 {
+			queue = append(queue, wt)
+		}
+	}
+
+	processed := make(map[string]bool)
+	for len(queue) > 0 {
+		wt := queue[0]
+		queue = queue[1:]
+
+		if processed[wt.Branch] {
+			continue
+		}
+		processed[wt.Branch] = true
+		result = append(result, wt)
+
+		// Find children and add them to queue
+		for branch, parent := range parentMap {
+			if parent == wt.Branch {
+				if child, exists := wtMap[branch]; exists && !processed[branch] {
+					queue = append(queue, child)
+				}
+			}
+		}
+	}
+
+	// Add any remaining worktrees (cycles or orphans)
+	for _, wt := range worktrees {
+		if !processed[wt.Branch] {
+			result = append(result, wt)
+		}
+	}
+
+	return result
+}
+
+// MergeOptions configures the merge operation.
+type MergeOptions struct {
+	Keep        bool   // Keep worktree and branches after merge
+	MergeMethod string // "squash", "rebase", "merge", or "" for default
+}
+
+// BranchDependency represents a branch that depends on another.
+type BranchDependency struct {
+	Branch       string
+	PRNumber     int
+	BaseBranch   string
+	HasWorktree  bool
+	WorktreePath string
+}
+
+// MergePR merges the PR for the current worktree and handles cleanup.
+func (m *Manager) MergePR(ctx context.Context, opts MergeOptions) error {
+	// Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Get current branch
+	result, err := m.git.Run(ctx, []string{"branch", "--show-current"}, cwd)
+	if err != nil {
+		return fmt.Errorf("failed to get current branch: %w", err)
+	}
+	currentBranch := strings.TrimSpace(result.Stdout)
+	if currentBranch == "" {
+		return fmt.Errorf("not on a branch (detached HEAD?)")
+	}
+
+	bareDir := m.BareDir()
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+
+	// Check if trying to merge default branch
+	if currentBranch == defaultBranch {
+		return fmt.Errorf("cannot merge the default branch (%s)", defaultBranch)
+	}
+
+	// Get PR info for current branch
+	prInfo, err := GetPRByBranch(ctx, m.gh, currentBranch, cwd)
+	if err != nil {
+		return fmt.Errorf("no PR found for branch %s: %w", currentBranch, err)
+	}
+
+	// Check if PR is mergeable
+	if prInfo.ReviewDecision != "" && prInfo.ReviewDecision != "APPROVED" {
+		m.output.Warn(fmt.Sprintf("PR #%d review status: %s", prInfo.Number, prInfo.ReviewDecision))
+	}
+
+	m.output.Info(fmt.Sprintf("Merging PR #%d for branch %s...", prInfo.Number, currentBranch))
+
+	// Find child branches BEFORE merging
+	childDeps, err := m.findChildBranches(ctx, currentBranch, cwd)
+	if err != nil {
+		m.output.Warn(fmt.Sprintf("Failed to find child branches: %v", err))
+	}
+
+	// Merge the PR
+	mergeArgs := []string{"pr", "merge", strconv.Itoa(prInfo.Number), "--delete-branch"}
+	switch opts.MergeMethod {
+	case "squash":
+		mergeArgs = append(mergeArgs, "--squash")
+	case "rebase":
+		mergeArgs = append(mergeArgs, "--rebase")
+	case "merge":
+		mergeArgs = append(mergeArgs, "--merge")
+	}
+
+	if _, err := m.gh.Run(ctx, mergeArgs, cwd); err != nil {
+		return fmt.Errorf("failed to merge PR: %w", err)
+	}
+	m.output.Success(fmt.Sprintf("Merged PR #%d", prInfo.Number))
+
+	// Fetch to get updated remote state
+	m.git.Run(ctx, []string{"fetch", "--prune"}, bareDir)
+
+	// Cleanup unless --keep
+	if !opts.Keep {
+		// Navigate away from current worktree before removing it
+		m.output.Info("Navigating to default branch worktree...")
+		fmt.Printf("__WT_CD__:%s\n", filepath.Join(m.RepoDir(), defaultBranch))
+
+		if err := m.Remove(ctx, currentBranch, true); err != nil {
+			m.output.Warn(fmt.Sprintf("Failed to cleanup worktree: %v", err))
+		}
+	}
+
+	// Handle child branches
+	if len(childDeps) > 0 {
+		m.output.Info(fmt.Sprintf("Found %d child branches depending on %s", len(childDeps), currentBranch))
+		m.handleChildBranches(ctx, childDeps, defaultBranch)
+	}
+
+	return nil
+}
+
+// findChildBranches finds all branches that have PRs targeting the given branch.
+func (m *Manager) findChildBranches(ctx context.Context, parentBranch, dir string) ([]BranchDependency, error) {
+	// Get all open PRs
+	prs, err := ListOpenPRs(ctx, m.gh, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get local worktrees
+	worktrees, _ := m.List(ctx)
+	wtMap := make(map[string]string) // branch -> path
+	for _, wt := range worktrees {
+		wtMap[wt.Branch] = wt.Path
+	}
+
+	// Filter PRs targeting our parent branch
+	var children []BranchDependency
+	for _, pr := range prs {
+		if pr.BaseRefName == parentBranch {
+			child := BranchDependency{
+				Branch:     pr.HeadRefName,
+				PRNumber:   pr.Number,
+				BaseBranch: parentBranch,
+			}
+			if path, ok := wtMap[pr.HeadRefName]; ok {
+				child.HasWorktree = true
+				child.WorktreePath = path
+			}
+			children = append(children, child)
+		}
+	}
+
+	return children, nil
+}
+
+// handleChildBranches rebases child branches onto the new base and updates their PRs.
+func (m *Manager) handleChildBranches(ctx context.Context, children []BranchDependency, newBase string) {
+	failedBranches := make(map[string]bool)
+
+	for _, child := range children {
+		// Check if ancestor failed
+		if failedBranches[child.BaseBranch] {
+			m.output.Warn(fmt.Sprintf("Skipping %s - ancestor branch failed to rebase", child.Branch))
+			failedBranches[child.Branch] = true
+			continue
+		}
+
+		if child.HasWorktree {
+			// Fetch latest
+			m.git.Run(ctx, []string{"fetch", "origin"}, child.WorktreePath)
+
+			// Rebase onto new base
+			m.output.Info(fmt.Sprintf("Rebasing %s onto %s...", child.Branch, newBase))
+			if _, err := m.git.Run(ctx, []string{"rebase", "origin/" + newBase}, child.WorktreePath); err != nil {
+				m.output.Error(fmt.Sprintf("Failed to rebase %s - resolve conflicts manually:\n  cd %s\n  git rebase --continue\n  git rebase --abort",
+					child.Branch, child.WorktreePath))
+				failedBranches[child.Branch] = true
+				continue
+			}
+
+			// Force push
+			if _, err := m.git.Run(ctx, []string{"push", "--force-with-lease"}, child.WorktreePath); err != nil {
+				m.output.Error(fmt.Sprintf("Failed to push %s: %v", child.Branch, err))
+				failedBranches[child.Branch] = true
+				continue
+			}
+
+			// Update branch description
+			SetBranchDescription(ctx, m.git, child.Branch, "parent:"+newBase, child.WorktreePath)
+
+			m.output.Success(fmt.Sprintf("Rebased %s onto %s", child.Branch, newBase))
+		} else {
+			m.output.Warn(fmt.Sprintf("Branch %s has no worktree, updating PR base only (rebase manually later)", child.Branch))
+		}
+
+		// Update PR base branch
+		if child.PRNumber > 0 {
+			if err := UpdatePRBase(ctx, m.gh, child.PRNumber, newBase, m.BareDir()); err != nil {
+				m.output.Warn(fmt.Sprintf("Failed to update PR #%d base: %v", child.PRNumber, err))
+			} else {
+				m.output.Success(fmt.Sprintf("Updated PR #%d base to %s", child.PRNumber, newBase))
+			}
+		}
+	}
 }
 
 // Prune cleans stale worktree metadata.
@@ -687,4 +1014,16 @@ func (m *Manager) GetWorktreePath(branch string) (string, error) {
 		return "", ErrWorktreeNotFound
 	}
 	return path, nil
+}
+
+// GetParentBranch returns the parent branch for a given branch if tracked.
+func (m *Manager) GetParentBranch(ctx context.Context, branch, dir string) (string, error) {
+	desc, err := GetBranchDescription(ctx, m.git, branch, dir)
+	if err != nil {
+		return "", nil // No description is not an error
+	}
+	if parent, ok := strings.CutPrefix(desc, "parent:"); ok {
+		return parent, nil
+	}
+	return "", nil // No parent tracked
 }

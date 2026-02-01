@@ -2,18 +2,43 @@ package wt
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 // MockGHRunner implements GHRunner for testing.
 type MockGHRunner struct {
-	Result *CmdResult
-	Err    error
-	Args   []string
+	Result  *CmdResult        // Default result (for backward compatibility)
+	Err     error             // Default error (for backward compatibility)
+	Args    []string          // Last args (for backward compatibility)
+	Calls   [][]string        // All calls made
+	Results map[string]*CmdResult
+	Errors  map[string]error
+}
+
+func NewMockGHRunner() *MockGHRunner {
+	return &MockGHRunner{
+		Results: make(map[string]*CmdResult),
+		Errors:  make(map[string]error),
+	}
 }
 
 func (m *MockGHRunner) Run(ctx context.Context, args []string, dir string) (*CmdResult, error) {
 	m.Args = args
+	m.Calls = append(m.Calls, args)
+	key := strings.Join(args, " ")
+
+	// Check for specific result/error first
+	if m.Results != nil {
+		if err, ok := m.Errors[key]; ok {
+			return &CmdResult{ExitCode: 1, Stderr: err.Error()}, err
+		}
+		if result, ok := m.Results[key]; ok {
+			return result, nil
+		}
+	}
+
+	// Fall back to default Result/Err
 	return m.Result, m.Err
 }
 

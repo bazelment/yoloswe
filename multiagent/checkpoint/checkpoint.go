@@ -213,8 +213,8 @@ func (c *Checkpoint) CanResume() bool {
 	case PhaseDesigning, PhaseBuilding, PhaseReviewing:
 		return true
 	case PhaseFailed:
-		// Can always resume from failed - restart from appropriate phase
-		return true
+		// Can only resume from failed if we have a design response
+		return c.DesignResponse != nil
 	default:
 		return false
 	}

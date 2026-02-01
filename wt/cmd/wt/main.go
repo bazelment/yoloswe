@@ -55,6 +55,7 @@ func init() {
 	rootCmd.AddCommand(rmCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(cdCmd)
 	rootCmd.AddCommand(pruneCmd)
 	rootCmd.AddCommand(shellenvCmd)
@@ -422,13 +423,16 @@ func init() {
 	statusCmd.Flags().BoolP("all", "a", false, "Show status for all repositories")
 }
 
-// syncCmd: wt sync [--rebase] [-a]
+// syncCmd: wt sync [-a]
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Sync all worktrees",
+	Short: "Fetch and rebase all worktrees",
+	Long: `Sync fetches the latest changes and rebases all worktrees.
+
+For cascading branches (created with --from), sync automatically detects
+when a parent branch has been merged and rebases onto the default branch.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		allRepos, _ := cmd.Flags().GetBool("all")
-		rebase, _ := cmd.Flags().GetBool("rebase")
 		ctx := context.Background()
 		output := wt.DefaultOutput()
 
@@ -450,7 +454,7 @@ var syncCmd = &cobra.Command{
 				return err
 			}
 			repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
-		repos = []string{repoName}
+			repos = []string{repoName}
 		}
 
 		for i, repoName := range repos {
@@ -462,7 +466,7 @@ var syncCmd = &cobra.Command{
 			}
 
 			m := wt.NewManager(wtRoot, repoName)
-			if err := m.Sync(ctx, rebase); err != nil {
+			if err := m.Sync(ctx); err != nil {
 				output.Error(fmt.Sprintf("Failed to sync %s: %v", repoName, err))
 			}
 		}
@@ -472,8 +476,59 @@ var syncCmd = &cobra.Command{
 }
 
 func init() {
-	syncCmd.Flags().BoolP("rebase", "r", false, "Rebase on upstream")
 	syncCmd.Flags().BoolP("all", "a", false, "Sync all repositories")
+}
+
+// mergeCmd: wt merge [--keep] [--squash|--rebase|--merge]
+var mergeCmd = &cobra.Command{
+	Use:   "merge",
+	Short: "Merge current branch's PR and cleanup",
+	Long: `Merge the PR for the current branch, remove the worktree, and handle cascading branches.
+
+By default, this command will:
+1. Merge the PR using the repository's default merge method
+2. Remove the worktree and delete local/remote branches
+3. Find any branches that were based on this one
+4. Rebase those branches onto the default branch
+5. Update their PR base branches
+
+Use --keep to skip worktree/branch cleanup.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		keep, _ := cmd.Flags().GetBool("keep")
+		squash, _ := cmd.Flags().GetBool("squash")
+		rebaseFlag, _ := cmd.Flags().GetBool("rebase")
+		mergeCommit, _ := cmd.Flags().GetBool("merge")
+
+		// Determine merge method
+		var mergeMethod string
+		if squash {
+			mergeMethod = "squash"
+		} else if rebaseFlag {
+			mergeMethod = "rebase"
+		} else if mergeCommit {
+			mergeMethod = "merge"
+		}
+
+		ctx := context.Background()
+		opts := wt.MergeOptions{
+			Keep:        keep,
+			MergeMethod: mergeMethod,
+		}
+
+		return m.MergePR(ctx, opts)
+	},
+}
+
+func init() {
+	mergeCmd.Flags().BoolP("keep", "k", false, "Keep worktree and branches after merge")
+	mergeCmd.Flags().Bool("squash", false, "Squash merge the PR")
+	mergeCmd.Flags().Bool("rebase", false, "Rebase merge the PR")
+	mergeCmd.Flags().Bool("merge", false, "Create a merge commit")
 }
 
 // cdCmd: wt cd [branch]
