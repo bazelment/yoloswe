@@ -31,7 +31,7 @@ var rootCmd = &cobra.Command{
 	Long: `wt - Git worktree CLI for power users managing multiple concurrent branches.
 
 A CLI tool for managing Git worktrees with support for bare clones,
-branch management, GitHub PR integration, and shell navigation.
+branch management, and shell navigation.
 
 Environment:
   WT_ROOT     Base directory for worktrees (default: ~/worktrees)`,
@@ -50,12 +50,12 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(newCmd)
 	rootCmd.AddCommand(openCmd)
-	rootCmd.AddCommand(prCmd)
 	rootCmd.AddCommand(lsCmd)
 	rootCmd.AddCommand(rmCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(mergeCmd)
+	rootCmd.AddCommand(prCmd)
 	rootCmd.AddCommand(cdCmd)
 	rootCmd.AddCommand(pruneCmd)
 	rootCmd.AddCommand(shellenvCmd)
@@ -157,33 +157,6 @@ var openCmd = &cobra.Command{
 		ctx := context.Background()
 
 		path, err := m.Open(ctx, branch)
-		if err != nil {
-			return err
-		}
-
-		fmt.Printf("__WT_CD__:%s\n", path)
-		return nil
-	},
-}
-
-// prCmd: wt pr <number>
-var prCmd = &cobra.Command{
-	Use:   "pr <number>",
-	Short: "Open GitHub PR in worktree",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := getManager()
-		if err != nil {
-			return err
-		}
-
-		var prNumber int
-		if _, err := fmt.Sscanf(args[0], "%d", &prNumber); err != nil {
-			return fmt.Errorf("invalid PR number: %s", args[0])
-		}
-
-		ctx := context.Background()
-		path, err := m.OpenPR(ctx, prNumber)
 		if err != nil {
 			return err
 		}
@@ -531,6 +504,68 @@ func init() {
 	mergeCmd.Flags().Bool("merge", false, "Create a merge commit")
 }
 
+// prCmd: wt pr [--title X] [--body X] [--base X] [--draft] [--no-push]
+var prCmd = &cobra.Command{
+	Use:   "pr",
+	Short: "Push and create a GitHub PR",
+	Long: `Push the current branch to origin and create a GitHub Pull Request.
+
+Base branch is auto-detected:
+  1. Explicit --base flag
+  2. Parent branch (for cascading branches created with --from)
+  3. Repository default branch
+
+Examples:
+  wt pr                           # Auto-detect base
+  wt pr --draft                   # Create draft PR
+  wt pr --base develop            # Target develop
+  wt pr -t "Add feature X"        # With title`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		title, _ := cmd.Flags().GetString("title")
+		body, _ := cmd.Flags().GetString("body")
+		base, _ := cmd.Flags().GetString("base")
+		draft, _ := cmd.Flags().GetBool("draft")
+		noPush, _ := cmd.Flags().GetBool("no-push")
+
+		ctx := context.Background()
+		result, err := m.CreatePR(ctx, wt.PROptions{
+			Title:  title,
+			Body:   body,
+			Base:   base,
+			Draft:  draft,
+			NoPush: noPush,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Display result
+		output := wt.DefaultOutput()
+		if result.Existed {
+			output.Info(fmt.Sprintf("PR already exists: #%d", result.Number))
+		} else {
+			output.Success(fmt.Sprintf("Created PR #%d", result.Number))
+		}
+		fmt.Printf("  %s -> %s\n", result.Branch, result.Base)
+		fmt.Printf("  %s\n", result.URL)
+
+		return nil
+	},
+}
+
+func init() {
+	prCmd.Flags().StringP("title", "t", "", "PR title")
+	prCmd.Flags().StringP("body", "b", "", "PR body")
+	prCmd.Flags().String("base", "", "Base branch (override auto-detection)")
+	prCmd.Flags().BoolP("draft", "d", false, "Create as draft PR")
+	prCmd.Flags().Bool("no-push", false, "Skip push if already pushed")
+}
+
 // cdCmd: wt cd [branch]
 var cdCmd = &cobra.Command{
 	Use:   "cd [branch]",
@@ -628,7 +663,7 @@ _wt_completions() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     case "$prev" in
         --repo|-R) COMPREPLY=($(compgen -W "$(ls ~/worktrees 2>/dev/null)" -- "$cur")) ;;
-        wt) COMPREPLY=($(compgen -W "--repo -R init new open pr ls rm status sync cd prune shellenv" -- "$cur")) ;;
+        wt) COMPREPLY=($(compgen -W "--repo -R init new open ls rm status sync merge pr cd prune shellenv" -- "$cur")) ;;
         rm|cd|open) COMPREPLY=($(compgen -W "$(command wt ls --json 2>/dev/null | grep -o '"branch": "[^"]*"' | cut -d'"' -f4)" -- "$cur")) ;;
     esac
 }
@@ -654,11 +689,12 @@ _wt_completions() {
         'init:Initialize repo with bare clone'
         'new:Create new branch worktree'
         'open:Open existing remote branch'
-        'pr:Open GitHub PR in worktree'
         'ls:List all worktrees'
         'rm:Remove worktree'
         'status:Show status dashboard'
         'sync:Sync all worktrees'
+        'merge:Merge PR and cleanup'
+        'pr:Push and create GitHub PR'
         'cd:Navigate to worktree'
         'prune:Clean stale metadata'
         'shellenv:Print shell integration'

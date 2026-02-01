@@ -42,39 +42,6 @@ func (m *MockGHRunner) Run(ctx context.Context, args []string, dir string) (*Cmd
 	return m.Result, m.Err
 }
 
-func TestGetPRInfo(t *testing.T) {
-	tests := []struct {
-		name     string
-		prNumber int
-		wantArg  string
-	}{
-		{"single digit", 5, "5"},
-		{"double digit", 42, "42"},
-		{"triple digit", 123, "123"},
-		{"large number", 9999, "9999"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mock := &MockGHRunner{
-				Result: &CmdResult{
-					Stdout: `{"number": 123, "url": "https://github.com/org/repo/pull/123", "headRefName": "feature"}`,
-				},
-			}
-
-			_, _ = GetPRInfo(context.Background(), mock, tt.prNumber, "/tmp")
-
-			// Check that the PR number was passed correctly
-			if len(mock.Args) < 3 {
-				t.Fatalf("expected at least 3 args, got %d", len(mock.Args))
-			}
-			if mock.Args[2] != tt.wantArg {
-				t.Errorf("PR number arg = %q, want %q", mock.Args[2], tt.wantArg)
-			}
-		})
-	}
-}
-
 func TestGetPRForBranch(t *testing.T) {
 	mock := &MockGHRunner{
 		Result: &CmdResult{
@@ -92,5 +59,57 @@ func TestGetPRForBranch(t *testing.T) {
 	}
 	if info.URL != "https://github.com/org/repo/pull/456" {
 		t.Errorf("URL = %q, want %q", info.URL, "https://github.com/org/repo/pull/456")
+	}
+}
+
+func TestCreatePR(t *testing.T) {
+	mock := &MockGHRunner{
+		Result: &CmdResult{
+			Stdout: `{"number": 123, "url": "https://github.com/org/repo/pull/123", "headRefName": "feature", "baseRefName": "main"}`,
+		},
+	}
+
+	info, err := CreatePR(context.Background(), mock, "Test PR", "Description", "main", false, "/tmp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if info.Number != 123 {
+		t.Errorf("Number = %d, want 123", info.Number)
+	}
+	if info.URL != "https://github.com/org/repo/pull/123" {
+		t.Errorf("URL = %q, want expected URL", info.URL)
+	}
+
+	// Verify args
+	args := mock.Args
+	if len(args) < 2 || args[0] != "pr" || args[1] != "create" {
+		t.Errorf("expected pr create command, got %v", args)
+	}
+
+	argsStr := strings.Join(args, " ")
+	if !strings.Contains(argsStr, "--base main") {
+		t.Errorf("expected --base main in args: %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "--title") {
+		t.Errorf("expected --title in args: %s", argsStr)
+	}
+}
+
+func TestCreatePRDraft(t *testing.T) {
+	mock := &MockGHRunner{
+		Result: &CmdResult{
+			Stdout: `{"number": 456, "url": "https://github.com/org/repo/pull/456", "headRefName": "feat", "baseRefName": "main"}`,
+		},
+	}
+
+	_, err := CreatePR(context.Background(), mock, "", "", "main", true, "/tmp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	argsStr := strings.Join(mock.Args, " ")
+	if !strings.Contains(argsStr, "--draft") {
+		t.Errorf("expected --draft in args: %s", argsStr)
 	}
 }
