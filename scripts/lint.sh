@@ -30,7 +30,16 @@ fi
 
 # Run golangci-lint on each module in go.work
 GO_LINT_FAILED=0
-for module in agent-cli-wrapper multiagent yoloswe; do
+
+# Parse module directories from go.work (lines starting with ./ or whitespace then ./)
+MODULES=$(grep -E '^\s*\./' go.work | sed 's/^[[:space:]]*\.\///' | tr -d '\r')
+
+if [[ -z "${MODULES}" ]]; then
+    echo "Error: No modules found in go.work"
+    exit 1
+fi
+
+for module in ${MODULES}; do
     if [[ -d "${module}" ]]; then
         echo "  Linting ${module}..."
         if ! (cd "${module}" && golangci-lint run --timeout=10m ./...); then

@@ -24,36 +24,36 @@ own working directory.
 
 2. Creating and maintaining a feature branch:
 
-	wt new feature-x              # Creates from default base (main)
-	wt new feature-y --from dev   # Creates from specific branch
+		wt new feature-x              # Creates from default base (main)
+		wt new feature-y --from dev   # Creates from specific branch
 
-   Staying in sync with upstream:
+	   Staying in sync with upstream:
 
-	wt cd feature-x
-	wt sync                       # Fetch latest (shows ahead/behind)
-	wt sync --rebase              # Fetch and rebase onto origin
+		wt cd feature-x
+		wt sync                       # Fetch latest (shows ahead/behind)
+		wt sync --rebase              # Fetch and rebase onto origin
 
-   Cascading branches (feature-b depends on feature-a):
+	   Cascading branches (feature-b depends on feature-a):
 
-	wt new feature-a              # First feature from main
-	wt new feature-b --from feature-a  # Second feature from first
+		wt new feature-a              # First feature from main
+		wt new feature-b --from feature-a  # Second feature from first
 
-   When feature-a is updated, rebase feature-b:
+	   When feature-a is updated, rebase feature-b:
 
-	wt cd feature-b
-	git rebase feature-a          # Rebase onto updated parent
+		wt cd feature-b
+		git rebase feature-a          # Rebase onto updated parent
 
-   After PR is merged:
+	   After PR is merged:
 
-	wt cd main
-	git pull                      # Update main with merged changes
-	wt rm feature-x -D            # Remove worktree + delete branch
+		wt cd main
+		git pull                      # Update main with merged changes
+		wt rm feature-x -D            # Remove worktree + delete branch
 
-   If you have cascading branches after parent merges:
+	   If you have cascading branches after parent merges:
 
-	wt cd feature-b
-	git rebase main               # Rebase onto main (parent is now in main)
-	git push --force-with-lease   # Update remote
+		wt cd feature-b
+		git rebase main               # Rebase onto main (parent is now in main)
+		git push --force-with-lease   # Update remote
 
 3. Opening an existing remote branch:
 
@@ -149,23 +149,23 @@ func (w *Worktree) Name() string {
 
 // WorktreeStatus contains extended status information.
 type WorktreeStatus struct {
+	LastCommitTime time.Time
+	LastCommitMsg  string
+	PRURL          string
 	Worktree       Worktree
 	Ahead          int
 	Behind         int
-	IsDirty        bool
-	LastCommitTime time.Time
-	LastCommitMsg  string
 	PRNumber       int
-	PRURL          string
+	IsDirty        bool
 }
 
 // Manager handles worktree operations for a repository.
 type Manager struct {
-	root     string
-	repoName string
 	git      GitRunner
 	gh       GHRunner
 	output   *Output
+	root     string
+	repoName string
 }
 
 // Option configures a Manager.
@@ -488,8 +488,8 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 		result, err := m.gh.Run(ctx, []string{"pr", "view", "--json", "number,url"}, wt.Path)
 		if err == nil && result.Stdout != "" {
 			var prData struct {
-				Number int    `json:"number"`
 				URL    string `json:"url"`
+				Number int    `json:"number"`
 			}
 			if json.Unmarshal([]byte(result.Stdout), &prData) == nil {
 				status.PRNumber = prData.Number
@@ -720,17 +720,17 @@ func (m *Manager) buildDependencyOrder(ctx context.Context, worktrees []Worktree
 
 // MergeOptions configures the merge operation.
 type MergeOptions struct {
-	Keep        bool   // Keep worktree and branches after merge
-	MergeMethod string // "squash", "rebase", "merge", or "" for default
+	MergeMethod string
+	Keep        bool
 }
 
 // BranchDependency represents a branch that depends on another.
 type BranchDependency struct {
 	Branch       string
-	PRNumber     int
 	BaseBranch   string
-	HasWorktree  bool
 	WorktreePath string
+	PRNumber     int
+	HasWorktree  bool
 }
 
 // MergePR merges the PR for the current worktree and handles cleanup.
@@ -964,11 +964,11 @@ type PROptions struct {
 
 // PRResult contains the result of PR creation.
 type PRResult struct {
-	Number  int
 	URL     string
 	Branch  string
 	Base    string
-	Existed bool // true if PR already existed
+	Number  int
+	Existed bool
 }
 
 // CreatePR pushes the current branch and creates a GitHub PR.

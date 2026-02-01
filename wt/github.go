@@ -38,13 +38,13 @@ func (r *DefaultGHRunner) Run(ctx context.Context, args []string, dir string) (*
 
 // PRInfo holds GitHub PR information.
 type PRInfo struct {
-	Number         int    `json:"number"`
 	URL            string `json:"url"`
 	HeadRefName    string `json:"headRefName"`
 	BaseRefName    string `json:"baseRefName"`
-	State          string `json:"state"` // OPEN, CLOSED, MERGED
+	State          string `json:"state"`
+	ReviewDecision string `json:"reviewDecision"`
+	Number         int    `json:"number"`
 	Merged         bool   `json:"merged"`
-	ReviewDecision string `json:"reviewDecision"` // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED
 }
 
 // StatusCheck represents a CI status check.

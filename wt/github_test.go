@@ -8,12 +8,12 @@ import (
 
 // MockGHRunner implements GHRunner for testing.
 type MockGHRunner struct {
-	Result  *CmdResult        // Default result (for backward compatibility)
-	Err     error             // Default error (for backward compatibility)
-	Args    []string          // Last args (for backward compatibility)
-	Calls   [][]string        // All calls made
+	Err     error
+	Result  *CmdResult
 	Results map[string]*CmdResult
 	Errors  map[string]error
+	Args    []string
+	Calls   [][]string
 }
 
 func NewMockGHRunner() *MockGHRunner {

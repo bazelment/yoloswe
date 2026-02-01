@@ -8,19 +8,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelment/yoloswe/wt"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/wt"
 )
 
 // testRepo sets up a wt-managed repository with a local "remote" for integration testing.
 type testRepo struct {
-	t         *testing.T
 	ctx       context.Context
+	t         *testing.T
 	git       *wt.DefaultGitRunner
-	remoteDir string // Bare remote repository
-	root      string // wt root directory (e.g., ~/worktrees)
-	repoName  string // Repository name
 	manager   *wt.Manager
+	remoteDir string
+	root      string
+	repoName  string
 }
 
 // newTestRepo creates a test repository setup with a local remote.
@@ -90,7 +91,7 @@ func (r *testRepo) pushBranch(branch string) {
 	r.git.Run(r.ctx, []string{"checkout", "-b", branch}, tmpDir)
 	require.NoError(r.t, os.WriteFile(filepath.Join(tmpDir, branch+".txt"), []byte(branch+" content\n"), 0644))
 	r.git.Run(r.ctx, []string{"add", "."}, tmpDir)
-	r.git.Run(r.ctx, []string{"commit", "-m", "add "+branch}, tmpDir)
+	r.git.Run(r.ctx, []string{"commit", "-m", "add " + branch}, tmpDir)
 	r.git.Run(r.ctx, []string{"push", "-u", "origin", branch}, tmpDir)
 }
 

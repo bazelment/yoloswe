@@ -1,5 +1,13 @@
 load("@gazelle//:def.bzl", "gazelle")
+load("@rules_go//go:def.bzl", "nogo")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# nogo enables Go vet checks during bazel build
+nogo(
+    name = "nogo",
+    vet = True,
+    visibility = ["//visibility:public"],
+)
 
 # gazelle:prefix github.com/bazelment/yoloswe
 gazelle(name = "gazelle")

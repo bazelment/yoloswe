@@ -43,8 +43,7 @@ func LoadRepoConfig(repoPath string) (*RepoConfig, error) {
 // RunHooks executes hook commands in a worktree.
 func RunHooks(commands []string, worktreePath, branch string, output *Output) error {
 	env := os.Environ()
-	env = append(env, "WT_BRANCH="+branch)
-	env = append(env, "WT_PATH="+worktreePath)
+	env = append(env, "WT_BRANCH="+branch, "WT_PATH="+worktreePath)
 
 	for _, cmdStr := range commands {
 		output.Info("Running: " + cmdStr)
