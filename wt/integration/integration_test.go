@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bazelment/yoloswe/wt"
@@ -66,17 +67,20 @@ func newTestRepo(t *testing.T) *testRepo {
 
 func (r *testRepo) init() string {
 	r.t.Helper()
+	r.t.Logf("Initializing wt repo from remote: %s", r.remoteDir)
 	mainPath, err := r.manager.Init(r.ctx, r.remoteDir)
 	require.NoError(r.t, err, "Manager.Init failed")
 
 	r.repoName = wt.GetRepoNameFromURL(r.remoteDir)
 	output := wt.NewOutput(&bytes.Buffer{}, false)
 	r.manager = wt.NewManager(r.root, r.repoName, wt.WithOutput(output))
+	r.t.Logf("  -> main worktree at: %s", mainPath)
 	return mainPath
 }
 
 func (r *testRepo) pushBranch(branch string) {
 	r.t.Helper()
+	r.t.Logf("Creating and pushing branch %q to remote", branch)
 	tmpDir := r.t.TempDir()
 	_, err := r.git.Run(r.ctx, []string{"clone", r.remoteDir, tmpDir}, "")
 	require.NoError(r.t, err)
@@ -92,10 +96,96 @@ func (r *testRepo) pushBranch(branch string) {
 
 func (r *testRepo) pushWorktree(wtPath, branch string) {
 	r.t.Helper()
+	r.t.Logf("Pushing worktree branch %q to remote", branch)
 	r.git.Run(r.ctx, []string{"config", "user.email", "test@test.com"}, wtPath)
 	r.git.Run(r.ctx, []string{"config", "user.name", "Test"}, wtPath)
 	_, err := r.git.Run(r.ctx, []string{"push", "-u", "origin", branch}, wtPath)
 	require.NoError(r.t, err, "git push failed for "+branch)
+}
+
+// commitInWorktree creates a commit in a worktree with a new file.
+func (r *testRepo) commitInWorktree(wtPath, filename, content, message string) {
+	r.t.Helper()
+	r.t.Logf("Committing in worktree: %s (file: %s)", filepath.Base(wtPath), filename)
+	r.git.Run(r.ctx, []string{"config", "user.email", "test@test.com"}, wtPath)
+	r.git.Run(r.ctx, []string{"config", "user.name", "Test"}, wtPath)
+	require.NoError(r.t, os.WriteFile(filepath.Join(wtPath, filename), []byte(content), 0644))
+	r.git.Run(r.ctx, []string{"add", "."}, wtPath)
+	_, err := r.git.Run(r.ctx, []string{"commit", "-m", message}, wtPath)
+	require.NoError(r.t, err, "commit failed in "+wtPath)
+}
+
+// addRemoteCommit adds a commit to the remote repository on the specified branch.
+func (r *testRepo) addRemoteCommit(branch, filename, content, message string) {
+	r.t.Helper()
+	r.t.Logf("Adding remote commit to %q: %s (file: %s)", branch, message, filename)
+	tmpDir := r.t.TempDir()
+	_, err := r.git.Run(r.ctx, []string{"clone", r.remoteDir, tmpDir}, "")
+	require.NoError(r.t, err)
+
+	r.git.Run(r.ctx, []string{"config", "user.email", "test@test.com"}, tmpDir)
+	r.git.Run(r.ctx, []string{"config", "user.name", "Test"}, tmpDir)
+	r.git.Run(r.ctx, []string{"checkout", branch}, tmpDir)
+	require.NoError(r.t, os.WriteFile(filepath.Join(tmpDir, filename), []byte(content), 0644))
+	r.git.Run(r.ctx, []string{"add", "."}, tmpDir)
+	r.git.Run(r.ctx, []string{"commit", "-m", message}, tmpDir)
+	_, err = r.git.Run(r.ctx, []string{"push", "origin", branch}, tmpDir)
+	require.NoError(r.t, err, "push failed for "+branch)
+}
+
+// deleteRemoteBranch deletes a branch from the remote repository.
+func (r *testRepo) deleteRemoteBranch(branch string) {
+	r.t.Helper()
+	r.t.Logf("Deleting remote branch %q", branch)
+	tmpDir := r.t.TempDir()
+	_, err := r.git.Run(r.ctx, []string{"clone", r.remoteDir, tmpDir}, "")
+	require.NoError(r.t, err)
+
+	_, err = r.git.Run(r.ctx, []string{"push", "origin", "--delete", branch}, tmpDir)
+	require.NoError(r.t, err, "delete remote branch failed for "+branch)
+}
+
+// remoteBranchExists checks if a branch exists on the remote.
+func (r *testRepo) remoteBranchExists(branch string) bool {
+	r.t.Helper()
+	exists, err := wt.RemoteBranchExists(r.ctx, r.git, branch, r.manager.BareDir())
+	require.NoError(r.t, err)
+	r.t.Logf("Checking remote branch %q exists: %v", branch, exists)
+	return exists
+}
+
+// getWorktreeCommit returns the HEAD commit hash of a worktree.
+func (r *testRepo) getWorktreeCommit(wtPath string) string {
+	r.t.Helper()
+	result, err := r.git.Run(r.ctx, []string{"rev-parse", "HEAD"}, wtPath)
+	require.NoError(r.t, err)
+	hash := strings.TrimSpace(result.Stdout)
+	r.t.Logf("Worktree %s HEAD: %s", filepath.Base(wtPath), hash[:8])
+	return hash
+}
+
+// isRebaseInProgress checks if a worktree is in the middle of a rebase.
+func (r *testRepo) isRebaseInProgress(branch string) bool {
+	r.t.Helper()
+	bareDir := r.manager.BareDir()
+	rebaseMerge := filepath.Join(bareDir, "worktrees", branch, "rebase-merge")
+	rebaseApply := filepath.Join(bareDir, "worktrees", branch, "rebase-apply")
+	inProgress := fileExists(rebaseMerge) || fileExists(rebaseApply)
+	r.t.Logf("Checking rebase in progress for %q: %v", branch, inProgress)
+	return inProgress
+}
+
+// abortRebase aborts any in-progress rebase in the worktree.
+func (r *testRepo) abortRebase(wtPath string) {
+	r.t.Helper()
+	r.t.Logf("Aborting rebase in %s", filepath.Base(wtPath))
+	r.git.Run(r.ctx, []string{"rebase", "--abort"}, wtPath)
+}
+
+// fileExists checks if a file exists in a directory.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // TestWorktreeLifecycle tests the full lifecycle: init, new, status, remove.
@@ -225,4 +315,237 @@ func TestErrorCases(t *testing.T) {
 		_, err := repo.manager.Open(repo.ctx, "nonexistent-branch")
 		require.ErrorIs(t, err, wt.ErrBranchNotFound)
 	})
+}
+
+// TestSyncRebasesWorktrees tests that Sync() fetches and rebases worktrees onto their remote tracking branch.
+func TestSyncRebasesWorktrees(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create feature-a from main with its own commit
+	t.Log("Creating worktree feature-a from main")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
+	repo.pushWorktree(featureAPath, "feature-a")
+
+	// Add another commit to origin/feature-a remotely (simulating teammate push)
+	repo.addRemoteCommit("feature-a", "remote-update.txt", "remote update content\n", "teammate added remote update")
+
+	// Before sync: local feature-a should NOT have the remote update
+	t.Log("Verifying local worktree does not have remote update yet")
+	require.False(t, fileExists(filepath.Join(featureAPath, "remote-update.txt")))
+
+	// Sync - should rebase local onto origin/feature-a
+	t.Log("Calling Sync() to rebase worktrees")
+	err = repo.manager.Sync(repo.ctx)
+	require.NoError(t, err)
+
+	// After sync: feature-a should have the remote update (rebased)
+	t.Log("Verifying feature-a has remote update after sync")
+	require.True(t, fileExists(filepath.Join(featureAPath, "remote-update.txt")),
+		"feature-a should contain remote-update.txt after rebase")
+	// And feature-a's own work should be preserved
+	require.True(t, fileExists(filepath.Join(featureAPath, "feature-a.txt")),
+		"feature-a should still have its own work")
+}
+
+// TestSyncMultipleWorktrees tests that Sync() handles multiple worktrees with remote updates.
+func TestSyncMultipleWorktrees(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create chain: main -> feature-a -> feature-b
+	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
+	repo.pushWorktree(featureAPath, "feature-a")
+
+	featureBPath, err := repo.manager.New(repo.ctx, "feature-b", "feature-a")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureBPath, "feature-b.txt", "feature-b content\n", "add feature-b work")
+	repo.pushWorktree(featureBPath, "feature-b")
+
+	// Add remote commits to both branches (simulating teammate pushes)
+	t.Log("Simulating teammate pushes to both branches")
+	repo.addRemoteCommit("feature-a", "remote-a.txt", "remote a content\n", "teammate update to feature-a")
+	repo.addRemoteCommit("feature-b", "remote-b.txt", "remote b content\n", "teammate update to feature-b")
+
+	// Before sync: neither branch should have the remote updates
+	t.Log("Verifying local worktrees do not have remote updates yet")
+	require.False(t, fileExists(filepath.Join(featureAPath, "remote-a.txt")))
+	require.False(t, fileExists(filepath.Join(featureBPath, "remote-b.txt")))
+
+	// Sync - should rebase both branches onto their respective remotes
+	t.Log("Calling Sync() to rebase all worktrees")
+	err = repo.manager.Sync(repo.ctx)
+	require.NoError(t, err)
+
+	// After sync:
+	t.Log("Verifying both branches have their remote updates")
+	// - feature-a should have remote-a.txt
+	require.True(t, fileExists(filepath.Join(featureAPath, "remote-a.txt")),
+		"feature-a should contain remote-a.txt after rebase")
+	require.True(t, fileExists(filepath.Join(featureAPath, "feature-a.txt")),
+		"feature-a should still have its own work")
+
+	// - feature-b should have remote-b.txt
+	require.True(t, fileExists(filepath.Join(featureBPath, "remote-b.txt")),
+		"feature-b should contain remote-b.txt after rebase")
+	require.True(t, fileExists(filepath.Join(featureBPath, "feature-b.txt")),
+		"feature-b should still have its own work")
+}
+
+// TestSyncConflictHandling tests that rebase conflicts are handled gracefully.
+func TestSyncConflictHandling(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create feature-a and add conflict.txt with one content
+	t.Log("Creating worktree feature-a with conflict.txt")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureAPath, "conflict.txt", "local version\n", "add conflict.txt locally")
+	repo.pushWorktree(featureAPath, "feature-a")
+
+	// Create divergent history on remote by force pushing a conflicting change
+	t.Log("Force-pushing conflicting change to remote (simulating teammate)")
+	tmpDir := repo.t.TempDir()
+	_, err = repo.git.Run(repo.ctx, []string{"clone", repo.remoteDir, tmpDir}, "")
+	require.NoError(t, err)
+	repo.git.Run(repo.ctx, []string{"config", "user.email", "test@test.com"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"config", "user.name", "Test"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"checkout", "feature-a"}, tmpDir)
+
+	// Reset to before our local commit, then create conflicting change
+	repo.git.Run(repo.ctx, []string{"reset", "--hard", "HEAD~1"}, tmpDir)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conflict.txt"), []byte("remote version\n"), 0644))
+	repo.git.Run(repo.ctx, []string{"add", "."}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"commit", "-m", "add conflict.txt on remote"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"push", "--force", "origin", "feature-a"}, tmpDir)
+
+	// Sync should not panic - it handles the conflict gracefully
+	t.Log("Calling Sync() - expecting conflict during rebase")
+	_ = repo.manager.Sync(repo.ctx)
+
+	// Worktree should be in rebase state (conflict needs manual resolution)
+	t.Log("Verifying feature-a is in rebase state due to conflict")
+	require.True(t, repo.isRebaseInProgress("feature-a"),
+		"sync should leave worktree in rebase state on conflict")
+
+	// Clean up the rebase state for test isolation
+	repo.abortRebase(featureAPath)
+}
+
+// TestSyncSkipsChildrenOfFailedBranch tests that children are skipped when parent rebase fails.
+func TestSyncSkipsChildrenOfFailedBranch(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create chain: main -> feature-a -> feature-b
+	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureAPath, "conflict.txt", "local version\n", "add conflict.txt locally")
+	repo.pushWorktree(featureAPath, "feature-a")
+
+	featureBPath, err := repo.manager.New(repo.ctx, "feature-b", "feature-a")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureBPath, "feature-b.txt", "feature-b content\n", "add feature-b work")
+	repo.pushWorktree(featureBPath, "feature-b")
+
+	// Record feature-b's commit hash before sync
+	t.Log("Recording feature-b commit hash before sync")
+	hashBefore := repo.getWorktreeCommit(featureBPath)
+
+	// Create conflict on origin/feature-a by force pushing a different change
+	t.Log("Force-pushing conflicting change to feature-a on remote")
+	tmpDir := repo.t.TempDir()
+	_, err = repo.git.Run(repo.ctx, []string{"clone", repo.remoteDir, tmpDir}, "")
+	require.NoError(t, err)
+	repo.git.Run(repo.ctx, []string{"config", "user.email", "test@test.com"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"config", "user.name", "Test"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"checkout", "feature-a"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"reset", "--hard", "HEAD~1"}, tmpDir)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conflict.txt"), []byte("remote version\n"), 0644))
+	repo.git.Run(repo.ctx, []string{"add", "."}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"commit", "-m", "conflicting change on remote"}, tmpDir)
+	repo.git.Run(repo.ctx, []string{"push", "--force", "origin", "feature-a"}, tmpDir)
+
+	// Sync - feature-a will fail, feature-b should be skipped
+	t.Log("Calling Sync() - feature-a will conflict, feature-b should be skipped")
+	_ = repo.manager.Sync(repo.ctx)
+
+	// Feature-a should be in rebase state (conflict)
+	t.Log("Verifying feature-a is in rebase state")
+	require.True(t, repo.isRebaseInProgress("feature-a"),
+		"feature-a should be in rebase state due to conflict")
+
+	// Feature-b should NOT have been rebased (same commit hash)
+	t.Log("Verifying feature-b was skipped (unchanged)")
+	hashAfter := repo.getWorktreeCommit(featureBPath)
+	require.Equal(t, hashBefore, hashAfter,
+		"feature-b should not have been rebased because parent feature-a failed")
+
+	// Feature-b's own work should be unchanged
+	require.True(t, fileExists(filepath.Join(featureBPath, "feature-b.txt")),
+		"feature-b should still have its own work unchanged")
+
+	// Clean up rebase state
+	repo.abortRebase(featureAPath)
+}
+
+// TestSyncParentBranchDeleted tests that when parent is deleted, child rebases onto default branch.
+func TestSyncParentBranchDeleted(t *testing.T) {
+	repo := newTestRepo(t)
+	repo.init()
+
+	// Create chain: main -> feature-a -> feature-b
+	t.Log("Creating worktree chain: main -> feature-a -> feature-b")
+	featureAPath, err := repo.manager.New(repo.ctx, "feature-a", "main")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureAPath, "feature-a.txt", "feature-a content\n", "add feature-a work")
+	repo.pushWorktree(featureAPath, "feature-a")
+
+	featureBPath, err := repo.manager.New(repo.ctx, "feature-b", "feature-a")
+	require.NoError(t, err)
+	repo.commitInWorktree(featureBPath, "feature-b.txt", "feature-b content\n", "add feature-b work")
+	repo.pushWorktree(featureBPath, "feature-b")
+
+	// Verify feature-b's parent is feature-a
+	t.Log("Verifying feature-b parent is feature-a")
+	parentB, _ := repo.manager.GetParentBranch(repo.ctx, "feature-b", featureBPath)
+	require.Equal(t, "feature-a", parentB)
+
+	// Simulate parent branch merged: delete from remote and remove local worktree
+	t.Log("Simulating parent branch merged: delete remote and remove local worktree")
+	repo.deleteRemoteBranch("feature-a")
+	require.False(t, repo.remoteBranchExists("feature-a"), "feature-a should be deleted from remote")
+
+	t.Log("Removing local feature-a worktree")
+	err = repo.manager.Remove(repo.ctx, "feature-a", false)
+	require.NoError(t, err)
+
+	// Add a new commit to main
+	repo.addRemoteCommit("main", "main-update.txt", "main update content\n", "update main after parent deleted")
+
+	// Sync - feature-b should detect parent is gone and rebase onto main
+	t.Log("Calling Sync() - feature-b should rebase onto main (parent gone)")
+	err = repo.manager.Sync(repo.ctx)
+	require.NoError(t, err)
+
+	// Feature-b should have the main update (rebased onto main, not feature-a)
+	t.Log("Verifying feature-b rebased onto main")
+	require.True(t, fileExists(filepath.Join(featureBPath, "main-update.txt")),
+		"feature-b should contain main-update.txt after rebase onto main")
+
+	// Feature-b's own work should be preserved
+	require.True(t, fileExists(filepath.Join(featureBPath, "feature-b.txt")),
+		"feature-b should still have its own work")
+
+	// Verify parent tracking was updated to main
+	t.Log("Verifying feature-b parent updated to main")
+	newParent, _ := repo.manager.GetParentBranch(repo.ctx, "feature-b", featureBPath)
+	require.Equal(t, "main", newParent, "feature-b should now track main as parent")
 }
