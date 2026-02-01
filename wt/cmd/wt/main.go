@@ -97,7 +97,14 @@ func getManager() (*wt.Manager, error) {
 var initCmd = &cobra.Command{
 	Use:   "init <repo-url>",
 	Short: "Initialize repo with bare clone",
-	Args:  cobra.ExactArgs(1),
+	Long: `Init creates a bare clone and sets up the default branch worktree.
+
+Rough commands:
+  git clone --bare <url> .bare/
+  git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+  git fetch origin
+  git worktree add <default-branch>/ <default-branch>`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		url := args[0]
 		repoName := wt.GetRepoNameFromURL(url)
@@ -118,7 +125,13 @@ var initCmd = &cobra.Command{
 var newCmd = &cobra.Command{
 	Use:   "new <branch>",
 	Short: "Create new branch worktree",
-	Args:  cobra.ExactArgs(1),
+	Long: `New creates a worktree with a new branch from a base branch.
+
+Rough commands:
+  git fetch origin
+  git worktree add -b <branch> <path> origin/<base>
+  git config branch.<branch>.description "parent:<base>"`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -147,7 +160,13 @@ func init() {
 var openCmd = &cobra.Command{
 	Use:   "open <branch>",
 	Short: "Open existing remote branch",
-	Args:  cobra.ExactArgs(1),
+	Long: `Open creates a worktree for an existing remote branch.
+
+Rough commands:
+  git fetch origin
+  git worktree add <path> <branch>   # auto-tracks origin/<branch>
+  git config branch.<branch>.description "parent:<default-branch>"`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -171,6 +190,10 @@ var openCmd = &cobra.Command{
 var lsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List all worktrees",
+	Long: `Ls lists all worktrees in the current repository.
+
+Rough commands:
+  git worktree list --porcelain`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		allRepos, _ := cmd.Flags().GetBool("all")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -265,7 +288,13 @@ func init() {
 var rmCmd = &cobra.Command{
 	Use:   "rm <branch>",
 	Short: "Remove worktree",
-	Args:  cobra.ExactArgs(1),
+	Long: `Rm removes a worktree. With -D, also deletes local and remote branches.
+
+Rough commands:
+  git worktree remove <path>
+  git branch -D <branch>         # with -D flag
+  git push origin --delete <branch>  # with -D flag`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -288,6 +317,13 @@ func init() {
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show status dashboard",
+	Long: `Status shows a dashboard of all worktrees with sync and PR status.
+
+Rough commands:
+  git worktree list --porcelain
+  git status --porcelain              # per worktree
+  git rev-list --left-right --count   # ahead/behind
+  gh pr view --json ...               # PR info`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		allRepos, _ := cmd.Flags().GetBool("all")
 		ctx := context.Background()
@@ -587,7 +623,11 @@ func init() {
 var cdCmd = &cobra.Command{
 	Use:   "cd [branch]",
 	Short: "Navigate to worktree",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Cd navigates to a worktree directory.
+
+Requires shell integration (eval "$(wt shellenv)") to change the
+shell's working directory. Without it, just prints the path.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -614,6 +654,10 @@ var cdCmd = &cobra.Command{
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: "Clean stale metadata",
+	Long: `Prune removes stale worktree metadata for directories that no longer exist.
+
+Rough commands:
+  git worktree prune`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -644,6 +688,13 @@ func init() {
 var shellenvCmd = &cobra.Command{
 	Use:   "shellenv",
 	Short: "Print shell integration",
+	Long: `Shellenv prints shell functions for directory navigation.
+
+Add to ~/.bashrc or ~/.zshrc:
+  eval "$(wt shellenv)"
+
+This wraps the wt command to handle directory changes from
+init, new, open, and cd commands.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		shell := os.Getenv("SHELL")
 		if strings.Contains(shell, "zsh") {
@@ -665,14 +716,21 @@ const bashScript = `# wt shell integration for bash
 # Add to ~/.bashrc: eval "$(wt shellenv)"
 
 wt() {
-    local output exit_code
-    output=$(command wt "$@")
-    exit_code=$?
-    echo "$output"
-    if [[ "$output" =~ __WT_CD__:([^[:space:]]+) ]]; then
-        cd "${BASH_REMATCH[1]}" || return 1
-    fi
-    return $exit_code
+    case "$1" in
+        cd|init|new|open|merge)
+            local output exit_code
+            output=$(command wt "$@")
+            exit_code=$?
+            echo "$output"
+            if [[ "$output" =~ __WT_CD__:([^[:space:]]+) ]]; then
+                cd "${BASH_REMATCH[1]}" || return 1
+            fi
+            return $exit_code
+            ;;
+        *)
+            command wt "$@"
+            ;;
+    esac
 }
 
 _wt_completions() {
@@ -691,14 +749,21 @@ const zshScript = `# wt shell integration for zsh
 # Add to ~/.zshrc: eval "$(wt shellenv)"
 
 wt() {
-    local output exit_code
-    output=$(command wt "$@")
-    exit_code=$?
-    echo "$output"
-    if [[ "$output" =~ '__WT_CD__:([^[:space:]]+)' ]]; then
-        cd "${match[1]}" || return 1
-    fi
-    return $exit_code
+    case "$1" in
+        cd|init|new|open|merge)
+            local output exit_code
+            output=$(command wt "$@")
+            exit_code=$?
+            echo "$output"
+            if [[ "$output" =~ '__WT_CD__:([^[:space:]]+)' ]]; then
+                cd "${match[1]}" || return 1
+            fi
+            return $exit_code
+            ;;
+        *)
+            command wt "$@"
+            ;;
+    esac
 }
 
 _wt_completions() {

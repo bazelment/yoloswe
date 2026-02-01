@@ -359,7 +359,7 @@ func (m *Manager) Open(ctx context.Context, branch string) (string, error) {
 
 	m.output.Info(fmt.Sprintf("Creating worktree for %s...", branch))
 	if _, err := m.git.Run(ctx, []string{
-		"worktree", "add", "--track", "-b", branch, worktreePath, "origin/" + branch,
+		"worktree", "add", worktreePath, branch,
 	}, bareDir); err != nil {
 		return "", fmt.Errorf("failed to create worktree: %w", err)
 	}
