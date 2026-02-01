@@ -281,6 +281,13 @@ func TestOpenExistingBranch(t *testing.T) {
 	require.NoError(t, err)
 	require.DirExists(t, wtPath)
 	require.FileExists(t, filepath.Join(wtPath, "existing-feature.txt"))
+
+	// Verify upstream tracking is configured so git push works without arguments
+	result, err := repo.git.Run(repo.ctx, []string{
+		"config", "--get", "branch.existing-feature.remote",
+	}, wtPath)
+	require.NoError(t, err)
+	require.Equal(t, "origin", strings.TrimSpace(result.Stdout))
 }
 
 // TestErrorCases tests various error conditions.
