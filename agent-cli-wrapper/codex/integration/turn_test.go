@@ -1,9 +1,11 @@
-package codex
+package integration
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
 
 // TestTurnCompletion tests that sending a message and waiting for turn
@@ -13,9 +15,9 @@ func TestTurnCompletion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	client := NewClient(
-		WithClientName("turn-test"),
-		WithClientVersion("1.0.0"),
+	client := codex.NewClient(
+		codex.WithClientName("turn-test"),
+		codex.WithClientVersion("1.0.0"),
 	)
 
 	// Start client
@@ -32,8 +34,8 @@ func TestTurnCompletion(t *testing.T) {
 	defer createCancel()
 
 	thread, err := client.CreateThread(createCtx,
-		WithWorkDir(t.TempDir()),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(t.TempDir()),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create thread: %v", err)

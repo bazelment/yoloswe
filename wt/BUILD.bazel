@@ -19,6 +19,7 @@ go_test(
     srcs = [
         "config_test.go",
         "git_test.go",
+        "github_test.go",
         "output_test.go",
         "worktree_test.go",
     ],
