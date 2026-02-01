@@ -58,6 +58,7 @@ func init() {
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(prCmd)
 	rootCmd.AddCommand(cdCmd)
+	rootCmd.AddCommand(goalCmd)
 	rootCmd.AddCommand(pruneCmd)
 	rootCmd.AddCommand(shellenvCmd)
 }
@@ -121,7 +122,7 @@ Rough commands:
 	},
 }
 
-// newCmd: wt new <branch> [--from X]
+// newCmd: wt new <branch> [--from X] [--goal X]
 var newCmd = &cobra.Command{
 	Use:   "new <branch>",
 	Short: "Create new branch worktree",
@@ -140,9 +141,10 @@ Rough commands:
 
 		branch := args[0]
 		baseBranch, _ := cmd.Flags().GetString("from")
+		goal, _ := cmd.Flags().GetString("goal")
 		ctx := context.Background()
 
-		path, err := m.New(ctx, branch, baseBranch)
+		path, err := m.New(ctx, branch, baseBranch, goal)
 		if err != nil {
 			return err
 		}
@@ -154,9 +156,10 @@ Rough commands:
 
 func init() {
 	newCmd.Flags().StringP("from", "f", "", "Base branch")
+	newCmd.Flags().StringP("goal", "g", "", "High-level goal for this worktree")
 }
 
-// openCmd: wt open <branch>
+// openCmd: wt open <branch> [--goal X]
 var openCmd = &cobra.Command{
 	Use:   "open <branch>",
 	Short: "Open existing remote branch",
@@ -174,9 +177,10 @@ Rough commands:
 		}
 
 		branch := args[0]
+		goal, _ := cmd.Flags().GetString("goal")
 		ctx := context.Background()
 
-		path, err := m.Open(ctx, branch)
+		path, err := m.Open(ctx, branch, goal)
 		if err != nil {
 			return err
 		}
@@ -184,6 +188,10 @@ Rough commands:
 		fmt.Printf("__WT_CD__:%s\n", path)
 		return nil
 	},
+}
+
+func init() {
+	openCmd.Flags().StringP("goal", "g", "", "High-level goal for this worktree")
 }
 
 // lsCmd: wt ls [--json] [-a]
@@ -243,11 +251,13 @@ Rough commands:
 		if jsonOutput {
 			data := make([]map[string]any, len(worktrees))
 			for i, w := range worktrees {
+				goal, _ := m.GetGoal(ctx, w.Branch, w.Path)
 				data[i] = map[string]any{
 					"branch":   w.Branch,
 					"path":     w.Path,
 					"commit":   w.Commit,
 					"detached": w.IsDetached,
+					"goal":     goal,
 				}
 			}
 			enc := json.NewEncoder(os.Stdout)
@@ -261,8 +271,25 @@ Rough commands:
 		}
 
 		output := wt.DefaultOutput()
-		fmt.Printf("\n%-25s %-50s %-10s\n", "Branch", "Path", "Status")
-		fmt.Println(strings.Repeat("-", 85))
+
+		// Check if any worktree has a goal
+		hasGoals := false
+		goals := make(map[string]string)
+		for _, w := range worktrees {
+			goal, _ := m.GetGoal(ctx, w.Branch, w.Path)
+			if goal != "" {
+				hasGoals = true
+				goals[w.Branch] = goal
+			}
+		}
+
+		if hasGoals {
+			fmt.Printf("\n%-25s %-40s %-8s %s\n", "Branch", "Path", "Status", "Goal")
+			fmt.Println(strings.Repeat("-", 105))
+		} else {
+			fmt.Printf("\n%-25s %-50s %-10s\n", "Branch", "Path", "Status")
+			fmt.Println(strings.Repeat("-", 85))
+		}
 
 		for _, w := range worktrees {
 			status, _ := m.GetStatus(ctx, w)
@@ -271,7 +298,12 @@ Rough commands:
 				statusStr = output.Colorize(wt.ColorYellow, "dirty")
 			}
 			branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 24))
-			fmt.Printf("%-34s %-50s %s\n", branchStr, w.Path, statusStr)
+			if hasGoals {
+				goal := goals[w.Branch]
+				fmt.Printf("%-34s %-40s %-8s %s\n", branchStr, truncate(w.Path, 39), statusStr, truncate(goal, 30))
+			} else {
+				fmt.Printf("%-34s %-50s %s\n", branchStr, w.Path, statusStr)
+			}
 		}
 		fmt.Println()
 
@@ -646,6 +678,64 @@ shell's working directory. Without it, just prints the path.`,
 		}
 
 		fmt.Printf("__WT_CD__:%s\n", path)
+		return nil
+	},
+}
+
+// goalCmd: wt goal [goal-text]
+var goalCmd = &cobra.Command{
+	Use:   "goal [goal-text]",
+	Short: "View or set worktree goal",
+	Long: `View or set the high-level goal for the current worktree.
+
+Without arguments, shows the current goal.
+With an argument, sets the goal.
+
+Examples:
+  wt goal                           # Show current goal
+  wt goal "Implement OAuth login"   # Set goal`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		ctx := context.Background()
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get current directory: %w", err)
+		}
+
+		// Get current branch using git directly
+		git := &wt.DefaultGitRunner{}
+		result, err := git.Run(ctx, []string{"branch", "--show-current"}, cwd)
+		if err != nil {
+			return fmt.Errorf("not in a git worktree: %w", err)
+		}
+		branch := strings.TrimSpace(result.Stdout)
+		if branch == "" {
+			return fmt.Errorf("not on a branch (detached HEAD?)")
+		}
+
+		output := wt.DefaultOutput()
+
+		if len(args) == 0 {
+			// Show current goal
+			goal, _ := m.GetGoal(ctx, branch, cwd)
+			if goal == "" {
+				output.Info("No goal set for this worktree")
+			} else {
+				fmt.Println(goal)
+			}
+			return nil
+		}
+
+		// Set goal
+		goal := strings.Join(args, " ")
+		if err := m.SetGoal(ctx, branch, goal, cwd); err != nil {
+			return fmt.Errorf("failed to set goal: %w", err)
+		}
+		output.Success(fmt.Sprintf("Goal set for %s", branch))
 		return nil
 	},
 }

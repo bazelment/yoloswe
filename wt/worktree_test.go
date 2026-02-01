@@ -145,7 +145,7 @@ func TestManagerNew(t *testing.T) {
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
 	ctx := context.Background()
-	path, err := m.New(ctx, "feature", "main")
+	path, err := m.New(ctx, "feature", "main", "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -183,7 +183,7 @@ func TestManagerNewFetchError(t *testing.T) {
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
 	ctx := context.Background()
-	_, err := m.New(ctx, "feature", "main")
+	_, err := m.New(ctx, "feature", "main", "")
 	if err == nil {
 		t.Fatal("Expected error when fetch fails")
 	}
@@ -239,12 +239,12 @@ func TestManagerRepoNotInitialized(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := m.New(ctx, "feature", "main")
+	_, err := m.New(ctx, "feature", "main", "")
 	if err != ErrRepoNotInitialized {
 		t.Errorf("New() error = %v, want ErrRepoNotInitialized", err)
 	}
 
-	_, err = m.Open(ctx, "feature")
+	_, err = m.Open(ctx, "feature", "")
 	if err != ErrRepoNotInitialized {
 		t.Errorf("Open() error = %v, want ErrRepoNotInitialized", err)
 	}
@@ -527,7 +527,7 @@ func TestNewTracksParentBranch(t *testing.T) {
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
 	ctx := context.Background()
-	_, err := m.New(ctx, "feature-b", "feature-a")
+	_, err := m.New(ctx, "feature-b", "feature-a", "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -566,7 +566,7 @@ func TestNewTracksDefaultBranch(t *testing.T) {
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
 	ctx := context.Background()
-	_, err := m.New(ctx, "feature", "main")
+	_, err := m.New(ctx, "feature", "main", "")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

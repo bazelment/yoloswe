@@ -186,3 +186,22 @@ func GetBranchDescription(ctx context.Context, runner GitRunner, branch, dir str
 	}
 	return strings.TrimSpace(result.Stdout), nil
 }
+
+// SetBranchGoal sets the goal for a branch.
+func SetBranchGoal(ctx context.Context, runner GitRunner, branch, goal, dir string) error {
+	_, err := runner.Run(ctx, []string{
+		"config", "branch." + branch + ".goal", goal,
+	}, dir)
+	return err
+}
+
+// GetBranchGoal gets the goal for a branch.
+func GetBranchGoal(ctx context.Context, runner GitRunner, branch, dir string) (string, error) {
+	result, err := runner.Run(ctx, []string{
+		"config", "branch." + branch + ".goal",
+	}, dir)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}

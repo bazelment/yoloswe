@@ -269,7 +269,7 @@ func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 }
 
 // New creates a new worktree with a new branch.
-func (m *Manager) New(ctx context.Context, branch, baseBranch string) (string, error) {
+func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string) (string, error) {
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return "", ErrRepoNotInitialized
@@ -324,6 +324,13 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch string) (string, e
 		}
 	}
 
+	// Set goal if provided
+	if goal != "" {
+		if err := SetBranchGoal(ctx, m.git, branch, goal, worktreePath); err != nil {
+			m.output.Warn(fmt.Sprintf("Failed to set goal: %v", err))
+		}
+	}
+
 	// Run post-create hooks
 	config, _ := LoadRepoConfig(worktreePath)
 	if len(config.PostCreate) > 0 {
@@ -334,7 +341,7 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch string) (string, e
 }
 
 // Open creates a worktree for an existing remote branch.
-func (m *Manager) Open(ctx context.Context, branch string) (string, error) {
+func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error) {
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return "", ErrRepoNotInitialized
@@ -372,6 +379,13 @@ func (m *Manager) Open(ctx context.Context, branch string) (string, error) {
 	description := "parent:" + defaultBranch
 	if err := SetBranchDescription(ctx, m.git, branch, description, worktreePath); err != nil {
 		m.output.Warn(fmt.Sprintf("Failed to track parent branch: %v", err))
+	}
+
+	// Set goal if provided
+	if goal != "" {
+		if err := SetBranchGoal(ctx, m.git, branch, goal, worktreePath); err != nil {
+			m.output.Warn(fmt.Sprintf("Failed to set goal: %v", err))
+		}
 	}
 
 	// Run post-create hooks
@@ -999,6 +1013,16 @@ func (m *Manager) GetParentBranch(ctx context.Context, branch, dir string) (stri
 		return parent, nil
 	}
 	return "", nil // No parent tracked
+}
+
+// SetGoal sets the goal for a branch in a worktree.
+func (m *Manager) SetGoal(ctx context.Context, branch, goal, dir string) error {
+	return SetBranchGoal(ctx, m.git, branch, goal, dir)
+}
+
+// GetGoal returns the goal for a branch in a worktree.
+func (m *Manager) GetGoal(ctx context.Context, branch, dir string) (string, error) {
+	return GetBranchGoal(ctx, m.git, branch, dir)
 }
 
 // PROptions configures PR creation.
