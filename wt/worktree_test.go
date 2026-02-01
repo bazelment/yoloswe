@@ -103,9 +103,9 @@ func TestWorktreeName(t *testing.T) {
 
 // MockGitRunner implements GitRunner for testing Manager.
 type MockGitRunner struct {
-	Calls   [][]string
 	Results map[string]*CmdResult
 	Errors  map[string]error
+	Calls   [][]string
 }
 
 func NewMockGitRunner() *MockGitRunner {

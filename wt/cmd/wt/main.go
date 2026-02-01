@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bazelment/yoloswe/wt"
 	"github.com/spf13/cobra"
+
+	"github.com/bazelment/yoloswe/wt"
 )
 
 var (
@@ -310,7 +311,7 @@ var statusCmd = &cobra.Command{
 				return err
 			}
 			repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
-		repos = []string{repoName}
+			repos = []string{repoName}
 		}
 
 		first := true
