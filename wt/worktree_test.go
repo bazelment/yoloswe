@@ -394,11 +394,11 @@ func TestIsParentBranchMerged(t *testing.T) {
 			mockGH := NewMockGHRunner()
 
 			if tt.prMerged {
-				mockGH.Results["pr view feature-a --json number,url,headRefName,baseRefName,state,merged,reviewDecision"] = &CmdResult{
-					Stdout: `{"number":1,"state":"MERGED","merged":true}`,
+				mockGH.Results["pr view feature-a --json number,url,headRefName,baseRefName,state,reviewDecision"] = &CmdResult{
+					Stdout: `{"number":1,"state":"MERGED"}`,
 				}
 			} else {
-				mockGH.Errors["pr view feature-a --json number,url,headRefName,baseRefName,state,merged,reviewDecision"] = os.ErrNotExist
+				mockGH.Errors["pr view feature-a --json number,url,headRefName,baseRefName,state,reviewDecision"] = os.ErrNotExist
 			}
 
 			if tt.branchExists {
@@ -545,8 +545,8 @@ func TestNewTracksParentBranch(t *testing.T) {
 	}
 }
 
-// TestNewDoesNotTrackDefaultBranch tests that New() doesn't set description when base is default.
-func TestNewDoesNotTrackDefaultBranch(t *testing.T) {
+// TestNewTracksDefaultBranch tests that New() always sets parent tracking, including for default branch.
+func TestNewTracksDefaultBranch(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "test-repo")
 	bareDir := filepath.Join(repoDir, ".bare")
@@ -560,6 +560,7 @@ func TestNewDoesNotTrackDefaultBranch(t *testing.T) {
 	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
 	featurePath := filepath.Join(repoDir, "feature")
 	mockGit.Results["worktree add -b feature "+featurePath+" origin/main"] = &CmdResult{}
+	mockGit.Results["config branch.feature.description parent:main"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
@@ -570,10 +571,15 @@ func TestNewDoesNotTrackDefaultBranch(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	// Verify branch description was NOT set
+	// Verify branch description was set to track main
+	descSet := false
 	for _, call := range mockGit.Calls {
-		if len(call) >= 2 && call[0] == "config" && strings.HasPrefix(call[1], "branch.feature.description") {
-			t.Error("Should not set branch description when base is default branch")
+		if len(call) >= 3 && call[0] == "config" && call[1] == "branch.feature.description" && call[2] == "parent:main" {
+			descSet = true
+			break
 		}
+	}
+	if !descSet {
+		t.Error("Expected branch description to be set to track main as parent")
 	}
 }
