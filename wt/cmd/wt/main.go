@@ -229,7 +229,7 @@ Rough commands:
 			fmt.Println(strings.Repeat("-", 70))
 			for _, repo := range repos {
 				repoStr := output.Colorize(wt.ColorCyan, repo)
-				path := filepath.Join(wtRoot, repo)
+				path := shortenHome(filepath.Join(wtRoot, repo))
 				fmt.Printf("%-39s %s\n", repoStr, path)
 			}
 			fmt.Println()
@@ -249,15 +249,18 @@ Rough commands:
 		}
 
 		if jsonOutput {
+			cwd, _ := os.Getwd()
 			data := make([]map[string]any, len(worktrees))
 			for i, w := range worktrees {
 				goal, _ := m.GetGoal(ctx, w.Branch, w.Path)
+				isCurrent := cwd == w.Path || strings.HasPrefix(cwd, w.Path+string(os.PathSeparator))
 				data[i] = map[string]any{
 					"branch":   w.Branch,
 					"path":     w.Path,
 					"commit":   w.Commit,
 					"detached": w.IsDetached,
 					"goal":     goal,
+					"current":  isCurrent,
 				}
 			}
 			enc := json.NewEncoder(os.Stdout)
@@ -272,6 +275,9 @@ Rough commands:
 
 		output := wt.DefaultOutput()
 
+		// Get current working directory to mark current worktree
+		cwd, _ := os.Getwd()
+
 		// Check if any worktree has a goal
 		hasGoals := false
 		goals := make(map[string]string)
@@ -284,11 +290,11 @@ Rough commands:
 		}
 
 		if hasGoals {
-			fmt.Printf("\n%-25s %-40s %-8s %s\n", "Branch", "Path", "Status", "Goal")
-			fmt.Println(strings.Repeat("-", 105))
+			fmt.Printf("\n  %-25s %-40s %-8s %s\n", "Branch", "Path", "Status", "Goal")
+			fmt.Println(strings.Repeat("-", 107))
 		} else {
-			fmt.Printf("\n%-25s %-50s %-10s\n", "Branch", "Path", "Status")
-			fmt.Println(strings.Repeat("-", 85))
+			fmt.Printf("\n  %-25s %-50s %-10s\n", "Branch", "Path", "Status")
+			fmt.Println(strings.Repeat("-", 87))
 		}
 
 		for _, w := range worktrees {
@@ -297,12 +303,21 @@ Rough commands:
 			if status.IsDirty {
 				statusStr = output.Colorize(wt.ColorYellow, "dirty")
 			}
+
+			// Check if this is the current worktree
+			isCurrent := cwd == w.Path || strings.HasPrefix(cwd, w.Path+string(os.PathSeparator))
+			marker := " "
+			if isCurrent {
+				marker = "*"
+			}
+
 			branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 24))
+			pathStr := shortenHome(w.Path)
 			if hasGoals {
 				goal := goals[w.Branch]
-				fmt.Printf("%-34s %-40s %-8s %s\n", branchStr, truncate(w.Path, 39), statusStr, truncate(goal, 30))
+				fmt.Printf("%s %-34s %-40s %-8s %s\n", marker, branchStr, truncate(pathStr, 39), statusStr, truncate(goal, 30))
 			} else {
-				fmt.Printf("%-34s %-50s %s\n", branchStr, w.Path, statusStr)
+				fmt.Printf("%s %-34s %-50s %s\n", marker, branchStr, pathStr, statusStr)
 			}
 		}
 		fmt.Println()
@@ -800,6 +815,18 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// shortenHome replaces home directory prefix with ~
+func shortenHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if strings.HasPrefix(path, home) {
+		return "~" + path[len(home):]
+	}
+	return path
 }
 
 const bashScript = `# wt shell integration for bash
