@@ -57,24 +57,6 @@ func (p *PRInfo) IsMergeable() bool {
 	return p.ReviewDecision == "APPROVED"
 }
 
-// GetPRInfo fetches PR information from GitHub.
-func GetPRInfo(ctx context.Context, runner GHRunner, prNumber int, dir string) (*PRInfo, error) {
-	result, err := runner.Run(ctx, []string{
-		"pr", "view", strconv.Itoa(prNumber),
-		"--json", "number,url,headRefName",
-	}, dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var info PRInfo
-	if err := json.Unmarshal([]byte(result.Stdout), &info); err != nil {
-		return nil, err
-	}
-
-	return &info, nil
-}
-
 // GetPRForBranch fetches PR information for the current branch.
 func GetPRForBranch(ctx context.Context, runner GHRunner, dir string) (*PRInfo, error) {
 	result, err := runner.Run(ctx, []string{
@@ -146,4 +128,32 @@ func IsPRMerged(ctx context.Context, runner GHRunner, branch, dir string) (bool,
 		return false, err
 	}
 	return info.Merged || info.State == "MERGED", nil
+}
+
+// CreatePR creates a new GitHub PR for the current branch.
+func CreatePR(ctx context.Context, runner GHRunner, title, body, base string, draft bool, dir string) (*PRInfo, error) {
+	args := []string{"pr", "create", "--json", "number,url,headRefName,baseRefName"}
+	if base != "" {
+		args = append(args, "--base", base)
+	}
+	if title != "" {
+		args = append(args, "--title", title)
+	}
+	if body != "" {
+		args = append(args, "--body", body)
+	}
+	if draft {
+		args = append(args, "--draft")
+	}
+
+	result, err := runner.Run(ctx, args, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var info PRInfo
+	if err := json.Unmarshal([]byte(result.Stdout), &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
 }

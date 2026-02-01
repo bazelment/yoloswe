@@ -9,8 +9,7 @@ wt manages multiple Git worktrees using a bare clone structure:
 	└── repo-name/
 	    ├── .bare/          # Bare clone (shared Git objects)
 	    ├── main/           # Worktree for main branch
-	    ├── feature-x/      # Worktree for feature-x branch
-	    └── pr-123/         # Worktree for PR #123
+	    └── feature-x/      # Worktree for feature-x branch
 
 This structure allows working on multiple branches simultaneously without
 stashing or switching contexts. Each worktree is a full checkout with its
@@ -60,11 +59,7 @@ own working directory.
 
 	wt open existing-branch
 
-4. Reviewing a GitHub PR:
-
-	wt pr 123                     # Creates pr-123/ worktree
-
-5. Day-to-day navigation:
+4. Day-to-day navigation:
 
 	wt ls                         # List worktrees in current repo
 	wt ls -a                      # List all repos
@@ -72,7 +67,7 @@ own working directory.
 	wt status                     # Show sync/dirty status
 	wt sync                       # Fetch all branches
 
-6. Cleanup:
+5. Cleanup:
 
 	wt rm feature-x               # Remove worktree only
 	wt rm feature-x -D            # Remove worktree + delete branch
@@ -96,7 +91,7 @@ Create .wt.yaml in your repository root:
 	  - echo "cleaned up"
 
 SECURITY WARNING: Hooks in .wt.yaml are executed automatically during
-init, new, open, pr, and rm operations with no confirmation prompt.
+init, new, open, and rm operations with no confirmation prompt.
 Only use wt with repositories you trust. A malicious .wt.yaml can
 execute arbitrary shell commands on your machine.
 
@@ -362,76 +357,6 @@ func (m *Manager) Open(ctx context.Context, branch string) (string, error) {
 	m.output.Info(fmt.Sprintf("Creating worktree for %s...", branch))
 	if _, err := m.git.Run(ctx, []string{
 		"worktree", "add", "--track", "-b", branch, worktreePath, "origin/" + branch,
-	}, bareDir); err != nil {
-		return "", fmt.Errorf("failed to create worktree: %w", err)
-	}
-
-	m.output.Success(fmt.Sprintf("Created worktree at %s", worktreePath))
-
-	// Run post-create hooks
-	config, _ := LoadRepoConfig(worktreePath)
-	if len(config.PostCreate) > 0 {
-		RunHooks(config.PostCreate, worktreePath, branch, m.output)
-	}
-
-	return worktreePath, nil
-}
-
-// OpenPR creates a worktree for a GitHub PR.
-func (m *Manager) OpenPR(ctx context.Context, prNumber int) (string, error) {
-	bareDir := m.BareDir()
-	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
-		return "", ErrRepoNotInitialized
-	}
-
-	// Find an existing worktree to run gh commands from
-	var ghDir string
-	entries, _ := os.ReadDir(m.RepoDir())
-	for _, entry := range entries {
-		if entry.IsDir() {
-			wtPath := filepath.Join(m.RepoDir(), entry.Name())
-			if _, err := os.Stat(filepath.Join(wtPath, ".git")); err == nil {
-				ghDir = wtPath
-				break
-			}
-		}
-	}
-	if ghDir == "" {
-		ghDir = bareDir
-	}
-
-	m.output.Info(fmt.Sprintf("Fetching PR #%d info...", prNumber))
-	result, err := m.gh.Run(ctx, []string{
-		"pr", "view", strconv.Itoa(prNumber), "--json", "headRefName",
-	}, ghDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch PR info: %w", err)
-	}
-
-	var prInfo struct {
-		HeadRefName string `json:"headRefName"`
-	}
-	if err := json.Unmarshal([]byte(result.Stdout), &prInfo); err != nil {
-		return "", fmt.Errorf("failed to parse PR info: %w", err)
-	}
-	branch := prInfo.HeadRefName
-
-	worktreeName := fmt.Sprintf("pr-%d", prNumber)
-	worktreePath := filepath.Join(m.RepoDir(), worktreeName)
-	if _, err := os.Stat(worktreePath); err == nil {
-		return "", ErrWorktreeExists
-	}
-
-	m.output.Info(fmt.Sprintf("Fetching PR #%d (%s)...", prNumber, branch))
-	if _, err := m.git.Run(ctx, []string{
-		"fetch", "origin", fmt.Sprintf("pull/%d/head:%s", prNumber, branch),
-	}, bareDir); err != nil {
-		return "", fmt.Errorf("failed to fetch PR: %w", err)
-	}
-
-	m.output.Info(fmt.Sprintf("Creating worktree for PR #%d...", prNumber))
-	if _, err := m.git.Run(ctx, []string{
-		"worktree", "add", worktreePath, branch,
 	}, bareDir); err != nil {
 		return "", fmt.Errorf("failed to create worktree: %w", err)
 	}
@@ -1026,4 +951,99 @@ func (m *Manager) GetParentBranch(ctx context.Context, branch, dir string) (stri
 		return parent, nil
 	}
 	return "", nil // No parent tracked
+}
+
+// PROptions configures PR creation.
+type PROptions struct {
+	Title  string
+	Body   string
+	Base   string // Override auto-detected base
+	Draft  bool
+	NoPush bool
+}
+
+// PRResult contains the result of PR creation.
+type PRResult struct {
+	Number  int
+	URL     string
+	Branch  string
+	Base    string
+	Existed bool // true if PR already existed
+}
+
+// CreatePR pushes the current branch and creates a GitHub PR.
+// Base branch is auto-detected: parent branch for cascading, otherwise default.
+func (m *Manager) CreatePR(ctx context.Context, opts PROptions) (*PRResult, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Get current branch
+	result, err := m.git.Run(ctx, []string{"branch", "--show-current"}, cwd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current branch: %w", err)
+	}
+	currentBranch := strings.TrimSpace(result.Stdout)
+	if currentBranch == "" {
+		return nil, fmt.Errorf("not on a branch (detached HEAD?)")
+	}
+
+	bareDir := m.BareDir()
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+
+	// Prevent PR for default branch
+	if currentBranch == defaultBranch {
+		return nil, fmt.Errorf("cannot create PR for the default branch (%s)", defaultBranch)
+	}
+
+	// Check if PR already exists
+	existingPR, err := GetPRByBranch(ctx, m.gh, currentBranch, cwd)
+	if err == nil && existingPR != nil && existingPR.Number > 0 && existingPR.State == "OPEN" {
+		m.output.Info(fmt.Sprintf("PR #%d already exists for branch %s", existingPR.Number, currentBranch))
+		return &PRResult{
+			Number:  existingPR.Number,
+			URL:     existingPR.URL,
+			Branch:  currentBranch,
+			Base:    existingPR.BaseRefName,
+			Existed: true,
+		}, nil
+	}
+
+	// Determine base branch
+	baseBranch := opts.Base
+	if baseBranch == "" {
+		parentBranch, _ := m.GetParentBranch(ctx, currentBranch, cwd)
+		if parentBranch != "" {
+			baseBranch = parentBranch
+			m.output.Info(fmt.Sprintf("Using parent branch: %s", baseBranch))
+		} else {
+			baseBranch = defaultBranch
+		}
+	}
+
+	// Push branch to remote
+	if !opts.NoPush {
+		m.output.Info(fmt.Sprintf("Pushing %s to origin...", currentBranch))
+		_, err := m.git.Run(ctx, []string{"push", "-u", "origin", currentBranch}, cwd)
+		if err != nil {
+			return nil, fmt.Errorf("failed to push branch: %w", err)
+		}
+	}
+
+	// Create PR
+	m.output.Info(fmt.Sprintf("Creating PR: %s -> %s", currentBranch, baseBranch))
+	prInfo, err := CreatePR(ctx, m.gh, opts.Title, opts.Body, baseBranch, opts.Draft, cwd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PR: %w", err)
+	}
+
+	m.output.Success(fmt.Sprintf("Created PR #%d: %s", prInfo.Number, prInfo.URL))
+
+	return &PRResult{
+		Number: prInfo.Number,
+		URL:    prInfo.URL,
+		Branch: currentBranch,
+		Base:   baseBranch,
+	}, nil
 }
