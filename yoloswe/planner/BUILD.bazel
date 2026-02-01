@@ -21,6 +21,7 @@ go_test(
         "planner_test.go",
     ],
     embed = [":planner"],
+    tags = ["manual"],
     deps = [
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",

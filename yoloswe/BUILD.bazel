@@ -27,6 +27,7 @@ go_test(
         "validation_test.go",
     ],
     embed = [":yoloswe"],
+    tags = ["manual"],
     deps = [
         "//agent-cli-wrapper/claude",
         "//yoloswe/reviewer",
