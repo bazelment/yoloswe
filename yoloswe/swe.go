@@ -107,6 +107,7 @@ type Config struct {
 
 	// Other settings
 	RequireApproval bool // Require user approval for tool executions (default: auto-approve)
+	ReviewFirst     bool // Skip first builder turn, start with review
 
 	// Output settings
 	Verbose bool
@@ -270,34 +271,36 @@ func (s *SWEWrapper) Run(ctx context.Context, prompt string) error {
 			break
 		}
 
-		// === Builder Phase ===
-		fmt.Fprint(s.output, "\n"+strings.Repeat("=", 60)+"\n")
-		fmt.Fprintf(s.output, "=== Iteration %d: BUILDER ===\n", iteration)
-		fmt.Fprint(s.output, strings.Repeat("=", 60)+"\n\n")
+		// === Builder Phase (skip on first iteration if ReviewFirst) ===
+		if !(s.config.ReviewFirst && iteration == 1) {
+			fmt.Fprint(s.output, "\n"+strings.Repeat("=", 60)+"\n")
+			fmt.Fprintf(s.output, "=== Iteration %d: BUILDER ===\n", iteration)
+			fmt.Fprint(s.output, strings.Repeat("=", 60)+"\n\n")
 
-		builderUsage, err := s.builder.RunTurn(ctx, currentMessage)
-		if err != nil {
-			if ctx.Err() == context.Canceled {
-				s.stats.ExitReason = ExitReasonInterrupt
-				fmt.Fprintln(s.output, "\n=== Builder interrupted by user ===")
-				return nil
+			builderUsage, err := s.builder.RunTurn(ctx, currentMessage)
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					s.stats.ExitReason = ExitReasonInterrupt
+					fmt.Fprintln(s.output, "\n=== Builder interrupted by user ===")
+					return nil
+				}
+				s.stats.ExitReason = ExitReasonError
+				fmt.Fprintf(s.output, "\n=== Builder failed: %v ===\n", err)
+				return fmt.Errorf("builder error: %w", err)
 			}
-			s.stats.ExitReason = ExitReasonError
-			fmt.Fprintf(s.output, "\n=== Builder failed: %v ===\n", err)
-			return fmt.Errorf("builder error: %w", err)
-		}
 
-		// Update builder stats
-		s.stats.BuilderCostUSD += builderUsage.CostUSD
-		s.stats.BuilderTokensIn += builderUsage.InputTokens
-		s.stats.BuilderTokensOut += builderUsage.OutputTokens
+			// Update builder stats
+			s.stats.BuilderCostUSD += builderUsage.CostUSD
+			s.stats.BuilderTokensIn += builderUsage.InputTokens
+			s.stats.BuilderTokensOut += builderUsage.OutputTokens
 
-		// Check budget after builder turn
-		if s.stats.BuilderCostUSD >= s.config.MaxBudgetUSD {
-			s.stats.ExitReason = ExitReasonBudgetExceeded
-			fmt.Fprintf(s.output, "\n=== Budget limit reached ($%.4f >= $%.4f) ===\n",
-				s.stats.BuilderCostUSD, s.config.MaxBudgetUSD)
-			break
+			// Check budget after builder turn
+			if s.stats.BuilderCostUSD >= s.config.MaxBudgetUSD {
+				s.stats.ExitReason = ExitReasonBudgetExceeded
+				fmt.Fprintf(s.output, "\n=== Budget limit reached ($%.4f >= $%.4f) ===\n",
+					s.stats.BuilderCostUSD, s.config.MaxBudgetUSD)
+				break
+			}
 		}
 
 		// === Reviewer Phase ===
@@ -306,6 +309,7 @@ func (s *SWEWrapper) Run(ctx context.Context, prompt string) error {
 		fmt.Fprint(s.output, strings.Repeat("=", 60)+"\n\n")
 
 		var reviewResult *reviewer.ReviewResult
+		var err error
 		if isFirstReview {
 			reviewPrompt := s.buildInitialReviewPrompt()
 			reviewResult, err = s.reviewer.ReviewWithResult(ctx, reviewPrompt)
@@ -381,33 +385,7 @@ func (s *SWEWrapper) buildInitialReviewPrompt() string {
 
 // buildFollowUpPrompt creates the prompt for follow-up reviews.
 func (s *SWEWrapper) buildFollowUpPrompt() string {
-	return `The builder has made additional changes based on your previous feedback.
-
-Please review the current state of the changes and provide an updated verdict.
-
-Focus on whether the previous issues have been addressed correctly.
-
-## Output Format
-You MUST respond with valid JSON in this exact format:
-{
-  "verdict": "accepted" or "rejected",
-  "summary": "Brief overall assessment of the changes",
-  "issues": [
-    {
-      "severity": "critical|high|medium|low",
-      "file": "path/to/file.go",
-      "line": 42,
-      "message": "Description of the issue",
-      "suggestion": "How to fix it"
-    }
-  ]
-}
-
-## Rules
-- verdict MUST be exactly "accepted" or "rejected"
-- If there are any critical or high severity issues, verdict MUST be "rejected"
-- issues array can be empty if verdict is "accepted"
-- Output ONLY the JSON object, no other text`
+	return `The code has been updated based on your previous feedback. Please review the changes again and provide your verdict in the same JSON format.`
 }
 
 // parseVerdict extracts the acceptance decision from the reviewer's JSON response.

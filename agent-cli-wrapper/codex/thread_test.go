@@ -411,3 +411,77 @@ func TestTurnResult_WithError(t *testing.T) {
 		t.Error("expected error")
 	}
 }
+
+func TestThread_LastUsage(t *testing.T) {
+	thread := newThread(nil, "thread-123", ThreadConfig{})
+
+	// Initially nil
+	usage := thread.getAndClearLastUsage()
+	if usage != nil {
+		t.Error("expected nil usage initially")
+	}
+
+	// Set usage
+	thread.setLastUsage(&TokenUsage{
+		InputTokens:           100,
+		OutputTokens:          50,
+		CachedInputTokens:     80,
+		ReasoningOutputTokens: 10,
+		TotalTokens:           150,
+	})
+
+	// Get and clear returns the usage
+	usage = thread.getAndClearLastUsage()
+	if usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if usage.InputTokens != 100 {
+		t.Errorf("unexpected InputTokens: %d", usage.InputTokens)
+	}
+	if usage.OutputTokens != 50 {
+		t.Errorf("unexpected OutputTokens: %d", usage.OutputTokens)
+	}
+	if usage.CachedInputTokens != 80 {
+		t.Errorf("unexpected CachedInputTokens: %d", usage.CachedInputTokens)
+	}
+	if usage.ReasoningOutputTokens != 10 {
+		t.Errorf("unexpected ReasoningOutputTokens: %d", usage.ReasoningOutputTokens)
+	}
+	if usage.TotalTokens != 150 {
+		t.Errorf("unexpected TotalTokens: %d", usage.TotalTokens)
+	}
+
+	// After get and clear, should be nil again
+	usage = thread.getAndClearLastUsage()
+	if usage != nil {
+		t.Error("expected nil usage after clear")
+	}
+}
+
+func TestThread_LastUsage_Overwrite(t *testing.T) {
+	thread := newThread(nil, "thread-123", ThreadConfig{})
+
+	// Set first usage
+	thread.setLastUsage(&TokenUsage{
+		InputTokens:  100,
+		OutputTokens: 50,
+	})
+
+	// Overwrite with second usage
+	thread.setLastUsage(&TokenUsage{
+		InputTokens:  200,
+		OutputTokens: 100,
+	})
+
+	// Should get the second usage
+	usage := thread.getAndClearLastUsage()
+	if usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if usage.InputTokens != 200 {
+		t.Errorf("expected InputTokens=200, got %d", usage.InputTokens)
+	}
+	if usage.OutputTokens != 100 {
+		t.Errorf("expected OutputTokens=100, got %d", usage.OutputTokens)
+	}
+}
