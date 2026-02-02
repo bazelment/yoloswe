@@ -3,10 +3,33 @@ package testutil
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
+
+// InitGitRepo initializes a git repo in the given directory with an initial commit.
+// This is needed because the reviewer (Codex) runs git commands like `git log`.
+func InitGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+	// Configure git user for commits
+	cmd = exec.Command("git", "config", "user.email", "test@test.com")
+	cmd.Dir = dir
+	cmd.Run()
+	cmd = exec.Command("git", "config", "user.name", "Test")
+	cmd.Dir = dir
+	cmd.Run()
+	// Create initial commit so git log works
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "Initial commit")
+	cmd.Dir = dir
+	cmd.Run()
+}
 
 // TurnEvents collects events from a single turn.
 type TurnEvents struct {

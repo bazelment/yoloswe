@@ -21,6 +21,7 @@ To add a new dependency, please always follow these steps, don't use `go` comman
 ## Test Style
 
 - Avoid using sleep to synchronize in tests, always use proper condition to wait on (with condvar or channel), also consider using `require.Eventually` when it's relevant. Make sure sensible timeout is chosen so the test won't get stuck when it fails to meet certain condition.
+- When running `bazel test`, always start with a small timeout like 1 minute and only increase when necessary.
 - When debugging test that couldn't finish properly and ends up being interrupted or timeout, launch the test binary directly under `bazel-bin/` as subprocess, so the terminal will show the progress and it's more clear where it's stuck.
     * Also consider using framework specific test case filter to only run failing test to speed up iteration process.
     * Tune framework specific test log verbosity to better understand the test code behaviour.

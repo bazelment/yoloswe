@@ -202,7 +202,12 @@ func (pm *processManager) Stop() error {
 			if pm.cmd.Process != nil {
 				pm.cmd.Process.Kill()
 			}
-			<-done
+			// Wait briefly for kill to take effect, but don't block forever
+			select {
+			case <-done:
+			case <-time.After(200 * time.Millisecond):
+				// Process still not exited, give up waiting
+			}
 		}
 	}
 
