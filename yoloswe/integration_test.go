@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/yoloswe/testutil"
 )
 
 // Integration tests for the builder-reviewer loop.
@@ -11,10 +13,12 @@ import (
 // Run with: bazel test //yoloswe:integration_test
 
 func TestIntegrationBuilderReviewerLoop(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
-		BuilderWorkDir: t.TempDir(),
+		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   1.0,
 		MaxTimeSeconds: 120,
 		MaxIterations:  3,
@@ -42,10 +46,12 @@ func TestIntegrationBuilderReviewerLoop(t *testing.T) {
 }
 
 func TestIntegrationBudgetLimit(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
-		BuilderWorkDir: t.TempDir(),
+		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   0.01, // Very low budget
 		MaxTimeSeconds: 60,
 		MaxIterations:  10,
@@ -53,24 +59,27 @@ func TestIntegrationBudgetLimit(t *testing.T) {
 	}
 
 	swe := New(config)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
 	prompt := "Implement a complex web server with authentication"
 
 	_ = swe.Run(ctx, prompt)
 	stats := swe.Stats()
 
-	// Should exit due to budget
-	if stats.ExitReason != ExitReasonBudgetExceeded {
-		t.Logf("Expected budget exceeded, got: %s (cost: $%.4f)", stats.ExitReason, stats.BuilderCostUSD)
+	// Should exit due to budget (or interrupt if context times out first)
+	if stats.ExitReason != ExitReasonBudgetExceeded && stats.ExitReason != ExitReasonInterrupt {
+		t.Logf("Expected budget exceeded or interrupt, got: %s (cost: $%.4f)", stats.ExitReason, stats.BuilderCostUSD)
 	}
 }
 
 func TestIntegrationTimeoutLimit(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 	config := Config{
 		BuilderModel:   "sonnet",
 		ReviewerModel:  "gpt-5.2-codex",
-		BuilderWorkDir: t.TempDir(),
+		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   10.0,
 		MaxTimeSeconds: 5, // Very short timeout
 		MaxIterations:  10,
@@ -78,24 +87,28 @@ func TestIntegrationTimeoutLimit(t *testing.T) {
 	}
 
 	swe := New(config)
-	ctx := context.Background()
+	// Use context timeout to bound test duration (first turn may exceed MaxTimeSeconds)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
 	prompt := "Create a comprehensive test suite"
 
 	_ = swe.Run(ctx, prompt)
 	stats := swe.Stats()
 
-	// Should exit due to timeout
-	if stats.ExitReason != ExitReasonTimeExceeded {
-		t.Logf("Expected timeout, got: %s (duration: %.1fs)", stats.ExitReason, float64(stats.TotalDurationMs)/1000)
+	// Should exit due to timeout or interrupt (context timeout may fire first)
+	if stats.ExitReason != ExitReasonTimeExceeded && stats.ExitReason != ExitReasonInterrupt {
+		t.Logf("Expected timeout or interrupt, got: %s (duration: %.1fs)", stats.ExitReason, float64(stats.TotalDurationMs)/1000)
 	}
 }
 
 func TestIntegrationContextCancellation(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
-		BuilderWorkDir: t.TempDir(),
+		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   5.0,
 		MaxTimeSeconds: 600,
 		MaxIterations:  10,
@@ -126,10 +139,12 @@ func TestIntegrationContextCancellation(t *testing.T) {
 }
 
 func TestIntegrationMaxIterations(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 	config := Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
-		BuilderWorkDir: t.TempDir(),
+		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   10.0,
 		MaxTimeSeconds: 600,
 		MaxIterations:  1, // Only one iteration
@@ -137,7 +152,8 @@ func TestIntegrationMaxIterations(t *testing.T) {
 	}
 
 	swe := New(config)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 
 	prompt := "Create a function with a subtle bug that needs fixing"
 

@@ -6,14 +6,16 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/yoloswe/testutil"
 )
 
 // Additional integration tests for the build command.
 // These tests require real Claude and Codex SDK sessions.
-// Run with: bazel test //yoloswe:integration_test
 
 func TestBuildCommand_SuccessfulCompletion(t *testing.T) {
 	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 
 	config := Config{
 		BuilderModel:   "haiku",
@@ -58,6 +60,7 @@ func TestBuildCommand_SuccessfulCompletion(t *testing.T) {
 
 func TestBuildCommand_ReviewerFeedbackLoop(t *testing.T) {
 	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 
 	config := Config{
 		BuilderModel:   "haiku",
@@ -114,6 +117,7 @@ func TestBuildCommand_ReviewerFeedbackLoop(t *testing.T) {
 
 func TestBuildCommand_MultipleIterations(t *testing.T) {
 	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
 
 	config := Config{
 		BuilderModel:   "haiku",
@@ -148,5 +152,70 @@ func TestBuildCommand_MultipleIterations(t *testing.T) {
 	// Verify stats are being tracked
 	if stats.BuilderTokensIn == 0 && stats.IterationCount > 0 {
 		t.Error("expected non-zero builder input tokens after iterations")
+	}
+}
+
+func TestBuildCommand_ReviewFirst(t *testing.T) {
+	workDir := t.TempDir()
+	testutil.InitGitRepo(t, workDir)
+
+	// Create existing code to review (with intentional issues)
+	existingCode := `package calc
+
+func Add(a, b int) int {
+	return a + b
+}
+
+func Divide(a, b int) int {
+	return a / b // potential division by zero
+}
+`
+	if err := os.WriteFile(filepath.Join(workDir, "calc.go"), []byte(existingCode), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	config := Config{
+		BuilderModel:   "haiku",
+		ReviewerModel:  "gpt-5.2-codex",
+		BuilderWorkDir: workDir,
+		RecordingDir:   t.TempDir(),
+		MaxBudgetUSD:   5.0,
+		MaxTimeSeconds: 300,
+		MaxIterations:  3,
+		Verbose:        true,
+		ReviewFirst:    true, // Start with review, skip first builder turn
+		Goal:           "Review and fix any issues in the calculator code",
+	}
+
+	swe := New(config)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// With ReviewFirst, the reviewer should analyze existing code first
+	prompt := "Fix any issues found by the reviewer in the calculator code"
+
+	err := swe.Run(ctx, prompt)
+	stats := swe.Stats()
+
+	t.Logf("Exit reason: %s", stats.ExitReason)
+	t.Logf("Iterations: %d", stats.IterationCount)
+	t.Logf("Builder tokens: input=%d, output=%d", stats.BuilderTokensIn, stats.BuilderTokensOut)
+	t.Logf("Reviewer tokens: input=%d, output=%d", stats.ReviewerTokensIn, stats.ReviewerTokensOut)
+
+	if err != nil {
+		t.Logf("Run error (may be expected): %v", err)
+	}
+
+	// Reviewer should have run (non-zero tokens)
+	if stats.ReviewerTokensIn == 0 {
+		t.Error("expected non-zero reviewer input tokens with ReviewFirst")
+	}
+
+	// Check if calc.go was modified (builder should fix issues)
+	content, err := os.ReadFile(filepath.Join(workDir, "calc.go"))
+	if err != nil {
+		t.Logf("Warning: could not read calc.go: %v", err)
+	} else {
+		t.Logf("Final calc.go content:\n%s", string(content))
 	}
 }
