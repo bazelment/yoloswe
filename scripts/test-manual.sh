@@ -7,13 +7,23 @@ set -euo pipefail
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${WORKSPACE_ROOT}"
 
+echo "=== Discovering manual tests ==="
+
+# Find all test targets with the "manual" tag
+MANUAL_TESTS=$(bazel query 'attr(tags, "manual", tests(//...))' 2>/dev/null)
+
+if [[ -z "${MANUAL_TESTS}" ]]; then
+    echo "No manual tests found."
+    exit 0
+fi
+
+echo "Found manual tests:"
+echo "${MANUAL_TESTS}" | sed 's/^/  /'
+echo ""
+
 echo "=== Running manual tests ==="
 echo "These tests require real CLI tools and authentication tokens."
 echo ""
 
-bazel test \
-    //agent-cli-wrapper/codex/integration:integration_test \
-    //yoloswe:yoloswe_test \
-    //yoloswe/planner:planner_test \
-    //yoloswe/reviewer/integration:integration_test \
-    "$@"
+# shellcheck disable=SC2086
+bazel test ${MANUAL_TESTS} "$@"

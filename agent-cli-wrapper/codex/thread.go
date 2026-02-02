@@ -17,6 +17,7 @@ type Thread struct {
 	turnWaiters   map[string][]chan *TurnResult
 	id            string
 	currentTurnID string
+	lastUsage     *TokenUsage // Token usage from last token_count event
 	mu            sync.RWMutex
 }
 
@@ -284,6 +285,22 @@ func (t *Thread) setReady() {
 
 func (t *Thread) setError(err error) {
 	t.state.SetError(err)
+}
+
+// setLastUsage updates the last token usage for this thread.
+func (t *Thread) setLastUsage(usage *TokenUsage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastUsage = usage
+}
+
+// getAndClearLastUsage returns the last token usage and clears it.
+func (t *Thread) getAndClearLastUsage() *TokenUsage {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	usage := t.lastUsage
+	t.lastUsage = nil
+	return usage
 }
 
 // TurnResult contains the result of a completed turn.

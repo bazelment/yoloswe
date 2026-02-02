@@ -24,14 +24,18 @@ type Config struct {
 	JSONOutput     bool
 }
 
-// BuildPrompt creates the review prompt from the config.
-func BuildPrompt(goal string) string {
-	goalText := goal
-	if goalText == "" {
-		goalText = "(not specified)"
+// buildGoalText formats the goal text for review prompts.
+func buildGoalText(goal string) string {
+	if goal == "" {
+		return "Review all changes on this branch. Use commit messages to understand their purpose."
 	}
+	return "Review all changes on this branch. The main goal of the change on this branch is: " + goal
+}
 
-	return fmt.Sprintf(`You are experienced software engineer, reviewing changes by another engineer on this branch (this is using git worktree). The main goal of the change on this branch is %s.
+// buildBasePrompt creates the common review prompt content.
+func buildBasePrompt(goal string) string {
+	return fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
+%s
 
 Focus on these areas:
 - Is the implementation correct? Is there any gap that should be addressed.
@@ -43,30 +47,19 @@ Focus on these areas:
 
 When you flag an issue, provide a short, direct explanation and cite the affected file and line range.
 Prioritize severe issues and avoid nit-level comments unless they block understanding of the diff.
-After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.
-Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected.`, goalText)
+Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected.`, buildGoalText(goal))
+}
+
+// BuildPrompt creates the review prompt with free-form text output.
+func BuildPrompt(goal string) string {
+	return buildBasePrompt(goal) + `
+
+After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.`
 }
 
 // BuildJSONPrompt creates a review prompt that requests JSON output format.
 func BuildJSONPrompt(goal string) string {
-	goalText := goal
-	if goalText == "" {
-		goalText = "(not specified)"
-	}
-
-	return fmt.Sprintf(`You are experienced software engineer, reviewing changes by another engineer on this branch (this is using git worktree). The main goal of the change on this branch is %s.
-
-Focus on these areas:
-- Is the implementation correct? Is there any gap that should be addressed.
-- Does it provide sufficient test coverage about the code path it touched.
-- maintainability. also look at code around it, is there any code duplication that can be avoided.
-- developer experience.
-- performance.
-- security.
-
-When you flag an issue, provide a short, direct explanation and cite the affected file and line range.
-Prioritize severe issues and avoid nit-level comments unless they block understanding of the diff.
-Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected.
+	return buildBasePrompt(goal) + `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:
@@ -94,7 +87,7 @@ You MUST respond with valid JSON in this exact format:
 - verdict MUST be exactly "accepted" or "rejected"
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
-- Output ONLY the JSON object, no other text`, goalText)
+- Output ONLY the JSON object, no other text`
 }
 
 // ReviewResult contains the result of a review turn.

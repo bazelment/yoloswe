@@ -181,6 +181,7 @@ type buildFlags struct {
 	maxIterations   int
 	verbose         bool
 	requireApproval bool
+	reviewFirst     bool
 }
 
 func newBuildCmd() *cobra.Command {
@@ -213,6 +214,7 @@ The loop continues until the reviewer accepts or limits are reached.`,
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt for builder")
 	cmd.Flags().BoolVar(&flags.requireApproval, "require-approval", false, "Require user approval for tool executions (default: auto-approve)")
 	cmd.Flags().StringVar(&flags.resumeSession, "resume", "", "Resume from a previous session ID")
+	cmd.Flags().BoolVar(&flags.reviewFirst, "review-first", false, "Skip first builder turn and start with review")
 
 	return cmd
 }
@@ -250,6 +252,7 @@ func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) {
 		SystemPrompt:    flags.systemPrompt,
 		RequireApproval: flags.requireApproval,
 		ResumeSessionID: flags.resumeSession,
+		ReviewFirst:     flags.reviewFirst,
 		ReviewerModel:   flags.reviewerModel,
 		Goal:            prompt, // Use prompt as goal
 		MaxBudgetUSD:    flags.budget,

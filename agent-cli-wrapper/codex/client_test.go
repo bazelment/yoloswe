@@ -400,3 +400,152 @@ func TestHandleExecCommandOutput_Base64Decoding(t *testing.T) {
 		})
 	}
 }
+
+// Test that handleTokenCount stores usage and handleTurnCompleted includes it
+func TestClient_TokenUsageInTurnCompleted(t *testing.T) {
+	client := NewClient(WithEventBufferSize(10))
+
+	// Add a thread manually
+	thread := newThread(client, "thread-123", ThreadConfig{})
+	client.threads["thread-123"] = thread
+
+	// Build token count notification with both total and last usage
+	tokenMsg := TokenCountMsg{
+		Info: &TokenUsageInfo{
+			TotalTokenUsage: &TokenUsage{
+				InputTokens:           1000,
+				OutputTokens:          500,
+				CachedInputTokens:     800,
+				ReasoningOutputTokens: 100,
+				TotalTokens:           1500,
+			},
+			LastTokenUsage: &TokenUsage{
+				InputTokens:           100,
+				OutputTokens:          50,
+				CachedInputTokens:     80,
+				ReasoningOutputTokens: 10,
+				TotalTokens:           150,
+			},
+		},
+	}
+	tokenMsgJSON, _ := json.Marshal(tokenMsg)
+
+	tokenNotif := CodexEventNotification{
+		ConversationID: "thread-123",
+		Msg:            tokenMsgJSON,
+	}
+	tokenNotifJSON, _ := json.Marshal(tokenNotif)
+
+	// Call handleTokenCount - should store last usage (not total)
+	client.handleTokenCount(tokenNotifJSON)
+
+	// Drain the TokenUsageEvent
+	select {
+	case <-client.events:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("TokenUsageEvent not received")
+	}
+
+	// Now simulate turn completion
+	turnNotif := TurnCompletedNotification{
+		ThreadID: "thread-123",
+		Turn: Turn{
+			ID:     "turn-456",
+			Status: "completed",
+		},
+	}
+	turnNotifJSON, _ := json.Marshal(turnNotif)
+
+	client.handleTurnCompleted(turnNotifJSON)
+
+	// Check TurnCompletedEvent has the last usage (not total)
+	select {
+	case event := <-client.events:
+		if e, ok := event.(TurnCompletedEvent); ok {
+			// Should use "last" usage, not "total"
+			if e.Usage.InputTokens != 100 {
+				t.Errorf("Usage.InputTokens = %d, want 100 (from last, not 1000 from total)", e.Usage.InputTokens)
+			}
+			if e.Usage.OutputTokens != 50 {
+				t.Errorf("Usage.OutputTokens = %d, want 50", e.Usage.OutputTokens)
+			}
+			if e.Usage.CachedInputTokens != 80 {
+				t.Errorf("Usage.CachedInputTokens = %d, want 80", e.Usage.CachedInputTokens)
+			}
+			if e.Usage.ReasoningOutputTokens != 10 {
+				t.Errorf("Usage.ReasoningOutputTokens = %d, want 10", e.Usage.ReasoningOutputTokens)
+			}
+			if e.Usage.TotalTokens != 150 {
+				t.Errorf("Usage.TotalTokens = %d, want 150", e.Usage.TotalTokens)
+			}
+		} else {
+			t.Errorf("unexpected event type: %T", event)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("TurnCompletedEvent not received")
+	}
+}
+
+// Test that usage is cleared after turn completion
+func TestClient_TokenUsageClearedAfterTurn(t *testing.T) {
+	client := NewClient(WithEventBufferSize(10))
+
+	thread := newThread(client, "thread-123", ThreadConfig{})
+	client.threads["thread-123"] = thread
+
+	// Set usage
+	tokenMsg := TokenCountMsg{
+		Info: &TokenUsageInfo{
+			LastTokenUsage: &TokenUsage{
+				InputTokens:  100,
+				OutputTokens: 50,
+			},
+		},
+	}
+	tokenMsgJSON, _ := json.Marshal(tokenMsg)
+	tokenNotif := CodexEventNotification{
+		ConversationID: "thread-123",
+		Msg:            tokenMsgJSON,
+	}
+	tokenNotifJSON, _ := json.Marshal(tokenNotif)
+	client.handleTokenCount(tokenNotifJSON)
+
+	// Drain TokenUsageEvent
+	<-client.events
+
+	// Complete turn
+	turnNotif := TurnCompletedNotification{
+		ThreadID: "thread-123",
+		Turn: Turn{
+			ID:     "turn-1",
+			Status: "completed",
+		},
+	}
+	turnNotifJSON, _ := json.Marshal(turnNotif)
+	client.handleTurnCompleted(turnNotifJSON)
+
+	// Drain first TurnCompletedEvent
+	<-client.events
+
+	// Complete another turn WITHOUT new token count
+	turnNotif.Turn.ID = "turn-2"
+	turnNotifJSON, _ = json.Marshal(turnNotif)
+	client.handleTurnCompleted(turnNotifJSON)
+
+	// Second TurnCompletedEvent should have zero usage (cleared after first)
+	select {
+	case event := <-client.events:
+		if e, ok := event.(TurnCompletedEvent); ok {
+			if e.Usage.InputTokens != 0 {
+				t.Errorf("Usage.InputTokens = %d, want 0 (should be cleared)", e.Usage.InputTokens)
+			}
+			if e.Usage.OutputTokens != 0 {
+				t.Errorf("Usage.OutputTokens = %d, want 0 (should be cleared)", e.Usage.OutputTokens)
+			}
+		} else {
+			t.Errorf("unexpected event type: %T", event)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("TurnCompletedEvent not received")
+	}
+}

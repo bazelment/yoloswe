@@ -369,7 +369,7 @@ func TestBuildInitialReviewPrompt(t *testing.T) {
 		{
 			name:        "empty goal",
 			goal:        "",
-			shouldMatch: "(not specified)",
+			shouldMatch: "Use commit messages to understand their purpose",
 		},
 	}
 
@@ -417,12 +417,10 @@ func TestBuildFollowUpPrompt(t *testing.T) {
 	prompt := swe.buildFollowUpPrompt()
 
 	expectedPhrases := []string{
-		"additional changes",
+		"updated",
 		"previous feedback",
 		"verdict",
 		"JSON",
-		"accepted",
-		"rejected",
 	}
 
 	for _, phrase := range expectedPhrases {

@@ -538,9 +538,20 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 	}
 
 	fullText := ""
+	var usage TurnUsage
 	if ok {
 		thread.handleTurnCompleted(notif.Turn.ID, success, errMsg)
 		fullText = thread.GetFullText()
+		// Get token usage from the last token_count event
+		if lastUsage := thread.getAndClearLastUsage(); lastUsage != nil {
+			usage = TurnUsage{
+				InputTokens:           lastUsage.InputTokens,
+				CachedInputTokens:     lastUsage.CachedInputTokens,
+				OutputTokens:          lastUsage.OutputTokens,
+				ReasoningOutputTokens: lastUsage.ReasoningOutputTokens,
+				TotalTokens:           lastUsage.TotalTokens,
+			}
+		}
 	}
 
 	c.emit(TurnCompletedEvent{
@@ -548,6 +559,7 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 		TurnID:   notif.Turn.ID,
 		Success:  success,
 		FullText: fullText,
+		Usage:    usage,
 	})
 }
 
@@ -630,6 +642,14 @@ func (c *Client) handleTokenCount(params json.RawMessage) {
 				TotalTokens:           msg.Info.LastTokenUsage.TotalTokens,
 			}
 		}
+	}
+
+	// Store usage in thread for TurnCompletedEvent
+	c.mu.RLock()
+	thread, ok := c.threads[notif.ConversationID]
+	c.mu.RUnlock()
+	if ok && lastUsage != nil {
+		thread.setLastUsage(lastUsage)
 	}
 
 	c.emit(TokenUsageEvent{

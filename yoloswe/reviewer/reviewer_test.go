@@ -18,14 +18,14 @@ func TestBuildPrompt(t *testing.T) {
 			contains: []string{
 				"add user authentication",
 				"experienced software engineer",
-				"reviewing changes",
+				"Review all changes on this branch",
 			},
 		},
 		{
 			name: "empty goal",
 			goal: "",
 			contains: []string{
-				"(not specified)",
+				"Use commit messages to understand their purpose",
 				"experienced software engineer",
 			},
 		},
@@ -55,7 +55,7 @@ func TestBuildJSONPrompt(t *testing.T) {
 			contains: []string{
 				"add user authentication",
 				"experienced software engineer",
-				"reviewing changes",
+				"Review all changes on this branch",
 				"JSON",
 				"verdict",
 				"accepted",
@@ -73,7 +73,7 @@ func TestBuildJSONPrompt(t *testing.T) {
 			name: "empty goal",
 			goal: "",
 			contains: []string{
-				"(not specified)",
+				"Use commit messages to understand their purpose",
 				"JSON",
 				"verdict",
 			},
