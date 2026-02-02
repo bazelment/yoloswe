@@ -8,16 +8,16 @@ import (
 
 // Thread represents an active conversation thread.
 type Thread struct {
-	config        ThreadConfig
-	turnStartTime time.Time
 	client        *Client
 	info          *ThreadInfo
 	state         *threadStateManager
 	accumulator   *threadAccumulator
 	turnWaiters   map[string][]chan *TurnResult
+	lastUsage     *TokenUsage // Token usage from last token_count event
+	config        ThreadConfig
+	turnStartTime time.Time
 	id            string
 	currentTurnID string
-	lastUsage     *TokenUsage // Token usage from last token_count event
 	mu            sync.RWMutex
 }
 
