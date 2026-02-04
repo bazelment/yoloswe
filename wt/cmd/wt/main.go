@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -360,7 +362,7 @@ func init() {
 	rmCmd.Flags().BoolP("delete-branch", "D", false, "Delete branch too")
 }
 
-// statusCmd: wt status [-a]
+// statusCmd: wt status [-a] [-w] [-i seconds]
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show status dashboard",
@@ -370,130 +372,186 @@ Rough commands:
   git worktree list --porcelain
   git status --porcelain              # per worktree
   git rev-list --left-right --count   # ahead/behind
-  gh pr view --json ...               # PR info`,
+  gh pr view --json ...               # PR info
+
+Use -w/--watch to continuously refresh the status display.
+Use -i/--interval to set the refresh interval (default: 60 seconds).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		allRepos, _ := cmd.Flags().GetBool("all")
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		interval, _ := cmd.Flags().GetInt("interval")
 		ctx := context.Background()
-		output := wt.DefaultOutput()
 
-		// Get list of repos to process
-		var repos []string
-		if allRepos {
-			var err error
-			repos, err = wt.ListAllRepos(wtRoot)
-			if err != nil {
-				return err
+		// Set up signal handling for graceful exit in watch mode
+		if watchMode {
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+			go func() {
+				<-sigCh
+				cancel()
+			}()
+
+			firstRender := true
+			for {
+				if firstRender {
+					// First render: just clear screen once
+					fmt.Print("\033[2J\033[H")
+					firstRender = false
+				} else {
+					// Subsequent renders: move cursor to top (in-place update)
+					fmt.Print("\033[H")
+				}
+
+				// Show timestamp
+				fmt.Printf("Last updated: %s (refreshing every %ds, Ctrl+C to exit)\n\n",
+					time.Now().Format("15:04:05"), interval)
+
+				if err := displayStatus(ctx, allRepos); err != nil {
+					return err
+				}
+
+				// Clear from cursor to end of screen (handles shorter output)
+				fmt.Print("\033[J")
+
+				select {
+				case <-ctx.Done():
+					fmt.Println("\nExiting watch mode...")
+					return nil
+				case <-time.After(time.Duration(interval) * time.Second):
+					// Continue to next iteration
+				}
 			}
-			if len(repos) == 0 {
-				output.Info("No repositories found")
-				return nil
-			}
-		} else {
-			m, err := getManager()
-			if err != nil {
-				return err
-			}
-			repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
-			repos = []string{repoName}
 		}
 
-		first := true
-		for _, repoName := range repos {
-			m := wt.NewManager(wtRoot, repoName)
-			worktrees, err := m.List(ctx)
-			if err != nil {
-				continue
-			}
-			if len(worktrees) == 0 {
-				continue
-			}
-
-			if allRepos {
-				if !first {
-					fmt.Println()
-				}
-				fmt.Printf("%s\n", output.Colorize(wt.ColorBold, repoName))
-			}
-			first = false
-
-			fmt.Printf("\n%s %s %s %s %s\n",
-				wt.Pad("Branch", 41), wt.Pad("Sync", 12), wt.Pad("Status", 8), wt.Pad("Last Commit", 12), "PR")
-			fmt.Println(strings.Repeat("-", 91))
-
-			for _, w := range worktrees {
-				status, _ := m.GetStatus(ctx, w)
-
-				// Sync status
-				var syncStr string
-				if w.IsDetached {
-					syncStr = output.Colorize(wt.ColorDim, "detached")
-				} else if status.Ahead == 0 && status.Behind == 0 {
-					syncStr = output.Colorize(wt.ColorGreen, "up to date")
-				} else {
-					var parts []string
-					if status.Ahead > 0 {
-						parts = append(parts, output.Colorize(wt.ColorGreen, fmt.Sprintf("↑%d", status.Ahead)))
-					}
-					if status.Behind > 0 {
-						parts = append(parts, output.Colorize(wt.ColorRed, fmt.Sprintf("↓%d", status.Behind)))
-					}
-					syncStr = strings.Join(parts, " ")
-				}
-
-				// Status
-				statusStr := output.Colorize(wt.ColorGreen, "clean")
-				if status.IsDirty {
-					statusStr = output.Colorize(wt.ColorYellow, "dirty")
-				}
-
-				// Last commit time
-				var timeStr string
-				if !status.LastCommitTime.IsZero() {
-					delta := time.Since(status.LastCommitTime)
-					if delta.Hours() >= 24 {
-						timeStr = fmt.Sprintf("%dd ago", int(delta.Hours()/24))
-					} else if delta.Hours() >= 1 {
-						timeStr = fmt.Sprintf("%dh ago", int(delta.Hours()))
-					} else {
-						timeStr = fmt.Sprintf("%dm ago", int(delta.Minutes()))
-					}
-				} else {
-					timeStr = "-"
-				}
-
-				// PR with status
-				prStr := "-"
-				if status.PRNumber > 0 {
-					prNum := fmt.Sprintf("#%d", status.PRNumber)
-					switch {
-					case status.PRState == "MERGED":
-						prStr = output.Colorize(wt.ColorGreen, prNum+" merged")
-					case status.PRState == "CLOSED":
-						prStr = output.Colorize(wt.ColorDim, prNum+" closed")
-					case status.PRIsDraft:
-						prStr = output.Colorize(wt.ColorDim, prNum+" draft")
-					case status.PRReviewStatus == "APPROVED":
-						prStr = output.Colorize(wt.ColorGreen, prNum+" approved")
-					case status.PRReviewStatus == "CHANGES_REQUESTED":
-						prStr = output.Colorize(wt.ColorRed, prNum+" changes")
-					default:
-						prStr = prNum
-					}
-				}
-
-				branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 40))
-				fmt.Printf("%s %s %s %s %s\n",
-					wt.Pad(branchStr, 41), wt.Pad(syncStr, 12), wt.Pad(statusStr, 8), wt.Pad(timeStr, 12), prStr)
-			}
-		}
-		fmt.Println()
-
-		return nil
+		return displayStatus(ctx, allRepos)
 	},
+}
+
+func displayStatus(ctx context.Context, allRepos bool) error {
+	output := wt.DefaultOutput()
+
+	// Get list of repos to process
+	var repos []string
+	if allRepos {
+		var err error
+		repos, err = wt.ListAllRepos(wtRoot)
+		if err != nil {
+			return err
+		}
+		if len(repos) == 0 {
+			output.Info("No repositories found")
+			return nil
+		}
+	} else {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+		repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
+		repos = []string{repoName}
+	}
+
+	first := true
+	for _, repoName := range repos {
+		m := wt.NewManager(wtRoot, repoName)
+		worktrees, err := m.List(ctx)
+		if err != nil {
+			continue
+		}
+		if len(worktrees) == 0 {
+			continue
+		}
+
+		if allRepos {
+			if !first {
+				fmt.Println()
+			}
+			fmt.Printf("%s\n", output.Colorize(wt.ColorBold, repoName))
+		}
+		first = false
+
+		fmt.Printf("\n%s %s %s %s %s\n",
+			wt.Pad("Branch", 41), wt.Pad("Sync", 12), wt.Pad("Status", 8), wt.Pad("Last Commit", 12), "PR")
+		fmt.Println(strings.Repeat("-", 91))
+
+		for _, w := range worktrees {
+			status, _ := m.GetStatus(ctx, w)
+
+			// Sync status
+			var syncStr string
+			if w.IsDetached {
+				syncStr = output.Colorize(wt.ColorDim, "detached")
+			} else if status.Ahead == 0 && status.Behind == 0 {
+				syncStr = output.Colorize(wt.ColorGreen, "up to date")
+			} else {
+				var parts []string
+				if status.Ahead > 0 {
+					parts = append(parts, output.Colorize(wt.ColorGreen, fmt.Sprintf("↑%d", status.Ahead)))
+				}
+				if status.Behind > 0 {
+					parts = append(parts, output.Colorize(wt.ColorRed, fmt.Sprintf("↓%d", status.Behind)))
+				}
+				syncStr = strings.Join(parts, " ")
+			}
+
+			// Status
+			statusStr := output.Colorize(wt.ColorGreen, "clean")
+			if status.IsDirty {
+				statusStr = output.Colorize(wt.ColorYellow, "dirty")
+			}
+
+			// Last commit time
+			var timeStr string
+			if !status.LastCommitTime.IsZero() {
+				delta := time.Since(status.LastCommitTime)
+				if delta.Hours() >= 24 {
+					timeStr = fmt.Sprintf("%dd ago", int(delta.Hours()/24))
+				} else if delta.Hours() >= 1 {
+					timeStr = fmt.Sprintf("%dh ago", int(delta.Hours()))
+				} else {
+					timeStr = fmt.Sprintf("%dm ago", int(delta.Minutes()))
+				}
+			} else {
+				timeStr = "-"
+			}
+
+			// PR with status
+			prStr := "-"
+			if status.PRNumber > 0 {
+				prNum := fmt.Sprintf("#%d", status.PRNumber)
+				switch {
+				case status.PRState == "MERGED":
+					prStr = output.Colorize(wt.ColorGreen, prNum+" merged")
+				case status.PRState == "CLOSED":
+					prStr = output.Colorize(wt.ColorDim, prNum+" closed")
+				case status.PRIsDraft:
+					prStr = output.Colorize(wt.ColorDim, prNum+" draft")
+				case status.PRReviewStatus == "APPROVED":
+					prStr = output.Colorize(wt.ColorGreen, prNum+" approved")
+				case status.PRReviewStatus == "CHANGES_REQUESTED":
+					prStr = output.Colorize(wt.ColorRed, prNum+" changes")
+				default:
+					prStr = prNum
+				}
+			}
+
+			branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 40))
+			fmt.Printf("%s %s %s %s %s\n",
+				wt.Pad(branchStr, 41), wt.Pad(syncStr, 12), wt.Pad(statusStr, 8), wt.Pad(timeStr, 12), prStr)
+		}
+	}
+	fmt.Println()
+
+	return nil
 }
 
 func init() {
 	statusCmd.Flags().BoolP("all", "a", false, "Show status for all repositories")
+	statusCmd.Flags().BoolP("watch", "w", false, "Watch mode: refresh status periodically")
+	statusCmd.Flags().IntP("interval", "i", 60, "Refresh interval in seconds (used with --watch)")
 }
 
 // syncCmd: wt sync [-a]
