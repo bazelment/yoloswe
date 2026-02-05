@@ -29,3 +29,4 @@ To add a new dependency, please always follow these steps, don't use `go` comman
 - All test cases should be ready to run in parallel, so they should avoid things like writing to the same temp file, using the same port, etc.
 - Never use static port in test, pick a random port to avoid port collision.
 - The tests should be deterministic, try to avoid external dependencies that has unstable output. When performing validation, avoid conditional check.
+- Tests for different purpose like integration should be put into different directory so that gazelle won't blend them into a single build target.

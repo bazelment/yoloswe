@@ -1,0 +1,756 @@
+package session
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/bazelment/yoloswe/yoloswe"
+	"github.com/bazelment/yoloswe/yoloswe/planner"
+)
+
+// ManagerConfig holds configuration for the session manager.
+type ManagerConfig struct {
+	// RepoName is the current repository name for persistence.
+	RepoName string
+	// Store is the persistence layer. If nil, sessions are not persisted.
+	Store *Store
+}
+
+// Manager handles multiple concurrent sessions.
+type Manager struct {
+	config ManagerConfig
+
+	sessions map[SessionID]*Session
+	events   chan interface{} // SessionEvent, SessionOutputEvent, SessionStateChangeEvent
+	mu       sync.RWMutex
+
+	// Output buffer per session (last N lines)
+	outputs   map[SessionID][]OutputLine
+	outputsMu sync.RWMutex
+
+	// Active builders for follow-up support
+	builders   map[SessionID]*yoloswe.BuilderSession
+	buildersMu sync.RWMutex
+
+	// Follow-up channels per session
+	followUpChans   map[SessionID]chan string
+	followUpChansMu sync.RWMutex
+
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewManager creates a new session manager.
+func NewManager() *Manager {
+	return NewManagerWithConfig(ManagerConfig{})
+}
+
+// NewManagerWithConfig creates a new session manager with the given config.
+func NewManagerWithConfig(config ManagerConfig) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Manager{
+		config:        config,
+		sessions:      make(map[SessionID]*Session),
+		events:        make(chan interface{}, 100),
+		outputs:       make(map[SessionID][]OutputLine),
+		builders:      make(map[SessionID]*yoloswe.BuilderSession),
+		followUpChans: make(map[SessionID]chan string),
+		ctx:           ctx,
+		cancel:        cancel,
+	}
+}
+
+// Events returns the channel for session events.
+func (m *Manager) Events() <-chan interface{} {
+	return m.events
+}
+
+// Close shuts down the manager and all sessions.
+func (m *Manager) Close() {
+	m.cancel()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, s := range m.sessions {
+		if s.cancel != nil {
+			s.cancel()
+		}
+	}
+}
+
+// generateSessionID creates a unique session ID.
+func generateSessionID(worktreeName string, sessionType SessionType) SessionID {
+	return SessionID(fmt.Sprintf("%s-%s-%d", worktreeName, sessionType, time.Now().UnixNano()%100000))
+}
+
+// generateTitle creates a short title from the first words of a prompt.
+func generateTitle(prompt string, maxLen int) string {
+	words := strings.Fields(prompt)
+	var b strings.Builder
+	for _, w := range words {
+		if b.Len()+len(w)+1 > maxLen {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w)
+	}
+	if b.Len() == 0 && len(prompt) > 0 {
+		if len(prompt) > maxLen-3 {
+			return prompt[:maxLen-3] + "..."
+		}
+		return prompt
+	}
+	return b.String()
+}
+
+// StartPlannerSession creates and starts a new planner session.
+func (m *Manager) StartPlannerSession(worktreePath, prompt string) (SessionID, error) {
+	worktreeName := filepath.Base(worktreePath)
+	sessionID := generateSessionID(worktreeName, SessionTypePlanner)
+
+	ctx, cancel := context.WithCancel(m.ctx)
+
+	session := &Session{
+		ID:           sessionID,
+		Type:         SessionTypePlanner,
+		Status:       StatusPending,
+		WorktreePath: worktreePath,
+		WorktreeName: worktreeName,
+		Prompt:       prompt,
+		Title:        generateTitle(prompt, 20),
+		Model:        "sonnet",
+		Progress:     &SessionProgress{LastActivity: time.Now()},
+		CreatedAt:    time.Now(),
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	m.mu.Lock()
+	m.sessions[sessionID] = session
+	m.mu.Unlock()
+
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0, 1000)
+	m.outputsMu.Unlock()
+
+	go m.runPlannerSession(session, prompt)
+
+	return sessionID, nil
+}
+
+// StartBuilderSession creates and starts a new builder session.
+func (m *Manager) StartBuilderSession(worktreePath, prompt string) (SessionID, error) {
+	worktreeName := filepath.Base(worktreePath)
+	sessionID := generateSessionID(worktreeName, SessionTypeBuilder)
+
+	ctx, cancel := context.WithCancel(m.ctx)
+
+	session := &Session{
+		ID:           sessionID,
+		Type:         SessionTypeBuilder,
+		Status:       StatusPending,
+		WorktreePath: worktreePath,
+		WorktreeName: worktreeName,
+		Prompt:       prompt,
+		Title:        generateTitle(prompt, 20),
+		Model:        "sonnet",
+		Progress:     &SessionProgress{LastActivity: time.Now()},
+		CreatedAt:    time.Now(),
+		ctx:          ctx,
+		cancel:       cancel,
+	}
+
+	m.mu.Lock()
+	m.sessions[sessionID] = session
+	m.mu.Unlock()
+
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0, 1000)
+	m.outputsMu.Unlock()
+
+	go m.runBuilderSession(session, prompt)
+
+	return sessionID, nil
+}
+
+// runPlannerSession runs a planner session in a goroutine.
+func (m *Manager) runPlannerSession(session *Session, prompt string) {
+	m.updateSessionStatus(session, StatusRunning)
+
+	// Create semantic event handler for structured output capture
+	eventHandler := newSessionEventHandler(m, session.ID)
+
+	config := planner.Config{
+		Model:        "sonnet",
+		WorkDir:      session.WorktreePath,
+		Simple:       true, // Auto-mode for TUI
+		BuildMode:    planner.BuildModeCurrent,
+		Output:       nil, // Discard text output, capture via events
+		EventHandler: eventHandler,
+	}
+
+	pw := planner.NewPlannerWrapper(config)
+
+	if err := pw.Start(session.ctx); err != nil {
+		m.updateSessionStatus(session, StatusFailed)
+		session.mu.Lock()
+		session.Error = err
+		session.mu.Unlock()
+		m.addOutput(session.ID, OutputLine{
+			Timestamp: time.Now(),
+			Type:      OutputTypeError,
+			Content:   fmt.Sprintf("Failed to start planner: %v", err),
+		})
+		m.persistSession(session)
+		return
+	}
+	defer func() {
+		pw.Stop()
+		m.persistSession(session)
+	}()
+
+	// Note: "Planner session started" is captured via event handler when renderer.Status() is called
+
+	if err := pw.Run(session.ctx, prompt); err != nil {
+		if session.ctx.Err() != nil {
+			m.updateSessionStatus(session, StatusStopped)
+		} else {
+			m.updateSessionStatus(session, StatusFailed)
+			session.mu.Lock()
+			session.Error = err
+			session.mu.Unlock()
+			m.addOutput(session.ID, OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeError,
+				Content:   fmt.Sprintf("Planner error: %v", err),
+			})
+		}
+		return
+	}
+
+	m.updateSessionStatus(session, StatusCompleted)
+	// Note: Completion status is captured via event handler
+}
+
+// runBuilderSession runs a builder session in a goroutine.
+// It supports follow-up messages via the follow-up channel.
+func (m *Manager) runBuilderSession(session *Session, prompt string) {
+	m.updateSessionStatus(session, StatusRunning)
+
+	config := yoloswe.BuilderConfig{
+		Model:   "sonnet",
+		WorkDir: session.WorktreePath,
+	}
+
+	// Create semantic event handler for structured output capture
+	eventHandler := newSessionEventHandler(m, session.ID)
+
+	// Use event-aware builder that emits structured events
+	// Text output goes to discard since we capture via events
+	builder := yoloswe.NewBuilderSessionWithEvents(config, nil, eventHandler)
+
+	if err := builder.Start(session.ctx); err != nil {
+		m.updateSessionStatus(session, StatusFailed)
+		session.mu.Lock()
+		session.Error = err
+		session.mu.Unlock()
+		m.addOutput(session.ID, OutputLine{
+			Timestamp: time.Now(),
+			Type:      OutputTypeError,
+			Content:   fmt.Sprintf("Failed to start builder: %v", err),
+		})
+		m.persistSession(session)
+		return
+	}
+
+	// Store builder for potential follow-ups
+	m.buildersMu.Lock()
+	m.builders[session.ID] = builder
+	m.buildersMu.Unlock()
+
+	// Create follow-up channel
+	followUpChan := make(chan string, 1)
+	m.followUpChansMu.Lock()
+	m.followUpChans[session.ID] = followUpChan
+	m.followUpChansMu.Unlock()
+
+	// Cleanup on exit
+	defer func() {
+		builder.Stop()
+		m.buildersMu.Lock()
+		delete(m.builders, session.ID)
+		m.buildersMu.Unlock()
+		m.followUpChansMu.Lock()
+		delete(m.followUpChans, session.ID)
+		m.followUpChansMu.Unlock()
+		m.persistSession(session)
+	}()
+
+	// Note: "Builder session started" is captured via event handler when renderer.Status() is called
+
+	// Run initial turn
+	currentPrompt := prompt
+	for {
+		usage, err := builder.RunTurn(session.ctx, currentPrompt)
+		if err != nil {
+			if session.ctx.Err() != nil {
+				m.updateSessionStatus(session, StatusStopped)
+			} else {
+				m.updateSessionStatus(session, StatusFailed)
+				session.mu.Lock()
+				session.Error = err
+				session.mu.Unlock()
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeError,
+					Content:   fmt.Sprintf("Builder error: %v", err),
+				})
+			}
+			return
+		}
+
+		// Update progress with usage
+		if usage != nil {
+			session.Progress.Update(func(p *SessionProgress) {
+				p.TurnCount++
+				p.TotalCostUSD += usage.CostUSD
+				p.InputTokens += usage.InputTokens
+				p.OutputTokens += usage.OutputTokens
+			})
+		}
+
+		// Note: Turn completion is captured via event handler's OnTurnComplete()
+
+		// Transition to idle state, waiting for follow-up
+		m.updateSessionStatus(session, StatusIdle)
+
+		// Wait for follow-up or cancellation
+		select {
+		case <-session.ctx.Done():
+			m.updateSessionStatus(session, StatusStopped)
+			return
+		case followUp, ok := <-followUpChan:
+			if !ok {
+				// Channel closed, complete the session
+				m.updateSessionStatus(session, StatusCompleted)
+				return
+			}
+			// Process follow-up
+			m.updateSessionStatus(session, StatusRunning)
+			m.addOutput(session.ID, OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeStatus,
+				Content:   fmt.Sprintf("Follow-up: %s", followUp),
+			})
+			currentPrompt = followUp
+		}
+	}
+}
+
+// updateSessionStatus updates session status and emits event.
+func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus) {
+	session.mu.Lock()
+	oldStatus := session.Status
+	session.Status = newStatus
+
+	now := time.Now()
+	switch newStatus {
+	case StatusRunning:
+		session.StartedAt = &now
+	case StatusCompleted, StatusFailed, StatusStopped:
+		session.CompletedAt = &now
+	}
+	session.mu.Unlock()
+
+	// Emit state change event
+	select {
+	case m.events <- SessionStateChangeEvent{
+		SessionID: session.ID,
+		OldStatus: oldStatus,
+		NewStatus: newStatus,
+	}:
+	default:
+		// Channel full, drop event
+	}
+}
+
+// addOutput adds an output line and emits event.
+func (m *Manager) addOutput(sessionID SessionID, line OutputLine) {
+	m.outputsMu.Lock()
+	if lines, ok := m.outputs[sessionID]; ok {
+		// Keep last 1000 lines
+		if len(lines) >= 1000 {
+			m.outputs[sessionID] = append(lines[1:], line)
+		} else {
+			m.outputs[sessionID] = append(lines, line)
+		}
+	}
+	m.outputsMu.Unlock()
+
+	// Emit output event
+	select {
+	case m.events <- SessionOutputEvent{
+		SessionID: sessionID,
+		Line:      line,
+	}:
+	default:
+		// Channel full, drop event
+	}
+}
+
+// appendOrAddText appends text to the last output line if it's a text line,
+// otherwise adds a new text line. This allows streaming text to accumulate
+// into a single OutputLine for proper markdown rendering.
+func (m *Manager) appendOrAddText(sessionID SessionID, text string) {
+	m.outputsMu.Lock()
+	lines, ok := m.outputs[sessionID]
+	if ok && len(lines) > 0 && lines[len(lines)-1].Type == OutputTypeText {
+		// Append to existing text line
+		lines[len(lines)-1].Content += text
+		m.outputsMu.Unlock()
+	} else {
+		m.outputsMu.Unlock()
+		m.addOutput(sessionID, OutputLine{
+			Timestamp: time.Now(),
+			Type:      OutputTypeText,
+			Content:   text,
+		})
+		return
+	}
+
+	// Emit event so the TUI re-renders
+	select {
+	case m.events <- SessionOutputEvent{SessionID: sessionID}:
+	default:
+	}
+}
+
+// updateToolOutput updates an existing tool output line by ToolID.
+// This is used to update tool state from running to complete in-place.
+func (m *Manager) updateToolOutput(sessionID SessionID, toolID string, fn func(*OutputLine)) {
+	m.outputsMu.Lock()
+	defer m.outputsMu.Unlock()
+
+	lines, ok := m.outputs[sessionID]
+	if !ok {
+		return
+	}
+
+	// Find the tool line by ID (search from end since recent tools are likely at the end)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i].ToolID == toolID && lines[i].Type == OutputTypeToolStart {
+			fn(&lines[i])
+			// Emit update event
+			select {
+			case m.events <- SessionOutputEvent{
+				SessionID: sessionID,
+				Line:      lines[i],
+			}:
+			default:
+			}
+			return
+		}
+	}
+}
+
+// updateSessionProgress updates session progress safely.
+// This is called by event handlers to update real-time progress.
+func (m *Manager) updateSessionProgress(sessionID SessionID, fn func(*SessionProgress)) {
+	m.mu.RLock()
+	session, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+
+	if !ok || session.Progress == nil {
+		return
+	}
+
+	session.Progress.Update(fn)
+}
+
+// StopSession stops a running session.
+func (m *Manager) StopSession(id SessionID) error {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	session.mu.RLock()
+	status := session.Status
+	session.mu.RUnlock()
+
+	if status != StatusRunning && status != StatusPending {
+		return fmt.Errorf("session not running: %s", id)
+	}
+
+	if session.cancel != nil {
+		session.cancel()
+	}
+
+	return nil
+}
+
+// GetSession returns a session by ID.
+func (m *Manager) GetSession(id SessionID) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	session, ok := m.sessions[id]
+	return session, ok
+}
+
+// GetSessionInfo returns session info for display.
+func (m *Manager) GetSessionInfo(id SessionID) (SessionInfo, bool) {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return SessionInfo{}, false
+	}
+
+	return session.ToInfo(), true
+}
+
+// GetSessionsForWorktree returns all sessions for a worktree.
+func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []SessionInfo
+	for _, s := range m.sessions {
+		if s.WorktreePath == worktreePath {
+			result = append(result, s.ToInfo())
+		}
+	}
+	return result
+}
+
+// GetAllSessions returns all sessions.
+func (m *Manager) GetAllSessions() []SessionInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]SessionInfo, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		result = append(result, s.ToInfo())
+	}
+	return result
+}
+
+// GetSessionOutput returns the output lines for a session.
+func (m *Manager) GetSessionOutput(id SessionID) []OutputLine {
+	m.outputsMu.RLock()
+	defer m.outputsMu.RUnlock()
+
+	if lines, ok := m.outputs[id]; ok {
+		// Return a copy
+		result := make([]OutputLine, len(lines))
+		copy(result, lines)
+		return result
+	}
+	return nil
+}
+
+// CountByStatus returns counts of sessions by status.
+func (m *Manager) CountByStatus() map[SessionStatus]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	counts := make(map[SessionStatus]int)
+	for _, s := range m.sessions {
+		s.mu.RLock()
+		counts[s.Status]++
+		s.mu.RUnlock()
+	}
+	return counts
+}
+
+// SendFollowUp sends a follow-up message to an idle session.
+func (m *Manager) SendFollowUp(id SessionID, message string) error {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	session.mu.RLock()
+	status := session.Status
+	session.mu.RUnlock()
+
+	if status != StatusIdle {
+		return fmt.Errorf("session is not idle (status: %s)", status)
+	}
+
+	m.followUpChansMu.RLock()
+	ch, ok := m.followUpChans[id]
+	m.followUpChansMu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("no follow-up channel for session: %s", id)
+	}
+
+	select {
+	case ch <- message:
+		return nil
+	default:
+		return fmt.Errorf("follow-up channel full")
+	}
+}
+
+// CompleteSession marks an idle session as completed.
+// This is used when the user is done with follow-ups.
+func (m *Manager) CompleteSession(id SessionID) error {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	session.mu.RLock()
+	status := session.Status
+	session.mu.RUnlock()
+
+	if status != StatusIdle {
+		return fmt.Errorf("session is not idle (status: %s)", status)
+	}
+
+	// Close the follow-up channel to signal completion
+	m.followUpChansMu.Lock()
+	if ch, ok := m.followUpChans[id]; ok {
+		close(ch)
+		delete(m.followUpChans, id)
+	}
+	m.followUpChansMu.Unlock()
+
+	return nil
+}
+
+// DeleteSession removes a session from the manager.
+// The session must be in a terminal state.
+func (m *Manager) DeleteSession(id SessionID) error {
+	m.mu.Lock()
+	session, ok := m.sessions[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	session.mu.RLock()
+	status := session.Status
+	session.mu.RUnlock()
+
+	if !status.IsTerminal() && status != StatusIdle {
+		m.mu.Unlock()
+		return fmt.Errorf("cannot delete session in status: %s", status)
+	}
+
+	delete(m.sessions, id)
+	m.mu.Unlock()
+
+	m.outputsMu.Lock()
+	delete(m.outputs, id)
+	m.outputsMu.Unlock()
+
+	// Also delete from store if configured
+	if m.config.Store != nil && m.config.RepoName != "" {
+		_ = m.config.Store.DeleteSession(m.config.RepoName, session.WorktreeName, id)
+	}
+
+	return nil
+}
+
+// persistSession saves a session to the store.
+func (m *Manager) persistSession(session *Session) {
+	if m.config.Store == nil || m.config.RepoName == "" {
+		return
+	}
+
+	m.outputsMu.RLock()
+	output := m.outputs[session.ID]
+	outputCopy := make([]OutputLine, len(output))
+	copy(outputCopy, output)
+	m.outputsMu.RUnlock()
+
+	stored := SessionToStored(session, m.config.RepoName, outputCopy)
+	if err := m.config.Store.SaveSession(stored); err != nil {
+		// Log error but don't fail
+		m.addOutput(session.ID, OutputLine{
+			Timestamp: time.Now(),
+			Type:      OutputTypeError,
+			Content:   fmt.Sprintf("Failed to persist session: %v", err),
+		})
+	}
+}
+
+// LoadHistorySessions loads past sessions from the store for a worktree.
+func (m *Manager) LoadHistorySessions(worktreeName string) ([]*SessionMeta, error) {
+	if m.config.Store == nil || m.config.RepoName == "" {
+		return nil, nil
+	}
+	return m.config.Store.ListSessions(m.config.RepoName, worktreeName)
+}
+
+// LoadSessionFromHistory loads a full session from the store.
+func (m *Manager) LoadSessionFromHistory(worktreeName string, id SessionID) (*StoredSession, error) {
+	if m.config.Store == nil || m.config.RepoName == "" {
+		return nil, fmt.Errorf("store not configured")
+	}
+	return m.config.Store.LoadSession(m.config.RepoName, worktreeName, id)
+}
+
+// AddSession adds a session to the manager (for testing).
+func (m *Manager) AddSession(session *Session) {
+	m.mu.Lock()
+	m.sessions[session.ID] = session
+	m.mu.Unlock()
+}
+
+// AddOutputLine adds an output line to a session (for testing).
+func (m *Manager) AddOutputLine(sessionID SessionID, line OutputLine) {
+	m.addOutput(sessionID, line)
+}
+
+// InitOutputBuffer initializes the output buffer for a session (for testing).
+func (m *Manager) InitOutputBuffer(sessionID SessionID) {
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0)
+	m.outputsMu.Unlock()
+}
+
+// PersistSession saves a session to the store (exported for testing).
+func (m *Manager) PersistSession(session *Session) {
+	m.persistSession(session)
+}
+
+// UpdateSessionStatus updates session status (exported for testing).
+func (m *Manager) UpdateSessionStatus(session *Session, newStatus SessionStatus) {
+	m.updateSessionStatus(session, newStatus)
+}
+
+// SetFollowUpChan sets the follow-up channel for a session (for testing).
+func (m *Manager) SetFollowUpChan(sessionID SessionID, ch chan string) {
+	m.followUpChansMu.Lock()
+	m.followUpChans[sessionID] = ch
+	m.followUpChansMu.Unlock()
+}
+
+// HasFollowUpChan checks if a follow-up channel exists for a session (for testing).
+func (m *Manager) HasFollowUpChan(sessionID SessionID) bool {
+	m.followUpChansMu.RLock()
+	defer m.followUpChansMu.RUnlock()
+	_, exists := m.followUpChans[sessionID]
+	return exists
+}

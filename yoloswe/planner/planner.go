@@ -188,6 +188,13 @@ type Config struct {
 	// Simple enables non-interactive mode: auto-answers questions with first option
 	// and exports plan to markdown on completion.
 	Simple bool
+
+	// Output is the writer for rendered output. If nil, defaults to os.Stdout.
+	Output io.Writer
+
+	// EventHandler receives semantic events for TUI integration.
+	// When set, the renderer emits structured events for tool calls, text blocks, etc.
+	EventHandler render.EventHandler
 }
 
 // SessionStats tracks cumulative token usage and cost for a session phase.
@@ -234,10 +241,21 @@ func NewPlannerWrapper(config Config) *PlannerWrapper {
 			config.RecordingDir = ".planner-sessions"
 		}
 	}
+	if config.Output == nil {
+		config.Output = os.Stdout
+	}
+
+	// Create renderer with or without event handler
+	var renderer *Renderer
+	if config.EventHandler != nil {
+		renderer = NewRendererWithEvents(config.Output, config.Verbose, config.EventHandler)
+	} else {
+		renderer = NewRenderer(config.Output, config.Verbose)
+	}
 
 	p := &PlannerWrapper{
 		config:   config,
-		renderer: NewRenderer(os.Stdout, config.Verbose),
+		renderer: renderer,
 	}
 
 	return p

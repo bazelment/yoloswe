@@ -1,10 +1,11 @@
-package yoloswe
+package integration
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/testutil"
 )
 
@@ -15,7 +16,7 @@ import (
 func TestIntegrationBuilderReviewerLoop(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -25,7 +26,7 @@ func TestIntegrationBuilderReviewerLoop(t *testing.T) {
 		Verbose:        true,
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -48,7 +49,7 @@ func TestIntegrationBuilderReviewerLoop(t *testing.T) {
 func TestIntegrationBudgetLimit(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -58,7 +59,7 @@ func TestIntegrationBudgetLimit(t *testing.T) {
 		Verbose:        true,
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -68,7 +69,7 @@ func TestIntegrationBudgetLimit(t *testing.T) {
 	stats := swe.Stats()
 
 	// Should exit due to budget (or interrupt if context times out first)
-	if stats.ExitReason != ExitReasonBudgetExceeded && stats.ExitReason != ExitReasonInterrupt {
+	if stats.ExitReason != yoloswe.ExitReasonBudgetExceeded && stats.ExitReason != yoloswe.ExitReasonInterrupt {
 		t.Logf("Expected budget exceeded or interrupt, got: %s (cost: $%.4f)", stats.ExitReason, stats.BuilderCostUSD)
 	}
 }
@@ -76,7 +77,7 @@ func TestIntegrationBudgetLimit(t *testing.T) {
 func TestIntegrationTimeoutLimit(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "sonnet",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -86,7 +87,7 @@ func TestIntegrationTimeoutLimit(t *testing.T) {
 		Verbose:        true,
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	// Use context timeout to bound test duration (first turn may exceed MaxTimeSeconds)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -97,7 +98,7 @@ func TestIntegrationTimeoutLimit(t *testing.T) {
 	stats := swe.Stats()
 
 	// Should exit due to timeout or interrupt (context timeout may fire first)
-	if stats.ExitReason != ExitReasonTimeExceeded && stats.ExitReason != ExitReasonInterrupt {
+	if stats.ExitReason != yoloswe.ExitReasonTimeExceeded && stats.ExitReason != yoloswe.ExitReasonInterrupt {
 		t.Logf("Expected timeout or interrupt, got: %s (duration: %.1fs)", stats.ExitReason, float64(stats.TotalDurationMs)/1000)
 	}
 }
@@ -105,7 +106,7 @@ func TestIntegrationTimeoutLimit(t *testing.T) {
 func TestIntegrationContextCancellation(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -115,7 +116,7 @@ func TestIntegrationContextCancellation(t *testing.T) {
 		Verbose:        true,
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Cancel after 2 seconds
@@ -130,7 +131,7 @@ func TestIntegrationContextCancellation(t *testing.T) {
 	stats := swe.Stats()
 
 	// Should exit due to interrupt
-	if stats.ExitReason != ExitReasonInterrupt {
+	if stats.ExitReason != yoloswe.ExitReasonInterrupt {
 		t.Logf("Expected interrupt, got: %s", stats.ExitReason)
 	}
 	if err != nil {
@@ -141,7 +142,7 @@ func TestIntegrationContextCancellation(t *testing.T) {
 func TestIntegrationMaxIterations(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -151,7 +152,7 @@ func TestIntegrationMaxIterations(t *testing.T) {
 		Verbose:        true,
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -161,7 +162,7 @@ func TestIntegrationMaxIterations(t *testing.T) {
 	stats := swe.Stats()
 
 	// Should exit due to max iterations if reviewer doesn't accept first time
-	if stats.IterationCount <= 1 && stats.ExitReason == ExitReasonMaxIterations {
+	if stats.IterationCount <= 1 && stats.ExitReason == yoloswe.ExitReasonMaxIterations {
 		t.Log("Reached max iterations as expected")
 	}
 	if err != nil {

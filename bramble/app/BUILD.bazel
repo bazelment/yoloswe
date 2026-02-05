@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "app",
+    srcs = [
+        "dropdown.go",
+        "markdown.go",
+        "model.go",
+        "output.go",
+        "repopicker.go",
+        "taskmodal.go",
+        "textarea.go",
+        "update.go",
+        "view.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/app",
+    visibility = ["//bramble:__subpackages__"],
+    deps = [
+        "//bramble/session",
+        "//wt",
+        "//wt/taskrouter",
+        "@com_github_charmbracelet_bubbletea//:bubbletea",
+        "@com_github_charmbracelet_glamour//:glamour",
+        "@com_github_charmbracelet_lipgloss//:lipgloss",
+        "@com_github_mattn_go_runewidth//:go-runewidth",
+    ],
+)
+
+go_test(
+    name = "app_test",
+    srcs = [
+        "output_test.go",
+        "textarea_test.go",
+    ],
+    embed = [":app"],
+    deps = [
+        "//bramble/session",
+        "//wt",
+        "@com_github_charmbracelet_bubbletea//:bubbletea",
+        "@com_github_stretchr_testify//assert",
+    ],
+)

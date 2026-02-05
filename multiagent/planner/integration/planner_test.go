@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-package planner
+package integration
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/checkpoint"
+	"github.com/bazelment/yoloswe/multiagent/planner"
 	"github.com/bazelment/yoloswe/multiagent/progress"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
 )
@@ -63,7 +64,7 @@ func TestCallDesigner_WithProgress(t *testing.T) {
 	}
 
 	reporter := &mockReporter{}
-	cfg := Config{
+	cfg := planner.Config{
 		PlannerConfig: agent.AgentConfig{
 			Model:      "haiku",
 			WorkDir:    t.TempDir(),
@@ -88,7 +89,7 @@ func TestCallDesigner_WithProgress(t *testing.T) {
 		MaxIterations: 10,
 	}
 
-	p := New(cfg, "test-session")
+	p := planner.New(cfg, "test-session")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -136,7 +137,7 @@ func TestCallBuilder_WithProgress(t *testing.T) {
 	}
 
 	reporter := &mockReporter{}
-	cfg := Config{
+	cfg := planner.Config{
 		PlannerConfig: agent.AgentConfig{
 			Model:      "haiku",
 			WorkDir:    t.TempDir(),
@@ -161,7 +162,7 @@ func TestCallBuilder_WithProgress(t *testing.T) {
 		MaxIterations: 10,
 	}
 
-	p := New(cfg, "test-session")
+	p := planner.New(cfg, "test-session")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -214,7 +215,7 @@ func TestCallReviewer_WithProgress(t *testing.T) {
 	}
 
 	reporter := &mockReporter{}
-	cfg := Config{
+	cfg := planner.Config{
 		PlannerConfig: agent.AgentConfig{
 			Model:      "haiku",
 			WorkDir:    t.TempDir(),
@@ -239,7 +240,7 @@ func TestCallReviewer_WithProgress(t *testing.T) {
 		MaxIterations: 10,
 	}
 
-	p := New(cfg, "test-session")
+	p := planner.New(cfg, "test-session")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -292,7 +293,7 @@ func TestFullWorkflow_DesignBuildReview(t *testing.T) {
 	reporter := &mockReporter{}
 	workDir := t.TempDir()
 
-	cfg := Config{
+	cfg := planner.Config{
 		PlannerConfig: agent.AgentConfig{
 			Model:      "haiku",
 			WorkDir:    workDir,
@@ -317,7 +318,7 @@ func TestFullWorkflow_DesignBuildReview(t *testing.T) {
 		MaxIterations: 10,
 	}
 
-	p := New(cfg, "test-workflow-session")
+	p := planner.New(cfg, "test-workflow-session")
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second) // 3 minutes for all three
 	defer cancel()
 

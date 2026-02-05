@@ -19,7 +19,7 @@
 //
 // Set CLAUDE_CLI_PATH to override the default claude CLI location.
 
-package claude
+package integration
 
 import (
 	"context"
@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // ============================================================================
@@ -35,18 +37,18 @@ import (
 
 // TurnEvents collects events from a single turn.
 type TurnEvents struct {
-	Ready        *ReadyEvent
-	TextEvents   []TextEvent
-	ToolStarts   []ToolStartEvent
-	ToolComplete []ToolCompleteEvent
-	ToolResults  []CLIToolResultEvent
-	TurnComplete *TurnCompleteEvent
-	Errors       []ErrorEvent
+	Ready        *claude.ReadyEvent
+	TextEvents   []claude.TextEvent
+	ToolStarts   []claude.ToolStartEvent
+	ToolComplete []claude.ToolCompleteEvent
+	ToolResults  []claude.CLIToolResultEvent
+	TurnComplete *claude.TurnCompleteEvent
+	Errors       []claude.ErrorEvent
 }
 
 // CollectTurnEvents collects all events until TurnCompleteEvent or context cancellation.
 // The ReadyEvent may be included if this is the first turn (CLI sends init after first message).
-func CollectTurnEvents(ctx context.Context, s *Session) (*TurnEvents, error) {
+func CollectTurnEvents(ctx context.Context, s *claude.Session) (*TurnEvents, error) {
 	events := &TurnEvents{}
 
 	for {
@@ -59,20 +61,20 @@ func CollectTurnEvents(ctx context.Context, s *Session) (*TurnEvents, error) {
 			}
 
 			switch e := event.(type) {
-			case ReadyEvent:
+			case claude.ReadyEvent:
 				events.Ready = &e
-			case TextEvent:
+			case claude.TextEvent:
 				events.TextEvents = append(events.TextEvents, e)
-			case ToolStartEvent:
+			case claude.ToolStartEvent:
 				events.ToolStarts = append(events.ToolStarts, e)
-			case ToolCompleteEvent:
+			case claude.ToolCompleteEvent:
 				events.ToolComplete = append(events.ToolComplete, e)
-			case CLIToolResultEvent:
+			case claude.CLIToolResultEvent:
 				events.ToolResults = append(events.ToolResults, e)
-			case TurnCompleteEvent:
+			case claude.TurnCompleteEvent:
 				events.TurnComplete = &e
 				return events, nil
-			case ErrorEvent:
+			case claude.ErrorEvent:
 				events.Errors = append(events.Errors, e)
 			}
 		}
@@ -90,7 +92,7 @@ func (te *TurnEvents) HasToolNamed(name string) bool {
 }
 
 // validateRecording validates session recording structure.
-func validateRecording(t *testing.T, recording *SessionRecording, minTurns int) {
+func validateRecording(t *testing.T, recording *claude.SessionRecording, minTurns int) {
 	t.Helper()
 
 	if recording == nil {
@@ -119,12 +121,12 @@ func TestSession_Integration_Scenario1_BypassPermissions(t *testing.T) {
 	t.Logf("Test artifacts directory: %s", testDir)
 
 	// Create session with bypass permissions
-	session := NewSession(
-		WithModel("haiku"),
-		WithWorkDir(testDir),
-		WithPermissionMode(PermissionModeBypass),
-		WithDisablePlugins(),
-		WithRecording(testDir),
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModeBypass),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
 	)
 
 	if err := session.Start(ctx); err != nil {
@@ -133,7 +135,7 @@ func TestSession_Integration_Scenario1_BypassPermissions(t *testing.T) {
 	defer session.Stop()
 
 	// Track tools used across all turns
-	var allToolStarts []ToolStartEvent
+	var allToolStarts []claude.ToolStartEvent
 
 	// Step 1: Search for tariff news
 	// Note: CLI sends init message after first user message, so ReadyEvent comes with first turn
@@ -241,23 +243,23 @@ func TestSession_Integration_Scenario2_DefaultPermissions(t *testing.T) {
 	t.Logf("Test artifacts directory: %s", testDir)
 
 	// Track permission requests
-	var permissionRequests []PermissionRequest
+	var permissionRequests []claude.PermissionRequest
 
 	// Permission handler - auto-approve all
-	handler := PermissionHandlerFunc(func(ctx context.Context, req *PermissionRequest) (*PermissionResponse, error) {
+	handler := claude.PermissionHandlerFunc(func(ctx context.Context, req *claude.PermissionRequest) (*claude.PermissionResponse, error) {
 		permissionRequests = append(permissionRequests, *req)
 		t.Logf("Permission requested for: %s", req.ToolName)
-		return &PermissionResponse{Behavior: PermissionAllow}, nil
+		return &claude.PermissionResponse{Behavior: claude.PermissionAllow}, nil
 	})
 
 	// Create session with default permissions
-	session := NewSession(
-		WithModel("haiku"),
-		WithWorkDir(testDir),
-		WithPermissionMode(PermissionModeDefault),
-		WithDisablePlugins(),
-		WithRecording(testDir),
-		WithPermissionHandler(handler),
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModeDefault),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
+		claude.WithPermissionHandler(handler),
 	)
 
 	if err := session.Start(ctx); err != nil {
@@ -341,12 +343,12 @@ func TestSession_Integration_Scenario3_PlanMode(t *testing.T) {
 	t.Logf("Test artifacts directory: %s", testDir)
 
 	// Create session with plan mode
-	session := NewSession(
-		WithModel("haiku"),
-		WithWorkDir(testDir),
-		WithPermissionMode(PermissionModePlan),
-		WithDisablePlugins(),
-		WithRecording(testDir),
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModePlan),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
 	)
 
 	if err := session.Start(ctx); err != nil {
@@ -371,7 +373,7 @@ func TestSession_Integration_Scenario3_PlanMode(t *testing.T) {
 	t.Log("Turn 1 completed (plan presented), switching mode and approving...")
 
 	// Switch permission mode to acceptEdits before proceeding
-	if err := session.SetPermissionMode(ctx, PermissionModeAcceptEdits); err != nil {
+	if err := session.SetPermissionMode(ctx, claude.PermissionModeAcceptEdits); err != nil {
 		t.Logf("SetPermissionMode warning: %v", err)
 	}
 
@@ -423,12 +425,12 @@ func TestSession_Integration_Scenario4_Interrupt(t *testing.T) {
 	t.Logf("Test artifacts directory: %s", testDir)
 
 	// Create session with bypass permissions
-	session := NewSession(
-		WithModel("haiku"),
-		WithWorkDir(testDir),
-		WithPermissionMode(PermissionModeBypass),
-		WithDisablePlugins(),
-		WithRecording(testDir),
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModeBypass),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
 	)
 
 	if err := session.Start(ctx); err != nil {
@@ -457,10 +459,10 @@ func TestSession_Integration_Scenario4_Interrupt(t *testing.T) {
 			}
 
 			switch e := event.(type) {
-			case ReadyEvent:
+			case claude.ReadyEvent:
 				events.Ready = &e
 				t.Logf("Session ready: id=%s", e.Info.SessionID)
-			case ToolStartEvent:
+			case claude.ToolStartEvent:
 				events.ToolStarts = append(events.ToolStarts, e)
 				if !interruptSent {
 					interruptSent = true
@@ -469,10 +471,10 @@ func TestSession_Integration_Scenario4_Interrupt(t *testing.T) {
 						t.Logf("Interrupt error: %v", err)
 					}
 				}
-			case TurnCompleteEvent:
+			case claude.TurnCompleteEvent:
 				events.TurnComplete = &e
 				goto turnDone
-			case ErrorEvent:
+			case claude.ErrorEvent:
 				events.Errors = append(events.Errors, e)
 			}
 		}

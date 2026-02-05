@@ -51,6 +51,31 @@ func NewBuilderSession(config BuilderConfig, output io.Writer) *BuilderSession {
 	}
 }
 
+// NewBuilderSessionWithEvents creates a new builder session that emits semantic events.
+// The event handler receives structured events for tool calls, text blocks, etc.
+// This is useful for TUI applications that need to capture and display events.
+// If output is nil, text output is discarded (events are still emitted).
+func NewBuilderSessionWithEvents(config BuilderConfig, output io.Writer, eventHandler render.EventHandler) *BuilderSession {
+	if config.Model == "" {
+		config.Model = "sonnet"
+	}
+	if config.RecordingDir == "" {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			config.RecordingDir = filepath.Join(homeDir, ".yoloswe")
+		} else {
+			config.RecordingDir = ".yoloswe"
+		}
+	}
+	if output == nil {
+		output = io.Discard
+	}
+	return &BuilderSession{
+		config:   config,
+		output:   output,
+		renderer: render.NewRendererWithEvents(output, config.Verbose, eventHandler),
+	}
+}
+
 // Start initializes and starts the claude session.
 func (b *BuilderSession) Start(ctx context.Context) error {
 	opts := []claude.SessionOption{

@@ -16,10 +16,7 @@ go_library(
 
 go_test(
     name = "planner_test",
-    srcs = [
-        "planner_integration_test.go",
-        "planner_test.go",
-    ],
+    srcs = ["planner_test.go"],
     embed = [":planner"],
     tags = ["manual"],
     deps = [

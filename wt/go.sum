@@ -1,3 +1,5 @@
+github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0-20260204055759-24a0ad9f53ee h1:z307VI6Sxocn57MvIdon2Qwym1pcRmmC0Ew3oSxQNOE=
+github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0-20260204055759-24a0ad9f53ee/go.mod h1:6k1SviuTF41ngmIWGjpWvCiZ1H6IA93Jyx9oDniM9S4=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

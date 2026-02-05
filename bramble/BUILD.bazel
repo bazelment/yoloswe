@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "bramble_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//bramble/app",
+        "//bramble/session",
+        "@com_github_charmbracelet_bubbletea//:bubbletea",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_binary(
+    name = "bramble",
+    embed = [":bramble_lib"],
+    visibility = ["//visibility:public"],
+)

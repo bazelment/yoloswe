@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = [
+        "build_test.go",
+        "integration_test.go",
+    ],
+    tags = [
+        "integration",
+        "manual",
+    ],
+    deps = [
+        "//yoloswe",
+        "//yoloswe/testutil",
+    ],
+)

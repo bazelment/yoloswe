@@ -10,13 +10,15 @@
 // Run with: go test -tags=integration ./codex/...
 // or: go test -tags=integration -v ./codex/... -run Integration
 
-package codex
+package integration
 
 import (
 	"context"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
 
 // ============================================================================
@@ -25,17 +27,17 @@ import (
 
 // TurnEvents collects events from a single turn.
 type TurnEvents struct {
-	ClientReady   *ClientReadyEvent
-	ThreadStarted *ThreadStartedEvent
-	ThreadReady   *ThreadReadyEvent
-	TurnStarted   *TurnStartedEvent
-	TurnCompleted *TurnCompletedEvent
-	TextDeltas    []TextDeltaEvent
-	Errors        []ErrorEvent
+	ClientReady   *codex.ClientReadyEvent
+	ThreadStarted *codex.ThreadStartedEvent
+	ThreadReady   *codex.ThreadReadyEvent
+	TurnStarted   *codex.TurnStartedEvent
+	TurnCompleted *codex.TurnCompletedEvent
+	TextDeltas    []codex.TextDeltaEvent
+	Errors        []codex.ErrorEvent
 }
 
 // CollectTurnEvents collects all events until TurnCompletedEvent or context cancellation.
-func CollectTurnEvents(ctx context.Context, c *Client) (*TurnEvents, error) {
+func CollectTurnEvents(ctx context.Context, c *codex.Client) (*TurnEvents, error) {
 	events := &TurnEvents{}
 
 	for {
@@ -48,20 +50,20 @@ func CollectTurnEvents(ctx context.Context, c *Client) (*TurnEvents, error) {
 			}
 
 			switch e := event.(type) {
-			case ClientReadyEvent:
+			case codex.ClientReadyEvent:
 				events.ClientReady = &e
-			case ThreadStartedEvent:
+			case codex.ThreadStartedEvent:
 				events.ThreadStarted = &e
-			case ThreadReadyEvent:
+			case codex.ThreadReadyEvent:
 				events.ThreadReady = &e
-			case TurnStartedEvent:
+			case codex.TurnStartedEvent:
 				events.TurnStarted = &e
-			case TurnCompletedEvent:
+			case codex.TurnCompletedEvent:
 				events.TurnCompleted = &e
 				return events, nil
-			case TextDeltaEvent:
+			case codex.TextDeltaEvent:
 				events.TextDeltas = append(events.TextDeltas, e)
-			case ErrorEvent:
+			case codex.ErrorEvent:
 				events.Errors = append(events.Errors, e)
 			}
 		}
@@ -69,7 +71,7 @@ func CollectTurnEvents(ctx context.Context, c *Client) (*TurnEvents, error) {
 }
 
 // WaitForThreadReady waits for ThreadReadyEvent for a specific thread.
-func WaitForThreadReady(ctx context.Context, c *Client, threadID string) error {
+func WaitForThreadReady(ctx context.Context, c *codex.Client, threadID string) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -78,7 +80,7 @@ func WaitForThreadReady(ctx context.Context, c *Client, threadID string) error {
 			if !ok {
 				return context.Canceled
 			}
-			if e, ok := event.(ThreadReadyEvent); ok && e.ThreadID == threadID {
+			if e, ok := event.(codex.ThreadReadyEvent); ok && e.ThreadID == threadID {
 				return nil
 			}
 		}
@@ -102,9 +104,9 @@ func TestClient_Integration_Scenario1_BasicAsk(t *testing.T) {
 	t.Logf("Test artifacts directory: %s", testDir)
 
 	// Create client
-	client := NewClient(
-		WithClientName("codex-integration-test"),
-		WithClientVersion("1.0.0"),
+	client := codex.NewClient(
+		codex.WithClientName("codex-integration-test"),
+		codex.WithClientVersion("1.0.0"),
 	)
 
 	// Start client
@@ -118,8 +120,8 @@ func TestClient_Integration_Scenario1_BasicAsk(t *testing.T) {
 	// Create thread
 	t.Log("Creating thread...")
 	thread, err := client.CreateThread(ctx,
-		WithWorkDir(testDir),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(testDir),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create thread: %v", err)
@@ -170,9 +172,9 @@ func TestClient_Integration_Scenario2_MultiTurn(t *testing.T) {
 	defer os.RemoveAll(testDir)
 	t.Logf("Test artifacts directory: %s", testDir)
 
-	client := NewClient(
-		WithClientName("codex-integration-test"),
-		WithClientVersion("1.0.0"),
+	client := codex.NewClient(
+		codex.WithClientName("codex-integration-test"),
+		codex.WithClientVersion("1.0.0"),
 	)
 
 	if err := client.Start(ctx); err != nil {
@@ -181,8 +183,8 @@ func TestClient_Integration_Scenario2_MultiTurn(t *testing.T) {
 	defer client.Stop()
 
 	thread, err := client.CreateThread(ctx,
-		WithWorkDir(testDir),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(testDir),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create thread: %v", err)
@@ -237,9 +239,9 @@ func TestClient_Integration_Scenario3_Streaming(t *testing.T) {
 	}
 	defer os.RemoveAll(testDir)
 
-	client := NewClient(
-		WithClientName("codex-integration-test"),
-		WithClientVersion("1.0.0"),
+	client := codex.NewClient(
+		codex.WithClientName("codex-integration-test"),
+		codex.WithClientVersion("1.0.0"),
 	)
 
 	if err := client.Start(ctx); err != nil {
@@ -248,8 +250,8 @@ func TestClient_Integration_Scenario3_Streaming(t *testing.T) {
 	defer client.Stop()
 
 	thread, err := client.CreateThread(ctx,
-		WithWorkDir(testDir),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(testDir),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create thread: %v", err)
@@ -309,9 +311,9 @@ func TestClient_Integration_Scenario4_ClientAsk(t *testing.T) {
 	}
 	defer os.RemoveAll(testDir)
 
-	client := NewClient(
-		WithClientName("codex-integration-test"),
-		WithClientVersion("1.0.0"),
+	client := codex.NewClient(
+		codex.WithClientName("codex-integration-test"),
+		codex.WithClientVersion("1.0.0"),
 	)
 
 	if err := client.Start(ctx); err != nil {
@@ -322,8 +324,8 @@ func TestClient_Integration_Scenario4_ClientAsk(t *testing.T) {
 	// Use the simple Ask method
 	t.Log("Using client.Ask() convenience method...")
 	response, err := client.Ask(ctx, "What is 5+5? Reply with just the number.",
-		WithWorkDir(testDir),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(testDir),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("client.Ask failed: %v", err)
@@ -351,9 +353,9 @@ func TestClient_Integration_Scenario5_MultipleThreads(t *testing.T) {
 	defer os.RemoveAll(testDir1)
 	defer os.RemoveAll(testDir2)
 
-	client := NewClient(
-		WithClientName("codex-integration-test"),
-		WithClientVersion("1.0.0"),
+	client := codex.NewClient(
+		codex.WithClientName("codex-integration-test"),
+		codex.WithClientVersion("1.0.0"),
 	)
 
 	if err := client.Start(ctx); err != nil {
@@ -364,8 +366,8 @@ func TestClient_Integration_Scenario5_MultipleThreads(t *testing.T) {
 	// Create two threads
 	t.Log("Creating thread 1...")
 	thread1, err := client.CreateThread(ctx,
-		WithWorkDir(testDir1),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(testDir1),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create thread 1: %v", err)
@@ -373,8 +375,8 @@ func TestClient_Integration_Scenario5_MultipleThreads(t *testing.T) {
 
 	t.Log("Creating thread 2...")
 	thread2, err := client.CreateThread(ctx,
-		WithWorkDir(testDir2),
-		WithApprovalPolicy(ApprovalPolicyFullAuto),
+		codex.WithWorkDir(testDir2),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create thread 2: %v", err)
@@ -390,7 +392,7 @@ func TestClient_Integration_Scenario5_MultipleThreads(t *testing.T) {
 		case <-timeout:
 			t.Fatal("Timeout waiting for threads to be ready")
 		case event := <-client.Events():
-			if e, ok := event.(ThreadReadyEvent); ok {
+			if e, ok := event.(codex.ThreadReadyEvent); ok {
 				if e.ThreadID == thread1.ID() || e.ThreadID == thread2.ID() {
 					readyCount++
 					t.Logf("Thread ready: %s", e.ThreadID)

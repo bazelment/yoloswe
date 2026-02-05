@@ -28,10 +28,16 @@ const (
 type Renderer struct {
 	out          io.Writer
 	lastToolName string
+	lastToolID   string // Track tool ID for matching start/complete events
 	mu           sync.Mutex
 	verbose      bool
 	noColor      bool
 	inToolOutput bool
+
+	// Event handler for semantic event capture (optional)
+	eventHandler EventHandler
+	// Text buffer for accumulating streaming text until semantic boundaries
+	textBuffer strings.Builder
 }
 
 // NewRenderer creates a new renderer writing to the given output.
@@ -45,6 +51,23 @@ func NewRenderer(out io.Writer, verbose bool) *Renderer {
 // NewRendererWithOptions creates a new renderer with explicit color control.
 func NewRendererWithOptions(out io.Writer, verbose, noColor bool) *Renderer {
 	return &Renderer{out: out, verbose: verbose, noColor: noColor}
+}
+
+// NewRendererWithEvents creates a new renderer that also emits semantic events.
+// The event handler receives structured events for tool calls, text blocks, etc.
+// This is useful for TUI applications that need to capture and display events.
+func NewRendererWithEvents(out io.Writer, verbose bool, handler EventHandler) *Renderer {
+	r := NewRenderer(out, verbose)
+	r.eventHandler = handler
+	return r
+}
+
+// SetEventHandler sets or updates the event handler.
+// Pass nil to disable event handling.
+func (r *Renderer) SetEventHandler(handler EventHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.eventHandler = handler
 }
 
 // isTerminal checks if the writer is a terminal.
@@ -67,12 +90,27 @@ func (r *Renderer) color(c string) string {
 	return c
 }
 
+// flushText emits accumulated text as a semantic event.
+// Called at semantic boundaries (tool start, turn complete, etc.)
+// Must be called with mutex held.
+func (r *Renderer) flushText() {
+	if r.eventHandler != nil && r.textBuffer.Len() > 0 {
+		r.eventHandler.OnText(r.textBuffer.String())
+		r.textBuffer.Reset()
+	}
+}
+
 // Status prints a status message.
 func (r *Renderer) Status(msg string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.flushText()
 	fmt.Fprintf(r.out, "%s[Status]%s %s\n", r.color(ColorGray), r.color(ColorReset), msg)
+
+	if r.eventHandler != nil {
+		r.eventHandler.OnStatus(msg)
+	}
 }
 
 // Text prints streaming text output.
@@ -82,6 +120,14 @@ func (r *Renderer) Text(text string) {
 
 	r.closeToolOutput()
 	fmt.Fprint(r.out, text)
+
+	// Accumulate text and flush at line boundaries for streaming in TUI.
+	if r.eventHandler != nil {
+		r.textBuffer.WriteString(text)
+		if strings.Contains(text, "\n") || r.textBuffer.Len() > 80 {
+			r.flushText()
+		}
+	}
 }
 
 // Thinking prints thinking/reasoning output in dim italic.
@@ -89,8 +135,13 @@ func (r *Renderer) Thinking(thinking string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.flushText() // Flush any accumulated text before thinking
 	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s%s%s%s", r.color(ColorDim), r.color(ColorItalic), thinking, r.color(ColorReset))
+
+	if r.eventHandler != nil {
+		r.eventHandler.OnThinking(thinking)
+	}
 }
 
 // ToolStart prints the start of a tool invocation.
@@ -98,15 +149,23 @@ func (r *Renderer) ToolStart(name, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.flushText() // Flush accumulated text before tool
 	r.closeToolOutput()
 	// Don't print for interactive tools - they'll be handled specially
 	if name == "AskUserQuestion" || name == "ExitPlanMode" {
 		r.lastToolName = name
+		r.lastToolID = id
 		return
 	}
 	fmt.Fprintf(r.out, "\n%s[%s]%s ", r.color(ColorCyan), name, r.color(ColorReset))
 	r.inToolOutput = true
 	r.lastToolName = name
+	r.lastToolID = id
+
+	// Emit event (input will be provided in ToolComplete)
+	if r.eventHandler != nil {
+		r.eventHandler.OnToolStart(name, id, nil)
+	}
 }
 
 // ToolProgress prints streaming tool input chunks.
@@ -126,6 +185,7 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 	// Don't print for interactive tools
 	if name == "AskUserQuestion" || name == "ExitPlanMode" {
 		r.inToolOutput = false
+		r.lastToolID = ""
 		return
 	}
 
@@ -138,6 +198,12 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 	}
 
 	r.inToolOutput = false
+
+	// Emit event with input and the tracked tool ID
+	if r.eventHandler != nil {
+		r.eventHandler.OnToolComplete(name, r.lastToolID, input, nil, false)
+	}
+	r.lastToolID = ""
 }
 
 // ToolResult prints the result of a tool execution.
@@ -280,9 +346,14 @@ func (r *Renderer) Error(err error, context string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.flushText()
 	r.closeToolOutput()
 
 	fmt.Fprintf(r.out, "\n%s[Error: %s]%s %v\n", r.color(ColorRed), context, r.color(ColorReset), err)
+
+	if r.eventHandler != nil {
+		r.eventHandler.OnError(err, context)
+	}
 }
 
 // TurnSummary prints a summary of the completed turn.
@@ -290,6 +361,7 @@ func (r *Renderer) TurnSummary(turnNumber int, success bool, durationMs int64, c
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.flushText() // Flush any remaining text
 	r.closeToolOutput()
 
 	status := "✓"
@@ -301,6 +373,10 @@ func (r *Renderer) TurnSummary(turnNumber int, success bool, durationMs int64, c
 
 	fmt.Fprintf(r.out, "\n%s%s Turn %d complete (%.1fs, $%.4f)%s\n",
 		r.color(colorCode), status, turnNumber, float64(durationMs)/1000, costUSD, r.color(ColorReset))
+
+	if r.eventHandler != nil {
+		r.eventHandler.OnTurnComplete(turnNumber, success, durationMs, costUSD)
+	}
 }
 
 // closeToolOutput closes any open tool output block.
