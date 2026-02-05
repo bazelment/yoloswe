@@ -214,11 +214,11 @@ func processSessionFile(filePath string, width, height int) error {
 
 	// Summary
 	var toolCount, textCount, errorCount int
-	for _, line := range outputLines {
-		switch line.Type {
+	for i := range outputLines {
+		switch outputLines[i].Type {
 		case session.OutputTypeToolStart:
 			toolCount++
-			if line.ToolState == session.ToolStateError {
+			if outputLines[i].ToolState == session.ToolStateError {
 				errorCount++
 			}
 		case session.OutputTypeText:
@@ -232,8 +232,8 @@ func processSessionFile(filePath string, width, height int) error {
 
 	// Show raw output lines for debugging
 	fmt.Println("\n--- RAW OUTPUT LINES (for debugging) ---")
-	for i, line := range outputLines {
-		renderDebugLine(i, line)
+	for i := range outputLines {
+		renderDebugLine(i, outputLines[i])
 	}
 
 	return nil
