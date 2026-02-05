@@ -35,14 +35,14 @@ const (
 
 // WorktreeInfo provides context about an existing worktree for routing decisions.
 type WorktreeInfo struct {
-	Name      string // Branch/worktree name
-	Path      string // Filesystem path
-	Goal      string // Branch goal description (if set)
-	Parent    string // Parent branch (for cascading branches)
-	IsDirty   bool   // Has uncommitted changes
-	IsAhead   bool   // Has unpushed commits
-	IsMerged  bool   // PR has been merged
-	PRState   string // PR state (open, merged, closed, "")
+	Name       string // Branch/worktree name
+	Path       string // Filesystem path
+	Goal       string // Branch goal description (if set)
+	Parent     string // Parent branch (for cascading branches)
+	IsDirty    bool   // Has uncommitted changes
+	IsAhead    bool   // Has unpushed commits
+	IsMerged   bool   // PR has been merged
+	PRState    string // PR state (open, merged, closed, "")
 	LastCommit string // Last commit message
 }
 

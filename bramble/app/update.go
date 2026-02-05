@@ -2,13 +2,15 @@ package app
 
 import (
 	"bytes"
+	"os/exec"
 	"strings"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
 	"github.com/bazelment/yoloswe/wt/taskrouter"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Update handles messages and updates the model.
@@ -148,6 +150,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.worktreeOpMessages = msg.messages
 		return m, m.refreshWorktrees()
 
+	case editorResultMsg:
+		if msg.err != nil {
+			m.lastError = "Failed to open editor: " + msg.err.Error()
+		}
+		return m, nil
+
 	case taskWorktreeCreatedMsg:
 		m.worktreeOpMessages = msg.messages
 		// Set pending selection - will be processed after worktrees refresh
@@ -246,6 +254,17 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return startBuilderMsg{prompt}
 				}
 			})
+		}
+		return m, nil
+
+	case "e":
+		// Open editor for worktree
+		if wt := m.selectedWorktree(); wt != nil {
+			return m, func() tea.Msg {
+				cmd := exec.Command(m.editor, wt.Path)
+				err := cmd.Start()
+				return editorResultMsg{err: err}
+			}
 		}
 		return m, nil
 
@@ -860,11 +879,4 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

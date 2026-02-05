@@ -212,4 +212,3 @@ func TestTextAreaViewRendering(t *testing.T) {
 	// Should have border characters (from lipgloss)
 	assert.True(t, strings.Contains(view, "─") || strings.Contains(view, "│"))
 }
-

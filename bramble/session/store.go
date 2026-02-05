@@ -47,6 +47,8 @@ type StoredProgress struct {
 
 // SessionMeta contains minimal session info for listing.
 type SessionMeta struct {
+	CreatedAt    time.Time     `json:"created_at"`
+	CompletedAt  *time.Time    `json:"completed_at,omitempty"`
 	ID           SessionID     `json:"id"`
 	Type         SessionType   `json:"type"`
 	Status       SessionStatus `json:"status"`
@@ -55,8 +57,6 @@ type SessionMeta struct {
 	Prompt       string        `json:"prompt"`
 	Title        string        `json:"title,omitempty"`
 	Model        string        `json:"model,omitempty"`
-	CreatedAt    time.Time     `json:"created_at"`
-	CompletedAt  *time.Time    `json:"completed_at,omitempty"`
 }
 
 // DefaultStoreDir returns the default store directory (~/.bramble/sessions).
@@ -422,7 +422,7 @@ func StoredToSessionInfo(stored *StoredSession) SessionInfo {
 	}
 
 	if stored.Progress != nil {
-		info.Progress = SessionProgress{
+		info.Progress = SessionProgressSnapshot{
 			TurnCount:    stored.Progress.TurnCount,
 			TotalCostUSD: stored.Progress.TotalCostUSD,
 			InputTokens:  stored.Progress.InputTokens,

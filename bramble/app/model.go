@@ -8,80 +8,63 @@ import (
 	"sync"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // FocusArea indicates which area has focus.
 type FocusArea int
 
 const (
-	FocusOutput FocusArea = iota // Main center area (default)
-	FocusInput                   // Input line at bottom
-	FocusWorktreeDropdown        // Alt-W dropdown open
-	FocusSessionDropdown         // Alt-S dropdown open
-	FocusTaskModal               // Task modal open
+	FocusOutput           FocusArea = iota // Main center area (default)
+	FocusInput                             // Input line at bottom
+	FocusWorktreeDropdown                  // Alt-W dropdown open
+	FocusSessionDropdown                   // Alt-S dropdown open
+	FocusTaskModal                         // Task modal open
 )
 
 // Model is the root application model.
 type Model struct {
-	// Configuration
-	wtRoot   string
-	repoName string // Current repo (single repo per TUI session)
-
-	// Session manager
-	sessionManager *session.Manager
-
-	// Data
-	worktrees []wt.Worktree         // Worktrees for current repo
-	sessions  []session.SessionInfo // All sessions
-
-	// Dropdowns
-	worktreeDropdown *Dropdown
-	sessionDropdown  *Dropdown
-
-	// Task modal
-	taskModal *TaskModal
-
-	// UI state
-	focus              FocusArea
-	viewingSessionID   session.SessionID
-	viewingHistoryData *session.StoredSession // Set when viewing a history session
-	width, height      int
-	scrollOffset       int // Scroll offset for session output (0 = showing latest)
-
-	// Input state
-	inputMode    bool
-	inputPrompt  string
-	inputArea    *TextArea
-	inputHandler func(string) tea.Cmd
-
-	// Error display
-	lastError string
-
-	// Worktree operation status messages
-	worktreeOpMessages []string
-
-	// Pending worktree selection (after refresh completes)
-	pendingWorktreeSelect string
+	ctx                   context.Context
+	inputHandler          func(string) tea.Cmd
+	viewingHistoryData    *session.StoredSession
+	sessionManager        *session.Manager
+	mdRenderer            *MarkdownRenderer
+	worktreeStatuses      map[string]*wt.WorktreeStatus
+	worktreeDropdown      *Dropdown
+	sessionDropdown       *Dropdown
+	taskModal             *TaskModal
+	inputArea             *TextArea
 	pendingPlannerPrompt  string
-
-	// Worktree status cache
-	worktreeStatuses map[string]*wt.WorktreeStatus
-
-	// Markdown rendering
-	mdRenderer *MarkdownRenderer
-
-	ctx context.Context
+	pendingWorktreeSelect string
+	repoName              string
+	editor                string
+	inputPrompt           string
+	viewingSessionID      session.SessionID
+	wtRoot                string
+	lastError             string
+	worktrees             []wt.Worktree
+	sessions              []session.SessionInfo
+	worktreeOpMessages    []string
+	focus                 FocusArea
+	scrollOffset          int
+	height                int
+	width                 int
+	inputMode             bool
 }
 
 // NewModel creates a new root model for a specific repo.
-func NewModel(ctx context.Context, wtRoot, repoName string, sessionManager *session.Manager) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager) Model {
+	if editor == "" {
+		editor = "code"
+	}
 	m := Model{
 		ctx:              ctx,
 		wtRoot:           wtRoot,
 		repoName:         repoName,
+		editor:           editor,
 		sessionManager:   sessionManager,
 		focus:            FocusOutput,
 		worktreeDropdown: NewDropdown(nil),
@@ -135,14 +118,6 @@ func (m Model) listenForSessionEvents() tea.Cmd {
 			return sessionEventMsg{event}
 		}
 	}
-}
-
-// getManager returns a wt.Manager for the current repo.
-func (m *Model) getManager() *wt.Manager {
-	if m.repoName == "" {
-		return nil
-	}
-	return wt.NewManager(m.wtRoot, m.repoName)
 }
 
 // selectedWorktree returns the currently selected worktree.
@@ -397,7 +372,7 @@ func generateDropdownTitle(prompt string, maxLen int) string {
 		}
 		b.WriteString(w)
 	}
-	if b.Len() == 0 && len(prompt) > 0 {
+	if b.Len() == 0 && prompt != "" {
 		if len(prompt) > maxLen-3 {
 			return prompt[:maxLen-3] + "..."
 		}
@@ -416,6 +391,7 @@ type (
 	startPlannerMsg   struct{ prompt string }
 	startBuilderMsg   struct{ prompt string }
 	createWorktreeMsg struct{ branch string }
+	editorResultMsg   struct{ err error }
 	taskRouteMsg      struct{ prompt string }
 	taskProposalMsg   struct {
 		proposal *RouteProposal
@@ -424,19 +400,19 @@ type (
 	taskConfirmMsg struct {
 		worktree string
 		parent   string
-		isNew    bool
 		prompt   string
+		isNew    bool
 	}
 	// worktreeOpResultMsg contains the result of a worktree operation
 	worktreeOpResultMsg struct {
-		messages []string
 		err      error
+		messages []string
 	}
 	// taskWorktreeCreatedMsg is sent when a worktree is created for a task (then planner should start)
 	taskWorktreeCreatedMsg struct {
-		messages     []string
 		worktreeName string
 		prompt       string
+		messages     []string
 	}
 	// tickMsg is sent periodically to update running tool timers
 	tickMsg struct {

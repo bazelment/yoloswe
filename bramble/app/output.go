@@ -5,19 +5,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bazelment/yoloswe/bramble/session"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/bazelment/yoloswe/bramble/session"
 )
 
 // OutputModel is a standalone model for rendering session output.
 // It can be used for testing with teatest.
 type OutputModel struct {
+	info       *session.SessionInfo
+	mdRenderer *MarkdownRenderer
 	lines      []session.OutputLine
 	width      int
 	height     int
-	info       *session.SessionInfo
 	isReplay   bool
-	mdRenderer *MarkdownRenderer
 }
 
 // NewOutputModel creates a new output model for testing.
