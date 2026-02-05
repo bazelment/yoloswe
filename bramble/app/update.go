@@ -60,7 +60,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingPlannerPrompt = ""
 			m.worktreeDropdown.SelectByID(worktreeName)
 			m.updateSessionDropdown()
-			model, cmd := m.startPlanner(prompt)
+			model, cmd := m.startSession(session.SessionTypePlanner, prompt)
 			return model, tea.Batch(cmd, m.refreshWorktreeStatuses())
 		}
 
@@ -113,11 +113,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case startPlannerMsg:
-		return m.startPlanner(msg.prompt)
-
-	case startBuilderMsg:
-		return m.startBuilder(msg.prompt)
+	case startSessionMsg:
+		return m.startSession(msg.sessionType, msg.prompt)
 
 	case createWorktreeMsg:
 		return m.createWorktree(msg.branch)
@@ -240,7 +237,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedWorktree() != nil {
 			return m.promptInput("Plan prompt: ", func(prompt string) tea.Cmd {
 				return func() tea.Msg {
-					return startPlannerMsg{prompt}
+					return startSessionMsg{session.SessionTypePlanner, prompt}
 				}
 			})
 		}
@@ -251,7 +248,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedWorktree() != nil {
 			return m.promptInput("Build prompt: ", func(prompt string) tea.Cmd {
 				return func() tea.Msg {
-					return startBuilderMsg{prompt}
+					return startSessionMsg{session.SessionTypeBuilder, prompt}
 				}
 			})
 		}
@@ -519,33 +516,14 @@ func (m Model) promptInput(prompt string, handler func(string) tea.Cmd) (tea.Mod
 	return m, nil
 }
 
-// startPlanner starts a planner session.
-func (m Model) startPlanner(prompt string) (tea.Model, tea.Cmd) {
+// startSession starts a session of the given type.
+func (m Model) startSession(sessionType session.SessionType, prompt string) (tea.Model, tea.Cmd) {
 	wt := m.selectedWorktree()
 	if wt == nil || prompt == "" {
 		return m, nil
 	}
 
-	sessionID, err := m.sessionManager.StartPlannerSession(wt.Path, prompt)
-	if err != nil {
-		m.lastError = err.Error()
-		return m, nil
-	}
-
-	m.viewingSessionID = sessionID
-	m.sessions = m.sessionManager.GetAllSessions()
-	m.updateSessionDropdown()
-	return m, nil
-}
-
-// startBuilder starts a builder session.
-func (m Model) startBuilder(prompt string) (tea.Model, tea.Cmd) {
-	wt := m.selectedWorktree()
-	if wt == nil || prompt == "" {
-		return m, nil
-	}
-
-	sessionID, err := m.sessionManager.StartBuilderSession(wt.Path, prompt)
+	sessionID, err := m.sessionManager.StartSession(sessionType, wt.Path, prompt)
 	if err != nil {
 		m.lastError = err.Error()
 		return m, nil
@@ -868,7 +846,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 
 	// Use existing worktree - select it and start planner
 	m.worktreeDropdown.SelectByID(msg.worktree)
-	return m.startPlanner(msg.prompt)
+	return m.startSession(session.SessionTypePlanner, msg.prompt)
 }
 
 func clamp(v, lo, hi int) int {

@@ -389,8 +389,10 @@ type (
 	sessionEventMsg   struct{ event interface{} }
 	sessionsUpdated   struct{}
 	promptInputMsg    struct{ value string }
-	startPlannerMsg   struct{ prompt string }
-	startBuilderMsg   struct{ prompt string }
+	startSessionMsg struct {
+		sessionType session.SessionType
+		prompt      string
+	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }
 	taskRouteMsg      struct{ prompt string }

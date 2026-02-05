@@ -8,9 +8,49 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
 )
+
+// sessionRunner abstracts the differences between planner and builder execution.
+type sessionRunner interface {
+	Start(ctx context.Context) error
+	RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error)
+	Stop() error
+}
+
+// plannerRunner adapts PlannerWrapper to the sessionRunner interface.
+// The first turn uses Run() to handle the full plan→build lifecycle.
+// Subsequent turns use RunTurn() for simple follow-up interaction.
+type plannerRunner struct {
+	pw       *planner.PlannerWrapper
+	firstRun bool
+}
+
+func (r *plannerRunner) Start(ctx context.Context) error { return r.pw.Start(ctx) }
+func (r *plannerRunner) Stop() error                     { return r.pw.Stop() }
+
+func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	if !r.firstRun {
+		r.firstRun = true
+		err := r.pw.Run(ctx, message)
+		return nil, err
+	}
+	return r.pw.RunTurn(ctx, message)
+}
+
+// builderRunner adapts BuilderSession to the sessionRunner interface.
+type builderRunner struct {
+	builder *yoloswe.BuilderSession
+}
+
+func (r *builderRunner) Start(ctx context.Context) error { return r.builder.Start(ctx) }
+func (r *builderRunner) Stop() error                     { return r.builder.Stop() }
+
+func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	return r.builder.RunTurn(ctx, message)
+}
 
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct {
@@ -24,13 +64,11 @@ type Manager struct {
 	sessions        map[SessionID]*Session
 	events          chan interface{}
 	outputs         map[SessionID][]OutputLine
-	builders        map[SessionID]*yoloswe.BuilderSession
 	followUpChans   map[SessionID]chan string
 	cancel          context.CancelFunc
 	config          ManagerConfig
 	mu              sync.RWMutex
 	outputsMu       sync.RWMutex
-	buildersMu      sync.RWMutex
 	followUpChansMu sync.RWMutex
 }
 
@@ -47,7 +85,6 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		sessions:      make(map[SessionID]*Session),
 		events:        make(chan interface{}, 100),
 		outputs:       make(map[SessionID][]OutputLine),
-		builders:      make(map[SessionID]*yoloswe.BuilderSession),
 		followUpChans: make(map[SessionID]chan string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -100,16 +137,16 @@ func generateTitle(prompt string, maxLen int) string {
 	return b.String()
 }
 
-// StartPlannerSession creates and starts a new planner session.
-func (m *Manager) StartPlannerSession(worktreePath, prompt string) (SessionID, error) {
+// StartSession creates and starts a new session of the given type.
+func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt string) (SessionID, error) {
 	worktreeName := filepath.Base(worktreePath)
-	sessionID := generateSessionID(worktreeName, SessionTypePlanner)
+	sessionID := generateSessionID(worktreeName, sessionType)
 
 	ctx, cancel := context.WithCancel(m.ctx)
 
 	session := &Session{
 		ID:           sessionID,
-		Type:         SessionTypePlanner,
+		Type:         sessionType,
 		Status:       StatusPending,
 		WorktreePath: worktreePath,
 		WorktreeName: worktreeName,
@@ -130,65 +167,50 @@ func (m *Manager) StartPlannerSession(worktreePath, prompt string) (SessionID, e
 	m.outputs[sessionID] = make([]OutputLine, 0, 1000)
 	m.outputsMu.Unlock()
 
-	go m.runPlannerSession(session, prompt)
+	go m.runSession(session, prompt)
 
 	return sessionID, nil
+}
+
+// StartPlannerSession creates and starts a new planner session.
+func (m *Manager) StartPlannerSession(worktreePath, prompt string) (SessionID, error) {
+	return m.StartSession(SessionTypePlanner, worktreePath, prompt)
 }
 
 // StartBuilderSession creates and starts a new builder session.
 func (m *Manager) StartBuilderSession(worktreePath, prompt string) (SessionID, error) {
-	worktreeName := filepath.Base(worktreePath)
-	sessionID := generateSessionID(worktreeName, SessionTypeBuilder)
-
-	ctx, cancel := context.WithCancel(m.ctx)
-
-	session := &Session{
-		ID:           sessionID,
-		Type:         SessionTypeBuilder,
-		Status:       StatusPending,
-		WorktreePath: worktreePath,
-		WorktreeName: worktreeName,
-		Prompt:       prompt,
-		Title:        generateTitle(prompt, 20),
-		Model:        "sonnet",
-		Progress:     &SessionProgress{LastActivity: time.Now()},
-		CreatedAt:    time.Now(),
-		ctx:          ctx,
-		cancel:       cancel,
-	}
-
-	m.mu.Lock()
-	m.sessions[sessionID] = session
-	m.mu.Unlock()
-
-	m.outputsMu.Lock()
-	m.outputs[sessionID] = make([]OutputLine, 0, 1000)
-	m.outputsMu.Unlock()
-
-	go m.runBuilderSession(session, prompt)
-
-	return sessionID, nil
+	return m.StartSession(SessionTypeBuilder, worktreePath, prompt)
 }
 
-// runPlannerSession runs a planner session in a goroutine.
-func (m *Manager) runPlannerSession(session *Session, prompt string) {
+// runSession runs a session in a goroutine, handling both planner and builder types.
+// Both types follow the same lifecycle: start → run turns → idle → follow-up → ...
+func (m *Manager) runSession(session *Session, prompt string) {
 	m.updateSessionStatus(session, StatusRunning)
 
-	// Create semantic event handler for structured output capture
 	eventHandler := newSessionEventHandler(m, session.ID)
 
-	config := planner.Config{
-		Model:        "sonnet",
-		WorkDir:      session.WorktreePath,
-		Simple:       true, // Auto-mode for TUI
-		BuildMode:    planner.BuildModeCurrent,
-		Output:       nil, // Discard text output, capture via events
-		EventHandler: eventHandler,
+	// Create the appropriate runner based on session type
+	var runner sessionRunner
+	switch session.Type {
+	case SessionTypePlanner:
+		pw := planner.NewPlannerWrapper(planner.Config{
+			Model:        "sonnet",
+			WorkDir:      session.WorktreePath,
+			Simple:       true,
+			BuildMode:    planner.BuildModeCurrent,
+			Output:       nil,
+			EventHandler: eventHandler,
+		})
+		runner = &plannerRunner{pw: pw}
+	case SessionTypeBuilder:
+		builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
+			Model:   "sonnet",
+			WorkDir: session.WorktreePath,
+		}, nil, eventHandler)
+		runner = &builderRunner{builder: builder}
 	}
 
-	pw := planner.NewPlannerWrapper(config)
-
-	if err := pw.Start(session.ctx); err != nil {
+	if err := runner.Start(session.ctx); err != nil {
 		m.updateSessionStatus(session, StatusFailed)
 		session.mu.Lock()
 		session.Error = err
@@ -196,99 +218,28 @@ func (m *Manager) runPlannerSession(session *Session, prompt string) {
 		m.addOutput(session.ID, OutputLine{
 			Timestamp: time.Now(),
 			Type:      OutputTypeError,
-			Content:   fmt.Sprintf("Failed to start planner: %v", err),
-		})
-		m.persistSession(session)
-		return
-	}
-	defer func() {
-		pw.Stop()
-		m.persistSession(session)
-	}()
-
-	// Note: "Planner session started" is captured via event handler when renderer.Status() is called
-
-	if err := pw.Run(session.ctx, prompt); err != nil {
-		if session.ctx.Err() != nil {
-			m.updateSessionStatus(session, StatusStopped)
-		} else {
-			m.updateSessionStatus(session, StatusFailed)
-			session.mu.Lock()
-			session.Error = err
-			session.mu.Unlock()
-			m.addOutput(session.ID, OutputLine{
-				Timestamp: time.Now(),
-				Type:      OutputTypeError,
-				Content:   fmt.Sprintf("Planner error: %v", err),
-			})
-		}
-		return
-	}
-
-	m.updateSessionStatus(session, StatusCompleted)
-	// Note: Completion status is captured via event handler
-}
-
-// runBuilderSession runs a builder session in a goroutine.
-// It supports follow-up messages via the follow-up channel.
-func (m *Manager) runBuilderSession(session *Session, prompt string) {
-	m.updateSessionStatus(session, StatusRunning)
-
-	config := yoloswe.BuilderConfig{
-		Model:   "sonnet",
-		WorkDir: session.WorktreePath,
-	}
-
-	// Create semantic event handler for structured output capture
-	eventHandler := newSessionEventHandler(m, session.ID)
-
-	// Use event-aware builder that emits structured events
-	// Text output goes to discard since we capture via events
-	builder := yoloswe.NewBuilderSessionWithEvents(config, nil, eventHandler)
-
-	if err := builder.Start(session.ctx); err != nil {
-		m.updateSessionStatus(session, StatusFailed)
-		session.mu.Lock()
-		session.Error = err
-		session.mu.Unlock()
-		m.addOutput(session.ID, OutputLine{
-			Timestamp: time.Now(),
-			Type:      OutputTypeError,
-			Content:   fmt.Sprintf("Failed to start builder: %v", err),
+			Content:   fmt.Sprintf("Failed to start session: %v", err),
 		})
 		m.persistSession(session)
 		return
 	}
 
-	// Store builder for potential follow-ups
-	m.buildersMu.Lock()
-	m.builders[session.ID] = builder
-	m.buildersMu.Unlock()
-
-	// Create follow-up channel
 	followUpChan := make(chan string, 1)
 	m.followUpChansMu.Lock()
 	m.followUpChans[session.ID] = followUpChan
 	m.followUpChansMu.Unlock()
 
-	// Cleanup on exit
 	defer func() {
-		builder.Stop()
-		m.buildersMu.Lock()
-		delete(m.builders, session.ID)
-		m.buildersMu.Unlock()
+		runner.Stop()
 		m.followUpChansMu.Lock()
 		delete(m.followUpChans, session.ID)
 		m.followUpChansMu.Unlock()
 		m.persistSession(session)
 	}()
 
-	// Note: "Builder session started" is captured via event handler when renderer.Status() is called
-
-	// Run initial turn
 	currentPrompt := prompt
 	for {
-		usage, err := builder.RunTurn(session.ctx, currentPrompt)
+		usage, err := runner.RunTurn(session.ctx, currentPrompt)
 		if err != nil {
 			if session.ctx.Err() != nil {
 				m.updateSessionStatus(session, StatusStopped)
@@ -300,13 +251,12 @@ func (m *Manager) runBuilderSession(session *Session, prompt string) {
 				m.addOutput(session.ID, OutputLine{
 					Timestamp: time.Now(),
 					Type:      OutputTypeError,
-					Content:   fmt.Sprintf("Builder error: %v", err),
+					Content:   fmt.Sprintf("Session error: %v", err),
 				})
 			}
 			return
 		}
 
-		// Update progress with usage
 		if usage != nil {
 			session.Progress.Update(func(p *SessionProgress) {
 				p.TurnCount++
@@ -316,23 +266,17 @@ func (m *Manager) runBuilderSession(session *Session, prompt string) {
 			})
 		}
 
-		// Note: Turn completion is captured via event handler's OnTurnComplete()
-
-		// Transition to idle state, waiting for follow-up
 		m.updateSessionStatus(session, StatusIdle)
 
-		// Wait for follow-up or cancellation
 		select {
 		case <-session.ctx.Done():
 			m.updateSessionStatus(session, StatusStopped)
 			return
 		case followUp, ok := <-followUpChan:
 			if !ok {
-				// Channel closed, complete the session
 				m.updateSessionStatus(session, StatusCompleted)
 				return
 			}
-			// Process follow-up
 			m.updateSessionStatus(session, StatusRunning)
 			m.addOutput(session.ID, OutputLine{
 				Timestamp: time.Now(),
@@ -478,8 +422,8 @@ func (m *Manager) StopSession(id SessionID) error {
 	status := session.Status
 	session.mu.RUnlock()
 
-	if status != StatusRunning && status != StatusPending {
-		return fmt.Errorf("session not running: %s", id)
+	if status != StatusRunning && status != StatusPending && status != StatusIdle {
+		return fmt.Errorf("session not active: %s", id)
 	}
 
 	if session.cancel != nil {

@@ -823,6 +823,57 @@ func parseOptionIndex(input string, numOptions int) int {
 	return idx - 1
 }
 
+// RunTurn sends a follow-up message and processes events until the turn completes.
+// This is intended for follow-up turns after Run() has completed the plan+build lifecycle.
+// It uses a simpler event loop than Run() since the plan→build state machine is no
+// longer relevant for follow-ups.
+func (p *PlannerWrapper) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	_, err := p.session.SendMessage(ctx, message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send message: %w", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case event, ok := <-p.session.Events():
+			if !ok {
+				return nil, fmt.Errorf("session ended unexpectedly")
+			}
+
+			switch e := event.(type) {
+			case claude.TextEvent:
+				p.renderer.Text(e.Text)
+
+			case claude.ThinkingEvent:
+				p.renderer.Thinking(e.Thinking)
+
+			case claude.ToolStartEvent:
+				p.renderer.ToolStart(e.Name, e.ID)
+
+			case claude.ToolCompleteEvent:
+				p.renderer.ToolComplete(e.Name, e.Input)
+
+			case claude.CLIToolResultEvent:
+				p.renderer.ToolResult(e.Content, e.IsError)
+
+			case claude.TurnCompleteEvent:
+				p.renderer.TurnSummary(e)
+				p.buildingStats.Add(e.Usage)
+				if !e.Success {
+					return &e.Usage, fmt.Errorf("turn completed with success=false")
+				}
+				return &e.Usage, nil
+
+			case claude.ErrorEvent:
+				p.renderer.Error(e.Error, e.Context)
+				return nil, fmt.Errorf("error: %v (context: %s)", e.Error, e.Context)
+			}
+		}
+	}
+}
+
 // RecordingPath returns the path to the session recording directory.
 func (p *PlannerWrapper) RecordingPath() string {
 	if p.session != nil {

@@ -11,6 +11,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/bramble/session",
     visibility = ["//bramble:__subpackages__"],
     deps = [
+        "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
         "//yoloswe",
         "//yoloswe/planner",
