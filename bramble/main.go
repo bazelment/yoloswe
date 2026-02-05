@@ -9,14 +9,16 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/bazelment/yoloswe/bramble/app"
-	"github.com/bazelment/yoloswe/bramble/session"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
+
+	"github.com/bazelment/yoloswe/bramble/app"
+	"github.com/bazelment/yoloswe/bramble/session"
 )
 
 var (
-	repoFlag string
+	repoFlag   string
+	editorFlag string
 )
 
 var rootCmd = &cobra.Command{
@@ -32,12 +34,14 @@ One TUI session operates on a single repo at a time. The repo can be:
   - Selected from a menu at startup (if not specified)
 
 Environment:
-  WT_ROOT     Base directory for worktrees (default: ~/worktrees)`,
+  WT_ROOT     Base directory for worktrees (default: ~/worktrees)
+  EDITOR      Editor command for [e]dit (default: code)`,
 	RunE: runTUI,
 }
 
 func init() {
 	rootCmd.Flags().StringVar(&repoFlag, "repo", "", "Repository name to open directly")
+	rootCmd.Flags().StringVar(&editorFlag, "editor", "", "Editor command for [e]dit (default: $EDITOR or 'code')")
 }
 
 func main() {
@@ -110,8 +114,14 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	})
 	defer sessionManager.Close()
 
+	// Determine editor command (priority: --editor flag > $EDITOR env > "code")
+	editor := editorFlag
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+
 	// Create and run TUI
-	model := app.NewModel(ctx, wtRoot, repoName, sessionManager)
+	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

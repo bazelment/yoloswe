@@ -18,11 +18,11 @@ type DropdownItem struct {
 
 // Dropdown represents a dropdown menu component.
 type Dropdown struct {
-	items       []DropdownItem
-	selectedIdx int
-	isOpen      bool
-	width       int
-	maxVisible  int
+	items        []DropdownItem
+	selectedIdx  int
+	isOpen       bool
+	width        int
+	maxVisible   int
 	scrollOffset int
 }
 
@@ -135,7 +135,7 @@ func (d *Dropdown) Count() int {
 	return len(d.items)
 }
 
-// View renders the dropdown header (closed state).
+// ViewHeader renders the dropdown header (closed state).
 func (d *Dropdown) ViewHeader() string {
 	item := d.SelectedItem()
 	if item == nil {
@@ -233,7 +233,7 @@ func (d *Dropdown) ViewOverlay() string {
 	}
 
 	content := d.ViewList()
-	
+
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("12")).
@@ -278,11 +278,4 @@ func truncateVisual(s string, maxCols int) string {
 	}
 	result.WriteString("...")
 	return result.String()
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -4,34 +4,32 @@ import (
 	"context"
 	"strings"
 
-	"github.com/bazelment/yoloswe/wt/taskrouter"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 // TaskModalState represents the current state of the new task flow.
 type TaskModalState int
 
 const (
-	TaskModalHidden TaskModalState = iota
-	TaskModalInput                 // User entering task description
-	TaskModalRouting               // AI is deciding where to route
-	TaskModalProposal              // Showing AI proposal
-	TaskModalAdjust                // User adjusting the proposal
+	TaskModalHidden   TaskModalState = iota
+	TaskModalInput                   // User entering task description
+	TaskModalRouting                 // AI is deciding where to route
+	TaskModalProposal                // Showing AI proposal
+	TaskModalAdjust                  // User adjusting the proposal
 )
 
 // TaskModal handles the "new task" flow UI.
 type TaskModal struct {
-	state     TaskModalState
-	textArea  *TextArea        // Multi-line input for task description
-	proposal  *taskrouter.RouteProposal
-	err       error
-
-	// For adjustment
+	err            error
+	textArea       *TextArea
+	proposal       *taskrouter.RouteProposal
 	adjustWorktree string
 	adjustParent   string
-
-	width  int
-	height int
+	state          TaskModalState
+	width          int
+	height         int
 }
 
 // NewTaskModal creates a new task modal.
@@ -156,7 +154,7 @@ func (m *TaskModal) View() string {
 	case TaskModalInput:
 		content.WriteString(titleStyle.Render("New task — Describe what you want to work on:"))
 		content.WriteString("\n")
-		
+
 		// Render the text area (includes buttons)
 		m.textArea.SetWidth(boxWidth - 6)
 		m.textArea.SetPrompt("")

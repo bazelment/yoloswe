@@ -14,34 +14,24 @@ import (
 
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct {
-	// RepoName is the current repository name for persistence.
+	Store    *Store
 	RepoName string
-	// Store is the persistence layer. If nil, sessions are not persisted.
-	Store *Store
 }
 
 // Manager handles multiple concurrent sessions.
 type Manager struct {
-	config ManagerConfig
-
-	sessions map[SessionID]*Session
-	events   chan interface{} // SessionEvent, SessionOutputEvent, SessionStateChangeEvent
-	mu       sync.RWMutex
-
-	// Output buffer per session (last N lines)
-	outputs   map[SessionID][]OutputLine
-	outputsMu sync.RWMutex
-
-	// Active builders for follow-up support
-	builders   map[SessionID]*yoloswe.BuilderSession
-	buildersMu sync.RWMutex
-
-	// Follow-up channels per session
+	config          ManagerConfig
+	ctx             context.Context
+	sessions        map[SessionID]*Session
+	events          chan interface{}
+	outputs         map[SessionID][]OutputLine
+	builders        map[SessionID]*yoloswe.BuilderSession
 	followUpChans   map[SessionID]chan string
+	cancel          context.CancelFunc
+	mu              sync.RWMutex
+	outputsMu       sync.RWMutex
+	buildersMu      sync.RWMutex
 	followUpChansMu sync.RWMutex
-
-	ctx    context.Context
-	cancel context.CancelFunc
 }
 
 // NewManager creates a new session manager.
@@ -101,7 +91,7 @@ func generateTitle(prompt string, maxLen int) string {
 		}
 		b.WriteString(w)
 	}
-	if b.Len() == 0 && len(prompt) > 0 {
+	if b.Len() == 0 && prompt != "" {
 		if len(prompt) > maxLen-3 {
 			return prompt[:maxLen-3] + "..."
 		}

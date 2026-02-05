@@ -42,9 +42,9 @@ func main() {
 
 // SessionMessage represents a single message from the session JSONL file.
 type SessionMessage struct {
-	Message   json.RawMessage `json:"message"`
 	Timestamp string          `json:"timestamp"`
 	Direction string          `json:"direction"`
+	Message   json.RawMessage `json:"message"`
 }
 
 // StreamEvent represents a stream event from Claude.
@@ -57,25 +57,25 @@ type StreamEvent struct {
 
 // ContentBlockStart represents a content_block_start event.
 type ContentBlockStart struct {
+	ContentBlock ContentBlock `json:"content_block"`
 	Type         string       `json:"type"`
 	Index        int          `json:"index"`
-	ContentBlock ContentBlock `json:"content_block"`
 }
 
 // ContentBlock represents a content block.
 type ContentBlock struct {
+	Input any    `json:"input"`
 	Type  string `json:"type"`
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Text  string `json:"text"`
-	Input any    `json:"input"`
 }
 
 // ContentBlockDelta represents a content_block_delta event.
 type ContentBlockDelta struct {
+	Delta DeltaBlock `json:"delta"`
 	Type  string     `json:"type"`
 	Index int        `json:"index"`
-	Delta DeltaBlock `json:"delta"`
 }
 
 // DeltaBlock represents the delta in a content_block_delta event.

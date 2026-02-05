@@ -3,21 +3,22 @@ package app
 import (
 	"strings"
 
-	"github.com/bazelment/yoloswe/wt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bazelment/yoloswe/wt"
 )
 
 // RepoPickerModel is the model for the repo selection screen.
 type RepoPickerModel struct {
-	wtRoot       string
-	repos        []string
-	selectedIdx  int
-	width        int
-	height       int
-	loading      bool
-	err          error
-	chosenRepo   string // Set when user makes a selection
+	err         error
+	wtRoot      string
+	chosenRepo  string
+	repos       []string
+	selectedIdx int
+	width       int
+	height      int
+	loading     bool
 }
 
 // NewRepoPickerModel creates a new repo picker model.

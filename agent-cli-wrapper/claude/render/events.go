@@ -37,13 +37,13 @@ type EventHandler interface {
 // Useful as a default or for testing.
 type NoOpEventHandler struct{}
 
-func (NoOpEventHandler) OnText(string)                                                     {}
-func (NoOpEventHandler) OnThinking(string)                                                 {}
-func (NoOpEventHandler) OnToolStart(string, string, map[string]interface{})                {}
-func (NoOpEventHandler) OnToolComplete(string, string, map[string]interface{}, any, bool)  {}
-func (NoOpEventHandler) OnTurnComplete(int, bool, int64, float64)                          {}
-func (NoOpEventHandler) OnStatus(string)                                                   {}
-func (NoOpEventHandler) OnError(error, string)                                             {}
+func (NoOpEventHandler) OnText(string)                                                    {}
+func (NoOpEventHandler) OnThinking(string)                                                {}
+func (NoOpEventHandler) OnToolStart(string, string, map[string]interface{})               {}
+func (NoOpEventHandler) OnToolComplete(string, string, map[string]interface{}, any, bool) {}
+func (NoOpEventHandler) OnTurnComplete(int, bool, int64, float64)                         {}
+func (NoOpEventHandler) OnStatus(string)                                                  {}
+func (NoOpEventHandler) OnError(error, string)                                            {}
 
 // Ensure NoOpEventHandler implements EventHandler
 var _ EventHandler = NoOpEventHandler{}

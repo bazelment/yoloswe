@@ -18,15 +18,15 @@ const (
 // TextArea is a multi-line text input component with word wrapping and focusable buttons.
 type TextArea struct {
 	value        string
-	cursorPos    int // Cursor position in the string
+	prompt       string
+	sendLabel    string
+	cancelLabel  string
+	cursorPos    int
 	width        int
 	maxHeight    int
 	minHeight    int
-	prompt       string
-	scrollOffset int // For vertical scrolling
+	scrollOffset int
 	focus        TextAreaFocus
-	sendLabel    string
-	cancelLabel  string
 }
 
 // NewTextArea creates a new multi-line text input.
@@ -257,7 +257,7 @@ func (t *TextArea) wrapLine(line string, width int) []string {
 		wrapped = append(wrapped, line[:breakAt])
 		line = line[breakAt:]
 	}
-	if len(line) > 0 {
+	if line != "" {
 		wrapped = append(wrapped, line)
 	}
 	return wrapped
@@ -278,14 +278,14 @@ func (t *TextArea) View() string {
 	// Render lines with word wrap
 	lines := t.getLines()
 	cursorRow, cursorCol := t.getCursorRowCol(lines)
-	
+
 	var displayLines []string
 	cursorDisplayRow := 0
 	cursorDisplayCol := cursorCol
 
 	for i, line := range lines {
 		wrappedLines := t.wrapLine(line, contentWidth)
-		
+
 		// Track cursor position in wrapped lines
 		if i == cursorRow {
 			// Find which wrapped line the cursor is on
@@ -299,7 +299,7 @@ func (t *TextArea) View() string {
 				col -= len(wl)
 			}
 		}
-		
+
 		displayLines = append(displayLines, wrappedLines...)
 	}
 
@@ -325,21 +325,21 @@ func (t *TextArea) View() string {
 
 	for i := t.scrollOffset; i < endIdx; i++ {
 		line := displayLines[i]
-		
+
 		// Show cursor on current line
 		if i == cursorDisplayRow {
 			if cursorDisplayCol <= len(line) {
 				line = line[:cursorDisplayCol] + "█" + line[cursorDisplayCol:]
 			} else {
-				line = line + "█"
+				line += "█"
 			}
 		}
-		
+
 		// Pad line to width
 		for len(line) < contentWidth {
 			line += " "
 		}
-		
+
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
@@ -380,4 +380,3 @@ func (t *TextArea) View() string {
 
 	return boxStyle.Render(content)
 }
-

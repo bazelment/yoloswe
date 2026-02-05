@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelment/yoloswe/bramble/session"
-	"github.com/bazelment/yoloswe/wt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 // Test session output rendering with various output types.
@@ -143,10 +144,10 @@ func TestOutputModelReplay(t *testing.T) {
 
 func TestFormatOutputLine(t *testing.T) {
 	tests := []struct {
-		name     string
 		line     session.OutputLine
-		width    int
+		name     string
 		contains string
+		width    int
 	}{
 		{
 			name:     "error line",
@@ -220,11 +221,11 @@ func TestToolStateRendering(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name      string
 		line      session.OutputLine
-		width     int
+		name      string
 		wantIcon  string
 		wantState string
+		width     int
 	}{
 		{
 			name: "running tool shows spinner and elapsed time",
@@ -308,11 +309,11 @@ func TestToolStateRendering(t *testing.T) {
 
 func TestFormatToolDisplay(t *testing.T) {
 	tests := []struct {
+		input    map[string]interface{}
 		name     string
 		toolName string
-		input    map[string]interface{}
-		maxLen   int
 		want     string
+		maxLen   int
 	}{
 		{
 			name:     "Read tool shows file path",
@@ -478,7 +479,7 @@ func TestRenderCenterScrolling(t *testing.T) {
 	assert.Equal(t, 50, len(allLines), "should have 50 output lines in manager")
 
 	// Create a Model that views this session
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 20 // Small terminal: centerHeight = 20-1-1-0-2 = 16
 	m.viewingSessionID = sessID
@@ -550,7 +551,7 @@ func TestRenderCenterFewLines(t *testing.T) {
 		})
 	}
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 30
 	m.viewingSessionID = sessID
@@ -586,7 +587,7 @@ func TestRenderCenterStreaming(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 20 // centerHeight = 16, outputHeight = 11
 	m.viewingSessionID = sessID
@@ -649,7 +650,7 @@ func TestRenderCenterAutoScrollStaysAtBottom(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 15 // centerHeight = 11, outputHeight = 6
 	m.viewingSessionID = sessID
@@ -707,7 +708,7 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 20
 	m.viewingSessionID = sessID
@@ -729,11 +730,11 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 
 	// Add a tool call after text — this should be a separate line
 	mgr.AddOutputLine(sessID, session.OutputLine{
-		Type:      session.OutputTypeToolStart,
-		ToolName:  "Read",
-		ToolID:    "t1",
-		ToolState: session.ToolStateComplete,
-		ToolInput: map[string]interface{}{"file_path": "/test.go"},
+		Type:       session.OutputTypeToolStart,
+		ToolName:   "Read",
+		ToolID:     "t1",
+		ToolState:  session.ToolStateComplete,
+		ToolInput:  map[string]interface{}{"file_path": "/test.go"},
 		DurationMs: 100,
 	})
 
@@ -784,7 +785,7 @@ func TestScrollViaUpdate(t *testing.T) {
 		})
 	}
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 20
 	m.viewingSessionID = sessID
@@ -864,11 +865,11 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 
 	// Add a tool call
 	mgr.AddOutputLine(sessID, session.OutputLine{
-		Type:      session.OutputTypeToolStart,
-		ToolName:  "Read",
-		ToolID:    "t1",
-		ToolState: session.ToolStateComplete,
-		ToolInput: map[string]interface{}{"file_path": "/test.go"},
+		Type:       session.OutputTypeToolStart,
+		ToolName:   "Read",
+		ToolID:     "t1",
+		ToolState:  session.ToolStateComplete,
+		ToolInput:  map[string]interface{}{"file_path": "/test.go"},
 		DurationMs: 100,
 	})
 
@@ -876,7 +877,7 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 	lines := mgr.GetSessionOutput(sessID)
 	assert.Equal(t, 2, len(lines), "should have 2 logical OutputLines")
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", mgr)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr)
 	m.width = 80
 	m.height = 15 // Small screen: centerHeight=11, outputHeight=6
 	m.viewingSessionID = sessID
@@ -913,8 +914,8 @@ func TestGenerateDropdownTitle(t *testing.T) {
 	tests := []struct {
 		name   string
 		prompt string
-		maxLen int
 		want   string
+		maxLen int
 	}{
 		{
 			name:   "short prompt",

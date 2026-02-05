@@ -492,8 +492,8 @@ func TestGenerateTitle(t *testing.T) {
 	tests := []struct {
 		name   string
 		prompt string
-		maxLen int
 		want   string
+		maxLen int
 	}{
 		{
 			name:   "short prompt fits entirely",

@@ -5,9 +5,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/bazelment/yoloswe/bramble/session"
 )
 
 // Styles
@@ -34,9 +35,6 @@ var (
 	statusBarStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("236")).
 			Foreground(lipgloss.Color("242"))
-
-	inputStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("14"))
 
 	runningStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("10"))
@@ -96,9 +94,7 @@ func (m Model) View() string {
 	centerBordered := borderStyle.Width(m.width).Height(centerHeight).Render(center)
 
 	// Build layout
-	var parts []string
-	parts = append(parts, topBar)
-	parts = append(parts, centerBordered)
+	parts := []string{topBar, centerBordered}
 
 	// Add input area if in input mode
 	if m.inputMode {
@@ -159,11 +155,11 @@ func (m Model) renderTopBar() string {
 		if sess.Type == session.SessionTypeBuilder {
 			icon = "🔨"
 		}
-		shortID := string(sess.ID)
-		if len(shortID) > 12 {
-			shortID = shortID[:12]
+		title := sess.Title
+		if title == "" {
+			title = string(sess.ID)[:12]
 		}
-		right = fmt.Sprintf("%s %s %s", icon, shortID, statusIcon(sess.Status))
+		right = fmt.Sprintf("%s %s %s", icon, title, statusIcon(sess.Status))
 	} else {
 		right = dimStyle.Render("(no session)")
 	}
@@ -229,7 +225,11 @@ func (m Model) renderCenter(width, height int) string {
 	if info.Type == session.SessionTypeBuilder {
 		typeIcon = "🔨"
 	}
-	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, info.Type, info.ID, statusIcon(info.Status))
+	title := info.Title
+	if title == "" {
+		title = string(info.ID)
+	}
+	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, info.Type, title, statusIcon(info.Status))
 	if info.Model != "" {
 		headerLine += "  " + dimStyle.Render("["+info.Model+"]")
 	}
@@ -241,7 +241,7 @@ func (m Model) renderCenter(width, height int) string {
 	b.WriteString("\n")
 
 	// Prompt
-	promptLine := fmt.Sprintf("  \"%s\"", truncate(info.Prompt, width-8))
+	promptLine := fmt.Sprintf("  %q", truncate(info.Prompt, width-8))
 	b.WriteString(dimStyle.Render(promptLine))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", width-2))
@@ -417,7 +417,7 @@ func (m Model) renderHistorySession(width, height int) string {
 	b.WriteString("\n")
 
 	// Prompt
-	promptLine := fmt.Sprintf("  \"%s\"", truncate(data.Prompt, width-8))
+	promptLine := fmt.Sprintf("  %q", truncate(data.Prompt, width-8))
 	b.WriteString(dimStyle.Render(promptLine))
 	b.WriteString("\n")
 
@@ -549,7 +549,7 @@ func (m Model) renderStatusBar() string {
 			hints = []string{"[↑/↓]scroll", "[Alt-W]worktree", "[Alt-S]session", "[s]top", "[q]uit"}
 		}
 	} else {
-		hints = []string{"[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt", "[t]ask", "[s]top", "[q]uit"}
+		hints = []string{"[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt", "[t]ask", "[s]top", "[q]uit"}
 	}
 
 	left := strings.Join(hints, "  ")
