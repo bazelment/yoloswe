@@ -598,8 +598,10 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	return nil
 }
 
-// Sync fetches and rebases all worktrees, handling cascading branches.
-func (m *Manager) Sync(ctx context.Context) error {
+// Sync fetches the latest changes and rebases worktrees.
+// If branch is non-empty, only that worktree is synced.
+// If branch is empty, all worktrees in the repo are synced.
+func (m *Manager) Sync(ctx context.Context, branch string) error {
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return ErrRepoNotInitialized
@@ -632,6 +634,21 @@ func (m *Manager) Sync(ctx context.Context) error {
 
 	// Build dependency graph and sort topologically
 	orderedWorktrees := m.buildDependencyOrder(ctx, worktrees)
+
+	// If syncing a single branch, filter to just that worktree
+	if branch != "" {
+		var filtered []Worktree
+		for _, wt := range orderedWorktrees {
+			if wt.Branch == branch {
+				filtered = append(filtered, wt)
+				break
+			}
+		}
+		if len(filtered) == 0 {
+			return fmt.Errorf("worktree for branch %q not found", branch)
+		}
+		orderedWorktrees = filtered
+	}
 
 	// Track failed branches to skip their children
 	failedBranches := make(map[string]bool)
@@ -683,7 +700,7 @@ func (m *Manager) Sync(ctx context.Context) error {
 		}
 
 		m.output.Info(fmt.Sprintf("Rebasing %s onto %s...", wt.Branch, rebaseTarget))
-		if _, err := m.git.Run(ctx, []string{"rebase", rebaseTarget}, wt.Path); err != nil {
+		if _, err := m.git.Run(ctx, []string{"rebase", "--autostash", rebaseTarget}, wt.Path); err != nil {
 			m.output.Error(fmt.Sprintf("Failed to rebase %s - resolve conflicts manually:\n  cd %s\n  git rebase --continue  # after fixing conflicts\n  git rebase --abort      # to cancel",
 				wt.Branch, wt.Path))
 			failedBranches[wt.Branch] = true

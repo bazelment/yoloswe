@@ -557,21 +557,24 @@ func init() {
 // syncCmd: wt sync [-a]
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Fetch and rebase all worktrees",
-	Long: `Sync fetches the latest changes and rebases all worktrees.
+	Short: "Fetch and rebase current worktree",
+	Long: `Sync fetches the latest changes and rebases the current worktree.
+
+By default, only the worktree you're currently in is synced.
+Use --all to sync all worktrees in the current repository.
+Use --all-repos to sync all worktrees across all repositories.
 
 For cascading branches (created with --from), sync automatically detects
 when a parent branch has been merged and rebases onto the default branch.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		allRepos, _ := cmd.Flags().GetBool("all")
+		syncAll, _ := cmd.Flags().GetBool("all")
+		allRepos, _ := cmd.Flags().GetBool("all-repos")
 		ctx := context.Background()
 		output := wt.DefaultOutput()
 
-		// Get list of repos to process
-		var repos []string
+		// --all-repos: sync every repo in wtRoot
 		if allRepos {
-			var err error
-			repos, err = wt.ListAllRepos(wtRoot)
+			repos, err := wt.ListAllRepos(wtRoot)
 			if err != nil {
 				return err
 			}
@@ -579,35 +582,51 @@ when a parent branch has been merged and rebases onto the default branch.`,
 				output.Info("No repositories found")
 				return nil
 			}
-		} else {
-			m, err := getManager()
-			if err != nil {
-				return err
-			}
-			repoName, _ := filepath.Rel(wtRoot, m.RepoDir())
-			repos = []string{repoName}
-		}
-
-		for i, repoName := range repos {
-			if allRepos {
+			for i, repoName := range repos {
 				if i > 0 {
 					fmt.Println()
 				}
 				fmt.Printf("%s\n", output.Colorize(wt.ColorBold, repoName))
+				m := wt.NewManager(wtRoot, repoName)
+				if err := m.Sync(ctx, ""); err != nil {
+					output.Error(fmt.Sprintf("Failed to sync %s: %v", repoName, err))
+				}
 			}
-
-			m := wt.NewManager(wtRoot, repoName)
-			if err := m.Sync(ctx); err != nil {
-				output.Error(fmt.Sprintf("Failed to sync %s: %v", repoName, err))
-			}
+			return nil
 		}
 
-		return nil
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		// --all: sync all worktrees in the current repo
+		if syncAll {
+			return m.Sync(ctx, "")
+		}
+
+		// Default: sync only the current worktree
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get current directory: %w", err)
+		}
+		git := &wt.DefaultGitRunner{}
+		result, err := git.Run(ctx, []string{"branch", "--show-current"}, cwd)
+		if err != nil {
+			return fmt.Errorf("not in a git worktree: %w", err)
+		}
+		branch := strings.TrimSpace(result.Stdout)
+		if branch == "" {
+			return fmt.Errorf("not on a branch (detached HEAD?)")
+		}
+
+		return m.Sync(ctx, branch)
 	},
 }
 
 func init() {
-	syncCmd.Flags().BoolP("all", "a", false, "Sync all repositories")
+	syncCmd.Flags().BoolP("all", "a", false, "Sync all worktrees in the current repository")
+	syncCmd.Flags().Bool("all-repos", false, "Sync all worktrees across all repositories")
 }
 
 // mergeCmd: wt merge [--keep] [--squash|--rebase|--merge]

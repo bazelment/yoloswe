@@ -346,7 +346,7 @@ func TestSyncRebasesWorktrees(t *testing.T) {
 
 	// Sync - should rebase local onto origin/main
 	t.Log("Calling Sync() to rebase worktrees onto origin/main")
-	err = repo.manager.Sync(repo.ctx)
+	err = repo.manager.Sync(repo.ctx, "")
 	require.NoError(t, err)
 
 	// After sync: feature-a should have the main update (rebased onto origin/main)
@@ -388,7 +388,7 @@ func TestSyncMultipleWorktrees(t *testing.T) {
 
 	// Sync - feature-a rebases onto origin/main, feature-b rebases onto feature-a
 	t.Log("Calling Sync() to rebase all worktrees")
-	err = repo.manager.Sync(repo.ctx)
+	err = repo.manager.Sync(repo.ctx, "")
 	require.NoError(t, err)
 
 	// After sync:
@@ -435,7 +435,7 @@ func TestSyncConflictHandling(t *testing.T) {
 
 	// Sync should not panic - it handles the conflict gracefully
 	t.Log("Calling Sync() - expecting conflict during rebase onto origin/main")
-	_ = repo.manager.Sync(repo.ctx)
+	_ = repo.manager.Sync(repo.ctx, "")
 
 	// Worktree should be in rebase state (conflict needs manual resolution)
 	t.Log("Verifying feature-a is in rebase state due to conflict")
@@ -482,7 +482,7 @@ func TestSyncSkipsChildrenOfFailedBranch(t *testing.T) {
 
 	// Sync - feature-a will fail due to conflict with main, feature-b should be skipped
 	t.Log("Calling Sync() - feature-a will conflict with main, feature-b should be skipped")
-	_ = repo.manager.Sync(repo.ctx)
+	_ = repo.manager.Sync(repo.ctx, "")
 
 	// Feature-a should be in rebase state (conflict)
 	t.Log("Verifying feature-a is in rebase state")
@@ -539,7 +539,7 @@ func TestSyncParentBranchDeleted(t *testing.T) {
 
 	// Sync - feature-b should detect parent is gone and rebase onto main
 	t.Log("Calling Sync() - feature-b should rebase onto main (parent gone)")
-	err = repo.manager.Sync(repo.ctx)
+	err = repo.manager.Sync(repo.ctx, "")
 	require.NoError(t, err)
 
 	// Feature-b should have the main update (rebased onto main, not feature-a)
@@ -585,7 +585,7 @@ func TestSyncOpenedBranchRebasesOntoMain(t *testing.T) {
 
 	// Sync - should rebase foo onto origin/main
 	t.Log("Calling Sync() to rebase foo onto origin/main")
-	err = repo.manager.Sync(repo.ctx)
+	err = repo.manager.Sync(repo.ctx, "")
 	require.NoError(t, err)
 
 	// After sync: foo should have the main update (rebased onto origin/main)
@@ -630,7 +630,7 @@ func TestSyncCascadingWithRemovedParentWorktree(t *testing.T) {
 
 	// Sync - feature-b should rebase onto origin/feature-a (not stale local ref)
 	t.Log("Calling Sync() - feature-b should rebase onto origin/feature-a")
-	err = repo.manager.Sync(repo.ctx)
+	err = repo.manager.Sync(repo.ctx, "")
 	require.NoError(t, err)
 
 	// After sync: feature-b should have the parent update from origin/feature-a
