@@ -1140,19 +1140,19 @@ func (m *Manager) CreatePR(ctx context.Context, opts PROptions) (*PRResult, erro
 // WorktreeInfo contains extended information about a worktree.
 // This combines Worktree data with branch metadata like goals and parent.
 type WorktreeInfo struct {
+	LastCommitTime time.Time
+	Goal           string
+	Parent         string
+	PRState        string
+	PRURL          string
+	LastCommitMsg  string
 	Worktree       Worktree
-	Goal           string    // Branch goal (if set)
-	Parent         string    // Parent branch (for cascading branches)
-	PRState        string    // PR state (OPEN, MERGED, CLOSED, "")
-	PRURL          string    // PR URL
-	PRNumber       int       // PR number
-	IsDirty        bool      // Has uncommitted changes
-	IsAhead        bool      // Has unpushed commits
-	IsMerged       bool      // PR has been merged
-	Ahead          int       // Commits ahead of remote
-	Behind         int       // Commits behind remote
-	LastCommitTime time.Time // Time of last commit
-	LastCommitMsg  string    // Last commit message
+	Ahead          int
+	Behind         int
+	PRNumber       int
+	IsMerged       bool
+	IsAhead        bool
+	IsDirty        bool
 }
 
 // GetWorktreeByBranch returns a Worktree by branch name.

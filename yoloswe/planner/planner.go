@@ -153,48 +153,18 @@ func (m BuildMode) IsValid() bool {
 
 // Config holds planner configuration.
 type Config struct {
-	// Model to use: "haiku", "sonnet", "opus"
-	Model string
-
-	// WorkDir is the working directory for file operations.
-	WorkDir string
-
-	// RecordingDir is the directory for session recordings.
-	RecordingDir string
-
-	// SystemPrompt overrides the default system prompt.
-	SystemPrompt string
-
-	// Prompt is the initial prompt, used for generating output filenames in simple mode.
-	Prompt string
-
-	// BuildMode controls what happens after planning completes in simple mode.
-	// "current" = execute in current session, "new" = execute in new session.
-	BuildMode BuildMode
-
-	// ExternalBuilderPath is the path to an external builder executable.
-	// When set with BuildMode "new", the external builder is launched instead
-	// of starting a fresh claude session.
+	Output              io.Writer
+	EventHandler        render.EventHandler
+	Model               string
+	WorkDir             string
+	RecordingDir        string
+	SystemPrompt        string
+	Prompt              string
+	BuildMode           BuildMode
 	ExternalBuilderPath string
-
-	// BuildModel is the model to use for build phase.
-	// If empty, uses Model for both planning and building.
-	// When set, planning uses Model and building uses BuildModel.
-	BuildModel string
-
-	// Verbose enables detailed tool result output. When false, only errors are shown.
-	Verbose bool
-
-	// Simple enables non-interactive mode: auto-answers questions with first option
-	// and exports plan to markdown on completion.
-	Simple bool
-
-	// Output is the writer for rendered output. If nil, defaults to os.Stdout.
-	Output io.Writer
-
-	// EventHandler receives semantic events for TUI integration.
-	// When set, the renderer emits structured events for tool calls, text blocks, etc.
-	EventHandler render.EventHandler
+	BuildModel          string
+	Verbose             bool
+	Simple              bool
 }
 
 // SessionStats tracks cumulative token usage and cost for a session phase.

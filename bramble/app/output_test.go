@@ -144,9 +144,9 @@ func TestOutputModelReplay(t *testing.T) {
 
 func TestFormatOutputLine(t *testing.T) {
 	tests := []struct {
-		line     session.OutputLine
 		name     string
 		contains string
+		line     session.OutputLine
 		width    int
 	}{
 		{
@@ -221,10 +221,10 @@ func TestToolStateRendering(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		line      session.OutputLine
 		name      string
 		wantIcon  string
 		wantState string
+		line      session.OutputLine
 		width     int
 	}{
 		{
@@ -1013,13 +1013,13 @@ func TestFormatWorktreeStatus(t *testing.T) {
 func TestTimeAgo(t *testing.T) {
 	tests := []struct {
 		name string
-		ago  time.Duration
 		want string
+		ago  time.Duration
 	}{
-		{"just now", 10 * time.Second, "just now"},
-		{"minutes", 5 * time.Minute, "5m ago"},
-		{"hours", 3 * time.Hour, "3h ago"},
-		{"days", 48 * time.Hour, "2d ago"},
+		{"just now", "just now", 10 * time.Second},
+		{"minutes", "5m ago", 5 * time.Minute},
+		{"hours", "3h ago", 3 * time.Hour},
+		{"days", "2d ago", 48 * time.Hour},
 	}
 
 	for _, tc := range tests {

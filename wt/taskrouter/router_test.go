@@ -22,9 +22,9 @@ func TestNewWithModel(t *testing.T) {
 
 func TestParseRouteResponse(t *testing.T) {
 	tests := []struct {
+		want     *RouteProposal
 		name     string
 		response string
-		want     *RouteProposal
 		wantErr  bool
 	}{
 		{
