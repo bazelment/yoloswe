@@ -190,7 +190,8 @@ func (m *Model) updateSessionDropdown() {
 
 	// Add live sessions first
 	sessions := m.currentWorktreeSessions()
-	for _, sess := range sessions {
+	for i := range sessions {
+		sess := &sessions[i]
 		// Type icon
 		icon := "📋" // planner
 		if sess.Type == session.SessionTypeBuilder {
@@ -229,8 +230,8 @@ func (m *Model) updateSessionDropdown() {
 
 	// Add history sessions (that aren't already in live sessions)
 	liveIDs := make(map[string]bool)
-	for _, sess := range sessions {
-		liveIDs[string(sess.ID)] = true
+	for i := range sessions {
+		liveIDs[string(sessions[i].ID)] = true
 	}
 	for _, hist := range historySessions {
 		if liveIDs[string(hist.ID)] {

@@ -253,8 +253,8 @@ func (m Model) renderCenter(width, height int) string {
 	// Pre-render all output lines into visual lines for proper scrolling.
 	// Each OutputLine may produce multiple visual lines (e.g., markdown text).
 	var allVisualLines []string
-	for _, line := range lines {
-		formatted := m.formatOutputLine(line, width)
+	for i := range lines {
+		formatted := m.formatOutputLine(lines[i], width)
 		visualLines := strings.Split(formatted, "\n")
 		allVisualLines = append(allVisualLines, visualLines...)
 	}
