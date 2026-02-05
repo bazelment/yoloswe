@@ -27,17 +27,14 @@ const (
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
 	out          io.Writer
+	eventHandler EventHandler
 	lastToolName string
-	lastToolID   string // Track tool ID for matching start/complete events
+	lastToolID   string
+	textBuffer   strings.Builder
 	mu           sync.Mutex
 	verbose      bool
 	noColor      bool
 	inToolOutput bool
-
-	// Event handler for semantic event capture (optional)
-	eventHandler EventHandler
-	// Text buffer for accumulating streaming text until semantic boundaries
-	textBuffer strings.Builder
 }
 
 // NewRenderer creates a new renderer writing to the given output.

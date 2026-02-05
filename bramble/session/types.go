@@ -116,19 +116,19 @@ type SessionProgressSnapshot struct {
 
 // SessionInfo provides a snapshot of session state for display.
 type SessionInfo struct {
-	ID           SessionID
-	Type         SessionType
-	Status       SessionStatus
+	CreatedAt    time.Time
+	CompletedAt  *time.Time
+	StartedAt    *time.Time
 	WorktreePath string
 	WorktreeName string
 	Prompt       string
 	Title        string
 	Model        string
-	Progress     SessionProgressSnapshot
-	CreatedAt    time.Time
-	StartedAt    *time.Time
-	CompletedAt  *time.Time
+	ID           SessionID
+	Status       SessionStatus
+	Type         SessionType
 	ErrorMsg     string
+	Progress     SessionProgressSnapshot
 }
 
 // ToInfo converts a Session to SessionInfo for safe display.
@@ -213,8 +213,8 @@ const (
 
 // SessionOutputEvent is sent when session produces output.
 type SessionOutputEvent struct {
-	Line      OutputLine
 	SessionID SessionID
+	Line      OutputLine
 }
 
 // SessionStateChangeEvent is sent when session state changes.

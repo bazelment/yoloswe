@@ -35,27 +35,23 @@ const (
 
 // WorktreeInfo provides context about an existing worktree for routing decisions.
 type WorktreeInfo struct {
-	Name       string // Branch/worktree name
-	Path       string // Filesystem path
-	Goal       string // Branch goal description (if set)
-	Parent     string // Parent branch (for cascading branches)
-	IsDirty    bool   // Has uncommitted changes
-	IsAhead    bool   // Has unpushed commits
-	IsMerged   bool   // PR has been merged
-	PRState    string // PR state (open, merged, closed, "")
-	LastCommit string // Last commit message
+	Name       string
+	Path       string
+	Goal       string
+	Parent     string
+	PRState    string
+	LastCommit string
+	IsDirty    bool
+	IsAhead    bool
+	IsMerged   bool
 }
 
 // RouteRequest contains the input for a routing decision.
 type RouteRequest struct {
-	// Prompt is the task description from the user.
-	Prompt string
-	// Worktrees is the list of existing worktrees in the repo.
-	Worktrees []WorktreeInfo
-	// CurrentWT is the currently selected worktree (provides context).
+	Prompt    string
 	CurrentWT string
-	// RepoName is the repository name.
-	RepoName string
+	RepoName  string
+	Worktrees []WorktreeInfo
 }
 
 // RouteProposal is the AI's recommendation for where to run a task.
@@ -84,10 +80,10 @@ type Config struct {
 
 // Router routes tasks to worktrees using AI.
 type Router struct {
-	config   Config
-	client   *codex.Client
 	output   io.Writer
+	client   *codex.Client
 	renderer *render.Renderer
+	config   Config
 }
 
 // New creates a new task router.

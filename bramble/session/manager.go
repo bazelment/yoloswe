@@ -20,7 +20,6 @@ type ManagerConfig struct {
 
 // Manager handles multiple concurrent sessions.
 type Manager struct {
-	config          ManagerConfig
 	ctx             context.Context
 	sessions        map[SessionID]*Session
 	events          chan interface{}
@@ -28,6 +27,7 @@ type Manager struct {
 	builders        map[SessionID]*yoloswe.BuilderSession
 	followUpChans   map[SessionID]chan string
 	cancel          context.CancelFunc
+	config          ManagerConfig
 	mu              sync.RWMutex
 	outputsMu       sync.RWMutex
 	buildersMu      sync.RWMutex
