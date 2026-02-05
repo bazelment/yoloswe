@@ -1,4 +1,4 @@
-package yoloswe
+package integration
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/testutil"
 )
 
@@ -17,7 +18,7 @@ func TestBuildCommand_SuccessfulCompletion(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
 
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -29,7 +30,7 @@ func TestBuildCommand_SuccessfulCompletion(t *testing.T) {
 		Goal:           "Create a simple hello.go file with a Hello function",
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -62,7 +63,7 @@ func TestBuildCommand_ReviewerFeedbackLoop(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
 
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -74,7 +75,7 @@ func TestBuildCommand_ReviewerFeedbackLoop(t *testing.T) {
 		Goal:           "Create a Go function with tests",
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -119,7 +120,7 @@ func TestBuildCommand_MultipleIterations(t *testing.T) {
 	workDir := t.TempDir()
 	testutil.InitGitRepo(t, workDir)
 
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -131,7 +132,7 @@ func TestBuildCommand_MultipleIterations(t *testing.T) {
 		Goal:           "Create a calculator with multiple operations",
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -174,7 +175,7 @@ func Divide(a, b int) int {
 		t.Fatalf("failed to create test file: %v", err)
 	}
 
-	config := Config{
+	config := yoloswe.Config{
 		BuilderModel:   "haiku",
 		ReviewerModel:  "gpt-5.2-codex",
 		BuilderWorkDir: workDir,
@@ -187,7 +188,7 @@ func Divide(a, b int) int {
 		Goal:           "Review and fix any issues in the calculator code",
 	}
 
-	swe := New(config)
+	swe := yoloswe.New(config)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 

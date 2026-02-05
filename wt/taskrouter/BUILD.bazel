@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "taskrouter",
+    srcs = ["router.go"],
+    embedsrcs = ["prompt.go.tmpl"],
+    importpath = "github.com/bazelment/yoloswe/wt/taskrouter",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/codex/render",
+    ],
+)
+
+go_test(
+    name = "taskrouter_test",
+    srcs = ["router_test.go"],
+    embed = [":taskrouter"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+go_test(
+    name = "integration_test",
+    srcs = ["router_integration_test.go"],
+    embed = [":taskrouter"],
+    tags = [
+        "integration",
+        "local",  # Need to access home directory for codex
+        "manual",
+    ],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

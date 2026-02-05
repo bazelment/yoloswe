@@ -1119,3 +1119,93 @@ func (m *Manager) CreatePR(ctx context.Context, opts PROptions) (*PRResult, erro
 		Base:   baseBranch,
 	}, nil
 }
+
+// WorktreeInfo contains extended information about a worktree.
+// This combines Worktree data with branch metadata like goals and parent.
+type WorktreeInfo struct {
+	Worktree       Worktree
+	Goal           string    // Branch goal (if set)
+	Parent         string    // Parent branch (for cascading branches)
+	PRState        string    // PR state (OPEN, MERGED, CLOSED, "")
+	PRURL          string    // PR URL
+	PRNumber       int       // PR number
+	IsDirty        bool      // Has uncommitted changes
+	IsAhead        bool      // Has unpushed commits
+	IsMerged       bool      // PR has been merged
+	Ahead          int       // Commits ahead of remote
+	Behind         int       // Commits behind remote
+	LastCommitTime time.Time // Time of last commit
+	LastCommitMsg  string    // Last commit message
+}
+
+// GetWorktreeByBranch returns a Worktree by branch name.
+func (m *Manager) GetWorktreeByBranch(ctx context.Context, branch string) (*Worktree, error) {
+	worktrees, err := m.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range worktrees {
+		if worktrees[i].Branch == branch {
+			return &worktrees[i], nil
+		}
+	}
+
+	return nil, ErrWorktreeNotFound
+}
+
+// GetWorktreeInfo returns extended information about a worktree.
+func (m *Manager) GetWorktreeInfo(ctx context.Context, branch string) (*WorktreeInfo, error) {
+	wt, err := m.GetWorktreeByBranch(ctx, branch)
+	if err != nil {
+		return nil, err
+	}
+
+	info := &WorktreeInfo{
+		Worktree: *wt,
+	}
+
+	// Get goal
+	goal, _ := m.GetGoal(ctx, branch, wt.Path)
+	info.Goal = goal
+
+	// Get parent
+	parent, _ := m.GetParentBranch(ctx, branch, wt.Path)
+	info.Parent = parent
+
+	// Get status
+	status, err := m.GetStatus(ctx, *wt)
+	if err == nil {
+		info.IsDirty = status.IsDirty
+		info.Ahead = status.Ahead
+		info.Behind = status.Behind
+		info.IsAhead = status.Ahead > 0
+		info.PRState = status.PRState
+		info.PRURL = status.PRURL
+		info.PRNumber = status.PRNumber
+		info.IsMerged = status.PRState == "MERGED"
+		info.LastCommitTime = status.LastCommitTime
+		info.LastCommitMsg = status.LastCommitMsg
+	}
+
+	return info, nil
+}
+
+// GetAllWorktreeInfo returns extended information for all worktrees.
+func (m *Manager) GetAllWorktreeInfo(ctx context.Context) ([]*WorktreeInfo, error) {
+	worktrees, err := m.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	infos := make([]*WorktreeInfo, 0, len(worktrees))
+	for _, wt := range worktrees {
+		info, err := m.GetWorktreeInfo(ctx, wt.Branch)
+		if err != nil {
+			continue // Skip worktrees we can't get info for
+		}
+		infos = append(infos, info)
+	}
+
+	return infos, nil
+}

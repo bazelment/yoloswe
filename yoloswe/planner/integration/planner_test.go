@@ -1,4 +1,4 @@
-package planner
+package integration
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bazelment/yoloswe/yoloswe/planner"
 )
 
 // Integration tests for the plan command.
@@ -16,7 +18,7 @@ func TestPlanCommand_SimpleMode(t *testing.T) {
 	workDir := t.TempDir()
 	recordDir := t.TempDir()
 
-	config := Config{
+	config := planner.Config{
 		Model:        "haiku",
 		WorkDir:      workDir,
 		RecordingDir: recordDir,
@@ -25,7 +27,7 @@ func TestPlanCommand_SimpleMode(t *testing.T) {
 		Verbose:      true,
 	}
 
-	p := NewPlannerWrapper(config)
+	p := planner.NewPlannerWrapper(config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -56,18 +58,18 @@ func TestPlanCommand_BuildCurrent(t *testing.T) {
 	workDir := t.TempDir()
 	recordDir := t.TempDir()
 
-	config := Config{
+	config := planner.Config{
 		Model:        "haiku",
 		WorkDir:      workDir,
 		RecordingDir: recordDir,
 		Prompt:       "Create a simple add function",
 		Simple:       true,
-		BuildMode:    BuildModeCurrent,
+		BuildMode:    planner.BuildModeCurrent,
 		BuildModel:   "haiku",
 		Verbose:      true,
 	}
 
-	p := NewPlannerWrapper(config)
+	p := planner.NewPlannerWrapper(config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -96,18 +98,18 @@ func TestPlanCommand_BuildNew(t *testing.T) {
 	workDir := t.TempDir()
 	recordDir := t.TempDir()
 
-	config := Config{
+	config := planner.Config{
 		Model:        "haiku",
 		WorkDir:      workDir,
 		RecordingDir: recordDir,
 		Prompt:       "Create a simple subtract function",
 		Simple:       true,
-		BuildMode:    BuildModeNewSession,
+		BuildMode:    planner.BuildModeNewSession,
 		BuildModel:   "haiku",
 		Verbose:      true,
 	}
 
-	p := NewPlannerWrapper(config)
+	p := planner.NewPlannerWrapper(config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -148,7 +150,7 @@ func TestPlanCommand_StdinInput(t *testing.T) {
 	// In a real CLI scenario, prompt would come from stdin
 	prompt := "Create a simple multiply function"
 
-	config := Config{
+	config := planner.Config{
 		Model:        "haiku",
 		WorkDir:      workDir,
 		RecordingDir: recordDir,
@@ -157,7 +159,7 @@ func TestPlanCommand_StdinInput(t *testing.T) {
 		Verbose:      true,
 	}
 
-	p := NewPlannerWrapper(config)
+	p := planner.NewPlannerWrapper(config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

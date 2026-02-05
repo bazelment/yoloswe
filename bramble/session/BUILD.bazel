@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "session",
+    srcs = [
+        "event_handler.go",
+        "manager.go",
+        "store.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/session",
+    visibility = ["//bramble:__subpackages__"],
+    deps = [
+        "//agent-cli-wrapper/claude/render",
+        "//yoloswe",
+        "//yoloswe/planner",
+    ],
+)
+
+go_test(
+    name = "session_test",
+    srcs = [
+        "manager_test.go",
+        "store_test.go",
+    ],
+    embed = [":session"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
