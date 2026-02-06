@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -217,7 +218,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			WorkDir:      session.WorktreePath,
 			Simple:       true,
 			BuildMode:    planner.BuildModeReturn,
-			Output:       nil,
+			Output:       io.Discard,
 			EventHandler: eventHandler,
 		})
 		runner = &plannerRunner{pw: pw}
