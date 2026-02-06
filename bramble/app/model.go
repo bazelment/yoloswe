@@ -60,6 +60,9 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	if editor == "" {
 		editor = "code"
 	}
+	wtDropdown := NewDropdown(nil)
+	wtDropdown.SetMaxVisible(20)
+
 	m := Model{
 		ctx:              ctx,
 		wtRoot:           wtRoot,
@@ -67,7 +70,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		editor:           editor,
 		sessionManager:   sessionManager,
 		focus:            FocusOutput,
-		worktreeDropdown: NewDropdown(nil),
+		worktreeDropdown: wtDropdown,
 		sessionDropdown:  NewDropdown(nil),
 		taskModal:        NewTaskModal(),
 		inputArea:        NewTextArea(),
@@ -161,23 +164,24 @@ func (m *Model) updateWorktreeDropdown() {
 	for i, w := range m.worktrees {
 		// Count sessions for badge
 		sessionCount := len(m.sessionManager.GetSessionsForWorktree(w.Path))
-		badge := ""
-		if sessionCount > 0 {
-			badge = statusBadge(sessionCount)
-		}
 
-		// Build label with inline status
 		label := w.Branch
+
+		// Build subtitle with status details
+		var subtitle string
 		if m.worktreeStatuses != nil {
 			if s, ok := m.worktreeStatuses[w.Branch]; ok {
-				label += "  " + formatWorktreeStatus(s)
+				subtitle = formatWorktreeStatus(s, sessionCount)
 			}
+		}
+		if subtitle == "" && sessionCount > 0 {
+			subtitle = dimStyle.Render(fmt.Sprintf("%d sessions", sessionCount))
 		}
 
 		items[i] = DropdownItem{
-			ID:    w.Branch,
-			Label: label,
-			Badge: badge,
+			ID:       w.Branch,
+			Label:    label,
+			Subtitle: subtitle,
 		}
 	}
 	m.worktreeDropdown.SetItems(items)
@@ -274,10 +278,6 @@ func (m *Model) loadHistorySessions() ([]*session.SessionMeta, error) {
 	return m.sessionManager.LoadHistorySessions(wt.Branch)
 }
 
-func statusBadge(count int) string {
-	return dimStyle.Render(fmt.Sprintf("[%d]", count))
-}
-
 // refreshWorktreeStatuses fetches status for all worktrees in the background.
 func (m Model) refreshWorktreeStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
@@ -313,33 +313,54 @@ func (m Model) refreshWorktreeStatuses() tea.Cmd {
 	}
 }
 
-// formatWorktreeStatus formats a WorktreeStatus for dropdown subtitle display.
-func formatWorktreeStatus(s *wt.WorktreeStatus) string {
+// formatWorktreeStatus formats a WorktreeStatus for dropdown subtitle display with colors.
+func formatWorktreeStatus(s *wt.WorktreeStatus, sessionCount int) string {
 	var parts []string
 
 	if s.IsDirty {
-		parts = append(parts, "dirty")
+		parts = append(parts, failedStyle.Render("dirty"))
 	} else {
-		parts = append(parts, "clean")
+		parts = append(parts, completedStyle.Render("clean"))
 	}
 
 	if s.Ahead > 0 || s.Behind > 0 {
 		var ab []string
 		if s.Ahead > 0 {
-			ab = append(ab, fmt.Sprintf("↑%d", s.Ahead))
+			ab = append(ab, runningStyle.Render(fmt.Sprintf("↑%d", s.Ahead)))
 		}
 		if s.Behind > 0 {
-			ab = append(ab, fmt.Sprintf("↓%d", s.Behind))
+			ab = append(ab, pendingStyle.Render(fmt.Sprintf("↓%d", s.Behind)))
 		}
 		parts = append(parts, strings.Join(ab, " "))
 	}
 
 	if s.PRNumber > 0 {
-		parts = append(parts, fmt.Sprintf("PR#%d %s", s.PRNumber, s.PRState))
+		prText := fmt.Sprintf("PR#%d %s", s.PRNumber, s.PRState)
+		switch s.PRState {
+		case "OPEN":
+			prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + runningStyle.Render("OPEN")
+			if s.PRIsDraft {
+				prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + dimStyle.Render("DRAFT")
+			}
+			if s.PRReviewStatus == "APPROVED" {
+				prText += " " + completedStyle.Render("✓approved")
+			} else if s.PRReviewStatus == "CHANGES_REQUESTED" {
+				prText += " " + failedStyle.Render("changes requested")
+			}
+		case "MERGED":
+			prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + idleStyle.Render("MERGED")
+		case "CLOSED":
+			prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + dimStyle.Render("CLOSED")
+		}
+		parts = append(parts, prText)
 	}
 
 	if !s.LastCommitTime.IsZero() {
-		parts = append(parts, timeAgo(s.LastCommitTime))
+		parts = append(parts, dimStyle.Render(timeAgo(s.LastCommitTime)))
+	}
+
+	if sessionCount > 0 {
+		parts = append(parts, idleStyle.Render(fmt.Sprintf("%d sessions", sessionCount)))
 	}
 
 	return strings.Join(parts, " | ")
