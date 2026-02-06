@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,11 +22,12 @@ type sessionRunner interface {
 }
 
 // plannerRunner adapts PlannerWrapper to the sessionRunner interface.
-// The first turn uses Run() to handle the full plan→build lifecycle.
-// Subsequent turns use RunTurn() for simple follow-up interaction.
+// The first turn uses Run() to handle planning until ExitPlanMode.
+// Subsequent turns use RunTurn() for plan iteration.
 type plannerRunner struct {
-	pw       *planner.PlannerWrapper
-	firstRun bool
+	pw           *planner.PlannerWrapper
+	PlanFilePath string // Set after first Run() completes
+	firstRun     bool
 }
 
 func (r *plannerRunner) Start(ctx context.Context) error { return r.pw.Start(ctx) }
@@ -35,6 +37,7 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 	if !r.firstRun {
 		r.firstRun = true
 		err := r.pw.Run(ctx, message)
+		r.PlanFilePath = r.pw.PlanFilePath()
 		return nil, err
 	}
 	return r.pw.RunTurn(ctx, message)
@@ -197,7 +200,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			Model:        "sonnet",
 			WorkDir:      session.WorktreePath,
 			Simple:       true,
-			BuildMode:    planner.BuildModeCurrent,
+			BuildMode:    planner.BuildModeReturn,
 			Output:       nil,
 			EventHandler: eventHandler,
 		})
@@ -264,6 +267,21 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				p.InputTokens += usage.InputTokens
 				p.OutputTokens += usage.OutputTokens
 			})
+		}
+
+		// After planner's first turn: read plan file and add to output
+		if pr, ok := runner.(*plannerRunner); ok && pr.PlanFilePath != "" {
+			session.mu.Lock()
+			session.PlanFilePath = pr.PlanFilePath
+			session.mu.Unlock()
+
+			if planContent, readErr := os.ReadFile(pr.PlanFilePath); readErr == nil {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypePlanReady,
+					Content:   string(planContent),
+				})
+			}
 		}
 
 		m.updateSessionStatus(session, StatusIdle)

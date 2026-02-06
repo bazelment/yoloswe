@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
@@ -285,6 +286,30 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return sessionsUpdated{}
 				}
 			})
+		}
+		return m, nil
+
+	case "a":
+		// Approve plan and start builder session
+		if sess := m.selectedSession(); sess != nil &&
+			sess.Status == session.StatusIdle &&
+			sess.Type == session.SessionTypePlanner &&
+			sess.PlanFilePath != "" {
+			worktreePath := sess.WorktreePath
+			planPath := sess.PlanFilePath
+			_ = m.sessionManager.CompleteSession(sess.ID)
+			m.sessions = m.sessionManager.GetAllSessions()
+			m.updateSessionDropdown()
+			planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
+			sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt)
+			if err != nil {
+				m.lastError = err.Error()
+				return m, nil
+			}
+			m.viewingSessionID = sessionID
+			m.sessions = m.sessionManager.GetAllSessions()
+			m.updateSessionDropdown()
+			return m, nil
 		}
 		return m, nil
 

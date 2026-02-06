@@ -235,7 +235,11 @@ func (m Model) renderCenter(width, height int) string {
 	}
 	// Add idle indicator with follow-up hint
 	if info.Status == session.StatusIdle {
-		headerLine += idleStyle.Render("  (awaiting follow-up - press 'f')")
+		if info.Type == session.SessionTypePlanner {
+			headerLine += idleStyle.Render("  (plan ready - 'a' approve & build / 'f' iterate)")
+		} else {
+			headerLine += idleStyle.Render("  (awaiting follow-up - press 'f')")
+		}
 	}
 	b.WriteString(headerLine)
 	b.WriteString("\n")
@@ -377,6 +381,20 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 	case session.OutputTypeStatus:
 		formatted = dimStyle.Render("  → " + line.Content)
 
+	case session.OutputTypePlanReady:
+		header := dimStyle.Render("  " + strings.Repeat("═", 20) + " Plan Ready " + strings.Repeat("═", 20))
+		rendered := ""
+		if m.mdRenderer != nil && line.Content != "" {
+			r, err := m.mdRenderer.Render(line.Content)
+			if err == nil {
+				rendered = strings.TrimRight(r, "\n")
+			}
+		}
+		if rendered == "" {
+			rendered = "  " + line.Content
+		}
+		formatted = header + "\n" + rendered
+
 	case session.OutputTypeText:
 		if m.mdRenderer != nil && line.Content != "" {
 			rendered, err := m.mdRenderer.Render(line.Content)
@@ -394,7 +412,7 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 	}
 
 	// Truncate width if needed (skip for markdown-rendered content which may have ANSI)
-	if line.Type != session.OutputTypeText && len(stripAnsi(formatted)) > width-2 {
+	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && len(stripAnsi(formatted)) > width-2 {
 		formatted = formatted[:width-5] + "..."
 	}
 
