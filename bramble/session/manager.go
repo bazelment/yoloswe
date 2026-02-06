@@ -162,6 +162,11 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt str
 
 	ctx, cancel := context.WithCancel(m.ctx)
 
+	model := "sonnet"
+	if sessionType == SessionTypePlanner {
+		model = "opus"
+	}
+
 	session := &Session{
 		ID:           sessionID,
 		Type:         sessionType,
@@ -170,7 +175,7 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt str
 		WorktreeName: worktreeName,
 		Prompt:       prompt,
 		Title:        generateTitle(prompt, 20),
-		Model:        "sonnet",
+		Model:        model,
 		Progress:     &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:    time.Now(),
 		ctx:          ctx,
@@ -214,7 +219,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	switch session.Type {
 	case SessionTypePlanner:
 		pw := planner.NewPlannerWrapper(planner.Config{
-			Model:        "sonnet",
+			Model:        "opus",
 			WorkDir:      session.WorktreePath,
 			Simple:       true,
 			BuildMode:    planner.BuildModeReturn,
