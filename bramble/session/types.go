@@ -53,6 +53,7 @@ type Session struct {
 	Prompt       string
 	Title        string
 	Model        string
+	PlanFilePath string // Path to plan file (planner sessions only)
 	ID           SessionID
 	WorktreePath string
 	Status       SessionStatus
@@ -124,6 +125,7 @@ type SessionInfo struct {
 	Prompt       string
 	Title        string
 	Model        string
+	PlanFilePath string
 	ID           SessionID
 	Status       SessionStatus
 	Type         SessionType
@@ -145,6 +147,7 @@ func (s *Session) ToInfo() SessionInfo {
 		Prompt:       s.Prompt,
 		Title:        s.Title,
 		Model:        s.Model,
+		PlanFilePath: s.PlanFilePath,
 		CreatedAt:    s.CreatedAt,
 		StartedAt:    s.StartedAt,
 		CompletedAt:  s.CompletedAt,
@@ -209,6 +212,7 @@ const (
 	OutputTypeError      OutputLineType = "error"
 	OutputTypeStatus     OutputLineType = "status"
 	OutputTypeTurnEnd    OutputLineType = "turn_end"
+	OutputTypePlanReady  OutputLineType = "plan_ready" // Plan file content for rendering
 )
 
 // SessionOutputEvent is sent when session produces output.

@@ -384,11 +384,11 @@ func generateDropdownTitle(prompt string, maxLen int) string {
 
 // Message types
 type (
-	errMsg            struct{ error }
-	worktreesMsg      struct{ worktrees []wt.Worktree }
-	sessionEventMsg   struct{ event interface{} }
-	sessionsUpdated   struct{}
-	promptInputMsg    struct{ value string }
+	errMsg          struct{ error }
+	worktreesMsg    struct{ worktrees []wt.Worktree }
+	sessionEventMsg struct{ event interface{} }
+	sessionsUpdated struct{}
+	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
 		sessionType session.SessionType
 		prompt      string

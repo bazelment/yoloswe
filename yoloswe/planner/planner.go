@@ -139,12 +139,15 @@ const (
 	BuildModeCurrent BuildMode = "current"
 	// BuildModeNewSession starts a fresh session to implement the plan.
 	BuildModeNewSession BuildMode = "new"
+	// BuildModeReturn returns to caller at ExitPlanMode without building.
+	// The caller is responsible for handling the plan (e.g., presenting choices in a TUI).
+	BuildModeReturn BuildMode = "return"
 )
 
 // IsValid returns true if the BuildMode is a recognized value.
 func (m BuildMode) IsValid() bool {
 	switch m {
-	case BuildModeNone, BuildModeCurrent, BuildModeNewSession:
+	case BuildModeNone, BuildModeCurrent, BuildModeNewSession, BuildModeReturn:
 		return true
 	default:
 		return false
@@ -487,6 +490,8 @@ func (p *PlannerWrapper) handleExitPlanMode(ctx context.Context, toolUseID strin
 	// In simple mode with build flag, auto-execute
 	if p.config.Simple {
 		switch p.config.BuildMode {
+		case BuildModeReturn:
+			return true, nil // Return to caller, let them handle the plan
 		case BuildModeCurrent:
 			return p.executeInCurrentSession(ctx)
 		case BuildModeNewSession:
