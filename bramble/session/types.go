@@ -215,6 +215,22 @@ const (
 	OutputTypePlanReady  OutputLineType = "plan_ready" // Plan file content for rendering
 )
 
+// deepCopyOutputLine returns a deep copy of an OutputLine, cloning mutable
+// fields (ToolInput map, ToolResult) so that the caller's copy is independent.
+func deepCopyOutputLine(line OutputLine) OutputLine {
+	if line.ToolInput != nil {
+		newInput := make(map[string]interface{}, len(line.ToolInput))
+		for k, v := range line.ToolInput {
+			newInput[k] = v
+		}
+		line.ToolInput = newInput
+	}
+	// ToolResult is an interface{} — typically a string or JSON-decoded value.
+	// A shallow copy is sufficient for immutable types; map values are not
+	// mutated after construction so this is safe in practice.
+	return line
+}
+
 // SessionOutputEvent is sent when session produces output.
 type SessionOutputEvent struct {
 	SessionID SessionID

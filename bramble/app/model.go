@@ -275,7 +275,7 @@ func (m *Model) loadHistorySessions() ([]*session.SessionMeta, error) {
 }
 
 func statusBadge(count int) string {
-	return dimStyle.Render("[" + string(rune('0'+count%10)) + "]")
+	return dimStyle.Render(fmt.Sprintf("[%d]", count))
 }
 
 // refreshWorktreeStatuses fetches status for all worktrees in the background.

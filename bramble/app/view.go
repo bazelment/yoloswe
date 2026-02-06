@@ -233,6 +233,9 @@ func (m Model) renderCenter(width, height int) string {
 	if info.Model != "" {
 		headerLine += "  " + dimStyle.Render("["+info.Model+"]")
 	}
+	if info.Progress.TurnCount > 0 || info.Progress.TotalCostUSD > 0 {
+		headerLine += "  " + dimStyle.Render(fmt.Sprintf("T:%d $%.4f", info.Progress.TurnCount, info.Progress.TotalCostUSD))
+	}
 	// Add idle indicator with follow-up hint
 	if info.Status == session.StatusIdle {
 		if info.Type == session.SessionTypePlanner {
@@ -446,104 +449,78 @@ func (m Model) renderHistorySession(width, height int) string {
 	b.WriteString(strings.Repeat("─", width-2))
 	b.WriteString("\n")
 
-	// Output lines from history
+	// Output lines from history - use formatOutputLine and visual line scroll
 	lines := data.Output
 
-	// Show last N lines that fit
-	outputHeight := height - 6 // Account for header, prompt, timestamp, separator
-	startIdx := 0
-	if len(lines) > outputHeight {
-		startIdx = len(lines) - outputHeight
+	var allVisualLines []string
+	for i := range lines {
+		formatted := m.formatOutputLine(lines[i], width)
+		visualLines := strings.Split(formatted, "\n")
+		allVisualLines = append(allVisualLines, visualLines...)
 	}
 
-	// Track visual lines written to avoid overflow
-	visualLinesWritten := 0
+	outputHeight := height - 6 // Account for header, prompt, timestamp, separator
+	totalVisual := len(allVisualLines)
+	scrollOffset := m.scrollOffset
 
-	for i := startIdx; i < len(lines) && visualLinesWritten < outputHeight; i++ {
-		line := lines[i]
-
-		// Format based on type (same as renderCenter)
-		var formatted string
-		switch line.Type {
-		case session.OutputTypeError:
-			formatted = errorStyle.Render("  ✗ " + line.Content)
-
-		case session.OutputTypeThinking:
-			formatted = dimStyle.Render("  💭 " + truncate(line.Content, width-8))
-
-		case session.OutputTypeTool:
-			formatted = "  🔧 " + line.Content
-
-		case session.OutputTypeToolStart:
-			toolDisplay := formatToolDisplay(line.ToolName, line.ToolInput, width-12)
-
-			switch line.ToolState {
-			case session.ToolStateComplete:
-				durationStr := fmt.Sprintf("%.2fs", float64(line.DurationMs)/1000)
-				formatted = "  ✓ " + dimStyle.Render(toolDisplay+" ("+durationStr+")")
-			case session.ToolStateError:
-				durationStr := fmt.Sprintf("%.2fs", float64(line.DurationMs)/1000)
-				formatted = "  " + errorStyle.Render("✗ "+toolDisplay+" ("+durationStr+")")
-			default:
-				formatted = "  🔧 " + toolDisplay
-			}
-
-		case session.OutputTypeToolResult:
-			// Legacy format
-			if line.IsError {
-				formatted = errorStyle.Render("  ✗ " + truncate(line.Content, width-10))
-			} else {
-				formatted = dimStyle.Render("  ✓ " + line.Content)
-			}
-
-		case session.OutputTypeTurnEnd:
-			turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f) ───", line.TurnNumber, line.CostUSD)
-			formatted = dimStyle.Render("  " + turnInfo)
-
-		case session.OutputTypeStatus:
-			formatted = dimStyle.Render("  → " + line.Content)
-
-		case session.OutputTypeText:
-			// Render markdown for assistant text
-			if m.mdRenderer != nil && line.Content != "" {
-				rendered, err := m.mdRenderer.Render(line.Content)
-				if err == nil {
-					rendered = strings.TrimRight(rendered, "\n")
-					formatted = rendered
-				} else {
-					formatted = "  " + line.Content
-				}
-			} else {
-				formatted = "  " + line.Content
-			}
-
-		default:
-			formatted = "  " + line.Content
+	if scrollOffset == 0 {
+		startIdx := totalVisual - outputHeight
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		for i := startIdx; i < totalVisual; i++ {
+			b.WriteString(allVisualLines[i])
+			b.WriteString("\n")
+		}
+	} else {
+		contentHeight := outputHeight - 2
+		if contentHeight < 1 {
+			contentHeight = 1
 		}
 
-		// Truncate width if needed (skip for markdown-rendered content)
-		if line.Type != session.OutputTypeText && len(stripAnsi(formatted)) > width-2 {
-			formatted = formatted[:width-5] + "..."
+		maxScroll := 0
+		if totalVisual > contentHeight {
+			maxScroll = totalVisual - contentHeight
+		}
+		if scrollOffset > maxScroll {
+			scrollOffset = maxScroll
 		}
 
-		// Count visual lines this content will take
-		contentLines := strings.Split(formatted, "\n")
-		linesNeeded := len(contentLines)
+		endIdx := totalVisual - scrollOffset
+		startIdx := endIdx - contentHeight
+		if startIdx < 0 {
+			startIdx = 0
+		}
 
-		// Truncate multi-line content if it would overflow
-		if visualLinesWritten+linesNeeded > outputHeight {
-			remaining := outputHeight - visualLinesWritten
-			if remaining > 0 {
-				truncatedLines := contentLines[:remaining]
-				b.WriteString(strings.Join(truncatedLines, "\n"))
+		if startIdx == 0 {
+			contentHeight = outputHeight - 1
+			maxScroll = 0
+			if totalVisual > contentHeight {
+				maxScroll = totalVisual - contentHeight
+			}
+			if scrollOffset > maxScroll {
+				scrollOffset = maxScroll
+			}
+			endIdx = totalVisual - scrollOffset
+
+			for i := 0; i < endIdx; i++ {
+				b.WriteString(allVisualLines[i])
 				b.WriteString("\n")
 			}
-			break
+			hiddenBelow := totalVisual - endIdx
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
+			b.WriteString("\n")
+		} else {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
+			b.WriteString("\n")
+			for i := startIdx; i < endIdx; i++ {
+				b.WriteString(allVisualLines[i])
+				b.WriteString("\n")
+			}
+			hiddenBelow := totalVisual - endIdx
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
+			b.WriteString("\n")
 		}
-
-		b.WriteString(formatted)
-		b.WriteString("\n")
-		visualLinesWritten += linesNeeded
 	}
 
 	return b.String()
@@ -553,21 +530,31 @@ func (m Model) renderHistorySession(width, height int) string {
 func (m Model) renderStatusBar() string {
 	// Build keybinding hints based on state
 	var hints []string
+	hasWorktree := m.selectedWorktree() != nil
 	if m.inputMode {
-		hints = []string{"[Tab] Switch", "[Enter] Select"}
+		hints = []string{"[Tab] Switch", "[Ctrl+Enter] Send", "[Esc] Cancel"}
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
 		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close"}
 	} else if m.viewingSessionID != "" {
-		// Session is selected - show scroll hints along with main actions
+		// Session is selected - show contextual actions
 		sess := m.selectedSession()
+		hints = []string{"[↑/↓]scroll"}
 		if sess != nil && sess.Status == session.StatusIdle {
-			// Show follow-up hint for idle sessions
-			hints = []string{"[f]ollow-up", "[↑/↓]scroll", "[Alt-S]session", "[s]top", "[q]uit"}
-		} else {
-			hints = []string{"[↑/↓]scroll", "[Alt-W]worktree", "[Alt-S]session", "[s]top", "[q]uit"}
+			hints = append(hints, "[f]ollow-up")
 		}
+		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
+			hints = append(hints, "[s]top")
+		}
+		hints = append(hints, "[Alt-W]worktree", "[Alt-S]session", "[q]uit")
 	} else {
-		hints = []string{"[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt", "[t]ask", "[s]top", "[q]uit"}
+		// No session selected - show worktree-dependent actions
+		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask"}
+		if hasWorktree {
+			hints = append(hints, "[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
+		} else {
+			hints = append(hints, "[n]ew wt")
+		}
+		hints = append(hints, "[q]uit")
 	}
 
 	left := strings.Join(hints, "  ")
@@ -577,6 +564,11 @@ func (m Model) renderStatusBar() string {
 	running := counts[session.StatusRunning]
 	idle := counts[session.StatusIdle]
 	right := fmt.Sprintf("Running: %d  Idle: %d", running, idle)
+
+	// New output indicator when scrolled up
+	if m.scrollOffset > 0 {
+		right = dimStyle.Render(fmt.Sprintf("(%d lines above)", m.scrollOffset)) + "  " + right
+	}
 
 	// Error message if any
 	if m.lastError != "" {
