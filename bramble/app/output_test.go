@@ -1002,7 +1002,7 @@ func TestFormatWorktreeStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := formatWorktreeStatus(tc.status)
+			result := formatWorktreeStatus(tc.status, 0)
 			for _, substr := range tc.want {
 				assert.Contains(t, result, substr)
 			}

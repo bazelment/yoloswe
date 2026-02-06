@@ -111,12 +111,26 @@ func (d *Dropdown) SelectIndex(idx int) {
 	}
 }
 
-// MoveSelection moves the selection up or down.
+// MoveSelection moves the selection up or down, skipping separator items.
 func (d *Dropdown) MoveSelection(delta int) {
 	if len(d.items) == 0 {
 		return
 	}
-	d.selectedIdx = clamp(d.selectedIdx+delta, 0, len(d.items)-1)
+	newIdx := clamp(d.selectedIdx+delta, 0, len(d.items)-1)
+	// Skip separator items by continuing in the same direction
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	for newIdx >= 0 && newIdx < len(d.items) && d.items[newIdx].ID == "---separator---" {
+		newIdx += step
+	}
+	newIdx = clamp(newIdx, 0, len(d.items)-1)
+	// If we still landed on a separator (e.g. at the boundary), don't move
+	if d.items[newIdx].ID == "---separator---" {
+		return
+	}
+	d.selectedIdx = newIdx
 	d.ensureVisible()
 }
 

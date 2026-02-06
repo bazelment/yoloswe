@@ -2,7 +2,11 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,13 +67,15 @@ type ManagerConfig struct {
 
 // Manager handles multiple concurrent sessions.
 type Manager struct {
-	ctx             context.Context
-	sessions        map[SessionID]*Session
-	events          chan interface{}
-	outputs         map[SessionID][]OutputLine
-	followUpChans   map[SessionID]chan string
-	cancel          context.CancelFunc
-	config          ManagerConfig
+	ctx           context.Context
+	sessions      map[SessionID]*Session
+	events        chan interface{}
+	outputs       map[SessionID][]OutputLine
+	followUpChans map[SessionID]chan string
+	cancel        context.CancelFunc
+	config        ManagerConfig
+	wg            sync.WaitGroup
+	// Lock ordering: mu > outputsMu > followUpChansMu. Never acquire in reverse order.
 	mu              sync.RWMutex
 	outputsMu       sync.RWMutex
 	followUpChansMu sync.RWMutex
@@ -86,7 +92,7 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 	return &Manager{
 		config:        config,
 		sessions:      make(map[SessionID]*Session),
-		events:        make(chan interface{}, 100),
+		events:        make(chan interface{}, 10000),
 		outputs:       make(map[SessionID][]OutputLine),
 		followUpChans: make(map[SessionID]chan string),
 		ctx:           ctx,
@@ -104,18 +110,27 @@ func (m *Manager) Close() {
 	m.cancel()
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for _, s := range m.sessions {
 		if s.cancel != nil {
 			s.cancel()
 		}
 	}
+	m.mu.Unlock()
+
+	// Wait for all runSession goroutines to finish (with timeout).
+	done := make(chan struct{})
+	go func() { m.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
 }
 
 // generateSessionID creates a unique session ID.
 func generateSessionID(worktreeName string, sessionType SessionType) SessionID {
-	return SessionID(fmt.Sprintf("%s-%s-%d", worktreeName, sessionType, time.Now().UnixNano()%100000))
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return SessionID(fmt.Sprintf("%s-%s-%s", worktreeName, sessionType, hex.EncodeToString(b)))
 }
 
 // generateTitle creates a short title from the first words of a prompt.
@@ -147,6 +162,11 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt str
 
 	ctx, cancel := context.WithCancel(m.ctx)
 
+	model := "sonnet"
+	if sessionType == SessionTypePlanner {
+		model = "opus"
+	}
+
 	session := &Session{
 		ID:           sessionID,
 		Type:         sessionType,
@@ -155,7 +175,7 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt str
 		WorktreeName: worktreeName,
 		Prompt:       prompt,
 		Title:        generateTitle(prompt, 20),
-		Model:        "sonnet",
+		Model:        model,
 		Progress:     &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:    time.Now(),
 		ctx:          ctx,
@@ -170,6 +190,7 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt str
 	m.outputs[sessionID] = make([]OutputLine, 0, 1000)
 	m.outputsMu.Unlock()
 
+	m.wg.Add(1)
 	go m.runSession(session, prompt)
 
 	return sessionID, nil
@@ -188,6 +209,7 @@ func (m *Manager) StartBuilderSession(worktreePath, prompt string) (SessionID, e
 // runSession runs a session in a goroutine, handling both planner and builder types.
 // Both types follow the same lifecycle: start → run turns → idle → follow-up → ...
 func (m *Manager) runSession(session *Session, prompt string) {
+	defer m.wg.Done()
 	m.updateSessionStatus(session, StatusRunning)
 
 	eventHandler := newSessionEventHandler(m, session.ID)
@@ -197,11 +219,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	switch session.Type {
 	case SessionTypePlanner:
 		pw := planner.NewPlannerWrapper(planner.Config{
-			Model:        "sonnet",
+			Model:        "opus",
 			WorkDir:      session.WorktreePath,
 			Simple:       true,
 			BuildMode:    planner.BuildModeReturn,
-			Output:       nil,
+			Output:       io.Discard,
 			EventHandler: eventHandler,
 		})
 		runner = &plannerRunner{pw: pw}
@@ -329,7 +351,7 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 		NewStatus: newStatus,
 	}:
 	default:
-		// Channel full, drop event
+		log.Printf("WARNING: events channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
 	}
 }
 
@@ -353,7 +375,7 @@ func (m *Manager) addOutput(sessionID SessionID, line OutputLine) {
 		Line:      line,
 	}:
 	default:
-		// Channel full, drop event
+		log.Printf("WARNING: events channel full, dropping output event for session %s", sessionID)
 	}
 }
 
@@ -381,6 +403,7 @@ func (m *Manager) appendOrAddText(sessionID SessionID, text string) {
 	select {
 	case m.events <- SessionOutputEvent{SessionID: sessionID}:
 	default:
+		log.Printf("WARNING: events channel full, dropping text append event for session %s", sessionID)
 	}
 }
 
@@ -398,14 +421,27 @@ func (m *Manager) updateToolOutput(sessionID SessionID, toolID string, fn func(*
 	// Find the tool line by ID (search from end since recent tools are likely at the end)
 	for i := len(lines) - 1; i >= 0; i-- {
 		if lines[i].ToolID == toolID && lines[i].Type == OutputTypeToolStart {
-			fn(&lines[i])
+			// Copy-on-write: copy line, mutate copy, assign back to avoid races
+			// with concurrent readers that may hold references to the old line.
+			lineCopy := lines[i]
+			// Deep-copy mutable map fields before mutation
+			if lineCopy.ToolInput != nil {
+				newInput := make(map[string]interface{}, len(lineCopy.ToolInput))
+				for k, v := range lineCopy.ToolInput {
+					newInput[k] = v
+				}
+				lineCopy.ToolInput = newInput
+			}
+			fn(&lineCopy)
+			lines[i] = lineCopy
 			// Emit update event
 			select {
 			case m.events <- SessionOutputEvent{
 				SessionID: sessionID,
-				Line:      lines[i],
+				Line:      lineCopy,
 			}:
 			default:
+				log.Printf("WARNING: events channel full, dropping tool update event for session %s", sessionID)
 			}
 			return
 		}
@@ -503,13 +539,17 @@ func (m *Manager) GetSessionOutput(id SessionID) []OutputLine {
 	m.outputsMu.RLock()
 	defer m.outputsMu.RUnlock()
 
-	if lines, ok := m.outputs[id]; ok {
-		// Return a copy
-		result := make([]OutputLine, len(lines))
-		copy(result, lines)
-		return result
+	lines, ok := m.outputs[id]
+	if !ok {
+		return nil
 	}
-	return nil
+
+	// Deep copy to avoid shared references to mutable fields.
+	result := make([]OutputLine, len(lines))
+	for i := range lines {
+		result[i] = deepCopyOutputLine(lines[i])
+	}
+	return result
 }
 
 // CountByStatus returns counts of sessions by status.

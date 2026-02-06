@@ -127,6 +127,12 @@ func (s *Store) SaveSession(session *StoredSession) error {
 		return fmt.Errorf("worktree name is empty")
 	}
 
+	// Marshal outside the lock to avoid holding it during CPU-bound work.
+	data, err := json.MarshalIndent(session, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -136,11 +142,6 @@ func (s *Store) SaveSession(session *StoredSession) error {
 	}
 
 	path := s.sessionPath(session.RepoName, session.WorktreeName, session.ID)
-
-	data, err := json.MarshalIndent(session, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal session: %w", err)
-	}
 
 	// Write atomically using temp file + rename
 	tmpPath := path + ".tmp"
@@ -199,12 +200,12 @@ func (s *Store) DeleteSession(repoName, worktreeName string, id SessionID) error
 // ListSessions returns metadata for all sessions in a worktree.
 // Sessions are sorted by creation time, newest first.
 func (s *Store) ListSessions(repoName, worktreeName string) ([]*SessionMeta, error) {
+	// Read directory entries under lock, then release for file I/O.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	dir := s.sessionDir(repoName, worktreeName)
-
 	entries, err := os.ReadDir(dir)
+	s.mu.RUnlock()
+
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []*SessionMeta{}, nil
@@ -212,6 +213,7 @@ func (s *Store) ListSessions(repoName, worktreeName string) ([]*SessionMeta, err
 		return nil, fmt.Errorf("failed to read session directory: %w", err)
 	}
 
+	// Collect file names, then read/parse files without holding the lock.
 	var sessions []*SessionMeta
 
 	for _, entry := range entries {

@@ -267,11 +267,22 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Stop session
+		// Stop session with confirmation
 		if sess := m.selectedSession(); sess != nil {
-			m.sessionManager.StopSession(sess.ID)
-			m.sessions = m.sessionManager.GetAllSessions()
-			m.updateSessionDropdown()
+			sessID := sess.ID
+			title := sess.Title
+			if title == "" {
+				title = string(sessID)[:12]
+			}
+			return m.promptInput("Stop session '"+title+"'? [y/n]: ", func(answer string) tea.Cmd {
+				if strings.TrimSpace(strings.ToLower(answer)) == "y" {
+					return func() tea.Msg {
+						m.sessionManager.StopSession(sessID)
+						return sessionsUpdated{}
+					}
+				}
+				return nil
+			})
 		}
 		return m, nil
 
@@ -458,10 +469,25 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputArea.CycleBackward()
 		return m, nil
 
+	case "ctrl+enter":
+		// Submit from any focus
+		value := m.inputArea.Value()
+		if value == "" {
+			return m, nil
+		}
+		m.inputArea.Reset()
+		return m, func() tea.Msg {
+			return promptInputMsg{value}
+		}
+
 	case "enter":
 		// Action depends on current focus
 		switch m.inputArea.Focus() {
-		case FocusTextInput, FocusSendButton:
+		case FocusTextInput:
+			// Insert newline when editing text
+			m.inputArea.InsertNewline()
+			return m, nil
+		case FocusSendButton:
 			// Submit the prompt
 			value := m.inputArea.Value()
 			if value == "" {
@@ -495,6 +521,18 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "delete":
 		if m.inputArea.Focus() == FocusTextInput {
 			m.inputArea.DeleteCharForward()
+		}
+		return m, nil
+
+	case "up":
+		if m.inputArea.Focus() == FocusTextInput {
+			m.inputArea.MoveCursorUp()
+		}
+		return m, nil
+
+	case "down":
+		if m.inputArea.Focus() == FocusTextInput {
+			m.inputArea.MoveCursorDown()
 		}
 		return m, nil
 
@@ -657,10 +695,24 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focus = FocusOutput
 			return m, nil
 
+		case "ctrl+enter":
+			// Submit from any focus
+			prompt := m.taskModal.Prompt()
+			if prompt != "" {
+				return m, func() tea.Msg {
+					return taskRouteMsg{prompt: prompt}
+				}
+			}
+			return m, nil
+
 		case "enter":
 			// Action depends on current focus
 			switch ta.Focus() {
-			case FocusTextInput, FocusSendButton:
+			case FocusTextInput:
+				// Insert newline when editing text
+				ta.InsertNewline()
+				return m, nil
+			case FocusSendButton:
 				// Submit the prompt
 				prompt := m.taskModal.Prompt()
 				if prompt != "" {
@@ -686,6 +738,18 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "delete":
 			if ta.Focus() == FocusTextInput {
 				ta.DeleteCharForward()
+			}
+			return m, nil
+
+		case "up":
+			if ta.Focus() == FocusTextInput {
+				ta.MoveCursorUp()
+			}
+			return m, nil
+
+		case "down":
+			if ta.Focus() == FocusTextInput {
+				ta.MoveCursorDown()
 			}
 			return m, nil
 
