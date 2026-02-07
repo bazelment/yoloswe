@@ -17,11 +17,11 @@ bazel_dep(name = "rules_rust", version = "0.67.0")
 bazel_dep(name = "rules_rust_prost", version = "0.67.0")
 
 # Proto rules for protocol buffers
-bazel_dep(name = "rules_proto", version = "6.0.2")
-bazel_dep(name = "protobuf", version = "29.0")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+bazel_dep(name = "protobuf", version = "29.1")
 
 # Shell rules for sh_binary
-bazel_dep(name = "rules_shell", version = "0.4.1")
+bazel_dep(name = "rules_shell", version = "0.6.1")
 
 # Configure Go SDK
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
