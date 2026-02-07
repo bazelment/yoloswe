@@ -59,10 +59,23 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 	return r.builder.RunTurn(ctx, message)
 }
 
+// SessionMode controls how sessions are executed.
+type SessionMode string
+
+const (
+	// SessionModeAuto auto-detects based on environment ($TMUX)
+	SessionModeAuto SessionMode = "auto"
+	// SessionModeTUI uses in-process SDK with TUI display (default)
+	SessionModeTUI SessionMode = "tui"
+	// SessionModeTmux creates tmux sessions running claude CLI
+	SessionModeTmux SessionMode = "tmux"
+)
+
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct {
-	Store    *Store
-	RepoName string
+	Store       *Store
+	RepoName    string
+	SessionMode SessionMode
 }
 
 // Manager handles multiple concurrent sessions.
@@ -89,6 +102,16 @@ func NewManager() *Manager {
 // NewManagerWithConfig creates a new session manager with the given config.
 func NewManagerWithConfig(config ManagerConfig) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Resolve auto mode
+	if config.SessionMode == SessionModeAuto || config.SessionMode == "" {
+		if IsInsideTmux() && IsTmuxAvailable() {
+			config.SessionMode = SessionModeTmux
+		} else {
+			config.SessionMode = SessionModeTUI
+		}
+	}
+
 	return &Manager{
 		config:        config,
 		sessions:      make(map[SessionID]*Session),
@@ -103,6 +126,11 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 // Events returns the channel for session events.
 func (m *Manager) Events() <-chan interface{} {
 	return m.events
+}
+
+// IsInTmuxMode returns true if the manager is configured to use tmux mode.
+func (m *Manager) IsInTmuxMode() bool {
+	return m.config.SessionMode == SessionModeTmux
 }
 
 // Close shuts down the manager and all sessions.
@@ -212,27 +240,56 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	defer m.wg.Done()
 	m.updateSessionStatus(session, StatusRunning)
 
-	eventHandler := newSessionEventHandler(m, session.ID)
-
-	// Create the appropriate runner based on session type
+	// Create the appropriate runner based on session mode and type
 	var runner sessionRunner
-	switch session.Type {
-	case SessionTypePlanner:
-		pw := planner.NewPlannerWrapper(planner.Config{
-			Model:        "opus",
-			WorkDir:      session.WorktreePath,
-			Simple:       true,
-			BuildMode:    planner.BuildModeReturn,
-			Output:       io.Discard,
-			EventHandler: eventHandler,
-		})
-		runner = &plannerRunner{pw: pw}
-	case SessionTypeBuilder:
-		builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
-			Model:   "sonnet",
-			WorkDir: session.WorktreePath,
-		}, nil, eventHandler)
-		runner = &builderRunner{builder: builder}
+	var eventHandler *sessionEventHandler
+
+	if m.config.SessionMode == SessionModeTmux {
+		// Tmux mode: create tmux window running claude CLI
+		tmuxName := generateTmuxWindowName()
+		session.mu.Lock()
+		session.TmuxWindowName = tmuxName
+		session.RunnerType = "tmux"
+		session.mu.Unlock()
+
+		permissionMode := ""
+		if session.Type == SessionTypePlanner {
+			permissionMode = "plan"
+		}
+
+		runner = &tmuxRunner{
+			windowName:     tmuxName,
+			workDir:        session.WorktreePath,
+			prompt:         prompt,
+			permissionMode: permissionMode,
+		}
+		// No event handler for tmux mode - all output is in the tmux window
+	} else {
+		// TUI mode: create in-process runner
+		session.mu.Lock()
+		session.RunnerType = "tui"
+		session.mu.Unlock()
+
+		eventHandler = newSessionEventHandler(m, session.ID)
+
+		switch session.Type {
+		case SessionTypePlanner:
+			pw := planner.NewPlannerWrapper(planner.Config{
+				Model:        "opus",
+				WorkDir:      session.WorktreePath,
+				Simple:       true,
+				BuildMode:    planner.BuildModeReturn,
+				Output:       io.Discard,
+				EventHandler: eventHandler,
+			})
+			runner = &plannerRunner{pw: pw}
+		case SessionTypeBuilder:
+			builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
+				Model:   "sonnet",
+				WorkDir: session.WorktreePath,
+			}, nil, eventHandler)
+			runner = &builderRunner{builder: builder}
+		}
 	}
 
 	if err := runner.Start(session.ctx); err != nil {
@@ -249,18 +306,65 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		return
 	}
 
+	defer func() {
+		runner.Stop()
+		if m.config.SessionMode != SessionModeTmux {
+			m.followUpChansMu.Lock()
+			delete(m.followUpChans, session.ID)
+			m.followUpChansMu.Unlock()
+		}
+		m.persistSession(session)
+	}()
+
+	// Tmux mode: just wait for the window to be stopped manually
+	// The tmux window handles all interaction, so we don't run turns
+	if m.config.SessionMode == SessionModeTmux {
+		m.updateSessionStatus(session, StatusRunning)
+
+		// Periodically check if tmux window still exists
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-session.ctx.Done():
+				m.updateSessionStatus(session, StatusStopped)
+				return
+			case <-ticker.C:
+				// Check if tmux window still exists
+				session.mu.RLock()
+				tmuxName := session.TmuxWindowName
+				sessionID := session.ID
+				session.mu.RUnlock()
+
+				if tmuxName != "" && !TmuxWindowExists(tmuxName) {
+					// Tmux window has disappeared - mark as completed and remove from session list
+					m.updateSessionStatus(session, StatusCompleted)
+
+					// Remove from active sessions map
+					m.mu.Lock()
+					delete(m.sessions, sessionID)
+					m.mu.Unlock()
+
+					// Remove outputs
+					m.outputsMu.Lock()
+					delete(m.outputs, sessionID)
+					m.outputsMu.Unlock()
+
+					// Persist before removal (for history)
+					m.persistSession(session)
+
+					return
+				}
+			}
+		}
+	}
+
+	// TUI mode: run turn-based interaction loop
 	followUpChan := make(chan string, 1)
 	m.followUpChansMu.Lock()
 	m.followUpChans[session.ID] = followUpChan
 	m.followUpChansMu.Unlock()
-
-	defer func() {
-		runner.Stop()
-		m.followUpChansMu.Lock()
-		delete(m.followUpChans, session.ID)
-		m.followUpChansMu.Unlock()
-		m.persistSession(session)
-	}()
 
 	currentPrompt := prompt
 	for {

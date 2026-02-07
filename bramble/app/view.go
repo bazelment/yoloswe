@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -148,29 +149,42 @@ func (m Model) renderTopBar() string {
 	}
 	left += "  " + dimStyle.Render("[Alt-W]")
 
-	// Right side: current session + session dropdown
+	// Right side: session info (different for tmux vs TUI mode)
 	right := ""
-	if sess := m.selectedSession(); sess != nil {
-		icon := "📋"
-		if sess.Type == session.SessionTypeBuilder {
-			icon = "🔨"
+	if m.sessionManager.IsInTmuxMode() {
+		// Tmux mode: show worktree path with ~ for home
+		if wt := m.selectedWorktree(); wt != nil {
+			path := wt.Path
+			// Replace home directory with ~
+			if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, home) {
+				path = "~" + strings.TrimPrefix(path, home)
+			}
+			right = dimStyle.Render(path)
 		}
-		title := sess.Title
-		if title == "" {
-			title = string(sess.ID)[:12]
-		}
-		right = fmt.Sprintf("%s %s %s", icon, title, statusIcon(sess.Status))
 	} else {
-		right = dimStyle.Render("(no session)")
-	}
+		// TUI mode: show current session + session dropdown
+		if sess := m.selectedSession(); sess != nil {
+			icon := "📋"
+			if sess.Type == session.SessionTypeBuilder {
+				icon = "🔨"
+			}
+			title := sess.Title
+			if title == "" {
+				title = string(sess.ID)[:12]
+			}
+			right = fmt.Sprintf("%s %s %s", icon, title, statusIcon(sess.Status))
+		} else {
+			right = dimStyle.Render("(no session)")
+		}
 
-	// Session dropdown trigger
-	if m.focus == FocusSessionDropdown {
-		right = selectedStyle.Render(right + " ▼")
-	} else {
-		right += " " + dimStyle.Render("▼")
+		// Session dropdown trigger
+		if m.focus == FocusSessionDropdown {
+			right = selectedStyle.Render(right + " ▼")
+		} else {
+			right += " " + dimStyle.Render("▼")
+		}
+		right += "  " + dimStyle.Render("[Alt-S]")
 	}
-	right += "  " + dimStyle.Render("[Alt-S]")
 
 	// Combine with padding
 	padding := m.width - len(stripAnsi(left)) - len(stripAnsi(right)) - 4
@@ -182,9 +196,95 @@ func (m Model) renderTopBar() string {
 	return topBarStyle.Width(m.width).Render(bar)
 }
 
+// renderSessionListView renders the session list for tmux mode.
+func (m Model) renderSessionListView(width, height int) string {
+	var b strings.Builder
+
+	// Table header
+	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(dimStyle.Render("Type    Name            Prompt                                  Status"))
+	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(strings.Repeat("─", width-4))
+	b.WriteString("\n")
+
+	// Get sessions for current worktree
+	var currentSessions []session.SessionInfo
+	if wt := m.selectedWorktree(); wt != nil {
+		allSessions := m.sessionManager.GetAllSessions()
+		for _, sess := range allSessions {
+			if sess.WorktreePath == wt.Path {
+				currentSessions = append(currentSessions, sess)
+			}
+		}
+	}
+
+	if len(currentSessions) == 0 {
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  No sessions for this worktree\n"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("  Press [p] to start a planner session or [b] to start a builder session\n"))
+		return b.String()
+	}
+
+	// Ensure selected index is in bounds
+	if m.selectedSessionIndex >= len(currentSessions) {
+		m.selectedSessionIndex = len(currentSessions) - 1
+	}
+	if m.selectedSessionIndex < 0 {
+		m.selectedSessionIndex = 0
+	}
+
+	// Render sessions
+	for i, sess := range currentSessions {
+		typeIcon := "📋"
+		if sess.Type == session.SessionTypeBuilder {
+			typeIcon = "🔨"
+		}
+
+		// Truncate prompt to fit (max ~35 chars)
+		promptDisplay := truncate(sess.Prompt, 40)
+
+		// Session name (tmux window name or ID)
+		nameDisplay := sess.TmuxWindowName
+		if nameDisplay == "" {
+			nameDisplay = string(sess.ID)[:min(15, len(sess.ID))]
+		}
+		nameDisplay = truncate(nameDisplay, 15)
+
+		// Format line: icon + name + prompt + status
+		statusStr := fmt.Sprintf("%s %s", statusIcon(sess.Status), sess.Status)
+		line := fmt.Sprintf("  %s  %-15s  %-40s  %s", typeIcon, nameDisplay, promptDisplay, statusStr)
+
+		// Highlight selected row
+		if i == m.selectedSessionIndex {
+			line = selectedStyle.Render(line)
+		}
+
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// min returns the minimum of two integers.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // renderCenter renders the main center area (session output + input).
 func (m Model) renderCenter(width, height int) string {
 	var b strings.Builder
+
+	// In tmux mode, always show session list
+	if m.sessionManager.IsInTmuxMode() {
+		return m.renderSessionListView(width, height)
+	}
 
 	if m.viewingSessionID == "" {
 		// No session selected - show worktree operation messages if any
@@ -531,12 +631,21 @@ func (m Model) renderStatusBar() string {
 	// Build keybinding hints based on state
 	var hints []string
 	hasWorktree := m.selectedWorktree() != nil
+	inTmuxMode := m.sessionManager.IsInTmuxMode()
+
 	if m.inputMode {
 		hints = []string{"[Tab] Switch", "[Ctrl+Enter] Send", "[Esc] Cancel"}
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
 		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close"}
+	} else if inTmuxMode {
+		// Tmux mode: show session list navigation hints
+		hints = []string{"[↑/↓] Navigate", "[Enter] Switch to session"}
+		if hasWorktree {
+			hints = append(hints, "[p] Plan", "[b] Build")
+		}
+		hints = append(hints, "[Alt-W] Worktree", "[q] Quit")
 	} else if m.viewingSessionID != "" {
-		// Session is selected - show contextual actions
+		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
 		hints = []string{"[↑/↓]scroll"}
 		if sess != nil && sess.Status == session.StatusIdle {
@@ -547,7 +656,7 @@ func (m Model) renderStatusBar() string {
 		}
 		hints = append(hints, "[Alt-W]worktree", "[Alt-S]session", "[q]uit")
 	} else {
-		// No session selected - show worktree-dependent actions
+		// SDK mode: no session selected - show worktree-dependent actions
 		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask"}
 		if hasWorktree {
 			hints = append(hints, "[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")

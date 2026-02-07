@@ -50,6 +50,7 @@ type Model struct {
 	worktreeOpMessages    []string
 	focus                 FocusArea
 	scrollOffset          int
+	selectedSessionIndex  int // For tmux mode session list navigation
 	height                int
 	width                 int
 	inputMode             bool

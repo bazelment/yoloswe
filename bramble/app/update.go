@@ -185,18 +185,79 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "alt+s":
-		// Open session dropdown
+		// In tmux mode, Alt-S does nothing (no dropdown)
+		if m.sessionManager.IsInTmuxMode() {
+			return m, nil
+		}
+		// TUI mode: open session dropdown
 		m.sessionDropdown.Open()
 		m.focus = FocusSessionDropdown
 		return m, nil
 
-	// Output scrolling (scrollOffset = lines from bottom; up increases, down decreases)
+	// Output scrolling (TUI mode) or session list navigation (tmux mode)
 	case "up", "k":
-		m.scrollOutput(1)
+		if m.sessionManager.IsInTmuxMode() {
+			// Tmux mode: navigate session list
+			if m.selectedSessionIndex > 0 {
+				m.selectedSessionIndex--
+			}
+		} else {
+			// TUI mode: scroll output
+			m.scrollOutput(1)
+		}
 		return m, nil
 
 	case "down", "j":
-		m.scrollOutput(-1)
+		if m.sessionManager.IsInTmuxMode() {
+			// Tmux mode: navigate session list
+			// Find number of sessions for current worktree
+			var sessionCount int
+			if wt := m.selectedWorktree(); wt != nil {
+				allSessions := m.sessionManager.GetAllSessions()
+				for _, sess := range allSessions {
+					if sess.WorktreePath == wt.Path {
+						sessionCount++
+					}
+				}
+			}
+			if m.selectedSessionIndex < sessionCount-1 {
+				m.selectedSessionIndex++
+			}
+		} else {
+			// TUI mode: scroll output
+			m.scrollOutput(-1)
+		}
+		return m, nil
+
+	case "enter":
+		// In tmux mode, Enter switches to the selected window
+		if m.sessionManager.IsInTmuxMode() {
+			// Get the currently selected session
+			var currentSessions []session.SessionInfo
+			if wt := m.selectedWorktree(); wt != nil {
+				allSessions := m.sessionManager.GetAllSessions()
+				for _, sess := range allSessions {
+					if sess.WorktreePath == wt.Path {
+						currentSessions = append(currentSessions, sess)
+					}
+				}
+			}
+
+			if m.selectedSessionIndex >= 0 && m.selectedSessionIndex < len(currentSessions) {
+				sess := currentSessions[m.selectedSessionIndex]
+				if sess.TmuxWindowName != "" {
+					return m, func() tea.Msg {
+						cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+						if err := cmd.Run(); err != nil {
+							return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+						}
+						return nil
+					}
+				} else {
+					m.lastError = "Session has no tmux window name"
+				}
+			}
+		}
 		return m, nil
 
 	case "pgup":
@@ -267,7 +328,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Stop session with confirmation
+		// Stop session with confirmation (TUI mode only)
+		if m.sessionManager.IsInTmuxMode() {
+			m.lastError = "Close tmux windows directly with prefix+& or 'exit' command"
+			return m, nil
+		}
 		if sess := m.selectedSession(); sess != nil {
 			sessID := sess.ID
 			title := sess.Title
@@ -287,7 +352,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "f":
-		// Follow-up on idle session
+		// Follow-up on idle session (TUI mode only)
+		if m.sessionManager.IsInTmuxMode() {
+			m.lastError = "Follow-ups must be done in the tmux window directly"
+			return m, nil
+		}
 		if sess := m.selectedSession(); sess != nil && sess.Status == session.StatusIdle {
 			return m.promptInput("Follow-up: ", func(message string) tea.Cmd {
 				return func() tea.Msg {
