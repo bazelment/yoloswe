@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "iteration.go",
         "mcp_tools.go",
+        "mcp_tools_typed.go",
         "mission_events.go",
         "planner.go",
         "prompts.go",

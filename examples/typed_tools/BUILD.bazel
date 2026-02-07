@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_binary(
+    name = "typed_tools",
+    embed = [":typed_tools_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "typed_tools_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/examples/typed_tools",
+    visibility = ["//visibility:private"],
+    deps = ["//agent-cli-wrapper/claude"],
+)

@@ -126,8 +126,12 @@ func (c *MCPConfig) AddSSEServer(name, url string) *MCPConfig {
 
 // AddSDKServer adds an SDK-based MCP server whose tool calls are handled
 // in-process via the stdin/stdout control protocol.
+//
+// The name is used both as the MCPServers map key and in the MCPSDKServerConfig.Name
+// field. The Name field is REQUIRED in the JSON config sent to the CLI — without it,
+// the CLI silently hangs. See MCPSDKServerConfig for details.
 func (c *MCPConfig) AddSDKServer(name string, handler SDKToolHandler) *MCPConfig {
-	c.MCPServers[name] = MCPSDKServerConfig{Type: MCPServerTypeSDK}
+	c.MCPServers[name] = MCPSDKServerConfig{Type: MCPServerTypeSDK, Name: name}
 	if c.sdkHandlers == nil {
 		c.sdkHandlers = make(map[string]SDKToolHandler)
 	}

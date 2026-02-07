@@ -43,21 +43,23 @@ type SessionInfo struct {
 
 // Session manages interaction with the Claude CLI.
 type Session struct {
-	recorder          *sessionRecorder
-	process           *processManager
-	accumulator       *streamAccumulator
-	turnManager       *turnManager
-	permissionManager *permissionManager
-	state             *sessionState
-	events            chan Event
-	info              *SessionInfo
-	done              chan struct{}
-	cancel            context.CancelFunc
-	ctx               context.Context
-	config            SessionConfig
-	mu                sync.RWMutex
-	started           bool
-	stopping          bool
+	ctx                     context.Context
+	events                  chan Event
+	recorder                *sessionRecorder
+	accumulator             *streamAccumulator
+	turnManager             *turnManager
+	permissionManager       *permissionManager
+	state                   *sessionState
+	process                 *processManager
+	info                    *SessionInfo
+	done                    chan struct{}
+	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	cancel                  context.CancelFunc
+	config                  SessionConfig
+	mu                      sync.RWMutex
+	pendingMu               sync.Mutex
+	started                 bool
+	stopping                bool
 }
 
 // NewSession creates a new Claude session with options.
@@ -68,9 +70,10 @@ func NewSession(opts ...SessionOption) *Session {
 	}
 
 	s := &Session{
-		config: config,
-		events: make(chan Event, config.EventBufferSize),
-		done:   make(chan struct{}),
+		config:                  config,
+		events:                  make(chan Event, config.EventBufferSize),
+		done:                    make(chan struct{}),
+		pendingControlResponses: make(map[string]chan protocol.ControlResponsePayload),
 	}
 
 	s.turnManager = newTurnManager()
@@ -88,9 +91,9 @@ func NewSession(opts ...SessionOption) *Session {
 // Start spawns the CLI process and begins the session.
 func (s *Session) Start(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.started {
+		s.mu.Unlock()
 		return ErrAlreadyStarted
 	}
 
@@ -100,12 +103,14 @@ func (s *Session) Start(ctx context.Context) error {
 	s.process = newProcessManager(s.config)
 	if err := s.process.Start(ctx); err != nil {
 		s.cancel()
+		s.mu.Unlock()
 		return err
 	}
 
 	// Transition state
 	if err := s.state.Transition(TransitionStarted); err != nil {
 		s.process.Stop()
+		s.mu.Unlock()
 		return err
 	}
 
@@ -118,7 +123,93 @@ func (s *Session) Start(ctx context.Context) error {
 	}
 
 	s.started = true
+	s.mu.Unlock()
+
+	// Send SDK initialize handshake (matching Python SDK behavior).
+	// This MUST happen:
+	//   1. After readLoop is started — so we can receive the CLI's response.
+	//   2. After s.mu is released — because during the initialize handshake,
+	//      the CLI interleaves MCP setup requests (initialize, notifications/initialized,
+	//      tools/list) as control_request messages. The readLoop calls handleControlRequest
+	//      which calls handleMCPMessage, and if s.mu were held, it would deadlock.
+	//
+	// Protocol flow during initialization:
+	//   SDK → CLI: control_request {subtype: "initialize"}
+	//   CLI → SDK: control_request {mcp_message: {method: "initialize"}}        (for each SDK server)
+	//   SDK → CLI: control_response {mcp_response: {result: initializeResult}}
+	//   CLI → SDK: control_request {mcp_message: {method: "notifications/initialized"}}
+	//   SDK → CLI: control_response {mcp_response: {result: {}}}
+	//   CLI → SDK: control_request {mcp_message: {method: "tools/list"}}
+	//   SDK → CLI: control_response {mcp_response: {result: toolsListResult}}
+	//   CLI → SDK: control_response {request_id: <init_req_id>}                 (initialize done)
+	//   CLI → SDK: system {subtype: "init", session_id: ..., tools: [...]}
+	if err := s.sendInitialize(ctx); err != nil {
+		s.Stop()
+		return fmt.Errorf("SDK initialize handshake failed: %w", err)
+	}
+
 	return nil
+}
+
+// sendInitialize sends the SDK initialize control request and waits for the response.
+// This is required by the Claude CLI control protocol before any user messages.
+func (s *Session) sendInitialize(ctx context.Context) error {
+	initReq := map[string]interface{}{
+		"subtype": "initialize",
+	}
+
+	_, err := s.sendControlRequestLocked(ctx, initReq, 60*time.Second)
+	return err
+}
+
+// sendControlRequestLocked sends a control request and waits for the response.
+// Despite the name, this does NOT require s.mu to be held — it uses its own
+// pendingMu for synchronizing the response channel map.
+func (s *Session) sendControlRequestLocked(ctx context.Context, request interface{}, timeout time.Duration) (protocol.ControlResponsePayload, error) {
+	requestID := generateRequestID()
+
+	// Register pending response channel
+	ch := make(chan protocol.ControlResponsePayload, 1)
+	s.pendingMu.Lock()
+	s.pendingControlResponses[requestID] = ch
+	s.pendingMu.Unlock()
+
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pendingControlResponses, requestID)
+		s.pendingMu.Unlock()
+	}()
+
+	// Build and send the control request
+	msg := protocol.ControlRequestToSend{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request:   request,
+	}
+
+	if err := s.process.WriteMessage(msg); err != nil {
+		return protocol.ControlResponsePayload{}, err
+	}
+
+	if s.recorder != nil {
+		s.recorder.RecordSent(msg)
+	}
+
+	// Wait for response with timeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case resp := <-ch:
+		if resp.Subtype == "error" {
+			return resp, fmt.Errorf("control request error: %s", resp.Error)
+		}
+		return resp, nil
+	case <-timeoutCtx.Done():
+		return protocol.ControlResponsePayload{}, fmt.Errorf("control request timed out")
+	case <-s.done:
+		return protocol.ControlResponsePayload{}, fmt.Errorf("session stopped")
+	}
 }
 
 // Events returns a read-only channel for receiving events.
@@ -481,6 +572,8 @@ func (s *Session) handleLine(line []byte) {
 		s.handleResult(m)
 	case protocol.ControlRequest:
 		s.handleControlRequest(m)
+	case protocol.ControlResponse:
+		s.handleControlResponse(m)
 	}
 }
 
@@ -655,6 +748,25 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 	// Complete turn (notifies waiters)
 	s.turnManager.CompleteTurn(result)
+}
+
+// handleControlResponse routes incoming control_response messages to the goroutine
+// that sent the corresponding control_request (matched by request_id).
+// This is used during the SDK initialize handshake — the CLI sends back a
+// control_response after completing MCP server setup.
+func (s *Session) handleControlResponse(msg protocol.ControlResponse) {
+	requestID := msg.Response.RequestID
+	s.pendingMu.Lock()
+	ch, ok := s.pendingControlResponses[requestID]
+	s.pendingMu.Unlock()
+
+	if ok {
+		// Send response to waiting goroutine (non-blocking since channel is buffered)
+		select {
+		case ch <- msg.Response:
+		default:
+		}
+	}
 }
 
 func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
@@ -836,6 +948,14 @@ func (s *Session) emitError(err error, context string) {
 }
 
 // handleMCPMessage dispatches an MCP JSON-RPC message to the appropriate SDK handler.
+// The CLI wraps MCP JSON-RPC requests in control_request messages with a special
+// "mcp_message" subtype, routing them to the SDK server identified by server_name.
+//
+// Expected methods during session lifecycle:
+//   - "initialize": Sent once per server during CLI startup. Must respond with protocol version and capabilities.
+//   - "notifications/initialized": Acknowledgement after initialize. Respond with empty object.
+//   - "tools/list": Sent after initialization. Must respond with the list of available tools.
+//   - "tools/call": Sent when Claude wants to invoke a tool. Handled async since tools may block.
 func (s *Session) handleMCPMessage(requestID string, mcpReq protocol.MCPMessageRequest) {
 	// Look up SDK handler
 	var handler SDKToolHandler

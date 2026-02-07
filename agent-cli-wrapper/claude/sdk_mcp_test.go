@@ -37,7 +37,7 @@ func TestMCPSDKServerConfig_ServerType(t *testing.T) {
 }
 
 func TestMCPSDKServerConfig_MarshalJSON(t *testing.T) {
-	cfg := MCPSDKServerConfig{Type: MCPServerTypeSDK}
+	cfg := MCPSDKServerConfig{Type: MCPServerTypeSDK, Name: "my-tools"}
 
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -53,9 +53,13 @@ func TestMCPSDKServerConfig_MarshalJSON(t *testing.T) {
 		t.Errorf("expected type 'sdk', got %v", parsed["type"])
 	}
 
-	// Should only have the type field
-	if len(parsed) != 1 {
-		t.Errorf("expected 1 field, got %d: %v", len(parsed), parsed)
+	if parsed["name"] != "my-tools" {
+		t.Errorf("expected name 'my-tools', got %v", parsed["name"])
+	}
+
+	// Should have type and name fields
+	if len(parsed) != 2 {
+		t.Errorf("expected 2 fields, got %d: %v", len(parsed), parsed)
 	}
 }
 
