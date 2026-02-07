@@ -14,6 +14,8 @@ const (
 	MCPServerTypeHTTP MCPServerType = "http"
 	// MCPServerTypeSSE uses Server-Sent Events transport.
 	MCPServerTypeSSE MCPServerType = "sse"
+	// MCPServerTypeSDK uses the stdin/stdout control protocol for MCP traffic.
+	MCPServerTypeSDK MCPServerType = "sdk"
 )
 
 // MCPServerConfig is the base interface for MCP server configurations.
@@ -71,7 +73,8 @@ func (c MCPSSEServerConfig) serverType() MCPServerType {
 // MCPConfig holds the MCP server configuration for a session.
 // The keys are server names, values are server configurations.
 type MCPConfig struct {
-	MCPServers map[string]MCPServerConfig `json:"mcpServers"`
+	MCPServers  map[string]MCPServerConfig `json:"mcpServers"`
+	sdkHandlers map[string]SDKToolHandler
 }
 
 // MarshalJSON implements json.Marshaler for MCPConfig.
@@ -119,4 +122,20 @@ func (c *MCPConfig) AddSSEServer(name, url string) *MCPConfig {
 		URL:  url,
 	}
 	return c
+}
+
+// AddSDKServer adds an SDK-based MCP server whose tool calls are handled
+// in-process via the stdin/stdout control protocol.
+func (c *MCPConfig) AddSDKServer(name string, handler SDKToolHandler) *MCPConfig {
+	c.MCPServers[name] = MCPSDKServerConfig{Type: MCPServerTypeSDK}
+	if c.sdkHandlers == nil {
+		c.sdkHandlers = make(map[string]SDKToolHandler)
+	}
+	c.sdkHandlers[name] = handler
+	return c
+}
+
+// SDKHandlers returns the registered SDK tool handlers.
+func (c *MCPConfig) SDKHandlers() map[string]SDKToolHandler {
+	return c.sdkHandlers
 }

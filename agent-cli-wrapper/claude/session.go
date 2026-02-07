@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -51,6 +52,8 @@ type Session struct {
 	events            chan Event
 	info              *SessionInfo
 	done              chan struct{}
+	cancel            context.CancelFunc
+	ctx               context.Context
 	config            SessionConfig
 	mu                sync.RWMutex
 	started           bool
@@ -91,8 +94,12 @@ func (s *Session) Start(ctx context.Context) error {
 		return ErrAlreadyStarted
 	}
 
+	// Create a context for tool handler goroutines, cancelled on Stop().
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+
 	s.process = newProcessManager(s.config)
 	if err := s.process.Start(ctx); err != nil {
+		s.cancel()
 		return err
 	}
 
@@ -328,6 +335,11 @@ func (s *Session) Stop() error {
 	}
 	s.stopping = true
 	s.mu.Unlock()
+
+	// Cancel context for tool handler goroutines
+	if s.cancel != nil {
+		s.cancel()
+	}
 
 	// Close done channel to signal goroutines
 	close(s.done)
@@ -648,6 +660,15 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 	ctx := context.Background()
 
+	// First check if this is an MCP message (SDK MCP server traffic)
+	reqData, parseErr := protocol.ParseControlRequest(msg.Request)
+	if parseErr == nil {
+		if mcpReq, ok := reqData.(protocol.MCPMessageRequest); ok {
+			s.handleMCPMessage(msg.RequestID, mcpReq)
+			return
+		}
+	}
+
 	// Parse tool use request from control message
 	toolReq := protocol.ParseToolUseRequest(msg)
 
@@ -812,6 +833,130 @@ func (s *Session) emitError(err error, context string) {
 		Error:      err,
 		Context:    context,
 	})
+}
+
+// handleMCPMessage dispatches an MCP JSON-RPC message to the appropriate SDK handler.
+func (s *Session) handleMCPMessage(requestID string, mcpReq protocol.MCPMessageRequest) {
+	// Look up SDK handler
+	var handler SDKToolHandler
+	if s.config.MCPConfig != nil {
+		handlers := s.config.MCPConfig.SDKHandlers()
+		if handlers != nil {
+			handler = handlers[mcpReq.ServerName]
+		}
+	}
+	if handler == nil {
+		s.sendMCPErrorResponse(requestID, nil, -32603, fmt.Sprintf("no SDK handler for server %q", mcpReq.ServerName))
+		return
+	}
+
+	// Parse the JSON-RPC request from the message
+	var rpcReq protocol.JSONRPCRequest
+	if err := json.Unmarshal(mcpReq.Message, &rpcReq); err != nil {
+		s.sendMCPErrorResponse(requestID, nil, -32700, "failed to parse JSON-RPC request")
+		return
+	}
+
+	switch rpcReq.Method {
+	case "initialize":
+		result := buildInitializeResult(mcpReq.ServerName)
+		s.sendMCPResponse(requestID, rpcReq.ID, result)
+
+	case "notifications/initialized":
+		// Notification acknowledgement — send empty success response
+		s.sendMCPResponse(requestID, rpcReq.ID, map[string]interface{}{})
+
+	case "tools/list":
+		result := buildToolsListResult(handler)
+		s.sendMCPResponse(requestID, rpcReq.ID, result)
+
+	case "tools/call":
+		// tools/call MUST be handled async — tool handlers can block for minutes.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.sendMCPErrorResponse(requestID, rpcReq.ID, -32603,
+						fmt.Sprintf("tool handler panic: %v", r))
+					s.emitError(fmt.Errorf("SDK tool handler panic: %v", r), "mcp_tool_call")
+				}
+			}()
+
+			var params protocol.MCPToolsCallParams
+			if err := json.Unmarshal(rpcReq.Params, &params); err != nil {
+				s.sendMCPErrorResponse(requestID, rpcReq.ID, -32602, "invalid tools/call params")
+				return
+			}
+
+			result, err := handler.HandleToolCall(s.ctx, params.Name, params.Arguments)
+			if err != nil {
+				// Return error as tool result (not JSON-RPC error) so Claude sees it
+				result = &protocol.MCPToolCallResult{
+					Content: []protocol.MCPContentItem{
+						{Type: "text", Text: fmt.Sprintf("Tool error: %v", err)},
+					},
+					IsError: true,
+				}
+			}
+
+			s.sendMCPResponse(requestID, rpcReq.ID, result)
+		}()
+
+	default:
+		s.sendMCPErrorResponse(requestID, rpcReq.ID, -32601, fmt.Sprintf("method not found: %s", rpcReq.Method))
+	}
+}
+
+// sendMCPResponse sends a successful MCP control response.
+func (s *Session) sendMCPResponse(requestID string, rpcID interface{}, result interface{}) {
+	rpcResp := protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      rpcID,
+		Result:  result,
+	}
+
+	resp := &protocol.ControlResponse{
+		Type: protocol.MessageTypeControlResponse,
+		Response: protocol.ControlResponsePayload{
+			Subtype:   "success",
+			RequestID: requestID,
+			Response:  protocol.MCPResponsePayload{MCPResponse: rpcResp},
+		},
+	}
+
+	if err := s.process.WriteMessage(resp); err != nil {
+		s.emitError(err, "send_mcp_response")
+	}
+	if s.recorder != nil {
+		s.recorder.RecordSent(resp)
+	}
+}
+
+// sendMCPErrorResponse sends a JSON-RPC error as an MCP control response.
+func (s *Session) sendMCPErrorResponse(requestID string, rpcID interface{}, code int, message string) {
+	rpcResp := protocol.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      rpcID,
+		Error: &protocol.JSONRPCError{
+			Code:    code,
+			Message: message,
+		},
+	}
+
+	resp := &protocol.ControlResponse{
+		Type: protocol.MessageTypeControlResponse,
+		Response: protocol.ControlResponsePayload{
+			Subtype:   "success",
+			RequestID: requestID,
+			Response:  protocol.MCPResponsePayload{MCPResponse: rpcResp},
+		},
+	}
+
+	if err := s.process.WriteMessage(resp); err != nil {
+		s.emitError(err, "send_mcp_error_response")
+	}
+	if s.recorder != nil {
+		s.recorder.RecordSent(resp)
+	}
 }
 
 // generateRequestID generates a unique request ID.

@@ -1,16 +1,16 @@
 package planner
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
-func TestMCPServer_Initialize(t *testing.T) {
+func newTestPlanner(t *testing.T) *Planner {
+	t.Helper()
 	cfg := Config{
 		PlannerConfig: agent.AgentConfig{
 			Model:      "sonnet",
@@ -33,140 +33,26 @@ func TestMCPServer_Initialize(t *testing.T) {
 			SessionDir: t.TempDir(),
 		},
 	}
-
-	p := New(cfg, "test-session")
-	server := NewMCPServer(p)
-
-	// Create a test request
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "initialize",
-		Params:  json.RawMessage(`{}`),
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	server.handleMCP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
-	}
-
-	var resp jsonRPCResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.Error != nil {
-		t.Errorf("unexpected error: %v", resp.Error)
-	}
-
-	// Check that result contains expected fields
-	result, ok := resp.Result.(*initializeResult)
-	if !ok {
-		// Result is a map, need to convert
-		resultMap, ok := resp.Result.(map[string]interface{})
-		if !ok {
-			t.Fatalf("result is not a map: %T", resp.Result)
-		}
-		if _, ok := resultMap["protocolVersion"]; !ok {
-			t.Error("result missing protocolVersion")
-		}
-		if _, ok := resultMap["capabilities"]; !ok {
-			t.Error("result missing capabilities")
-		}
-		if _, ok := resultMap["serverInfo"]; !ok {
-			t.Error("result missing serverInfo")
-		}
-	} else {
-		if result.ProtocolVersion == "" {
-			t.Error("protocolVersion is empty")
-		}
-	}
+	return New(cfg, "test-session")
 }
 
-func TestMCPServer_ToolsList(t *testing.T) {
-	cfg := Config{
-		PlannerConfig: agent.AgentConfig{
-			Model:      "sonnet",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		DesignerConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		BuilderConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		ReviewerConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-	}
+func TestPlannerToolHandler_Tools(t *testing.T) {
+	p := newTestPlanner(t)
+	handler := NewPlannerToolHandler(p)
 
-	p := New(cfg, "test-session")
-	server := NewMCPServer(p)
-
-	// Create a test request
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "tools/list",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	server.handleMCP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
-	}
-
-	var resp jsonRPCResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if resp.Error != nil {
-		t.Errorf("unexpected error: %v", resp.Error)
-	}
-
-	// Check that result contains tools
-	resultMap, ok := resp.Result.(map[string]interface{})
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-
-	tools, ok := resultMap["tools"].([]interface{})
-	if !ok {
-		t.Fatalf("tools is not an array: %T", resultMap["tools"])
-	}
-
+	tools := handler.Tools()
 	if len(tools) != 3 {
-		t.Errorf("expected 3 tools, got %d", len(tools))
+		t.Fatalf("expected 3 tools, got %d", len(tools))
 	}
 
-	// Check tool names
 	toolNames := make(map[string]bool)
 	for _, tool := range tools {
-		toolMap, ok := tool.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if name, ok := toolMap["name"].(string); ok {
-			toolNames[name] = true
+		toolNames[tool.Name] = true
+
+		// Verify inputSchema is valid JSON
+		var schema map[string]interface{}
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			t.Errorf("tool %q has invalid inputSchema: %v", tool.Name, err)
 		}
 	}
 
@@ -181,114 +67,99 @@ func TestMCPServer_ToolsList(t *testing.T) {
 	}
 }
 
-func TestMCPServer_InvalidMethod(t *testing.T) {
-	cfg := Config{
-		PlannerConfig: agent.AgentConfig{
-			Model:      "sonnet",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		DesignerConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		BuilderConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		ReviewerConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
+func TestPlannerToolHandler_UnknownTool(t *testing.T) {
+	p := newTestPlanner(t)
+	handler := NewPlannerToolHandler(p)
+
+	result, err := handler.HandleToolCall(context.Background(), "nonexistent", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	p := New(cfg, "test-session")
-	server := NewMCPServer(p)
-
-	// Create a test request with invalid method
-	reqBody := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "invalid/method",
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	server.handleMCP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
+	if !result.IsError {
+		t.Error("expected IsError for unknown tool")
 	}
 
-	var resp jsonRPCResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	if len(result.Content) == 0 {
+		t.Fatal("expected content in error result")
 	}
 
-	if resp.Error == nil {
-		t.Error("expected error for invalid method")
-	}
-
-	if resp.Error.Code != -32601 {
-		t.Errorf("expected error code -32601, got %d", resp.Error.Code)
+	if result.Content[0].Type != "text" {
+		t.Errorf("expected content type 'text', got %q", result.Content[0].Type)
 	}
 }
 
-func TestMCPServer_StartStop(t *testing.T) {
-	cfg := Config{
-		PlannerConfig: agent.AgentConfig{
-			Model:      "sonnet",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		DesignerConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		BuilderConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
-		ReviewerConfig: agent.AgentConfig{
-			Model:      "haiku",
-			WorkDir:    ".",
-			SessionDir: t.TempDir(),
-		},
+func TestPlannerToolHandler_ToolDefinitionSchemas(t *testing.T) {
+	p := newTestPlanner(t)
+	handler := NewPlannerToolHandler(p)
+
+	tools := handler.Tools()
+	for _, tool := range tools {
+		var schema map[string]interface{}
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			t.Errorf("tool %q: failed to parse inputSchema: %v", tool.Name, err)
+			continue
+		}
+
+		if schema["type"] != "object" {
+			t.Errorf("tool %q: expected schema type 'object', got %v", tool.Name, schema["type"])
+		}
+
+		props, ok := schema["properties"].(map[string]interface{})
+		if !ok {
+			t.Errorf("tool %q: expected properties to be object", tool.Name)
+			continue
+		}
+
+		// All tools should have a "task" property
+		if _, ok := props["task"]; !ok {
+			t.Errorf("tool %q: missing 'task' property", tool.Name)
+		}
+
+		required, ok := schema["required"].([]interface{})
+		if !ok {
+			t.Errorf("tool %q: expected required to be array", tool.Name)
+			continue
+		}
+
+		hasTaskRequired := false
+		for _, r := range required {
+			if r == "task" {
+				hasTaskRequired = true
+			}
+		}
+		if !hasTaskRequired {
+			t.Errorf("tool %q: 'task' should be required", tool.Name)
+		}
 	}
+}
 
-	p := New(cfg, "test-session")
-	server := NewMCPServer(p)
+func TestPlannerToolHandler_ImplementsSDKToolHandler(t *testing.T) {
+	p := newTestPlanner(t)
+	handler := NewPlannerToolHandler(p)
 
-	// Start the server
-	url, err := server.Start()
-	if err != nil {
-		t.Fatalf("failed to start server: %v", err)
-	}
+	// Verify it has the right method signatures
+	_ = handler.Tools()
+	_, _ = handler.HandleToolCall(context.Background(), "test", json.RawMessage(`{}`))
 
-	if url == "" {
-		t.Error("URL should not be empty")
-	}
+	// Verify MCPToolDefinition fields match expected types
+	tools := handler.Tools()
+	for _, tool := range tools {
+		if tool.Name == "" {
+			t.Error("tool name should not be empty")
+		}
+		if tool.Description == "" {
+			t.Error("tool description should not be empty")
+		}
+		if len(tool.InputSchema) == 0 {
+			t.Error("tool inputSchema should not be empty")
+		}
 
-	// Verify the URL looks right
-	if len(url) < 10 {
-		t.Errorf("URL seems too short: %s", url)
-	}
-
-	// Stop the server
-	if err := server.Stop(); err != nil {
-		t.Errorf("failed to stop server: %v", err)
-	}
-
-	// Stopping again should be idempotent
-	if err := server.Stop(); err != nil {
-		t.Errorf("second stop failed: %v", err)
+		// Verify it's a valid protocol.MCPToolDefinition
+		_ = protocol.MCPToolDefinition{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: tool.InputSchema,
+		}
 	}
 }

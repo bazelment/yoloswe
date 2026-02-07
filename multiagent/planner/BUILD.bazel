@@ -16,6 +16,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/protocol",
         "//multiagent/agent",
         "//multiagent/checkpoint",
         "//multiagent/progress",
@@ -37,6 +38,7 @@ go_test(
     embed = [":planner"],
     deps = [
         "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/protocol",
         "//multiagent/agent",
         "//multiagent/protocol",
     ],
