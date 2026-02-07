@@ -203,7 +203,7 @@ func (m Model) renderSessionListView(width, height int) string {
 	// Table header
 	b.WriteString("\n")
 	b.WriteString("  ")
-	b.WriteString(dimStyle.Render("Type    Name            Prompt                                  Status"))
+	b.WriteString(dimStyle.Render("Type    Name            Status        Prompt"))
 	b.WriteString("\n")
 	b.WriteString("  ")
 	b.WriteString(strings.Repeat("─", width-4))
@@ -243,9 +243,6 @@ func (m Model) renderSessionListView(width, height int) string {
 			typeIcon = "🔨"
 		}
 
-		// Truncate prompt to fit (max ~35 chars)
-		promptDisplay := truncate(sess.Prompt, 40)
-
 		// Session name (tmux window name or ID)
 		nameDisplay := sess.TmuxWindowName
 		if nameDisplay == "" {
@@ -253,9 +250,18 @@ func (m Model) renderSessionListView(width, height int) string {
 		}
 		nameDisplay = truncate(nameDisplay, 15)
 
-		// Format line: icon + name + prompt + status
-		statusStr := fmt.Sprintf("%s %s", statusIcon(sess.Status), sess.Status)
-		line := fmt.Sprintf("  %s  %-15s  %-40s  %s", typeIcon, nameDisplay, promptDisplay, statusStr)
+		// Status with icon
+		statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status), sess.Status)
+
+		// Prompt gets remaining width (more space) - strip quotes if present
+		prompt := sess.Prompt
+		if len(prompt) > 0 && prompt[0] == '"' {
+			prompt = strings.Trim(prompt, `"`)
+		}
+		promptDisplay := truncate(prompt, 80)
+
+		// Format line: icon + name + status + prompt
+		line := fmt.Sprintf("  %s  %-15s  %-13s  %s", typeIcon, nameDisplay, statusStr, promptDisplay)
 
 		// Highlight selected row
 		if i == m.selectedSessionIndex {
