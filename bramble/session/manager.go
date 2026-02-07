@@ -76,6 +76,7 @@ type ManagerConfig struct {
 	Store       *Store
 	RepoName    string
 	SessionMode SessionMode
+	YoloMode    bool // Skip all permission prompts
 }
 
 // Manager handles multiple concurrent sessions.
@@ -262,6 +263,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			workDir:        session.WorktreePath,
 			prompt:         prompt,
 			permissionMode: permissionMode,
+			yoloMode:       m.config.YoloMode,
 		}
 		// No event handler for tmux mode - all output is in the tmux window
 	} else {

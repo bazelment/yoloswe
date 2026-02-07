@@ -14,6 +14,7 @@ type tmuxRunner struct {
 	workDir        string // working directory for the window
 	prompt         string // initial prompt
 	permissionMode string // permission mode: "" (default) or "plan"
+	yoloMode       bool   // skip all permission prompts
 }
 
 // Start creates a new tmux window in the current session and launches the claude CLI in it.
@@ -38,6 +39,12 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 	// Add permission mode flag for planner sessions
 	if r.permissionMode == "plan" {
 		args = append(args, "--permission-mode", "plan")
+	}
+
+	// Add yolo mode flags to skip all permissions
+	if r.yoloMode {
+		args = append(args, "--allow-dangerously-skip-permissions")
+		args = append(args, "--dangerously-skip-permissions")
 	}
 
 	// Add the prompt
