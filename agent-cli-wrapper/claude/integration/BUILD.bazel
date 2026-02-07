@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Integration tests require a valid Claude API key and network access.
+# Run with: bazel test //agent-cli-wrapper/claude/integration:integration_test --test_tag_filters=integration
+go_test(
+    name = "integration_test",
+    srcs = [
+        "sdk_mcp_test.go",
+        "sdk_mcp_typed_test.go",
+        "session_test.go",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "manual",
+    ],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/protocol",
+    ],
+)
