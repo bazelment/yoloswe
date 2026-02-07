@@ -38,8 +38,7 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 
 	// Add yolo mode flags first to skip all permissions
 	if r.yoloMode {
-		args = append(args, "--allow-dangerously-skip-permissions")
-		args = append(args, "--dangerously-skip-permissions")
+		args = append(args, "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions")
 	}
 
 	// Add permission mode flag for planner sessions (after yolo flags, before prompt)

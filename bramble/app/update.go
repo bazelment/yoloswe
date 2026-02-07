@@ -214,8 +214,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			var sessionCount int
 			if wt := m.selectedWorktree(); wt != nil {
 				allSessions := m.sessionManager.GetAllSessions()
-				for _, sess := range allSessions {
-					if sess.WorktreePath == wt.Path {
+				for i := range allSessions {
+					if allSessions[i].WorktreePath == wt.Path {
 						sessionCount++
 					}
 				}
@@ -236,9 +236,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			var currentSessions []session.SessionInfo
 			if wt := m.selectedWorktree(); wt != nil {
 				allSessions := m.sessionManager.GetAllSessions()
-				for _, sess := range allSessions {
-					if sess.WorktreePath == wt.Path {
-						currentSessions = append(currentSessions, sess)
+				for i := range allSessions {
+					if allSessions[i].WorktreePath == wt.Path {
+						currentSessions = append(currentSessions, allSessions[i])
 					}
 				}
 			}
@@ -253,9 +253,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						}
 						return nil
 					}
-				} else {
-					m.lastError = "Session has no tmux window name"
 				}
+				m.lastError = "Session has no tmux window name"
 			}
 		}
 		return m, nil

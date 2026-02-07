@@ -42,25 +42,25 @@ type SessionID string
 
 // Session represents a single plan or builder session.
 type Session struct {
-	CreatedAt       time.Time
-	ctx             context.Context
-	Error           error
-	Progress        *SessionProgress
-	StartedAt       *time.Time
-	CompletedAt     *time.Time
-	cancel          context.CancelFunc
-	WorktreeName    string
-	Prompt          string
-	Title           string
-	Model           string
+	CreatedAt      time.Time
+	ctx            context.Context
+	Error          error
+	Progress       *SessionProgress
+	StartedAt      *time.Time
+	CompletedAt    *time.Time
+	cancel         context.CancelFunc
+	WorktreeName   string
+	Prompt         string
+	Title          string
+	Model          string
 	PlanFilePath   string // Path to plan file (planner sessions only)
 	TmuxWindowName string // tmux window name (empty for TUI mode)
 	RunnerType     string // "tui" or "tmux"
-	ID              SessionID
-	WorktreePath    string
-	Status          SessionStatus
-	Type            SessionType
-	mu              sync.RWMutex
+	ID             SessionID
+	WorktreePath   string
+	Status         SessionStatus
+	Type           SessionType
+	mu             sync.RWMutex
 }
 
 // SessionProgress tracks real-time progress.
@@ -119,22 +119,22 @@ type SessionProgressSnapshot struct {
 
 // SessionInfo provides a snapshot of session state for display.
 type SessionInfo struct {
-	CreatedAt       time.Time
-	CompletedAt     *time.Time
-	StartedAt       *time.Time
-	WorktreePath    string
-	WorktreeName    string
-	Prompt          string
-	Title           string
-	Model           string
+	CreatedAt      time.Time
+	CompletedAt    *time.Time
+	StartedAt      *time.Time
+	WorktreePath   string
+	WorktreeName   string
+	Prompt         string
+	Title          string
+	Model          string
 	PlanFilePath   string
 	TmuxWindowName string // tmux window name (empty for TUI mode)
 	RunnerType     string // "tui" or "tmux"
-	ID              SessionID
-	Status          SessionStatus
-	Type            SessionType
-	ErrorMsg        string
-	Progress        SessionProgressSnapshot
+	ID             SessionID
+	Status         SessionStatus
+	Type           SessionType
+	ErrorMsg       string
+	Progress       SessionProgressSnapshot
 }
 
 // ToInfo converts a Session to SessionInfo for safe display.

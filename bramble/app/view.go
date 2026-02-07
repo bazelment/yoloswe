@@ -213,9 +213,9 @@ func (m Model) renderSessionListView(width, height int) string {
 	var currentSessions []session.SessionInfo
 	if wt := m.selectedWorktree(); wt != nil {
 		allSessions := m.sessionManager.GetAllSessions()
-		for _, sess := range allSessions {
-			if sess.WorktreePath == wt.Path {
-				currentSessions = append(currentSessions, sess)
+		for i := range allSessions {
+			if allSessions[i].WorktreePath == wt.Path {
+				currentSessions = append(currentSessions, allSessions[i])
 			}
 		}
 	}
@@ -246,7 +246,7 @@ func (m Model) renderSessionListView(width, height int) string {
 		// Session name (tmux window name or ID)
 		nameDisplay := sess.TmuxWindowName
 		if nameDisplay == "" {
-			nameDisplay = string(sess.ID)[:min(15, len(sess.ID))]
+			nameDisplay = string(sess.ID)[:minInt(15, len(sess.ID))]
 		}
 		nameDisplay = truncate(nameDisplay, 15)
 
@@ -255,7 +255,7 @@ func (m Model) renderSessionListView(width, height int) string {
 
 		// Prompt gets remaining width (more space) - strip quotes if present
 		prompt := sess.Prompt
-		if len(prompt) > 0 && prompt[0] == '"' {
+		if prompt != "" && prompt[0] == '"' {
 			prompt = strings.Trim(prompt, `"`)
 		}
 		promptDisplay := truncate(prompt, 80)
@@ -275,8 +275,8 @@ func (m Model) renderSessionListView(width, height int) string {
 	return b.String()
 }
 
-// min returns the minimum of two integers.
-func min(a, b int) int {
+// minInt returns the minimum of two integers.
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
