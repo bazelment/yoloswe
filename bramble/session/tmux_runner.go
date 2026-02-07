@@ -36,18 +36,18 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 	claudeCmd := "claude"
 	args := []string{}
 
-	// Add permission mode flag for planner sessions
-	if r.permissionMode == "plan" {
-		args = append(args, "--permission-mode", "plan")
-	}
-
-	// Add yolo mode flags to skip all permissions
+	// Add yolo mode flags first to skip all permissions
 	if r.yoloMode {
 		args = append(args, "--allow-dangerously-skip-permissions")
 		args = append(args, "--dangerously-skip-permissions")
 	}
 
-	// Add the prompt
+	// Add permission mode flag for planner sessions (after yolo flags, before prompt)
+	if r.permissionMode == "plan" {
+		args = append(args, "--permission-mode", "plan")
+	}
+
+	// Add the prompt last
 	args = append(args, r.prompt)
 
 	// Build the full command string for tmux
