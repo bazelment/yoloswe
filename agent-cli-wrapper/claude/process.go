@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -35,10 +36,15 @@ func newProcessManager(config SessionConfig) *processManager {
 
 // BuildCLIArgs builds the CLI arguments from the config.
 // This is exposed so callers can see what flags will be used.
+//
+// Flag ordering and selection matches the Python SDK (subprocess_cli.py).
+// Key gotchas discovered during debugging:
+//   - Do NOT use --print: that flag puts the CLI in one-shot mode (no streaming).
+//   - --setting-sources "" disables external settings that can interfere with SDK mode.
+//   - --input-format stream-json must come last (matches Python SDK convention).
+//   - The CLAUDE_CODE_ENTRYPOINT=sdk-go env var is set in Start(), not here.
 func (pm *processManager) BuildCLIArgs() ([]string, error) {
 	args := []string{
-		"--print",
-		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", pm.config.Model,
@@ -82,6 +88,12 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 	// Always include partial messages for tool progress tracking
 	args = append(args, "--include-partial-messages")
 
+	// Disable external setting sources (matching Python SDK behavior)
+	args = append(args, "--setting-sources", "")
+
+	// Input format must come last (matching Python SDK)
+	args = append(args, "--input-format", "stream-json")
+
 	return args, nil
 }
 
@@ -108,6 +120,11 @@ func (pm *processManager) Start(ctx context.Context) error {
 
 	// Create command
 	pm.cmd = exec.CommandContext(ctx, cliPath, args...)
+
+	// Set environment variables (matching Python SDK)
+	pm.cmd.Env = append(os.Environ(),
+		"CLAUDE_CODE_ENTRYPOINT=sdk-go",
+	)
 
 	// Set working directory
 	if pm.config.WorkDir != "" {

@@ -1,5 +1,7 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# gazelle:go_test integration,manual
+
 go_library(
     name = "claude",
     srcs = [
@@ -13,6 +15,7 @@ go_library(
         "process.go",
         "recorder.go",
         "sdk_mcp.go",
+        "sdk_mcp_typed.go",
         "session.go",
         "session_options.go",
         "state.go",
@@ -23,6 +26,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/internal/ndjson",
         "//agent-cli-wrapper/protocol",
+        "@com_github_invopop_jsonschema//:jsonschema",
     ],
 )
 
@@ -34,8 +38,13 @@ go_test(
         "mcp_test.go",
         "recorder_test.go",
         "sdk_mcp_test.go",
+        "sdk_mcp_typed_test.go",
         "turn_test.go",
     ],
     embed = [":claude"],
-    deps = ["//agent-cli-wrapper/protocol"],
+    deps = [
+        "//agent-cli-wrapper/protocol",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )
