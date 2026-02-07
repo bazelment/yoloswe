@@ -1,3 +1,4 @@
+# gazelle:ignore
 load("@rules_go//go:def.bzl", "go_test")
 
 # Integration tests require a valid Claude API key and network access.
