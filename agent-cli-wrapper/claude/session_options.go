@@ -181,6 +181,18 @@ func WithPermissionPromptToolStdio() SessionOption {
 	}
 }
 
+// WithSDKTools is a convenience option that configures an SDK MCP server.
+// If the session already has an MCPConfig, the SDK server is added to it;
+// otherwise a new MCPConfig is created.
+func WithSDKTools(serverName string, handler SDKToolHandler) SessionOption {
+	return func(c *SessionConfig) {
+		if c.MCPConfig == nil {
+			c.MCPConfig = NewMCPConfig()
+		}
+		c.MCPConfig.AddSDKServer(serverName, handler)
+	}
+}
+
 // WithResume sets a session ID to resume instead of starting a new session.
 // When resuming, the CLI will load the previous conversation context.
 func WithResume(sessionID string) SessionOption {

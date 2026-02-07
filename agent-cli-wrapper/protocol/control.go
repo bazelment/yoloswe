@@ -19,6 +19,7 @@ const (
 	ControlRequestSubtypeCanUseTool        ControlRequestSubtype = "can_use_tool"
 	ControlRequestSubtypeSetPermissionMode ControlRequestSubtype = "set_permission_mode"
 	ControlRequestSubtypeInterrupt         ControlRequestSubtype = "interrupt"
+	ControlRequestSubtypeMCPMessage        ControlRequestSubtype = "mcp_message"
 )
 
 // ControlRequestData is the interface for control request discrimination.
@@ -79,6 +80,12 @@ func ParseControlRequest(data json.RawMessage) (ControlRequestData, error) {
 		return r, nil
 	case ControlRequestSubtypeInterrupt:
 		var r InterruptRequest
+		if err := json.Unmarshal(data, &r); err != nil {
+			return nil, err
+		}
+		return r, nil
+	case ControlRequestSubtypeMCPMessage:
+		var r MCPMessageRequest
 		if err := json.Unmarshal(data, &r); err != nil {
 			return nil, err
 		}

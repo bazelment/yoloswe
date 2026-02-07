@@ -28,7 +28,7 @@ type Planner struct {
 	iterConfig          *IterationConfig
 	stateMachine        *StateMachine
 	checkpointMgr       *checkpoint.Manager
-	mcpServer           *MCPServer
+	toolHandler         *PlannerToolHandler
 	swarmSessionID      string
 	filesModified       []string
 	filesCreated        []string
@@ -90,8 +90,8 @@ func New(cfg Config, swarmSessionID string) *Planner {
 		p.progress = cfg.Progress
 	}
 
-	// Create MCP server (will be started in Start())
-	p.mcpServer = NewMCPServer(p)
+	// Create tool handler for SDK MCP (wired in Start())
+	p.toolHandler = NewPlannerToolHandler(p)
 
 	return p
 }
@@ -149,16 +149,10 @@ func (p *Planner) incrementIterations() {
 	p.iterationCount++
 }
 
-// Start initializes the Planner's session and MCP server.
+// Start initializes the Planner's session with SDK MCP tools.
 func (p *Planner) Start(ctx context.Context) error {
-	// Start the MCP server first
-	mcpURL, err := p.mcpServer.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start MCP server: %w", err)
-	}
-
-	// Configure the Claude session to use the MCP server
-	mcpConfig := claude.NewMCPConfig().AddHTTPServer("planner-tools", mcpURL)
+	// Configure the Claude session to use SDK MCP tools
+	mcpConfig := claude.NewMCPConfig().AddSDKServer("planner-tools", p.toolHandler)
 	p.session.SetSessionOptions(
 		claude.WithMCPConfig(mcpConfig),
 		claude.WithSystemPrompt(p.config.SystemPrompt),
@@ -169,15 +163,7 @@ func (p *Planner) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the Planner.
 func (p *Planner) Stop() error {
-	// Stop the session first
-	err := p.session.Stop()
-
-	// Then stop the MCP server
-	if p.mcpServer != nil {
-		p.mcpServer.Stop()
-	}
-
-	return err
+	return p.session.Stop()
 }
 
 // SendMessage sends a message to the Planner and waits for completion.
