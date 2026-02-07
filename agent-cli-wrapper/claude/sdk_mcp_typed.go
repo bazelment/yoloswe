@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 	"github.com/invopop/jsonschema"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
 // TypedToolRegistry implements SDKToolHandler using Go generics for type-safe tool registration.
@@ -17,10 +18,10 @@ type TypedToolRegistry struct {
 
 // toolRegistration stores a single tool's metadata and type-erased handler.
 type toolRegistration struct {
+	invoke      func(context.Context, json.RawMessage) (*protocol.MCPToolCallResult, error)
 	name        string
 	description string
 	schema      json.RawMessage
-	invoke      func(context.Context, json.RawMessage) (*protocol.MCPToolCallResult, error)
 }
 
 // NewTypedToolRegistry creates a new empty TypedToolRegistry.

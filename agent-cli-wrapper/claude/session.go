@@ -43,30 +43,23 @@ type SessionInfo struct {
 
 // Session manages interaction with the Claude CLI.
 type Session struct {
-	recorder          *sessionRecorder
-	process           *processManager
-	accumulator       *streamAccumulator
-	turnManager       *turnManager
-	permissionManager *permissionManager
-	state             *sessionState
-	events            chan Event
-	info              *SessionInfo
-	done              chan struct{}
-	cancel            context.CancelFunc
-	ctx               context.Context
-	config            SessionConfig
-
-	// pendingControlResponses tracks control requests awaiting responses.
-	// Key is request_id, value is a channel that receives the response payload.
-	// This is used by the SDK initialize handshake (sendInitialize) and could
-	// be used for future control request/response pairs. The separate pendingMu
-	// is needed because readLoop dispatches responses while s.mu may be held.
+	ctx                     context.Context
+	events                  chan Event
+	recorder                *sessionRecorder
+	accumulator             *streamAccumulator
+	turnManager             *turnManager
+	permissionManager       *permissionManager
+	state                   *sessionState
+	process                 *processManager
+	info                    *SessionInfo
+	done                    chan struct{}
 	pendingControlResponses map[string]chan protocol.ControlResponsePayload
-	pendingMu              sync.Mutex
-
-	mu       sync.RWMutex
-	started  bool
-	stopping bool
+	cancel                  context.CancelFunc
+	config                  SessionConfig
+	mu                      sync.RWMutex
+	pendingMu               sync.Mutex
+	started                 bool
+	stopping                bool
 }
 
 // NewSession creates a new Claude session with options.

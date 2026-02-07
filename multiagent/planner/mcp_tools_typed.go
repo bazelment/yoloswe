@@ -26,8 +26,8 @@ type BuilderParams struct {
 // ReviewerParams defines the parameters for the reviewer tool using typed approach.
 type ReviewerParams struct {
 	Task   string   `json:"task" jsonschema:"required,description=Description of what to review"`
-	Files  []string `json:"files,omitempty" jsonschema:"description=List of files that were changed"`
 	Design string   `json:"design,omitempty" jsonschema:"description=Original design to review against"`
+	Files  []string `json:"files,omitempty" jsonschema:"description=List of files that were changed"`
 }
 
 // NewPlannerToolHandlerTyped creates a TypedToolRegistry-based handler for planner tools.

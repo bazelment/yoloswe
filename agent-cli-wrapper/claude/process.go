@@ -85,14 +85,14 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 		args = append(args, "--resume", pm.config.Resume)
 	}
 
-	// Always include partial messages for tool progress tracking
-	args = append(args, "--include-partial-messages")
-
-	// Disable external setting sources (matching Python SDK behavior)
-	args = append(args, "--setting-sources", "")
-
-	// Input format must come last (matching Python SDK)
-	args = append(args, "--input-format", "stream-json")
+	// Always include partial messages for tool progress tracking.
+	// Disable external setting sources (matching Python SDK behavior).
+	// Input format must come last (matching Python SDK).
+	args = append(args,
+		"--include-partial-messages",
+		"--setting-sources", "",
+		"--input-format", "stream-json",
+	)
 
 	return args, nil
 }

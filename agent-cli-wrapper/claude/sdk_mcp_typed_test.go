@@ -22,8 +22,8 @@ type NumberParams struct {
 
 type ComplexParams struct {
 	Query      string   `json:"query" jsonschema:"required,description=Search query"`
-	MaxResults int      `json:"max_results,omitempty" jsonschema:"description=Maximum results,default=10"`
 	Filters    []string `json:"filters,omitempty" jsonschema:"description=Filter criteria"`
+	MaxResults int      `json:"max_results,omitempty" jsonschema:"description=Maximum results,default=10"`
 	Enabled    bool     `json:"enabled,omitempty" jsonschema:"description=Enable feature"`
 }
 
