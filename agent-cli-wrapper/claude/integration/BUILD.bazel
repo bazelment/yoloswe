@@ -7,6 +7,9 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "integration_test",
     srcs = [
+        "config_test.go",
+        "content_blocks_test.go",
+        "query_test.go",
         "sdk_mcp_test.go",
         "sdk_mcp_typed_test.go",
         "session_test.go",

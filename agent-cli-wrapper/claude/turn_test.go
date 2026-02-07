@@ -182,14 +182,16 @@ func TestTurnManager_WaitForTurn(t *testing.T) {
 	var result *TurnResult
 	var err error
 
+	started := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		close(started)
 		result, err = tm.WaitForTurn(context.Background(), 1)
 	}()
 
-	// Give goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
+	// Wait for goroutine to be running before completing
+	<-started
 
 	// Complete the turn
 	tm.CompleteTurn(TurnResult{
@@ -234,14 +236,16 @@ func TestTurnManager_WaitForTurn_Cancelled(t *testing.T) {
 	var result *TurnResult
 	var err error
 
+	started := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		close(started)
 		result, err = tm.WaitForTurn(ctx, 1)
 	}()
 
-	// Give goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
+	// Wait for goroutine to be running before cancelling
+	<-started
 
 	// Cancel context
 	cancel()
@@ -266,14 +270,16 @@ func TestTurnManager_WaitForTurn_WithError(t *testing.T) {
 	var result *TurnResult
 	var err error
 
+	started := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		close(started)
 		result, err = tm.WaitForTurn(context.Background(), 1)
 	}()
 
-	// Give goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
+	// Wait for goroutine to be running before completing
+	<-started
 
 	// Complete the turn with an error
 	turnErr := &ProtocolError{Message: "test error"}
@@ -303,17 +309,28 @@ func TestTurnManager_MultipleWaiters(t *testing.T) {
 	results := make([]*TurnResult, 3)
 	errors := make([]error, 3)
 
+	allStarted := make(chan struct{})
+	var startOnce sync.Once
+	startCount := 0
+	var startMu sync.Mutex
+
 	for i := 0; i < 3; i++ {
 		i := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			startMu.Lock()
+			startCount++
+			if startCount == 3 {
+				startOnce.Do(func() { close(allStarted) })
+			}
+			startMu.Unlock()
 			results[i], errors[i] = tm.WaitForTurn(context.Background(), 1)
 		}()
 	}
 
-	// Give goroutines time to start waiting
-	time.Sleep(10 * time.Millisecond)
+	// Wait for all goroutines to be running before completing
+	<-allStarted
 
 	// Complete the turn
 	tm.CompleteTurn(TurnResult{
@@ -388,4 +405,145 @@ func TestTurnManager_Concurrent(t *testing.T) {
 
 	// Should complete without race conditions
 	// (run with -race flag to verify)
+}
+
+func TestTurnManager_AppendContentBlock(t *testing.T) {
+	tm := newTurnManager()
+	tm.StartTurn("Test")
+
+	// Append a text block
+	tm.AppendContentBlock(ContentBlock{
+		Type: ContentBlockTypeText,
+		Text: "Hello world",
+	})
+
+	// Append a tool use block
+	tm.AppendContentBlock(ContentBlock{
+		Type:      ContentBlockTypeToolUse,
+		ToolUseID: "tool-1",
+		ToolName:  "Read",
+		ToolInput: map[string]interface{}{"file_path": "/test"},
+	})
+
+	// Verify blocks are stored
+	turn := tm.CurrentTurn()
+	if len(turn.ContentBlocks) != 2 {
+		t.Fatalf("expected 2 content blocks, got %d", len(turn.ContentBlocks))
+	}
+
+	// Check text block
+	if turn.ContentBlocks[0].Type != ContentBlockTypeText {
+		t.Errorf("expected text block type, got %v", turn.ContentBlocks[0].Type)
+	}
+	if turn.ContentBlocks[0].Text != "Hello world" {
+		t.Errorf("expected text 'Hello world', got %q", turn.ContentBlocks[0].Text)
+	}
+
+	// Check tool use block
+	if turn.ContentBlocks[1].Type != ContentBlockTypeToolUse {
+		t.Errorf("expected tool_use block type, got %v", turn.ContentBlocks[1].Type)
+	}
+	if turn.ContentBlocks[1].ToolName != "Read" {
+		t.Errorf("expected tool name 'Read', got %q", turn.ContentBlocks[1].ToolName)
+	}
+}
+
+func TestTurnManager_AppendContentBlock_NoTurn(t *testing.T) {
+	tm := newTurnManager()
+
+	// AppendContentBlock with no turn should not panic
+	tm.AppendContentBlock(ContentBlock{
+		Type: ContentBlockTypeText,
+		Text: "test",
+	})
+
+	// Should not have any turns
+	history := tm.GetTurnHistory()
+	if len(history) != 0 {
+		t.Errorf("expected no turns, got %d", len(history))
+	}
+}
+
+func TestTurnManager_GetTurnByNumber(t *testing.T) {
+	tm := newTurnManager()
+
+	// Create multiple turns
+	tm.StartTurn("Turn 1")
+	tm.AppendText("First")
+	tm.StartTurn("Turn 2")
+	tm.AppendText("Second")
+	tm.StartTurn("Turn 3")
+	tm.AppendText("Third")
+
+	// Get turn by number
+	turn2 := tm.GetTurnByNumber(2)
+	if turn2 == nil {
+		t.Fatal("expected to find turn 2")
+	}
+	if turn2.Number != 2 {
+		t.Errorf("expected turn number 2, got %d", turn2.Number)
+	}
+	if turn2.FullText != "Second" {
+		t.Errorf("expected text 'Second', got %q", turn2.FullText)
+	}
+
+	// Get first turn
+	turn1 := tm.GetTurnByNumber(1)
+	if turn1 == nil {
+		t.Fatal("expected to find turn 1")
+	}
+	if turn1.FullText != "First" {
+		t.Errorf("expected text 'First', got %q", turn1.FullText)
+	}
+
+	// Get unknown turn
+	unknown := tm.GetTurnByNumber(99)
+	if unknown != nil {
+		t.Errorf("expected nil for unknown turn, got %v", unknown)
+	}
+}
+
+func TestTurnManager_WaitForTurn_AlreadyCompleted(t *testing.T) {
+	tm := newTurnManager()
+	tm.StartTurn("Test")
+
+	// Complete the turn BEFORE any waiter registers
+	tm.CompleteTurn(TurnResult{
+		TurnNumber: 1,
+		Success:    true,
+		DurationMs: 50,
+	})
+
+	// Now wait for the already-completed turn - should return immediately
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := tm.WaitForTurn(ctx, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Success {
+		t.Error("expected success")
+	}
+}
+
+func TestTurnResult_ContentBlocks(t *testing.T) {
+	// Test that TurnResult includes ContentBlocks field
+	result := TurnResult{
+		TurnNumber: 1,
+		Success:    true,
+		ContentBlocks: []ContentBlock{
+			{Type: ContentBlockTypeText, Text: "Hello"},
+			{Type: ContentBlockTypeThinking, Thinking: "Analyzing..."},
+		},
+	}
+
+	if len(result.ContentBlocks) != 2 {
+		t.Errorf("expected 2 content blocks, got %d", len(result.ContentBlocks))
+	}
+	if result.ContentBlocks[0].Text != "Hello" {
+		t.Errorf("expected text 'Hello', got %q", result.ContentBlocks[0].Text)
+	}
 }
