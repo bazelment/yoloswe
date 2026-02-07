@@ -4,6 +4,8 @@ This is a Bazel-managed monorepo with a collection of multiple Go projects.
 Always use `bazel build //...` and `bazel test //...` to build and test the project.
 Never use `go build` or `go test` directly.
 
+Always run lint/type-check/tests before creating or pushing to a PR. Never create a PR without passing quality gates first.
+
 ## What to do when a new Go module is imported
 
 To add a new dependency, please always follow these steps, don't use `go` commands directly:

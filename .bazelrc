@@ -2,3 +2,20 @@
 
 # Use Bzlmod for dependency management
 common --enable_bzlmod
+
+# Shared disk cache for build artifacts
+common --disk_cache=~/.cache/bazel-disk-cache
+
+# Repository cache for external dependencies (shared across workspaces)
+common --repository_cache=~/.cache/bazel-repo-cache
+
+# Prevent "another command is running" by not blocking on server lock
+# This allows multiple bazel commands to run concurrently (each gets its own server)
+startup --noblock_for_lock
+
+# Python configuration
+build --python_version=PY3
+
+# Test configuration
+test --test_output=errors
+test --test_summary=detailed
