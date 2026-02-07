@@ -17,8 +17,10 @@ import (
 )
 
 var (
-	repoFlag   string
-	editorFlag string
+	repoFlag        string
+	editorFlag      string
+	sessionModeFlag string
+	yoloFlag        bool
 )
 
 var rootCmd = &cobra.Command{
@@ -42,6 +44,8 @@ Environment:
 func init() {
 	rootCmd.Flags().StringVar(&repoFlag, "repo", "", "Repository name to open directly")
 	rootCmd.Flags().StringVar(&editorFlag, "editor", "", "Editor command for [e]dit (default: $EDITOR or 'code')")
+	rootCmd.Flags().StringVar(&sessionModeFlag, "session-mode", "auto", "Session execution mode: auto (default), tui, or tmux")
+	rootCmd.Flags().BoolVar(&yoloFlag, "yolo", false, "Skip all permission prompts (dangerous!)")
 }
 
 func main() {
@@ -109,8 +113,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	sessionManager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName: repoName,
-		Store:    store,
+		RepoName:    repoName,
+		Store:       store,
+		SessionMode: session.SessionMode(sessionModeFlag),
+		YoloMode:    yoloFlag,
 	})
 	defer sessionManager.Close()
 

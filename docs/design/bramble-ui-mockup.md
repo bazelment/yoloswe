@@ -298,3 +298,128 @@ Only after **confirm** or **adjust then confirm** does the planning session star
 - Mouse support (keyboard-first).
 
 For full requirements and session model, see [../prd/tuimanager.md](../prd/tuimanager.md).
+
+---
+
+## 9. Tmux Mode
+
+Bramble supports an alternative **tmux mode** for session execution. In this mode, sessions run as named tmux sessions executing the `claude` CLI directly, rather than using the in-process SDK.
+
+### 9.1 Activation
+
+Tmux mode is controlled by the `--session-mode` flag:
+
+```bash
+bramble --session-mode tmux   # Explicit tmux mode
+bramble --session-mode sdk    # Explicit SDK mode (default)
+bramble --session-mode auto   # Auto-detect: use tmux if inside tmux, else SDK
+```
+
+Auto-detection checks:
+1. Is the current process running inside tmux? (checks `$TMUX` environment variable)
+2. Is the `tmux` command available?
+3. If both true → use tmux mode, else use SDK mode
+
+### 9.2 UI Differences in Tmux Mode
+
+**Central Area:** Always shows a **session list** instead of output
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ REPOSITORY  my-app  ▼   feature-auth   │   (tmux mode - sessions below)         │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                    │
+│  Active Sessions for worktree: feature-auth                                       │
+│                                                                                    │
+│  Type    Name            Prompt                                  Status            │
+│  ────────────────────────────────────────────────────────────────────────────────  │
+│  📋      happy-tiger     "Add OAuth authentication"              ● running         │
+│  🔨      wise-ocean      "Implement the plan in..."              ◐ idle            │
+│  📋      calm-river      "Refactor database layer"               ✓ completed       │
+│                                                                                    │
+│  [↑/↓] Navigate  [Enter] Switch to session  [p] Plan  [b] Build  [s] Stop  [q] Quit│
+│                                                                                    │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ [↑/↓] Navigate  [Enter] Switch to session  [Alt-W] Worktree  [q] Quit            │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Differences:**
+
+1. **Top Bar:**
+   - Right side shows "(tmux mode - sessions below)" instead of current session + dropdown
+   - **No Alt-S dropdown** - sessions are always visible in the center
+
+2. **Central Area:**
+   - **Session list view** replacing output display
+   - Shows: type icon, session name (e.g., "happy-tiger"), truncated prompt, status
+   - Highlighted row indicates selected session
+   - Navigation with **↑/↓** keys
+
+3. **Session Switching:**
+   - **Enter** key on a session executes `tmux switch-client -t <session-name>`
+   - User is immediately transported to that tmux session
+   - All interaction (output, follow-ups) happens in the tmux session
+
+4. **No Output Display:**
+   - TUI never shows session output
+   - Output lives in the tmux session
+   - No scrolling, no streaming text in the TUI
+
+5. **No Follow-ups:**
+   - **f** key is disabled (shows error: "Follow-ups must be done in the tmux session directly")
+   - All follow-ups typed directly in the tmux session
+
+6. **Status Bar:**
+   - Different hints: `[↑/↓] Navigate  [Enter] Switch to session  [p] Plan  [b] Build  [s] Stop  [q] Quit`
+   - No `[f]ollow-up` or `[Alt-S]session` hints
+
+### 9.3 Session Lifecycle in Tmux Mode
+
+**Creation (p/b keys):**
+1. User presses **p** (plan) or **b** (build) and provides a prompt
+2. Bramble generates a unique two-word tmux session name (e.g., "happy-tiger", "wise-ocean")
+3. Creates a detached tmux session:
+   ```bash
+   # Planner:
+   tmux new-session -d -s happy-tiger -c /path/to/worktree claude --permission-mode plan "prompt"
+
+   # Builder:
+   tmux new-session -d -s wise-ocean -c /path/to/worktree claude "prompt"
+   ```
+4. Session appears in the list with status "running"
+
+**Interaction:**
+1. Navigate to session with **↑/↓**
+2. Press **Enter** → `tmux switch-client -t <session-name>`
+3. User is now in the tmux session, interacting directly with `claude` CLI
+4. All output, follow-ups, approvals happen in the tmux session
+5. User can switch back to bramble using tmux key bindings (e.g., `prefix + w`)
+
+**Termination:**
+1. Press **s** (stop) on a running session
+2. Bramble executes `tmux kill-session -t <session-name>`
+3. Session removed from list
+
+### 9.4 Session Names
+
+Tmux sessions use **two-word memorable names**:
+- Format: `{adjective}-{noun}` (e.g., "happy-tiger", "wise-ocean", "calm-river")
+- Generated from curated word lists (~50 adjectives, ~50 nouns = 2500 combinations)
+- Collision detection: checks existing tmux sessions before assignment
+- Fallback: if all retries fail (unlikely), appends random hex suffix
+
+### 9.5 Use Cases
+
+**When to use tmux mode:**
+- User prefers direct `claude` CLI interaction
+- Need persistent sessions that survive bramble restarts
+- Want to use tmux features (split panes, copy mode, etc.)
+- Working in an existing tmux workflow
+
+**When to use SDK mode (default):**
+- Prefer integrated TUI experience with output in bramble
+- Don't have tmux installed
+- Not running inside tmux
+
+---
