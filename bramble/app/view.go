@@ -237,7 +237,8 @@ func (m Model) renderSessionListView(width, height int) string {
 	}
 
 	// Render sessions
-	for i, sess := range currentSessions {
+	for i := range currentSessions {
+		sess := &currentSessions[i]
 		typeIcon := "📋"
 		if sess.Type == session.SessionTypeBuilder {
 			typeIcon = "🔨"
