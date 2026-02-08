@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"sync"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/wt"
@@ -11,7 +10,6 @@ import (
 // ClaudeProvider wraps the Claude SDK behind the Provider interface.
 type ClaudeProvider struct {
 	events chan AgentEvent
-	mu     sync.Mutex
 }
 
 // NewClaudeProvider creates a new Claude provider.
@@ -80,10 +78,10 @@ func (p *ClaudeProvider) Close() error {
 
 // ClaudeLongRunningProvider wraps a persistent Claude session.
 type ClaudeLongRunningProvider struct {
-	*ClaudeProvider
-	session      *claude.Session
-	sessionOpts  []claude.SessionOption
 	eventHandler EventHandler
+	*ClaudeProvider
+	session     *claude.Session
+	sessionOpts []claude.SessionOption
 }
 
 // NewClaudeLongRunningProvider creates a Claude provider with a persistent session.

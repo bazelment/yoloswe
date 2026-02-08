@@ -16,12 +16,12 @@ import (
 
 // mockProvider implements agent.Provider for testing the provider → session manager flow.
 type mockProvider struct {
-	mu         sync.Mutex
+	err        error
+	result     *agent.AgentResult
+	eventsChan chan agent.AgentEvent
 	name       string
 	calls      []string
-	result     *agent.AgentResult
-	err        error
-	eventsChan chan agent.AgentEvent
+	mu         sync.Mutex
 	closed     bool
 }
 
@@ -63,28 +63,14 @@ func (p *mockProvider) Close() error {
 	return nil
 }
 
-func (p *mockProvider) getCalls() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	result := make([]string, len(p.calls))
-	copy(result, p.calls)
-	return result
-}
-
-func (p *mockProvider) isClosed() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.closed
-}
-
 // mockLongRunningProvider implements agent.LongRunningProvider.
 type mockLongRunningProvider struct {
+	messages []string
 	mockProvider
+	startedMu  sync.Mutex
+	messagesMu sync.Mutex
 	started    bool
 	stopped    bool
-	startedMu  sync.Mutex
-	messages   []string
-	messagesMu sync.Mutex
 }
 
 func newMockLongRunningProvider(name string) *mockLongRunningProvider {
@@ -140,9 +126,9 @@ func TestProviderRunnerConversion(t *testing.T) {
 	// Verify that a mock provider can be used with ManagerConfig
 	provider := newMockProvider("test-provider")
 	manager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName: "test-repo",
+		RepoName:    "test-repo",
 		SessionMode: session.SessionModeTUI,
-		Provider: provider,
+		Provider:    provider,
 	})
 	defer manager.Close()
 
@@ -155,7 +141,7 @@ func TestProviderManagerConfigBackwardCompat(t *testing.T) {
 
 	// Verify that ManagerConfig without Provider still works (backward-compatible)
 	manager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName: "test-repo",
+		RepoName:    "test-repo",
 		SessionMode: session.SessionModeTUI,
 	})
 	defer manager.Close()
@@ -205,9 +191,9 @@ func TestProviderUsageConversion(t *testing.T) {
 	}
 
 	manager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName: "test-repo",
+		RepoName:    "test-repo",
 		SessionMode: session.SessionModeTUI,
-		Provider: provider,
+		Provider:    provider,
 	})
 	defer manager.Close()
 
@@ -228,10 +214,10 @@ func TestProviderSessionWithStore(t *testing.T) {
 
 	provider := newMockProvider("store-test")
 	manager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName: "test-repo",
+		RepoName:    "test-repo",
 		SessionMode: session.SessionModeTUI,
-		Store:    store,
-		Provider: provider,
+		Store:       store,
+		Provider:    provider,
 	})
 	defer manager.Close()
 

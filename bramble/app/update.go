@@ -542,35 +542,34 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Refresh file tree and history for new worktree
 			m.focus = FocusOutput
 			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())
-		} else {
-			// Session selected - view it
-			if item := m.sessionDropdown.SelectedItem(); item != nil {
-				if item.ID == "---separator---" {
-					// Can't select separator
-					return m, nil
-				}
-				m.viewingSessionID = session.SessionID(item.ID)
-				m.scrollOffset = 0 // Reset scroll when switching sessions
-				// Check if this is a live session or history
-				if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
-					// Live session
-					m.viewingHistoryData = nil
-				} else {
-					// History session - load from store
-					wt := m.selectedWorktree()
-					if wt != nil {
-						histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
-						if err == nil {
-							m.viewingHistoryData = histData
-						} else {
-							m.lastError = "Failed to load history: " + err.Error()
-							m.viewingHistoryData = nil
-						}
+		}
+		// Session selected - view it
+		if item := m.sessionDropdown.SelectedItem(); item != nil {
+			if item.ID == "---separator---" {
+				// Can't select separator
+				return m, nil
+			}
+			m.viewingSessionID = session.SessionID(item.ID)
+			m.scrollOffset = 0 // Reset scroll when switching sessions
+			// Check if this is a live session or history
+			if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
+				// Live session
+				m.viewingHistoryData = nil
+			} else {
+				// History session - load from store
+				wt := m.selectedWorktree()
+				if wt != nil {
+					histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
+					if err == nil {
+						m.viewingHistoryData = histData
+					} else {
+						m.lastError = "Failed to load history: " + err.Error()
+						m.viewingHistoryData = nil
 					}
 				}
 			}
-			m.sessionDropdown.Close()
 		}
+		m.sessionDropdown.Close()
 		m.focus = FocusOutput
 		return m, nil
 

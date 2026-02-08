@@ -13,28 +13,27 @@ import (
 
 var (
 	fileTreeHeaderStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("12")).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("12"))
+				Bold(true).
+				Foreground(lipgloss.Color("12")).
+				BorderBottom(true).
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("12"))
 
 	fileTreeHeaderDimStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("242")).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("242"))
+				Foreground(lipgloss.Color("242")).
+				BorderBottom(true).
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("242"))
 )
 
 // FileTree displays a navigable tree of changed files from a WorktreeContext.
 type FileTree struct {
-	root    string           // worktree root path
-	entries []fileEntry      // flattened, displayable entries
-	cursor  int              // currently highlighted entry
-	offset  int              // scroll offset for viewport
-	dirty   bool             // needs rebuild
-	files   []fileInfo       // raw file list from context
-	focused bool             // whether this pane has focus
+	root    string
+	entries []fileEntry
+	files   []fileInfo
+	cursor  int
+	offset  int
+	focused bool
 }
 
 // fileInfo holds a file path and its git status indicator.

@@ -12,51 +12,40 @@ import (
 // When an agent runs in a worktree, this type automatically provides the tree's
 // diffs, changed files, branch history, and PR status.
 type WorktreeContext struct {
-	// Identity
-	Branch string `json:"branch"`
-	Path   string `json:"path"`
-	Goal   string `json:"goal,omitempty"`
-	Parent string `json:"parent,omitempty"`
-
-	// Git state
-	DiffStat       string   `json:"diff_stat,omitempty"`
-	DiffContent    string   `json:"diff_content,omitempty"`
-	ChangedFiles   []string `json:"changed_files,omitempty"`
-	UntrackedFiles []string `json:"untracked_files,omitempty"`
-
-	// Branch state
-	Ahead   int  `json:"ahead"`
-	Behind  int  `json:"behind"`
-	IsDirty bool `json:"is_dirty"`
-
-	// Recent history
-	RecentCommits []CommitInfo `json:"recent_commits,omitempty"`
-
-	// PR context
-	PRNumber int    `json:"pr_number,omitempty"`
-	PRState  string `json:"pr_state,omitempty"`
-	PRURL    string `json:"pr_url,omitempty"`
-
-	// Metadata
-	GatheredAt time.Time `json:"gathered_at"`
+	GatheredAt     time.Time    `json:"gathered_at"`
+	PRState        string       `json:"pr_state,omitempty"`
+	Path           string       `json:"path"`
+	Goal           string       `json:"goal,omitempty"`
+	Parent         string       `json:"parent,omitempty"`
+	DiffStat       string       `json:"diff_stat,omitempty"`
+	DiffContent    string       `json:"diff_content,omitempty"`
+	Branch         string       `json:"branch"`
+	PRURL          string       `json:"pr_url,omitempty"`
+	ChangedFiles   []string     `json:"changed_files,omitempty"`
+	UntrackedFiles []string     `json:"untracked_files,omitempty"`
+	RecentCommits  []CommitInfo `json:"recent_commits,omitempty"`
+	Ahead          int          `json:"ahead"`
+	PRNumber       int          `json:"pr_number,omitempty"`
+	Behind         int          `json:"behind"`
+	IsDirty        bool         `json:"is_dirty"`
 }
 
 // CommitInfo holds information about a single commit.
 type CommitInfo struct {
+	Date    time.Time `json:"date"`
 	Hash    string    `json:"hash"`
 	Subject string    `json:"subject"`
 	Author  string    `json:"author"`
-	Date    time.Time `json:"date"`
 }
 
 // ContextOptions controls what data to gather for a WorktreeContext.
 type ContextOptions struct {
-	IncludeDiff     bool // Include full diff content (can be large)
-	IncludeDiffStat bool // Include diff stat summary
-	IncludeFileList bool // Include changed/untracked file lists
-	IncludeCommits  int  // Number of recent commits (0 = none)
-	IncludePRInfo   bool // Include PR information (requires gh CLI)
-	MaxDiffBytes    int  // Truncate diff at this size (0 = unlimited)
+	IncludeCommits  int
+	MaxDiffBytes    int
+	IncludeDiff     bool
+	IncludeDiffStat bool
+	IncludeFileList bool
+	IncludePRInfo   bool
 }
 
 // DefaultContextOptions returns options suitable for agent consumption.

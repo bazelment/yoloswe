@@ -7,16 +7,16 @@ import (
 
 // Sentinel errors for common error conditions.
 var (
-	ErrAlreadyStarted     = errors.New("session already started")
-	ErrNotStarted         = errors.New("session not started")
-	ErrStopping           = errors.New("session is stopping")
-	ErrSessionClosed      = errors.New("session is closed")
-	ErrTimeout            = errors.New("operation timed out")
-	ErrProcessExited      = errors.New("CLI process exited unexpectedly")
-	ErrInvalidState       = errors.New("invalid state transition")
-	ErrPermissionDenied   = errors.New("permission denied")
-	ErrBudgetExceeded     = errors.New("budget limit exceeded")
-	ErrMaxTurnsExceeded   = errors.New("max turns exceeded")
+	ErrAlreadyStarted   = errors.New("session already started")
+	ErrNotStarted       = errors.New("session not started")
+	ErrStopping         = errors.New("session is stopping")
+	ErrSessionClosed    = errors.New("session is closed")
+	ErrTimeout          = errors.New("operation timed out")
+	ErrProcessExited    = errors.New("CLI process exited unexpectedly")
+	ErrInvalidState     = errors.New("invalid state transition")
+	ErrPermissionDenied = errors.New("permission denied")
+	ErrBudgetExceeded   = errors.New("budget limit exceeded")
+	ErrMaxTurnsExceeded = errors.New("max turns exceeded")
 )
 
 // ProtocolError represents a protocol-level error.
@@ -73,8 +73,8 @@ func (e *TurnError) Unwrap() error {
 
 // CLINotFoundError indicates the Claude CLI binary was not found.
 type CLINotFoundError struct {
-	Path  string
 	Cause error
+	Path  string
 }
 
 func (e *CLINotFoundError) Error() string {

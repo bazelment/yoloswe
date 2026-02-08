@@ -19,8 +19,8 @@ type TurnResult struct {
 	Error         error
 	Text          string
 	Thinking      string
-	Usage         TurnUsage
 	ContentBlocks []ContentBlock
+	Usage         TurnUsage
 	TurnNumber    int
 	DurationMs    int64
 	Success       bool

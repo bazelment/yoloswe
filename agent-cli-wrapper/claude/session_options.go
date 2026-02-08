@@ -26,89 +26,30 @@ type AgentDefinition struct {
 
 // SessionConfig holds session configuration.
 type SessionConfig struct {
-	// PermissionHandler handles permission requests in default mode.
-	PermissionHandler PermissionHandler
-
-	// InteractiveToolHandler handles interactive tools (AskUserQuestion, ExitPlanMode).
-	// These tools require user input, not permission approval.
-	InteractiveToolHandler InteractiveToolHandler
-
-	// MCPConfig configures MCP servers for custom tools.
-	MCPConfig *MCPConfig
-
-	// StderrHandler is an optional handler for CLI stderr output.
-	StderrHandler func([]byte)
-
-	// Model to use: "haiku", "sonnet", "opus"
-	Model string
-
-	// RecordingDir is the directory for recordings (default: .claude-sessions).
-	RecordingDir string
-
-	// PermissionMode controls tool execution approval.
-	PermissionMode PermissionMode
-
-	// WorkDir is the working directory for file operations.
-	WorkDir string
-
-	// CLIPath is the path to the Claude CLI binary (uses "claude" in PATH if empty).
-	CLIPath string
-
-	// SystemPrompt overrides the default system prompt.
-	SystemPrompt string
-
-	// Resume is the session ID to resume. If set, the CLI will continue
-	// a previous session instead of starting a new one.
-	Resume string
-
-	// EventBufferSize is the event channel buffer size (default: 100).
-	EventBufferSize int
-
-	// MaxTurns is the SDK-enforced turn limit. If set, the SDK will return
-	// ErrMaxTurnsExceeded after the specified number of turns.
-	MaxTurns int
-
-	// MaxBudgetUSD is the SDK-enforced budget limit. If set, the SDK will return
-	// ErrBudgetExceeded when the cumulative cost exceeds this limit.
-	MaxBudgetUSD float64
-
-	// AllowedTools is a list of tools that Claude is allowed to use.
-	// Maps to --allowed-tools CLI flag.
-	AllowedTools []string
-
-	// DisallowedTools is a list of tools that Claude is not allowed to use.
-	// Maps to --disallowed-tools CLI flag.
-	DisallowedTools []string
-
-	// Betas is a list of beta features to enable.
-	// Maps to --beta CLI flag.
-	Betas []string
-
-	// Agents is a list of agent definitions for sub-agents.
-	// Maps to --agents CLI flag with JSON encoding.
-	Agents []AgentDefinition
-
-	// Env is a map of additional environment variables to set for the CLI process.
-	Env map[string]string
-
-	// ExtraArgs is an escape hatch for passing additional CLI arguments.
-	ExtraArgs []string
-
-	// DisablePlugins disables CLI plugins for faster startup.
-	DisablePlugins bool
-
-	// RecordMessages enables session recording.
-	RecordMessages bool
-
-	// DangerouslySkipPermissions skips all permission prompts (use with caution).
-	// This is typically used with PermissionModePlan to enable plan mode without prompts.
+	PermissionHandler          PermissionHandler
+	InteractiveToolHandler     InteractiveToolHandler
+	MCPConfig                  *MCPConfig
+	StderrHandler              func([]byte)
+	Env                        map[string]string
+	PermissionMode             PermissionMode
+	Model                      string
+	WorkDir                    string
+	CLIPath                    string
+	SystemPrompt               string
+	Resume                     string
+	RecordingDir               string
+	AllowedTools               []string
+	DisallowedTools            []string
+	Betas                      []string
+	Agents                     []AgentDefinition
+	ExtraArgs                  []string
+	MaxTurns                   int
+	MaxBudgetUSD               float64
+	EventBufferSize            int
+	DisablePlugins             bool
+	RecordMessages             bool
 	DangerouslySkipPermissions bool
-
-	// PermissionPromptToolStdio enables stdio-based permission prompts.
-	// When true, all permission prompts flow through the control protocol
-	// as can_use_tool control requests instead of CLI's interactive UI.
-	// This enables fully programmatic permission control.
-	PermissionPromptToolStdio bool
+	PermissionPromptToolStdio  bool
 }
 
 // SessionOption is a functional option for configuring a Session.

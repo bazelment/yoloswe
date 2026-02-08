@@ -9,36 +9,23 @@ import (
 // AgentResult is the provider-agnostic result of an agent execution.
 // It replaces direct dependency on claude.TurnResult in the agent interfaces.
 type AgentResult struct {
-	// Text is the accumulated text response.
-	Text string
-
-	// Thinking is reasoning/chain-of-thought content (if available).
-	Thinking string
-
-	// ContentBlocks contains structured content blocks.
+	Error         error
+	Text          string
+	Thinking      string
 	ContentBlocks []AgentContentBlock
-
-	// Usage tracks token consumption and cost.
-	Usage AgentUsage
-
-	// Success indicates whether the execution completed without errors.
-	Success bool
-
-	// Error contains any error from execution.
-	Error error
-
-	// DurationMs is the execution time in milliseconds.
-	DurationMs int64
+	Usage         AgentUsage
+	DurationMs    int64
+	Success       bool
 }
 
 // AgentContentBlock is a provider-agnostic content block.
 type AgentContentBlock struct {
-	Type       string                 // "text", "thinking", "tool_use", "tool_result"
-	Text       string                 // For text and thinking blocks
-	ToolName   string                 // For tool_use blocks
-	ToolInput  map[string]interface{} // For tool_use blocks
-	ToolResult interface{}            // For tool_result blocks
-	IsError    bool                   // For tool_result blocks
+	ToolResult interface{}
+	ToolInput  map[string]interface{}
+	Type       string
+	Text       string
+	ToolName   string
+	IsError    bool
 }
 
 // AgentUsage tracks token usage across providers.
@@ -82,19 +69,19 @@ func (e ThinkingAgentEvent) AgentEventType() AgentEventType { return AgentEventT
 
 // ToolStartAgentEvent is emitted when a tool invocation begins.
 type ToolStartAgentEvent struct {
+	Input map[string]interface{}
 	Name  string
 	ID    string
-	Input map[string]interface{}
 }
 
 func (e ToolStartAgentEvent) AgentEventType() AgentEventType { return AgentEventToolStart }
 
 // ToolCompleteAgentEvent is emitted when a tool invocation finishes.
 type ToolCompleteAgentEvent struct {
+	Result  interface{}
+	Input   map[string]interface{}
 	Name    string
 	ID      string
-	Input   map[string]interface{}
-	Result  interface{}
 	IsError bool
 }
 
@@ -165,13 +152,13 @@ type ExecuteOption func(*ExecuteConfig)
 
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
+	EventHandler   EventHandler
 	Model          string
 	WorkDir        string
 	SystemPrompt   string
-	PermissionMode string // "default", "plan", "bypass"
+	PermissionMode string
 	MaxTurns       int
 	MaxBudgetUSD   float64
-	EventHandler   EventHandler
 }
 
 // WithProviderModel sets the model for a provider execution.

@@ -163,7 +163,6 @@ type WorktreeStatus struct {
 	PRIsDraft      bool
 }
 
-
 // Manager handles worktree operations for a repository.
 type Manager struct {
 	git      GitRunner

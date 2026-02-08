@@ -12,12 +12,12 @@ const (
 
 // ContentBlock is a structured content block from a Claude response.
 type ContentBlock struct {
+	ToolResult interface{}            `json:"tool_result,omitempty"`
+	ToolInput  map[string]interface{} `json:"tool_input,omitempty"`
 	Type       ContentBlockType       `json:"type"`
 	Text       string                 `json:"text,omitempty"`
 	Thinking   string                 `json:"thinking,omitempty"`
 	ToolUseID  string                 `json:"tool_use_id,omitempty"`
 	ToolName   string                 `json:"tool_name,omitempty"`
-	ToolInput  map[string]interface{} `json:"tool_input,omitempty"`
-	ToolResult interface{}            `json:"tool_result,omitempty"`
 	IsError    bool                   `json:"is_error,omitempty"`
 }

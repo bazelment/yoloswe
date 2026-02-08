@@ -346,7 +346,7 @@ func (m Model) refreshWorktreeStatuses() tea.Cmd {
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
 
-		// Fast: git-only status (no network)
+		// Fast: git-only status (no network), then slow: PR info (network call to GitHub)
 		cmds = append(cmds, func() tea.Msg {
 			manager := wt.NewManager(wtRoot, repoName)
 			status, err := manager.GetGitStatus(ctx, w)
@@ -354,10 +354,7 @@ func (m Model) refreshWorktreeStatuses() tea.Cmd {
 				return nil
 			}
 			return singleWorktreeStatusMsg{branch: w.Branch, status: status}
-		})
-
-		// Slow: PR info (network call to GitHub)
-		cmds = append(cmds, func() tea.Msg {
+		}, func() tea.Msg {
 			manager := wt.NewManager(wtRoot, repoName)
 			pr, err := manager.FetchPRInfo(ctx, w)
 			if err != nil || pr == nil {
@@ -532,18 +529,18 @@ type (
 	}
 	// singleWorktreeStatusMsg carries the git-only status for one worktree (fast, local).
 	singleWorktreeStatusMsg struct {
-		branch string
 		status *wt.WorktreeStatus
+		branch string
 	}
 	// worktreePRInfoMsg carries PR info for one worktree (slow, network).
 	worktreePRInfoMsg struct {
-		branch string
 		pr     *wt.PRInfo
+		branch string
 	}
 	// fileTreeContextMsg carries gathered worktree context for the file tree
 	fileTreeContextMsg struct {
-		worktreePath string
 		wtCtx        *wt.WorktreeContext
+		worktreePath string
 	}
 	// historySessionsMsg carries async-loaded history sessions for a worktree.
 	historySessionsMsg struct {
