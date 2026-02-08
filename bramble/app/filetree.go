@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -259,10 +260,9 @@ func (ft *FileTree) Render(width, height int) string {
 			line = selectedStyle.Render(stripAnsi(line))
 		}
 
-		// Truncate to width
-		stripped := stripAnsi(line)
-		if len(stripped) > width {
-			line = line[:width-3] + "..."
+		// Truncate to width (visual columns, not byte count)
+		if runewidth.StringWidth(stripAnsi(line)) > width {
+			line = truncateVisual(line, width)
 		}
 
 		b.WriteString(line)

@@ -38,13 +38,17 @@ go_test(
         "output_test.go",
         "textarea_test.go",
         "toast_test.go",
+        "update_feedback_test.go",
+        "update_scroll_test.go",
         "welcome_test.go",
+        "width_test.go",
     ],
     embed = [":app"],
     deps = [
         "//bramble/session",
         "//wt",
         "@com_github_charmbracelet_bubbletea//:bubbletea",
+        "@com_github_mattn_go_runewidth//:go-runewidth",
         "@com_github_stretchr_testify//assert",
     ],
 )

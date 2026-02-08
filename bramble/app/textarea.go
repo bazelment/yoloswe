@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // TextAreaFocus indicates which element has focus in the text area.
@@ -363,7 +364,7 @@ func (t *TextArea) View() string {
 		cancelBtn = dimStyle.Render("[ " + t.cancelLabel + " ]")
 	}
 	status := sendBtn + "  " + cancelBtn
-	statusPadding := contentWidth - len(stripAnsi(status))
+	statusPadding := contentWidth - runewidth.StringWidth(stripAnsi(status))
 	if statusPadding < 0 {
 		statusPadding = 0
 	}

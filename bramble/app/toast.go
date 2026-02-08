@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // ToastLevel determines the notification style and auto-dismiss duration.
@@ -138,8 +139,8 @@ func (tm *ToastManager) View() string {
 		}
 		content := icon + t.Message
 		// Truncate to width (guard against small widths to avoid negative slice)
-		if tm.width > 7 && len(content) > tm.width-4 {
-			content = content[:tm.width-7] + "..."
+		if tm.width > 7 && runewidth.StringWidth(content) > tm.width-4 {
+			content = truncateVisual(content, tm.width-4)
 		}
 		lines = append(lines, style.Width(tm.width).Render(content))
 	}

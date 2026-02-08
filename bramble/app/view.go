@@ -204,7 +204,7 @@ func (m Model) renderTopBar() string {
 	}
 
 	// Combine with padding
-	padding := m.width - len(stripAnsi(left)) - len(stripAnsi(right)) - 4
+	padding := m.width - runewidth.StringWidth(stripAnsi(left)) - runewidth.StringWidth(stripAnsi(right)) - 4
 	if padding < 1 {
 		padding = 1
 	}
@@ -531,8 +531,8 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 	}
 
 	// Truncate width if needed (skip for markdown-rendered content which may have ANSI)
-	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && len(stripAnsi(formatted)) > width-2 {
-		formatted = formatted[:width-5] + "..."
+	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
+		formatted = truncateVisual(formatted, width-2)
 	}
 
 	return formatted
@@ -696,7 +696,7 @@ func (m Model) renderStatusBar() string {
 	}
 
 	// Pad to fill width
-	padding := m.width - len(stripAnsi(left)) - len(stripAnsi(right)) - 2
+	padding := m.width - runewidth.StringWidth(stripAnsi(left)) - runewidth.StringWidth(stripAnsi(right)) - 2
 	if padding < 1 {
 		padding = 1
 	}
@@ -725,15 +725,40 @@ func statusIcon(status session.SessionStatus) string {
 	}
 }
 
-// truncate truncates a string to max length.
+// truncate truncates a plain-text string (no ANSI) to at most max visual
+// columns, appending "..." when truncation occurs. It correctly handles
+// multi-byte UTF-8 and wide (CJK / emoji) characters.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if runewidth.StringWidth(s) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		// Not enough room for ellipsis; just return what fits.
+		var b strings.Builder
+		cols := 0
+		for _, r := range s {
+			w := runewidth.RuneWidth(r)
+			if cols+w > max {
+				break
+			}
+			b.WriteRune(r)
+			cols += w
+		}
+		return b.String()
 	}
-	return s[:max-3] + "..."
+	target := max - 3
+	var b strings.Builder
+	cols := 0
+	for _, r := range s {
+		w := runewidth.RuneWidth(r)
+		if cols+w > target {
+			break
+		}
+		b.WriteRune(r)
+		cols += w
+	}
+	b.WriteString("...")
+	return b.String()
 }
 
 // formatToolDisplay formats a tool invocation for display.
@@ -778,7 +803,7 @@ func formatToolDisplay(toolName string, input map[string]interface{}, maxLen int
 
 // truncatePath truncates a path, keeping the end visible.
 func truncatePath(path string, max int) string {
-	if len(path) <= max {
+	if runewidth.StringWidth(path) <= max {
 		return path
 	}
 	if max <= 7 {
@@ -790,7 +815,7 @@ func truncatePath(path string, max int) string {
 		return truncate(path, max)
 	}
 	suffix := parts[len(parts)-1]
-	if len(suffix)+4 >= max {
+	if runewidth.StringWidth(suffix)+4 >= max {
 		return truncate(path, max)
 	}
 	return ".../" + suffix

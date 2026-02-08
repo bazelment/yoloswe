@@ -47,8 +47,34 @@ Each cycle consists of 4 phases:
 
 ---
 
+---
+
 ## Cycle 2
-**Status**: Pending
+**Status**: Complete
+**Focus**: Polish and correctness - completing Cycle 1 work
+
+### Phase 1: Product Research
+**Status**: Complete
+**Findings**: Identified silent-failure paths, width calculation bugs, missing scroll memory
+
+### Phase 2: Architecture Design
+**Status**: Complete
+
+### Phase 3: Implementation
+**Status**: Complete
+**Features**:
+1. Action Feedback - Toast notifications for all 10 silent-failure key paths
+2. Per-Session Scroll Position Memory - Save/restore scroll on session switch
+3. Width Calculation Fixes - Replace len(stripAnsi()) with runewidth.StringWidth()
+
+### Phase 4: Code Review
+**Status**: Complete
+**Fixes Applied**:
+- Fixed filetree.go truncation corrupting ANSI escape sequences
+- Fixed truncate() using byte-length on multi-byte UTF-8
+- Fixed truncatePath() using byte-length for column limits
+- Fixed confirmTask() discarding toast expiry command
+- Fixed generateDropdownTitle() using byte-length for column fitting
 
 ## Cycle 3
 **Status**: Pending

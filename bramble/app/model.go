@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
@@ -26,13 +27,18 @@ const (
 )
 
 // Model is the root application model.
-type Model struct {
+type Model struct { //nolint:govet // fieldalignment: readability over padding for app state
 	ctx                   context.Context
+	worktrees             []wt.Worktree
+	sessions              []session.SessionInfo
+	cachedHistory         []*session.SessionMeta
+	worktreeOpMessages    []string
 	inputHandler          func(string) tea.Cmd
+	worktreeStatuses      map[string]*wt.WorktreeStatus
+	scrollPositions       map[session.SessionID]int
 	viewingHistoryData    *session.StoredSession
 	sessionManager        *session.Manager
 	mdRenderer            *MarkdownRenderer
-	worktreeStatuses      map[string]*wt.WorktreeStatus
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
 	taskModal             *TaskModal
@@ -46,18 +52,14 @@ type Model struct {
 	repoName              string
 	editor                string
 	inputPrompt           string
-	viewingSessionID      session.SessionID
 	wtRoot                string
-	historyBranch         string // branch the cached history belongs to
-	worktrees             []wt.Worktree
-	sessions              []session.SessionInfo
-	cachedHistory         []*session.SessionMeta // async-loaded history for historyBranch
-	worktreeOpMessages    []string
-	focus                 FocusArea
+	viewingSessionID      session.SessionID
+	historyBranch         string
 	scrollOffset          int
-	selectedSessionIndex  int // For tmux mode session list navigation
+	selectedSessionIndex  int
 	height                int
 	width                 int
+	focus                 FocusArea
 	inputMode             bool
 }
 
@@ -90,6 +92,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		inputArea:        NewTextArea(),
 		splitPane:        NewSplitPane(),
 		fileTree:         NewFileTree("", nil),
+		scrollPositions:  make(map[session.SessionID]int),
 	}
 
 	// Pre-populate worktrees so the first View() render shows branch names.
@@ -447,23 +450,24 @@ func timeAgo(t time.Time) string {
 // generateDropdownTitle creates a short title from a prompt for dropdown display.
 func generateDropdownTitle(prompt string, maxLen int) string {
 	words := strings.Fields(prompt)
-	var b strings.Builder
+	var parts []string
+	cols := 0
 	for _, w := range words {
-		if b.Len()+len(w)+1 > maxLen {
+		wWidth := runewidth.StringWidth(w)
+		needed := wWidth
+		if cols > 0 {
+			needed++ // space separator
+		}
+		if cols+needed > maxLen {
 			break
 		}
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(w)
+		parts = append(parts, w)
+		cols += needed
 	}
-	if b.Len() == 0 && prompt != "" {
-		if len(prompt) > maxLen-3 {
-			return prompt[:maxLen-3] + "..."
-		}
-		return prompt
+	if len(parts) == 0 && prompt != "" {
+		return truncate(prompt, maxLen)
 	}
-	return b.String()
+	return strings.Join(parts, " ")
 }
 
 // refreshFileTree gathers worktree context for the file tree display.

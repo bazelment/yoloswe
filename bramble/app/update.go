@@ -263,7 +263,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "alt+s":
 		// In tmux mode, Alt-S does nothing (no dropdown)
 		if m.sessionManager.IsInTmuxMode() {
-			return m, nil
+			toastCmd := m.addToast("Sessions are in tmux windows; use prefix+w to list", ToastInfo)
+			return m, toastCmd
 		}
 		// TUI mode: open session dropdown
 		m.sessionDropdown.Open()
@@ -337,6 +338,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				// No toast for missing tmux window name - it's a rare edge case
+			} else {
+				toastCmd := m.addToast("No sessions to switch to", ToastInfo)
+				return m, toastCmd
 			}
 		}
 		return m, nil
@@ -366,7 +370,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("No repository loaded", ToastError)
+		return m, toastCmd
 
 	case "t":
 		// New task (prompt-first flow with AI routing)
@@ -384,7 +389,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "b":
 		// Start builder
@@ -395,7 +401,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "e":
 		// Open editor for worktree
@@ -406,7 +413,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return editorResultMsg{err: err}
 			}
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "s":
 		// Stop session with confirmation (TUI mode only)
@@ -430,7 +438,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return nil
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("No active session to stop (Alt-S to select)", ToastInfo)
+		return m, toastCmd
 
 	case "f":
 		// Follow-up on idle session (TUI mode only)
@@ -448,7 +457,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+		return m, toastCmd
 
 	case "a":
 		// Approve plan and start builder session
@@ -467,12 +477,17 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				toastCmd := m.addToast(err.Error(), ToastError)
 				return m, toastCmd
 			}
+			if m.viewingSessionID != "" {
+				m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+			}
 			m.viewingSessionID = sessionID
+			m.scrollOffset = 0 // New builder session starts at bottom
 			m.sessions = m.sessionManager.GetAllSessions()
 			m.updateSessionDropdown()
 			return m, nil
 		}
-		return m, nil
+		toastCmd := m.addToast("No plan ready to approve", ToastInfo)
+		return m, toastCmd
 
 	case "d":
 		// Delete worktree
@@ -493,7 +508,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "r":
 		// Refresh
@@ -527,6 +543,18 @@ func (m *Model) scrollToTop() {
 // scrollToBottom scrolls to the end (latest) output.
 func (m *Model) scrollToBottom() {
 	m.scrollOffset = 0
+}
+
+// switchViewingSession saves the scroll position for the current session,
+// sets the viewing session to newID, and restores the saved scroll position
+// (or 0 if none was saved).
+func (m *Model) switchViewingSession(newID session.SessionID) {
+	if m.viewingSessionID != "" {
+		m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+	}
+	m.viewingSessionID = newID
+	m.scrollOffset = m.scrollPositions[newID] // zero-value (0) if not found
+	m.viewingHistoryData = nil
 }
 
 // handleDropdownMode handles key presses when a dropdown is open.
@@ -569,10 +597,8 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Worktree selected - update session dropdown
 			m.worktreeDropdown.Close()
 			m.updateSessionDropdown()
-			// Clear viewing session when switching worktrees
-			m.viewingSessionID = ""
-			m.viewingHistoryData = nil
-			m.scrollOffset = 0
+			// Save scroll position and clear viewing session when switching worktrees
+			m.switchViewingSession("")
 			// Refresh file tree and history for new worktree
 			m.focus = FocusOutput
 			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())
@@ -583,12 +609,10 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Can't select separator
 				return m, nil
 			}
-			m.viewingSessionID = session.SessionID(item.ID)
-			m.scrollOffset = 0 // Reset scroll when switching sessions
+			m.switchViewingSession(session.SessionID(item.ID))
 			// Check if this is a live session or history
 			if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
-				// Live session
-				m.viewingHistoryData = nil
+				// Live session -- viewingHistoryData already nil from switchViewingSession
 			} else {
 				// History session - load from store
 				wt := m.selectedWorktree()
@@ -596,9 +620,6 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
 					if err == nil {
 						m.viewingHistoryData = histData
-					} else {
-						// Log error but don't show toast - history loading is background operation
-						m.viewingHistoryData = nil
 					}
 				}
 			}
@@ -752,7 +773,11 @@ func (m Model) startSession(sessionType session.SessionType, prompt string) (tea
 		return m, toastCmd
 	}
 
+	if m.viewingSessionID != "" {
+		m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+	}
 	m.viewingSessionID = sessionID
+	m.scrollOffset = 0 // New session starts at bottom
 	m.sessions = m.sessionManager.GetAllSessions()
 	m.updateSessionDropdown()
 	toastCmd := m.addToast("Session started: "+string(sessionID)[:12], ToastSuccess)
@@ -805,9 +830,10 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 
 	// Clear viewing session if it belongs to this worktree
 	if w := m.selectedWorktree(); w != nil && w.Branch == branch {
-		m.viewingSessionID = ""
-		m.viewingHistoryData = nil
-		m.scrollOffset = 0
+		// Save scroll position before clearing (session being deleted,
+		// so the saved position will be stale, but that's fine -- it's
+		// a no-op to save for a soon-to-be-deleted session).
+		m.switchViewingSession("")
 	}
 
 	// Show pending message
@@ -1048,13 +1074,13 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 	m.taskModal.Hide()
 	m.focus = FocusOutput
 
-	m.addToast("Task confirmed, starting session...", ToastSuccess)
+	toastCmd := m.addToast("Task confirmed, starting session...", ToastSuccess)
 
 	// If creating a new worktree, do that first
 	if msg.isNew {
 		if m.repoName == "" {
-			toastCmd := m.addToast("No repository selected", ToastError)
-			return m, toastCmd
+			errToastCmd := m.addToast("No repository selected", ToastError)
+			return m, errToastCmd
 		}
 
 		// Show pending message
@@ -1067,7 +1093,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		worktreeName := msg.worktree
 		parent := msg.parent
 		prompt := msg.prompt
-		return m, func() tea.Msg {
+		return m, tea.Batch(toastCmd, func() tea.Msg {
 			var buf bytes.Buffer
 			output := wt.NewOutput(&buf, false)
 			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
@@ -1093,12 +1119,13 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 				worktreeName: worktreeName,
 				prompt:       prompt,
 			}
-		}
+		})
 	}
 
 	// Use existing worktree - select it and start planner
 	m.worktreeDropdown.SelectByID(msg.worktree)
-	return m.startSession(session.SessionTypePlanner, msg.prompt)
+	model, cmd := m.startSession(session.SessionTypePlanner, msg.prompt)
+	return model, tea.Batch(toastCmd, cmd)
 }
 
 func clamp(v, lo, hi int) int {

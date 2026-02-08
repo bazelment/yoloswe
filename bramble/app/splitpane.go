@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // PaneLayout controls the center area display mode.
@@ -110,11 +111,11 @@ func padToSize(content string, width, height int) string {
 	// Pad each line to width
 	for i, line := range lines {
 		stripped := stripAnsi(line)
-		if len(stripped) < width {
-			lines[i] = line + strings.Repeat(" ", width-len(stripped))
-		} else if len(stripped) > width {
-			// Truncate (approximate - doesn't handle ANSI perfectly)
-			lines[i] = line[:width]
+		visualWidth := runewidth.StringWidth(stripped)
+		if visualWidth < width {
+			lines[i] = line + strings.Repeat(" ", width-visualWidth)
+		} else if visualWidth > width {
+			lines[i] = truncateVisual(line, width)
 		}
 	}
 

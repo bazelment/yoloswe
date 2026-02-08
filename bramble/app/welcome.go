@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -101,7 +102,7 @@ func renderKeyHint(key, action, description string) string {
 	//   "    [t]  New task         Describe what you want; AI picks the branch"
 	keyCol := fmt.Sprintf("  %s", welcomeKeyStyle.Render(fmt.Sprintf("[%s]", key)))
 	// Pad key column to 14 chars visual width for alignment
-	keyVisual := len(stripAnsi(keyCol))
+	keyVisual := runewidth.StringWidth(stripAnsi(keyCol))
 	padding := 14 - keyVisual
 	if padding < 1 {
 		padding = 1
