@@ -230,11 +230,35 @@ func TestTextAreaHandleKey_Space(t *testing.T) {
 	assert.Equal(t, "hello ", ta.Value())
 }
 
-func TestTextAreaHandleKey_Newline(t *testing.T) {
+func TestTextAreaHandleKey_EnterSubmitsWhenNonEmpty(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("line1")
 	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, TextAreaSubmit, action)
+	assert.Equal(t, "line1", ta.Value()) // Value unchanged, submit triggered
+}
+
+func TestTextAreaHandleKey_EnterNoOpWhenEmpty(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("")
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "", ta.Value())
+}
+
+func TestTextAreaHandleKey_EnterNoOpWhenWhitespace(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("   \n  \t  ")
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "   \n  \t  ", ta.Value()) // Value unchanged
+}
+
+func TestTextAreaHandleKey_ShiftEnterInsertsNewline(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("line1")
+	// Test InsertNewline directly since bubbletea shift+enter encoding varies
+	ta.InsertNewline()
 	assert.Equal(t, "line1\n", ta.Value())
 }
 

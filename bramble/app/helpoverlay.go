@@ -192,6 +192,11 @@ func buildHelpSections(m *Model) []HelpSection {
 			HelpBinding{"b", "Start builder session"},
 		)
 	}
+	if !inTmux {
+		sess.Bindings = append(sess.Bindings,
+			HelpBinding{"1..9", "Quick switch to session N"},
+		)
+	}
 	if hasSession && sessIdle && !inTmux {
 		sess.Bindings = append(sess.Bindings,
 			HelpBinding{"f", "Follow-up on idle session"},
@@ -233,6 +238,7 @@ func buildHelpSections(m *Model) []HelpSection {
 		tmux.Bindings = append(tmux.Bindings,
 			HelpBinding{"Up/k", "Navigate up"},
 			HelpBinding{"Down/j", "Navigate down"},
+			HelpBinding{"1..9", "Select session N in list"},
 			HelpBinding{"Enter", "Switch to tmux window"},
 		)
 		sections = append(sections, tmux)
@@ -272,7 +278,9 @@ func buildHelpSections(m *Model) []HelpSection {
 		inp := HelpSection{Title: "Input Mode"}
 		inp.Bindings = append(inp.Bindings,
 			HelpBinding{"Tab", "Cycle focus (text/send/cancel)"},
-			HelpBinding{"Ctrl+Enter", "Submit prompt"},
+			HelpBinding{"Enter", "Submit prompt (non-empty)"},
+			HelpBinding{"Shift+Enter", "Insert newline"},
+			HelpBinding{"Ctrl+Enter", "Submit (alternative)"},
 			HelpBinding{"Esc", "Cancel input"},
 		)
 		sections = append(sections, inp)

@@ -61,6 +61,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	width                 int
 	focus                 FocusArea
 	inputMode             bool
+	confirmQuit           bool
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -266,12 +267,18 @@ func (m *Model) updateSessionDropdown() {
 			label = generateDropdownTitle(sess.Prompt, 20)
 		}
 
+		// Add index prefix for sessions 1-9
+		indexPrefix := ""
+		if i < 9 {
+			indexPrefix = fmt.Sprintf("%d. ", i+1)
+		}
+
 		// Format rich subtitle with progress and prompt
 		subtitle := formatSessionSubtitle(sess)
 
 		items = append(items, DropdownItem{
 			ID:       string(sess.ID),
-			Label:    label,
+			Label:    indexPrefix + label,
 			Subtitle: subtitle,
 			Icon:     icon,
 			Badge:    badge,

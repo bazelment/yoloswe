@@ -39,6 +39,8 @@ go_test(
         "filetree_open_test.go",
         "helpoverlay_test.go",
         "output_test.go",
+        "quick_switch_test.go",
+        "quit_confirm_test.go",
         "scrollrender_test.go",
         "session_subtitle_test.go",
         "textarea_test.go",

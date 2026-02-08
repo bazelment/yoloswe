@@ -13,7 +13,7 @@ Each cycle consists of 4 phases:
 ---
 
 ## Cycle 1
-**Status**: In Progress
+**Status**: Complete
 **Focus**: TBD (pending PM analysis)
 
 ### Phase 1: Product Research
@@ -113,5 +113,37 @@ Each cycle consists of 4 phases:
 **Fixes**: runewidth for subtitle budget, path traversal prevention in AbsSelectedPath,
 zero-CreatedAt guard, float64 tolerance comparison, added path traversal test
 
+---
+
 ## Cycle 5
-**Status**: Pending
+**Status**: Complete
+**Focus**: UX polish - keyboard ergonomics and safety
+
+### Phase 1-2: PM + Architecture
+**Picks**: Unified submit (Enter=send), confirmation before quit, quick session switch 1-9
+
+### Phase 3: Implementation
+**Features**:
+1. Unified Submit - Enter submits prompt (non-empty), Shift+Enter inserts newline, Ctrl+Enter still submits
+2. Confirmation Before Quit - `q` with active sessions shows confirmation toast, second `q`/`y` confirms
+3. Quick Session Switch - bare digit keys 1-9 jump to Nth session, numbered labels in dropdown
+
+### Phase 4: Code Review
+**Fixes**:
+- Fixed `TestQuitConfirm_CompletedSessions_DontCount` not actually testing with completed sessions
+- Replaced duplicated session filtering with `currentWorktreeSessions()` in digit handler and tmux list
+- Added number prefixes to tmux session list view for discoverability
+
+---
+
+## Summary of All 5 Cycles
+
+| Cycle | Focus | Features | Review Fixes |
+|-------|-------|----------|-------------|
+| 1 | Discoverability | Help overlay, toast notifications, welcome screen | 5 fixes (panic, scroll, alignment, styles) |
+| 2 | Correctness | Action feedback, scroll memory, runewidth | 5 fixes (ANSI corruption, byte-length bugs) |
+| 3 | Code quality | Scroll helper, HandleKey extraction, dropdown filter | 2 fixes (phantom indicator, filter selection) |
+| 4 | Actionable data | Session progress, cost tracking, file open | 5 fixes (runewidth, path traversal, float comparison) |
+| 5 | UX polish | Unified submit, quit confirm, quick switch | 3 fixes (test quality, DRY, tmux numbers) |
+
+**Total**: 15 features implemented, 20 review fixes applied across 5 cycles.

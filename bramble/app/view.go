@@ -219,23 +219,14 @@ func (m Model) renderSessionListView(width, height int) string {
 
 	// Table header
 	b.WriteString("\n")
-	b.WriteString("  ")
-	b.WriteString(dimStyle.Render("Type    Name            Status        Prompt"))
+	b.WriteString(dimStyle.Render("   Type  Name            Status        Prompt"))
 	b.WriteString("\n")
-	b.WriteString("  ")
-	b.WriteString(strings.Repeat("─", width-4))
+	b.WriteString("   ")
+	b.WriteString(strings.Repeat("─", width-3))
 	b.WriteString("\n")
 
 	// Get sessions for current worktree
-	var currentSessions []session.SessionInfo
-	if wt := m.selectedWorktree(); wt != nil {
-		allSessions := m.sessionManager.GetAllSessions()
-		for i := range allSessions {
-			if allSessions[i].WorktreePath == wt.Path {
-				currentSessions = append(currentSessions, allSessions[i])
-			}
-		}
-	}
+	currentSessions := m.currentWorktreeSessions()
 
 	if len(currentSessions) == 0 {
 		return m.renderWelcome(width, height)
@@ -274,8 +265,14 @@ func (m Model) renderSessionListView(width, height int) string {
 		}
 		promptDisplay := truncate(prompt, 80)
 
-		// Format line: icon + name + status + prompt
-		line := fmt.Sprintf("  %s  %-15s  %-13s  %s", typeIcon, nameDisplay, statusStr, promptDisplay)
+		// Number prefix for quick switch (1-9)
+		numPrefix := "   "
+		if i < 9 {
+			numPrefix = fmt.Sprintf("%d. ", i+1)
+		}
+
+		// Format line: number + icon + name + status + prompt
+		line := fmt.Sprintf("%s%s  %-15s  %-13s  %s", numPrefix, typeIcon, nameDisplay, statusStr, promptDisplay)
 
 		// Highlight selected row
 		if i == m.selectedSessionIndex {
@@ -590,8 +587,10 @@ func (m Model) renderStatusBar() string {
 	hasWorktree := m.selectedWorktree() != nil
 	inTmuxMode := m.sessionManager.IsInTmuxMode()
 
-	if m.inputMode {
-		hints = []string{"[Tab] Switch", "[Ctrl+Enter] Send", "[Esc] Cancel", "[?]help", "[q]uit"}
+	if m.confirmQuit {
+		hints = []string{"[q/y] Confirm quit", "[any key] Cancel"}
+	} else if m.inputMode {
+		hints = []string{"[Tab] Switch", "[Enter] Send", "[Shift+Enter] Newline", "[Esc] Cancel", "[?]help"}
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
 		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close", "[?]help", "[q]uit"}
 	} else if inTmuxMode {

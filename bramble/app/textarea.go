@@ -295,13 +295,21 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 		t.CycleBackward()
 		return TextAreaHandled
 
+	case "shift+enter":
+		if t.Focus() == FocusTextInput {
+			t.InsertNewline()
+		}
+		return TextAreaHandled
+
 	case "ctrl+enter":
 		return TextAreaSubmit
 
 	case "enter":
 		switch t.Focus() {
 		case FocusTextInput:
-			t.InsertNewline()
+			if strings.TrimSpace(t.value) != "" {
+				return TextAreaSubmit
+			}
 			return TextAreaHandled
 		case FocusSendButton:
 			return TextAreaSubmit

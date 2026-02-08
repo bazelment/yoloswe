@@ -225,6 +225,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyPress handles key presses in normal mode (not input, not dropdown).
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle quit confirmation at the top
+	if m.confirmQuit {
+		m.confirmQuit = false
+		switch msg.String() {
+		case "q", "y", "ctrl+c":
+			return m, tea.Quit
+		default:
+			toastCmd := m.addToast("Quit cancelled", ToastInfo)
+			return m, toastCmd
+		}
+	}
+
 	switch msg.String() {
 	case "?":
 		// Open help overlay
@@ -235,7 +247,24 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = FocusHelp
 		return m, nil
 
-	case "q", "ctrl+c":
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "q":
+		// Check for active sessions
+		var activeSessions []session.SessionInfo
+		allSessions := m.sessionManager.GetAllSessions()
+		for i := range allSessions {
+			if !allSessions[i].Status.IsTerminal() {
+				activeSessions = append(activeSessions, allSessions[i])
+			}
+		}
+		if len(activeSessions) > 0 {
+			m.confirmQuit = true
+			toastMsg := fmt.Sprintf("%d active session(s). Press 'q' or 'y' to confirm quit, any other key to cancel", len(activeSessions))
+			toastCmd := m.addToast(toastMsg, ToastInfo)
+			return m, toastCmd
+		}
 		return m, tea.Quit
 
 	case "f2":
@@ -535,6 +564,20 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		// Reset scroll
 		m.scrollOffset = 0
+		return m, nil
+
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		idx := int(msg.String()[0]-'0') - 1
+		liveSessions := m.currentWorktreeSessions()
+		if idx >= len(liveSessions) {
+			toastCmd := m.addToast(fmt.Sprintf("No session #%s", msg.String()), ToastInfo)
+			return m, toastCmd
+		}
+		if m.sessionManager.IsInTmuxMode() {
+			m.selectedSessionIndex = idx
+			return m, nil
+		}
+		m.switchViewingSession(liveSessions[idx].ID)
 		return m, nil
 	}
 
