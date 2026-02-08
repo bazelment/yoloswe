@@ -3,6 +3,7 @@ package app
 import (
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
@@ -262,6 +263,111 @@ func (t *TextArea) wrapLine(line string, width int) []string {
 		wrapped = append(wrapped, line)
 	}
 	return wrapped
+}
+
+// TextAreaAction represents the result of handling a key press in a TextArea.
+type TextAreaAction int
+
+const (
+	// TextAreaHandled means the key was consumed by the TextArea (cursor move, char insert, etc.).
+	TextAreaHandled TextAreaAction = iota
+	// TextAreaSubmit means the user triggered submit (Ctrl+Enter, or Enter on Send button).
+	TextAreaSubmit
+	// TextAreaCancel means the user triggered cancel (Esc, or Enter on Cancel button).
+	TextAreaCancel
+	// TextAreaQuit means the user pressed Ctrl+C (global quit).
+	TextAreaQuit
+	// TextAreaUnhandled means the key was not consumed (caller should handle it).
+	TextAreaUnhandled
+)
+
+// HandleKey processes a key message against this TextArea and returns the
+// resulting action. The TextArea is mutated in place for cursor movement,
+// character insertion, focus cycling, etc. The caller is responsible for
+// acting on Submit, Cancel, and Quit.
+func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
+	switch msg.String() {
+	case "tab":
+		t.CycleForward()
+		return TextAreaHandled
+
+	case "shift+tab":
+		t.CycleBackward()
+		return TextAreaHandled
+
+	case "ctrl+enter":
+		return TextAreaSubmit
+
+	case "enter":
+		switch t.Focus() {
+		case FocusTextInput:
+			t.InsertNewline()
+			return TextAreaHandled
+		case FocusSendButton:
+			return TextAreaSubmit
+		case FocusCancelButton:
+			return TextAreaCancel
+		}
+		return TextAreaHandled
+
+	case "esc":
+		return TextAreaCancel
+
+	case "backspace":
+		if t.Focus() == FocusTextInput {
+			t.DeleteChar()
+		}
+		return TextAreaHandled
+
+	case "delete":
+		if t.Focus() == FocusTextInput {
+			t.DeleteCharForward()
+		}
+		return TextAreaHandled
+
+	case "up":
+		if t.Focus() == FocusTextInput {
+			t.MoveCursorUp()
+		}
+		return TextAreaHandled
+
+	case "down":
+		if t.Focus() == FocusTextInput {
+			t.MoveCursorDown()
+		}
+		return TextAreaHandled
+
+	case "left":
+		if t.Focus() == FocusTextInput {
+			t.MoveCursorLeft()
+		}
+		return TextAreaHandled
+
+	case "right":
+		if t.Focus() == FocusTextInput {
+			t.MoveCursorRight()
+		}
+		return TextAreaHandled
+
+	case "ctrl+c":
+		return TextAreaQuit
+
+	default:
+		if t.Focus() == FocusTextInput {
+			keyStr := msg.String()
+			if keyStr == "space" {
+				t.InsertChar(' ')
+			} else if len(keyStr) == 1 {
+				t.InsertChar(rune(keyStr[0]))
+			} else if len(msg.Runes) > 0 {
+				for _, r := range msg.Runes {
+					t.InsertChar(r)
+				}
+			}
+			return TextAreaHandled
+		}
+		return TextAreaUnhandled
+	}
 }
 
 // View renders the text area.

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -211,4 +212,116 @@ func TestTextAreaViewRendering(t *testing.T) {
 
 	// Should have border characters (from lipgloss)
 	assert.True(t, strings.Contains(view, "─") || strings.Contains(view, "│"))
+}
+
+func TestTextAreaHandleKey_CharInsertion(t *testing.T) {
+	ta := NewTextArea()
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "a", ta.Value())
+}
+
+func TestTextAreaHandleKey_Space(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello")
+	// Space key comes as a special string
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "hello ", ta.Value())
+}
+
+func TestTextAreaHandleKey_Newline(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("line1")
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "line1\n", ta.Value())
+}
+
+func TestTextAreaHandleKey_Backspace(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("abc")
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "ab", ta.Value())
+}
+
+func TestTextAreaHandleKey_CursorMovement(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("line1\nline2")
+
+	// Move up
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyUp})
+	assert.Equal(t, TextAreaHandled, action)
+
+	// Move down
+	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyDown})
+	assert.Equal(t, TextAreaHandled, action)
+
+	// Move left
+	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
+	assert.Equal(t, TextAreaHandled, action)
+
+	// Move right
+	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyRight})
+	assert.Equal(t, TextAreaHandled, action)
+}
+
+func TestTextAreaHandleKey_TabCycling(t *testing.T) {
+	ta := NewTextArea()
+	assert.Equal(t, FocusTextInput, ta.Focus())
+
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, FocusSendButton, ta.Focus())
+
+	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, FocusTextInput, ta.Focus())
+}
+
+func TestTextAreaHandleKey_EnterOnSendButton(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetFocus(FocusSendButton)
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, TextAreaSubmit, action)
+}
+
+func TestTextAreaHandleKey_EnterOnCancelButton(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetFocus(FocusCancelButton)
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, TextAreaCancel, action)
+}
+
+func TestTextAreaHandleKey_Escape(t *testing.T) {
+	ta := NewTextArea()
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEscape})
+	assert.Equal(t, TextAreaCancel, action)
+}
+
+func TestTextAreaHandleKey_CtrlC(t *testing.T) {
+	ta := NewTextArea()
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	assert.Equal(t, TextAreaQuit, action)
+}
+
+func TestTextAreaHandleKey_IgnoredWhenNotFocused(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetFocus(FocusSendButton)
+	// Typing 'a' when send button focused should not insert text
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	assert.Equal(t, TextAreaUnhandled, action)
+	assert.Equal(t, "", ta.Value())
+}
+
+func TestTextAreaHandleKey_Delete(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("abc")
+	// Move cursor to middle
+	ta.MoveCursorLeft()
+	ta.MoveCursorLeft()
+	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyDelete})
+	assert.Equal(t, TextAreaHandled, action)
+	assert.Equal(t, "ac", ta.Value())
 }

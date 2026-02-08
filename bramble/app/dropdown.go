@@ -17,13 +17,15 @@ type DropdownItem struct {
 }
 
 // Dropdown represents a dropdown menu component.
-type Dropdown struct {
-	items        []DropdownItem
-	selectedIdx  int
-	isOpen       bool
-	width        int
-	maxVisible   int
-	scrollOffset int
+type Dropdown struct { //nolint:govet // fieldalignment: readability over padding
+	items           []DropdownItem
+	filteredIndices []int // indices into items; nil = no filter (show all)
+	filterText      string
+	selectedIdx     int
+	width           int
+	maxVisible      int
+	scrollOffset    int
+	isOpen          bool
 }
 
 // NewDropdown creates a new dropdown with the given items.
@@ -37,10 +39,10 @@ func NewDropdown(items []DropdownItem) *Dropdown {
 // SetItems replaces the dropdown items.
 func (d *Dropdown) SetItems(items []DropdownItem) {
 	d.items = items
+	d.ClearFilter()
 	if d.selectedIdx >= len(items) {
 		d.selectedIdx = max(0, len(items)-1)
 	}
-	d.scrollOffset = 0
 }
 
 // SetWidth sets the dropdown width.
@@ -61,6 +63,7 @@ func (d *Dropdown) SetMaxVisible(n int) {
 // Open opens the dropdown.
 func (d *Dropdown) Open() {
 	d.isOpen = true
+	d.ClearFilter()
 }
 
 // Close closes the dropdown.
@@ -85,7 +88,13 @@ func (d *Dropdown) SelectedIndex() int {
 
 // SelectedItem returns the currently selected item, or nil if none.
 func (d *Dropdown) SelectedItem() *DropdownItem {
-	if d.selectedIdx >= 0 && d.selectedIdx < len(d.items) {
+	eff := d.effectiveItems()
+	if d.selectedIdx >= 0 && d.selectedIdx < len(eff) {
+		// Return pointer to original item (not the copy in eff)
+		if d.filteredIndices != nil {
+			origIdx := d.filteredIndices[d.selectedIdx]
+			return &d.items[origIdx]
+		}
 		return &d.items[d.selectedIdx]
 	}
 	return nil
@@ -93,6 +102,8 @@ func (d *Dropdown) SelectedItem() *DropdownItem {
 
 // SelectByID selects an item by its ID.
 func (d *Dropdown) SelectByID(id string) bool {
+	// Clear filter so selectedIdx maps to full items list
+	d.ClearFilter()
 	for i, item := range d.items {
 		if item.ID == id {
 			d.selectedIdx = i
@@ -105,6 +116,7 @@ func (d *Dropdown) SelectByID(id string) bool {
 
 // SelectIndex selects an item by index.
 func (d *Dropdown) SelectIndex(idx int) {
+	d.ClearFilter()
 	if idx >= 0 && idx < len(d.items) {
 		d.selectedIdx = idx
 		d.ensureVisible()
@@ -113,21 +125,22 @@ func (d *Dropdown) SelectIndex(idx int) {
 
 // MoveSelection moves the selection up or down, skipping separator items.
 func (d *Dropdown) MoveSelection(delta int) {
-	if len(d.items) == 0 {
+	effLen := d.effectiveLen()
+	if effLen == 0 {
 		return
 	}
-	newIdx := clamp(d.selectedIdx+delta, 0, len(d.items)-1)
+	eff := d.effectiveItems()
+	newIdx := clamp(d.selectedIdx+delta, 0, effLen-1)
 	// Skip separator items by continuing in the same direction
 	step := 1
 	if delta < 0 {
 		step = -1
 	}
-	for newIdx >= 0 && newIdx < len(d.items) && d.items[newIdx].ID == "---separator---" {
+	for newIdx >= 0 && newIdx < effLen && eff[newIdx].ID == "---separator---" {
 		newIdx += step
 	}
-	newIdx = clamp(newIdx, 0, len(d.items)-1)
-	// If we still landed on a separator (e.g. at the boundary), don't move
-	if d.items[newIdx].ID == "---separator---" {
+	newIdx = clamp(newIdx, 0, effLen-1)
+	if eff[newIdx].ID == "---separator---" {
 		return
 	}
 	d.selectedIdx = newIdx
@@ -142,6 +155,94 @@ func (d *Dropdown) ensureVisible() {
 	if d.selectedIdx >= d.scrollOffset+d.maxVisible {
 		d.scrollOffset = d.selectedIdx - d.maxVisible + 1
 	}
+}
+
+// FilterText returns the current filter string.
+func (d *Dropdown) FilterText() string {
+	return d.filterText
+}
+
+// AppendFilter adds a rune to the filter and recomputes the filtered list.
+func (d *Dropdown) AppendFilter(r rune) {
+	d.filterText += string(r)
+	d.applyFilter()
+}
+
+// BackspaceFilter removes the last rune from the filter.
+// If the filter becomes empty, the full list is restored.
+func (d *Dropdown) BackspaceFilter() {
+	if d.filterText == "" {
+		return
+	}
+	runes := []rune(d.filterText)
+	d.filterText = string(runes[:len(runes)-1])
+	d.applyFilter()
+}
+
+// ClearFilter resets the filter and shows all items.
+// Maps the current filtered selection back to its original index so the
+// user's selection is preserved.
+func (d *Dropdown) ClearFilter() {
+	// Map filtered selectedIdx back to original index before clearing
+	if d.filteredIndices != nil && d.selectedIdx >= 0 && d.selectedIdx < len(d.filteredIndices) {
+		d.selectedIdx = d.filteredIndices[d.selectedIdx]
+	}
+	d.filterText = ""
+	d.filteredIndices = nil
+	// Clamp selectedIdx to valid range
+	if d.selectedIdx >= len(d.items) {
+		d.selectedIdx = max(0, len(d.items)-1)
+	}
+	d.scrollOffset = 0
+}
+
+// applyFilter recomputes filteredIndices from filterText.
+func (d *Dropdown) applyFilter() {
+	if d.filterText == "" {
+		d.ClearFilter()
+		return
+	}
+
+	lower := strings.ToLower(d.filterText)
+	// Initialize to empty slice (not nil) to distinguish from "no filter"
+	d.filteredIndices = []int{}
+	for i, item := range d.items {
+		if item.ID == "---separator---" {
+			continue // Never include separators in filtered results
+		}
+		if strings.Contains(strings.ToLower(item.Label), lower) {
+			d.filteredIndices = append(d.filteredIndices, i)
+		}
+	}
+
+	// Reset selection to first match when filter changes
+	if len(d.filteredIndices) > 0 {
+		d.selectedIdx = 0
+	} else {
+		d.selectedIdx = -1 // No matches
+	}
+	d.scrollOffset = 0
+	d.ensureVisible()
+}
+
+// effectiveItems returns the items currently visible (filtered or all).
+func (d *Dropdown) effectiveItems() []DropdownItem {
+	if d.filteredIndices == nil {
+		return d.items
+	}
+	result := make([]DropdownItem, len(d.filteredIndices))
+	for i, idx := range d.filteredIndices {
+		result[i] = d.items[idx]
+	}
+	return result
+}
+
+// effectiveLen returns the count of items currently visible.
+func (d *Dropdown) effectiveLen() int {
+	if d.filteredIndices == nil {
+		return len(d.items)
+	}
+	return len(d.filteredIndices)
 }
 
 // Count returns the number of items.
@@ -174,13 +275,24 @@ func (d *Dropdown) ViewHeader() string {
 
 // ViewList renders the dropdown list (open state).
 func (d *Dropdown) ViewList() string {
-	if len(d.items) == 0 {
+	eff := d.effectiveItems()
+	if len(eff) == 0 {
+		if d.filterText != "" {
+			return dimStyle.Render("  No matches for \"" + d.filterText + "\"")
+		}
 		return dimStyle.Render("  (empty)")
 	}
 
 	var b strings.Builder
 
-	endIdx := min(d.scrollOffset+d.maxVisible, len(d.items))
+	// Show filter indicator when active
+	if d.filterText != "" {
+		filterLine := dimStyle.Render("  Filter: ") + d.filterText
+		b.WriteString(filterLine)
+		b.WriteString("\n")
+	}
+
+	endIdx := min(d.scrollOffset+d.maxVisible, len(eff))
 
 	// Show scroll indicator at top if needed
 	if d.scrollOffset > 0 {
@@ -189,7 +301,7 @@ func (d *Dropdown) ViewList() string {
 	}
 
 	for i := d.scrollOffset; i < endIdx; i++ {
-		item := d.items[i]
+		item := eff[i]
 
 		prefix := "  "
 		if i == d.selectedIdx {
@@ -233,7 +345,7 @@ func (d *Dropdown) ViewList() string {
 	}
 
 	// Show scroll indicator at bottom if needed
-	if endIdx < len(d.items) {
+	if endIdx < len(eff) {
 		b.WriteString(dimStyle.Render("  ↓ more"))
 	}
 

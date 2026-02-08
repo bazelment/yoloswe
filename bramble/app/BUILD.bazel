@@ -34,8 +34,10 @@ go_library(
 go_test(
     name = "app_test",
     srcs = [
+        "dropdown_test.go",
         "helpoverlay_test.go",
         "output_test.go",
+        "scrollrender_test.go",
         "textarea_test.go",
         "toast_test.go",
         "update_feedback_test.go",
@@ -50,5 +52,6 @@ go_test(
         "@com_github_charmbracelet_bubbletea//:bubbletea",
         "@com_github_mattn_go_runewidth//:go-runewidth",
         "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )

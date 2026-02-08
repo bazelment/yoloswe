@@ -569,8 +569,23 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = FocusHelp
 		return m, nil
 
-	case "esc", "alt+w", "alt+s":
-		// Close dropdown
+	case "alt+w", "alt+s":
+		// Always close dropdown immediately
+		m.worktreeDropdown.Close()
+		m.sessionDropdown.Close()
+		m.focus = FocusOutput
+		return m, nil
+
+	case "esc":
+		// If filter is active, clear it first. If already empty, close dropdown.
+		dd := m.worktreeDropdown
+		if m.focus == FocusSessionDropdown {
+			dd = m.sessionDropdown
+		}
+		if dd.FilterText() != "" {
+			dd.ClearFilter()
+			return m, nil
+		}
 		m.worktreeDropdown.Close()
 		m.sessionDropdown.Close()
 		m.focus = FocusOutput
@@ -589,6 +604,15 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.worktreeDropdown.MoveSelection(-1)
 		} else {
 			m.sessionDropdown.MoveSelection(-1)
+		}
+		return m, nil
+
+	case "backspace":
+		// Remove last filter character
+		if m.focus == FocusWorktreeDropdown {
+			m.worktreeDropdown.BackspaceFilter()
+		} else {
+			m.sessionDropdown.BackspaceFilter()
 		}
 		return m, nil
 
@@ -630,28 +654,36 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	}
 
-	return m, nil
+	default:
+		// Type-to-filter: route printable characters to the dropdown
+		keyStr := msg.String()
+		var r rune
+		if len(keyStr) == 1 {
+			r = rune(keyStr[0])
+		} else if len(msg.Runes) == 1 {
+			r = msg.Runes[0]
+		}
+		if r != 0 && r >= ' ' && r != 127 { // printable, non-control
+			if m.focus == FocusWorktreeDropdown {
+				m.worktreeDropdown.AppendFilter(r)
+			} else {
+				m.sessionDropdown.AppendFilter(r)
+			}
+			return m, nil
+		}
+		return m, nil
+	}
 }
 
 // handleInputMode handles key presses in input mode.
 // Tab cycles focus between text input and buttons.
 // Enter activates the focused element.
 func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "tab":
-		// Cycle focus forward
-		m.inputArea.CycleForward()
-		return m, nil
+	action := m.inputArea.HandleKey(msg)
 
-	case "shift+tab":
-		// Cycle focus backward
-		m.inputArea.CycleBackward()
-		return m, nil
-
-	case "ctrl+enter":
-		// Submit from any focus
+	switch action {
+	case TextAreaSubmit:
 		value := m.inputArea.Value()
 		if value == "" {
 			return m, nil
@@ -661,91 +693,17 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return promptInputMsg{value}
 		}
 
-	case "enter":
-		// Action depends on current focus
-		switch m.inputArea.Focus() {
-		case FocusTextInput:
-			// Insert newline when editing text
-			m.inputArea.InsertNewline()
-			return m, nil
-		case FocusSendButton:
-			// Submit the prompt
-			value := m.inputArea.Value()
-			if value == "" {
-				return m, nil // Don't submit empty
-			}
-			m.inputArea.Reset()
-			return m, func() tea.Msg {
-				return promptInputMsg{value}
-			}
-		case FocusCancelButton:
-			// Cancel
-			m.inputMode = false
-			m.inputArea.Reset()
-			m.inputHandler = nil
-			return m, nil
-		}
-		return m, nil
-
-	case "esc":
+	case TextAreaCancel:
 		m.inputMode = false
 		m.inputArea.Reset()
 		m.inputHandler = nil
 		return m, nil
 
-	case "backspace":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.DeleteChar()
-		}
-		return m, nil
-
-	case "delete":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.DeleteCharForward()
-		}
-		return m, nil
-
-	case "up":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorUp()
-		}
-		return m, nil
-
-	case "down":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorDown()
-		}
-		return m, nil
-
-	case "left":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorLeft()
-		}
-		return m, nil
-
-	case "right":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorRight()
-		}
-		return m, nil
-
-	case "ctrl+c":
+	case TextAreaQuit:
 		return m, tea.Quit
 
 	default:
-		// Only insert characters when text input is focused
-		if m.inputArea.Focus() == FocusTextInput {
-			keyStr := msg.String()
-			if keyStr == "space" {
-				m.inputArea.InsertChar(' ')
-			} else if len(keyStr) == 1 {
-				m.inputArea.InsertChar(rune(keyStr[0]))
-			} else if len(msg.Runes) > 0 {
-				for _, r := range msg.Runes {
-					m.inputArea.InsertChar(r)
-				}
-			}
-		}
+		// TextAreaHandled or TextAreaUnhandled -- no Model-level action needed
 		return m, nil
 	}
 }
@@ -868,22 +826,10 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch state {
 	case TaskModalInput:
 		ta := m.taskModal.TextArea()
-		switch msg.String() {
-		case "tab":
-			ta.CycleForward()
-			return m, nil
+		action := ta.HandleKey(msg)
 
-		case "shift+tab":
-			ta.CycleBackward()
-			return m, nil
-
-		case "esc":
-			m.taskModal.Hide()
-			m.focus = FocusOutput
-			return m, nil
-
-		case "ctrl+enter":
-			// Submit from any focus
+		switch action {
+		case TextAreaSubmit:
 			prompt := m.taskModal.Prompt()
 			if prompt != "" {
 				return m, func() tea.Msg {
@@ -892,83 +838,15 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "enter":
-			// Action depends on current focus
-			switch ta.Focus() {
-			case FocusTextInput:
-				// Insert newline when editing text
-				ta.InsertNewline()
-				return m, nil
-			case FocusSendButton:
-				// Submit the prompt
-				prompt := m.taskModal.Prompt()
-				if prompt != "" {
-					return m, func() tea.Msg {
-						return taskRouteMsg{prompt: prompt}
-					}
-				}
-				return m, nil
-			case FocusCancelButton:
-				// Cancel
-				m.taskModal.Hide()
-				m.focus = FocusOutput
-				return m, nil
-			}
+		case TextAreaCancel:
+			m.taskModal.Hide()
+			m.focus = FocusOutput
 			return m, nil
 
-		case "backspace":
-			if ta.Focus() == FocusTextInput {
-				ta.DeleteChar()
-			}
-			return m, nil
-
-		case "delete":
-			if ta.Focus() == FocusTextInput {
-				ta.DeleteCharForward()
-			}
-			return m, nil
-
-		case "up":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorUp()
-			}
-			return m, nil
-
-		case "down":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorDown()
-			}
-			return m, nil
-
-		case "left":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorLeft()
-			}
-			return m, nil
-
-		case "right":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorRight()
-			}
-			return m, nil
-
-		case "ctrl+c":
+		case TextAreaQuit:
 			return m, tea.Quit
 
 		default:
-			// Only insert characters when text input is focused
-			if ta.Focus() == FocusTextInput {
-				keyStr := msg.String()
-				if keyStr == "space" {
-					ta.InsertChar(' ')
-				} else if len(keyStr) == 1 {
-					ta.InsertChar(rune(keyStr[0]))
-				} else if len(msg.Runes) > 0 {
-					for _, r := range msg.Runes {
-						ta.InsertChar(r)
-					}
-				}
-			}
 			return m, nil
 		}
 

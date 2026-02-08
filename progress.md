@@ -76,8 +76,23 @@ Each cycle consists of 4 phases:
 - Fixed confirmTask() discarding toast expiry command
 - Fixed generateDropdownTitle() using byte-length for column fitting
 
+---
+
 ## Cycle 3
-**Status**: Pending
+**Status**: Complete
+**Focus**: Code quality refactors and dropdown filtering
+
+### Phase 1-2: PM + Architecture
+**Picks**: Scroll rendering helper, TextArea key handler extraction, dropdown search/filtering
+
+### Phase 3: Implementation
+**Features**:
+1. Shared renderScrollableLines() - eliminated ~130 lines of duplicated scroll logic
+2. Shared TextArea.HandleKey() - eliminated ~216 lines of duplicated key handling
+3. Dropdown type-to-filter - case-insensitive search in worktree/session dropdowns
+
+### Phase 4: Code Review
+**Fixes**: Phantom "0 more lines" indicator, ClearFilter losing selected item
 
 ## Cycle 4
 **Status**: Pending

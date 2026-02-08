@@ -384,19 +384,20 @@ func (m Model) renderOutputArea(width, height int) string {
 
 	// Scroll on visual lines, not logical OutputLine count
 	outputHeight := height - 5 // Account for header, prompt, separator
-	totalVisual := len(allVisualLines)
-	scrollOffset := m.scrollOffset
+	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset))
 
-	// Determine visible window with scroll indicators at edges.
-	// scrollOffset=0 means "at bottom" (latest), higher values scroll toward top.
-	//
-	// Layout cases:
-	// - At bottom (scrollOffset=0): no indicators, full outputHeight for content
-	// - Scrolled to top: only ↓ indicator at bottom, content = outputHeight-1
-	// - Scrolled in middle: ↑ at top + ↓ at bottom, content = outputHeight-2
+	return b.String()
+}
+
+// renderScrollableLines renders a window of visual lines with scroll indicators.
+// scrollOffset=0 means "at bottom" (latest output visible).
+// Higher values scroll toward the top (older content).
+func renderScrollableLines(allVisualLines []string, outputHeight int, scrollOffset int) string {
+	var b strings.Builder
+	totalVisual := len(allVisualLines)
 
 	if scrollOffset == 0 {
-		// At bottom: no indicators
+		// At bottom: no indicators, full outputHeight for content
 		startIdx := totalVisual - outputHeight
 		if startIdx < 0 {
 			startIdx = 0
@@ -407,7 +408,7 @@ func (m Model) renderOutputArea(width, height int) string {
 		}
 	} else {
 		// Scrolled up: try with 2 indicators first (most common scrolled case)
-		contentHeight := outputHeight - 2 // room for ↑ and ↓
+		contentHeight := outputHeight - 2 // room for up-arrow and down-arrow
 		if contentHeight < 1 {
 			contentHeight = 1
 		}
@@ -427,7 +428,7 @@ func (m Model) renderOutputArea(width, height int) string {
 		}
 
 		if startIdx == 0 {
-			// At/near top: only need ↓ indicator, reclaim the ↑ line for content
+			// At/near top: only need down-arrow indicator, reclaim the up-arrow line
 			contentHeight = outputHeight - 1
 			maxScroll = 0
 			if totalVisual > contentHeight {
@@ -437,17 +438,18 @@ func (m Model) renderOutputArea(width, height int) string {
 				scrollOffset = maxScroll
 			}
 			endIdx = totalVisual - scrollOffset
-			// startIdx stays 0
 
 			for i := 0; i < endIdx; i++ {
 				b.WriteString(allVisualLines[i])
 				b.WriteString("\n")
 			}
 			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
-			b.WriteString("\n")
+			if hiddenBelow > 0 {
+				b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
+				b.WriteString("\n")
+			}
 		} else {
-			// Middle: both ↑ and ↓ indicators
+			// Middle: both up-arrow and down-arrow indicators
 			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
 			b.WriteString("\n")
 			for i := startIdx; i < endIdx; i++ {
@@ -576,68 +578,7 @@ func (m Model) renderHistorySession(width, height int) string {
 	}
 
 	outputHeight := height - 6 // Account for header, prompt, timestamp, separator
-	totalVisual := len(allVisualLines)
-	scrollOffset := m.scrollOffset
-
-	if scrollOffset == 0 {
-		startIdx := totalVisual - outputHeight
-		if startIdx < 0 {
-			startIdx = 0
-		}
-		for i := startIdx; i < totalVisual; i++ {
-			b.WriteString(allVisualLines[i])
-			b.WriteString("\n")
-		}
-	} else {
-		contentHeight := outputHeight - 2
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-
-		maxScroll := 0
-		if totalVisual > contentHeight {
-			maxScroll = totalVisual - contentHeight
-		}
-		if scrollOffset > maxScroll {
-			scrollOffset = maxScroll
-		}
-
-		endIdx := totalVisual - scrollOffset
-		startIdx := endIdx - contentHeight
-		if startIdx < 0 {
-			startIdx = 0
-		}
-
-		if startIdx == 0 {
-			contentHeight = outputHeight - 1
-			maxScroll = 0
-			if totalVisual > contentHeight {
-				maxScroll = totalVisual - contentHeight
-			}
-			if scrollOffset > maxScroll {
-				scrollOffset = maxScroll
-			}
-			endIdx = totalVisual - scrollOffset
-
-			for i := 0; i < endIdx; i++ {
-				b.WriteString(allVisualLines[i])
-				b.WriteString("\n")
-			}
-			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
-			b.WriteString("\n")
-		} else {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
-			b.WriteString("\n")
-			for i := startIdx; i < endIdx; i++ {
-				b.WriteString(allVisualLines[i])
-				b.WriteString("\n")
-			}
-			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
-			b.WriteString("\n")
-		}
-	}
+	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset))
 
 	return b.String()
 }
