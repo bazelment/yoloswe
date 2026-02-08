@@ -7,14 +7,16 @@ import (
 
 // Sentinel errors for common error conditions.
 var (
-	ErrAlreadyStarted   = errors.New("session already started")
-	ErrNotStarted       = errors.New("session not started")
-	ErrStopping         = errors.New("session is stopping")
-	ErrSessionClosed    = errors.New("session is closed")
-	ErrTimeout          = errors.New("operation timed out")
-	ErrProcessExited    = errors.New("CLI process exited unexpectedly")
-	ErrInvalidState     = errors.New("invalid state transition")
-	ErrPermissionDenied = errors.New("permission denied")
+	ErrAlreadyStarted     = errors.New("session already started")
+	ErrNotStarted         = errors.New("session not started")
+	ErrStopping           = errors.New("session is stopping")
+	ErrSessionClosed      = errors.New("session is closed")
+	ErrTimeout            = errors.New("operation timed out")
+	ErrProcessExited      = errors.New("CLI process exited unexpectedly")
+	ErrInvalidState       = errors.New("invalid state transition")
+	ErrPermissionDenied   = errors.New("permission denied")
+	ErrBudgetExceeded     = errors.New("budget limit exceeded")
+	ErrMaxTurnsExceeded   = errors.New("max turns exceeded")
 )
 
 // ProtocolError represents a protocol-level error.
@@ -69,6 +71,20 @@ func (e *TurnError) Unwrap() error {
 	return e.Cause
 }
 
+// CLINotFoundError indicates the Claude CLI binary was not found.
+type CLINotFoundError struct {
+	Path  string
+	Cause error
+}
+
+func (e *CLINotFoundError) Error() string {
+	return fmt.Sprintf("CLI binary not found at %q: %v", e.Path, e.Cause)
+}
+
+func (e *CLINotFoundError) Unwrap() error {
+	return e.Cause
+}
+
 // IsRecoverable returns true if the error is recoverable.
 func IsRecoverable(err error) bool {
 	if err == nil {
@@ -78,6 +94,12 @@ func IsRecoverable(err error) bool {
 	// Process exit errors are not recoverable
 	var procErr *ProcessError
 	if errors.As(err, &procErr) {
+		return false
+	}
+
+	// CLI not found is not recoverable
+	var cliErr *CLINotFoundError
+	if errors.As(err, &cliErr) {
 		return false
 	}
 

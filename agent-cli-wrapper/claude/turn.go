@@ -16,23 +16,25 @@ type TurnUsage struct {
 
 // TurnResult contains the result of a completed turn.
 type TurnResult struct {
-	Error      error
-	Text       string
-	Thinking   string
-	Usage      TurnUsage
-	TurnNumber int
-	DurationMs int64
-	Success    bool
+	Error         error
+	Text          string
+	Thinking      string
+	Usage         TurnUsage
+	ContentBlocks []ContentBlock
+	TurnNumber    int
+	DurationMs    int64
+	Success       bool
 }
 
 // turnState tracks the state of a single turn.
 type turnState struct {
-	StartTime    time.Time
-	UserMessage  interface{}
-	Tools        map[string]*toolState
-	FullText     string
-	FullThinking string
-	Number       int
+	StartTime     time.Time
+	UserMessage   interface{}
+	Tools         map[string]*toolState
+	FullText      string
+	FullThinking  string
+	ContentBlocks []ContentBlock
+	Number        int
 }
 
 // toolState tracks the state of a tool within a turn.
@@ -48,6 +50,7 @@ type toolState struct {
 type turnManager struct {
 	currentTurn       *turnState
 	completionWaiters map[int][]chan *TurnResult
+	completedResults  map[int]*TurnResult
 	turns             []*turnState
 	currentTurnNumber int
 	mu                sync.RWMutex
@@ -58,6 +61,7 @@ func newTurnManager() *turnManager {
 	return &turnManager{
 		turns:             make([]*turnState, 0),
 		completionWaiters: make(map[int][]chan *TurnResult),
+		completedResults:  make(map[int]*TurnResult),
 	}
 }
 
@@ -157,11 +161,19 @@ func (tm *turnManager) FindToolByID(id string) *toolState {
 }
 
 // WaitForTurn waits for a specific turn to complete.
+// Safe to call even after the turn has already completed.
 func (tm *turnManager) WaitForTurn(ctx context.Context, turnNumber int) (*TurnResult, error) {
+	tm.mu.Lock()
+	// Check if the turn already completed before registering a waiter.
+	if result, ok := tm.completedResults[turnNumber]; ok {
+		tm.mu.Unlock()
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		return result, nil
+	}
 	// Create a channel to receive the result
 	resultChan := make(chan *TurnResult, 1)
-
-	tm.mu.Lock()
 	tm.completionWaiters[turnNumber] = append(tm.completionWaiters[turnNumber], resultChan)
 	tm.mu.Unlock()
 
@@ -189,6 +201,8 @@ func (tm *turnManager) WaitForTurn(ctx context.Context, turnNumber int) (*TurnRe
 // CompleteTurn marks a turn as complete and notifies waiters.
 func (tm *turnManager) CompleteTurn(result TurnResult) {
 	tm.mu.Lock()
+	// Cache result so late callers to WaitForTurn see it immediately.
+	tm.completedResults[result.TurnNumber] = &result
 	waiters := tm.completionWaiters[result.TurnNumber]
 	delete(tm.completionWaiters, result.TurnNumber)
 	tm.mu.Unlock()
@@ -208,4 +222,25 @@ func (tm *turnManager) GetTurnHistory() []*turnState {
 	result := make([]*turnState, len(tm.turns))
 	copy(result, tm.turns)
 	return result
+}
+
+// AppendContentBlock appends a content block to the current turn.
+func (tm *turnManager) AppendContentBlock(block ContentBlock) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.currentTurn != nil {
+		tm.currentTurn.ContentBlocks = append(tm.currentTurn.ContentBlocks, block)
+	}
+}
+
+// GetTurnByNumber returns a turn by its number.
+func (tm *turnManager) GetTurnByNumber(n int) *turnState {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	for _, turn := range tm.turns {
+		if turn.Number == n {
+			return turn
+		}
+	}
+	return nil
 }

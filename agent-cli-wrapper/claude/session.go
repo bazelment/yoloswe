@@ -1,22 +1,3 @@
-// Package claude provides a Go SDK for interacting with the Claude CLI.
-//
-// Basic usage:
-//
-//	session := claude.NewSession(
-//	    claude.WithModel("haiku"),
-//	    claude.WithPermissionMode(claude.PermissionModeBypass),
-//	)
-//
-//	if err := session.Start(ctx); err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer session.Stop()
-//
-//	result, err := session.Ask(ctx, "What is 2+2?")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	fmt.Printf("Success: %v, Cost: $%.6f\n", result.Success, result.Usage.CostUSD)
 package claude
 
 import (
@@ -56,6 +37,7 @@ type Session struct {
 	pendingControlResponses map[string]chan protocol.ControlResponsePayload
 	cancel                  context.CancelFunc
 	config                  SessionConfig
+	cumulativeCostUSD       float64
 	mu                      sync.RWMutex
 	pendingMu               sync.Mutex
 	started                 bool
@@ -328,6 +310,40 @@ func (s *Session) Ask(ctx context.Context, content string) (*TurnResult, error) 
 		return nil, err
 	}
 	return s.WaitForTurn(ctx)
+}
+
+// CollectResponse loops on Events() until a TurnCompleteEvent, returning
+// the accumulated TurnResult and all events received during the turn.
+func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, error) {
+	var events []Event
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, events, ctx.Err()
+		case evt, ok := <-s.events:
+			if !ok {
+				return nil, events, ErrSessionClosed
+			}
+			events = append(events, evt)
+			if tc, ok := evt.(TurnCompleteEvent); ok {
+				result := &TurnResult{
+					TurnNumber: tc.TurnNumber,
+					Success:    tc.Success,
+					DurationMs: tc.DurationMs,
+					Usage:      tc.Usage,
+					Error:      tc.Error,
+				}
+				// Populate text/blocks from turn state
+				turn := s.turnManager.GetTurnByNumber(tc.TurnNumber)
+				if turn != nil {
+					result.Text = turn.FullText
+					result.Thinking = turn.FullThinking
+					result.ContentBlocks = turn.ContentBlocks
+				}
+				return result, events, nil
+			}
+		}
+	}
 }
 
 // AskWithTimeout is a convenience wrapper with timeout context.
@@ -663,6 +679,29 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 			}
 		}
 	}
+
+	// Accumulate structured content blocks
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case protocol.TextBlock:
+			s.turnManager.AppendContentBlock(ContentBlock{
+				Type: ContentBlockTypeText,
+				Text: b.Text,
+			})
+		case protocol.ThinkingBlock:
+			s.turnManager.AppendContentBlock(ContentBlock{
+				Type:     ContentBlockTypeThinking,
+				Thinking: b.Thinking,
+			})
+		case protocol.ToolUseBlock:
+			s.turnManager.AppendContentBlock(ContentBlock{
+				Type:      ContentBlockTypeToolUse,
+				ToolUseID: b.ID,
+				ToolName:  b.Name,
+				ToolInput: b.Input,
+			})
+		}
+	}
 }
 
 func (s *Session) handleUser(msg protocol.UserMessage) {
@@ -696,6 +735,22 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 			})
 		}
 	}
+
+	// Accumulate tool result content blocks
+	for _, block := range blocks {
+		if resultBlock, ok := block.(protocol.ToolResultBlock); ok {
+			isError := false
+			if resultBlock.IsError != nil {
+				isError = *resultBlock.IsError
+			}
+			s.turnManager.AppendContentBlock(ContentBlock{
+				Type:       ContentBlockTypeToolResult,
+				ToolUseID:  resultBlock.ToolUseID,
+				ToolResult: resultBlock.Content,
+				IsError:    isError,
+			})
+		}
+	}
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
@@ -719,14 +774,31 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		},
 	}
 
-	// Populate text fields from turn state
+	// Populate text fields and content blocks from turn state
 	if turn != nil {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
+		result.ContentBlocks = turn.ContentBlocks
 	}
 
 	if msg.IsError {
 		result.Error = fmt.Errorf("%s", msg.Result)
+	}
+
+	// Update cumulative cost and check SDK-level limits.
+	// SDK limit errors are only set if there is no existing error from the CLI,
+	// to avoid silently overwriting the real error.
+	s.mu.Lock()
+	s.cumulativeCostUSD += msg.TotalCostUSD
+	totalCost := s.cumulativeCostUSD
+	s.mu.Unlock()
+
+	if result.Error == nil {
+		if s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns {
+			result.Error = ErrMaxTurnsExceeded
+		} else if s.config.MaxBudgetUSD > 0 && totalCost >= s.config.MaxBudgetUSD {
+			result.Error = ErrBudgetExceeded
+		}
 	}
 
 	// Record turn completion
