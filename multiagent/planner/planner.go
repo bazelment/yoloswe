@@ -167,7 +167,7 @@ func (p *Planner) Stop() error {
 }
 
 // SendMessage sends a message to the Planner and waits for completion.
-func (p *Planner) SendMessage(ctx context.Context, message string) (*claude.TurnResult, error) {
+func (p *Planner) SendMessage(ctx context.Context, message string) (*agent.AgentResult, error) {
 	return p.session.SendMessage(ctx, message)
 }
 

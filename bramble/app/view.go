@@ -61,8 +61,13 @@ var (
 
 // View renders the model.
 func (m Model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Loading..."
+	// Use sensible defaults before WindowSizeMsg arrives so the first
+	// render shows the real UI instead of a blank "Loading..." screen.
+	if m.width == 0 {
+		m.width = 80
+	}
+	if m.height == 0 {
+		m.height = 24
 	}
 
 	// Layout: top bar (1 line) + center + input area (dynamic) + status bar (1 line)
@@ -286,12 +291,26 @@ func minInt(a, b int) int {
 
 // renderCenter renders the main center area (session output + input).
 func (m Model) renderCenter(width, height int) string {
-	var b strings.Builder
-
-	// In tmux mode, always show session list
+	// In tmux mode, always show session list (no split pane)
 	if m.sessionManager.IsInTmuxMode() {
 		return m.renderSessionListView(width, height)
 	}
+
+	// If split pane is active, render file tree on left, output on right
+	if m.splitPane.IsSplit() {
+		m.fileTree.SetFocused(m.splitPane.FocusLeft())
+		rightWidth := m.splitPane.RightWidth(width)
+		leftContent := m.fileTree.Render(m.splitPane.LeftWidth(width), height)
+		rightContent := m.renderOutputArea(rightWidth, height)
+		return m.splitPane.Render(leftContent, rightContent, width, height)
+	}
+
+	return m.renderOutputArea(width, height)
+}
+
+// renderOutputArea renders the session output content (used by renderCenter).
+func (m Model) renderOutputArea(width, height int) string {
+	var b strings.Builder
 
 	if m.viewingSessionID == "" {
 		// No session selected - show worktree operation messages if any
@@ -661,10 +680,10 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}
-		hints = append(hints, "[Alt-W]worktree", "[Alt-S]session", "[q]uit")
+		hints = append(hints, "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[q]uit")
 	} else {
 		// SDK mode: no session selected - show worktree-dependent actions
-		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask"}
+		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask", "[F2]split"}
 		if hasWorktree {
 			hints = append(hints, "[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
 		} else {

@@ -4,6 +4,7 @@ go 1.24.6
 
 require (
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
+	github.com/bazelment/yoloswe/wt v0.0.0-20260207203406-ad2b626fcc6a
 	github.com/spf13/cobra v1.10.2
 )
 

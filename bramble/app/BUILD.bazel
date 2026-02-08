@@ -4,10 +4,12 @@ go_library(
     name = "app",
     srcs = [
         "dropdown.go",
+        "filetree.go",
         "markdown.go",
         "model.go",
         "output.go",
         "repopicker.go",
+        "splitpane.go",
         "taskmodal.go",
         "textarea.go",
         "update.go",

@@ -4,8 +4,8 @@ import "context"
 
 // QueryResult extends TurnResult with session metadata.
 type QueryResult struct {
-	TurnResult
 	SessionID string
+	TurnResult
 }
 
 // Query sends a one-shot prompt and returns the result.

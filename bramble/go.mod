@@ -4,6 +4,7 @@ go 1.24.6
 
 require (
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
+	github.com/bazelment/yoloswe/multiagent v0.0.0-20260207203406-ad2b626fcc6a
 	github.com/bazelment/yoloswe/wt v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -12,6 +13,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/term v0.31.0
 )
 
 require (
@@ -49,7 +51,6 @@ require (
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
-	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

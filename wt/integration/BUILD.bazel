@@ -1,8 +1,12 @@
+# gazelle:ignore
 load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "integration_test",
-    srcs = ["integration_test.go"],
+    srcs = [
+        "atomic_test.go",
+        "integration_test.go",
+    ],
     deps = [
         "//wt",
         "@com_github_stretchr_testify//require",

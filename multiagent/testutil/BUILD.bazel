@@ -11,6 +11,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/claude",
+        "//multiagent/agent",
         "//multiagent/protocol",
         "//multiagent/subagent",
     ],

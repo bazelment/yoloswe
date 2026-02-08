@@ -1,10 +1,6 @@
 package agent
 
-import (
-	"context"
-
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
-)
+import "context"
 
 // Agent is the base interface for all agents.
 type Agent interface {
@@ -30,7 +26,7 @@ type LongRunningAgent interface {
 	Stop() error
 
 	// SendMessage sends a message to the agent and waits for completion.
-	SendMessage(ctx context.Context, message string) (*claude.TurnResult, error)
+	SendMessage(ctx context.Context, message string) (*AgentResult, error)
 
 	// TurnCount returns the number of turns completed.
 	TurnCount() int
@@ -43,31 +39,8 @@ type EphemeralAgent interface {
 
 	// Execute runs a single task with a fresh session.
 	// Returns the result, task ID (for logging), and any error.
-	Execute(ctx context.Context, prompt string) (*claude.TurnResult, string, error)
+	Execute(ctx context.Context, prompt string) (*AgentResult, string, error)
 
 	// TaskCount returns the number of tasks executed.
 	TaskCount() int
-}
-
-// TurnResult wraps claude.TurnResult with additional context.
-type TurnResult struct {
-	*claude.TurnResult
-
-	// Text is the accumulated text response.
-	Text string
-
-	// AgentRole identifies which agent produced this result.
-	AgentRole AgentRole
-
-	// TaskID is set for ephemeral agents to identify the task.
-	TaskID string
-}
-
-// ExtractText extracts the text content from a TurnResult.
-// This is a helper since the SDK's TurnResult doesn't directly expose accumulated text.
-func ExtractText(result *claude.TurnResult) string {
-	// The SDK accumulates text in the turn, but we need to access it via recording
-	// For now, we'll rely on the caller to collect text from events
-	// This is a placeholder - actual implementation depends on SDK internals
-	return ""
 }

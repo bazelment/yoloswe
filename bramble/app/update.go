@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -62,25 +61,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeDropdown.SelectByID(worktreeName)
 			m.updateSessionDropdown()
 			model, cmd := m.startSession(session.SessionTypePlanner, prompt)
-			return model, tea.Batch(cmd, m.refreshWorktreeStatuses())
+			// Defer heavy loading so the UI renders the worktree name first
+			return model, tea.Batch(cmd, deferredRefreshCmd())
 		}
 
 		// Auto-select first worktree if none selected
 		if m.worktreeDropdown.SelectedItem() == nil && len(m.worktrees) > 0 {
 			m.worktreeDropdown.SelectIndex(0)
 		}
-		// Update session dropdown for new worktree
+		// Update session dropdown with live sessions immediately;
+		// defer git statuses, file tree, and history to let the UI render first.
 		m.updateSessionDropdown()
-		cmds = append(cmds, m.refreshWorktreeStatuses())
+		return m, deferredRefreshCmd()
+
+	case deferredRefreshMsg:
+		return m, tea.Batch(m.refreshWorktreeStatuses(), m.refreshFileTree(), m.refreshHistorySessions())
+
+	case singleWorktreeStatusMsg:
+		if msg.status != nil {
+			if m.worktreeStatuses == nil {
+				m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
+			}
+			m.worktreeStatuses[msg.branch] = msg.status
+			m.updateWorktreeDropdown()
+		}
 		return m, tea.Batch(cmds...)
 
-	case worktreeStatusMsg:
-		m.worktreeStatuses = msg.statuses
-		m.updateWorktreeDropdown()
-		// Schedule next refresh in 30 seconds
-		cmds = append(cmds, tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
-			return refreshStatusTickMsg{}
-		}))
+	case worktreePRInfoMsg:
+		if msg.pr != nil {
+			if m.worktreeStatuses == nil {
+				m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
+			}
+			status := m.worktreeStatuses[msg.branch]
+			if status == nil {
+				status = &wt.WorktreeStatus{}
+				m.worktreeStatuses[msg.branch] = status
+			}
+			status.PRNumber = msg.pr.Number
+			status.PRURL = msg.pr.URL
+			status.PRState = msg.pr.State
+			status.PRIsDraft = msg.pr.IsDraft
+			status.PRReviewStatus = msg.pr.ReviewDecision
+			m.updateWorktreeDropdown()
+		}
+		return m, tea.Batch(cmds...)
+
+	case historySessionsMsg:
+		m.historyBranch = msg.branch
+		m.cachedHistory = msg.sessions
+		m.updateSessionDropdown()
 		return m, tea.Batch(cmds...)
 
 	case refreshStatusTickMsg:
@@ -164,6 +193,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deleteWorktreeMsg:
 		return m.deleteWorktree(msg.branch, msg.deleteBranch)
 
+	case fileTreeContextMsg:
+		m.fileTree = NewFileTree(msg.worktreePath, msg.wtCtx)
+		return m, nil
+
 	case tickMsg:
 		// Continue ticking for running tool timer animation
 		return m, tickCmd()
@@ -177,6 +210,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+
+	case "f2":
+		// Toggle split pane (file tree + output)
+		m.splitPane.Toggle()
+		// Focus the file tree when opening, focus output when closing
+		if m.splitPane.IsSplit() {
+			m.splitPane.SetFocusLeft(true)
+		}
+		return m, nil
+
+	case "tab":
+		// Toggle focus between panes when split is active
+		if m.splitPane.IsSplit() {
+			m.splitPane.ToggleFocus()
+			return m, nil
+		}
+		return m, nil
 
 	case "alt+w":
 		// Open worktree dropdown
@@ -201,6 +251,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedSessionIndex > 0 {
 				m.selectedSessionIndex--
 			}
+		} else if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
+			// Split pane: navigate file tree
+			m.fileTree.MoveUp()
 		} else {
 			// TUI mode: scroll output
 			m.scrollOutput(1)
@@ -223,6 +276,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedSessionIndex < sessionCount-1 {
 				m.selectedSessionIndex++
 			}
+		} else if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
+			// Split pane: navigate file tree
+			m.fileTree.MoveDown()
 		} else {
 			// TUI mode: scroll output
 			m.scrollOutput(-1)
@@ -483,35 +539,37 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.viewingSessionID = ""
 			m.viewingHistoryData = nil
 			m.scrollOffset = 0
-		} else {
-			// Session selected - view it
-			if item := m.sessionDropdown.SelectedItem(); item != nil {
-				if item.ID == "---separator---" {
-					// Can't select separator
-					return m, nil
-				}
-				m.viewingSessionID = session.SessionID(item.ID)
-				m.scrollOffset = 0 // Reset scroll when switching sessions
-				// Check if this is a live session or history
-				if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
-					// Live session
-					m.viewingHistoryData = nil
-				} else {
-					// History session - load from store
-					wt := m.selectedWorktree()
-					if wt != nil {
-						histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
-						if err == nil {
-							m.viewingHistoryData = histData
-						} else {
-							m.lastError = "Failed to load history: " + err.Error()
-							m.viewingHistoryData = nil
-						}
+			// Refresh file tree and history for new worktree
+			m.focus = FocusOutput
+			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())
+		}
+		// Session selected - view it
+		if item := m.sessionDropdown.SelectedItem(); item != nil {
+			if item.ID == "---separator---" {
+				// Can't select separator
+				return m, nil
+			}
+			m.viewingSessionID = session.SessionID(item.ID)
+			m.scrollOffset = 0 // Reset scroll when switching sessions
+			// Check if this is a live session or history
+			if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
+				// Live session
+				m.viewingHistoryData = nil
+			} else {
+				// History session - load from store
+				wt := m.selectedWorktree()
+				if wt != nil {
+					histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
+					if err == nil {
+						m.viewingHistoryData = histData
+					} else {
+						m.lastError = "Failed to load history: " + err.Error()
+						m.viewingHistoryData = nil
 					}
 				}
 			}
-			m.sessionDropdown.Close()
 		}
+		m.sessionDropdown.Close()
 		m.focus = FocusOutput
 		return m, nil
 
@@ -689,7 +747,7 @@ func (m Model) createWorktree(branch string) (tea.Model, tea.Cmd) {
 		output := wt.NewOutput(&buf, false) // No colors for captured output
 		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-		_, err := manager.New(ctx, branch, "", "")
+		_, err := manager.NewAtomic(ctx, branch, "", "")
 
 		// Parse captured messages
 		var messages []string
@@ -977,7 +1035,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 			output := wt.NewOutput(&buf, false)
 			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-			_, err := manager.New(ctx, worktreeName, parent, "")
+			_, err := manager.NewAtomic(ctx, worktreeName, parent, "")
 
 			// Parse captured messages
 			var messages []string

@@ -115,7 +115,7 @@ func (s *LongRunningSession) Stop() error {
 
 // SendMessage sends a message and waits for the turn to complete.
 // This is the primary way to interact with long-running agents.
-func (s *LongRunningSession) SendMessage(ctx context.Context, message string) (*claude.TurnResult, error) {
+func (s *LongRunningSession) SendMessage(ctx context.Context, message string) (*AgentResult, error) {
 	s.mu.Lock()
 	if !s.started {
 		s.mu.Unlock()
@@ -143,7 +143,7 @@ func (s *LongRunningSession) SendMessage(ctx context.Context, message string) (*
 	s.turnCount++
 	s.mu.Unlock()
 
-	return result, nil
+	return ClaudeResultToAgentResult(result), nil
 }
 
 // Events returns the event channel for streaming responses.
@@ -209,7 +209,7 @@ func (s *LongRunningSession) SendMessageAsync(ctx context.Context, message strin
 
 // WaitForTurn blocks until the current turn completes.
 // If no turn is in progress, it returns immediately with nil.
-func (s *LongRunningSession) WaitForTurn(ctx context.Context) (*claude.TurnResult, error) {
+func (s *LongRunningSession) WaitForTurn(ctx context.Context) (*AgentResult, error) {
 	s.mu.Lock()
 	session := s.session
 	s.mu.Unlock()
@@ -233,7 +233,7 @@ func (s *LongRunningSession) WaitForTurn(ctx context.Context) (*claude.TurnResul
 	s.turnCount++
 	s.mu.Unlock()
 
-	return result, nil
+	return ClaudeResultToAgentResult(result), nil
 }
 
 // SendToolResult sends a tool result for a specific tool use.
@@ -301,7 +301,6 @@ func NewEphemeralSession(config AgentConfig, swarmSessionID string) *EphemeralSe
 
 // ExecuteResult contains the result of an ephemeral session execution.
 type ExecuteResult struct {
-	*claude.TurnResult
 	FilesCreated  []string
 	FilesModified []string
 }
@@ -338,14 +337,14 @@ func (r *claudeSessionRunner) Events() <-chan claude.Event {
 
 // Execute creates a fresh session, runs the prompt, and returns the result.
 // Each call is independent - no conversation history is preserved.
-func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*claude.TurnResult, string, error) {
+func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentResult, string, error) {
 	result, _, taskID, err := e.ExecuteWithFiles(ctx, prompt)
 	return result, taskID, err
 }
 
 // ExecuteWithFiles creates a fresh session, runs the prompt, and returns the result with file tracking.
 // This method tracks Write and Edit tool calls to report which files were created/modified.
-func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) (*claude.TurnResult, *ExecuteResult, string, error) {
+func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
 	// Generate unique task directory
 	taskID := nextTaskID()
 	taskDir := filepath.Join(e.baseSessionDir, taskID)
@@ -376,7 +375,7 @@ func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) 
 	e.taskCount++
 	e.mu.Unlock()
 
-	return result, execResult, taskID, nil
+	return ClaudeResultToAgentResult(result), execResult, taskID, nil
 }
 
 // eventGoroutineTimeout is the maximum time to wait for the event processing
@@ -463,7 +462,6 @@ func runSessionWithFileTracking(ctx context.Context, session sessionRunner, prom
 	// Safe to access file lists now - goroutine has finished (or timed out)
 	filesMu.Lock()
 	execResult := &ExecuteResult{
-		TurnResult:    result,
 		FilesCreated:  append([]string(nil), filesCreated...),
 		FilesModified: append([]string(nil), filesModified...),
 	}

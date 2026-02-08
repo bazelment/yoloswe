@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -37,6 +36,8 @@ type Model struct {
 	sessionDropdown       *Dropdown
 	taskModal             *TaskModal
 	inputArea             *TextArea
+	splitPane             *SplitPane
+	fileTree              *FileTree
 	pendingPlannerPrompt  string
 	pendingWorktreeSelect string
 	repoName              string
@@ -45,8 +46,10 @@ type Model struct {
 	viewingSessionID      session.SessionID
 	wtRoot                string
 	lastError             string
+	historyBranch         string // branch the cached history belongs to
 	worktrees             []wt.Worktree
 	sessions              []session.SessionInfo
+	cachedHistory         []*session.SessionMeta // async-loaded history for historyBranch
 	worktreeOpMessages    []string
 	focus                 FocusArea
 	scrollOffset          int
@@ -57,7 +60,11 @@ type Model struct {
 }
 
 // NewModel creates a new root model for a specific repo.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager) Model {
+// If initialWorktrees is non-nil, the model is pre-populated so the first
+// render shows branch names immediately without waiting for an async refresh.
+// width/height set the initial terminal dimensions so the first View() can
+// render a proper layout without waiting for WindowSizeMsg.
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, initialWorktrees []wt.Worktree, width, height int) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -71,10 +78,22 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		editor:           editor,
 		sessionManager:   sessionManager,
 		focus:            FocusOutput,
+		width:            width,
+		height:           height,
 		worktreeDropdown: wtDropdown,
 		sessionDropdown:  NewDropdown(nil),
 		taskModal:        NewTaskModal(),
 		inputArea:        NewTextArea(),
+		splitPane:        NewSplitPane(),
+		fileTree:         NewFileTree("", nil),
+	}
+
+	// Pre-populate worktrees so the first View() render shows branch names.
+	if len(initialWorktrees) > 0 {
+		m.worktrees = initialWorktrees
+		m.updateWorktreeDropdown()
+		m.worktreeDropdown.SelectIndex(0)
+		m.updateSessionDropdown()
 	}
 
 	return m
@@ -82,17 +101,36 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 
 // Init initializes the model.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.refreshWorktrees(),
+	cmds := []tea.Cmd{
 		m.listenForSessionEvents(),
 		tickCmd(),
-	)
+	}
+
+	if len(m.worktrees) > 0 {
+		// Worktrees were pre-loaded — skip the initial refresh and go
+		// straight to deferred loading of statuses, file tree, and history.
+		cmds = append(cmds, deferredRefreshCmd())
+	} else {
+		// No pre-loaded data; fetch worktrees asynchronously.
+		cmds = append(cmds, m.refreshWorktrees())
+	}
+
+	return tea.Batch(cmds...)
 }
 
 // tickCmd returns a command that sends a tick message every 100ms.
 func tickCmd() tea.Cmd {
 	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg{time: t}
+	})
+}
+
+// deferredRefreshCmd schedules a deferred refresh after a short delay,
+// allowing the UI to render with just worktree names before loading
+// git statuses, file tree, and history sessions.
+func deferredRefreshCmd() tea.Cmd {
+	return tea.Tick(time.Millisecond, func(time.Time) tea.Msg {
+		return deferredRefreshMsg{}
 	})
 }
 
@@ -189,7 +227,7 @@ func (m *Model) updateWorktreeDropdown() {
 }
 
 // updateSessionDropdown updates the session dropdown items.
-// Includes both live sessions and history sessions from the store.
+// Uses live sessions immediately and cached history (loaded async).
 func (m *Model) updateSessionDropdown() {
 	var items []DropdownItem
 
@@ -224,8 +262,17 @@ func (m *Model) updateSessionDropdown() {
 		})
 	}
 
-	// Add separator if we have both live and history
-	historySessions, _ := m.loadHistorySessions()
+	// Use cached history for the current worktree (loaded async)
+	w := m.selectedWorktree()
+	currentBranch := ""
+	if w != nil {
+		currentBranch = w.Branch
+	}
+	var historySessions []*session.SessionMeta
+	if currentBranch != "" && m.historyBranch == currentBranch {
+		historySessions = m.cachedHistory
+	}
+
 	if len(items) > 0 && len(historySessions) > 0 {
 		items = append(items, DropdownItem{
 			ID:    "---separator---",
@@ -270,48 +317,59 @@ func (m *Model) updateSessionDropdown() {
 	m.sessionDropdown.SetItems(items)
 }
 
-// loadHistorySessions loads history sessions for the current worktree.
-func (m *Model) loadHistorySessions() ([]*session.SessionMeta, error) {
-	wt := m.selectedWorktree()
-	if wt == nil {
-		return nil, nil
+// refreshHistorySessions loads history sessions from disk asynchronously.
+func (m Model) refreshHistorySessions() tea.Cmd {
+	w := m.selectedWorktree()
+	if w == nil {
+		return nil
 	}
-	return m.sessionManager.LoadHistorySessions(wt.Branch)
+	branch := w.Branch
+	mgr := m.sessionManager
+	return func() tea.Msg {
+		sessions, _ := mgr.LoadHistorySessions(branch)
+		return historySessionsMsg{branch: branch, sessions: sessions}
+	}
 }
 
-// refreshWorktreeStatuses fetches status for all worktrees in the background.
+// refreshWorktreeStatuses fetches status for each worktree in two phases:
+// 1. Fast: local git status (dirty, ahead/behind, last commit) — updates UI immediately
+// 2. Slow: PR info from GitHub API — trickles in as each network call completes
 func (m Model) refreshWorktreeStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
 		return nil
 	}
-	worktrees := make([]wt.Worktree, len(m.worktrees))
-	copy(worktrees, m.worktrees)
 	wtRoot := m.wtRoot
 	repoName := m.repoName
 	ctx := m.ctx
 
-	return func() tea.Msg {
-		manager := wt.NewManager(wtRoot, repoName)
-		statuses := make(map[string]*wt.WorktreeStatus)
-		var mu sync.Mutex
-		var wg sync.WaitGroup
+	cmds := make([]tea.Cmd, 0, len(m.worktrees)*2+1)
+	for _, w := range m.worktrees {
+		w := w // capture loop variable
 
-		for _, w := range worktrees {
-			wg.Add(1)
-			go func(w wt.Worktree) {
-				defer wg.Done()
-				status, err := manager.GetStatus(ctx, w)
-				if err != nil {
-					return
-				}
-				mu.Lock()
-				statuses[w.Branch] = status
-				mu.Unlock()
-			}(w)
-		}
-		wg.Wait()
-		return worktreeStatusMsg{statuses: statuses}
+		// Fast: git-only status (no network), then slow: PR info (network call to GitHub)
+		cmds = append(cmds, func() tea.Msg {
+			manager := wt.NewManager(wtRoot, repoName)
+			status, err := manager.GetGitStatus(ctx, w)
+			if err != nil {
+				return nil
+			}
+			return singleWorktreeStatusMsg{branch: w.Branch, status: status}
+		}, func() tea.Msg {
+			manager := wt.NewManager(wtRoot, repoName)
+			pr, err := manager.FetchPRInfo(ctx, w)
+			if err != nil || pr == nil {
+				return nil
+			}
+			return worktreePRInfoMsg{branch: w.Branch, pr: pr}
+		})
 	}
+
+	// Schedule the next periodic refresh
+	cmds = append(cmds, tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+		return refreshStatusTickMsg{}
+	}))
+
+	return tea.Batch(cmds...)
 }
 
 // formatWorktreeStatus formats a WorktreeStatus for dropdown subtitle display with colors.
@@ -404,6 +462,32 @@ func generateDropdownTitle(prompt string, maxLen int) string {
 	return b.String()
 }
 
+// refreshFileTree gathers worktree context for the file tree display.
+func (m Model) refreshFileTree() tea.Cmd {
+	w := m.selectedWorktree()
+	if w == nil {
+		return nil
+	}
+	wtRoot := m.wtRoot
+	repoName := m.repoName
+	ctx := m.ctx
+	worktree := *w
+	return func() tea.Msg {
+		manager := wt.NewManager(wtRoot, repoName)
+		opts := wt.ContextOptions{
+			IncludeFileList: true,
+		}
+		wtCtx, err := manager.GatherContext(ctx, worktree, opts)
+		if err != nil {
+			return nil
+		}
+		return fileTreeContextMsg{
+			worktreePath: worktree.Path,
+			wtCtx:        wtCtx,
+		}
+	}
+}
+
 // Message types
 type (
 	errMsg          struct{ error }
@@ -443,12 +527,31 @@ type (
 	tickMsg struct {
 		time time.Time
 	}
-	// worktreeStatusMsg carries refreshed worktree statuses
-	worktreeStatusMsg struct {
-		statuses map[string]*wt.WorktreeStatus
+	// singleWorktreeStatusMsg carries the git-only status for one worktree (fast, local).
+	singleWorktreeStatusMsg struct {
+		status *wt.WorktreeStatus
+		branch string
+	}
+	// worktreePRInfoMsg carries PR info for one worktree (slow, network).
+	worktreePRInfoMsg struct {
+		pr     *wt.PRInfo
+		branch string
+	}
+	// fileTreeContextMsg carries gathered worktree context for the file tree
+	fileTreeContextMsg struct {
+		wtCtx        *wt.WorktreeContext
+		worktreePath string
+	}
+	// historySessionsMsg carries async-loaded history sessions for a worktree.
+	historySessionsMsg struct {
+		branch   string
+		sessions []*session.SessionMeta
 	}
 	// refreshStatusTickMsg triggers a periodic status refresh
 	refreshStatusTickMsg struct{}
+	// deferredRefreshMsg is sent after a short delay so the initial UI
+	// renders with just worktree names before loading statuses/file tree.
+	deferredRefreshMsg struct{}
 	// deleteWorktreeMsg is sent to delete a worktree
 	deleteWorktreeMsg struct {
 		branch       string

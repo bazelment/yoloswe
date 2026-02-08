@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
 )
@@ -52,12 +51,12 @@ func (b *Builder) TaskCount() int {
 }
 
 // Execute runs a build task and returns the raw result.
-func (b *Builder) Execute(ctx context.Context, prompt string) (*claude.TurnResult, string, error) {
+func (b *Builder) Execute(ctx context.Context, prompt string) (*agent.AgentResult, string, error) {
 	return b.session.Execute(ctx, prompt)
 }
 
 // ExecuteWithFiles runs a build task and returns the result with file tracking.
-func (b *Builder) ExecuteWithFiles(ctx context.Context, prompt string) (*claude.TurnResult, *agent.ExecuteResult, string, error) {
+func (b *Builder) ExecuteWithFiles(ctx context.Context, prompt string) (*agent.AgentResult, *agent.ExecuteResult, string, error) {
 	return b.session.ExecuteWithFiles(ctx, prompt)
 }
 
