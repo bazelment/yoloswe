@@ -451,7 +451,7 @@ func TestVisualLineCountInOutput(t *testing.T) {
 // verifying that content is visible and scrolling works correctly.
 func TestRenderCenterScrolling(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	// Create a test session
@@ -529,7 +529,7 @@ func TestRenderCenterScrolling(t *testing.T) {
 // TestRenderCenterFewLines tests renderCenter when output lines fit within the view.
 func TestRenderCenterFewLines(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	sessID := session.SessionID("test-few-lines")
@@ -573,7 +573,7 @@ func TestRenderCenterFewLines(t *testing.T) {
 // and each render should show the latest content (auto-scroll at scrollOffset=0).
 func TestRenderCenterStreaming(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	sessID := session.SessionID("test-stream")
@@ -636,7 +636,7 @@ func TestRenderCenterStreaming(t *testing.T) {
 // the view always tracks the latest output even as totalLines grows.
 func TestRenderCenterAutoScrollStaysAtBottom(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	sessID := session.SessionID("test-autoscroll")
@@ -694,7 +694,7 @@ func TestRenderCenterAutoScrollStaysAtBottom(t *testing.T) {
 // (via appendOrAddText) accumulate into a single output line and are visible.
 func TestRenderCenterTextStreaming(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	sessID := session.SessionID("test-text-stream")
@@ -764,7 +764,7 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 // simulating what bubbletea does when the user presses arrow keys.
 func TestScrollViaUpdate(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	sessID := session.SessionID("test-scroll-update")
@@ -839,7 +839,7 @@ func TestScrollViaUpdate(t *testing.T) {
 // scenario: a session has few OutputLines but they contain long text/markdown.
 func TestScrollWithMultiLineContent(t *testing.T) {
 	ctx := context.Background()
-	mgr := session.NewManager()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
 	sessID := session.SessionID("test-multiline-scroll")

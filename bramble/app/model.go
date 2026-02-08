@@ -22,6 +22,7 @@ const (
 	FocusWorktreeDropdown                  // Alt-W dropdown open
 	FocusSessionDropdown                   // Alt-S dropdown open
 	FocusTaskModal                         // Task modal open
+	FocusHelp                              // Help overlay open
 )
 
 // Model is the root application model.
@@ -35,6 +36,8 @@ type Model struct {
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
 	taskModal             *TaskModal
+	toasts                *ToastManager
+	helpOverlay           *HelpOverlay
 	inputArea             *TextArea
 	splitPane             *SplitPane
 	fileTree              *FileTree
@@ -45,7 +48,6 @@ type Model struct {
 	inputPrompt           string
 	viewingSessionID      session.SessionID
 	wtRoot                string
-	lastError             string
 	historyBranch         string // branch the cached history belongs to
 	worktrees             []wt.Worktree
 	sessions              []session.SessionInfo
@@ -83,6 +85,8 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		worktreeDropdown: wtDropdown,
 		sessionDropdown:  NewDropdown(nil),
 		taskModal:        NewTaskModal(),
+		toasts:           NewToastManager(),
+		helpOverlay:      NewHelpOverlay(),
 		inputArea:        NewTextArea(),
 		splitPane:        NewSplitPane(),
 		fileTree:         NewFileTree("", nil),
@@ -557,6 +561,8 @@ type (
 		branch       string
 		deleteBranch bool
 	}
+	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
+	toastExpireMsg struct{}
 )
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.
@@ -565,4 +571,34 @@ type RouteProposal = struct {
 	Worktree  string
 	Parent    string
 	Reasoning string
+}
+
+// addToast adds a notification and schedules expiry if this is the first toast.
+func (m *Model) addToast(message string, level ToastLevel) tea.Cmd {
+	m.toasts.Add(message, level)
+	// Schedule a tick to check for expiration.
+	// We schedule at the earliest expiration time of any active toast.
+	return m.scheduleToastExpiry()
+}
+
+// scheduleToastExpiry schedules a tea.Tick at the earliest toast expiration time.
+func (m *Model) scheduleToastExpiry() tea.Cmd {
+	if !m.toasts.HasToasts() {
+		return nil
+	}
+	// Find the earliest expiration
+	earliest := m.toasts.toasts[0].CreatedAt.Add(m.toasts.toasts[0].Duration)
+	for _, t := range m.toasts.toasts[1:] {
+		exp := t.CreatedAt.Add(t.Duration)
+		if exp.Before(earliest) {
+			earliest = exp
+		}
+	}
+	delay := time.Until(earliest)
+	if delay < 0 {
+		delay = 0
+	}
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return toastExpireMsg{}
+	})
 }

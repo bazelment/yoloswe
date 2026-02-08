@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -19,7 +20,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle task modal first
+		// Handle help overlay first (highest visual priority)
+		if m.focus == FocusHelp {
+			return m.handleHelpOverlay(msg)
+		}
+		// Handle task modal
 		if m.taskModal.IsVisible() {
 			return m.handleTaskModal(msg)
 		}
@@ -37,6 +42,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.helpOverlay.SetSize(msg.Width, msg.Height)
 		// Update dropdown widths
 		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
 		m.sessionDropdown.SetWidth(m.width / 2)
@@ -130,8 +136,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
-		m.lastError = msg.Error()
-		return m, nil
+		cmd := m.addToast(msg.Error(), ToastError)
+		return m, cmd
 
 	case promptInputMsg:
 		// Input completed
@@ -172,16 +178,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeOpResultMsg:
 		if msg.err != nil {
-			m.lastError = msg.err.Error()
+			cmds = append(cmds, m.addToast(msg.err.Error(), ToastError))
+		} else if len(msg.messages) > 0 {
+			cmds = append(cmds, m.addToast("Worktree operation completed", ToastSuccess))
 		}
 		m.worktreeOpMessages = msg.messages
-		return m, m.refreshWorktrees()
+		return m, tea.Batch(append(cmds, m.refreshWorktrees())...)
 
 	case editorResultMsg:
 		if msg.err != nil {
-			m.lastError = "Failed to open editor: " + msg.err.Error()
+			cmds = append(cmds, m.addToast("Failed to open editor: "+msg.err.Error(), ToastError))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 
 	case taskWorktreeCreatedMsg:
 		m.worktreeOpMessages = msg.messages
@@ -200,6 +208,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Continue ticking for running tool timer animation
 		return m, tickCmd()
+
+	case toastExpireMsg:
+		m.toasts.Tick(time.Now())
+		// If toasts remain, schedule the next expiry check
+		if m.toasts.HasToasts() {
+			expiryCmd := m.scheduleToastExpiry()
+			return m, expiryCmd
+		}
+		return m, nil
 	}
 
 	return m, tea.Batch(cmds...)
@@ -208,6 +225,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKeyPress handles key presses in normal mode (not input, not dropdown).
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "?":
+		// Open help overlay
+		m.helpOverlay.previousFocus = m.focus
+		m.helpOverlay.SetSize(m.width, m.height)
+		sections := buildHelpSections(&m)
+		m.helpOverlay.SetSections(sections)
+		m.focus = FocusHelp
+		return m, nil
+
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
@@ -310,7 +336,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						return nil
 					}
 				}
-				m.lastError = "Session has no tmux window name"
+				// No toast for missing tmux window name - it's a rare edge case
 			}
 		}
 		return m, nil
@@ -385,8 +411,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		// Stop session with confirmation (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
-			m.lastError = "Close tmux windows directly with prefix+& or 'exit' command"
-			return m, nil
+			toastCmd := m.addToast("Close tmux windows directly with prefix+& or 'exit' command", ToastInfo)
+			return m, toastCmd
 		}
 		if sess := m.selectedSession(); sess != nil {
 			sessID := sess.ID
@@ -409,8 +435,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		// Follow-up on idle session (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
-			m.lastError = "Follow-ups must be done in the tmux window directly"
-			return m, nil
+			toastCmd := m.addToast("Follow-ups must be done in the tmux window directly", ToastInfo)
+			return m, toastCmd
 		}
 		if sess := m.selectedSession(); sess != nil && sess.Status == session.StatusIdle {
 			return m.promptInput("Follow-up: ", func(message string) tea.Cmd {
@@ -438,8 +464,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
 			sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt)
 			if err != nil {
-				m.lastError = err.Error()
-				return m, nil
+				toastCmd := m.addToast(err.Error(), ToastError)
+				return m, toastCmd
 			}
 			m.viewingSessionID = sessionID
 			m.sessions = m.sessionManager.GetAllSessions()
@@ -474,8 +500,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.refreshWorktrees()
 
 	case "esc":
-		// Clear error and reset scroll
-		m.lastError = ""
+		// Reset scroll
 		m.scrollOffset = 0
 		return m, nil
 	}
@@ -507,6 +532,15 @@ func (m *Model) scrollToBottom() {
 // handleDropdownMode handles key presses when a dropdown is open.
 func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "?":
+		// Open help overlay
+		m.helpOverlay.previousFocus = m.focus
+		m.helpOverlay.SetSize(m.width, m.height)
+		sections := buildHelpSections(&m)
+		m.helpOverlay.SetSections(sections)
+		m.focus = FocusHelp
+		return m, nil
+
 	case "esc", "alt+w", "alt+s":
 		// Close dropdown
 		m.worktreeDropdown.Close()
@@ -563,7 +597,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if err == nil {
 						m.viewingHistoryData = histData
 					} else {
-						m.lastError = "Failed to load history: " + err.Error()
+						// Log error but don't show toast - history loading is background operation
 						m.viewingHistoryData = nil
 					}
 				}
@@ -714,14 +748,15 @@ func (m Model) startSession(sessionType session.SessionType, prompt string) (tea
 
 	sessionID, err := m.sessionManager.StartSession(sessionType, wt.Path, prompt)
 	if err != nil {
-		m.lastError = err.Error()
-		return m, nil
+		toastCmd := m.addToast(err.Error(), ToastError)
+		return m, toastCmd
 	}
 
 	m.viewingSessionID = sessionID
 	m.sessions = m.sessionManager.GetAllSessions()
 	m.updateSessionDropdown()
-	return m, nil
+	toastCmd := m.addToast("Session started: "+string(sessionID)[:12], ToastSuccess)
+	return m, toastCmd
 }
 
 // createWorktree creates a new worktree asynchronously with captured output.
@@ -731,8 +766,8 @@ func (m Model) createWorktree(branch string) (tea.Model, tea.Cmd) {
 	}
 
 	if m.repoName == "" {
-		m.lastError = "No repository selected"
-		return m, nil
+		toastCmd := m.addToast("No repository selected", ToastError)
+		return m, toastCmd
 	}
 
 	// Show pending message
@@ -1013,11 +1048,13 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 	m.taskModal.Hide()
 	m.focus = FocusOutput
 
+	m.addToast("Task confirmed, starting session...", ToastSuccess)
+
 	// If creating a new worktree, do that first
 	if msg.isNew {
 		if m.repoName == "" {
-			m.lastError = "No repository selected"
-			return m, nil
+			toastCmd := m.addToast("No repository selected", ToastError)
+			return m, toastCmd
 		}
 
 		// Show pending message
@@ -1072,4 +1109,24 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// handleHelpOverlay handles key presses when the help overlay is visible.
+func (m Model) handleHelpOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "?", "esc":
+		// Close help, restore previous focus
+		m.focus = m.helpOverlay.previousFocus
+		return m, nil
+	case "up", "k":
+		m.helpOverlay.ScrollUp()
+		return m, nil
+	case "down", "j":
+		m.helpOverlay.ScrollDown()
+		return m, nil
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	}
+	// Ignore all other keys while help is open
+	return m, nil
 }

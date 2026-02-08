@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "dropdown.go",
         "filetree.go",
+        "helpoverlay.go",
         "markdown.go",
         "model.go",
         "output.go",
@@ -12,8 +13,10 @@ go_library(
         "splitpane.go",
         "taskmodal.go",
         "textarea.go",
+        "toast.go",
         "update.go",
         "view.go",
+        "welcome.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/app",
     visibility = ["//bramble:__subpackages__"],
@@ -31,8 +34,11 @@ go_library(
 go_test(
     name = "app_test",
     srcs = [
+        "helpoverlay_test.go",
         "output_test.go",
         "textarea_test.go",
+        "toast_test.go",
+        "welcome_test.go",
     ],
     embed = [":app"],
     deps = [

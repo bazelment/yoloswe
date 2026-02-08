@@ -70,9 +70,10 @@ func (m Model) View() string {
 		m.height = 24
 	}
 
-	// Layout: top bar (1 line) + center + input area (dynamic) + status bar (1 line)
+	// Layout: top bar (1 line) + center + toast area (dynamic) + input area (dynamic) + status bar (1 line)
 	topBarHeight := 1
 	statusBarHeight := 1
+	toastHeight := m.toasts.Height()
 	inputHeight := 0
 	if m.inputMode {
 		// Dynamic input height based on content (min 5, max 12 lines including border and status)
@@ -89,7 +90,7 @@ func (m Model) View() string {
 			inputHeight = maxInputHeight
 		}
 	}
-	centerHeight := m.height - topBarHeight - statusBarHeight - inputHeight - 2 // borders
+	centerHeight := m.height - topBarHeight - statusBarHeight - toastHeight - inputHeight - 2 // borders
 
 	// Build components
 	topBar := m.renderTopBar()
@@ -101,6 +102,12 @@ func (m Model) View() string {
 
 	// Build layout
 	parts := []string{topBar, centerBordered}
+
+	// Add toast notifications if any
+	if m.toasts.HasToasts() {
+		m.toasts.SetWidth(m.width)
+		parts = append(parts, m.toasts.View())
+	}
 
 	// Add input area if in input mode
 	if m.inputMode {
@@ -130,6 +137,11 @@ func (m Model) View() string {
 			overlayX = 0
 		}
 		content = overlayAt(content, overlay, overlayX, 1)
+	}
+
+	// Show help overlay if active
+	if m.focus == FocusHelp {
+		return m.helpOverlay.View()
 	}
 
 	// Show task modal if visible
@@ -226,11 +238,7 @@ func (m Model) renderSessionListView(width, height int) string {
 	}
 
 	if len(currentSessions) == 0 {
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  No sessions for this worktree\n"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  Press [p] to start a planner session or [b] to start a builder session\n"))
-		return b.String()
+		return m.renderWelcome(width, height)
 	}
 
 	// Ensure selected index is in bounds
@@ -313,25 +321,7 @@ func (m Model) renderOutputArea(width, height int) string {
 	var b strings.Builder
 
 	if m.viewingSessionID == "" {
-		// No session selected - show worktree operation messages if any
-		if len(m.worktreeOpMessages) > 0 {
-			b.WriteString("\n")
-			for _, msg := range m.worktreeOpMessages {
-				b.WriteString("  ")
-				b.WriteString(msg)
-				b.WriteString("\n")
-			}
-			return b.String()
-		}
-
-		// Default empty state
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  No session selected"))
-		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("  Choose a session with [Alt-S]"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  Or start a new session with [p]lan or [b]uild"))
-		return b.String()
+		return m.renderWelcome(width, height)
 	}
 
 	// Check if viewing history session
@@ -660,16 +650,16 @@ func (m Model) renderStatusBar() string {
 	inTmuxMode := m.sessionManager.IsInTmuxMode()
 
 	if m.inputMode {
-		hints = []string{"[Tab] Switch", "[Ctrl+Enter] Send", "[Esc] Cancel"}
+		hints = []string{"[Tab] Switch", "[Ctrl+Enter] Send", "[Esc] Cancel", "[?]help", "[q]uit"}
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
-		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close"}
+		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close", "[?]help", "[q]uit"}
 	} else if inTmuxMode {
 		// Tmux mode: show session list navigation hints
 		hints = []string{"[↑/↓] Navigate", "[Enter] Switch to session"}
 		if hasWorktree {
 			hints = append(hints, "[p] Plan", "[b] Build")
 		}
-		hints = append(hints, "[Alt-W] Worktree", "[q] Quit")
+		hints = append(hints, "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
@@ -680,7 +670,7 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}
-		hints = append(hints, "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[q]uit")
+		hints = append(hints, "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
 	} else {
 		// SDK mode: no session selected - show worktree-dependent actions
 		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask", "[F2]split"}
@@ -689,7 +679,7 @@ func (m Model) renderStatusBar() string {
 		} else {
 			hints = append(hints, "[n]ew wt")
 		}
-		hints = append(hints, "[q]uit")
+		hints = append(hints, "[?]help", "[q]uit")
 	}
 
 	left := strings.Join(hints, "  ")
@@ -703,11 +693,6 @@ func (m Model) renderStatusBar() string {
 	// New output indicator when scrolled up
 	if m.scrollOffset > 0 {
 		right = dimStyle.Render(fmt.Sprintf("(%d lines above)", m.scrollOffset)) + "  " + right
-	}
-
-	// Error message if any
-	if m.lastError != "" {
-		right = errorStyle.Render("Error: " + truncate(m.lastError, 40))
 	}
 
 	// Pad to fill width
