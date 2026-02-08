@@ -195,6 +195,15 @@ func (m *Model) selectedSession() *session.SessionInfo {
 	return &info
 }
 
+// aggregateCost returns the sum of TotalCostUSD across all sessions.
+func (m *Model) aggregateCost() float64 {
+	var total float64
+	for i := range m.sessions {
+		total += m.sessions[i].Progress.TotalCostUSD
+	}
+	return total
+}
+
 // currentWorktreeSessions returns sessions for the current worktree.
 func (m *Model) currentWorktreeSessions() []session.SessionInfo {
 	wt := m.selectedWorktree()
@@ -257,8 +266,8 @@ func (m *Model) updateSessionDropdown() {
 			label = generateDropdownTitle(sess.Prompt, 20)
 		}
 
-		// Truncate prompt for subtitle
-		subtitle := truncate(sess.Prompt, 40)
+		// Format rich subtitle with progress and prompt
+		subtitle := formatSessionSubtitle(sess)
 
 		items = append(items, DropdownItem{
 			ID:       string(sess.ID),
@@ -322,6 +331,36 @@ func (m *Model) updateSessionDropdown() {
 	}
 
 	m.sessionDropdown.SetItems(items)
+}
+
+// formatSessionSubtitle builds a rich subtitle for a live session dropdown item.
+// Shows progress (turns, cost, elapsed) when available, followed by prompt excerpt.
+func formatSessionSubtitle(sess *session.SessionInfo) string {
+	var parts []string
+
+	// Progress prefix: only show when session has started doing work
+	if sess.Progress.TurnCount > 0 || sess.Progress.TotalCostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("T:%d $%.4f", sess.Progress.TurnCount, sess.Progress.TotalCostUSD))
+	}
+
+	// Elapsed time since creation (only when set and within a reasonable range)
+	if !sess.CreatedAt.IsZero() && time.Since(sess.CreatedAt) < 365*24*time.Hour {
+		parts = append(parts, timeAgo(sess.CreatedAt))
+	}
+
+	// Build prefix
+	prefix := ""
+	if len(parts) > 0 {
+		prefix = strings.Join(parts, " ") + " | "
+	}
+
+	// Remaining budget for prompt (use runewidth for correct column count)
+	maxPromptLen := 40 - runewidth.StringWidth(prefix)
+	if maxPromptLen < 10 {
+		maxPromptLen = 10
+	}
+
+	return prefix + truncate(sess.Prompt, maxPromptLen)
 }
 
 // refreshHistorySessions loads history sessions from disk asynchronously.

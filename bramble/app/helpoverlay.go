@@ -246,6 +246,11 @@ func buildHelpSections(m *Model) []HelpSection {
 			HelpBinding{"Home", "Scroll to top"},
 			HelpBinding{"End", "Scroll to bottom"},
 		)
+		if m.splitPane.IsSplit() {
+			out.Bindings = append(out.Bindings,
+				HelpBinding{"Enter", "Open file in editor (file tree)"},
+			)
+		}
 		sections = append(sections, out)
 	}
 

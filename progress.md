@@ -94,8 +94,24 @@ Each cycle consists of 4 phases:
 ### Phase 4: Code Review
 **Fixes**: Phantom "0 more lines" indicator, ClearFilter losing selected item
 
+---
+
 ## Cycle 4
-**Status**: Pending
+**Status**: Complete
+**Focus**: Making existing data actionable
+
+### Phase 1-2: PM + Architecture
+**Picks**: Session progress in dropdown, aggregate cost in status bar, file tree enter-to-open
+
+### Phase 3: Implementation
+**Features**:
+1. Session progress in dropdown - T:{turns} ${cost} {elapsed} | {prompt}
+2. Aggregate cost in status bar - always-visible Cost: $X.XXXX
+3. File tree enter-to-open - Enter key opens selected file in editor
+
+### Phase 4: Code Review
+**Fixes**: runewidth for subtitle budget, path traversal prevention in AbsSelectedPath,
+zero-CreatedAt guard, float64 tolerance comparison, added path traversal test
 
 ## Cycle 5
 **Status**: Pending

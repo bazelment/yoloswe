@@ -631,6 +631,12 @@ func (m Model) renderStatusBar() string {
 	idle := counts[session.StatusIdle]
 	right := fmt.Sprintf("Running: %d  Idle: %d", running, idle)
 
+	// Aggregate cost
+	totalCost := m.aggregateCost()
+	if totalCost > 0 {
+		right += fmt.Sprintf("  Cost: $%.4f", totalCost)
+	}
+
 	// New output indicator when scrolled up
 	if m.scrollOffset > 0 {
 		right = dimStyle.Render(fmt.Sprintf("(%d lines above)", m.scrollOffset)) + "  " + right

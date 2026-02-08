@@ -34,10 +34,13 @@ go_library(
 go_test(
     name = "app_test",
     srcs = [
+        "aggregate_cost_test.go",
         "dropdown_test.go",
+        "filetree_open_test.go",
         "helpoverlay_test.go",
         "output_test.go",
         "scrollrender_test.go",
+        "session_subtitle_test.go",
         "textarea_test.go",
         "toast_test.go",
         "update_feedback_test.go",

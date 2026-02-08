@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -313,6 +314,22 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
+		// Split pane: open selected file in editor
+		if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
+			filePath := m.fileTree.AbsSelectedPath()
+			if filePath == "" {
+				toastCmd := m.addToast("No file selected", ToastInfo)
+				return m, toastCmd
+			}
+			fileName := filepath.Base(filePath)
+			editor := m.editor
+			toastCmd := m.addToast("Opening "+fileName+" in editor", ToastSuccess)
+			return m, tea.Batch(toastCmd, func() tea.Msg {
+				cmd := exec.Command(editor, filePath)
+				err := cmd.Start()
+				return editorResultMsg{err: err}
+			})
+		}
 		// In tmux mode, Enter switches to the selected window
 		if m.sessionManager.IsInTmuxMode() {
 			// Get the currently selected session
