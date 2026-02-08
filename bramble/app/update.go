@@ -192,6 +192,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case tmuxWindowMsg:
+		if msg.err != nil {
+			cmds = append(cmds, m.addToast("Failed to open tmux window: "+msg.err.Error(), ToastError))
+		}
+		return m, tea.Batch(cmds...)
+
 	case taskWorktreeCreatedMsg:
 		m.worktreeOpMessages = msg.messages
 		// Set pending selection - will be processed after worktrees refresh
@@ -458,6 +464,24 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				err := cmd.Start()
 				return editorResultMsg{err: err}
 			}
+		}
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
+
+	case "w":
+		// Open new tmux window in worktree directory
+		if !session.IsInsideTmux() || !session.IsTmuxAvailable() {
+			toastCmd := m.addToast("Not inside tmux", ToastInfo)
+			return m, toastCmd
+		}
+		if wt := m.selectedWorktree(); wt != nil {
+			wtPath := wt.Path
+			toastCmd := m.addToast("Opening tmux window in "+filepath.Base(wtPath), ToastSuccess)
+			return m, tea.Batch(toastCmd, func() tea.Msg {
+				cmd := exec.Command("tmux", "new-window", "-c", wtPath)
+				err := cmd.Run()
+				return tmuxWindowMsg{err: err}
+			})
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd

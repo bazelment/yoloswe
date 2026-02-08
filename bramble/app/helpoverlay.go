@@ -225,6 +225,7 @@ func buildHelpSections(m *Model) []HelpSection {
 		wt.Bindings = append(wt.Bindings,
 			HelpBinding{"d", "Delete worktree"},
 			HelpBinding{"e", "Open in editor"},
+			HelpBinding{"w", "Open tmux window in worktree"},
 		)
 	}
 	wt.Bindings = append(wt.Bindings,

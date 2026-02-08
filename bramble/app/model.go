@@ -611,6 +611,8 @@ type (
 		branch       string
 		deleteBranch bool
 	}
+	// tmuxWindowMsg carries the result of opening a new tmux window.
+	tmuxWindowMsg struct{ err error }
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
 	toastExpireMsg struct{}
 )
