@@ -197,7 +197,7 @@ func (o *Orchestrator) Stop() error {
 
 // SendMessage sends a user message to the Orchestrator.
 // The Orchestrator will decide whether to respond directly or delegate to Planner.
-func (o *Orchestrator) SendMessage(ctx context.Context, message string) (*claude.TurnResult, error) {
+func (o *Orchestrator) SendMessage(ctx context.Context, message string) (*agent.AgentResult, error) {
 	o.mu.Lock()
 	if !o.started {
 		o.mu.Unlock()

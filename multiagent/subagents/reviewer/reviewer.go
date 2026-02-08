@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/protocol"
 )
@@ -52,12 +51,12 @@ func (r *Reviewer) TaskCount() int {
 }
 
 // Execute runs a review task and returns the raw result.
-func (r *Reviewer) Execute(ctx context.Context, prompt string) (*claude.TurnResult, string, error) {
+func (r *Reviewer) Execute(ctx context.Context, prompt string) (*agent.AgentResult, string, error) {
 	return r.session.Execute(ctx, prompt)
 }
 
 // ExecuteWithFiles runs a review task and returns the result with file tracking.
-func (r *Reviewer) ExecuteWithFiles(ctx context.Context, prompt string) (*claude.TurnResult, *agent.ExecuteResult, string, error) {
+func (r *Reviewer) ExecuteWithFiles(ctx context.Context, prompt string) (*agent.AgentResult, *agent.ExecuteResult, string, error) {
 	return r.session.ExecuteWithFiles(ctx, prompt)
 }
 

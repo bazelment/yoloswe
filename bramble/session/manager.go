@@ -9,11 +9,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
 )
@@ -59,6 +61,61 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 	return r.builder.RunTurn(ctx, message)
 }
 
+// providerRunner adapts agent.Provider to the sessionRunner interface.
+// This allows plugging in any provider backend (Claude, Codex, Gemini)
+// via the ManagerConfig.Provider field.
+type providerRunner struct {
+	provider     agent.Provider
+	eventHandler *sessionEventHandler
+}
+
+func (r *providerRunner) Start(ctx context.Context) error {
+	if lrp, ok := r.provider.(agent.LongRunningProvider); ok {
+		return lrp.Start(ctx)
+	}
+	return nil
+}
+
+func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	var opts []agent.ExecuteOption
+	if r.eventHandler != nil {
+		opts = append(opts, agent.WithProviderEventHandler(r.eventHandler))
+	}
+
+	// Long-running providers maintain state across turns
+	if lrp, ok := r.provider.(agent.LongRunningProvider); ok {
+		result, err := lrp.SendMessage(ctx, message)
+		if err != nil {
+			return nil, err
+		}
+		return agentUsageToTurnUsage(result.Usage), nil
+	}
+
+	// Ephemeral providers create a fresh session each turn
+	result, err := r.provider.Execute(ctx, message, nil, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return agentUsageToTurnUsage(result.Usage), nil
+}
+
+func (r *providerRunner) Stop() error {
+	if lrp, ok := r.provider.(agent.LongRunningProvider); ok {
+		return lrp.Stop()
+	}
+	return r.provider.Close()
+}
+
+// agentUsageToTurnUsage converts agent.AgentUsage to claude.TurnUsage.
+func agentUsageToTurnUsage(u agent.AgentUsage) *claude.TurnUsage {
+	return &claude.TurnUsage{
+		CostUSD:         u.CostUSD,
+		InputTokens:     u.InputTokens,
+		OutputTokens:    u.OutputTokens,
+		CacheReadTokens: u.CacheReadTokens,
+	}
+}
+
 // SessionMode controls how sessions are executed.
 type SessionMode string
 
@@ -74,6 +131,7 @@ const (
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct {
 	Store       *Store
+	Provider    agent.Provider // Optional pluggable agent backend; nil uses default runners
 	RepoName    string
 	SessionMode SessionMode
 	YoloMode    bool // Skip all permission prompts
@@ -274,23 +332,32 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 		eventHandler = newSessionEventHandler(m, session.ID)
 
-		switch session.Type {
-		case SessionTypePlanner:
-			pw := planner.NewPlannerWrapper(planner.Config{
-				Model:        "opus",
-				WorkDir:      session.WorktreePath,
-				Simple:       true,
-				BuildMode:    planner.BuildModeReturn,
-				Output:       io.Discard,
-				EventHandler: eventHandler,
-			})
-			runner = &plannerRunner{pw: pw}
-		case SessionTypeBuilder:
-			builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
-				Model:   "sonnet",
-				WorkDir: session.WorktreePath,
-			}, nil, eventHandler)
-			runner = &builderRunner{builder: builder}
+		if m.config.Provider != nil {
+			// Use the pluggable provider backend
+			runner = &providerRunner{
+				provider:     m.config.Provider,
+				eventHandler: eventHandler,
+			}
+		} else {
+			// Default: use hardcoded planner/builder runners
+			switch session.Type {
+			case SessionTypePlanner:
+				pw := planner.NewPlannerWrapper(planner.Config{
+					Model:        "opus",
+					WorkDir:      session.WorktreePath,
+					Simple:       true,
+					BuildMode:    planner.BuildModeReturn,
+					Output:       io.Discard,
+					EventHandler: eventHandler,
+				})
+				runner = &plannerRunner{pw: pw}
+			case SessionTypeBuilder:
+				builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
+					Model:   "sonnet",
+					WorkDir: session.WorktreePath,
+				}, nil, eventHandler)
+				runner = &builderRunner{builder: builder}
+			}
 		}
 	}
 
@@ -625,10 +692,13 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 			result = append(result, s.ToInfo())
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
 	return result
 }
 
-// GetAllSessions returns all sessions.
+// GetAllSessions returns all sessions sorted by creation time (newest first).
 func (m *Manager) GetAllSessions() []SessionInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -637,6 +707,9 @@ func (m *Manager) GetAllSessions() []SessionInfo {
 	for _, s := range m.sessions {
 		result = append(result, s.ToInfo())
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
 	return result
 }
 

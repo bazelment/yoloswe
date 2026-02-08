@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // MockResponse represents a pre-configured response for mock sessions.
@@ -73,7 +73,7 @@ func (m *MockLongRunningSession) Stop() error {
 }
 
 // SendMessage simulates sending a message and returns the next pre-configured response.
-func (m *MockLongRunningSession) SendMessage(ctx context.Context, message string) (*claude.TurnResult, error) {
+func (m *MockLongRunningSession) SendMessage(ctx context.Context, message string) (*agent.AgentResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -100,10 +100,10 @@ func (m *MockLongRunningSession) SendMessage(ctx context.Context, message string
 	m.totalCost += resp.Cost
 	m.turnCount++
 
-	return &claude.TurnResult{
-		TurnNumber: m.turnCount,
-		Success:    resp.Success,
-		Usage: claude.TurnUsage{
+	return &agent.AgentResult{
+		Text:    resp.Text,
+		Success: resp.Success,
+		Usage: agent.AgentUsage{
 			CostUSD: resp.Cost,
 		},
 	}, nil
@@ -173,7 +173,7 @@ func NewMockEphemeralSession(config MockSessionConfig) *MockEphemeralSession {
 }
 
 // Execute simulates executing a task and returns the next pre-configured response.
-func (m *MockEphemeralSession) Execute(ctx context.Context, prompt string) (*claude.TurnResult, string, error) {
+func (m *MockEphemeralSession) Execute(ctx context.Context, prompt string) (*agent.AgentResult, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -199,10 +199,10 @@ func (m *MockEphemeralSession) Execute(ctx context.Context, prompt string) (*cla
 	// Update metrics
 	m.totalCost += resp.Cost
 
-	return &claude.TurnResult{
-		TurnNumber: 1, // Ephemeral sessions always have turn 1
-		Success:    resp.Success,
-		Usage: claude.TurnUsage{
+	return &agent.AgentResult{
+		Text:    resp.Text,
+		Success: resp.Success,
+		Usage: agent.AgentUsage{
 			CostUSD: resp.Cost,
 		},
 	}, taskID, nil

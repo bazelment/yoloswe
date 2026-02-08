@@ -3,7 +3,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "wt",
     srcs = [
+        "atomic.go",
         "config.go",
+        "context.go",
         "git.go",
         "github.go",
         "output.go",
@@ -17,7 +19,9 @@ go_library(
 go_test(
     name = "wt_test",
     srcs = [
+        "atomic_test.go",
         "config_test.go",
+        "context_test.go",
         "git_test.go",
         "github_test.go",
         "output_test.go",

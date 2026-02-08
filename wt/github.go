@@ -45,6 +45,7 @@ type PRInfo struct {
 	State          string `json:"state"` // OPEN, CLOSED, MERGED
 	ReviewDecision string `json:"reviewDecision"`
 	Number         int    `json:"number"`
+	IsDraft        bool   `json:"isDraft"`
 }
 
 // StatusCheck represents a CI status check.

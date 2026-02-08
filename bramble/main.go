@@ -11,9 +11,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 var (
@@ -126,8 +128,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		editor = os.Getenv("EDITOR")
 	}
 
+	// Pre-load worktrees synchronously so the first render shows branch names
+	// instead of flashing an empty UI while waiting for the git subprocess.
+	manager := wt.NewManager(wtRoot, repoName)
+	worktrees, _ := manager.List(ctx)
+
+	// Query terminal size synchronously so the first View() renders a
+	// properly laid-out UI instead of waiting for the async WindowSizeMsg.
+	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
+
 	// Create and run TUI
-	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager)
+	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, worktrees, termWidth, termHeight)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

@@ -148,6 +148,7 @@ func (w *Worktree) Name() string {
 }
 
 // WorktreeStatus contains extended status information.
+// WorktreeStatus holds extended status for a worktree.
 type WorktreeStatus struct {
 	LastCommitTime time.Time
 	LastCommitMsg  string
@@ -161,6 +162,7 @@ type WorktreeStatus struct {
 	IsDirty        bool
 	PRIsDraft      bool
 }
+
 
 // Manager handles worktree operations for a repository.
 type Manager struct {
@@ -470,8 +472,9 @@ func parseWorktreeList(output string) []Worktree {
 	return worktrees
 }
 
-// GetStatus returns extended status for a worktree.
-func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, error) {
+// GetGitStatus returns local git status for a worktree (no network calls).
+// This is fast and suitable for UI that needs immediate feedback.
+func (m *Manager) GetGitStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, error) {
 	status := &WorktreeStatus{Worktree: wt}
 
 	// Check dirty status
@@ -508,25 +511,56 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 		}
 	}
 
-	// Get PR info
-	if !wt.IsDetached {
-		result, err := m.gh.Run(ctx, []string{"pr", "view", "--json", "number,url,state,isDraft,reviewDecision"}, wt.Path)
-		if err == nil && result.Stdout != "" {
-			var prData struct {
-				URL            string `json:"url"`
-				State          string `json:"state"`
-				ReviewDecision string `json:"reviewDecision"`
-				Number         int    `json:"number"`
-				IsDraft        bool   `json:"isDraft"`
-			}
-			if json.Unmarshal([]byte(result.Stdout), &prData) == nil {
-				status.PRNumber = prData.Number
-				status.PRURL = prData.URL
-				status.PRState = prData.State
-				status.PRIsDraft = prData.IsDraft
-				status.PRReviewStatus = prData.ReviewDecision
-			}
-		}
+	return status, nil
+}
+
+// FetchPRInfo fetches PR information for a worktree via the GitHub CLI.
+// This makes a network call and may be slow.
+func (m *Manager) FetchPRInfo(ctx context.Context, wt Worktree) (*PRInfo, error) {
+	if wt.IsDetached {
+		return nil, nil
+	}
+
+	result, err := m.gh.Run(ctx, []string{"pr", "view", "--json", "number,url,state,isDraft,reviewDecision"}, wt.Path)
+	if err != nil || result.Stdout == "" {
+		return nil, err
+	}
+
+	var prData struct {
+		URL            string `json:"url"`
+		State          string `json:"state"`
+		ReviewDecision string `json:"reviewDecision"`
+		Number         int    `json:"number"`
+		IsDraft        bool   `json:"isDraft"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &prData); err != nil {
+		return nil, err
+	}
+
+	return &PRInfo{
+		Number:         prData.Number,
+		URL:            prData.URL,
+		State:          prData.State,
+		IsDraft:        prData.IsDraft,
+		ReviewDecision: prData.ReviewDecision,
+	}, nil
+}
+
+// GetStatus returns extended status for a worktree including PR info.
+// This makes a network call for PR info; use GetGitStatus for local-only status.
+func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, error) {
+	status, err := m.GetGitStatus(ctx, wt)
+	if err != nil {
+		return nil, err
+	}
+
+	pr, _ := m.FetchPRInfo(ctx, wt)
+	if pr != nil {
+		status.PRNumber = pr.Number
+		status.PRURL = pr.URL
+		status.PRState = pr.State
+		status.PRIsDraft = pr.IsDraft
+		status.PRReviewStatus = pr.ReviewDecision
 	}
 
 	return status, nil

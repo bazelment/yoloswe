@@ -16,6 +16,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
+        "//multiagent/agent",
         "//yoloswe",
         "//yoloswe/planner",
     ],

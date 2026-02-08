@@ -4,12 +4,20 @@ go_library(
     name = "agent",
     srcs = [
         "agent.go",
+        "claude_provider.go",
+        "codex_provider.go",
         "config.go",
+        "gemini_provider.go",
+        "provider.go",
         "session.go",
     ],
     importpath = "github.com/bazelment/yoloswe/multiagent/agent",
     visibility = ["//visibility:public"],
-    deps = ["//agent-cli-wrapper/claude"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/codex",
+        "//wt",
+    ],
 )
 
 go_test(
