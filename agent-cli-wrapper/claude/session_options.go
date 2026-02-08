@@ -14,6 +14,16 @@ const (
 	PermissionModeBypass PermissionMode = "bypassPermissions"
 )
 
+// AgentDefinition defines a sub-agent for the Claude CLI.
+type AgentDefinition struct {
+	Name            string   `json:"name"`
+	Description     string   `json:"description,omitempty"`
+	Prompt          string   `json:"prompt,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	AllowedTools    []string `json:"allowed_tools,omitempty"`
+	DisallowedTools []string `json:"disallowed_tools,omitempty"`
+}
+
 // SessionConfig holds session configuration.
 type SessionConfig struct {
 	// PermissionHandler handles permission requests in default mode.
@@ -53,6 +63,36 @@ type SessionConfig struct {
 
 	// EventBufferSize is the event channel buffer size (default: 100).
 	EventBufferSize int
+
+	// MaxTurns is the SDK-enforced turn limit. If set, the SDK will return
+	// ErrMaxTurnsExceeded after the specified number of turns.
+	MaxTurns int
+
+	// MaxBudgetUSD is the SDK-enforced budget limit. If set, the SDK will return
+	// ErrBudgetExceeded when the cumulative cost exceeds this limit.
+	MaxBudgetUSD float64
+
+	// AllowedTools is a list of tools that Claude is allowed to use.
+	// Maps to --allowed-tools CLI flag.
+	AllowedTools []string
+
+	// DisallowedTools is a list of tools that Claude is not allowed to use.
+	// Maps to --disallowed-tools CLI flag.
+	DisallowedTools []string
+
+	// Betas is a list of beta features to enable.
+	// Maps to --beta CLI flag.
+	Betas []string
+
+	// Agents is a list of agent definitions for sub-agents.
+	// Maps to --agents CLI flag with JSON encoding.
+	Agents []AgentDefinition
+
+	// Env is a map of additional environment variables to set for the CLI process.
+	Env map[string]string
+
+	// ExtraArgs is an escape hatch for passing additional CLI arguments.
+	ExtraArgs []string
 
 	// DisablePlugins disables CLI plugins for faster startup.
 	DisablePlugins bool
@@ -198,6 +238,62 @@ func WithSDKTools(serverName string, handler SDKToolHandler) SessionOption {
 func WithResume(sessionID string) SessionOption {
 	return func(c *SessionConfig) {
 		c.Resume = sessionID
+	}
+}
+
+// WithMaxTurns sets the SDK-enforced turn limit.
+func WithMaxTurns(n int) SessionOption {
+	return func(c *SessionConfig) {
+		c.MaxTurns = n
+	}
+}
+
+// WithMaxBudgetUSD sets the SDK-enforced budget limit in USD.
+func WithMaxBudgetUSD(budget float64) SessionOption {
+	return func(c *SessionConfig) {
+		c.MaxBudgetUSD = budget
+	}
+}
+
+// WithAllowedTools sets the list of tools that Claude is allowed to use.
+func WithAllowedTools(tools ...string) SessionOption {
+	return func(c *SessionConfig) {
+		c.AllowedTools = tools
+	}
+}
+
+// WithDisallowedTools sets the list of tools that Claude is not allowed to use.
+func WithDisallowedTools(tools ...string) SessionOption {
+	return func(c *SessionConfig) {
+		c.DisallowedTools = tools
+	}
+}
+
+// WithBetas enables beta features.
+func WithBetas(betas ...string) SessionOption {
+	return func(c *SessionConfig) {
+		c.Betas = betas
+	}
+}
+
+// WithAgents sets the agent definitions for sub-agents.
+func WithAgents(agents ...AgentDefinition) SessionOption {
+	return func(c *SessionConfig) {
+		c.Agents = agents
+	}
+}
+
+// WithEnv sets additional environment variables for the CLI process.
+func WithEnv(env map[string]string) SessionOption {
+	return func(c *SessionConfig) {
+		c.Env = env
+	}
+}
+
+// WithExtraArgs sets additional CLI arguments (escape hatch).
+func WithExtraArgs(args ...string) SessionOption {
+	return func(c *SessionConfig) {
+		c.ExtraArgs = args
 	}
 }
 

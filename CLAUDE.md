@@ -32,3 +32,15 @@ To add a new dependency, please always follow these steps, don't use `go` comman
 - Never use static port in test, pick a random port to avoid port collision.
 - The tests should be deterministic, try to avoid external dependencies that has unstable output. When performing validation, avoid conditional check.
 - Tests for different purpose like integration should be put into different directory so that gazelle won't blend them into a single build target.
+
+## Integration Tests and Gazelle
+
+Integration test `BUILD.bazel` files are hand-maintained and must include `# gazelle:ignore` as the first line. Gazelle cannot generate these correctly because:
+1. Test files behind `//go:build integration` build tags are invisible to Gazelle
+2. Gazelle cannot add the required `tags = ["manual", "local"]` or `gotags = ["integration"]` attributes
+
+When creating a new `integration/` test directory:
+1. Write the `BUILD.bazel` by hand with `# gazelle:ignore` at the top
+2. Include `gotags = ["integration"]` so Bazel passes the build tag to the Go compiler
+3. Include `tags = ["manual"]` (and optionally `"local"`) so tests are excluded from `bazel test //...`
+4. After running `bazel run //:gazelle`, verify the integration BUILD files were not modified

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -85,6 +86,31 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 		args = append(args, "--resume", pm.config.Resume)
 	}
 
+	// Add allowed/disallowed tools
+	for _, tool := range pm.config.AllowedTools {
+		args = append(args, "--allowed-tools", tool)
+	}
+	for _, tool := range pm.config.DisallowedTools {
+		args = append(args, "--disallowed-tools", tool)
+	}
+
+	// Add beta flags
+	for _, beta := range pm.config.Betas {
+		args = append(args, "--beta", beta)
+	}
+
+	// Add agents configuration
+	if len(pm.config.Agents) > 0 {
+		agentsJSON, err := json.Marshal(pm.config.Agents)
+		if err != nil {
+			return nil, &ProcessError{Message: "failed to marshal agents config", Cause: err}
+		}
+		args = append(args, "--agents", string(agentsJSON))
+	}
+
+	// Add extra args (escape hatch)
+	args = append(args, pm.config.ExtraArgs...)
+
 	// Always include partial messages for tool progress tracking.
 	// Disable external setting sources (matching Python SDK behavior).
 	// Input format must come last (matching Python SDK).
@@ -126,6 +152,11 @@ func (pm *processManager) Start(ctx context.Context) error {
 		"CLAUDE_CODE_ENTRYPOINT=sdk-go",
 	)
 
+	// Add custom environment variables
+	for k, v := range pm.config.Env {
+		pm.cmd.Env = append(pm.cmd.Env, k+"="+v)
+	}
+
 	// Set working directory
 	if pm.config.WorkDir != "" {
 		pm.cmd.Dir = pm.config.WorkDir
@@ -153,6 +184,9 @@ func (pm *processManager) Start(ctx context.Context) error {
 
 	// Start the process
 	if err := pm.cmd.Start(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return &CLINotFoundError{Path: cliPath, Cause: err}
+		}
 		return &ProcessError{Message: "failed to start CLI process", Cause: err}
 	}
 

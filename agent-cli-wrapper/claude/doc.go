@@ -6,6 +6,14 @@
 //
 // # Quick Start
 //
+// For simple one-shot queries:
+//
+//	result, err := claude.Query(ctx, "What is 2+2?")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Printf("Response: %s\nCost: $%.6f\n", result.Text, result.Usage.CostUSD)
+//
 // For simple synchronous usage:
 //
 //	session := claude.NewSession(
