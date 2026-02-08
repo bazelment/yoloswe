@@ -70,9 +70,10 @@ func (m Model) View() string {
 		m.height = 24
 	}
 
-	// Layout: top bar (1 line) + center + input area (dynamic) + status bar (1 line)
+	// Layout: top bar (1 line) + center + toast area (dynamic) + input area (dynamic) + status bar (1 line)
 	topBarHeight := 1
 	statusBarHeight := 1
+	toastHeight := m.toasts.Height()
 	inputHeight := 0
 	if m.inputMode {
 		// Dynamic input height based on content (min 5, max 12 lines including border and status)
@@ -89,7 +90,7 @@ func (m Model) View() string {
 			inputHeight = maxInputHeight
 		}
 	}
-	centerHeight := m.height - topBarHeight - statusBarHeight - inputHeight - 2 // borders
+	centerHeight := m.height - topBarHeight - statusBarHeight - toastHeight - inputHeight - 2 // borders
 
 	// Build components
 	topBar := m.renderTopBar()
@@ -101,6 +102,12 @@ func (m Model) View() string {
 
 	// Build layout
 	parts := []string{topBar, centerBordered}
+
+	// Add toast notifications if any
+	if m.toasts.HasToasts() {
+		m.toasts.SetWidth(m.width)
+		parts = append(parts, m.toasts.View())
+	}
 
 	// Add input area if in input mode
 	if m.inputMode {
@@ -130,6 +137,11 @@ func (m Model) View() string {
 			overlayX = 0
 		}
 		content = overlayAt(content, overlay, overlayX, 1)
+	}
+
+	// Show help overlay if active
+	if m.focus == FocusHelp {
+		return m.helpOverlay.View()
 	}
 
 	// Show task modal if visible
@@ -192,7 +204,7 @@ func (m Model) renderTopBar() string {
 	}
 
 	// Combine with padding
-	padding := m.width - len(stripAnsi(left)) - len(stripAnsi(right)) - 4
+	padding := m.width - runewidth.StringWidth(stripAnsi(left)) - runewidth.StringWidth(stripAnsi(right)) - 4
 	if padding < 1 {
 		padding = 1
 	}
@@ -207,30 +219,17 @@ func (m Model) renderSessionListView(width, height int) string {
 
 	// Table header
 	b.WriteString("\n")
-	b.WriteString("  ")
-	b.WriteString(dimStyle.Render("Type    Name            Status        Prompt"))
+	b.WriteString(dimStyle.Render("   Type  Name            Status        Prompt"))
 	b.WriteString("\n")
-	b.WriteString("  ")
-	b.WriteString(strings.Repeat("─", width-4))
+	b.WriteString("   ")
+	b.WriteString(strings.Repeat("─", width-3))
 	b.WriteString("\n")
 
 	// Get sessions for current worktree
-	var currentSessions []session.SessionInfo
-	if wt := m.selectedWorktree(); wt != nil {
-		allSessions := m.sessionManager.GetAllSessions()
-		for i := range allSessions {
-			if allSessions[i].WorktreePath == wt.Path {
-				currentSessions = append(currentSessions, allSessions[i])
-			}
-		}
-	}
+	currentSessions := m.currentWorktreeSessions()
 
 	if len(currentSessions) == 0 {
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  No sessions for this worktree\n"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  Press [p] to start a planner session or [b] to start a builder session\n"))
-		return b.String()
+		return m.renderWelcome(width, height)
 	}
 
 	// Ensure selected index is in bounds
@@ -266,8 +265,14 @@ func (m Model) renderSessionListView(width, height int) string {
 		}
 		promptDisplay := truncate(prompt, 80)
 
-		// Format line: icon + name + status + prompt
-		line := fmt.Sprintf("  %s  %-15s  %-13s  %s", typeIcon, nameDisplay, statusStr, promptDisplay)
+		// Number prefix for quick switch (1-9)
+		numPrefix := "   "
+		if i < 9 {
+			numPrefix = fmt.Sprintf("%d. ", i+1)
+		}
+
+		// Format line: number + icon + name + status + prompt
+		line := fmt.Sprintf("%s%s  %-15s  %-13s  %s", numPrefix, typeIcon, nameDisplay, statusStr, promptDisplay)
 
 		// Highlight selected row
 		if i == m.selectedSessionIndex {
@@ -313,25 +318,7 @@ func (m Model) renderOutputArea(width, height int) string {
 	var b strings.Builder
 
 	if m.viewingSessionID == "" {
-		// No session selected - show worktree operation messages if any
-		if len(m.worktreeOpMessages) > 0 {
-			b.WriteString("\n")
-			for _, msg := range m.worktreeOpMessages {
-				b.WriteString("  ")
-				b.WriteString(msg)
-				b.WriteString("\n")
-			}
-			return b.String()
-		}
-
-		// Default empty state
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  No session selected"))
-		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("  Choose a session with [Alt-S]"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  Or start a new session with [p]lan or [b]uild"))
-		return b.String()
+		return m.renderWelcome(width, height)
 	}
 
 	// Check if viewing history session
@@ -394,19 +381,20 @@ func (m Model) renderOutputArea(width, height int) string {
 
 	// Scroll on visual lines, not logical OutputLine count
 	outputHeight := height - 5 // Account for header, prompt, separator
-	totalVisual := len(allVisualLines)
-	scrollOffset := m.scrollOffset
+	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset))
 
-	// Determine visible window with scroll indicators at edges.
-	// scrollOffset=0 means "at bottom" (latest), higher values scroll toward top.
-	//
-	// Layout cases:
-	// - At bottom (scrollOffset=0): no indicators, full outputHeight for content
-	// - Scrolled to top: only ↓ indicator at bottom, content = outputHeight-1
-	// - Scrolled in middle: ↑ at top + ↓ at bottom, content = outputHeight-2
+	return b.String()
+}
+
+// renderScrollableLines renders a window of visual lines with scroll indicators.
+// scrollOffset=0 means "at bottom" (latest output visible).
+// Higher values scroll toward the top (older content).
+func renderScrollableLines(allVisualLines []string, outputHeight int, scrollOffset int) string {
+	var b strings.Builder
+	totalVisual := len(allVisualLines)
 
 	if scrollOffset == 0 {
-		// At bottom: no indicators
+		// At bottom: no indicators, full outputHeight for content
 		startIdx := totalVisual - outputHeight
 		if startIdx < 0 {
 			startIdx = 0
@@ -417,7 +405,7 @@ func (m Model) renderOutputArea(width, height int) string {
 		}
 	} else {
 		// Scrolled up: try with 2 indicators first (most common scrolled case)
-		contentHeight := outputHeight - 2 // room for ↑ and ↓
+		contentHeight := outputHeight - 2 // room for up-arrow and down-arrow
 		if contentHeight < 1 {
 			contentHeight = 1
 		}
@@ -437,7 +425,7 @@ func (m Model) renderOutputArea(width, height int) string {
 		}
 
 		if startIdx == 0 {
-			// At/near top: only need ↓ indicator, reclaim the ↑ line for content
+			// At/near top: only need down-arrow indicator, reclaim the up-arrow line
 			contentHeight = outputHeight - 1
 			maxScroll = 0
 			if totalVisual > contentHeight {
@@ -447,17 +435,18 @@ func (m Model) renderOutputArea(width, height int) string {
 				scrollOffset = maxScroll
 			}
 			endIdx = totalVisual - scrollOffset
-			// startIdx stays 0
 
 			for i := 0; i < endIdx; i++ {
 				b.WriteString(allVisualLines[i])
 				b.WriteString("\n")
 			}
 			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
-			b.WriteString("\n")
+			if hiddenBelow > 0 {
+				b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
+				b.WriteString("\n")
+			}
 		} else {
-			// Middle: both ↑ and ↓ indicators
+			// Middle: both up-arrow and down-arrow indicators
 			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
 			b.WriteString("\n")
 			for i := startIdx; i < endIdx; i++ {
@@ -541,8 +530,8 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 	}
 
 	// Truncate width if needed (skip for markdown-rendered content which may have ANSI)
-	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && len(stripAnsi(formatted)) > width-2 {
-		formatted = formatted[:width-5] + "..."
+	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
+		formatted = truncateVisual(formatted, width-2)
 	}
 
 	return formatted
@@ -586,68 +575,7 @@ func (m Model) renderHistorySession(width, height int) string {
 	}
 
 	outputHeight := height - 6 // Account for header, prompt, timestamp, separator
-	totalVisual := len(allVisualLines)
-	scrollOffset := m.scrollOffset
-
-	if scrollOffset == 0 {
-		startIdx := totalVisual - outputHeight
-		if startIdx < 0 {
-			startIdx = 0
-		}
-		for i := startIdx; i < totalVisual; i++ {
-			b.WriteString(allVisualLines[i])
-			b.WriteString("\n")
-		}
-	} else {
-		contentHeight := outputHeight - 2
-		if contentHeight < 1 {
-			contentHeight = 1
-		}
-
-		maxScroll := 0
-		if totalVisual > contentHeight {
-			maxScroll = totalVisual - contentHeight
-		}
-		if scrollOffset > maxScroll {
-			scrollOffset = maxScroll
-		}
-
-		endIdx := totalVisual - scrollOffset
-		startIdx := endIdx - contentHeight
-		if startIdx < 0 {
-			startIdx = 0
-		}
-
-		if startIdx == 0 {
-			contentHeight = outputHeight - 1
-			maxScroll = 0
-			if totalVisual > contentHeight {
-				maxScroll = totalVisual - contentHeight
-			}
-			if scrollOffset > maxScroll {
-				scrollOffset = maxScroll
-			}
-			endIdx = totalVisual - scrollOffset
-
-			for i := 0; i < endIdx; i++ {
-				b.WriteString(allVisualLines[i])
-				b.WriteString("\n")
-			}
-			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
-			b.WriteString("\n")
-		} else {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
-			b.WriteString("\n")
-			for i := startIdx; i < endIdx; i++ {
-				b.WriteString(allVisualLines[i])
-				b.WriteString("\n")
-			}
-			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
-			b.WriteString("\n")
-		}
-	}
+	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset))
 
 	return b.String()
 }
@@ -659,17 +587,19 @@ func (m Model) renderStatusBar() string {
 	hasWorktree := m.selectedWorktree() != nil
 	inTmuxMode := m.sessionManager.IsInTmuxMode()
 
-	if m.inputMode {
-		hints = []string{"[Tab] Switch", "[Ctrl+Enter] Send", "[Esc] Cancel"}
+	if m.confirmQuit {
+		hints = []string{"[q/y] Confirm quit", "[any key] Cancel"}
+	} else if m.inputMode {
+		hints = []string{"[Tab] Switch", "[Enter] Send", "[Shift+Enter] Newline", "[Esc] Cancel", "[?]help"}
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
-		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close"}
+		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close", "[?]help", "[q]uit"}
 	} else if inTmuxMode {
 		// Tmux mode: show session list navigation hints
 		hints = []string{"[↑/↓] Navigate", "[Enter] Switch to session"}
 		if hasWorktree {
 			hints = append(hints, "[p] Plan", "[b] Build")
 		}
-		hints = append(hints, "[Alt-W] Worktree", "[q] Quit")
+		hints = append(hints, "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
@@ -680,7 +610,7 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}
-		hints = append(hints, "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[q]uit")
+		hints = append(hints, "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
 	} else {
 		// SDK mode: no session selected - show worktree-dependent actions
 		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask", "[F2]split"}
@@ -689,7 +619,7 @@ func (m Model) renderStatusBar() string {
 		} else {
 			hints = append(hints, "[n]ew wt")
 		}
-		hints = append(hints, "[q]uit")
+		hints = append(hints, "[?]help", "[q]uit")
 	}
 
 	left := strings.Join(hints, "  ")
@@ -700,18 +630,19 @@ func (m Model) renderStatusBar() string {
 	idle := counts[session.StatusIdle]
 	right := fmt.Sprintf("Running: %d  Idle: %d", running, idle)
 
+	// Aggregate cost
+	totalCost := m.aggregateCost()
+	if totalCost > 0 {
+		right += fmt.Sprintf("  Cost: $%.4f", totalCost)
+	}
+
 	// New output indicator when scrolled up
 	if m.scrollOffset > 0 {
 		right = dimStyle.Render(fmt.Sprintf("(%d lines above)", m.scrollOffset)) + "  " + right
 	}
 
-	// Error message if any
-	if m.lastError != "" {
-		right = errorStyle.Render("Error: " + truncate(m.lastError, 40))
-	}
-
 	// Pad to fill width
-	padding := m.width - len(stripAnsi(left)) - len(stripAnsi(right)) - 2
+	padding := m.width - runewidth.StringWidth(stripAnsi(left)) - runewidth.StringWidth(stripAnsi(right)) - 2
 	if padding < 1 {
 		padding = 1
 	}
@@ -740,15 +671,40 @@ func statusIcon(status session.SessionStatus) string {
 	}
 }
 
-// truncate truncates a string to max length.
+// truncate truncates a plain-text string (no ANSI) to at most max visual
+// columns, appending "..." when truncation occurs. It correctly handles
+// multi-byte UTF-8 and wide (CJK / emoji) characters.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if runewidth.StringWidth(s) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		// Not enough room for ellipsis; just return what fits.
+		var b strings.Builder
+		cols := 0
+		for _, r := range s {
+			w := runewidth.RuneWidth(r)
+			if cols+w > max {
+				break
+			}
+			b.WriteRune(r)
+			cols += w
+		}
+		return b.String()
 	}
-	return s[:max-3] + "..."
+	target := max - 3
+	var b strings.Builder
+	cols := 0
+	for _, r := range s {
+		w := runewidth.RuneWidth(r)
+		if cols+w > target {
+			break
+		}
+		b.WriteRune(r)
+		cols += w
+	}
+	b.WriteString("...")
+	return b.String()
 }
 
 // formatToolDisplay formats a tool invocation for display.
@@ -793,7 +749,7 @@ func formatToolDisplay(toolName string, input map[string]interface{}, maxLen int
 
 // truncatePath truncates a path, keeping the end visible.
 func truncatePath(path string, max int) string {
-	if len(path) <= max {
+	if runewidth.StringWidth(path) <= max {
 		return path
 	}
 	if max <= 7 {
@@ -805,7 +761,7 @@ func truncatePath(path string, max int) string {
 		return truncate(path, max)
 	}
 	suffix := parts[len(parts)-1]
-	if len(suffix)+4 >= max {
+	if runewidth.StringWidth(suffix)+4 >= max {
 		return truncate(path, max)
 	}
 	return ".../" + suffix

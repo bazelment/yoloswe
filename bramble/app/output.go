@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 )
@@ -197,8 +198,8 @@ func formatOutputLine(line session.OutputLine, width int) string {
 	}
 
 	// Truncate if needed (skip for markdown content which may have multi-line)
-	if line.Type != session.OutputTypeText && len(stripAnsi(formatted)) > width-2 {
-		formatted = formatted[:width-5] + "..."
+	if line.Type != session.OutputTypeText && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
+		formatted = truncateVisual(formatted, width-2)
 	}
 
 	return formatted

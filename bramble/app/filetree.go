@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -213,6 +214,24 @@ func (ft *FileTree) SelectedPath() string {
 	return ""
 }
 
+// AbsSelectedPath returns the absolute path of the currently selected file,
+// or empty string if the selection is a directory or nothing is selected.
+// It ensures the result is contained within the worktree root.
+func (ft *FileTree) AbsSelectedPath() string {
+	rel := ft.SelectedPath()
+	if rel == "" || ft.root == "" {
+		return ""
+	}
+	abs := filepath.Join(ft.root, rel)
+	// Clean both paths and verify containment to prevent path traversal.
+	cleanAbs := filepath.Clean(abs)
+	cleanRoot := filepath.Clean(ft.root)
+	if !strings.HasPrefix(cleanAbs, cleanRoot+string(filepath.Separator)) && cleanAbs != cleanRoot {
+		return ""
+	}
+	return cleanAbs
+}
+
 // SetFocused sets whether the file tree pane has focus.
 func (ft *FileTree) SetFocused(focused bool) {
 	ft.focused = focused
@@ -259,10 +278,9 @@ func (ft *FileTree) Render(width, height int) string {
 			line = selectedStyle.Render(stripAnsi(line))
 		}
 
-		// Truncate to width
-		stripped := stripAnsi(line)
-		if len(stripped) > width {
-			line = line[:width-3] + "..."
+		// Truncate to width (visual columns, not byte count)
+		if runewidth.StringWidth(stripAnsi(line)) > width {
+			line = truncateVisual(line, width)
 		}
 
 		b.WriteString(line)

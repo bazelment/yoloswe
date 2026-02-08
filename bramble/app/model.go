@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
@@ -22,19 +23,27 @@ const (
 	FocusWorktreeDropdown                  // Alt-W dropdown open
 	FocusSessionDropdown                   // Alt-S dropdown open
 	FocusTaskModal                         // Task modal open
+	FocusHelp                              // Help overlay open
 )
 
 // Model is the root application model.
-type Model struct {
+type Model struct { //nolint:govet // fieldalignment: readability over padding for app state
 	ctx                   context.Context
+	worktrees             []wt.Worktree
+	sessions              []session.SessionInfo
+	cachedHistory         []*session.SessionMeta
+	worktreeOpMessages    []string
 	inputHandler          func(string) tea.Cmd
+	worktreeStatuses      map[string]*wt.WorktreeStatus
+	scrollPositions       map[session.SessionID]int
 	viewingHistoryData    *session.StoredSession
 	sessionManager        *session.Manager
 	mdRenderer            *MarkdownRenderer
-	worktreeStatuses      map[string]*wt.WorktreeStatus
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
 	taskModal             *TaskModal
+	toasts                *ToastManager
+	helpOverlay           *HelpOverlay
 	inputArea             *TextArea
 	splitPane             *SplitPane
 	fileTree              *FileTree
@@ -43,20 +52,16 @@ type Model struct {
 	repoName              string
 	editor                string
 	inputPrompt           string
-	viewingSessionID      session.SessionID
 	wtRoot                string
-	lastError             string
-	historyBranch         string // branch the cached history belongs to
-	worktrees             []wt.Worktree
-	sessions              []session.SessionInfo
-	cachedHistory         []*session.SessionMeta // async-loaded history for historyBranch
-	worktreeOpMessages    []string
-	focus                 FocusArea
+	viewingSessionID      session.SessionID
+	historyBranch         string
 	scrollOffset          int
-	selectedSessionIndex  int // For tmux mode session list navigation
+	selectedSessionIndex  int
 	height                int
 	width                 int
+	focus                 FocusArea
 	inputMode             bool
+	confirmQuit           bool
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -83,9 +88,12 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		worktreeDropdown: wtDropdown,
 		sessionDropdown:  NewDropdown(nil),
 		taskModal:        NewTaskModal(),
+		toasts:           NewToastManager(),
+		helpOverlay:      NewHelpOverlay(),
 		inputArea:        NewTextArea(),
 		splitPane:        NewSplitPane(),
 		fileTree:         NewFileTree("", nil),
+		scrollPositions:  make(map[session.SessionID]int),
 	}
 
 	// Pre-populate worktrees so the first View() render shows branch names.
@@ -188,6 +196,15 @@ func (m *Model) selectedSession() *session.SessionInfo {
 	return &info
 }
 
+// aggregateCost returns the sum of TotalCostUSD across all sessions.
+func (m *Model) aggregateCost() float64 {
+	var total float64
+	for i := range m.sessions {
+		total += m.sessions[i].Progress.TotalCostUSD
+	}
+	return total
+}
+
 // currentWorktreeSessions returns sessions for the current worktree.
 func (m *Model) currentWorktreeSessions() []session.SessionInfo {
 	wt := m.selectedWorktree()
@@ -250,12 +267,18 @@ func (m *Model) updateSessionDropdown() {
 			label = generateDropdownTitle(sess.Prompt, 20)
 		}
 
-		// Truncate prompt for subtitle
-		subtitle := truncate(sess.Prompt, 40)
+		// Add index prefix for sessions 1-9
+		indexPrefix := ""
+		if i < 9 {
+			indexPrefix = fmt.Sprintf("%d. ", i+1)
+		}
+
+		// Format rich subtitle with progress and prompt
+		subtitle := formatSessionSubtitle(sess)
 
 		items = append(items, DropdownItem{
 			ID:       string(sess.ID),
-			Label:    label,
+			Label:    indexPrefix + label,
 			Subtitle: subtitle,
 			Icon:     icon,
 			Badge:    badge,
@@ -315,6 +338,36 @@ func (m *Model) updateSessionDropdown() {
 	}
 
 	m.sessionDropdown.SetItems(items)
+}
+
+// formatSessionSubtitle builds a rich subtitle for a live session dropdown item.
+// Shows progress (turns, cost, elapsed) when available, followed by prompt excerpt.
+func formatSessionSubtitle(sess *session.SessionInfo) string {
+	var parts []string
+
+	// Progress prefix: only show when session has started doing work
+	if sess.Progress.TurnCount > 0 || sess.Progress.TotalCostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("T:%d $%.4f", sess.Progress.TurnCount, sess.Progress.TotalCostUSD))
+	}
+
+	// Elapsed time since creation (only when set and within a reasonable range)
+	if !sess.CreatedAt.IsZero() && time.Since(sess.CreatedAt) < 365*24*time.Hour {
+		parts = append(parts, timeAgo(sess.CreatedAt))
+	}
+
+	// Build prefix
+	prefix := ""
+	if len(parts) > 0 {
+		prefix = strings.Join(parts, " ") + " | "
+	}
+
+	// Remaining budget for prompt (use runewidth for correct column count)
+	maxPromptLen := 40 - runewidth.StringWidth(prefix)
+	if maxPromptLen < 10 {
+		maxPromptLen = 10
+	}
+
+	return prefix + truncate(sess.Prompt, maxPromptLen)
 }
 
 // refreshHistorySessions loads history sessions from disk asynchronously.
@@ -443,23 +496,24 @@ func timeAgo(t time.Time) string {
 // generateDropdownTitle creates a short title from a prompt for dropdown display.
 func generateDropdownTitle(prompt string, maxLen int) string {
 	words := strings.Fields(prompt)
-	var b strings.Builder
+	var parts []string
+	cols := 0
 	for _, w := range words {
-		if b.Len()+len(w)+1 > maxLen {
+		wWidth := runewidth.StringWidth(w)
+		needed := wWidth
+		if cols > 0 {
+			needed++ // space separator
+		}
+		if cols+needed > maxLen {
 			break
 		}
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(w)
+		parts = append(parts, w)
+		cols += needed
 	}
-	if b.Len() == 0 && prompt != "" {
-		if len(prompt) > maxLen-3 {
-			return prompt[:maxLen-3] + "..."
-		}
-		return prompt
+	if len(parts) == 0 && prompt != "" {
+		return truncate(prompt, maxLen)
 	}
-	return b.String()
+	return strings.Join(parts, " ")
 }
 
 // refreshFileTree gathers worktree context for the file tree display.
@@ -557,6 +611,10 @@ type (
 		branch       string
 		deleteBranch bool
 	}
+	// tmuxWindowMsg carries the result of opening a new tmux window.
+	tmuxWindowMsg struct{ err error }
+	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
+	toastExpireMsg struct{}
 )
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.
@@ -565,4 +623,34 @@ type RouteProposal = struct {
 	Worktree  string
 	Parent    string
 	Reasoning string
+}
+
+// addToast adds a notification and schedules expiry if this is the first toast.
+func (m *Model) addToast(message string, level ToastLevel) tea.Cmd {
+	m.toasts.Add(message, level)
+	// Schedule a tick to check for expiration.
+	// We schedule at the earliest expiration time of any active toast.
+	return m.scheduleToastExpiry()
+}
+
+// scheduleToastExpiry schedules a tea.Tick at the earliest toast expiration time.
+func (m *Model) scheduleToastExpiry() tea.Cmd {
+	if !m.toasts.HasToasts() {
+		return nil
+	}
+	// Find the earliest expiration
+	earliest := m.toasts.toasts[0].CreatedAt.Add(m.toasts.toasts[0].Duration)
+	for _, t := range m.toasts.toasts[1:] {
+		exp := t.CreatedAt.Add(t.Duration)
+		if exp.Before(earliest) {
+			earliest = exp
+		}
+	}
+	delay := time.Until(earliest)
+	if delay < 0 {
+		delay = 0
+	}
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return toastExpireMsg{}
+	})
 }

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -19,7 +21,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle task modal first
+		// Handle help overlay first (highest visual priority)
+		if m.focus == FocusHelp {
+			return m.handleHelpOverlay(msg)
+		}
+		// Handle task modal
 		if m.taskModal.IsVisible() {
 			return m.handleTaskModal(msg)
 		}
@@ -37,6 +43,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.helpOverlay.SetSize(msg.Width, msg.Height)
 		// Update dropdown widths
 		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
 		m.sessionDropdown.SetWidth(m.width / 2)
@@ -130,8 +137,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
-		m.lastError = msg.Error()
-		return m, nil
+		cmd := m.addToast(msg.Error(), ToastError)
+		return m, cmd
 
 	case promptInputMsg:
 		// Input completed
@@ -172,16 +179,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeOpResultMsg:
 		if msg.err != nil {
-			m.lastError = msg.err.Error()
+			cmds = append(cmds, m.addToast(msg.err.Error(), ToastError))
+		} else if len(msg.messages) > 0 {
+			cmds = append(cmds, m.addToast("Worktree operation completed", ToastSuccess))
 		}
 		m.worktreeOpMessages = msg.messages
-		return m, m.refreshWorktrees()
+		return m, tea.Batch(append(cmds, m.refreshWorktrees())...)
 
 	case editorResultMsg:
 		if msg.err != nil {
-			m.lastError = "Failed to open editor: " + msg.err.Error()
+			cmds = append(cmds, m.addToast("Failed to open editor: "+msg.err.Error(), ToastError))
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
+
+	case tmuxWindowMsg:
+		if msg.err != nil {
+			cmds = append(cmds, m.addToast("Failed to open tmux window: "+msg.err.Error(), ToastError))
+		}
+		return m, tea.Batch(cmds...)
 
 	case taskWorktreeCreatedMsg:
 		m.worktreeOpMessages = msg.messages
@@ -200,6 +215,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Continue ticking for running tool timer animation
 		return m, tickCmd()
+
+	case toastExpireMsg:
+		m.toasts.Tick(time.Now())
+		// If toasts remain, schedule the next expiry check
+		if m.toasts.HasToasts() {
+			expiryCmd := m.scheduleToastExpiry()
+			return m, expiryCmd
+		}
+		return m, nil
 	}
 
 	return m, tea.Batch(cmds...)
@@ -207,8 +231,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyPress handles key presses in normal mode (not input, not dropdown).
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle quit confirmation at the top
+	if m.confirmQuit {
+		m.confirmQuit = false
+		switch msg.String() {
+		case "q", "y", "ctrl+c":
+			return m, tea.Quit
+		default:
+			toastCmd := m.addToast("Quit cancelled", ToastInfo)
+			return m, toastCmd
+		}
+	}
+
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "?":
+		// Open help overlay
+		m.helpOverlay.previousFocus = m.focus
+		m.helpOverlay.SetSize(m.width, m.height)
+		sections := buildHelpSections(&m)
+		m.helpOverlay.SetSections(sections)
+		m.focus = FocusHelp
+		return m, nil
+
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "q":
+		// Check for active sessions
+		var activeSessions []session.SessionInfo
+		allSessions := m.sessionManager.GetAllSessions()
+		for i := range allSessions {
+			if !allSessions[i].Status.IsTerminal() {
+				activeSessions = append(activeSessions, allSessions[i])
+			}
+		}
+		if len(activeSessions) > 0 {
+			m.confirmQuit = true
+			toastMsg := fmt.Sprintf("%d active session(s). Press 'q' or 'y' to confirm quit, any other key to cancel", len(activeSessions))
+			toastCmd := m.addToast(toastMsg, ToastInfo)
+			return m, toastCmd
+		}
 		return m, tea.Quit
 
 	case "f2":
@@ -237,7 +299,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "alt+s":
 		// In tmux mode, Alt-S does nothing (no dropdown)
 		if m.sessionManager.IsInTmuxMode() {
-			return m, nil
+			toastCmd := m.addToast("Sessions are in tmux windows; use prefix+w to list", ToastInfo)
+			return m, toastCmd
 		}
 		// TUI mode: open session dropdown
 		m.sessionDropdown.Open()
@@ -286,6 +349,22 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
+		// Split pane: open selected file in editor
+		if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
+			filePath := m.fileTree.AbsSelectedPath()
+			if filePath == "" {
+				toastCmd := m.addToast("No file selected", ToastInfo)
+				return m, toastCmd
+			}
+			fileName := filepath.Base(filePath)
+			editor := m.editor
+			toastCmd := m.addToast("Opening "+fileName+" in editor", ToastSuccess)
+			return m, tea.Batch(toastCmd, func() tea.Msg {
+				cmd := exec.Command(editor, filePath)
+				err := cmd.Start()
+				return editorResultMsg{err: err}
+			})
+		}
 		// In tmux mode, Enter switches to the selected window
 		if m.sessionManager.IsInTmuxMode() {
 			// Get the currently selected session
@@ -310,7 +389,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						return nil
 					}
 				}
-				m.lastError = "Session has no tmux window name"
+				// No toast for missing tmux window name - it's a rare edge case
+			} else {
+				toastCmd := m.addToast("No sessions to switch to", ToastInfo)
+				return m, toastCmd
 			}
 		}
 		return m, nil
@@ -340,7 +422,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("No repository loaded", ToastError)
+		return m, toastCmd
 
 	case "t":
 		// New task (prompt-first flow with AI routing)
@@ -358,7 +441,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "b":
 		// Start builder
@@ -369,7 +453,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "e":
 		// Open editor for worktree
@@ -380,13 +465,32 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return editorResultMsg{err: err}
 			}
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
+
+	case "w":
+		// Open new tmux window in worktree directory
+		if !session.IsInsideTmux() || !session.IsTmuxAvailable() {
+			toastCmd := m.addToast("Not inside tmux", ToastInfo)
+			return m, toastCmd
+		}
+		if wt := m.selectedWorktree(); wt != nil {
+			wtPath := wt.Path
+			toastCmd := m.addToast("Opening tmux window in "+filepath.Base(wtPath), ToastSuccess)
+			return m, tea.Batch(toastCmd, func() tea.Msg {
+				cmd := exec.Command("tmux", "new-window", "-c", wtPath)
+				err := cmd.Run()
+				return tmuxWindowMsg{err: err}
+			})
+		}
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "s":
 		// Stop session with confirmation (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
-			m.lastError = "Close tmux windows directly with prefix+& or 'exit' command"
-			return m, nil
+			toastCmd := m.addToast("Close tmux windows directly with prefix+& or 'exit' command", ToastInfo)
+			return m, toastCmd
 		}
 		if sess := m.selectedSession(); sess != nil {
 			sessID := sess.ID
@@ -404,13 +508,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return nil
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("No active session to stop (Alt-S to select)", ToastInfo)
+		return m, toastCmd
 
 	case "f":
 		// Follow-up on idle session (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
-			m.lastError = "Follow-ups must be done in the tmux window directly"
-			return m, nil
+			toastCmd := m.addToast("Follow-ups must be done in the tmux window directly", ToastInfo)
+			return m, toastCmd
 		}
 		if sess := m.selectedSession(); sess != nil && sess.Status == session.StatusIdle {
 			return m.promptInput("Follow-up: ", func(message string) tea.Cmd {
@@ -422,7 +527,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+		return m, toastCmd
 
 	case "a":
 		// Approve plan and start builder session
@@ -438,15 +544,20 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
 			sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt)
 			if err != nil {
-				m.lastError = err.Error()
-				return m, nil
+				toastCmd := m.addToast(err.Error(), ToastError)
+				return m, toastCmd
+			}
+			if m.viewingSessionID != "" {
+				m.scrollPositions[m.viewingSessionID] = m.scrollOffset
 			}
 			m.viewingSessionID = sessionID
+			m.scrollOffset = 0 // New builder session starts at bottom
 			m.sessions = m.sessionManager.GetAllSessions()
 			m.updateSessionDropdown()
 			return m, nil
 		}
-		return m, nil
+		toastCmd := m.addToast("No plan ready to approve", ToastInfo)
+		return m, toastCmd
 
 	case "d":
 		// Delete worktree
@@ -467,16 +578,30 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			})
 		}
-		return m, nil
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
 
 	case "r":
 		// Refresh
 		return m, m.refreshWorktrees()
 
 	case "esc":
-		// Clear error and reset scroll
-		m.lastError = ""
+		// Reset scroll
 		m.scrollOffset = 0
+		return m, nil
+
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		idx := int(msg.String()[0]-'0') - 1
+		liveSessions := m.currentWorktreeSessions()
+		if idx >= len(liveSessions) {
+			toastCmd := m.addToast(fmt.Sprintf("No session #%s", msg.String()), ToastInfo)
+			return m, toastCmd
+		}
+		if m.sessionManager.IsInTmuxMode() {
+			m.selectedSessionIndex = idx
+			return m, nil
+		}
+		m.switchViewingSession(liveSessions[idx].ID)
 		return m, nil
 	}
 
@@ -504,11 +629,47 @@ func (m *Model) scrollToBottom() {
 	m.scrollOffset = 0
 }
 
+// switchViewingSession saves the scroll position for the current session,
+// sets the viewing session to newID, and restores the saved scroll position
+// (or 0 if none was saved).
+func (m *Model) switchViewingSession(newID session.SessionID) {
+	if m.viewingSessionID != "" {
+		m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+	}
+	m.viewingSessionID = newID
+	m.scrollOffset = m.scrollPositions[newID] // zero-value (0) if not found
+	m.viewingHistoryData = nil
+}
+
 // handleDropdownMode handles key presses when a dropdown is open.
 func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "alt+w", "alt+s":
-		// Close dropdown
+	case "?":
+		// Open help overlay
+		m.helpOverlay.previousFocus = m.focus
+		m.helpOverlay.SetSize(m.width, m.height)
+		sections := buildHelpSections(&m)
+		m.helpOverlay.SetSections(sections)
+		m.focus = FocusHelp
+		return m, nil
+
+	case "alt+w", "alt+s":
+		// Always close dropdown immediately
+		m.worktreeDropdown.Close()
+		m.sessionDropdown.Close()
+		m.focus = FocusOutput
+		return m, nil
+
+	case "esc":
+		// If filter is active, clear it first. If already empty, close dropdown.
+		dd := m.worktreeDropdown
+		if m.focus == FocusSessionDropdown {
+			dd = m.sessionDropdown
+		}
+		if dd.FilterText() != "" {
+			dd.ClearFilter()
+			return m, nil
+		}
 		m.worktreeDropdown.Close()
 		m.sessionDropdown.Close()
 		m.focus = FocusOutput
@@ -530,15 +691,22 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "backspace":
+		// Remove last filter character
+		if m.focus == FocusWorktreeDropdown {
+			m.worktreeDropdown.BackspaceFilter()
+		} else {
+			m.sessionDropdown.BackspaceFilter()
+		}
+		return m, nil
+
 	case "enter":
 		if m.focus == FocusWorktreeDropdown {
 			// Worktree selected - update session dropdown
 			m.worktreeDropdown.Close()
 			m.updateSessionDropdown()
-			// Clear viewing session when switching worktrees
-			m.viewingSessionID = ""
-			m.viewingHistoryData = nil
-			m.scrollOffset = 0
+			// Save scroll position and clear viewing session when switching worktrees
+			m.switchViewingSession("")
 			// Refresh file tree and history for new worktree
 			m.focus = FocusOutput
 			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())
@@ -549,12 +717,10 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Can't select separator
 				return m, nil
 			}
-			m.viewingSessionID = session.SessionID(item.ID)
-			m.scrollOffset = 0 // Reset scroll when switching sessions
+			m.switchViewingSession(session.SessionID(item.ID))
 			// Check if this is a live session or history
 			if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
-				// Live session
-				m.viewingHistoryData = nil
+				// Live session -- viewingHistoryData already nil from switchViewingSession
 			} else {
 				// History session - load from store
 				wt := m.selectedWorktree()
@@ -562,9 +728,6 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
 					if err == nil {
 						m.viewingHistoryData = histData
-					} else {
-						m.lastError = "Failed to load history: " + err.Error()
-						m.viewingHistoryData = nil
 					}
 				}
 			}
@@ -575,28 +738,36 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	}
 
-	return m, nil
+	default:
+		// Type-to-filter: route printable characters to the dropdown
+		keyStr := msg.String()
+		var r rune
+		if len(keyStr) == 1 {
+			r = rune(keyStr[0])
+		} else if len(msg.Runes) == 1 {
+			r = msg.Runes[0]
+		}
+		if r != 0 && r >= ' ' && r != 127 { // printable, non-control
+			if m.focus == FocusWorktreeDropdown {
+				m.worktreeDropdown.AppendFilter(r)
+			} else {
+				m.sessionDropdown.AppendFilter(r)
+			}
+			return m, nil
+		}
+		return m, nil
+	}
 }
 
 // handleInputMode handles key presses in input mode.
 // Tab cycles focus between text input and buttons.
 // Enter activates the focused element.
 func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "tab":
-		// Cycle focus forward
-		m.inputArea.CycleForward()
-		return m, nil
+	action := m.inputArea.HandleKey(msg)
 
-	case "shift+tab":
-		// Cycle focus backward
-		m.inputArea.CycleBackward()
-		return m, nil
-
-	case "ctrl+enter":
-		// Submit from any focus
+	switch action {
+	case TextAreaSubmit:
 		value := m.inputArea.Value()
 		if value == "" {
 			return m, nil
@@ -606,91 +777,17 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return promptInputMsg{value}
 		}
 
-	case "enter":
-		// Action depends on current focus
-		switch m.inputArea.Focus() {
-		case FocusTextInput:
-			// Insert newline when editing text
-			m.inputArea.InsertNewline()
-			return m, nil
-		case FocusSendButton:
-			// Submit the prompt
-			value := m.inputArea.Value()
-			if value == "" {
-				return m, nil // Don't submit empty
-			}
-			m.inputArea.Reset()
-			return m, func() tea.Msg {
-				return promptInputMsg{value}
-			}
-		case FocusCancelButton:
-			// Cancel
-			m.inputMode = false
-			m.inputArea.Reset()
-			m.inputHandler = nil
-			return m, nil
-		}
-		return m, nil
-
-	case "esc":
+	case TextAreaCancel:
 		m.inputMode = false
 		m.inputArea.Reset()
 		m.inputHandler = nil
 		return m, nil
 
-	case "backspace":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.DeleteChar()
-		}
-		return m, nil
-
-	case "delete":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.DeleteCharForward()
-		}
-		return m, nil
-
-	case "up":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorUp()
-		}
-		return m, nil
-
-	case "down":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorDown()
-		}
-		return m, nil
-
-	case "left":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorLeft()
-		}
-		return m, nil
-
-	case "right":
-		if m.inputArea.Focus() == FocusTextInput {
-			m.inputArea.MoveCursorRight()
-		}
-		return m, nil
-
-	case "ctrl+c":
+	case TextAreaQuit:
 		return m, tea.Quit
 
 	default:
-		// Only insert characters when text input is focused
-		if m.inputArea.Focus() == FocusTextInput {
-			keyStr := msg.String()
-			if keyStr == "space" {
-				m.inputArea.InsertChar(' ')
-			} else if len(keyStr) == 1 {
-				m.inputArea.InsertChar(rune(keyStr[0]))
-			} else if len(msg.Runes) > 0 {
-				for _, r := range msg.Runes {
-					m.inputArea.InsertChar(r)
-				}
-			}
-		}
+		// TextAreaHandled or TextAreaUnhandled -- no Model-level action needed
 		return m, nil
 	}
 }
@@ -714,14 +811,19 @@ func (m Model) startSession(sessionType session.SessionType, prompt string) (tea
 
 	sessionID, err := m.sessionManager.StartSession(sessionType, wt.Path, prompt)
 	if err != nil {
-		m.lastError = err.Error()
-		return m, nil
+		toastCmd := m.addToast(err.Error(), ToastError)
+		return m, toastCmd
 	}
 
+	if m.viewingSessionID != "" {
+		m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+	}
 	m.viewingSessionID = sessionID
+	m.scrollOffset = 0 // New session starts at bottom
 	m.sessions = m.sessionManager.GetAllSessions()
 	m.updateSessionDropdown()
-	return m, nil
+	toastCmd := m.addToast("Session started: "+string(sessionID)[:12], ToastSuccess)
+	return m, toastCmd
 }
 
 // createWorktree creates a new worktree asynchronously with captured output.
@@ -731,8 +833,8 @@ func (m Model) createWorktree(branch string) (tea.Model, tea.Cmd) {
 	}
 
 	if m.repoName == "" {
-		m.lastError = "No repository selected"
-		return m, nil
+		toastCmd := m.addToast("No repository selected", ToastError)
+		return m, toastCmd
 	}
 
 	// Show pending message
@@ -770,9 +872,10 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 
 	// Clear viewing session if it belongs to this worktree
 	if w := m.selectedWorktree(); w != nil && w.Branch == branch {
-		m.viewingSessionID = ""
-		m.viewingHistoryData = nil
-		m.scrollOffset = 0
+		// Save scroll position before clearing (session being deleted,
+		// so the saved position will be stale, but that's fine -- it's
+		// a no-op to save for a soon-to-be-deleted session).
+		m.switchViewingSession("")
 	}
 
 	// Show pending message
@@ -807,22 +910,10 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch state {
 	case TaskModalInput:
 		ta := m.taskModal.TextArea()
-		switch msg.String() {
-		case "tab":
-			ta.CycleForward()
-			return m, nil
+		action := ta.HandleKey(msg)
 
-		case "shift+tab":
-			ta.CycleBackward()
-			return m, nil
-
-		case "esc":
-			m.taskModal.Hide()
-			m.focus = FocusOutput
-			return m, nil
-
-		case "ctrl+enter":
-			// Submit from any focus
+		switch action {
+		case TextAreaSubmit:
 			prompt := m.taskModal.Prompt()
 			if prompt != "" {
 				return m, func() tea.Msg {
@@ -831,83 +922,15 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "enter":
-			// Action depends on current focus
-			switch ta.Focus() {
-			case FocusTextInput:
-				// Insert newline when editing text
-				ta.InsertNewline()
-				return m, nil
-			case FocusSendButton:
-				// Submit the prompt
-				prompt := m.taskModal.Prompt()
-				if prompt != "" {
-					return m, func() tea.Msg {
-						return taskRouteMsg{prompt: prompt}
-					}
-				}
-				return m, nil
-			case FocusCancelButton:
-				// Cancel
-				m.taskModal.Hide()
-				m.focus = FocusOutput
-				return m, nil
-			}
+		case TextAreaCancel:
+			m.taskModal.Hide()
+			m.focus = FocusOutput
 			return m, nil
 
-		case "backspace":
-			if ta.Focus() == FocusTextInput {
-				ta.DeleteChar()
-			}
-			return m, nil
-
-		case "delete":
-			if ta.Focus() == FocusTextInput {
-				ta.DeleteCharForward()
-			}
-			return m, nil
-
-		case "up":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorUp()
-			}
-			return m, nil
-
-		case "down":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorDown()
-			}
-			return m, nil
-
-		case "left":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorLeft()
-			}
-			return m, nil
-
-		case "right":
-			if ta.Focus() == FocusTextInput {
-				ta.MoveCursorRight()
-			}
-			return m, nil
-
-		case "ctrl+c":
+		case TextAreaQuit:
 			return m, tea.Quit
 
 		default:
-			// Only insert characters when text input is focused
-			if ta.Focus() == FocusTextInput {
-				keyStr := msg.String()
-				if keyStr == "space" {
-					ta.InsertChar(' ')
-				} else if len(keyStr) == 1 {
-					ta.InsertChar(rune(keyStr[0]))
-				} else if len(msg.Runes) > 0 {
-					for _, r := range msg.Runes {
-						ta.InsertChar(r)
-					}
-				}
-			}
 			return m, nil
 		}
 
@@ -1013,11 +1036,13 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 	m.taskModal.Hide()
 	m.focus = FocusOutput
 
+	toastCmd := m.addToast("Task confirmed, starting session...", ToastSuccess)
+
 	// If creating a new worktree, do that first
 	if msg.isNew {
 		if m.repoName == "" {
-			m.lastError = "No repository selected"
-			return m, nil
+			errToastCmd := m.addToast("No repository selected", ToastError)
+			return m, errToastCmd
 		}
 
 		// Show pending message
@@ -1030,7 +1055,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		worktreeName := msg.worktree
 		parent := msg.parent
 		prompt := msg.prompt
-		return m, func() tea.Msg {
+		return m, tea.Batch(toastCmd, func() tea.Msg {
 			var buf bytes.Buffer
 			output := wt.NewOutput(&buf, false)
 			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
@@ -1056,12 +1081,13 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 				worktreeName: worktreeName,
 				prompt:       prompt,
 			}
-		}
+		})
 	}
 
 	// Use existing worktree - select it and start planner
 	m.worktreeDropdown.SelectByID(msg.worktree)
-	return m.startSession(session.SessionTypePlanner, msg.prompt)
+	model, cmd := m.startSession(session.SessionTypePlanner, msg.prompt)
+	return model, tea.Batch(toastCmd, cmd)
 }
 
 func clamp(v, lo, hi int) int {
@@ -1072,4 +1098,24 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// handleHelpOverlay handles key presses when the help overlay is visible.
+func (m Model) handleHelpOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "?", "esc":
+		// Close help, restore previous focus
+		m.focus = m.helpOverlay.previousFocus
+		return m, nil
+	case "up", "k":
+		m.helpOverlay.ScrollUp()
+		return m, nil
+	case "down", "j":
+		m.helpOverlay.ScrollDown()
+		return m, nil
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	}
+	// Ignore all other keys while help is open
+	return m, nil
 }
