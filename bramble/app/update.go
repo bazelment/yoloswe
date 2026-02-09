@@ -314,9 +314,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Output scrolling (TUI mode) or session list navigation (tmux mode)
 	case "up", "k":
 		if m.sessionManager.IsInTmuxMode() {
-			// Tmux mode: navigate session list
-			if m.selectedSessionIndex > 0 {
-				m.selectedSessionIndex--
+			if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
+				// Tmux mode + split pane: navigate file tree
+				m.fileTree.MoveUp()
+			} else {
+				// Tmux mode: navigate session list
+				if m.selectedSessionIndex > 0 {
+					m.selectedSessionIndex--
+				}
 			}
 		} else if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
 			// Split pane: navigate file tree
@@ -329,19 +334,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "down", "j":
 		if m.sessionManager.IsInTmuxMode() {
-			// Tmux mode: navigate session list
-			// Find number of sessions for current worktree
-			var sessionCount int
-			if wt := m.selectedWorktree(); wt != nil {
-				allSessions := m.sessionManager.GetAllSessions()
-				for i := range allSessions {
-					if allSessions[i].WorktreePath == wt.Path {
-						sessionCount++
+			if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
+				// Tmux mode + split pane: navigate file tree
+				m.fileTree.MoveDown()
+			} else {
+				// Tmux mode: navigate session list
+				var sessionCount int
+				if wt := m.selectedWorktree(); wt != nil {
+					allSessions := m.sessionManager.GetAllSessions()
+					for i := range allSessions {
+						if allSessions[i].WorktreePath == wt.Path {
+							sessionCount++
+						}
 					}
 				}
-			}
-			if m.selectedSessionIndex < sessionCount-1 {
-				m.selectedSessionIndex++
+				if m.selectedSessionIndex < sessionCount-1 {
+					m.selectedSessionIndex++
+				}
 			}
 		} else if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
 			// Split pane: navigate file tree

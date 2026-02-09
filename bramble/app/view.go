@@ -321,8 +321,15 @@ func minInt(a, b int) int {
 
 // renderCenter renders the main center area (session output + input).
 func (m Model) renderCenter(width, height int) string {
-	// In tmux mode, always show session list (no split pane)
+	// In tmux mode, show session list (with optional file tree split)
 	if m.sessionManager.IsInTmuxMode() {
+		if m.splitPane.IsSplit() {
+			m.fileTree.SetFocused(m.splitPane.FocusLeft())
+			rightWidth := m.splitPane.RightWidth(width)
+			leftContent := m.fileTree.Render(m.splitPane.LeftWidth(width), height)
+			rightContent := m.renderSessionListView(rightWidth, height)
+			return m.splitPane.Render(leftContent, rightContent, width, height)
+		}
 		return m.renderSessionListView(width, height)
 	}
 
@@ -626,7 +633,7 @@ func (m Model) renderStatusBar() string {
 		if hasWorktree {
 			hints = append(hints, "[p] Plan", "[b] Build")
 		}
-		hints = append(hints, "[Alt-W] Worktree", "[?]help", "[q] Quit")
+		hints = append(hints, "[F2]split", "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
