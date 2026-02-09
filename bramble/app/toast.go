@@ -149,17 +149,17 @@ func (tm *ToastManager) View() string {
 
 var (
 	toastSuccessStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("22")). // dark green background
-				Foreground(lipgloss.Color("10")). // bright green text
+				Background(lipgloss.AdaptiveColor{Light: "194", Dark: "22"}).
+				Foreground(lipgloss.AdaptiveColor{Light: "22", Dark: "10"}).
 				Padding(0, 1)
 
 	toastInfoStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("17")). // dark blue background
-			Foreground(lipgloss.Color("14")). // cyan text
+			Background(lipgloss.AdaptiveColor{Light: "153", Dark: "17"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "17", Dark: "14"}).
 			Padding(0, 1)
 
 	toastErrorStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("52")). // dark red background
-			Foreground(lipgloss.Color("9")).  // bright red text
+			Background(lipgloss.AdaptiveColor{Light: "217", Dark: "52"}).
+			Foreground(lipgloss.AdaptiveColor{Light: "52", Dark: "9"}).
 			Padding(0, 1)
 )

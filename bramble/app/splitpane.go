@@ -73,7 +73,7 @@ func (sp *SplitPane) RightWidth(totalWidth int) int {
 }
 
 var dividerStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("240"))
+	Foreground(borderColor)
 
 // Render composites left and right content into a split or single layout.
 // When PaneLayoutSingle, only rightContent is shown.
