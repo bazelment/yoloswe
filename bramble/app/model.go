@@ -12,6 +12,7 @@ import (
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
+	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 // FocusArea indicates which area has focus.
@@ -41,6 +42,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	scrollPositions       map[session.SessionID]int
 	viewingHistoryData    *session.StoredSession
 	sessionManager        *session.Manager
+	taskRouter            *taskrouter.Router
 	mdRenderer            *MarkdownRenderer
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
@@ -72,7 +74,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 // render shows branch names immediately without waiting for an async refresh.
 // width/height set the initial terminal dimensions so the first View() can
 // render a proper layout without waiting for WindowSizeMsg.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, initialWorktrees []wt.Worktree, width, height int) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -85,6 +87,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		repoName:         repoName,
 		editor:           editor,
 		sessionManager:   sessionManager,
+		taskRouter:       taskRouter,
 		focus:            FocusOutput,
 		width:            width,
 		height:           height,

@@ -125,7 +125,7 @@ func TestToastViaModelUpdate(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
 
 	// Simulate an error message
 	newModel, cmd := m.Update(errMsg{fmt.Errorf("test error")})

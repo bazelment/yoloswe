@@ -9,6 +9,7 @@ go_library(
         "//bramble/app",
         "//bramble/session",
         "//wt",
+        "//wt/taskrouter",
         "@com_github_charmbracelet_bubbletea//:bubbletea",
         "@com_github_spf13_cobra//:cobra",
         "@org_golang_x_term//:term",
