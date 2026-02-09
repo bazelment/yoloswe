@@ -37,17 +37,6 @@ func (m Model) renderWelcome(width, height int) string {
 	wt := m.selectedWorktree()
 	inTmux := m.sessionManager.IsInTmuxMode()
 
-	// Show worktree operation messages if any (e.g. "Creating worktree...")
-	if len(m.worktreeOpMessages) > 0 {
-		b.WriteString("\n")
-		for _, msg := range m.worktreeOpMessages {
-			b.WriteString("  ")
-			b.WriteString(msg)
-			b.WriteString("\n")
-		}
-		return b.String()
-	}
-
 	b.WriteString("\n")
 
 	if !hasWorktrees {
@@ -96,6 +85,16 @@ func (m Model) renderWelcome(width, height int) string {
 			}
 			b.WriteString("\n")
 			b.WriteString(renderTimeline(timeline, maxTimelineLines))
+		}
+	}
+
+	// Show worktree operation messages if any (e.g. "Creating worktree...")
+	if len(m.worktreeOpMessages) > 0 {
+		b.WriteString("\n")
+		for _, msg := range m.worktreeOpMessages {
+			b.WriteString("  ")
+			b.WriteString(msg)
+			b.WriteString("\n")
 		}
 	}
 
