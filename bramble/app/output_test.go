@@ -1040,7 +1040,7 @@ func TestWindowKeyOutsideTmux(t *testing.T) {
 	})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, []wt.Worktree{
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, 80, 24)
 	m.worktreeDropdown.SelectIndex(0)
@@ -1065,7 +1065,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 		})
 		defer mgr.Close()
 
-		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, []wt.Worktree{
+		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
 			{Branch: "main", Path: "/tmp/wt/main"},
 		}, 80, 24)
 		m.worktreeDropdown.SelectIndex(0)
@@ -1080,7 +1080,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 		})
 		defer mgr.Close()
 
-		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, []wt.Worktree{
+		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
 			{Branch: "main", Path: "/tmp/wt/main"},
 		}, 80, 24)
 		m.worktreeDropdown.SelectIndex(0)
