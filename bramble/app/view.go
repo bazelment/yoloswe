@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
@@ -680,6 +681,22 @@ func (m Model) renderStatusBar() string {
 // formatKeyHints formats a key-action pair as "[key] action".
 func formatKeyHints(key, action string) string {
 	return "[" + key + "] " + action
+}
+
+// printableRune extracts a printable rune from a key message, returning false
+// if the key does not represent a single printable character.
+func printableRune(msg tea.KeyMsg) (rune, bool) {
+	keyStr := msg.String()
+	var r rune
+	if len(keyStr) == 1 {
+		r = rune(keyStr[0])
+	} else if len(msg.Runes) == 1 {
+		r = msg.Runes[0]
+	}
+	if r != 0 && r >= ' ' && r != 127 {
+		return r, true
+	}
+	return 0, false
 }
 
 // statusIcon returns a status icon for the session status.

@@ -739,14 +739,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		// Type-to-filter: route printable characters to the dropdown
-		keyStr := msg.String()
-		var r rune
-		if len(keyStr) == 1 {
-			r = rune(keyStr[0])
-		} else if len(msg.Runes) == 1 {
-			r = msg.Runes[0]
-		}
-		if r != 0 && r >= ' ' && r != 127 { // printable, non-control
+		if r, ok := printableRune(msg); ok {
 			if m.focus == FocusWorktreeDropdown {
 				m.worktreeDropdown.AppendFilter(r)
 			} else {

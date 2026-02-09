@@ -125,14 +125,7 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		default:
 			// Type-to-filter: printable characters
-			keyStr := msg.String()
-			var r rune
-			if len(keyStr) == 1 {
-				r = rune(keyStr[0])
-			} else if len(msg.Runes) == 1 {
-				r = msg.Runes[0]
-			}
-			if r != 0 && r >= ' ' && r != 127 {
+			if r, ok := printableRune(msg); ok {
 				m.filterText += string(r)
 				m.applyFilter()
 				return m, nil

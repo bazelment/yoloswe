@@ -130,10 +130,10 @@ func (t *TextArea) Value() string {
 	return t.value
 }
 
-// Reset clears the text area and resets focus to text input.
+// Reset clears the text area content and resets focus to text input.
+// The placeholder is preserved since it is field metadata, not user state.
 func (t *TextArea) Reset() {
 	t.value = ""
-	t.placeholder = ""
 	t.cursorPos = 0
 	t.scrollOffset = 0
 	t.focus = FocusTextInput
@@ -265,18 +265,35 @@ func (t *TextArea) LineCount() int {
 	return len(t.getLines())
 }
 
-// wrapLine wraps a single line to fit the width (rune-based).
+// wrapLine wraps a single line to fit the width (visual-width-based for CJK/emoji support).
 func (t *TextArea) wrapLine(line string, width int) []string {
-	runes := []rune(line)
-	if width <= 0 || len(runes) <= width {
+	if width <= 0 || runewidth.StringWidth(line) <= width {
 		return []string{line}
 	}
 
+	runes := []rune(line)
 	var wrapped []string
-	for len(runes) > width {
-		// Find break point (prefer space)
-		breakAt := width
-		for i := width - 1; i > 0; i-- {
+	for len(runes) > 0 {
+		// Find how many runes fit within the visual width
+		visualW := 0
+		fitCount := 0
+		for i, r := range runes {
+			rw := runewidth.RuneWidth(r)
+			if visualW+rw > width {
+				fitCount = i
+				break
+			}
+			visualW += rw
+			fitCount = i + 1
+		}
+		if fitCount == 0 {
+			// Single character wider than width; take it anyway to avoid infinite loop
+			fitCount = 1
+		}
+
+		// Prefer breaking at a space
+		breakAt := fitCount
+		for i := fitCount - 1; i > 0; i-- {
 			if runes[i] == ' ' {
 				breakAt = i + 1
 				break
@@ -284,9 +301,6 @@ func (t *TextArea) wrapLine(line string, width int) []string {
 		}
 		wrapped = append(wrapped, string(runes[:breakAt]))
 		runes = runes[breakAt:]
-	}
-	if len(runes) > 0 {
-		wrapped = append(wrapped, string(runes))
 	}
 	return wrapped
 }
@@ -388,11 +402,10 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 
 	default:
 		if t.Focus() == FocusTextInput {
-			keyStr := msg.String()
-			if keyStr == "space" {
+			if msg.String() == "space" {
 				t.InsertChar(' ')
-			} else if len(keyStr) == 1 {
-				t.InsertChar(rune(keyStr[0]))
+			} else if r, ok := printableRune(msg); ok {
+				t.InsertChar(r)
 			} else if len(msg.Runes) > 0 {
 				for _, r := range msg.Runes {
 					t.InsertChar(r)
@@ -492,8 +505,8 @@ func (t *TextArea) View() string {
 			}
 		}
 
-		// Pad line to width (rune-based)
-		for utf8.RuneCountInString(line) < contentWidth {
+		// Pad line to width (visual-width-based for CJK/emoji support)
+		for runewidth.StringWidth(line) < contentWidth {
 			line += " "
 		}
 
