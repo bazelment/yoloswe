@@ -150,11 +150,7 @@ func (m Model) buildTimeline() []timelineEntry {
 		sess := &liveSessions[i]
 		liveIDs[sess.ID] = true
 
-		icon := "📋"
-		if sess.Type == session.SessionTypeBuilder {
-			icon = "🔨"
-		}
-
+		icon := sessionTypeIcon(sess.Type)
 		event := sessionStatusEvent(sess.Status)
 
 		// Pick the most relevant timestamp
@@ -188,11 +184,7 @@ func (m Model) buildTimeline() []timelineEntry {
 				continue
 			}
 
-			icon := "📋"
-			if hist.Type == session.SessionTypeBuilder {
-				icon = "🔨"
-			}
-
+			icon := sessionTypeIcon(hist.Type)
 			event := sessionStatusEvent(hist.Status)
 
 			ts := hist.CreatedAt
@@ -216,6 +208,15 @@ func (m Model) buildTimeline() []timelineEntry {
 	})
 
 	return entries
+}
+
+// sessionTypeIcon returns a fixed-width ASCII icon for a session type.
+// Uses ASCII glyphs instead of emoji to avoid inconsistent terminal widths.
+func sessionTypeIcon(t session.SessionType) string {
+	if t == session.SessionTypeBuilder {
+		return "[B]"
+	}
+	return "[P]"
 }
 
 // sessionStatusEvent maps a session status to a human-readable event name.
@@ -253,6 +254,13 @@ func renderTimeline(entries []timelineEntry, maxLines int) string {
 
 	for _, e := range visible {
 		styledEvent := styleTimelineEvent(e.event)
+		// Pad event column to fixed visual width (9 = len("Completed"))
+		// so columns align regardless of status string length.
+		eventVisual := runewidth.StringWidth(stripAnsi(styledEvent))
+		eventPad := 9 - eventVisual
+		if eventPad > 0 {
+			styledEvent += strings.Repeat(" ", eventPad)
+		}
 		promptExcerpt := truncate(e.prompt, 40)
 		b.WriteString(fmt.Sprintf("  %s  %s  %s  %s\n",
 			e.icon,

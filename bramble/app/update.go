@@ -1064,10 +1064,11 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // routeTask runs the task router asynchronously.
 func (m Model) routeTask(prompt string) tea.Cmd {
-	// Capture fields needed by the closure.
+	// Capture all fields on the main goroutine to avoid data races.
+	// In particular, worktreeStatuses is a map that the Update loop mutates,
+	// so we snapshot the needed values here rather than reading the map in the
+	// async closure.
 	router := m.taskRouter
-	worktrees := m.worktrees
-	statuses := m.worktreeStatuses
 	repoName := m.repoName
 	ctx := m.ctx
 
@@ -1076,26 +1077,26 @@ func (m Model) routeTask(prompt string) tea.Cmd {
 		currentWT = w.Branch
 	}
 
-	return func() tea.Msg {
-		// Build enriched worktree info for the router
-		worktreeInfos := make([]taskrouter.WorktreeInfo, len(worktrees))
-		for i, wt := range worktrees {
-			info := taskrouter.WorktreeInfo{
-				Name: wt.Branch,
-				Path: wt.Path,
-			}
-			if statuses != nil {
-				if s, ok := statuses[wt.Branch]; ok {
-					info.IsDirty = s.IsDirty
-					info.IsAhead = s.Ahead > 0
-					info.PRState = s.PRState
-					info.IsMerged = s.PRState == "MERGED"
-					info.LastCommit = s.LastCommitMsg
-				}
-			}
-			worktreeInfos[i] = info
+	// Build enriched worktree info synchronously (main goroutine).
+	worktreeInfos := make([]taskrouter.WorktreeInfo, len(m.worktrees))
+	for i, wt := range m.worktrees {
+		info := taskrouter.WorktreeInfo{
+			Name: wt.Branch,
+			Path: wt.Path,
 		}
+		if m.worktreeStatuses != nil {
+			if s, ok := m.worktreeStatuses[wt.Branch]; ok {
+				info.IsDirty = s.IsDirty
+				info.IsAhead = s.Ahead > 0
+				info.PRState = s.PRState
+				info.IsMerged = s.PRState == "MERGED"
+				info.LastCommit = s.LastCommitMsg
+			}
+		}
+		worktreeInfos[i] = info
+	}
 
+	return func() tea.Msg {
 		req := taskrouter.RouteRequest{
 			Prompt:    prompt,
 			Worktrees: worktreeInfos,
