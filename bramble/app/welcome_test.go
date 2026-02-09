@@ -112,9 +112,9 @@ func TestWelcomeWorktreeOpMessages(t *testing.T) {
 
 	view := m.renderWelcome(80, 20)
 
-	// Should show operation messages instead of welcome
+	// Should show both welcome content and operation messages
 	assert.Contains(t, view, "Creating worktree")
-	assert.NotContains(t, view, "Welcome")
+	assert.Contains(t, view, "Welcome")
 }
 
 func TestRenderOutputAreaDelegatesToWelcome(t *testing.T) {
