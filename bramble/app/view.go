@@ -57,6 +57,21 @@ var (
 			BorderForeground(lipgloss.Color("240")).
 			BorderLeft(false).
 			BorderRight(false)
+
+	// Shared input box styles — keep interactive components visually consistent.
+	inputBoxBorderColor = lipgloss.Color("12")
+
+	// inputBoxStyle is for inline input components (TextArea, Dropdown overlays).
+	inputBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(inputBoxBorderColor).
+			Padding(0, 1)
+
+	// modalBoxStyle is for centered modal dialogs (TaskModal, RepoPicker).
+	modalBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(inputBoxBorderColor).
+			Padding(1, 2)
 )
 
 // View renders the model.
@@ -74,6 +89,10 @@ func (m Model) View() string {
 	topBarHeight := 1
 	statusBarHeight := 1
 	toastHeight := m.toasts.Height()
+	confirmHeight := 0
+	if m.focus == FocusConfirm && m.confirmPrompt != nil {
+		confirmHeight = 5 // message + blank line + hints + top/bottom borders
+	}
 	inputHeight := 0
 	if m.inputMode {
 		// Dynamic input height based on content (min 5, max 12 lines including border and status)
@@ -90,7 +109,7 @@ func (m Model) View() string {
 			inputHeight = maxInputHeight
 		}
 	}
-	centerHeight := m.height - topBarHeight - statusBarHeight - toastHeight - inputHeight - 2 // borders
+	centerHeight := m.height - topBarHeight - statusBarHeight - toastHeight - inputHeight - confirmHeight - 2 // borders
 
 	// Build components
 	topBar := m.renderTopBar()
@@ -115,6 +134,11 @@ func (m Model) View() string {
 		m.inputArea.SetMaxHeight(inputHeight - 2)
 		m.inputArea.SetPrompt(m.inputPrompt)
 		parts = append(parts, m.inputArea.View())
+	}
+
+	// Add confirm prompt if in confirm mode
+	if m.focus == FocusConfirm && m.confirmPrompt != nil {
+		parts = append(parts, m.confirmPrompt.View())
 	}
 
 	parts = append(parts, statusBar)
@@ -589,6 +613,8 @@ func (m Model) renderStatusBar() string {
 
 	if m.confirmQuit {
 		hints = []string{"[q/y] Confirm quit", "[any key] Cancel"}
+	} else if m.focus == FocusConfirm && m.confirmPrompt != nil {
+		hints = []string{"See prompt for keys", "[Esc] Cancel"}
 	} else if m.inputMode {
 		hints = []string{"[Tab] Switch", "[Enter] Send", "[Shift+Enter] Newline", "[Esc] Cancel", "[?]help"}
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
@@ -649,6 +675,11 @@ func (m Model) renderStatusBar() string {
 
 	bar := left + strings.Repeat(" ", padding) + right
 	return statusBarStyle.Width(m.width).Render(bar)
+}
+
+// formatKeyHints formats a key-action pair as "[key] action".
+func formatKeyHints(key, action string) string {
+	return "[" + key + "] " + action
 }
 
 // statusIcon returns a status icon for the session status.

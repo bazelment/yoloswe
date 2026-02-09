@@ -24,6 +24,7 @@ const (
 type TaskModal struct {
 	err            error
 	textArea       *TextArea
+	adjustTextArea *TextArea // for editing branch name in adjust state
 	proposal       *taskrouter.RouteProposal
 	adjustWorktree string
 	adjustParent   string
@@ -38,9 +39,16 @@ func NewTaskModal() *TaskModal {
 	ta.SetMinHeight(3)
 	ta.SetMaxHeight(8)
 	ta.SetLabels("Continue", "Cancel")
+
+	adjustTA := NewTextArea()
+	adjustTA.SetMinHeight(1)
+	adjustTA.SetMaxHeight(1)
+	adjustTA.SetLabels("Confirm", "Back")
+
 	return &TaskModal{
-		state:    TaskModalHidden,
-		textArea: ta,
+		state:          TaskModalHidden,
+		textArea:       ta,
+		adjustTextArea: adjustTA,
 	}
 }
 
@@ -64,6 +72,7 @@ func (m *TaskModal) State() TaskModalState {
 func (m *TaskModal) Show() {
 	m.state = TaskModalInput
 	m.textArea.Reset()
+	m.textArea.SetPlaceholder("Describe what you want to work on...")
 	m.proposal = nil
 	m.err = nil
 }
@@ -120,11 +129,19 @@ func (m *TaskModal) Error() error {
 	return m.err
 }
 
-// StartAdjust transitions to the adjust state.
+// StartAdjust transitions to the adjust state with pre-populated branch name.
 func (m *TaskModal) StartAdjust() {
 	if m.proposal != nil {
 		m.state = TaskModalAdjust
+		m.adjustTextArea.Reset()
+		m.adjustTextArea.SetValue(m.adjustWorktree)
+		m.adjustTextArea.SetPlaceholder("e.g. feature/my-feature")
 	}
+}
+
+// AdjustTextArea returns the text area for the adjust state.
+func (m *TaskModal) AdjustTextArea() *TextArea {
+	return m.adjustTextArea
 }
 
 // AdjustedWorktree returns the adjusted worktree name.
@@ -172,7 +189,7 @@ func (m *TaskModal) View() string {
 			content.WriteString("\n\n")
 			content.WriteString(errorStyle.Render("  " + m.err.Error()))
 			content.WriteString("\n\n")
-			content.WriteString(dimStyle.Render("  [ Esc: cancel ]"))
+			content.WriteString(dimStyle.Render("  " + formatKeyHints("Esc", "cancel")))
 		} else if m.proposal != nil {
 			content.WriteString(titleStyle.Render("New task — Proposal"))
 			content.WriteString("\n\n")
@@ -197,7 +214,7 @@ func (m *TaskModal) View() string {
 				content.WriteString("\n\n")
 			}
 
-			content.WriteString(dimStyle.Render("  [ Enter: confirm  a: adjust  Esc: cancel ]"))
+			content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "confirm") + "  " + formatKeyHints("a", "adjust") + "  " + formatKeyHints("Esc", "cancel")))
 		}
 
 	case TaskModalAdjust:
@@ -207,25 +224,20 @@ func (m *TaskModal) View() string {
 			content.WriteString("  Worktree: " + m.adjustWorktree)
 			content.WriteString("\n\n")
 			content.WriteString(dimStyle.Render("  (Use ↑/↓ to select from existing worktrees)"))
-		} else {
-			content.WriteString("  Branch name: " + m.adjustWorktree)
-			content.WriteString("\n")
-			content.WriteString("  Parent: " + m.adjustParent)
 			content.WriteString("\n\n")
-			content.WriteString(dimStyle.Render("  (Edit branch name, then Enter to confirm)"))
+			content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "confirm") + "  " + formatKeyHints("Esc", "back")))
+		} else {
+			content.WriteString("  Branch name:\n")
+			m.adjustTextArea.SetWidth(boxWidth - 10)
+			m.adjustTextArea.SetPrompt("")
+			content.WriteString(m.adjustTextArea.View())
+			content.WriteString("\n")
+			content.WriteString("  Parent: " + dimStyle.Render(m.adjustParent))
 		}
-		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("  [ Enter: confirm  Esc: back ]"))
 	}
 
 	// Create bordered box
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("12")).
-		Padding(1, 2).
-		Width(boxWidth)
-
-	box := boxStyle.Render(content.String())
+	box := modalBoxStyle.Width(boxWidth).Render(content.String())
 
 	// Center the box
 	if m.width > 0 && m.height > 0 {

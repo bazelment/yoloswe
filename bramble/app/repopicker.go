@@ -11,14 +11,16 @@ import (
 
 // RepoPickerModel is the model for the repo selection screen.
 type RepoPickerModel struct {
-	err         error
-	wtRoot      string
-	chosenRepo  string
-	repos       []string
-	selectedIdx int
-	width       int
-	height      int
-	loading     bool
+	err             error
+	wtRoot          string
+	chosenRepo      string
+	filterText      string
+	repos           []string
+	filteredIndices []int // indices into repos; nil = no filter (show all)
+	selectedIdx     int
+	width           int
+	height          int
+	loading         bool
 }
 
 // NewRepoPickerModel creates a new repo picker model.
@@ -62,11 +64,29 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "ctrl+c":
+			return m, tea.Quit
+
+		case "q":
+			// Only quit if no filter active; otherwise treat as filter char
+			if m.filterText == "" {
+				return m, tea.Quit
+			}
+			m.filterText += "q"
+			m.applyFilter()
+			return m, nil
+
+		case "esc":
+			// Clear filter first, then quit
+			if m.filterText != "" {
+				m.clearFilter()
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "j", "down":
-			if m.selectedIdx < len(m.repos)-1 {
+			eff := m.effectiveRepos()
+			if m.selectedIdx < len(eff)-1 {
 				m.selectedIdx++
 			}
 			return m, nil
@@ -78,15 +98,46 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
-			if len(m.repos) > 0 && m.selectedIdx < len(m.repos) {
-				m.chosenRepo = m.repos[m.selectedIdx]
+			eff := m.effectiveRepos()
+			if len(eff) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(eff) {
+				m.chosenRepo = eff[m.selectedIdx]
 				return m, tea.Quit
 			}
 			return m, nil
 
 		case "r":
-			m.loading = true
-			return m, m.loadRepos()
+			// Only refresh if no filter active; otherwise treat as filter char
+			if m.filterText == "" {
+				m.loading = true
+				return m, m.loadRepos()
+			}
+			m.filterText += "r"
+			m.applyFilter()
+			return m, nil
+
+		case "backspace":
+			if m.filterText != "" {
+				runes := []rune(m.filterText)
+				m.filterText = string(runes[:len(runes)-1])
+				m.applyFilter()
+			}
+			return m, nil
+
+		default:
+			// Type-to-filter: printable characters
+			keyStr := msg.String()
+			var r rune
+			if len(keyStr) == 1 {
+				r = rune(keyStr[0])
+			} else if len(msg.Runes) == 1 {
+				r = msg.Runes[0]
+			}
+			if r != 0 && r >= ' ' && r != 127 {
+				m.filterText += string(r)
+				m.applyFilter()
+				return m, nil
+			}
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -98,6 +149,10 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repos = msg.repos
 		m.loading = false
 		m.err = nil
+		// Re-apply active filter to new repo list
+		if m.filterText != "" {
+			m.applyFilter()
+		}
 		return m, nil
 
 	case repoLoadErrorMsg:
@@ -119,6 +174,9 @@ func (m RepoPickerModel) View() string {
 	boxWidth := 60
 	if m.width < 70 {
 		boxWidth = m.width - 10
+	}
+	if boxWidth < 20 {
+		boxWidth = 20
 	}
 
 	var content strings.Builder
@@ -146,54 +204,62 @@ func (m RepoPickerModel) View() string {
 		content.WriteString(dimStyle.Render("  Press [q] to quit"))
 		content.WriteString("\n")
 	} else {
-		content.WriteString("  Select a repo (↑/↓ then Enter):\n\n")
+		content.WriteString("  Select a repo (type to filter, ↑/↓ then Enter):\n\n")
 
-		// Show repos
-		maxVisible := min(10, m.height-10)
-		startIdx := 0
-		if m.selectedIdx >= maxVisible {
-			startIdx = m.selectedIdx - maxVisible + 1
+		// Show filter indicator when active
+		if m.filterText != "" {
+			filterLine := dimStyle.Render("  Filter: ") + m.filterText
+			content.WriteString(filterLine)
+			content.WriteString("\n\n")
 		}
-		endIdx := min(startIdx+maxVisible, len(m.repos))
 
-		if startIdx > 0 {
-			content.WriteString(dimStyle.Render("    ↑ more"))
+		// Show effective repos (filtered or all)
+		eff := m.effectiveRepos()
+
+		if len(eff) == 0 && m.filterText != "" {
+			content.WriteString(dimStyle.Render("  No matches for \"" + m.filterText + "\""))
 			content.WriteString("\n")
-		}
+		} else {
+			maxVisible := min(10, m.height-10)
+			startIdx := 0
+			if m.selectedIdx >= maxVisible {
+				startIdx = m.selectedIdx - maxVisible + 1
+			}
+			endIdx := min(startIdx+maxVisible, len(eff))
 
-		for i := startIdx; i < endIdx; i++ {
-			prefix := "    "
-			if i == m.selectedIdx {
-				prefix = "  > "
+			if startIdx > 0 {
+				content.WriteString(dimStyle.Render("    ↑ more"))
+				content.WriteString("\n")
 			}
 
-			line := prefix + m.repos[i]
-			if i == m.selectedIdx {
-				content.WriteString(selectedStyle.Render(line))
-			} else {
-				content.WriteString(line)
-			}
-			content.WriteString("\n")
-		}
+			for i := startIdx; i < endIdx; i++ {
+				prefix := "    "
+				if i == m.selectedIdx {
+					prefix = "  > "
+				}
 
-		if endIdx < len(m.repos) {
-			content.WriteString(dimStyle.Render("    ↓ more"))
-			content.WriteString("\n")
+				line := prefix + eff[i]
+				if i == m.selectedIdx {
+					content.WriteString(selectedStyle.Render(line))
+				} else {
+					content.WriteString(line)
+				}
+				content.WriteString("\n")
+			}
+
+			if endIdx < len(eff) {
+				content.WriteString(dimStyle.Render("    ↓ more"))
+				content.WriteString("\n")
+			}
 		}
 
 		content.WriteString("\n")
-		content.WriteString(dimStyle.Render("  [ Tab: next  Enter: open  q: quit ]"))
+		content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "open") + "  " + formatKeyHints("Esc", "clear filter/quit") + "  " + formatKeyHints("q", "quit")))
 		content.WriteString("\n")
 	}
 
 	// Create bordered box
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		Padding(1, 2).
-		Width(boxWidth)
-
-	box := boxStyle.Render(content.String())
+	box := modalBoxStyle.Width(boxWidth).Render(content.String())
 
 	// Center the box
 	return lipgloss.Place(
@@ -206,4 +272,51 @@ func (m RepoPickerModel) View() string {
 // SelectedRepo returns the chosen repo name, or empty if none was chosen.
 func (m RepoPickerModel) SelectedRepo() string {
 	return m.chosenRepo
+}
+
+// effectiveRepos returns the repos currently visible (filtered or all).
+func (m *RepoPickerModel) effectiveRepos() []string {
+	if m.filteredIndices == nil {
+		return m.repos
+	}
+	result := make([]string, len(m.filteredIndices))
+	for i, idx := range m.filteredIndices {
+		result[i] = m.repos[idx]
+	}
+	return result
+}
+
+// applyFilter recomputes filteredIndices from filterText.
+func (m *RepoPickerModel) applyFilter() {
+	if m.filterText == "" {
+		m.clearFilter()
+		return
+	}
+
+	lower := strings.ToLower(m.filterText)
+	m.filteredIndices = []int{}
+	for i, repo := range m.repos {
+		if strings.Contains(strings.ToLower(repo), lower) {
+			m.filteredIndices = append(m.filteredIndices, i)
+		}
+	}
+
+	if len(m.filteredIndices) > 0 {
+		m.selectedIdx = 0
+	} else {
+		m.selectedIdx = -1
+	}
+}
+
+// clearFilter resets the filter and shows all repos.
+func (m *RepoPickerModel) clearFilter() {
+	// Map filtered selectedIdx back to original index before clearing
+	if m.filteredIndices != nil && m.selectedIdx >= 0 && m.selectedIdx < len(m.filteredIndices) {
+		m.selectedIdx = m.filteredIndices[m.selectedIdx]
+	}
+	m.filterText = ""
+	m.filteredIndices = nil
+	if m.selectedIdx < 0 || m.selectedIdx >= len(m.repos) {
+		m.selectedIdx = max(0, len(m.repos)-1)
+	}
 }
