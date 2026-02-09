@@ -19,7 +19,7 @@ func TestScrollPositionPreservedOnSessionSwitch(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Create two sessions
@@ -80,7 +80,7 @@ func TestScrollPositionClearedOnWorktreeSwitch(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 		{Branch: "feature", Path: "/tmp/wt/feature"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
 	m.worktreeDropdown.SelectIndex(0)
 	m.updateSessionDropdown()
 
@@ -112,7 +112,7 @@ func TestNewSessionStartsAtBottom(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Create and view session A

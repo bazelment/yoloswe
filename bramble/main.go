@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
+	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 var (
@@ -133,12 +136,26 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	manager := wt.NewManager(wtRoot, repoName)
 	worktrees, _ := manager.List(ctx)
 
+	// Start the AI task router (non-fatal if it fails — routeTask falls back to mock)
+	router := taskrouter.New(taskrouter.Config{
+		WorkDir: repoPath,
+		NoColor: true,
+	})
+	router.SetOutput(io.Discard)
+	var taskRouter *taskrouter.Router
+	if err := router.Start(ctx); err != nil {
+		log.Printf("Warning: task router failed to start: %v (falling back to heuristic routing)", err)
+	} else {
+		taskRouter = router
+		defer router.Stop()
+	}
+
 	// Query terminal size synchronously so the first View() renders a
 	// properly laid-out UI instead of waiting for the async WindowSizeMsg.
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
 
 	// Create and run TUI
-	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, worktrees, termWidth, termHeight)
+	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

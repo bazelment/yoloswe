@@ -1,0 +1,20 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = ["route_task_test.go"],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//bramble/app",
+        "//bramble/session",
+        "//wt/taskrouter",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
