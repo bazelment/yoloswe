@@ -276,7 +276,7 @@ func TestHandleKeyPress_UpDownNavigatesSessionListInTmuxSplitRightFocus(t *testi
 	worktrees := []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, worktrees, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
 
 	// Start sessions so navigation has items
 	_, _ = mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A")
