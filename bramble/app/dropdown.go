@@ -190,7 +190,7 @@ func (d *Dropdown) ClearFilter() {
 	d.filterText = ""
 	d.filteredIndices = nil
 	// Clamp selectedIdx to valid range
-	if d.selectedIdx >= len(d.items) {
+	if d.selectedIdx < 0 || d.selectedIdx >= len(d.items) {
 		d.selectedIdx = max(0, len(d.items)-1)
 	}
 	d.scrollOffset = 0
@@ -360,11 +360,7 @@ func (d *Dropdown) ViewOverlay() string {
 
 	content := d.ViewList()
 
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("12")).
-		Padding(0, 1)
-
+	style := inputBoxStyle
 	if d.width > 0 {
 		style = style.Width(d.width)
 	}

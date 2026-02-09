@@ -349,3 +349,82 @@ func TestTextAreaHandleKey_Delete(t *testing.T) {
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "ac", ta.Value())
 }
+
+func TestTextAreaUnicodeInsert(t *testing.T) {
+	ta := NewTextArea()
+	// Insert CJK characters
+	ta.InsertChar('你')
+	ta.InsertChar('好')
+	assert.Equal(t, "你好", ta.Value())
+
+	// Insert emoji
+	ta.InsertChar('🎉')
+	assert.Equal(t, "你好🎉", ta.Value())
+}
+
+func TestTextAreaUnicodeCursorMovement(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("你好世界") // 4 CJK characters
+	// Cursor at end (pos 4)
+
+	// Move left twice — cursor should be between 好 and 世
+	ta.MoveCursorLeft()
+	ta.MoveCursorLeft()
+	ta.InsertChar('X')
+	assert.Equal(t, "你好X世界", ta.Value())
+}
+
+func TestTextAreaUnicodeBackspace(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("abc你好")
+	// Cursor at end, delete 好
+	ta.DeleteChar()
+	assert.Equal(t, "abc你", ta.Value())
+	// Delete 你
+	ta.DeleteChar()
+	assert.Equal(t, "abc", ta.Value())
+}
+
+func TestTextAreaUnicodeDeleteForward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("你好abc")
+	// Move cursor to start
+	for i := 0; i < 5; i++ {
+		ta.MoveCursorLeft()
+	}
+	// Delete forward (你)
+	ta.DeleteCharForward()
+	assert.Equal(t, "好abc", ta.Value())
+}
+
+func TestTextAreaUnicodeInsertString(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello ")
+	ta.InsertString("世界🌍")
+	assert.Equal(t, "hello 世界🌍", ta.Value())
+}
+
+func TestTextAreaUnicodeWrapLine(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetWidth(12) // content width will be smaller due to padding
+	ta.SetMaxHeight(10)
+	// Each CJK char is 2 columns wide, so 6 chars = 12 columns
+	ta.SetValue("你好世界测试完成")
+	// Should render without panic
+	view := ta.View()
+	assert.NotEmpty(t, view)
+}
+
+func TestTextAreaResetPreservesPlaceholder(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetPlaceholder("Enter text here...")
+	ta.SetValue("some content")
+
+	ta.Reset()
+	assert.Equal(t, "", ta.Value())
+
+	// Placeholder should survive Reset
+	ta.SetWidth(40)
+	view := ta.View()
+	assert.Contains(t, view, "Enter text here...")
+}

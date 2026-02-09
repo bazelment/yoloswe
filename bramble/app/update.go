@@ -25,6 +25,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == FocusHelp {
 			return m.handleHelpOverlay(msg)
 		}
+		// Handle confirm prompt
+		if m.focus == FocusConfirm {
+			return m.handleConfirmMode(msg)
+		}
 		// Handle task modal
 		if m.taskModal.IsVisible() {
 			return m.handleTaskModal(msg)
@@ -420,7 +424,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return func() tea.Msg {
 					return createWorktreeMsg{branch}
 				}
-			})
+			}, "e.g. feature/my-feature")
 		}
 		toastCmd := m.addToast("No repository loaded", ToastError)
 		return m, toastCmd
@@ -439,7 +443,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return func() tea.Msg {
 					return startSessionMsg{session.SessionTypePlanner, prompt}
 				}
-			})
+			}, "Describe what you want to plan...")
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd
@@ -451,7 +455,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return func() tea.Msg {
 					return startSessionMsg{session.SessionTypeBuilder, prompt}
 				}
-			})
+			}, "Describe what to build...")
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd
@@ -498,14 +502,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if title == "" {
 				title = string(sessID)[:12]
 			}
-			return m.promptInput("Stop session '"+title+"'? [y/n]: ", func(answer string) tea.Cmd {
-				if strings.TrimSpace(strings.ToLower(answer)) == "y" {
-					return func() tea.Msg {
-						m.sessionManager.StopSession(sessID)
-						return sessionsUpdated{}
-					}
+			return m.showConfirm("Stop session '"+title+"'?", []ConfirmOption{
+				{Key: "y", Label: "yes"},
+			}, func(key string) tea.Cmd {
+				return func() tea.Msg {
+					m.sessionManager.StopSession(sessID)
+					return sessionsUpdated{}
 				}
-				return nil
 			})
 		}
 		toastCmd := m.addToast("No active session to stop (Alt-S to select)", ToastInfo)
@@ -525,7 +528,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 					return sessionsUpdated{}
 				}
-			})
+			}, "Type your follow-up message...")
 		}
 		toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
 		return m, toastCmd
@@ -563,18 +566,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Delete worktree
 		if w := m.selectedWorktree(); w != nil {
 			branch := w.Branch
-			return m.promptInput("Delete worktree '"+branch+"'? [y]es / [y+branch] yes and delete branch / [n]o: ", func(answer string) tea.Cmd {
-				switch strings.TrimSpace(strings.ToLower(answer)) {
-				case "y", "yes":
-					return func() tea.Msg {
-						return deleteWorktreeMsg{branch: branch, deleteBranch: false}
-					}
-				case "y+branch":
-					return func() tea.Msg {
-						return deleteWorktreeMsg{branch: branch, deleteBranch: true}
-					}
-				default:
-					return nil // Cancel
+			return m.showConfirm("Delete worktree '"+branch+"'?", []ConfirmOption{
+				{Key: "y", Label: "yes, keep branch"},
+				{Key: "d", Label: "yes + delete branch"},
+			}, func(key string) tea.Cmd {
+				deleteBranch := key == "d"
+				return func() tea.Msg {
+					return deleteWorktreeMsg{branch: branch, deleteBranch: deleteBranch}
 				}
 			})
 		}
@@ -741,14 +739,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	default:
 		// Type-to-filter: route printable characters to the dropdown
-		keyStr := msg.String()
-		var r rune
-		if len(keyStr) == 1 {
-			r = rune(keyStr[0])
-		} else if len(msg.Runes) == 1 {
-			r = msg.Runes[0]
-		}
-		if r != 0 && r >= ' ' && r != 127 { // printable, non-control
+		if r, ok := printableRune(msg); ok {
 			if m.focus == FocusWorktreeDropdown {
 				m.worktreeDropdown.AppendFilter(r)
 			} else {
@@ -792,11 +783,49 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// promptInput switches to input mode.
-func (m Model) promptInput(prompt string, handler func(string) tea.Cmd) (tea.Model, tea.Cmd) {
+// handleConfirmMode handles key presses in the single-keypress confirmation prompt.
+func (m Model) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result := m.confirmPrompt.HandleKey(msg)
+
+	switch {
+	case result.Quit:
+		return m, tea.Quit
+	case result.Cancelled:
+		m.focus = FocusOutput
+		m.confirmPrompt = nil
+		m.confirmHandler = nil
+		return m, nil
+	case result.Matched != "":
+		handler := m.confirmHandler
+		m.focus = FocusOutput
+		m.confirmPrompt = nil
+		m.confirmHandler = nil
+		if handler != nil {
+			return m, handler(result.Matched)
+		}
+		return m, nil
+	default:
+		// Unrecognized key — stay in confirm mode
+		return m, nil
+	}
+}
+
+// showConfirm switches to confirmation mode with a single-keypress prompt.
+func (m Model) showConfirm(message string, options []ConfirmOption, handler func(string) tea.Cmd) (tea.Model, tea.Cmd) {
+	m.confirmPrompt = NewConfirmPrompt(message, options)
+	m.confirmHandler = handler
+	m.focus = FocusConfirm
+	return m, nil
+}
+
+// promptInput switches to input mode with an optional placeholder.
+func (m Model) promptInput(prompt string, handler func(string) tea.Cmd, placeholder ...string) (tea.Model, tea.Cmd) {
 	m.inputMode = true
 	m.inputPrompt = prompt
 	m.inputArea.Reset()
+	if len(placeholder) > 0 {
+		m.inputArea.SetPlaceholder(placeholder[0])
+	}
 	m.inputHandler = handler
 	m.focus = FocusInput
 	return m, nil
@@ -979,23 +1008,51 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case TaskModalAdjust:
+		if m.taskModal.Proposal().Action == taskrouter.ActionCreateNew {
+			// Route key events to the adjust TextArea for branch name editing
+			ta := m.taskModal.AdjustTextArea()
+			action := ta.HandleKey(msg)
+
+			switch action {
+			case TextAreaSubmit:
+				// Read edited value and confirm
+				edited := ta.Value()
+				if edited != "" {
+					m.taskModal.adjustWorktree = edited
+				}
+				return m, func() tea.Msg {
+					return taskConfirmMsg{
+						worktree: m.taskModal.AdjustedWorktree(),
+						parent:   m.taskModal.AdjustedParent(),
+						isNew:    true,
+						prompt:   m.taskModal.Prompt(),
+					}
+				}
+			case TextAreaCancel:
+				// Go back to proposal state (discard edits)
+				m.taskModal.SetProposal(m.taskModal.Proposal())
+				return m, nil
+			case TextAreaQuit:
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
+
+		// Existing worktree mode — original behavior
 		switch msg.String() {
 		case "esc":
-			// Go back to proposal
 			m.taskModal.SetProposal(m.taskModal.Proposal())
 			return m, nil
-
 		case "enter":
-			// Confirm with adjustments
 			return m, func() tea.Msg {
 				return taskConfirmMsg{
 					worktree: m.taskModal.AdjustedWorktree(),
 					parent:   m.taskModal.AdjustedParent(),
-					isNew:    m.taskModal.Proposal().Action == taskrouter.ActionCreateNew,
+					isNew:    false,
 					prompt:   m.taskModal.Prompt(),
 				}
 			}
-
 		case "ctrl+c":
 			return m, tea.Quit
 		}

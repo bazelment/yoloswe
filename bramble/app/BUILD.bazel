@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "app",
     srcs = [
+        "confirmprompt.go",
         "dropdown.go",
         "filetree.go",
         "helpoverlay.go",
@@ -35,12 +36,14 @@ go_test(
     name = "app_test",
     srcs = [
         "aggregate_cost_test.go",
+        "confirmprompt_test.go",
         "dropdown_test.go",
         "filetree_open_test.go",
         "helpoverlay_test.go",
         "output_test.go",
         "quick_switch_test.go",
         "quit_confirm_test.go",
+        "repopicker_test.go",
         "scrollrender_test.go",
         "session_subtitle_test.go",
         "textarea_test.go",

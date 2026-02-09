@@ -2,9 +2,9 @@ package app
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -21,6 +21,7 @@ const (
 type TextArea struct {
 	value        string
 	prompt       string
+	placeholder  string
 	sendLabel    string
 	cancelLabel  string
 	cursorPos    int
@@ -103,10 +104,25 @@ func (t *TextArea) SetPrompt(p string) {
 	t.prompt = p
 }
 
+// SetPlaceholder sets the placeholder text shown when the value is empty.
+func (t *TextArea) SetPlaceholder(p string) {
+	t.placeholder = p
+}
+
+// runeOffset converts a rune-based cursor position to a byte offset in s.
+func runeOffset(s string, runePos int) int {
+	byteOff := 0
+	for i := 0; i < runePos && byteOff < len(s); i++ {
+		_, size := utf8.DecodeRuneInString(s[byteOff:])
+		byteOff += size
+	}
+	return byteOff
+}
+
 // SetValue sets the text content.
 func (t *TextArea) SetValue(s string) {
 	t.value = s
-	t.cursorPos = len(s)
+	t.cursorPos = utf8.RuneCountInString(s)
 }
 
 // Value returns the current text content.
@@ -114,7 +130,8 @@ func (t *TextArea) Value() string {
 	return t.value
 }
 
-// Reset clears the text area and resets focus to text input.
+// Reset clears the text area content and resets focus to text input.
+// The placeholder is preserved since it is field metadata, not user state.
 func (t *TextArea) Reset() {
 	t.value = ""
 	t.cursorPos = 0
@@ -124,14 +141,16 @@ func (t *TextArea) Reset() {
 
 // InsertChar inserts a character at the cursor position.
 func (t *TextArea) InsertChar(r rune) {
-	t.value = t.value[:t.cursorPos] + string(r) + t.value[t.cursorPos:]
+	byteOff := runeOffset(t.value, t.cursorPos)
+	t.value = t.value[:byteOff] + string(r) + t.value[byteOff:]
 	t.cursorPos++
 }
 
 // InsertString inserts a string at the cursor position.
 func (t *TextArea) InsertString(s string) {
-	t.value = t.value[:t.cursorPos] + s + t.value[t.cursorPos:]
-	t.cursorPos += len(s)
+	byteOff := runeOffset(t.value, t.cursorPos)
+	t.value = t.value[:byteOff] + s + t.value[byteOff:]
+	t.cursorPos += utf8.RuneCountInString(s)
 }
 
 // InsertNewline inserts a newline at the cursor position.
@@ -142,15 +161,20 @@ func (t *TextArea) InsertNewline() {
 // DeleteChar deletes the character before the cursor.
 func (t *TextArea) DeleteChar() {
 	if t.cursorPos > 0 {
-		t.value = t.value[:t.cursorPos-1] + t.value[t.cursorPos:]
+		byteOff := runeOffset(t.value, t.cursorPos)
+		prevByteOff := runeOffset(t.value, t.cursorPos-1)
+		t.value = t.value[:prevByteOff] + t.value[byteOff:]
 		t.cursorPos--
 	}
 }
 
 // DeleteCharForward deletes the character after the cursor.
 func (t *TextArea) DeleteCharForward() {
-	if t.cursorPos < len(t.value) {
-		t.value = t.value[:t.cursorPos] + t.value[t.cursorPos+1:]
+	runeCount := utf8.RuneCountInString(t.value)
+	if t.cursorPos < runeCount {
+		byteOff := runeOffset(t.value, t.cursorPos)
+		nextByteOff := runeOffset(t.value, t.cursorPos+1)
+		t.value = t.value[:byteOff] + t.value[nextByteOff:]
 	}
 }
 
@@ -163,7 +187,7 @@ func (t *TextArea) MoveCursorLeft() {
 
 // MoveCursorRight moves the cursor right.
 func (t *TextArea) MoveCursorRight() {
-	if t.cursorPos < len(t.value) {
+	if t.cursorPos < utf8.RuneCountInString(t.value) {
 		t.cursorPos++
 	}
 }
@@ -174,7 +198,7 @@ func (t *TextArea) MoveCursorUp() {
 	row, col := t.getCursorRowCol(lines)
 	if row > 0 {
 		newRow := row - 1
-		newCol := min(col, len(lines[newRow]))
+		newCol := min(col, utf8.RuneCountInString(lines[newRow]))
 		t.cursorPos = t.posFromRowCol(lines, newRow, newCol)
 	}
 }
@@ -185,7 +209,7 @@ func (t *TextArea) MoveCursorDown() {
 	row, col := t.getCursorRowCol(lines)
 	if row < len(lines)-1 {
 		newRow := row + 1
-		newCol := min(col, len(lines[newRow]))
+		newCol := min(col, utf8.RuneCountInString(lines[newRow]))
 		t.cursorPos = t.posFromRowCol(lines, newRow, newCol)
 	}
 }
@@ -201,7 +225,7 @@ func (t *TextArea) MoveCursorToLineStart() {
 func (t *TextArea) MoveCursorToLineEnd() {
 	lines := t.getLines()
 	row, _ := t.getCursorRowCol(lines)
-	t.cursorPos = t.posFromRowCol(lines, row, len(lines[row]))
+	t.cursorPos = t.posFromRowCol(lines, row, utf8.RuneCountInString(lines[row]))
 }
 
 // getLines splits the value into lines.
@@ -212,25 +236,26 @@ func (t *TextArea) getLines() []string {
 	return strings.Split(t.value, "\n")
 }
 
-// getCursorRowCol returns the cursor row and column.
+// getCursorRowCol returns the cursor row and column (in runes).
 func (t *TextArea) getCursorRowCol(lines []string) (int, int) {
 	pos := 0
 	for row, line := range lines {
-		if pos+len(line) >= t.cursorPos {
+		lineRunes := utf8.RuneCountInString(line)
+		if pos+lineRunes >= t.cursorPos {
 			return row, t.cursorPos - pos
 		}
-		pos += len(line) + 1 // +1 for newline
+		pos += lineRunes + 1 // +1 for newline
 	}
 	// Cursor at end
 	lastRow := len(lines) - 1
-	return lastRow, len(lines[lastRow])
+	return lastRow, utf8.RuneCountInString(lines[lastRow])
 }
 
-// posFromRowCol converts row/col to absolute position.
+// posFromRowCol converts row/col (in runes) to absolute rune position.
 func (t *TextArea) posFromRowCol(lines []string, row, col int) int {
 	pos := 0
 	for i := 0; i < row && i < len(lines); i++ {
-		pos += len(lines[i]) + 1 // +1 for newline
+		pos += utf8.RuneCountInString(lines[i]) + 1 // +1 for newline
 	}
 	return pos + col
 }
@@ -240,27 +265,42 @@ func (t *TextArea) LineCount() int {
 	return len(t.getLines())
 }
 
-// wrapLine wraps a single line to fit the width.
+// wrapLine wraps a single line to fit the width (visual-width-based for CJK/emoji support).
 func (t *TextArea) wrapLine(line string, width int) []string {
-	if width <= 0 || len(line) <= width {
+	if width <= 0 || runewidth.StringWidth(line) <= width {
 		return []string{line}
 	}
 
+	runes := []rune(line)
 	var wrapped []string
-	for len(line) > width {
-		// Find break point (prefer space)
-		breakAt := width
-		for i := width - 1; i > 0; i-- {
-			if line[i] == ' ' {
+	for len(runes) > 0 {
+		// Find how many runes fit within the visual width
+		visualW := 0
+		fitCount := 0
+		for i, r := range runes {
+			rw := runewidth.RuneWidth(r)
+			if visualW+rw > width {
+				fitCount = i
+				break
+			}
+			visualW += rw
+			fitCount = i + 1
+		}
+		if fitCount == 0 {
+			// Single character wider than width; take it anyway to avoid infinite loop
+			fitCount = 1
+		}
+
+		// Prefer breaking at a space
+		breakAt := fitCount
+		for i := fitCount - 1; i > 0; i-- {
+			if runes[i] == ' ' {
 				breakAt = i + 1
 				break
 			}
 		}
-		wrapped = append(wrapped, line[:breakAt])
-		line = line[breakAt:]
-	}
-	if line != "" {
-		wrapped = append(wrapped, line)
+		wrapped = append(wrapped, string(runes[:breakAt]))
+		runes = runes[breakAt:]
 	}
 	return wrapped
 }
@@ -362,11 +402,10 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 
 	default:
 		if t.Focus() == FocusTextInput {
-			keyStr := msg.String()
-			if keyStr == "space" {
+			if msg.String() == "space" {
 				t.InsertChar(' ')
-			} else if len(keyStr) == 1 {
-				t.InsertChar(rune(keyStr[0]))
+			} else if r, ok := printableRune(msg); ok {
+				t.InsertChar(r)
 			} else if len(msg.Runes) > 0 {
 				for _, r := range msg.Runes {
 					t.InsertChar(r)
@@ -381,6 +420,9 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 // View renders the text area.
 func (t *TextArea) View() string {
 	contentWidth := t.width - 4 // Account for padding and border
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
 
 	var b strings.Builder
 
@@ -389,6 +431,9 @@ func (t *TextArea) View() string {
 		b.WriteString(dimStyle.Render(t.prompt))
 		b.WriteString("\n")
 	}
+
+	// Show placeholder text when value is empty
+	showPlaceholder := t.value == "" && t.placeholder != ""
 
 	// Render lines with word wrap
 	lines := t.getLines()
@@ -406,12 +451,13 @@ func (t *TextArea) View() string {
 			// Find which wrapped line the cursor is on
 			col := cursorCol
 			for j, wl := range wrappedLines {
-				if col <= len(wl) {
+				wlRunes := utf8.RuneCountInString(wl)
+				if col <= wlRunes {
 					cursorDisplayRow = len(displayLines) + j
 					cursorDisplayCol = col
 					break
 				}
-				col -= len(wl)
+				col -= wlRunes
 			}
 		}
 
@@ -441,17 +487,26 @@ func (t *TextArea) View() string {
 	for i := t.scrollOffset; i < endIdx; i++ {
 		line := displayLines[i]
 
+		if showPlaceholder && i == 0 {
+			// Show cursor then placeholder in dim style
+			b.WriteString("█")
+			b.WriteString(dimStyle.Render(t.placeholder))
+			b.WriteString("\n")
+			continue
+		}
+
 		// Show cursor on current line
 		if i == cursorDisplayRow {
-			if cursorDisplayCol <= len(line) {
-				line = line[:cursorDisplayCol] + "█" + line[cursorDisplayCol:]
+			lineRunes := []rune(line)
+			if cursorDisplayCol <= len(lineRunes) {
+				line = string(lineRunes[:cursorDisplayCol]) + "█" + string(lineRunes[cursorDisplayCol:])
 			} else {
 				line += "█"
 			}
 		}
 
-		// Pad line to width
-		for len(line) < contentWidth {
+		// Pad line to width (visual-width-based for CJK/emoji support)
+		for runewidth.StringWidth(line) < contentWidth {
 			line += " "
 		}
 
@@ -487,11 +542,7 @@ func (t *TextArea) View() string {
 
 	// Add border
 	content := b.String()
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("12")).
-		Padding(0, 1).
-		Width(t.width)
+	boxStyle := inputBoxStyle.Width(t.width)
 
 	return boxStyle.Render(content)
 }
