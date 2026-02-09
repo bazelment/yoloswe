@@ -212,6 +212,232 @@ func TestBuildHelpSections_SplitPaneActive(t *testing.T) {
 	}
 }
 
+func TestHandleKeyPress_F2TogglesSplitInTmuxMode(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	// Initially not split
+	if m.splitPane.IsSplit() {
+		t.Fatal("expected split pane to be inactive initially")
+	}
+
+	// Press F2
+	msg := tea.KeyMsg{Type: tea.KeyF2}
+	newModel, _ := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if !m2.splitPane.IsSplit() {
+		t.Error("expected split pane to be active after F2")
+	}
+	if !m2.splitPane.FocusLeft() {
+		t.Error("expected focus on file tree (left) after F2")
+	}
+}
+
+func TestHandleKeyPress_UpDownNavigatesFileTreeInTmuxSplit(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	// Set up split pane with file tree focused
+	m.splitPane.Toggle()
+	m.splitPane.SetFocusLeft(true)
+	m.fileTree = NewFileTree("/tmp/wt/main", &wt.WorktreeContext{
+		ChangedFiles: []string{"a.go", "b.go", "c.go"},
+	})
+	m.fileTree.cursor = 0
+
+	startCursor := m.fileTree.cursor
+
+	// Press down
+	msg := tea.KeyMsg{Type: tea.KeyDown}
+	newModel, _ := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if m2.fileTree.cursor != startCursor+1 {
+		t.Errorf("expected cursor to move down, got %d (was %d)", m2.fileTree.cursor, startCursor)
+	}
+
+	// Press up
+	msgUp := tea.KeyMsg{Type: tea.KeyUp}
+	newModel2, _ := m2.handleKeyPress(msgUp)
+	m3 := newModel2.(Model)
+
+	if m3.fileTree.cursor != startCursor {
+		t.Errorf("expected cursor to move back up, got %d (was %d)", m3.fileTree.cursor, startCursor)
+	}
+}
+
+func TestHandleKeyPress_UpDownNavigatesSessionListInTmuxSplitRightFocus(t *testing.T) {
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTmux})
+	t.Cleanup(func() { mgr.Close() })
+
+	worktrees := []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, worktrees, 80, 24)
+
+	// Start sessions so navigation has items
+	_, _ = mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A")
+	_, _ = mgr.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "session B")
+
+	// Set up split pane with right focus (session list)
+	m.splitPane.Toggle()
+	m.splitPane.SetFocusLeft(false)
+	m.selectedSessionIndex = 0
+	m.worktreeDropdown.SelectIndex(0)
+
+	// Press down — should navigate session list, not file tree
+	msg := tea.KeyMsg{Type: tea.KeyDown}
+	newModel, _ := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if m2.selectedSessionIndex != 1 {
+		t.Errorf("expected session index to increment to 1, got %d", m2.selectedSessionIndex)
+	}
+}
+
+func TestBuildHelpSections_TmuxModeIncludesF2(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	sections := buildHelpSections(&m)
+
+	var navSection *HelpSection
+	for i := range sections {
+		if sections[i].Title == "Navigation" {
+			navSection = &sections[i]
+			break
+		}
+	}
+
+	if navSection == nil {
+		t.Fatal("expected Navigation section in help")
+	}
+
+	hasF2 := false
+	hasTab := false
+	for _, b := range navSection.Bindings {
+		if b.Key == "F2" {
+			hasF2 = true
+		}
+		if b.Key == "Tab" {
+			hasTab = true
+		}
+	}
+
+	if !hasF2 {
+		t.Error("expected F2 binding in tmux mode help")
+	}
+	if !hasTab {
+		t.Error("expected Tab binding in tmux mode help")
+	}
+}
+
+func TestHandleKeyPress_TabTogglesFocusInTmuxSplit(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	// Activate split pane with left focus
+	m.splitPane.Toggle()
+	m.splitPane.SetFocusLeft(true)
+
+	if !m.splitPane.FocusLeft() {
+		t.Fatal("expected focus on left pane initially")
+	}
+
+	// Press Tab
+	msg := tea.KeyMsg{Type: tea.KeyTab}
+	newModel, _ := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if m2.splitPane.FocusLeft() {
+		t.Error("expected focus to switch to right pane after Tab")
+	}
+
+	// Press Tab again
+	newModel2, _ := m2.handleKeyPress(msg)
+	m3 := newModel2.(Model)
+
+	if !m3.splitPane.FocusLeft() {
+		t.Error("expected focus to switch back to left pane after second Tab")
+	}
+}
+
+func TestHandleKeyPress_EnterOpensFileInTmuxSplit(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.editor = "code"
+
+	// Activate split pane with left focus
+	m.splitPane.Toggle()
+	m.splitPane.SetFocusLeft(true)
+
+	// Set up file tree with a file
+	m.fileTree = NewFileTree("/tmp/wt/main", &wt.WorktreeContext{
+		ChangedFiles: []string{"auth.go"},
+	})
+	for i := 0; i < len(m.fileTree.entries); i++ {
+		if m.fileTree.entries[i].Path != "" {
+			m.fileTree.cursor = i
+			break
+		}
+	}
+
+	// Press Enter — should open file, not switch tmux window
+	msg := tea.KeyMsg{Type: tea.KeyEnter}
+	newModel, cmd := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if cmd == nil {
+		t.Error("expected non-nil command for opening file")
+	}
+	if !m2.toasts.HasToasts() {
+		t.Error("expected toast notification for file open")
+	}
+}
+
+func TestBuildHelpSections_TmuxSplitShowsEnterFileBinding(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	// Activate split pane
+	m.splitPane.Toggle()
+
+	sections := buildHelpSections(&m)
+
+	var sessionListSection *HelpSection
+	for i := range sections {
+		if sections[i].Title == "Session List" {
+			sessionListSection = &sections[i]
+			break
+		}
+	}
+
+	if sessionListSection == nil {
+		t.Fatal("expected Session List section in tmux mode help")
+	}
+
+	var enterBindings []string
+	for _, b := range sessionListSection.Bindings {
+		if b.Key == "Enter" {
+			enterBindings = append(enterBindings, b.Description)
+		}
+	}
+
+	if len(enterBindings) != 1 {
+		t.Errorf("expected exactly 1 Enter binding in tmux split help, got %d: %v", len(enterBindings), enterBindings)
+	}
+	if len(enterBindings) > 0 && !contains(enterBindings[0], "file") {
+		t.Errorf("expected Enter binding to mention file, got: %s", enterBindings[0])
+	}
+}
+
 func TestBuildHelpSections_SplitPaneInactive(t *testing.T) {
 	// Force TUI mode
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{
