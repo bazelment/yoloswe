@@ -423,15 +423,18 @@ func TestBuildHelpSections_TmuxSplitShowsEnterFileBinding(t *testing.T) {
 		t.Fatal("expected Session List section in tmux mode help")
 	}
 
-	hasFileEnter := false
+	var enterBindings []string
 	for _, b := range sessionListSection.Bindings {
-		if b.Key == "Enter" && contains(b.Description, "file") {
-			hasFileEnter = true
+		if b.Key == "Enter" {
+			enterBindings = append(enterBindings, b.Description)
 		}
 	}
 
-	if !hasFileEnter {
-		t.Error("expected Enter file-open binding in tmux mode help when split is active")
+	if len(enterBindings) != 1 {
+		t.Errorf("expected exactly 1 Enter binding in tmux split help, got %d: %v", len(enterBindings), enterBindings)
+	}
+	if len(enterBindings) > 0 && !contains(enterBindings[0], "file") {
+		t.Errorf("expected Enter binding to mention file, got: %s", enterBindings[0])
 	}
 }
 

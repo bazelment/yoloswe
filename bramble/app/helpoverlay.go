@@ -240,11 +240,14 @@ func buildHelpSections(m *Model) []HelpSection {
 			HelpBinding{"Up/k", "Navigate up"},
 			HelpBinding{"Down/j", "Navigate down"},
 			HelpBinding{"1..9", "Select session N in list"},
-			HelpBinding{"Enter", "Switch to tmux window"},
 		)
 		if m.splitPane.IsSplit() {
 			tmux.Bindings = append(tmux.Bindings,
-				HelpBinding{"Enter", "Open file in editor (file tree)"},
+				HelpBinding{"Enter", "Switch to tmux window (session list) / Open file (file tree)"},
+			)
+		} else {
+			tmux.Bindings = append(tmux.Bindings,
+				HelpBinding{"Enter", "Switch to tmux window"},
 			)
 		}
 		sections = append(sections, tmux)
