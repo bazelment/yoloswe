@@ -336,6 +336,105 @@ func TestBuildHelpSections_TmuxModeIncludesF2(t *testing.T) {
 	}
 }
 
+func TestHandleKeyPress_TabTogglesFocusInTmuxSplit(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	// Activate split pane with left focus
+	m.splitPane.Toggle()
+	m.splitPane.SetFocusLeft(true)
+
+	if !m.splitPane.FocusLeft() {
+		t.Fatal("expected focus on left pane initially")
+	}
+
+	// Press Tab
+	msg := tea.KeyMsg{Type: tea.KeyTab}
+	newModel, _ := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if m2.splitPane.FocusLeft() {
+		t.Error("expected focus to switch to right pane after Tab")
+	}
+
+	// Press Tab again
+	newModel2, _ := m2.handleKeyPress(msg)
+	m3 := newModel2.(Model)
+
+	if !m3.splitPane.FocusLeft() {
+		t.Error("expected focus to switch back to left pane after second Tab")
+	}
+}
+
+func TestHandleKeyPress_EnterOpensFileInTmuxSplit(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.editor = "code"
+
+	// Activate split pane with left focus
+	m.splitPane.Toggle()
+	m.splitPane.SetFocusLeft(true)
+
+	// Set up file tree with a file
+	m.fileTree = NewFileTree("/tmp/wt/main", &wt.WorktreeContext{
+		ChangedFiles: []string{"auth.go"},
+	})
+	for i := 0; i < len(m.fileTree.entries); i++ {
+		if m.fileTree.entries[i].Path != "" {
+			m.fileTree.cursor = i
+			break
+		}
+	}
+
+	// Press Enter — should open file, not switch tmux window
+	msg := tea.KeyMsg{Type: tea.KeyEnter}
+	newModel, cmd := m.handleKeyPress(msg)
+	m2 := newModel.(Model)
+
+	if cmd == nil {
+		t.Error("expected non-nil command for opening file")
+	}
+	if !m2.toasts.HasToasts() {
+		t.Error("expected toast notification for file open")
+	}
+}
+
+func TestBuildHelpSections_TmuxSplitShowsEnterFileBinding(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+
+	// Activate split pane
+	m.splitPane.Toggle()
+
+	sections := buildHelpSections(&m)
+
+	var sessionListSection *HelpSection
+	for i := range sections {
+		if sections[i].Title == "Session List" {
+			sessionListSection = &sections[i]
+			break
+		}
+	}
+
+	if sessionListSection == nil {
+		t.Fatal("expected Session List section in tmux mode help")
+	}
+
+	hasFileEnter := false
+	for _, b := range sessionListSection.Bindings {
+		if b.Key == "Enter" && contains(b.Description, "file") {
+			hasFileEnter = true
+		}
+	}
+
+	if !hasFileEnter {
+		t.Error("expected Enter file-open binding in tmux mode help when split is active")
+	}
+}
+
 func TestBuildHelpSections_SplitPaneInactive(t *testing.T) {
 	// Force TUI mode
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{

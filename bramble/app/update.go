@@ -317,11 +317,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
 				// Tmux mode + split pane: navigate file tree
 				m.fileTree.MoveUp()
-			} else {
+			} else if m.selectedSessionIndex > 0 {
 				// Tmux mode: navigate session list
-				if m.selectedSessionIndex > 0 {
-					m.selectedSessionIndex--
-				}
+				m.selectedSessionIndex--
 			}
 		} else if m.splitPane.IsSplit() && m.splitPane.FocusLeft() {
 			// Split pane: navigate file tree
