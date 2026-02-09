@@ -15,16 +15,16 @@ import (
 var (
 	fileTreeHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("12")).
+				Foreground(accentColor).
 				BorderBottom(true).
 				BorderStyle(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("12"))
+				BorderForeground(accentColor)
 
 	fileTreeHeaderDimStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("242")).
+				Foreground(dimColor).
 				BorderBottom(true).
 				BorderStyle(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("242"))
+				BorderForeground(dimColor)
 )
 
 // FileTree displays a navigable tree of changed files from a WorktreeContext.

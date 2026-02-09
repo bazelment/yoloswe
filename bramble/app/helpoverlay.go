@@ -144,12 +144,12 @@ func (h *HelpOverlay) View() string {
 
 // Styles for help overlay (package-level to avoid allocations in View)
 var (
-	helpSectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
-	helpKeyStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	helpSectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(idleColor)
+	helpKeyStyle          = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	helpKeyAlignStyle     = lipgloss.NewStyle().Width(12).Align(lipgloss.Right)
 	helpBoxStyle          = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("240")).
+				BorderForeground(borderColor).
 				Padding(1, 2)
 )
 

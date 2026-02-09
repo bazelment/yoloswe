@@ -14,15 +14,15 @@ import (
 var (
 	welcomeTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("12")).
+				Foreground(accentColor).
 				MarginBottom(1)
 
 	welcomeKeyStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("14"))
+			Foreground(idleColor)
 
 	welcomeDescStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("252"))
+				Foreground(barFgColor)
 )
 
 // renderWelcome renders the welcome/empty state for the center area.

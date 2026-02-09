@@ -1030,6 +1030,66 @@ func TestTimeAgo(t *testing.T) {
 	}
 }
 
+// TestWindowKeyOutsideTmux tests the "w" keybinding when not inside a tmux session.
+// (In CI/test environments we are never inside tmux, so the handler should show a toast.)
+func TestWindowKeyOutsideTmux(t *testing.T) {
+	ctx := context.Background()
+
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{
+		SessionMode: session.SessionModeTUI,
+	})
+	defer mgr.Close()
+
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, 80, 24)
+	m.worktreeDropdown.SelectIndex(0)
+
+	wKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}}
+	newModel, cmd := m.Update(wKey)
+	m2 := newModel.(Model)
+
+	// Outside tmux, the handler returns a toast cmd (not nil)
+	assert.NotNil(t, cmd, "should return a toast command")
+	// Should have added a toast about not being inside tmux
+	assert.True(t, m2.toasts.HasToasts(), "should show a toast message")
+}
+
+// TestStatusBarWindowHint tests that the [w] Window hint appears in tmux mode.
+func TestStatusBarWindowHint(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("tmux mode shows window hint", func(t *testing.T) {
+		mgr := session.NewManagerWithConfig(session.ManagerConfig{
+			SessionMode: session.SessionModeTmux,
+		})
+		defer mgr.Close()
+
+		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, []wt.Worktree{
+			{Branch: "main", Path: "/tmp/wt/main"},
+		}, 80, 24)
+		m.worktreeDropdown.SelectIndex(0)
+
+		view := m.View()
+		assert.Contains(t, view, "[w] Window")
+	})
+
+	t.Run("TUI mode does not show window hint", func(t *testing.T) {
+		mgr := session.NewManagerWithConfig(session.ManagerConfig{
+			SessionMode: session.SessionModeTUI,
+		})
+		defer mgr.Close()
+
+		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, []wt.Worktree{
+			{Branch: "main", Path: "/tmp/wt/main"},
+		}, 80, 24)
+		m.worktreeDropdown.SelectIndex(0)
+
+		view := m.View()
+		assert.NotContains(t, view, "[w] Window")
+	})
+}
+
 func TestDropdownWidth(t *testing.T) {
 	d := NewDropdown(nil)
 	assert.Equal(t, 0, d.Width())

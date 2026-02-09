@@ -13,65 +13,81 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
+// Adaptive colors: {Light terminal, Dark terminal}
+//
+// Light values target a white (#ffffff) background.
+// Dark values target a near-black (#1c1c1c) background.
+var (
+	accentColor  = lipgloss.AdaptiveColor{Light: "4", Dark: "12"}    // navy / bright blue
+	dimColor     = lipgloss.AdaptiveColor{Light: "238", Dark: "242"} // muted text
+	borderColor  = lipgloss.AdaptiveColor{Light: "248", Dark: "240"} // subtle lines
+	barBgColor   = lipgloss.AdaptiveColor{Light: "254", Dark: "236"} // bar fill
+	barFgColor   = lipgloss.AdaptiveColor{Light: "236", Dark: "252"} // bar primary text
+	selectBg     = lipgloss.AdaptiveColor{Light: "195", Dark: "240"} // highlight row (light cyan / dark gray)
+	selectFg     = lipgloss.AdaptiveColor{Light: "0", Dark: "15"}    // black / white
+	errorColor   = lipgloss.AdaptiveColor{Light: "1", Dark: "9"}     // dark red / bright red
+	runningColor = lipgloss.AdaptiveColor{Light: "2", Dark: "10"}    // dark green / bright green
+	idleColor    = lipgloss.AdaptiveColor{Light: "6", Dark: "14"}    // dark cyan / bright cyan
+	pendingColor = lipgloss.AdaptiveColor{Light: "3", Dark: "11"}    // dark yellow / bright yellow
+	doneColor    = lipgloss.AdaptiveColor{Light: "244", Dark: "8"}   // gray / dark gray
+)
+
 // Styles
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("12"))
+			Foreground(accentColor)
 
 	selectedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("240")).
-			Foreground(lipgloss.Color("15"))
+			Background(selectBg).
+			Foreground(selectFg)
 
 	dimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("242"))
+			Foreground(dimColor)
 
 	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("9"))
+			Foreground(errorColor)
 
 	topBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252")).
+			Background(barBgColor).
+			Foreground(barFgColor).
 			Padding(0, 1)
 
 	statusBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("242"))
+			Background(barBgColor).
+			Foreground(dimColor)
 
 	runningStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("10"))
+			Foreground(runningColor)
 
 	idleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("14"))
+			Foreground(idleColor)
 
 	pendingStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("11"))
+			Foreground(pendingColor)
 
 	completedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(doneColor)
 
 	failedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("9"))
+			Foreground(errorColor)
 
 	borderStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240")).
+			BorderForeground(borderColor).
 			BorderLeft(false).
 			BorderRight(false)
-
-	// Shared input box styles — keep interactive components visually consistent.
-	inputBoxBorderColor = lipgloss.Color("12")
 
 	// inputBoxStyle is for inline input components (TextArea, Dropdown overlays).
 	inputBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(inputBoxBorderColor).
+			BorderForeground(accentColor).
 			Padding(0, 1)
 
 	// modalBoxStyle is for centered modal dialogs (TaskModal, RepoPicker).
 	modalBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(inputBoxBorderColor).
+			BorderForeground(accentColor).
 			Padding(1, 2)
 )
 
@@ -624,7 +640,7 @@ func (m Model) renderStatusBar() string {
 		// Tmux mode: show session list navigation hints
 		hints = []string{"[↑/↓] Navigate", "[Enter] Switch to session"}
 		if hasWorktree {
-			hints = append(hints, "[p] Plan", "[b] Build")
+			hints = append(hints, "[p] Plan", "[b] Build", "[w] Window")
 		}
 		hints = append(hints, "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
