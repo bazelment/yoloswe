@@ -111,6 +111,27 @@ func TestKeyFeedback_Enter_TmuxNoSessions(t *testing.T) {
 	assert.Contains(t, m2.toasts.toasts[0].Message, "No sessions to switch to")
 }
 
+func TestKeyFeedback_ShiftS_NoRepo(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, nil, "")
+
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m2 := newModel.(Model)
+
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "No repository loaded")
+}
+
+func TestKeyFeedback_ShiftS_ProducesSyncMsg(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, nil, "test-repo")
+
+	_, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+
+	assert.NotNil(t, cmd)
+	msg := cmd()
+	_, ok := msg.(syncWorktreesMsg)
+	assert.True(t, ok, "Expected syncWorktreesMsg, got %T", msg)
+}
+
 func TestKeyFeedback_AltS_TmuxMode(t *testing.T) {
 	m := setupModel(t, session.SessionModeTmux, nil, "test-repo")
 

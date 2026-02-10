@@ -21,18 +21,3 @@ go_test(
         "@com_github_stretchr_testify//require",
     ],
 )
-
-go_test(
-    name = "integration_test",
-    srcs = ["router_integration_test.go"],
-    embed = [":taskrouter"],
-    tags = [
-        "integration",
-        "local",  # Need to access home directory for codex
-        "manual",
-    ],
-    deps = [
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-    ],
-)

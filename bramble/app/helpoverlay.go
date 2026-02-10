@@ -230,6 +230,7 @@ func buildHelpSections(m *Model) []HelpSection {
 	}
 	wt.Bindings = append(wt.Bindings,
 		HelpBinding{"r", "Refresh worktrees"},
+		HelpBinding{"S", "Sync worktrees (fetch + rebase)"},
 	)
 	sections = append(sections, wt)
 
