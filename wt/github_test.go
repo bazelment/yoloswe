@@ -96,7 +96,7 @@ func TestCreatePR(t *testing.T) {
 	}
 }
 
-func TestListAllPRInfo(t *testing.T) {
+func TestListOpenPRs(t *testing.T) {
 	mock := &MockGHRunner{
 		Result: &CmdResult{
 			Stdout: `[
@@ -106,7 +106,7 @@ func TestListAllPRInfo(t *testing.T) {
 		},
 	}
 
-	prs, err := ListAllPRInfo(context.Background(), mock, "/tmp")
+	prs, err := ListOpenPRs(context.Background(), mock, "/tmp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,16 +160,19 @@ func TestListAllPRInfo(t *testing.T) {
 	if !strings.Contains(argsStr, "url") {
 		t.Errorf("expected 'url' in JSON fields: %s", argsStr)
 	}
+	if !strings.Contains(argsStr, "--limit 1000") {
+		t.Errorf("expected '--limit 1000' in args: %s", argsStr)
+	}
 }
 
-func TestListAllPRInfoEmpty(t *testing.T) {
+func TestListOpenPRsEmpty(t *testing.T) {
 	mock := &MockGHRunner{
 		Result: &CmdResult{
 			Stdout: `[]`,
 		},
 	}
 
-	prs, err := ListAllPRInfo(context.Background(), mock, "/tmp")
+	prs, err := ListOpenPRs(context.Background(), mock, "/tmp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

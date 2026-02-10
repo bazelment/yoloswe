@@ -549,7 +549,7 @@ func (m *Manager) FetchPRInfo(ctx context.Context, wt Worktree) (*PRInfo, error)
 // dir must be a valid Git worktree path (not the bare repo parent)
 // because gh requires a Git repository context.
 func (m *Manager) FetchAllPRInfo(ctx context.Context, dir string) ([]PRInfo, error) {
-	return ListAllPRInfo(ctx, m.gh, dir)
+	return ListOpenPRs(ctx, m.gh, dir)
 }
 
 // GetStatus returns extended status for a worktree including PR info.

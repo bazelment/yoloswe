@@ -392,9 +392,9 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 	}
 }
 
-// refreshGitStatuses fetches local git status for each worktree (no network).
-// Reschedules itself every 30 seconds via refreshGitStatusTickMsg.
-func (m Model) refreshGitStatuses() tea.Cmd {
+// fetchGitStatuses fetches local git status for each worktree (no network).
+// Does NOT schedule the next tick — callers must manage timers separately.
+func (m Model) fetchGitStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
 		return nil
 	}
@@ -402,7 +402,7 @@ func (m Model) refreshGitStatuses() tea.Cmd {
 	repoName := m.repoName
 	ctx := m.ctx
 
-	cmds := make([]tea.Cmd, 0, len(m.worktrees)+1)
+	cmds := make([]tea.Cmd, 0, len(m.worktrees))
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
 		cmds = append(cmds, func() tea.Msg {
@@ -415,17 +415,12 @@ func (m Model) refreshGitStatuses() tea.Cmd {
 		})
 	}
 
-	// Schedule the next periodic git status refresh (30s)
-	cmds = append(cmds, tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
-		return refreshGitStatusTickMsg{}
-	}))
-
 	return tea.Batch(cmds...)
 }
 
-// refreshPRStatuses fetches all open PRs in a single batch API call.
-// Reschedules itself every 5 minutes via refreshPRStatusTickMsg.
-func (m Model) refreshPRStatuses() tea.Cmd {
+// fetchPRStatuses fetches all open PRs in a single batch API call.
+// Does NOT schedule the next tick — callers must manage timers separately.
+func (m Model) fetchPRStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
 		return nil
 	}
@@ -435,20 +430,28 @@ func (m Model) refreshPRStatuses() tea.Cmd {
 	// Use first worktree's path as working dir for gh CLI (needs a valid Git repo)
 	wtDir := m.worktrees[0].Path
 
-	return tea.Batch(
-		func() tea.Msg {
-			manager := wt.NewManager(wtRoot, repoName)
-			prs, err := manager.FetchAllPRInfo(ctx, wtDir)
-			if err != nil {
-				return nil
-			}
-			return batchPRInfoMsg{prs: prs}
-		},
-		// Schedule the next periodic PR refresh (5 min)
-		tea.Tick(5*time.Minute, func(t time.Time) tea.Msg {
-			return refreshPRStatusTickMsg{}
-		}),
-	)
+	return func() tea.Msg {
+		manager := wt.NewManager(wtRoot, repoName)
+		prs, err := manager.FetchAllPRInfo(ctx, wtDir)
+		if err != nil {
+			return nil
+		}
+		return batchPRInfoMsg{prs: prs}
+	}
+}
+
+// scheduleGitStatusTick schedules the next periodic git status refresh (30s).
+func scheduleGitStatusTick() tea.Cmd {
+	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+		return refreshGitStatusTickMsg{}
+	})
+}
+
+// schedulePRStatusTick schedules the next periodic PR status refresh (5min).
+func schedulePRStatusTick() tea.Cmd {
+	return tea.Tick(5*time.Minute, func(t time.Time) tea.Msg {
+		return refreshPRStatusTickMsg{}
+	})
 }
 
 // formatWorktreeStatus formats a WorktreeStatus for dropdown subtitle display with colors.

@@ -86,14 +86,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, deferredRefreshCmd()
 
 	case deferredRefreshMsg:
-		return m, tea.Batch(m.refreshGitStatuses(), m.refreshPRStatuses(), m.refreshFileTree(), m.refreshHistorySessions())
+		return m, tea.Batch(
+			m.fetchGitStatuses(), scheduleGitStatusTick(),
+			m.fetchPRStatuses(), schedulePRStatusTick(),
+			m.refreshFileTree(), m.refreshHistorySessions(),
+		)
 
 	case singleWorktreeStatusMsg:
 		if msg.status != nil {
 			if m.worktreeStatuses == nil {
 				m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
 			}
-			m.worktreeStatuses[msg.branch] = msg.status
+			// Merge git-only fields into existing status to preserve PR data
+			existing := m.worktreeStatuses[msg.branch]
+			if existing == nil {
+				m.worktreeStatuses[msg.branch] = msg.status
+			} else {
+				existing.IsDirty = msg.status.IsDirty
+				existing.Ahead = msg.status.Ahead
+				existing.Behind = msg.status.Behind
+				existing.LastCommitTime = msg.status.LastCommitTime
+				existing.LastCommitMsg = msg.status.LastCommitMsg
+				existing.Worktree = msg.status.Worktree
+			}
 			m.updateWorktreeDropdown()
 		}
 		return m, tea.Batch(cmds...)
@@ -120,11 +135,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				status.PRState = pr.State
 				status.PRIsDraft = pr.IsDraft
 				status.PRReviewStatus = pr.ReviewDecision
+			} else {
+				// No open PR for this branch — clear PR data so we don't
+				// show stale OPEN state after a PR is merged or closed.
+				status.PRNumber = 0
+				status.PRURL = ""
+				status.PRState = ""
+				status.PRIsDraft = false
+				status.PRReviewStatus = ""
 			}
-			// When no open PR matches, keep existing PR data unchanged.
-			// The batch only fetches open PRs, so merged/closed PRs won't
-			// appear — we preserve whatever state was previously set rather
-			// than clearing it.
 		}
 		m.updateWorktreeDropdown()
 		return m, tea.Batch(cmds...)
@@ -136,10 +155,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case refreshGitStatusTickMsg:
-		return m, m.refreshGitStatuses()
+		return m, tea.Batch(m.fetchGitStatuses(), scheduleGitStatusTick())
 
 	case refreshPRStatusTickMsg:
-		return m, m.refreshPRStatuses()
+		return m, tea.Batch(m.fetchPRStatuses(), schedulePRStatusTick())
 
 	case sessionEventMsg:
 		// Update sessions list
@@ -203,8 +222,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.addToast("Worktree operation completed", ToastSuccess))
 		}
 		m.worktreeOpMessages = msg.messages
-		// Refresh worktrees and PR statuses after worktree operations
-		cmds = append(cmds, m.refreshWorktrees(), m.refreshPRStatuses())
+		// Refresh worktrees and one-shot PR fetch (no new timer)
+		cmds = append(cmds, m.refreshWorktrees(), m.fetchPRStatuses())
 		return m, tea.Batch(cmds...)
 
 	case editorResultMsg:
@@ -610,8 +629,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toastCmd
 
 	case "r":
-		// Refresh (worktrees + PR statuses)
-		return m, tea.Batch(m.refreshWorktrees(), m.refreshPRStatuses())
+		// Refresh (worktrees + one-shot PR fetch, no new timer)
+		return m, tea.Batch(m.refreshWorktrees(), m.fetchPRStatuses())
 
 	case "g":
 		// Sync current worktree (fetch + rebase)

@@ -454,7 +454,7 @@ branch refs/heads/feature-b
 	}
 
 	mockGH := NewMockGHRunner()
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state --state open"] = &CmdResult{
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,isDraft,reviewDecision,url --state open --limit 1000"] = &CmdResult{
 		Stdout: `[
 			{"number":2,"headRefName":"feature-b","baseRefName":"feature-a","state":"OPEN"},
 			{"number":3,"headRefName":"feature-c","baseRefName":"feature-a","state":"OPEN"},
