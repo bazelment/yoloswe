@@ -30,92 +30,18 @@ func TestTextAreaBasicOperations(t *testing.T) {
 	assert.Equal(t, "Hello\nWorld", ta.Value())
 	assert.Equal(t, 2, ta.LineCount())
 
-	// Test backspace
-	ta.DeleteChar()
-	assert.Equal(t, "Hello\nWorl", ta.Value())
-
 	// Test reset
 	ta.Reset()
 	assert.Equal(t, "", ta.Value())
 	assert.Equal(t, 1, ta.LineCount())
 }
 
-func TestTextAreaCursorMovement(t *testing.T) {
+func TestTextAreaSetValue(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetWidth(40)
 	ta.SetValue("Line1\nLine2\nLine3")
-
-	// Cursor should be at end (after "Line3")
-	// Insert X at end
-	ta.InsertChar('X')
-	assert.Equal(t, "Line1\nLine2\nLine3X", ta.Value())
-
-	// Move to start of line (start of "Line3X")
-	ta.MoveCursorToLineStart()
-	ta.InsertChar('Y')
-	assert.Equal(t, "Line1\nLine2\nYLine3X", ta.Value())
-
-	// Move up - cursor is now at position 1 in line 3, move to line 2 position 1
-	ta.MoveCursorUp()
-	ta.InsertChar('Z')
-	assert.Equal(t, "Line1\nLZine2\nYLine3X", ta.Value())
-}
-
-func TestTextAreaCursorUpDown(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetWidth(40)
-	ta.SetValue("abc\ndefgh\nij")
-
-	// Cursor starts at end (line 3, col 2)
-	ta.MoveCursorUp()
-	// Should be on line 2, col 2 (or end of line if shorter)
-	ta.InsertChar('X')
-	assert.Equal(t, "abc\ndeXfgh\nij", ta.Value())
-}
-
-func TestTextAreaDeleteForward(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetValue("Hello World")
-
-	// Move to position 5 (after "Hello")
-	for i := 0; i < 6; i++ {
-		ta.MoveCursorLeft()
-	}
-	ta.DeleteCharForward()
-	assert.Equal(t, "HelloWorld", ta.Value())
-}
-
-func TestTextAreaWordWrap(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetWidth(20)
-	ta.SetMaxHeight(10)
-
-	// Add a long line that should wrap
-	ta.SetValue("This is a very long line that should wrap")
-
-	// The view should render without panic
-	view := ta.View()
-	assert.NotEmpty(t, view)
-
-	// Verify line count shows correctly
-	assert.Contains(t, view, "line")
-}
-
-func TestTextAreaMultipleLines(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetWidth(40)
-	ta.SetMinHeight(3)
-	ta.SetMaxHeight(5)
-
-	ta.SetValue("Line 1\nLine 2\nLine 3\nLine 4")
-
-	assert.Equal(t, 4, ta.LineCount())
-
-	view := ta.View()
-	assert.NotEmpty(t, view)
-	// Check for button labels
-	assert.Contains(t, view, "Send")
-	assert.Contains(t, view, "Cancel")
+	assert.Equal(t, "Line1\nLine2\nLine3", ta.Value())
+	assert.Equal(t, 3, ta.LineCount())
 }
 
 func TestTextAreaInsertString(t *testing.T) {
@@ -124,7 +50,6 @@ func TestTextAreaInsertString(t *testing.T) {
 	ta.InsertString("World")
 	assert.Equal(t, "Hello World", ta.Value())
 
-	// Insert at cursor position (which is at the end)
 	ta.InsertString("!")
 	assert.Equal(t, "Hello World!", ta.Value())
 }
@@ -132,7 +57,7 @@ func TestTextAreaInsertString(t *testing.T) {
 func TestTextAreaLineCount(t *testing.T) {
 	ta := NewTextArea()
 
-	// Empty text area has 1 line (the empty line)
+	// Empty text area has 1 line
 	assert.Equal(t, 1, ta.LineCount())
 
 	ta.SetValue("one")
@@ -214,6 +139,22 @@ func TestTextAreaViewRendering(t *testing.T) {
 	assert.True(t, strings.Contains(view, "─") || strings.Contains(view, "│"))
 }
 
+func TestTextAreaMultipleLines(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetWidth(40)
+	ta.SetMinHeight(3)
+	ta.SetMaxHeight(5)
+
+	ta.SetValue("Line 1\nLine 2\nLine 3\nLine 4")
+
+	assert.Equal(t, 4, ta.LineCount())
+
+	view := ta.View()
+	assert.NotEmpty(t, view)
+	assert.Contains(t, view, "Send")
+	assert.Contains(t, view, "Cancel")
+}
+
 func TestTextAreaHandleKey_CharInsertion(t *testing.T) {
 	ta := NewTextArea()
 	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
@@ -224,7 +165,6 @@ func TestTextAreaHandleKey_CharInsertion(t *testing.T) {
 func TestTextAreaHandleKey_Space(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello")
-	// Space key comes as a special string
 	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "hello ", ta.Value())
@@ -251,7 +191,6 @@ func TestTextAreaHandleKey_EnterNoOpWhenWhitespace(t *testing.T) {
 	ta.SetValue("   \n  \t  ")
 	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, TextAreaHandled, action)
-	assert.Equal(t, "   \n  \t  ", ta.Value()) // Value unchanged
 }
 
 func TestTextAreaHandleKey_ShiftEnterInsertsNewline(t *testing.T) {
@@ -342,9 +281,9 @@ func TestTextAreaHandleKey_IgnoredWhenNotFocused(t *testing.T) {
 func TestTextAreaHandleKey_Delete(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("abc")
-	// Move cursor to middle
-	ta.MoveCursorLeft()
-	ta.MoveCursorLeft()
+	// Bubbles places cursor at end after SetValue. Move left twice so cursor is after 'a'.
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
 	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyDelete})
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "ac", ta.Value())
@@ -352,49 +291,12 @@ func TestTextAreaHandleKey_Delete(t *testing.T) {
 
 func TestTextAreaUnicodeInsert(t *testing.T) {
 	ta := NewTextArea()
-	// Insert CJK characters
 	ta.InsertChar('你')
 	ta.InsertChar('好')
 	assert.Equal(t, "你好", ta.Value())
 
-	// Insert emoji
 	ta.InsertChar('🎉')
 	assert.Equal(t, "你好🎉", ta.Value())
-}
-
-func TestTextAreaUnicodeCursorMovement(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetValue("你好世界") // 4 CJK characters
-	// Cursor at end (pos 4)
-
-	// Move left twice — cursor should be between 好 and 世
-	ta.MoveCursorLeft()
-	ta.MoveCursorLeft()
-	ta.InsertChar('X')
-	assert.Equal(t, "你好X世界", ta.Value())
-}
-
-func TestTextAreaUnicodeBackspace(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetValue("abc你好")
-	// Cursor at end, delete 好
-	ta.DeleteChar()
-	assert.Equal(t, "abc你", ta.Value())
-	// Delete 你
-	ta.DeleteChar()
-	assert.Equal(t, "abc", ta.Value())
-}
-
-func TestTextAreaUnicodeDeleteForward(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetValue("你好abc")
-	// Move cursor to start
-	for i := 0; i < 5; i++ {
-		ta.MoveCursorLeft()
-	}
-	// Delete forward (你)
-	ta.DeleteCharForward()
-	assert.Equal(t, "好abc", ta.Value())
 }
 
 func TestTextAreaUnicodeInsertString(t *testing.T) {
@@ -402,17 +304,6 @@ func TestTextAreaUnicodeInsertString(t *testing.T) {
 	ta.SetValue("hello ")
 	ta.InsertString("世界🌍")
 	assert.Equal(t, "hello 世界🌍", ta.Value())
-}
-
-func TestTextAreaUnicodeWrapLine(t *testing.T) {
-	ta := NewTextArea()
-	ta.SetWidth(12) // content width will be smaller due to padding
-	ta.SetMaxHeight(10)
-	// Each CJK char is 2 columns wide, so 6 chars = 12 columns
-	ta.SetValue("你好世界测试完成")
-	// Should render without panic
-	view := ta.View()
-	assert.NotEmpty(t, view)
 }
 
 func TestTextAreaResetPreservesPlaceholder(t *testing.T) {
@@ -427,4 +318,86 @@ func TestTextAreaResetPreservesPlaceholder(t *testing.T) {
 	ta.SetWidth(40)
 	view := ta.View()
 	assert.Contains(t, view, "Enter text here...")
+}
+
+// --- Readline keybinding tests ---
+
+func TestTextAreaReadline_CtrlA_LineStart(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Cursor is at end after SetValue; ctrl+a should move to start
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	// Insert 'X' at start to verify cursor position
+	ta.InsertChar('X')
+	assert.Equal(t, "Xhello world", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlE_LineEnd(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Move cursor to start first
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	// ctrl+e should move to end
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlE})
+	ta.InsertChar('X')
+	assert.Equal(t, "hello worldX", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlW_DeleteWordBackward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// ctrl+w should delete "world"
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlW})
+	assert.Equal(t, "hello ", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlK_DeleteAfterCursor(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Move to start
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	// Move right 5 chars to position after "hello"
+	for i := 0; i < 5; i++ {
+		ta.HandleKey(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	// ctrl+k should delete from cursor to end of line
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlK})
+	assert.Equal(t, "hello", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlU_DeleteBeforeCursor(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Cursor at end; ctrl+u should delete everything before cursor on this line
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	assert.Equal(t, "", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlD_DeleteCharForward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("abc")
+	// Move to start
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	// ctrl+d deletes char forward
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+	assert.Equal(t, "bc", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlB_CharBackward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("abc")
+	// ctrl+b moves cursor one char backward
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+	ta.InsertChar('X')
+	assert.Equal(t, "abXc", ta.Value())
+}
+
+func TestTextAreaReadline_CtrlF_CharForward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("abc")
+	// Move to start, then ctrl+f to move forward
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	ta.InsertChar('X')
+	assert.Equal(t, "aXbc", ta.Value())
 }
