@@ -621,6 +621,10 @@ type (
 	}
 	// syncWorktreesMsg is sent to sync all worktrees (fetch + rebase)
 	syncWorktreesMsg struct{}
+	// syncWorktreeMsg is sent to sync the currently selected worktree (fetch + rebase)
+	syncWorktreeMsg struct {
+		branch string
+	}
 	// tmuxWindowMsg carries the result of opening a new tmux window.
 	tmuxWindowMsg struct{ err error }
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.

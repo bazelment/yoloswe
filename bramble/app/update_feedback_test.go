@@ -114,7 +114,7 @@ func TestKeyFeedback_Enter_TmuxNoSessions(t *testing.T) {
 func TestKeyFeedback_ShiftS_NoRepo(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, nil, "")
 
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 	m2 := newModel.(Model)
 
 	assert.True(t, m2.toasts.HasToasts())
@@ -124,7 +124,7 @@ func TestKeyFeedback_ShiftS_NoRepo(t *testing.T) {
 func TestKeyFeedback_ShiftS_ProducesSyncMsg(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, nil, "test-repo")
 
-	_, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	_, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
 	assert.NotNil(t, cmd)
 	msg := cmd()

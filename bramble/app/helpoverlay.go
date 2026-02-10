@@ -226,11 +226,12 @@ func buildHelpSections(m *Model) []HelpSection {
 			HelpBinding{"d", "Delete worktree"},
 			HelpBinding{"e", "Open in editor"},
 			HelpBinding{"w", "Open tmux window in worktree"},
+			HelpBinding{"g", "Sync current worktree (fetch + rebase)"},
 		)
 	}
 	wt.Bindings = append(wt.Bindings,
 		HelpBinding{"r", "Refresh worktrees"},
-		HelpBinding{"S", "Sync worktrees (fetch + rebase)"},
+		HelpBinding{"G", "Sync all worktrees (fetch + rebase)"},
 	)
 	sections = append(sections, wt)
 

@@ -215,6 +215,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case syncWorktreesMsg:
 		return m.syncWorktrees()
 
+	case syncWorktreeMsg:
+		return m.syncWorktree(msg.branch)
+
 	case fileTreeContextMsg:
 		m.fileTree = NewFileTree(msg.worktreePath, msg.wtCtx)
 		return m, nil
@@ -593,7 +596,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Refresh
 		return m, m.refreshWorktrees()
 
-	case "S":
+	case "g":
+		// Sync current worktree (fetch + rebase)
+		if m.repoName == "" {
+			toastCmd := m.addToast("No repository loaded", ToastError)
+			return m, toastCmd
+		}
+		selected := m.selectedWorktree()
+		if selected == nil {
+			toastCmd := m.addToast("No worktree selected", ToastError)
+			return m, toastCmd
+		}
+		branch := selected.Branch
+		return m, func() tea.Msg {
+			return syncWorktreeMsg{branch: branch}
+		}
+
+	case "G":
 		// Sync all worktrees (fetch + rebase)
 		if m.repoName == "" {
 			toastCmd := m.addToast("No repository loaded", ToastError)
@@ -955,12 +974,22 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 
 // syncWorktrees syncs all worktrees asynchronously (fetch + rebase).
 func (m Model) syncWorktrees() (tea.Model, tea.Cmd) {
+	return m.syncWorktree("")
+}
+
+// syncWorktree syncs a single worktree asynchronously (fetch + rebase).
+// Pass an empty branch string to sync all worktrees.
+func (m Model) syncWorktree(branch string) (tea.Model, tea.Cmd) {
 	if m.repoName == "" {
 		toastCmd := m.addToast("No repository selected", ToastError)
 		return m, toastCmd
 	}
 
-	m.worktreeOpMessages = []string{"Syncing worktrees..."}
+	if branch == "" {
+		m.worktreeOpMessages = []string{"Syncing worktrees..."}
+	} else {
+		m.worktreeOpMessages = []string{fmt.Sprintf("Syncing worktree %s...", branch)}
+	}
 
 	wtRoot := m.wtRoot
 	repoName := m.repoName
@@ -970,7 +999,7 @@ func (m Model) syncWorktrees() (tea.Model, tea.Cmd) {
 		output := wt.NewOutput(&buf, false)
 		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-		err := manager.Sync(ctx, "")
+		err := manager.Sync(ctx, branch)
 
 		var messages []string
 		for _, line := range strings.Split(buf.String(), "\n") {
