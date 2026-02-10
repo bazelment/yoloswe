@@ -212,6 +212,9 @@ func buildHelpSections(m *Model) []HelpSection {
 			HelpBinding{"s", "Stop session"},
 		)
 	}
+	sess.Bindings = append(sess.Bindings,
+		HelpBinding{"S", "Toggle all worktrees sessions view"},
+	)
 	if len(sess.Bindings) > 0 {
 		sections = append(sections, sess)
 	}

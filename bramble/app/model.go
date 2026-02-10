@@ -67,6 +67,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
+	showAllSessions       bool // true = show sessions across all worktrees
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -218,6 +219,23 @@ func (m *Model) currentWorktreeSessions() []session.SessionInfo {
 		return nil
 	}
 	return m.sessionManager.GetSessionsForWorktree(wt.Path)
+}
+
+// visibleSessions returns the sessions that should be displayed in the session list.
+// When showAllSessions is true, returns all non-terminal sessions across all worktrees.
+// Otherwise, returns sessions for the current worktree only.
+func (m *Model) visibleSessions() []session.SessionInfo {
+	if !m.showAllSessions {
+		return m.currentWorktreeSessions()
+	}
+	allSessions := m.sessionManager.GetAllSessions()
+	var active []session.SessionInfo
+	for i := range allSessions {
+		if !allSessions[i].Status.IsTerminal() {
+			active = append(active, allSessions[i])
+		}
+	}
+	return active
 }
 
 // updateWorktreeDropdown updates the worktree dropdown items.

@@ -210,8 +210,10 @@ func (m Model) renderTopBar() string {
 	// Right side: session info (different for tmux vs TUI mode)
 	right := ""
 	if m.sessionManager.IsInTmuxMode() {
-		// Tmux mode: show worktree path with ~ for home
-		if wt := m.selectedWorktree(); wt != nil {
+		if m.showAllSessions {
+			right = idleStyle.Render("[All Sessions]")
+		} else if wt := m.selectedWorktree(); wt != nil {
+			// Tmux mode: show worktree path with ~ for home
 			path := wt.Path
 			// Replace home directory with ~
 			if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, home) {
@@ -258,20 +260,24 @@ func (m Model) renderTopBar() string {
 func (m Model) renderSessionListView(width, height int) string {
 	var b strings.Builder
 
-	// Table header
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("   Type  Name            Status        Prompt"))
-	b.WriteString("\n")
-	b.WriteString("   ")
-	b.WriteString(strings.Repeat("─", width-3))
-	b.WriteString("\n")
-
-	// Get sessions for current worktree
-	currentSessions := m.currentWorktreeSessions()
+	// Get sessions based on current view mode
+	currentSessions := m.visibleSessions()
 
 	if len(currentSessions) == 0 {
 		return m.renderWelcome(width, height)
 	}
+
+	// Table header
+	b.WriteString("\n")
+	if m.showAllSessions {
+		b.WriteString(dimStyle.Render("   Type  Worktree        Name            Status        Prompt"))
+	} else {
+		b.WriteString(dimStyle.Render("   Type  Name            Status        Prompt"))
+	}
+	b.WriteString("\n")
+	b.WriteString("   ")
+	b.WriteString(strings.Repeat("─", width-3))
+	b.WriteString("\n")
 
 	// Ensure selected index is in bounds
 	if m.selectedSessionIndex >= len(currentSessions) {
@@ -313,7 +319,13 @@ func (m Model) renderSessionListView(width, height int) string {
 		}
 
 		// Format line: number + icon + name + status + prompt
-		line := fmt.Sprintf("%s%s  %-15s  %-13s  %s", numPrefix, typeIcon, nameDisplay, statusStr, promptDisplay)
+		var line string
+		if m.showAllSessions {
+			wtName := truncate(sess.WorktreeName, 15)
+			line = fmt.Sprintf("%s%s  %-15s  %-15s  %-13s  %s", numPrefix, typeIcon, wtName, nameDisplay, statusStr, promptDisplay)
+		} else {
+			line = fmt.Sprintf("%s%s  %-15s  %-13s  %s", numPrefix, typeIcon, nameDisplay, statusStr, promptDisplay)
+		}
 
 		// Highlight selected row
 		if i == m.selectedSessionIndex {
@@ -646,6 +658,11 @@ func (m Model) renderStatusBar() string {
 	} else if inTmuxMode {
 		// Tmux mode: show session list navigation hints
 		hints = []string{"[↑/↓] Navigate", "[Enter] Switch to session"}
+		if m.showAllSessions {
+			hints = append(hints, "[S] Current wt")
+		} else {
+			hints = append(hints, "[S] All sessions")
+		}
 		if hasWorktree {
 			hints = append(hints, "[p] Plan", "[b] Build", "[w] Window")
 		}
