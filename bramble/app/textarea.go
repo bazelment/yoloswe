@@ -24,14 +24,15 @@ const (
 // buttons, and maps Enter/Esc/Ctrl+C to action enums the caller can act on.
 type TextArea struct {
 	inner       textarea.Model
+	pendingCmd  tea.Cmd // command from last inner.Update, retrieved via Cmd()
 	prompt      string
 	placeholder string
 	sendLabel   string
 	cancelLabel string
-	focus       TextAreaFocus
 	width       int
 	maxHeight   int
 	minHeight   int
+	focus       TextAreaFocus
 }
 
 // NewTextArea creates a new multi-line text input.
@@ -191,6 +192,15 @@ func (t *TextArea) LineCount() int {
 	return t.inner.LineCount()
 }
 
+// Cmd returns and clears any pending tea.Cmd produced by the last HandleKey
+// call (e.g. cursor blink scheduling from the inner bubbles textarea).
+// Callers should batch this into their returned command.
+func (t *TextArea) Cmd() tea.Cmd {
+	cmd := t.pendingCmd
+	t.pendingCmd = nil
+	return cmd
+}
+
 // TextAreaAction represents the result of handling a key press in a TextArea.
 type TextAreaAction int
 
@@ -246,7 +256,9 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 
 	default:
 		if t.focus == FocusTextInput {
-			t.inner, _ = t.inner.Update(msg)
+			var cmd tea.Cmd
+			t.inner, cmd = t.inner.Update(msg)
+			t.pendingCmd = cmd
 			return TextAreaHandled
 		}
 		return TextAreaUnhandled

@@ -401,3 +401,31 @@ func TestTextAreaReadline_CtrlF_CharForward(t *testing.T) {
 	ta.InsertChar('X')
 	assert.Equal(t, "aXbc", ta.Value())
 }
+
+func TestTextAreaReadline_AltB_WordBackward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Cursor at end; alt+b should jump back one word to "world"
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}, Alt: true})
+	ta.InsertChar('X')
+	assert.Equal(t, "hello Xworld", ta.Value())
+}
+
+func TestTextAreaReadline_AltF_WordForward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Move to start, then alt+f to jump forward one word
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}, Alt: true})
+	ta.InsertChar('X')
+	assert.Equal(t, "helloX world", ta.Value())
+}
+
+func TestTextAreaReadline_AltD_DeleteWordForward(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Move to start, then alt+d to delete "hello"
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true})
+	assert.Equal(t, " world", ta.Value())
+}
