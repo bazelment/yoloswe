@@ -116,6 +116,26 @@ func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, er
 	return prs, nil
 }
 
+// ListAllPRInfo fetches all open PRs with full details in a single API call.
+// This replaces N individual gh pr view calls with 1 gh pr list call.
+func ListAllPRInfo(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, error) {
+	result, err := runner.Run(ctx, []string{
+		"pr", "list",
+		"--json", "number,headRefName,baseRefName,state,isDraft,reviewDecision,url",
+		"--state", "open",
+	}, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var prs []PRInfo
+	if err := json.Unmarshal([]byte(result.Stdout), &prs); err != nil {
+		return nil, err
+	}
+
+	return prs, nil
+}
+
 // UpdatePRBase changes the base branch of a PR.
 func UpdatePRBase(ctx context.Context, runner GHRunner, prNumber int, newBase, dir string) error {
 	_, err := runner.Run(ctx, []string{

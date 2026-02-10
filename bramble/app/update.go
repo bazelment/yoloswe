@@ -86,7 +86,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, deferredRefreshCmd()
 
 	case deferredRefreshMsg:
-		return m, tea.Batch(m.refreshWorktreeStatuses(), m.refreshFileTree(), m.refreshHistorySessions())
+		return m, tea.Batch(m.refreshGitStatuses(), m.refreshPRStatuses(), m.refreshFileTree(), m.refreshHistorySessions())
 
 	case singleWorktreeStatusMsg:
 		if msg.status != nil {
@@ -98,23 +98,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
-	case worktreePRInfoMsg:
-		if msg.pr != nil {
-			if m.worktreeStatuses == nil {
-				m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
-			}
-			status := m.worktreeStatuses[msg.branch]
+	case batchPRInfoMsg:
+		if m.worktreeStatuses == nil {
+			m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
+		}
+		// Build headRefName -> PRInfo map
+		prByBranch := make(map[string]*wt.PRInfo, len(msg.prs))
+		for i := range msg.prs {
+			prByBranch[msg.prs[i].HeadRefName] = &msg.prs[i]
+		}
+		// Apply to each worktree's status
+		for _, w := range m.worktrees {
+			status := m.worktreeStatuses[w.Branch]
 			if status == nil {
 				status = &wt.WorktreeStatus{}
-				m.worktreeStatuses[msg.branch] = status
+				m.worktreeStatuses[w.Branch] = status
 			}
-			status.PRNumber = msg.pr.Number
-			status.PRURL = msg.pr.URL
-			status.PRState = msg.pr.State
-			status.PRIsDraft = msg.pr.IsDraft
-			status.PRReviewStatus = msg.pr.ReviewDecision
-			m.updateWorktreeDropdown()
+			if pr, ok := prByBranch[w.Branch]; ok {
+				status.PRNumber = pr.Number
+				status.PRURL = pr.URL
+				status.PRState = pr.State
+				status.PRIsDraft = pr.IsDraft
+				status.PRReviewStatus = pr.ReviewDecision
+			} else {
+				// No open PR for this branch — clear stale PR data
+				status.PRNumber = 0
+				status.PRURL = ""
+				status.PRState = ""
+				status.PRIsDraft = false
+				status.PRReviewStatus = ""
+			}
 		}
+		m.updateWorktreeDropdown()
 		return m, tea.Batch(cmds...)
 
 	case historySessionsMsg:
@@ -123,8 +138,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateSessionDropdown()
 		return m, tea.Batch(cmds...)
 
-	case refreshStatusTickMsg:
-		return m, m.refreshWorktreeStatuses()
+	case refreshGitStatusTickMsg:
+		return m, m.refreshGitStatuses()
+
+	case refreshPRStatusTickMsg:
+		return m, m.refreshPRStatuses()
 
 	case sessionEventMsg:
 		// Update sessions list
@@ -188,7 +206,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.addToast("Worktree operation completed", ToastSuccess))
 		}
 		m.worktreeOpMessages = msg.messages
-		return m, tea.Batch(append(cmds, m.refreshWorktrees())...)
+		// Refresh worktrees and PR statuses after worktree operations
+		cmds = append(cmds, m.refreshWorktrees(), m.refreshPRStatuses())
+		return m, tea.Batch(cmds...)
 
 	case editorResultMsg:
 		if msg.err != nil {
@@ -593,8 +613,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toastCmd
 
 	case "r":
-		// Refresh
-		return m, m.refreshWorktrees()
+		// Refresh (worktrees + PR statuses)
+		return m, tea.Batch(m.refreshWorktrees(), m.refreshPRStatuses())
 
 	case "g":
 		// Sync current worktree (fetch + rebase)

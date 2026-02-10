@@ -392,10 +392,9 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 	}
 }
 
-// refreshWorktreeStatuses fetches status for each worktree in two phases:
-// 1. Fast: local git status (dirty, ahead/behind, last commit) — updates UI immediately
-// 2. Slow: PR info from GitHub API — trickles in as each network call completes
-func (m Model) refreshWorktreeStatuses() tea.Cmd {
+// refreshGitStatuses fetches local git status for each worktree (no network).
+// Reschedules itself every 30 seconds via refreshGitStatusTickMsg.
+func (m Model) refreshGitStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
 		return nil
 	}
@@ -403,11 +402,9 @@ func (m Model) refreshWorktreeStatuses() tea.Cmd {
 	repoName := m.repoName
 	ctx := m.ctx
 
-	cmds := make([]tea.Cmd, 0, len(m.worktrees)*2+1)
+	cmds := make([]tea.Cmd, 0, len(m.worktrees)+1)
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
-
-		// Fast: git-only status (no network), then slow: PR info (network call to GitHub)
 		cmds = append(cmds, func() tea.Msg {
 			manager := wt.NewManager(wtRoot, repoName)
 			status, err := manager.GetGitStatus(ctx, w)
@@ -415,22 +412,41 @@ func (m Model) refreshWorktreeStatuses() tea.Cmd {
 				return nil
 			}
 			return singleWorktreeStatusMsg{branch: w.Branch, status: status}
-		}, func() tea.Msg {
-			manager := wt.NewManager(wtRoot, repoName)
-			pr, err := manager.FetchPRInfo(ctx, w)
-			if err != nil || pr == nil {
-				return nil
-			}
-			return worktreePRInfoMsg{branch: w.Branch, pr: pr}
 		})
 	}
 
-	// Schedule the next periodic refresh
+	// Schedule the next periodic git status refresh (30s)
 	cmds = append(cmds, tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
-		return refreshStatusTickMsg{}
+		return refreshGitStatusTickMsg{}
 	}))
 
 	return tea.Batch(cmds...)
+}
+
+// refreshPRStatuses fetches all open PRs in a single batch API call.
+// Reschedules itself every 5 minutes via refreshPRStatusTickMsg.
+func (m Model) refreshPRStatuses() tea.Cmd {
+	if m.repoName == "" || len(m.worktrees) == 0 {
+		return nil
+	}
+	wtRoot := m.wtRoot
+	repoName := m.repoName
+	ctx := m.ctx
+
+	return tea.Batch(
+		func() tea.Msg {
+			manager := wt.NewManager(wtRoot, repoName)
+			prs, err := manager.FetchAllPRInfo(ctx)
+			if err != nil {
+				return nil
+			}
+			return batchPRInfoMsg{prs: prs}
+		},
+		// Schedule the next periodic PR refresh (5 min)
+		tea.Tick(5*time.Minute, func(t time.Time) tea.Msg {
+			return refreshPRStatusTickMsg{}
+		}),
+	)
 }
 
 // formatWorktreeStatus formats a WorktreeStatus for dropdown subtitle display with colors.
@@ -594,10 +610,9 @@ type (
 		status *wt.WorktreeStatus
 		branch string
 	}
-	// worktreePRInfoMsg carries PR info for one worktree (slow, network).
-	worktreePRInfoMsg struct {
-		pr     *wt.PRInfo
-		branch string
+	// batchPRInfoMsg carries all open PRs fetched in a single API call.
+	batchPRInfoMsg struct {
+		prs []wt.PRInfo
 	}
 	// fileTreeContextMsg carries gathered worktree context for the file tree
 	fileTreeContextMsg struct {
@@ -609,8 +624,10 @@ type (
 		branch   string
 		sessions []*session.SessionMeta
 	}
-	// refreshStatusTickMsg triggers a periodic status refresh
-	refreshStatusTickMsg struct{}
+	// refreshGitStatusTickMsg triggers a periodic git status refresh (30s)
+	refreshGitStatusTickMsg struct{}
+	// refreshPRStatusTickMsg triggers a periodic PR status refresh (5min)
+	refreshPRStatusTickMsg struct{}
 	// deferredRefreshMsg is sent after a short delay so the initial UI
 	// renders with just worktree names before loading statuses/file tree.
 	deferredRefreshMsg struct{}

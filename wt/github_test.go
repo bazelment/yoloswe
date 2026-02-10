@@ -96,6 +96,89 @@ func TestCreatePR(t *testing.T) {
 	}
 }
 
+func TestListAllPRInfo(t *testing.T) {
+	mock := &MockGHRunner{
+		Result: &CmdResult{
+			Stdout: `[
+				{"number": 10, "headRefName": "feature-a", "baseRefName": "main", "state": "OPEN", "isDraft": false, "reviewDecision": "APPROVED", "url": "https://github.com/org/repo/pull/10"},
+				{"number": 20, "headRefName": "feature-b", "baseRefName": "main", "state": "OPEN", "isDraft": true, "reviewDecision": "", "url": "https://github.com/org/repo/pull/20"}
+			]`,
+		},
+	}
+
+	prs, err := ListAllPRInfo(context.Background(), mock, "/tmp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(prs) != 2 {
+		t.Fatalf("got %d PRs, want 2", len(prs))
+	}
+
+	// Verify first PR
+	if prs[0].Number != 10 {
+		t.Errorf("prs[0].Number = %d, want 10", prs[0].Number)
+	}
+	if prs[0].HeadRefName != "feature-a" {
+		t.Errorf("prs[0].HeadRefName = %q, want %q", prs[0].HeadRefName, "feature-a")
+	}
+	if prs[0].ReviewDecision != "APPROVED" {
+		t.Errorf("prs[0].ReviewDecision = %q, want %q", prs[0].ReviewDecision, "APPROVED")
+	}
+	if prs[0].IsDraft {
+		t.Error("prs[0].IsDraft = true, want false")
+	}
+	if prs[0].URL != "https://github.com/org/repo/pull/10" {
+		t.Errorf("prs[0].URL = %q, want expected URL", prs[0].URL)
+	}
+
+	// Verify second PR
+	if prs[1].Number != 20 {
+		t.Errorf("prs[1].Number = %d, want 20", prs[1].Number)
+	}
+	if prs[1].HeadRefName != "feature-b" {
+		t.Errorf("prs[1].HeadRefName = %q, want %q", prs[1].HeadRefName, "feature-b")
+	}
+	if !prs[1].IsDraft {
+		t.Error("prs[1].IsDraft = false, want true")
+	}
+
+	// Verify correct args were passed
+	argsStr := strings.Join(mock.Args, " ")
+	if !strings.Contains(argsStr, "pr list") {
+		t.Errorf("expected 'pr list' in args: %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "--state open") {
+		t.Errorf("expected '--state open' in args: %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "isDraft") {
+		t.Errorf("expected 'isDraft' in JSON fields: %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "reviewDecision") {
+		t.Errorf("expected 'reviewDecision' in JSON fields: %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "url") {
+		t.Errorf("expected 'url' in JSON fields: %s", argsStr)
+	}
+}
+
+func TestListAllPRInfoEmpty(t *testing.T) {
+	mock := &MockGHRunner{
+		Result: &CmdResult{
+			Stdout: `[]`,
+		},
+	}
+
+	prs, err := ListAllPRInfo(context.Background(), mock, "/tmp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(prs) != 0 {
+		t.Fatalf("got %d PRs, want 0", len(prs))
+	}
+}
+
 func TestCreatePRDraft(t *testing.T) {
 	mock := &MockGHRunner{
 		Result: &CmdResult{
