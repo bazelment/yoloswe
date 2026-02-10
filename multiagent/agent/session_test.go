@@ -181,7 +181,7 @@ func TestRunSessionWithFileTracking_StopBeforeWait(t *testing.T) {
 	var err error
 
 	go func() {
-		result, execResult, err = runSessionWithFileTracking(ctx, mock, "test prompt")
+		result, execResult, err = runSessionWithFileTracking(ctx, mock, "test prompt", nopLogger)
 		close(done)
 	}()
 
@@ -228,7 +228,7 @@ func TestRunSessionWithFileTracking_TracksFiles(t *testing.T) {
 		mockSessionRunner: newMockSessionRunner(),
 	}
 
-	result, execResult, err := runSessionWithFileTracking(ctx, customMock, "test")
+	result, execResult, err := runSessionWithFileTracking(ctx, customMock, "test", nopLogger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestRunSessionWithFileTracking_StopError(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	_, _, err := runSessionWithFileTracking(ctx, mock, "test")
+	_, _, err := runSessionWithFileTracking(ctx, mock, "test", nopLogger)
 	if err == nil {
 		t.Fatal("expected error from Stop failure")
 	}
@@ -319,7 +319,7 @@ func TestRunSessionWithFileTracking_StopFailsToCloseEvents(t *testing.T) {
 	ctx := context.Background()
 
 	start := time.Now()
-	result, execResult, err := runSessionWithFileTracking(ctx, mock, "test")
+	result, execResult, err := runSessionWithFileTracking(ctx, mock, "test", nopLogger)
 	elapsed := time.Since(start)
 
 	// Should complete (with timeout) rather than deadlock forever

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/procattr"
 )
 
 // processManager manages the Claude CLI process.
@@ -157,6 +158,9 @@ func (pm *processManager) Start(ctx context.Context) error {
 		pm.cmd.Env = append(pm.cmd.Env, k+"="+v)
 	}
 
+	// Configure process group for orphan prevention.
+	procattr.Set(pm.cmd)
+
 	// Set working directory
 	if pm.config.WorkDir != "" {
 		pm.cmd.Dir = pm.config.WorkDir
@@ -258,8 +262,8 @@ func (pm *processManager) Stop() error {
 	}
 
 	if pm.cmd.Process != nil {
-		// Send SIGTERM for graceful shutdown
-		_ = pm.cmd.Process.Signal(syscall.SIGTERM)
+		// Send SIGTERM to the entire process group for graceful shutdown.
+		_ = procattr.SignalGroup(pm.cmd.Process, syscall.SIGTERM)
 	}
 
 	// Wait for process to exit after SIGTERM
@@ -271,8 +275,8 @@ func (pm *processManager) Stop() error {
 	}
 
 	if pm.cmd.Process != nil {
-		// Force kill with SIGKILL
-		_ = pm.cmd.Process.Kill()
+		// Force kill the entire process group with SIGKILL.
+		_ = procattr.KillGroup(pm.cmd.Process)
 	}
 
 	// Wait briefly for kill to take effect

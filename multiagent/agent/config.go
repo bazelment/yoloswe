@@ -1,7 +1,10 @@
 // Package agent provides core types and interfaces for the multi-agent system.
 package agent
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // AgentRole identifies the type of agent.
 type AgentRole string
@@ -26,35 +29,17 @@ func (r AgentRole) IsLongRunning() bool {
 
 // AgentConfig configures an agent instance.
 type AgentConfig struct {
-	// Role identifies the agent type.
-	Role AgentRole
-
-	// Model specifies the Claude model to use (e.g., "haiku", "sonnet", "opus").
-	Model string
-
-	// SystemPrompt is the system prompt for this agent.
-	SystemPrompt string
-
-	// WorkDir is the working directory for file operations.
-	WorkDir string
-
-	// SessionDir is the directory for storing session recordings.
-	// For long-running agents: SessionDir/role/
-	// For ephemeral agents: SessionDir/role/task-xxx/
-	SessionDir string
-
-	// MaxTurnsPerTask limits turns for ephemeral agents (prevents runaway).
+	Logger          *slog.Logger
+	Role            AgentRole
+	Model           string
+	SystemPrompt    string
+	WorkDir         string
+	SessionDir      string
+	AllowedTools    []string
 	MaxTurnsPerTask int
-
-	// TurnTimeout is the maximum time to wait for a turn to complete.
-	TurnTimeout time.Duration
-
-	// BudgetUSD is the cost budget for this agent (0 = unlimited).
-	BudgetUSD float64
-
-	// TaskTimeout is the maximum time for a single task execution (0 = unlimited).
-	// Only applies to ephemeral agents (Designer, Builder, Reviewer).
-	TaskTimeout time.Duration
+	TurnTimeout     time.Duration
+	BudgetUSD       float64
+	TaskTimeout     time.Duration
 }
 
 // DefaultConfig returns a config with sensible defaults.

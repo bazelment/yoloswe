@@ -18,6 +18,7 @@ go_library(
     ],
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/codex",
     visibility = ["//visibility:public"],
+    deps = ["//agent-cli-wrapper/internal/procattr"],
 )
 
 go_test(

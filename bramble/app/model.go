@@ -222,17 +222,17 @@ func (m *Model) currentWorktreeSessions() []session.SessionInfo {
 }
 
 // visibleSessions returns the sessions that should be displayed in the session list.
-// When showAllSessions is true, returns all non-terminal sessions across all worktrees.
+// When showAllSessions is true, returns all non-terminal sessions across all worktrees
+// using the cached m.sessions field for consistent state within a render cycle.
 // Otherwise, returns sessions for the current worktree only.
 func (m *Model) visibleSessions() []session.SessionInfo {
 	if !m.showAllSessions {
 		return m.currentWorktreeSessions()
 	}
-	allSessions := m.sessionManager.GetAllSessions()
 	var active []session.SessionInfo
-	for i := range allSessions {
-		if !allSessions[i].Status.IsTerminal() {
-			active = append(active, allSessions[i])
+	for i := range m.sessions {
+		if !m.sessions[i].Status.IsTerminal() {
+			active = append(active, m.sessions[i])
 		}
 	}
 	return active
@@ -621,6 +621,7 @@ type (
 	// worktreeOpResultMsg contains the result of a worktree operation
 	worktreeOpResultMsg struct {
 		err      error
+		branch   string // non-empty for create operations, used for auto-switch
 		messages []string
 	}
 	// taskWorktreeCreatedMsg is sent when a worktree is created for a task (then planner should start)

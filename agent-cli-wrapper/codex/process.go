@@ -8,7 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/procattr"
 )
 
 // processManager manages the codex app-server subprocess.
@@ -49,6 +52,9 @@ func (pm *processManager) Start(ctx context.Context) error {
 
 	// Build command
 	pm.cmd = exec.CommandContext(ctx, codexPath, "app-server")
+
+	// Configure process group for orphan prevention.
+	procattr.Set(pm.cmd)
 
 	// Set up pipes
 	var err error
@@ -189,18 +195,18 @@ func (pm *processManager) Stop() error {
 	case <-done:
 		// Process exited cleanly
 	case <-time.After(500 * time.Millisecond):
-		// Send SIGTERM
+		// Send SIGINT to the entire process group for graceful shutdown.
 		if pm.cmd.Process != nil {
-			pm.cmd.Process.Signal(os.Interrupt)
+			_ = procattr.SignalGroup(pm.cmd.Process, syscall.SIGINT)
 		}
 
 		select {
 		case <-done:
-			// Process exited after SIGTERM
+			// Process exited after SIGINT
 		case <-time.After(500 * time.Millisecond):
-			// Force kill
+			// Force kill the entire process group.
 			if pm.cmd.Process != nil {
-				pm.cmd.Process.Kill()
+				_ = procattr.KillGroup(pm.cmd.Process)
 			}
 			// Wait briefly for kill to take effect, but don't block forever
 			select {

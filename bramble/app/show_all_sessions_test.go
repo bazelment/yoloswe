@@ -94,19 +94,19 @@ func TestVisibleSessions_AllNonTerminal(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main session")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature session")
-	require.NoError(t, err)
-	m.sessions = m.sessionManager.GetAllSessions()
+	// Use cached sessions directly to avoid race with background goroutines
+	m.sessions = []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
+		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
+		{ID: "s3", Status: session.StatusCompleted, WorktreePath: "/tmp/wt/main"},
+	}
 
-	// Toggle to show all — both running sessions should be visible
+	// Toggle to show all — only non-terminal sessions should be visible
 	m.showAllSessions = true
 	sessions := m.visibleSessions()
 	assert.Len(t, sessions, 2)
 
 	// Verify filtering logic: visibleSessions only returns non-terminal.
-	// All started sessions are in Running state, so all should appear.
 	for _, s := range sessions {
 		assert.False(t, s.Status.IsTerminal(), "visibleSessions should exclude terminal sessions")
 	}
@@ -142,11 +142,11 @@ func TestShowAllSessions_QuickSwitch_TmuxMode(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main session")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature session")
-	require.NoError(t, err)
-	m.sessions = m.sessionManager.GetAllSessions()
+	// Use cached sessions directly to avoid race with background goroutines
+	m.sessions = []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
+		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
+	}
 
 	// Toggle to show all sessions
 	m.showAllSessions = true
@@ -187,11 +187,11 @@ func TestShowAllSessions_NavigateDown(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "s1")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "s2")
-	require.NoError(t, err)
-	m.sessions = m.sessionManager.GetAllSessions()
+	// Use cached sessions directly to avoid race with background goroutines
+	m.sessions = []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
+		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
+	}
 
 	m.showAllSessions = true
 	m.selectedSessionIndex = 0
