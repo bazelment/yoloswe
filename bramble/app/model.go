@@ -617,6 +617,8 @@ type (
 		branch       string
 		deleteBranch bool
 	}
+	// syncWorktreesMsg is sent to sync all worktrees (fetch + rebase)
+	syncWorktreesMsg struct{}
 	// tmuxWindowMsg carries the result of opening a new tmux window.
 	tmuxWindowMsg struct{ err error }
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.

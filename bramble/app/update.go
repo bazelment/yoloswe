@@ -212,6 +212,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deleteWorktreeMsg:
 		return m.deleteWorktree(msg.branch, msg.deleteBranch)
 
+	case syncWorktreesMsg:
+		return m.syncWorktrees()
+
 	case fileTreeContextMsg:
 		m.fileTree = NewFileTree(msg.worktreePath, msg.wtCtx)
 		return m, nil
@@ -590,6 +593,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Refresh
 		return m, m.refreshWorktrees()
 
+	case "S":
+		// Sync all worktrees (fetch + rebase)
+		if m.repoName == "" {
+			toastCmd := m.addToast("No repository loaded", ToastError)
+			return m, toastCmd
+		}
+		return m, func() tea.Msg {
+			return syncWorktreesMsg{}
+		}
+
 	case "esc":
 		// Reset scroll
 		m.scrollOffset = 0
@@ -927,6 +940,37 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
 		err := manager.Remove(ctx, branch, deleteBranch)
+
+		var messages []string
+		for _, line := range strings.Split(buf.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				messages = append(messages, line)
+			}
+		}
+
+		return worktreeOpResultMsg{messages: messages, err: err}
+	}
+}
+
+// syncWorktrees syncs all worktrees asynchronously (fetch + rebase).
+func (m Model) syncWorktrees() (tea.Model, tea.Cmd) {
+	if m.repoName == "" {
+		toastCmd := m.addToast("No repository selected", ToastError)
+		return m, toastCmd
+	}
+
+	m.worktreeOpMessages = []string{"Syncing worktrees..."}
+
+	wtRoot := m.wtRoot
+	repoName := m.repoName
+	ctx := m.ctx
+	return m, func() tea.Msg {
+		var buf bytes.Buffer
+		output := wt.NewOutput(&buf, false)
+		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
+
+		err := manager.Sync(ctx, "")
 
 		var messages []string
 		for _, line := range strings.Split(buf.String(), "\n") {
