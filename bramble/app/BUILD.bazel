@@ -38,6 +38,7 @@ go_test(
     name = "app_test",
     srcs = [
         "aggregate_cost_test.go",
+        "auto_switch_test.go",
         "confirmprompt_test.go",
         "dropdown_test.go",
         "filetree_open_test.go",
