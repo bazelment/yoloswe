@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "app",
     srcs = [
+        "allsessions.go",
         "confirmprompt.go",
         "dropdown.go",
         "filetree.go",

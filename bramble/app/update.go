@@ -25,6 +25,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == FocusHelp {
 			return m.handleHelpOverlay(msg)
 		}
+		// Handle all sessions overlay
+		if m.focus == FocusAllSessions {
+			return m.handleAllSessionsOverlay(msg)
+		}
 		// Handle confirm prompt
 		if m.focus == FocusConfirm {
 			return m.handleConfirmMode(msg)
@@ -48,6 +52,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.helpOverlay.SetSize(msg.Width, msg.Height)
+		m.allSessionsOverlay.SetSize(msg.Width, msg.Height)
 		// Update dropdown widths
 		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
 		m.sessionDropdown.SetWidth(m.width / 2)
@@ -555,17 +560,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toastCmd
 
 	case "S":
-		// Toggle show all active sessions across all worktrees
-		m.showAllSessions = !m.showAllSessions
-		m.selectedSessionIndex = 0
-		if m.showAllSessions {
-			m.updateSessionDropdown()
-			toastCmd := m.addToast("Showing all active sessions", ToastInfo)
-			return m, toastCmd
+		// Open all sessions overlay
+		var activeSessions []session.SessionInfo
+		for i := range m.sessions {
+			if !m.sessions[i].Status.IsTerminal() {
+				activeSessions = append(activeSessions, m.sessions[i])
+			}
 		}
-		m.updateSessionDropdown()
-		toastCmd := m.addToast("Showing current worktree sessions", ToastInfo)
-		return m, toastCmd
+		m.allSessionsOverlay.Show(activeSessions, m.sessionManager.IsInTmuxMode(), m.width, m.height)
+		m.focus = FocusAllSessions
+		return m, nil
 
 	case "f":
 		// Follow-up on idle session (TUI mode only)
@@ -784,7 +788,6 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.updateSessionDropdown()
 			// Save scroll position and clear viewing session when switching worktrees
 			m.switchViewingSession("")
-			m.showAllSessions = false
 			m.selectedSessionIndex = 0
 			// Refresh file tree and history for new worktree
 			m.focus = FocusOutput
@@ -1310,6 +1313,82 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// handleAllSessionsOverlay handles key presses when the all sessions overlay is visible.
+func (m Model) handleAllSessionsOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.allSessionsOverlay.Hide()
+		m.focus = FocusOutput
+		return m, nil
+
+	case "up", "k":
+		m.allSessionsOverlay.MoveSelection(-1)
+		return m, nil
+
+	case "down", "j":
+		m.allSessionsOverlay.MoveSelection(1)
+		return m, nil
+
+	case "enter":
+		sess := m.allSessionsOverlay.SelectedSession()
+		if sess == nil {
+			m.allSessionsOverlay.Hide()
+			m.focus = FocusOutput
+			return m, nil
+		}
+		m.allSessionsOverlay.Hide()
+		m.focus = FocusOutput
+		if m.sessionManager.IsInTmuxMode() {
+			if sess.TmuxWindowName != "" {
+				return m, func() tea.Msg {
+					cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+					if err := cmd.Run(); err != nil {
+						return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+					}
+					return nil
+				}
+			}
+			toastCmd := m.addToast("Session has no tmux window", ToastInfo)
+			return m, toastCmd
+		}
+		// TUI mode: switch viewing session
+		m.switchViewingSession(sess.ID)
+		return m, nil
+
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		n := int(msg.String()[0]-'0')
+		if !m.allSessionsOverlay.SelectByNumber(n) {
+			return m, nil
+		}
+		// Select and switch immediately
+		sess := m.allSessionsOverlay.SelectedSession()
+		if sess == nil {
+			return m, nil
+		}
+		m.allSessionsOverlay.Hide()
+		m.focus = FocusOutput
+		if m.sessionManager.IsInTmuxMode() {
+			if sess.TmuxWindowName != "" {
+				return m, func() tea.Msg {
+					cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+					if err := cmd.Run(); err != nil {
+						return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+					}
+					return nil
+				}
+			}
+			toastCmd := m.addToast("Session has no tmux window", ToastInfo)
+			return m, toastCmd
+		}
+		m.switchViewingSession(sess.ID)
+		return m, nil
+	}
+	return m, nil
 }
 
 // handleHelpOverlay handles key presses when the help overlay is visible.

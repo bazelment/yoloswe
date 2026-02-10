@@ -26,6 +26,7 @@ const (
 	FocusTaskModal                         // Task modal open
 	FocusHelp                              // Help overlay open
 	FocusConfirm                           // Single-keypress confirmation prompt
+	FocusAllSessions                       // All sessions overlay open
 )
 
 // Model is the root application model.
@@ -49,6 +50,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	taskModal             *TaskModal
 	toasts                *ToastManager
 	helpOverlay           *HelpOverlay
+	allSessionsOverlay    *AllSessionsOverlay
 	inputArea             *TextArea
 	splitPane             *SplitPane
 	fileTree              *FileTree
@@ -67,7 +69,6 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
-	showAllSessions       bool // true = show sessions across all worktrees
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -97,6 +98,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		taskModal:        NewTaskModal(),
 		toasts:           NewToastManager(),
 		helpOverlay:      NewHelpOverlay(),
+		allSessionsOverlay: NewAllSessionsOverlay(),
 		inputArea:        NewTextArea(),
 		splitPane:        NewSplitPane(),
 		fileTree:         NewFileTree("", nil),
@@ -222,20 +224,9 @@ func (m *Model) currentWorktreeSessions() []session.SessionInfo {
 }
 
 // visibleSessions returns the sessions that should be displayed in the session list.
-// When showAllSessions is true, returns all non-terminal sessions across all worktrees
-// using the cached m.sessions field for consistent state within a render cycle.
-// Otherwise, returns sessions for the current worktree only.
+// Returns sessions for the current worktree only.
 func (m *Model) visibleSessions() []session.SessionInfo {
-	if !m.showAllSessions {
-		return m.currentWorktreeSessions()
-	}
-	var active []session.SessionInfo
-	for i := range m.sessions {
-		if !m.sessions[i].Status.IsTerminal() {
-			active = append(active, m.sessions[i])
-		}
-	}
-	return active
+	return m.currentWorktreeSessions()
 }
 
 // updateWorktreeDropdown updates the worktree dropdown items.
@@ -272,7 +263,7 @@ func (m *Model) updateWorktreeDropdown() {
 func (m *Model) updateSessionDropdown() {
 	var items []DropdownItem
 
-	// Add live sessions first (respects showAllSessions toggle)
+	// Add live sessions first
 	sessions := m.visibleSessions()
 	for i := range sessions {
 		sess := &sessions[i]
@@ -295,11 +286,6 @@ func (m *Model) updateSessionDropdown() {
 		indexPrefix := ""
 		if i < 9 {
 			indexPrefix = fmt.Sprintf("%d. ", i+1)
-		}
-
-		// When showing all sessions, prefix with worktree name
-		if m.showAllSessions && sess.WorktreeName != "" {
-			label = "[" + sess.WorktreeName + "] " + label
 		}
 
 		// Format rich subtitle with progress and prompt

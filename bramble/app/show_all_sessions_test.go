@@ -11,33 +11,8 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
-func TestShowAllSessions_Toggle(t *testing.T) {
+func TestAllSessionsOverlay_Show(t *testing.T) {
 	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
-		{Branch: "main", Path: "/tmp/wt/main"},
-	}, "test-repo")
-	m.worktreeDropdown.SelectIndex(0)
-
-	assert.False(t, m.showAllSessions)
-
-	// Press 'S' to toggle on
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m2 := newModel.(Model)
-
-	assert.True(t, m2.showAllSessions)
-	assert.Equal(t, 0, m2.selectedSessionIndex)
-	assert.True(t, m2.toasts.HasToasts())
-	assert.Contains(t, m2.toasts.toasts[0].Message, "all active sessions")
-
-	// Press 'S' again to toggle off
-	newModel2, _ := m2.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m3 := newModel2.(Model)
-
-	assert.False(t, m3.showAllSessions)
-	assert.Contains(t, m3.toasts.toasts[1].Message, "current worktree sessions")
-}
-
-func TestShowAllSessions_TUIMode_TogglesAndUpdatesDropdown(t *testing.T) {
-	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 		{Branch: "feature", Path: "/tmp/wt/feature"},
 	}, "test-repo")
@@ -49,120 +24,163 @@ func TestShowAllSessions_TUIMode_TogglesAndUpdatesDropdown(t *testing.T) {
 	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
-	m.updateSessionDropdown()
 
-	// Before toggle: dropdown shows only main worktree session
-	itemsBefore := m.sessionDropdown.effectiveItems()
-	assert.Len(t, itemsBefore, 1)
+	assert.False(t, m.allSessionsOverlay.IsVisible())
 
-	// Press 'S' in TUI mode -- should toggle and update dropdown
+	// Press 'S' to open overlay
 	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
 	m2 := newModel.(Model)
 
-	assert.True(t, m2.showAllSessions)
-	assert.True(t, m2.toasts.HasToasts())
-	assert.Contains(t, m2.toasts.toasts[0].Message, "all active sessions")
-
-	// Dropdown should now show sessions from both worktrees
-	itemsAfter := m2.sessionDropdown.effectiveItems()
-	assert.Len(t, itemsAfter, 2)
+	assert.True(t, m2.allSessionsOverlay.IsVisible())
+	assert.Equal(t, FocusAllSessions, m2.focus)
+	// Should contain active sessions from both worktrees
+	assert.Len(t, m2.allSessionsOverlay.Sessions(), 2)
 }
 
-func TestVisibleSessions_CurrentWorktreeOnly(t *testing.T) {
+func TestAllSessionsOverlay_Navigate(t *testing.T) {
 	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 		{Branch: "feature", Path: "/tmp/wt/feature"},
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main session")
+	m.sessions = []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
+		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
+	}
+
+	// Open overlay
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m2 := newModel.(Model)
+
+	assert.Equal(t, 0, m2.allSessionsOverlay.selectedIdx)
+
+	// Navigate down
+	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
+	m3 := newModel2.(Model)
+	assert.Equal(t, 1, m3.allSessionsOverlay.selectedIdx)
+
+	// Navigate down again -- should clamp
+	newModel3, _ := m3.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
+	m4 := newModel3.(Model)
+	assert.Equal(t, 1, m4.allSessionsOverlay.selectedIdx)
+
+	// Navigate up
+	newModel4, _ := m4.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyUp})
+	m5 := newModel4.(Model)
+	assert.Equal(t, 0, m5.allSessionsOverlay.selectedIdx)
+}
+
+func TestAllSessionsOverlay_Select_TUIMode(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature session")
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
-	// Default: only current worktree sessions
-	sessions := m.visibleSessions()
-	assert.Len(t, sessions, 1)
-	assert.Equal(t, "/tmp/wt/main", sessions[0].WorktreePath)
+	// Open overlay
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m2 := newModel.(Model)
+
+	// Navigate to second session
+	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
+	m3 := newModel2.(Model)
+
+	// Remember the expected session ID (second in the overlay's list)
+	expectedID := m3.allSessionsOverlay.Sessions()[1].ID
+
+	// Press Enter to select
+	newModel3, _ := m3.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyEnter})
+	m4 := newModel3.(Model)
+
+	assert.False(t, m4.allSessionsOverlay.IsVisible())
+	assert.Equal(t, FocusOutput, m4.focus)
+	assert.Equal(t, expectedID, m4.viewingSessionID)
 }
 
-func TestVisibleSessions_AllNonTerminal(t *testing.T) {
+func TestAllSessionsOverlay_Close(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	m.sessions = []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
+	}
+
+	// Open overlay
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m2 := newModel.(Model)
+	assert.True(t, m2.allSessionsOverlay.IsVisible())
+
+	// Press Esc to close
+	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyEsc})
+	m3 := newModel2.(Model)
+
+	assert.False(t, m3.allSessionsOverlay.IsVisible())
+	assert.Equal(t, FocusOutput, m3.focus)
+}
+
+func TestAllSessionsOverlay_QuickSwitch(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task")
+	require.NoError(t, err)
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
+	require.NoError(t, err)
+	m.sessions = m.sessionManager.GetAllSessions()
+
+	// Open overlay
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m2 := newModel.(Model)
+
+	// The first session in the overlay list
+	expectedID := m2.allSessionsOverlay.Sessions()[0].ID
+
+	// Press '1' to select first session
+	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m3 := newModel2.(Model)
+
+	assert.False(t, m3.allSessionsOverlay.IsVisible())
+	assert.Equal(t, FocusOutput, m3.focus)
+	assert.Equal(t, expectedID, m3.viewingSessionID)
+}
+
+func TestAllSessionsOverlay_FilterTerminal(t *testing.T) {
 	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 		{Branch: "feature", Path: "/tmp/wt/feature"},
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	// Use cached sessions directly to avoid race with background goroutines
 	m.sessions = []session.SessionInfo{
 		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
 		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
 		{ID: "s3", Status: session.StatusCompleted, WorktreePath: "/tmp/wt/main"},
 	}
 
-	// Toggle to show all — only non-terminal sessions should be visible
-	m.showAllSessions = true
-	sessions := m.visibleSessions()
+	// Open overlay - should only show non-terminal sessions
+	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	m2 := newModel.(Model)
+
+	sessions := m2.allSessionsOverlay.Sessions()
 	assert.Len(t, sessions, 2)
-
-	// Verify filtering logic: visibleSessions only returns non-terminal.
 	for _, s := range sessions {
-		assert.False(t, s.Status.IsTerminal(), "visibleSessions should exclude terminal sessions")
+		assert.False(t, s.Status.IsTerminal(), "overlay should exclude terminal sessions")
 	}
 }
 
-func TestShowAllSessions_ResetOnWorktreeSwitch(t *testing.T) {
-	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
-		{Branch: "main", Path: "/tmp/wt/main"},
-		{Branch: "feature", Path: "/tmp/wt/feature"},
-	}, "test-repo")
-	m.worktreeDropdown.SelectIndex(0)
-
-	// Toggle on
-	m.showAllSessions = true
-	m.selectedSessionIndex = 3
-
-	// Simulate worktree dropdown selection
-	m.focus = FocusWorktreeDropdown
-	m.worktreeDropdown.Open()
-	m.worktreeDropdown.MoveSelection(1) // select "feature"
-
-	newModel, _ := m.handleDropdownMode(tea.KeyMsg{Type: tea.KeyEnter})
-	m2 := newModel.(Model)
-
-	assert.False(t, m2.showAllSessions)
-	assert.Equal(t, 0, m2.selectedSessionIndex)
-}
-
-func TestShowAllSessions_QuickSwitch_TmuxMode(t *testing.T) {
-	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
-		{Branch: "main", Path: "/tmp/wt/main"},
-		{Branch: "feature", Path: "/tmp/wt/feature"},
-	}, "test-repo")
-	m.worktreeDropdown.SelectIndex(0)
-
-	// Use cached sessions directly to avoid race with background goroutines
-	m.sessions = []session.SessionInfo{
-		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
-		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
-	}
-
-	// Toggle to show all sessions
-	m.showAllSessions = true
-
-	// Press '2' to select second session (from other worktree)
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
-	m2 := newModel.(Model)
-	assert.Equal(t, 1, m2.selectedSessionIndex)
-
-	// Press '3' -- out of range
-	newModel2, _ := m2.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
-	m3 := newModel2.(Model)
-	assert.True(t, m3.toasts.HasToasts())
-}
-
-func TestShowAllSessions_HelpContainsSBinding(t *testing.T) {
+func TestAllSessionsOverlay_HelpBinding(t *testing.T) {
 	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
@@ -174,35 +192,9 @@ func TestShowAllSessions_HelpContainsSBinding(t *testing.T) {
 		for _, b := range s.Bindings {
 			if b.Key == "S" {
 				found = true
+				assert.Contains(t, b.Description, "all sessions")
 			}
 		}
 	}
 	assert.True(t, found, "Help sections should contain 'S' keybinding")
-}
-
-func TestShowAllSessions_NavigateDown(t *testing.T) {
-	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
-		{Branch: "main", Path: "/tmp/wt/main"},
-		{Branch: "feature", Path: "/tmp/wt/feature"},
-	}, "test-repo")
-	m.worktreeDropdown.SelectIndex(0)
-
-	// Use cached sessions directly to avoid race with background goroutines
-	m.sessions = []session.SessionInfo{
-		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
-		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
-	}
-
-	m.showAllSessions = true
-	m.selectedSessionIndex = 0
-
-	// Navigate down
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
-	m2 := newModel.(Model)
-	assert.Equal(t, 1, m2.selectedSessionIndex)
-
-	// Navigate down again -- should clamp
-	newModel2, _ := m2.handleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
-	m3 := newModel2.(Model)
-	assert.Equal(t, 1, m3.selectedSessionIndex)
 }
