@@ -171,13 +171,15 @@ func (m Model) buildTimeline() []timelineEntry {
 		})
 	}
 
-	// Add history sessions (dedup by ID)
+	// Add history sessions (dedup by ID).
+	// Compare by directory name (w.Name()) since historyBranch stores the
+	// directory name, not the git branch — this survives branch checkouts.
 	w := m.selectedWorktree()
-	currentBranch := ""
+	currentName := ""
 	if w != nil {
-		currentBranch = w.Branch
+		currentName = w.Name()
 	}
-	if currentBranch != "" && m.historyBranch == currentBranch {
+	if currentName != "" && m.historyBranch == currentName {
 		for _, hist := range m.cachedHistory {
 			if liveIDs[hist.ID] {
 				continue
