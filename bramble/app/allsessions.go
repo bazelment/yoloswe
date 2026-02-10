@@ -94,40 +94,62 @@ func (o *AllSessionsOverlay) View() string {
 	// Build content lines
 	var lines []string
 
-	lines = append(lines, titleStyle.Render("All Active Sessions"))
-	lines = append(lines, "")
+	lines = append(lines, titleStyle.Render("All Active Sessions"), "")
 
-	// Calculate box width first so we can size columns dynamically
+	// Calculate box width — use most of the terminal but cap at 140
 	boxWidth := o.width - 4
 	if boxWidth > 140 {
 		boxWidth = 140
 	}
-	if boxWidth < 60 {
-		boxWidth = 60
+	if boxWidth < 40 {
+		boxWidth = 40
 	}
 
 	// Content width inside box (subtract border + padding: 2 border + 4 padding)
 	contentWidth := boxWidth - 6
+	if contentWidth < 30 {
+		contentWidth = 30
+	}
 
 	if len(o.sessions) == 0 {
-		lines = append(lines, dimStyle.Render("  No active sessions across any worktree."))
-		lines = append(lines, "")
+		lines = append(lines, dimStyle.Render("  No active sessions across any worktree."), "")
 	} else {
-		// Fixed-width columns: #(3) + Type(4) + gaps(8) + Worktree(20) + Name(20) + Status(12) = 67
-		// Prompt gets the rest
-		promptWidth := contentWidth - 67
-		if promptWidth < 15 {
-			promptWidth = 15
+		// Scale column widths to fit contentWidth.
+		// Fixed overhead: " #. 🔨  " prefix (~9 cols) + status (~12 cols) + gaps = ~27 cols
+		// Remaining budget is split among Worktree, Name, and Prompt.
+		fixedCols := 27 // num(3) + icon(4) + status(12) + spacing(8)
+		flexBudget := contentWidth - fixedCols
+		if flexBudget < 30 {
+			flexBudget = 30
+		}
+		// Allocate: 30% worktree, 25% name, 45% prompt (with minimums)
+		wtColWidth := flexBudget * 30 / 100
+		if wtColWidth < 8 {
+			wtColWidth = 8
+		}
+		nameColWidth := flexBudget * 25 / 100
+		if nameColWidth < 8 {
+			nameColWidth = 8
+		}
+		promptWidth := flexBudget - wtColWidth - nameColWidth
+		if promptWidth < 10 {
+			promptWidth = 10
 		}
 
 		// Table header
-		header := dimStyle.Render(fmt.Sprintf("   %-4s %-4s %-20s %-20s %-12s %s", "#", "Type", "Worktree", "Name", "Status", "Prompt"))
+		wtFmt := fmt.Sprintf("%%-%ds", wtColWidth)
+		nameFmt := fmt.Sprintf("%%-%ds", nameColWidth)
+		headerFmt := "   %-4s %-4s " + wtFmt + " " + nameFmt + " %-12s %s"
+		header := dimStyle.Render(fmt.Sprintf(headerFmt, "#", "Type", "Worktree", "Name", "Status", "Prompt"))
 		lines = append(lines, header)
 		sepWidth := contentWidth - 3
-		if sepWidth < 40 {
-			sepWidth = 40
+		if sepWidth < 20 {
+			sepWidth = 20
 		}
 		lines = append(lines, "   "+strings.Repeat("─", sepWidth))
+
+		// Row format string
+		rowFmt := " %s %s  " + wtFmt + " " + nameFmt + " %-12s %s"
 
 		// Session rows
 		for i := range o.sessions {
@@ -146,7 +168,7 @@ func (o *AllSessionsOverlay) View() string {
 			}
 
 			// Worktree name
-			wtName := truncate(sess.WorktreeName, 19)
+			wtName := truncate(sess.WorktreeName, wtColWidth-1)
 
 			// Session name
 			nameDisplay := sess.TmuxWindowName
@@ -158,7 +180,7 @@ func (o *AllSessionsOverlay) View() string {
 			} else if nameDisplay == "" {
 				nameDisplay = string(sess.ID)
 			}
-			nameDisplay = truncate(nameDisplay, 19)
+			nameDisplay = truncate(nameDisplay, nameColWidth-1)
 
 			// Status
 			statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status), sess.Status)
@@ -170,7 +192,7 @@ func (o *AllSessionsOverlay) View() string {
 			}
 			promptDisplay := truncate(prompt, promptWidth)
 
-			line := fmt.Sprintf(" %s %s  %-20s %-20s %-12s %s", num, typeIcon, wtName, nameDisplay, statusStr, promptDisplay)
+			line := fmt.Sprintf(rowFmt, num, typeIcon, wtName, nameDisplay, statusStr, promptDisplay)
 
 			if i == o.selectedIdx {
 				line = selectedStyle.Render(line)
@@ -208,4 +230,3 @@ var allSessionsBoxStyle = lipgloss.NewStyle().
 	Border(lipgloss.RoundedBorder()).
 	BorderForeground(borderColor).
 	Padding(1, 2)
-

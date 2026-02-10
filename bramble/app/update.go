@@ -560,11 +560,12 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toastCmd
 
 	case "S":
-		// Open all sessions overlay
+		// Open all sessions overlay — fetch fresh from manager to avoid stale cache
+		allSessions := m.sessionManager.GetAllSessions()
 		var activeSessions []session.SessionInfo
-		for i := range m.sessions {
-			if !m.sessions[i].Status.IsTerminal() {
-				activeSessions = append(activeSessions, m.sessions[i])
+		for i := range allSessions {
+			if !allSessions[i].Status.IsTerminal() {
+				activeSessions = append(activeSessions, allSessions[i])
 			}
 		}
 		m.allSessionsOverlay.Show(activeSessions, m.sessionManager.IsInTmuxMode(), m.width, m.height)
@@ -1332,62 +1333,45 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		sess := m.allSessionsOverlay.SelectedSession()
-		if sess == nil {
-			m.allSessionsOverlay.Hide()
-			m.focus = FocusOutput
-			return m, nil
-		}
-		m.allSessionsOverlay.Hide()
-		m.focus = FocusOutput
-		if m.sessionManager.IsInTmuxMode() {
-			if sess.TmuxWindowName != "" {
-				return m, func() tea.Msg {
-					cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
-					if err := cmd.Run(); err != nil {
-						return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
-					}
-					return nil
-				}
-			}
-			toastCmd := m.addToast("Session has no tmux window", ToastInfo)
-			return m, toastCmd
-		}
-		// TUI mode: switch viewing session
-		m.switchViewingSession(sess.ID)
-		return m, nil
+		return m.switchToOverlaySession()
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		n := int(msg.String()[0]-'0')
+		n := int(msg.String()[0] - '0')
 		if !m.allSessionsOverlay.SelectByNumber(n) {
 			return m, nil
 		}
-		// Select and switch immediately
-		sess := m.allSessionsOverlay.SelectedSession()
-		if sess == nil {
-			return m, nil
-		}
+		return m.switchToOverlaySession()
+	}
+	return m, nil
+}
+
+// switchToOverlaySession closes the overlay and switches to the selected session.
+func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
+	sess := m.allSessionsOverlay.SelectedSession()
+	if sess == nil {
 		m.allSessionsOverlay.Hide()
 		m.focus = FocusOutput
-		if m.sessionManager.IsInTmuxMode() {
-			if sess.TmuxWindowName != "" {
-				return m, func() tea.Msg {
-					cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
-					if err := cmd.Run(); err != nil {
-						return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
-					}
-					return nil
-				}
-			}
-			toastCmd := m.addToast("Session has no tmux window", ToastInfo)
-			return m, toastCmd
-		}
-		m.switchViewingSession(sess.ID)
 		return m, nil
 	}
+	m.allSessionsOverlay.Hide()
+	m.focus = FocusOutput
+	if m.sessionManager.IsInTmuxMode() {
+		if sess.TmuxWindowName != "" {
+			return m, func() tea.Msg {
+				cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+				if err := cmd.Run(); err != nil {
+					return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+				}
+				return nil
+			}
+		}
+		toastCmd := m.addToast("Session has no tmux window", ToastInfo)
+		return m, toastCmd
+	}
+	m.switchViewingSession(sess.ID)
 	return m, nil
 }
 
