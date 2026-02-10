@@ -120,14 +120,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				status.PRState = pr.State
 				status.PRIsDraft = pr.IsDraft
 				status.PRReviewStatus = pr.ReviewDecision
-			} else {
-				// No open PR for this branch — clear stale PR data
-				status.PRNumber = 0
-				status.PRURL = ""
-				status.PRState = ""
-				status.PRIsDraft = false
-				status.PRReviewStatus = ""
 			}
+			// When no open PR matches, keep existing PR data unchanged.
+			// The batch only fetches open PRs, so merged/closed PRs won't
+			// appear — we preserve whatever state was previously set rather
+			// than clearing it.
 		}
 		m.updateWorktreeDropdown()
 		return m, tea.Batch(cmds...)

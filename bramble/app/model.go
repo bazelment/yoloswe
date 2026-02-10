@@ -432,11 +432,13 @@ func (m Model) refreshPRStatuses() tea.Cmd {
 	wtRoot := m.wtRoot
 	repoName := m.repoName
 	ctx := m.ctx
+	// Use first worktree's path as working dir for gh CLI (needs a valid Git repo)
+	wtDir := m.worktrees[0].Path
 
 	return tea.Batch(
 		func() tea.Msg {
 			manager := wt.NewManager(wtRoot, repoName)
-			prs, err := manager.FetchAllPRInfo(ctx)
+			prs, err := manager.FetchAllPRInfo(ctx, wtDir)
 			if err != nil {
 				return nil
 			}

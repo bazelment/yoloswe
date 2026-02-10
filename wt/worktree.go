@@ -546,9 +546,10 @@ func (m *Manager) FetchPRInfo(ctx context.Context, wt Worktree) (*PRInfo, error)
 }
 
 // FetchAllPRInfo fetches all open PRs in a single API call.
-// Any worktree directory can be used as the working directory for the gh CLI.
-func (m *Manager) FetchAllPRInfo(ctx context.Context) ([]PRInfo, error) {
-	return ListAllPRInfo(ctx, m.gh, m.RepoDir())
+// dir must be a valid Git worktree path (not the bare repo parent)
+// because gh requires a Git repository context.
+func (m *Manager) FetchAllPRInfo(ctx context.Context, dir string) ([]PRInfo, error) {
+	return ListAllPRInfo(ctx, m.gh, dir)
 }
 
 // GetStatus returns extended status for a worktree including PR info.
