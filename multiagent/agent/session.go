@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +13,22 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
+
+// fmtCost formats a USD cost for log output (e.g. "$0.003").
+func fmtCost(usd float64) string {
+	return fmt.Sprintf("$%.4f", math.Round(usd*1e4)/1e4)
+}
+
+// nopHandler is a slog.Handler that discards all output.
+type nopHandler struct{}
+
+func (nopHandler) Enabled(context.Context, slog.Level) bool  { return false }
+func (nopHandler) Handle(context.Context, slog.Record) error { return nil }
+func (h nopHandler) WithAttrs([]slog.Attr) slog.Handler      { return h }
+func (h nopHandler) WithGroup(string) slog.Handler           { return h }
+
+// nopLogger is a shared no-op logger instance.
+var nopLogger = slog.New(nopHandler{})
 
 // taskCounter is used to generate unique task IDs for ephemeral sessions.
 var taskCounter uint64
@@ -24,14 +42,15 @@ func nextTaskID() string {
 // LongRunningSession wraps a claude.Session for long-running agents (Orchestrator, Planner).
 // It maintains a persistent session across multiple turns.
 type LongRunningSession struct {
-	session      *claude.Session
-	sessionDir   string
-	extraOptions []claude.SessionOption
-	config       AgentConfig
-	totalCost    float64
-	turnCount    int
-	mu           sync.Mutex
-	started      bool
+	asyncSendTime time.Time
+	session       *claude.Session
+	sessionDir    string
+	extraOptions  []claude.SessionOption
+	config        AgentConfig
+	totalCost     float64
+	turnCount     int
+	mu            sync.Mutex
+	started       bool
 }
 
 // NewLongRunningSession creates a new long-running session.
@@ -41,6 +60,13 @@ func NewLongRunningSession(config AgentConfig, swarmSessionID string) *LongRunni
 		config:     config,
 		sessionDir: sessionDir,
 	}
+}
+
+func (s *LongRunningSession) logger() *slog.Logger {
+	if s.config.Logger != nil {
+		return s.config.Logger.With("role", s.config.Role)
+	}
+	return nopLogger
 }
 
 // SetSessionOptions sets additional Claude session options.
@@ -73,6 +99,11 @@ func (s *LongRunningSession) ensureSession(ctx context.Context) error {
 		return nil
 	}
 
+	s.logger().Info("session starting",
+		"model", s.config.Model,
+		"workdir", s.config.WorkDir,
+	)
+
 	// Ensure session directory exists
 	if err := os.MkdirAll(s.sessionDir, 0755); err != nil {
 		return fmt.Errorf("failed to create session directory: %w", err)
@@ -85,6 +116,10 @@ func (s *LongRunningSession) ensureSession(ctx context.Context) error {
 		claude.WithRecording(s.sessionDir),
 		claude.WithPermissionMode(claude.PermissionModeBypass),
 		claude.WithDisablePlugins(),
+	}
+
+	if len(s.config.AllowedTools) > 0 {
+		opts = append(opts, claude.WithAllowedTools(s.config.AllowedTools...))
 	}
 
 	// Add any extra options (e.g., MCP config)
@@ -109,6 +144,10 @@ func (s *LongRunningSession) Stop() error {
 		return nil
 	}
 
+	s.logger().Info("session stopped",
+		"totalCost", fmtCost(s.totalCost),
+		"turns", s.turnCount,
+	)
 	s.started = false
 	return s.session.Stop()
 }
@@ -131,9 +170,16 @@ func (s *LongRunningSession) SendMessage(ctx context.Context, message string) (*
 	session := s.session
 	s.mu.Unlock()
 
+	log := s.logger()
+	log.Info("sending message",
+		"prompt", message,
+	)
+
 	// Send the message
+	start := time.Now()
 	result, err := session.Ask(ctx, message)
 	if err != nil {
+		log.Info("message failed", "error", err)
 		return nil, err
 	}
 
@@ -142,6 +188,11 @@ func (s *LongRunningSession) SendMessage(ctx context.Context, message string) (*
 	s.totalCost += result.Usage.CostUSD
 	s.turnCount++
 	s.mu.Unlock()
+
+	log.Info("turn complete",
+		"cost", fmtCost(result.Usage.CostUSD),
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
 
 	return ClaudeResultToAgentResult(result), nil
 }
@@ -154,6 +205,63 @@ func (s *LongRunningSession) Events() <-chan claude.Event {
 		return nil
 	}
 	return s.session.Events()
+}
+
+// LoggingEvents returns a channel that forwards events from the session
+// while logging tool start/complete and turn complete events.
+// This is useful for streaming callers that want visibility without
+// consuming events themselves for logging.
+// The returned channel mirrors the underlying session's events channel
+// (stays open for long-running sessions, closes when session stops).
+//
+// NOTE: LoggingEvents calls RecordUsage on TurnCompleteEvent. Callers
+// must NOT also call WaitForTurn (which also records usage) for the
+// same turn, or cost/turn accounting will be double-counted.
+func (s *LongRunningSession) LoggingEvents() <-chan claude.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session == nil {
+		return nil
+	}
+
+	log := s.logger()
+	src := s.session.Events()
+	out := make(chan claude.Event, cap(src))
+
+	go func() {
+		defer close(out)
+		for event := range src {
+			switch e := event.(type) {
+			case claude.ToolCompleteEvent:
+				filePath, _ := e.Input["file_path"].(string)
+				if filePath != "" {
+					log.Info("tool", "name", e.Name, "file", filepath.Base(filePath))
+				} else {
+					log.Info("tool", "name", e.Name)
+				}
+			case claude.TurnCompleteEvent:
+				// Record usage so TotalCost() is accurate in streaming mode.
+				s.RecordUsage(e.Usage)
+
+				s.mu.Lock()
+				sendTime := s.asyncSendTime
+				s.mu.Unlock()
+				if !sendTime.IsZero() {
+					log.Info("turn complete",
+						"cost", fmtCost(e.Usage.CostUSD),
+						"duration", time.Since(sendTime).Round(time.Millisecond),
+					)
+				} else {
+					log.Info("turn complete",
+						"cost", fmtCost(e.Usage.CostUSD),
+					)
+				}
+			}
+			out <- event
+		}
+	}()
+
+	return out
 }
 
 // SessionDir returns the session recording directory.
@@ -204,6 +312,14 @@ func (s *LongRunningSession) SendMessageAsync(ctx context.Context, message strin
 	session := s.session
 	s.mu.Unlock()
 
+	s.logger().Info("sending message",
+		"prompt", message,
+	)
+
+	s.mu.Lock()
+	s.asyncSendTime = time.Now()
+	s.mu.Unlock()
+
 	return session.SendMessage(ctx, message)
 }
 
@@ -212,6 +328,7 @@ func (s *LongRunningSession) SendMessageAsync(ctx context.Context, message strin
 func (s *LongRunningSession) WaitForTurn(ctx context.Context) (*AgentResult, error) {
 	s.mu.Lock()
 	session := s.session
+	sendTime := s.asyncSendTime
 	s.mu.Unlock()
 
 	if session == nil {
@@ -232,6 +349,18 @@ func (s *LongRunningSession) WaitForTurn(ctx context.Context) (*AgentResult, err
 	s.totalCost += result.Usage.CostUSD
 	s.turnCount++
 	s.mu.Unlock()
+
+	log := s.logger()
+	if !sendTime.IsZero() {
+		log.Info("turn complete",
+			"cost", fmtCost(result.Usage.CostUSD),
+			"duration", time.Since(sendTime).Round(time.Millisecond),
+		)
+	} else {
+		log.Info("turn complete",
+			"cost", fmtCost(result.Usage.CostUSD),
+		)
+	}
 
 	return ClaudeResultToAgentResult(result), nil
 }
@@ -335,6 +464,13 @@ func (r *claudeSessionRunner) Events() <-chan claude.Event {
 	return r.session.Events()
 }
 
+func (e *EphemeralSession) logger() *slog.Logger {
+	if e.config.Logger != nil {
+		return e.config.Logger.With("role", e.config.Role)
+	}
+	return nopLogger
+}
+
 // Execute creates a fresh session, runs the prompt, and returns the result.
 // Each call is independent - no conversation history is preserved.
 func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentResult, string, error) {
@@ -349,23 +485,39 @@ func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) 
 	taskID := nextTaskID()
 	taskDir := filepath.Join(e.baseSessionDir, taskID)
 
+	log := e.logger()
+	log.Info("session starting",
+		"taskID", taskID,
+		"model", e.config.Model,
+	)
+
 	// Ensure task directory exists
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		return nil, nil, "", fmt.Errorf("failed to create task directory: %w", err)
 	}
 
 	// Create a fresh session for this task
-	session := claude.NewSession(
+	opts := []claude.SessionOption{
 		claude.WithModel(e.config.Model),
 		claude.WithWorkDir(e.config.WorkDir),
 		claude.WithRecording(taskDir),
 		claude.WithPermissionMode(claude.PermissionModeBypass),
 		claude.WithDisablePlugins(),
-	)
+	}
+	if len(e.config.AllowedTools) > 0 {
+		opts = append(opts, claude.WithAllowedTools(e.config.AllowedTools...))
+	}
+	session := claude.NewSession(opts...)
 
 	runner := &claudeSessionRunner{session: session}
-	result, execResult, err := runSessionWithFileTracking(ctx, runner, prompt)
+	start := time.Now()
+	result, execResult, err := runSessionWithFileTracking(ctx, runner, prompt, log)
 	if err != nil {
+		log.Info("task failed",
+			"taskID", taskID,
+			"error", err,
+			"duration", time.Since(start).Round(time.Millisecond),
+		)
 		return nil, nil, taskID, err
 	}
 
@@ -374,6 +526,14 @@ func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) 
 	e.totalCost += result.Usage.CostUSD
 	e.taskCount++
 	e.mu.Unlock()
+
+	log.Info("task complete",
+		"taskID", taskID,
+		"cost", fmtCost(result.Usage.CostUSD),
+		"filesCreated", len(execResult.FilesCreated),
+		"filesModified", len(execResult.FilesModified),
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
 
 	return ClaudeResultToAgentResult(result), execResult, taskID, nil
 }
@@ -393,7 +553,7 @@ const eventGoroutineTimeout = 5 * time.Second
 // 4. Wait for event goroutine to finish (with timeout)
 //
 // If step 3 and 4 are reversed, the goroutine blocks forever on the events channel.
-func runSessionWithFileTracking(ctx context.Context, session sessionRunner, prompt string) (*claude.TurnResult, *ExecuteResult, error) {
+func runSessionWithFileTracking(ctx context.Context, session sessionRunner, prompt string, log *slog.Logger) (*claude.TurnResult, *ExecuteResult, error) {
 	// Start the session
 	if err := session.Start(ctx); err != nil {
 		return nil, nil, fmt.Errorf("failed to start session: %w", err)
@@ -413,13 +573,14 @@ func runSessionWithFileTracking(ctx context.Context, session sessionRunner, prom
 			return
 		}
 		for event := range events {
-			if toolEvent, ok := event.(claude.ToolCompleteEvent); ok {
-				filePath, _ := toolEvent.Input["file_path"].(string)
+			if e, ok := event.(claude.ToolCompleteEvent); ok {
+				filePath, _ := e.Input["file_path"].(string)
 				if filePath != "" {
+					log.Info("tool", "name", e.Name, "file", filepath.Base(filePath))
 					filesMu.Lock()
 					if !fileSeen[filePath] {
 						fileSeen[filePath] = true
-						switch toolEvent.Name {
+						switch e.Name {
 						case "Write":
 							filesCreated = append(filesCreated, filePath)
 						case "Edit":
@@ -431,6 +592,11 @@ func runSessionWithFileTracking(ctx context.Context, session sessionRunner, prom
 			}
 		}
 	}()
+
+	// Log the full prompt for comprehensive test debugging.
+	log.Info("sending message",
+		"prompt", prompt,
+	)
 
 	// Execute the single turn
 	result, err := session.Ask(ctx, prompt)

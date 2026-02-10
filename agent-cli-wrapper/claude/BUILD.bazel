@@ -25,6 +25,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/internal/ndjson",
+        "//agent-cli-wrapper/internal/procattr",
         "//agent-cli-wrapper/protocol",
         "@com_github_invopop_jsonschema//:jsonschema",
     ],

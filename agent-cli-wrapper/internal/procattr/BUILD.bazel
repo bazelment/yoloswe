@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "procattr",
+    srcs = [
+        "procattr_linux.go",
+        "procattr_other.go",
+        "signal.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/internal/procattr",
+    visibility = ["//agent-cli-wrapper:__subpackages__"],
+)
+
+go_test(
+    name = "procattr_test",
+    srcs = ["procattr_test.go"],
+    embed = [":procattr"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
