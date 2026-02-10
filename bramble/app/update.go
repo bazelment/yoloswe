@@ -63,7 +63,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.worktrees = msg.worktrees
 		m.updateWorktreeDropdown()
 
-		// Check for pending worktree selection (from task creation)
+		// Check for pending worktree selection (from worktree creation)
 		if m.pendingWorktreeSelect != "" {
 			worktreeName := m.pendingWorktreeSelect
 			prompt := m.pendingPlannerPrompt
@@ -71,9 +71,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingPlannerPrompt = ""
 			m.worktreeDropdown.SelectByID(worktreeName)
 			m.updateSessionDropdown()
-			model, cmd := m.startSession(session.SessionTypePlanner, prompt)
-			// Defer heavy loading so the UI renders the worktree name first
-			return model, tea.Batch(cmd, deferredRefreshCmd())
+			if prompt != "" {
+				model, cmd := m.startSession(session.SessionTypePlanner, prompt)
+				// Defer heavy loading so the UI renders the worktree name first
+				return model, tea.Batch(cmd, deferredRefreshCmd())
+			}
+			return m, deferredRefreshCmd()
 		}
 
 		// Auto-select first worktree if none selected
@@ -222,6 +225,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.addToast("Worktree operation completed", ToastSuccess))
 		}
 		m.worktreeOpMessages = msg.messages
+		// Auto-switch to newly created worktree
+		if msg.branch != "" && msg.err == nil {
+			m.pendingWorktreeSelect = msg.branch
+			m.pendingPlannerPrompt = "" // clear any stale task prompt
+		}
 		// Refresh worktrees and one-shot PR fetch (no new timer)
 		cmds = append(cmds, m.refreshWorktrees(), m.fetchPRStatuses())
 		return m, tea.Batch(cmds...)
@@ -963,7 +971,7 @@ func (m Model) createWorktree(branch string) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		return worktreeOpResultMsg{messages: messages, err: err}
+		return worktreeOpResultMsg{messages: messages, err: err, branch: branch}
 	}
 }
 
