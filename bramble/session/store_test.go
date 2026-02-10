@@ -556,6 +556,39 @@ func TestTitleAndModelInStoredToSessionInfo(t *testing.T) {
 	assert.Equal(t, "sonnet", info.Model)
 }
 
+// TestHistorySessionLookupByDirectoryName verifies that sessions saved with a
+// specific WorktreeName can only be found using that exact name (the directory
+// name, not the branch name). This documents the contract that callers must
+// use the worktree directory name for history lookups.
+func TestHistorySessionLookupByDirectoryName(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	// Save sessions under directory name "feature-a"
+	for i := 0; i < 3; i++ {
+		s := &StoredSession{
+			ID:           SessionID(fmt.Sprintf("session-%d", i)),
+			Type:         SessionTypePlanner,
+			Status:       StatusCompleted,
+			RepoName:     "repo",
+			WorktreeName: "feature-a",
+			CreatedAt:    time.Now().Add(time.Duration(i) * time.Hour),
+		}
+		require.NoError(t, store.SaveSession(s))
+	}
+
+	// Lookup by directory name should find them
+	list, err := store.ListSessions("repo", "feature-a")
+	require.NoError(t, err)
+	assert.Len(t, list, 3, "ListSessions with directory name should find all sessions")
+
+	// Lookup by a different name (e.g. a new branch checked out in the worktree)
+	// should find nothing — callers must use directory name, not branch name
+	list, err = store.ListSessions("repo", "some-other-branch")
+	require.NoError(t, err)
+	assert.Empty(t, list, "ListSessions with non-matching name should find nothing")
+}
+
 func TestTitleAndModelInListSessions(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)

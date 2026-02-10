@@ -602,6 +602,41 @@ func TestSessionTitleAndModelInGetSessionInfo(t *testing.T) {
 	assert.Equal(t, "sonnet", info.Model)
 }
 
+// TestLiveSessionsFoundByPathNotBranch verifies that GetSessionsForWorktree
+// uses the worktree path (not branch name) to find sessions. This means
+// sessions are found regardless of what branch is currently checked out.
+func TestLiveSessionsFoundByPathNotBranch(t *testing.T) {
+	m := NewManager()
+	defer m.Close()
+
+	// Add sessions with a specific worktree path
+	sessions := []*Session{
+		{ID: "s1", WorktreePath: "/worktrees/repo/feature-a", WorktreeName: "feature-a", Progress: &SessionProgress{}},
+		{ID: "s2", WorktreePath: "/worktrees/repo/feature-a", WorktreeName: "feature-a", Progress: &SessionProgress{}},
+		{ID: "s3", WorktreePath: "/worktrees/repo/feature-b", WorktreeName: "feature-b", Progress: &SessionProgress{}},
+	}
+
+	m.mu.Lock()
+	for _, s := range sessions {
+		m.sessions[s.ID] = s
+	}
+	m.mu.Unlock()
+
+	// GetSessionsForWorktree uses path, so even if the branch inside
+	// /worktrees/repo/feature-a has been changed to "new-branch",
+	// sessions are still found by path
+	result := m.GetSessionsForWorktree("/worktrees/repo/feature-a")
+	assert.Len(t, result, 2, "should find sessions by path regardless of branch name")
+
+	// Different path returns different sessions
+	result = m.GetSessionsForWorktree("/worktrees/repo/feature-b")
+	assert.Len(t, result, 1)
+
+	// Non-existent path returns empty
+	result = m.GetSessionsForWorktree("/worktrees/repo/nonexistent")
+	assert.Empty(t, result)
+}
+
 func TestAppendOrAddText(t *testing.T) {
 	m := NewManager()
 	defer m.Close()

@@ -382,7 +382,7 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 	if w == nil {
 		return nil
 	}
-	branch := w.Branch
+	branch := w.Name()
 	mgr := m.sessionManager
 	return func() tea.Msg {
 		sessions, _ := mgr.LoadHistorySessions(branch)
