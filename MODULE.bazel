@@ -44,6 +44,7 @@ use_repo(
     "com_github_bazelment_yoloswe_multiagent",
     "com_github_bazelment_yoloswe_wt",
     "com_github_bazelment_yoloswe_yoloswe",
+    "com_github_charmbracelet_bubbles",
     "com_github_charmbracelet_bubbletea",
     "com_github_charmbracelet_glamour",
     "com_github_charmbracelet_lipgloss",

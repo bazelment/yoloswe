@@ -785,8 +785,9 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	default:
-		// TextAreaHandled or TextAreaUnhandled -- no Model-level action needed
-		return m, nil
+		// TextAreaHandled or TextAreaUnhandled — surface any inner command
+		// (e.g. cursor blink scheduling) from the bubbles textarea.
+		return m, m.inputArea.Cmd()
 	}
 }
 
@@ -967,7 +968,7 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		default:
-			return m, nil
+			return m, ta.Cmd()
 		}
 
 	case TaskModalRouting:
@@ -1042,7 +1043,7 @@ func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case TextAreaQuit:
 				return m, tea.Quit
 			default:
-				return m, nil
+				return m, ta.Cmd()
 			}
 		}
 

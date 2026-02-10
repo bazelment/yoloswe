@@ -2,9 +2,11 @@ package app
 
 import (
 	"strings"
-	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -17,24 +19,51 @@ const (
 	FocusCancelButton
 )
 
-// TextArea is a multi-line text input component with word wrapping and focusable buttons.
+// TextArea is a multi-line text input component backed by charmbracelet/bubbles
+// textarea. It adds focus-cycling between the text input and Send/Cancel
+// buttons, and maps Enter/Esc/Ctrl+C to action enums the caller can act on.
 type TextArea struct {
-	value        string
-	prompt       string
-	placeholder  string
-	sendLabel    string
-	cancelLabel  string
-	cursorPos    int
-	width        int
-	maxHeight    int
-	minHeight    int
-	scrollOffset int
-	focus        TextAreaFocus
+	inner       textarea.Model
+	pendingCmd  tea.Cmd // command from last inner.Update, retrieved via Cmd()
+	prompt      string
+	placeholder string
+	sendLabel   string
+	cancelLabel string
+	width       int
+	maxHeight   int
+	minHeight   int
+	focus       TextAreaFocus
 }
 
 // NewTextArea creates a new multi-line text input.
 func NewTextArea() *TextArea {
+	inner := textarea.New()
+	inner.ShowLineNumbers = false
+	inner.CharLimit = 0
+	inner.Prompt = ""
+	inner.MaxHeight = 10
+	inner.SetHeight(3)
+	inner.SetWidth(60)
+	inner.FocusedStyle = textarea.Style{
+		Base:        lipgloss.NewStyle(),
+		Placeholder: lipgloss.NewStyle().Foreground(dimColor),
+		Text:        lipgloss.NewStyle(),
+		CursorLine:  lipgloss.NewStyle(),
+	}
+	inner.BlurredStyle = inner.FocusedStyle
+
+	// Rebind InsertNewline from enter → shift+enter (Bramble convention)
+	inner.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter"),
+		key.WithHelp("shift+enter", "insert newline"),
+	)
+	// Disable clipboard paste (ctrl+v) to avoid clipboard dependency issues
+	inner.KeyMap.Paste.SetEnabled(false)
+
+	inner.Focus()
+
 	return &TextArea{
+		inner:       inner,
 		width:       60,
 		maxHeight:   10,
 		minHeight:   3,
@@ -58,6 +87,11 @@ func (t *TextArea) Focus() TextAreaFocus {
 // SetFocus sets the focus.
 func (t *TextArea) SetFocus(f TextAreaFocus) {
 	t.focus = f
+	if f == FocusTextInput {
+		t.pendingCmd = t.inner.Focus()
+	} else {
+		t.inner.Blur()
+	}
 }
 
 // CycleForward moves focus to the next element (Tab).
@@ -65,10 +99,12 @@ func (t *TextArea) CycleForward() {
 	switch t.focus {
 	case FocusTextInput:
 		t.focus = FocusSendButton
+		t.inner.Blur()
 	case FocusSendButton:
 		t.focus = FocusCancelButton
 	case FocusCancelButton:
 		t.focus = FocusTextInput
+		t.pendingCmd = t.inner.Focus()
 	}
 }
 
@@ -77,8 +113,10 @@ func (t *TextArea) CycleBackward() {
 	switch t.focus {
 	case FocusTextInput:
 		t.focus = FocusCancelButton
+		t.inner.Blur()
 	case FocusSendButton:
 		t.focus = FocusTextInput
+		t.pendingCmd = t.inner.Focus()
 	case FocusCancelButton:
 		t.focus = FocusSendButton
 	}
@@ -87,11 +125,16 @@ func (t *TextArea) CycleBackward() {
 // SetWidth sets the text area width.
 func (t *TextArea) SetWidth(w int) {
 	t.width = w
+	t.inner.SetWidth(w - 4) // Account for padding and border
 }
 
 // SetMaxHeight sets the maximum height.
 func (t *TextArea) SetMaxHeight(h int) {
 	t.maxHeight = h
+	t.inner.MaxHeight = h - 2 // Reserve for prompt and button row
+	if t.inner.MaxHeight < 1 {
+		t.inner.MaxHeight = 1
+	}
 }
 
 // SetMinHeight sets the minimum height.
@@ -99,7 +142,7 @@ func (t *TextArea) SetMinHeight(h int) {
 	t.minHeight = h
 }
 
-// SetPrompt sets the prompt label.
+// SetPrompt sets the prompt label shown above the text area.
 func (t *TextArea) SetPrompt(p string) {
 	t.prompt = p
 }
@@ -107,202 +150,55 @@ func (t *TextArea) SetPrompt(p string) {
 // SetPlaceholder sets the placeholder text shown when the value is empty.
 func (t *TextArea) SetPlaceholder(p string) {
 	t.placeholder = p
-}
-
-// runeOffset converts a rune-based cursor position to a byte offset in s.
-func runeOffset(s string, runePos int) int {
-	byteOff := 0
-	for i := 0; i < runePos && byteOff < len(s); i++ {
-		_, size := utf8.DecodeRuneInString(s[byteOff:])
-		byteOff += size
-	}
-	return byteOff
+	t.inner.Placeholder = p
 }
 
 // SetValue sets the text content.
 func (t *TextArea) SetValue(s string) {
-	t.value = s
-	t.cursorPos = utf8.RuneCountInString(s)
+	t.inner.SetValue(s)
 }
 
 // Value returns the current text content.
 func (t *TextArea) Value() string {
-	return t.value
+	return t.inner.Value()
 }
 
 // Reset clears the text area content and resets focus to text input.
-// The placeholder is preserved since it is field metadata, not user state.
 func (t *TextArea) Reset() {
-	t.value = ""
-	t.cursorPos = 0
-	t.scrollOffset = 0
+	t.inner.Reset()
 	t.focus = FocusTextInput
+	t.pendingCmd = t.inner.Focus()
+	// Preserve placeholder
+	t.inner.Placeholder = t.placeholder
 }
 
 // InsertChar inserts a character at the cursor position.
 func (t *TextArea) InsertChar(r rune) {
-	byteOff := runeOffset(t.value, t.cursorPos)
-	t.value = t.value[:byteOff] + string(r) + t.value[byteOff:]
-	t.cursorPos++
+	t.inner.InsertRune(r)
 }
 
 // InsertString inserts a string at the cursor position.
 func (t *TextArea) InsertString(s string) {
-	byteOff := runeOffset(t.value, t.cursorPos)
-	t.value = t.value[:byteOff] + s + t.value[byteOff:]
-	t.cursorPos += utf8.RuneCountInString(s)
+	t.inner.InsertString(s)
 }
 
 // InsertNewline inserts a newline at the cursor position.
 func (t *TextArea) InsertNewline() {
-	t.InsertChar('\n')
-}
-
-// DeleteChar deletes the character before the cursor.
-func (t *TextArea) DeleteChar() {
-	if t.cursorPos > 0 {
-		byteOff := runeOffset(t.value, t.cursorPos)
-		prevByteOff := runeOffset(t.value, t.cursorPos-1)
-		t.value = t.value[:prevByteOff] + t.value[byteOff:]
-		t.cursorPos--
-	}
-}
-
-// DeleteCharForward deletes the character after the cursor.
-func (t *TextArea) DeleteCharForward() {
-	runeCount := utf8.RuneCountInString(t.value)
-	if t.cursorPos < runeCount {
-		byteOff := runeOffset(t.value, t.cursorPos)
-		nextByteOff := runeOffset(t.value, t.cursorPos+1)
-		t.value = t.value[:byteOff] + t.value[nextByteOff:]
-	}
-}
-
-// MoveCursorLeft moves the cursor left.
-func (t *TextArea) MoveCursorLeft() {
-	if t.cursorPos > 0 {
-		t.cursorPos--
-	}
-}
-
-// MoveCursorRight moves the cursor right.
-func (t *TextArea) MoveCursorRight() {
-	if t.cursorPos < utf8.RuneCountInString(t.value) {
-		t.cursorPos++
-	}
-}
-
-// MoveCursorUp moves the cursor up one line.
-func (t *TextArea) MoveCursorUp() {
-	lines := t.getLines()
-	row, col := t.getCursorRowCol(lines)
-	if row > 0 {
-		newRow := row - 1
-		newCol := min(col, utf8.RuneCountInString(lines[newRow]))
-		t.cursorPos = t.posFromRowCol(lines, newRow, newCol)
-	}
-}
-
-// MoveCursorDown moves the cursor down one line.
-func (t *TextArea) MoveCursorDown() {
-	lines := t.getLines()
-	row, col := t.getCursorRowCol(lines)
-	if row < len(lines)-1 {
-		newRow := row + 1
-		newCol := min(col, utf8.RuneCountInString(lines[newRow]))
-		t.cursorPos = t.posFromRowCol(lines, newRow, newCol)
-	}
-}
-
-// MoveCursorToLineStart moves cursor to start of current line.
-func (t *TextArea) MoveCursorToLineStart() {
-	lines := t.getLines()
-	row, _ := t.getCursorRowCol(lines)
-	t.cursorPos = t.posFromRowCol(lines, row, 0)
-}
-
-// MoveCursorToLineEnd moves cursor to end of current line.
-func (t *TextArea) MoveCursorToLineEnd() {
-	lines := t.getLines()
-	row, _ := t.getCursorRowCol(lines)
-	t.cursorPos = t.posFromRowCol(lines, row, utf8.RuneCountInString(lines[row]))
-}
-
-// getLines splits the value into lines.
-func (t *TextArea) getLines() []string {
-	if t.value == "" {
-		return []string{""}
-	}
-	return strings.Split(t.value, "\n")
-}
-
-// getCursorRowCol returns the cursor row and column (in runes).
-func (t *TextArea) getCursorRowCol(lines []string) (int, int) {
-	pos := 0
-	for row, line := range lines {
-		lineRunes := utf8.RuneCountInString(line)
-		if pos+lineRunes >= t.cursorPos {
-			return row, t.cursorPos - pos
-		}
-		pos += lineRunes + 1 // +1 for newline
-	}
-	// Cursor at end
-	lastRow := len(lines) - 1
-	return lastRow, utf8.RuneCountInString(lines[lastRow])
-}
-
-// posFromRowCol converts row/col (in runes) to absolute rune position.
-func (t *TextArea) posFromRowCol(lines []string, row, col int) int {
-	pos := 0
-	for i := 0; i < row && i < len(lines); i++ {
-		pos += utf8.RuneCountInString(lines[i]) + 1 // +1 for newline
-	}
-	return pos + col
+	t.inner.InsertRune('\n')
 }
 
 // LineCount returns the number of lines.
 func (t *TextArea) LineCount() int {
-	return len(t.getLines())
+	return t.inner.LineCount()
 }
 
-// wrapLine wraps a single line to fit the width (visual-width-based for CJK/emoji support).
-func (t *TextArea) wrapLine(line string, width int) []string {
-	if width <= 0 || runewidth.StringWidth(line) <= width {
-		return []string{line}
-	}
-
-	runes := []rune(line)
-	var wrapped []string
-	for len(runes) > 0 {
-		// Find how many runes fit within the visual width
-		visualW := 0
-		fitCount := 0
-		for i, r := range runes {
-			rw := runewidth.RuneWidth(r)
-			if visualW+rw > width {
-				fitCount = i
-				break
-			}
-			visualW += rw
-			fitCount = i + 1
-		}
-		if fitCount == 0 {
-			// Single character wider than width; take it anyway to avoid infinite loop
-			fitCount = 1
-		}
-
-		// Prefer breaking at a space
-		breakAt := fitCount
-		for i := fitCount - 1; i > 0; i-- {
-			if runes[i] == ' ' {
-				breakAt = i + 1
-				break
-			}
-		}
-		wrapped = append(wrapped, string(runes[:breakAt]))
-		runes = runes[breakAt:]
-	}
-	return wrapped
+// Cmd returns and clears any pending tea.Cmd produced by the last HandleKey
+// call (e.g. cursor blink scheduling from the inner bubbles textarea).
+// Callers should batch this into their returned command.
+func (t *TextArea) Cmd() tea.Cmd {
+	cmd := t.pendingCmd
+	t.pendingCmd = nil
+	return cmd
 }
 
 // TextAreaAction represents the result of handling a key press in a TextArea.
@@ -335,19 +231,13 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 		t.CycleBackward()
 		return TextAreaHandled
 
-	case "shift+enter":
-		if t.Focus() == FocusTextInput {
-			t.InsertNewline()
-		}
-		return TextAreaHandled
-
 	case "ctrl+enter":
 		return TextAreaSubmit
 
 	case "enter":
-		switch t.Focus() {
+		switch t.focus {
 		case FocusTextInput:
-			if strings.TrimSpace(t.value) != "" {
+			if strings.TrimSpace(t.Value()) != "" {
 				return TextAreaSubmit
 			}
 			return TextAreaHandled
@@ -361,56 +251,14 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 	case "esc":
 		return TextAreaCancel
 
-	case "backspace":
-		if t.Focus() == FocusTextInput {
-			t.DeleteChar()
-		}
-		return TextAreaHandled
-
-	case "delete":
-		if t.Focus() == FocusTextInput {
-			t.DeleteCharForward()
-		}
-		return TextAreaHandled
-
-	case "up":
-		if t.Focus() == FocusTextInput {
-			t.MoveCursorUp()
-		}
-		return TextAreaHandled
-
-	case "down":
-		if t.Focus() == FocusTextInput {
-			t.MoveCursorDown()
-		}
-		return TextAreaHandled
-
-	case "left":
-		if t.Focus() == FocusTextInput {
-			t.MoveCursorLeft()
-		}
-		return TextAreaHandled
-
-	case "right":
-		if t.Focus() == FocusTextInput {
-			t.MoveCursorRight()
-		}
-		return TextAreaHandled
-
 	case "ctrl+c":
 		return TextAreaQuit
 
 	default:
-		if t.Focus() == FocusTextInput {
-			if msg.String() == "space" {
-				t.InsertChar(' ')
-			} else if r, ok := printableRune(msg); ok {
-				t.InsertChar(r)
-			} else if len(msg.Runes) > 0 {
-				for _, r := range msg.Runes {
-					t.InsertChar(r)
-				}
-			}
+		if t.focus == FocusTextInput {
+			var cmd tea.Cmd
+			t.inner, cmd = t.inner.Update(msg)
+			t.pendingCmd = cmd
 			return TextAreaHandled
 		}
 		return TextAreaUnhandled
@@ -424,6 +272,22 @@ func (t *TextArea) View() string {
 		contentWidth = 1
 	}
 
+	// Configure inner dimensions before rendering
+	t.inner.SetWidth(contentWidth)
+	lineCount := t.inner.LineCount()
+	desiredHeight := lineCount
+	if desiredHeight < t.minHeight {
+		desiredHeight = t.minHeight
+	}
+	maxInnerHeight := t.maxHeight - 2 // Reserve for prompt and button row
+	if maxInnerHeight < 1 {
+		maxInnerHeight = 1
+	}
+	if desiredHeight > maxInnerHeight {
+		desiredHeight = maxInnerHeight
+	}
+	t.inner.SetHeight(desiredHeight)
+
 	var b strings.Builder
 
 	// Prompt
@@ -432,93 +296,9 @@ func (t *TextArea) View() string {
 		b.WriteString("\n")
 	}
 
-	// Show placeholder text when value is empty
-	showPlaceholder := t.value == "" && t.placeholder != ""
-
-	// Render lines with word wrap
-	lines := t.getLines()
-	cursorRow, cursorCol := t.getCursorRowCol(lines)
-
-	var displayLines []string
-	cursorDisplayRow := 0
-	cursorDisplayCol := cursorCol
-
-	for i, line := range lines {
-		wrappedLines := t.wrapLine(line, contentWidth)
-
-		// Track cursor position in wrapped lines
-		if i == cursorRow {
-			// Find which wrapped line the cursor is on
-			col := cursorCol
-			for j, wl := range wrappedLines {
-				wlRunes := utf8.RuneCountInString(wl)
-				if col <= wlRunes {
-					cursorDisplayRow = len(displayLines) + j
-					cursorDisplayCol = col
-					break
-				}
-				col -= wlRunes
-			}
-		}
-
-		displayLines = append(displayLines, wrappedLines...)
-	}
-
-	// Calculate visible area
-	visibleHeight := t.maxHeight - 2 // Reserve space for prompt and status
-	if visibleHeight < t.minHeight {
-		visibleHeight = t.minHeight
-	}
-
-	// Adjust scroll to keep cursor visible
-	if cursorDisplayRow < t.scrollOffset {
-		t.scrollOffset = cursorDisplayRow
-	}
-	if cursorDisplayRow >= t.scrollOffset+visibleHeight {
-		t.scrollOffset = cursorDisplayRow - visibleHeight + 1
-	}
-
-	// Render visible lines
-	endIdx := t.scrollOffset + visibleHeight
-	if endIdx > len(displayLines) {
-		endIdx = len(displayLines)
-	}
-
-	for i := t.scrollOffset; i < endIdx; i++ {
-		line := displayLines[i]
-
-		if showPlaceholder && i == 0 {
-			// Show cursor then placeholder in dim style
-			b.WriteString("█")
-			b.WriteString(dimStyle.Render(t.placeholder))
-			b.WriteString("\n")
-			continue
-		}
-
-		// Show cursor on current line
-		if i == cursorDisplayRow {
-			lineRunes := []rune(line)
-			if cursorDisplayCol <= len(lineRunes) {
-				line = string(lineRunes[:cursorDisplayCol]) + "█" + string(lineRunes[cursorDisplayCol:])
-			} else {
-				line += "█"
-			}
-		}
-
-		// Pad line to width (visual-width-based for CJK/emoji support)
-		for runewidth.StringWidth(line) < contentWidth {
-			line += " "
-		}
-
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-
-	// Pad to minimum height
-	for i := len(displayLines); i < visibleHeight; i++ {
-		b.WriteString(strings.Repeat(" ", contentWidth))
-		b.WriteString("\n")
-	}
+	// Render the bubbles textarea
+	b.WriteString(t.inner.View())
+	b.WriteString("\n")
 
 	// Render buttons with focus indication
 	var sendBtn, cancelBtn string
