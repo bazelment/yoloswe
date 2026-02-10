@@ -692,9 +692,7 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 			result = append(result, s.ToInfo())
 		}
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.After(result[j].CreatedAt)
-	})
+	sortSessionsByTime(result)
 	return result
 }
 
@@ -707,10 +705,19 @@ func (m *Manager) GetAllSessions() []SessionInfo {
 	for _, s := range m.sessions {
 		result = append(result, s.ToInfo())
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.After(result[j].CreatedAt)
-	})
+	sortSessionsByTime(result)
 	return result
+}
+
+// sortSessionsByTime sorts sessions newest-first, breaking ties by ID
+// for deterministic ordering when timestamps are equal.
+func sortSessionsByTime(sessions []SessionInfo) {
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].CreatedAt.Equal(sessions[j].CreatedAt) {
+			return sessions[i].ID < sessions[j].ID
+		}
+		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	})
 }
 
 // GetSessionOutput returns the output lines for a session.

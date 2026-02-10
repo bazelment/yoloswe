@@ -545,6 +545,13 @@ func (m *Manager) FetchPRInfo(ctx context.Context, wt Worktree) (*PRInfo, error)
 	}, nil
 }
 
+// FetchAllPRInfo fetches all open PRs in a single API call.
+// dir must be a valid Git worktree path (not the bare repo parent)
+// because gh requires a Git repository context.
+func (m *Manager) FetchAllPRInfo(ctx context.Context, dir string) ([]PRInfo, error) {
+	return ListOpenPRs(ctx, m.gh, dir)
+}
+
 // GetStatus returns extended status for a worktree including PR info.
 // This makes a network call for PR info; use GetGitStatus for local-only status.
 func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, error) {

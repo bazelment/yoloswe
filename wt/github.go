@@ -97,12 +97,14 @@ func GetPRByBranch(ctx context.Context, runner GHRunner, branch, dir string) (*P
 	return &info, nil
 }
 
-// ListOpenPRs returns all open PRs in the repository.
+// ListOpenPRs returns all open PRs in the repository with full details.
+// Uses --limit 1000 to avoid gh's default cap of 30 results.
 func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, error) {
 	result, err := runner.Run(ctx, []string{
 		"pr", "list",
-		"--json", "number,headRefName,baseRefName,state",
+		"--json", "number,headRefName,baseRefName,state,isDraft,reviewDecision,url",
 		"--state", "open",
+		"--limit", "1000",
 	}, dir)
 	if err != nil {
 		return nil, err
