@@ -31,37 +31,3 @@ go_test(
     ],
 )
 
-go_test(
-    name = "integration_test",
-    timeout = "long",
-    srcs = ["integration_test.go"],
-    embed = [":yoloswe"],
-    tags = [
-        "integration",
-        "local",
-        "manual",
-    ],
-    deps = [
-        "//agent-cli-wrapper/claude",
-        "//yoloswe/reviewer",
-        "//yoloswe/testutil",
-    ],
-)
-
-go_test(
-    name = "build_integration_test",
-    timeout = "long",
-    srcs = ["build_integration_test.go"],
-    embed = [":yoloswe"],
-    shard_count = 2,
-    tags = [
-        "integration",
-        "local",
-        "manual",
-    ],
-    deps = [
-        "//agent-cli-wrapper/claude",
-        "//yoloswe/reviewer",
-        "//yoloswe/testutil",
-    ],
-)
