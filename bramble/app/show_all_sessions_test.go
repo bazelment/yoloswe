@@ -36,19 +36,36 @@ func TestShowAllSessions_Toggle(t *testing.T) {
 	assert.Contains(t, m3.toasts.toasts[1].Message, "current worktree sessions")
 }
 
-func TestShowAllSessions_TUIMode_ShowsToast(t *testing.T) {
+func TestShowAllSessions_TUIMode_TogglesAndUpdatesDropdown(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
+		{Branch: "feature", Path: "/tmp/wt/feature"},
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	// Press 'S' in TUI mode -- should show info toast, not toggle
+	// Start sessions on different worktrees
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task")
+	require.NoError(t, err)
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
+	require.NoError(t, err)
+	m.sessions = m.sessionManager.GetAllSessions()
+	m.updateSessionDropdown()
+
+	// Before toggle: dropdown shows only main worktree session
+	itemsBefore := m.sessionDropdown.effectiveItems()
+	assert.Len(t, itemsBefore, 1)
+
+	// Press 'S' in TUI mode -- should toggle and update dropdown
 	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
 	m2 := newModel.(Model)
 
-	assert.False(t, m2.showAllSessions)
+	assert.True(t, m2.showAllSessions)
 	assert.True(t, m2.toasts.HasToasts())
-	assert.Contains(t, m2.toasts.toasts[0].Message, "Alt-S")
+	assert.Contains(t, m2.toasts.toasts[0].Message, "all active sessions")
+
+	// Dropdown should now show sessions from both worktrees
+	itemsAfter := m2.sessionDropdown.effectiveItems()
+	assert.Len(t, itemsAfter, 2)
 }
 
 func TestVisibleSessions_CurrentWorktreeOnly(t *testing.T) {

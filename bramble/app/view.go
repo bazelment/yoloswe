@@ -236,6 +236,9 @@ func (m Model) renderTopBar() string {
 		} else {
 			right = dimStyle.Render("(no session)")
 		}
+		if m.showAllSessions {
+			right = idleStyle.Render("[All]") + " " + right
+		}
 
 		// Session dropdown trigger
 		if m.focus == FocusSessionDropdown {
@@ -677,6 +680,11 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}
+		if m.showAllSessions {
+			hints = append(hints, "[S]current wt")
+		} else {
+			hints = append(hints, "[S]all sessions")
+		}
 		hints = append(hints, "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
 	} else {
 		// SDK mode: no session selected - show worktree-dependent actions
@@ -685,6 +693,11 @@ func (m Model) renderStatusBar() string {
 			hints = append(hints, "[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
 		} else {
 			hints = append(hints, "[n]ew wt")
+		}
+		if m.showAllSessions {
+			hints = append(hints, "[S]current wt")
+		} else {
+			hints = append(hints, "[S]all sessions")
 		}
 		hints = append(hints, "[?]help", "[q]uit")
 	}

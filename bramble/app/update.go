@@ -511,17 +511,15 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toastCmd
 
 	case "S":
-		// Toggle show all active sessions across all worktrees (tmux mode only)
-		if !m.sessionManager.IsInTmuxMode() {
-			toastCmd := m.addToast("Use Alt-S to browse sessions", ToastInfo)
-			return m, toastCmd
-		}
+		// Toggle show all active sessions across all worktrees
 		m.showAllSessions = !m.showAllSessions
 		m.selectedSessionIndex = 0
 		if m.showAllSessions {
+			m.updateSessionDropdown()
 			toastCmd := m.addToast("Showing all active sessions", ToastInfo)
 			return m, toastCmd
 		}
+		m.updateSessionDropdown()
 		toastCmd := m.addToast("Showing current worktree sessions", ToastInfo)
 		return m, toastCmd
 
@@ -627,21 +625,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		idx := int(msg.String()[0]-'0') - 1
-		if m.sessionManager.IsInTmuxMode() {
-			// Tmux mode: use visibleSessions (respects showAllSessions toggle)
-			liveSessions := m.visibleSessions()
-			if idx >= len(liveSessions) {
-				toastCmd := m.addToast(fmt.Sprintf("No session #%s", msg.String()), ToastInfo)
-				return m, toastCmd
-			}
-			m.selectedSessionIndex = idx
-			return m, nil
-		}
-		// TUI mode: always use current worktree sessions
-		liveSessions := m.currentWorktreeSessions()
+		liveSessions := m.visibleSessions()
 		if idx >= len(liveSessions) {
 			toastCmd := m.addToast(fmt.Sprintf("No session #%s", msg.String()), ToastInfo)
 			return m, toastCmd
+		}
+		if m.sessionManager.IsInTmuxMode() {
+			m.selectedSessionIndex = idx
+			return m, nil
 		}
 		m.switchViewingSession(liveSessions[idx].ID)
 		return m, nil

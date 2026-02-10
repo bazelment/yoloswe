@@ -272,8 +272,8 @@ func (m *Model) updateWorktreeDropdown() {
 func (m *Model) updateSessionDropdown() {
 	var items []DropdownItem
 
-	// Add live sessions first
-	sessions := m.currentWorktreeSessions()
+	// Add live sessions first (respects showAllSessions toggle)
+	sessions := m.visibleSessions()
 	for i := range sessions {
 		sess := &sessions[i]
 		// Type icon
@@ -295,6 +295,11 @@ func (m *Model) updateSessionDropdown() {
 		indexPrefix := ""
 		if i < 9 {
 			indexPrefix = fmt.Sprintf("%d. ", i+1)
+		}
+
+		// When showing all sessions, prefix with worktree name
+		if m.showAllSessions && sess.WorktreeName != "" {
+			label = "[" + sess.WorktreeName + "] " + label
 		}
 
 		// Format rich subtitle with progress and prompt
