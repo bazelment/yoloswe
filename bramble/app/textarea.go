@@ -88,7 +88,7 @@ func (t *TextArea) Focus() TextAreaFocus {
 func (t *TextArea) SetFocus(f TextAreaFocus) {
 	t.focus = f
 	if f == FocusTextInput {
-		t.inner.Focus()
+		t.pendingCmd = t.inner.Focus()
 	} else {
 		t.inner.Blur()
 	}
@@ -104,7 +104,7 @@ func (t *TextArea) CycleForward() {
 		t.focus = FocusCancelButton
 	case FocusCancelButton:
 		t.focus = FocusTextInput
-		t.inner.Focus()
+		t.pendingCmd = t.inner.Focus()
 	}
 }
 
@@ -116,7 +116,7 @@ func (t *TextArea) CycleBackward() {
 		t.inner.Blur()
 	case FocusSendButton:
 		t.focus = FocusTextInput
-		t.inner.Focus()
+		t.pendingCmd = t.inner.Focus()
 	case FocusCancelButton:
 		t.focus = FocusSendButton
 	}
@@ -167,7 +167,7 @@ func (t *TextArea) Value() string {
 func (t *TextArea) Reset() {
 	t.inner.Reset()
 	t.focus = FocusTextInput
-	t.inner.Focus()
+	t.pendingCmd = t.inner.Focus()
 	// Preserve placeholder
 	t.inner.Placeholder = t.placeholder
 }
