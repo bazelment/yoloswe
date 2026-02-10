@@ -743,7 +743,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// History session - load from store
 				wt := m.selectedWorktree()
 				if wt != nil {
-					histData, err := m.sessionManager.LoadSessionFromHistory(wt.Branch, m.viewingSessionID)
+					histData, err := m.sessionManager.LoadSessionFromHistory(wt.Name(), m.viewingSessionID)
 					if err == nil {
 						m.viewingHistoryData = histData
 					}

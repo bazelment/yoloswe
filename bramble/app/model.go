@@ -291,14 +291,16 @@ func (m *Model) updateSessionDropdown() {
 		})
 	}
 
-	// Use cached history for the current worktree (loaded async)
+	// Use cached history for the current worktree (loaded async).
+	// Compare by directory name (w.Name()) since historyBranch stores the
+	// directory name, not the git branch — this survives branch checkouts.
 	w := m.selectedWorktree()
-	currentBranch := ""
+	currentName := ""
 	if w != nil {
-		currentBranch = w.Branch
+		currentName = w.Name()
 	}
 	var historySessions []*session.SessionMeta
-	if currentBranch != "" && m.historyBranch == currentBranch {
+	if currentName != "" && m.historyBranch == currentName {
 		historySessions = m.cachedHistory
 	}
 
@@ -382,7 +384,7 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 	if w == nil {
 		return nil
 	}
-	branch := w.Branch
+	branch := w.Name()
 	mgr := m.sessionManager
 	return func() tea.Msg {
 		sessions, _ := mgr.LoadHistorySessions(branch)

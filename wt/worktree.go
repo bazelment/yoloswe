@@ -1054,15 +1054,28 @@ func (m *Manager) GetWorktreePath(branch string) (string, error) {
 }
 
 // GetParentBranch returns the parent branch for a given branch if tracked.
+// If the current branch has no parent config, it falls back to checking the
+// directory name (the original branch the worktree was created for), which
+// handles the case where the user ran `git checkout -b` inside a worktree.
 func (m *Manager) GetParentBranch(ctx context.Context, branch, dir string) (string, error) {
 	desc, err := GetBranchDescription(ctx, m.git, branch, dir)
-	if err != nil {
-		return "", nil // No description is not an error
+	if err == nil {
+		if parent, ok := strings.CutPrefix(desc, "parent:"); ok {
+			return parent, nil
+		}
 	}
-	if parent, ok := strings.CutPrefix(desc, "parent:"); ok {
-		return parent, nil
+	// Fallback: if the worktree directory name differs from the branch,
+	// check the original branch's config (worktree may have been checked out to a different branch)
+	dirName := filepath.Base(dir)
+	if dirName != branch {
+		desc, err = GetBranchDescription(ctx, m.git, dirName, dir)
+		if err == nil {
+			if parent, ok := strings.CutPrefix(desc, "parent:"); ok {
+				return parent, nil
+			}
+		}
 	}
-	return "", nil // No parent tracked
+	return "", nil
 }
 
 // SetGoal sets the goal for a branch in a worktree.
@@ -1071,8 +1084,19 @@ func (m *Manager) SetGoal(ctx context.Context, branch, goal, dir string) error {
 }
 
 // GetGoal returns the goal for a branch in a worktree.
+// If the current branch has no goal config, it falls back to checking the
+// directory name, which handles the case where the user ran `git checkout -b`
+// inside a worktree.
 func (m *Manager) GetGoal(ctx context.Context, branch, dir string) (string, error) {
-	return GetBranchGoal(ctx, m.git, branch, dir)
+	goal, err := GetBranchGoal(ctx, m.git, branch, dir)
+	if err == nil && goal != "" {
+		return goal, nil
+	}
+	dirName := filepath.Base(dir)
+	if dirName != branch {
+		return GetBranchGoal(ctx, m.git, dirName, dir)
+	}
+	return "", nil
 }
 
 // PROptions configures PR creation.

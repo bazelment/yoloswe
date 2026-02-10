@@ -183,6 +183,22 @@ func (r *testRepo) abortRebase(wtPath string) {
 	r.git.Run(r.ctx, []string{"rebase", "--abort"}, wtPath)
 }
 
+// checkoutBranch checks out a branch in a worktree directory.
+// If create is true, creates a new branch with -b.
+func (r *testRepo) checkoutBranch(wtPath, branch string, create bool) {
+	r.t.Helper()
+	args := []string{"checkout"}
+	if create {
+		args = append(args, "-b")
+		r.t.Logf("Creating and checking out new branch %q in %s", branch, filepath.Base(wtPath))
+	} else {
+		r.t.Logf("Checking out branch %q in %s", branch, filepath.Base(wtPath))
+	}
+	args = append(args, branch)
+	_, err := r.git.Run(r.ctx, args, wtPath)
+	require.NoError(r.t, err, "checkout failed for "+branch)
+}
+
 // fileExists checks if a file exists in a directory.
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
