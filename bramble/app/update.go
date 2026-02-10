@@ -1065,8 +1065,8 @@ func (m Model) handleMergeKey() (tea.Model, tea.Cmd) {
 
 	// Check for running/pending sessions (idle is OK)
 	sessions := m.sessionManager.GetSessionsForWorktree(w.Path)
-	for _, s := range sessions {
-		if !s.Status.IsTerminal() && s.Status != session.StatusIdle {
+	for i := range sessions {
+		if !sessions[i].Status.IsTerminal() && sessions[i].Status != session.StatusIdle {
 			toastCmd := m.addToast("Stop active sessions first.", ToastInfo)
 			return m, toastCmd
 		}

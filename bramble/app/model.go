@@ -681,7 +681,7 @@ type (
 		mergeMethod string // "squash", "rebase", "merge"
 	}
 	// mergePRDoneMsg signals merge completed, triggers post-merge prompt.
-	mergePRDoneMsg struct {
+	mergePRDoneMsg struct { //nolint:govet // fieldalignment: readability over padding
 		branch   string
 		prNumber int
 		messages []string
