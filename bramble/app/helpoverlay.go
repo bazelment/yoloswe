@@ -227,6 +227,7 @@ func buildHelpSections(m *Model) []HelpSection {
 	if hasWorktree {
 		wt.Bindings = append(wt.Bindings,
 			HelpBinding{"d", "Delete worktree"},
+			HelpBinding{"m", "Merge PR"},
 			HelpBinding{"e", "Open in editor"},
 			HelpBinding{"w", "Open tmux window in worktree"},
 			HelpBinding{"g", "Sync current worktree (fetch + rebase)"},

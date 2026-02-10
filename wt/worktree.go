@@ -215,6 +215,11 @@ func (m *Manager) BareDir() string {
 	return filepath.Join(m.RepoDir(), ".bare")
 }
 
+// GitRunner returns the git runner used by this manager.
+func (m *Manager) GitRunner() GitRunner {
+	return m.git
+}
+
 // Init initializes a new repository with a bare clone.
 func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 	repoName := GetRepoNameFromURL(url)
@@ -934,6 +939,62 @@ func (m *Manager) MergePR(ctx context.Context, opts MergeOptions) error {
 	}
 
 	return nil
+}
+
+// MergePRForBranch merges the PR for the given branch. Unlike MergePR, it does
+// not rely on os.Getwd() and always keeps the worktree (caller handles cleanup).
+func (m *Manager) MergePRForBranch(ctx context.Context, branch string, opts MergeOptions) (int, error) {
+	bareDir := m.BareDir()
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+
+	if branch == defaultBranch {
+		return 0, fmt.Errorf("cannot merge the default branch (%s)", defaultBranch)
+	}
+
+	// Get PR info for the branch
+	prInfo, err := GetPRByBranch(ctx, m.gh, branch, bareDir)
+	if err != nil {
+		return 0, fmt.Errorf("no PR found for branch %s: %w", branch, err)
+	}
+
+	if prInfo.ReviewDecision != "" && prInfo.ReviewDecision != "APPROVED" {
+		m.output.Warn(fmt.Sprintf("PR #%d review status: %s", prInfo.Number, prInfo.ReviewDecision))
+	}
+
+	m.output.Info(fmt.Sprintf("Merging PR #%d for branch %s...", prInfo.Number, branch))
+
+	// Find child branches BEFORE merging
+	childDeps, err := m.findChildBranches(ctx, branch, bareDir)
+	if err != nil {
+		m.output.Warn(fmt.Sprintf("Failed to find child branches: %v", err))
+	}
+
+	// Merge the PR
+	mergeArgs := []string{"pr", "merge", strconv.Itoa(prInfo.Number), "--delete-branch"}
+	switch opts.MergeMethod {
+	case "squash":
+		mergeArgs = append(mergeArgs, "--squash")
+	case "rebase":
+		mergeArgs = append(mergeArgs, "--rebase")
+	case "merge":
+		mergeArgs = append(mergeArgs, "--merge")
+	}
+
+	if _, err := m.gh.Run(ctx, mergeArgs, bareDir); err != nil {
+		return 0, fmt.Errorf("failed to merge PR: %w", err)
+	}
+	m.output.Success(fmt.Sprintf("Merged PR #%d", prInfo.Number))
+
+	// Fetch to get updated remote state
+	m.git.Run(ctx, []string{"fetch", "--prune"}, bareDir)
+
+	// Handle child branches
+	if len(childDeps) > 0 {
+		m.output.Info(fmt.Sprintf("Found %d child branches depending on %s", len(childDeps), branch))
+		m.handleChildBranches(ctx, childDeps, defaultBranch)
+	}
+
+	return prInfo.Number, nil
 }
 
 // findChildBranches finds all branches that have PRs targeting the given branch.

@@ -675,6 +675,23 @@ type (
 	tmuxWindowMsg struct{ err error }
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
 	toastExpireMsg struct{}
+	// mergePRMsg triggers the async PR merge operation.
+	mergePRMsg struct {
+		branch      string
+		mergeMethod string // "squash", "rebase", "merge"
+	}
+	// mergePRDoneMsg signals merge completed, triggers post-merge prompt.
+	mergePRDoneMsg struct {
+		branch   string
+		prNumber int
+		messages []string
+		err      error
+	}
+	// postMergeActionMsg triggers post-merge worktree action.
+	postMergeActionMsg struct {
+		branch string
+		action string // "delete", "reset", "keep"
+	}
 )
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.

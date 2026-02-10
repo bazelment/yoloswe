@@ -667,7 +667,7 @@ func (m Model) renderStatusBar() string {
 			hints = append(hints, "[S] All sessions")
 		}
 		if hasWorktree {
-			hints = append(hints, "[p] Plan", "[b] Build", "[w] Window")
+			hints = append(hints, "[m] Merge", "[p] Plan", "[b] Build", "[w] Window")
 		}
 		hints = append(hints, "[F2]split", "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
@@ -690,7 +690,7 @@ func (m Model) renderStatusBar() string {
 		// SDK mode: no session selected - show worktree-dependent actions
 		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask", "[F2]split"}
 		if hasWorktree {
-			hints = append(hints, "[e]dit", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
+			hints = append(hints, "[e]dit", "[m]erge", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
 		} else {
 			hints = append(hints, "[n]ew wt")
 		}

@@ -256,6 +256,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deleteWorktreeMsg:
 		return m.deleteWorktree(msg.branch, msg.deleteBranch)
 
+	case mergePRMsg:
+		return m.mergePR(msg.branch, msg.mergeMethod)
+
+	case mergePRDoneMsg:
+		return m.handleMergePRDone(msg)
+
+	case postMergeActionMsg:
+		return m.handlePostMergeAction(msg)
+
 	case syncWorktreesMsg:
 		return m.syncWorktrees()
 
@@ -614,6 +623,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		toastCmd := m.addToast("No plan ready to approve", ToastInfo)
 		return m, toastCmd
+
+	case "m":
+		// Merge PR
+		return m.handleMergeKey()
 
 	case "d":
 		// Delete worktree
@@ -1011,6 +1024,190 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 		}
 
 		return worktreeOpResultMsg{messages: messages, err: err}
+	}
+}
+
+// handleMergeKey runs pre-flight checks and shows the merge confirmation prompt.
+func (m Model) handleMergeKey() (tea.Model, tea.Cmd) {
+	w := m.selectedWorktree()
+	if w == nil {
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
+	}
+
+	branch := w.Branch
+	status := m.worktreeStatuses[branch]
+
+	if status == nil {
+		toastCmd := m.addToast("Worktree status not loaded yet", ToastInfo)
+		return m, toastCmd
+	}
+
+	if status.PRNumber == 0 {
+		toastCmd := m.addToast(fmt.Sprintf("No PR found for %s", branch), ToastInfo)
+		return m, toastCmd
+	}
+
+	if status.PRState != "OPEN" {
+		toastCmd := m.addToast(fmt.Sprintf("PR #%d is %s", status.PRNumber, status.PRState), ToastInfo)
+		return m, toastCmd
+	}
+
+	if status.IsDirty {
+		toastCmd := m.addToast("Uncommitted changes. Commit or stash first.", ToastInfo)
+		return m, toastCmd
+	}
+
+	if status.Ahead > 0 {
+		toastCmd := m.addToast(fmt.Sprintf("%d unpushed commits. Push first.", status.Ahead), ToastInfo)
+		return m, toastCmd
+	}
+
+	// Check for running/pending sessions (idle is OK)
+	sessions := m.sessionManager.GetSessionsForWorktree(w.Path)
+	for _, s := range sessions {
+		if !s.Status.IsTerminal() && s.Status != session.StatusIdle {
+			toastCmd := m.addToast("Stop active sessions first.", ToastInfo)
+			return m, toastCmd
+		}
+	}
+
+	// Build confirmation message
+	msg := fmt.Sprintf("Merge PR #%d (%s)?", status.PRNumber, branch)
+	if status.PRReviewStatus != "" {
+		msg += fmt.Sprintf("\nReview: %s", status.PRReviewStatus)
+	}
+	if status.PRIsDraft {
+		msg += "\n[Draft PR]"
+	}
+
+	return m.showConfirm(msg, []ConfirmOption{
+		{Key: "s", Label: "squash"},
+		{Key: "r", Label: "rebase"},
+		{Key: "m", Label: "merge commit"},
+	}, func(key string) tea.Cmd {
+		method := map[string]string{"s": "squash", "r": "rebase", "m": "merge"}[key]
+		return func() tea.Msg {
+			return mergePRMsg{branch: branch, mergeMethod: method}
+		}
+	})
+}
+
+// mergePR runs the async merge operation.
+func (m Model) mergePR(branch, mergeMethod string) (tea.Model, tea.Cmd) {
+	if branch == "" || m.repoName == "" {
+		return m, nil
+	}
+
+	m.worktreeOpMessages = []string{fmt.Sprintf("Merging PR for %s...", branch)}
+
+	wtRoot := m.wtRoot
+	repoName := m.repoName
+	ctx := m.ctx
+	return m, func() tea.Msg {
+		var buf bytes.Buffer
+		output := wt.NewOutput(&buf, false)
+		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
+
+		prNumber, err := manager.MergePRForBranch(ctx, branch, wt.MergeOptions{
+			MergeMethod: mergeMethod,
+			Keep:        true,
+		})
+
+		var messages []string
+		for _, line := range strings.Split(buf.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				messages = append(messages, line)
+			}
+		}
+
+		return mergePRDoneMsg{branch: branch, prNumber: prNumber, messages: messages, err: err}
+	}
+}
+
+// handleMergePRDone handles the result of a merge operation.
+func (m Model) handleMergePRDone(msg mergePRDoneMsg) (tea.Model, tea.Cmd) {
+	m.worktreeOpMessages = msg.messages
+
+	if msg.err != nil {
+		toastCmd := m.addToast(msg.err.Error(), ToastError)
+		return m, toastCmd
+	}
+
+	prompt := fmt.Sprintf("PR #%d merged! What to do with worktree '%s'?", msg.prNumber, msg.branch)
+	branch := msg.branch
+	return m.showConfirm(prompt, []ConfirmOption{
+		{Key: "d", Label: "delete worktree + branch"},
+		{Key: "r", Label: "reset to main"},
+		{Key: "k", Label: "keep as-is"},
+	}, func(key string) tea.Cmd {
+		action := map[string]string{"d": "delete", "r": "reset", "k": "keep"}[key]
+		return func() tea.Msg {
+			return postMergeActionMsg{branch: branch, action: action}
+		}
+	})
+}
+
+// handlePostMergeAction handles the user's choice after a successful merge.
+func (m Model) handlePostMergeAction(msg postMergeActionMsg) (tea.Model, tea.Cmd) {
+	switch msg.action {
+	case "delete":
+		// Clear viewing session if it belongs to this worktree
+		if w := m.selectedWorktree(); w != nil && w.Branch == msg.branch {
+			m.switchViewingSession("")
+		}
+		return m.deleteWorktree(msg.branch, true)
+
+	case "reset":
+		m.worktreeOpMessages = []string{fmt.Sprintf("Resetting %s to default branch...", msg.branch)}
+		wtRoot := m.wtRoot
+		repoName := m.repoName
+		ctx := m.ctx
+		branch := msg.branch
+		return m, func() tea.Msg {
+			var buf bytes.Buffer
+			output := wt.NewOutput(&buf, false)
+			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
+
+			bareDir := manager.BareDir()
+			defaultBranch, _ := wt.GetDefaultBranch(ctx, manager.GitRunner(), bareDir)
+			if defaultBranch == "" {
+				defaultBranch = "main"
+			}
+
+			// Find the worktree path for this branch
+			worktrees, _ := manager.List(ctx)
+			var wtPath string
+			for _, w := range worktrees {
+				if w.Branch == branch {
+					wtPath = w.Path
+					break
+				}
+			}
+			if wtPath == "" {
+				return worktreeOpResultMsg{err: fmt.Errorf("worktree for %s not found", branch)}
+			}
+
+			// Fetch and reset to origin/default
+			manager.GitRunner().Run(ctx, []string{"fetch", "origin"}, wtPath)
+			if _, err := manager.GitRunner().Run(ctx, []string{"reset", "--hard", "origin/" + defaultBranch}, wtPath); err != nil {
+				return worktreeOpResultMsg{err: fmt.Errorf("failed to reset: %w", err)}
+			}
+
+			var messages []string
+			for _, line := range strings.Split(buf.String(), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					messages = append(messages, line)
+				}
+			}
+			messages = append(messages, fmt.Sprintf("Reset %s to %s", branch, defaultBranch))
+			return worktreeOpResultMsg{messages: messages}
+		}
+
+	default: // "keep"
+		return m, tea.Batch(m.refreshWorktrees(), m.fetchPRStatuses())
 	}
 }
 
