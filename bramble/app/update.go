@@ -974,43 +974,22 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 
 // syncWorktrees syncs all worktrees asynchronously (fetch + rebase).
 func (m Model) syncWorktrees() (tea.Model, tea.Cmd) {
-	if m.repoName == "" {
-		toastCmd := m.addToast("No repository selected", ToastError)
-		return m, toastCmd
-	}
-
-	m.worktreeOpMessages = []string{"Syncing worktrees..."}
-
-	wtRoot := m.wtRoot
-	repoName := m.repoName
-	ctx := m.ctx
-	return m, func() tea.Msg {
-		var buf bytes.Buffer
-		output := wt.NewOutput(&buf, false)
-		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-		err := manager.Sync(ctx, "")
-
-		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
-		}
-
-		return worktreeOpResultMsg{messages: messages, err: err}
-	}
+	return m.syncWorktree("")
 }
 
 // syncWorktree syncs a single worktree asynchronously (fetch + rebase).
+// Pass an empty branch string to sync all worktrees.
 func (m Model) syncWorktree(branch string) (tea.Model, tea.Cmd) {
 	if m.repoName == "" {
 		toastCmd := m.addToast("No repository selected", ToastError)
 		return m, toastCmd
 	}
 
-	m.worktreeOpMessages = []string{fmt.Sprintf("Syncing worktree %s...", branch)}
+	if branch == "" {
+		m.worktreeOpMessages = []string{"Syncing worktrees..."}
+	} else {
+		m.worktreeOpMessages = []string{fmt.Sprintf("Syncing worktree %s...", branch)}
+	}
 
 	wtRoot := m.wtRoot
 	repoName := m.repoName
