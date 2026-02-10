@@ -343,16 +343,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.fileTree.MoveDown()
 			} else {
 				// Tmux mode: navigate session list
-				var sessionCount int
-				if wt := m.selectedWorktree(); wt != nil {
-					allSessions := m.sessionManager.GetAllSessions()
-					for i := range allSessions {
-						if allSessions[i].WorktreePath == wt.Path {
-							sessionCount++
-						}
-					}
-				}
-				if m.selectedSessionIndex < sessionCount-1 {
+				sessions := m.visibleSessions()
+				if m.selectedSessionIndex < len(sessions)-1 {
 					m.selectedSessionIndex++
 				}
 			}
@@ -384,16 +376,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// In tmux mode, Enter switches to the selected window
 		if m.sessionManager.IsInTmuxMode() {
-			// Get the currently selected session
-			var currentSessions []session.SessionInfo
-			if wt := m.selectedWorktree(); wt != nil {
-				allSessions := m.sessionManager.GetAllSessions()
-				for i := range allSessions {
-					if allSessions[i].WorktreePath == wt.Path {
-						currentSessions = append(currentSessions, allSessions[i])
-					}
-				}
-			}
+			currentSessions := m.visibleSessions()
 
 			if m.selectedSessionIndex >= 0 && m.selectedSessionIndex < len(currentSessions) {
 				sess := currentSessions[m.selectedSessionIndex]
@@ -527,6 +510,19 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		toastCmd := m.addToast("No active session to stop (Alt-S to select)", ToastInfo)
 		return m, toastCmd
 
+	case "S":
+		// Toggle show all active sessions across all worktrees
+		m.showAllSessions = !m.showAllSessions
+		m.selectedSessionIndex = 0
+		if m.showAllSessions {
+			m.updateSessionDropdown()
+			toastCmd := m.addToast("Showing all active sessions", ToastInfo)
+			return m, toastCmd
+		}
+		m.updateSessionDropdown()
+		toastCmd := m.addToast("Showing current worktree sessions", ToastInfo)
+		return m, toastCmd
+
 	case "f":
 		// Follow-up on idle session (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
@@ -629,7 +625,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		idx := int(msg.String()[0]-'0') - 1
-		liveSessions := m.currentWorktreeSessions()
+		liveSessions := m.visibleSessions()
 		if idx >= len(liveSessions) {
 			toastCmd := m.addToast(fmt.Sprintf("No session #%s", msg.String()), ToastInfo)
 			return m, toastCmd
@@ -744,6 +740,8 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.updateSessionDropdown()
 			// Save scroll position and clear viewing session when switching worktrees
 			m.switchViewingSession("")
+			m.showAllSessions = false
+			m.selectedSessionIndex = 0
 			// Refresh file tree and history for new worktree
 			m.focus = FocusOutput
 			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())

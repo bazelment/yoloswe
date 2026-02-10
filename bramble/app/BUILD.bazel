@@ -48,6 +48,7 @@ go_test(
         "repopicker_test.go",
         "scrollrender_test.go",
         "session_subtitle_test.go",
+        "show_all_sessions_test.go",
         "textarea_test.go",
         "toast_test.go",
         "update_feedback_test.go",
