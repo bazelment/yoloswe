@@ -30,4 +30,3 @@ go_test(
         "//yoloswe/reviewer",
     ],
 )
-
