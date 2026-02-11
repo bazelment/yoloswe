@@ -479,6 +479,24 @@ func TestRepoPickerInitRepo_BareSlashURLReturnsError(t *testing.T) {
 	assert.Contains(t, errMsg.err.Error(), "could not determine repository name")
 }
 
+func TestRepoPickerInitRepo_DotRepoNameReturnsError(t *testing.T) {
+	m := newTestRepoPicker(nil)
+	cmd := m.initRepo(context.Background(), "https://example.com/.")
+	msg := cmd()
+	errMsg, ok := msg.(repoInitErrorMsg)
+	require.True(t, ok, "expected repoInitErrorMsg, got %T", msg)
+	assert.Contains(t, errMsg.err.Error(), "could not determine repository name")
+}
+
+func TestRepoPickerInitRepo_DotDotRepoNameReturnsError(t *testing.T) {
+	m := newTestRepoPicker(nil)
+	cmd := m.initRepo(context.Background(), "https://example.com/..")
+	msg := cmd()
+	errMsg, ok := msg.(repoInitErrorMsg)
+	require.True(t, ok, "expected repoInitErrorMsg, got %T", msg)
+	assert.Contains(t, errMsg.err.Error(), "could not determine repository name")
+}
+
 // --- Clone cancellation tests ---
 
 func TestRepoPickerCloning_CtrlCCancelsCloneContext(t *testing.T) {

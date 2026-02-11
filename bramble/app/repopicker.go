@@ -89,7 +89,7 @@ func (m RepoPickerModel) initRepo(ctx context.Context, url string) tea.Cmd {
 	return func() tea.Msg {
 		// Validate that the URL yields a usable repo name before cloning.
 		repoName := wt.GetRepoNameFromURL(url)
-		if repoName == "" {
+		if repoName == "" || repoName == "." || repoName == ".." || strings.ContainsAny(repoName, "/\\") {
 			return repoInitErrorMsg{err: fmt.Errorf("could not determine repository name from URL")}
 		}
 		manager := wt.NewManager(m.wtRoot, "")
