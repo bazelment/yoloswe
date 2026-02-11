@@ -135,7 +135,7 @@ func TestDropdownFilter_NoMatchesShowsEmptyMessage(t *testing.T) {
 	d.AppendFilter('x')
 
 	assert.Equal(t, 0, d.effectiveLen(), "Should have no matches for 'x'")
-	view := d.ViewList()
+	view := d.ViewList(NewStyles(Dark))
 	assert.Contains(t, view, "No matches")
 	assert.Contains(t, view, "x")
 }
@@ -146,7 +146,7 @@ func TestDropdownFilter_ViewShowsFilterIndicator(t *testing.T) {
 	d.Open()
 
 	d.AppendFilter('a')
-	view := d.ViewList()
+	view := d.ViewList(NewStyles(Dark))
 	assert.Contains(t, view, "Filter:")
 	assert.Contains(t, view, "a")
 }

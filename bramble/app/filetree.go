@@ -6,32 +6,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/wt"
 )
 
-var (
-	fileTreeHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(accentColor).
-				BorderBottom(true).
-				BorderStyle(lipgloss.NormalBorder()).
-				BorderForeground(accentColor)
-
-	fileTreeHeaderDimStyle = lipgloss.NewStyle().
-				Foreground(dimColor).
-				BorderBottom(true).
-				BorderStyle(lipgloss.NormalBorder()).
-				BorderForeground(dimColor)
-)
-
 // FileTree displays a navigable tree of changed files from a WorktreeContext.
-type FileTree struct {
+type FileTree struct { //nolint:govet // fieldalignment: readability over padding
 	root    string
 	entries []fileEntry
 	files   []fileInfo
+	styles  *Styles
 	cursor  int
 	offset  int
 	focused bool
@@ -89,9 +74,16 @@ func (ft *FileTree) SetContext(wtCtx *wt.WorktreeContext) {
 func (ft *FileTree) rebuild() {
 	ft.entries = nil
 
+	// Use a fallback dim renderer if styles haven't been set yet.
+	dimRender := func(s string) string { return s }
+	if ft.styles != nil {
+		sty := ft.styles.Dim
+		dimRender = func(s string) string { return sty.Render(s) }
+	}
+
 	if len(ft.files) == 0 {
 		ft.entries = append(ft.entries, fileEntry{
-			Display: dimStyle.Render("  (no changes)"),
+			Display: dimRender("  (no changes)"),
 		})
 		return
 	}
@@ -144,7 +136,7 @@ func (ft *FileTree) rebuild() {
 				displayDir = "."
 			}
 			ft.entries = append(ft.entries, fileEntry{
-				Display: dimStyle.Render("  " + displayDir + "/"),
+				Display: dimRender("  " + displayDir + "/"),
 				IsDir:   true,
 				Depth:   0,
 			})
@@ -157,7 +149,7 @@ func (ft *FileTree) rebuild() {
 		}
 		for _, f := range dirFiles[dir] {
 			name := filepath.Base(f.Path)
-			statusColor := statusIndicator(f.Status)
+			statusColor := statusIndicator(f.Status, ft.styles)
 			ft.entries = append(ft.entries, fileEntry{
 				Display: fmt.Sprintf("%s%s %s", indent, statusColor, name),
 				Path:    f.Path,
@@ -176,18 +168,21 @@ func (ft *FileTree) rebuild() {
 }
 
 // statusIndicator returns a colored status character.
-func statusIndicator(status string) string {
+func statusIndicator(status string, s *Styles) string {
+	if s == nil {
+		return status
+	}
 	switch status {
 	case "M":
-		return runningStyle.Render("M")
+		return s.Running.Render("M")
 	case "A":
-		return completedStyle.Render("A")
+		return s.Completed.Render("A")
 	case "D":
-		return failedStyle.Render("D")
+		return s.Failed.Render("D")
 	case "?":
-		return pendingStyle.Render("?")
+		return s.Pending.Render("?")
 	default:
-		return dimStyle.Render(status)
+		return s.Dim.Render(status)
 	}
 }
 
@@ -243,7 +238,14 @@ func (ft *FileTree) FileCount() int {
 }
 
 // Render draws the file tree within the given dimensions.
-func (ft *FileTree) Render(width, height int) string {
+func (ft *FileTree) Render(width, height int, s *Styles) string {
+	// Update styles and rebuild entries if the styles pointer has changed
+	// (e.g. on theme change) so that embedded ANSI codes stay in sync.
+	if ft.styles != s {
+		ft.styles = s
+		ft.rebuild()
+	}
+
 	var b strings.Builder
 
 	// Title with file count, rendered with bottom border via lipgloss
@@ -251,9 +253,9 @@ func (ft *FileTree) Render(width, height int) string {
 	if len(ft.files) > 0 {
 		titleText = fmt.Sprintf("Files (%d)", len(ft.files))
 	}
-	headerStyle := fileTreeHeaderDimStyle
+	headerStyle := s.FileTreeHeaderDim
 	if ft.focused {
-		headerStyle = fileTreeHeaderStyle
+		headerStyle = s.FileTreeHeader
 	}
 	b.WriteString(headerStyle.Width(width).Render(titleText))
 	b.WriteString("\n")
@@ -275,7 +277,7 @@ func (ft *FileTree) Render(width, height int) string {
 
 		// Highlight cursor
 		if i == ft.cursor {
-			line = selectedStyle.Render(stripAnsi(line))
+			line = s.Selected.Render(stripAnsi(line))
 		}
 
 		// Truncate to width (visual columns, not byte count)

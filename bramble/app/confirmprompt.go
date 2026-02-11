@@ -57,7 +57,7 @@ func (c *ConfirmPrompt) HandleKey(msg tea.KeyMsg) ConfirmResult {
 }
 
 // View renders the confirmation prompt with its keybinding hints.
-func (c *ConfirmPrompt) View() string {
+func (c *ConfirmPrompt) View(s *Styles) string {
 	var b strings.Builder
 	b.WriteString(c.message)
 	b.WriteString("\n\n")
@@ -68,8 +68,8 @@ func (c *ConfirmPrompt) View() string {
 		hints = append(hints, formatKeyHints(opt.Key, opt.Label))
 	}
 	hints = append(hints, formatKeyHints("Esc", "cancel"))
-	b.WriteString(dimStyle.Render(strings.Join(hints, "  ")))
+	b.WriteString(s.Dim.Render(strings.Join(hints, "  ")))
 
 	content := b.String()
-	return inputBoxStyle.Render(content)
+	return s.InputBox.Render(content)
 }

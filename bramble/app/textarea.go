@@ -46,7 +46,7 @@ func NewTextArea() *TextArea {
 	inner.SetWidth(60)
 	inner.FocusedStyle = textarea.Style{
 		Base:        lipgloss.NewStyle(),
-		Placeholder: lipgloss.NewStyle().Foreground(dimColor),
+		Placeholder: lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		Text:        lipgloss.NewStyle(),
 		CursorLine:  lipgloss.NewStyle(),
 	}
@@ -151,6 +151,12 @@ func (t *TextArea) SetPrompt(p string) {
 func (t *TextArea) SetPlaceholder(p string) {
 	t.placeholder = p
 	t.inner.Placeholder = p
+}
+
+// SetPlaceholderColor updates the placeholder foreground color from the palette.
+func (t *TextArea) SetPlaceholderColor(c lipgloss.Color) {
+	t.inner.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(c)
+	t.inner.BlurredStyle.Placeholder = t.inner.FocusedStyle.Placeholder
 }
 
 // SetValue sets the text content.
@@ -266,7 +272,7 @@ func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
 }
 
 // View renders the text area.
-func (t *TextArea) View() string {
+func (t *TextArea) View(s *Styles) string {
 	contentWidth := t.width - 4 // Account for padding and border
 	if contentWidth < 1 {
 		contentWidth = 1
@@ -292,7 +298,7 @@ func (t *TextArea) View() string {
 
 	// Prompt
 	if t.prompt != "" {
-		b.WriteString(dimStyle.Render(t.prompt))
+		b.WriteString(s.Dim.Render(t.prompt))
 		b.WriteString("\n")
 	}
 
@@ -303,14 +309,14 @@ func (t *TextArea) View() string {
 	// Render buttons with focus indication
 	var sendBtn, cancelBtn string
 	if t.focus == FocusSendButton {
-		sendBtn = selectedStyle.Render("[ " + t.sendLabel + " ]")
+		sendBtn = s.Selected.Render("[ " + t.sendLabel + " ]")
 	} else {
-		sendBtn = dimStyle.Render("[ " + t.sendLabel + " ]")
+		sendBtn = s.Dim.Render("[ " + t.sendLabel + " ]")
 	}
 	if t.focus == FocusCancelButton {
-		cancelBtn = selectedStyle.Render("[ " + t.cancelLabel + " ]")
+		cancelBtn = s.Selected.Render("[ " + t.cancelLabel + " ]")
 	} else {
-		cancelBtn = dimStyle.Render("[ " + t.cancelLabel + " ]")
+		cancelBtn = s.Dim.Render("[ " + t.cancelLabel + " ]")
 	}
 	status := sendBtn + "  " + cancelBtn
 	statusPadding := contentWidth - runewidth.StringWidth(stripAnsi(status))
@@ -322,7 +328,7 @@ func (t *TextArea) View() string {
 
 	// Add border
 	content := b.String()
-	boxStyle := inputBoxStyle.Width(t.width)
+	boxStyle := s.InputBox.Width(t.width)
 
 	return boxStyle.Render(content)
 }

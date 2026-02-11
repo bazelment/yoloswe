@@ -19,7 +19,7 @@ func makeLines(n int) []string {
 
 func TestRenderScrollableLines_FitsWithoutScroll(t *testing.T) {
 	lines := makeLines(5)
-	result := renderScrollableLines(lines, 10, 0)
+	result := renderScrollableLines(lines, 10, 0, NewStyles(Dark))
 	// All 5 lines should appear, no indicators
 	for _, l := range lines {
 		assert.Contains(t, result, l)
@@ -29,7 +29,7 @@ func TestRenderScrollableLines_FitsWithoutScroll(t *testing.T) {
 
 func TestRenderScrollableLines_AtBottom_NoIndicators(t *testing.T) {
 	lines := makeLines(20)
-	result := renderScrollableLines(lines, 10, 0)
+	result := renderScrollableLines(lines, 10, 0, NewStyles(Dark))
 	// Should show last 10 lines, no scroll indicators
 	assert.Contains(t, result, "line 19")
 	assert.Contains(t, result, "line 10")
@@ -40,7 +40,7 @@ func TestRenderScrollableLines_AtBottom_NoIndicators(t *testing.T) {
 
 func TestRenderScrollableLines_ScrolledMiddle_BothIndicators(t *testing.T) {
 	lines := makeLines(30)
-	result := renderScrollableLines(lines, 10, 10)
+	result := renderScrollableLines(lines, 10, 10, NewStyles(Dark))
 	// Should have both up and down indicators
 	assert.Contains(t, result, "\u2191")
 	assert.Contains(t, result, "\u2193")
@@ -50,21 +50,21 @@ func TestRenderScrollableLines_ScrolledMiddle_BothIndicators(t *testing.T) {
 func TestRenderScrollableLines_ScrolledToTop_OnlyDownIndicator(t *testing.T) {
 	lines := makeLines(30)
 	// Scroll far enough to reach top
-	result := renderScrollableLines(lines, 10, 999)
+	result := renderScrollableLines(lines, 10, 999, NewStyles(Dark))
 	assert.Contains(t, result, "line 0")
 	assert.NotContains(t, result, "\u2191") // no up arrow at top
 	assert.Contains(t, result, "\u2193")    // down arrow present
 }
 
 func TestRenderScrollableLines_EmptyLines(t *testing.T) {
-	result := renderScrollableLines(nil, 10, 0)
+	result := renderScrollableLines(nil, 10, 0, NewStyles(Dark))
 	assert.Equal(t, "", result)
 }
 
 func TestRenderScrollableLines_ScrollClamped(t *testing.T) {
 	lines := makeLines(5)
 	// scrollOffset larger than content; should clamp and not panic
-	result := renderScrollableLines(lines, 10, 100)
+	result := renderScrollableLines(lines, 10, 100, NewStyles(Dark))
 	require.NotEmpty(t, result)
 	// Should show line 0 since we're clamped to top
 	assert.Contains(t, result, "line 0")
@@ -76,7 +76,7 @@ func TestRenderScrollableLines_ScrollClamped(t *testing.T) {
 func TestRenderScrollableLines_HeightOne(t *testing.T) {
 	lines := makeLines(10)
 	// Edge case: only 1 line of display height
-	result := renderScrollableLines(lines, 1, 0)
+	result := renderScrollableLines(lines, 1, 0, NewStyles(Dark))
 	require.NotEmpty(t, result)
 	// Should show at least 1 line, no panic
 	lineCount := strings.Count(result, "\n")

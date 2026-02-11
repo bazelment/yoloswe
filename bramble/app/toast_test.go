@@ -82,17 +82,17 @@ func TestToastRendering(t *testing.T) {
 	tm.SetWidth(80)
 
 	// No toasts -> empty string
-	assert.Equal(t, "", tm.View())
+	assert.Equal(t, "", tm.View(NewStyles(Dark)))
 
 	// Success toast
 	tm.Add("Worktree created", ToastSuccess)
-	view := tm.View()
+	view := tm.View(NewStyles(Dark))
 	assert.Contains(t, view, "Worktree created")
 	assert.Contains(t, view, "✓") // success icon
 
 	// Error toast
 	tm.Add("Failed to start session", ToastError)
-	view = tm.View()
+	view = tm.View(NewStyles(Dark))
 	assert.Contains(t, view, "Failed to start session")
 	assert.Contains(t, view, "!") // error icon
 }
@@ -116,7 +116,7 @@ func TestToastSmallWidth(t *testing.T) {
 	tm := NewToastManager()
 	tm.SetWidth(5) // Very small width -- should not panic
 	tm.Add("a long message that exceeds the width", ToastError)
-	view := tm.View()
+	view := tm.View(NewStyles(Dark))
 	assert.NotEmpty(t, view) // Should render without panic
 }
 

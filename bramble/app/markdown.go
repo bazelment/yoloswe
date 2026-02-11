@@ -5,23 +5,29 @@ import (
 )
 
 // MarkdownRenderer wraps glamour for terminal markdown rendering.
-type MarkdownRenderer struct {
-	renderer *glamour.TermRenderer
-	width    int
+type MarkdownRenderer struct { //nolint:govet // fieldalignment: readability over padding
+	renderer     *glamour.TermRenderer
+	width        int
+	glamourStyle string // "dark", "light", or "auto"
 }
 
-// NewMarkdownRenderer creates a new markdown renderer with the given width.
-func NewMarkdownRenderer(width int) (*MarkdownRenderer, error) {
+// NewMarkdownRenderer creates a new markdown renderer with the given width and style.
+// If glamourStyle is empty, "auto" is used.
+func NewMarkdownRenderer(width int, glamourStyle string) (*MarkdownRenderer, error) {
+	if glamourStyle == "" {
+		glamourStyle = "auto"
+	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamourOption(glamourStyle),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &MarkdownRenderer{
-		renderer: r,
-		width:    width,
+		renderer:     r,
+		width:        width,
+		glamourStyle: glamourStyle,
 	}, nil
 }
 
@@ -36,7 +42,7 @@ func (m *MarkdownRenderer) SetWidth(width int) error {
 		return nil
 	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamourOption(m.glamourStyle),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -45,4 +51,16 @@ func (m *MarkdownRenderer) SetWidth(width int) error {
 	m.renderer = r
 	m.width = width
 	return nil
+}
+
+// glamourOption returns the glamour TermRendererOption for a style name.
+func glamourOption(style string) glamour.TermRendererOption {
+	switch style {
+	case "dark":
+		return glamour.WithStandardStyle("dark")
+	case "light":
+		return glamour.WithStandardStyle("light")
+	default:
+		return glamour.WithAutoStyle()
+	}
 }

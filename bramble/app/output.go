@@ -16,6 +16,7 @@ import (
 type OutputModel struct {
 	info       *session.SessionInfo
 	mdRenderer *MarkdownRenderer
+	styles     *Styles
 	lines      []session.OutputLine
 	width      int
 	height     int
@@ -27,6 +28,7 @@ func NewOutputModel(info *session.SessionInfo, lines []session.OutputLine) Outpu
 	return OutputModel{
 		lines:    lines,
 		info:     info,
+		styles:   NewStyles(Dark),
 		isReplay: false,
 		width:    80,
 		height:   24,
@@ -35,10 +37,11 @@ func NewOutputModel(info *session.SessionInfo, lines []session.OutputLine) Outpu
 
 // NewOutputModelWithMarkdown creates a new output model with markdown rendering.
 func NewOutputModelWithMarkdown(info *session.SessionInfo, lines []session.OutputLine, width int) OutputModel {
-	md, _ := NewMarkdownRenderer(width)
+	md, _ := NewMarkdownRenderer(width, "")
 	return OutputModel{
 		lines:      lines,
 		info:       info,
+		styles:     NewStyles(Dark),
 		isReplay:   false,
 		width:      width,
 		height:     24,
@@ -52,6 +55,7 @@ func NewReplayOutputModel(stored *session.StoredSession) OutputModel {
 	return OutputModel{
 		lines:    stored.Output,
 		info:     &info,
+		styles:   NewStyles(Dark),
 		isReplay: true,
 		width:    80,
 		height:   24,
@@ -71,7 +75,7 @@ func (m *OutputModel) SetSize(width, height int) {
 // EnableMarkdown enables markdown rendering for text content.
 func (m *OutputModel) EnableMarkdown() {
 	if m.mdRenderer == nil {
-		m.mdRenderer, _ = NewMarkdownRenderer(m.width)
+		m.mdRenderer, _ = NewMarkdownRenderer(m.width, "")
 	}
 }
 
@@ -96,10 +100,11 @@ func (m OutputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the output.
 func (m OutputModel) View() string {
+	s := m.styles
 	var b strings.Builder
 
 	if m.info == nil {
-		b.WriteString(dimStyle.Render("  No session"))
+		b.WriteString(s.Dim.Render("  No session"))
 		return b.String()
 	}
 
@@ -110,14 +115,14 @@ func (m OutputModel) View() string {
 	}
 
 	if m.isReplay {
-		b.WriteString(typeIcon + " " + string(m.info.ID) + "  " + dimStyle.Render("[Replay]"))
+		b.WriteString(typeIcon + " " + string(m.info.ID) + "  " + s.Dim.Render("[Replay]"))
 	} else {
-		b.WriteString(typeIcon + " " + string(m.info.ID) + "  " + statusIcon(m.info.Status))
+		b.WriteString(typeIcon + " " + string(m.info.ID) + "  " + statusIcon(m.info.Status, s))
 	}
 	b.WriteString("\n")
 
 	// Prompt
-	b.WriteString(dimStyle.Render("\"" + truncate(m.info.Prompt, m.width-4) + "\""))
+	b.WriteString(s.Dim.Render("\"" + truncate(m.info.Prompt, m.width-4) + "\""))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
@@ -141,22 +146,22 @@ func (m OutputModel) View() string {
 				continue
 			}
 		}
-		b.WriteString(formatOutputLine(line, m.width))
+		b.WriteString(formatOutputLineWithStyles(line, m.width, s))
 		b.WriteString("\n")
 	}
 
 	return b.String()
 }
 
-// formatOutputLine formats a single output line for display.
-func formatOutputLine(line session.OutputLine, width int) string {
+// formatOutputLineWithStyles formats a single output line for display using the given styles.
+func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) string {
 	var formatted string
 	switch line.Type {
 	case session.OutputTypeError:
-		formatted = errorStyle.Render("✗ " + line.Content)
+		formatted = s.Error.Render("✗ " + line.Content)
 
 	case session.OutputTypeThinking:
-		formatted = dimStyle.Render("💭 " + truncate(line.Content, width-4))
+		formatted = s.Dim.Render("💭 " + truncate(line.Content, width-4))
 
 	case session.OutputTypeTool:
 		// Legacy tool type - kept for backward compat
@@ -171,15 +176,15 @@ func formatOutputLine(line session.OutputLine, width int) string {
 			// Show running indicator with elapsed time
 			elapsed := time.Since(line.StartTime)
 			elapsedStr := fmt.Sprintf("%.1fs", elapsed.Seconds())
-			formatted = "🔧 " + toolDisplay + " " + runningStyle.Render("⏳ "+elapsedStr)
+			formatted = "🔧 " + toolDisplay + " " + s.Running.Render("⏳ "+elapsedStr)
 		case session.ToolStateComplete:
 			// Show checkmark with duration
 			durationStr := fmt.Sprintf("%.2fs", float64(line.DurationMs)/1000)
-			formatted = "✓ " + dimStyle.Render(toolDisplay+" ("+durationStr+")")
+			formatted = "✓ " + s.Dim.Render(toolDisplay+" ("+durationStr+")")
 		case session.ToolStateError:
 			// Show error indicator with duration
 			durationStr := fmt.Sprintf("%.2fs", float64(line.DurationMs)/1000)
-			formatted = errorStyle.Render("✗ " + toolDisplay + " (" + durationStr + ")")
+			formatted = s.Error.Render("✗ " + toolDisplay + " (" + durationStr + ")")
 		default:
 			// Fallback for legacy or unset state
 			formatted = "🔧 " + toolDisplay
@@ -188,10 +193,10 @@ func formatOutputLine(line session.OutputLine, width int) string {
 	case session.OutputTypeTurnEnd:
 		// Turn summary with cost
 		turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f) ───", line.TurnNumber, line.CostUSD)
-		formatted = dimStyle.Render(turnInfo)
+		formatted = s.Dim.Render(turnInfo)
 
 	case session.OutputTypeStatus:
-		formatted = dimStyle.Render("→ " + line.Content)
+		formatted = s.Dim.Render("→ " + line.Content)
 
 	default:
 		formatted = line.Content

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -27,6 +28,7 @@ const (
 	FocusHelp                              // Help overlay open
 	FocusConfirm                           // Single-keypress confirmation prompt
 	FocusAllSessions                       // All sessions overlay open
+	FocusThemePicker                       // Theme picker overlay open
 )
 
 // Model is the root application model.
@@ -52,6 +54,9 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	toasts                *ToastManager
 	helpOverlay           *HelpOverlay
 	allSessionsOverlay    *AllSessionsOverlay
+	themePicker           *ThemePicker
+	styles                *Styles
+	settings              Settings
 	inputArea             *TextArea
 	splitPane             *SplitPane
 	fileTree              *FileTree
@@ -88,6 +93,14 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	wtDropdown := NewDropdown(nil)
 	wtDropdown.SetMaxVisible(20)
 
+	// Load settings and resolve theme
+	settings := LoadSettings()
+	palette := Dark
+	if p, ok := ThemeByName(settings.ThemeName); ok {
+		palette = p
+	}
+	styles := NewStyles(palette)
+
 	m := Model{
 		ctx:                ctx,
 		wtRoot:             wtRoot,
@@ -95,6 +108,9 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		editor:             editor,
 		sessionManager:     sessionManager,
 		taskRouter:         taskRouter,
+		styles:             styles,
+		settings:           settings,
+		themePicker:        NewThemePicker(),
 		focus:              FocusOutput,
 		width:              width,
 		height:             height,
@@ -111,6 +127,11 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		fileTree:           NewFileTree("", nil),
 		scrollPositions:    make(map[session.SessionID]int),
 	}
+
+	// Sync placeholder colors with the loaded theme (NewTextArea defaults to "245")
+	dimColor := lipgloss.Color(palette.Dim)
+	m.inputArea.SetPlaceholderColor(dimColor)
+	m.taskModal.SetPlaceholderColor(dimColor)
 
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {
@@ -248,12 +269,12 @@ func (m *Model) updateWorktreeDropdown() {
 		// Build subtitle with status details
 		var subtitle string
 		if m.worktreeStatuses != nil {
-			if s, ok := m.worktreeStatuses[w.Branch]; ok {
-				subtitle = formatWorktreeStatus(s, sessionCount)
+			if st, ok := m.worktreeStatuses[w.Branch]; ok {
+				subtitle = formatWorktreeStatus(st, sessionCount, m.styles)
 			}
 		}
 		if subtitle == "" && sessionCount > 0 {
-			subtitle = dimStyle.Render(fmt.Sprintf("%d sessions", sessionCount))
+			subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
 		}
 
 		items[i] = DropdownItem{
@@ -281,7 +302,7 @@ func (m *Model) updateSessionDropdown() {
 		}
 
 		// Status badge
-		badge := statusIcon(sess.Status)
+		badge := statusIcon(sess.Status, m.styles)
 
 		// Use title if available, otherwise derive from prompt
 		label := sess.Title
@@ -342,7 +363,7 @@ func (m *Model) updateSessionDropdown() {
 			icon = "🔨"
 		}
 
-		badge := dimStyle.Render("(history)")
+		badge := m.styles.Dim.Render("(history)")
 
 		// Use title if available, otherwise derive from prompt
 		label := hist.Title
@@ -471,53 +492,53 @@ func schedulePRStatusTick() tea.Cmd {
 }
 
 // formatWorktreeStatus formats a WorktreeStatus for dropdown subtitle display with colors.
-func formatWorktreeStatus(s *wt.WorktreeStatus, sessionCount int) string {
+func formatWorktreeStatus(ws *wt.WorktreeStatus, sessionCount int, s *Styles) string {
 	var parts []string
 
-	if s.IsDirty {
-		parts = append(parts, failedStyle.Render("dirty"))
+	if ws.IsDirty {
+		parts = append(parts, s.Failed.Render("dirty"))
 	} else {
-		parts = append(parts, completedStyle.Render("clean"))
+		parts = append(parts, s.Completed.Render("clean"))
 	}
 
-	if s.Ahead > 0 || s.Behind > 0 {
+	if ws.Ahead > 0 || ws.Behind > 0 {
 		var ab []string
-		if s.Ahead > 0 {
-			ab = append(ab, runningStyle.Render(fmt.Sprintf("↑%d", s.Ahead)))
+		if ws.Ahead > 0 {
+			ab = append(ab, s.Running.Render(fmt.Sprintf("↑%d", ws.Ahead)))
 		}
-		if s.Behind > 0 {
-			ab = append(ab, pendingStyle.Render(fmt.Sprintf("↓%d", s.Behind)))
+		if ws.Behind > 0 {
+			ab = append(ab, s.Pending.Render(fmt.Sprintf("↓%d", ws.Behind)))
 		}
 		parts = append(parts, strings.Join(ab, " "))
 	}
 
-	if s.PRNumber > 0 {
-		prText := fmt.Sprintf("PR#%d %s", s.PRNumber, s.PRState)
-		switch s.PRState {
+	if ws.PRNumber > 0 {
+		prText := fmt.Sprintf("PR#%d %s", ws.PRNumber, ws.PRState)
+		switch ws.PRState {
 		case "OPEN":
-			prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + runningStyle.Render("OPEN")
-			if s.PRIsDraft {
-				prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + dimStyle.Render("DRAFT")
+			prText = fmt.Sprintf("PR#%d", ws.PRNumber) + " " + s.Running.Render("OPEN")
+			if ws.PRIsDraft {
+				prText = fmt.Sprintf("PR#%d", ws.PRNumber) + " " + s.Dim.Render("DRAFT")
 			}
-			if s.PRReviewStatus == "APPROVED" {
-				prText += " " + completedStyle.Render("✓approved")
-			} else if s.PRReviewStatus == "CHANGES_REQUESTED" {
-				prText += " " + failedStyle.Render("changes requested")
+			if ws.PRReviewStatus == "APPROVED" {
+				prText += " " + s.Completed.Render("✓approved")
+			} else if ws.PRReviewStatus == "CHANGES_REQUESTED" {
+				prText += " " + s.Failed.Render("changes requested")
 			}
 		case "MERGED":
-			prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + idleStyle.Render("MERGED")
+			prText = fmt.Sprintf("PR#%d", ws.PRNumber) + " " + s.Idle.Render("MERGED")
 		case "CLOSED":
-			prText = fmt.Sprintf("PR#%d", s.PRNumber) + " " + dimStyle.Render("CLOSED")
+			prText = fmt.Sprintf("PR#%d", ws.PRNumber) + " " + s.Dim.Render("CLOSED")
 		}
 		parts = append(parts, prText)
 	}
 
-	if !s.LastCommitTime.IsZero() {
-		parts = append(parts, dimStyle.Render(timeAgo(s.LastCommitTime)))
+	if !ws.LastCommitTime.IsZero() {
+		parts = append(parts, s.Dim.Render(timeAgo(ws.LastCommitTime)))
 	}
 
 	if sessionCount > 0 {
-		parts = append(parts, idleStyle.Render(fmt.Sprintf("%d sessions", sessionCount)))
+		parts = append(parts, s.Idle.Render(fmt.Sprintf("%d sessions", sessionCount)))
 	}
 
 	return strings.Join(parts, " | ")
@@ -724,4 +745,19 @@ func (m *Model) scheduleToastExpiry() tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return toastExpireMsg{}
 	})
+}
+
+// applyTheme rebuilds styles from a palette and recreates the markdown renderer.
+func (m *Model) applyTheme(palette ColorPalette) {
+	m.styles = NewStyles(palette)
+	// Recreate the markdown renderer with the new glamour style
+	if m.mdRenderer != nil {
+		if newRenderer, err := NewMarkdownRenderer(m.width-8, palette.GlamourStyle); err == nil {
+			m.mdRenderer = newRenderer
+		}
+		// If creation fails, preserve the old renderer
+	}
+	// Update text area placeholder colors from the palette
+	m.inputArea.SetPlaceholderColor(lipgloss.Color(palette.Dim))
+	m.taskModal.SetPlaceholderColor(lipgloss.Color(palette.Dim))
 }

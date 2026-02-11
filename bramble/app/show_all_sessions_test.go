@@ -87,13 +87,23 @@ func TestAllSessionsOverlay_Select_TUIMode(t *testing.T) {
 	// Open overlay
 	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
 	m2 := newModel.(Model)
+	require.True(t, m2.allSessionsOverlay.IsVisible())
+	require.Len(t, m2.allSessionsOverlay.Sessions(), 2, "should have 2 sessions")
+
+	// Get the initial selection
+	initialSelected := m2.allSessionsOverlay.SelectedSession()
+	require.NotNil(t, initialSelected, "should have an initial selection")
+	initialSelectedID := initialSelected.ID
 
 	// Navigate to second session
 	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
 	m3 := newModel2.(Model)
 
-	// Remember the expected session ID (second in the overlay's list)
-	expectedID := m3.allSessionsOverlay.Sessions()[1].ID
+	// Get the newly selected session after navigation
+	newSelected := m3.allSessionsOverlay.SelectedSession()
+	require.NotNil(t, newSelected, "should have a new selection")
+	expectedID := newSelected.ID
+	require.NotEqual(t, initialSelectedID, expectedID, "should have selected a different session")
 
 	// Press Enter to select
 	newModel3, _ := m3.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyEnter})

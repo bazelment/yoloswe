@@ -278,7 +278,7 @@ func TestRenderTimelineOverflow(t *testing.T) {
 	}
 
 	// maxLines=2 should show 2 entries + overflow indicator
-	output := renderTimeline(entries, 2)
+	output := renderTimeline(entries, 2, NewStyles(Dark))
 
 	assert.Contains(t, output, "Session timeline")
 	assert.Contains(t, output, "task 1")
@@ -294,7 +294,7 @@ func TestRenderTimelineNoOverflow(t *testing.T) {
 		{timestamp: time.Now().Add(-1 * time.Minute), icon: "[B]", event: "Completed", prompt: "task 2"},
 	}
 
-	output := renderTimeline(entries, 10)
+	output := renderTimeline(entries, 10, NewStyles(Dark))
 
 	assert.Contains(t, output, "task 1")
 	assert.Contains(t, output, "task 2")

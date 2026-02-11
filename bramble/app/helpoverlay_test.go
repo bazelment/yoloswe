@@ -151,7 +151,7 @@ func TestHelpOverlayRendering(t *testing.T) {
 	m.helpOverlay.SetSections(sections)
 	m.helpOverlay.SetSize(80, 24)
 
-	view := m.helpOverlay.View()
+	view := m.helpOverlay.View(m.styles)
 
 	// Verify View() output contains expected content
 	if !strings.Contains(view, "Bramble Key Bindings") {
@@ -172,7 +172,7 @@ func TestHelpOverlayRendering(t *testing.T) {
 
 	// Verify narrow terminal still renders without panic
 	m.helpOverlay.SetSize(40, 24)
-	viewNarrow := m.helpOverlay.View()
+	viewNarrow := m.helpOverlay.View(m.styles)
 	if viewNarrow == "" {
 		t.Error("View should render even in narrow terminal")
 	}

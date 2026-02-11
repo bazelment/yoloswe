@@ -86,11 +86,11 @@ func (o *AllSessionsOverlay) Sessions() []session.SessionInfo {
 }
 
 // View renders the overlay as a centered box.
-func (o *AllSessionsOverlay) View() string {
+func (o *AllSessionsOverlay) View(s *Styles) string {
 	// Build content lines
 	var lines []string
 
-	lines = append(lines, titleStyle.Render("All Active Sessions"), "")
+	lines = append(lines, s.Title.Render("All Active Sessions"), "")
 
 	// Calculate box width — use most of the terminal but cap at 140
 	boxWidth := o.width - 4
@@ -108,7 +108,7 @@ func (o *AllSessionsOverlay) View() string {
 	}
 
 	if len(o.sessions) == 0 {
-		lines = append(lines, dimStyle.Render("  No active sessions across any worktree."), "")
+		lines = append(lines, s.Dim.Render("  No active sessions across any worktree."), "")
 	} else {
 		// Scale column widths to fit contentWidth.
 		// Fixed overhead: " #. 🔨  " prefix (~9 cols) + status (~12 cols) + gaps = ~27 cols
@@ -137,7 +137,7 @@ func (o *AllSessionsOverlay) View() string {
 		nameFmt := fmt.Sprintf("%%-%ds", nameColWidth)
 		// Prefix: " #.  T  " = 1 space + 2 num + 1 space + 2 icon + 2 spaces = 8 visual cols
 		headerFmt := " %-3s %-4s " + wtFmt + " " + nameFmt + " %-12s %s"
-		header := dimStyle.Render(fmt.Sprintf(headerFmt, "#", "Type", "Worktree", "Name", "Status", "Prompt"))
+		header := s.Dim.Render(fmt.Sprintf(headerFmt, "#", "Type", "Worktree", "Name", "Status", "Prompt"))
 		lines = append(lines, header)
 		sepWidth := contentWidth - 1
 		if sepWidth < 20 {
@@ -181,7 +181,7 @@ func (o *AllSessionsOverlay) View() string {
 			nameDisplay = truncate(nameDisplay, nameColWidth-1)
 
 			// Status
-			statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status), sess.Status)
+			statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status, s), sess.Status)
 
 			// Prompt
 			prompt := sess.Prompt
@@ -193,7 +193,7 @@ func (o *AllSessionsOverlay) View() string {
 			line := fmt.Sprintf(rowFmt, num, typeIcon, wtName, nameDisplay, statusStr, promptDisplay)
 
 			if i == o.selectedIdx {
-				line = selectedStyle.Render(line)
+				line = s.Selected.Render(line)
 			}
 
 			lines = append(lines, line)
@@ -203,12 +203,12 @@ func (o *AllSessionsOverlay) View() string {
 	lines = append(lines, "")
 
 	// Footer
-	footer := dimStyle.Render("[↑/↓] Navigate  [Enter] Switch  [1-9] Quick select  [Esc] Close")
+	footer := s.Dim.Render("[↑/↓] Navigate  [Enter] Switch  [1-9] Quick select  [Esc] Close")
 	lines = append(lines, footer)
 
 	contentStr := strings.Join(lines, "\n")
 
-	box := allSessionsBoxStyle.
+	box := s.AllSessionsBox.
 		Width(boxWidth).
 		Render(contentStr)
 
@@ -222,9 +222,3 @@ func (o *AllSessionsOverlay) View() string {
 	}
 	return box
 }
-
-// allSessionsBoxStyle defines the overlay box style.
-var allSessionsBoxStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(borderColor).
-	Padding(1, 2)

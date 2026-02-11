@@ -27,6 +27,7 @@ go_test(
     srcs = [
         "manager_test.go",
         "store_test.go",
+        "tmux_test.go",
     ],
     embed = [":session"],
     deps = [
