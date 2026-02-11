@@ -745,7 +745,10 @@ func (m *Model) applyTheme(palette ColorPalette) {
 	m.styles = NewStyles(palette)
 	// Recreate the markdown renderer with the new glamour style
 	if m.mdRenderer != nil {
-		m.mdRenderer, _ = NewMarkdownRenderer(m.width-8, palette.GlamourStyle)
+		if newRenderer, err := NewMarkdownRenderer(m.width-8, palette.GlamourStyle); err == nil {
+			m.mdRenderer = newRenderer
+		}
+		// If creation fails, preserve the old renderer
 	}
 	// Update text area placeholder colors from the palette
 	m.inputArea.SetPlaceholderColor(lipgloss.Color(palette.Dim))
