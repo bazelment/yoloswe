@@ -124,8 +124,12 @@ func (h *DefaultTerminalHandler) Create(ctx context.Context, req CreateTerminalR
 	if req.CWD != "" {
 		cmd.Dir = req.CWD
 	}
-	for _, env := range req.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+	// Inherit parent environment and append custom env vars
+	if len(req.Env) > 0 {
+		cmd.Env = os.Environ()
+		for _, env := range req.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+		}
 	}
 
 	tp := &terminalProcess{

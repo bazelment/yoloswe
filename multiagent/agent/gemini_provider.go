@@ -38,7 +38,10 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	// Ensure client is started (lazy init)
 	if p.client == nil {
 		client := acp.NewClient(p.clientOpts...)
-		if err := client.Start(ctx); err != nil {
+		// Use context.Background() to decouple the ACP subprocess lifetime
+		// from any single request's context. The subprocess should live as long
+		// as the provider, not just the first request.
+		if err := client.Start(context.Background()); err != nil {
 			return nil, err
 		}
 		p.client = client
@@ -84,10 +87,10 @@ func (p *GeminiProvider) Close() error {
 // GeminiLongRunningProvider wraps a persistent ACP session for multi-turn use.
 type GeminiLongRunningProvider struct {
 	*GeminiProvider
-	client      *acp.Client
-	session     *acp.Session
-	clientOpts  []acp.ClientOption
-	sessionOpts []acp.SessionOption
+	longRunningClient *acp.Client
+	session           *acp.Session
+	clientOpts        []acp.ClientOption
+	sessionOpts       []acp.SessionOption
 }
 
 // NewGeminiLongRunningProvider creates a Gemini provider with a persistent session.
@@ -104,7 +107,7 @@ func (p *GeminiLongRunningProvider) Start(ctx context.Context) error {
 	if err := client.Start(ctx); err != nil {
 		return err
 	}
-	p.client = client
+	p.longRunningClient = client
 
 	session, err := client.NewSession(ctx, p.sessionOpts...)
 	if err != nil {
@@ -130,8 +133,8 @@ func (p *GeminiLongRunningProvider) SendMessage(ctx context.Context, message str
 }
 
 func (p *GeminiLongRunningProvider) Stop() error {
-	if p.client != nil {
-		return p.client.Stop()
+	if p.longRunningClient != nil {
+		return p.longRunningClient.Stop()
 	}
 	return nil
 }
@@ -139,8 +142,8 @@ func (p *GeminiLongRunningProvider) Stop() error {
 // Close stops the long-running provider's ACP client and closes the event channel.
 func (p *GeminiLongRunningProvider) Close() error {
 	// Stop the long-running client (distinct from the embedded GeminiProvider.client).
-	if p.client != nil {
-		p.client.Stop()
+	if p.longRunningClient != nil {
+		p.longRunningClient.Stop()
 	}
 	// Also stop the embedded provider's client if it was lazily initialized.
 	if p.GeminiProvider.client != nil {
