@@ -49,7 +49,7 @@ func TestAllSessionsOverlay_Navigate(t *testing.T) {
 		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
 		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
 	}
-	m.allSessionsOverlay.Show(sessions, true, m.width, m.height)
+	m.allSessionsOverlay.Show(sessions, m.width, m.height)
 	m.focus = FocusAllSessions
 	m2 := m
 
@@ -193,7 +193,7 @@ func TestAllSessionsOverlay_FilterTerminal(t *testing.T) {
 			active = append(active, mixed[i])
 		}
 	}
-	m2.allSessionsOverlay.Show(active, true, m2.width, m2.height)
+	m2.allSessionsOverlay.Show(active, m2.width, m2.height)
 	assert.Len(t, m2.allSessionsOverlay.Sessions(), 2, "should filter out completed session")
 }
 

@@ -568,7 +568,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				activeSessions = append(activeSessions, allSessions[i])
 			}
 		}
-		m.allSessionsOverlay.Show(activeSessions, m.sessionManager.IsInTmuxMode(), m.width, m.height)
+		m.allSessionsOverlay.Show(activeSessions, m.width, m.height)
 		m.focus = FocusAllSessions
 		return m, nil
 

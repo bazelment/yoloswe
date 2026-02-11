@@ -11,13 +11,11 @@ import (
 
 // AllSessionsOverlay displays all active sessions across all worktrees.
 type AllSessionsOverlay struct {
-	sessions     []session.SessionInfo
-	selectedIdx  int
-	scrollOffset int
-	width        int
-	height       int
-	visible      bool
-	inTmuxMode   bool
+	sessions    []session.SessionInfo
+	selectedIdx int
+	width       int
+	height      int
+	visible     bool
 }
 
 // NewAllSessionsOverlay creates a new overlay.
@@ -26,13 +24,11 @@ func NewAllSessionsOverlay() *AllSessionsOverlay {
 }
 
 // Show populates and displays the overlay with the given sessions.
-func (o *AllSessionsOverlay) Show(sessions []session.SessionInfo, inTmuxMode bool, w, h int) {
+func (o *AllSessionsOverlay) Show(sessions []session.SessionInfo, w, h int) {
 	o.sessions = sessions
-	o.inTmuxMode = inTmuxMode
 	o.width = w
 	o.height = h
 	o.selectedIdx = 0
-	o.scrollOffset = 0
 	o.visible = true
 }
 
@@ -139,24 +135,26 @@ func (o *AllSessionsOverlay) View() string {
 		// Table header
 		wtFmt := fmt.Sprintf("%%-%ds", wtColWidth)
 		nameFmt := fmt.Sprintf("%%-%ds", nameColWidth)
-		headerFmt := "   %-4s %-4s " + wtFmt + " " + nameFmt + " %-12s %s"
+		// Prefix: " #.  T  " = 1 space + 2 num + 1 space + 2 icon + 2 spaces = 8 visual cols
+		headerFmt := " %-3s %-4s " + wtFmt + " " + nameFmt + " %-12s %s"
 		header := dimStyle.Render(fmt.Sprintf(headerFmt, "#", "Type", "Worktree", "Name", "Status", "Prompt"))
 		lines = append(lines, header)
-		sepWidth := contentWidth - 3
+		sepWidth := contentWidth - 1
 		if sepWidth < 20 {
 			sepWidth = 20
 		}
-		lines = append(lines, "   "+strings.Repeat("─", sepWidth))
+		lines = append(lines, " "+strings.Repeat("─", sepWidth))
 
-		// Row format string
-		rowFmt := " %s %s  " + wtFmt + " " + nameFmt + " %-12s %s"
+		// Row format string: " 1. 🔨  " — emoji is 2 display cols but 1 %s arg
+		// %-3s for num ("1." padded to 3), %s for icon (2 display cols + 2 spaces)
+		rowFmt := " %-3s %s  " + wtFmt + " " + nameFmt + " %-12s %s"
 
 		// Session rows
 		for i := range o.sessions {
 			sess := &o.sessions[i]
 
-			// Number
-			num := "  "
+			// Number (1-9 for quick select, blank otherwise)
+			num := ""
 			if i < 9 {
 				num = fmt.Sprintf("%d.", i+1)
 			}
