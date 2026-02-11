@@ -26,6 +26,7 @@ type RepoPickerModel struct {
 	cloneCancel       context.CancelFunc
 	err               error
 	cloneErr          error
+	styles            *Styles
 	wtRoot            string
 	chosenRepo        string
 	filterText        string
@@ -42,10 +43,14 @@ type RepoPickerModel struct {
 }
 
 // NewRepoPickerModel creates a new repo picker model.
-func NewRepoPickerModel(ctx context.Context, wtRoot string) RepoPickerModel {
+func NewRepoPickerModel(ctx context.Context, wtRoot string, styles *Styles) RepoPickerModel {
+	if styles == nil {
+		styles = NewStyles(DefaultDark)
+	}
 	return RepoPickerModel{
 		ctx:     ctx,
 		wtRoot:  wtRoot,
+		styles:  styles,
 		loading: true,
 	}
 }
@@ -361,7 +366,7 @@ func (m RepoPickerModel) View() string {
 	}
 
 	// Create bordered box
-	box := modalBoxStyle.Width(boxWidth).Render(content.String())
+	box := m.styles.ModalBox.Width(boxWidth).Render(content.String())
 
 	// Center the box
 	return lipgloss.Place(
@@ -372,7 +377,7 @@ func (m RepoPickerModel) View() string {
 }
 
 func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
-	title := titleStyle.Render("Bramble — Add repository")
+	title := m.styles.Title.Render("Bramble — Add repository")
 	content.WriteString(title)
 	content.WriteString("\n")
 	content.WriteString(strings.Repeat("─", boxWidth-4))
@@ -383,60 +388,60 @@ func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
 
 	if m.cloneErr != nil {
 		content.WriteString("\n")
-		content.WriteString(errorStyle.Render("  Error: " + m.cloneErr.Error()))
+		content.WriteString(m.styles.Error.Render("  Error: " + m.cloneErr.Error()))
 		content.WriteString("\n")
 	}
 
 	content.WriteString("\n")
-	content.WriteString(dimStyle.Render("  e.g. https://github.com/user/repo"))
+	content.WriteString(m.styles.Dim.Render("  e.g. https://github.com/user/repo"))
 	content.WriteString("\n")
-	content.WriteString(dimStyle.Render("       git@github.com:user/repo.git"))
+	content.WriteString(m.styles.Dim.Render("       git@github.com:user/repo.git"))
 	content.WriteString("\n\n")
-	content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "clone") + "  " + formatKeyHints("Esc", "back")))
+	content.WriteString(m.styles.Dim.Render("  " + formatKeyHints("Enter", "clone") + "  " + formatKeyHints("Esc", "back")))
 	content.WriteString("\n")
 }
 
 func (m RepoPickerModel) viewCloning(content *strings.Builder, boxWidth int) {
-	title := titleStyle.Render("Bramble — Cloning repository")
+	title := m.styles.Title.Render("Bramble — Cloning repository")
 	content.WriteString(title)
 	content.WriteString("\n")
 	content.WriteString(strings.Repeat("─", boxWidth-4))
 	content.WriteString("\n\n")
 
 	content.WriteString("  Cloning " + m.cloneRepoName + "...\n\n")
-	content.WriteString(dimStyle.Render("  This may take a moment."))
+	content.WriteString(m.styles.Dim.Render("  This may take a moment."))
 	content.WriteString("\n")
 }
 
 func (m RepoPickerModel) viewList(content *strings.Builder, boxWidth int) {
 	// Title
-	title := titleStyle.Render("Bramble — Choose repository")
+	title := m.styles.Title.Render("Bramble — Choose repository")
 	content.WriteString(title)
 	content.WriteString("\n")
 	content.WriteString(strings.Repeat("─", boxWidth-4))
 	content.WriteString("\n\n")
 
 	if m.loading {
-		content.WriteString(dimStyle.Render("  Loading repositories..."))
+		content.WriteString(m.styles.Dim.Render("  Loading repositories..."))
 		content.WriteString("\n")
 	} else if m.err != nil {
-		content.WriteString(errorStyle.Render("  Error: " + m.err.Error()))
+		content.WriteString(m.styles.Error.Render("  Error: " + m.err.Error()))
 		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("  Press [r] to retry or [q] to quit"))
+		content.WriteString(m.styles.Dim.Render("  Press [r] to retry or [q] to quit"))
 		content.WriteString("\n")
 	} else if len(m.repos) == 0 {
-		content.WriteString(dimStyle.Render("  No repos found in " + m.wtRoot))
+		content.WriteString(m.styles.Dim.Render("  No repos found in " + m.wtRoot))
 		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("  Press [a] to add a repository"))
+		content.WriteString(m.styles.Dim.Render("  Press [a] to add a repository"))
 		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("  Press [q] to quit"))
+		content.WriteString(m.styles.Dim.Render("  Press [q] to quit"))
 		content.WriteString("\n")
 	} else {
 		content.WriteString("  Select a repo (type to filter, ↑/↓ then Enter):\n\n")
 
 		// Show filter indicator when active
 		if m.filterText != "" {
-			filterLine := dimStyle.Render("  Filter: ") + m.filterText
+			filterLine := m.styles.Dim.Render("  Filter: ") + m.filterText
 			content.WriteString(filterLine)
 			content.WriteString("\n\n")
 		}
@@ -445,7 +450,7 @@ func (m RepoPickerModel) viewList(content *strings.Builder, boxWidth int) {
 		eff := m.effectiveRepos()
 
 		if len(eff) == 0 && m.filterText != "" {
-			content.WriteString(dimStyle.Render("  No matches for \"" + m.filterText + "\""))
+			content.WriteString(m.styles.Dim.Render("  No matches for \"" + m.filterText + "\""))
 			content.WriteString("\n")
 		} else {
 			maxVisible := min(10, m.height-10)
@@ -456,7 +461,7 @@ func (m RepoPickerModel) viewList(content *strings.Builder, boxWidth int) {
 			endIdx := min(startIdx+maxVisible, len(eff))
 
 			if startIdx > 0 {
-				content.WriteString(dimStyle.Render("    ↑ more"))
+				content.WriteString(m.styles.Dim.Render("    ↑ more"))
 				content.WriteString("\n")
 			}
 
@@ -468,7 +473,7 @@ func (m RepoPickerModel) viewList(content *strings.Builder, boxWidth int) {
 
 				line := prefix + eff[i]
 				if i == m.selectedIdx {
-					content.WriteString(selectedStyle.Render(line))
+					content.WriteString(m.styles.Selected.Render(line))
 				} else {
 					content.WriteString(line)
 				}
@@ -476,13 +481,13 @@ func (m RepoPickerModel) viewList(content *strings.Builder, boxWidth int) {
 			}
 
 			if endIdx < len(eff) {
-				content.WriteString(dimStyle.Render("    ↓ more"))
+				content.WriteString(m.styles.Dim.Render("    ↓ more"))
 				content.WriteString("\n")
 			}
 		}
 
 		content.WriteString("\n")
-		content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "open") + "  " + formatKeyHints("a", "add repo") + "  " + formatKeyHints("Esc", "clear filter/quit") + "  " + formatKeyHints("q", "quit")))
+		content.WriteString(m.styles.Dim.Render("  " + formatKeyHints("Enter", "open") + "  " + formatKeyHints("a", "add repo") + "  " + formatKeyHints("Esc", "clear filter/quit") + "  " + formatKeyHints("q", "quit")))
 		content.WriteString("\n")
 	}
 }

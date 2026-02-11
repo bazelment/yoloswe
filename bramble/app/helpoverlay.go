@@ -60,10 +60,10 @@ func (h *HelpOverlay) ScrollDown() {
 }
 
 // View renders the help overlay as a centered full-screen box.
-func (h *HelpOverlay) View() string {
+func (h *HelpOverlay) View(s *Styles) string {
 	// Build all content lines
 	allLines := []string{
-		titleStyle.Render("Bramble Key Bindings"),
+		s.Title.Render("Bramble Key Bindings"),
 		"",
 	}
 
@@ -73,17 +73,17 @@ func (h *HelpOverlay) View() string {
 			allLines = append(allLines, "")
 		}
 		// Section title
-		allLines = append(allLines, helpSectionTitleStyle.Render(section.Title))
+		allLines = append(allLines, s.HelpSectionTitle.Render(section.Title))
 
 		// Bindings in this section
 		for _, binding := range section.Bindings {
-			key := helpKeyStyle.Render(helpKeyAlignStyle.Render(binding.Key))
+			key := s.HelpKey.Render(s.HelpKeyAlign.Render(binding.Key))
 			allLines = append(allLines, "  "+key+"  "+binding.Description)
 		}
 	}
 
 	// Footer is rendered separately so it is always visible (not scrolled away).
-	footer := "\n" + dimStyle.Render("Press ? or Esc to close")
+	footer := "\n" + s.Dim.Render("Press ? or Esc to close")
 
 	// Apply scroll offset: clamp to valid range.
 	// Box chrome (border + padding) consumes ~6 lines, footer takes 2 lines.
@@ -109,10 +109,10 @@ func (h *HelpOverlay) View() string {
 
 	// Add scroll indicators
 	if h.scrollOffset > 0 {
-		visibleLines = append([]string{dimStyle.Render("  (scroll up for more)")}, visibleLines...)
+		visibleLines = append([]string{s.Dim.Render("  (scroll up for more)")}, visibleLines...)
 	}
 	if endIdx < len(allLines) {
-		visibleLines = append(visibleLines, dimStyle.Render("  (scroll down for more)"))
+		visibleLines = append(visibleLines, s.Dim.Render("  (scroll down for more)"))
 	}
 
 	contentStr := strings.Join(visibleLines, "\n") + footer
@@ -127,7 +127,7 @@ func (h *HelpOverlay) View() string {
 	}
 
 	// Create bordered box
-	box := helpBoxStyle.
+	box := s.HelpBox.
 		Width(boxWidth).
 		Render(contentStr)
 
@@ -141,17 +141,6 @@ func (h *HelpOverlay) View() string {
 	}
 	return box
 }
-
-// Styles for help overlay (package-level to avoid allocations in View)
-var (
-	helpSectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(idleColor)
-	helpKeyStyle          = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	helpKeyAlignStyle     = lipgloss.NewStyle().Width(12).Align(lipgloss.Right)
-	helpBoxStyle          = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(borderColor).
-				Padding(1, 2)
-)
 
 // buildHelpSections returns help sections appropriate for the given context.
 // It reads the model state to determine which keys are relevant.
@@ -304,6 +293,7 @@ func buildHelpSections(m *Model) []HelpSection {
 	// General
 	gen := HelpSection{Title: "General"}
 	gen.Bindings = append(gen.Bindings,
+		HelpBinding{"T", "Change color theme"},
 		HelpBinding{"Esc", "Clear error / close overlay"},
 		HelpBinding{"q", "Quit Bramble"},
 		HelpBinding{"Ctrl-C", "Force quit"},

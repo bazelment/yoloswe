@@ -13,84 +13,6 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
-// Adaptive colors: {Light terminal, Dark terminal}
-//
-// Light values target a white (#ffffff) background.
-// Dark values target a near-black (#1c1c1c) background.
-var (
-	accentColor  = lipgloss.AdaptiveColor{Light: "4", Dark: "12"}    // navy / bright blue
-	dimColor     = lipgloss.AdaptiveColor{Light: "238", Dark: "242"} // muted text
-	borderColor  = lipgloss.AdaptiveColor{Light: "248", Dark: "240"} // subtle lines
-	barBgColor   = lipgloss.AdaptiveColor{Light: "254", Dark: "236"} // bar fill
-	barFgColor   = lipgloss.AdaptiveColor{Light: "236", Dark: "252"} // bar primary text
-	selectBg     = lipgloss.AdaptiveColor{Light: "195", Dark: "240"} // highlight row (light cyan / dark gray)
-	selectFg     = lipgloss.AdaptiveColor{Light: "0", Dark: "15"}    // black / white
-	errorColor   = lipgloss.AdaptiveColor{Light: "1", Dark: "9"}     // dark red / bright red
-	runningColor = lipgloss.AdaptiveColor{Light: "2", Dark: "10"}    // dark green / bright green
-	idleColor    = lipgloss.AdaptiveColor{Light: "6", Dark: "14"}    // dark cyan / bright cyan
-	pendingColor = lipgloss.AdaptiveColor{Light: "3", Dark: "11"}    // dark yellow / bright yellow
-	doneColor    = lipgloss.AdaptiveColor{Light: "244", Dark: "8"}   // gray / dark gray
-)
-
-// Styles
-var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(accentColor)
-
-	selectedStyle = lipgloss.NewStyle().
-			Background(selectBg).
-			Foreground(selectFg)
-
-	dimStyle = lipgloss.NewStyle().
-			Foreground(dimColor)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(errorColor)
-
-	topBarStyle = lipgloss.NewStyle().
-			Background(barBgColor).
-			Foreground(barFgColor).
-			Padding(0, 1)
-
-	statusBarStyle = lipgloss.NewStyle().
-			Background(barBgColor).
-			Foreground(dimColor)
-
-	runningStyle = lipgloss.NewStyle().
-			Foreground(runningColor)
-
-	idleStyle = lipgloss.NewStyle().
-			Foreground(idleColor)
-
-	pendingStyle = lipgloss.NewStyle().
-			Foreground(pendingColor)
-
-	completedStyle = lipgloss.NewStyle().
-			Foreground(doneColor)
-
-	failedStyle = lipgloss.NewStyle().
-			Foreground(errorColor)
-
-	borderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(borderColor).
-			BorderLeft(false).
-			BorderRight(false)
-
-	// inputBoxStyle is for inline input components (TextArea, Dropdown overlays).
-	inputBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(accentColor).
-			Padding(0, 1)
-
-	// modalBoxStyle is for centered modal dialogs (TaskModal, RepoPicker).
-	modalBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(accentColor).
-			Padding(1, 2)
-)
-
 // View renders the model.
 func (m Model) View() string {
 	// Use sensible defaults before WindowSizeMsg arrives so the first
@@ -134,7 +56,7 @@ func (m Model) View() string {
 	statusBar := m.renderStatusBar()
 
 	// Add border to center
-	centerBordered := borderStyle.Width(m.width).Height(centerHeight).Render(center)
+	centerBordered := m.styles.Border.Width(m.width).Height(centerHeight).Render(center)
 
 	// Build layout
 	parts := []string{topBar, centerBordered}
@@ -142,7 +64,7 @@ func (m Model) View() string {
 	// Add toast notifications if any
 	if m.toasts.HasToasts() {
 		m.toasts.SetWidth(m.width)
-		parts = append(parts, m.toasts.View())
+		parts = append(parts, m.toasts.View(m.styles))
 	}
 
 	// Add input area if in input mode
@@ -150,12 +72,12 @@ func (m Model) View() string {
 		m.inputArea.SetWidth(m.width - 4)
 		m.inputArea.SetMaxHeight(inputHeight - 2)
 		m.inputArea.SetPrompt(m.inputPrompt)
-		parts = append(parts, m.inputArea.View())
+		parts = append(parts, m.inputArea.View(m.styles))
 	}
 
 	// Add confirm prompt if in confirm mode
 	if m.focus == FocusConfirm && m.confirmPrompt != nil {
-		parts = append(parts, m.confirmPrompt.View())
+		parts = append(parts, m.confirmPrompt.View(m.styles))
 	}
 
 	parts = append(parts, statusBar)
@@ -165,12 +87,12 @@ func (m Model) View() string {
 
 	// Show dropdown overlay if open
 	if m.focus == FocusWorktreeDropdown && m.worktreeDropdown.IsOpen() {
-		overlay := m.worktreeDropdown.ViewOverlay()
+		overlay := m.worktreeDropdown.ViewOverlay(m.styles)
 		// Position overlay below the top bar
 		content = overlayAt(content, overlay, 2, 1)
 	}
 	if m.focus == FocusSessionDropdown && m.sessionDropdown.IsOpen() {
-		overlay := m.sessionDropdown.ViewOverlay()
+		overlay := m.sessionDropdown.ViewOverlay(m.styles)
 		// Right-align the session dropdown overlay
 		dropdownWidth := m.sessionDropdown.Width()
 		overlayX := m.width - dropdownWidth - 4
@@ -182,17 +104,22 @@ func (m Model) View() string {
 
 	// Show help overlay if active
 	if m.focus == FocusHelp {
-		return m.helpOverlay.View()
+		return m.helpOverlay.View(m.styles)
 	}
 
 	// Show task modal if visible
 	if m.taskModal.IsVisible() {
-		return m.taskModal.View()
+		return m.taskModal.View(m.styles)
 	}
 
 	// Show all sessions overlay if visible
 	if m.allSessionsOverlay.IsVisible() {
-		return m.allSessionsOverlay.View()
+		return m.allSessionsOverlay.View(m.styles)
+	}
+
+	// Show theme picker overlay if visible
+	if m.themePicker.IsVisible() {
+		return m.themePicker.View(m.styles)
 	}
 
 	return content
@@ -200,17 +127,18 @@ func (m Model) View() string {
 
 // renderTopBar renders the top bar with repo, worktree dropdown, and session dropdown.
 func (m Model) renderTopBar() string {
+	s := m.styles
 	// Left side: repo name + worktree dropdown
-	left := dimStyle.Render(m.repoName)
+	left := s.Dim.Render(m.repoName)
 
 	// Worktree dropdown header
 	left += "  "
 	if m.focus == FocusWorktreeDropdown {
-		left += selectedStyle.Render(m.worktreeDropdown.ViewHeader())
+		left += s.Selected.Render(m.worktreeDropdown.ViewHeader(s))
 	} else {
-		left += m.worktreeDropdown.ViewHeader()
+		left += m.worktreeDropdown.ViewHeader(s)
 	}
-	left += "  " + dimStyle.Render("[Alt-W]")
+	left += "  " + s.Dim.Render("[Alt-W]")
 
 	// Right side: session info (different for tmux vs TUI mode)
 	right := ""
@@ -222,7 +150,7 @@ func (m Model) renderTopBar() string {
 			if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(path, home) {
 				path = "~" + strings.TrimPrefix(path, home)
 			}
-			right = dimStyle.Render(path)
+			right = s.Dim.Render(path)
 		}
 	} else {
 		// TUI mode: show current session + session dropdown
@@ -235,18 +163,18 @@ func (m Model) renderTopBar() string {
 			if title == "" {
 				title = string(sess.ID)[:12]
 			}
-			right = fmt.Sprintf("%s %s %s", icon, title, statusIcon(sess.Status))
+			right = fmt.Sprintf("%s %s %s", icon, title, statusIcon(sess.Status, s))
 		} else {
-			right = dimStyle.Render("(no session)")
+			right = s.Dim.Render("(no session)")
 		}
 
 		// Session dropdown trigger
 		if m.focus == FocusSessionDropdown {
-			right = selectedStyle.Render(right + " ▼")
+			right = s.Selected.Render(right + " ▼")
 		} else {
-			right += " " + dimStyle.Render("▼")
+			right += " " + s.Dim.Render("▼")
 		}
-		right += "  " + dimStyle.Render("[Alt-S]")
+		right += "  " + s.Dim.Render("[Alt-S]")
 	}
 
 	// Combine with padding
@@ -256,11 +184,12 @@ func (m Model) renderTopBar() string {
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
-	return topBarStyle.Width(m.width).Render(bar)
+	return s.TopBar.Width(m.width).Render(bar)
 }
 
 // renderSessionListView renders the session list for tmux mode.
 func (m Model) renderSessionListView(width, height int) string {
+	s := m.styles
 	var b strings.Builder
 
 	// Get sessions based on current view mode
@@ -272,7 +201,7 @@ func (m Model) renderSessionListView(width, height int) string {
 
 	// Table header
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("   Type  Name            Status        Prompt"))
+	b.WriteString(s.Dim.Render("   Type  Name            Status        Prompt"))
 	b.WriteString("\n")
 	b.WriteString("   ")
 	b.WriteString(strings.Repeat("─", width-3))
@@ -302,7 +231,7 @@ func (m Model) renderSessionListView(width, height int) string {
 		nameDisplay = truncate(nameDisplay, 15)
 
 		// Status with icon
-		statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status), sess.Status)
+		statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status, s), sess.Status)
 
 		// Prompt gets remaining width (more space) - strip quotes if present
 		prompt := sess.Prompt
@@ -322,7 +251,7 @@ func (m Model) renderSessionListView(width, height int) string {
 
 		// Highlight selected row
 		if i == m.selectedSessionIndex {
-			line = selectedStyle.Render(line)
+			line = s.Selected.Render(line)
 		}
 
 		b.WriteString(line)
@@ -347,9 +276,9 @@ func (m Model) renderCenter(width, height int) string {
 		if m.splitPane.IsSplit() {
 			m.fileTree.SetFocused(m.splitPane.FocusLeft())
 			rightWidth := m.splitPane.RightWidth(width)
-			leftContent := m.fileTree.Render(m.splitPane.LeftWidth(width), height)
+			leftContent := m.fileTree.Render(m.splitPane.LeftWidth(width), height, m.styles)
 			rightContent := m.renderSessionListView(rightWidth, height)
-			return m.splitPane.Render(leftContent, rightContent, width, height)
+			return m.splitPane.Render(leftContent, rightContent, width, height, m.styles)
 		}
 		return m.renderSessionListView(width, height)
 	}
@@ -358,9 +287,9 @@ func (m Model) renderCenter(width, height int) string {
 	if m.splitPane.IsSplit() {
 		m.fileTree.SetFocused(m.splitPane.FocusLeft())
 		rightWidth := m.splitPane.RightWidth(width)
-		leftContent := m.fileTree.Render(m.splitPane.LeftWidth(width), height)
+		leftContent := m.fileTree.Render(m.splitPane.LeftWidth(width), height, m.styles)
 		rightContent := m.renderOutputArea(rightWidth, height)
-		return m.splitPane.Render(leftContent, rightContent, width, height)
+		return m.splitPane.Render(leftContent, rightContent, width, height, m.styles)
 	}
 
 	return m.renderOutputArea(width, height)
@@ -368,6 +297,7 @@ func (m Model) renderCenter(width, height int) string {
 
 // renderOutputArea renders the session output content (used by renderCenter).
 func (m Model) renderOutputArea(width, height int) string {
+	s := m.styles
 	var b strings.Builder
 
 	if m.viewingSessionID == "" {
@@ -382,7 +312,7 @@ func (m Model) renderOutputArea(width, height int) string {
 	// Get session info
 	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
 	if !ok {
-		b.WriteString(errorStyle.Render("  Session not found"))
+		b.WriteString(s.Error.Render("  Session not found"))
 		return b.String()
 	}
 
@@ -395,19 +325,19 @@ func (m Model) renderOutputArea(width, height int) string {
 	if title == "" {
 		title = string(info.ID)
 	}
-	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, info.Type, title, statusIcon(info.Status))
+	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, info.Type, title, statusIcon(info.Status, s))
 	if info.Model != "" {
-		headerLine += "  " + dimStyle.Render("["+info.Model+"]")
+		headerLine += "  " + s.Dim.Render("["+info.Model+"]")
 	}
 	if info.Progress.TurnCount > 0 || info.Progress.TotalCostUSD > 0 {
-		headerLine += "  " + dimStyle.Render(fmt.Sprintf("T:%d $%.4f", info.Progress.TurnCount, info.Progress.TotalCostUSD))
+		headerLine += "  " + s.Dim.Render(fmt.Sprintf("T:%d $%.4f", info.Progress.TurnCount, info.Progress.TotalCostUSD))
 	}
 	// Add idle indicator with follow-up hint
 	if info.Status == session.StatusIdle {
 		if info.Type == session.SessionTypePlanner {
-			headerLine += idleStyle.Render("  (plan ready - 'a' approve & build / 'f' iterate)")
+			headerLine += s.Idle.Render("  (plan ready - 'a' approve & build / 'f' iterate)")
 		} else {
-			headerLine += idleStyle.Render("  (awaiting follow-up - press 'f')")
+			headerLine += s.Idle.Render("  (awaiting follow-up - press 'f')")
 		}
 	}
 	b.WriteString(headerLine)
@@ -415,7 +345,7 @@ func (m Model) renderOutputArea(width, height int) string {
 
 	// Prompt
 	promptLine := fmt.Sprintf("  %q", truncate(info.Prompt, width-8))
-	b.WriteString(dimStyle.Render(promptLine))
+	b.WriteString(s.Dim.Render(promptLine))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", width-2))
 	b.WriteString("\n")
@@ -434,7 +364,7 @@ func (m Model) renderOutputArea(width, height int) string {
 
 	// Scroll on visual lines, not logical OutputLine count
 	outputHeight := height - 5 // Account for header, prompt, separator
-	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset))
+	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset, s))
 
 	return b.String()
 }
@@ -442,7 +372,7 @@ func (m Model) renderOutputArea(width, height int) string {
 // renderScrollableLines renders a window of visual lines with scroll indicators.
 // scrollOffset=0 means "at bottom" (latest output visible).
 // Higher values scroll toward the top (older content).
-func renderScrollableLines(allVisualLines []string, outputHeight int, scrollOffset int) string {
+func renderScrollableLines(allVisualLines []string, outputHeight int, scrollOffset int, s *Styles) string {
 	var b strings.Builder
 	totalVisual := len(allVisualLines)
 
@@ -495,19 +425,19 @@ func renderScrollableLines(allVisualLines []string, outputHeight int, scrollOffs
 			}
 			hiddenBelow := totalVisual - endIdx
 			if hiddenBelow > 0 {
-				b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
+				b.WriteString(s.Dim.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
 				b.WriteString("\n")
 			}
 		} else {
 			// Middle: both up-arrow and down-arrow indicators
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
+			b.WriteString(s.Dim.Render(fmt.Sprintf("  ↑ %d more lines (press Home to jump to top)", startIdx)))
 			b.WriteString("\n")
 			for i := startIdx; i < endIdx; i++ {
 				b.WriteString(allVisualLines[i])
 				b.WriteString("\n")
 			}
 			hiddenBelow := totalVisual - endIdx
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
+			b.WriteString(s.Dim.Render(fmt.Sprintf("  ↓ %d more lines (press End to jump to latest)", hiddenBelow)))
 			b.WriteString("\n")
 		}
 	}
@@ -517,13 +447,14 @@ func renderScrollableLines(allVisualLines []string, outputHeight int, scrollOffs
 
 // formatOutputLine formats a single OutputLine for display in the center view.
 func (m Model) formatOutputLine(line session.OutputLine, width int) string {
+	s := m.styles
 	var formatted string
 	switch line.Type {
 	case session.OutputTypeError:
-		formatted = errorStyle.Render("  ✗ " + line.Content)
+		formatted = s.Error.Render("  ✗ " + line.Content)
 
 	case session.OutputTypeThinking:
-		formatted = dimStyle.Render("  💭 " + truncate(line.Content, width-8))
+		formatted = s.Dim.Render("  💭 " + truncate(line.Content, width-8))
 
 	case session.OutputTypeTool:
 		formatted = "  🔧 " + line.Content
@@ -534,26 +465,26 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 		case session.ToolStateRunning:
 			elapsed := time.Since(line.StartTime)
 			elapsedStr := fmt.Sprintf("%.1fs", elapsed.Seconds())
-			formatted = "  🔧 " + toolDisplay + " " + runningStyle.Render("⏳ "+elapsedStr)
+			formatted = "  🔧 " + toolDisplay + " " + s.Running.Render("⏳ "+elapsedStr)
 		case session.ToolStateComplete:
 			durationStr := fmt.Sprintf("%.2fs", float64(line.DurationMs)/1000)
-			formatted = "  ✓ " + dimStyle.Render(toolDisplay+" ("+durationStr+")")
+			formatted = "  ✓ " + s.Dim.Render(toolDisplay+" ("+durationStr+")")
 		case session.ToolStateError:
 			durationStr := fmt.Sprintf("%.2fs", float64(line.DurationMs)/1000)
-			formatted = "  " + errorStyle.Render("✗ "+toolDisplay+" ("+durationStr+")")
+			formatted = "  " + s.Error.Render("✗ "+toolDisplay+" ("+durationStr+")")
 		default:
 			formatted = "  🔧 " + toolDisplay
 		}
 
 	case session.OutputTypeTurnEnd:
 		turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f) ───", line.TurnNumber, line.CostUSD)
-		formatted = dimStyle.Render("  " + turnInfo)
+		formatted = s.Dim.Render("  " + turnInfo)
 
 	case session.OutputTypeStatus:
-		formatted = dimStyle.Render("  → " + line.Content)
+		formatted = s.Dim.Render("  → " + line.Content)
 
 	case session.OutputTypePlanReady:
-		header := dimStyle.Render("  " + strings.Repeat("═", 20) + " Plan Ready " + strings.Repeat("═", 20))
+		header := s.Dim.Render("  " + strings.Repeat("═", 20) + " Plan Ready " + strings.Repeat("═", 20))
 		rendered := ""
 		if m.mdRenderer != nil && line.Content != "" {
 			r, err := m.mdRenderer.Render(line.Content)
@@ -592,6 +523,7 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 
 // renderHistorySession renders a history session (read-only replay).
 func (m Model) renderHistorySession(width, height int) string {
+	s := m.styles
 	var b strings.Builder
 
 	data := m.viewingHistoryData
@@ -601,18 +533,18 @@ func (m Model) renderHistorySession(width, height int) string {
 	if data.Type == session.SessionTypeBuilder {
 		typeIcon = "🔨"
 	}
-	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, data.Type, data.ID, dimStyle.Render("[Replay]"))
+	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, data.Type, data.ID, s.Dim.Render("[Replay]"))
 	b.WriteString(headerLine)
 	b.WriteString("\n")
 
 	// Prompt
 	promptLine := fmt.Sprintf("  %q", truncate(data.Prompt, width-8))
-	b.WriteString(dimStyle.Render(promptLine))
+	b.WriteString(s.Dim.Render(promptLine))
 	b.WriteString("\n")
 
 	// Timestamp
 	timeLine := fmt.Sprintf("  Recorded: %s", data.CreatedAt.Format("2006-01-02 15:04"))
-	b.WriteString(dimStyle.Render(timeLine))
+	b.WriteString(s.Dim.Render(timeLine))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", width-2))
 	b.WriteString("\n")
@@ -628,13 +560,14 @@ func (m Model) renderHistorySession(width, height int) string {
 	}
 
 	outputHeight := height - 6 // Account for header, prompt, timestamp, separator
-	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset))
+	b.WriteString(renderScrollableLines(allVisualLines, outputHeight, m.scrollOffset, s))
 
 	return b.String()
 }
 
 // renderStatusBar renders the bottom status bar.
 func (m Model) renderStatusBar() string {
+	s := m.styles
 	// Build keybinding hints based on state
 	var hints []string
 	hasWorktree := m.selectedWorktree() != nil
@@ -693,7 +626,7 @@ func (m Model) renderStatusBar() string {
 
 	// New output indicator when scrolled up
 	if m.scrollOffset > 0 {
-		right = dimStyle.Render(fmt.Sprintf("(%d lines above)", m.scrollOffset)) + "  " + right
+		right = s.Dim.Render(fmt.Sprintf("(%d lines above)", m.scrollOffset)) + "  " + right
 	}
 
 	// Pad to fill width
@@ -703,7 +636,7 @@ func (m Model) renderStatusBar() string {
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
-	return statusBarStyle.Width(m.width).Render(bar)
+	return s.StatusBar.Width(m.width).Render(bar)
 }
 
 // formatKeyHints formats a key-action pair as "[key] action".
@@ -728,20 +661,20 @@ func printableRune(msg tea.KeyMsg) (rune, bool) {
 }
 
 // statusIcon returns a status icon for the session status.
-func statusIcon(status session.SessionStatus) string {
+func statusIcon(status session.SessionStatus, s *Styles) string {
 	switch status {
 	case session.StatusPending:
-		return pendingStyle.Render("○")
+		return s.Pending.Render("○")
 	case session.StatusRunning:
-		return runningStyle.Render("●")
+		return s.Running.Render("●")
 	case session.StatusIdle:
-		return idleStyle.Render("◐")
+		return s.Idle.Render("◐")
 	case session.StatusCompleted:
-		return completedStyle.Render("✓")
+		return s.Completed.Render("✓")
 	case session.StatusFailed:
-		return failedStyle.Render("✗")
+		return s.Failed.Render("✗")
 	case session.StatusStopped:
-		return dimStyle.Render("◌")
+		return s.Dim.Render("◌")
 	default:
 		return "?"
 	}

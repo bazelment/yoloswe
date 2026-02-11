@@ -14,6 +14,7 @@ func newTestRepoPicker(repos []string) RepoPickerModel {
 	m := RepoPickerModel{
 		ctx:    context.Background(),
 		repos:  repos,
+		styles: NewStyles(DefaultDark),
 		width:  80,
 		height: 24,
 	}

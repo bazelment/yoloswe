@@ -25,6 +25,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == FocusHelp {
 			return m.handleHelpOverlay(msg)
 		}
+		// Handle theme picker overlay
+		if m.focus == FocusThemePicker {
+			return m.handleThemePicker(msg)
+		}
 		// Handle all sessions overlay
 		if m.focus == FocusAllSessions {
 			return m.handleAllSessionsOverlay(msg)
@@ -58,7 +62,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionDropdown.SetWidth(m.width / 2)
 		// Initialize or update markdown renderer
 		if m.mdRenderer == nil {
-			m.mdRenderer, _ = NewMarkdownRenderer(m.width - 8)
+			m.mdRenderer, _ = NewMarkdownRenderer(m.width-8, m.styles.Palette.GlamourStyle)
 		} else {
 			_ = m.mdRenderer.SetWidth(m.width - 8)
 		}
@@ -579,6 +583,12 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.allSessionsOverlay.Show(activeSessions, m.width, m.height)
 		m.focus = FocusAllSessions
+		return m, nil
+
+	case "T":
+		// Open theme picker
+		m.themePicker.Show(m.styles.Palette.Name, m.width, m.height)
+		m.focus = FocusThemePicker
 		return m, nil
 
 	case "f":
@@ -1599,5 +1609,51 @@ func (m Model) handleHelpOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	// Ignore all other keys while help is open
+	return m, nil
+}
+
+// handleThemePicker handles key presses when the theme picker overlay is visible.
+func (m Model) handleThemePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// Revert to original theme
+		origName := m.themePicker.OriginalTheme()
+		if origName != m.styles.Palette.Name {
+			if p, ok := ThemeByName(origName); ok {
+				m.applyTheme(p)
+			}
+		}
+		m.themePicker.Hide()
+		m.focus = FocusOutput
+		return m, nil
+
+	case "enter":
+		// Confirm the selected theme and persist
+		selected := m.themePicker.SelectedTheme()
+		m.applyTheme(selected)
+		m.settings.ThemeName = selected.Name
+		_ = SaveSettings(m.settings)
+		m.themePicker.Hide()
+		m.focus = FocusOutput
+		toastCmd := m.addToast("Theme set to "+selected.Name, ToastSuccess)
+		return m, toastCmd
+
+	case "up", "k":
+		m.themePicker.MoveSelection(-1)
+		// Live preview
+		selected := m.themePicker.SelectedTheme()
+		m.applyTheme(selected)
+		return m, nil
+
+	case "down", "j":
+		m.themePicker.MoveSelection(1)
+		// Live preview
+		selected := m.themePicker.SelectedTheme()
+		m.applyTheme(selected)
+		return m, nil
+
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	}
 	return m, nil
 }

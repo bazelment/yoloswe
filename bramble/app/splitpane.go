@@ -72,12 +72,9 @@ func (sp *SplitPane) RightWidth(totalWidth int) int {
 	return totalWidth - sp.LeftWidth(totalWidth) - 1 // -1 for divider
 }
 
-var dividerStyle = lipgloss.NewStyle().
-	Foreground(borderColor)
-
 // Render composites left and right content into a split or single layout.
 // When PaneLayoutSingle, only rightContent is shown.
-func (sp *SplitPane) Render(leftContent, rightContent string, width, height int) string {
+func (sp *SplitPane) Render(leftContent, rightContent string, width, height int, s *Styles) string {
 	if sp.layout == PaneLayoutSingle {
 		return rightContent
 	}
@@ -86,7 +83,7 @@ func (sp *SplitPane) Render(leftContent, rightContent string, width, height int)
 	rightWidth := sp.RightWidth(width)
 
 	// Build the divider column
-	divider := strings.Repeat(dividerStyle.Render("│")+"\n", height)
+	divider := strings.Repeat(s.Divider.Render("│")+"\n", height)
 	divider = strings.TrimRight(divider, "\n")
 
 	// Pad/truncate left and right content to fixed widths

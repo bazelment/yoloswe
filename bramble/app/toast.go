@@ -117,7 +117,7 @@ func (tm *ToastManager) Height() int {
 
 // View renders all active toasts stacked vertically.
 // Returns empty string if no toasts are active.
-func (tm *ToastManager) View() string {
+func (tm *ToastManager) View(s *Styles) string {
 	if len(tm.toasts) == 0 {
 		return ""
 	}
@@ -128,13 +128,13 @@ func (tm *ToastManager) View() string {
 		var icon string
 		switch t.Level {
 		case ToastSuccess:
-			style = toastSuccessStyle
+			style = s.ToastSuccess
 			icon = " ✓ "
 		case ToastInfo:
-			style = toastInfoStyle
+			style = s.ToastInfo
 			icon = " i "
 		case ToastError:
-			style = toastErrorStyle
+			style = s.ToastError
 			icon = " ! "
 		}
 		content := icon + t.Message
@@ -146,20 +146,3 @@ func (tm *ToastManager) View() string {
 	}
 	return strings.Join(lines, "\n")
 }
-
-var (
-	toastSuccessStyle = lipgloss.NewStyle().
-				Background(lipgloss.AdaptiveColor{Light: "194", Dark: "22"}).
-				Foreground(lipgloss.AdaptiveColor{Light: "22", Dark: "10"}).
-				Padding(0, 1)
-
-	toastInfoStyle = lipgloss.NewStyle().
-			Background(lipgloss.AdaptiveColor{Light: "153", Dark: "17"}).
-			Foreground(lipgloss.AdaptiveColor{Light: "17", Dark: "14"}).
-			Padding(0, 1)
-
-	toastErrorStyle = lipgloss.NewStyle().
-			Background(lipgloss.AdaptiveColor{Light: "217", Dark: "52"}).
-			Foreground(lipgloss.AdaptiveColor{Light: "52", Dark: "9"}).
-			Padding(0, 1)
-)

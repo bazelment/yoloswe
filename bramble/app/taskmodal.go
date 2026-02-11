@@ -155,7 +155,7 @@ func (m *TaskModal) AdjustedParent() string {
 }
 
 // View renders the task modal.
-func (m *TaskModal) View() string {
+func (m *TaskModal) View(s *Styles) string {
 	if m.state == TaskModalHidden {
 		return ""
 	}
@@ -169,75 +169,75 @@ func (m *TaskModal) View() string {
 
 	switch m.state {
 	case TaskModalInput:
-		content.WriteString(titleStyle.Render("New task — Describe what you want to work on:"))
+		content.WriteString(s.Title.Render("New task — Describe what you want to work on:"))
 		content.WriteString("\n")
 
 		// Render the text area (includes buttons)
 		m.textArea.SetWidth(boxWidth - 6)
 		m.textArea.SetPrompt("")
-		content.WriteString(m.textArea.View())
+		content.WriteString(m.textArea.View(s))
 
 	case TaskModalRouting:
-		content.WriteString(titleStyle.Render("New task"))
+		content.WriteString(s.Title.Render("New task"))
 		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("  Deciding where to run this..."))
+		content.WriteString(s.Dim.Render("  Deciding where to run this..."))
 		content.WriteString("\n")
 
 	case TaskModalProposal:
 		if m.err != nil {
-			content.WriteString(titleStyle.Render("New task — Error"))
+			content.WriteString(s.Title.Render("New task — Error"))
 			content.WriteString("\n\n")
-			content.WriteString(errorStyle.Render("  " + m.err.Error()))
+			content.WriteString(s.Error.Render("  " + m.err.Error()))
 			content.WriteString("\n\n")
-			content.WriteString(dimStyle.Render("  " + formatKeyHints("Esc", "cancel")))
+			content.WriteString(s.Dim.Render("  " + formatKeyHints("Esc", "cancel")))
 		} else if m.proposal != nil {
-			content.WriteString(titleStyle.Render("New task — Proposal"))
+			content.WriteString(s.Title.Render("New task — Proposal"))
 			content.WriteString("\n\n")
 
 			if m.proposal.Action == taskrouter.ActionUseExisting {
 				content.WriteString("  Proposed: Use existing worktree ")
-				content.WriteString(selectedStyle.Render(m.proposal.Worktree))
+				content.WriteString(s.Selected.Render(m.proposal.Worktree))
 				content.WriteString("\n")
 				content.WriteString("    → Start planning session with your prompt there.")
 			} else {
 				content.WriteString("  Proposed: Create worktree ")
-				content.WriteString(selectedStyle.Render(m.proposal.Worktree))
+				content.WriteString(s.Selected.Render(m.proposal.Worktree))
 				content.WriteString("\n")
 				content.WriteString("    from ")
-				content.WriteString(dimStyle.Render(m.proposal.Parent))
+				content.WriteString(s.Dim.Render(m.proposal.Parent))
 				content.WriteString(" → start planning session there.")
 			}
 			content.WriteString("\n\n")
 
 			if m.proposal.Reasoning != "" {
-				content.WriteString(dimStyle.Render("  Reasoning: " + truncate(m.proposal.Reasoning, boxWidth-14)))
+				content.WriteString(s.Dim.Render("  Reasoning: " + truncate(m.proposal.Reasoning, boxWidth-14)))
 				content.WriteString("\n\n")
 			}
 
-			content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "confirm") + "  " + formatKeyHints("a", "adjust") + "  " + formatKeyHints("Esc", "cancel")))
+			content.WriteString(s.Dim.Render("  " + formatKeyHints("Enter", "confirm") + "  " + formatKeyHints("a", "adjust") + "  " + formatKeyHints("Esc", "cancel")))
 		}
 
 	case TaskModalAdjust:
-		content.WriteString(titleStyle.Render("New task — Adjust"))
+		content.WriteString(s.Title.Render("New task — Adjust"))
 		content.WriteString("\n\n")
 		if m.proposal.Action == taskrouter.ActionUseExisting {
 			content.WriteString("  Worktree: " + m.adjustWorktree)
 			content.WriteString("\n\n")
-			content.WriteString(dimStyle.Render("  (Use ↑/↓ to select from existing worktrees)"))
+			content.WriteString(s.Dim.Render("  (Use ↑/↓ to select from existing worktrees)"))
 			content.WriteString("\n\n")
-			content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "confirm") + "  " + formatKeyHints("Esc", "back")))
+			content.WriteString(s.Dim.Render("  " + formatKeyHints("Enter", "confirm") + "  " + formatKeyHints("Esc", "back")))
 		} else {
 			content.WriteString("  Branch name:\n")
 			m.adjustTextArea.SetWidth(boxWidth - 10)
 			m.adjustTextArea.SetPrompt("")
-			content.WriteString(m.adjustTextArea.View())
+			content.WriteString(m.adjustTextArea.View(s))
 			content.WriteString("\n")
-			content.WriteString("  Parent: " + dimStyle.Render(m.adjustParent))
+			content.WriteString("  Parent: " + s.Dim.Render(m.adjustParent))
 		}
 	}
 
 	// Create bordered box
-	box := modalBoxStyle.Width(boxWidth).Render(content.String())
+	box := s.ModalBox.Width(boxWidth).Render(content.String())
 
 	// Center the box
 	if m.width > 0 && m.height > 0 {

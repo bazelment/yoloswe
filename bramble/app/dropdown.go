@@ -251,10 +251,10 @@ func (d *Dropdown) Count() int {
 }
 
 // ViewHeader renders the dropdown header (closed state).
-func (d *Dropdown) ViewHeader() string {
+func (d *Dropdown) ViewHeader(s *Styles) string {
 	item := d.SelectedItem()
 	if item == nil {
-		return dimStyle.Render("(none)")
+		return s.Dim.Render("(none)")
 	}
 
 	var b strings.Builder
@@ -265,29 +265,29 @@ func (d *Dropdown) ViewHeader() string {
 	b.WriteString(item.Label)
 	if item.Badge != "" {
 		b.WriteString(" ")
-		b.WriteString(dimStyle.Render(item.Badge))
+		b.WriteString(s.Dim.Render(item.Badge))
 	}
 	b.WriteString(" ")
-	b.WriteString(dimStyle.Render("▼"))
+	b.WriteString(s.Dim.Render("▼"))
 
 	return b.String()
 }
 
 // ViewList renders the dropdown list (open state).
-func (d *Dropdown) ViewList() string {
+func (d *Dropdown) ViewList(s *Styles) string {
 	eff := d.effectiveItems()
 	if len(eff) == 0 {
 		if d.filterText != "" {
-			return dimStyle.Render("  No matches for \"" + d.filterText + "\"")
+			return s.Dim.Render("  No matches for \"" + d.filterText + "\"")
 		}
-		return dimStyle.Render("  (empty)")
+		return s.Dim.Render("  (empty)")
 	}
 
 	var b strings.Builder
 
 	// Show filter indicator when active
 	if d.filterText != "" {
-		filterLine := dimStyle.Render("  Filter: ") + d.filterText
+		filterLine := s.Dim.Render("  Filter: ") + d.filterText
 		b.WriteString(filterLine)
 		b.WriteString("\n")
 	}
@@ -296,7 +296,7 @@ func (d *Dropdown) ViewList() string {
 
 	// Show scroll indicator at top if needed
 	if d.scrollOffset > 0 {
-		b.WriteString(dimStyle.Render("  ↑ more"))
+		b.WriteString(s.Dim.Render("  ↑ more"))
 		b.WriteString("\n")
 	}
 
@@ -327,7 +327,7 @@ func (d *Dropdown) ViewList() string {
 		}
 
 		if i == d.selectedIdx {
-			b.WriteString(selectedStyle.Render(lineStr))
+			b.WriteString(s.Selected.Render(lineStr))
 		} else {
 			b.WriteString(lineStr)
 		}
@@ -335,7 +335,7 @@ func (d *Dropdown) ViewList() string {
 
 		// Show subtitle if present
 		if item.Subtitle != "" {
-			subtitle := "    " + dimStyle.Render(item.Subtitle)
+			subtitle := "    " + s.Dim.Render(item.Subtitle)
 			if d.width > 0 && lipgloss.Width(subtitle) > d.width-2 {
 				subtitle = truncateVisual(subtitle, d.width-5)
 			}
@@ -346,21 +346,21 @@ func (d *Dropdown) ViewList() string {
 
 	// Show scroll indicator at bottom if needed
 	if endIdx < len(eff) {
-		b.WriteString(dimStyle.Render("  ↓ more"))
+		b.WriteString(s.Dim.Render("  ↓ more"))
 	}
 
 	return b.String()
 }
 
 // ViewOverlay renders the dropdown as an overlay box.
-func (d *Dropdown) ViewOverlay() string {
+func (d *Dropdown) ViewOverlay(s *Styles) string {
 	if !d.isOpen {
 		return ""
 	}
 
-	content := d.ViewList()
+	content := d.ViewList(s)
 
-	style := inputBoxStyle
+	style := s.InputBox
 	if d.width > 0 {
 		style = style.Width(d.width)
 	}

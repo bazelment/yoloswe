@@ -65,7 +65,7 @@ func TestConfirmPrompt_ViewRendersMessage(t *testing.T) {
 		{Key: "y", Label: "yes"},
 	})
 
-	view := cp.View()
+	view := cp.View(NewStyles(DefaultDark))
 	assert.Contains(t, view, "Stop session 'abc'?")
 	assert.Contains(t, view, "[y] yes")
 	assert.Contains(t, view, "[Esc] cancel")
@@ -77,7 +77,7 @@ func TestConfirmPrompt_ViewRendersMultipleOptions(t *testing.T) {
 		{Key: "d", Label: "yes + delete branch"},
 	})
 
-	view := cp.View()
+	view := cp.View(NewStyles(DefaultDark))
 	assert.Contains(t, view, "Delete worktree 'feat'?")
 	assert.Contains(t, view, "[y] yes, keep branch")
 	assert.Contains(t, view, "[d] yes + delete branch")
