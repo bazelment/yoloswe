@@ -1,0 +1,35 @@
+class Wt < Formula
+  desc "Git worktree CLI for power users"
+  homepage "https://github.com/bazelment/yoloswe"
+  version "{{.Version}}"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/wt-v{{.Version}}-darwin-arm64.tar.gz"
+      sha256 "{{.DarwinArm64SHA256}}"
+    end
+    on_intel do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/wt-v{{.Version}}-darwin-amd64.tar.gz"
+      sha256 "{{.DarwinAmd64SHA256}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/wt-v{{.Version}}-linux-arm64.tar.gz"
+      sha256 "{{.LinuxArm64SHA256}}"
+    end
+    on_intel do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/wt-v{{.Version}}-linux-amd64.tar.gz"
+      sha256 "{{.LinuxAmd64SHA256}}"
+    end
+  end
+
+  def install
+    bin.install "wt"
+  end
+
+  test do
+    assert_match "Git worktree CLI for power users", shell_output("#{bin}/wt --help")
+  end
+end
