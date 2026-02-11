@@ -1210,7 +1210,7 @@ func (m *Manager) CreatePR(ctx context.Context, opts PROptions) (*PRResult, erro
 
 	// Create PR
 	m.output.Info(fmt.Sprintf("Creating PR: %s -> %s", currentBranch, baseBranch))
-	prInfo, err := CreatePR(ctx, m.gh, opts.Title, opts.Body, baseBranch, opts.Draft, cwd)
+	prInfo, err := CreatePR(ctx, m.gh, opts.Title, opts.Body, baseBranch, currentBranch, opts.Draft, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PR: %w", err)
 	}

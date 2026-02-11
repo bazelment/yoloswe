@@ -6,5 +6,5 @@ use (
 	./multiagent
 	./wt
 	./bramble
-	./fixer
+	./medivac
 )

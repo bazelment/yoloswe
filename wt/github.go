@@ -136,30 +136,53 @@ func IsPRMerged(ctx context.Context, runner GHRunner, branch, dir string) (bool,
 	return info.State == "MERGED", nil
 }
 
-// CreatePR creates a new GitHub PR for the current branch.
-func CreatePR(ctx context.Context, runner GHRunner, title, body, base string, draft bool, dir string) (*PRInfo, error) {
-	args := []string{"pr", "create", "--json", "number,url,headRefName,baseRefName"}
-	if base != "" {
-		args = append(args, "--base", base)
-	}
-	if title != "" {
-		args = append(args, "--title", title)
-	}
-	if body != "" {
-		args = append(args, "--body", body)
+// createPRResponse maps the JSON returned by the GitHub REST API for PR creation.
+type createPRResponse struct {
+	HTMLURL string `json:"html_url"`
+	Head    struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+	Number int  `json:"number"`
+	Draft  bool `json:"draft"`
+}
+
+// CreatePR creates a new GitHub PR using the REST API (gh api).
+// The head parameter is the branch name containing the changes.
+// The dir parameter is used by gh to resolve {owner}/{repo} from git remotes.
+func CreatePR(ctx context.Context, runner GHRunner, title, body, base, head string, draft bool, dir string) (*PRInfo, error) {
+	args := []string{
+		"api", "repos/{owner}/{repo}/pulls",
+		"-f", "title=" + title,
+		"-f", "body=" + body,
+		"-f", "head=" + head,
+		"-f", "base=" + base,
 	}
 	if draft {
-		args = append(args, "--draft")
+		args = append(args, "-F", "draft=true")
 	}
 
 	result, err := runner.Run(ctx, args, dir)
 	if err != nil {
+		if result != nil && result.Stderr != "" {
+			return nil, fmt.Errorf("%w: %s", err, result.Stderr)
+		}
 		return nil, err
 	}
 
-	var info PRInfo
-	if err := json.Unmarshal([]byte(result.Stdout), &info); err != nil {
-		return nil, err
+	var resp createPRResponse
+	if err := json.Unmarshal([]byte(result.Stdout), &resp); err != nil {
+		return nil, fmt.Errorf("parse PR response: %w", err)
 	}
-	return &info, nil
+
+	return &PRInfo{
+		Number:      resp.Number,
+		URL:         resp.HTMLURL,
+		HeadRefName: resp.Head.Ref,
+		BaseRefName: resp.Base.Ref,
+		State:       "OPEN",
+		IsDraft:     resp.Draft,
+	}, nil
 }
