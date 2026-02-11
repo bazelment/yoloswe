@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -207,7 +208,7 @@ func (s *worktreeServer) FetchAllPRInfo(ctx context.Context, _ *pb.FetchAllPRInf
 func (s *worktreeServer) NewAtomic(ctx context.Context, req *pb.NewAtomicRequest) (*pb.NewAtomicResponse, error) {
 	path, err := s.svc.NewAtomic(ctx, req.Branch, req.BaseBranch, req.Goal)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "create worktree: %v", err)
+		return nil, s.errWithMessages("create worktree: %v", err)
 	}
 	return &pb.NewAtomicResponse{
 		Path:     path,
@@ -217,14 +218,14 @@ func (s *worktreeServer) NewAtomic(ctx context.Context, req *pb.NewAtomicRequest
 
 func (s *worktreeServer) Remove(ctx context.Context, req *pb.RemoveWorktreeRequest) (*pb.RemoveWorktreeResponse, error) {
 	if err := s.svc.Remove(ctx, req.NameOrBranch, req.DeleteBranch); err != nil {
-		return nil, status.Errorf(codes.Internal, "remove worktree: %v", err)
+		return nil, s.errWithMessages("remove worktree: %v", err)
 	}
 	return &pb.RemoveWorktreeResponse{Messages: s.svc.Messages()}, nil
 }
 
 func (s *worktreeServer) Sync(ctx context.Context, req *pb.SyncWorktreeRequest) (*pb.SyncWorktreeResponse, error) {
 	if err := s.svc.Sync(ctx, req.Branch); err != nil {
-		return nil, status.Errorf(codes.Internal, "sync worktree: %v", err)
+		return nil, s.errWithMessages("sync worktree: %v", err)
 	}
 	return &pb.SyncWorktreeResponse{Messages: s.svc.Messages()}, nil
 }
@@ -232,7 +233,7 @@ func (s *worktreeServer) Sync(ctx context.Context, req *pb.SyncWorktreeRequest) 
 func (s *worktreeServer) MergePRForBranch(ctx context.Context, req *pb.MergePRRequest) (*pb.MergePRResponse, error) {
 	prNum, err := s.svc.MergePRForBranch(ctx, req.Branch, MergeOptionsFromProto(req.Options))
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "merge PR: %v", err)
+		return nil, s.errWithMessages("merge PR: %v", err)
 	}
 	return &pb.MergePRResponse{
 		PrNumber: int32(prNum),
@@ -252,9 +253,19 @@ func (s *worktreeServer) GatherContext(ctx context.Context, req *pb.GatherContex
 
 func (s *worktreeServer) ResetToDefault(ctx context.Context, req *pb.ResetToDefaultRequest) (*pb.ResetToDefaultResponse, error) {
 	if err := s.svc.ResetToDefault(ctx, req.Branch); err != nil {
-		return nil, status.Errorf(codes.Internal, "reset to default: %v", err)
+		return nil, s.errWithMessages("reset to default: %v", err)
 	}
 	return &pb.ResetToDefaultResponse{Messages: s.svc.Messages()}, nil
+}
+
+// errWithMessages returns a gRPC error that includes any captured operation messages
+// in the error string, so diagnostic output is not lost on error in remote mode.
+func (s *worktreeServer) errWithMessages(format string, err error) error {
+	msgs := s.svc.Messages()
+	if len(msgs) == 0 {
+		return status.Errorf(codes.Internal, format, err)
+	}
+	return status.Errorf(codes.Internal, format+"\nOutput:\n  "+strings.Join(msgs, "\n  "), err)
 }
 
 // ============================================================================

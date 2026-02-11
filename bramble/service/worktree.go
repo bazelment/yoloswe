@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -34,6 +35,7 @@ type LocalWorktreeService struct {
 	root     string
 	repoName string
 	messages []string
+	mu       sync.Mutex
 }
 
 // NewLocalWorktreeService creates a new local worktree service.
@@ -66,24 +68,32 @@ func (s *LocalWorktreeService) captureMessages(buf *bytes.Buffer) {
 
 // Messages returns captured output messages from the last operation.
 func (s *LocalWorktreeService) Messages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.messages
 }
 
 // List returns all worktrees for the repo.
 func (s *LocalWorktreeService) List(ctx context.Context) ([]wt.Worktree, error) {
+	s.mu.Lock()
 	s.messages = nil
+	s.mu.Unlock()
 	return s.manager().List(ctx)
 }
 
 // GetGitStatus returns local git status for a worktree.
 func (s *LocalWorktreeService) GetGitStatus(ctx context.Context, w wt.Worktree) (*wt.WorktreeStatus, error) {
+	s.mu.Lock()
 	s.messages = nil
+	s.mu.Unlock()
 	return s.manager().GetGitStatus(ctx, w)
 }
 
 // FetchAllPRInfo fetches all open PRs in a single batch.
 func (s *LocalWorktreeService) FetchAllPRInfo(ctx context.Context) ([]wt.PRInfo, error) {
+	s.mu.Lock()
 	s.messages = nil
+	s.mu.Unlock()
 	mgr := s.manager()
 	// Need a valid git repo directory for gh CLI.
 	worktrees, err := mgr.List(ctx)
@@ -100,7 +110,9 @@ func (s *LocalWorktreeService) FetchAllPRInfo(ctx context.Context) ([]wt.PRInfo,
 func (s *LocalWorktreeService) NewAtomic(ctx context.Context, branch, baseBranch, goal string) (string, error) {
 	mgr, buf := s.managerWithCapture()
 	result, err := mgr.NewAtomic(ctx, branch, baseBranch, goal)
+	s.mu.Lock()
 	s.captureMessages(buf)
+	s.mu.Unlock()
 	return result, err
 }
 
@@ -108,7 +120,9 @@ func (s *LocalWorktreeService) NewAtomic(ctx context.Context, branch, baseBranch
 func (s *LocalWorktreeService) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool) error {
 	mgr, buf := s.managerWithCapture()
 	err := mgr.Remove(ctx, nameOrBranch, deleteBranch)
+	s.mu.Lock()
 	s.captureMessages(buf)
+	s.mu.Unlock()
 	return err
 }
 
@@ -116,7 +130,9 @@ func (s *LocalWorktreeService) Remove(ctx context.Context, nameOrBranch string, 
 func (s *LocalWorktreeService) Sync(ctx context.Context, branch string) error {
 	mgr, buf := s.managerWithCapture()
 	err := mgr.Sync(ctx, branch)
+	s.mu.Lock()
 	s.captureMessages(buf)
+	s.mu.Unlock()
 	return err
 }
 
@@ -124,13 +140,17 @@ func (s *LocalWorktreeService) Sync(ctx context.Context, branch string) error {
 func (s *LocalWorktreeService) MergePRForBranch(ctx context.Context, branch string, opts wt.MergeOptions) (int, error) {
 	mgr, buf := s.managerWithCapture()
 	prNumber, err := mgr.MergePRForBranch(ctx, branch, opts)
+	s.mu.Lock()
 	s.captureMessages(buf)
+	s.mu.Unlock()
 	return prNumber, err
 }
 
 // GatherContext gathers worktree context for file tree display.
 func (s *LocalWorktreeService) GatherContext(ctx context.Context, w wt.Worktree, opts wt.ContextOptions) (*wt.WorktreeContext, error) {
+	s.mu.Lock()
 	s.messages = nil
+	s.mu.Unlock()
 	return s.manager().GatherContext(ctx, w, opts)
 }
 
@@ -146,7 +166,9 @@ func (s *LocalWorktreeService) ResetToDefault(ctx context.Context, branch string
 
 	worktrees, err := mgr.List(ctx)
 	if err != nil {
+		s.mu.Lock()
 		s.captureMessages(buf)
+		s.mu.Unlock()
 		return fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
@@ -158,20 +180,28 @@ func (s *LocalWorktreeService) ResetToDefault(ctx context.Context, branch string
 		}
 	}
 	if wtPath == "" {
+		s.mu.Lock()
 		s.captureMessages(buf)
+		s.mu.Unlock()
 		return fmt.Errorf("worktree for %s not found", branch)
 	}
 
 	if _, err := mgr.GitRunner().Run(ctx, []string{"fetch", "origin"}, wtPath); err != nil {
+		s.mu.Lock()
 		s.captureMessages(buf)
+		s.mu.Unlock()
 		return fmt.Errorf("failed to fetch: %w", err)
 	}
 	if _, err := mgr.GitRunner().Run(ctx, []string{"reset", "--hard", "origin/" + defaultBranch}, wtPath); err != nil {
+		s.mu.Lock()
 		s.captureMessages(buf)
+		s.mu.Unlock()
 		return fmt.Errorf("failed to reset: %w", err)
 	}
 
+	s.mu.Lock()
 	s.captureMessages(buf)
 	s.messages = append(s.messages, fmt.Sprintf("Reset %s to %s", branch, defaultBranch))
+	s.mu.Unlock()
 	return nil
 }

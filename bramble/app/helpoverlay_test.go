@@ -217,6 +217,7 @@ func TestBuildHelpSectionsWithSession(t *testing.T) {
 		t.Fatalf("Failed to start session: %v", err)
 	}
 	m.viewingSessionID = sessionID
+	m.refreshSessionCache()
 
 	// Wait for session to become idle (in real code, this would be through events)
 	// For now just check that sections build without error

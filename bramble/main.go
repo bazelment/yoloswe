@@ -363,6 +363,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Printf("Bramble server listening on %s (repo: %s)", listenAddr, repoName)
+	if serveAddrFlag != "localhost" && serveAddrFlag != "127.0.0.1" {
+		log.Printf("WARNING: listening on %s without TLS — auth tokens are sent in plaintext", serveAddrFlag)
+	}
 	fmt.Printf("Auth token: %s\n", token)
 
 	// Graceful shutdown

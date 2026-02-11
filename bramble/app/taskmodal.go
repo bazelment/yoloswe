@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/bazelment/yoloswe/bramble/service"
 	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
@@ -261,47 +262,22 @@ func (m *TaskModal) BuildRouteRequest(worktrees []taskrouter.WorktreeInfo, curre
 }
 
 // MockRouteForTesting returns a mock proposal for testing without AI.
+// Delegates to service.SuggestBranchName for branch name generation.
 func MockRouteForTesting(prompt string, hasWorktrees bool) *taskrouter.RouteProposal {
 	if hasWorktrees {
 		return &taskrouter.RouteProposal{
 			Action:    taskrouter.ActionCreateNew,
-			Worktree:  suggestBranchName(prompt),
+			Worktree:  service.SuggestBranchName(prompt),
 			Parent:    "main",
 			Reasoning: "Creating new branch for this task",
 		}
 	}
 	return &taskrouter.RouteProposal{
 		Action:    taskrouter.ActionCreateNew,
-		Worktree:  suggestBranchName(prompt),
+		Worktree:  service.SuggestBranchName(prompt),
 		Parent:    "main",
 		Reasoning: "First feature branch for this repo",
 	}
-}
-
-// suggestBranchName generates a simple branch name from a prompt.
-func suggestBranchName(prompt string) string {
-	// Simple heuristic: take first few words, make kebab-case
-	words := strings.Fields(strings.ToLower(prompt))
-	if len(words) > 4 {
-		words = words[:4]
-	}
-
-	// Filter common words
-	filtered := make([]string, 0, len(words))
-	commonWords := map[string]bool{"a": true, "an": true, "the": true, "to": true, "for": true, "and": true, "or": true, "in": true, "on": true, "with": true}
-	for _, w := range words {
-		// Remove punctuation
-		w = strings.Trim(w, ".,!?;:")
-		if !commonWords[w] && len(w) > 1 {
-			filtered = append(filtered, w)
-		}
-	}
-
-	if len(filtered) == 0 {
-		return "feature-new"
-	}
-
-	return "feature-" + strings.Join(filtered, "-")
 }
 
 // RouteTask runs the task router (placeholder - actual implementation would use the router).

@@ -171,6 +171,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
 
+		// Update cached output/session info when the event affects the viewed session.
+		switch evt := msg.event.(type) {
+		case session.SessionOutputEvent:
+			if evt.SessionID == m.viewingSessionID {
+				m.refreshSessionCache()
+			}
+		case session.SessionStateChangeEvent:
+			if evt.SessionID == m.viewingSessionID {
+				m.refreshSessionCache()
+			}
+		case session.SessionReconnectEvent:
+			// On reconnect, perform a full state refresh to recover any events
+			// missed during the disconnect.
+			m.refreshSessionCache()
+			cmds = append(cmds, deferredRefreshCmd())
+		}
+
 		// Keep listening for events
 		cmds = append(cmds, m.listenForSessionEvents())
 		return m, tea.Batch(cmds...)
@@ -178,6 +195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionsUpdated:
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
+		m.refreshSessionCache()
 		return m, nil
 
 	case errMsg:
@@ -620,6 +638,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.viewingSessionID = sessionID
 			m.scrollOffset = 0 // New builder session starts at bottom
+			m.refreshSessionCache()
 			m.sessions = m.sessionManager.GetAllSessions()
 			m.updateSessionDropdown()
 			return m, nil
@@ -732,6 +751,7 @@ func (m *Model) switchViewingSession(newID session.SessionID) {
 	m.viewingSessionID = newID
 	m.scrollOffset = m.scrollPositions[newID] // zero-value (0) if not found
 	m.viewingHistoryData = nil
+	m.refreshSessionCache()
 }
 
 // handleDropdownMode handles key presses when a dropdown is open.
@@ -952,6 +972,7 @@ func (m Model) startSession(sessionType session.SessionType, prompt string) (tea
 	}
 	m.viewingSessionID = sessionID
 	m.scrollOffset = 0 // New session starts at bottom
+	m.refreshSessionCache()
 	m.sessions = m.sessionManager.GetAllSessions()
 	m.updateSessionDropdown()
 	toastCmd := m.addToast("Session started: "+string(sessionID)[:12], ToastSuccess)

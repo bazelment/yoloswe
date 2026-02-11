@@ -41,6 +41,7 @@ func (p *SessionProxy) streamEvents(ctx context.Context) {
 		maxBackoff     = 10 * time.Second
 	)
 	backoff := initialBackoff
+	wasConnected := false
 
 	for {
 		if ctx.Err() != nil {
@@ -52,6 +53,7 @@ func (p *SessionProxy) streamEvents(ctx context.Context) {
 				return
 			}
 			log.Printf("StreamEvents connection error: %v (retrying in %v)", err, backoff)
+			wasConnected = true // Any failure means the next success is a reconnect
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -62,6 +64,18 @@ func (p *SessionProxy) streamEvents(ctx context.Context) {
 		}
 		// Connected successfully — reset backoff
 		backoff = initialBackoff
+
+		// If this is a reconnection (not the first connect), emit a
+		// reconnect event so the TUI can perform a full state refresh.
+		if wasConnected {
+			select {
+			case p.events <- session.SessionReconnectEvent{}:
+			default:
+				log.Printf("WARNING: session proxy events channel full, dropping reconnect event")
+			}
+		}
+		wasConnected = true
+
 		for {
 			event, err := stream.Recv()
 			if err != nil {

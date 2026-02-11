@@ -39,14 +39,14 @@ func heuristicRoute(prompt string, hasWorktrees bool) *taskrouter.RouteProposal 
 	}
 	return &taskrouter.RouteProposal{
 		Action:    taskrouter.ActionCreateNew,
-		Worktree:  suggestBranchName(prompt),
+		Worktree:  SuggestBranchName(prompt),
 		Parent:    "main",
 		Reasoning: reasoning,
 	}
 }
 
-// suggestBranchName generates a simple branch name from a prompt.
-func suggestBranchName(prompt string) string {
+// SuggestBranchName generates a simple branch name from a prompt.
+func SuggestBranchName(prompt string) string {
 	words := strings.Fields(strings.ToLower(prompt))
 	if len(words) > 4 {
 		words = words[:4]

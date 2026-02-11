@@ -62,6 +62,8 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	editor                string
 	inputPrompt           string
 	wtRoot                string
+	cachedOutput          []session.OutputLine
+	cachedSessionInfo     *session.SessionInfo
 	viewingSessionID      session.SessionID
 	historyBranch         string
 	scrollOffset          int
@@ -198,15 +200,30 @@ func (m *Model) selectedWorktree() *wt.Worktree {
 }
 
 // selectedSession returns the currently selected/viewing session.
+// It uses the cached session info to avoid calling GetSessionInfo on every render.
 func (m *Model) selectedSession() *session.SessionInfo {
 	if m.viewingSessionID == "" {
 		return nil
 	}
-	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
-	if !ok {
-		return nil
+	return m.cachedSessionInfo
+}
+
+// refreshSessionCache refreshes the cached output and session info for the
+// currently viewed session. Call this when viewingSessionID changes or when
+// a session event arrives that affects the viewed session.
+func (m *Model) refreshSessionCache() {
+	if m.viewingSessionID == "" {
+		m.cachedOutput = nil
+		m.cachedSessionInfo = nil
+		return
 	}
-	return &info
+	m.cachedOutput = m.sessionManager.GetSessionOutput(m.viewingSessionID)
+	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
+	if ok {
+		m.cachedSessionInfo = &info
+	} else {
+		m.cachedSessionInfo = nil
+	}
 }
 
 // aggregateCost returns the sum of TotalCostUSD across all sessions.

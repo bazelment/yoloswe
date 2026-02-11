@@ -249,3 +249,7 @@ type SessionStateChangeEvent struct {
 	OldStatus SessionStatus
 	NewStatus SessionStatus
 }
+
+// SessionReconnectEvent is emitted when the session proxy reconnects to the server.
+// The TUI should perform a full state refresh when receiving this event.
+type SessionReconnectEvent struct{}
