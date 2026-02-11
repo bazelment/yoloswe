@@ -38,6 +38,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	worktreeOpMessages    []string
 	inputHandler          func(string) tea.Cmd
 	confirmHandler        func(string) tea.Cmd
+	confirmCancelHandler  func() tea.Cmd
 	confirmPrompt         *ConfirmPrompt
 	worktreeStatuses      map[string]*wt.WorktreeStatus
 	scrollPositions       map[session.SessionID]int
@@ -661,6 +662,23 @@ type (
 	tmuxWindowMsg struct{ err error }
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
 	toastExpireMsg struct{}
+	// mergePRMsg triggers the async PR merge operation.
+	mergePRMsg struct {
+		branch      string
+		mergeMethod string // "squash", "rebase", "merge"
+	}
+	// mergePRDoneMsg signals merge completed, triggers post-merge prompt.
+	mergePRDoneMsg struct { //nolint:govet // fieldalignment: readability over padding
+		branch   string
+		prNumber int
+		messages []string
+		err      error
+	}
+	// postMergeActionMsg triggers post-merge worktree action.
+	postMergeActionMsg struct {
+		branch string
+		action string // "delete", "reset", "keep"
+	}
 )
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.

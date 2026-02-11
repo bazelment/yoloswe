@@ -5,6 +5,7 @@ Always use `bazel build //...` and `bazel test //...` to build and test the proj
 Never use `go build` or `go test` directly.
 
 Always run lint/type-check/tests before creating or pushing to a PR. Never create a PR without passing quality gates first.
+Run `scripts/lint.sh` before running `bazel test //...` to catch lint issues early.
 
 ## What to do when a new Go module is imported
 

@@ -215,6 +215,11 @@ func (m *Manager) BareDir() string {
 	return filepath.Join(m.RepoDir(), ".bare")
 }
 
+// GitRunner returns the git runner used by this manager.
+func (m *Manager) GitRunner() GitRunner {
+	return m.git
+}
+
 // Init initializes a new repository with a bare clone.
 func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 	repoName := GetRepoNameFromURL(url)
@@ -870,29 +875,59 @@ func (m *Manager) MergePR(ctx context.Context, opts MergeOptions) error {
 		return fmt.Errorf("not on a branch (detached HEAD?)")
 	}
 
+	prNumber, err := m.mergePR(ctx, currentBranch, cwd, opts)
+	if err != nil {
+		return err
+	}
+
 	bareDir := m.BareDir()
 	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
 
-	// Check if trying to merge default branch
-	if currentBranch == defaultBranch {
-		return fmt.Errorf("cannot merge the default branch (%s)", defaultBranch)
+	// Cleanup unless --keep
+	if !opts.Keep {
+		// Navigate away from current worktree before removing it
+		m.output.Info("Navigating to default branch worktree...")
+		fmt.Printf("__WT_CD__:%s\n", filepath.Join(m.RepoDir(), defaultBranch))
+
+		if err := m.Remove(ctx, currentBranch, true); err != nil {
+			m.output.Warn(fmt.Sprintf("Failed to cleanup worktree: %v", err))
+		}
 	}
 
-	// Get PR info for current branch
-	prInfo, err := GetPRByBranch(ctx, m.gh, currentBranch, cwd)
+	_ = prNumber
+	return nil
+}
+
+// MergePRForBranch merges the PR for the given branch. Unlike MergePR, it does
+// not rely on os.Getwd() and always keeps the worktree (caller handles cleanup).
+func (m *Manager) MergePRForBranch(ctx context.Context, branch string, opts MergeOptions) (int, error) {
+	return m.mergePR(ctx, branch, m.BareDir(), opts)
+}
+
+// mergePR is the shared implementation for MergePR and MergePRForBranch.
+// It looks up the PR, merges it, fetches, and handles child branches.
+func (m *Manager) mergePR(ctx context.Context, branch, dir string, opts MergeOptions) (int, error) {
+	bareDir := m.BareDir()
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+
+	if branch == defaultBranch {
+		return 0, fmt.Errorf("cannot merge the default branch (%s)", defaultBranch)
+	}
+
+	// Get PR info for the branch
+	prInfo, err := GetPRByBranch(ctx, m.gh, branch, dir)
 	if err != nil {
-		return fmt.Errorf("no PR found for branch %s: %w", currentBranch, err)
+		return 0, fmt.Errorf("no PR found for branch %s: %w", branch, err)
 	}
 
-	// Check if PR is mergeable
 	if prInfo.ReviewDecision != "" && prInfo.ReviewDecision != "APPROVED" {
 		m.output.Warn(fmt.Sprintf("PR #%d review status: %s", prInfo.Number, prInfo.ReviewDecision))
 	}
 
-	m.output.Info(fmt.Sprintf("Merging PR #%d for branch %s...", prInfo.Number, currentBranch))
+	m.output.Info(fmt.Sprintf("Merging PR #%d for branch %s...", prInfo.Number, branch))
 
 	// Find child branches BEFORE merging
-	childDeps, err := m.findChildBranches(ctx, currentBranch, cwd)
+	childDeps, err := m.findChildBranches(ctx, branch, dir)
 	if err != nil {
 		m.output.Warn(fmt.Sprintf("Failed to find child branches: %v", err))
 	}
@@ -908,32 +943,21 @@ func (m *Manager) MergePR(ctx context.Context, opts MergeOptions) error {
 		mergeArgs = append(mergeArgs, "--merge")
 	}
 
-	if _, err := m.gh.Run(ctx, mergeArgs, cwd); err != nil {
-		return fmt.Errorf("failed to merge PR: %w", err)
+	if _, err := m.gh.Run(ctx, mergeArgs, dir); err != nil {
+		return 0, fmt.Errorf("failed to merge PR: %w", err)
 	}
 	m.output.Success(fmt.Sprintf("Merged PR #%d", prInfo.Number))
 
 	// Fetch to get updated remote state
 	m.git.Run(ctx, []string{"fetch", "--prune"}, bareDir)
 
-	// Cleanup unless --keep
-	if !opts.Keep {
-		// Navigate away from current worktree before removing it
-		m.output.Info("Navigating to default branch worktree...")
-		fmt.Printf("__WT_CD__:%s\n", filepath.Join(m.RepoDir(), defaultBranch))
-
-		if err := m.Remove(ctx, currentBranch, true); err != nil {
-			m.output.Warn(fmt.Sprintf("Failed to cleanup worktree: %v", err))
-		}
-	}
-
 	// Handle child branches
 	if len(childDeps) > 0 {
-		m.output.Info(fmt.Sprintf("Found %d child branches depending on %s", len(childDeps), currentBranch))
+		m.output.Info(fmt.Sprintf("Found %d child branches depending on %s", len(childDeps), branch))
 		m.handleChildBranches(ctx, childDeps, defaultBranch)
 	}
 
-	return nil
+	return prInfo.Number, nil
 }
 
 // findChildBranches finds all branches that have PRs targeting the given branch.
