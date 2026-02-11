@@ -57,6 +57,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.helpOverlay.SetSize(msg.Width, msg.Height)
 		m.allSessionsOverlay.SetSize(msg.Width, msg.Height)
+		m.themePicker.SetSize(msg.Width, msg.Height)
 		// Update dropdown widths
 		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
 		m.sessionDropdown.SetWidth(m.width / 2)
@@ -1632,24 +1633,30 @@ func (m Model) handleThemePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		selected := m.themePicker.SelectedTheme()
 		m.applyTheme(selected)
 		m.settings.ThemeName = selected.Name
-		_ = SaveSettings(m.settings)
 		m.themePicker.Hide()
 		m.focus = FocusOutput
-		toastCmd := m.addToast("Theme set to "+selected.Name, ToastSuccess)
+		var toastCmd tea.Cmd
+		if err := SaveSettings(m.settings); err != nil {
+			toastCmd = m.addToast("Theme applied but failed to save: "+err.Error(), ToastError)
+		} else {
+			toastCmd = m.addToast("Theme set to "+selected.Name, ToastSuccess)
+		}
 		return m, toastCmd
 
 	case "up", "k":
+		prev := m.themePicker.SelectedTheme().Name
 		m.themePicker.MoveSelection(-1)
-		// Live preview
-		selected := m.themePicker.SelectedTheme()
-		m.applyTheme(selected)
+		if sel := m.themePicker.SelectedTheme(); sel.Name != prev {
+			m.applyTheme(sel)
+		}
 		return m, nil
 
 	case "down", "j":
+		prev := m.themePicker.SelectedTheme().Name
 		m.themePicker.MoveSelection(1)
-		// Live preview
-		selected := m.themePicker.SelectedTheme()
-		m.applyTheme(selected)
+		if sel := m.themePicker.SelectedTheme(); sel.Name != prev {
+			m.applyTheme(sel)
+		}
 		return m, nil
 
 	case "q", "ctrl+c":

@@ -153,6 +153,12 @@ func (t *TextArea) SetPlaceholder(p string) {
 	t.inner.Placeholder = p
 }
 
+// SetPlaceholderColor updates the placeholder foreground color from the palette.
+func (t *TextArea) SetPlaceholderColor(c lipgloss.Color) {
+	t.inner.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(c)
+	t.inner.BlurredStyle.Placeholder = t.inner.FocusedStyle.Placeholder
+}
+
 // SetValue sets the text content.
 func (t *TextArea) SetValue(s string) {
 	t.inner.SetValue(s)

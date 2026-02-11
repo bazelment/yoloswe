@@ -58,6 +58,12 @@ func (m *TaskModal) SetSize(w, h int) {
 	m.height = h
 }
 
+// SetPlaceholderColor updates the placeholder color on both text areas.
+func (m *TaskModal) SetPlaceholderColor(c lipgloss.Color) {
+	m.textArea.SetPlaceholderColor(c)
+	m.adjustTextArea.SetPlaceholderColor(c)
+}
+
 // IsVisible returns true if the modal is visible.
 func (m *TaskModal) IsVisible() bool {
 	return m.state != TaskModalHidden

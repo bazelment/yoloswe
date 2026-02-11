@@ -44,6 +44,12 @@ func (tp *ThemePicker) Hide() {
 	tp.visible = false
 }
 
+// SetSize updates the overlay dimensions (e.g. on terminal resize).
+func (tp *ThemePicker) SetSize(w, h int) {
+	tp.width = w
+	tp.height = h
+}
+
 // IsVisible returns whether the picker is showing.
 func (tp *ThemePicker) IsVisible() bool {
 	return tp.visible

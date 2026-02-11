@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -741,4 +742,7 @@ func (m *Model) applyTheme(palette ColorPalette) {
 	if m.mdRenderer != nil {
 		m.mdRenderer, _ = NewMarkdownRenderer(m.width-8, palette.GlamourStyle)
 	}
+	// Update text area placeholder colors from the palette
+	m.inputArea.SetPlaceholderColor(lipgloss.Color(palette.Dim))
+	m.taskModal.SetPlaceholderColor(lipgloss.Color(palette.Dim))
 }
