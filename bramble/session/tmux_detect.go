@@ -58,3 +58,20 @@ func TmuxWindowExists(name string) bool {
 	}
 	return false
 }
+
+// TmuxWindowPaneDead checks if the pane in the given tmux window has exited.
+// This is useful when remain-on-exit is set — the window stays but the process is dead.
+// Returns true if the pane is dead, false if it's still running or if the window doesn't exist.
+func TmuxWindowPaneDead(name string) bool {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return false
+	}
+
+	cmd := exec.Command("tmux", "list-panes", "-t", name, "-F", "#{pane_dead}")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(string(output)) == "1"
+}

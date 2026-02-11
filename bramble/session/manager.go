@@ -389,6 +389,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	// The tmux window handles all interaction, so we don't run turns
 	if m.config.SessionMode == SessionModeTmux {
 		m.updateSessionStatus(session, StatusRunning)
+		startTime := time.Now()
 
 		// Periodically check if tmux window still exists
 		ticker := time.NewTicker(2 * time.Second)
@@ -406,8 +407,49 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				sessionID := session.ID
 				session.mu.RUnlock()
 
-				if tmuxName != "" && !TmuxWindowExists(tmuxName) {
-					// Tmux window has disappeared - mark as completed and remove from session list
+				if tmuxName == "" {
+					continue
+				}
+
+				windowExists := TmuxWindowExists(tmuxName)
+				paneDead := windowExists && TmuxWindowPaneDead(tmuxName)
+
+				if paneDead {
+					// The process in the tmux window has exited but the window
+					// remains (due to remain-on-exit). This means claude failed
+					// to start or crashed.
+					m.updateSessionStatus(session, StatusFailed)
+					session.mu.Lock()
+					session.Error = fmt.Errorf("claude process exited unexpectedly (window %q still open with remain-on-exit — check it for error details)", tmuxName)
+					session.mu.Unlock()
+					m.addOutput(session.ID, OutputLine{
+						Timestamp: time.Now(),
+						Type:      OutputTypeError,
+						Content:   fmt.Sprintf("Session failed: claude exited in tmux window %q. Switch to that window to see the error.", tmuxName),
+					})
+					m.persistSession(session)
+					return
+				}
+
+				if !windowExists {
+					if time.Since(startTime) < 10*time.Second {
+						// Window disappeared very quickly — likely a startup failure.
+						// With remain-on-exit this shouldn't happen, but handle it
+						// defensively in case the option wasn't set.
+						m.updateSessionStatus(session, StatusFailed)
+						session.mu.Lock()
+						session.Error = fmt.Errorf("tmux window %q disappeared shortly after creation — claude may have failed to start", tmuxName)
+						session.mu.Unlock()
+						m.addOutput(session.ID, OutputLine{
+							Timestamp: time.Now(),
+							Type:      OutputTypeError,
+							Content:   fmt.Sprintf("Session failed: tmux window %q vanished immediately. Claude may have failed to start.", tmuxName),
+						})
+						m.persistSession(session)
+						return
+					}
+
+					// Window disappeared after running for a while — normal completion
 					m.updateSessionStatus(session, StatusCompleted)
 
 					// Remove from active sessions map
