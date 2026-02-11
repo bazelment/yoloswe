@@ -357,7 +357,6 @@ func (e *Engine) launchAgents(ctx context.Context, groups []IssueGroup, fixResul
 					BudgetUSD:  e.config.AgentBudget,
 					BaseBranch: e.config.Branch,
 					SessionDir: e.config.SessionDir,
-					RepoDir:    e.config.RepoDir,
 					Logger:     e.logger.With("issue", g.Issues[0].ID),
 				})
 				recordFixAttempt(e.tracker, result, e.config.LogFile)
@@ -375,7 +374,6 @@ func (e *Engine) launchAgents(ctx context.Context, groups []IssueGroup, fixResul
 					BudgetUSD:  e.config.AgentBudget,
 					BaseBranch: e.config.Branch,
 					SessionDir: e.config.SessionDir,
-					RepoDir:    e.config.RepoDir,
 					Logger:     e.logger.With("group", g.Key),
 				})
 				recordGroupFixAttempt(e.tracker, result, e.config.LogFile)

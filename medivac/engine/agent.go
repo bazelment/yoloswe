@@ -21,7 +21,6 @@ type FixAgentConfig struct {
 	Model      string
 	BaseBranch string
 	SessionDir string
-	RepoDir    string
 	BudgetUSD  float64
 }
 
@@ -69,9 +68,7 @@ func RunFixAgent(ctx context.Context, config FixAgentConfig) *FixAgentResult {
 		"path", wtPath,
 	)
 
-	// Detect build system and build prompt
-	buildInfo := DetectBuildInfo(config.RepoDir)
-	prompt := buildFixPrompt(config.Issue, config.BaseBranch, buildInfo)
+	prompt := buildFixPrompt(config.Issue, config.BaseBranch)
 
 	// Create ephemeral session
 	sess := agent.NewEphemeralSession(agent.AgentConfig{
@@ -218,7 +215,6 @@ type GroupFixAgentConfig struct {
 	Model      string
 	BaseBranch string
 	SessionDir string
-	RepoDir    string
 	Group      IssueGroup
 	BudgetUSD  float64
 }
@@ -262,8 +258,7 @@ func RunGroupFixAgent(ctx context.Context, config GroupFixAgentConfig) *GroupFix
 	}
 	result.WorktreePath = wtPath
 
-	buildInfo := DetectBuildInfo(config.RepoDir)
-	prompt := buildGroupFixPrompt(config.Group, config.BaseBranch, buildInfo)
+	prompt := buildGroupFixPrompt(config.Group, config.BaseBranch)
 
 	sess := agent.NewEphemeralSession(agent.AgentConfig{
 		Logger:     log,

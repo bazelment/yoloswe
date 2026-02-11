@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "agent.go",
         "analysis.go",
-        "buildinfo.go",
         "engine.go",
         "grouping.go",
         "prompts.go",
@@ -24,7 +23,6 @@ go_test(
     name = "engine_test",
     srcs = [
         "analysis_test.go",
-        "buildinfo_test.go",
         "engine_test.go",
         "grouping_test.go",
     ],
