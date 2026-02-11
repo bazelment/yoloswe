@@ -18,9 +18,9 @@ func TestQuickSwitch_SwitchesToSession(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Start two sessions
-	sess1, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "first prompt")
+	sess1, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "first prompt", "")
 	require.NoError(t, err)
-	sess2, err := m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "second prompt")
+	sess2, err := m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "second prompt", "")
 	require.NoError(t, err)
 
 	m.sessions = m.sessionManager.GetAllSessions()
@@ -47,7 +47,7 @@ func TestQuickSwitch_OutOfRange_ShowsToast(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Start only one session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "first prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "first prompt", "")
 	require.NoError(t, err)
 
 	m.sessions = m.sessionManager.GetAllSessions()
@@ -85,11 +85,11 @@ func TestQuickSwitch_TmuxMode_SelectsIndex(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Start three sessions
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "first prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "first prompt", "")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "second prompt")
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "second prompt", "")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "third prompt")
+	_, err = m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "third prompt", "")
 	require.NoError(t, err)
 
 	m.sessions = m.sessionManager.GetAllSessions()
@@ -111,7 +111,7 @@ func TestQuickSwitch_SessionDropdownShowsNumbers(t *testing.T) {
 
 	// Start several sessions to test numbering
 	for i := 0; i < 5; i++ {
-		_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "prompt")
+		_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "prompt", "")
 		require.NoError(t, err)
 	}
 

@@ -23,8 +23,8 @@ func TestScrollPositionPreservedOnSessionSwitch(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Create two sessions
-	sessionA, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A")
-	sessionB, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session B")
+	sessionA, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A", "")
+	sessionB, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session B", "")
 
 	// View session A and scroll
 	m.viewingSessionID = sessionA
@@ -85,7 +85,7 @@ func TestScrollPositionClearedOnWorktreeSwitch(t *testing.T) {
 	m.updateSessionDropdown()
 
 	// Create session on worktree 1
-	sessionA, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A")
+	sessionA, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A", "")
 	m.viewingSessionID = sessionA
 	m.scrollOffset = 15
 
@@ -116,12 +116,12 @@ func TestNewSessionStartsAtBottom(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Create and view session A
-	sessionA, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A")
+	sessionA, _ := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A", "")
 	m.viewingSessionID = sessionA
 	m.scrollOffset = 20
 
 	// Start a new session
-	newModel, _ := m.startSession(session.SessionTypePlanner, "new session")
+	newModel, _ := m.startSession(session.SessionTypePlanner, "new session", "")
 	m2 := newModel.(Model)
 
 	// Check that old session's scroll was saved

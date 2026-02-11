@@ -35,7 +35,7 @@ func TestQuitConfirm_ActiveSessions_ShowsConfirmation(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session to make it active
-	sessID, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	sessID, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 	require.NotEmpty(t, sessID)
 
@@ -64,7 +64,7 @@ func TestQuitConfirm_SecondQ_Quits(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -89,7 +89,7 @@ func TestQuitConfirm_Y_Quits(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -114,7 +114,7 @@ func TestQuitConfirm_OtherKey_Cancels(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -144,7 +144,7 @@ func TestQuitConfirm_CtrlC_AlwaysQuits(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -164,7 +164,7 @@ func TestQuitConfirm_IdleSessions_CountAsActive(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session and make it idle
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 
 	// Simulate session becoming idle (normally done by session manager)
@@ -184,7 +184,7 @@ func TestQuitConfirm_CompletedSessions_DontCount(t *testing.T) {
 	}, "test-repo")
 
 	// Start a session and mark it as completed
-	sessID, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt")
+	sessID, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
 	require.NoError(t, err)
 
 	// Get the internal session and mark it completed

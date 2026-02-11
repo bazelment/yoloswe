@@ -77,7 +77,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeDropdown.SelectByID(worktreeName)
 			m.updateSessionDropdown()
 			if prompt != "" {
-				model, cmd := m.startSession(session.SessionTypePlanner, prompt)
+				model, cmd := m.startSession(session.SessionTypePlanner, prompt, m.defaultPlanModel)
 				// Defer heavy loading so the UI renders the worktree name first
 				return model, tea.Batch(cmd, deferredRefreshCmd())
 			}
@@ -189,15 +189,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case promptInputMsg:
 		// Input completed
 		m.inputMode = false
+		// Save pending state before clearing — closures created at prompt-open
+		// time capture a stale copy of m, so we snapshot the live values here.
+		pendingModel := m.pendingModel
+		pendingSessionType := m.pendingSessionType
+		m.pendingModel = ""
+		m.pendingSessionType = ""
 		if m.inputHandler != nil {
-			cmd := m.inputHandler(msg.value)
+			cmd := m.inputHandler(msg.value, pendingModel, pendingSessionType)
 			m.inputHandler = nil
 			return m, cmd
 		}
 		return m, nil
 
 	case startSessionMsg:
-		return m.startSession(msg.sessionType, msg.prompt)
+		// Save the chosen model as the new default for this session type
+		if msg.model != "" {
+			switch msg.sessionType {
+			case session.SessionTypePlanner:
+				m.defaultPlanModel = msg.model
+			case session.SessionTypeBuilder:
+				m.defaultBuildModel = msg.model
+			}
+		}
+		return m.startSession(msg.sessionType, msg.prompt, msg.model)
 
 	case createWorktreeMsg:
 		return m.createWorktree(msg.branch)
@@ -474,7 +489,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		// New worktree
 		if m.repoName != "" {
-			return m.promptInput("Branch name: ", func(branch string) tea.Cmd {
+			return m.promptInput("Branch name: ", func(branch string, _ string, _ session.SessionType) tea.Cmd {
 				return func() tea.Msg {
 					return createWorktreeMsg{branch}
 				}
@@ -493,9 +508,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		// Start planner
 		if m.selectedWorktree() != nil {
-			return m.promptInput("Plan prompt: ", func(prompt string) tea.Cmd {
+			m.pendingModel = m.defaultPlanModel
+			m.pendingSessionType = session.SessionTypePlanner
+			return m.promptInput(fmt.Sprintf("Plan prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
 				return func() tea.Msg {
-					return startSessionMsg{session.SessionTypePlanner, prompt}
+					return startSessionMsg{session.SessionTypePlanner, prompt, model}
 				}
 			}, "Describe what you want to plan...")
 		}
@@ -505,9 +522,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "b":
 		// Start builder
 		if m.selectedWorktree() != nil {
-			return m.promptInput("Build prompt: ", func(prompt string) tea.Cmd {
+			m.pendingModel = m.defaultBuildModel
+			m.pendingSessionType = session.SessionTypeBuilder
+			return m.promptInput(fmt.Sprintf("Build prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
 				return func() tea.Msg {
-					return startSessionMsg{session.SessionTypeBuilder, prompt}
+					return startSessionMsg{session.SessionTypeBuilder, prompt, model}
 				}
 			}, "Describe what to build...")
 		}
@@ -588,7 +607,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toastCmd
 		}
 		if sess := m.selectedSession(); sess != nil && sess.Status == session.StatusIdle {
-			return m.promptInput("Follow-up: ", func(message string) tea.Cmd {
+			return m.promptInput("Follow-up: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
 				return func() tea.Msg {
 					if err := m.sessionManager.SendFollowUp(sess.ID, message); err != nil {
 						return errMsg{err}
@@ -612,7 +631,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessions = m.sessionManager.GetAllSessions()
 			m.updateSessionDropdown()
 			planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
-			sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt)
+			sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt, m.defaultBuildModel)
 			if err != nil {
 				toastCmd := m.addToast(err.Error(), ToastError)
 				return m, toastCmd
@@ -853,6 +872,19 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Tab cycles focus between text input and buttons.
 // Enter activates the focused element.
 func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Alt+M: cycle model selection when in a plan/build prompt.
+	// Note: Ctrl+M is aliased to Enter in terminals, so we use Alt+M instead.
+	if msg.String() == "alt+m" && m.pendingModel != "" {
+		next := session.NextModel(m.pendingModel)
+		m.pendingModel = next.ID
+		prefix := "Plan"
+		if m.pendingSessionType == session.SessionTypeBuilder {
+			prefix = "Build"
+		}
+		m.inputPrompt = fmt.Sprintf("%s prompt [%s]:", prefix, m.pendingModel)
+		return m, nil
+	}
+
 	action := m.inputArea.HandleKey(msg)
 
 	switch action {
@@ -870,6 +902,8 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputMode = false
 		m.inputArea.Reset()
 		m.inputHandler = nil
+		m.pendingModel = ""
+		m.pendingSessionType = ""
 		return m, nil
 
 	case TextAreaQuit:
@@ -924,7 +958,7 @@ func (m Model) showConfirm(message string, options []ConfirmOption, handler func
 }
 
 // promptInput switches to input mode with an optional placeholder.
-func (m Model) promptInput(prompt string, handler func(string) tea.Cmd, placeholder ...string) (tea.Model, tea.Cmd) {
+func (m Model) promptInput(prompt string, handler func(value, model string, sessionType session.SessionType) tea.Cmd, placeholder ...string) (tea.Model, tea.Cmd) {
 	m.inputMode = true
 	m.inputPrompt = prompt
 	m.inputArea.Reset()
@@ -936,14 +970,14 @@ func (m Model) promptInput(prompt string, handler func(string) tea.Cmd, placehol
 	return m, nil
 }
 
-// startSession starts a session of the given type.
-func (m Model) startSession(sessionType session.SessionType, prompt string) (tea.Model, tea.Cmd) {
+// startSession starts a session of the given type with the specified model.
+func (m Model) startSession(sessionType session.SessionType, prompt, model string) (tea.Model, tea.Cmd) {
 	wt := m.selectedWorktree()
 	if wt == nil || prompt == "" {
 		return m, nil
 	}
 
-	sessionID, err := m.sessionManager.StartSession(sessionType, wt.Path, prompt)
+	sessionID, err := m.sessionManager.StartSession(sessionType, wt.Path, prompt, model)
 	if err != nil {
 		toastCmd := m.addToast(err.Error(), ToastError)
 		return m, toastCmd
@@ -1509,7 +1543,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 
 	// Use existing worktree - select it and start planner
 	m.worktreeDropdown.SelectByID(msg.worktree)
-	model, cmd := m.startSession(session.SessionTypePlanner, msg.prompt)
+	model, cmd := m.startSession(session.SessionTypePlanner, msg.prompt, m.defaultPlanModel)
 	return model, tea.Batch(toastCmd, cmd)
 }
 

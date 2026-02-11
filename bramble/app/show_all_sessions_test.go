@@ -19,9 +19,9 @@ func TestAllSessionsOverlay_Show(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Start sessions on different worktrees
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task", "")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -78,9 +78,9 @@ func TestAllSessionsOverlay_Select_TUIMode(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task", "")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -134,9 +134,9 @@ func TestAllSessionsOverlay_QuickSwitch(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task", "")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task")
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
 	require.NoError(t, err)
 	m.sessions = m.sessionManager.GetAllSessions()
 
@@ -164,9 +164,9 @@ func TestAllSessionsOverlay_FilterTerminal(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Start 2 sessions via the manager (will be running = non-terminal)
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "task 1")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "task 1", "")
 	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "task 2")
+	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "task 2", "")
 	require.NoError(t, err)
 
 	// Open overlay - all sessions are running (non-terminal), so all should appear
@@ -226,7 +226,7 @@ func TestAllSessionsOverlay_FreshFromManager(t *testing.T) {
 
 	// Start a session via the manager but do NOT update m.sessions —
 	// simulates the case where no sessionEventMsg has arrived yet.
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "fresh task")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "fresh task", "")
 	require.NoError(t, err)
 	// m.sessions is intentionally left empty / stale
 

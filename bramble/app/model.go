@@ -36,7 +36,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	sessions              []session.SessionInfo
 	cachedHistory         []*session.SessionMeta
 	worktreeOpMessages    []string
-	inputHandler          func(string) tea.Cmd
+	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
 	confirmHandler        func(string) tea.Cmd
 	confirmCancelHandler  func() tea.Cmd
 	confirmPrompt         *ConfirmPrompt
@@ -61,6 +61,10 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	editor                string
 	inputPrompt           string
 	wtRoot                string
+	defaultPlanModel      string              // Remembered default model for plan sessions
+	defaultBuildModel     string              // Remembered default model for build sessions
+	pendingModel          string              // Model for the current input flow (transient)
+	pendingSessionType    session.SessionType // Session type for current input flow (transient)
 	viewingSessionID      session.SessionID
 	historyBranch         string
 	scrollOffset          int
@@ -94,6 +98,8 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		focus:              FocusOutput,
 		width:              width,
 		height:             height,
+		defaultPlanModel:   "opus",
+		defaultBuildModel:  "sonnet",
 		worktreeDropdown:   wtDropdown,
 		sessionDropdown:    NewDropdown(nil),
 		taskModal:          NewTaskModal(),
@@ -591,6 +597,7 @@ type (
 	startSessionMsg struct {
 		sessionType session.SessionType
 		prompt      string
+		model       string
 	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }

@@ -44,6 +44,9 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 
 	// Build thread options
 	var threadOpts []codex.ThreadOption
+	if cfg.Model != "" {
+		threadOpts = append(threadOpts, codex.WithModel(cfg.Model))
+	}
 	if cfg.WorkDir != "" {
 		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
 	}

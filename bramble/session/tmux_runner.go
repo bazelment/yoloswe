@@ -10,12 +10,14 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
-// tmuxRunner implements sessionRunner by creating a tmux window that runs the claude CLI.
+// tmuxRunner implements sessionRunner by creating a tmux window that runs the agent CLI.
 type tmuxRunner struct {
 	windowName     string // tmux window name (e.g., "happy-tiger")
 	workDir        string // working directory for the window
 	prompt         string // initial prompt
-	permissionMode string // permission mode: "" (default) or "plan"
+	model          string // model ID (e.g. "opus", "gpt-5.3-codex")
+	provider       string // binary name: "claude" or "codex"
+	permissionMode string // permission mode: "" (default) or "plan" (claude only)
 	yoloMode       bool   // skip all permission prompts
 }
 
@@ -34,25 +36,11 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 		return fmt.Errorf("tmux window %q already exists", r.windowName)
 	}
 
-	// Build the claude command
-	claudeCmd := "claude"
-	args := []string{}
-
-	// Add yolo mode flags first to skip all permissions
-	if r.yoloMode {
-		args = append(args, "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions")
-	}
-
-	// Add permission mode flag for planner sessions (after yolo flags, before prompt)
-	if r.permissionMode == "plan" {
-		args = append(args, "--permission-mode", "plan")
-	}
-
-	// Add the prompt last
-	args = append(args, r.prompt)
+	// Build the agent command based on provider
+	binary, args := r.buildCommand()
 
 	// Build the full command string for tmux
-	cmdStr := buildShellCommand(claudeCmd, args)
+	cmdStr := buildShellCommand(binary, args)
 
 	// Create tmux window with the claude command
 	// -n: window name
@@ -111,6 +99,39 @@ func (r *tmuxRunner) Stop() error {
 	}
 
 	return nil
+}
+
+// buildCommand returns the binary name and argument list for the agent CLI.
+func (r *tmuxRunner) buildCommand() (binary string, args []string) {
+	binary = r.provider
+	if binary == "" {
+		binary = ProviderClaude
+	}
+
+	// Add model flag
+	if r.model != "" {
+		args = append(args, "--model", r.model)
+	}
+
+	switch binary {
+	case ProviderCodex:
+		// Codex-specific flags
+		if r.yoloMode {
+			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+		}
+	default:
+		// Claude-specific flags
+		if r.yoloMode {
+			args = append(args, "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions")
+		}
+		if r.permissionMode == "plan" {
+			args = append(args, "--permission-mode", "plan")
+		}
+	}
+
+	// Add the prompt last
+	args = append(args, r.prompt)
+	return binary, args
 }
 
 // buildShellCommand constructs a shell command string with properly escaped arguments.

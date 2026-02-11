@@ -15,6 +15,50 @@ const (
 	SessionTypeBuilder SessionType = "builder"
 )
 
+// Provider names for agent backends.
+const (
+	ProviderClaude = "claude"
+	ProviderCodex  = "codex"
+)
+
+// AgentModel describes a model available for session execution.
+type AgentModel struct {
+	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.3-codex")
+	Provider string // Binary/provider name: "claude" or "codex"
+	Label    string // Display label for the UI (e.g. "opus (claude)")
+}
+
+// AvailableModels is the ordered list of models. Ctrl+M cycles through this list.
+var AvailableModels = []AgentModel{
+	{ID: "opus", Provider: ProviderClaude, Label: "opus"},
+	{ID: "sonnet", Provider: ProviderClaude, Label: "sonnet"},
+	{ID: "haiku", Provider: ProviderClaude, Label: "haiku"},
+	{ID: "gpt-5.3-codex", Provider: ProviderCodex, Label: "gpt-5.3-codex"},
+	{ID: "gpt-5.2", Provider: ProviderCodex, Label: "gpt-5.2"},
+	{ID: "gpt-5.1-codex-max", Provider: ProviderCodex, Label: "gpt-5.1-codex-max"},
+}
+
+// ModelByID returns the AgentModel for the given ID, or false if not found.
+func ModelByID(id string) (AgentModel, bool) {
+	for _, m := range AvailableModels {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return AgentModel{}, false
+}
+
+// NextModel returns the next model in the cycle after currentID.
+// If currentID is not found, returns the first model.
+func NextModel(currentID string) AgentModel {
+	for i, m := range AvailableModels {
+		if m.ID == currentID {
+			return AvailableModels[(i+1)%len(AvailableModels)]
+		}
+	}
+	return AvailableModels[0]
+}
+
 // SessionStatus represents the lifecycle state of a session.
 type SessionStatus string
 

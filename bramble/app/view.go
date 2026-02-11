@@ -645,7 +645,11 @@ func (m Model) renderStatusBar() string {
 	} else if m.focus == FocusConfirm && m.confirmPrompt != nil {
 		hints = []string{"See prompt for keys", "[Esc] Cancel"}
 	} else if m.inputMode {
-		hints = []string{"[Tab] Switch", "[Enter] Send", "[Shift+Enter] Newline", "[Esc] Cancel", "[?]help"}
+		hints = []string{"[Tab] Switch", "[Enter] Send", "[Shift+Enter] Newline", "[Esc] Cancel"}
+		if m.pendingModel != "" {
+			hints = append(hints, "[Alt+M] "+m.pendingModel)
+		}
+		hints = append(hints, "[?]help")
 	} else if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
 		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close", "[?]help", "[q]uit"}
 	} else if inTmuxMode {

@@ -67,6 +67,8 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 type providerRunner struct {
 	provider     agent.Provider
 	eventHandler *sessionEventHandler
+	model        string // model ID for provider (e.g. "gpt-5.3-codex")
+	workDir      string // working directory for provider
 }
 
 func (r *providerRunner) Start(ctx context.Context) error {
@@ -80,6 +82,12 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 	var opts []agent.ExecuteOption
 	if r.eventHandler != nil {
 		opts = append(opts, agent.WithProviderEventHandler(r.eventHandler))
+	}
+	if r.model != "" {
+		opts = append(opts, agent.WithProviderModel(r.model))
+	}
+	if r.workDir != "" {
+		opts = append(opts, agent.WithProviderWorkDir(r.workDir))
 	}
 
 	// Long-running providers maintain state across turns
@@ -243,15 +251,19 @@ func generateTitle(prompt string, maxLen int) string {
 }
 
 // StartSession creates and starts a new session of the given type.
-func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt string) (SessionID, error) {
+// model is the AgentModel ID (e.g. "opus", "gpt-5.3-codex"). If empty,
+// defaults to "opus" for planners and "sonnet" for builders.
+func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, model string) (SessionID, error) {
 	worktreeName := filepath.Base(worktreePath)
 	sessionID := generateSessionID(worktreeName, sessionType)
 
 	ctx, cancel := context.WithCancel(m.ctx)
 
-	model := "sonnet"
-	if sessionType == SessionTypePlanner {
-		model = "opus"
+	if model == "" {
+		model = "sonnet"
+		if sessionType == SessionTypePlanner {
+			model = "opus"
+		}
 	}
 
 	session := &Session{
@@ -284,13 +296,13 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt str
 }
 
 // StartPlannerSession creates and starts a new planner session.
-func (m *Manager) StartPlannerSession(worktreePath, prompt string) (SessionID, error) {
-	return m.StartSession(SessionTypePlanner, worktreePath, prompt)
+func (m *Manager) StartPlannerSession(worktreePath, prompt, model string) (SessionID, error) {
+	return m.StartSession(SessionTypePlanner, worktreePath, prompt, model)
 }
 
 // StartBuilderSession creates and starts a new builder session.
-func (m *Manager) StartBuilderSession(worktreePath, prompt string) (SessionID, error) {
-	return m.StartSession(SessionTypeBuilder, worktreePath, prompt)
+func (m *Manager) StartBuilderSession(worktreePath, prompt, model string) (SessionID, error) {
+	return m.StartSession(SessionTypeBuilder, worktreePath, prompt, model)
 }
 
 // runSession runs a session in a goroutine, handling both planner and builder types.
@@ -303,8 +315,15 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	var runner sessionRunner
 	var eventHandler *sessionEventHandler
 
+	// Resolve model provider for runner routing
+	agentModel, modelFound := ModelByID(session.Model)
+	if !modelFound {
+		// Unknown model — default to claude provider
+		agentModel = AgentModel{ID: session.Model, Provider: ProviderClaude}
+	}
+
 	if m.config.SessionMode == SessionModeTmux {
-		// Tmux mode: create tmux window running claude CLI
+		// Tmux mode: create tmux window running the agent CLI
 		tmuxName := generateTmuxWindowName()
 		session.mu.Lock()
 		session.TmuxWindowName = tmuxName
@@ -320,6 +339,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			windowName:     tmuxName,
 			workDir:        session.WorktreePath,
 			prompt:         prompt,
+			model:          agentModel.ID,
+			provider:       agentModel.Provider,
 			permissionMode: permissionMode,
 			yoloMode:       m.config.YoloMode,
 		}
@@ -338,12 +359,20 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				provider:     m.config.Provider,
 				eventHandler: eventHandler,
 			}
+		} else if agentModel.Provider == ProviderCodex {
+			// Codex provider backend
+			runner = &providerRunner{
+				provider:     agent.NewCodexProvider(),
+				eventHandler: eventHandler,
+				model:        session.Model,
+				workDir:      session.WorktreePath,
+			}
 		} else {
-			// Default: use hardcoded planner/builder runners
+			// Default: use hardcoded planner/builder runners with model from session
 			switch session.Type {
 			case SessionTypePlanner:
 				pw := planner.NewPlannerWrapper(planner.Config{
-					Model:        "opus",
+					Model:        session.Model,
 					WorkDir:      session.WorktreePath,
 					Simple:       true,
 					BuildMode:    planner.BuildModeReturn,
@@ -353,7 +382,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				runner = &plannerRunner{pw: pw}
 			case SessionTypeBuilder:
 				builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
-					Model:   "sonnet",
+					Model:   session.Model,
 					WorkDir: session.WorktreePath,
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
