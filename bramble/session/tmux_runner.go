@@ -52,13 +52,7 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 	args = append(args, r.prompt)
 
 	// Build the full command string for tmux
-	// We need to escape the prompt properly for shell execution
-	cmdStr := claudeCmd
-	for _, arg := range args {
-		// Escape single quotes: replace ' with '\'' (end quote, escaped quote, start quote)
-		escaped := "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
-		cmdStr += " " + escaped
-	}
+	cmdStr := buildShellCommand(claudeCmd, args)
 
 	// Create tmux window with the claude command
 	// -n: window name
@@ -117,4 +111,16 @@ func (r *tmuxRunner) Stop() error {
 	}
 
 	return nil
+}
+
+// buildShellCommand constructs a shell command string with properly escaped arguments.
+// Each argument is wrapped in single quotes with embedded single quotes escaped
+// using the standard '\” technique.
+func buildShellCommand(cmd string, args []string) string {
+	cmdStr := cmd
+	for _, arg := range args {
+		escaped := "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+		cmdStr += " " + escaped
+	}
+	return cmdStr
 }
