@@ -14,7 +14,7 @@ type ClientConfig struct {
 	EventBufferSize   int
 }
 
-func defaultClientConfig() ClientConfig {
+func defaultACPClientConfig() ClientConfig {
 	return ClientConfig{
 		BinaryPath:      "gemini",
 		BinaryArgs:      []string{"--experimental-acp"},
@@ -83,7 +83,7 @@ type SessionConfig struct {
 	McpServers []McpServerConfig
 }
 
-func defaultSessionConfig() SessionConfig {
+func defaultACPSessionConfig() SessionConfig {
 	return SessionConfig{}
 }
 

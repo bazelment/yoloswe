@@ -77,7 +77,7 @@ func (t *Thread) SendInput(ctx context.Context, input []UserInput, opts ...TurnO
 	}
 
 	// Build turn config
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}

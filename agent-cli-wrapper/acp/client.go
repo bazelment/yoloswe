@@ -42,7 +42,7 @@ type rpcResult struct {
 
 // NewClient creates a new ACP client with options.
 func NewClient(opts ...ClientOption) *Client {
-	config := defaultClientConfig()
+	config := defaultACPClientConfig()
 	for _, opt := range opts {
 		opt(&config)
 	}
@@ -168,7 +168,7 @@ func (c *Client) NewSession(ctx context.Context, opts ...SessionOption) (*Sessio
 	}
 	c.mu.RUnlock()
 
-	cfg := defaultSessionConfig()
+	cfg := defaultACPSessionConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
