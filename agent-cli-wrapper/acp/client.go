@@ -30,6 +30,7 @@ type Client struct {
 	done      chan struct{}
 	config    ClientConfig
 	mu        sync.RWMutex
+	readWg    sync.WaitGroup // tracks readLoop goroutine
 	started   bool
 	stopping  bool
 }
@@ -94,6 +95,7 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 
 	// Start message reading goroutine
+	c.readWg.Add(1)
 	go c.readLoop(ctx)
 
 	c.started = true
@@ -227,6 +229,10 @@ func (c *Client) Stop() error {
 	}
 	c.mu.Unlock()
 
+	// Wait for readLoop to exit before closing events channel
+	// This prevents panic from sending on closed channel
+	c.readWg.Wait()
+
 	close(c.events)
 
 	return nil
@@ -251,6 +257,7 @@ func (c *Client) AgentInfo() *InitializeResponse {
 
 // readLoop reads and processes messages from the agent subprocess.
 func (c *Client) readLoop(ctx context.Context) {
+	defer c.readWg.Done()
 	for {
 		select {
 		case <-ctx.Done():
