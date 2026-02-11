@@ -1,0 +1,35 @@
+class Bramble < Formula
+  desc "TUI for managing worktrees and AI sessions"
+  homepage "https://github.com/bazelment/yoloswe"
+  version "{{.Version}}"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/bramble-v{{.Version}}-darwin-arm64.tar.gz"
+      sha256 "{{.DarwinArm64SHA256}}"
+    end
+    on_intel do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/bramble-v{{.Version}}-darwin-amd64.tar.gz"
+      sha256 "{{.DarwinAmd64SHA256}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/bramble-v{{.Version}}-linux-arm64.tar.gz"
+      sha256 "{{.LinuxArm64SHA256}}"
+    end
+    on_intel do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/bramble-v{{.Version}}-linux-amd64.tar.gz"
+      sha256 "{{.LinuxAmd64SHA256}}"
+    end
+  end
+
+  def install
+    bin.install "bramble"
+  end
+
+  test do
+    assert_match "TUI for managing worktrees", shell_output("#{bin}/bramble --help")
+  end
+end
