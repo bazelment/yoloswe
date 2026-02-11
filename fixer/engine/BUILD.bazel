@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "engine",
+    srcs = [
+        "agent.go",
+        "engine.go",
+        "prompts.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/fixer/engine",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//fixer/github",
+        "//fixer/issue",
+        "//multiagent/agent",
+        "//wt",
+    ],
+)
+
+go_test(
+    name = "engine_test",
+    srcs = ["engine_test.go"],
+    embed = [":engine"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//fixer/github",
+        "//fixer/issue",
+        "//wt",
+    ],
+)

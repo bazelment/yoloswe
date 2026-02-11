@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "issue",
+    srcs = [
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/fixer/issue",
+    visibility = ["//visibility:public"],
+    deps = ["//fixer/github"],
+)
+
+go_test(
+    name = "issue_test",
+    srcs = ["tracker_test.go"],
+    embed = [":issue"],
+    deps = ["//fixer/github"],
+)

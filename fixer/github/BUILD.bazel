@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "github",
+    srcs = [
+        "actions.go",
+        "parser.go",
+        "triage.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/fixer/github",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//wt",
+    ],
+)
+
+go_test(
+    name = "github_test",
+    srcs = [
+        "actions_test.go",
+        "parser_test.go",
+        "triage_test.go",
+    ],
+    embed = [":github"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//wt",
+    ],
+)
