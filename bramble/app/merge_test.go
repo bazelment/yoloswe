@@ -158,7 +158,7 @@ func TestMergeKey_IdleSessionAllowed(t *testing.T) {
 	}
 
 	// Add an idle session via the session manager so GetSessionsForWorktree returns it
-	m.sessionManager.AddSession(&session.Session{
+	m.sessionManager.(*session.Manager).AddSession(&session.Session{
 		ID:           "s1",
 		Status:       session.StatusIdle,
 		WorktreePath: "/tmp/wt/feature",

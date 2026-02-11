@@ -479,10 +479,11 @@ func TestRenderCenterScrolling(t *testing.T) {
 	assert.Equal(t, 50, len(allLines), "should have 50 output lines in manager")
 
 	// Create a Model that views this session
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 20 // Small terminal: centerHeight = 20-1-1-0-2 = 16
 	m.viewingSessionID = sessID
+	m.refreshSessionCache()
 
 	centerHeight := 16
 	center := m.renderCenter(80, centerHeight)
@@ -551,10 +552,11 @@ func TestRenderCenterFewLines(t *testing.T) {
 		})
 	}
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 30
 	m.viewingSessionID = sessID
+	m.refreshSessionCache()
 
 	centerHeight := 26
 	center := m.renderCenter(80, centerHeight)
@@ -587,10 +589,11 @@ func TestRenderCenterStreaming(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 20 // centerHeight = 16, outputHeight = 11
 	m.viewingSessionID = sessID
+	m.refreshSessionCache()
 
 	centerHeight := 16
 
@@ -600,6 +603,7 @@ func TestRenderCenterStreaming(t *testing.T) {
 			Type:    session.OutputTypeStatus,
 			Content: fmt.Sprintf("Stream-%03d", i),
 		})
+		m.refreshSessionCache()
 
 		center := m.renderCenter(80, centerHeight)
 
@@ -619,6 +623,7 @@ func TestRenderCenterStreaming(t *testing.T) {
 		ToolState: session.ToolStateRunning,
 		StartTime: time.Now(),
 	})
+	m.refreshSessionCache()
 
 	center := m.renderCenter(80, centerHeight)
 	assert.Contains(t, center, "[Read]", "running tool should be visible")
@@ -650,7 +655,7 @@ func TestRenderCenterAutoScrollStaysAtBottom(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 15 // centerHeight = 11, outputHeight = 6
 	m.viewingSessionID = sessID
@@ -664,6 +669,7 @@ func TestRenderCenterAutoScrollStaysAtBottom(t *testing.T) {
 			Content: fmt.Sprintf("Auto-%03d", i),
 		})
 	}
+	m.refreshSessionCache()
 
 	// scrollOffset should still be 0
 	assert.Equal(t, 0, m.scrollOffset, "scrollOffset should remain 0")
@@ -708,10 +714,11 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 20
 	m.viewingSessionID = sessID
+	m.refreshSessionCache()
 
 	centerHeight := 16
 
@@ -720,6 +727,7 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 		Type:    session.OutputTypeText,
 		Content: "Hello ",
 	})
+	m.refreshSessionCache()
 
 	lines := mgr.GetSessionOutput(sessID)
 	assert.Equal(t, 1, len(lines))
@@ -737,6 +745,7 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 		ToolInput:  map[string]interface{}{"file_path": "/test.go"},
 		DurationMs: 100,
 	})
+	m.refreshSessionCache()
 
 	lines = mgr.GetSessionOutput(sessID)
 	assert.Equal(t, 2, len(lines))
@@ -752,6 +761,7 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 		Type:    session.OutputTypeText,
 		Content: "World!",
 	})
+	m.refreshSessionCache()
 
 	lines = mgr.GetSessionOutput(sessID)
 	assert.Equal(t, 3, len(lines), "text after tool should be separate line")
@@ -785,10 +795,11 @@ func TestScrollViaUpdate(t *testing.T) {
 		})
 	}
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 20
 	m.viewingSessionID = sessID
+	m.refreshSessionCache()
 
 	// Verify initial state shows latest
 	view := m.View()
@@ -877,10 +888,11 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 	lines := mgr.GetSessionOutput(sessID)
 	assert.Equal(t, 2, len(lines), "should have 2 logical OutputLines")
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 0, 0)
 	m.width = 80
 	m.height = 15 // Small screen: centerHeight=11, outputHeight=6
 	m.viewingSessionID = sessID
+	m.refreshSessionCache()
 
 	// Default view (scrollOffset=0): should show the end (tool call + last text lines)
 	view := m.View()
@@ -1040,7 +1052,7 @@ func TestWindowKeyOutsideTmux(t *testing.T) {
 	})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, 80, 24)
 	m.worktreeDropdown.SelectIndex(0)
@@ -1065,7 +1077,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 		})
 		defer mgr.Close()
 
-		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
+		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, []wt.Worktree{
 			{Branch: "main", Path: "/tmp/wt/main"},
 		}, 80, 24)
 		m.worktreeDropdown.SelectIndex(0)
@@ -1080,7 +1092,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 		})
 		defer mgr.Close()
 
-		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
+		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, []wt.Worktree{
 			{Branch: "main", Path: "/tmp/wt/main"},
 		}, 80, 24)
 		m.worktreeDropdown.SelectIndex(0)

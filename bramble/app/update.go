@@ -1,11 +1,9 @@
 package app
 
 import (
-	"bytes"
 	"fmt"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -173,6 +171,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
 
+		// Update cached output/session info when the event affects the viewed session.
+		switch evt := msg.event.(type) {
+		case session.SessionOutputEvent:
+			if evt.SessionID == m.viewingSessionID {
+				m.refreshSessionCache()
+			}
+		case session.SessionStateChangeEvent:
+			if evt.SessionID == m.viewingSessionID {
+				m.refreshSessionCache()
+			}
+		case session.SessionReconnectEvent:
+			// On reconnect, perform a full state refresh to recover any events
+			// missed during the disconnect.
+			m.refreshSessionCache()
+			cmds = append(cmds, deferredRefreshCmd())
+		}
+
 		// Keep listening for events
 		cmds = append(cmds, m.listenForSessionEvents())
 		return m, tea.Batch(cmds...)
@@ -180,6 +195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionsUpdated:
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
+		m.refreshSessionCache()
 		return m, nil
 
 	case errMsg:
@@ -622,6 +638,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.viewingSessionID = sessionID
 			m.scrollOffset = 0 // New builder session starts at bottom
+			m.refreshSessionCache()
 			m.sessions = m.sessionManager.GetAllSessions()
 			m.updateSessionDropdown()
 			return m, nil
@@ -734,6 +751,7 @@ func (m *Model) switchViewingSession(newID session.SessionID) {
 	m.viewingSessionID = newID
 	m.scrollOffset = m.scrollPositions[newID] // zero-value (0) if not found
 	m.viewingHistoryData = nil
+	m.refreshSessionCache()
 }
 
 // handleDropdownMode handles key presses when a dropdown is open.
@@ -954,6 +972,7 @@ func (m Model) startSession(sessionType session.SessionType, prompt string) (tea
 	}
 	m.viewingSessionID = sessionID
 	m.scrollOffset = 0 // New session starts at bottom
+	m.refreshSessionCache()
 	m.sessions = m.sessionManager.GetAllSessions()
 	m.updateSessionDropdown()
 	toastCmd := m.addToast("Session started: "+string(sessionID)[:12], ToastSuccess)
@@ -974,27 +993,11 @@ func (m Model) createWorktree(branch string) (tea.Model, tea.Cmd) {
 	// Show pending message
 	m.worktreeOpMessages = []string{"Creating worktree " + branch + "..."}
 
-	// Run asynchronously
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
 	return m, func() tea.Msg {
-		var buf bytes.Buffer
-		output := wt.NewOutput(&buf, false) // No colors for captured output
-		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-		_, err := manager.NewAtomic(ctx, branch, "", "")
-
-		// Parse captured messages
-		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
-		}
-
-		return worktreeOpResultMsg{messages: messages, err: err, branch: branch}
+		_, err := wtSvc.NewAtomic(ctx, branch, "", "")
+		return worktreeOpResultMsg{messages: wtSvc.Messages(), err: err, branch: branch}
 	}
 }
 
@@ -1015,25 +1018,11 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 	// Show pending message
 	m.worktreeOpMessages = []string{"Deleting worktree " + branch + "..."}
 
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
 	return m, func() tea.Msg {
-		var buf bytes.Buffer
-		output := wt.NewOutput(&buf, false)
-		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-		err := manager.Remove(ctx, branch, deleteBranch)
-
-		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
-		}
-
-		return worktreeOpResultMsg{messages: messages, err: err}
+		err := wtSvc.Remove(ctx, branch, deleteBranch)
+		return worktreeOpResultMsg{messages: wtSvc.Messages(), err: err}
 	}
 }
 
@@ -1111,28 +1100,14 @@ func (m Model) mergePR(branch, mergeMethod string) (tea.Model, tea.Cmd) {
 
 	m.worktreeOpMessages = []string{fmt.Sprintf("Merging PR for %s...", branch)}
 
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
 	return m, func() tea.Msg {
-		var buf bytes.Buffer
-		output := wt.NewOutput(&buf, false)
-		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-		prNumber, err := manager.MergePRForBranch(ctx, branch, wt.MergeOptions{
+		prNumber, err := wtSvc.MergePRForBranch(ctx, branch, wt.MergeOptions{
 			MergeMethod: mergeMethod,
 			Keep:        true,
 		})
-
-		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
-		}
-
-		return mergePRDoneMsg{branch: branch, prNumber: prNumber, messages: messages, err: err}
+		return mergePRDoneMsg{branch: branch, prNumber: prNumber, messages: wtSvc.Messages(), err: err}
 	}
 }
 
@@ -1175,49 +1150,12 @@ func (m Model) handlePostMergeAction(msg postMergeActionMsg) (tea.Model, tea.Cmd
 
 	case "reset":
 		m.worktreeOpMessages = []string{fmt.Sprintf("Resetting %s to default branch...", msg.branch)}
-		wtRoot := m.wtRoot
-		repoName := m.repoName
+		wtSvc := m.worktreeService
 		ctx := m.ctx
 		branch := msg.branch
 		return m, func() tea.Msg {
-			var buf bytes.Buffer
-			output := wt.NewOutput(&buf, false)
-			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-			bareDir := manager.BareDir()
-			defaultBranch, _ := wt.GetDefaultBranch(ctx, manager.GitRunner(), bareDir)
-			if defaultBranch == "" {
-				defaultBranch = "main"
-			}
-
-			// Find the worktree path for this branch
-			worktrees, _ := manager.List(ctx)
-			var wtPath string
-			for _, w := range worktrees {
-				if w.Branch == branch {
-					wtPath = w.Path
-					break
-				}
-			}
-			if wtPath == "" {
-				return worktreeOpResultMsg{err: fmt.Errorf("worktree for %s not found", branch)}
-			}
-
-			// Fetch and reset to origin/default
-			manager.GitRunner().Run(ctx, []string{"fetch", "origin"}, wtPath)
-			if _, err := manager.GitRunner().Run(ctx, []string{"reset", "--hard", "origin/" + defaultBranch}, wtPath); err != nil {
-				return worktreeOpResultMsg{err: fmt.Errorf("failed to reset: %w", err)}
-			}
-
-			var messages []string
-			for _, line := range strings.Split(buf.String(), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					messages = append(messages, line)
-				}
-			}
-			messages = append(messages, fmt.Sprintf("Reset %s to %s", branch, defaultBranch))
-			return worktreeOpResultMsg{messages: messages}
+			err := wtSvc.ResetToDefault(ctx, branch)
+			return worktreeOpResultMsg{messages: wtSvc.Messages(), err: err}
 		}
 
 	default: // "keep"
@@ -1244,25 +1182,11 @@ func (m Model) syncWorktree(branch string) (tea.Model, tea.Cmd) {
 		m.worktreeOpMessages = []string{fmt.Sprintf("Syncing worktree %s...", branch)}
 	}
 
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
 	return m, func() tea.Msg {
-		var buf bytes.Buffer
-		output := wt.NewOutput(&buf, false)
-		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-		err := manager.Sync(ctx, branch)
-
-		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
-		}
-
-		return worktreeOpResultMsg{messages: messages, err: err}
+		err := wtSvc.Sync(ctx, branch)
+		return worktreeOpResultMsg{messages: wtSvc.Messages(), err: err}
 	}
 }
 
@@ -1402,7 +1326,7 @@ func (m Model) routeTask(prompt string) tea.Cmd {
 	// In particular, worktreeStatuses is a map that the Update loop mutates,
 	// so we snapshot the needed values here rather than reading the map in the
 	// async closure.
-	router := m.taskRouter
+	routerSvc := m.taskRouterService
 	repoName := m.repoName
 	ctx := m.ctx
 
@@ -1438,7 +1362,7 @@ func (m Model) routeTask(prompt string) tea.Cmd {
 			RepoName:  repoName,
 		}
 
-		proposal, err := RouteTask(ctx, router, req)
+		proposal, err := routerSvc.Route(ctx, req)
 		if err != nil {
 			return taskProposalMsg{err: err}
 		}
@@ -1471,36 +1395,19 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		// Show pending message
 		m.worktreeOpMessages = []string{"Creating worktree " + msg.worktree + "..."}
 
-		// Run asynchronously and start planner after
-		wtRoot := m.wtRoot
-		repoName := m.repoName
+		wtSvc := m.worktreeService
 		ctx := m.ctx
 		worktreeName := msg.worktree
 		parent := msg.parent
 		prompt := msg.prompt
 		return m, tea.Batch(toastCmd, func() tea.Msg {
-			var buf bytes.Buffer
-			output := wt.NewOutput(&buf, false)
-			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
-
-			_, err := manager.NewAtomic(ctx, worktreeName, parent, "")
-
-			// Parse captured messages
-			var messages []string
-			for _, line := range strings.Split(buf.String(), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					messages = append(messages, line)
-				}
-			}
-
+			_, err := wtSvc.NewAtomic(ctx, worktreeName, parent, "")
 			if err != nil {
-				return worktreeOpResultMsg{messages: messages, err: err}
+				return worktreeOpResultMsg{messages: wtSvc.Messages(), err: err}
 			}
 
-			// Return a message that will trigger worktree refresh and planner start
 			return taskWorktreeCreatedMsg{
-				messages:     messages,
+				messages:     wtSvc.Messages(),
 				worktreeName: worktreeName,
 				prompt:       prompt,
 			}

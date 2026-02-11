@@ -12,6 +12,7 @@ go_test(
     ],
     deps = [
         "//bramble/app",
+        "//bramble/service",
         "//bramble/session",
         "//wt/taskrouter",
         "@com_github_stretchr_testify//assert",

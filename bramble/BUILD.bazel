@@ -7,11 +7,15 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//bramble/app",
+        "//bramble/remote",
+        "//bramble/remote/proto:bramble_go_proto",
+        "//bramble/service",
         "//bramble/session",
-        "//wt",
         "//wt/taskrouter",
         "@com_github_charmbracelet_bubbletea//:bubbletea",
         "@com_github_spf13_cobra//:cobra",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_x_term//:term",
     ],
 )

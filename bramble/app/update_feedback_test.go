@@ -17,7 +17,7 @@ func setupModel(t *testing.T, mode session.SessionMode, worktrees []wt.Worktree,
 	ctx := context.Background()
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: mode})
 	t.Cleanup(func() { mgr.Close() })
-	m := NewModel(ctx, "/tmp/wt", repoName, "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", repoName, "", mgr, nil, nil, worktrees, 80, 24)
 	return m
 }
 

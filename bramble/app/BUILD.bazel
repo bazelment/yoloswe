@@ -23,6 +23,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/bramble/app",
     visibility = ["//bramble:__subpackages__"],
     deps = [
+        "//bramble/service",
         "//bramble/session",
         "//wt",
         "//wt/taskrouter",

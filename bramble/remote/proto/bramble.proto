@@ -1,0 +1,412 @@
+syntax = "proto3";
+
+package bramble;
+
+option go_package = "github.com/bazelment/yoloswe/bramble/remote/proto";
+
+// ============================================================================
+// Shared types
+// ============================================================================
+
+message SessionInfo {
+  string id = 1;
+  string type = 2;             // "planner" or "builder"
+  string status = 3;           // "pending","running","idle","completed","failed","stopped"
+  string worktree_path = 4;
+  string worktree_name = 5;
+  string prompt = 6;
+  string title = 7;
+  string model = 8;
+  string plan_file_path = 9;
+  string tmux_window_name = 10;
+  string runner_type = 11;
+  int64 created_at_unix_ns = 12;
+  int64 started_at_unix_ns = 13;   // 0 means nil
+  int64 completed_at_unix_ns = 14; // 0 means nil
+  string error_msg = 15;
+  SessionProgress progress = 16;
+}
+
+message SessionProgress {
+  string current_phase = 1;
+  string current_tool = 2;
+  string status_line = 3;
+  int32 turn_count = 4;
+  double total_cost_usd = 5;
+  int32 input_tokens = 6;
+  int32 output_tokens = 7;
+  int64 last_activity_unix_ns = 8;
+}
+
+message OutputLine {
+  int64 timestamp_unix_ns = 1;
+  string type = 2;             // OutputLineType as string
+  string content = 3;
+  string tool_name = 4;
+  string tool_id = 5;
+  string tool_state = 6;      // ToolState as string
+  bytes tool_input_json = 7;   // JSON-encoded map[string]interface{}
+  bytes tool_result_json = 8;  // JSON-encoded interface{}
+  int64 start_time_unix_ns = 9;
+  int32 turn_number = 10;
+  double cost_usd = 11;
+  int64 duration_ms = 12;
+  bool is_error = 13;
+}
+
+message Worktree {
+  string path = 1;
+  string branch = 2;
+  string commit = 3;
+  bool is_detached = 4;
+}
+
+message WorktreeStatus {
+  Worktree worktree = 1;
+  bool is_dirty = 2;
+  int32 ahead = 3;
+  int32 behind = 4;
+  int32 pr_number = 5;
+  string pr_url = 6;
+  string pr_state = 7;
+  string pr_review_status = 8;
+  bool pr_is_draft = 9;
+  string last_commit_msg = 10;
+  int64 last_commit_time_unix_ns = 11;
+}
+
+message PRInfo {
+  string url = 1;
+  string head_ref_name = 2;
+  string base_ref_name = 3;
+  string state = 4;
+  string review_decision = 5;
+  int32 number = 6;
+  bool is_draft = 7;
+}
+
+message CommitInfo {
+  string hash = 1;
+  string subject = 2;
+  string author = 3;
+  int64 date_unix_ns = 4;
+}
+
+message WorktreeContext {
+  string path = 1;
+  string branch = 2;
+  string goal = 3;
+  string parent = 4;
+  bool is_dirty = 5;
+  int32 ahead = 6;
+  int32 behind = 7;
+  repeated string changed_files = 8;
+  repeated string untracked_files = 9;
+  repeated CommitInfo recent_commits = 10;
+  string diff_stat = 11;
+  string diff_content = 12;
+  int32 pr_number = 13;
+  string pr_url = 14;
+  string pr_state = 15;
+  int64 gathered_at_unix_ns = 16;
+}
+
+message ContextOptions {
+  bool include_diff = 1;
+  bool include_diff_stat = 2;
+  bool include_file_list = 3;
+  bool include_pr_info = 4;
+  int32 include_commits = 5;
+  int32 max_diff_bytes = 6;
+}
+
+message MergeOptions {
+  string merge_method = 1;
+  bool keep = 2;
+}
+
+message SessionMeta {
+  string id = 1;
+  string type = 2;
+  string status = 3;
+  string repo_name = 4;
+  string worktree_name = 5;
+  string prompt = 6;
+  string title = 7;
+  string model = 8;
+  int64 created_at_unix_ns = 9;
+  int64 completed_at_unix_ns = 10;
+}
+
+message StoredSession {
+  string id = 1;
+  string type = 2;
+  string status = 3;
+  string repo_name = 4;
+  string worktree_path = 5;
+  string worktree_name = 6;
+  string prompt = 7;
+  string title = 8;
+  string model = 9;
+  int64 created_at_unix_ns = 10;
+  int64 started_at_unix_ns = 11;
+  int64 completed_at_unix_ns = 12;
+  string error_msg = 13;
+  SessionProgress progress = 14;
+  repeated OutputLine output = 15;
+}
+
+// ============================================================================
+// Events (server-streamed to clients)
+// ============================================================================
+
+message SessionEvent {
+  oneof event {
+    StateChangeEvent state_change = 1;
+    OutputEvent output = 2;
+  }
+}
+
+message StateChangeEvent {
+  string session_id = 1;
+  string old_status = 2;
+  string new_status = 3;
+}
+
+message OutputEvent {
+  string session_id = 1;
+  OutputLine line = 2;
+}
+
+// ============================================================================
+// Task Router types
+// ============================================================================
+
+message TaskWorktreeInfo {
+  string name = 1;
+  string path = 2;
+  string goal = 3;
+  string parent = 4;
+  string pr_state = 5;
+  string last_commit = 6;
+  bool is_dirty = 7;
+  bool is_ahead = 8;
+  bool is_merged = 9;
+}
+
+message RouteProposal {
+  string action = 1;    // "use_existing" or "create_new"
+  string worktree = 2;
+  string parent = 3;
+  string reasoning = 4;
+}
+
+// ============================================================================
+// Session Service
+// ============================================================================
+
+service BrambleSessionService {
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  rpc SendFollowUp(SendFollowUpRequest) returns (SendFollowUpResponse);
+  rpc CompleteSession(CompleteSessionRequest) returns (CompleteSessionResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+  rpc GetSessionInfo(GetSessionInfoRequest) returns (GetSessionInfoResponse);
+  rpc GetSessionsForWorktree(GetSessionsForWorktreeRequest) returns (GetSessionsForWorktreeResponse);
+  rpc GetAllSessions(GetAllSessionsRequest) returns (GetAllSessionsResponse);
+  rpc GetSessionOutput(GetSessionOutputRequest) returns (GetSessionOutputResponse);
+  rpc CountByStatus(CountByStatusRequest) returns (CountByStatusResponse);
+  rpc LoadHistorySessions(LoadHistorySessionsRequest) returns (LoadHistorySessionsResponse);
+  rpc LoadSessionFromHistory(LoadSessionFromHistoryRequest) returns (LoadSessionFromHistoryResponse);
+  rpc IsInTmuxMode(IsInTmuxModeRequest) returns (IsInTmuxModeResponse);
+  rpc StreamEvents(StreamEventsRequest) returns (stream SessionEvent);
+}
+
+// --- Session Service request/response messages ---
+
+message StartSessionRequest {
+  string session_type = 1; // "planner" or "builder"
+  string worktree_path = 2;
+  string prompt = 3;
+}
+message StartSessionResponse {
+  string session_id = 1;
+}
+
+message StopSessionRequest {
+  string session_id = 1;
+}
+message StopSessionResponse {}
+
+message SendFollowUpRequest {
+  string session_id = 1;
+  string message = 2;
+}
+message SendFollowUpResponse {}
+
+message CompleteSessionRequest {
+  string session_id = 1;
+}
+message CompleteSessionResponse {}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+message DeleteSessionResponse {}
+
+message GetSessionInfoRequest {
+  string session_id = 1;
+}
+message GetSessionInfoResponse {
+  SessionInfo info = 1;
+  bool found = 2;
+}
+
+message GetSessionsForWorktreeRequest {
+  string worktree_path = 1;
+}
+message GetSessionsForWorktreeResponse {
+  repeated SessionInfo sessions = 1;
+}
+
+message GetAllSessionsRequest {}
+message GetAllSessionsResponse {
+  repeated SessionInfo sessions = 1;
+}
+
+message GetSessionOutputRequest {
+  string session_id = 1;
+}
+message GetSessionOutputResponse {
+  repeated OutputLine lines = 1;
+}
+
+message CountByStatusRequest {}
+message CountByStatusResponse {
+  map<string, int32> counts = 1;
+}
+
+message LoadHistorySessionsRequest {
+  string worktree_name = 1;
+}
+message LoadHistorySessionsResponse {
+  repeated SessionMeta sessions = 1;
+}
+
+message LoadSessionFromHistoryRequest {
+  string worktree_name = 1;
+  string session_id = 2;
+}
+message LoadSessionFromHistoryResponse {
+  StoredSession session = 1;
+}
+
+message IsInTmuxModeRequest {}
+message IsInTmuxModeResponse {
+  bool is_tmux_mode = 1;
+}
+
+message StreamEventsRequest {}
+
+// ============================================================================
+// Worktree Service
+// ============================================================================
+
+service BrambleWorktreeService {
+  rpc List(ListWorktreesRequest) returns (ListWorktreesResponse);
+  rpc GetGitStatus(GetGitStatusRequest) returns (GetGitStatusResponse);
+  rpc FetchAllPRInfo(FetchAllPRInfoRequest) returns (FetchAllPRInfoResponse);
+  rpc NewAtomic(NewAtomicRequest) returns (NewAtomicResponse);
+  rpc Remove(RemoveWorktreeRequest) returns (RemoveWorktreeResponse);
+  rpc Sync(SyncWorktreeRequest) returns (SyncWorktreeResponse);
+  rpc MergePRForBranch(MergePRRequest) returns (MergePRResponse);
+  rpc GatherContext(GatherContextRequest) returns (GatherContextResponse);
+  rpc ResetToDefault(ResetToDefaultRequest) returns (ResetToDefaultResponse);
+}
+
+// --- Worktree Service request/response messages ---
+
+message ListWorktreesRequest {}
+message ListWorktreesResponse {
+  repeated Worktree worktrees = 1;
+}
+
+message GetGitStatusRequest {
+  Worktree worktree = 1;
+}
+message GetGitStatusResponse {
+  WorktreeStatus status = 1;
+  repeated string messages = 2;
+}
+
+message FetchAllPRInfoRequest {}
+message FetchAllPRInfoResponse {
+  repeated PRInfo prs = 1;
+}
+
+message NewAtomicRequest {
+  string branch = 1;
+  string base_branch = 2;
+  string goal = 3;
+}
+message NewAtomicResponse {
+  string path = 1;
+  repeated string messages = 2;
+}
+
+message RemoveWorktreeRequest {
+  string name_or_branch = 1;
+  bool delete_branch = 2;
+}
+message RemoveWorktreeResponse {
+  repeated string messages = 1;
+}
+
+message SyncWorktreeRequest {
+  string branch = 1;
+}
+message SyncWorktreeResponse {
+  repeated string messages = 1;
+}
+
+message MergePRRequest {
+  string branch = 1;
+  MergeOptions options = 2;
+}
+message MergePRResponse {
+  int32 pr_number = 1;
+  repeated string messages = 2;
+}
+
+message GatherContextRequest {
+  Worktree worktree = 1;
+  ContextOptions options = 2;
+}
+message GatherContextResponse {
+  WorktreeContext context = 1;
+}
+
+message ResetToDefaultRequest {
+  string branch = 1;
+}
+message ResetToDefaultResponse {
+  repeated string messages = 1;
+}
+
+// ============================================================================
+// Task Router Service
+// ============================================================================
+
+service BrambleTaskRouterService {
+  rpc Route(RouteTaskRequest) returns (RouteTaskResponse);
+}
+
+message RouteTaskRequest {
+  string prompt = 1;
+  string current_wt = 2;
+  string repo_name = 3;
+  repeated TaskWorktreeInfo worktrees = 4;
+}
+message RouteTaskResponse {
+  RouteProposal proposal = 1;
+}

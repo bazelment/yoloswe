@@ -10,9 +10,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/bazelment/yoloswe/bramble/service"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
-	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 // FocusArea indicates which area has focus.
@@ -43,8 +43,9 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	worktreeStatuses      map[string]*wt.WorktreeStatus
 	scrollPositions       map[session.SessionID]int
 	viewingHistoryData    *session.StoredSession
-	sessionManager        *session.Manager
-	taskRouter            *taskrouter.Router
+	sessionManager        session.SessionService
+	worktreeService       service.WorktreeService
+	taskRouterService     service.TaskRouterService
 	mdRenderer            *MarkdownRenderer
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
@@ -61,6 +62,8 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	editor                string
 	inputPrompt           string
 	wtRoot                string
+	cachedOutput          []session.OutputLine
+	cachedSessionInfo     *session.SessionInfo
 	viewingSessionID      session.SessionID
 	historyBranch         string
 	scrollOffset          int
@@ -77,7 +80,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 // render shows branch names immediately without waiting for an async refresh.
 // width/height set the initial terminal dimensions so the first View() can
 // render a proper layout without waiting for WindowSizeMsg.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager session.SessionService, worktreeService service.WorktreeService, taskRouterService service.TaskRouterService, initialWorktrees []wt.Worktree, width, height int) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -90,7 +93,8 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		repoName:           repoName,
 		editor:             editor,
 		sessionManager:     sessionManager,
-		taskRouter:         taskRouter,
+		worktreeService:    worktreeService,
+		taskRouterService:  taskRouterService,
 		focus:              FocusOutput,
 		width:              width,
 		height:             height,
@@ -157,10 +161,11 @@ func (m Model) refreshWorktrees() tea.Cmd {
 	if m.repoName == "" {
 		return nil
 	}
-	manager := wt.NewManager(m.wtRoot, m.repoName)
+	wtSvc := m.worktreeService
+	ctx := m.ctx
 
 	return func() tea.Msg {
-		worktrees, err := manager.List(m.ctx)
+		worktrees, err := wtSvc.List(ctx)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -195,15 +200,30 @@ func (m *Model) selectedWorktree() *wt.Worktree {
 }
 
 // selectedSession returns the currently selected/viewing session.
+// It uses the cached session info to avoid calling GetSessionInfo on every render.
 func (m *Model) selectedSession() *session.SessionInfo {
 	if m.viewingSessionID == "" {
 		return nil
 	}
-	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
-	if !ok {
-		return nil
+	return m.cachedSessionInfo
+}
+
+// refreshSessionCache refreshes the cached output and session info for the
+// currently viewed session. Call this when viewingSessionID changes or when
+// a session event arrives that affects the viewed session.
+func (m *Model) refreshSessionCache() {
+	if m.viewingSessionID == "" {
+		m.cachedOutput = nil
+		m.cachedSessionInfo = nil
+		return
 	}
-	return &info
+	m.cachedOutput = m.sessionManager.GetSessionOutput(m.viewingSessionID)
+	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
+	if ok {
+		m.cachedSessionInfo = &info
+	} else {
+		m.cachedSessionInfo = nil
+	}
 }
 
 // aggregateCost returns the sum of TotalCostUSD across all sessions.
@@ -408,16 +428,14 @@ func (m Model) fetchGitStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
 		return nil
 	}
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
 
 	cmds := make([]tea.Cmd, 0, len(m.worktrees))
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
 		cmds = append(cmds, func() tea.Msg {
-			manager := wt.NewManager(wtRoot, repoName)
-			status, err := manager.GetGitStatus(ctx, w)
+			status, err := wtSvc.GetGitStatus(ctx, w)
 			if err != nil {
 				return nil
 			}
@@ -434,15 +452,11 @@ func (m Model) fetchPRStatuses() tea.Cmd {
 	if m.repoName == "" || len(m.worktrees) == 0 {
 		return nil
 	}
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
-	// Use first worktree's path as working dir for gh CLI (needs a valid Git repo)
-	wtDir := m.worktrees[0].Path
 
 	return func() tea.Msg {
-		manager := wt.NewManager(wtRoot, repoName)
-		prs, err := manager.FetchAllPRInfo(ctx, wtDir)
+		prs, err := wtSvc.FetchAllPRInfo(ctx)
 		if err != nil {
 			return nil
 		}
@@ -561,16 +575,14 @@ func (m Model) refreshFileTree() tea.Cmd {
 	if w == nil {
 		return nil
 	}
-	wtRoot := m.wtRoot
-	repoName := m.repoName
+	wtSvc := m.worktreeService
 	ctx := m.ctx
 	worktree := *w
 	return func() tea.Msg {
-		manager := wt.NewManager(wtRoot, repoName)
 		opts := wt.ContextOptions{
 			IncludeFileList: true,
 		}
-		wtCtx, err := manager.GatherContext(ctx, worktree, opts)
+		wtCtx, err := wtSvc.GatherContext(ctx, worktree, opts)
 		if err != nil {
 			return nil
 		}

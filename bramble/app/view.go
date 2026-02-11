@@ -379,12 +379,12 @@ func (m Model) renderOutputArea(width, height int) string {
 		return m.renderHistorySession(width, height)
 	}
 
-	// Get session info
-	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
-	if !ok {
+	// Use cached session info to avoid blocking gRPC calls in the render path.
+	if m.cachedSessionInfo == nil {
 		b.WriteString(errorStyle.Render("  Session not found"))
 		return b.String()
 	}
+	info := *m.cachedSessionInfo
 
 	// Session header
 	typeIcon := "📋"
@@ -420,8 +420,8 @@ func (m Model) renderOutputArea(width, height int) string {
 	b.WriteString(strings.Repeat("─", width-2))
 	b.WriteString("\n")
 
-	// Output lines
-	lines := m.sessionManager.GetSessionOutput(m.viewingSessionID)
+	// Use cached output lines to avoid blocking gRPC calls in the render path.
+	lines := m.cachedOutput
 
 	// Pre-render all output lines into visual lines for proper scrolling.
 	// Each OutputLine may produce multiple visual lines (e.g., markdown text).
