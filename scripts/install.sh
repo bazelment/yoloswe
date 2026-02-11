@@ -79,8 +79,8 @@ verify_checksum() {
   elif command -v shasum &>/dev/null; then
     actual_sha="$(shasum -a 256 "${file}" | awk '{print $1}')"
   else
-    echo "Warning: Cannot verify checksum (no sha256sum or shasum found)"
-    return 0
+    echo "  Warning: Cannot verify checksum (no sha256sum or shasum found)"
+    return 2
   fi
 
   if [[ "${actual_sha}" != "${expected_sha}" ]]; then
@@ -138,10 +138,17 @@ main() {
 
     # Verify checksum
     local expected_sha
-    expected_sha="$(grep "${archive_name}" "${checksums_file}" | awk '{print $1}')"
+    expected_sha="$(grep -F "${archive_name}" "${checksums_file}" | awk '{print $1}' || true)"
     if [[ -n "${expected_sha}" ]]; then
-      verify_checksum "${tmp_dir}/${archive_name}" "${expected_sha}"
-      echo "  Checksum verified."
+      local checksum_rc=0
+      verify_checksum "${tmp_dir}/${archive_name}" "${expected_sha}" || checksum_rc=$?
+      if [[ "${checksum_rc}" -eq 0 ]]; then
+        echo "  Checksum verified."
+      elif [[ "${checksum_rc}" -eq 2 ]]; then
+        echo "  Skipping checksum verification."
+      else
+        exit 1
+      fi
     fi
 
     tar -xzf "${tmp_dir}/${archive_name}" -C "${tmp_dir}"
