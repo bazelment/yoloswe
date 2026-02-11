@@ -886,15 +886,21 @@ func (m Model) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case result.Quit:
 		return m, tea.Quit
 	case result.Cancelled:
+		cancelHandler := m.confirmCancelHandler
 		m.focus = FocusOutput
 		m.confirmPrompt = nil
 		m.confirmHandler = nil
+		m.confirmCancelHandler = nil
+		if cancelHandler != nil {
+			return m, cancelHandler()
+		}
 		return m, nil
 	case result.Matched != "":
 		handler := m.confirmHandler
 		m.focus = FocusOutput
 		m.confirmPrompt = nil
 		m.confirmHandler = nil
+		m.confirmCancelHandler = nil
 		if handler != nil {
 			return m, handler(result.Matched)
 		}
@@ -1137,7 +1143,7 @@ func (m Model) handleMergePRDone(msg mergePRDoneMsg) (tea.Model, tea.Cmd) {
 
 	prompt := fmt.Sprintf("PR #%d merged! What to do with worktree '%s'?", msg.prNumber, msg.branch)
 	branch := msg.branch
-	return m.showConfirm(prompt, []ConfirmOption{
+	newModel, cmd := m.showConfirm(prompt, []ConfirmOption{
 		{Key: "d", Label: "delete worktree + branch"},
 		{Key: "r", Label: "reset to main"},
 		{Key: "k", Label: "keep as-is"},
@@ -1147,16 +1153,20 @@ func (m Model) handleMergePRDone(msg mergePRDoneMsg) (tea.Model, tea.Cmd) {
 			return postMergeActionMsg{branch: branch, action: action}
 		}
 	})
+	// Refresh even if user cancels — the merge already happened on GitHub.
+	m2 := newModel.(Model)
+	m2.confirmCancelHandler = func() tea.Cmd {
+		return func() tea.Msg {
+			return postMergeActionMsg{branch: branch, action: "keep"}
+		}
+	}
+	return m2, cmd
 }
 
 // handlePostMergeAction handles the user's choice after a successful merge.
 func (m Model) handlePostMergeAction(msg postMergeActionMsg) (tea.Model, tea.Cmd) {
 	switch msg.action {
 	case "delete":
-		// Clear viewing session if it belongs to this worktree
-		if w := m.selectedWorktree(); w != nil && w.Branch == msg.branch {
-			m.switchViewingSession("")
-		}
 		return m.deleteWorktree(msg.branch, true)
 
 	case "reset":

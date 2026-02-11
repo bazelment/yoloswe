@@ -157,10 +157,13 @@ func TestMergeKey_IdleSessionAllowed(t *testing.T) {
 		"feature": {PRNumber: 42, PRState: "OPEN"},
 	}
 
-	// Inject an idle session directly to avoid async races
-	m.sessions = []session.SessionInfo{
-		{ID: "s1", Status: session.StatusIdle, WorktreePath: "/tmp/wt/feature"},
-	}
+	// Add an idle session via the session manager so GetSessionsForWorktree returns it
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s1",
+		Status:       session.StatusIdle,
+		WorktreePath: "/tmp/wt/feature",
+		Progress:     &session.SessionProgress{},
+	})
 
 	m2 := pressKey(m, 'm')
 

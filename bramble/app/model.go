@@ -37,6 +37,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	worktreeOpMessages    []string
 	inputHandler          func(string) tea.Cmd
 	confirmHandler        func(string) tea.Cmd
+	confirmCancelHandler  func() tea.Cmd
 	confirmPrompt         *ConfirmPrompt
 	worktreeStatuses      map[string]*wt.WorktreeStatus
 	scrollPositions       map[session.SessionID]int
