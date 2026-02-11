@@ -122,6 +122,11 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		scrollPositions:    make(map[session.SessionID]int),
 	}
 
+	// Sync placeholder colors with the loaded theme (NewTextArea defaults to "245")
+	dimColor := lipgloss.Color(palette.Dim)
+	m.inputArea.SetPlaceholderColor(dimColor)
+	m.taskModal.SetPlaceholderColor(dimColor)
+
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {
 		m.worktrees = initialWorktrees

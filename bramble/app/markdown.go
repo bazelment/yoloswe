@@ -17,15 +17,8 @@ func NewMarkdownRenderer(width int, glamourStyle string) (*MarkdownRenderer, err
 	if glamourStyle == "" {
 		glamourStyle = "auto"
 	}
-	opt := glamour.WithAutoStyle()
-	switch glamourStyle {
-	case "dark":
-		opt = glamour.WithStandardStyle("dark")
-	case "light":
-		opt = glamour.WithStandardStyle("light")
-	}
 	r, err := glamour.NewTermRenderer(
-		opt,
+		glamourOption(glamourStyle),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -48,15 +41,8 @@ func (m *MarkdownRenderer) SetWidth(width int) error {
 	if width == m.width {
 		return nil
 	}
-	opt := glamour.WithAutoStyle()
-	switch m.glamourStyle {
-	case "dark":
-		opt = glamour.WithStandardStyle("dark")
-	case "light":
-		opt = glamour.WithStandardStyle("light")
-	}
 	r, err := glamour.NewTermRenderer(
-		opt,
+		glamourOption(m.glamourStyle),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -65,4 +51,16 @@ func (m *MarkdownRenderer) SetWidth(width int) error {
 	m.renderer = r
 	m.width = width
 	return nil
+}
+
+// glamourOption returns the glamour TermRendererOption for a style name.
+func glamourOption(style string) glamour.TermRendererOption {
+	switch style {
+	case "dark":
+		return glamour.WithStandardStyle("dark")
+	case "light":
+		return glamour.WithStandardStyle("light")
+	default:
+		return glamour.WithAutoStyle()
+	}
 }
