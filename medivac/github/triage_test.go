@@ -327,6 +327,50 @@ func TestTriageBatch_MultiRun(t *testing.T) {
 	}
 }
 
+func TestTriageBatch_MultiRun_RunAttribution(t *testing.T) {
+	// LLM returns failures with run_id matching the correct run.
+	responseJSON := fmt.Sprintf(`[
+		{"run_id": %d, "category": "lint/go", "job": "lint", "file": "main.go", "line": 10, "summary": "unused var", "details": "x"},
+		{"run_id": 200, "category": "build/docker", "job": "build", "file": "", "line": 0, "summary": "docker build failed", "details": "exit code 1"}
+	]`, testRun.ID)
+
+	run2 := WorkflowRun{
+		ID: 200, Name: "Docker Publish", HeadBranch: "main", HeadSHA: "def456",
+		URL: "https://example.com/runs/200", CreatedAt: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+	}
+
+	runs := []RunData{
+		{Run: testRun, FailedJobs: testJobs, Log: "ci log"},
+		{Run: run2, FailedJobs: testJobs, Log: "docker log"},
+	}
+
+	result, err := TriageBatch(context.Background(), runs, TriageConfig{Query: mockQuery(responseJSON, 0.005)})
+	if err != nil {
+		t.Fatalf("TriageBatch: %v", err)
+	}
+	if len(result.Failures) != 2 {
+		t.Fatalf("expected 2 failures, got %d", len(result.Failures))
+	}
+
+	// First failure should have testRun metadata.
+	f0 := result.Failures[0]
+	if f0.RunID != testRun.ID {
+		t.Errorf("failure 0: expected RunID %d, got %d", testRun.ID, f0.RunID)
+	}
+	if f0.RunURL != testRun.URL {
+		t.Errorf("failure 0: expected RunURL %q, got %q", testRun.URL, f0.RunURL)
+	}
+
+	// Second failure should have run2 metadata.
+	f1 := result.Failures[1]
+	if f1.RunID != 200 {
+		t.Errorf("failure 1: expected RunID 200, got %d", f1.RunID)
+	}
+	if f1.RunURL != "https://example.com/runs/200" {
+		t.Errorf("failure 1: expected RunURL for run2, got %q", f1.RunURL)
+	}
+}
+
 func TestBuildBatchTriagePrompt(t *testing.T) {
 	run2 := WorkflowRun{ID: 200, Name: "Docker Publish", HeadBranch: "main", HeadSHA: "def456"}
 	runs := []RunData{
@@ -342,6 +386,7 @@ func TestBuildBatchTriagePrompt(t *testing.T) {
 		"Run 2: Docker Publish",
 		"ci log output",
 		"docker log output",
+		"run_id",
 		"ENUMERATE",
 		"DEDUPLICATE",
 		"ONLY ONCE",

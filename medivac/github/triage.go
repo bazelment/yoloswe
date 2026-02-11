@@ -27,6 +27,7 @@ type triageResponse struct {
 	Summary   string `json:"summary"`
 	Details   string `json:"details"`
 	ErrorCode string `json:"error_code"`
+	RunID     int64  `json:"run_id"`
 	Line      int    `json:"line"`
 }
 
@@ -239,7 +240,11 @@ func TriageBatch(
 		}
 	}
 
-	// Use first run's metadata as default for issue.CIFailure fields.
+	// Build run lookup by ID for correct metadata attribution.
+	runByID := make(map[int64]WorkflowRun, len(runs))
+	for i := range runs {
+		runByID[runs[i].Run.ID] = runs[i].Run
+	}
 	defaultRun := runs[0].Run
 
 	failures := make([]issue.CIFailure, 0, len(items))
@@ -255,11 +260,19 @@ func TriageBatch(
 			jobName = defaultJob
 		}
 
+		// Use the run metadata from the LLM-reported run_id, falling back to the first run.
+		run := defaultRun
+		if item.RunID != 0 {
+			if r, ok := runByID[item.RunID]; ok {
+				run = r
+			}
+		}
+
 		f := issue.CIFailure{
-			RunID:     defaultRun.ID,
-			RunURL:    defaultRun.URL,
-			HeadSHA:   defaultRun.HeadSHA,
-			Branch:    defaultRun.HeadBranch,
+			RunID:     run.ID,
+			RunURL:    run.URL,
+			HeadSHA:   run.HeadSHA,
+			Branch:    run.HeadBranch,
 			JobName:   jobName,
 			Category:  cat,
 			Summary:   item.Summary,
@@ -267,7 +280,7 @@ func TriageBatch(
 			File:      item.File,
 			Line:      item.Line,
 			ErrorCode: item.ErrorCode,
-			Timestamp: defaultRun.CreatedAt,
+			Timestamp: run.CreatedAt,
 		}
 		f.Signature = issue.ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
 
@@ -326,6 +339,7 @@ func buildBatchTriagePrompt(runs []RunData) string {
 	b.WriteString("Each element should have these fields:\n\n")
 	b.WriteString("```json\n")
 	b.WriteString(`[{
+  "run_id": 12345,
   "category": "one of: lint/go, lint/bazel, lint/ts, lint/python, build, build/docker, test, infra/dependabot, infra/ci, unknown",
   "job": "name of the failed job this error belongs to",
   "file": "path/to/file relative to repository root (empty string if not identifiable)",
@@ -338,6 +352,7 @@ func buildBatchTriagePrompt(runs []RunData) string {
 	b.WriteString("Rules:\n")
 	b.WriteString("- Return ONLY the JSON array, no other text\n")
 	b.WriteString("- Use the most specific category that fits\n")
+	b.WriteString("- For 'run_id': use the numeric Run ID from the run header above where this error was found\n")
 	b.WriteString("- If no clear errors, return an empty array []\n")
 	b.WriteString("- Keep summary under 100 characters\n")
 	b.WriteString("- Keep details under 500 characters\n")

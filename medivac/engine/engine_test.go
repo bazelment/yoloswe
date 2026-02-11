@@ -534,23 +534,25 @@ func TestScan_SecondScan_OnlyNewRuns(t *testing.T) {
 
 func TestFixBranchName(t *testing.T) {
 	tests := []struct {
-		category issue.FailureCategory
-		id       string
-		want     string
+		category    issue.FailureCategory
+		id          string
+		want        string
+		fixAttempts int
 	}{
-		{issue.CategoryLintGo, "abc123", "fix/lint-go/abc123"},
-		{issue.CategoryTest, "def456", "fix/test/def456"},
-		{issue.CategoryBuild, "xyz", "fix/build/xyz"},
+		{issue.CategoryLintGo, "abc123", "fix/lint-go/abc123-v1", 0},
+		{issue.CategoryTest, "def456", "fix/test/def456-v1", 0},
+		{issue.CategoryBuild, "xyz", "fix/build/xyz-v3", 2},
 	}
 
 	for _, tt := range tests {
 		iss := &issue.Issue{
-			Category: tt.category,
-			ID:       tt.id,
+			Category:    tt.category,
+			ID:          tt.id,
+			FixAttempts: make([]issue.FixAttempt, tt.fixAttempts),
 		}
 		got := fixBranchName(iss)
 		if got != tt.want {
-			t.Errorf("fixBranchName(%s, %s) = %s, want %s", tt.category, tt.id, got, tt.want)
+			t.Errorf("fixBranchName(%s, %s, attempts=%d) = %s, want %s", tt.category, tt.id, tt.fixAttempts, got, tt.want)
 		}
 	}
 }

@@ -255,11 +255,12 @@ func RunFixAgent(ctx context.Context, config FixAgentConfig) *FixAgentResult {
 	}
 }
 
-// fixBranchName generates a branch name for a fix issue.
+// fixBranchName generates a unique branch name for a fix issue.
+// The attempt number ensures retries don't collide with previous branches.
 func fixBranchName(iss *issue.Issue) string {
-	// fix/<category>/<short-id>
 	cat := strings.ReplaceAll(string(iss.Category), "/", "-")
-	return fmt.Sprintf("fix/%s/%s", cat, iss.ID)
+	attempt := len(iss.FixAttempts) + 1
+	return fmt.Sprintf("fix/%s/%s-v%d", cat, iss.ID, attempt)
 }
 
 // recordFixAttempt updates the tracker with the fix agent result for one or more issues.
