@@ -212,7 +212,7 @@ func TestBuildHelpSectionsWithSession(t *testing.T) {
 	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
 
 	// Add a session
-	sessionID, err := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/feature-auth", "test plan")
+	sessionID, err := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/feature-auth", "test plan", "")
 	if err != nil {
 		t.Fatalf("Failed to start session: %v", err)
 	}

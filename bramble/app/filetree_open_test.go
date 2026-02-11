@@ -279,8 +279,8 @@ func TestHandleKeyPress_UpDownNavigatesSessionListInTmuxSplitRightFocus(t *testi
 	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
 
 	// Start sessions so navigation has items
-	_, _ = mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A")
-	_, _ = mgr.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "session B")
+	_, _ = mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A", "")
+	_, _ = mgr.StartSession(session.SessionTypeBuilder, "/tmp/wt/main", "session B", "")
 
 	// Set up split pane with right focus (session list)
 	m.splitPane.Toggle()

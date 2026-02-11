@@ -107,7 +107,7 @@ func TestMergeKey_ActiveSession(t *testing.T) {
 	}
 
 	// Start a running session for this worktree
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/feature", "test")
+	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/feature", "test", "")
 	require.NoError(t, err)
 
 	m2 := pressKey(m, 'm')
