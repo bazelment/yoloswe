@@ -95,7 +95,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// If no repo specified, show the repo picker
 	if repoName == "" {
-		selectedRepo, err := runRepoPicker(wtRoot)
+		selectedRepo, err := runRepoPicker(ctx, wtRoot)
 		if err != nil {
 			return err
 		}
@@ -166,8 +166,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 }
 
 // runRepoPicker shows the repo selection screen and returns the selected repo.
-func runRepoPicker(wtRoot string) (string, error) {
-	picker := app.NewRepoPickerModel(wtRoot)
+func runRepoPicker(ctx context.Context, wtRoot string) (string, error) {
+	picker := app.NewRepoPickerModel(ctx, wtRoot)
 	p := tea.NewProgram(picker, tea.WithAltScreen())
 
 	finalModel, err := p.Run()

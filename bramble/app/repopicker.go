@@ -1,6 +1,9 @@
 package app
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,23 +12,39 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
+type pickerMode int
+
+const (
+	pickerModeList pickerMode = iota
+	pickerModeURLInput
+	pickerModeCloning
+)
+
 // RepoPickerModel is the model for the repo selection screen.
 type RepoPickerModel struct {
-	err             error
-	wtRoot          string
-	chosenRepo      string
-	filterText      string
-	repos           []string
-	filteredIndices []int // indices into repos; nil = no filter (show all)
-	selectedIdx     int
-	width           int
-	height          int
-	loading         bool
+	ctx               context.Context
+	cloneCancel       context.CancelFunc
+	err               error
+	cloneErr          error
+	wtRoot            string
+	chosenRepo        string
+	filterText        string
+	urlInput          string
+	cloneRepoName     string
+	pendingSelectRepo string
+	repos             []string
+	filteredIndices   []int // indices into repos; nil = no filter (show all)
+	selectedIdx       int
+	width             int
+	height            int
+	mode              pickerMode
+	loading           bool
 }
 
 // NewRepoPickerModel creates a new repo picker model.
-func NewRepoPickerModel(wtRoot string) RepoPickerModel {
+func NewRepoPickerModel(ctx context.Context, wtRoot string) RepoPickerModel {
 	return RepoPickerModel{
+		ctx:     ctx,
 		wtRoot:  wtRoot,
 		loading: true,
 	}
@@ -34,6 +53,14 @@ func NewRepoPickerModel(wtRoot string) RepoPickerModel {
 // RepoSelectedMsg is sent when a repo is selected.
 type RepoSelectedMsg struct {
 	RepoName string
+}
+
+type repoInitSuccessMsg struct {
+	repoName string
+}
+
+type repoInitErrorMsg struct {
+	err error
 }
 
 // Init initializes the repo picker.
@@ -59,8 +86,136 @@ type repoLoadErrorMsg struct {
 	err error
 }
 
+func (m RepoPickerModel) initRepo(ctx context.Context, url string) tea.Cmd {
+	return func() tea.Msg {
+		// Validate that the URL yields a usable repo name before cloning.
+		repoName := wt.GetRepoNameFromURL(url)
+		if repoName == "" || repoName == "." || repoName == ".." || strings.ContainsAny(repoName, "/\\") {
+			return repoInitErrorMsg{err: fmt.Errorf("could not determine repository name from URL")}
+		}
+		var buf bytes.Buffer
+		output := wt.NewOutput(&buf, false)
+		manager := wt.NewManager(m.wtRoot, "", wt.WithOutput(output))
+		if _, err := manager.Init(ctx, url); err != nil {
+			return repoInitErrorMsg{err: err}
+		}
+		return repoInitSuccessMsg{repoName: repoName}
+	}
+}
+
 // Update handles messages.
 func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case pickerModeURLInput:
+		return m.updateURLInput(msg)
+	case pickerModeCloning:
+		return m.updateCloning(msg)
+	default:
+		return m.updateList(msg)
+	}
+}
+
+func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.mode = pickerModeList
+			m.urlInput = ""
+			m.cloneErr = nil
+			return m, nil
+		case "enter":
+			url := strings.TrimSpace(m.urlInput)
+			if url == "" {
+				return m, nil
+			}
+			cloneCtx, cloneCancel := context.WithCancel(m.ctx)
+			m.mode = pickerModeCloning
+			m.cloneRepoName = url
+			m.cloneErr = nil
+			m.cloneCancel = cloneCancel
+			return m, m.initRepo(cloneCtx, url)
+		case "backspace":
+			if m.urlInput != "" {
+				runes := []rune(m.urlInput)
+				m.urlInput = string(runes[:len(runes)-1])
+			}
+			return m, nil
+		default:
+			if r, ok := printableRune(msg); ok {
+				m.urlInput += string(r)
+				return m, nil
+			}
+			return m, nil
+		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+	case repoLoadedMsg:
+		m.repos = msg.repos
+		m.loading = false
+		m.err = nil
+		return m, nil
+	case repoLoadErrorMsg:
+		m.err = msg.err
+		m.loading = false
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			if m.cloneCancel != nil {
+				m.cloneCancel()
+			}
+			return m, tea.Quit
+		}
+		return m, nil
+	case repoInitSuccessMsg:
+		if m.cloneCancel != nil {
+			m.cloneCancel()
+			m.cloneCancel = nil
+		}
+		m.pendingSelectRepo = msg.repoName
+		m.mode = pickerModeList
+		m.urlInput = ""
+		m.cloneErr = nil
+		m.cloneRepoName = ""
+		m.loading = true
+		return m, m.loadRepos()
+	case repoInitErrorMsg:
+		if m.cloneCancel != nil {
+			m.cloneCancel()
+			m.cloneCancel = nil
+		}
+		m.mode = pickerModeURLInput
+		m.cloneErr = msg.err
+		m.cloneRepoName = ""
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+	case repoLoadedMsg:
+		m.repos = msg.repos
+		m.loading = false
+		m.err = nil
+		return m, nil
+	case repoLoadErrorMsg:
+		m.err = msg.err
+		m.loading = false
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m RepoPickerModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -115,6 +270,18 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applyFilter()
 			return m, nil
 
+		case "a":
+			// Only enter URL input if no filter active; otherwise treat as filter char
+			if m.filterText == "" {
+				m.mode = pickerModeURLInput
+				m.urlInput = ""
+				m.cloneErr = nil
+				return m, nil
+			}
+			m.filterText += "a"
+			m.applyFilter()
+			return m, nil
+
 		case "backspace":
 			if m.filterText != "" {
 				runes := []rune(m.filterText)
@@ -142,6 +309,16 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repos = msg.repos
 		m.loading = false
 		m.err = nil
+		// If we just cloned a repo, auto-select it
+		if m.pendingSelectRepo != "" {
+			for i, repo := range m.repos {
+				if repo == m.pendingSelectRepo {
+					m.selectedIdx = i
+					break
+				}
+			}
+			m.pendingSelectRepo = ""
+		}
 		// Re-apply active filter to new repo list
 		if m.filterText != "" {
 			m.applyFilter()
@@ -174,6 +351,64 @@ func (m RepoPickerModel) View() string {
 
 	var content strings.Builder
 
+	switch m.mode {
+	case pickerModeURLInput:
+		m.viewURLInput(&content, boxWidth)
+	case pickerModeCloning:
+		m.viewCloning(&content, boxWidth)
+	default:
+		m.viewList(&content, boxWidth)
+	}
+
+	// Create bordered box
+	box := modalBoxStyle.Width(boxWidth).Render(content.String())
+
+	// Center the box
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		box,
+	)
+}
+
+func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
+	title := titleStyle.Render("Bramble — Add repository")
+	content.WriteString(title)
+	content.WriteString("\n")
+	content.WriteString(strings.Repeat("─", boxWidth-4))
+	content.WriteString("\n\n")
+
+	content.WriteString("  Enter a git URL:\n\n")
+	content.WriteString("  > " + m.urlInput + "█\n")
+
+	if m.cloneErr != nil {
+		content.WriteString("\n")
+		content.WriteString(errorStyle.Render("  Error: " + m.cloneErr.Error()))
+		content.WriteString("\n")
+	}
+
+	content.WriteString("\n")
+	content.WriteString(dimStyle.Render("  e.g. https://github.com/user/repo"))
+	content.WriteString("\n")
+	content.WriteString(dimStyle.Render("       git@github.com:user/repo.git"))
+	content.WriteString("\n\n")
+	content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "clone") + "  " + formatKeyHints("Esc", "back")))
+	content.WriteString("\n")
+}
+
+func (m RepoPickerModel) viewCloning(content *strings.Builder, boxWidth int) {
+	title := titleStyle.Render("Bramble — Cloning repository")
+	content.WriteString(title)
+	content.WriteString("\n")
+	content.WriteString(strings.Repeat("─", boxWidth-4))
+	content.WriteString("\n\n")
+
+	content.WriteString("  Cloning " + m.cloneRepoName + "...\n\n")
+	content.WriteString(dimStyle.Render("  This may take a moment."))
+	content.WriteString("\n")
+}
+
+func (m RepoPickerModel) viewList(content *strings.Builder, boxWidth int) {
 	// Title
 	title := titleStyle.Render("Bramble — Choose repository")
 	content.WriteString(title)
@@ -192,7 +427,7 @@ func (m RepoPickerModel) View() string {
 	} else if len(m.repos) == 0 {
 		content.WriteString(dimStyle.Render("  No repos found in " + m.wtRoot))
 		content.WriteString("\n\n")
-		content.WriteString(dimStyle.Render("  Run 'wt init <url>' to add a repository"))
+		content.WriteString(dimStyle.Render("  Press [a] to add a repository"))
 		content.WriteString("\n\n")
 		content.WriteString(dimStyle.Render("  Press [q] to quit"))
 		content.WriteString("\n")
@@ -247,19 +482,9 @@ func (m RepoPickerModel) View() string {
 		}
 
 		content.WriteString("\n")
-		content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "open") + "  " + formatKeyHints("Esc", "clear filter/quit") + "  " + formatKeyHints("q", "quit")))
+		content.WriteString(dimStyle.Render("  " + formatKeyHints("Enter", "open") + "  " + formatKeyHints("a", "add repo") + "  " + formatKeyHints("Esc", "clear filter/quit") + "  " + formatKeyHints("q", "quit")))
 		content.WriteString("\n")
 	}
-
-	// Create bordered box
-	box := modalBoxStyle.Width(boxWidth).Render(content.String())
-
-	// Center the box
-	return lipgloss.Place(
-		m.width, m.height,
-		lipgloss.Center, lipgloss.Center,
-		box,
-	)
 }
 
 // SelectedRepo returns the chosen repo name, or empty if none was chosen.
