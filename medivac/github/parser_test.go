@@ -114,22 +114,22 @@ func TestTrimLog_Trims(t *testing.T) {
 }
 
 func TestComputeSignature_Stable(t *testing.T) {
-	sig1 := issue.ComputeSignature(issue.CategoryLintGo, "main.go", "unused variable x", "lint", "")
-	sig2 := issue.ComputeSignature(issue.CategoryLintGo, "main.go", "unused variable x", "lint", "")
+	sig1 := issue.ComputeSignature("main.go", "unused variable x", "lint", "")
+	sig2 := issue.ComputeSignature("main.go", "unused variable x", "lint", "")
 	if sig1 != sig2 {
 		t.Errorf("signatures should be equal: %s != %s", sig1, sig2)
 	}
 
 	// Different message should produce different signature.
-	sig3 := issue.ComputeSignature(issue.CategoryLintGo, "main.go", "different error", "lint", "")
+	sig3 := issue.ComputeSignature("main.go", "different error", "lint", "")
 	if sig1 == sig3 {
 		t.Errorf("signatures should differ for different messages")
 	}
 }
 
 func TestComputeSignature_IgnoresLineNumbers(t *testing.T) {
-	sig1 := issue.ComputeSignature(issue.CategoryBuild, "main.go", "error at :10:5", "build", "")
-	sig2 := issue.ComputeSignature(issue.CategoryBuild, "main.go", "error at :20:3", "build", "")
+	sig1 := issue.ComputeSignature("main.go", "error at :10:5", "build", "")
+	sig2 := issue.ComputeSignature("main.go", "error at :20:3", "build", "")
 	if sig1 != sig2 {
 		t.Errorf("signatures should be equal after line number normalization: %s != %s", sig1, sig2)
 	}
@@ -138,8 +138,8 @@ func TestComputeSignature_IgnoresLineNumbers(t *testing.T) {
 func TestComputeSignature_SameAcrossJobs(t *testing.T) {
 	// Same error in different jobs should produce the same signature
 	// so cross-job dedup works correctly.
-	sig1 := issue.ComputeSignature(issue.CategoryTest, "foo.go", "test failed", "lint-job", "")
-	sig2 := issue.ComputeSignature(issue.CategoryTest, "foo.go", "test failed", "build-job", "")
+	sig1 := issue.ComputeSignature("foo.go", "test failed", "lint-job", "")
+	sig2 := issue.ComputeSignature("foo.go", "test failed", "build-job", "")
 	if sig1 != sig2 {
 		t.Errorf("signatures should be equal across different jobs: %s != %s", sig1, sig2)
 	}
@@ -147,8 +147,8 @@ func TestComputeSignature_SameAcrossJobs(t *testing.T) {
 
 func TestComputeSignature_JobNameFallback(t *testing.T) {
 	// When summary and details are both empty, job name is used as fallback.
-	sig1 := issue.ComputeSignature(issue.CategoryUnknown, "", "", "lint-job", "")
-	sig2 := issue.ComputeSignature(issue.CategoryUnknown, "", "", "build-job", "")
+	sig1 := issue.ComputeSignature("", "", "lint-job", "")
+	sig2 := issue.ComputeSignature("", "", "build-job", "")
 	if sig1 == sig2 {
 		t.Errorf("signatures should differ when job name is the only discriminator")
 	}
@@ -156,7 +156,7 @@ func TestComputeSignature_JobNameFallback(t *testing.T) {
 
 func TestComputeSignature_EmptySummaryFallback(t *testing.T) {
 	// With empty summary, should use details.
-	sig1 := issue.ComputeSignature(issue.CategoryUnknown, "", "", "job", "some error detail")
+	sig1 := issue.ComputeSignature("", "", "job", "some error detail")
 	if sig1 == "" {
 		t.Error("expected non-empty signature")
 	}
@@ -166,7 +166,7 @@ func TestComputeSignature_EmptySummaryFallback(t *testing.T) {
 	}
 
 	// With empty summary and details, should use job name.
-	sig2 := issue.ComputeSignature(issue.CategoryUnknown, "", "", "my-job", "")
+	sig2 := issue.ComputeSignature("", "", "my-job", "")
 	if sig2 == "" {
 		t.Error("expected non-empty signature")
 	}
@@ -189,8 +189,8 @@ func TestValidCategories(t *testing.T) {
 }
 
 func TestComputeSignature_IgnoresCategory(t *testing.T) {
-	sig1 := issue.ComputeSignature(issue.CategoryLintTS, "src/app.tsx", "Parameter 'e' implicitly has an 'any' type", "lint", "")
-	sig2 := issue.ComputeSignature(issue.CategoryBuildDocker, "src/app.tsx", "Parameter 'e' implicitly has an 'any' type", "build", "")
+	sig1 := issue.ComputeSignature("src/app.tsx", "Parameter 'e' implicitly has an 'any' type", "lint", "")
+	sig2 := issue.ComputeSignature("src/app.tsx", "Parameter 'e' implicitly has an 'any' type", "build", "")
 	if sig1 != sig2 {
 		t.Errorf("signatures should be equal regardless of category: %s != %s", sig1, sig2)
 	}

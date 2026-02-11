@@ -179,16 +179,22 @@ func (t *Tracker) Reconcile(failures []CIFailure) *ReconcileResult {
 		}
 	}
 
-	// Check for resolved issues (fix_merged issues no longer seen)
-	for sig, issue := range t.issues {
-		if seenSignatures[sig] {
-			continue
-		}
-		if issue.Status == StatusFixMerged {
-			issue.Status = StatusVerified
-			now := time.Now()
-			issue.ResolvedAt = &now
-			result.Resolved = append(result.Resolved, issue)
+	// Check for resolved issues (fix_merged issues no longer seen).
+	// Only perform verification if we actually triaged failures;
+	// calling Reconcile(nil) means we didn't run triage, so we have no evidence
+	// that fix_merged issues are truly verified. An empty slice []CIFailure{}
+	// means we triaged but found no failures, which is valid evidence for verification.
+	if failures != nil {
+		for sig, issue := range t.issues {
+			if seenSignatures[sig] {
+				continue
+			}
+			if issue.Status == StatusFixMerged {
+				issue.Status = StatusVerified
+				now := time.Now()
+				issue.ResolvedAt = &now
+				result.Resolved = append(result.Resolved, issue)
+			}
 		}
 	}
 

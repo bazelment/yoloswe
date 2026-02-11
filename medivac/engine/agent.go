@@ -110,6 +110,19 @@ func runAgentCore(
 
 	logger.Info("worktree created", "path", r.WorktreePath)
 
+	// Ensure worktree is cleaned up on error paths.
+	// On success, the worktree will be cleaned up later after successful merge.
+	defer func() {
+		if !r.Success {
+			if removeErr := wtManager.Remove(ctx, r.Branch, true); removeErr != nil {
+				logger.Warn("failed to cleanup worktree on error path",
+					"branch", r.Branch,
+					"error", removeErr,
+				)
+			}
+		}
+	}()
+
 	// Create ephemeral session
 	if sessionFactory == nil {
 		sessionFactory = defaultSessionFactory
@@ -167,6 +180,13 @@ func runAgentCore(
 	// If no file changes but analysis says fix not applied, treat as analysis_only (not an error).
 	if len(r.FilesChanged) == 0 {
 		if r.Analysis != nil && !r.Analysis.FixApplied {
+			// Analysis-only: no PR will be created, cleanup worktree immediately
+			if removeErr := wtManager.Remove(ctx, r.Branch, true); removeErr != nil {
+				logger.Warn("failed to cleanup worktree after analysis-only outcome",
+					"branch", r.Branch,
+					"error", removeErr,
+				)
+			}
 			r.Success = true // analysis-only is a valid outcome
 			logger.Info("agent completed with analysis only (no code fix possible)",
 				"issueCount", len(issues),

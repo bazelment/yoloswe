@@ -69,9 +69,9 @@ func TestTriageRun_BasicJSON(t *testing.T) {
 		Query: mockQuery(responseJSON, 0.001),
 	}
 
-	failures, cost, err := TriageRun(context.Background(), testRun, testJobs, nil, "some log", cfg)
+	failures, cost, err := triageRun(context.Background(), testRun, testJobs, nil, "some log", cfg)
 	if err != nil {
-		t.Fatalf("TriageRun: %v", err)
+		t.Fatalf("triageRun: %v", err)
 	}
 	if cost != 0.001 {
 		t.Errorf("expected cost 0.001, got %f", cost)
@@ -116,9 +116,9 @@ func TestTriageRun_MarkdownFencedJSON(t *testing.T) {
 		Query: mockQuery(responseJSON, 0.0005),
 	}
 
-	failures, _, err := TriageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
+	failures, _, err := triageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
 	if err != nil {
-		t.Fatalf("TriageRun: %v", err)
+		t.Fatalf("triageRun: %v", err)
 	}
 	if len(failures) != 1 {
 		t.Fatalf("expected 1 failure, got %d", len(failures))
@@ -135,9 +135,9 @@ func TestTriageRun_InvalidCategory(t *testing.T) {
 		Query: mockQuery(responseJSON, 0.001),
 	}
 
-	failures, _, err := TriageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
+	failures, _, err := triageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
 	if err != nil {
-		t.Fatalf("TriageRun: %v", err)
+		t.Fatalf("triageRun: %v", err)
 	}
 	if len(failures) != 1 {
 		t.Fatalf("expected 1 failure, got %d", len(failures))
@@ -155,9 +155,9 @@ func TestTriageRun_InvalidJobFallback(t *testing.T) {
 		Query: mockQuery(responseJSON, 0.001),
 	}
 
-	failures, _, err := TriageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
+	failures, _, err := triageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
 	if err != nil {
-		t.Fatalf("TriageRun: %v", err)
+		t.Fatalf("triageRun: %v", err)
 	}
 	if failures[0].JobName != "lint" {
 		t.Errorf("expected fallback to first job 'lint', got %s", failures[0].JobName)
@@ -169,9 +169,9 @@ func TestTriageRun_EmptyArray(t *testing.T) {
 		Query: mockQuery("[]", 0.0001),
 	}
 
-	failures, _, err := TriageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
+	failures, _, err := triageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
 	if err != nil {
-		t.Fatalf("TriageRun: %v", err)
+		t.Fatalf("triageRun: %v", err)
 	}
 	if len(failures) != 0 {
 		t.Errorf("expected 0 failures, got %d", len(failures))
@@ -183,7 +183,7 @@ func TestTriageRun_QueryError(t *testing.T) {
 		Query: mockQueryError(fmt.Errorf("network error")),
 	}
 
-	_, _, err := TriageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
+	_, _, err := triageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -203,9 +203,9 @@ func TestTriageRun_Dedup(t *testing.T) {
 		Query: mockQuery(responseJSON, 0.001),
 	}
 
-	failures, _, err := TriageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
+	failures, _, err := triageRun(context.Background(), testRun, testJobs, nil, "log", cfg)
 	if err != nil {
-		t.Fatalf("TriageRun: %v", err)
+		t.Fatalf("triageRun: %v", err)
 	}
 	if len(failures) != 1 {
 		t.Errorf("expected 1 deduped failure, got %d", len(failures))

@@ -62,7 +62,7 @@ type CIFailure struct {
 // Job name is only used in the hash when it's the sole identifier
 // (empty summary + empty details), so the same error across different
 // jobs deduplicates correctly.
-func ComputeSignature(category FailureCategory, file, summary, jobName, details string) string {
+func ComputeSignature(file, summary, jobName, details string) string {
 	msg := summary
 	if msg == "" {
 		msg = details

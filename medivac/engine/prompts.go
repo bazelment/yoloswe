@@ -45,7 +45,9 @@ func buildFixPrompt(iss *issue.Issue, branch string) string {
 		PreviousAttempts: iss.FixAttempts,
 	}
 	var buf bytes.Buffer
-	fixTmpl.Execute(&buf, data)
+	if err := fixTmpl.Execute(&buf, data); err != nil {
+		return fmt.Sprintf("ERROR: Failed to render fix prompt: %v", err)
+	}
 	return buf.String()
 }
 
@@ -68,7 +70,9 @@ func buildGroupFixPrompt(group IssueGroup, branch string) string {
 		Failures: failures,
 	}
 	var buf bytes.Buffer
-	groupFixTmpl.Execute(&buf, data)
+	if err := groupFixTmpl.Execute(&buf, data); err != nil {
+		return fmt.Sprintf("ERROR: Failed to render group fix prompt: %v", err)
+	}
 	return buf.String()
 }
 
@@ -87,7 +91,10 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	if maxLen < 3 {
+		return "..."
+	}
+	return s[:maxLen-3] + "..."
 }
 
 const fixPromptTmpl = `You are a CI failure medivac agent. Your goal is to fix a specific CI failure in this repository.

@@ -36,10 +36,12 @@ type triageResponse struct {
 	Line      int    `json:"line"`
 }
 
-// TriageRun sends all metadata for a single workflow run (annotations, failed
+// triageRun sends all metadata for a single workflow run (annotations, failed
 // jobs, cleaned log) to the LLM in a single call and returns deduplicated
 // issue.CIFailure results plus the cost incurred.
-func TriageRun(
+// This function is kept for test compatibility but is not used in production;
+// TriageBatch is the primary triage implementation.
+func triageRun(
 	ctx context.Context,
 	run WorkflowRun,
 	failedJobs []JobResult,
@@ -108,7 +110,7 @@ func TriageRun(
 			ErrorCode: item.ErrorCode,
 			Timestamp: run.CreatedAt,
 		}
-		f.Signature = issue.ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
+		f.Signature = issue.ComputeSignature(f.File, f.Summary, f.JobName, f.Details)
 
 		if !seen[f.Signature] {
 			seen[f.Signature] = true
@@ -298,7 +300,7 @@ func TriageBatch(
 			ErrorCode: item.ErrorCode,
 			Timestamp: run.CreatedAt,
 		}
-		f.Signature = issue.ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
+		f.Signature = issue.ComputeSignature(f.File, f.Summary, f.JobName, f.Details)
 
 		if !seen[f.Signature] {
 			seen[f.Signature] = true

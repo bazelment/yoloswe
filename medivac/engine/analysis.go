@@ -62,7 +62,8 @@ func ParseAnalysis(text string) *AgentAnalysis {
 		} else if v, ok := cutField(line, "root_cause:"); ok {
 			a.RootCause = v
 		} else if v, ok := cutField(line, "fix_applied:"); ok {
-			a.FixApplied = strings.EqualFold(strings.TrimSpace(v), "yes")
+			v = strings.TrimSpace(v)
+			a.FixApplied = strings.EqualFold(v, "yes") || strings.EqualFold(v, "true")
 		} else if strings.HasPrefix(line, "- ") {
 			opt := parseFixOption(line[2:])
 			if opt.Label != "" {
