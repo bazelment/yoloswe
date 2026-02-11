@@ -394,6 +394,48 @@ func TestRepoPickerPendingSelect_ClearedEvenIfNotFound(t *testing.T) {
 	assert.Equal(t, "", m.pendingSelectRepo) // Cleared even if not found
 }
 
+// --- Repo load in non-list modes ---
+
+func TestRepoPickerURLInput_RepoLoadedMsgHandled(t *testing.T) {
+	// If loadRepos completes while in URL input mode, it should update repos
+	// and clear loading so returning to list doesn't show stale "Loading..." state.
+	m := newTestRepoPicker(nil)
+	m.loading = true
+	m.mode = pickerModeURLInput
+
+	m2, _ := m.Update(repoLoadedMsg{repos: []string{"alpha", "beta"}})
+	m = m2.(RepoPickerModel)
+
+	assert.False(t, m.loading)
+	assert.Len(t, m.repos, 2)
+	assert.Equal(t, pickerModeURLInput, m.mode) // stays in URL input mode
+}
+
+func TestRepoPickerURLInput_RepoLoadErrorMsgHandled(t *testing.T) {
+	m := newTestRepoPicker(nil)
+	m.loading = true
+	m.mode = pickerModeURLInput
+
+	m2, _ := m.Update(repoLoadErrorMsg{err: fmt.Errorf("load failed")})
+	m = m2.(RepoPickerModel)
+
+	assert.False(t, m.loading)
+	assert.Equal(t, pickerModeURLInput, m.mode)
+}
+
+func TestRepoPickerCloning_RepoLoadedMsgHandled(t *testing.T) {
+	m := newTestRepoPicker(nil)
+	m.loading = true
+	m.mode = pickerModeCloning
+
+	m2, _ := m.Update(repoLoadedMsg{repos: []string{"alpha"}})
+	m = m2.(RepoPickerModel)
+
+	assert.False(t, m.loading)
+	assert.Len(t, m.repos, 1)
+	assert.Equal(t, pickerModeCloning, m.mode)
+}
+
 // --- View tests ---
 
 func TestRepoPickerView_EmptyStateShowsAddHint(t *testing.T) {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -92,7 +93,9 @@ func (m RepoPickerModel) initRepo(ctx context.Context, url string) tea.Cmd {
 		if repoName == "" || repoName == "." || repoName == ".." || strings.ContainsAny(repoName, "/\\") {
 			return repoInitErrorMsg{err: fmt.Errorf("could not determine repository name from URL")}
 		}
-		manager := wt.NewManager(m.wtRoot, "")
+		var buf bytes.Buffer
+		output := wt.NewOutput(&buf, false)
+		manager := wt.NewManager(m.wtRoot, "", wt.WithOutput(output))
 		if _, err := manager.Init(ctx, url); err != nil {
 			return repoInitErrorMsg{err: err}
 		}
@@ -151,6 +154,15 @@ func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+	case repoLoadedMsg:
+		m.repos = msg.repos
+		m.loading = false
+		m.err = nil
+		return m, nil
+	case repoLoadErrorMsg:
+		m.err = msg.err
+		m.loading = false
+		return m, nil
 	}
 	return m, nil
 }
@@ -189,6 +201,15 @@ func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		return m, nil
+	case repoLoadedMsg:
+		m.repos = msg.repos
+		m.loading = false
+		m.err = nil
+		return m, nil
+	case repoLoadErrorMsg:
+		m.err = msg.err
+		m.loading = false
 		return m, nil
 	}
 	return m, nil
