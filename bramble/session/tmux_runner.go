@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
@@ -50,22 +52,29 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 	args = append(args, r.prompt)
 
 	// Build the full command string for tmux
-	// We need to escape the prompt properly for shell execution
-	cmdStr := claudeCmd
-	for _, arg := range args {
-		// Simple escaping - wrap in single quotes and escape any single quotes
-		escaped := "'" + arg + "'"
-		cmdStr += " " + escaped
-	}
+	cmdStr := buildShellCommand(claudeCmd, args)
 
 	// Create tmux window with the claude command
 	// -n: window name
 	// -c: working directory
-	// Note: We don't use -d flag, so we switch to the window immediately
 	createCmd := exec.Command("tmux", "new-window", "-n", r.windowName, "-c", r.workDir, cmdStr)
 
 	if err := createCmd.Run(); err != nil {
 		return fmt.Errorf("failed to create tmux window %q: %w", r.windowName, err)
+	}
+
+	// Set remain-on-exit so the window stays open if claude crashes,
+	// allowing the user to see the error output instead of the window
+	// vanishing silently.
+	setOptCmd := exec.Command("tmux", "set-option", "-t", r.windowName, "remain-on-exit", "on")
+	_ = setOptCmd.Run()
+
+	// Brief pause then verify the window still exists. Without remain-on-exit
+	// (e.g. if the set-option failed), a broken command could cause the window
+	// to vanish before we even start monitoring.
+	time.Sleep(100 * time.Millisecond)
+	if !TmuxWindowExists(r.windowName) {
+		return fmt.Errorf("tmux window %q disappeared immediately after creation — claude may have failed to start", r.windowName)
 	}
 
 	// Display a message showing how to switch back
@@ -102,4 +111,16 @@ func (r *tmuxRunner) Stop() error {
 	}
 
 	return nil
+}
+
+// buildShellCommand constructs a shell command string with properly escaped arguments.
+// Each argument is wrapped in single quotes with embedded single quotes escaped
+// using the standard '\” technique.
+func buildShellCommand(cmd string, args []string) string {
+	cmdStr := cmd
+	for _, arg := range args {
+		escaped := "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+		cmdStr += " " + escaped
+	}
+	return cmdStr
 }
