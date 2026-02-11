@@ -45,7 +45,7 @@ type RepoPickerModel struct {
 // NewRepoPickerModel creates a new repo picker model.
 func NewRepoPickerModel(ctx context.Context, wtRoot string, styles *Styles) RepoPickerModel {
 	if styles == nil {
-		styles = NewStyles(DefaultDark)
+		styles = NewStyles(Dark)
 	}
 	return RepoPickerModel{
 		ctx:     ctx,

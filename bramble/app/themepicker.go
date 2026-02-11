@@ -71,7 +71,7 @@ func (tp *ThemePicker) SelectedTheme() ColorPalette {
 	if tp.selectedIdx >= 0 && tp.selectedIdx < len(tp.themes) {
 		return tp.themes[tp.selectedIdx]
 	}
-	return DefaultDark
+	return Dark
 }
 
 // OriginalTheme returns the theme name that was active when the picker opened.

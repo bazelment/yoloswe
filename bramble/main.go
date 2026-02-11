@@ -168,7 +168,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 // runRepoPicker shows the repo selection screen and returns the selected repo.
 func runRepoPicker(ctx context.Context, wtRoot string) (string, error) {
 	settings := app.LoadSettings()
-	palette := app.DefaultDark
+	palette := app.Dark
 	if p, ok := app.ThemeByName(settings.ThemeName); ok {
 		palette = p
 	}

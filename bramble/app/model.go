@@ -91,7 +91,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 
 	// Load settings and resolve theme
 	settings := LoadSettings()
-	palette := DefaultDark
+	palette := Dark
 	if p, ok := ThemeByName(settings.ThemeName); ok {
 		palette = p
 	}

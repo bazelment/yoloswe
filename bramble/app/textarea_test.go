@@ -76,7 +76,7 @@ func TestTextAreaPrompt(t *testing.T) {
 	ta.SetPrompt("Enter text:")
 	ta.SetValue("Hello")
 
-	view := ta.View(NewStyles(DefaultDark))
+	view := ta.View(NewStyles(Dark))
 	assert.Contains(t, view, "Enter text:")
 	assert.Contains(t, view, "Hello")
 }
@@ -113,7 +113,7 @@ func TestTextAreaCustomLabels(t *testing.T) {
 	ta.SetWidth(40)
 	ta.SetLabels("Continue", "Back")
 
-	view := ta.View(NewStyles(DefaultDark))
+	view := ta.View(NewStyles(Dark))
 	assert.Contains(t, view, "Continue")
 	assert.Contains(t, view, "Back")
 }
@@ -126,7 +126,7 @@ func TestTextAreaViewRendering(t *testing.T) {
 	ta.SetPrompt("Test prompt:")
 	ta.SetValue("Test content")
 
-	view := ta.View(NewStyles(DefaultDark))
+	view := ta.View(NewStyles(Dark))
 
 	// Should contain the prompt
 	assert.Contains(t, view, "Test prompt:")
@@ -149,7 +149,7 @@ func TestTextAreaMultipleLines(t *testing.T) {
 
 	assert.Equal(t, 4, ta.LineCount())
 
-	view := ta.View(NewStyles(DefaultDark))
+	view := ta.View(NewStyles(Dark))
 	assert.NotEmpty(t, view)
 	assert.Contains(t, view, "Send")
 	assert.Contains(t, view, "Cancel")
@@ -316,7 +316,7 @@ func TestTextAreaResetPreservesPlaceholder(t *testing.T) {
 
 	// Placeholder should survive Reset
 	ta.SetWidth(40)
-	view := ta.View(NewStyles(DefaultDark))
+	view := ta.View(NewStyles(Dark))
 	assert.Contains(t, view, "Enter text here...")
 }
 

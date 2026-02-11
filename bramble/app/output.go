@@ -28,7 +28,7 @@ func NewOutputModel(info *session.SessionInfo, lines []session.OutputLine) Outpu
 	return OutputModel{
 		lines:    lines,
 		info:     info,
-		styles:   NewStyles(DefaultDark),
+		styles:   NewStyles(Dark),
 		isReplay: false,
 		width:    80,
 		height:   24,
@@ -41,7 +41,7 @@ func NewOutputModelWithMarkdown(info *session.SessionInfo, lines []session.Outpu
 	return OutputModel{
 		lines:      lines,
 		info:       info,
-		styles:     NewStyles(DefaultDark),
+		styles:     NewStyles(Dark),
 		isReplay:   false,
 		width:      width,
 		height:     24,
@@ -55,7 +55,7 @@ func NewReplayOutputModel(stored *session.StoredSession) OutputModel {
 	return OutputModel{
 		lines:    stored.Output,
 		info:     &info,
-		styles:   NewStyles(DefaultDark),
+		styles:   NewStyles(Dark),
 		isReplay: true,
 		width:    80,
 		height:   24,

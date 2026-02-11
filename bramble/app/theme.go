@@ -215,82 +215,161 @@ func NewStyles(p ColorPalette) *Styles {
 }
 
 // Built-in palettes.
+// The four RGB palettes (Dark, Light, DarkDaltonized, LightDaltonized) use
+// "#RRGGBB" hex strings so lipgloss renders exact 24-bit colour.
+// The two ANSI palettes (DarkAnsi, LightAnsi) use basic-16 colour numbers
+// so they adapt to the user's terminal colour scheme.
 var (
-	// DefaultDark is the default dark-terminal palette with improved readability.
-	// Dim uses "245" (was 242) and Done uses "245" (was 8) for better contrast.
-	DefaultDark = ColorPalette{
-		Name:           "default-dark",
-		Accent:         "12",  // bright blue
-		Dim:            "245", // improved: was 242, now brighter for readability
-		Border:         "240", // subtle lines
-		BarBg:          "236", // bar fill
-		BarFg:          "252", // bar primary text
-		SelectBg:       "240", // highlight row
-		SelectFg:       "15",  // white
-		Error:          "9",   // bright red
-		Running:        "10",  // bright green
-		Idle:           "14",  // bright cyan
-		Pending:        "11",  // bright yellow
-		Done:           "245", // improved: was 8 (near-invisible), now readable gray
-		ToastSuccessBg: "22",
-		ToastSuccessFg: "10",
-		ToastInfoBg:    "17",
-		ToastInfoFg:    "14",
-		ToastErrorBg:   "52",
-		ToastErrorFg:   "9",
+	// Dark is the default dark palette, based on Claude Code's dark theme.
+	Dark = ColorPalette{
+		Name:           "dark",
+		Accent:         "#D77757", // terracotta orange (claude)
+		Dim:            "#999999", // medium gray (inactive)
+		Border:         "#505050", // dark gray (subtle)
+		BarBg:          "#373737", // dark gray (userMessageBackground)
+		BarFg:          "#FFFFFF", // white (text)
+		SelectBg:       "#606060", // slightly brighter than subtle
+		SelectFg:       "#FFFFFF", // white (text)
+		Error:          "#FF6B80", // coral red (error)
+		Running:        "#4EBA65", // green (success)
+		Idle:           "#B1B9F9", // periwinkle (permission)
+		Pending:        "#FFC107", // amber (warning)
+		Done:           "#999999", // medium gray (inactive)
+		ToastSuccessBg: "#1A3D1F", // darker green
+		ToastSuccessFg: "#4EBA65", // green (success)
+		ToastInfoBg:    "#2A2D4A", // darker periwinkle
+		ToastInfoFg:    "#B1B9F9", // periwinkle (permission)
+		ToastErrorBg:   "#4A1A22", // darker red
+		ToastErrorFg:   "#FF6B80", // coral red (error)
 		GlamourStyle:   "dark",
 	}
 
-	// DefaultLight is the default light-terminal palette.
-	DefaultLight = ColorPalette{
-		Name:           "default-light",
-		Accent:         "4",   // navy
-		Dim:            "238", // muted text
-		Border:         "248", // subtle lines
-		BarBg:          "254", // bar fill
-		BarFg:          "236", // bar primary text
-		SelectBg:       "195", // light cyan highlight
-		SelectFg:       "0",   // black
-		Error:          "1",   // dark red
-		Running:        "2",   // dark green
-		Idle:           "6",   // dark cyan
-		Pending:        "3",   // dark yellow
-		Done:           "244", // gray
-		ToastSuccessBg: "194",
-		ToastSuccessFg: "22",
-		ToastInfoBg:    "153",
-		ToastInfoFg:    "17",
-		ToastErrorBg:   "217",
-		ToastErrorFg:   "52",
+	// Light is the light palette, based on Claude Code's light theme.
+	Light = ColorPalette{
+		Name:           "light",
+		Accent:         "#D77757", // terracotta orange (claude)
+		Dim:            "#666666", // dark gray (inactive)
+		Border:         "#AFAFAF", // medium gray (subtle)
+		BarBg:          "#F0F0F0", // light gray (userMessageBackground)
+		BarFg:          "#000000", // black (text)
+		SelectBg:       "#C0C0C0", // slightly brighter than subtle
+		SelectFg:       "#000000", // black (text)
+		Error:          "#AB2B3F", // dark red (error)
+		Running:        "#2C7A39", // dark green (success)
+		Idle:           "#5769F7", // blue-violet (permission)
+		Pending:        "#966C1E", // dark amber (warning)
+		Done:           "#666666", // dark gray (inactive)
+		ToastSuccessBg: "#D4EDDA", // pale green
+		ToastSuccessFg: "#2C7A39", // dark green (success)
+		ToastInfoBg:    "#D6DAFE", // pale periwinkle
+		ToastInfoFg:    "#5769F7", // blue-violet (permission)
+		ToastErrorBg:   "#F5D0D6", // pale red
+		ToastErrorFg:   "#AB2B3F", // dark red (error)
 		GlamourStyle:   "light",
 	}
 
-	// HighContrast is a high-contrast palette for maximum readability.
-	HighContrast = ColorPalette{
-		Name:           "high-contrast",
-		Accent:         "87",  // bright cyan
-		Dim:            "252", // very bright gray
-		Border:         "250", // bright border
-		BarBg:          "234", // dark bar
-		BarFg:          "15",  // white text
-		SelectBg:       "21",  // bright blue background
-		SelectFg:       "15",  // white
-		Error:          "196", // vivid red
-		Running:        "46",  // vivid green
-		Idle:           "51",  // vivid cyan
-		Pending:        "226", // vivid yellow
-		Done:           "250", // bright gray
-		ToastSuccessBg: "22",
-		ToastSuccessFg: "46",
-		ToastInfoBg:    "17",
-		ToastInfoFg:    "51",
-		ToastErrorBg:   "52",
-		ToastErrorFg:   "196",
+	// DarkDaltonized is a colorblind-friendly dark palette.
+	// Key difference: success uses blue instead of green.
+	DarkDaltonized = ColorPalette{
+		Name:           "dark-daltonized",
+		Accent:         "#FF9933", // bright orange
+		Dim:            "#999999", // medium gray
+		Border:         "#505050", // dark gray
+		BarBg:          "#373737", // dark gray
+		BarFg:          "#FFFFFF", // white
+		SelectBg:       "#606060", // slightly brighter than subtle
+		SelectFg:       "#FFFFFF", // white
+		Error:          "#FF6666", // bright red
+		Running:        "#3399FF", // blue (NOT green)
+		Idle:           "#99CCFF", // light sky blue
+		Pending:        "#FFCC00", // bright yellow
+		Done:           "#999999", // medium gray
+		ToastSuccessBg: "#1A2D4A", // darker blue
+		ToastSuccessFg: "#3399FF", // blue (success)
+		ToastInfoBg:    "#2A3D5A", // darker sky blue
+		ToastInfoFg:    "#99CCFF", // light sky blue
+		ToastErrorBg:   "#4A1A1A", // darker red
+		ToastErrorFg:   "#FF6666", // bright red
 		GlamourStyle:   "dark",
 	}
 
+	// LightDaltonized is a colorblind-friendly light palette.
+	// Key difference: success uses teal-blue instead of green.
+	LightDaltonized = ColorPalette{
+		Name:           "light-daltonized",
+		Accent:         "#FF9933", // bright orange
+		Dim:            "#666666", // dark gray
+		Border:         "#AFAFAF", // medium gray
+		BarBg:          "#F0F0F0", // light gray
+		BarFg:          "#000000", // black
+		SelectBg:       "#C0C0C0", // slightly brighter than subtle
+		SelectFg:       "#000000", // black
+		Error:          "#CC0000", // pure red
+		Running:        "#006699", // dark teal-blue
+		Idle:           "#3366FF", // blue
+		Pending:        "#FF9900", // orange
+		Done:           "#666666", // dark gray
+		ToastSuccessBg: "#CCE5F0", // pale teal
+		ToastSuccessFg: "#006699", // dark teal-blue
+		ToastInfoBg:    "#D6DEFF", // pale blue
+		ToastInfoFg:    "#3366FF", // blue
+		ToastErrorBg:   "#F5CCCC", // pale red
+		ToastErrorFg:   "#CC0000", // pure red
+		GlamourStyle:   "light",
+	}
+
+	// DarkAnsi is an ANSI-only dark palette that adapts to the terminal's
+	// colour scheme. Uses basic-16 colour numbers (0-15).
+	DarkAnsi = ColorPalette{
+		Name:           "dark-ansi",
+		Accent:         "9",   // red bright (ansi)
+		Dim:            "7",   // white / silver (ansi)
+		Border:         "7",   // white / silver (ansi)
+		BarBg:          "236", // dark gray (extended, safe on dark terms)
+		BarFg:          "15",  // bright white (ansi)
+		SelectBg:       "240", // medium gray (extended)
+		SelectFg:       "15",  // bright white (ansi)
+		Error:          "9",   // red bright (ansi)
+		Running:        "10",  // green bright (ansi)
+		Idle:           "12",  // blue bright (ansi)
+		Pending:        "11",  // yellow bright (ansi)
+		Done:           "7",   // white / silver (ansi)
+		ToastSuccessBg: "22",  // dark green (extended)
+		ToastSuccessFg: "10",  // green bright (ansi)
+		ToastInfoBg:    "17",  // dark blue (extended)
+		ToastInfoFg:    "12",  // blue bright (ansi)
+		ToastErrorBg:   "52",  // dark red (extended)
+		ToastErrorFg:   "9",   // red bright (ansi)
+		GlamourStyle:   "dark",
+	}
+
+	// LightAnsi is an ANSI-only light palette that adapts to the terminal's
+	// colour scheme. Uses basic-16 colour numbers (0-15).
+	LightAnsi = ColorPalette{
+		Name:           "light-ansi",
+		Accent:         "9",   // red bright (ansi)
+		Dim:            "8",   // black bright / dark gray (ansi)
+		Border:         "8",   // black bright / dark gray (ansi)
+		BarBg:          "254", // light gray (extended, safe on light terms)
+		BarFg:          "0",   // black (ansi)
+		SelectBg:       "195", // light cyan (extended)
+		SelectFg:       "0",   // black (ansi)
+		Error:          "1",   // red (ansi)
+		Running:        "2",   // green (ansi)
+		Idle:           "4",   // blue (ansi)
+		Pending:        "3",   // yellow (ansi)
+		Done:           "8",   // black bright / dark gray (ansi)
+		ToastSuccessBg: "194", // pale green (extended)
+		ToastSuccessFg: "2",   // green (ansi)
+		ToastInfoBg:    "153", // pale blue (extended)
+		ToastInfoFg:    "4",   // blue (ansi)
+		ToastErrorBg:   "217", // pale red (extended)
+		ToastErrorFg:   "1",   // red (ansi)
+		GlamourStyle:   "light",
+	}
+
 	// BuiltinThemes lists all available built-in themes.
-	BuiltinThemes = []ColorPalette{DefaultDark, DefaultLight, HighContrast}
+	BuiltinThemes = []ColorPalette{Dark, Light, DarkDaltonized, LightDaltonized, DarkAnsi, LightAnsi}
 )
 
 // ThemeByName looks up a built-in theme by name.
