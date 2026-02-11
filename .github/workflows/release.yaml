@@ -95,11 +95,21 @@ jobs:
             dist/*.tar.gz
             dist/checksums.txt
 
+      - name: Generate GitHub App token
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: bazelment
+          repositories: homebrew-tap
+
       - name: Update Homebrew tap
         if: ${{ !contains(steps.version.outputs.version, '-') }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAP_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # Strip the 'v' prefix for the formula version
           FORMULA_VERSION="${VERSION#v}"
