@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/bramble/app"
+	"github.com/bazelment/yoloswe/bramble/service"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
@@ -37,7 +38,7 @@ func TestRouteTaskWithRealRouter(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := app.NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, router, nil, 80, 24)
+	m := app.NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, service.NewLocalTaskRouterService(router), nil, 80, 24)
 
 	// Use RouteTask (exported from taskmodal.go) directly to verify wiring
 	req := taskrouter.RouteRequest{

@@ -18,7 +18,7 @@ func TestWelcomeNoWorktrees(t *testing.T) {
 	defer mgr.Close()
 
 	// No worktrees, no sessions
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 80, 24)
 
 	view := m.renderWelcome(80, 20)
 
@@ -38,7 +38,7 @@ func TestWelcomeWithWorktrees(t *testing.T) {
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 		{Branch: "fix-bug", Path: "/tmp/wt/fix-bug"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 
 	view := m.renderWelcome(80, 20)
 
@@ -58,7 +58,7 @@ func TestWelcomeWithWorktreeStatus(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 	m.worktreeStatuses = map[string]*wt.WorktreeStatus{
 		"feature-auth": {
 			IsDirty:  true,
@@ -83,7 +83,7 @@ func TestWelcomeWithSessions(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 
 	// Add a session for this worktree
 	mgr.AddSession(&session.Session{
@@ -107,7 +107,7 @@ func TestWelcomeWorktreeOpMessages(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, nil, 80, 24)
 	m.worktreeOpMessages = []string{"Creating worktree feature-new..."}
 
 	view := m.renderWelcome(80, 20)
@@ -125,7 +125,7 @@ func TestRenderOutputAreaDelegatesToWelcome(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 	// viewingSessionID is "" by default
 
 	output := m.renderOutputArea(80, 20)
@@ -143,7 +143,7 @@ func TestBuildTimelineMergeLiveAndHistory(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 
 	now := time.Now()
 	earlier := now.Add(-10 * time.Minute)
@@ -190,7 +190,7 @@ func TestBuildTimelineDeduplicatesLiveOverHistory(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 
 	now := time.Now()
 
@@ -233,7 +233,7 @@ func TestBuildTimelineHistoryOnly(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, worktrees, 80, 24)
 
 	now := time.Now()
 	t1 := now.Add(-5 * time.Minute)

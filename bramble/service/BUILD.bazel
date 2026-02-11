@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "service",
+    srcs = [
+        "taskrouter.go",
+        "worktree.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/service",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//wt",
+        "//wt/taskrouter",
+    ],
+)

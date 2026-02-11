@@ -188,9 +188,10 @@ func TestQuitConfirm_CompletedSessions_DontCount(t *testing.T) {
 	require.NoError(t, err)
 
 	// Get the internal session and mark it completed
-	sess, ok := m.sessionManager.GetSession(sessID)
+	mgr := m.sessionManager.(*session.Manager)
+	sess, ok := mgr.GetSession(sessID)
 	require.True(t, ok)
-	m.sessionManager.UpdateSessionStatus(sess, session.StatusCompleted)
+	mgr.UpdateSessionStatus(sess, session.StatusCompleted)
 
 	m.sessions = m.sessionManager.GetAllSessions()
 	require.Len(t, m.sessions, 1)

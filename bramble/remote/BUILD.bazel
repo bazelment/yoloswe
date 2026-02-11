@@ -1,0 +1,50 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "remote",
+    srcs = [
+        "auth.go",
+        "broadcaster.go",
+        "convert.go",
+        "server.go",
+        "session_proxy.go",
+        "taskrouter_proxy.go",
+        "worktree_proxy.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/remote",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bramble/remote/proto:bramble_go_proto",
+        "//bramble/service",
+        "//bramble/session",
+        "//wt",
+        "//wt/taskrouter",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//metadata",
+        "@org_golang_google_grpc//status",
+    ],
+)
+
+go_test(
+    name = "remote_test",
+    srcs = [
+        "auth_test.go",
+        "broadcaster_test.go",
+        "convert_test.go",
+        "server_test.go",
+    ],
+    embed = [":remote"],
+    deps = [
+        "//bramble/remote/proto:bramble_go_proto",
+        "//bramble/session",
+        "//wt",
+        "//wt/taskrouter",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//status",
+    ],
+)

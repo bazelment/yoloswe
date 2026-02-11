@@ -137,6 +137,9 @@ type ManagerConfig struct {
 	YoloMode    bool // Skip all permission prompts
 }
 
+// Verify Manager implements SessionService at compile time.
+var _ SessionService = (*Manager)(nil)
+
 // Manager handles multiple concurrent sessions.
 type Manager struct {
 	ctx           context.Context
