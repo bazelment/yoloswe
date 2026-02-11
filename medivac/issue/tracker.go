@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/bazelment/yoloswe/medivac/github"
 )
 
 // trackerFile is the persistent JSON structure.
@@ -109,7 +107,7 @@ type ReconcileResult struct {
 
 // Reconcile updates the issue database with the latest CI failures.
 // It returns new, updated, and resolved issues.
-func (t *Tracker) Reconcile(failures []github.CIFailure) *ReconcileResult {
+func (t *Tracker) Reconcile(failures []CIFailure) *ReconcileResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -133,6 +131,8 @@ func (t *Tracker) Reconcile(failures []github.CIFailure) *ReconcileResult {
 				File:      f.File,
 				Line:      f.Line,
 				ErrorCode: f.ErrorCode,
+				RunURL:    f.RunURL,
+				JobName:   f.JobName,
 				Status:    StatusNew,
 				FirstSeen: f.Timestamp,
 				LastSeen:  f.Timestamp,
@@ -143,7 +143,7 @@ func (t *Tracker) Reconcile(failures []github.CIFailure) *ReconcileResult {
 			continue
 		}
 
-		// Existing issue — update counters regardless
+		// Existing issue — update counters and latest metadata
 		if f.Timestamp.Before(existing.FirstSeen) {
 			existing.FirstSeen = f.Timestamp
 		}
@@ -153,6 +153,13 @@ func (t *Tracker) Reconcile(failures []github.CIFailure) *ReconcileResult {
 		existing.SeenCount++
 		if f.Details != "" {
 			existing.Details = f.Details
+		}
+		// Update to latest RunURL and JobName
+		if f.RunURL != "" {
+			existing.RunURL = f.RunURL
+		}
+		if f.JobName != "" {
+			existing.JobName = f.JobName
 		}
 
 		// Only add to Updated list once per reconcile

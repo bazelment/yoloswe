@@ -11,6 +11,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/claude",
+        "//medivac/issue",
         "//wt",
     ],
 )
@@ -25,6 +26,7 @@ go_test(
     embed = [":github"],
     deps = [
         "//agent-cli-wrapper/claude",
+        "//medivac/issue",
         "//wt",
     ],
 )

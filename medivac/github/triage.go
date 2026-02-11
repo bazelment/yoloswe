@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/medivac/issue"
 )
 
 // TriageConfig controls LLM triage behavior.
@@ -31,7 +32,7 @@ type triageResponse struct {
 
 // TriageRun sends all metadata for a single workflow run (annotations, failed
 // jobs, cleaned log) to the LLM in a single call and returns deduplicated
-// CIFailure results plus the cost incurred.
+// issue.CIFailure results plus the cost incurred.
 func TriageRun(
 	ctx context.Context,
 	run WorkflowRun,
@@ -39,7 +40,7 @@ func TriageRun(
 	annotations []Annotation,
 	log string,
 	config TriageConfig,
-) ([]CIFailure, float64, error) {
+) ([]issue.CIFailure, float64, error) {
 	model := config.Model
 	if model == "" {
 		model = "haiku"
@@ -75,19 +76,19 @@ func TriageRun(
 		defaultJob = failedJobs[0].Name
 	}
 
-	failures := make([]CIFailure, 0, len(items))
+	failures := make([]issue.CIFailure, 0, len(items))
 	seen := make(map[string]bool)
 
 	for _, item := range items {
-		cat := FailureCategory(item.Category)
-		if !ValidCategories[cat] {
-			cat = CategoryUnknown
+		cat := issue.FailureCategory(item.Category)
+		if !issue.ValidCategories[cat] {
+			cat = issue.CategoryUnknown
 		}
 		jobName := item.Job
 		if !jobNames[jobName] {
 			jobName = defaultJob
 		}
-		f := CIFailure{
+		f := issue.CIFailure{
 			RunID:     run.ID,
 			RunURL:    run.URL,
 			HeadSHA:   run.HeadSHA,
@@ -101,7 +102,7 @@ func TriageRun(
 			ErrorCode: item.ErrorCode,
 			Timestamp: run.CreatedAt,
 		}
-		f.Signature = ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
+		f.Signature = issue.ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
 
 		if !seen[f.Signature] {
 			seen[f.Signature] = true
@@ -190,7 +191,7 @@ type RunData struct {
 
 // BatchTriageResult holds the output of batch triage.
 type BatchTriageResult struct {
-	Failures []CIFailure
+	Failures []issue.CIFailure
 	Cost     float64
 }
 
@@ -238,23 +239,23 @@ func TriageBatch(
 		}
 	}
 
-	// Use first run's metadata as default for CIFailure fields.
+	// Use first run's metadata as default for issue.CIFailure fields.
 	defaultRun := runs[0].Run
 
-	failures := make([]CIFailure, 0, len(items))
+	failures := make([]issue.CIFailure, 0, len(items))
 	seen := make(map[string]bool)
 
 	for _, item := range items {
-		cat := FailureCategory(item.Category)
-		if !ValidCategories[cat] {
-			cat = CategoryUnknown
+		cat := issue.FailureCategory(item.Category)
+		if !issue.ValidCategories[cat] {
+			cat = issue.CategoryUnknown
 		}
 		jobName := item.Job
 		if !jobNames[jobName] {
 			jobName = defaultJob
 		}
 
-		f := CIFailure{
+		f := issue.CIFailure{
 			RunID:     defaultRun.ID,
 			RunURL:    defaultRun.URL,
 			HeadSHA:   defaultRun.HeadSHA,
@@ -268,7 +269,7 @@ func TriageBatch(
 			ErrorCode: item.ErrorCode,
 			Timestamp: defaultRun.CreatedAt,
 		}
-		f.Signature = ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
+		f.Signature = issue.ComputeSignature(f.Category, f.File, f.Summary, f.JobName, f.Details)
 
 		if !seen[f.Signature] {
 			seen[f.Signature] = true

@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/bazelment/yoloswe/medivac/github"
 )
 
 func tempTrackerPath(t *testing.T) string {
@@ -31,17 +29,17 @@ func TestReconcile_NewIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	failures := []github.CIFailure{
+	failures := []CIFailure{
 		{
 			Signature: "lint/go:abc:main.go",
-			Category:  github.CategoryLintGo,
+			Category:  CategoryLintGo,
 			Summary:   "unused variable",
 			File:      "main.go",
 			Timestamp: time.Now(),
 		},
 		{
 			Signature: "test/bazel:def:test_test.go",
-			Category:  github.CategoryTest,
+			Category:  CategoryTest,
 			Summary:   "test failed",
 			File:      "test_test.go",
 			Timestamp: time.Now(),
@@ -76,14 +74,14 @@ func TestReconcile_UpdateExisting(t *testing.T) {
 	now := time.Now()
 
 	// First reconcile
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: now},
+	tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: now},
 	})
 
 	// Second reconcile with same failure
 	later := now.Add(time.Hour)
-	result := tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: later},
+	result := tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: later},
 	})
 
 	if len(result.New) != 0 {
@@ -109,14 +107,14 @@ func TestReconcile_Recurred(t *testing.T) {
 	now := time.Now()
 
 	// Create and mark as fix_merged
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: now},
+	tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: now},
 	})
 	tracker.UpdateStatus(sig, StatusFixMerged)
 
 	// Failure appears again
-	result := tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: now.Add(time.Hour)},
+	result := tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: now.Add(time.Hour)},
 	})
 
 	if len(result.Updated) != 1 {
@@ -139,13 +137,13 @@ func TestReconcile_Verified(t *testing.T) {
 	now := time.Now()
 
 	// Create and mark as fix_merged
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: now},
+	tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: now},
 	})
 	tracker.UpdateStatus(sig, StatusFixMerged)
 
 	// Reconcile without that failure present
-	result := tracker.Reconcile([]github.CIFailure{})
+	result := tracker.Reconcile([]CIFailure{})
 
 	if len(result.Resolved) != 1 {
 		t.Fatalf("expected 1 resolved, got %d", len(result.Resolved))
@@ -167,10 +165,10 @@ func TestGetActionable(t *testing.T) {
 	}
 
 	now := time.Now()
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: "sig1", Category: github.CategoryLintGo, Summary: "issue 1", Timestamp: now},
-		{Signature: "sig2", Category: github.CategoryTest, Summary: "issue 2", Timestamp: now},
-		{Signature: "sig3", Category: github.CategoryBuild, Summary: "issue 3", Timestamp: now},
+	tracker.Reconcile([]CIFailure{
+		{Signature: "sig1", Category: CategoryLintGo, Summary: "issue 1", Timestamp: now},
+		{Signature: "sig2", Category: CategoryTest, Summary: "issue 2", Timestamp: now},
+		{Signature: "sig3", Category: CategoryBuild, Summary: "issue 3", Timestamp: now},
 	})
 
 	// Mark one as in_progress
@@ -190,8 +188,8 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tracker1.Reconcile([]github.CIFailure{
-		{Signature: "sig1", Category: github.CategoryLintGo, Summary: "issue 1", Timestamp: time.Now()},
+	tracker1.Reconcile([]CIFailure{
+		{Signature: "sig1", Category: CategoryLintGo, Summary: "issue 1", Timestamp: time.Now()},
 	})
 	tracker1.AddFixAttempt("sig1", FixAttempt{Branch: "fix/lint-go/abc", PRURL: "https://example.com/pr/1"})
 
@@ -229,15 +227,15 @@ func TestReconcile_NoDuplicateInUpdated(t *testing.T) {
 	now := time.Now()
 
 	// First reconcile creates the issue
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: now},
+	tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: now},
 	})
 
 	// Second reconcile with two failures that have the same signature
 	later := now.Add(time.Hour)
-	result := tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "unused variable", Timestamp: later},
-		{Signature: sig, Category: github.CategoryBuildDocker, Summary: "unused variable", Timestamp: later},
+	result := tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "unused variable", Timestamp: later},
+		{Signature: sig, Category: CategoryBuildDocker, Summary: "unused variable", Timestamp: later},
 	})
 
 	if len(result.Updated) != 1 {
@@ -261,14 +259,14 @@ func TestReconcile_TimestampOrdering(t *testing.T) {
 
 	// First failure has a "later" timestamp
 	later := time.Date(2026, 2, 11, 3, 0, 0, 0, time.UTC)
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "err", Timestamp: later},
+	tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "err", Timestamp: later},
 	})
 
 	// Second failure has an "earlier" timestamp (from an older run scanned later)
 	earlier := time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC)
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: sig, Category: github.CategoryLintGo, Summary: "err", Timestamp: earlier},
+	tracker.Reconcile([]CIFailure{
+		{Signature: sig, Category: CategoryLintGo, Summary: "err", Timestamp: earlier},
 	})
 
 	issue := tracker.Get(sig)
@@ -290,8 +288,8 @@ func TestDismissAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: "sig1", Category: github.CategoryInfraCI, Summary: "parallel golangci-lint", Timestamp: time.Now()},
+	tracker.Reconcile([]CIFailure{
+		{Signature: "sig1", Category: CategoryInfraCI, Summary: "parallel golangci-lint", Timestamp: time.Now()},
 	})
 
 	iss := tracker.GetByID(tracker.Get("sig1").ID)
@@ -353,8 +351,8 @@ func TestReopen_NotDismissed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tracker.Reconcile([]github.CIFailure{
-		{Signature: "sig1", Category: github.CategoryLintGo, Summary: "err", Timestamp: time.Now()},
+	tracker.Reconcile([]CIFailure{
+		{Signature: "sig1", Category: CategoryLintGo, Summary: "err", Timestamp: time.Now()},
 	})
 
 	id := tracker.Get("sig1").ID
@@ -455,8 +453,8 @@ func TestReviewedRuns_BackwardCompat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tracker1.Reconcile([]github.CIFailure{
-		{Signature: "sig1", Category: github.CategoryLintGo, Summary: "err", Timestamp: time.Now()},
+	tracker1.Reconcile([]CIFailure{
+		{Signature: "sig1", Category: CategoryLintGo, Summary: "err", Timestamp: time.Now()},
 	})
 	if err := tracker1.Save(); err != nil {
 		t.Fatal(err)
@@ -491,8 +489,8 @@ func TestDismiss_PersistsAcrossSave(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tracker1.Reconcile([]github.CIFailure{
-		{Signature: "sig1", Category: github.CategoryInfraCI, Summary: "flake", Timestamp: time.Now()},
+	tracker1.Reconcile([]CIFailure{
+		{Signature: "sig1", Category: CategoryInfraCI, Summary: "flake", Timestamp: time.Now()},
 	})
 	id := tracker1.Get("sig1").ID
 	tracker1.Dismiss(id, "flake")

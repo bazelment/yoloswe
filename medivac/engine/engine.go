@@ -12,32 +12,41 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
+// Scanner abstracts CI data gathering operations.
+// This interface enables testing and potential support for non-GitHub CI systems.
+type Scanner interface {
+	ListFailedRuns(ctx context.Context, branch string, limit int) ([]github.WorkflowRun, error)
+	GetJobsForRun(ctx context.Context, runID int64) ([]github.JobResult, error)
+	GetAnnotations(ctx context.Context, runID int64) ([]github.Annotation, error)
+	GetJobLog(ctx context.Context, runID int64) (string, error)
+}
+
 // Config configures the medivac engine.
 type Config struct {
-	WTManager    *wt.Manager
-	GHRunner     wt.GHRunner
-	TriageQuery  github.QueryFn // injectable for testing; nil = real claude.Query
-	Logger       *slog.Logger
-	RepoDir      string
-	TrackerPath  string
-	AgentModel   string
-	Branch       string
-	SessionDir   string
-	LogFile      string // Path to the log file for this run (stored in fix attempts)
-	TriageModel  string // Claude model for triage (default "haiku")
-	AgentBudget  float64
-	TriageBudget float64 // Max spend on LLM triage per scan (default $0.10)
-	MaxParallel  int
-	RunLimit     int
-	DryRun       bool
+	WTManager   *wt.Manager
+	GHRunner    wt.GHRunner
+	Scanner     Scanner        // injectable for testing; nil = create default github.Client
+	TriageQuery github.QueryFn // injectable for testing; nil = real claude.Query
+	Logger      *slog.Logger
+	RepoDir     string
+	TrackerPath string
+	AgentModel  string
+	Branch      string
+	SessionDir  string
+	LogFile     string // Path to the log file for this run (stored in fix attempts)
+	TriageModel string // Claude model for triage (default "haiku")
+	AgentBudget float64
+	MaxParallel int
+	RunLimit    int
+	DryRun      bool
 }
 
 // Engine is the core medivac orchestrator.
 type Engine struct {
-	ghClient *github.Client
-	tracker  *issue.Tracker
-	logger   *slog.Logger
-	config   Config
+	scanner Scanner
+	tracker *issue.Tracker
+	logger  *slog.Logger
+	config  Config
 }
 
 // New creates a new Engine from the given config.
@@ -57,9 +66,6 @@ func New(config Config) (*Engine, error) {
 	if config.TriageModel == "" {
 		config.TriageModel = "haiku"
 	}
-	if config.TriageBudget <= 0 {
-		config.TriageBudget = 0.50
-	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
@@ -69,13 +75,17 @@ func New(config Config) (*Engine, error) {
 		return nil, fmt.Errorf("load tracker: %w", err)
 	}
 
-	ghClient := github.NewClient(config.GHRunner, config.RepoDir)
+	// Use provided scanner or create default github.Client
+	scanner := config.Scanner
+	if scanner == nil {
+		scanner = github.NewClient(config.GHRunner, config.RepoDir)
+	}
 
 	return &Engine{
-		config:   config,
-		ghClient: ghClient,
-		tracker:  tracker,
-		logger:   config.Logger,
+		config:  config,
+		scanner: scanner,
+		tracker: tracker,
+		logger:  config.Logger,
 	}, nil
 }
 
@@ -83,7 +93,7 @@ func New(config Config) (*Engine, error) {
 type ScanResult struct {
 	Reconciled    *issue.ReconcileResult
 	Runs          []github.WorkflowRun
-	Failures      []github.CIFailure
+	Failures      []issue.CIFailure
 	TotalIssues   int
 	ActionableLen int
 	TriageCost    float64
@@ -101,7 +111,7 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 	)
 
 	// Fetch failed runs.
-	runs, err := e.ghClient.ListFailedRuns(ctx, e.config.Branch, e.config.RunLimit)
+	runs, err := e.scanner.ListFailedRuns(ctx, e.config.Branch, e.config.RunLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list failed runs: %w", err)
 	}
@@ -148,10 +158,10 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 		run := unreviewedRuns[i]
 
 		// Fetch annotations (best-effort).
-		annotations, _ := e.ghClient.GetAnnotations(ctx, run.ID)
+		annotations, _ := e.scanner.GetAnnotations(ctx, run.ID)
 
 		// Fetch raw log.
-		rawLog, err := e.ghClient.GetJobLog(ctx, run.ID)
+		rawLog, err := e.scanner.GetJobLog(ctx, run.ID)
 		if err != nil {
 			e.logger.Warn("failed to get job log", "runID", run.ID, "error", err)
 			continue
@@ -160,7 +170,7 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 		trimmedLog := github.TrimLog(cleanedLog, 100, 100)
 
 		// Get failed jobs.
-		jobs, err := e.ghClient.GetJobsForRun(ctx, run.ID)
+		jobs, err := e.scanner.GetJobsForRun(ctx, run.ID)
 		if err != nil {
 			e.logger.Warn("failed to get jobs", "runID", run.ID, "error", err)
 			continue
@@ -359,7 +369,7 @@ func (e *Engine) launchAgents(ctx context.Context, groups []IssueGroup, fixResul
 					SessionDir: e.config.SessionDir,
 					Logger:     e.logger.With("issue", g.Issues[0].ID),
 				})
-				recordFixAttempt(e.tracker, result, e.config.LogFile)
+				recordFixAttempt(e.tracker, g.Issues, result.Branch, result.PRURL, result.PRNumber, result.AgentCost, result.Analysis, result.Success, result.Error, e.config.LogFile)
 				mu.Lock()
 				fixResult.Results = append(fixResult.Results, result)
 				fixResult.TotalCost += result.AgentCost
@@ -376,7 +386,7 @@ func (e *Engine) launchAgents(ctx context.Context, groups []IssueGroup, fixResul
 					SessionDir: e.config.SessionDir,
 					Logger:     e.logger.With("group", g.Key),
 				})
-				recordGroupFixAttempt(e.tracker, result, e.config.LogFile)
+				recordFixAttempt(e.tracker, g.Issues, result.Branch, result.PRURL, result.PRNumber, result.AgentCost, result.Analysis, result.Success, result.Error, e.config.LogFile)
 				mu.Lock()
 				fixResult.GroupResults = append(fixResult.GroupResults, result)
 				fixResult.TotalCost += result.AgentCost

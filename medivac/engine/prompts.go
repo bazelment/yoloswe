@@ -8,14 +8,17 @@ import (
 	"github.com/bazelment/yoloswe/medivac/issue"
 )
 
-var fixTmpl = template.Must(template.New("fix").Parse(fixPromptTmpl))
+var fixTmpl = template.Must(template.New("fix").Funcs(template.FuncMap{
+	"add": func(a, b int) int { return a + b },
+}).Parse(fixPromptTmpl))
 var groupFixTmpl = template.Must(template.New("groupfix").Parse(groupFixPromptTmpl))
 
 // fixPromptData holds all data needed to render the single-issue fix prompt.
 type fixPromptData struct {
-	Issue        *issue.Issue
-	Branch       string
-	FileWithLine string
+	Issue            *issue.Issue
+	Branch           string
+	FileWithLine     string
+	PreviousAttempts []issue.FixAttempt
 }
 
 // groupFixPromptData holds all data needed to render the group fix prompt.
@@ -36,9 +39,10 @@ type groupFailure struct {
 // buildFixPrompt constructs the prompt for a fix agent given an issue.
 func buildFixPrompt(iss *issue.Issue, branch string) string {
 	data := fixPromptData{
-		Issue:        iss,
-		Branch:       branch,
-		FileWithLine: fileWithLine(iss),
+		Issue:            iss,
+		Branch:           branch,
+		FileWithLine:     fileWithLine(iss),
+		PreviousAttempts: iss.FixAttempts,
 	}
 	var buf bytes.Buffer
 	fixTmpl.Execute(&buf, data)
@@ -55,7 +59,7 @@ func buildGroupFixPrompt(group IssueGroup, branch string) string {
 			Index:        i + 1,
 			Issue:        iss,
 			FileWithLine: fileWithLine(iss),
-			Details:      truncate(iss.Details, 200),
+			Details:      truncate(iss.Details, 500),
 		})
 	}
 	data := groupFixPromptData{
@@ -95,6 +99,15 @@ const fixPromptTmpl = `You are a CI failure medivac agent. Your goal is to fix a
 {{- if .Issue.File}}
 - **File:** {{.FileWithLine}}
 {{- end}}
+{{- if .Issue.ErrorCode}}
+- **Error Code:** {{.Issue.ErrorCode}}
+{{- end}}
+{{- if .Issue.RunURL}}
+- **CI Run:** {{.Issue.RunURL}}
+{{- end}}
+{{- if .Issue.JobName}}
+- **Job Name:** {{.Issue.JobName}}
+{{- end}}
 - **Branch:** {{.Branch}}
 - **Times seen:** {{.Issue.SeenCount}}
 {{- if .Issue.Details}}
@@ -104,6 +117,25 @@ const fixPromptTmpl = `You are a CI failure medivac agent. Your goal is to fix a
 ` + "```" + `
 {{.Issue.Details}}
 ` + "```" + `
+{{- end}}
+{{- if .PreviousAttempts}}
+
+## Previous Fix Attempts
+
+This issue has been attempted before. Learn from these attempts and DO NOT repeat the same approach:
+{{range $i, $attempt := .PreviousAttempts}}
+### Attempt {{add $i 1}}
+- **Outcome:** {{$attempt.Outcome}}
+{{- if $attempt.RootCause}}
+- **Root Cause:** {{$attempt.RootCause}}
+{{- end}}
+{{- if $attempt.Reasoning}}
+- **Reasoning:** {{$attempt.Reasoning}}
+{{- end}}
+{{- if $attempt.Error}}
+- **Error:** {{$attempt.Error}}
+{{- end}}
+{{end}}
 {{- end}}
 
 ## Instructions
@@ -116,18 +148,21 @@ const fixPromptTmpl = `You are a CI failure medivac agent. Your goal is to fix a
 6. **Push** to the remote branch.
 7. **Report your analysis** at the very end of your response, in exactly this format:
 
-` + "```" + `
+` + "```json" + `
 <ANALYSIS>
-reasoning: <1-2 sentences explaining why the failure happened>
-root_cause: <the underlying cause, not just the symptom>
-fix_applied: <yes or no>
-fix_options:
-- <label>: <description of this approach>
-- <label>: <description of another approach>
+{
+  "reasoning": "1-2 sentences explaining why the failure happened",
+  "root_cause": "the underlying cause, not just the symptom",
+  "fix_applied": true,
+  "fix_options": [
+    {"label": "approach1", "description": "description of this approach"},
+    {"label": "approach2", "description": "description of another approach"}
+  ]
+}
 </ANALYSIS>
 ` + "```" + `
 
-If you cannot fix the issue with code changes (e.g., it requires manual config, secrets, external service changes), set fix_applied to "no" and list the options anyway. This analysis is critical -- always include it.
+If you cannot fix the issue with code changes (e.g., it requires manual config, secrets, external service changes), set fix_applied to false and list the options anyway. This analysis is critical -- always include it.
 
 ## Important Rules
 
@@ -166,18 +201,21 @@ const groupFixPromptTmpl = `You are a CI failure medivac agent. Your goal is to 
 6. **Push** to the remote branch.
 7. **Report your analysis** at the very end of your response, in exactly this format:
 
-` + "```" + `
+` + "```json" + `
 <ANALYSIS>
-reasoning: <1-2 sentences explaining why the failure happened>
-root_cause: <the underlying cause, not just the symptom>
-fix_applied: <yes or no>
-fix_options:
-- <label>: <description of this approach>
-- <label>: <description of another approach>
+{
+  "reasoning": "1-2 sentences explaining why the failure happened",
+  "root_cause": "the underlying cause, not just the symptom",
+  "fix_applied": true,
+  "fix_options": [
+    {"label": "approach1", "description": "description of this approach"},
+    {"label": "approach2", "description": "description of another approach"}
+  ]
+}
 </ANALYSIS>
 ` + "```" + `
 
-If you cannot fix the issue with code changes (e.g., it requires manual config, secrets, external service changes), set fix_applied to "no" and list the options anyway. This analysis is critical -- always include it.
+If you cannot fix the issue with code changes (e.g., it requires manual config, secrets, external service changes), set fix_applied to false and list the options anyway. This analysis is critical -- always include it.
 
 ## Important Rules
 

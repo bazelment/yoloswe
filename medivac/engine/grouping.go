@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/bazelment/yoloswe/medivac/github"
 	"github.com/bazelment/yoloswe/medivac/issue"
 )
 
@@ -65,7 +64,7 @@ func groupKey(iss *issue.Issue) string {
 	}
 
 	// 2. Dependabot grouping by package name
-	if iss.Category == github.CategoryInfraDepbot {
+	if iss.Category == issue.CategoryInfraDepbot {
 		pkg := extractPackageName(iss.Summary)
 		if pkg != "" {
 			return fmt.Sprintf("dependabot:%s", pkg)
@@ -77,7 +76,7 @@ func groupKey(iss *issue.Issue) string {
 }
 
 // isTypeScriptCategory returns true for categories that contain TypeScript errors.
-func isTypeScriptCategory(cat github.FailureCategory) bool {
+func isTypeScriptCategory(cat issue.FailureCategory) bool {
 	switch cat {
 	case "lint/ts", "build", "build/docker":
 		return true

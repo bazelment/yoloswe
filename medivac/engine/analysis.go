@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/bazelment/yoloswe/medivac/issue"
@@ -14,8 +15,17 @@ type AgentAnalysis struct {
 	FixApplied bool
 }
 
+// analysisJSON is the JSON structure for analysis blocks.
+type analysisJSON struct {
+	Reasoning  string            `json:"reasoning"`
+	RootCause  string            `json:"root_cause"`
+	FixOptions []issue.FixOption `json:"fix_options"`
+	FixApplied bool              `json:"fix_applied"`
+}
+
 // ParseAnalysis extracts a structured ANALYSIS block from agent text.
 // Returns nil if no valid block is found.
+// Tries JSON format first, then falls back to legacy key-value format.
 func ParseAnalysis(text string) *AgentAnalysis {
 	start := strings.Index(text, "<ANALYSIS>")
 	if start == -1 {
@@ -26,7 +36,20 @@ func ParseAnalysis(text string) *AgentAnalysis {
 		return nil
 	}
 	block := text[start+len("<ANALYSIS>") : start+end]
+	block = strings.TrimSpace(block)
 
+	// Try JSON format first
+	var ajson analysisJSON
+	if err := json.Unmarshal([]byte(block), &ajson); err == nil {
+		return &AgentAnalysis{
+			Reasoning:  ajson.Reasoning,
+			RootCause:  ajson.RootCause,
+			FixApplied: ajson.FixApplied,
+			FixOptions: ajson.FixOptions,
+		}
+	}
+
+	// Fall back to legacy key-value format
 	a := &AgentAnalysis{}
 	for _, line := range strings.Split(block, "\n") {
 		line = strings.TrimSpace(line)

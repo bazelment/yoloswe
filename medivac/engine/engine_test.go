@@ -141,7 +141,7 @@ func TestScan(t *testing.T) {
 	if len(result.Failures) != 1 {
 		t.Errorf("expected 1 failure, got %d", len(result.Failures))
 	}
-	if result.Failures[0].Category != github.CategoryLintGo {
+	if result.Failures[0].Category != issue.CategoryLintGo {
 		t.Errorf("expected lint/go, got %s", result.Failures[0].Category)
 	}
 	if len(result.Reconciled.New) != 1 {
@@ -534,13 +534,13 @@ func TestScan_SecondScan_OnlyNewRuns(t *testing.T) {
 
 func TestFixBranchName(t *testing.T) {
 	tests := []struct {
-		category github.FailureCategory
+		category issue.FailureCategory
 		id       string
 		want     string
 	}{
-		{github.CategoryLintGo, "abc123", "fix/lint-go/abc123"},
-		{github.CategoryTest, "def456", "fix/test/def456"},
-		{github.CategoryBuild, "xyz", "fix/build/xyz"},
+		{issue.CategoryLintGo, "abc123", "fix/lint-go/abc123"},
+		{issue.CategoryTest, "def456", "fix/test/def456"},
+		{issue.CategoryBuild, "xyz", "fix/build/xyz"},
 	}
 
 	for _, tt := range tests {

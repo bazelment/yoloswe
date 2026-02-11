@@ -10,10 +10,9 @@ import (
 )
 
 var (
-	scanBranch       string
-	scanLimit        int
-	scanTriageModel  string
-	scanTriageBudget float64
+	scanBranch      string
+	scanLimit       int
+	scanTriageModel string
 )
 
 var scanCmd = &cobra.Command{
@@ -28,16 +27,15 @@ var scanCmd = &cobra.Command{
 		log, logFile, closeLog := newFileLogger(root)
 		defer closeLog()
 		eng, err := engine.New(engine.Config{
-			GHRunner:     &wt.DefaultGHRunner{},
-			RepoDir:      root,
-			TrackerPath:  resolveTrackerPath(root),
-			Branch:       scanBranch,
-			RunLimit:     scanLimit,
-			TriageModel:  scanTriageModel,
-			TriageBudget: scanTriageBudget,
-			DryRun:       dryRun,
-			LogFile:      logFile,
-			Logger:       log,
+			GHRunner:    &wt.DefaultGHRunner{},
+			RepoDir:     root,
+			TrackerPath: resolveTrackerPath(root),
+			Branch:      scanBranch,
+			RunLimit:    scanLimit,
+			TriageModel: scanTriageModel,
+			DryRun:      dryRun,
+			LogFile:     logFile,
+			Logger:      log,
 		})
 		if err != nil {
 			return fmt.Errorf("create engine: %w", err)
@@ -58,7 +56,6 @@ func init() {
 	scanCmd.Flags().StringVar(&scanBranch, "branch", "main", "Branch to scan for failures")
 	scanCmd.Flags().IntVar(&scanLimit, "limit", 5, "Number of recent failed runs to check")
 	scanCmd.Flags().StringVar(&scanTriageModel, "triage-model", "haiku", "Claude model for LLM triage")
-	scanCmd.Flags().Float64Var(&scanTriageBudget, "triage-budget", 0.50, "Max spend on LLM triage per scan (USD)")
 }
 
 func printScanResult(r *engine.ScanResult) {

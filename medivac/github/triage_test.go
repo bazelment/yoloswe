@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/medivac/issue"
 )
 
 // mockQuery returns a fake QueryResult with the given text and cost.
@@ -80,7 +81,7 @@ func TestTriageRun_BasicJSON(t *testing.T) {
 	}
 
 	f0 := failures[0]
-	if f0.Category != CategoryLintGo {
+	if f0.Category != issue.CategoryLintGo {
 		t.Errorf("expected lint/go, got %s", f0.Category)
 	}
 	if f0.File != "pkg/server.go" {
@@ -100,7 +101,7 @@ func TestTriageRun_BasicJSON(t *testing.T) {
 	}
 
 	f1 := failures[1]
-	if f1.Category != CategoryLintTS {
+	if f1.Category != issue.CategoryLintTS {
 		t.Errorf("expected lint/ts, got %s", f1.Category)
 	}
 	if f1.JobName != "build" {
@@ -122,7 +123,7 @@ func TestTriageRun_MarkdownFencedJSON(t *testing.T) {
 	if len(failures) != 1 {
 		t.Fatalf("expected 1 failure, got %d", len(failures))
 	}
-	if failures[0].Category != CategoryTest {
+	if failures[0].Category != issue.CategoryTest {
 		t.Errorf("expected test, got %s", failures[0].Category)
 	}
 }
@@ -141,7 +142,7 @@ func TestTriageRun_InvalidCategory(t *testing.T) {
 	if len(failures) != 1 {
 		t.Fatalf("expected 1 failure, got %d", len(failures))
 	}
-	if failures[0].Category != CategoryUnknown {
+	if failures[0].Category != issue.CategoryUnknown {
 		t.Errorf("invalid category should map to unknown, got %s", failures[0].Category)
 	}
 }

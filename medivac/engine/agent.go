@@ -12,16 +12,33 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
+// AgentSession is an interface for agent session execution.
+// This enables testing by allowing mock implementations.
+type AgentSession interface {
+	ExecuteWithFiles(ctx context.Context, prompt string) (*agent.AgentResult, *agent.ExecuteResult, string, error)
+	TotalCost() float64
+}
+
+// SessionFactory creates new agent sessions.
+// This is injectable for testing.
+type SessionFactory func(config agent.AgentConfig, sessionID string) AgentSession
+
+// defaultSessionFactory creates real ephemeral sessions.
+func defaultSessionFactory(config agent.AgentConfig, sessionID string) AgentSession {
+	return agent.NewEphemeralSession(config, sessionID)
+}
+
 // FixAgentConfig configures a single fix agent.
 type FixAgentConfig struct {
-	Issue      *issue.Issue
-	WTManager  *wt.Manager
-	GHRunner   wt.GHRunner
-	Logger     *slog.Logger
-	Model      string
-	BaseBranch string
-	SessionDir string
-	BudgetUSD  float64
+	Issue          *issue.Issue
+	WTManager      *wt.Manager
+	GHRunner       wt.GHRunner
+	SessionFactory SessionFactory // optional; defaults to real sessions
+	Logger         *slog.Logger
+	Model          string
+	BaseBranch     string
+	SessionDir     string
+	BudgetUSD      float64
 }
 
 // FixAgentResult reports the outcome of a fix agent.
@@ -38,65 +55,91 @@ type FixAgentResult struct {
 	Success      bool
 }
 
-// RunFixAgent runs a single fix agent: creates worktree, runs Claude session, creates PR.
-func RunFixAgent(ctx context.Context, config FixAgentConfig) *FixAgentResult {
-	result := &FixAgentResult{Issue: config.Issue}
-	log := config.Logger
-	if log == nil {
-		log = slog.Default()
+// agentCoreResult holds the results of a runAgentCore execution.
+type agentCoreResult struct {
+	Error        error
+	Analysis     *AgentAnalysis
+	Branch       string
+	WorktreePath string
+	PRURL        string
+	FilesChanged []string
+	AgentCost    float64
+	PRNumber     int
+	Success      bool
+}
+
+// runAgentCore is the unified implementation for both single and group fix agents.
+// It handles worktree creation, session execution, and PR creation for any number of issues.
+func runAgentCore(
+	ctx context.Context,
+	issues []*issue.Issue,
+	prompt string,
+	sessionID string,
+	wtManager *wt.Manager,
+	ghRunner wt.GHRunner,
+	logger *slog.Logger,
+	model string,
+	baseBranch string,
+	sessionDir string,
+	budgetUSD float64,
+	sessionFactory SessionFactory,
+) agentCoreResult {
+	if logger == nil {
+		logger = slog.Default()
 	}
 
-	// Generate branch name from issue
-	branchName := fixBranchName(config.Issue)
-	result.Branch = branchName
+	r := agentCoreResult{}
 
-	log.Info("creating worktree",
-		"branch", branchName,
-		"base", config.BaseBranch,
-		"issue", config.Issue.ID,
+	// Use the first issue as the "leader" for branch naming
+	leader := issues[0]
+	r.Branch = fixBranchName(leader)
+
+	logger.Info("creating worktree",
+		"branch", r.Branch,
+		"base", baseBranch,
+		"issueCount", len(issues),
 	)
 
 	// Create worktree
-	wtPath, err := config.WTManager.New(ctx, branchName, config.BaseBranch, config.Issue.Summary)
+	var err error
+	r.WorktreePath, err = wtManager.New(ctx, r.Branch, baseBranch, leader.Summary)
 	if err != nil {
-		result.Error = fmt.Errorf("create worktree: %w", err)
-		return result
+		r.Error = fmt.Errorf("create worktree: %w", err)
+		return r
 	}
-	result.WorktreePath = wtPath
 
-	log.Info("worktree created",
-		"path", wtPath,
-	)
-
-	prompt := buildFixPrompt(config.Issue, config.BaseBranch)
+	logger.Info("worktree created", "path", r.WorktreePath)
 
 	// Create ephemeral session
-	sess := agent.NewEphemeralSession(agent.AgentConfig{
-		Logger:     log,
+	if sessionFactory == nil {
+		sessionFactory = defaultSessionFactory
+	}
+	sess := sessionFactory(agent.AgentConfig{
+		Logger:     logger,
 		Role:       agent.RoleBuilder,
-		Model:      config.Model,
-		WorkDir:    wtPath,
-		SessionDir: config.SessionDir,
-		BudgetUSD:  config.BudgetUSD,
-	}, fmt.Sprintf("medivac-%s", config.Issue.ID))
+		Model:      model,
+		WorkDir:    r.WorktreePath,
+		SessionDir: sessionDir,
+		BudgetUSD:  budgetUSD,
+	}, sessionID)
 
-	log.Info("running fix agent",
-		"issue", config.Issue.ID,
-		"model", config.Model,
+	logger.Info("running fix agent",
+		"issueCount", len(issues),
+		"model", model,
 	)
 
 	// Execute the fix
-	agentResult, execResult, _, err := sess.ExecuteWithFiles(ctx, prompt)
-	result.AgentCost = sess.TotalCost()
+	agentResult, execResult, _, execErr := sess.ExecuteWithFiles(ctx, prompt)
+	r.AgentCost = sess.TotalCost()
 
-	if err != nil {
-		result.Error = fmt.Errorf("agent execution: %w", err)
-		return result
+	if execErr != nil {
+		r.Error = fmt.Errorf("agent execution: %w", execErr)
+		return r
 	}
 
 	// Parse analysis from agent response (best-effort).
 	if agentResult != nil && agentResult.Text != "" {
-		result.Analysis = ParseAnalysis(agentResult.Text)
+		r.Analysis = ParseAnalysis(agentResult.Text)
 	}
 
 	if agentResult == nil || !agentResult.Success {
@@ -104,58 +147,112 @@ func RunFixAgent(ctx context.Context, config FixAgentConfig) *FixAgentResult {
 		if agentResult != nil && agentResult.Text != "" {
 			errMsg = agentResult.Text
 		}
-		result.Error = fmt.Errorf("agent failed: %s", errMsg)
-		return result
+		r.Error = fmt.Errorf("agent failed: %s", errMsg)
+		return r
 	}
 
 	if execResult != nil {
-		result.FilesChanged = append(result.FilesChanged, execResult.FilesCreated...)
-		result.FilesChanged = append(result.FilesChanged, execResult.FilesModified...)
+		r.FilesChanged = append(r.FilesChanged, execResult.FilesCreated...)
+		r.FilesChanged = append(r.FilesChanged, execResult.FilesModified...)
 	}
 
 	// If no file changes but analysis says fix not applied, treat as analysis_only (not an error).
-	if len(result.FilesChanged) == 0 {
-		if result.Analysis != nil && !result.Analysis.FixApplied {
-			result.Success = true // analysis-only is a valid outcome
-			log.Info("agent completed with analysis only (no code fix possible)",
-				"issue", config.Issue.ID,
-				"rootCause", result.Analysis.RootCause,
+	if len(r.FilesChanged) == 0 {
+		if r.Analysis != nil && !r.Analysis.FixApplied {
+			r.Success = true // analysis-only is a valid outcome
+			logger.Info("agent completed with analysis only (no code fix possible)",
+				"issueCount", len(issues),
+				"rootCause", r.Analysis.RootCause,
 			)
-			return result
+			return r
 		}
-		result.Error = fmt.Errorf("agent made no file changes")
-		return result
+		r.Error = fmt.Errorf("agent made no file changes")
+		return r
 	}
 
-	log.Info("agent completed, creating PR",
-		"filesChanged", len(result.FilesChanged),
-		"cost", fmt.Sprintf("$%.4f", result.AgentCost),
+	logger.Info("agent completed, creating PR",
+		"filesChanged", len(r.FilesChanged),
+		"cost", fmt.Sprintf("$%.4f", r.AgentCost),
 	)
 
 	// Create PR
-	title := fmt.Sprintf("fix(%s): %s", config.Issue.Category, truncate(config.Issue.Summary, 60))
-	body := fmt.Sprintf("Automated fix for CI failure.\n\n**Category:** %s\n**Signature:** `%s`\n**File:** %s\n\n%s",
-		config.Issue.Category, config.Issue.Signature, config.Issue.File, config.Issue.Details)
+	var title, body string
+	if len(issues) == 1 {
+		// Single issue PR
+		iss := issues[0]
+		title = fmt.Sprintf("fix(%s): %s", iss.Category, truncate(iss.Summary, 60))
+		body = fmt.Sprintf("Automated fix for CI failure.\n\n**Category:** %s\n**Signature:** `%s`\n**File:** %s\n\n%s",
+			iss.Category, iss.Signature, iss.File, iss.Details)
+	} else {
+		// Group PR
+		title = fmt.Sprintf("fix(%s): %s (%d issues)", leader.Category, truncate(leader.Summary, 40), len(issues))
+		var bodyBuilder strings.Builder
+		bodyBuilder.WriteString("Automated fix for a group of related CI failures.\n\n")
+		bodyBuilder.WriteString(fmt.Sprintf("**Issues fixed:** %d\n\n", len(issues)))
+		for _, iss := range issues {
+			bodyBuilder.WriteString(fmt.Sprintf("- `%s` %s — %s", iss.ID, iss.Category, truncate(iss.Summary, 80)))
+			if iss.File != "" {
+				bodyBuilder.WriteString(fmt.Sprintf(" (`%s`)", iss.File))
+			}
+			bodyBuilder.WriteString("\n")
+		}
+		body = bodyBuilder.String()
+	}
+
 	if len(body) > 4000 {
 		body = body[:4000] + "\n... (truncated)"
 	}
 
-	prInfo, err := wt.CreatePR(ctx, config.GHRunner, title, body, config.BaseBranch, branchName, false, wtPath)
-	if err != nil {
-		result.Error = fmt.Errorf("create PR: %w", err)
-		return result
+	prInfo, prErr := wt.CreatePR(ctx, ghRunner, title, body, baseBranch, r.Branch, false, r.WorktreePath)
+	if prErr != nil {
+		r.Error = fmt.Errorf("create PR: %w", prErr)
+		return r
 	}
 
-	result.PRURL = prInfo.URL
-	result.PRNumber = prInfo.Number
-	result.Success = true
+	r.PRURL = prInfo.URL
+	r.PRNumber = prInfo.Number
+	r.Success = true
 
-	log.Info("fix PR created",
+	logger.Info("fix PR created",
 		"pr", prInfo.URL,
 		"number", prInfo.Number,
 	)
 
-	return result
+	return r
+}
+
+// RunFixAgent runs a single fix agent: creates worktree, runs Claude session, creates PR.
+func RunFixAgent(ctx context.Context, config FixAgentConfig) *FixAgentResult {
+	prompt := buildFixPrompt(config.Issue, config.BaseBranch)
+	sessionID := fmt.Sprintf("medivac-%s", config.Issue.ID)
+
+	r := runAgentCore(
+		ctx,
+		[]*issue.Issue{config.Issue},
+		prompt,
+		sessionID,
+		config.WTManager,
+		config.GHRunner,
+		config.Logger,
+		config.Model,
+		config.BaseBranch,
+		config.SessionDir,
+		config.BudgetUSD,
+		config.SessionFactory,
+	)
+
+	return &FixAgentResult{
+		Issue:        config.Issue,
+		Error:        r.Error,
+		Analysis:     r.Analysis,
+		Branch:       r.Branch,
+		WorktreePath: r.WorktreePath,
+		PRURL:        r.PRURL,
+		FilesChanged: r.FilesChanged,
+		AgentCost:    r.AgentCost,
+		PRNumber:     r.PRNumber,
+		Success:      r.Success,
+	}
 }
 
 // fixBranchName generates a branch name for a fix issue.
@@ -165,58 +262,74 @@ func fixBranchName(iss *issue.Issue) string {
 	return fmt.Sprintf("fix/%s/%s", cat, iss.ID)
 }
 
-// recordFixAttempt updates the tracker with the fix agent result.
-func recordFixAttempt(tracker *issue.Tracker, result *FixAgentResult, logFile string) {
+// recordFixAttempt updates the tracker with the fix agent result for one or more issues.
+// For group fixes, the cost is split evenly across all issues.
+func recordFixAttempt(tracker *issue.Tracker, issues []*issue.Issue, branch string, prURL string, prNumber int, agentCost float64, analysis *AgentAnalysis, success bool, err error, logFile string) {
 	now := time.Now()
+
+	// Split cost evenly if this is a group fix
+	costPerIssue := agentCost
+	if len(issues) > 1 {
+		costPerIssue = agentCost / float64(len(issues))
+	}
+
 	attempt := issue.FixAttempt{
-		Branch:    result.Branch,
-		PRURL:     result.PRURL,
-		PRNumber:  result.PRNumber,
-		AgentCost: result.AgentCost,
+		Branch:    branch,
+		PRURL:     prURL,
+		PRNumber:  prNumber,
+		AgentCost: costPerIssue,
 		LogFile:   logFile,
 		StartedAt: now,
 	}
 
 	// Map analysis fields into the attempt.
-	if result.Analysis != nil {
-		attempt.Reasoning = result.Analysis.Reasoning
-		attempt.RootCause = result.Analysis.RootCause
-		attempt.FixOptions = result.Analysis.FixOptions
+	if analysis != nil {
+		attempt.Reasoning = analysis.Reasoning
+		attempt.RootCause = analysis.RootCause
+		attempt.FixOptions = analysis.FixOptions
 	}
 
-	if result.Success && result.PRURL != "" {
+	// Determine outcome and new status
+	var newStatus issue.Status
+	if success && prURL != "" {
 		attempt.Outcome = "pr_created"
 		attempt.PRState = "OPEN"
-		tracker.UpdateStatus(result.Issue.Signature, issue.StatusFixPending)
-	} else if result.Success {
+		newStatus = issue.StatusFixPending
+	} else if success {
 		// analysis_only: agent succeeded but no PR (not code-fixable).
 		// Reset to "new" so it can be manually triaged.
 		attempt.Outcome = "analysis_only"
-		tracker.UpdateStatus(result.Issue.Signature, issue.StatusNew)
+		newStatus = issue.StatusNew
 	} else {
 		attempt.Outcome = "failed"
-		if result.Error != nil {
-			attempt.Error = result.Error.Error()
+		if err != nil {
+			attempt.Error = err.Error()
 		}
 		// Reset from in_progress back to new so the issue remains actionable.
-		tracker.UpdateStatus(result.Issue.Signature, issue.StatusNew)
+		newStatus = issue.StatusNew
 	}
 
 	completed := now
 	attempt.CompletedAt = &completed
-	tracker.AddFixAttempt(result.Issue.Signature, attempt)
+
+	// Record the attempt for all issues
+	for _, iss := range issues {
+		tracker.AddFixAttempt(iss.Signature, attempt)
+		tracker.UpdateStatus(iss.Signature, newStatus)
+	}
 }
 
 // GroupFixAgentConfig configures a fix agent for a group of related issues.
 type GroupFixAgentConfig struct {
-	WTManager  *wt.Manager
-	Logger     *slog.Logger
-	GHRunner   wt.GHRunner
-	Model      string
-	BaseBranch string
-	SessionDir string
-	Group      IssueGroup
-	BudgetUSD  float64
+	WTManager      *wt.Manager
+	SessionFactory SessionFactory // optional; defaults to real sessions
+	Logger         *slog.Logger
+	GHRunner       wt.GHRunner
+	Model          string
+	BaseBranch     string
+	SessionDir     string
+	Group          IssueGroup
+	BudgetUSD      float64
 }
 
 // GroupFixAgentResult reports the outcome of a grouped fix agent.
@@ -235,171 +348,36 @@ type GroupFixAgentResult struct {
 
 // RunGroupFixAgent runs a single fix agent for a group of related issues.
 func RunGroupFixAgent(ctx context.Context, config GroupFixAgentConfig) *GroupFixAgentResult {
-	result := &GroupFixAgentResult{Group: config.Group}
 	leader := config.Group.Leader()
-	log := config.Logger
-	if log == nil {
-		log = slog.Default()
-	}
-
-	branchName := fixBranchName(leader)
-	result.Branch = branchName
-
-	log.Info("creating worktree for issue group",
-		"branch", branchName,
-		"groupKey", config.Group.Key,
-		"issueCount", len(config.Group.Issues),
-	)
-
-	wtPath, err := config.WTManager.New(ctx, branchName, config.BaseBranch, leader.Summary)
-	if err != nil {
-		result.Error = fmt.Errorf("create worktree: %w", err)
-		return result
-	}
-	result.WorktreePath = wtPath
 
 	prompt := buildGroupFixPrompt(config.Group, config.BaseBranch)
+	sessionID := fmt.Sprintf("medivac-group-%s", leader.ID)
 
-	sess := agent.NewEphemeralSession(agent.AgentConfig{
-		Logger:     log,
-		Role:       agent.RoleBuilder,
-		Model:      config.Model,
-		WorkDir:    wtPath,
-		SessionDir: config.SessionDir,
-		BudgetUSD:  config.BudgetUSD,
-	}, fmt.Sprintf("medivac-group-%s", leader.ID))
-
-	log.Info("running group fix agent",
-		"groupKey", config.Group.Key,
-		"issueCount", len(config.Group.Issues),
-		"model", config.Model,
+	r := runAgentCore(
+		ctx,
+		config.Group.Issues,
+		prompt,
+		sessionID,
+		config.WTManager,
+		config.GHRunner,
+		config.Logger,
+		config.Model,
+		config.BaseBranch,
+		config.SessionDir,
+		config.BudgetUSD,
+		config.SessionFactory,
 	)
 
-	agentResult, execResult, _, err := sess.ExecuteWithFiles(ctx, prompt)
-	result.AgentCost = sess.TotalCost()
-
-	// Parse analysis from agent response (best-effort).
-	if agentResult != nil && agentResult.Text != "" {
-		result.Analysis = ParseAnalysis(agentResult.Text)
-	}
-
-	if err != nil {
-		result.Error = fmt.Errorf("agent execution: %w", err)
-		return result
-	}
-
-	if agentResult == nil || !agentResult.Success {
-		errMsg := "agent reported failure"
-		if agentResult != nil && agentResult.Text != "" {
-			errMsg = agentResult.Text
-		}
-		result.Error = fmt.Errorf("agent failed: %s", errMsg)
-		return result
-	}
-
-	if execResult != nil {
-		result.FilesChanged = append(result.FilesChanged, execResult.FilesCreated...)
-		result.FilesChanged = append(result.FilesChanged, execResult.FilesModified...)
-	}
-
-	// If no file changes but analysis says fix not applied, treat as analysis_only.
-	if len(result.FilesChanged) == 0 {
-		if result.Analysis != nil && !result.Analysis.FixApplied {
-			result.Success = true
-			log.Info("group agent completed with analysis only (no code fix possible)",
-				"groupKey", config.Group.Key,
-				"rootCause", result.Analysis.RootCause,
-			)
-			return result
-		}
-		result.Error = fmt.Errorf("agent made no file changes")
-		return result
-	}
-
-	log.Info("group agent completed, creating PR",
-		"filesChanged", len(result.FilesChanged),
-		"cost", fmt.Sprintf("$%.4f", result.AgentCost),
-	)
-
-	// PR title/body list all issues in the group
-	title := fmt.Sprintf("fix(%s): %s (%d issues)", leader.Category, truncate(leader.Summary, 40), len(config.Group.Issues))
-	var bodyBuilder strings.Builder
-	bodyBuilder.WriteString("Automated fix for a group of related CI failures.\n\n")
-	bodyBuilder.WriteString(fmt.Sprintf("**Group key:** `%s`\n", config.Group.Key))
-	bodyBuilder.WriteString(fmt.Sprintf("**Issues fixed:** %d\n\n", len(config.Group.Issues)))
-	for _, iss := range config.Group.Issues {
-		bodyBuilder.WriteString(fmt.Sprintf("- `%s` %s — %s", iss.ID, iss.Category, truncate(iss.Summary, 80)))
-		if iss.File != "" {
-			bodyBuilder.WriteString(fmt.Sprintf(" (`%s`)", iss.File))
-		}
-		bodyBuilder.WriteString("\n")
-	}
-	body := bodyBuilder.String()
-	if len(body) > 4000 {
-		body = body[:4000] + "\n... (truncated)"
-	}
-
-	prInfo, err := wt.CreatePR(ctx, config.GHRunner, title, body, config.BaseBranch, branchName, false, result.WorktreePath)
-	if err != nil {
-		result.Error = fmt.Errorf("create PR: %w", err)
-		return result
-	}
-
-	result.PRURL = prInfo.URL
-	result.PRNumber = prInfo.Number
-	result.Success = true
-
-	log.Info("group fix PR created",
-		"pr", prInfo.URL,
-		"number", prInfo.Number,
-		"issueCount", len(config.Group.Issues),
-	)
-
-	return result
-}
-
-// recordGroupFixAttempt updates the tracker with a group fix agent result,
-// recording the attempt on ALL issues in the group.
-func recordGroupFixAttempt(tracker *issue.Tracker, result *GroupFixAgentResult, logFile string) {
-	now := time.Now()
-	attempt := issue.FixAttempt{
-		Branch:    result.Branch,
-		PRURL:     result.PRURL,
-		PRNumber:  result.PRNumber,
-		AgentCost: result.AgentCost / float64(len(result.Group.Issues)), // split cost
-		LogFile:   logFile,
-		StartedAt: now,
-	}
-
-	// Map analysis fields into the attempt.
-	if result.Analysis != nil {
-		attempt.Reasoning = result.Analysis.Reasoning
-		attempt.RootCause = result.Analysis.RootCause
-		attempt.FixOptions = result.Analysis.FixOptions
-	}
-
-	if result.Success && result.PRURL != "" {
-		attempt.Outcome = "pr_created"
-		attempt.PRState = "OPEN"
-	} else if result.Success {
-		attempt.Outcome = "analysis_only"
-	} else {
-		attempt.Outcome = "failed"
-		if result.Error != nil {
-			attempt.Error = result.Error.Error()
-		}
-	}
-
-	completed := now
-	attempt.CompletedAt = &completed
-
-	for _, iss := range result.Group.Issues {
-		tracker.AddFixAttempt(iss.Signature, attempt)
-		if result.Success && result.PRURL != "" {
-			tracker.UpdateStatus(iss.Signature, issue.StatusFixPending)
-		} else {
-			// analysis_only or failed: reset to "new" so issue remains actionable.
-			tracker.UpdateStatus(iss.Signature, issue.StatusNew)
-		}
+	return &GroupFixAgentResult{
+		Group:        config.Group,
+		Error:        r.Error,
+		Analysis:     r.Analysis,
+		Branch:       r.Branch,
+		WorktreePath: r.WorktreePath,
+		PRURL:        r.PRURL,
+		FilesChanged: r.FilesChanged,
+		AgentCost:    r.AgentCost,
+		PRNumber:     r.PRNumber,
+		Success:      r.Success,
 	}
 }

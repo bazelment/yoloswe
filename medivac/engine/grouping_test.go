@@ -3,7 +3,6 @@ package engine
 import (
 	"testing"
 
-	"github.com/bazelment/yoloswe/medivac/github"
 	"github.com/bazelment/yoloswe/medivac/issue"
 )
 
@@ -31,8 +30,8 @@ func TestGroupIssues_TSErrorCodes(t *testing.T) {
 
 func TestGroupIssues_Dependabot(t *testing.T) {
 	issues := []*issue.Issue{
-		{Signature: "sig1", Category: github.CategoryInfraDepbot, Summary: "No solution found when resolving dependencies for cryptography"},
-		{Signature: "sig2", Category: github.CategoryInfraDepbot, Summary: "Dependency resolution failed for cryptography>=46.0.0"},
+		{Signature: "sig1", Category: issue.CategoryInfraDepbot, Summary: "No solution found when resolving dependencies for cryptography"},
+		{Signature: "sig2", Category: issue.CategoryInfraDepbot, Summary: "Dependency resolution failed for cryptography>=46.0.0"},
 	}
 
 	groups := GroupIssues(issues)
@@ -47,8 +46,8 @@ func TestGroupIssues_Dependabot(t *testing.T) {
 
 func TestGroupIssues_Singleton(t *testing.T) {
 	issues := []*issue.Issue{
-		{Signature: "sig1", Category: github.CategoryLintGo, Summary: "unused variable x", File: "main.go"},
-		{Signature: "sig2", Category: github.CategoryInfraCI, Summary: "parallel golangci-lint is running"},
+		{Signature: "sig1", Category: issue.CategoryLintGo, Summary: "unused variable x", File: "main.go"},
+		{Signature: "sig2", Category: issue.CategoryInfraCI, Summary: "parallel golangci-lint is running"},
 	}
 
 	groups := GroupIssues(issues)
