@@ -60,7 +60,7 @@ func TestListFailedRuns(t *testing.T) {
 		"--limit", "5",
 	}, string(data))
 
-	client := NewClient(mock, "/repo")
+	client := NewClient(mock, "/repo", nil)
 	result, err := client.ListFailedRuns(context.Background(), "main", 5)
 	if err != nil {
 		t.Fatalf("ListFailedRuns: %v", err)
@@ -92,7 +92,7 @@ func TestGetJobsForRun(t *testing.T) {
 		"--json", "jobs",
 	}, string(data))
 
-	client := NewClient(mock, "/repo")
+	client := NewClient(mock, "/repo", nil)
 	jobs, err := client.GetJobsForRun(context.Background(), 123)
 	if err != nil {
 		t.Fatalf("GetJobsForRun: %v", err)
@@ -134,7 +134,7 @@ func TestGetAnnotations(t *testing.T) {
 		"repos/{owner}/{repo}/check-runs/456/annotations",
 	}, string(annsData))
 
-	client := NewClient(mock, "/repo")
+	client := NewClient(mock, "/repo", nil)
 	result, err := client.GetAnnotations(context.Background(), 123)
 	if err != nil {
 		t.Fatalf("GetAnnotations: %v", err)
@@ -155,7 +155,7 @@ func TestGetJobLog(t *testing.T) {
 		"--log-failed",
 	}, "some log output here")
 
-	client := NewClient(mock, "/repo")
+	client := NewClient(mock, "/repo", nil)
 	log, err := client.GetJobLog(context.Background(), 123)
 	if err != nil {
 		t.Fatalf("GetJobLog: %v", err)

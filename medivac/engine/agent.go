@@ -100,9 +100,9 @@ func runAgentCore(
 		"issueCount", len(issues),
 	)
 
-	// Create worktree
+	// Create worktree (fetch is done once by launchAgents, skip here)
 	var err error
-	r.WorktreePath, err = wtManager.New(ctx, r.Branch, baseBranch, leader.Summary)
+	r.WorktreePath, err = wtManager.New(ctx, r.Branch, baseBranch, leader.Summary, wt.NewOptions{SkipFetch: true})
 	if err != nil {
 		r.Error = fmt.Errorf("create worktree: %w", err)
 		return r
@@ -123,6 +123,9 @@ func runAgentCore(
 		BudgetUSD:  budgetUSD,
 	}, sessionID)
 
+	logger.Debug("fix prompt built", "chars", len(prompt), "issueCount", len(issues))
+	logger.Log(ctx, LevelTrace, "fix prompt", "content", prompt)
+
 	logger.Info("running fix agent",
 		"issueCount", len(issues),
 		"model", model,
@@ -135,6 +138,11 @@ func runAgentCore(
 	if execErr != nil {
 		r.Error = fmt.Errorf("agent execution: %w", execErr)
 		return r
+	}
+
+	if agentResult != nil {
+		logger.Debug("agent response received", "responseChars", len(agentResult.Text), "success", agentResult.Success)
+		logger.Log(ctx, LevelTrace, "agent response", "text", agentResult.Text)
 	}
 
 	// Parse analysis from agent response (best-effort).

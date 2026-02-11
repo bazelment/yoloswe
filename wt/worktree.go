@@ -274,8 +274,31 @@ func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 	return mainPath, nil
 }
 
+// FetchOrigin fetches the latest refs from origin for this repo's bare clone.
+// Call this before parallel New calls to avoid concurrent git-fetch conflicts.
+func (m *Manager) FetchOrigin(ctx context.Context) error {
+	bareDir := m.BareDir()
+	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
+		return ErrRepoNotInitialized
+	}
+	m.output.Info("Fetching latest from origin...")
+	if _, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir); err != nil {
+		return fmt.Errorf("failed to fetch from origin: %w", err)
+	}
+	return nil
+}
+
+// NewOptions configures optional behavior for New.
+type NewOptions struct {
+	SkipFetch bool // skip git-fetch (caller already fetched)
+}
+
 // New creates a new worktree with a new branch.
-func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string) (string, error) {
+func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts ...NewOptions) (string, error) {
+	var o NewOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return "", ErrRepoNotInitialized
@@ -305,9 +328,10 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string) (str
 		}
 	}
 
-	m.output.Info("Fetching latest from origin...")
-	if _, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir); err != nil {
-		return "", fmt.Errorf("failed to fetch from origin: %w", err)
+	if !o.SkipFetch {
+		if err := m.FetchOrigin(ctx); err != nil {
+			return "", err
+		}
 	}
 
 	m.output.Info(fmt.Sprintf("Creating worktree %s from %s...", branch, baseBranch))

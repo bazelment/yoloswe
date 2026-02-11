@@ -7,6 +7,7 @@ go_library(
         "analysis.go",
         "engine.go",
         "grouping.go",
+        "loglevel.go",
         "prompts.go",
     ],
     importpath = "github.com/bazelment/yoloswe/medivac/engine",

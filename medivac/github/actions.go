@@ -5,20 +5,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/bazelment/yoloswe/wt"
 )
 
+// LevelDump matches engine.LevelDump for raw data logging at -vvv.
+const LevelDump slog.Level = slog.LevelDebug - 8
+
 // Client wraps the gh CLI for GitHub Actions data.
 type Client struct {
-	gh  wt.GHRunner
-	dir string
+	gh     wt.GHRunner
+	logger *slog.Logger
+	dir    string
 }
 
 // NewClient creates a Client that runs gh commands in dir.
-func NewClient(gh wt.GHRunner, dir string) *Client {
-	return &Client{gh: gh, dir: dir}
+func NewClient(gh wt.GHRunner, dir string, logger *slog.Logger) *Client {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Client{gh: gh, dir: dir, logger: logger}
 }
 
 // WorkflowRun represents a GitHub Actions workflow run.
@@ -62,16 +70,19 @@ func (c *Client) ListFailedRuns(ctx context.Context, branch string, limit int) (
 	if limit <= 0 {
 		limit = 10
 	}
-	result, err := c.gh.Run(ctx, []string{
+	args := []string{
 		"run", "list",
 		"--branch", branch,
 		"--status", "failure",
 		"--json", "databaseId,name,status,conclusion,headBranch,headSha,url,createdAt",
 		"--limit", fmt.Sprintf("%d", limit),
-	}, c.dir)
+	}
+	c.logger.Debug("gh command", "args", args)
+	result, err := c.gh.Run(ctx, args, c.dir)
 	if err != nil {
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
+	c.logger.Log(ctx, LevelDump, "gh stdout", "cmd", "run list", "bytes", len(result.Stdout), "stdout", result.Stdout)
 
 	var runs []WorkflowRun
 	if err := json.Unmarshal([]byte(result.Stdout), &runs); err != nil {
@@ -82,13 +93,16 @@ func (c *Client) ListFailedRuns(ctx context.Context, branch string, limit int) (
 
 // GetJobsForRun returns the jobs for a specific workflow run.
 func (c *Client) GetJobsForRun(ctx context.Context, runID int64) ([]JobResult, error) {
-	result, err := c.gh.Run(ctx, []string{
+	args := []string{
 		"run", "view", fmt.Sprintf("%d", runID),
 		"--json", "jobs",
-	}, c.dir)
+	}
+	c.logger.Debug("gh command", "args", args)
+	result, err := c.gh.Run(ctx, args, c.dir)
 	if err != nil {
 		return nil, fmt.Errorf("gh run view jobs: %w", err)
 	}
+	c.logger.Log(ctx, LevelDump, "gh stdout", "cmd", "run view jobs", "runID", runID, "bytes", len(result.Stdout), "stdout", result.Stdout)
 
 	var resp jobsResponse
 	if err := json.Unmarshal([]byte(result.Stdout), &resp); err != nil {
@@ -115,13 +129,16 @@ func (c *Client) GetAnnotations(ctx context.Context, runID int64) ([]Annotation,
 			continue
 		}
 
-		result, err := c.gh.Run(ctx, []string{
+		args := []string{
 			"api",
 			fmt.Sprintf("repos/{owner}/{repo}/check-runs/%d/annotations", job.ID),
-		}, c.dir)
+		}
+		c.logger.Debug("gh command", "args", args)
+		result, err := c.gh.Run(ctx, args, c.dir)
 		if err != nil {
 			continue // best-effort
 		}
+		c.logger.Log(ctx, LevelDump, "gh stdout", "cmd", "api annotations", "jobID", job.ID, "bytes", len(result.Stdout), "stdout", result.Stdout)
 
 		var anns []Annotation
 		if err := json.Unmarshal([]byte(result.Stdout), &anns); err != nil {
@@ -137,15 +154,18 @@ func (c *Client) GetAnnotations(ctx context.Context, runID int64) ([]Annotation,
 
 // GetJobLog returns the failed-job log output for a workflow run.
 func (c *Client) GetJobLog(ctx context.Context, runID int64) (string, error) {
-	result, err := c.gh.Run(ctx, []string{
+	args := []string{
 		"run", "view", fmt.Sprintf("%d", runID),
 		"--log-failed",
-	}, c.dir)
+	}
+	c.logger.Debug("gh command", "args", args)
+	result, err := c.gh.Run(ctx, args, c.dir)
 	if err != nil {
 		if result != nil {
 			return result.Stdout, fmt.Errorf("gh run view --log-failed: %w", err)
 		}
 		return "", fmt.Errorf("gh run view --log-failed: %w", err)
 	}
+	c.logger.Log(ctx, LevelDump, "gh stdout", "cmd", "run view --log-failed", "runID", runID, "bytes", len(result.Stdout))
 	return result.Stdout, nil
 }

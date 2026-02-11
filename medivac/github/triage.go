@@ -4,16 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/medivac/issue"
 )
 
+// LevelTrace matches engine.LevelTrace for prompt/response logging at -vv.
+const LevelTrace slog.Level = slog.LevelDebug - 4
+
 // TriageConfig controls LLM triage behavior.
 type TriageConfig struct {
-	Query QueryFn // injectable for testing; defaults to claude.Query
-	Model string  // Claude model (default "haiku")
+	Query  QueryFn      // injectable for testing; defaults to claude.Query
+	Logger *slog.Logger // optional; nil = slog.Default()
+	Model  string       // Claude model (default "haiku")
 }
 
 // QueryFn is the signature for one-shot LLM queries.
@@ -207,6 +212,11 @@ func TriageBatch(
 		return &BatchTriageResult{}, nil
 	}
 
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	model := config.Model
 	if model == "" {
 		model = "haiku"
@@ -217,16 +227,22 @@ func TriageBatch(
 	}
 
 	prompt := buildBatchTriagePrompt(runs)
+	logger.Debug("built triage prompt", "runs", len(runs), "promptChars", len(prompt))
+	logger.Log(ctx, LevelTrace, "triage prompt", "content", prompt)
 
 	result, err := queryFn(ctx, prompt, claude.WithModel(model))
 	if err != nil {
 		return nil, fmt.Errorf("batch triage query: %w", err)
 	}
 
+	logger.Debug("triage response received", "responseChars", len(result.Text), "cost", result.Usage.CostUSD)
+	logger.Log(ctx, LevelTrace, "triage response", "text", result.Text)
+
 	items, err := parseTriageResponse(result.Text)
 	if err != nil {
 		return nil, fmt.Errorf("parse batch triage response: %w", err)
 	}
+	logger.Debug("parsed triage items", "count", len(items))
 
 	// Build valid job name set across all runs.
 	jobNames := make(map[string]bool)

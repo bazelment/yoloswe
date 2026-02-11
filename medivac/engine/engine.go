@@ -78,7 +78,7 @@ func New(config Config) (*Engine, error) {
 	// Use provided scanner or create default github.Client
 	scanner := config.Scanner
 	if scanner == nil {
-		scanner = github.NewClient(config.GHRunner, config.RepoDir)
+		scanner = github.NewClient(config.GHRunner, config.RepoDir, config.Logger)
 	}
 
 	return &Engine{
@@ -169,6 +169,15 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 		cleanedLog := github.CleanLog(rawLog)
 		trimmedLog := github.TrimLog(cleanedLog, 100, 100)
 
+		e.logger.Debug("fetched CI log",
+			"runID", run.ID,
+			"rawBytes", len(rawLog),
+			"cleanedBytes", len(cleanedLog),
+			"trimmedBytes", len(trimmedLog),
+		)
+		e.logger.Log(ctx, LevelDump, "raw CI log", "runID", run.ID, "content", rawLog)
+		e.logger.Log(ctx, LevelTrace, "trimmed CI log", "runID", run.ID, "content", trimmedLog)
+
 		// Get failed jobs.
 		jobs, err := e.scanner.GetJobsForRun(ctx, run.ID)
 		if err != nil {
@@ -190,6 +199,7 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 			"runID", run.ID,
 			"workflow", run.Name,
 			"failedJobs", len(failedJobs),
+			"annotations", len(annotations),
 		)
 
 		runDataSlice = append(runDataSlice, github.RunData{
@@ -203,8 +213,9 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 
 	// Single LLM call to triage all runs at once.
 	triageCfg := github.TriageConfig{
-		Model: e.config.TriageModel,
-		Query: e.config.TriageQuery,
+		Model:  e.config.TriageModel,
+		Query:  e.config.TriageQuery,
+		Logger: e.logger,
 	}
 
 	batchResult, err := github.TriageBatch(ctx, runDataSlice, triageCfg)
@@ -226,6 +237,12 @@ func (e *Engine) Scan(ctx context.Context) (*ScanResult, error) {
 
 	// Reconcile with known issues.
 	reconciled := e.tracker.Reconcile(allFailures)
+
+	e.logger.Debug("reconciled issues",
+		"new", len(reconciled.New),
+		"updated", len(reconciled.Updated),
+		"resolved", len(reconciled.Resolved),
+	)
 
 	if err := e.tracker.Save(); err != nil {
 		return nil, fmt.Errorf("save tracker: %w", err)
@@ -334,6 +351,30 @@ func (e *Engine) launchAgents(ctx context.Context, groups []IssueGroup, fixResul
 			} else {
 				fixResult.GroupResults = append(fixResult.GroupResults, &GroupFixAgentResult{
 					Group: group,
+				})
+			}
+		}
+		return
+	}
+
+	// Fetch once before launching parallel agents to avoid concurrent
+	// git-fetch conflicts on the same bare repo.
+	if err := e.config.WTManager.FetchOrigin(ctx); err != nil {
+		e.logger.Error("failed to fetch origin before launching agents", "error", err)
+		// Mark all issues as failed and return.
+		for _, group := range groups {
+			for _, iss := range group.Issues {
+				e.tracker.UpdateStatus(iss.Signature, issue.StatusNew)
+			}
+			if len(group.Issues) == 1 {
+				fixResult.Results = append(fixResult.Results, &FixAgentResult{
+					Issue: group.Issues[0],
+					Error: fmt.Errorf("pre-fetch failed: %w", err),
+				})
+			} else {
+				fixResult.GroupResults = append(fixResult.GroupResults, &GroupFixAgentResult{
+					Group: group,
+					Error: fmt.Errorf("pre-fetch failed: %w", err),
 				})
 			}
 		}

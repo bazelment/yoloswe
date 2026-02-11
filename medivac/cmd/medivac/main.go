@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/bazelment/yoloswe/medivac/engine"
 )
 
 var (
@@ -16,7 +18,7 @@ var (
 	trackerPath string
 	sessionDir  string
 	dryRun      bool
-	verbose     bool
+	verbosity   int
 )
 
 var rootCmd = &cobra.Command{
@@ -32,7 +34,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&trackerPath, "tracker", "", "Path to issues.json (default: <repo-root>/.medivac/issues.json)")
 	rootCmd.PersistentFlags().StringVar(&sessionDir, "session-dir", "", "Session recording directory (default: <repo-root>/.medivac/sessions)")
 	rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without making changes")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
+	rootCmd.PersistentFlags().CountVarP(&verbosity, "verbose", "v", "Increase verbosity (-v, -vv, -vvv)")
 }
 
 func main() {
@@ -92,24 +94,32 @@ func resolveWTRoot(repoRoot string) (string, string, error) {
 	}
 }
 
-// newLogger creates a structured logger that writes to stderr and to a
-// timestamped log file in <root>/.medivac/logs/ so runs can be revisited later.
-func newLogger() *slog.Logger {
-	level := slog.LevelInfo
-	if verbose {
-		level = slog.LevelDebug
+// verbosityLevel maps the -v count to a slog.Level.
+//
+//	0 → Info, 1 → Debug, 2 → Trace (-8), 3+ → Dump (-12)
+func verbosityLevel() slog.Level {
+	switch {
+	case verbosity >= 3:
+		return engine.LevelDump
+	case verbosity == 2:
+		return engine.LevelTrace
+	case verbosity == 1:
+		return slog.LevelDebug
+	default:
+		return slog.LevelInfo
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}
+
+// newLogger creates a structured logger that writes to stderr.
+func newLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: verbosityLevel()}))
 }
 
 // newFileLogger creates a logger that writes to both stderr and a persistent
 // log file under <root>/.medivac/logs/. Returns the logger, the log file path,
 // and a cleanup function to close the log file.
 func newFileLogger(root string) (*slog.Logger, string, func()) {
-	level := slog.LevelInfo
-	if verbose {
-		level = slog.LevelDebug
-	}
+	level := verbosityLevel()
 
 	logDir := filepath.Join(root, ".medivac", "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
