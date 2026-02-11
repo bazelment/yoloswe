@@ -9,13 +9,16 @@ import (
 
 // ClaudeProvider wraps the Claude SDK behind the Provider interface.
 type ClaudeProvider struct {
-	events chan AgentEvent
+	events      chan AgentEvent
+	sessionOpts []claude.SessionOption
 }
 
 // NewClaudeProvider creates a new Claude provider.
-func NewClaudeProvider() *ClaudeProvider {
+// Optional session options are prepended before per-call options built from ExecuteConfig.
+func NewClaudeProvider(sessionOpts ...claude.SessionOption) *ClaudeProvider {
 	return &ClaudeProvider{
-		events: make(chan AgentEvent, 100),
+		events:      make(chan AgentEvent, 100),
+		sessionOpts: sessionOpts,
 	}
 }
 
@@ -30,11 +33,12 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	// Map to Claude session options
-	sessionOpts := []claude.SessionOption{
+	// Map to Claude session options: provider-level opts first, then per-call overrides
+	sessionOpts := append([]claude.SessionOption{}, p.sessionOpts...)
+	sessionOpts = append(sessionOpts,
 		claude.WithModel(cfg.Model),
 		claude.WithDisablePlugins(),
-	}
+	)
 	if cfg.WorkDir != "" {
 		sessionOpts = append(sessionOpts, claude.WithWorkDir(cfg.WorkDir))
 	}

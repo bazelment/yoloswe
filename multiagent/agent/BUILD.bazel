@@ -14,6 +14,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/multiagent/agent",
     visibility = ["//visibility:public"],
     deps = [
+        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//wt",

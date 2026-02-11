@@ -1,0 +1,180 @@
+package acp
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Session represents an active ACP conversation session.
+type Session struct {
+	client   *Client
+	state    *sessionStateManager
+	turnDone chan *TurnResult
+	id       string
+	text     strings.Builder
+	thinking strings.Builder
+	mu       sync.Mutex
+}
+
+// TurnResult contains the result of a completed prompt turn.
+type TurnResult struct {
+	Error      error
+	FullText   string
+	Thinking   string
+	StopReason string // "endTurn", "cancelled", "error", "maxTokens"
+	DurationMs int64
+	Success    bool
+}
+
+func newSession(client *Client, id string) *Session {
+	s := &Session{
+		client: client,
+		id:     id,
+		state:  newSessionStateManager(),
+	}
+	_ = s.state.SetReady()
+	return s
+}
+
+// ID returns the session ID.
+func (s *Session) ID() string {
+	return s.id
+}
+
+// State returns the current session state.
+func (s *Session) State() SessionState {
+	return s.state.Current()
+}
+
+// Prompt sends a text prompt and waits for the turn to complete.
+func (s *Session) Prompt(ctx context.Context, text string) (*TurnResult, error) {
+	s.mu.Lock()
+	if s.state.IsClosed() {
+		s.mu.Unlock()
+		return nil, ErrClientClosed
+	}
+	if !s.state.IsReady() {
+		s.mu.Unlock()
+		return nil, ErrInvalidState
+	}
+
+	if err := s.state.SetProcessing(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+
+	// Reset accumulators
+	s.text.Reset()
+	s.thinking.Reset()
+	s.turnDone = make(chan *TurnResult, 1)
+	s.mu.Unlock()
+
+	start := time.Now()
+
+	// Send prompt request
+	params := PromptRequest{
+		SessionID: s.id,
+		Prompt:    []ContentBlock{NewTextContent(text)},
+	}
+
+	resp, err := s.client.sendRequestAndWait(ctx, MethodSessionPrompt, params)
+	durationMs := time.Since(start).Milliseconds()
+
+	if err != nil {
+		_ = s.state.SetReady()
+
+		result := &TurnResult{
+			Error:      err,
+			DurationMs: durationMs,
+			Success:    false,
+		}
+
+		s.mu.Lock()
+		if s.turnDone != nil {
+			select {
+			case s.turnDone <- result:
+			default:
+			}
+		}
+		s.mu.Unlock()
+
+		return result, err
+	}
+
+	// Parse response
+	var promptResp PromptResponse
+	if resp.Result != nil {
+		if jsonErr := json.Unmarshal(resp.Result, &promptResp); jsonErr != nil {
+			_ = s.state.SetReady()
+			return nil, &ProtocolError{Message: "failed to parse prompt response", Cause: jsonErr}
+		}
+	}
+
+	// Build result
+	s.mu.Lock()
+	result := &TurnResult{
+		FullText:   s.text.String(),
+		Thinking:   s.thinking.String(),
+		StopReason: promptResp.StopReason,
+		DurationMs: durationMs,
+		Success:    promptResp.StopReason == "endTurn" || promptResp.StopReason == "end_turn" || promptResp.StopReason == "",
+	}
+
+	if s.turnDone != nil {
+		select {
+		case s.turnDone <- result:
+		default:
+		}
+	}
+	s.mu.Unlock()
+
+	_ = s.state.SetReady()
+
+	// Emit turn complete event
+	s.client.emit(TurnCompleteEvent{
+		SessionID:  s.id,
+		FullText:   result.FullText,
+		Thinking:   result.Thinking,
+		StopReason: result.StopReason,
+		DurationMs: durationMs,
+		Success:    result.Success,
+	})
+
+	return result, nil
+}
+
+// Cancel sends a cancel notification for the current prompt.
+func (s *Session) Cancel() error {
+	return s.client.sendNotification(MethodSessionCancel, CancelNotification{
+		SessionID: s.id,
+	})
+}
+
+// handleUpdate processes a session/update notification from the agent.
+// Called by the client's readLoop.
+func (s *Session) handleUpdate(update *SessionUpdate) {
+	switch update.Type {
+	case UpdateTypeAgentMessage:
+		if update.Content != nil && update.Content.Type == "text" {
+			s.mu.Lock()
+			s.text.WriteString(update.Content.Text)
+			s.mu.Unlock()
+		}
+	case UpdateTypeAgentThought:
+		if update.Content != nil && update.Content.Type == "text" {
+			s.mu.Lock()
+			s.thinking.WriteString(update.Content.Text)
+			s.mu.Unlock()
+		}
+	}
+	// Other update types (tool_call, plan_update, etc.) are handled by
+	// the client's event emission in handleSessionUpdate.
+}
+
+// close marks the session as closed.
+func (s *Session) close() {
+	s.state.SetClosed()
+}
