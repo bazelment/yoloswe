@@ -280,3 +280,134 @@ func (m *mockEphemeralProvider) Execute(ctx context.Context, prompt string, wtCt
 		Success: true,
 	}, nil
 }
+
+// Test that providerRunner forwards tool results correctly in ToolCompleteAgentEvent.
+func TestProviderRunner_ToolCompleteWithResult(t *testing.T) {
+	mockProvider := newMockLongRunningProvider()
+
+	manager := NewManager()
+	defer manager.Close()
+
+	sessionID := SessionID("test-session")
+	session := &Session{
+		ID:       sessionID,
+		Status:   StatusRunning,
+		Progress: &SessionProgress{},
+	}
+	manager.AddSession(session)
+	manager.InitOutputBuffer(sessionID)
+
+	handler := newSessionEventHandler(manager, sessionID)
+
+	runner := &providerRunner{
+		provider:     mockProvider,
+		eventHandler: handler,
+	}
+
+	ctx := context.Background()
+	err := runner.Start(ctx)
+	require.NoError(t, err)
+
+	// Emit a tool start event first (required for OnToolComplete to update the line)
+	mockProvider.emitEvent(agent.ToolStartAgentEvent{
+		Name:  "read_file",
+		ID:    "tool-1",
+		Input: map[string]interface{}{"path": "/test/file.txt"},
+	})
+
+	// Give bridge time to process
+	time.Sleep(50 * time.Millisecond)
+
+	// Emit a tool complete event with a result
+	testResult := map[string]interface{}{"content": "file contents here"}
+	mockProvider.emitEvent(agent.ToolCompleteAgentEvent{
+		Name:    "read_file",
+		ID:      "tool-1",
+		Input:   map[string]interface{}{"path": "/test/file.txt"},
+		Result:  testResult,
+		IsError: false,
+	})
+
+	// Give bridge time to process
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify the tool complete event was recorded with the result
+	output := manager.GetSessionOutput(sessionID)
+	require.NotEmpty(t, output)
+
+	// Find tool output with the result
+	var foundToolWithResult bool
+	for _, line := range output {
+		if line.ToolID == "tool-1" {
+			// The result should be preserved in the output line
+			assert.NotNil(t, line.ToolResult, "tool result should not be nil")
+			if line.ToolResult != nil {
+				foundToolWithResult = true
+			}
+			break
+		}
+	}
+	assert.True(t, foundToolWithResult, "expected to find tool output with result field populated")
+
+	err = runner.Stop()
+	require.NoError(t, err)
+}
+
+// Test that providerRunner forwards turn cost correctly in TurnCompleteAgentEvent.
+func TestProviderRunner_TurnCompleteWithCost(t *testing.T) {
+	mockProvider := newMockLongRunningProvider()
+
+	manager := NewManager()
+	defer manager.Close()
+
+	sessionID := SessionID("test-session")
+	session := &Session{
+		ID:       sessionID,
+		Status:   StatusRunning,
+		Progress: &SessionProgress{},
+	}
+	manager.AddSession(session)
+	manager.InitOutputBuffer(sessionID)
+
+	handler := newSessionEventHandler(manager, sessionID)
+
+	runner := &providerRunner{
+		provider:     mockProvider,
+		eventHandler: handler,
+	}
+
+	ctx := context.Background()
+	err := runner.Start(ctx)
+	require.NoError(t, err)
+
+	// Emit a turn complete event with a cost
+	testCostUSD := 0.00123
+	mockProvider.emitEvent(agent.TurnCompleteAgentEvent{
+		TurnNumber: 1,
+		Success:    true,
+		DurationMs: 5000,
+		CostUSD:    testCostUSD,
+	})
+
+	// Give bridge time to process
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify the turn complete event was recorded with the cost in the output line
+	output := manager.GetSessionOutput(sessionID)
+	require.NotEmpty(t, output)
+
+	// Find turn end output
+	var foundTurnWithCost bool
+	for _, line := range output {
+		if line.Type == OutputTypeTurnEnd && line.TurnNumber == 1 {
+			// The cost should be preserved in the output line
+			assert.Equal(t, testCostUSD, line.CostUSD, "turn cost should be included in output line")
+			foundTurnWithCost = true
+			break
+		}
+	}
+	assert.True(t, foundTurnWithCost, "expected to find turn end output with cost field")
+
+	err = runner.Stop()
+	require.NoError(t, err)
+}

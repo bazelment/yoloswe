@@ -115,9 +115,9 @@ func (r *providerRunner) bridgeProviderEvents() {
 			case agent.ToolStartAgentEvent:
 				r.eventHandler.OnToolStart(e.Name, e.ID, e.Input)
 			case agent.ToolCompleteAgentEvent:
-				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, nil, e.IsError)
+				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, e.Result, e.IsError)
 			case agent.TurnCompleteAgentEvent:
-				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, 0)
+				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.CostUSD)
 			case agent.ErrorAgentEvent:
 				r.eventHandler.OnError(e.Err, e.Context)
 			}
