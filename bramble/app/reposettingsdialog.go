@@ -103,17 +103,29 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 		}
 	}
 
-	// Initialize provider statuses and enabled map
+	// Initialize provider statuses and enabled map.
+	// Only installed providers can be enabled — non-installed ones are always
+	// unchecked and untoggable in the UI.
 	d.providerStatuses = providerStatuses
 	d.enabledProviders = make(map[string]bool, len(agent.AllProviders))
 	if len(enabledProviders) == 0 {
-		// nil/empty = all enabled
+		// nil/empty = all installed providers enabled
 		for _, s := range providerStatuses {
-			d.enabledProviders[s.Provider] = true
+			if s.Installed {
+				d.enabledProviders[s.Provider] = true
+			}
 		}
 	} else {
+		installedSet := make(map[string]bool, len(providerStatuses))
+		for _, s := range providerStatuses {
+			if s.Installed {
+				installedSet[s.Provider] = true
+			}
+		}
 		for _, p := range enabledProviders {
-			d.enabledProviders[p] = true
+			if installedSet[p] {
+				d.enabledProviders[p] = true
+			}
 		}
 	}
 
@@ -138,13 +150,17 @@ func (d *RepoSettingsDialog) EnabledProviders() []string {
 		return nil // no availability data → treat as all enabled
 	}
 	result := make([]string, 0, len(d.providerStatuses))
+	installedCount := 0
 	for _, s := range d.providerStatuses {
-		if d.enabledProviders[s.Provider] {
-			result = append(result, s.Provider)
+		if s.Installed {
+			installedCount++
+			if d.enabledProviders[s.Provider] {
+				result = append(result, s.Provider)
+			}
 		}
 	}
-	// If all are enabled, return nil to mean "all" (backward compat)
-	if len(result) == len(d.providerStatuses) {
+	// If all installed providers are enabled, return nil to mean "all" (backward compat)
+	if len(result) == installedCount {
 		return nil
 	}
 	return result
