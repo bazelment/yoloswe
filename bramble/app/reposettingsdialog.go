@@ -282,15 +282,19 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 		}
 	case "left", "h":
 		if d.focus == RepoSettingsFocusTheme {
-			d.moveTheme(-1)
+			d.moveThemeGrid(0, -1)
 			return RepoSettingsActionNone, nil
 		}
 	case "right", "l":
 		if d.focus == RepoSettingsFocusTheme {
-			d.moveTheme(1)
+			d.moveThemeGrid(0, 1)
 			return RepoSettingsActionNone, nil
 		}
 	case "up":
+		if d.focus == RepoSettingsFocusTheme {
+			d.moveThemeGrid(-1, 0)
+			return RepoSettingsActionNone, nil
+		}
 		if d.focus == RepoSettingsFocusProviders {
 			if d.providerCursor > 0 {
 				d.providerCursor--
@@ -304,6 +308,10 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 			return RepoSettingsActionNone, nil
 		}
 	case "down":
+		if d.focus == RepoSettingsFocusTheme {
+			d.moveThemeGrid(1, 0)
+			return RepoSettingsActionNone, nil
+		}
 		if d.focus == RepoSettingsFocusProviders {
 			if d.providerCursor < len(d.providerStatuses)-1 {
 				d.providerCursor++
@@ -334,17 +342,133 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 	}
 }
 
-func (d *RepoSettingsDialog) moveTheme(delta int) {
-	if len(d.themes) == 0 {
+// themeGridCols returns how many columns the theme grid should have based on
+// the current dialog width.
+func (d *RepoSettingsDialog) themeGridCols() int {
+	boxWidth := 84
+	if d.width > 0 && d.width < 96 {
+		boxWidth = d.width - 8
+	}
+	if boxWidth < 52 {
+		boxWidth = 52
+	}
+	innerWidth := boxWidth - 6 // ModalBox padding (2*2) + border (2)
+	cols := innerWidth / 25
+	if cols < 1 {
+		cols = 1
+	}
+	if cols > 3 {
+		cols = 3
+	}
+	return cols
+}
+
+// moveThemeGrid navigates the theme selection in a 2D grid layout.
+func (d *RepoSettingsDialog) moveThemeGrid(dRow, dCol int) {
+	n := len(d.themes)
+	if n == 0 {
 		return
 	}
-	d.selectedIdx += delta
-	if d.selectedIdx < 0 {
-		d.selectedIdx = len(d.themes) - 1
+	cols := d.themeGridCols()
+	row := d.selectedIdx / cols
+	col := d.selectedIdx % cols
+	rows := (n + cols - 1) / cols
+
+	col += dCol
+	if col < 0 {
+		col = cols - 1
 	}
-	if d.selectedIdx >= len(d.themes) {
-		d.selectedIdx = 0
+	if col >= cols {
+		col = 0
 	}
+
+	row += dRow
+	if row < 0 {
+		row = rows - 1
+	}
+	if row >= rows {
+		row = 0
+	}
+
+	idx := row*cols + col
+	// Clamp to valid range (last row may be short)
+	if idx >= n {
+		idx = n - 1
+	}
+	d.selectedIdx = idx
+}
+
+// renderThemeSwatch renders a single theme swatch showing the theme name and
+// colored preview dots inside a rounded border box.
+func renderThemeSwatch(palette ColorPalette, width int, selected, current bool, appStyles *Styles) string {
+	borderColor := lipgloss.Color(palette.Border)
+	if selected {
+		borderColor = lipgloss.Color(appStyles.Palette.Accent)
+	}
+
+	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(palette.Accent)).Bold(true)
+	name := palette.Name
+	if current {
+		name += "*"
+	}
+
+	dot := func(c string) string {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Render("\u25cf")
+	}
+	dots := strings.Join([]string{
+		dot(palette.Running),
+		dot(palette.Error),
+		dot(palette.Idle),
+		dot(palette.Pending),
+		dot(palette.Dim),
+	}, " ")
+
+	contentWidth := width - 4 // border (2) + padding (2)
+	if contentWidth < 8 {
+		contentWidth = 8
+	}
+
+	renderedName := nameStyle.Render(name)
+	content := renderedName + "\n" + dots
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1).
+		Width(contentWidth).
+		Render(content)
+
+	return box
+}
+
+// renderThemeGrid builds the full grid of theme swatches.
+func (d *RepoSettingsDialog) renderThemeGrid(boxWidth int, styles *Styles) string {
+	cols := d.themeGridCols()
+	n := len(d.themes)
+	rows := (n + cols - 1) / cols
+
+	swatchWidth := (boxWidth - 6) / cols // distribute inner width evenly
+	if swatchWidth < 12 {
+		swatchWidth = 12
+	}
+
+	var rowStrings []string
+	for r := 0; r < rows; r++ {
+		var swatches []string
+		for c := 0; c < cols; c++ {
+			idx := r*cols + c
+			if idx >= n {
+				// Pad with empty space to keep grid aligned
+				swatches = append(swatches, strings.Repeat(" ", swatchWidth))
+				continue
+			}
+			selected := idx == d.selectedIdx
+			current := d.themes[idx].Name == d.original
+			swatches = append(swatches, renderThemeSwatch(d.themes[idx], swatchWidth, selected, current, styles))
+		}
+		rowStrings = append(rowStrings, lipgloss.JoinHorizontal(lipgloss.Top, swatches...))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rowStrings...)
 }
 
 // View renders the dialog.
@@ -366,13 +490,13 @@ func (d *RepoSettingsDialog) View(styles *Styles) string {
 
 	inputHeight := 4
 	if d.height > 0 {
-		maxInputHeight := (d.height - 18) / 2
+		maxInputHeight := (d.height - 26) / 2
 		if maxInputHeight > inputHeight {
 			inputHeight = maxInputHeight
 		}
 	}
-	if inputHeight < 3 {
-		inputHeight = 3
+	if inputHeight < 2 {
+		inputHeight = 2
 	}
 	if inputHeight > 8 {
 		inputHeight = 8
@@ -384,12 +508,8 @@ func (d *RepoSettingsDialog) View(styles *Styles) string {
 	d.deleteInput.SetHeight(inputHeight)
 
 	themeLabel := "Color Theme"
-	themeValue := d.SelectedTheme().Name
 	if d.focus == RepoSettingsFocusTheme {
 		themeLabel = styles.Selected.Render(" " + themeLabel + " ")
-		themeValue = styles.Selected.Render(" < " + themeValue + " > ")
-	} else {
-		themeValue = styles.Dim.Render("< " + themeValue + " >")
 	}
 
 	createLabel := "On Worktree Create (run after create)"
@@ -417,9 +537,11 @@ func (d *RepoSettingsDialog) View(styles *Styles) string {
 	b.WriteString("\n\n")
 	b.WriteString(themeLabel)
 	b.WriteString("\n")
-	b.WriteString(themeValue)
-	b.WriteString(" ")
-	b.WriteString(styles.Dim.Render("[Left/Right]"))
+	b.WriteString(d.renderThemeGrid(boxWidth, styles))
+	if d.focus == RepoSettingsFocusTheme {
+		b.WriteString("\n")
+		b.WriteString(styles.Dim.Render("[Arrow Keys] Navigate"))
+	}
 	b.WriteString("\n\n")
 
 	// Providers section
