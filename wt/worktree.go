@@ -85,9 +85,15 @@ This enables `wt cd` to change your shell's working directory.
 Create .wt.yaml in your repository root:
 
 	default_base: main
+	# Legacy names
 	post_create:
 	  - npm install
 	post_remove:
+	  - echo "cleaned up"
+	# Bramble names
+	on_worktree_create:
+	  - npm install
+	on_worktree_delete:
 	  - echo "cleaned up"
 
 SECURITY WARNING: Hooks in .wt.yaml are executed automatically during
@@ -266,9 +272,15 @@ func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 	m.output.Success(fmt.Sprintf("Main worktree: %s", mainPath))
 
 	// Run post-create hooks
-	config, _ := LoadRepoConfig(mainPath)
-	if len(config.PostCreate) > 0 {
-		RunHooks(config.PostCreate, mainPath, defaultBranch, m.output)
+	config, err := LoadRepoConfig(mainPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to load repo config: %w", err)
+	}
+	createCommands := config.WorktreeCreateCommands()
+	if len(createCommands) > 0 {
+		if err := RunHooks(createCommands, mainPath, defaultBranch, m.output); err != nil {
+			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		}
 	}
 
 	return mainPath, nil
@@ -317,7 +329,10 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 			if entry.IsDir() {
 				wtPath := filepath.Join(m.RepoDir(), entry.Name())
 				if _, err := os.Stat(filepath.Join(wtPath, ".git")); err == nil {
-					config, _ := LoadRepoConfig(wtPath)
+					config, err := LoadRepoConfig(wtPath)
+					if err != nil {
+						return "", fmt.Errorf("failed to load repo config: %w", err)
+					}
 					baseBranch = config.DefaultBase
 					break
 				}
@@ -362,9 +377,15 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 	}
 
 	// Run post-create hooks
-	config, _ := LoadRepoConfig(worktreePath)
-	if len(config.PostCreate) > 0 {
-		RunHooks(config.PostCreate, worktreePath, branch, m.output)
+	config, err := LoadRepoConfig(worktreePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to load repo config: %w", err)
+	}
+	createCommands := config.WorktreeCreateCommands()
+	if len(createCommands) > 0 {
+		if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
+			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		}
 	}
 
 	return worktreePath, nil
@@ -419,9 +440,15 @@ func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error)
 	}
 
 	// Run post-create hooks
-	config, _ := LoadRepoConfig(worktreePath)
-	if len(config.PostCreate) > 0 {
-		RunHooks(config.PostCreate, worktreePath, branch, m.output)
+	config, err := LoadRepoConfig(worktreePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to load repo config: %w", err)
+	}
+	createCommands := config.WorktreeCreateCommands()
+	if len(createCommands) > 0 {
+		if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
+			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		}
 	}
 
 	return worktreePath, nil
@@ -637,9 +664,15 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	}
 
 	// Run post-remove hooks first
-	config, _ := LoadRepoConfig(worktreePath)
-	if len(config.PostRemove) > 0 {
-		RunHooks(config.PostRemove, worktreePath, branchName, m.output)
+	config, err := LoadRepoConfig(worktreePath)
+	if err != nil {
+		return fmt.Errorf("failed to load repo config: %w", err)
+	}
+	deleteCommands := config.WorktreeDeleteCommands()
+	if len(deleteCommands) > 0 {
+		if err := RunHooks(deleteCommands, worktreePath, branchName, m.output); err != nil {
+			m.output.Warn(fmt.Sprintf("Post-remove hook failed: %v", err))
+		}
 	}
 
 	m.output.Info(fmt.Sprintf("Removing worktree %s...", branchName))

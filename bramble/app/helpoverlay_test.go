@@ -169,12 +169,33 @@ func TestHelpOverlayRendering(t *testing.T) {
 	if !strings.Contains(view, "Press ? or Esc to close") {
 		t.Error("View should contain footer text")
 	}
-
 	// Verify narrow terminal still renders without panic
 	m.helpOverlay.SetSize(40, 24)
 	viewNarrow := m.helpOverlay.View(m.styles)
 	if viewNarrow == "" {
 		t.Error("View should render even in narrow terminal")
+	}
+}
+
+func TestHelpOverlayIncludesSettingsBinding(t *testing.T) {
+	ctx := context.Background()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+	defer mgr.Close()
+
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
+	sections := buildHelpSections(&m)
+
+	found := false
+	for _, section := range sections {
+		for _, binding := range section.Bindings {
+			if binding.Key == "Ctrl-," {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected Ctrl-, settings binding in help sections")
 	}
 }
 

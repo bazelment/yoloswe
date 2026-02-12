@@ -583,3 +583,86 @@ func TestNewTracksDefaultBranch(t *testing.T) {
 		t.Error("Expected branch description to be set to track main as parent")
 	}
 }
+
+func TestManagerRemoveContinuesOnWorktreeDeleteCommandFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	config := `
+on_worktree_delete:
+  - false
+`
+	if err := os.WriteFile(filepath.Join(wtPath, ".wt.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	err := m.Remove(context.Background(), "feature", false)
+	if err != nil {
+		t.Fatalf("Remove() should continue when delete command fails, got error: %v", err)
+	}
+
+	removeFound := false
+	for _, call := range mockGit.Calls {
+		if len(call) >= 3 && call[0] == "worktree" && call[1] == "remove" && call[2] == wtPath {
+			removeFound = true
+			break
+		}
+	}
+	if !removeFound {
+		t.Fatalf("Expected worktree remove call even when delete command fails, got calls: %v", mockGit.Calls)
+	}
+}
+
+func TestManagerRemoveRunsWorktreeDeleteCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	config := `
+on_worktree_delete:
+  - true
+`
+	if err := os.WriteFile(filepath.Join(wtPath, ".wt.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	if err := m.Remove(context.Background(), "feature", false); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+
+	removeFound := false
+	for _, call := range mockGit.Calls {
+		if len(call) >= 3 && call[0] == "worktree" && call[1] == "remove" && call[2] == wtPath {
+			removeFound = true
+			break
+		}
+	}
+	if !removeFound {
+		t.Fatalf("Expected worktree remove call, got calls: %v", mockGit.Calls)
+	}
+}
