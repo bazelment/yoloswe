@@ -349,7 +349,7 @@ func (m Model) renderOutputArea(width, height int) string {
 	b.WriteString("\n")
 
 	// Prompt
-	promptLine := fmt.Sprintf("  %q", truncate(info.Prompt, width-8))
+	promptLine := fmt.Sprintf("  %q", info.Prompt)
 	b.WriteString(s.Dim.Render(promptLine))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", width-2))
@@ -503,16 +503,7 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 		formatted = header + "\n" + rendered
 
 	case session.OutputTypeText:
-		if m.mdRenderer != nil && line.Content != "" {
-			rendered, err := m.mdRenderer.Render(line.Content)
-			if err == nil {
-				formatted = strings.TrimRight(rendered, "\n")
-			} else {
-				formatted = "  " + line.Content
-			}
-		} else {
-			formatted = "  " + line.Content
-		}
+		formatted = renderTextContent(line.Content, m.mdRenderer, "  ")
 
 	default:
 		formatted = "  " + line.Content
@@ -543,7 +534,7 @@ func (m Model) renderHistorySession(width, height int) string {
 	b.WriteString("\n")
 
 	// Prompt
-	promptLine := fmt.Sprintf("  %q", truncate(data.Prompt, width-8))
+	promptLine := fmt.Sprintf("  %q", data.Prompt)
 	b.WriteString(s.Dim.Render(promptLine))
 	b.WriteString("\n")
 

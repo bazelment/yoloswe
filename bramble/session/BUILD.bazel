@@ -17,6 +17,7 @@ go_library(
         "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
+        "//agent-cli-wrapper/codex",
         "//multiagent/agent",
         "//yoloswe",
         "//yoloswe/planner",
@@ -26,6 +27,7 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "manager_provider_fallback_test.go",
         "manager_test.go",
         "provider_runner_test.go",
         "store_test.go",

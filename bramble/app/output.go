@@ -122,7 +122,7 @@ func (m OutputModel) View() string {
 	b.WriteString("\n")
 
 	// Prompt
-	b.WriteString(s.Dim.Render("\"" + truncate(m.info.Prompt, m.width-4) + "\""))
+	b.WriteString(s.Dim.Render(fmt.Sprintf("%q", m.info.Prompt)))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
@@ -136,15 +136,10 @@ func (m OutputModel) View() string {
 
 	for i := startIdx; i < len(m.lines); i++ {
 		line := m.lines[i]
-		// Handle text with optional markdown rendering
-		if line.Type == session.OutputTypeText && m.mdRenderer != nil && line.Content != "" {
-			rendered, err := m.mdRenderer.Render(line.Content)
-			if err == nil {
-				rendered = strings.TrimRight(rendered, "\n")
-				b.WriteString(rendered)
-				b.WriteString("\n")
-				continue
-			}
+		if line.Type == session.OutputTypeText {
+			b.WriteString(renderTextContent(line.Content, m.mdRenderer, ""))
+			b.WriteString("\n")
+			continue
 		}
 		b.WriteString(formatOutputLineWithStyles(line, m.width, s))
 		b.WriteString("\n")

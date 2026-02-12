@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "codexlogview_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/codexlogview",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//agent-cli-wrapper/codex",
+        "//bramble/app",
+        "//bramble/session",
+        "//yoloswe/sessionplayer",
+    ],
+)
+
+go_binary(
+    name = "codexlogview",
+    embed = [":codexlogview_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "codexlogview_test",
+    srcs = ["main_test.go"],
+    embed = [":codexlogview_lib"],
+    deps = [
+        "//bramble/session",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
