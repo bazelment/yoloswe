@@ -1824,11 +1824,33 @@ func runRepoHookCommands(commands []string, worktreePath, branch string, message
 		cmd := exec.Command("sh", "-c", cmdStr)
 		cmd.Dir = worktreePath
 		cmd.Env = env
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+
+		// Capture output to buffer instead of writing to os.Stdout/Stderr
+		// to prevent TUI corruption
+		var outBuf, errBuf bytes.Buffer
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &errBuf
+
 		if err := cmd.Run(); err != nil {
 			*messages = append(*messages, "Command failed: "+cmdStr)
+			// Include stderr output in messages for debugging
+			if errBuf.Len() > 0 {
+				for _, line := range strings.Split(strings.TrimSpace(errBuf.String()), "\n") {
+					if line != "" {
+						*messages = append(*messages, "  "+line)
+					}
+				}
+			}
 			return err
+		}
+
+		// Include stdout output in messages
+		if outBuf.Len() > 0 {
+			for _, line := range strings.Split(strings.TrimSpace(outBuf.String()), "\n") {
+				if line != "" {
+					*messages = append(*messages, "  "+line)
+				}
+			}
 		}
 	}
 	return nil

@@ -77,8 +77,9 @@ func RunHooks(commands []string, worktreePath, branch string, output *Output) er
 		cmd := exec.Command("sh", "-c", cmdStr)
 		cmd.Dir = worktreePath
 		cmd.Env = env
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		// Write hook output to the same writer as Output to prevent TUI corruption
+		cmd.Stdout = output.Writer()
+		cmd.Stderr = output.Writer()
 
 		if err := cmd.Run(); err != nil {
 			output.Error("Hook failed: " + cmdStr)
