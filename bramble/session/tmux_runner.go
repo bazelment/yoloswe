@@ -121,9 +121,13 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 	case ProviderGemini:
 		// Gemini-specific flags
-		args = append(args, "--experimental-acp")
+		// Note: Do NOT use --experimental-acp in tmux mode. ACP is for programmatic
+		// JSON-RPC communication (TUI mode), not interactive CLI usage (tmux mode).
 		if r.yoloMode {
-			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+			args = append(args, "--yolo")
+		}
+		if r.permissionMode == "plan" {
+			args = append(args, "--approval-mode", "plan")
 		}
 	default:
 		// Claude-specific flags
