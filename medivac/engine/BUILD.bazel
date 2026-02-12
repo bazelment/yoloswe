@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "engine",
+    srcs = [
+        "agent.go",
+        "analysis.go",
+        "engine.go",
+        "grouping.go",
+        "loglevel.go",
+        "prompts.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/medivac/engine",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//medivac/github",
+        "//medivac/issue",
+        "//multiagent/agent",
+        "//wt",
+    ],
+)
+
+go_test(
+    name = "engine_test",
+    srcs = [
+        "agent_test.go",
+        "analysis_test.go",
+        "engine_test.go",
+        "grouping_test.go",
+    ],
+    embed = [":engine"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//medivac/github",
+        "//medivac/issue",
+        "//wt",
+    ],
+)

@@ -63,13 +63,13 @@ func TestGetPRForBranch(t *testing.T) {
 }
 
 func TestCreatePR(t *testing.T) {
-	mock := &MockGHRunner{
-		Result: &CmdResult{
-			Stdout: `{"number": 123, "url": "https://github.com/org/repo/pull/123", "headRefName": "feature", "baseRefName": "main"}`,
-		},
+	mock := NewMockGHRunner()
+	// gh api repos/{owner}/{repo}/pulls returns JSON directly
+	mock.Results["api repos/{owner}/{repo}/pulls -f title=Test PR -f body=Description -f head=feature -f base=main"] = &CmdResult{
+		Stdout: `{"number": 123, "html_url": "https://github.com/org/repo/pull/123", "head": {"ref": "feature"}, "base": {"ref": "main"}, "draft": false}`,
 	}
 
-	info, err := CreatePR(context.Background(), mock, "Test PR", "Description", "main", false, "/tmp")
+	info, err := CreatePR(context.Background(), mock, "Test PR", "Description", "main", "feature", false, "/tmp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -80,19 +80,26 @@ func TestCreatePR(t *testing.T) {
 	if info.URL != "https://github.com/org/repo/pull/123" {
 		t.Errorf("URL = %q, want expected URL", info.URL)
 	}
-
-	// Verify args
-	args := mock.Args
-	if len(args) < 2 || args[0] != "pr" || args[1] != "create" {
-		t.Errorf("expected pr create command, got %v", args)
+	if info.HeadRefName != "feature" {
+		t.Errorf("HeadRefName = %q, want %q", info.HeadRefName, "feature")
+	}
+	if info.BaseRefName != "main" {
+		t.Errorf("BaseRefName = %q, want %q", info.BaseRefName, "main")
 	}
 
-	argsStr := strings.Join(args, " ")
-	if !strings.Contains(argsStr, "--base main") {
-		t.Errorf("expected --base main in args: %s", argsStr)
+	// Verify the API call
+	if len(mock.Calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(mock.Calls))
 	}
-	if !strings.Contains(argsStr, "--title") {
-		t.Errorf("expected --title in args: %s", argsStr)
+	argsStr := strings.Join(mock.Calls[0], " ")
+	if !strings.Contains(argsStr, "api repos/{owner}/{repo}/pulls") {
+		t.Errorf("expected api call, got %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "base=main") {
+		t.Errorf("expected base=main in args: %s", argsStr)
+	}
+	if !strings.Contains(argsStr, "head=feature") {
+		t.Errorf("expected head=feature in args: %s", argsStr)
 	}
 }
 
@@ -183,19 +190,25 @@ func TestListOpenPRsEmpty(t *testing.T) {
 }
 
 func TestCreatePRDraft(t *testing.T) {
-	mock := &MockGHRunner{
-		Result: &CmdResult{
-			Stdout: `{"number": 456, "url": "https://github.com/org/repo/pull/456", "headRefName": "feat", "baseRefName": "main"}`,
-		},
+	mock := NewMockGHRunner()
+	mock.Results["api repos/{owner}/{repo}/pulls -f title= -f body= -f head=feat -f base=main -F draft=true"] = &CmdResult{
+		Stdout: `{"number": 456, "html_url": "https://github.com/org/repo/pull/456", "head": {"ref": "feat"}, "base": {"ref": "main"}, "draft": true}`,
 	}
 
-	_, err := CreatePR(context.Background(), mock, "", "", "main", true, "/tmp")
+	info, err := CreatePR(context.Background(), mock, "", "", "main", "feat", true, "/tmp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	argsStr := strings.Join(mock.Args, " ")
-	if !strings.Contains(argsStr, "--draft") {
-		t.Errorf("expected --draft in args: %s", argsStr)
+	if info.Number != 456 {
+		t.Errorf("Number = %d, want 456", info.Number)
+	}
+	if !info.IsDraft {
+		t.Error("expected IsDraft = true")
+	}
+
+	argsStr := strings.Join(mock.Calls[0], " ")
+	if !strings.Contains(argsStr, "draft=true") {
+		t.Errorf("expected draft=true in args: %s", argsStr)
 	}
 }

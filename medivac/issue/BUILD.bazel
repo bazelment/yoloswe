@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "issue",
+    srcs = [
+        "signature.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/medivac/issue",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "issue_test",
+    srcs = ["tracker_test.go"],
+    embed = [":issue"],
+)

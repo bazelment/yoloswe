@@ -53,7 +53,11 @@ func (op *AtomicOp) Rollback(ctx context.Context) error {
 //
 // Note: post_create hooks are not reversed on failure. Hooks are side-effectful
 // by nature and may not be safely reversible.
-func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string) (string, error) {
+func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string, opts ...NewOptions) (string, error) {
+	var o NewOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	op := m.NewAtomicOp()
 	defer func() {
 		if !op.committed {
@@ -89,10 +93,11 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 		}
 	}
 
-	// Step 1: Fetch
-	m.output.Info("Fetching latest from origin...")
-	if _, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir); err != nil {
-		return "", fmt.Errorf("failed to fetch from origin: %w", err)
+	// Step 1: Fetch (unless caller already fetched)
+	if !o.SkipFetch {
+		if err := m.FetchOrigin(ctx); err != nil {
+			return "", err
+		}
 	}
 
 	// Step 2: Create worktree + branch
