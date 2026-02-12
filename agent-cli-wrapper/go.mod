@@ -4,7 +4,7 @@ go 1.24.6
 
 require (
 	github.com/invopop/jsonschema v0.13.0
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
