@@ -135,6 +135,9 @@ func (r *Router) Route(ctx context.Context, req RouteRequest) (*RouteProposal, e
 	if err != nil {
 		return nil, fmt.Errorf("provider execution failed: %w", err)
 	}
+	if result == nil {
+		return nil, fmt.Errorf("provider returned nil result")
+	}
 	if result.Error != nil {
 		return nil, fmt.Errorf("provider error: %w", result.Error)
 	}

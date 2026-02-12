@@ -132,12 +132,12 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 
 // EnabledProviders returns the list of enabled provider names from the dialog.
 // Returns nil only when no provider status data is available (backward compat).
-// An explicit empty slice means "all providers disabled".
+// Returns a non-nil empty slice when all providers are explicitly disabled.
 func (d *RepoSettingsDialog) EnabledProviders() []string {
 	if len(d.providerStatuses) == 0 {
 		return nil // no availability data → treat as all enabled
 	}
-	var result []string
+	result := make([]string, 0, len(d.providerStatuses))
 	for _, s := range d.providerStatuses {
 		if d.enabledProviders[s.Provider] {
 			result = append(result, s.Provider)

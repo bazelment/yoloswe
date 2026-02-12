@@ -1,5 +1,7 @@
 package agent
 
+import "sync"
+
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
 	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.3-codex")
@@ -32,9 +34,10 @@ func ModelByID(id string) (AgentModel, bool) {
 }
 
 // ModelRegistry provides a filtered view of models based on provider
-// availability and user-enabled providers.
+// availability and user-enabled providers. It is safe for concurrent use.
 type ModelRegistry struct {
 	filtered []AgentModel
+	mu       sync.RWMutex
 }
 
 // NewModelRegistry creates a registry filtered by availability and enabled providers.
@@ -55,7 +58,7 @@ func (r *ModelRegistry) Rebuild(availability *ProviderAvailability, enabledProvi
 		enabledSet[p] = true
 	}
 
-	r.filtered = nil
+	var newFiltered []AgentModel
 	for _, m := range AllModels {
 		if !availability.IsInstalled(m.Provider) {
 			continue
@@ -63,17 +66,25 @@ func (r *ModelRegistry) Rebuild(availability *ProviderAvailability, enabledProvi
 		if !allEnabled && !enabledSet[m.Provider] {
 			continue
 		}
-		r.filtered = append(r.filtered, m)
+		newFiltered = append(newFiltered, m)
 	}
+
+	r.mu.Lock()
+	r.filtered = newFiltered
+	r.mu.Unlock()
 }
 
-// Models returns the filtered model list.
+// Models returns a snapshot of the filtered model list.
 func (r *ModelRegistry) Models() []AgentModel {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.filtered
 }
 
 // ModelByID returns a model from the filtered list, or false if not available.
 func (r *ModelRegistry) ModelByID(id string) (AgentModel, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, m := range r.filtered {
 		if m.ID == id {
 			return m, true
@@ -87,6 +98,8 @@ func (r *ModelRegistry) ModelByID(id string) (AgentModel, bool) {
 // If the filtered list is empty (no providers installed+enabled), returns
 // the current model unchanged to avoid selecting an unavailable provider.
 func (r *ModelRegistry) NextModel(currentID string) AgentModel {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if len(r.filtered) == 0 {
 		// No providers available — return the current model unchanged
 		// rather than selecting one the user can't actually use.
@@ -112,6 +125,8 @@ func (r *ModelRegistry) NextModel(currentID string) AgentModel {
 // HasProvider returns true if at least one model from the given provider
 // is in the filtered list.
 func (r *ModelRegistry) HasProvider(provider string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, m := range r.filtered {
 		if m.Provider == provider {
 			return true
@@ -122,6 +137,8 @@ func (r *ModelRegistry) HasProvider(provider string) bool {
 
 // FirstModelForProvider returns the first model from a given provider, or false.
 func (r *ModelRegistry) FirstModelForProvider(provider string) (AgentModel, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, m := range r.filtered {
 		if m.Provider == provider {
 			return m, true
