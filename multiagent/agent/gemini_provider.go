@@ -15,6 +15,7 @@ type GeminiProvider struct {
 	bridgeDone chan struct{} // signals bridge goroutine to exit
 	clientOpts []acp.ClientOption
 	mu         sync.Mutex
+	bridgeWg   sync.WaitGroup // tracks bridge goroutine
 }
 
 // NewGeminiProvider creates a new Gemini provider.
@@ -52,10 +53,10 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		p.client = client
 		p.bridgeDone = make(chan struct{})
 
-		// Start a single persistent bridge goroutine for this client
-		if cfg.EventHandler != nil {
-			go bridgeACPEvents(p.client.Events(), cfg.EventHandler, p.events, p.bridgeDone)
-		}
+		// Start a single persistent bridge goroutine for the client's events.
+		// This goroutine will forward ALL events from the client to p.events.
+		p.bridgeWg.Add(1)
+		go bridgeACPEventsToChannel(p.client.Events(), p.events, p.bridgeDone, &p.bridgeWg)
 	}
 	client := p.client
 	p.mu.Unlock()
@@ -72,7 +73,22 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return nil, err
 	}
 
+	// If an EventHandler is provided, start a bridge goroutine for this specific
+	// Execute call to forward events to the handler. This goroutine will exit
+	// when the session completes.
+	var bridgeDone chan struct{}
+	if cfg.EventHandler != nil {
+		bridgeDone = make(chan struct{})
+		go bridgeACPEventsToHandler(client.Events(), cfg.EventHandler, bridgeDone)
+	}
+
 	result, err := session.Prompt(ctx, fullPrompt)
+
+	// Signal the per-Execute bridge to stop
+	if bridgeDone != nil {
+		close(bridgeDone)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -84,9 +100,8 @@ func (p *GeminiProvider) Events() <-chan AgentEvent { return p.events }
 
 func (p *GeminiProvider) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
-	// Signal bridge goroutine to exit before closing events channel
+	// Signal bridge goroutine to exit
 	if p.bridgeDone != nil {
 		close(p.bridgeDone)
 		p.bridgeDone = nil
@@ -97,6 +112,11 @@ func (p *GeminiProvider) Close() error {
 		p.client.Stop()
 		p.client = nil
 	}
+
+	p.mu.Unlock()
+
+	// Wait for bridge goroutine to fully exit before closing events channel
+	p.bridgeWg.Wait()
 
 	// Now safe to close our events channel since bridge goroutine has exited
 	close(p.events)
@@ -164,12 +184,8 @@ func (p *GeminiLongRunningProvider) Close() error {
 	if p.longRunningClient != nil {
 		p.longRunningClient.Stop()
 	}
-	// Also stop the embedded provider's client if it was lazily initialized.
-	if p.GeminiProvider.client != nil {
-		p.GeminiProvider.client.Stop()
-	}
-	close(p.events)
-	return nil
+	// Delegate to the base Close() to properly clean up bridge goroutines and events
+	return p.GeminiProvider.Close()
 }
 
 // acpResultToAgentResult converts an ACP TurnResult to the provider-agnostic AgentResult.
@@ -187,9 +203,11 @@ func acpResultToAgentResult(r *acp.TurnResult) *AgentResult {
 	}
 }
 
-// bridgeACPEvents converts ACP events to AgentEvents and forwards to handler.
+// bridgeACPEventsToChannel forwards ACP events to the AgentEvent channel.
+// This is a persistent goroutine that runs for the lifetime of the client.
 // Exits when events channel closes OR done channel is closed.
-func bridgeACPEvents(events <-chan acp.Event, handler EventHandler, ch chan<- AgentEvent, done <-chan struct{}) {
+func bridgeACPEventsToChannel(events <-chan acp.Event, ch chan<- AgentEvent, done <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
 	if events == nil {
 		return
 	}
@@ -203,21 +221,18 @@ func bridgeACPEvents(events <-chan acp.Event, handler EventHandler, ch chan<- Ag
 			}
 			switch e := event.(type) {
 			case acp.TextDeltaEvent:
-				handler.OnText(e.Delta)
 				select {
 				case ch <- TextAgentEvent{Text: e.Delta}:
 				default:
 				}
 
 			case acp.ThinkingDeltaEvent:
-				handler.OnThinking(e.Delta)
 				select {
 				case ch <- ThinkingAgentEvent{Thinking: e.Delta}:
 				default:
 				}
 
 			case acp.ToolCallStartEvent:
-				handler.OnToolStart(e.ToolName, e.ToolCallID, e.Input)
 				select {
 				case ch <- ToolStartAgentEvent{Name: e.ToolName, ID: e.ToolCallID, Input: e.Input}:
 				default:
@@ -225,7 +240,6 @@ func bridgeACPEvents(events <-chan acp.Event, handler EventHandler, ch chan<- Ag
 
 			case acp.ToolCallUpdateEvent:
 				if e.Status == "completed" || e.Status == "errored" {
-					handler.OnToolComplete(e.ToolName, e.ToolCallID, e.Input, nil, e.Status == "errored")
 					select {
 					case ch <- ToolCompleteAgentEvent{Name: e.ToolName, ID: e.ToolCallID, Input: e.Input, IsError: e.Status == "errored"}:
 					default:
@@ -233,18 +247,56 @@ func bridgeACPEvents(events <-chan acp.Event, handler EventHandler, ch chan<- Ag
 				}
 
 			case acp.TurnCompleteEvent:
-				handler.OnTurnComplete(1, e.Success, e.DurationMs, 0)
 				select {
 				case ch <- TurnCompleteAgentEvent{TurnNumber: 1, Success: e.Success, DurationMs: e.DurationMs}:
 				default:
 				}
 
 			case acp.ErrorEvent:
-				handler.OnError(e.Error, e.Context)
 				select {
 				case ch <- ErrorAgentEvent{Err: e.Error, Context: e.Context}:
 				default:
 				}
+			}
+		}
+	}
+}
+
+// bridgeACPEventsToHandler forwards ACP events to an EventHandler.
+// This is a per-Execute goroutine that runs for the duration of a single request.
+// Exits when events channel closes OR done channel is closed.
+func bridgeACPEventsToHandler(events <-chan acp.Event, handler EventHandler, done <-chan struct{}) {
+	if events == nil || handler == nil {
+		return
+	}
+	for {
+		select {
+		case <-done:
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			switch e := event.(type) {
+			case acp.TextDeltaEvent:
+				handler.OnText(e.Delta)
+
+			case acp.ThinkingDeltaEvent:
+				handler.OnThinking(e.Delta)
+
+			case acp.ToolCallStartEvent:
+				handler.OnToolStart(e.ToolName, e.ToolCallID, e.Input)
+
+			case acp.ToolCallUpdateEvent:
+				if e.Status == "completed" || e.Status == "errored" {
+					handler.OnToolComplete(e.ToolName, e.ToolCallID, e.Input, nil, e.Status == "errored")
+				}
+
+			case acp.TurnCompleteEvent:
+				handler.OnTurnComplete(1, e.Success, e.DurationMs, 0)
+
+			case acp.ErrorEvent:
+				handler.OnError(e.Error, e.Context)
 			}
 		}
 	}
