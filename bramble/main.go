@@ -117,26 +117,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("repository not found: %s (expected at %s)", repoName, repoPath)
 	}
 
-	// Initialize session store and manager
+	// Initialize session store
 	store, err := session.NewStore("")
 	if err != nil {
 		return fmt.Errorf("failed to create session store: %w", err)
 	}
-
-	sessionManager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName:       repoName,
-		Store:          store,
-		SessionMode:    session.SessionMode(sessionModeFlag),
-		TmuxExitOnQuit: tmuxExitOnQuit,
-		YoloMode:       yoloFlag,
-		ProtocolLogDir: func() string {
-			if protocolLogDir != "" {
-				return protocolLogDir
-			}
-			return os.Getenv("BRAMBLE_PROTOCOL_LOG_DIR")
-		}(),
-	})
-	defer sessionManager.Close()
 
 	// Determine editor command (priority: --editor flag > $EDITOR env > "code")
 	editor := editorFlag
@@ -155,6 +140,23 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Load settings and build filtered model registry
 	settings := app.LoadSettings()
 	modelRegistry := agent.NewModelRegistry(providerAvailability, settings.EnabledProviders)
+
+	// Initialize session manager (after registry so it can enforce provider availability)
+	sessionManager := session.NewManagerWithConfig(session.ManagerConfig{
+		RepoName:       repoName,
+		Store:          store,
+		SessionMode:    session.SessionMode(sessionModeFlag),
+		TmuxExitOnQuit: tmuxExitOnQuit,
+		YoloMode:       yoloFlag,
+		ModelRegistry:  modelRegistry,
+		ProtocolLogDir: func() string {
+			if protocolLogDir != "" {
+				return protocolLogDir
+			}
+			return os.Getenv("BRAMBLE_PROTOCOL_LOG_DIR")
+		}(),
+	})
+	defer sessionManager.Close()
 
 	// Start the AI task router using the best available provider.
 	// Priority: codex (original default) → claude → gemini.

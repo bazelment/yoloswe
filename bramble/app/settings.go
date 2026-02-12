@@ -35,9 +35,10 @@ func (s Settings) IsProviderEnabled(provider string) bool {
 }
 
 // SetEnabledProviders sets the list of enabled providers.
-// A nil or empty list means all providers are enabled.
+// A nil list means all providers are enabled (default/unset).
+// An explicit empty list means no providers are enabled.
 func (s *Settings) SetEnabledProviders(providers []string) {
-	if len(providers) == 0 {
+	if providers == nil {
 		s.EnabledProviders = nil
 		return
 	}
