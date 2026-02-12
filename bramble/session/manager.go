@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/yoloswe"
@@ -363,6 +364,14 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			// Codex provider backend
 			runner = &providerRunner{
 				provider:     agent.NewCodexProvider(),
+				eventHandler: eventHandler,
+				model:        session.Model,
+				workDir:      session.WorktreePath,
+			}
+		} else if agentModel.Provider == ProviderGemini {
+			// Gemini provider backend
+			runner = &providerRunner{
+				provider:     agent.NewGeminiLongRunningProvider([]acp.ClientOption{}, acp.WithSessionCWD(session.WorktreePath)),
 				eventHandler: eventHandler,
 				model:        session.Model,
 				workDir:      session.WorktreePath,

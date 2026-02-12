@@ -119,6 +119,12 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.yoloMode {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		}
+	case ProviderGemini:
+		// Gemini-specific flags
+		args = append(args, "--experimental-acp")
+		if r.yoloMode {
+			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+		}
 	default:
 		// Claude-specific flags
 		if r.yoloMode {
