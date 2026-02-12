@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "taskrouter",
+    srcs = ["router.go"],
+    embedsrcs = ["prompt.go.tmpl"],
+    importpath = "github.com/bazelment/yoloswe/bramble/taskrouter",
+    visibility = ["//visibility:public"],
+    deps = ["//multiagent/agent"],
+)
+
+go_test(
+    name = "taskrouter_test",
+    srcs = ["router_test.go"],
+    embed = [":taskrouter"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

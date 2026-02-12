@@ -13,9 +13,26 @@ func TestThemeShortcutOpensSettingsDialog(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
 
 	nextModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	m2 := nextModel.(Model)
+
+	if m2.focus != FocusRepoSettings {
+		t.Fatalf("focus = %v, want %v", m2.focus, FocusRepoSettings)
+	}
+	if !m2.repoSettingsDialog.IsVisible() {
+		t.Fatal("repo settings dialog should be visible")
+	}
+}
+
+func TestSettingsShortcutCtrlLOpensSettingsDialog(t *testing.T) {
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+	defer mgr.Close()
+
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
+
+	nextModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlL})
 	m2 := nextModel.(Model)
 
 	if m2.focus != FocusRepoSettings {
@@ -30,7 +47,7 @@ func TestSettingsDialogCancelRevertsThemePreview(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
 	orig := m.styles.Palette.Name
 
 	nextModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})

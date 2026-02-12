@@ -293,7 +293,7 @@ func buildHelpSections(m *Model) []HelpSection {
 	// General
 	gen := HelpSection{Title: "General"}
 	gen.Bindings = append(gen.Bindings,
-		HelpBinding{"Ctrl-,", "Open settings"},
+		HelpBinding{"Ctrl+L", "Open settings"},
 		HelpBinding{"Esc", "Clear error / close overlay"},
 		HelpBinding{"q", "Quit Bramble"},
 		HelpBinding{"Ctrl-C", "Force quit"},

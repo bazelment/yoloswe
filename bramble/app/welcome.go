@@ -9,6 +9,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -48,6 +49,11 @@ func (m Model) renderWelcome(width, height int) string {
 		}
 		b.WriteString(renderKeyHint("?", "Help", "Show all keyboard shortcuts", m.styles))
 		b.WriteString("\n")
+
+		// Provider status line
+		if m.providerAvailability != nil {
+			b.WriteString(renderProviderStatus(m.providerAvailability, m.settings.EnabledProviders, m.styles))
+		}
 
 		// Current worktree summary
 		if wt != nil {
@@ -280,6 +286,31 @@ func styleTimelineEvent(event string, s *Styles) string {
 	default:
 		return event
 	}
+}
+
+// renderProviderStatus renders a single-line provider availability summary.
+func renderProviderStatus(availability *agent.ProviderAvailability, enabledProviders []string, s *Styles) string {
+	allEnabled := len(enabledProviders) == 0
+	enabledSet := make(map[string]bool, len(enabledProviders))
+	for _, p := range enabledProviders {
+		enabledSet[p] = true
+	}
+
+	var parts []string
+	for _, name := range agent.AllProviders {
+		status := availability.Status(name)
+		enabled := allEnabled || enabledSet[name]
+
+		if status.Installed && enabled {
+			parts = append(parts, s.Completed.Render(name))
+		} else if status.Installed && !enabled {
+			parts = append(parts, s.Dim.Render(name+" (disabled)"))
+		} else {
+			parts = append(parts, s.Dim.Render(name+" (not found)"))
+		}
+	}
+
+	return fmt.Sprintf("  %s %s\n", s.Dim.Render("Providers:"), strings.Join(parts, "  "))
 }
 
 // renderWorktreeSummary renders a summary of the current worktree.

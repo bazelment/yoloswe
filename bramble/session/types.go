@@ -5,6 +5,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // SessionType distinguishes between planner and builder sessions.
@@ -15,53 +17,33 @@ const (
 	SessionTypeBuilder SessionType = "builder"
 )
 
-// Provider names for agent backends.
+// Provider name aliases — canonical definitions are in multiagent/agent.
 const (
-	ProviderClaude = "claude"
-	ProviderCodex  = "codex"
-	ProviderGemini = "gemini"
+	ProviderClaude = agent.ProviderClaude
+	ProviderCodex  = agent.ProviderCodex
+	ProviderGemini = agent.ProviderGemini
 )
 
-// AgentModel describes a model available for session execution.
-type AgentModel struct {
-	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.3-codex")
-	Provider string // Binary/provider name: "claude" or "codex"
-	Label    string // Display label for the UI (e.g. "opus (claude)")
-}
+// AgentModel is an alias for agent.AgentModel.
+type AgentModel = agent.AgentModel
 
-// AvailableModels is the ordered list of models. Ctrl+M cycles through this list.
-var AvailableModels = []AgentModel{
-	{ID: "opus", Provider: ProviderClaude, Label: "opus"},
-	{ID: "sonnet", Provider: ProviderClaude, Label: "sonnet"},
-	{ID: "haiku", Provider: ProviderClaude, Label: "haiku"},
-	{ID: "gpt-5.3-codex", Provider: ProviderCodex, Label: "gpt-5.3-codex"},
-	{ID: "gpt-5.2", Provider: ProviderCodex, Label: "gpt-5.2"},
-	{ID: "gpt-5.1-codex-max", Provider: ProviderCodex, Label: "gpt-5.1-codex-max"},
-	{ID: "gemini-3-pro", Provider: ProviderGemini, Label: "gemini-3-pro"},
-	{ID: "gemini-3-flash", Provider: ProviderGemini, Label: "gemini-3-flash"},
-	{ID: "gemini-2.5-pro", Provider: ProviderGemini, Label: "gemini-2.5-pro"},
-	{ID: "gemini-2.5-flash", Provider: ProviderGemini, Label: "gemini-2.5-flash"},
-}
+// AvailableModels is the full unfiltered model list (alias).
+var AvailableModels = agent.AllModels
 
-// ModelByID returns the AgentModel for the given ID, or false if not found.
+// ModelByID looks up a model by ID from the full list (alias).
 func ModelByID(id string) (AgentModel, bool) {
-	for _, m := range AvailableModels {
-		if m.ID == id {
-			return m, true
-		}
-	}
-	return AgentModel{}, false
+	return agent.ModelByID(id)
 }
 
-// NextModel returns the next model in the cycle after currentID.
-// If currentID is not found, returns the first model.
+// NextModel cycles through the full unfiltered model list (alias).
+// Prefer ModelRegistry.NextModel() for availability-filtered cycling.
 func NextModel(currentID string) AgentModel {
-	for i, m := range AvailableModels {
+	for i, m := range agent.AllModels {
 		if m.ID == currentID {
-			return AvailableModels[(i+1)%len(AvailableModels)]
+			return agent.AllModels[(i+1)%len(agent.AllModels)]
 		}
 	}
-	return AvailableModels[0]
+	return agent.AllModels[0]
 }
 
 // SessionStatus represents the lifecycle state of a session.
