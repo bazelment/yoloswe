@@ -12,7 +12,7 @@ func TestRepoSettingsDialogRoundTrip(t *testing.T) {
 	d.Show("repo-a", RepoSettings{
 		OnWorktreeCreate: []string{"npm ci", "go test ./..."},
 		OnWorktreeDelete: []string{"rm -rf .cache"},
-	}, "dark", 100, 40, lipgloss.Color("245"))
+	}, "dark", 100, 40, lipgloss.Color("245"), nil, nil)
 
 	got := d.RepoSettings()
 	if len(got.OnWorktreeCreate) != 2 {
@@ -28,7 +28,7 @@ func TestRepoSettingsDialogRoundTrip(t *testing.T) {
 
 func TestRepoSettingsDialogParseCommandLines(t *testing.T) {
 	d := NewRepoSettingsDialog()
-	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"))
+	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"), nil, nil)
 	d.createInput.SetValue("  npm ci \n\n go test ./... \n ")
 	d.deleteInput.SetValue(" \n rm -rf .cache \n")
 
@@ -46,11 +46,12 @@ func TestRepoSettingsDialogParseCommandLines(t *testing.T) {
 
 func TestRepoSettingsDialogSaveShortcut(t *testing.T) {
 	d := NewRepoSettingsDialog()
-	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"))
+	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"), nil, nil)
 
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab})
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab})
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Theme → Providers
+	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Providers → Create
+	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Create → Delete
+	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Delete → Save
 	action, _ := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if action != RepoSettingsActionSave {
 		t.Fatalf("action = %v, want RepoSettingsActionSave", action)
@@ -59,7 +60,7 @@ func TestRepoSettingsDialogSaveShortcut(t *testing.T) {
 
 func TestRepoSettingsDialogThemeSelection(t *testing.T) {
 	d := NewRepoSettingsDialog()
-	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"))
+	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"), nil, nil)
 
 	original := d.SelectedTheme().Name
 	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyRight})

@@ -17,8 +17,9 @@ import (
 
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/bramble/taskrouter"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
-	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 var (
@@ -148,18 +149,29 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	manager := wt.NewManager(wtRoot, repoName)
 	worktrees, _ := manager.List(ctx)
 
-	// Start the AI task router (non-fatal if it fails — routeTask falls back to mock)
-	router := taskrouter.New(taskrouter.Config{
-		WorkDir: repoPath,
-		NoColor: true,
-	})
-	router.SetOutput(io.Discard)
+	// Probe which provider CLIs are installed
+	providerAvailability := agent.NewProviderAvailability()
+
+	// Load settings and build filtered model registry
+	settings := app.LoadSettings()
+	modelRegistry := agent.NewModelRegistry(providerAvailability, settings.EnabledProviders)
+
+	// Start the AI task router using the best available provider.
+	// Priority: codex (original default) → claude → gemini.
 	var taskRouter *taskrouter.Router
-	if err := router.Start(ctx); err != nil {
-		log.Printf("Warning: task router failed to start: %v (falling back to heuristic routing)", err)
-	} else {
-		taskRouter = router
-		defer router.Stop()
+	routerProvider := pickRouterProvider(providerAvailability, settings.EnabledProviders)
+	if routerProvider != nil {
+		router := taskrouter.New(taskrouter.Config{
+			Provider: routerProvider,
+			WorkDir:  repoPath,
+		})
+		router.SetOutput(io.Discard)
+		if err := router.Start(ctx); err != nil {
+			log.Printf("Warning: task router failed to start: %v (falling back to heuristic routing)", err)
+		} else {
+			taskRouter = router
+			defer router.Stop()
+		}
 	}
 
 	// Query terminal size synchronously so the first View() renders a
@@ -167,7 +179,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
 
 	// Create and run TUI
-	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight)
+	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
@@ -235,4 +247,35 @@ func detectRepoFromPath(cwd, wtRoot string) (string, error) {
 	}
 
 	return "", fmt.Errorf("not in a wt-managed repo")
+}
+
+// pickRouterProvider selects the best available provider for the task router.
+// Prefers codex (original default), then claude, then gemini.
+// Returns nil if no suitable provider is installed and enabled.
+func pickRouterProvider(availability *agent.ProviderAvailability, enabledProviders []string) agent.Provider {
+	enabled := func(name string) bool {
+		if len(enabledProviders) == 0 {
+			return true
+		}
+		for _, p := range enabledProviders {
+			if p == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Try codex first (best for routing tasks, original default)
+	if availability.IsInstalled(agent.ProviderCodex) && enabled(agent.ProviderCodex) {
+		return agent.NewCodexProvider()
+	}
+	// Fall back to claude
+	if availability.IsInstalled(agent.ProviderClaude) && enabled(agent.ProviderClaude) {
+		return agent.NewClaudeProvider()
+	}
+	// Fall back to gemini
+	if availability.IsInstalled(agent.ProviderGemini) && enabled(agent.ProviderGemini) {
+		return agent.NewGeminiProvider()
+	}
+	return nil
 }

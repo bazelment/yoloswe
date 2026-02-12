@@ -588,11 +588,11 @@ func (m Model) renderStatusBar() string {
 		hints = []string{"[↑/↓]select", "[Enter]choose", "[Esc]close", "[?]help", "[q]uit"}
 	} else if inTmuxMode {
 		// Tmux mode: show session list navigation hints
-		hints = []string{"[↑/↓] Navigate", "[Enter] Switch to session", "[S] All sessions"}
+		hints = []string{"[S] All sessions"}
 		if hasWorktree {
 			hints = append(hints, "[m] Merge", "[p] Plan", "[b] Build", "[w] Window")
 		}
-		hints = append(hints, "[F2]split", "[Ctrl-,]settings", "[Alt-W] Worktree", "[?]help", "[q] Quit")
+		hints = append(hints, "[F2]split", "[Ctrl+L]settings", "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
@@ -603,10 +603,10 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}
-		hints = append(hints, "[S]all sessions", "[Ctrl-,]settings", "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
+		hints = append(hints, "[S]all sessions", "[Ctrl+L]settings", "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
 	} else {
 		// SDK mode: no session selected - show worktree-dependent actions
-		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[Ctrl-,]settings", "[t]ask", "[F2]split"}
+		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[Ctrl+L]settings", "[t]ask", "[F2]split"}
 		if hasWorktree {
 			hints = append(hints, "[e]dit", "[m]erge", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
 		} else {

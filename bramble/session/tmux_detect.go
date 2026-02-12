@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -125,4 +126,46 @@ func KillTmuxWindowByID(windowID string) error {
 	}
 
 	return nil
+}
+
+// TmuxWindowPaneExitStatus returns the exit status of the first dead pane in
+// the given tmux window. It returns (exitCode, true) if a dead pane was found,
+// or (0, false) if no pane is dead or the window doesn't exist.
+func TmuxWindowPaneExitStatus(name string) (int, bool) {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return 0, false
+	}
+
+	cmd := exec.Command("tmux", "list-panes", "-t", name, "-F", "#{pane_dead} #{pane_dead_status}")
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, false
+	}
+
+	return parsePaneExitStatus(string(output))
+}
+
+// parsePaneExitStatus parses the output of `tmux list-panes -F "#{pane_dead} #{pane_dead_status}"`.
+// Returns (exitCode, true) for the first dead pane found, or (0, false) if none.
+func parsePaneExitStatus(output string) (int, bool) {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		if parts[0] != "1" {
+			continue // pane is alive, skip
+		}
+		// Pane is dead; parse exit status
+		exitCode, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return 1, true // unparseable status — treat as failure
+		}
+		return exitCode, true
+	}
+	return 0, false
 }

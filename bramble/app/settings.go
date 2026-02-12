@@ -15,8 +15,34 @@ type RepoSettings struct {
 
 // Settings holds persistent user preferences.
 type Settings struct { //nolint:govet // fieldalignment: keep JSON field order readable
-	ThemeName string                  `json:"theme_name"`
-	Repos     map[string]RepoSettings `json:"repos,omitempty"`
+	ThemeName        string                  `json:"theme_name"`
+	EnabledProviders []string                `json:"enabled_providers,omitempty"`
+	Repos            map[string]RepoSettings `json:"repos,omitempty"`
+}
+
+// IsProviderEnabled returns true if the provider is enabled in settings.
+// If EnabledProviders is nil/empty, all providers are considered enabled.
+func (s Settings) IsProviderEnabled(provider string) bool {
+	if len(s.EnabledProviders) == 0 {
+		return true
+	}
+	for _, p := range s.EnabledProviders {
+		if p == provider {
+			return true
+		}
+	}
+	return false
+}
+
+// SetEnabledProviders sets the list of enabled providers.
+// A nil or empty list means all providers are enabled.
+func (s *Settings) SetEnabledProviders(providers []string) {
+	if len(providers) == 0 {
+		s.EnabledProviders = nil
+		return
+	}
+	s.EnabledProviders = make([]string, len(providers))
+	copy(s.EnabledProviders, providers)
 }
 
 // RepoSettingsFor returns settings for one repository.

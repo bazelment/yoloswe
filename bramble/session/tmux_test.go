@@ -201,6 +201,96 @@ func TestNextModel(t *testing.T) {
 	assert.Equal(t, AvailableModels[0].ID, m.ID)
 }
 
+func TestParsePaneExitStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		wantCode int
+		wantOk   bool
+	}{
+		{
+			name:     "single pane success exit",
+			output:   "1 0\n",
+			wantCode: 0,
+			wantOk:   true,
+		},
+		{
+			name:     "single pane failure exit code 1",
+			output:   "1 1\n",
+			wantCode: 1,
+			wantOk:   true,
+		},
+		{
+			name:     "single pane failure exit code 127",
+			output:   "1 127\n",
+			wantCode: 127,
+			wantOk:   true,
+		},
+		{
+			name:     "single pane alive",
+			output:   "0 \n",
+			wantCode: 0,
+			wantOk:   false,
+		},
+		{
+			name:     "multi-pane first dead with exit 0",
+			output:   "1 0\n0 \n",
+			wantCode: 0,
+			wantOk:   true,
+		},
+		{
+			name:     "multi-pane first alive second dead",
+			output:   "0 \n1 2\n",
+			wantCode: 2,
+			wantOk:   true,
+		},
+		{
+			name:     "multi-pane all alive",
+			output:   "0 \n0 \n",
+			wantCode: 0,
+			wantOk:   false,
+		},
+		{
+			name:     "empty output",
+			output:   "",
+			wantCode: 0,
+			wantOk:   false,
+		},
+		{
+			name:     "whitespace only",
+			output:   "  \n",
+			wantCode: 0,
+			wantOk:   false,
+		},
+		{
+			name:     "dead pane trailing space only",
+			output:   "1 \n",
+			wantCode: 0,
+			wantOk:   false,
+		},
+		{
+			name:     "dead pane with non-numeric status",
+			output:   "1 abc\n",
+			wantCode: 1,
+			wantOk:   true,
+		},
+		{
+			name:     "malformed single field line",
+			output:   "1\n",
+			wantCode: 0,
+			wantOk:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCode, gotOk := parsePaneExitStatus(tt.output)
+			assert.Equal(t, tt.wantCode, gotCode)
+			assert.Equal(t, tt.wantOk, gotOk)
+		})
+	}
+}
+
 func TestParsePaneDeadOutput(t *testing.T) {
 	tests := []struct {
 		name   string

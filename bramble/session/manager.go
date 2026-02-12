@@ -385,11 +385,12 @@ const (
 
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct { //nolint:govet // fieldalignment: readability over packing
-	Store       *Store
-	Provider    agent.Provider // Optional pluggable agent backend; nil uses default runners
-	RepoName    string
-	SessionMode SessionMode
-	YoloMode    bool // Skip all permission prompts
+	Store         *Store
+	Provider      agent.Provider       // Optional pluggable agent backend; nil uses default runners
+	ModelRegistry *agent.ModelRegistry // Optional filtered model registry; nil uses full list
+	RepoName      string
+	SessionMode   SessionMode
+	YoloMode      bool // Skip all permission prompts
 	// TmuxExitOnQuit controls whether Bramble should kill tmux windows it started
 	// when a session is stopped (including app quit). Default is false.
 	TmuxExitOnQuit bool
@@ -681,11 +682,35 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	var runner sessionRunner
 	var eventHandler *sessionEventHandler
 
-	// Resolve model provider for runner routing
-	agentModel, modelFound := ModelByID(session.Model)
+	// Resolve model provider for runner routing.
+	// Prefer the filtered registry if available, fall back to the full list.
+	var agentModel AgentModel
+	var modelFound bool
+	if m.config.ModelRegistry != nil {
+		agentModel, modelFound = m.config.ModelRegistry.ModelByID(session.Model)
+	}
+	if !modelFound {
+		agentModel, modelFound = ModelByID(session.Model)
+	}
 	if !modelFound {
 		// Unknown model — default to claude provider
 		agentModel = AgentModel{ID: session.Model, Provider: ProviderClaude}
+	}
+
+	// If a registry is configured and the model's provider is not available,
+	// fail early with a clear message.
+	if m.config.ModelRegistry != nil && !m.config.ModelRegistry.HasProvider(agentModel.Provider) {
+		m.updateSessionStatus(session, StatusFailed)
+		session.mu.Lock()
+		session.Error = fmt.Errorf("provider %q is not available (not installed or disabled in settings)", agentModel.Provider)
+		session.mu.Unlock()
+		m.addOutput(session.ID, OutputLine{
+			Timestamp: time.Now(),
+			Type:      OutputTypeError,
+			Content:   fmt.Sprintf("Provider %q is not available. Install the CLI or enable it in settings.", agentModel.Provider),
+		})
+		m.persistSession(session)
+		return
 	}
 
 	if m.config.SessionMode == SessionModeTmux {
@@ -861,11 +886,34 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 				if paneDead {
 					// The process in the tmux window has exited but the window
-					// remains (due to remain-on-exit). This means claude failed
-					// to start or crashed.
+					// remains (due to remain-on-exit). Check exit code to
+					// determine whether it completed successfully or failed.
+					exitCode, gotStatus := TmuxWindowPaneExitStatus(tmuxName)
+
+					if gotStatus && exitCode == 0 {
+						// Clean exit — session completed successfully
+						m.updateSessionStatus(session, StatusCompleted)
+
+						m.mu.Lock()
+						delete(m.sessions, sessionID)
+						m.mu.Unlock()
+
+						m.outputsMu.Lock()
+						delete(m.outputs, sessionID)
+						m.outputsMu.Unlock()
+
+						m.persistSession(session)
+						return
+					}
+
+					// Non-zero exit or couldn't read status — failure
 					m.updateSessionStatus(session, StatusFailed)
 					session.mu.Lock()
-					session.Error = fmt.Errorf("claude process exited unexpectedly (window %q still open with remain-on-exit — check it for error details)", tmuxName)
+					if gotStatus {
+						session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, tmuxName)
+					} else {
+						session.Error = fmt.Errorf("claude process exited unexpectedly (window %q still open with remain-on-exit — check it for error details)", tmuxName)
+					}
 					session.mu.Unlock()
 					m.addOutput(session.ID, OutputLine{
 						Timestamp: time.Now(),

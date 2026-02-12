@@ -1,19 +1,23 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // RepoSettingsDialogFocus indicates which control is focused.
 type RepoSettingsDialogFocus int
 
 const (
-	RepoSettingsFocusTheme RepoSettingsDialogFocus = iota
+	RepoSettingsFocusTheme     RepoSettingsDialogFocus = iota
+	RepoSettingsFocusProviders                         // Provider toggle section
 	RepoSettingsFocusCreate
 	RepoSettingsFocusDelete
 	RepoSettingsFocusSave
@@ -32,16 +36,19 @@ const (
 
 // RepoSettingsDialog is an overlay for editing per-repo worktree hook commands.
 type RepoSettingsDialog struct { //nolint:govet // fieldalignment: readability over packing
-	createInput textarea.Model
-	deleteInput textarea.Model
-	themes      []ColorPalette
-	repoName    string
-	original    string
-	width       int
-	height      int
-	selectedIdx int
-	focus       RepoSettingsDialogFocus
-	visible     bool
+	createInput      textarea.Model
+	deleteInput      textarea.Model
+	themes           []ColorPalette
+	providerStatuses []agent.ProviderStatus
+	enabledProviders map[string]bool
+	repoName         string
+	original         string
+	width            int
+	height           int
+	selectedIdx      int
+	providerCursor   int // which provider row is highlighted
+	focus            RepoSettingsDialogFocus
+	visible          bool
 }
 
 // NewRepoSettingsDialog creates a new repo settings dialog.
@@ -80,7 +87,7 @@ func newRepoSettingsTextArea() textarea.Model {
 }
 
 // Show opens the dialog with repo settings.
-func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentTheme string, w, h int, placeholderColor lipgloss.Color) {
+func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentTheme string, w, h int, placeholderColor lipgloss.Color, providerStatuses []agent.ProviderStatus, enabledProviders []string) {
 	d.repoName = repoName
 	d.width = w
 	d.height = h
@@ -88,10 +95,25 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 	d.focus = RepoSettingsFocusTheme
 	d.original = currentTheme
 	d.selectedIdx = 0
+	d.providerCursor = 0
 	for i := range d.themes {
 		if d.themes[i].Name == currentTheme {
 			d.selectedIdx = i
 			break
+		}
+	}
+
+	// Initialize provider statuses and enabled map
+	d.providerStatuses = providerStatuses
+	d.enabledProviders = make(map[string]bool, len(agent.AllProviders))
+	if len(enabledProviders) == 0 {
+		// nil/empty = all enabled
+		for _, s := range providerStatuses {
+			d.enabledProviders[s.Provider] = true
+		}
+	} else {
+		for _, p := range enabledProviders {
+			d.enabledProviders[p] = true
 		}
 	}
 
@@ -106,6 +128,21 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 
 	d.createInput.Blur()
 	d.deleteInput.Blur()
+}
+
+// EnabledProviders returns the list of enabled provider names from the dialog.
+func (d *RepoSettingsDialog) EnabledProviders() []string {
+	var result []string
+	for _, s := range d.providerStatuses {
+		if d.enabledProviders[s.Provider] {
+			result = append(result, s.Provider)
+		}
+	}
+	// If all are enabled, return nil to mean "all" (backward compat)
+	if len(result) == len(d.providerStatuses) {
+		return nil
+	}
+	return result
 }
 
 // Hide closes the dialog.
@@ -164,7 +201,7 @@ func parseCommandLines(in string) []string {
 func (d *RepoSettingsDialog) setFocus(f RepoSettingsDialogFocus) {
 	d.focus = f
 	switch f {
-	case RepoSettingsFocusTheme:
+	case RepoSettingsFocusTheme, RepoSettingsFocusProviders:
 		d.createInput.Blur()
 		d.deleteInput.Blur()
 	case RepoSettingsFocusCreate:
@@ -198,8 +235,8 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 	case "ctrl+c":
 		return RepoSettingsActionQuit, nil
 	case "q":
-		// Only quit if not focused on text inputs
-		if d.focus != RepoSettingsFocusCreate && d.focus != RepoSettingsFocusDelete {
+		// Only quit if not focused on text inputs or providers
+		if d.focus != RepoSettingsFocusCreate && d.focus != RepoSettingsFocusDelete && d.focus != RepoSettingsFocusProviders {
 			return RepoSettingsActionQuit, nil
 		}
 	case "ctrl+enter":
@@ -210,10 +247,28 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 	case "shift+tab":
 		d.moveFocus(-1)
 		return RepoSettingsActionNone, nil
+	case " ":
+		// Space toggles provider enabled state
+		if d.focus == RepoSettingsFocusProviders && len(d.providerStatuses) > 0 {
+			ps := d.providerStatuses[d.providerCursor]
+			if ps.Installed {
+				d.enabledProviders[ps.Provider] = !d.enabledProviders[ps.Provider]
+			}
+			return RepoSettingsActionNone, nil
+		}
 	case "enter":
 		switch d.focus {
 		case RepoSettingsFocusTheme:
 			d.moveFocus(1)
+			return RepoSettingsActionNone, nil
+		case RepoSettingsFocusProviders:
+			// Enter toggles the selected provider (same as space)
+			if len(d.providerStatuses) > 0 {
+				ps := d.providerStatuses[d.providerCursor]
+				if ps.Installed {
+					d.enabledProviders[ps.Provider] = !d.enabledProviders[ps.Provider]
+				}
+			}
 			return RepoSettingsActionNone, nil
 		case RepoSettingsFocusSave:
 			return RepoSettingsActionSave, nil
@@ -231,11 +286,27 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 			return RepoSettingsActionNone, nil
 		}
 	case "up":
+		if d.focus == RepoSettingsFocusProviders {
+			if d.providerCursor > 0 {
+				d.providerCursor--
+			} else {
+				d.moveFocus(-1) // Move to theme section
+			}
+			return RepoSettingsActionNone, nil
+		}
 		if d.focus == RepoSettingsFocusSave || d.focus == RepoSettingsFocusCancel {
 			d.moveFocus(-1)
 			return RepoSettingsActionNone, nil
 		}
 	case "down":
+		if d.focus == RepoSettingsFocusProviders {
+			if d.providerCursor < len(d.providerStatuses)-1 {
+				d.providerCursor++
+			} else {
+				d.moveFocus(1) // Move to create section
+			}
+			return RepoSettingsActionNone, nil
+		}
 		if d.focus == RepoSettingsFocusSave || d.focus == RepoSettingsFocusCancel {
 			d.moveFocus(1)
 			return RepoSettingsActionNone, nil
@@ -345,6 +416,41 @@ func (d *RepoSettingsDialog) View(styles *Styles) string {
 	b.WriteString(" ")
 	b.WriteString(styles.Dim.Render("[Left/Right]"))
 	b.WriteString("\n\n")
+
+	// Providers section
+	providerLabel := "Providers"
+	if d.focus == RepoSettingsFocusProviders {
+		providerLabel = styles.Selected.Render(" " + providerLabel + " ")
+	}
+	b.WriteString(providerLabel)
+	b.WriteString("\n")
+	for i, ps := range d.providerStatuses {
+		checkbox := "[ ]"
+		if d.enabledProviders[ps.Provider] {
+			checkbox = "[x]"
+		}
+		status := styles.Failed.Render("not found")
+		if ps.Installed {
+			ver := ps.Version
+			if ver == "" {
+				ver = "installed"
+			}
+			status = styles.Completed.Render(ver)
+		}
+		line := fmt.Sprintf("  %s %-8s %s", checkbox, ps.Provider, status)
+		if d.focus == RepoSettingsFocusProviders && i == d.providerCursor {
+			line = styles.Selected.Render(line)
+		} else if !ps.Installed {
+			line = styles.Dim.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if d.focus == RepoSettingsFocusProviders {
+		b.WriteString(styles.Dim.Render("  [Space/Enter] toggle  [Up/Down] navigate"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(createLabel)
 	b.WriteString("\n")
 	b.WriteString(styles.InputBox.Width(inputWidth + 2).Render(d.createInput.View()))

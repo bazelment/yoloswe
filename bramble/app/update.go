@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/wt"
-	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 // Update handles messages and updates the model.
@@ -660,7 +660,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toastCmd
 		}
 		cfg := m.settings.RepoSettingsFor(m.repoName)
-		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim))
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.EnabledProviders)
 		m.repoSettingsDialog.FocusTheme()
 		m.focus = FocusRepoSettings
 		return m, nil
@@ -672,18 +672,18 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toastCmd
 		}
 		cfg := m.settings.RepoSettingsFor(m.repoName)
-		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim))
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.EnabledProviders)
 		m.focus = FocusRepoSettings
 		return m, nil
 
-	case "ctrl+,", "ctrl+l":
-		// Primary settings shortcut requested by product.
+	case "ctrl+l":
+		// Primary settings shortcut.
 		if m.repoName == "" {
 			toastCmd := m.addToast("No repository loaded", ToastError)
 			return m, toastCmd
 		}
 		cfg := m.settings.RepoSettingsFor(m.repoName)
-		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim))
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.EnabledProviders)
 		m.focus = FocusRepoSettings
 		return m, nil
 
@@ -962,7 +962,12 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Alt+M: cycle model selection when in a plan/build prompt.
 	// Note: Ctrl+M is aliased to Enter in terminals, so we use Alt+M instead.
 	if msg.String() == "alt+m" && m.pendingModel != "" {
-		next := session.NextModel(m.pendingModel)
+		var next session.AgentModel
+		if m.modelRegistry != nil {
+			next = m.modelRegistry.NextModel(m.pendingModel)
+		} else {
+			next = session.NextModel(m.pendingModel)
+		}
 		m.pendingModel = next.ID
 		prefix := "Plan"
 		if m.pendingSessionType == session.SessionTypeBuilder {
@@ -1822,6 +1827,25 @@ func (m Model) handleRepoSettingsDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.applyTheme(selected)
 		m.settings.ThemeName = selected.Name
 		m.settings.SetRepoSettings(m.repoName, cfg)
+
+		// Save provider preferences and rebuild the model registry
+		enabledProviders := m.repoSettingsDialog.EnabledProviders()
+		m.settings.SetEnabledProviders(enabledProviders)
+		if m.modelRegistry != nil && m.providerAvailability != nil {
+			m.modelRegistry.Rebuild(m.providerAvailability, m.settings.EnabledProviders)
+			// Reset defaults if current defaults are no longer available
+			if _, ok := m.modelRegistry.ModelByID(m.defaultPlanModel); !ok {
+				if models := m.modelRegistry.Models(); len(models) > 0 {
+					m.defaultPlanModel = models[0].ID
+				}
+			}
+			if _, ok := m.modelRegistry.ModelByID(m.defaultBuildModel); !ok {
+				if models := m.modelRegistry.Models(); len(models) > 0 {
+					m.defaultBuildModel = models[0].ID
+				}
+			}
+		}
+
 		m.repoSettingsDialog.Hide()
 		m.focus = FocusOutput
 		err := SaveSettings(m.settings)
