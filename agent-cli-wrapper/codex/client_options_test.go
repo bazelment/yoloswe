@@ -6,7 +6,7 @@ import (
 )
 
 func TestDefaultClientConfig(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 
 	if cfg.ClientName == "" {
 		t.Error("ClientName should have a default")
@@ -20,7 +20,7 @@ func TestDefaultClientConfig(t *testing.T) {
 }
 
 func TestClientOption_WithCodexPath(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	WithCodexPath("/usr/local/bin/codex")(&cfg)
 
 	if cfg.CodexPath != "/usr/local/bin/codex" {
@@ -29,7 +29,7 @@ func TestClientOption_WithCodexPath(t *testing.T) {
 }
 
 func TestClientOption_WithClientName(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	WithClientName("my-app")(&cfg)
 
 	if cfg.ClientName != "my-app" {
@@ -38,7 +38,7 @@ func TestClientOption_WithClientName(t *testing.T) {
 }
 
 func TestClientOption_WithClientVersion(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	WithClientVersion("2.0.0")(&cfg)
 
 	if cfg.ClientVersion != "2.0.0" {
@@ -47,7 +47,7 @@ func TestClientOption_WithClientVersion(t *testing.T) {
 }
 
 func TestClientOption_WithEventBufferSize(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	WithEventBufferSize(500)(&cfg)
 
 	if cfg.EventBufferSize != 500 {
@@ -56,7 +56,7 @@ func TestClientOption_WithEventBufferSize(t *testing.T) {
 }
 
 func TestClientOption_WithStderrHandler(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	called := false
 	handler := func(data []byte) {
 		called = true
@@ -75,7 +75,7 @@ func TestClientOption_WithStderrHandler(t *testing.T) {
 }
 
 func TestClientOption_WithApprovalHandler(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	handler := AutoApproveHandler()
 	WithApprovalHandler(handler)(&cfg)
 
@@ -85,7 +85,7 @@ func TestClientOption_WithApprovalHandler(t *testing.T) {
 }
 
 func TestClientOptions_Multiple(t *testing.T) {
-	cfg := defaultClientConfig()
+	cfg := defaultCodexClientConfig()
 	opts := []ClientOption{
 		WithCodexPath("/custom/codex"),
 		WithClientName("test-client"),
@@ -112,7 +112,7 @@ func TestClientOptions_Multiple(t *testing.T) {
 }
 
 func TestDefaultThreadConfig(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 
 	// Thread config starts empty, all fields are optional
 	if cfg.Model != "" {
@@ -124,7 +124,7 @@ func TestDefaultThreadConfig(t *testing.T) {
 }
 
 func TestThreadOption_WithModel(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	WithModel("gpt-4o")(&cfg)
 
 	if cfg.Model != "gpt-4o" {
@@ -133,7 +133,7 @@ func TestThreadOption_WithModel(t *testing.T) {
 }
 
 func TestThreadOption_WithModelProvider(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	WithModelProvider("openai")(&cfg)
 
 	if cfg.ModelProvider != "openai" {
@@ -142,7 +142,7 @@ func TestThreadOption_WithModelProvider(t *testing.T) {
 }
 
 func TestThreadOption_WithProfile(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	WithProfile("coding")(&cfg)
 
 	if cfg.Profile != "coding" {
@@ -151,7 +151,7 @@ func TestThreadOption_WithProfile(t *testing.T) {
 }
 
 func TestThreadOption_WithWorkDir(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	WithWorkDir("/home/user/project")(&cfg)
 
 	if cfg.WorkDir != "/home/user/project" {
@@ -160,7 +160,7 @@ func TestThreadOption_WithWorkDir(t *testing.T) {
 }
 
 func TestThreadOption_WithApprovalPolicy(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	WithApprovalPolicy(ApprovalPolicyFullAuto)(&cfg)
 
 	if cfg.ApprovalPolicy != ApprovalPolicyFullAuto {
@@ -169,7 +169,7 @@ func TestThreadOption_WithApprovalPolicy(t *testing.T) {
 }
 
 func TestThreadOption_WithSandbox(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	sandbox := &SandboxConfig{
 		Type:          "docker",
 		WritableRoots: []string{"/tmp"},
@@ -186,7 +186,7 @@ func TestThreadOption_WithSandbox(t *testing.T) {
 }
 
 func TestThreadOption_WithThreadConfig(t *testing.T) {
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	extraConfig := map[string]interface{}{
 		"key1": "value1",
 		"key2": 42,
@@ -202,7 +202,7 @@ func TestThreadOption_WithThreadConfig(t *testing.T) {
 }
 
 func TestDefaultTurnConfig(t *testing.T) {
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 
 	// Turn config starts empty
 	if cfg.Model != "" {
@@ -214,7 +214,7 @@ func TestDefaultTurnConfig(t *testing.T) {
 }
 
 func TestTurnOption_WithTurnApprovalPolicy(t *testing.T) {
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 	WithTurnApprovalPolicy(ApprovalPolicyAutoEdit)(&cfg)
 
 	if cfg.ApprovalPolicy != ApprovalPolicyAutoEdit {
@@ -223,7 +223,7 @@ func TestTurnOption_WithTurnApprovalPolicy(t *testing.T) {
 }
 
 func TestTurnOption_WithTurnModel(t *testing.T) {
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 	WithTurnModel("o4-mini")(&cfg)
 
 	if cfg.Model != "o4-mini" {
@@ -232,7 +232,7 @@ func TestTurnOption_WithTurnModel(t *testing.T) {
 }
 
 func TestTurnOption_WithEffort(t *testing.T) {
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 	WithEffort("high")(&cfg)
 
 	if cfg.Effort != "high" {
@@ -241,7 +241,7 @@ func TestTurnOption_WithEffort(t *testing.T) {
 }
 
 func TestTurnOption_WithSummary(t *testing.T) {
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 	WithSummary("Context for this turn")(&cfg)
 
 	if cfg.Summary != "Context for this turn" {
@@ -250,7 +250,7 @@ func TestTurnOption_WithSummary(t *testing.T) {
 }
 
 func TestTurnOption_WithOutputSchema(t *testing.T) {
-	cfg := defaultTurnConfig()
+	cfg := defaultCodexTurnConfig()
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{

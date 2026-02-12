@@ -45,6 +45,9 @@ func TestSessionPersistenceRoundtrip(t *testing.T) {
 	// Add to manager
 	manager.AddSession(sess)
 
+	// Initialize output buffer before adding output lines
+	manager.InitOutputBuffer(sess.ID)
+
 	// Add some output
 	manager.AddOutputLine(sess.ID, session.OutputLine{Type: session.OutputTypeStatus, Content: "Started"})
 	manager.AddOutputLine(sess.ID, session.OutputLine{Type: session.OutputTypeThinking, Content: "Processing..."})
@@ -173,6 +176,7 @@ func TestSessionDeleteFromManagerAndStore(t *testing.T) {
 	}
 
 	manager.AddSession(sess)
+	manager.InitOutputBuffer(sess.ID)
 	manager.AddOutputLine(sess.ID, session.OutputLine{Content: "test"})
 	manager.PersistSession(sess)
 

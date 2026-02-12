@@ -1,0 +1,26 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# Provider conformance integration tests.
+# These tests require real CLI binaries (claude, codex, gemini) and network access.
+# "local" disables sandboxing so tests can access API keys and binaries.
+# "manual" excludes from wildcard builds (bazel test //...).
+# Run with: bazel test //multiagent/agent/integration:integration_test --test_timeout=600
+go_test(
+    name = "integration_test",
+    srcs = ["provider_conformance_test.go"],
+    gotags = ["integration"],
+    shard_count = 4,
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/claude",
+        "//multiagent/agent",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

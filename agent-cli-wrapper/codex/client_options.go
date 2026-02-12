@@ -25,7 +25,7 @@ type ClientConfig struct {
 	EventBufferSize int
 }
 
-func defaultClientConfig() ClientConfig {
+func defaultCodexClientConfig() ClientConfig {
 	return ClientConfig{
 		ClientName:      "codex-go-sdk",
 		ClientVersion:   "1.0.0",
@@ -110,7 +110,7 @@ type ThreadConfig struct {
 	ApprovalPolicy ApprovalPolicy
 }
 
-func defaultThreadConfig() ThreadConfig {
+func defaultCodexThreadConfig() ThreadConfig {
 	return ThreadConfig{}
 }
 
@@ -187,7 +187,7 @@ type TurnConfig struct {
 	Summary string
 }
 
-func defaultTurnConfig() TurnConfig {
+func defaultCodexTurnConfig() TurnConfig {
 	return TurnConfig{}
 }
 

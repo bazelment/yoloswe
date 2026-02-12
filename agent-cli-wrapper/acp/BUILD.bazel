@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "acp",
+    srcs = [
+        "client.go",
+        "client_options.go",
+        "doc.go",
+        "errors.go",
+        "events.go",
+        "handlers.go",
+        "jsonrpc.go",
+        "process.go",
+        "protocol.go",
+        "session.go",
+        "state.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/acp",
+    visibility = ["//visibility:public"],
+    deps = ["//agent-cli-wrapper/internal/procattr"],
+)

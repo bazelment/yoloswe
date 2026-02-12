@@ -239,6 +239,7 @@ func TestProviderSessionWithStore(t *testing.T) {
 	}
 
 	manager.AddSession(sess)
+	manager.InitOutputBuffer(sess.ID)
 	manager.AddOutputLine(sess.ID, session.OutputLine{
 		Type:    session.OutputTypeText,
 		Content: "mock response",

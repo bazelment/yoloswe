@@ -41,7 +41,7 @@ type rpcResult struct {
 
 // NewClient creates a new Codex client with options.
 func NewClient(opts ...ClientOption) *Client {
-	config := defaultClientConfig()
+	config := defaultCodexClientConfig()
 	for _, opt := range opts {
 		opt(&config)
 	}
@@ -200,7 +200,7 @@ func (c *Client) CreateThread(ctx context.Context, opts ...ThreadOption) (*Threa
 	c.mu.RUnlock()
 
 	// Build thread config
-	cfg := defaultThreadConfig()
+	cfg := defaultCodexThreadConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
