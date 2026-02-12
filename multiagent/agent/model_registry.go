@@ -84,9 +84,18 @@ func (r *ModelRegistry) ModelByID(id string) (AgentModel, bool) {
 
 // NextModel returns the next model in the filtered cycle after currentID.
 // If currentID is not found, returns the first filtered model.
-// Falls back to the first model in AllModels if the filtered list is empty.
+// If the filtered list is empty (no providers installed+enabled), returns
+// the current model unchanged to avoid selecting an unavailable provider.
 func (r *ModelRegistry) NextModel(currentID string) AgentModel {
 	if len(r.filtered) == 0 {
+		// No providers available — return the current model unchanged
+		// rather than selecting one the user can't actually use.
+		if currentID != "" {
+			if m, ok := ModelByID(currentID); ok {
+				return m
+			}
+		}
+		// Last resort fallback (should not happen in practice).
 		if len(AllModels) > 0 {
 			return AllModels[0]
 		}

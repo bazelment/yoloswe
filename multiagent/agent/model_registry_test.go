@@ -80,9 +80,18 @@ func TestModelRegistry_EmptyFallback(t *testing.T) {
 	reg := NewModelRegistry(avail, nil)
 	assert.Empty(t, reg.Models())
 
-	// Should fall back to first in AllModels
-	next := reg.NextModel("anything")
-	assert.Equal(t, AllModels[0].ID, next.ID)
+	// When no providers are available, NextModel should return the
+	// current model unchanged (to avoid selecting an unavailable one).
+	next := reg.NextModel("opus")
+	assert.Equal(t, "opus", next.ID)
+
+	// Unknown currentID falls back to AllModels[0] as last resort
+	next2 := reg.NextModel("nonexistent")
+	assert.Equal(t, AllModels[0].ID, next2.ID)
+
+	// Empty currentID also falls back
+	next3 := reg.NextModel("")
+	assert.Equal(t, AllModels[0].ID, next3.ID)
 }
 
 func TestModelRegistry_RebuildWithEnabled(t *testing.T) {

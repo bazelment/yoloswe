@@ -2,9 +2,11 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Provider name constants for agent backends.
@@ -118,13 +120,19 @@ func checkProvider(provider string) ProviderStatus {
 	}
 }
 
-// getVersion runs `<binary> --version` and returns the first line of output.
-// Returns empty string if it fails.
+// versionTimeout is the maximum time to wait for a `--version` probe.
+const versionTimeout = 5 * time.Second
+
+// getVersion runs `<binary> --version` and returns the first line of stdout.
+// Stderr is discarded to avoid capturing noise like Node.js deprecation warnings.
+// Returns empty string if it fails or times out.
 func getVersion(binaryPath string) string {
-	cmd := exec.Command(binaryPath, "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binaryPath, "--version")
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	cmd.Stderr = &out
+	// Discard stderr — tools like gemini emit Node.js deprecation warnings there.
 	if err := cmd.Run(); err != nil {
 		return ""
 	}
