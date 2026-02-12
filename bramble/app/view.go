@@ -117,6 +117,11 @@ func (m Model) View() string {
 		return m.allSessionsOverlay.View(m.styles)
 	}
 
+	// Show repo settings overlay if visible
+	if m.repoSettingsDialog.IsVisible() {
+		return m.repoSettingsDialog.View(m.styles)
+	}
+
 	// Show theme picker overlay if visible
 	if m.themePicker.IsVisible() {
 		return m.themePicker.View(m.styles)
@@ -591,7 +596,7 @@ func (m Model) renderStatusBar() string {
 		if hasWorktree {
 			hints = append(hints, "[m] Merge", "[p] Plan", "[b] Build", "[w] Window")
 		}
-		hints = append(hints, "[F2]split", "[Alt-W] Worktree", "[?]help", "[q] Quit")
+		hints = append(hints, "[F2]split", "[Ctrl-,]settings", "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
@@ -602,10 +607,10 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}
-		hints = append(hints, "[S]all sessions", "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
+		hints = append(hints, "[S]all sessions", "[Ctrl-,]settings", "[F2]split", "[Alt-W]worktree", "[Alt-S]session", "[?]help", "[q]uit")
 	} else {
 		// SDK mode: no session selected - show worktree-dependent actions
-		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[t]ask", "[F2]split"}
+		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[Ctrl-,]settings", "[t]ask", "[F2]split"}
 		if hasWorktree {
 			hints = append(hints, "[e]dit", "[m]erge", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
 		} else {

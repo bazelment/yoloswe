@@ -3,12 +3,14 @@ package app
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
@@ -28,6 +30,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle theme picker overlay
 		if m.focus == FocusThemePicker {
 			return m.handleThemePicker(msg)
+		}
+		// Handle repo settings overlay
+		if m.focus == FocusRepoSettings {
+			return m.handleRepoSettingsDialog(msg)
 		}
 		// Handle all sessions overlay
 		if m.focus == FocusAllSessions {
@@ -58,6 +64,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.helpOverlay.SetSize(msg.Width, msg.Height)
 		m.allSessionsOverlay.SetSize(msg.Width, msg.Height)
 		m.themePicker.SetSize(msg.Width, msg.Height)
+		m.repoSettingsDialog.SetSize(msg.Width, msg.Height)
 		// Update dropdown widths
 		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
 		m.sessionDropdown.SetWidth(m.width / 2)
@@ -249,6 +256,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if len(msg.messages) > 0 {
 			cmds = append(cmds, m.addToast("Worktree operation completed", ToastSuccess))
 		}
+		if msg.warning != "" {
+			cmds = append(cmds, m.addToast(msg.warning, ToastInfo))
+		}
 		m.worktreeOpMessages = msg.messages
 		// Auto-switch to newly created worktree
 		if msg.branch != "" && msg.err == nil {
@@ -273,10 +283,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskWorktreeCreatedMsg:
 		m.worktreeOpMessages = msg.messages
+		if msg.warning != "" {
+			cmds = append(cmds, m.addToast(msg.warning, ToastInfo))
+		}
 		// Set pending selection - will be processed after worktrees refresh
 		m.pendingWorktreeSelect = msg.worktreeName
 		m.pendingPlannerPrompt = msg.prompt
-		return m, m.refreshWorktrees()
+		cmds = append(cmds, m.refreshWorktrees())
+		return m, tea.Batch(cmds...)
 
 	case deleteWorktreeMsg:
 		return m.deleteWorktree(msg.branch, msg.deleteBranch)
@@ -606,9 +620,37 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "T":
-		// Open theme picker
-		m.themePicker.Show(m.styles.Palette.Name, m.width, m.height)
-		m.focus = FocusThemePicker
+		// Open unified settings dialog focused on theme.
+		if m.repoName == "" {
+			toastCmd := m.addToast("No repository loaded", ToastError)
+			return m, toastCmd
+		}
+		cfg := m.settings.RepoSettingsFor(m.repoName)
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim))
+		m.repoSettingsDialog.FocusTheme()
+		m.focus = FocusRepoSettings
+		return m, nil
+
+	case "R":
+		// Open repo settings
+		if m.repoName == "" {
+			toastCmd := m.addToast("No repository loaded", ToastError)
+			return m, toastCmd
+		}
+		cfg := m.settings.RepoSettingsFor(m.repoName)
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim))
+		m.focus = FocusRepoSettings
+		return m, nil
+
+	case "ctrl+,", "ctrl+l":
+		// Primary settings shortcut requested by product.
+		if m.repoName == "" {
+			toastCmd := m.addToast("No repository loaded", ToastError)
+			return m, toastCmd
+		}
+		cfg := m.settings.RepoSettingsFor(m.repoName)
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim))
+		m.focus = FocusRepoSettings
 		return m, nil
 
 	case "f":
@@ -1022,24 +1064,29 @@ func (m Model) createWorktree(branch string) (tea.Model, tea.Cmd) {
 	// Run asynchronously
 	wtRoot := m.wtRoot
 	repoName := m.repoName
+	repoSettings := m.settings.RepoSettingsFor(repoName)
 	ctx := m.ctx
 	return m, func() tea.Msg {
 		var buf bytes.Buffer
 		output := wt.NewOutput(&buf, false) // No colors for captured output
 		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-		_, err := manager.NewAtomic(ctx, branch, "", "")
-
-		// Parse captured messages
-		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
+		worktreePath, err := manager.NewAtomic(ctx, branch, "", "")
+		messages := parseHookOutput(buf.String())
+		if err != nil {
+			return worktreeOpResultMsg{messages: messages, err: err}
 		}
 
-		return worktreeOpResultMsg{messages: messages, err: err, branch: branch}
+		var warning string
+		if err := runRepoHookCommands(repoSettings.OnWorktreeCreate, worktreePath, branch, &messages); err != nil {
+			warning = "Worktree created, but on-worktree-create command failed"
+			messages = append(messages, "Non-fatal: on-worktree-create command failed")
+		}
+		if warning == "" {
+			warning = extractHookWarning(messages)
+		}
+
+		return worktreeOpResultMsg{messages: messages, err: nil, branch: branch, warning: warning}
 	}
 }
 
@@ -1062,23 +1109,35 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 
 	wtRoot := m.wtRoot
 	repoName := m.repoName
+	repoSettings := m.settings.RepoSettingsFor(repoName)
+	worktreePath := filepath.Join(wtRoot, repoName, branch)
+	for _, w := range m.worktrees {
+		if w.Branch == branch {
+			worktreePath = w.Path
+			break
+		}
+	}
 	ctx := m.ctx
 	return m, func() tea.Msg {
 		var buf bytes.Buffer
 		output := wt.NewOutput(&buf, false)
 		manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-		err := manager.Remove(ctx, branch, deleteBranch)
-
+		var warning string
 		var messages []string
-		for _, line := range strings.Split(buf.String(), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				messages = append(messages, line)
-			}
+		if err := runRepoHookCommands(repoSettings.OnWorktreeDelete, worktreePath, branch, &messages); err != nil {
+			warning = "Worktree delete continued, but on-worktree-delete command failed"
+			messages = append(messages, "Non-fatal: on-worktree-delete command failed")
 		}
 
-		return worktreeOpResultMsg{messages: messages, err: err}
+		err := manager.Remove(ctx, branch, deleteBranch)
+
+		messages = append(messages, parseHookOutput(buf.String())...)
+		if warning == "" {
+			warning = extractHookWarning(messages)
+		}
+
+		return worktreeOpResultMsg{messages: messages, err: err, warning: warning}
 	}
 }
 
@@ -1523,24 +1582,27 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		worktreeName := msg.worktree
 		parent := msg.parent
 		prompt := msg.prompt
+		repoSettings := m.settings.RepoSettingsFor(repoName)
 		return m, tea.Batch(toastCmd, func() tea.Msg {
 			var buf bytes.Buffer
 			output := wt.NewOutput(&buf, false)
 			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-			_, err := manager.NewAtomic(ctx, worktreeName, parent, "")
-
-			// Parse captured messages
-			var messages []string
-			for _, line := range strings.Split(buf.String(), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					messages = append(messages, line)
-				}
-			}
+			worktreePath, err := manager.NewAtomic(ctx, worktreeName, parent, "")
+			messages := parseHookOutput(buf.String())
 
 			if err != nil {
 				return worktreeOpResultMsg{messages: messages, err: err}
+			}
+
+			// Run per-repo hook commands
+			var warning string
+			if err := runRepoHookCommands(repoSettings.OnWorktreeCreate, worktreePath, worktreeName, &messages); err != nil {
+				warning = "Worktree created, but on-worktree-create command failed"
+				messages = append(messages, "Non-fatal: on-worktree-create command failed")
+			}
+			if warning == "" {
+				warning = extractHookWarning(messages)
 			}
 
 			// Return a message that will trigger worktree refresh and planner start
@@ -1548,6 +1610,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 				messages:     messages,
 				worktreeName: worktreeName,
 				prompt:       prompt,
+				warning:      warning,
 			}
 		})
 	}
@@ -1697,4 +1760,108 @@ func (m Model) handleThemePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// handleRepoSettingsDialog handles key presses when the repo settings dialog is visible.
+func (m Model) handleRepoSettingsDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	prevTheme := m.repoSettingsDialog.SelectedTheme().Name
+	action, cmd := m.repoSettingsDialog.Update(msg)
+	if sel := m.repoSettingsDialog.SelectedTheme(); sel.Name != prevTheme {
+		m.applyTheme(sel)
+	}
+	switch action {
+	case RepoSettingsActionQuit:
+		return m, tea.Quit
+	case RepoSettingsActionCancel:
+		origName := m.repoSettingsDialog.OriginalThemeName()
+		if origName != m.styles.Palette.Name {
+			if p, ok := ThemeByName(origName); ok {
+				m.applyTheme(p)
+			}
+		}
+		m.repoSettingsDialog.Hide()
+		m.focus = FocusOutput
+		return m, cmd
+	case RepoSettingsActionSave:
+		cfg := m.repoSettingsDialog.RepoSettings()
+		selected := m.repoSettingsDialog.SelectedTheme()
+		m.applyTheme(selected)
+		m.settings.ThemeName = selected.Name
+		m.settings.SetRepoSettings(m.repoName, cfg)
+		m.repoSettingsDialog.Hide()
+		m.focus = FocusOutput
+		err := SaveSettings(m.settings)
+		if err != nil {
+			return m, tea.Batch(cmd, m.addToast("Settings updated but failed to save: "+err.Error(), ToastError))
+		}
+		return m, tea.Batch(cmd, m.addToast("Repo settings saved", ToastSuccess))
+	default:
+		return m, cmd
+	}
+}
+
+func parseHookOutput(out string) []string {
+	var messages []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			messages = append(messages, line)
+		}
+	}
+	return messages
+}
+
+func runRepoHookCommands(commands []string, worktreePath, branch string, messages *[]string) error {
+	env := os.Environ()
+	env = append(env, "WT_BRANCH="+branch, "WT_PATH="+worktreePath)
+
+	for _, cmdStr := range commands {
+		cmdStr = strings.TrimSpace(cmdStr)
+		if cmdStr == "" {
+			continue
+		}
+		*messages = append(*messages, "Running: "+cmdStr)
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Dir = worktreePath
+		cmd.Env = env
+
+		// Capture output to buffer instead of writing to os.Stdout/Stderr
+		// to prevent TUI corruption
+		var outBuf, errBuf bytes.Buffer
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &errBuf
+
+		if err := cmd.Run(); err != nil {
+			*messages = append(*messages, "Command failed: "+cmdStr)
+			// Include stderr output in messages for debugging
+			if errBuf.Len() > 0 {
+				for _, line := range strings.Split(strings.TrimSpace(errBuf.String()), "\n") {
+					if line != "" {
+						*messages = append(*messages, "  "+line)
+					}
+				}
+			}
+			return err
+		}
+
+		// Include stdout output in messages
+		if outBuf.Len() > 0 {
+			for _, line := range strings.Split(strings.TrimSpace(outBuf.String()), "\n") {
+				if line != "" {
+					*messages = append(*messages, "  "+line)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func extractHookWarning(messages []string) string {
+	for _, msg := range messages {
+		lower := strings.ToLower(msg)
+		if strings.Contains(lower, "hook failed") {
+			return "Worktree operation completed, but hook command failed"
+		}
+	}
+	return ""
 }

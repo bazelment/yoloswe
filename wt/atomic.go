@@ -51,8 +51,8 @@ func (op *AtomicOp) Rollback(ctx context.Context) error {
 // If any step fails, all previously completed steps are undone, leaving no
 // orphaned worktrees or branches.
 //
-// Note: post_create hooks are not reversed on failure. Hooks are side-effectful
-// by nature and may not be safely reversible.
+// Note: post_create hook failures are non-fatal. The worktree remains created;
+// hooks are side-effectful by nature and may not be safely reversible.
 func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string, opts ...NewOptions) (string, error) {
 	var o NewOptions
 	if len(opts) > 0 {
@@ -82,7 +82,11 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 			if entry.IsDir() {
 				wtPath := filepath.Join(m.RepoDir(), entry.Name())
 				if _, err := os.Stat(filepath.Join(wtPath, ".git")); err == nil {
-					config, _ := LoadRepoConfig(wtPath)
+					config, err := LoadRepoConfig(wtPath)
+					if err != nil {
+						// Config load failed, try next worktree
+						continue
+					}
 					baseBranch = config.DefaultBase
 					break
 				}
@@ -138,10 +142,15 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 	}
 
 	// Step 5: Run post-create hooks (not reversed on failure -- hooks are side-effectful)
-	config, _ := LoadRepoConfig(worktreePath)
-	if len(config.PostCreate) > 0 {
-		if err := RunHooks(config.PostCreate, worktreePath, branch, m.output); err != nil {
-			return "", fmt.Errorf("post-create hook failed: %w", err)
+	config, err := LoadRepoConfig(worktreePath)
+	if err != nil {
+		m.output.Warn(fmt.Sprintf("Failed to load repo config, skipping hooks: %v", err))
+	} else {
+		createCommands := config.WorktreeCreateCommands()
+		if len(createCommands) > 0 {
+			if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
+				m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+			}
 		}
 	}
 

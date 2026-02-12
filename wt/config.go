@@ -10,9 +10,11 @@ import (
 
 // RepoConfig holds per-repository configuration from .wt.yaml.
 type RepoConfig struct {
-	DefaultBase string   `yaml:"default_base"`
-	PostCreate  []string `yaml:"post_create"`
-	PostRemove  []string `yaml:"post_remove"`
+	DefaultBase      string   `yaml:"default_base"`
+	PostCreate       []string `yaml:"post_create"`
+	PostRemove       []string `yaml:"post_remove"`
+	OnWorktreeCreate []string `yaml:"on_worktree_create"`
+	OnWorktreeDelete []string `yaml:"on_worktree_delete"`
 }
 
 // LoadRepoConfig loads .wt.yaml from a repository path.
@@ -40,6 +42,30 @@ func LoadRepoConfig(repoPath string) (*RepoConfig, error) {
 	return &config, nil
 }
 
+// WorktreeCreateCommands returns commands that should run after creating a worktree.
+// It supports both legacy wt keys and bramble-specific keys.
+func (c *RepoConfig) WorktreeCreateCommands() []string {
+	if c == nil {
+		return nil
+	}
+	cmds := make([]string, 0, len(c.PostCreate)+len(c.OnWorktreeCreate))
+	cmds = append(cmds, c.PostCreate...)
+	cmds = append(cmds, c.OnWorktreeCreate...)
+	return cmds
+}
+
+// WorktreeDeleteCommands returns commands that should run before deleting a worktree.
+// It supports both legacy wt keys and bramble-specific keys.
+func (c *RepoConfig) WorktreeDeleteCommands() []string {
+	if c == nil {
+		return nil
+	}
+	cmds := make([]string, 0, len(c.PostRemove)+len(c.OnWorktreeDelete))
+	cmds = append(cmds, c.PostRemove...)
+	cmds = append(cmds, c.OnWorktreeDelete...)
+	return cmds
+}
+
 // RunHooks executes hook commands in a worktree.
 func RunHooks(commands []string, worktreePath, branch string, output *Output) error {
 	env := os.Environ()
@@ -51,8 +77,9 @@ func RunHooks(commands []string, worktreePath, branch string, output *Output) er
 		cmd := exec.Command("sh", "-c", cmdStr)
 		cmd.Dir = worktreePath
 		cmd.Env = env
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		// Write hook output to the same writer as Output to prevent TUI corruption
+		cmd.Stdout = output.Writer()
+		cmd.Stderr = output.Writer()
 
 		if err := cmd.Run(); err != nil {
 			output.Error("Hook failed: " + cmdStr)

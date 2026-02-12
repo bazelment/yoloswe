@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,20 @@ func TestAllSessionsOverlay_Show(t *testing.T) {
 	require.NoError(t, err)
 	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
 	require.NoError(t, err)
+
+	// Wait for sessions to be created and in non-terminal state
+	// Prevents flakiness where sessions might fail before the overlay is shown
+	require.Eventually(t, func() bool {
+		allSessions := m.sessionManager.GetAllSessions()
+		nonTerminalCount := 0
+		for i := range allSessions {
+			if !allSessions[i].Status.IsTerminal() {
+				nonTerminalCount++
+			}
+		}
+		return nonTerminalCount == 2
+	}, 2*time.Second, 50*time.Millisecond, "sessions should be in non-terminal state")
+
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	assert.False(t, m.allSessionsOverlay.IsVisible())

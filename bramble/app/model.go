@@ -29,6 +29,7 @@ const (
 	FocusConfirm                           // Single-keypress confirmation prompt
 	FocusAllSessions                       // All sessions overlay open
 	FocusThemePicker                       // Theme picker overlay open
+	FocusRepoSettings                      // Repo settings overlay open
 )
 
 // Model is the root application model.
@@ -55,6 +56,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	helpOverlay           *HelpOverlay
 	allSessionsOverlay    *AllSessionsOverlay
 	themePicker           *ThemePicker
+	repoSettingsDialog    *RepoSettingsDialog
 	styles                *Styles
 	settings              Settings
 	inputArea             *TextArea
@@ -111,6 +113,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		styles:             styles,
 		settings:           settings,
 		themePicker:        NewThemePicker(),
+		repoSettingsDialog: NewRepoSettingsDialog(),
 		focus:              FocusOutput,
 		width:              width,
 		height:             height,
@@ -132,6 +135,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	dimColor := lipgloss.Color(palette.Dim)
 	m.inputArea.SetPlaceholderColor(dimColor)
 	m.taskModal.SetPlaceholderColor(dimColor)
+	m.repoSettingsDialog.SetSize(width, height)
 
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {
@@ -634,16 +638,18 @@ type (
 		isNew    bool
 	}
 	// worktreeOpResultMsg contains the result of a worktree operation
-	worktreeOpResultMsg struct {
+	worktreeOpResultMsg struct { //nolint:govet // fieldalignment: readability for message payload
 		err      error
 		branch   string // non-empty for create operations, used for auto-switch
 		messages []string
+		warning  string // optional non-fatal warning shown in toast
 	}
 	// taskWorktreeCreatedMsg is sent when a worktree is created for a task (then planner should start)
-	taskWorktreeCreatedMsg struct {
+	taskWorktreeCreatedMsg struct { //nolint:govet // fieldalignment: readability for message payload
 		worktreeName string
 		prompt       string
 		messages     []string
+		warning      string // optional non-fatal warning shown in toast
 	}
 	// tickMsg is sent periodically to update running tool timers
 	tickMsg struct {

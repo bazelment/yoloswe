@@ -85,6 +85,11 @@ func (o *Output) Printf(format string, args ...any) {
 	fmt.Fprintf(o.w, format, args...)
 }
 
+// Writer returns the underlying writer for direct output.
+func (o *Output) Writer() io.Writer {
+	return o.w
+}
+
 // Pad pads a string (which may contain ANSI codes) to the specified visible width.
 func Pad(s string, width int) string {
 	visible := visibleLen(s)
