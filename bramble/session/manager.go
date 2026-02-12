@@ -373,6 +373,14 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			clientOpts := []acp.ClientOption{
 				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
 			}
+
+			// Configure permission handler based on session type
+			if session.Type == SessionTypePlanner {
+				// Planner sessions should only be able to read, not write
+				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
+			}
+			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
+
 			runner = &providerRunner{
 				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
 				eventHandler: eventHandler,
