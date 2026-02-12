@@ -84,7 +84,8 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 				if _, err := os.Stat(filepath.Join(wtPath, ".git")); err == nil {
 					config, err := LoadRepoConfig(wtPath)
 					if err != nil {
-						return "", fmt.Errorf("failed to load repo config: %w", err)
+						// Config load failed, try next worktree
+						continue
 					}
 					baseBranch = config.DefaultBase
 					break
@@ -143,12 +144,13 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 	// Step 5: Run post-create hooks (not reversed on failure -- hooks are side-effectful)
 	config, err := LoadRepoConfig(worktreePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to load repo config: %w", err)
-	}
-	createCommands := config.WorktreeCreateCommands()
-	if len(createCommands) > 0 {
-		if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
-			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		m.output.Warn(fmt.Sprintf("Failed to load repo config, skipping hooks: %v", err))
+	} else {
+		createCommands := config.WorktreeCreateCommands()
+		if len(createCommands) > 0 {
+			if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
+				m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+			}
 		}
 	}
 

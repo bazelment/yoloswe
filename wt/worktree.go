@@ -274,12 +274,13 @@ func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 	// Run post-create hooks
 	config, err := LoadRepoConfig(mainPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to load repo config: %w", err)
-	}
-	createCommands := config.WorktreeCreateCommands()
-	if len(createCommands) > 0 {
-		if err := RunHooks(createCommands, mainPath, defaultBranch, m.output); err != nil {
-			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		m.output.Warn(fmt.Sprintf("Failed to load repo config, skipping hooks: %v", err))
+	} else {
+		createCommands := config.WorktreeCreateCommands()
+		if len(createCommands) > 0 {
+			if err := RunHooks(createCommands, mainPath, defaultBranch, m.output); err != nil {
+				m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+			}
 		}
 	}
 
@@ -331,7 +332,8 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 				if _, err := os.Stat(filepath.Join(wtPath, ".git")); err == nil {
 					config, err := LoadRepoConfig(wtPath)
 					if err != nil {
-						return "", fmt.Errorf("failed to load repo config: %w", err)
+						// Config load failed, try next worktree
+						continue
 					}
 					baseBranch = config.DefaultBase
 					break
@@ -379,12 +381,13 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 	// Run post-create hooks
 	config, err := LoadRepoConfig(worktreePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to load repo config: %w", err)
-	}
-	createCommands := config.WorktreeCreateCommands()
-	if len(createCommands) > 0 {
-		if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
-			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		m.output.Warn(fmt.Sprintf("Failed to load repo config, skipping hooks: %v", err))
+	} else {
+		createCommands := config.WorktreeCreateCommands()
+		if len(createCommands) > 0 {
+			if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
+				m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+			}
 		}
 	}
 
@@ -442,12 +445,13 @@ func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error)
 	// Run post-create hooks
 	config, err := LoadRepoConfig(worktreePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to load repo config: %w", err)
-	}
-	createCommands := config.WorktreeCreateCommands()
-	if len(createCommands) > 0 {
-		if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
-			m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+		m.output.Warn(fmt.Sprintf("Failed to load repo config, skipping hooks: %v", err))
+	} else {
+		createCommands := config.WorktreeCreateCommands()
+		if len(createCommands) > 0 {
+			if err := RunHooks(createCommands, worktreePath, branch, m.output); err != nil {
+				m.output.Warn(fmt.Sprintf("Post-create hook failed: %v", err))
+			}
 		}
 	}
 
@@ -666,12 +670,13 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	// Run post-remove hooks first
 	config, err := LoadRepoConfig(worktreePath)
 	if err != nil {
-		return fmt.Errorf("failed to load repo config: %w", err)
-	}
-	deleteCommands := config.WorktreeDeleteCommands()
-	if len(deleteCommands) > 0 {
-		if err := RunHooks(deleteCommands, worktreePath, branchName, m.output); err != nil {
-			m.output.Warn(fmt.Sprintf("Post-remove hook failed: %v", err))
+		m.output.Warn(fmt.Sprintf("Failed to load repo config, skipping hooks: %v", err))
+	} else {
+		deleteCommands := config.WorktreeDeleteCommands()
+		if len(deleteCommands) > 0 {
+			if err := RunHooks(deleteCommands, worktreePath, branchName, m.output); err != nil {
+				m.output.Warn(fmt.Sprintf("Post-remove hook failed: %v", err))
+			}
 		}
 	}
 

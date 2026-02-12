@@ -1582,18 +1582,28 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		worktreeName := msg.worktree
 		parent := msg.parent
 		prompt := msg.prompt
+		repoSettings := m.settings.RepoSettingsFor(repoName)
 		return m, tea.Batch(toastCmd, func() tea.Msg {
 			var buf bytes.Buffer
 			output := wt.NewOutput(&buf, false)
 			manager := wt.NewManager(wtRoot, repoName, wt.WithOutput(output))
 
-			_, err := manager.NewAtomic(ctx, worktreeName, parent, "")
+			worktreePath, err := manager.NewAtomic(ctx, worktreeName, parent, "")
 			messages := parseHookOutput(buf.String())
 
 			if err != nil {
 				return worktreeOpResultMsg{messages: messages, err: err}
 			}
-			warning := extractHookWarning(messages)
+
+			// Run per-repo hook commands
+			var warning string
+			if err := runRepoHookCommands(repoSettings.OnWorktreeCreate, worktreePath, worktreeName, &messages); err != nil {
+				warning = "Worktree created, but on-worktree-create command failed"
+				messages = append(messages, "Non-fatal: on-worktree-create command failed")
+			}
+			if warning == "" {
+				warning = extractHookWarning(messages)
+			}
 
 			// Return a message that will trigger worktree refresh and planner start
 			return taskWorktreeCreatedMsg{

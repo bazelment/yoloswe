@@ -181,11 +181,11 @@ func (d *RepoSettingsDialog) setFocus(f RepoSettingsDialogFocus) {
 
 func (d *RepoSettingsDialog) moveFocus(delta int) {
 	next := int(d.focus) + delta
-	if next < int(RepoSettingsFocusCreate) {
+	if next < int(RepoSettingsFocusTheme) {
 		next = int(RepoSettingsFocusCancel)
 	}
 	if next > int(RepoSettingsFocusCancel) {
-		next = int(RepoSettingsFocusCreate)
+		next = int(RepoSettingsFocusTheme)
 	}
 	d.setFocus(RepoSettingsDialogFocus(next))
 }
@@ -195,8 +195,13 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 	switch msg.String() {
 	case "esc":
 		return RepoSettingsActionCancel, nil
-	case "q", "ctrl+c":
+	case "ctrl+c":
 		return RepoSettingsActionQuit, nil
+	case "q":
+		// Only quit if not focused on text inputs
+		if d.focus != RepoSettingsFocusCreate && d.focus != RepoSettingsFocusDelete {
+			return RepoSettingsActionQuit, nil
+		}
 	case "ctrl+enter":
 		return RepoSettingsActionSave, nil
 	case "tab":
