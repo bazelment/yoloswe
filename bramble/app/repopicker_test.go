@@ -12,11 +12,12 @@ import (
 
 func newTestRepoPicker(repos []string) RepoPickerModel {
 	m := RepoPickerModel{
-		ctx:    context.Background(),
-		repos:  repos,
-		styles: NewStyles(Dark),
-		width:  80,
-		height: 24,
+		ctx:           context.Background(),
+		repos:         repos,
+		styles:        NewStyles(Dark),
+		urlInputField: newRepoPickerURLInput(NewStyles(Dark)),
+		width:         80,
+		height:        24,
 	}
 	return m
 }
@@ -226,6 +227,38 @@ func TestRepoPickerURLInput_CharacterAccumulation(t *testing.T) {
 	}
 
 	assert.Equal(t, "https://github.com/user/repo", m.urlInput)
+}
+
+func TestRepoPickerURLInput_PasteInsertsMultipleRunes(t *testing.T) {
+	m := newTestRepoPicker([]string{"foo"})
+	m.mode = pickerModeURLInput
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://github.com/user/repo")})
+	m = m2.(RepoPickerModel)
+
+	assert.Equal(t, "https://github.com/user/repo", m.urlInput)
+}
+
+func TestRepoPickerURLInput_ReadlineLineStartAndEnd(t *testing.T) {
+	m := newTestRepoPicker([]string{"foo"})
+	m.mode = pickerModeURLInput
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello world")})
+	m = m2.(RepoPickerModel)
+
+	// Ctrl+A moves to start, so X is inserted at the beginning.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	m = m2.(RepoPickerModel)
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	m = m2.(RepoPickerModel)
+
+	// Ctrl+E moves to end, so Y is inserted at the end.
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = m2.(RepoPickerModel)
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	m = m2.(RepoPickerModel)
+
+	assert.Equal(t, "Xhello worldY", m.urlInput)
 }
 
 func TestRepoPickerURLInput_BackspaceRemovesChar(t *testing.T) {

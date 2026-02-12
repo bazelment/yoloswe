@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -21,7 +22,7 @@ const (
 )
 
 // RepoPickerModel is the model for the repo selection screen.
-type RepoPickerModel struct {
+type RepoPickerModel struct { //nolint:govet // fieldalignment: readability over packed layout
 	ctx               context.Context
 	cloneCancel       context.CancelFunc
 	err               error
@@ -31,6 +32,7 @@ type RepoPickerModel struct {
 	chosenRepo        string
 	filterText        string
 	urlInput          string
+	urlInputField     textinput.Model
 	cloneRepoName     string
 	pendingSelectRepo string
 	repos             []string
@@ -47,12 +49,29 @@ func NewRepoPickerModel(ctx context.Context, wtRoot string, styles *Styles) Repo
 	if styles == nil {
 		styles = NewStyles(Dark)
 	}
+	urlInputField := newRepoPickerURLInput(styles)
 	return RepoPickerModel{
-		ctx:     ctx,
-		wtRoot:  wtRoot,
-		styles:  styles,
-		loading: true,
+		ctx:           ctx,
+		wtRoot:        wtRoot,
+		styles:        styles,
+		urlInputField: urlInputField,
+		loading:       true,
 	}
+}
+
+func newRepoPickerURLInput(styles *Styles) textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = "> "
+	ti.Placeholder = "https://github.com/user/repo"
+	ti.CharLimit = 0
+	ti.PromptStyle = lipgloss.NewStyle()
+	ti.TextStyle = lipgloss.NewStyle()
+	ti.Cursor.Style = lipgloss.NewStyle()
+	if styles != nil {
+		ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(styles.Palette.Dim))
+	}
+	ti.Blur()
+	return ti
 }
 
 // RepoSelectedMsg is sent when a repo is selected.
@@ -121,6 +140,7 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.ensureURLInputReady()
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -128,11 +148,12 @@ func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			m.mode = pickerModeList
-			m.urlInput = ""
+			m.clearURLInput()
 			m.cloneErr = nil
+			m.urlInputField.Blur()
 			return m, nil
 		case "enter":
-			url := strings.TrimSpace(m.urlInput)
+			url := strings.TrimSpace(m.urlInputField.Value())
 			if url == "" {
 				return m, nil
 			}
@@ -141,23 +162,13 @@ func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cloneRepoName = url
 			m.cloneErr = nil
 			m.cloneCancel = cloneCancel
+			m.urlInputField.Blur()
 			return m, m.initRepo(cloneCtx, url)
-		case "backspace":
-			if m.urlInput != "" {
-				runes := []rune(m.urlInput)
-				m.urlInput = string(runes[:len(runes)-1])
-			}
-			return m, nil
-		default:
-			if r, ok := printableRune(msg); ok {
-				m.urlInput += string(r)
-				return m, nil
-			}
-			return m, nil
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.resizeURLInputField()
 		return m, nil
 	case repoLoadedMsg:
 		m.repos = msg.repos
@@ -169,10 +180,14 @@ func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		return m, nil
 	}
-	return m, nil
+	var cmd tea.Cmd
+	m.urlInputField, cmd = m.urlInputField.Update(msg)
+	m.syncURLInputFromField()
+	return m, cmd
 }
 
 func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.ensureURLInputReady()
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
@@ -189,7 +204,7 @@ func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingSelectRepo = msg.repoName
 		m.mode = pickerModeList
-		m.urlInput = ""
+		m.clearURLInput()
 		m.cloneErr = nil
 		m.cloneRepoName = ""
 		m.loading = true
@@ -200,6 +215,8 @@ func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cloneCancel = nil
 		}
 		m.mode = pickerModeURLInput
+		m.urlInputField.Focus()
+		m.resizeURLInputField()
 		m.cloneErr = msg.err
 		m.cloneRepoName = ""
 		return m, nil
@@ -221,6 +238,7 @@ func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RepoPickerModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.ensureURLInputReady()
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -279,7 +297,9 @@ func (m RepoPickerModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Only enter URL input if no filter active; otherwise treat as filter char
 			if m.filterText == "" {
 				m.mode = pickerModeURLInput
-				m.urlInput = ""
+				m.clearURLInput()
+				m.urlInputField.Focus()
+				m.resizeURLInputField()
 				m.cloneErr = nil
 				return m, nil
 			}
@@ -347,7 +367,10 @@ func (m RepoPickerModel) View() string {
 
 	// Build the picker box
 	boxWidth := 60
-	if m.width < 70 {
+	if m.mode == pickerModeURLInput || m.mode == pickerModeCloning {
+		boxWidth = 92
+	}
+	if m.width < boxWidth+10 {
 		boxWidth = m.width - 10
 	}
 	if boxWidth < 20 {
@@ -377,6 +400,9 @@ func (m RepoPickerModel) View() string {
 }
 
 func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
+	m.ensureURLInputReady()
+	m.resizeURLInputField()
+
 	title := m.styles.Title.Render("Bramble — Add repository")
 	content.WriteString(title)
 	content.WriteString("\n")
@@ -384,7 +410,7 @@ func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
 	content.WriteString("\n\n")
 
 	content.WriteString("  Enter a git URL:\n\n")
-	content.WriteString("  > " + m.urlInput + "█\n")
+	content.WriteString("  " + m.urlInputField.View() + "\n")
 
 	if m.cloneErr != nil {
 		content.WriteString("\n")
@@ -397,8 +423,52 @@ func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
 	content.WriteString("\n")
 	content.WriteString(m.styles.Dim.Render("       git@github.com:user/repo.git"))
 	content.WriteString("\n\n")
-	content.WriteString(m.styles.Dim.Render("  " + formatKeyHints("Enter", "clone") + "  " + formatKeyHints("Esc", "back")))
+	content.WriteString(m.styles.Dim.Render("  " + formatKeyHints("Enter", "clone") + "  " + formatKeyHints("Esc", "back") + "  " + formatKeyHints("Ctrl+v", "paste")))
 	content.WriteString("\n")
+}
+
+func (m *RepoPickerModel) ensureURLInputReady() {
+	if m.urlInputField.Prompt == "" {
+		m.urlInputField = newRepoPickerURLInput(m.styles)
+	}
+	if m.mode == pickerModeURLInput && !m.urlInputField.Focused() {
+		m.urlInputField.Focus()
+	}
+	if m.mode != pickerModeURLInput && m.urlInputField.Focused() {
+		m.urlInputField.Blur()
+	}
+	if m.urlInput != "" && m.urlInputField.Value() == "" {
+		m.urlInputField.SetValue(m.urlInput)
+		m.urlInputField.CursorEnd()
+	}
+}
+
+func (m *RepoPickerModel) clearURLInput() {
+	m.urlInput = ""
+	m.urlInputField.Reset()
+}
+
+func (m *RepoPickerModel) syncURLInputFromField() {
+	m.urlInput = m.urlInputField.Value()
+}
+
+func (m *RepoPickerModel) resizeURLInputField() {
+	inputWidth := m.urlDialogInputWidth()
+	if inputWidth < 12 {
+		inputWidth = 12
+	}
+	m.urlInputField.Width = inputWidth
+}
+
+func (m RepoPickerModel) urlDialogInputWidth() int {
+	boxWidth := 92
+	if m.width > 0 && m.width < boxWidth+10 {
+		boxWidth = m.width - 10
+	}
+	if boxWidth < 20 {
+		boxWidth = 20
+	}
+	return boxWidth - 8 // box border + left indent + prompt
 }
 
 func (m RepoPickerModel) viewCloning(content *strings.Builder, boxWidth int) {
