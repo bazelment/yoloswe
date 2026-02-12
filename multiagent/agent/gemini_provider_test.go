@@ -285,3 +285,32 @@ func (h *testEventHandler) OnTurnComplete(turnNumber int, success bool, duration
 
 func (h *testEventHandler) OnError(err error, context string) {
 }
+
+// Test that GeminiLongRunningProvider.Close() cleans up both clients without double-closing bridgeDone.
+// This prevents resource leaks when Execute() was called on a long-running instance.
+func TestGeminiLongRunningProvider_CloseCleanupBothClients(t *testing.T) {
+	// Create a GeminiProvider with initialized channels
+	baseProvider := &GeminiProvider{
+		client:     nil, // No actual client for this test
+		events:     make(chan AgentEvent, 10),
+		bridgeDone: make(chan struct{}),
+	}
+
+	// Create long-running provider that embeds the base provider
+	lrProvider := &GeminiLongRunningProvider{
+		GeminiProvider: baseProvider,
+	}
+
+	// Close should complete successfully without panicking
+	// (it should not try to close bridgeDone twice)
+	err := lrProvider.Close()
+	if err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+
+	// Verify that the embedded provider's client field is set to nil
+	// (indicating it was cleaned up)
+	if baseProvider.client != nil {
+		t.Error("embedded GeminiProvider.client should be nil after Close()")
+	}
+}

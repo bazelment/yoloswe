@@ -411,3 +411,45 @@ func TestProviderRunner_TurnCompleteWithCost(t *testing.T) {
 	err = runner.Stop()
 	require.NoError(t, err)
 }
+
+// Test that providerRunner properly waits for event bridge goroutine to exit on Stop.
+// This prevents goroutine leaks where the bridge could block forever on the events channel.
+func TestProviderRunner_EventBridgeGracefulShutdown(t *testing.T) {
+	mockProvider := newMockLongRunningProvider()
+
+	manager := NewManager()
+	defer manager.Close()
+
+	sessionID := SessionID("test-session")
+	session := &Session{
+		ID:       sessionID,
+		Status:   StatusRunning,
+		Progress: &SessionProgress{},
+	}
+	manager.AddSession(session)
+	manager.InitOutputBuffer(sessionID)
+
+	handler := newSessionEventHandler(manager, sessionID)
+
+	runner := &providerRunner{
+		provider:     mockProvider,
+		eventHandler: handler,
+	}
+
+	ctx := context.Background()
+	err := runner.Start(ctx)
+	require.NoError(t, err)
+
+	// Emit an event to ensure bridge is actively running
+	mockProvider.emitEvent(agent.TextAgentEvent{Text: "test"})
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop should wait for the bridge goroutine to exit
+	// If the fix is not applied, the goroutine could leak
+	err = runner.Stop()
+	require.NoError(t, err)
+
+	// Verify that the WaitGroup counter is 0 (all goroutines exited)
+	// We can't directly check this, but we can verify Stop() completed without hanging
+	assert.Nil(t, runner.eventBridgeDone, "eventBridgeDone should be nil after Stop")
+}

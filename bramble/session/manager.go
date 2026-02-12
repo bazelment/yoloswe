@@ -71,6 +71,7 @@ type providerRunner struct {
 	eventBridgeDone chan struct{}
 	model           string // model ID for provider (e.g. "gpt-5.3-codex")
 	workDir         string // working directory for provider
+	eventBridgeWg   sync.WaitGroup
 }
 
 func (r *providerRunner) Start(ctx context.Context) error {
@@ -82,6 +83,7 @@ func (r *providerRunner) Start(ctx context.Context) error {
 		// Start event bridge to forward provider events to session event handler
 		if r.eventHandler != nil {
 			r.eventBridgeDone = make(chan struct{})
+			r.eventBridgeWg.Add(1)
 			go r.bridgeProviderEvents()
 		}
 
@@ -92,6 +94,8 @@ func (r *providerRunner) Start(ctx context.Context) error {
 
 // bridgeProviderEvents forwards events from the provider to the session event handler.
 func (r *providerRunner) bridgeProviderEvents() {
+	defer r.eventBridgeWg.Done()
+
 	events := r.provider.Events()
 	if events == nil {
 		return
@@ -158,6 +162,8 @@ func (r *providerRunner) Stop() error {
 	// Stop event bridge
 	if r.eventBridgeDone != nil {
 		close(r.eventBridgeDone)
+		// Wait for bridge goroutine to exit before proceeding
+		r.eventBridgeWg.Wait()
 		r.eventBridgeDone = nil
 	}
 

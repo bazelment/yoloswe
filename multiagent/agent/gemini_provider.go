@@ -201,6 +201,14 @@ func (p *GeminiLongRunningProvider) Close() error {
 		p.longRunningClient = nil
 	}
 
+	// Also stop the embedded GeminiProvider's client in case Execute() was called.
+	// We can't call GeminiProvider.Close() because it would try to close bridgeDone again,
+	// so we just stop the client directly.
+	if p.GeminiProvider.client != nil {
+		p.GeminiProvider.client.Stop()
+		p.GeminiProvider.client = nil
+	}
+
 	p.mu.Unlock()
 
 	// Wait for bridge goroutine to fully exit before closing events channel
