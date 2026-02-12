@@ -370,8 +370,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			}
 		} else if agentModel.Provider == ProviderGemini {
 			// Gemini provider backend
+			clientOpts := []acp.ClientOption{
+				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
+			}
 			runner = &providerRunner{
-				provider:     agent.NewGeminiLongRunningProvider([]acp.ClientOption{}, acp.WithSessionCWD(session.WorktreePath)),
+				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
 				eventHandler: eventHandler,
 				model:        session.Model,
 				workDir:      session.WorktreePath,
