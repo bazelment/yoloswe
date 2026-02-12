@@ -36,6 +36,10 @@ import (
 // Test Infrastructure
 // ============================================================================
 
+// Note: Gemini tests do NOT use t.Parallel() to avoid API rate limiting.
+// Since shards are separate processes, we can't use a mutex. Instead, we
+// conditionally call t.Parallel() only for non-Gemini providers.
+
 // agentTurnEvents collects events from a single provider execution.
 type agentTurnEvents struct {
 	TextEvents    []agent.TextAgentEvent
@@ -225,6 +229,15 @@ func skipIfBinaryMissing(t *testing.T, binary string) {
 	}
 }
 
+// parallelIfNotGemini enables parallel execution for non-Gemini tests.
+// Gemini tests run sequentially to avoid API rate limiting.
+func parallelIfNotGemini(t *testing.T, providerName string) {
+	t.Helper()
+	if providerName != "gemini" {
+		t.Parallel()
+	}
+}
+
 // ============================================================================
 // Test 1: BasicPrompt — all 3 providers
 // ============================================================================
@@ -233,7 +246,7 @@ func TestConformance_BasicPrompt(t *testing.T) {
 	for _, f := range allFactories() {
 		f := f
 		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -285,7 +298,7 @@ func TestConformance_EventsStreamDuringExecution(t *testing.T) {
 			continue
 		}
 		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -362,7 +375,7 @@ func TestConformance_LongRunningMultiTurn(t *testing.T) {
 			continue
 		}
 		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -510,7 +523,7 @@ func TestConformance_PermissionCallback(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, tc.name)
 			skipIfBinaryMissing(t, tc.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
@@ -555,7 +568,7 @@ func TestConformance_ContextCancellation(t *testing.T) {
 	for _, f := range allFactories() {
 		f := f
 		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			tmpDir := t.TempDir()
@@ -608,7 +621,7 @@ func TestConformance_ErrorOnInvalidWorkDir(t *testing.T) {
 			continue // Codex does not error on invalid work dir
 		}
 		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -637,7 +650,7 @@ func TestConformance_FileToolTracking(t *testing.T) {
 			continue
 		}
 		t.Run(f.name, func(t *testing.T) {
-			t.Parallel()
+			parallelIfNotGemini(t, f.name)
 			skipIfBinaryMissing(t, f.binary)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
