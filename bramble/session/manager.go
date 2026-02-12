@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/yoloswe"
@@ -65,17 +66,67 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 // This allows plugging in any provider backend (Claude, Codex, Gemini)
 // via the ManagerConfig.Provider field.
 type providerRunner struct {
-	provider     agent.Provider
-	eventHandler *sessionEventHandler
-	model        string // model ID for provider (e.g. "gpt-5.3-codex")
-	workDir      string // working directory for provider
+	provider        agent.Provider
+	eventHandler    *sessionEventHandler
+	eventBridgeDone chan struct{}
+	model           string // model ID for provider (e.g. "gpt-5.3-codex")
+	workDir         string // working directory for provider
+	eventBridgeWg   sync.WaitGroup
 }
 
 func (r *providerRunner) Start(ctx context.Context) error {
 	if lrp, ok := r.provider.(agent.LongRunningProvider); ok {
-		return lrp.Start(ctx)
+		if err := lrp.Start(ctx); err != nil {
+			return err
+		}
+
+		// Start event bridge to forward provider events to session event handler
+		if r.eventHandler != nil {
+			r.eventBridgeDone = make(chan struct{})
+			r.eventBridgeWg.Add(1)
+			go r.bridgeProviderEvents()
+		}
+
+		return nil
 	}
 	return nil
+}
+
+// bridgeProviderEvents forwards events from the provider to the session event handler.
+func (r *providerRunner) bridgeProviderEvents() {
+	defer r.eventBridgeWg.Done()
+
+	events := r.provider.Events()
+	if events == nil {
+		return
+	}
+
+	for {
+		select {
+		case <-r.eventBridgeDone:
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+
+			// Forward event to session handler
+			switch e := ev.(type) {
+			case agent.TextAgentEvent:
+				r.eventHandler.OnText(e.Text)
+			case agent.ThinkingAgentEvent:
+				r.eventHandler.OnThinking(e.Thinking)
+			case agent.ToolStartAgentEvent:
+				r.eventHandler.OnToolStart(e.Name, e.ID, e.Input)
+			case agent.ToolCompleteAgentEvent:
+				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, e.Result, e.IsError)
+			case agent.TurnCompleteAgentEvent:
+				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.CostUSD)
+			case agent.ErrorAgentEvent:
+				r.eventHandler.OnError(e.Err, e.Context)
+			}
+		}
+	}
 }
 
 func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
@@ -108,6 +159,15 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 }
 
 func (r *providerRunner) Stop() error {
+	// Stop event bridge
+	if r.eventBridgeDone != nil {
+		close(r.eventBridgeDone)
+		// Wait for bridge goroutine to exit before proceeding
+		r.eventBridgeWg.Wait()
+		r.eventBridgeDone = nil
+	}
+
+	// Stop provider
 	if lrp, ok := r.provider.(agent.LongRunningProvider); ok {
 		return lrp.Stop()
 	}
@@ -363,6 +423,25 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			// Codex provider backend
 			runner = &providerRunner{
 				provider:     agent.NewCodexProvider(),
+				eventHandler: eventHandler,
+				model:        session.Model,
+				workDir:      session.WorktreePath,
+			}
+		} else if agentModel.Provider == ProviderGemini {
+			// Gemini provider backend
+			clientOpts := []acp.ClientOption{
+				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
+			}
+
+			// Configure permission handler based on session type
+			if session.Type == SessionTypePlanner {
+				// Planner sessions should only be able to read, not write
+				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
+			}
+			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
+
+			runner = &providerRunner{
+				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
 				eventHandler: eventHandler,
 				model:        session.Model,
 				workDir:      session.WorktreePath,

@@ -119,6 +119,21 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.yoloMode {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		}
+	case ProviderGemini:
+		// Gemini-specific flags
+		// Note: Do NOT use --experimental-acp in tmux mode. ACP is for programmatic
+		// JSON-RPC communication (TUI mode), not interactive CLI usage (tmux mode).
+		//
+		// IMPORTANT: Gemini CLI requires folder trust before running commands.
+		// Users must run `gemini` once in the project directory and select
+		// "Trust folder" from the prompt. Trust is saved to ~/.gemini/trustedFolders.json.
+		// Without this, tmux sessions will hang at the trust prompt.
+		if r.yoloMode {
+			args = append(args, "--yolo")
+		}
+		if r.permissionMode == "plan" {
+			args = append(args, "--approval-mode", "plan")
+		}
 	default:
 		// Claude-specific flags
 		if r.yoloMode {

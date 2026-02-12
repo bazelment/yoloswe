@@ -247,3 +247,59 @@ func (h *BypassPermissionHandler) RequestPermission(_ context.Context, req Reque
 		Outcome: PermissionOutcome{Type: "cancelled"},
 	}, nil
 }
+
+// PlanOnlyPermissionHandler allows read-only operations and rejects write operations.
+// This is suitable for planner sessions that should not execute modifications.
+type PlanOnlyPermissionHandler struct{}
+
+func (h *PlanOnlyPermissionHandler) RequestPermission(_ context.Context, req RequestPermissionRequest) (*RequestPermissionResponse, error) {
+	// Gemini often leaves ToolName empty and encodes it in ToolCallID
+	// (e.g., "write_file-1770849300776"). Extract the tool name from either field.
+	toolName := req.ToolCall.ToolName
+	if toolName == "" {
+		toolName = extractToolName(req.ToolCall.ToolCallID)
+	}
+
+	// Allow read-only operations
+	readOnlyTools := map[string]bool{
+		"read_file":       true,
+		"read_text_file":  true,
+		"list_directory":  true,
+		"glob":            true,
+		"grep":            true,
+		"bash_command":    false, // Most bash commands can modify state
+		"execute_command": false, // Command execution can modify state
+	}
+
+	// Check if this is a read-only tool
+	if isReadOnly, exists := readOnlyTools[toolName]; exists && isReadOnly {
+		// Find the first allow option
+		for _, opt := range req.Options {
+			if strings.HasPrefix(opt.Kind, "allow") {
+				return &RequestPermissionResponse{
+					Outcome: PermissionOutcome{
+						Type:     "selected",
+						OptionID: opt.ID,
+					},
+				}, nil
+			}
+		}
+	}
+
+	// For write operations or unknown tools, find a reject option
+	for _, opt := range req.Options {
+		if strings.HasPrefix(opt.Kind, "reject") {
+			return &RequestPermissionResponse{
+				Outcome: PermissionOutcome{
+					Type:     "selected",
+					OptionID: opt.ID,
+				},
+			}, nil
+		}
+	}
+
+	// Fallback: cancel the request
+	return &RequestPermissionResponse{
+		Outcome: PermissionOutcome{Type: "cancelled"},
+	}, nil
+}

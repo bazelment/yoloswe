@@ -2,9 +2,9 @@ go 1.24.6
 
 use (
 	./agent-cli-wrapper
-	./yoloswe
-	./multiagent
-	./wt
 	./bramble
 	./medivac
+	./multiagent
+	./wt
+	./yoloswe
 )

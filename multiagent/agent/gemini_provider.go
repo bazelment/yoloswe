@@ -148,6 +148,13 @@ func (p *GeminiLongRunningProvider) Start(ctx context.Context) error {
 	}
 	p.longRunningClient = client
 
+	// Start the persistent event bridge for this long-running client
+	p.mu.Lock()
+	p.bridgeDone = make(chan struct{})
+	p.bridgeWg.Add(1)
+	go bridgeACPEventsToChannel(client.Events(), p.events, p.bridgeDone, &p.bridgeWg)
+	p.mu.Unlock()
+
 	session, err := client.NewSession(ctx, p.sessionOpts...)
 	if err != nil {
 		client.Stop()
@@ -180,12 +187,36 @@ func (p *GeminiLongRunningProvider) Stop() error {
 
 // Close stops the long-running provider's ACP client and closes the event channel.
 func (p *GeminiLongRunningProvider) Close() error {
+	p.mu.Lock()
+
+	// Signal bridge goroutine to exit
+	if p.bridgeDone != nil {
+		close(p.bridgeDone)
+		p.bridgeDone = nil
+	}
+
 	// Stop the long-running client (distinct from the embedded GeminiProvider.client).
 	if p.longRunningClient != nil {
 		p.longRunningClient.Stop()
+		p.longRunningClient = nil
 	}
-	// Delegate to the base Close() to properly clean up bridge goroutines and events
-	return p.GeminiProvider.Close()
+
+	// Also stop the embedded GeminiProvider's client in case Execute() was called.
+	// We can't call GeminiProvider.Close() because it would try to close bridgeDone again,
+	// so we just stop the client directly.
+	if p.GeminiProvider.client != nil {
+		p.GeminiProvider.client.Stop()
+		p.GeminiProvider.client = nil
+	}
+
+	p.mu.Unlock()
+
+	// Wait for bridge goroutine to fully exit before closing events channel
+	p.bridgeWg.Wait()
+
+	// Now safe to close our events channel since bridge goroutine has exited
+	close(p.events)
+	return nil
 }
 
 // acpResultToAgentResult converts an ACP TurnResult to the provider-agnostic AgentResult.

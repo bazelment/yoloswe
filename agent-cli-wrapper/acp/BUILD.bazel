@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "acp",
@@ -18,4 +18,10 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/acp",
     visibility = ["//visibility:public"],
     deps = ["//agent-cli-wrapper/internal/procattr"],
+)
+
+go_test(
+    name = "acp_test",
+    srcs = ["handlers_test.go"],
+    embed = [":acp"],
 )
