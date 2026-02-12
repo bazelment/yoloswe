@@ -27,11 +27,14 @@ go_test(
     name = "session_test",
     srcs = [
         "manager_test.go",
+        "provider_runner_test.go",
         "store_test.go",
         "tmux_test.go",
     ],
     embed = [":session"],
     deps = [
+        "//multiagent/agent",
+        "//wt",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

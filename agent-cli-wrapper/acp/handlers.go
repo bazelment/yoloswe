@@ -253,7 +253,12 @@ func (h *BypassPermissionHandler) RequestPermission(_ context.Context, req Reque
 type PlanOnlyPermissionHandler struct{}
 
 func (h *PlanOnlyPermissionHandler) RequestPermission(_ context.Context, req RequestPermissionRequest) (*RequestPermissionResponse, error) {
+	// Gemini often leaves ToolName empty and encodes it in ToolCallID
+	// (e.g., "write_file-1770849300776"). Extract the tool name from either field.
 	toolName := req.ToolCall.ToolName
+	if toolName == "" {
+		toolName = extractToolName(req.ToolCall.ToolCallID)
+	}
 
 	// Allow read-only operations
 	readOnlyTools := map[string]bool{
