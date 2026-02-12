@@ -25,8 +25,12 @@ go_test(
     name = "agent_test",
     srcs = [
         "config_test.go",
+        "gemini_provider_test.go",
         "session_test.go",
     ],
     embed = [":agent"],
-    deps = ["//agent-cli-wrapper/claude"],
+    deps = [
+        "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/claude",
+    ],
 )
