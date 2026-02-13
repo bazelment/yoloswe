@@ -390,6 +390,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	RepoName    string
 	SessionMode SessionMode
 	YoloMode    bool // Skip all permission prompts
+	// TmuxExitOnQuit controls whether Bramble should kill tmux windows it started
+	// when a session is stopped (including app quit). Default is false.
+	TmuxExitOnQuit bool
 	// ProtocolLogDir captures provider protocol/session logs for debugging.
 	// If empty, protocol logging is disabled.
 	ProtocolLogDir string
@@ -555,6 +558,104 @@ func (m *Manager) StartBuilderSession(worktreePath, prompt, model string) (Sessi
 	return m.StartSession(SessionTypeBuilder, worktreePath, prompt, model)
 }
 
+// TrackTmuxWindow registers an externally created tmux window so it appears in
+// the session list for its worktree.
+func (m *Manager) TrackTmuxWindow(worktreePath, windowName string) (SessionID, error) {
+	if m.config.SessionMode != SessionModeTmux {
+		return "", fmt.Errorf("track tmux window is only available in tmux mode")
+	}
+	if strings.TrimSpace(worktreePath) == "" {
+		return "", fmt.Errorf("worktree path is empty")
+	}
+	if strings.TrimSpace(windowName) == "" {
+		return "", fmt.Errorf("tmux window name is empty")
+	}
+
+	worktreeName := filepath.Base(worktreePath)
+	sessionID := generateSessionID(worktreeName, SessionTypeBuilder)
+	ctx, cancel := context.WithCancel(m.ctx)
+
+	session := &Session{
+		ID:             sessionID,
+		Type:           SessionTypeBuilder,
+		Status:         StatusPending,
+		WorktreePath:   worktreePath,
+		WorktreeName:   worktreeName,
+		Prompt:         "Manual tmux window",
+		Title:          windowName,
+		TmuxWindowName: windowName,
+		RunnerType:     "tmux-tracked",
+		Progress:       &SessionProgress{LastActivity: time.Now()},
+		CreatedAt:      time.Now(),
+		ctx:            ctx,
+		cancel:         cancel,
+	}
+
+	m.mu.Lock()
+	m.sessions[sessionID] = session
+	m.mu.Unlock()
+
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0, 16)
+	m.outputsMu.Unlock()
+
+	m.updateSessionStatus(session, StatusRunning)
+
+	// Monitor window lifecycle only in real tmux environments.
+	if IsInsideTmux() && IsTmuxAvailable() {
+		m.wg.Add(1)
+		go m.monitorTrackedTmuxWindow(session)
+	}
+
+	return sessionID, nil
+}
+
+func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-session.ctx.Done():
+			if m.config.TmuxExitOnQuit {
+				session.mu.RLock()
+				tmuxName := session.TmuxWindowName
+				session.mu.RUnlock()
+				if tmuxName != "" {
+					_ = (&tmuxRunner{
+						windowName: tmuxName,
+						killOnStop: true,
+					}).Stop()
+				}
+			}
+			m.updateSessionStatus(session, StatusStopped)
+			return
+		case <-ticker.C:
+			session.mu.RLock()
+			tmuxName := session.TmuxWindowName
+			sessionID := session.ID
+			session.mu.RUnlock()
+
+			if tmuxName == "" || TmuxWindowExists(tmuxName) {
+				continue
+			}
+
+			m.updateSessionStatus(session, StatusCompleted)
+
+			m.mu.Lock()
+			delete(m.sessions, sessionID)
+			m.mu.Unlock()
+
+			m.outputsMu.Lock()
+			delete(m.outputs, sessionID)
+			m.outputsMu.Unlock()
+			return
+		}
+	}
+}
+
 // runSession runs a session in a goroutine, handling both planner and builder types.
 // Both types follow the same lifecycle: start → run turns → idle → follow-up → ...
 func (m *Manager) runSession(session *Session, prompt string) {
@@ -593,6 +694,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			provider:       agentModel.Provider,
 			permissionMode: permissionMode,
 			yoloMode:       m.config.YoloMode,
+			killOnStop:     m.config.TmuxExitOnQuit,
 		}
 		// No event handler for tmux mode - all output is in the tmux window
 	} else {

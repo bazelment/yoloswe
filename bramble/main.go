@@ -25,6 +25,7 @@ var (
 	repoFlag        string
 	editorFlag      string
 	sessionModeFlag string
+	tmuxExitOnQuit  bool
 	protocolLogDir  string
 	yoloFlag        bool
 )
@@ -52,6 +53,7 @@ func init() {
 	rootCmd.Flags().StringVar(&repoFlag, "repo", "", "Repository name to open directly")
 	rootCmd.Flags().StringVar(&editorFlag, "editor", "", "Editor command for [e]dit (default: $EDITOR or 'code')")
 	rootCmd.Flags().StringVar(&sessionModeFlag, "session-mode", "auto", "Session execution mode: auto (default), tui, or tmux")
+	rootCmd.Flags().BoolVar(&tmuxExitOnQuit, "tmux-exit-on-quit", false, "Kill Bramble-created tmux windows when quitting Bramble")
 	rootCmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for provider protocol/stderr logs (optional; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 	rootCmd.Flags().BoolVar(&yoloFlag, "yolo", false, "Skip all permission prompts (dangerous!)")
 }
@@ -121,10 +123,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	sessionManager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName:    repoName,
-		Store:       store,
-		SessionMode: session.SessionMode(sessionModeFlag),
-		YoloMode:    yoloFlag,
+		RepoName:       repoName,
+		Store:          store,
+		SessionMode:    session.SessionMode(sessionModeFlag),
+		TmuxExitOnQuit: tmuxExitOnQuit,
+		YoloMode:       yoloFlag,
 		ProtocolLogDir: func() string {
 			if protocolLogDir != "" {
 				return protocolLogDir

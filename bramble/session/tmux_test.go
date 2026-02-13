@@ -158,6 +158,16 @@ func TestTmuxRunnerBuildCommand(t *testing.T) {
 	}
 }
 
+func TestTmuxRunnerStop_NoKillOnStop(t *testing.T) {
+	runner := tmuxRunner{
+		windowName: "test-window",
+		killOnStop: false,
+	}
+
+	err := runner.Stop()
+	assert.NoError(t, err)
+}
+
 func TestModelByID(t *testing.T) {
 	m, ok := ModelByID("opus")
 	assert.True(t, ok)

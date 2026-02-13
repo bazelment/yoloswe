@@ -693,7 +693,11 @@ type (
 		branch string
 	}
 	// tmuxWindowMsg carries the result of opening a new tmux window.
-	tmuxWindowMsg struct{ err error }
+	tmuxWindowMsg struct { //nolint:govet // fieldalignment: readability for message payload
+		worktreePath string
+		windowName   string
+		err          error
+	}
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
 	toastExpireMsg struct{}
 	// mergePRMsg triggers the async PR merge operation.

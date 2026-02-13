@@ -278,6 +278,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tmuxWindowMsg:
 		if msg.err != nil {
 			cmds = append(cmds, m.addToast("Failed to open tmux window: "+msg.err.Error(), ToastError))
+			return m, tea.Batch(cmds...)
+		}
+		if msg.windowName != "" && msg.worktreePath != "" {
+			if _, err := m.sessionManager.TrackTmuxWindow(msg.worktreePath, msg.windowName); err != nil {
+				cmds = append(cmds, m.addToast("Failed to track tmux window: "+err.Error(), ToastError))
+				return m, tea.Batch(cmds...)
+			}
+			m.sessions = m.sessionManager.GetAllSessions()
+			m.updateSessionDropdown()
+			m.updateWorktreeDropdown()
 		}
 		return m, tea.Batch(cmds...)
 
@@ -574,9 +584,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			wtPath := wt.Path
 			toastCmd := m.addToast("Opening tmux window in "+filepath.Base(wtPath), ToastSuccess)
 			return m, tea.Batch(toastCmd, func() tea.Msg {
-				cmd := exec.Command("tmux", "new-window", "-c", wtPath)
-				err := cmd.Run()
-				return tmuxWindowMsg{err: err}
+				cmd := exec.Command("tmux", "new-window", "-c", wtPath, "-P", "-F", "#{window_name}")
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					detail := strings.TrimSpace(string(out))
+					if detail != "" {
+						return tmuxWindowMsg{err: fmt.Errorf("%w: %s", err, detail)}
+					}
+					return tmuxWindowMsg{err: err}
+				}
+				windowName := strings.TrimSpace(string(out))
+				if windowName == "" {
+					return tmuxWindowMsg{err: fmt.Errorf("tmux did not return a window name")}
+				}
+				return tmuxWindowMsg{
+					worktreePath: wtPath,
+					windowName:   windowName,
+				}
 			})
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
