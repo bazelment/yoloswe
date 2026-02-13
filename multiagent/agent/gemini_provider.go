@@ -56,7 +56,10 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		// Start a single persistent bridge goroutine for the client's events.
 		// This goroutine will forward ALL events from the client to p.events.
 		p.bridgeWg.Add(1)
-		go bridgeACPEventsToChannel(p.client.Events(), p.events, p.bridgeDone, &p.bridgeWg)
+		go func() {
+			defer p.bridgeWg.Done()
+			bridgeEvents(p.client.Events(), nil, p.events, p.bridgeDone, "", nil)
+		}()
 	}
 	client := p.client
 	p.mu.Unlock()
@@ -79,7 +82,7 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	var bridgeDone chan struct{}
 	if cfg.EventHandler != nil {
 		bridgeDone = make(chan struct{})
-		go bridgeACPEventsToHandler(client.Events(), cfg.EventHandler, bridgeDone)
+		go bridgeEvents(client.Events(), cfg.EventHandler, nil, bridgeDone, "", nil)
 	}
 
 	result, err := session.Prompt(ctx, fullPrompt)
@@ -152,7 +155,10 @@ func (p *GeminiLongRunningProvider) Start(ctx context.Context) error {
 	p.mu.Lock()
 	p.bridgeDone = make(chan struct{})
 	p.bridgeWg.Add(1)
-	go bridgeACPEventsToChannel(client.Events(), p.events, p.bridgeDone, &p.bridgeWg)
+	go func() {
+		defer p.bridgeWg.Done()
+		bridgeEvents(client.Events(), nil, p.events, p.bridgeDone, "", nil)
+	}()
 	p.mu.Unlock()
 
 	session, err := client.NewSession(ctx, p.sessionOpts...)
@@ -231,104 +237,5 @@ func acpResultToAgentResult(r *acp.TurnResult) *AgentResult {
 		Error:      r.Error,
 		DurationMs: r.DurationMs,
 		// ACP does not define token usage; fields default to zero.
-	}
-}
-
-// bridgeACPEventsToChannel forwards ACP events to the AgentEvent channel.
-// This is a persistent goroutine that runs for the lifetime of the client.
-// Exits when events channel closes OR done channel is closed.
-func bridgeACPEventsToChannel(events <-chan acp.Event, ch chan<- AgentEvent, done <-chan struct{}, wg *sync.WaitGroup) {
-	defer wg.Done()
-	if events == nil {
-		return
-	}
-	for {
-		select {
-		case <-done:
-			return
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			switch e := event.(type) {
-			case acp.TextDeltaEvent:
-				select {
-				case ch <- TextAgentEvent{Text: e.Delta}:
-				default:
-				}
-
-			case acp.ThinkingDeltaEvent:
-				select {
-				case ch <- ThinkingAgentEvent{Thinking: e.Delta}:
-				default:
-				}
-
-			case acp.ToolCallStartEvent:
-				select {
-				case ch <- ToolStartAgentEvent{Name: e.ToolName, ID: e.ToolCallID, Input: e.Input}:
-				default:
-				}
-
-			case acp.ToolCallUpdateEvent:
-				if e.Status == "completed" || e.Status == "errored" {
-					select {
-					case ch <- ToolCompleteAgentEvent{Name: e.ToolName, ID: e.ToolCallID, Input: e.Input, IsError: e.Status == "errored"}:
-					default:
-					}
-				}
-
-			case acp.TurnCompleteEvent:
-				select {
-				case ch <- TurnCompleteAgentEvent{TurnNumber: 1, Success: e.Success, DurationMs: e.DurationMs}:
-				default:
-				}
-
-			case acp.ErrorEvent:
-				select {
-				case ch <- ErrorAgentEvent{Err: e.Error, Context: e.Context}:
-				default:
-				}
-			}
-		}
-	}
-}
-
-// bridgeACPEventsToHandler forwards ACP events to an EventHandler.
-// This is a per-Execute goroutine that runs for the duration of a single request.
-// Exits when events channel closes OR done channel is closed.
-func bridgeACPEventsToHandler(events <-chan acp.Event, handler EventHandler, done <-chan struct{}) {
-	if events == nil || handler == nil {
-		return
-	}
-	for {
-		select {
-		case <-done:
-			return
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			switch e := event.(type) {
-			case acp.TextDeltaEvent:
-				handler.OnText(e.Delta)
-
-			case acp.ThinkingDeltaEvent:
-				handler.OnThinking(e.Delta)
-
-			case acp.ToolCallStartEvent:
-				handler.OnToolStart(e.ToolName, e.ToolCallID, e.Input)
-
-			case acp.ToolCallUpdateEvent:
-				if e.Status == "completed" || e.Status == "errored" {
-					handler.OnToolComplete(e.ToolName, e.ToolCallID, e.Input, nil, e.Status == "errored")
-				}
-
-			case acp.TurnCompleteEvent:
-				handler.OnTurnComplete(1, e.Success, e.DurationMs, 0)
-
-			case acp.ErrorEvent:
-				handler.OnError(e.Error, e.Context)
-			}
-		}
 	}
 }

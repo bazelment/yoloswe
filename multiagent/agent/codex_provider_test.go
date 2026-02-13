@@ -95,9 +95,11 @@ func TestBridgeCodexEvents_MapsEventsToHandlerAndChannel(t *testing.T) {
 	turnDone := make(chan struct{})
 	handler := &recordingHandler{}
 
+	turnDoneOnce := sync.Once{}
 	bridgeDone := make(chan struct{})
 	go func() {
-		bridgeCodexEvents(events, "thread-1", handler, agentEvents, stop, turnDone)
+		bridgeEvents(events, handler, agentEvents, stop, "thread-1",
+			func() { turnDoneOnce.Do(func() { close(turnDone) }) })
 		close(bridgeDone)
 	}()
 
@@ -182,9 +184,11 @@ func TestBridgeCodexEvents_FiltersOtherThreads(t *testing.T) {
 	turnDone := make(chan struct{})
 	handler := &recordingHandler{}
 
+	turnDoneOnce := sync.Once{}
 	bridgeDone := make(chan struct{})
 	go func() {
-		bridgeCodexEvents(events, "thread-target", handler, agentEvents, stop, turnDone)
+		bridgeEvents(events, handler, agentEvents, stop, "thread-target",
+			func() { turnDoneOnce.Do(func() { close(turnDone) }) })
 		close(bridgeDone)
 	}()
 
@@ -250,13 +254,5 @@ func TestCodexApprovalPolicyForPermissionMode(t *testing.T) {
 	_, ok = codexApprovalPolicyForPermissionMode("")
 	if ok {
 		t.Fatal("empty permission mode should not map to explicit approval policy")
-	}
-}
-
-func TestParseCodexTurnNumber_PrefixedTurnID(t *testing.T) {
-	t.Parallel()
-
-	if got := parseCodexTurnNumber("turn-456"); got != 456 {
-		t.Fatalf("parseCodexTurnNumber(turn-456) = %d, want 456", got)
 	}
 }

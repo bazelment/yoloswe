@@ -1,5 +1,7 @@
 package acp
 
+import "github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
+
 // EventType discriminates between event kinds.
 type EventType int
 
@@ -64,6 +66,9 @@ type TextDeltaEvent struct {
 // Type returns the event type.
 func (e TextDeltaEvent) Type() EventType { return EventTypeTextDelta }
 
+func (e TextDeltaEvent) StreamEventKind() agentstream.EventKind { return agentstream.KindText }
+func (e TextDeltaEvent) StreamDelta() string                    { return e.Delta }
+
 // ThinkingDeltaEvent contains streaming thought/reasoning content.
 type ThinkingDeltaEvent struct {
 	SessionID string
@@ -73,6 +78,9 @@ type ThinkingDeltaEvent struct {
 
 // Type returns the event type.
 func (e ThinkingDeltaEvent) Type() EventType { return EventTypeThinkingDelta }
+
+func (e ThinkingDeltaEvent) StreamEventKind() agentstream.EventKind { return agentstream.KindThinking }
+func (e ThinkingDeltaEvent) StreamDelta() string                    { return e.Delta }
 
 // ToolCallStartEvent fires when a tool call starts.
 type ToolCallStartEvent struct {
@@ -85,6 +93,11 @@ type ToolCallStartEvent struct {
 // Type returns the event type.
 func (e ToolCallStartEvent) Type() EventType { return EventTypeToolCallStart }
 
+func (e ToolCallStartEvent) StreamEventKind() agentstream.EventKind  { return agentstream.KindToolStart }
+func (e ToolCallStartEvent) StreamToolName() string                  { return e.ToolName }
+func (e ToolCallStartEvent) StreamToolCallID() string                { return e.ToolCallID }
+func (e ToolCallStartEvent) StreamToolInput() map[string]interface{} { return e.Input }
+
 // ToolCallUpdateEvent fires when a tool call status changes.
 type ToolCallUpdateEvent struct {
 	Input      map[string]interface{}
@@ -96,6 +109,18 @@ type ToolCallUpdateEvent struct {
 
 // Type returns the event type.
 func (e ToolCallUpdateEvent) Type() EventType { return EventTypeToolCallUpdate }
+
+func (e ToolCallUpdateEvent) StreamEventKind() agentstream.EventKind {
+	if e.Status == "completed" || e.Status == "errored" {
+		return agentstream.KindToolEnd
+	}
+	return agentstream.KindUnknown
+}
+func (e ToolCallUpdateEvent) StreamToolName() string                  { return e.ToolName }
+func (e ToolCallUpdateEvent) StreamToolCallID() string                { return e.ToolCallID }
+func (e ToolCallUpdateEvent) StreamToolInput() map[string]interface{} { return e.Input }
+func (e ToolCallUpdateEvent) StreamToolResult() interface{}           { return nil }
+func (e ToolCallUpdateEvent) StreamToolIsError() bool                 { return e.Status == "errored" }
 
 // TurnCompleteEvent fires when a prompt turn completes.
 type TurnCompleteEvent struct {
@@ -110,6 +135,14 @@ type TurnCompleteEvent struct {
 
 // Type returns the event type.
 func (e TurnCompleteEvent) Type() EventType { return EventTypeTurnComplete }
+
+func (e TurnCompleteEvent) StreamEventKind() agentstream.EventKind {
+	return agentstream.KindTurnComplete
+}
+func (e TurnCompleteEvent) StreamTurnNum() int    { return 1 }
+func (e TurnCompleteEvent) StreamIsSuccess() bool { return e.Success }
+func (e TurnCompleteEvent) StreamDuration() int64 { return e.DurationMs }
+func (e TurnCompleteEvent) StreamCost() float64   { return 0 }
 
 // PlanUpdateEvent fires when the agent updates its plan.
 type PlanUpdateEvent struct {
@@ -129,3 +162,7 @@ type ErrorEvent struct {
 
 // Type returns the event type.
 func (e ErrorEvent) Type() EventType { return EventTypeError }
+
+func (e ErrorEvent) StreamEventKind() agentstream.EventKind { return agentstream.KindError }
+func (e ErrorEvent) StreamErr() error                       { return e.Error }
+func (e ErrorEvent) StreamErrorContext() string             { return e.Context }

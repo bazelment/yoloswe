@@ -76,6 +76,7 @@ go_test(
         "//bramble/session",
         "//wt",
         "@com_github_charmbracelet_bubbletea//:bubbletea",
+        "@com_github_charmbracelet_lipgloss//:lipgloss",
         "@com_github_mattn_go_runewidth//:go-runewidth",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

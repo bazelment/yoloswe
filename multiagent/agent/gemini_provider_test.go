@@ -67,7 +67,10 @@ func TestBridgeACPEventsToChannel(t *testing.T) {
 
 	// Start bridge
 	wg.Add(1)
-	go bridgeACPEventsToChannel(acpEvents, agentEvents, done, &wg)
+	go func() {
+		defer wg.Done()
+		bridgeEvents(acpEvents, nil, agentEvents, done, "", nil)
+	}()
 
 	// Send some events
 	acpEvents <- acp.TextDeltaEvent{Delta: "hello"}
@@ -137,7 +140,10 @@ func TestBridgeACPEventsToChannel_StopsOnDone(t *testing.T) {
 	var wg sync.WaitGroup
 
 	wg.Add(1)
-	go bridgeACPEventsToChannel(acpEvents, agentEvents, done, &wg)
+	go func() {
+		defer wg.Done()
+		bridgeEvents(acpEvents, nil, agentEvents, done, "", nil)
+	}()
 
 	// Close done immediately
 	close(done)
@@ -165,7 +171,10 @@ func TestBridgeACPEventsToChannel_StopsOnChannelClose(t *testing.T) {
 	var wg sync.WaitGroup
 
 	wg.Add(1)
-	go bridgeACPEventsToChannel(acpEvents, agentEvents, done, &wg)
+	go func() {
+		defer wg.Done()
+		bridgeEvents(acpEvents, nil, agentEvents, done, "", nil)
+	}()
 
 	// Close events channel
 	close(acpEvents)
@@ -217,7 +226,7 @@ func TestBridgeACPEventsToHandler(t *testing.T) {
 	}
 
 	// Start bridge
-	go bridgeACPEventsToHandler(acpEvents, handler, done)
+	go bridgeEvents(acpEvents, handler, nil, done, "", nil)
 
 	// Send events
 	acpEvents <- acp.TextDeltaEvent{Delta: "test1"}

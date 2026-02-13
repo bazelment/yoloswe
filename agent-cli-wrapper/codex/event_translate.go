@@ -41,84 +41,6 @@ type MappedEvent struct { //nolint:govet // fieldalignment: keep semantic groupi
 	Success      bool
 }
 
-// MapEvent converts a typed Codex SDK event into a normalized event.
-func MapEvent(ev Event) (MappedEvent, bool) {
-	switch e := ev.(type) {
-	case TextDeltaEvent:
-		return MappedEvent{
-			Kind:     MappedEventTextDelta,
-			ThreadID: e.ThreadID,
-			TurnID:   e.TurnID,
-			ItemID:   e.ItemID,
-			Delta:    e.Delta,
-		}, true
-	case ReasoningDeltaEvent:
-		return MappedEvent{
-			Kind:     MappedEventReasoningDelta,
-			ThreadID: e.ThreadID,
-			TurnID:   e.TurnID,
-			ItemID:   e.ItemID,
-			Delta:    e.Delta,
-		}, true
-	case CommandStartEvent:
-		return MappedEvent{
-			Kind:     MappedEventCommandStart,
-			ThreadID: e.ThreadID,
-			TurnID:   e.TurnID,
-			CallID:   e.CallID,
-			Command:  commandText(e.ParsedCmd, e.Command),
-			CWD:      e.CWD,
-		}, true
-	case CommandEndEvent:
-		return MappedEvent{
-			Kind:       MappedEventCommandEnd,
-			ThreadID:   e.ThreadID,
-			TurnID:     e.TurnID,
-			CallID:     e.CallID,
-			Stdout:     e.Stdout,
-			Stderr:     e.Stderr,
-			ExitCode:   e.ExitCode,
-			DurationMs: e.DurationMs,
-			Success:    e.ExitCode == 0,
-		}, true
-	case TurnCompletedEvent:
-		return MappedEvent{
-			Kind:       MappedEventTurnCompleted,
-			ThreadID:   e.ThreadID,
-			TurnID:     e.TurnID,
-			Usage:      e.Usage,
-			DurationMs: e.DurationMs,
-			Success:    e.Success,
-		}, true
-	case ErrorEvent:
-		return MappedEvent{
-			Kind:         MappedEventError,
-			ThreadID:     e.ThreadID,
-			TurnID:       e.TurnID,
-			Error:        e.Error,
-			ErrorContext: e.Context,
-		}, true
-	case TokenUsageEvent:
-		var usage TurnUsage
-		if e.TotalUsage != nil {
-			usage = TurnUsage{
-				InputTokens:           e.TotalUsage.InputTokens,
-				CachedInputTokens:     e.TotalUsage.CachedInputTokens,
-				OutputTokens:          e.TotalUsage.OutputTokens,
-				ReasoningOutputTokens: e.TotalUsage.ReasoningOutputTokens,
-				TotalTokens:           e.TotalUsage.TotalTokens,
-			}
-		}
-		return MappedEvent{
-			Kind:     MappedEventTokenUsage,
-			ThreadID: e.ThreadID,
-			Usage:    usage,
-		}, true
-	default:
-		return MappedEvent{}, false
-	}
-}
-
 // ParseMappedNotification parses a Codex protocol notification into a
 // normalized event. Unknown or unsupported methods return (zero, false).
 func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent, bool) {
@@ -277,14 +199,6 @@ func TurnNumberFromID(turnID string) int {
 	}
 
 	return 1
-}
-
-func commandText(parsed string, command []string) string {
-	cmd := strings.TrimSpace(parsed)
-	if cmd == "" {
-		cmd = strings.TrimSpace(strings.Join(command, " "))
-	}
-	return cmd
 }
 
 func parsedCommandText(parsed []ParsedCmd, command []string) string {

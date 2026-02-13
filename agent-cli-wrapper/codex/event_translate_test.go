@@ -5,28 +5,6 @@ import (
 	"testing"
 )
 
-func TestMapEvent_CommandStart(t *testing.T) {
-	ev, ok := MapEvent(CommandStartEvent{
-		ThreadID:  "thread-1",
-		TurnID:    "turn-1",
-		CallID:    "call-1",
-		ParsedCmd: "echo hi",
-		CWD:       "/tmp/work",
-	})
-	if !ok {
-		t.Fatal("expected mapped event")
-	}
-	if ev.Kind != MappedEventCommandStart {
-		t.Fatalf("Kind = %v, want command start", ev.Kind)
-	}
-	if ev.Command != "echo hi" {
-		t.Fatalf("Command = %q, want %q", ev.Command, "echo hi")
-	}
-	if ev.CWD != "/tmp/work" {
-		t.Fatalf("CWD = %q, want %q", ev.CWD, "/tmp/work")
-	}
-}
-
 func TestParseMappedNotification_TurnCompleted(t *testing.T) {
 	params := json.RawMessage(`{"threadId":"t1","turn":{"id":"turn-2","status":"completed","error":null,"items":[]}}`)
 	ev, ok := ParseMappedNotification(NotifyTurnCompleted, params)

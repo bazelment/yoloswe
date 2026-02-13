@@ -17,7 +17,10 @@ go_library(
     ],
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/acp",
     visibility = ["//visibility:public"],
-    deps = ["//agent-cli-wrapper/internal/procattr"],
+    deps = [
+        "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/internal/procattr",
+    ],
 )
 
 go_test(
