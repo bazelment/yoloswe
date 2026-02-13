@@ -108,8 +108,8 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 	// unchecked and untoggable in the UI.
 	d.providerStatuses = providerStatuses
 	d.enabledProviders = make(map[string]bool, len(agent.AllProviders))
-	if len(enabledProviders) == 0 {
-		// nil/empty = all installed providers enabled
+	if enabledProviders == nil {
+		// nil = all installed providers enabled (default/unset)
 		for _, s := range providerStatuses {
 			if s.Installed {
 				d.enabledProviders[s.Provider] = true
