@@ -25,6 +25,7 @@ var (
 	repoFlag        string
 	editorFlag      string
 	sessionModeFlag string
+	protocolLogDir  string
 	yoloFlag        bool
 )
 
@@ -42,7 +43,8 @@ One TUI session operates on a single repo at a time. The repo can be:
 
 Environment:
   WT_ROOT     Base directory for worktrees (default: ~/worktrees)
-  EDITOR      Editor command for [e]dit (default: code)`,
+  EDITOR      Editor command for [e]dit (default: code)
+  BRAMBLE_PROTOCOL_LOG_DIR  Directory for Codex/Gemini protocol logs`,
 	RunE: runTUI,
 }
 
@@ -50,6 +52,7 @@ func init() {
 	rootCmd.Flags().StringVar(&repoFlag, "repo", "", "Repository name to open directly")
 	rootCmd.Flags().StringVar(&editorFlag, "editor", "", "Editor command for [e]dit (default: $EDITOR or 'code')")
 	rootCmd.Flags().StringVar(&sessionModeFlag, "session-mode", "auto", "Session execution mode: auto (default), tui, or tmux")
+	rootCmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for provider protocol/stderr logs (optional; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 	rootCmd.Flags().BoolVar(&yoloFlag, "yolo", false, "Skip all permission prompts (dangerous!)")
 }
 
@@ -122,6 +125,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		Store:       store,
 		SessionMode: session.SessionMode(sessionModeFlag),
 		YoloMode:    yoloFlag,
+		ProtocolLogDir: func() string {
+			if protocolLogDir != "" {
+				return protocolLogDir
+			}
+			return os.Getenv("BRAMBLE_PROTOCOL_LOG_DIR")
+		}(),
 	})
 	defer sessionManager.Close()
 

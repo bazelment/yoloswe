@@ -16,6 +16,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
@@ -65,13 +66,70 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 // providerRunner adapts agent.Provider to the sessionRunner interface.
 // This allows plugging in any provider backend (Claude, Codex, Gemini)
 // via the ManagerConfig.Provider field.
-type providerRunner struct {
+type providerRunner struct { //nolint:govet // fieldalignment: keep related lifecycle fields grouped
 	provider        agent.Provider
 	eventHandler    *sessionEventHandler
 	eventBridgeDone chan struct{}
 	model           string // model ID for provider (e.g. "gpt-5.3-codex")
+	permissionMode  string // execution permissions (e.g. "bypass", "plan")
 	workDir         string // working directory for provider
 	eventBridgeWg   sync.WaitGroup
+	turnObsMu       sync.Mutex
+	turnObsSeq      uint64
+	sawText         bool
+	sawThinking     bool
+	turnDone        bool
+	turnDoneCh      chan struct{}
+}
+
+// trackingEventHandler wraps provider callbacks to record observed event types
+// for the current turn before forwarding to the session event handler.
+type trackingEventHandler struct {
+	runner     *providerRunner
+	next       agent.EventHandler
+	turnObsSeq uint64
+}
+
+func (h *trackingEventHandler) OnText(text string) {
+	if !h.runner.observeText(h.turnObsSeq, text) {
+		return
+	}
+	h.next.OnText(text)
+}
+
+func (h *trackingEventHandler) OnThinking(thinking string) {
+	if !h.runner.observeThinking(h.turnObsSeq, thinking) {
+		return
+	}
+	h.next.OnThinking(thinking)
+}
+
+func (h *trackingEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
+	if !h.runner.acceptTurnEvent(h.turnObsSeq) {
+		return
+	}
+	h.next.OnToolStart(name, id, input)
+}
+
+func (h *trackingEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
+	if !h.runner.acceptTurnEvent(h.turnObsSeq) {
+		return
+	}
+	h.next.OnToolComplete(name, id, input, result, isError)
+}
+
+func (h *trackingEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
+	if !h.runner.markTurnDone(h.turnObsSeq) {
+		return
+	}
+	h.next.OnTurnComplete(turnNumber, success, durationMs, costUSD)
+}
+
+func (h *trackingEventHandler) OnError(err error, context string) {
+	if !h.runner.acceptTurnEvent(h.turnObsSeq) {
+		return
+	}
+	h.next.OnError(err, context)
 }
 
 func (r *providerRunner) Start(ctx context.Context) error {
@@ -110,17 +168,25 @@ func (r *providerRunner) bridgeProviderEvents() {
 				return
 			}
 
-			// Forward event to session handler
+			// Forward event to session handler. Call observation tracking
+			// for side effects (turn-done detection, text/thinking seen flags)
+			// and filter whitespace-only text/thinking deltas.
+			turnObsSeq := r.currentTurnObservationSeq()
 			switch e := ev.(type) {
 			case agent.TextAgentEvent:
-				r.eventHandler.OnText(e.Text)
+				if r.observeText(turnObsSeq, e.Text) || strings.TrimSpace(e.Text) != "" {
+					r.eventHandler.OnText(e.Text)
+				}
 			case agent.ThinkingAgentEvent:
-				r.eventHandler.OnThinking(e.Thinking)
+				if r.observeThinking(turnObsSeq, e.Thinking) || strings.TrimSpace(e.Thinking) != "" {
+					r.eventHandler.OnThinking(e.Thinking)
+				}
 			case agent.ToolStartAgentEvent:
 				r.eventHandler.OnToolStart(e.Name, e.ID, e.Input)
 			case agent.ToolCompleteAgentEvent:
 				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, e.Result, e.IsError)
 			case agent.TurnCompleteAgentEvent:
+				r.markTurnDone(turnObsSeq)
 				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.CostUSD)
 			case agent.ErrorAgentEvent:
 				r.eventHandler.OnError(e.Err, e.Context)
@@ -130,32 +196,153 @@ func (r *providerRunner) bridgeProviderEvents() {
 }
 
 func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	turnObsSeq := r.beginTurnObservation()
+
 	var opts []agent.ExecuteOption
 	if r.eventHandler != nil {
-		opts = append(opts, agent.WithProviderEventHandler(r.eventHandler))
+		opts = append(opts, agent.WithProviderEventHandler(&trackingEventHandler{
+			runner:     r,
+			next:       r.eventHandler,
+			turnObsSeq: turnObsSeq,
+		}))
 	}
 	if r.model != "" {
 		opts = append(opts, agent.WithProviderModel(r.model))
+	}
+	if r.permissionMode != "" {
+		opts = append(opts, agent.WithProviderPermissionMode(r.permissionMode))
 	}
 	if r.workDir != "" {
 		opts = append(opts, agent.WithProviderWorkDir(r.workDir))
 	}
 
+	var result *agent.AgentResult
+
 	// Long-running providers maintain state across turns
 	if lrp, ok := r.provider.(agent.LongRunningProvider); ok {
-		result, err := lrp.SendMessage(ctx, message)
+		var err error
+		result, err = lrp.SendMessage(ctx, message)
 		if err != nil {
 			return nil, err
 		}
-		return agentUsageToTurnUsage(result.Usage), nil
+		// Give bridged events a brief window to flush before fallback synthesis.
+		r.waitForTurnDone(turnObsSeq, 150*time.Millisecond)
+	} else {
+		// Ephemeral providers create a fresh session each turn
+		var err error
+		result, err = r.provider.Execute(ctx, message, nil, opts...)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Ephemeral providers create a fresh session each turn
-	result, err := r.provider.Execute(ctx, message, nil, opts...)
-	if err != nil {
-		return nil, err
-	}
+	r.emitFallbackFromResult(turnObsSeq, result)
 	return agentUsageToTurnUsage(result.Usage), nil
+}
+
+func (r *providerRunner) beginTurnObservation() uint64 {
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	r.turnObsSeq++
+	r.sawText = false
+	r.sawThinking = false
+	r.turnDone = false
+	r.turnDoneCh = make(chan struct{})
+	return r.turnObsSeq
+}
+
+func (r *providerRunner) currentTurnObservationSeq() uint64 {
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	return r.turnObsSeq
+}
+
+func (r *providerRunner) acceptTurnEvent(turnObsSeq uint64) bool {
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	return turnObsSeq == r.turnObsSeq && !r.turnDone && r.turnDoneCh != nil
+}
+
+func (r *providerRunner) observeText(turnObsSeq uint64, text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	if turnObsSeq != r.turnObsSeq || r.turnDone || r.turnDoneCh == nil {
+		return false
+	}
+	r.sawText = true
+	return true
+}
+
+func (r *providerRunner) observeThinking(turnObsSeq uint64, thinking string) bool {
+	if strings.TrimSpace(thinking) == "" {
+		return false
+	}
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	if turnObsSeq != r.turnObsSeq || r.turnDone || r.turnDoneCh == nil {
+		return false
+	}
+	r.sawThinking = true
+	return true
+}
+
+func (r *providerRunner) markTurnDone(turnObsSeq uint64) bool {
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	if turnObsSeq != r.turnObsSeq || r.turnDone || r.turnDoneCh == nil {
+		return false
+	}
+	r.turnDone = true
+	close(r.turnDoneCh)
+	return true
+}
+
+func (r *providerRunner) waitForTurnDone(turnObsSeq uint64, timeout time.Duration) {
+	r.turnObsMu.Lock()
+	if turnObsSeq != r.turnObsSeq {
+		r.turnObsMu.Unlock()
+		return
+	}
+	alreadyDone := r.turnDone
+	doneCh := r.turnDoneCh
+	r.turnObsMu.Unlock()
+
+	if alreadyDone || doneCh == nil {
+		return
+	}
+
+	select {
+	case <-doneCh:
+	case <-time.After(timeout):
+	}
+}
+
+func (r *providerRunner) emitFallbackFromResult(turnObsSeq uint64, result *agent.AgentResult) {
+	if r.eventHandler == nil || result == nil {
+		return
+	}
+
+	r.turnObsMu.Lock()
+	if turnObsSeq != r.turnObsSeq {
+		r.turnObsMu.Unlock()
+		return
+	}
+	sawText := r.sawText
+	sawThinking := r.sawThinking
+	r.turnObsMu.Unlock()
+
+	thinking := strings.TrimSpace(result.Thinking)
+	if !sawThinking && thinking != "" {
+		r.eventHandler.OnThinking(thinking)
+	}
+
+	text := strings.TrimSpace(result.Text)
+	if !sawText && text != "" {
+		r.eventHandler.OnText(result.Text)
+	}
 }
 
 func (r *providerRunner) Stop() error {
@@ -197,12 +384,15 @@ const (
 )
 
 // ManagerConfig holds configuration for the session manager.
-type ManagerConfig struct {
+type ManagerConfig struct { //nolint:govet // fieldalignment: readability over packing
 	Store       *Store
 	Provider    agent.Provider // Optional pluggable agent backend; nil uses default runners
 	RepoName    string
 	SessionMode SessionMode
 	YoloMode    bool // Skip all permission prompts
+	// ProtocolLogDir captures provider protocol/session logs for debugging.
+	// If empty, protocol logging is disabled.
+	ProtocolLogDir string
 }
 
 // Manager handles multiple concurrent sessions.
@@ -421,16 +611,46 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			}
 		} else if agentModel.Provider == ProviderCodex {
 			// Codex provider backend
+			codexOpts, codexLogHint, codexStderrHint := m.codexProviderOptions(session.ID)
+			if codexLogHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   codexLogHint,
+				})
+			}
+			if codexStderrHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   codexStderrHint,
+				})
+			}
 			runner = &providerRunner{
-				provider:     agent.NewCodexProvider(),
+				provider:     agent.NewCodexProvider(codexOpts...),
 				eventHandler: eventHandler,
 				model:        session.Model,
-				workDir:      session.WorktreePath,
+				permissionMode: func() string {
+					if session.Type == SessionTypePlanner {
+						return "plan"
+					}
+					return "bypass"
+				}(),
+				workDir: session.WorktreePath,
 			}
 		} else if agentModel.Provider == ProviderGemini {
 			// Gemini provider backend
 			clientOpts := []acp.ClientOption{
 				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
+			}
+
+			if stderrOpt, stderrPath := m.geminiProtocolStderrOption(session.ID); stderrOpt != nil {
+				clientOpts = append(clientOpts, stderrOpt)
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   fmt.Sprintf("Gemini stderr log: %s", stderrPath),
+				})
 			}
 
 			// Configure permission handler based on session type
@@ -641,10 +861,16 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				return
 			}
 			m.updateSessionStatus(session, StatusRunning)
+			now := time.Now()
 			m.addOutput(session.ID, OutputLine{
-				Timestamp: time.Now(),
+				Timestamp: now,
 				Type:      OutputTypeStatus,
-				Content:   fmt.Sprintf("Follow-up: %s", followUp),
+				Content:   "Follow-up prompt:",
+			})
+			m.addOutput(session.ID, OutputLine{
+				Timestamp: now,
+				Type:      OutputTypeText,
+				Content:   followUp,
 			})
 			currentPrompt = followUp
 		}
@@ -1081,4 +1307,69 @@ func (m *Manager) HasFollowUpChan(sessionID SessionID) bool {
 	defer m.followUpChansMu.RUnlock()
 	_, exists := m.followUpChans[sessionID]
 	return exists
+}
+
+func (m *Manager) protocolLogPath(sessionID SessionID, suffix string) (string, bool) {
+	logDir := strings.TrimSpace(m.config.ProtocolLogDir)
+	if logDir == "" {
+		return "", false
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		log.Printf("WARNING: failed to create protocol log dir %q: %v", logDir, err)
+		return "", false
+	}
+	return filepath.Join(logDir, fmt.Sprintf("%s-%s", sessionID, suffix)), true
+}
+
+func (m *Manager) codexProviderOptions(sessionID SessionID) ([]codex.ClientOption, string, string) {
+	sessionLogPath, ok := m.protocolLogPath(sessionID, "codex.protocol.jsonl")
+	if !ok {
+		return nil, "", ""
+	}
+
+	stderrLogPath, _ := m.protocolLogPath(sessionID, "codex.stderr.log")
+
+	opts := []codex.ClientOption{
+		codex.WithSessionLogPath(sessionLogPath),
+	}
+
+	if stderrLogPath != "" {
+		opts = append(opts, codex.WithStderrHandler(newFileAppendHandler(stderrLogPath)))
+	}
+
+	return opts,
+		fmt.Sprintf("Codex protocol log: %s", sessionLogPath),
+		fmt.Sprintf("Codex stderr log: %s", stderrLogPath)
+}
+
+func (m *Manager) geminiProtocolStderrOption(sessionID SessionID) (acp.ClientOption, string) {
+	stderrLogPath, ok := m.protocolLogPath(sessionID, "gemini.stderr.log")
+	if !ok {
+		return nil, ""
+	}
+	return acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)), stderrLogPath
+}
+
+func newFileAppendHandler(path string) func([]byte) {
+	var mu sync.Mutex
+	return func(data []byte) {
+		if len(data) == 0 || strings.TrimSpace(path) == "" {
+			return
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			log.Printf("WARNING: failed to open protocol log %q: %v", path, err)
+			return
+		}
+		if _, err := f.Write(data); err != nil {
+			log.Printf("WARNING: failed to write protocol log %q: %v", path, err)
+		}
+		if err := f.Close(); err != nil {
+			log.Printf("WARNING: failed to close protocol log %q: %v", path, err)
+		}
+	}
 }

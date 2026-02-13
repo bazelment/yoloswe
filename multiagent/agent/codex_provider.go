@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/wt"
@@ -47,6 +50,9 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	if cfg.Model != "" {
 		threadOpts = append(threadOpts, codex.WithModel(cfg.Model))
 	}
+	if policy, ok := codexApprovalPolicyForPermissionMode(cfg.PermissionMode); ok {
+		threadOpts = append(threadOpts, codex.WithApprovalPolicy(policy))
+	}
 	if cfg.WorkDir != "" {
 		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
 	}
@@ -57,6 +63,26 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		return nil, err
 	}
 
+	bridgeStop := make(chan struct{})
+	bridgeDone := make(chan struct{})
+	turnDone := make(chan struct{})
+	turnDoneOnce := sync.Once{}
+	go func() {
+		bridgeEvents(
+			p.client.Events(),
+			cfg.EventHandler,
+			p.events,
+			bridgeStop,
+			thread.ID(),
+			func() { turnDoneOnce.Do(func() { close(turnDone) }) },
+		)
+		close(bridgeDone)
+	}()
+	defer func() {
+		close(bridgeStop)
+		<-bridgeDone
+	}()
+
 	if err := thread.WaitReady(ctx); err != nil {
 		return nil, err
 	}
@@ -64,6 +90,10 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	result, err := thread.Ask(ctx, fullPrompt)
 	if err != nil {
 		return nil, err
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(150 * time.Millisecond):
 	}
 
 	return codexResultToAgentResult(result), nil
@@ -90,8 +120,23 @@ func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 		Error:      r.Error,
 		DurationMs: r.DurationMs,
 		Usage: AgentUsage{
-			InputTokens:  int(r.Usage.InputTokens),
-			OutputTokens: int(r.Usage.OutputTokens),
+			InputTokens:     int(r.Usage.InputTokens),
+			OutputTokens:    int(r.Usage.OutputTokens),
+			CacheReadTokens: int(r.Usage.CachedInputTokens),
 		},
+	}
+}
+
+func codexApprovalPolicyForPermissionMode(permissionMode string) (codex.ApprovalPolicy, bool) {
+	switch strings.ToLower(strings.TrimSpace(permissionMode)) {
+	case "", "default":
+		return "", false
+	case "bypass":
+		return codex.ApprovalPolicyNever, true
+	case "plan":
+		// Planner mode should preserve approval gating for potentially mutating tools.
+		return codex.ApprovalPolicyOnRequest, true
+	default:
+		return "", false
 	}
 }

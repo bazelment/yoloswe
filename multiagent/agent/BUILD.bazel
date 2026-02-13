@@ -4,6 +4,7 @@ go_library(
     name = "agent",
     srcs = [
         "agent.go",
+        "bridge.go",
         "claude_provider.go",
         "codex_provider.go",
         "config.go",
@@ -15,6 +16,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//wt",
@@ -24,6 +26,7 @@ go_library(
 go_test(
     name = "agent_test",
     srcs = [
+        "codex_provider_test.go",
         "config_test.go",
         "gemini_provider_test.go",
         "session_test.go",
@@ -32,5 +35,6 @@ go_test(
     deps = [
         "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/codex",
     ],
 )

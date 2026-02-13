@@ -189,7 +189,7 @@ func TestFormatOutputLine(t *testing.T) {
 	}
 }
 
-func TestOutputModelTruncation(t *testing.T) {
+func TestOutputModelLongPromptNoTruncation(t *testing.T) {
 	info := &session.SessionInfo{
 		ID:     "test-id",
 		Type:   session.SessionTypePlanner,
@@ -211,9 +211,8 @@ func TestOutputModelTruncation(t *testing.T) {
 
 	view := m.View()
 	assert.NotEmpty(t, view)
-
-	// Should show truncated prompt (ends with ...)
-	// Note: The truncation happens in the render function
+	assert.Contains(t, view, info.Prompt)
+	assert.NotContains(t, view, "...\"")
 	t.Logf("Truncated output:\n%s", view)
 }
 

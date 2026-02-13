@@ -61,7 +61,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 
 	// Bridge Claude events to AgentEvent channel and EventHandler
 	if cfg.EventHandler != nil {
-		go bridgeClaudeEvents(session.Events(), cfg.EventHandler, p.events)
+		go bridgeEvents(session.Events(), cfg.EventHandler, p.events, nil, "", nil)
 	}
 
 	// Execute single turn
@@ -102,7 +102,7 @@ func (p *ClaudeLongRunningProvider) Start(ctx context.Context) error {
 		return err
 	}
 	if p.eventHandler != nil {
-		go bridgeClaudeEvents(p.session.Events(), p.eventHandler, p.events)
+		go bridgeEvents(p.session.Events(), p.eventHandler, p.events, nil, "", nil)
 	}
 	return nil
 }
@@ -139,52 +139,5 @@ func ClaudeResultToAgentResult(r *claude.TurnResult) *AgentResult {
 			CacheReadTokens: r.Usage.CacheReadTokens,
 			CostUSD:         r.Usage.CostUSD,
 		},
-	}
-}
-
-// bridgeClaudeEvents converts Claude events to AgentEvents and forwards to handler.
-func bridgeClaudeEvents(events <-chan claude.Event, handler EventHandler, ch chan<- AgentEvent) {
-	if events == nil {
-		return
-	}
-	for event := range events {
-		switch e := event.(type) {
-		case claude.TextEvent:
-			handler.OnText(e.Text)
-			select {
-			case ch <- TextAgentEvent{Text: e.Text}:
-			default:
-			}
-		case claude.ThinkingEvent:
-			handler.OnThinking(e.Thinking)
-			select {
-			case ch <- ThinkingAgentEvent{Thinking: e.Thinking}:
-			default:
-			}
-		case claude.ToolStartEvent:
-			handler.OnToolStart(e.Name, e.ID, nil)
-			select {
-			case ch <- ToolStartAgentEvent{Name: e.Name, ID: e.ID}:
-			default:
-			}
-		case claude.ToolCompleteEvent:
-			handler.OnToolComplete(e.Name, e.ID, e.Input, nil, false)
-			select {
-			case ch <- ToolCompleteAgentEvent{Name: e.Name, ID: e.ID, Input: e.Input}:
-			default:
-			}
-		case claude.TurnCompleteEvent:
-			handler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.Usage.CostUSD)
-			select {
-			case ch <- TurnCompleteAgentEvent{TurnNumber: e.TurnNumber, Success: e.Success, DurationMs: e.DurationMs, CostUSD: e.Usage.CostUSD}:
-			default:
-			}
-		case claude.ErrorEvent:
-			handler.OnError(e.Error, e.Context)
-			select {
-			case ch <- ErrorAgentEvent{Err: e.Error, Context: e.Context}:
-			default:
-			}
-		}
 	}
 }

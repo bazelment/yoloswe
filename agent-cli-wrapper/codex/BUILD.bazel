@@ -9,6 +9,7 @@ go_library(
         "client_options.go",
         "doc.go",
         "errors.go",
+        "event_translate.go",
         "events.go",
         "jsonrpc.go",
         "process.go",
@@ -18,7 +19,10 @@ go_library(
     ],
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/codex",
     visibility = ["//visibility:public"],
-    deps = ["//agent-cli-wrapper/internal/procattr"],
+    deps = [
+        "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/internal/procattr",
+    ],
 )
 
 go_test(
@@ -29,6 +33,7 @@ go_test(
         "client_options_test.go",
         "client_test.go",
         "errors_test.go",
+        "event_translate_test.go",
         "events_test.go",
         "process_test.go",
         "state_test.go",
