@@ -156,18 +156,7 @@ func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) s
 		formatted = s.Error.Render("✗ " + line.Content)
 
 	case session.OutputTypeThinking:
-		thinkingLines := strings.Split(line.Content, "\n")
-		var parts []string
-		for _, tl := range thinkingLines {
-			tl = strings.TrimRight(tl, " \t\r")
-			if tl == "" {
-				continue
-			}
-			parts = append(parts, s.Dim.Render("💭 "+truncate(tl, width-4)))
-		}
-		if len(parts) > 0 {
-			formatted = strings.Join(parts, "\n")
-		}
+		formatted = formatThinkingContent(line.Content, width, "", s)
 
 	case session.OutputTypeTool:
 		// Legacy tool type - kept for backward compat
@@ -208,10 +197,37 @@ func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) s
 		formatted = line.Content
 	}
 
-	// Truncate if needed (skip for markdown content which may have multi-line)
-	if line.Type != session.OutputTypeText && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
+	// Truncate if needed (skip for multi-line content: markdown text and thinking)
+	if line.Type != session.OutputTypeText && line.Type != session.OutputTypeThinking && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
 		formatted = truncateVisual(formatted, width-2)
 	}
 
 	return formatted
+}
+
+// formatThinkingContent formats accumulated thinking text for display.
+// The 💭 prefix is shown only on the first line; continuation lines are
+// indented with spaces. prefix is prepended to every line (e.g. "  " for
+// the session-detail view).
+func formatThinkingContent(content string, width int, prefix string, s *Styles) string {
+	thinkingLines := strings.Split(content, "\n")
+	prefixLen := len(prefix)
+	// "💭 " occupies 3 rune-widths (emoji + space); continuation uses same indent.
+	iconPrefix := "💭 "
+	contPrefix := "   "
+	maxContent := width - prefixLen - 4 // room for prefix + icon/indent
+
+	var parts []string
+	for _, tl := range thinkingLines {
+		tl = strings.TrimRight(tl, " \t\r")
+		if tl == "" {
+			continue
+		}
+		lp := iconPrefix
+		if len(parts) > 0 {
+			lp = contPrefix
+		}
+		parts = append(parts, s.Dim.Render(prefix+lp+truncate(tl, maxContent)))
+	}
+	return strings.Join(parts, "\n")
 }
