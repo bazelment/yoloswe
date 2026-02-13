@@ -931,13 +931,14 @@ func (m *Manager) addOutput(sessionID SessionID, line OutputLine) {
 // appendOrAddOutput appends a streaming delta to the last output line if its
 // type matches, otherwise adds a new line. This allows streaming text and
 // thinking deltas to accumulate into a single OutputLine instead of creating
-// one line per delta. AppendStreamingDelta is used to handle overlap at chunk
-// boundaries.
+// one line per delta. Plain concatenation is used because live streaming
+// deltas are non-overlapping token chunks. (For replay of protocol logs where
+// deltas may overlap, use AppendStreamingDelta instead.)
 func (m *Manager) appendOrAddOutput(sessionID SessionID, lineType OutputLineType, delta string) {
 	m.outputsMu.Lock()
 	lines, ok := m.outputs[sessionID]
 	if ok && len(lines) > 0 && lines[len(lines)-1].Type == lineType {
-		lines[len(lines)-1].Content = AppendStreamingDelta(lines[len(lines)-1].Content, delta)
+		lines[len(lines)-1].Content += delta
 		m.outputsMu.Unlock()
 	} else {
 		m.outputsMu.Unlock()
