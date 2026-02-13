@@ -156,7 +156,18 @@ func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) s
 		formatted = s.Error.Render("✗ " + line.Content)
 
 	case session.OutputTypeThinking:
-		formatted = s.Dim.Render("💭 " + truncate(line.Content, width-4))
+		thinkingLines := strings.Split(line.Content, "\n")
+		var parts []string
+		for _, tl := range thinkingLines {
+			tl = strings.TrimRight(tl, " \t\r")
+			if tl == "" {
+				continue
+			}
+			parts = append(parts, s.Dim.Render("💭 "+truncate(tl, width-4)))
+		}
+		if len(parts) > 0 {
+			formatted = strings.Join(parts, "\n")
+		}
 
 	case session.OutputTypeTool:
 		// Legacy tool type - kept for backward compat

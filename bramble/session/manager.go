@@ -928,22 +928,23 @@ func (m *Manager) addOutput(sessionID SessionID, line OutputLine) {
 	}
 }
 
-// appendOrAddText appends text to the last output line if it's a text line,
-// otherwise adds a new text line. This allows streaming text to accumulate
-// into a single OutputLine for proper markdown rendering.
-func (m *Manager) appendOrAddText(sessionID SessionID, text string) {
+// appendOrAddOutput appends a streaming delta to the last output line if its
+// type matches, otherwise adds a new line. This allows streaming text and
+// thinking deltas to accumulate into a single OutputLine instead of creating
+// one line per delta. AppendStreamingDelta is used to handle overlap at chunk
+// boundaries.
+func (m *Manager) appendOrAddOutput(sessionID SessionID, lineType OutputLineType, delta string) {
 	m.outputsMu.Lock()
 	lines, ok := m.outputs[sessionID]
-	if ok && len(lines) > 0 && lines[len(lines)-1].Type == OutputTypeText {
-		// Append to existing text line
-		lines[len(lines)-1].Content += text
+	if ok && len(lines) > 0 && lines[len(lines)-1].Type == lineType {
+		lines[len(lines)-1].Content = AppendStreamingDelta(lines[len(lines)-1].Content, delta)
 		m.outputsMu.Unlock()
 	} else {
 		m.outputsMu.Unlock()
 		m.addOutput(sessionID, OutputLine{
 			Timestamp: time.Now(),
-			Type:      OutputTypeText,
-			Content:   text,
+			Type:      lineType,
+			Content:   delta,
 		})
 		return
 	}
@@ -952,8 +953,21 @@ func (m *Manager) appendOrAddText(sessionID SessionID, text string) {
 	select {
 	case m.events <- SessionOutputEvent{SessionID: sessionID}:
 	default:
-		log.Printf("WARNING: events channel full, dropping text append event for session %s", sessionID)
+		log.Printf("WARNING: events channel full, dropping %s append event for session %s", lineType, sessionID)
 	}
+}
+
+// appendOrAddText appends text to the last text output line, or adds a new one.
+func (m *Manager) appendOrAddText(sessionID SessionID, text string) {
+	m.appendOrAddOutput(sessionID, OutputTypeText, text)
+}
+
+// appendOrAddThinking appends thinking to the last thinking output line, or adds a new one.
+func (m *Manager) appendOrAddThinking(sessionID SessionID, thinking string) {
+	if strings.TrimSpace(thinking) == "" {
+		return
+	}
+	m.appendOrAddOutput(sessionID, OutputTypeThinking, thinking)
 }
 
 // updateToolOutput updates an existing tool output line by ToolID.

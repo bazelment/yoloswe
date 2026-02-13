@@ -441,7 +441,7 @@ func (p *codexReplayParser) appendTextDelta(ts time.Time, threadID, itemID, delt
 	}
 
 	if idx, ok := p.itemTextLine[itemID]; ok && idx >= 0 && idx < len(p.lines) {
-		p.lines[idx].Content = appendStreamingDelta(p.lines[idx].Content, delta)
+		p.lines[idx].Content = session.AppendStreamingDelta(p.lines[idx].Content, delta)
 		return
 	}
 
@@ -500,7 +500,7 @@ func (p *codexReplayParser) appendOrAddText(ts time.Time, text string) {
 		return
 	}
 	if len(p.lines) > 0 && p.lines[len(p.lines)-1].Type == session.OutputTypeText {
-		p.lines[len(p.lines)-1].Content = appendStreamingDelta(p.lines[len(p.lines)-1].Content, text)
+		p.lines[len(p.lines)-1].Content = session.AppendStreamingDelta(p.lines[len(p.lines)-1].Content, text)
 		return
 	}
 	p.lines = append(p.lines, session.OutputLine{
@@ -515,7 +515,7 @@ func (p *codexReplayParser) appendOrAddThinking(ts time.Time, text string) {
 		return
 	}
 	if len(p.lines) > 0 && p.lines[len(p.lines)-1].Type == session.OutputTypeThinking {
-		p.lines[len(p.lines)-1].Content = appendStreamingDelta(p.lines[len(p.lines)-1].Content, text)
+		p.lines[len(p.lines)-1].Content = session.AppendStreamingDelta(p.lines[len(p.lines)-1].Content, text)
 		return
 	}
 	p.lines = append(p.lines, session.OutputLine{
@@ -567,27 +567,6 @@ func parseTimestamp(ts string) time.Time {
 		return t
 	}
 	return time.Now()
-}
-
-// appendStreamingDelta appends a new streaming delta while removing duplicated
-// overlap between the end of the existing text and the start of the delta.
-func appendStreamingDelta(existing, delta string) string {
-	if existing == "" || delta == "" {
-		return existing + delta
-	}
-
-	maxOverlap := len(existing)
-	if len(delta) < maxOverlap {
-		maxOverlap = len(delta)
-	}
-
-	for overlap := maxOverlap; overlap > 0; overlap-- {
-		if existing[len(existing)-overlap:] == delta[:overlap] {
-			return existing + delta[overlap:]
-		}
-	}
-
-	return existing + delta
 }
 
 func tokenSummaryContent(usage codex.TokenUsage) string {

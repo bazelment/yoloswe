@@ -33,11 +33,7 @@ func (h *sessionEventHandler) OnText(text string) {
 }
 
 func (h *sessionEventHandler) OnThinking(thinking string) {
-	h.manager.addOutput(h.sessionID, OutputLine{
-		Timestamp: time.Now(),
-		Type:      OutputTypeThinking,
-		Content:   thinking,
-	})
+	h.manager.appendOrAddThinking(h.sessionID, thinking)
 }
 
 func (h *sessionEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
