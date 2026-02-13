@@ -459,7 +459,7 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 		formatted = s.Error.Render("  ✗ " + line.Content)
 
 	case session.OutputTypeThinking:
-		formatted = s.Dim.Render("  💭 " + truncate(line.Content, width-8))
+		formatted = formatThinkingContent(line.Content, width, "  ", s)
 
 	case session.OutputTypeTool:
 		formatted = "  🔧 " + line.Content
@@ -509,8 +509,8 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 		formatted = "  " + line.Content
 	}
 
-	// Truncate width if needed (skip for markdown-rendered content which may have ANSI)
-	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
+	// Truncate width if needed (skip for multi-line content: text, plan, thinking)
+	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && line.Type != session.OutputTypeThinking && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
 		formatted = truncateVisual(formatted, width-2)
 	}
 

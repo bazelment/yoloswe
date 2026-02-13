@@ -286,6 +286,29 @@ func deepCopyOutputLine(line OutputLine) OutputLine {
 	return line
 }
 
+// AppendStreamingDelta appends a new streaming delta while removing duplicated
+// overlap between the end of the existing text and the start of the delta.
+// This is used to accumulate streaming text/thinking deltas into a single
+// OutputLine.Content without producing duplicate text at chunk boundaries.
+func AppendStreamingDelta(existing, delta string) string {
+	if existing == "" || delta == "" {
+		return existing + delta
+	}
+
+	maxOverlap := len(existing)
+	if len(delta) < maxOverlap {
+		maxOverlap = len(delta)
+	}
+
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		if existing[len(existing)-overlap:] == delta[:overlap] {
+			return existing + delta[overlap:]
+		}
+	}
+
+	return existing + delta
+}
+
 // SessionOutputEvent is sent when session produces output.
 type SessionOutputEvent struct {
 	SessionID SessionID
