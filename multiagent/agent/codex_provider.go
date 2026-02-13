@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -161,66 +160,75 @@ func bridgeCodexEvents(
 				return
 			}
 
-			eventThreadID, hasThread := codexEventThreadID(ev)
-			if hasThread && eventThreadID != threadID {
+			mapped, ok := codex.MapEvent(ev)
+			if !ok {
+				continue
+			}
+			if mapped.ThreadID != "" && mapped.ThreadID != threadID {
 				continue
 			}
 
-			switch e := ev.(type) {
-			case codex.TextDeltaEvent:
+			switch mapped.Kind {
+			case codex.MappedEventTextDelta:
 				if handler != nil {
-					handler.OnText(e.Delta)
+					handler.OnText(mapped.Delta)
 				}
 				select {
-				case out <- TextAgentEvent{Text: e.Delta}:
+				case out <- TextAgentEvent{Text: mapped.Delta}:
 				default:
 				}
 
-			case codex.ReasoningDeltaEvent:
+			case codex.MappedEventReasoningDelta:
 				if handler != nil {
-					handler.OnThinking(e.Delta)
+					handler.OnThinking(mapped.Delta)
 				}
 				select {
-				case out <- ThinkingAgentEvent{Thinking: e.Delta}:
+				case out <- ThinkingAgentEvent{Thinking: mapped.Delta}:
 				default:
 				}
 
-			case codex.CommandStartEvent:
-				input := codexCommandInput(e)
+			case codex.MappedEventCommandStart:
+				input := map[string]interface{}{}
+				if mapped.Command != "" {
+					input["command"] = mapped.Command
+				}
+				if mapped.CWD != "" {
+					input["cwd"] = mapped.CWD
+				}
 				toolInputsMu.Lock()
-				toolInputs[e.CallID] = input
+				toolInputs[mapped.CallID] = input
 				toolInputsMu.Unlock()
 
 				if handler != nil {
-					handler.OnToolStart("Bash", e.CallID, input)
+					handler.OnToolStart("Bash", mapped.CallID, input)
 				}
 				select {
-				case out <- ToolStartAgentEvent{Name: "Bash", ID: e.CallID, Input: input}:
+				case out <- ToolStartAgentEvent{Name: "Bash", ID: mapped.CallID, Input: input}:
 				default:
 				}
 
-			case codex.CommandEndEvent:
+			case codex.MappedEventCommandEnd:
 				toolInputsMu.Lock()
-				input := toolInputs[e.CallID]
-				delete(toolInputs, e.CallID)
+				input := toolInputs[mapped.CallID]
+				delete(toolInputs, mapped.CallID)
 				toolInputsMu.Unlock()
 				if input == nil {
 					input = map[string]interface{}{}
 				}
 				result := map[string]interface{}{
-					"stdout":      e.Stdout,
-					"stderr":      e.Stderr,
-					"exit_code":   e.ExitCode,
-					"duration_ms": e.DurationMs,
+					"stdout":      mapped.Stdout,
+					"stderr":      mapped.Stderr,
+					"exit_code":   mapped.ExitCode,
+					"duration_ms": mapped.DurationMs,
 				}
-				isError := e.ExitCode != 0
+				isError := mapped.ExitCode != 0
 				if handler != nil {
-					handler.OnToolComplete("Bash", e.CallID, input, result, isError)
+					handler.OnToolComplete("Bash", mapped.CallID, input, result, isError)
 				}
 				select {
 				case out <- ToolCompleteAgentEvent{
 					Name:    "Bash",
-					ID:      e.CallID,
+					ID:      mapped.CallID,
 					Input:   input,
 					Result:  result,
 					IsError: isError,
@@ -228,27 +236,27 @@ func bridgeCodexEvents(
 				default:
 				}
 
-			case codex.TurnCompletedEvent:
-				turnNumber := parseCodexTurnNumber(e.TurnID)
+			case codex.MappedEventTurnCompleted:
+				turnNumber := parseCodexTurnNumber(mapped.TurnID)
 				if handler != nil {
-					handler.OnTurnComplete(turnNumber, e.Success, e.DurationMs, 0)
+					handler.OnTurnComplete(turnNumber, mapped.Success, mapped.DurationMs, 0)
 				}
 				select {
 				case out <- TurnCompleteAgentEvent{
 					TurnNumber: turnNumber,
-					Success:    e.Success,
-					DurationMs: e.DurationMs,
+					Success:    mapped.Success,
+					DurationMs: mapped.DurationMs,
 				}:
 				default:
 				}
 				markTurnDone()
 
-			case codex.ErrorEvent:
+			case codex.MappedEventError:
 				if handler != nil {
-					handler.OnError(e.Error, e.Context)
+					handler.OnError(mapped.Error, mapped.ErrorContext)
 				}
 				select {
-				case out <- ErrorAgentEvent{Err: e.Error, Context: e.Context}:
+				case out <- ErrorAgentEvent{Err: mapped.Error, Context: mapped.ErrorContext}:
 				default:
 				}
 			}
@@ -256,60 +264,8 @@ func bridgeCodexEvents(
 	}
 }
 
-func codexEventThreadID(ev codex.Event) (string, bool) {
-	switch e := ev.(type) {
-	case codex.ThreadReadyEvent:
-		return e.ThreadID, true
-	case codex.TurnStartedEvent:
-		return e.ThreadID, true
-	case codex.TurnCompletedEvent:
-		return e.ThreadID, true
-	case codex.TextDeltaEvent:
-		return e.ThreadID, true
-	case codex.ItemStartedEvent:
-		return e.ThreadID, true
-	case codex.ItemCompletedEvent:
-		return e.ThreadID, true
-	case codex.TokenUsageEvent:
-		return e.ThreadID, true
-	case codex.ErrorEvent:
-		if e.ThreadID != "" {
-			return e.ThreadID, true
-		}
-		return "", false
-	case codex.CommandStartEvent:
-		return e.ThreadID, true
-	case codex.CommandOutputEvent:
-		return e.ThreadID, true
-	case codex.CommandEndEvent:
-		return e.ThreadID, true
-	case codex.ReasoningDeltaEvent:
-		return e.ThreadID, true
-	default:
-		return "", false
-	}
-}
-
-func codexCommandInput(e codex.CommandStartEvent) map[string]interface{} {
-	input := map[string]interface{}{}
-	cmd := strings.TrimSpace(e.ParsedCmd)
-	if cmd == "" {
-		cmd = strings.TrimSpace(strings.Join(e.Command, " "))
-	}
-	if cmd != "" {
-		input["command"] = cmd
-	}
-	if e.CWD != "" {
-		input["cwd"] = e.CWD
-	}
-	return input
-}
-
 func parseCodexTurnNumber(turnID string) int {
-	if n, err := strconv.Atoi(turnID); err == nil && n >= 0 {
-		return n + 1
-	}
-	return 1
+	return codex.TurnNumberFromID(turnID)
 }
 
 func codexApprovalPolicyForPermissionMode(permissionMode string) (codex.ApprovalPolicy, bool) {
@@ -319,9 +275,8 @@ func codexApprovalPolicyForPermissionMode(permissionMode string) (codex.Approval
 	case "bypass":
 		return codex.ApprovalPolicyNever, true
 	case "plan":
-		// Codex provider currently lacks an interactive approval callback in Bramble.
-		// Use auto-approval to avoid deadlocked turns waiting for user approval.
-		return codex.ApprovalPolicyNever, true
+		// Planner mode should preserve approval gating for potentially mutating tools.
+		return codex.ApprovalPolicyOnRequest, true
 	default:
 		return "", false
 	}

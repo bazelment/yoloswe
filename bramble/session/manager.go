@@ -75,6 +75,7 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	workDir         string // working directory for provider
 	eventBridgeWg   sync.WaitGroup
 	turnObsMu       sync.Mutex
+	turnObsSeq      uint64
 	sawText         bool
 	sawThinking     bool
 	turnDone        bool
@@ -84,34 +85,50 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 // trackingEventHandler wraps provider callbacks to record observed event types
 // for the current turn before forwarding to the session event handler.
 type trackingEventHandler struct {
-	runner *providerRunner
-	next   agent.EventHandler
+	runner     *providerRunner
+	next       agent.EventHandler
+	turnObsSeq uint64
 }
 
 func (h *trackingEventHandler) OnText(text string) {
-	h.runner.markText()
+	if !h.runner.observeText(h.turnObsSeq, text) {
+		return
+	}
 	h.next.OnText(text)
 }
 
 func (h *trackingEventHandler) OnThinking(thinking string) {
-	h.runner.markThinking()
+	if !h.runner.observeThinking(h.turnObsSeq, thinking) {
+		return
+	}
 	h.next.OnThinking(thinking)
 }
 
 func (h *trackingEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
+	if !h.runner.acceptTurnEvent(h.turnObsSeq) {
+		return
+	}
 	h.next.OnToolStart(name, id, input)
 }
 
 func (h *trackingEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
+	if !h.runner.acceptTurnEvent(h.turnObsSeq) {
+		return
+	}
 	h.next.OnToolComplete(name, id, input, result, isError)
 }
 
 func (h *trackingEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
-	h.runner.markTurnDone()
+	if !h.runner.markTurnDone(h.turnObsSeq) {
+		return
+	}
 	h.next.OnTurnComplete(turnNumber, success, durationMs, costUSD)
 }
 
 func (h *trackingEventHandler) OnError(err error, context string) {
+	if !h.runner.acceptTurnEvent(h.turnObsSeq) {
+		return
+	}
 	h.next.OnError(err, context)
 }
 
@@ -152,19 +169,20 @@ func (r *providerRunner) bridgeProviderEvents() {
 			}
 
 			// Forward event to session handler
+			turnObsSeq := r.currentTurnObservationSeq()
 			switch e := ev.(type) {
 			case agent.TextAgentEvent:
-				r.markText()
+				r.observeText(turnObsSeq, e.Text)
 				r.eventHandler.OnText(e.Text)
 			case agent.ThinkingAgentEvent:
-				r.markThinking()
+				r.observeThinking(turnObsSeq, e.Thinking)
 				r.eventHandler.OnThinking(e.Thinking)
 			case agent.ToolStartAgentEvent:
 				r.eventHandler.OnToolStart(e.Name, e.ID, e.Input)
 			case agent.ToolCompleteAgentEvent:
 				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, e.Result, e.IsError)
 			case agent.TurnCompleteAgentEvent:
-				r.markTurnDone()
+				r.markTurnDone(turnObsSeq)
 				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.CostUSD)
 			case agent.ErrorAgentEvent:
 				r.eventHandler.OnError(e.Err, e.Context)
@@ -174,13 +192,14 @@ func (r *providerRunner) bridgeProviderEvents() {
 }
 
 func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
-	r.resetTurnObservation()
+	turnObsSeq := r.beginTurnObservation()
 
 	var opts []agent.ExecuteOption
 	if r.eventHandler != nil {
 		opts = append(opts, agent.WithProviderEventHandler(&trackingEventHandler{
-			runner: r,
-			next:   r.eventHandler,
+			runner:     r,
+			next:       r.eventHandler,
+			turnObsSeq: turnObsSeq,
 		}))
 	}
 	if r.model != "" {
@@ -203,7 +222,7 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 			return nil, err
 		}
 		// Give bridged events a brief window to flush before fallback synthesis.
-		r.waitForTurnDone(150 * time.Millisecond)
+		r.waitForTurnDone(turnObsSeq, 150*time.Millisecond)
 	} else {
 		// Ephemeral providers create a fresh session each turn
 		var err error
@@ -213,45 +232,76 @@ func (r *providerRunner) RunTurn(ctx context.Context, message string) (*claude.T
 		}
 	}
 
-	r.emitFallbackFromResult(result)
+	r.emitFallbackFromResult(turnObsSeq, result)
 	return agentUsageToTurnUsage(result.Usage), nil
 }
 
-func (r *providerRunner) resetTurnObservation() {
+func (r *providerRunner) beginTurnObservation() uint64 {
 	r.turnObsMu.Lock()
 	defer r.turnObsMu.Unlock()
+	r.turnObsSeq++
 	r.sawText = false
 	r.sawThinking = false
 	r.turnDone = false
 	r.turnDoneCh = make(chan struct{})
+	return r.turnObsSeq
 }
 
-func (r *providerRunner) markText() {
-	r.turnObsMu.Lock()
-	r.sawText = true
-	r.turnObsMu.Unlock()
-}
-
-func (r *providerRunner) markThinking() {
-	r.turnObsMu.Lock()
-	r.sawThinking = true
-	r.turnObsMu.Unlock()
-}
-
-func (r *providerRunner) markTurnDone() {
+func (r *providerRunner) currentTurnObservationSeq() uint64 {
 	r.turnObsMu.Lock()
 	defer r.turnObsMu.Unlock()
-	if r.turnDone {
-		return
-	}
-	r.turnDone = true
-	if r.turnDoneCh != nil {
-		close(r.turnDoneCh)
-	}
+	return r.turnObsSeq
 }
 
-func (r *providerRunner) waitForTurnDone(timeout time.Duration) {
+func (r *providerRunner) acceptTurnEvent(turnObsSeq uint64) bool {
 	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	return turnObsSeq == r.turnObsSeq && !r.turnDone && r.turnDoneCh != nil
+}
+
+func (r *providerRunner) observeText(turnObsSeq uint64, text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	if turnObsSeq != r.turnObsSeq || r.turnDone || r.turnDoneCh == nil {
+		return false
+	}
+	r.sawText = true
+	return true
+}
+
+func (r *providerRunner) observeThinking(turnObsSeq uint64, thinking string) bool {
+	if strings.TrimSpace(thinking) == "" {
+		return false
+	}
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	if turnObsSeq != r.turnObsSeq || r.turnDone || r.turnDoneCh == nil {
+		return false
+	}
+	r.sawThinking = true
+	return true
+}
+
+func (r *providerRunner) markTurnDone(turnObsSeq uint64) bool {
+	r.turnObsMu.Lock()
+	defer r.turnObsMu.Unlock()
+	if turnObsSeq != r.turnObsSeq || r.turnDone || r.turnDoneCh == nil {
+		return false
+	}
+	r.turnDone = true
+	close(r.turnDoneCh)
+	return true
+}
+
+func (r *providerRunner) waitForTurnDone(turnObsSeq uint64, timeout time.Duration) {
+	r.turnObsMu.Lock()
+	if turnObsSeq != r.turnObsSeq {
+		r.turnObsMu.Unlock()
+		return
+	}
 	alreadyDone := r.turnDone
 	doneCh := r.turnDoneCh
 	r.turnObsMu.Unlock()
@@ -266,12 +316,16 @@ func (r *providerRunner) waitForTurnDone(timeout time.Duration) {
 	}
 }
 
-func (r *providerRunner) emitFallbackFromResult(result *agent.AgentResult) {
+func (r *providerRunner) emitFallbackFromResult(turnObsSeq uint64, result *agent.AgentResult) {
 	if r.eventHandler == nil || result == nil {
 		return
 	}
 
 	r.turnObsMu.Lock()
+	if turnObsSeq != r.turnObsSeq {
+		r.turnObsMu.Unlock()
+		return
+	}
 	sawText := r.sawText
 	sawThinking := r.sawThinking
 	r.turnObsMu.Unlock()

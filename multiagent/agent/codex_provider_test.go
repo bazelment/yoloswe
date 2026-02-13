@@ -243,12 +243,20 @@ func TestCodexApprovalPolicyForPermissionMode(t *testing.T) {
 	}
 
 	policy, ok = codexApprovalPolicyForPermissionMode("plan")
-	if !ok || policy != codex.ApprovalPolicyNever {
-		t.Fatalf("plan mapping = (%q,%v), want (%q,true)", policy, ok, codex.ApprovalPolicyNever)
+	if !ok || policy != codex.ApprovalPolicyOnRequest {
+		t.Fatalf("plan mapping = (%q,%v), want (%q,true)", policy, ok, codex.ApprovalPolicyOnRequest)
 	}
 
 	_, ok = codexApprovalPolicyForPermissionMode("")
 	if ok {
 		t.Fatal("empty permission mode should not map to explicit approval policy")
+	}
+}
+
+func TestParseCodexTurnNumber_PrefixedTurnID(t *testing.T) {
+	t.Parallel()
+
+	if got := parseCodexTurnNumber("turn-456"); got != 456 {
+		t.Fatalf("parseCodexTurnNumber(turn-456) = %d, want 456", got)
 	}
 }

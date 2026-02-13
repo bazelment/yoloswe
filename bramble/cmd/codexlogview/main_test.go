@@ -12,14 +12,29 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
-func TestParseCLIArgs_MultipleFilesLegacyTailOptions(t *testing.T) {
-	cfg, err := parseCLIArgs([]string{"a.jsonl", "b.jsonl", "100", "20", "plain", "compact"})
+func TestParseCLIArgs_MultipleFilesWithFlags(t *testing.T) {
+	cfg, err := parseCLIArgs([]string{
+		"--width=100",
+		"--height=20",
+		"--markdown=false",
+		"--compact=true",
+		"a.jsonl",
+		"b.jsonl",
+	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a.jsonl", "b.jsonl"}, cfg.paths)
 	assert.Equal(t, 100, cfg.width)
 	assert.Equal(t, 20, cfg.height)
 	assert.False(t, cfg.enableMarkdown)
 	assert.True(t, cfg.compact)
+}
+
+func TestParseCLIArgs_Aliases(t *testing.T) {
+	cfg, err := parseCLIArgs([]string{"--plain", "--full", "a.jsonl"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a.jsonl"}, cfg.paths)
+	assert.False(t, cfg.enableMarkdown)
+	assert.False(t, cfg.compact)
 }
 
 func TestParseCLIArgs_DefaultCompact(t *testing.T) {
@@ -115,6 +130,44 @@ func TestParseCodexProtocolLog_DedupesApprovalEventsByCallID(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, statusCount)
+}
+
+func TestParseCodexProtocolLog_ApprovalRequestReemitsAfterTurnComplete(t *testing.T) {
+	logPath := writeLog(t, []string{
+		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
+		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"turn1"}]}}}`,
+		`{"timestamp":"2026-02-12T00:00:02Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"0","itemId":"call_1","reason":"Need write access","command":"echo hi > out.txt"}}}`,
+		`{"timestamp":"2026-02-12T00:00:03Z","direction":"received","message":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}`,
+		`{"timestamp":"2026-02-12T00:00:04Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"turn2"}]}}}`,
+		`{"timestamp":"2026-02-12T00:00:05Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"1","itemId":"call_1","reason":"Need write access","command":"echo hi > out.txt"}}}`,
+	})
+
+	replay, err := parseCodexProtocolLog(logPath)
+	require.NoError(t, err)
+	assert.Equal(t, session.StatusIdle, replay.status)
+
+	statusCount := 0
+	for _, line := range replay.lines {
+		if line.Type == session.OutputTypeStatus && line.Content == "Approval required before command execution" {
+			statusCount++
+		}
+	}
+	assert.Equal(t, 2, statusCount)
+}
+
+func TestParseCodexProtocolLog_TurnCompletionPreservesOtherThreadApprovals(t *testing.T) {
+	logPath := writeLog(t, []string{
+		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
+		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"thread1"}]}}}`,
+		`{"timestamp":"2026-02-12T00:00:02Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t2","input":[{"type":"text","text":"thread2"}]}}}`,
+		`{"timestamp":"2026-02-12T00:00:03Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"0","itemId":"call_t1","reason":"Need approval","command":"touch t1.txt"}}}`,
+		`{"timestamp":"2026-02-12T00:00:04Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t2","turnId":"0","itemId":"call_t2","reason":"Need approval","command":"touch t2.txt"}}}`,
+		`{"timestamp":"2026-02-12T00:00:05Z","direction":"received","message":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}`,
+	})
+
+	replay, err := parseCodexProtocolLog(logPath)
+	require.NoError(t, err)
+	assert.Equal(t, session.StatusIdle, replay.status)
 }
 
 func writeLog(t *testing.T, lines []string) string {
