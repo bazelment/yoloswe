@@ -8,7 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bazelment/yoloswe/wt/taskrouter"
+	"github.com/bazelment/yoloswe/bramble/taskrouter"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // Integration tests for the task router using real Codex.
@@ -20,9 +21,8 @@ func TestRouteEmptyRepo(t *testing.T) {
 	// Expected: create_new with a reasonable branch name
 
 	r := taskrouter.New(taskrouter.Config{
-		Model:   "gpt-5.2-codex",
-		WorkDir: t.TempDir(),
-		Verbose: true,
+		Provider: agent.NewCodexProvider(),
+		WorkDir:  t.TempDir(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -56,9 +56,8 @@ func TestRouteMatchingBranch(t *testing.T) {
 	// Expected: use_existing with the matching branch
 
 	r := taskrouter.New(taskrouter.Config{
-		Model:   "gpt-5.2-codex",
-		WorkDir: t.TempDir(),
-		Verbose: true,
+		Provider: agent.NewCodexProvider(),
+		WorkDir:  t.TempDir(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -104,9 +103,8 @@ func TestRouteDependentTask(t *testing.T) {
 	// Expected: create_new with parent set to the dependency branch
 
 	r := taskrouter.New(taskrouter.Config{
-		Model:   "gpt-5.2-codex",
-		WorkDir: t.TempDir(),
-		Verbose: true,
+		Provider: agent.NewCodexProvider(),
+		WorkDir:  t.TempDir(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -155,9 +153,8 @@ func TestRouteUnrelatedTask(t *testing.T) {
 	// Expected: create_new from main
 
 	r := taskrouter.New(taskrouter.Config{
-		Model:   "gpt-5.2-codex",
-		WorkDir: t.TempDir(),
-		Verbose: true,
+		Provider: agent.NewCodexProvider(),
+		WorkDir:  t.TempDir(),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

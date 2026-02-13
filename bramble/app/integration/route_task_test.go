@@ -13,7 +13,8 @@ import (
 
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
-	"github.com/bazelment/yoloswe/wt/taskrouter"
+	"github.com/bazelment/yoloswe/bramble/taskrouter"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // TestRouteTaskWithRealRouter verifies that the TUI wiring to the real
@@ -22,10 +23,10 @@ func TestRouteTaskWithRealRouter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Start a real router
+	// Start a real router with a codex provider
 	router := taskrouter.New(taskrouter.Config{
-		WorkDir: t.TempDir(),
-		NoColor: true,
+		Provider: agent.NewCodexProvider(),
+		WorkDir:  t.TempDir(),
 	})
 	router.SetOutput(io.Discard)
 
@@ -37,7 +38,7 @@ func TestRouteTaskWithRealRouter(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := app.NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, router, nil, 80, 24)
+	m := app.NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, router, nil, 80, 24, nil, nil)
 
 	// Use RouteTask (exported from taskmodal.go) directly to verify wiring
 	req := taskrouter.RouteRequest{

@@ -13,7 +13,8 @@ go_test(
     deps = [
         "//bramble/app",
         "//bramble/session",
-        "//wt/taskrouter",
+        "//bramble/taskrouter",
+        "//multiagent/agent",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

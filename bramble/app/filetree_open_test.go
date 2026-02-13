@@ -93,7 +93,7 @@ func TestAbsSelectedPath_PathTraversal(t *testing.T) {
 }
 
 func TestHandleKeyPress_EnterInSplitPane(t *testing.T) {
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", session.NewManager(), nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", session.NewManager(), nil, nil, 80, 24, nil, nil)
 
 	// Set up split pane with file tree
 	m.splitPane.Toggle()
@@ -128,7 +128,7 @@ func TestHandleKeyPress_EnterInSplitPane(t *testing.T) {
 }
 
 func TestHandleKeyPress_EnterInSplitPane_NoFile(t *testing.T) {
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", session.NewManager(), nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", session.NewManager(), nil, nil, 80, 24, nil, nil)
 
 	// Set up split pane with file tree
 	m.splitPane.Toggle()
@@ -158,7 +158,7 @@ func TestHandleKeyPress_EnterInSplitPane_NoFile(t *testing.T) {
 }
 
 func TestHandleKeyPress_EnterNotInSplitPane(t *testing.T) {
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", session.NewManager(), nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", session.NewManager(), nil, nil, 80, 24, nil, nil)
 
 	// Don't activate split pane
 	// Send Enter key
@@ -177,7 +177,7 @@ func TestBuildHelpSections_SplitPaneActive(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{
 		SessionMode: session.SessionModeTUI,
 	})
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", mgr, nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", mgr, nil, nil, 80, 24, nil, nil)
 	m.splitPane.Toggle()
 
 	sections := buildHelpSections(&m)
@@ -276,7 +276,7 @@ func TestHandleKeyPress_UpDownNavigatesSessionListInTmuxSplitRightFocus(t *testi
 	worktrees := []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil)
 
 	// Start sessions so navigation has items
 	_, _ = mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "session A", "")
@@ -443,7 +443,7 @@ func TestBuildHelpSections_SplitPaneInactive(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{
 		SessionMode: session.SessionModeTUI,
 	})
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", mgr, nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "code", mgr, nil, nil, 80, 24, nil, nil)
 	// Don't activate split pane
 
 	sections := buildHelpSections(&m)
