@@ -358,9 +358,8 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 	}
 }
 
-// themeGridCols returns how many columns the theme grid should have based on
-// the current dialog width.
-func (d *RepoSettingsDialog) themeGridCols() int {
+// dialogBoxWidth returns the computed box width for the dialog based on terminal width.
+func (d *RepoSettingsDialog) dialogBoxWidth() int {
 	boxWidth := 84
 	if d.width > 0 && d.width < 96 {
 		boxWidth = d.width - 8
@@ -368,6 +367,13 @@ func (d *RepoSettingsDialog) themeGridCols() int {
 	if boxWidth < 52 {
 		boxWidth = 52
 	}
+	return boxWidth
+}
+
+// themeGridCols returns how many columns the theme grid should have based on
+// the current dialog width.
+func (d *RepoSettingsDialog) themeGridCols() int {
+	boxWidth := d.dialogBoxWidth()
 	innerWidth := boxWidth - 6 // ModalBox padding (2*2) + border (2)
 	cols := innerWidth / 25
 	if cols < 1 {
@@ -492,13 +498,7 @@ func (d *RepoSettingsDialog) View(styles *Styles) string {
 	title := styles.Title.Render("Repo Settings")
 	subtitle := styles.Dim.Render("Repository: " + d.repoName)
 
-	boxWidth := 84
-	if d.width > 0 && d.width < 96 {
-		boxWidth = d.width - 8
-	}
-	if boxWidth < 52 {
-		boxWidth = 52
-	}
+	boxWidth := d.dialogBoxWidth()
 	inputWidth := boxWidth - 10
 	if inputWidth < 20 {
 		inputWidth = 20
