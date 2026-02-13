@@ -168,15 +168,19 @@ func (r *providerRunner) bridgeProviderEvents() {
 				return
 			}
 
-			// Forward event to session handler
+			// Forward event to session handler. Call observation tracking
+			// for side effects (turn-done detection, text/thinking seen flags)
+			// and filter whitespace-only text/thinking deltas.
 			turnObsSeq := r.currentTurnObservationSeq()
 			switch e := ev.(type) {
 			case agent.TextAgentEvent:
-				r.observeText(turnObsSeq, e.Text)
-				r.eventHandler.OnText(e.Text)
+				if r.observeText(turnObsSeq, e.Text) || strings.TrimSpace(e.Text) != "" {
+					r.eventHandler.OnText(e.Text)
+				}
 			case agent.ThinkingAgentEvent:
-				r.observeThinking(turnObsSeq, e.Thinking)
-				r.eventHandler.OnThinking(e.Thinking)
+				if r.observeThinking(turnObsSeq, e.Thinking) || strings.TrimSpace(e.Thinking) != "" {
+					r.eventHandler.OnThinking(e.Thinking)
+				}
 			case agent.ToolStartAgentEvent:
 				r.eventHandler.OnToolStart(e.Name, e.ID, e.Input)
 			case agent.ToolCompleteAgentEvent:
