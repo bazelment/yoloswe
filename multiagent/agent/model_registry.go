@@ -49,11 +49,11 @@ func NewModelRegistry(availability *ProviderAvailability, enabledProviders []str
 }
 
 // Rebuild recomputes the filtered model list. A provider must be both installed
-// AND enabled to appear. If enabledProviders is nil/empty, all installed
-// providers are considered enabled.
+// AND enabled to appear. If enabledProviders is nil, all installed
+// providers are considered enabled (default).
 func (r *ModelRegistry) Rebuild(availability *ProviderAvailability, enabledProviders []string) {
 	enabledSet := make(map[string]bool, len(enabledProviders))
-	allEnabled := len(enabledProviders) == 0
+	allEnabled := enabledProviders == nil
 	for _, p := range enabledProviders {
 		enabledSet[p] = true
 	}

@@ -139,7 +139,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Load settings and build filtered model registry
 	settings := app.LoadSettings()
-	modelRegistry := agent.NewModelRegistry(providerAvailability, settings.EnabledProviders)
+	modelRegistry := agent.NewModelRegistry(providerAvailability, settings.GetEnabledProviders())
 
 	// Initialize session manager (after registry so it can enforce provider availability)
 	sessionManager := session.NewManagerWithConfig(session.ManagerConfig{
@@ -161,7 +161,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Start the AI task router using the best available provider.
 	// Priority: codex (original default) → claude → gemini.
 	var taskRouter *taskrouter.Router
-	routerProvider := pickRouterProvider(providerAvailability, settings.EnabledProviders)
+	routerProvider := pickRouterProvider(providerAvailability, settings.GetEnabledProviders())
 	if routerProvider != nil {
 		router := taskrouter.New(taskrouter.Config{
 			Provider: routerProvider,
@@ -256,8 +256,8 @@ func detectRepoFromPath(cwd, wtRoot string) (string, error) {
 // Returns nil if no suitable provider is installed and enabled.
 func pickRouterProvider(availability *agent.ProviderAvailability, enabledProviders []string) agent.Provider {
 	enabled := func(name string) bool {
-		if len(enabledProviders) == 0 {
-			return true
+		if enabledProviders == nil {
+			return true // nil means all enabled
 		}
 		for _, p := range enabledProviders {
 			if p == name {

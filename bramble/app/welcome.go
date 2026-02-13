@@ -52,7 +52,7 @@ func (m Model) renderWelcome(width, height int) string {
 
 		// Provider status line
 		if m.providerAvailability != nil {
-			b.WriteString(renderProviderStatus(m.providerAvailability, m.settings.EnabledProviders, m.styles))
+			b.WriteString(renderProviderStatus(m.providerAvailability, m.settings.GetEnabledProviders(), m.styles))
 		}
 
 		// Current worktree summary
@@ -290,7 +290,7 @@ func styleTimelineEvent(event string, s *Styles) string {
 
 // renderProviderStatus renders a single-line provider availability summary.
 func renderProviderStatus(availability *agent.ProviderAvailability, enabledProviders []string, s *Styles) string {
-	allEnabled := len(enabledProviders) == 0
+	allEnabled := enabledProviders == nil
 	enabledSet := make(map[string]bool, len(enabledProviders))
 	for _, p := range enabledProviders {
 		enabledSet[p] = true

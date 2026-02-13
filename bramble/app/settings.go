@@ -16,17 +16,27 @@ type RepoSettings struct {
 // Settings holds persistent user preferences.
 type Settings struct { //nolint:govet // fieldalignment: keep JSON field order readable
 	ThemeName        string                  `json:"theme_name"`
-	EnabledProviders []string                `json:"enabled_providers,omitempty"`
+	EnabledProviders *[]string               `json:"enabled_providers,omitempty"`
 	Repos            map[string]RepoSettings `json:"repos,omitempty"`
 }
 
-// IsProviderEnabled returns true if the provider is enabled in settings.
-// If EnabledProviders is nil/empty, all providers are considered enabled.
-func (s Settings) IsProviderEnabled(provider string) bool {
-	if len(s.EnabledProviders) == 0 {
-		return true
+// GetEnabledProviders returns the enabled providers slice for use with model registry.
+// Returns nil if EnabledProviders is nil (all providers enabled by default).
+func (s Settings) GetEnabledProviders() []string {
+	if s.EnabledProviders == nil {
+		return nil
 	}
-	for _, p := range s.EnabledProviders {
+	return *s.EnabledProviders
+}
+
+// IsProviderEnabled returns true if the provider is enabled in settings.
+// If EnabledProviders is nil, all providers are considered enabled (default).
+// If EnabledProviders is non-nil (even if empty), only listed providers are enabled.
+func (s Settings) IsProviderEnabled(provider string) bool {
+	if s.EnabledProviders == nil {
+		return true // nil means all enabled (default/unset)
+	}
+	for _, p := range *s.EnabledProviders {
 		if p == provider {
 			return true
 		}
@@ -42,8 +52,9 @@ func (s *Settings) SetEnabledProviders(providers []string) {
 		s.EnabledProviders = nil
 		return
 	}
-	s.EnabledProviders = make([]string, len(providers))
-	copy(s.EnabledProviders, providers)
+	copied := make([]string, len(providers))
+	copy(copied, providers)
+	s.EnabledProviders = &copied
 }
 
 // RepoSettingsFor returns settings for one repository.

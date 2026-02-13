@@ -660,7 +660,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toastCmd
 		}
 		cfg := m.settings.RepoSettingsFor(m.repoName)
-		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.EnabledProviders)
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.GetEnabledProviders())
 		m.repoSettingsDialog.FocusTheme()
 		m.focus = FocusRepoSettings
 		return m, nil
@@ -672,7 +672,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toastCmd
 		}
 		cfg := m.settings.RepoSettingsFor(m.repoName)
-		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.EnabledProviders)
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.GetEnabledProviders())
 		m.focus = FocusRepoSettings
 		return m, nil
 
@@ -683,7 +683,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toastCmd
 		}
 		cfg := m.settings.RepoSettingsFor(m.repoName)
-		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.EnabledProviders)
+		m.repoSettingsDialog.Show(m.repoName, cfg, m.styles.Palette.Name, m.width, m.height, lipgloss.Color(m.styles.Palette.Dim), m.providerStatusList(), m.settings.GetEnabledProviders())
 		m.focus = FocusRepoSettings
 		return m, nil
 
@@ -1832,7 +1832,7 @@ func (m Model) handleRepoSettingsDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		enabledProviders := m.repoSettingsDialog.EnabledProviders()
 		m.settings.SetEnabledProviders(enabledProviders)
 		if m.modelRegistry != nil && m.providerAvailability != nil {
-			m.modelRegistry.Rebuild(m.providerAvailability, m.settings.EnabledProviders)
+			m.modelRegistry.Rebuild(m.providerAvailability, m.settings.GetEnabledProviders())
 			// Reset defaults if current defaults are no longer available
 			if _, ok := m.modelRegistry.ModelByID(m.defaultPlanModel); !ok {
 				if models := m.modelRegistry.Models(); len(models) > 0 {
