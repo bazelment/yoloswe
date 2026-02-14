@@ -280,7 +280,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.addToast("Failed to open tmux window: "+msg.err.Error(), ToastError))
 			return m, tea.Batch(cmds...)
 		}
-		if msg.windowName != "" && msg.windowID != "" && msg.worktreePath != "" {
+		// Only track in tmux mode
+		if m.sessionManager.IsInTmuxMode() && msg.windowName != "" && msg.windowID != "" && msg.worktreePath != "" {
 			if _, err := m.sessionManager.TrackTmuxWindow(msg.worktreePath, msg.windowName, msg.windowID); err != nil {
 				cmds = append(cmds, m.addToast("Failed to track tmux window: "+err.Error(), ToastError))
 				return m, tea.Batch(cmds...)
