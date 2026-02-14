@@ -457,6 +457,25 @@ func (m *Manager) IsInTmuxMode() bool {
 func (m *Manager) Close() {
 	m.cancel()
 
+	// If TmuxExitOnQuit is enabled, kill tmux windows before canceling sessions
+	if m.config.TmuxExitOnQuit && m.config.SessionMode == SessionModeTmux {
+		m.mu.Lock()
+		for _, s := range m.sessions {
+			s.mu.RLock()
+			windowID := s.TmuxWindowID
+			windowName := s.TmuxWindowName
+			s.mu.RUnlock()
+			// Prefer window ID (stable), fall back to window name
+			if windowID != "" {
+				_ = KillTmuxWindowByID(windowID)
+			} else if windowName != "" {
+				// For sessions created before window ID tracking
+				_ = (&tmuxRunner{windowName: windowName, killOnStop: true}).Stop()
+			}
+		}
+		m.mu.Unlock()
+	}
+
 	m.mu.Lock()
 	for _, s := range m.sessions {
 		if s.cancel != nil {
@@ -623,26 +642,18 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	for {
 		select {
 		case <-session.ctx.Done():
-			if m.config.TmuxExitOnQuit {
-				session.mu.RLock()
-				tmuxName := session.TmuxWindowName
-				session.mu.RUnlock()
-				if tmuxName != "" {
-					_ = (&tmuxRunner{
-						windowName: tmuxName,
-						killOnStop: true,
-					}).Stop()
-				}
-			}
+			// Window cleanup is handled in Close() if TmuxExitOnQuit is enabled
+			// This ensures cleanup only happens on app quit, not on individual session stops
 			m.updateSessionStatus(session, StatusStopped)
 			return
 		case <-ticker.C:
 			session.mu.RLock()
-			tmuxName := session.TmuxWindowName
+			windowID := session.TmuxWindowID
 			sessionID := session.ID
 			session.mu.RUnlock()
 
-			if tmuxName == "" || TmuxWindowExists(tmuxName) {
+			// Use window ID for stable identification
+			if windowID == "" || TmuxWindowExistsByID(windowID) {
 				continue
 			}
 
@@ -698,7 +709,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			provider:       agentModel.Provider,
 			permissionMode: permissionMode,
 			yoloMode:       m.config.YoloMode,
-			killOnStop:     m.config.TmuxExitOnQuit,
+			killOnStop:     false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}
 		// No event handler for tmux mode - all output is in the tmux window
 	} else {
