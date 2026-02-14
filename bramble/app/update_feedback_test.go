@@ -151,6 +151,7 @@ func TestTmuxWindowMsg_TracksWindowForSelectedWorktree(t *testing.T) {
 	newModel, _ := m.Update(tmuxWindowMsg{
 		worktreePath: "/tmp/wt/main",
 		windowName:   "scratch",
+		windowID:     "@1",
 	})
 	m2 := newModel.(Model)
 
@@ -158,4 +159,5 @@ func TestTmuxWindowMsg_TracksWindowForSelectedWorktree(t *testing.T) {
 	assert.Len(t, sessions, 1)
 	assert.Equal(t, "/tmp/wt/main", sessions[0].WorktreePath)
 	assert.Equal(t, "scratch", sessions[0].TmuxWindowName)
+	assert.Equal(t, "@1", sessions[0].TmuxWindowID)
 }

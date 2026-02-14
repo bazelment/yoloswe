@@ -696,6 +696,7 @@ type (
 	tmuxWindowMsg struct { //nolint:govet // fieldalignment: readability for message payload
 		worktreePath string
 		windowName   string
+		windowID     string
 		err          error
 	}
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.

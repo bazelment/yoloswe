@@ -163,7 +163,7 @@ func TestManagerTrackTmuxWindow(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTmux})
 	defer m.Close()
 
-	sessionID, err := m.TrackTmuxWindow("/worktrees/repo/main", "scratch")
+	sessionID, err := m.TrackTmuxWindow("/worktrees/repo/main", "scratch", "@1")
 	require.NoError(t, err)
 	require.NotEmpty(t, sessionID)
 
@@ -174,6 +174,7 @@ func TestManagerTrackTmuxWindow(t *testing.T) {
 	assert.Equal(t, "/worktrees/repo/main", info.WorktreePath)
 	assert.Equal(t, "main", info.WorktreeName)
 	assert.Equal(t, "scratch", info.TmuxWindowName)
+	assert.Equal(t, "@1", info.TmuxWindowID)
 
 	worktreeSessions := m.GetSessionsForWorktree("/worktrees/repo/main")
 	require.Len(t, worktreeSessions, 1)
@@ -184,7 +185,7 @@ func TestManagerTrackTmuxWindow_NotTmuxMode(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	_, err := m.TrackTmuxWindow("/worktrees/repo/main", "scratch")
+	_, err := m.TrackTmuxWindow("/worktrees/repo/main", "scratch", "@1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tmux mode")
 }

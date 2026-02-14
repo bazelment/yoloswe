@@ -560,7 +560,7 @@ func (m *Manager) StartBuilderSession(worktreePath, prompt, model string) (Sessi
 
 // TrackTmuxWindow registers an externally created tmux window so it appears in
 // the session list for its worktree.
-func (m *Manager) TrackTmuxWindow(worktreePath, windowName string) (SessionID, error) {
+func (m *Manager) TrackTmuxWindow(worktreePath, windowName, windowID string) (SessionID, error) {
 	if m.config.SessionMode != SessionModeTmux {
 		return "", fmt.Errorf("track tmux window is only available in tmux mode")
 	}
@@ -569,6 +569,9 @@ func (m *Manager) TrackTmuxWindow(worktreePath, windowName string) (SessionID, e
 	}
 	if strings.TrimSpace(windowName) == "" {
 		return "", fmt.Errorf("tmux window name is empty")
+	}
+	if strings.TrimSpace(windowID) == "" {
+		return "", fmt.Errorf("tmux window ID is empty")
 	}
 
 	worktreeName := filepath.Base(worktreePath)
@@ -584,6 +587,7 @@ func (m *Manager) TrackTmuxWindow(worktreePath, windowName string) (SessionID, e
 		Prompt:         "Manual tmux window",
 		Title:          windowName,
 		TmuxWindowName: windowName,
+		TmuxWindowID:   windowID,
 		RunnerType:     "tmux-tracked",
 		Progress:       &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:      time.Now(),
@@ -675,7 +679,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 	if m.config.SessionMode == SessionModeTmux {
 		// Tmux mode: create tmux window running the agent CLI
-		tmuxName := generateTmuxWindowName()
+		tmuxName := GenerateTmuxWindowName()
 		session.mu.Lock()
 		session.TmuxWindowName = tmuxName
 		session.RunnerType = "tmux"
