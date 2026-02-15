@@ -29,10 +29,10 @@ var (
 	}
 )
 
-// generateTmuxWindowName creates a random two-word window name.
+// GenerateTmuxWindowName creates a random two-word window name.
 // It checks for uniqueness against existing tmux windows and retries up to maxAttempts times.
 // Format: "{adjective}-{noun}" (e.g., "happy-tiger")
-func generateTmuxWindowName() string {
+func GenerateTmuxWindowName() string {
 	const maxAttempts = 10
 
 	for i := 0; i < maxAttempts; i++ {

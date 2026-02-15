@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -59,6 +60,29 @@ func TmuxWindowExists(name string) bool {
 	return false
 }
 
+// TmuxWindowExistsByID checks if a tmux window with the given ID (e.g., "@1") exists.
+// Window IDs are stable and unique, unlike window names which can be renamed.
+func TmuxWindowExistsByID(windowID string) bool {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return false
+	}
+
+	// Use tmux list-windows to check if the window exists
+	cmd := exec.Command("tmux", "list-windows", "-F", "#{window_id}")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == windowID {
+			return true
+		}
+	}
+	return false
+}
+
 // TmuxWindowPaneDead checks if any pane in the given tmux window has exited.
 // This is useful when remain-on-exit is set — the window stays but the process is dead.
 // Returns true if any pane is dead, false if all are running or if the window doesn't exist.
@@ -86,4 +110,19 @@ func parsePaneDeadOutput(output string) bool {
 		}
 	}
 	return false
+}
+
+// KillTmuxWindowByID kills a tmux window by its window ID (e.g., "@1").
+// Window IDs are stable and unique, unlike window names which can be renamed.
+func KillTmuxWindowByID(windowID string) error {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return fmt.Errorf("tmux is not available or not inside tmux")
+	}
+
+	cmd := exec.Command("tmux", "kill-window", "-t", windowID)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to kill tmux window %q: %w", windowID, err)
+	}
+
+	return nil
 }

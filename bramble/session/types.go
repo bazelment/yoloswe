@@ -104,6 +104,7 @@ type Session struct {
 	Model          string
 	PlanFilePath   string // Path to plan file (planner sessions only)
 	TmuxWindowName string // tmux window name (empty for TUI mode)
+	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
 	RunnerType     string // "tui" or "tmux"
 	ID             SessionID
 	WorktreePath   string
@@ -178,6 +179,7 @@ type SessionInfo struct {
 	Model          string
 	PlanFilePath   string
 	TmuxWindowName string // tmux window name (empty for TUI mode)
+	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
 	RunnerType     string // "tui" or "tmux"
 	ID             SessionID
 	Status         SessionStatus
@@ -202,6 +204,7 @@ func (s *Session) ToInfo() SessionInfo {
 		Model:          s.Model,
 		PlanFilePath:   s.PlanFilePath,
 		TmuxWindowName: s.TmuxWindowName,
+		TmuxWindowID:   s.TmuxWindowID,
 		RunnerType:     s.RunnerType,
 		CreatedAt:      s.CreatedAt,
 		StartedAt:      s.StartedAt,

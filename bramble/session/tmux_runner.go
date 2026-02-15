@@ -19,6 +19,7 @@ type tmuxRunner struct {
 	provider       string // binary name: "claude" or "codex"
 	permissionMode string // permission mode: "" (default) or "plan" (claude only)
 	yoloMode       bool   // skip all permission prompts
+	killOnStop     bool   // kill tmux window on Stop()
 }
 
 // Start creates a new tmux window in the current session and launches the claude CLI in it.
@@ -84,6 +85,10 @@ func (r *tmuxRunner) RunTurn(ctx context.Context, message string) (*claude.TurnU
 
 // Stop kills the tmux window.
 func (r *tmuxRunner) Stop() error {
+	if !r.killOnStop {
+		return nil
+	}
+
 	if !IsTmuxAvailable() || !IsInsideTmux() {
 		return fmt.Errorf("tmux is not available or not inside tmux")
 	}

@@ -233,7 +233,12 @@ func (m Model) renderSessionListView(width, height int) string {
 		if nameDisplay == "" {
 			nameDisplay = string(sess.ID)[:minInt(15, len(sess.ID))]
 		}
-		nameDisplay = truncate(nameDisplay, 15)
+		// For tracked windows, append window ID
+		if sess.TmuxWindowID != "" {
+			nameDisplay = fmt.Sprintf("%s %s", truncate(nameDisplay, 10), sess.TmuxWindowID)
+		} else {
+			nameDisplay = truncate(nameDisplay, 15)
+		}
 
 		// Status with icon
 		statusStr := fmt.Sprintf("%s %-8s", statusIcon(sess.Status, s), sess.Status)

@@ -141,3 +141,23 @@ func TestKeyFeedback_AltS_TmuxMode(t *testing.T) {
 	assert.True(t, m2.toasts.HasToasts())
 	assert.Contains(t, m2.toasts.toasts[0].Message, "Sessions are in tmux windows")
 }
+
+func TestTmuxWindowMsg_TracksWindowForSelectedWorktree(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	newModel, _ := m.Update(tmuxWindowMsg{
+		worktreePath: "/tmp/wt/main",
+		windowName:   "scratch",
+		windowID:     "@1",
+	})
+	m2 := newModel.(Model)
+
+	sessions := m2.visibleSessions()
+	assert.Len(t, sessions, 1)
+	assert.Equal(t, "/tmp/wt/main", sessions[0].WorktreePath)
+	assert.Equal(t, "scratch", sessions[0].TmuxWindowName)
+	assert.Equal(t, "@1", sessions[0].TmuxWindowID)
+}
