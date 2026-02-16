@@ -478,7 +478,7 @@ func TestRenderCenterScrolling(t *testing.T) {
 	assert.Equal(t, 50, len(allLines), "should have 50 output lines in manager")
 
 	// Create a Model that views this session
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 20 // Small terminal: centerHeight = 20-1-1-0-2 = 16
 	m.viewingSessionID = sessID
@@ -550,7 +550,7 @@ func TestRenderCenterFewLines(t *testing.T) {
 		})
 	}
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 30
 	m.viewingSessionID = sessID
@@ -586,7 +586,7 @@ func TestRenderCenterStreaming(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 20 // centerHeight = 16, outputHeight = 11
 	m.viewingSessionID = sessID
@@ -649,7 +649,7 @@ func TestRenderCenterAutoScrollStaysAtBottom(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 15 // centerHeight = 11, outputHeight = 6
 	m.viewingSessionID = sessID
@@ -707,7 +707,7 @@ func TestRenderCenterTextStreaming(t *testing.T) {
 	})
 	mgr.InitOutputBuffer(sessID)
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 20
 	m.viewingSessionID = sessID
@@ -784,7 +784,7 @@ func TestScrollViaUpdate(t *testing.T) {
 		})
 	}
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 20
 	m.viewingSessionID = sessID
@@ -876,7 +876,7 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 	lines := mgr.GetSessionOutput(sessID)
 	assert.Equal(t, 2, len(lines), "should have 2 logical OutputLines")
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0)
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 0, 0, nil, nil)
 	m.width = 80
 	m.height = 15 // Small screen: centerHeight=11, outputHeight=6
 	m.viewingSessionID = sessID
@@ -1041,7 +1041,7 @@ func TestWindowKeyOutsideTmux(t *testing.T) {
 
 	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
-	}, 80, 24)
+	}, 80, 24, nil, nil)
 	m.worktreeDropdown.SelectIndex(0)
 
 	wKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}}
@@ -1066,7 +1066,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 
 		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
 			{Branch: "main", Path: "/tmp/wt/main"},
-		}, 80, 24)
+		}, 80, 24, nil, nil)
 		m.worktreeDropdown.SelectIndex(0)
 
 		view := m.View()
@@ -1081,7 +1081,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 
 		m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, []wt.Worktree{
 			{Branch: "main", Path: "/tmp/wt/main"},
-		}, 80, 24)
+		}, 80, 24, nil, nil)
 		m.worktreeDropdown.SelectIndex(0)
 
 		view := m.View()

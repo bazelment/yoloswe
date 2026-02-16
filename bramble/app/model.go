@@ -12,8 +12,9 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/bramble/taskrouter"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
-	"github.com/bazelment/yoloswe/wt/taskrouter"
 )
 
 // FocusArea indicates which area has focus.
@@ -59,6 +60,8 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	repoSettingsDialog    *RepoSettingsDialog
 	styles                *Styles
 	settings              Settings
+	providerAvailability  *agent.ProviderAvailability
+	modelRegistry         *agent.ModelRegistry
 	inputArea             *TextArea
 	splitPane             *SplitPane
 	fileTree              *FileTree
@@ -88,7 +91,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 // render shows branch names immediately without waiting for an async refresh.
 // width/height set the initial terminal dimensions so the first View() can
 // render a proper layout without waiting for WindowSizeMsg.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -103,32 +106,50 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	}
 	styles := NewStyles(palette)
 
+	// Resolve default models from the registry (prefer claude if available)
+	defaultPlanModel := "opus"
+	defaultBuildModel := "sonnet"
+	if modelRegistry != nil {
+		if m, ok := modelRegistry.ModelByID("opus"); ok {
+			defaultPlanModel = m.ID
+		} else if models := modelRegistry.Models(); len(models) > 0 {
+			defaultPlanModel = models[0].ID
+		}
+		if m, ok := modelRegistry.ModelByID("sonnet"); ok {
+			defaultBuildModel = m.ID
+		} else if models := modelRegistry.Models(); len(models) > 0 {
+			defaultBuildModel = models[0].ID
+		}
+	}
+
 	m := Model{
-		ctx:                ctx,
-		wtRoot:             wtRoot,
-		repoName:           repoName,
-		editor:             editor,
-		sessionManager:     sessionManager,
-		taskRouter:         taskRouter,
-		styles:             styles,
-		settings:           settings,
-		themePicker:        NewThemePicker(),
-		repoSettingsDialog: NewRepoSettingsDialog(),
-		focus:              FocusOutput,
-		width:              width,
-		height:             height,
-		defaultPlanModel:   "opus",
-		defaultBuildModel:  "sonnet",
-		worktreeDropdown:   wtDropdown,
-		sessionDropdown:    NewDropdown(nil),
-		taskModal:          NewTaskModal(),
-		toasts:             NewToastManager(),
-		helpOverlay:        NewHelpOverlay(),
-		allSessionsOverlay: NewAllSessionsOverlay(),
-		inputArea:          NewTextArea(),
-		splitPane:          NewSplitPane(),
-		fileTree:           NewFileTree("", nil),
-		scrollPositions:    make(map[session.SessionID]int),
+		ctx:                  ctx,
+		wtRoot:               wtRoot,
+		repoName:             repoName,
+		editor:               editor,
+		sessionManager:       sessionManager,
+		taskRouter:           taskRouter,
+		providerAvailability: providerAvailability,
+		modelRegistry:        modelRegistry,
+		styles:               styles,
+		settings:             settings,
+		themePicker:          NewThemePicker(),
+		repoSettingsDialog:   NewRepoSettingsDialog(),
+		focus:                FocusOutput,
+		width:                width,
+		height:               height,
+		defaultPlanModel:     defaultPlanModel,
+		defaultBuildModel:    defaultBuildModel,
+		worktreeDropdown:     wtDropdown,
+		sessionDropdown:      NewDropdown(nil),
+		taskModal:            NewTaskModal(),
+		toasts:               NewToastManager(),
+		helpOverlay:          NewHelpOverlay(),
+		allSessionsOverlay:   NewAllSessionsOverlay(),
+		inputArea:            NewTextArea(),
+		splitPane:            NewSplitPane(),
+		fileTree:             NewFileTree("", nil),
+		scrollPositions:      make(map[session.SessionID]int),
 	}
 
 	// Sync placeholder colors with the loaded theme (NewTextArea defaults to "245")
@@ -756,6 +777,15 @@ func (m *Model) scheduleToastExpiry() tea.Cmd {
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return toastExpireMsg{}
 	})
+}
+
+// providerStatusList returns provider statuses for UI display.
+// Returns nil if no availability info is configured.
+func (m *Model) providerStatusList() []agent.ProviderStatus {
+	if m.providerAvailability == nil {
+		return nil
+	}
+	return m.providerAvailability.AllStatuses()
 }
 
 // applyTheme rebuilds styles from a palette and recreates the markdown renderer.

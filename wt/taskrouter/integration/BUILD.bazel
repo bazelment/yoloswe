@@ -9,7 +9,8 @@ go_test(
         "manual",
     ],
     deps = [
-        "//wt/taskrouter",
+        "//bramble/taskrouter",
+        "//multiagent/agent",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

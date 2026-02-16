@@ -11,7 +11,7 @@ func TestWorktreeOpResultWarningShowsToast(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
 
 	updated, _ := m.Update(worktreeOpResultMsg{
 		branch:   "feature/a",
