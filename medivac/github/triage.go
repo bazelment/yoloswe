@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/medivac/issue"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // LevelTrace matches engine.LevelTrace for prompt/response logging at -vv.
@@ -16,13 +16,14 @@ const LevelTrace slog.Level = slog.LevelDebug - 4
 
 // TriageConfig controls LLM triage behavior.
 type TriageConfig struct {
-	Query  QueryFn      // injectable for testing; defaults to claude.Query
+	Query  QueryFn      // injectable for testing; defaults to agent.Query
 	Logger *slog.Logger // optional; nil = slog.Default()
-	Model  string       // Claude model (default "haiku")
+	Model  string       // model ID (default "haiku"); supports any registered model
 }
 
 // QueryFn is the signature for one-shot LLM queries.
-type QueryFn func(ctx context.Context, prompt string, opts ...claude.SessionOption) (*claude.QueryResult, error)
+// modelID identifies the model (e.g. "haiku", "gemini-2.5-flash").
+type QueryFn func(ctx context.Context, modelID, prompt string) (*agent.QueryResult, error)
 
 // triageResponse is one element of the JSON array returned by the LLM.
 type triageResponse struct {
@@ -55,12 +56,12 @@ func triageRun(
 	}
 	queryFn := config.Query
 	if queryFn == nil {
-		queryFn = claude.Query
+		queryFn = agent.Query
 	}
 
 	prompt := buildTriagePrompt(run, failedJobs, annotations, log)
 
-	result, err := queryFn(ctx, prompt, claude.WithModel(model))
+	result, err := queryFn(ctx, model, prompt)
 	if err != nil {
 		return nil, 0, fmt.Errorf("triage query: %w", err)
 	}
@@ -225,14 +226,14 @@ func TriageBatch(
 	}
 	queryFn := config.Query
 	if queryFn == nil {
-		queryFn = claude.Query
+		queryFn = agent.Query
 	}
 
 	prompt := buildBatchTriagePrompt(runs)
 	logger.Debug("built triage prompt", "runs", len(runs), "promptChars", len(prompt))
 	logger.Log(ctx, LevelTrace, "triage prompt", "content", prompt)
 
-	result, err := queryFn(ctx, prompt, claude.WithModel(model))
+	result, err := queryFn(ctx, model, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("batch triage query: %w", err)
 	}

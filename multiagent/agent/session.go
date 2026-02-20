@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -407,11 +411,14 @@ func (s *LongRunningSession) RecordUsage(usage claude.TurnUsage) {
 	s.turnCount++
 }
 
-// EphemeralSession creates fresh Claude sessions for each task (Designer, Builder, Reviewer).
+// EphemeralSession creates fresh sessions for each task (Designer, Builder, Reviewer).
 // Each Execute() call creates a new session, runs one interaction, and stops the session.
+// When ProviderName is set to a non-Claude provider, it uses NewProviderForModel
+// instead of creating a claude.Session directly.
 type EphemeralSession struct {
 	swarmSessionID string
 	baseSessionDir string
+	ProviderName   string // "claude", "gemini", "codex"; empty defaults to "claude"
 	config         AgentConfig
 	totalCost      float64
 	taskCount      int
@@ -479,8 +486,23 @@ func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentRe
 }
 
 // ExecuteWithFiles creates a fresh session, runs the prompt, and returns the result with file tracking.
-// This method tracks Write and Edit tool calls to report which files were created/modified.
+// For Claude, it tracks Write and Edit tool calls via events.
+// For non-Claude providers, it detects file changes via git diff.
 func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
+	providerName := e.ProviderName
+	if providerName == "" {
+		providerName = ProviderClaude
+	}
+
+	if providerName != ProviderClaude {
+		return e.executeWithProvider(ctx, prompt, providerName)
+	}
+
+	return e.executeWithClaude(ctx, prompt)
+}
+
+// executeWithClaude is the original Claude-specific execution path.
+func (e *EphemeralSession) executeWithClaude(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
 	// Generate unique task directory
 	taskID := nextTaskID()
 	taskDir := filepath.Join(e.baseSessionDir, taskID)
@@ -536,6 +558,102 @@ func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) 
 	)
 
 	return ClaudeResultToAgentResult(result), execResult, taskID, nil
+}
+
+// executeWithProvider runs the prompt using a non-Claude provider
+// and detects file changes via git diff.
+func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, providerName string) (*AgentResult, *ExecuteResult, string, error) {
+	taskID := nextTaskID()
+
+	log := e.logger()
+	log.Info("session starting",
+		"taskID", taskID,
+		"model", e.config.Model,
+		"provider", providerName,
+	)
+
+	m, ok := ModelByID(e.config.Model)
+	if !ok {
+		return nil, nil, "", fmt.Errorf("unknown model %q", e.config.Model)
+	}
+
+	provider, err := NewProviderForModel(m)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("create provider: %w", err)
+	}
+	defer provider.Close()
+
+	log.Info("sending message",
+		"prompt", prompt,
+	)
+
+	start := time.Now()
+	result, err := provider.Execute(ctx, prompt, nil,
+		WithProviderModel(e.config.Model),
+		WithProviderWorkDir(e.config.WorkDir),
+		WithProviderPermissionMode("bypass"),
+	)
+	if err != nil {
+		log.Info("task failed",
+			"taskID", taskID,
+			"error", err,
+			"duration", time.Since(start).Round(time.Millisecond),
+		)
+		return nil, nil, taskID, err
+	}
+
+	// Detect file changes via git diff since non-Claude providers
+	// don't emit tool events.
+	execResult := detectFileChangesGit(e.config.WorkDir, log)
+
+	// Update metrics
+	e.mu.Lock()
+	e.totalCost += result.Usage.CostUSD
+	e.taskCount++
+	e.mu.Unlock()
+
+	log.Info("task complete",
+		"taskID", taskID,
+		"provider", providerName,
+		"cost", fmtCost(result.Usage.CostUSD),
+		"filesCreated", len(execResult.FilesCreated),
+		"filesModified", len(execResult.FilesModified),
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
+
+	return result, execResult, taskID, nil
+}
+
+// detectFileChangesGit runs `git diff --name-status HEAD` in the given directory
+// to detect files created or modified by the agent.
+func detectFileChangesGit(workDir string, log *slog.Logger) *ExecuteResult {
+	result := &ExecuteResult{}
+
+	cmd := exec.Command("git", "diff", "--name-status", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		log.Warn("git diff failed for file tracking", "error", err)
+		return result
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		status, file := parts[0], parts[1]
+		switch {
+		case status == "A":
+			result.FilesCreated = append(result.FilesCreated, file)
+		case strings.HasPrefix(status, "M"):
+			result.FilesModified = append(result.FilesModified, file)
+		}
+	}
+
+	return result
 }
 
 // eventGoroutineTimeout is the maximum time to wait for the event processing

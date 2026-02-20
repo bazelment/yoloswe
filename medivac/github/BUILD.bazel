@@ -10,8 +10,8 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/medivac/github",
     visibility = ["//visibility:public"],
     deps = [
-        "//agent-cli-wrapper/claude",
         "//medivac/issue",
+        "//multiagent/agent",
         "//wt",
     ],
 )
@@ -25,8 +25,8 @@ go_test(
     ],
     embed = [":github"],
     deps = [
-        "//agent-cli-wrapper/claude",
         "//medivac/issue",
+        "//multiagent/agent",
         "//wt",
     ],
 )

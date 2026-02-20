@@ -12,6 +12,7 @@ go_library(
         "model_registry.go",
         "provider.go",
         "provider_check.go",
+        "query.go",
         "session.go",
     ],
     importpath = "github.com/bazelment/yoloswe/multiagent/agent",

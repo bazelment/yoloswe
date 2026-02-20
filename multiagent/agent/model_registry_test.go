@@ -53,10 +53,10 @@ func TestModelRegistry_FilteredCycling(t *testing.T) {
 
 	// Cycling from last claude model should skip codex and go to gemini
 	next := reg.NextModel("haiku")
-	assert.Equal(t, "gemini-3-pro", next.ID)
+	assert.Equal(t, "gemini-3.1-pro-preview", next.ID)
 
 	// Cycling from last gemini model should wrap to first claude
-	next = reg.NextModel("gemini-2.5-flash")
+	next = reg.NextModel("gemini-2.5-flash-lite")
 	assert.Equal(t, "opus", next.ID)
 }
 

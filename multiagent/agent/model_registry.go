@@ -17,10 +17,12 @@ var AllModels = []AgentModel{
 	{ID: "gpt-5.3-codex", Provider: ProviderCodex, Label: "gpt-5.3-codex"},
 	{ID: "gpt-5.2", Provider: ProviderCodex, Label: "gpt-5.2"},
 	{ID: "gpt-5.1-codex-max", Provider: ProviderCodex, Label: "gpt-5.1-codex-max"},
-	{ID: "gemini-3-pro", Provider: ProviderGemini, Label: "gemini-3-pro"},
-	{ID: "gemini-3-flash", Provider: ProviderGemini, Label: "gemini-3-flash"},
+	{ID: "gemini-3.1-pro-preview", Provider: ProviderGemini, Label: "gemini-3.1-pro-preview"},
+	{ID: "gemini-3-pro-preview", Provider: ProviderGemini, Label: "gemini-3-pro-preview"},
+	{ID: "gemini-3-flash-preview", Provider: ProviderGemini, Label: "gemini-3-flash-preview"},
 	{ID: "gemini-2.5-pro", Provider: ProviderGemini, Label: "gemini-2.5-pro"},
 	{ID: "gemini-2.5-flash", Provider: ProviderGemini, Label: "gemini-2.5-flash"},
+	{ID: "gemini-2.5-flash-lite", Provider: ProviderGemini, Label: "gemini-2.5-flash-lite"},
 }
 
 // ModelByID returns the AgentModel for the given ID from the full list, or false if not found.

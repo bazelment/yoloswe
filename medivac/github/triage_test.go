@@ -7,25 +7,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/medivac/issue"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // mockQuery returns a fake QueryResult with the given text and cost.
 func mockQuery(text string, cost float64) QueryFn {
-	return func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
-		return &claude.QueryResult{
-			TurnResult: claude.TurnResult{
-				Text:    text,
-				Success: true,
-				Usage:   claude.TurnUsage{CostUSD: cost},
-			},
+	return func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
+		return &agent.QueryResult{
+			Text:  text,
+			Usage: agent.AgentUsage{CostUSD: cost},
 		}, nil
 	}
 }
 
 func mockQueryError(err error) QueryFn {
-	return func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
+	return func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
 		return nil, err
 	}
 }
@@ -297,14 +294,11 @@ func TestTriageBatch_MultiRun(t *testing.T) {
 	}
 
 	callCount := 0
-	countingQuery := func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
+	countingQuery := func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
 		callCount++
-		return &claude.QueryResult{
-			TurnResult: claude.TurnResult{
-				Text:    responseJSON,
-				Success: true,
-				Usage:   claude.TurnUsage{CostUSD: 0.005},
-			},
+		return &agent.QueryResult{
+			Text:  responseJSON,
+			Usage: agent.AgentUsage{CostUSD: 0.005},
 		}, nil
 	}
 
