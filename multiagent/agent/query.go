@@ -46,6 +46,16 @@ func Query(ctx context.Context, modelID, prompt string) (*QueryResult, error) {
 		return nil, err
 	}
 
+	if !result.Success {
+		errMsg := "query failed"
+		if result.Error != nil {
+			errMsg = result.Error.Error()
+		} else if result.Text != "" {
+			errMsg = result.Text
+		}
+		return nil, fmt.Errorf("%s provider: %s", m.Provider, errMsg)
+	}
+
 	return &QueryResult{
 		Text:  result.Text,
 		Usage: result.Usage,

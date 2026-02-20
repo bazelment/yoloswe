@@ -418,11 +418,17 @@ func (s *LongRunningSession) RecordUsage(usage claude.TurnUsage) {
 type EphemeralSession struct {
 	swarmSessionID string
 	baseSessionDir string
-	ProviderName   string // "claude", "gemini", "codex"; empty defaults to "claude"
+	providerName   string // "claude", "gemini", "codex"; empty defaults to "claude"
 	config         AgentConfig
 	totalCost      float64
 	taskCount      int
 	mu             sync.Mutex
+}
+
+// SetProviderName sets the provider to use for execution.
+// Must be called before Execute/ExecuteWithFiles.
+func (e *EphemeralSession) SetProviderName(name string) {
+	e.providerName = name
 }
 
 // NewEphemeralSession creates a new ephemeral session factory.
@@ -489,7 +495,7 @@ func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentRe
 // For Claude, it tracks Write and Edit tool calls via events.
 // For non-Claude providers, it detects file changes via git diff.
 func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
-	providerName := e.ProviderName
+	providerName := e.providerName
 	if providerName == "" {
 		providerName = ProviderClaude
 	}
@@ -624,22 +630,24 @@ func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, prov
 	return result, execResult, taskID, nil
 }
 
-// detectFileChangesGit runs `git diff --name-status HEAD` in the given directory
-// to detect files created or modified by the agent.
+// detectFileChangesGit detects files created or modified by the agent
+// using both `git diff --name-status HEAD` (for tracked changes) and
+// `git ls-files --others --exclude-standard` (for untracked new files).
 func detectFileChangesGit(workDir string, log *slog.Logger) *ExecuteResult {
 	result := &ExecuteResult{}
 
-	cmd := exec.Command("git", "diff", "--name-status", "HEAD")
-	cmd.Dir = workDir
-	out, err := cmd.Output()
+	// Detect tracked file changes (staged + unstaged modifications).
+	diffCmd := exec.Command("git", "diff", "--name-status", "HEAD")
+	diffCmd.Dir = workDir
+	diffOut, err := diffCmd.Output()
 	if err != nil {
 		log.Warn("git diff failed for file tracking", "error", err)
 		return result
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		line := scanner.Text()
+	s := bufio.NewScanner(bytes.NewReader(diffOut))
+	for s.Scan() {
+		line := s.Text()
 		parts := strings.SplitN(line, "\t", 2)
 		if len(parts) != 2 {
 			continue
@@ -650,6 +658,23 @@ func detectFileChangesGit(workDir string, log *slog.Logger) *ExecuteResult {
 			result.FilesCreated = append(result.FilesCreated, file)
 		case strings.HasPrefix(status, "M"):
 			result.FilesModified = append(result.FilesModified, file)
+		}
+	}
+
+	// Detect untracked new files that haven't been git-added.
+	untrackedCmd := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	untrackedCmd.Dir = workDir
+	untrackedOut, err := untrackedCmd.Output()
+	if err != nil {
+		log.Warn("git ls-files failed for untracked file tracking", "error", err)
+		return result
+	}
+
+	s = bufio.NewScanner(bytes.NewReader(untrackedOut))
+	for s.Scan() {
+		file := strings.TrimSpace(s.Text())
+		if file != "" {
+			result.FilesCreated = append(result.FilesCreated, file)
 		}
 	}
 

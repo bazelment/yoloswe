@@ -29,7 +29,7 @@ type SessionFactory func(config agent.AgentConfig, sessionID string) AgentSessio
 func defaultSessionFactory(config agent.AgentConfig, sessionID string) AgentSession {
 	sess := agent.NewEphemeralSession(config, sessionID)
 	if m, ok := agent.ModelByID(config.Model); ok {
-		sess.ProviderName = m.Provider
+		sess.SetProviderName(m.Provider)
 	}
 	return sess
 }
