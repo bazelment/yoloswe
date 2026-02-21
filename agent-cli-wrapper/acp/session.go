@@ -91,32 +91,7 @@ func (s *Session) Prompt(ctx context.Context, text string) (*TurnResult, error) 
 		// streamed, so treat this as a successful turn when we have
 		// accumulated content from the stream.
 		if s.isRecoverablePromptError(err) {
-			s.mu.Lock()
-			result := &TurnResult{
-				FullText:   s.text.String(),
-				Thinking:   s.thinking.String(),
-				DurationMs: durationMs,
-				Success:    true,
-			}
-			if s.turnDone != nil {
-				select {
-				case s.turnDone <- result:
-				default:
-				}
-			}
-			s.mu.Unlock()
-
-			_ = s.state.SetReady()
-
-			s.client.emit(TurnCompleteEvent{
-				SessionID:  s.id,
-				FullText:   result.FullText,
-				Thinking:   result.Thinking,
-				DurationMs: durationMs,
-				Success:    true,
-			})
-
-			return result, nil
+			return s.completeTurn("endTurn", durationMs), nil
 		}
 
 		_ = s.state.SetReady()
@@ -126,15 +101,7 @@ func (s *Session) Prompt(ctx context.Context, text string) (*TurnResult, error) 
 			DurationMs: durationMs,
 			Success:    false,
 		}
-
-		s.mu.Lock()
-		if s.turnDone != nil {
-			select {
-			case s.turnDone <- result:
-			default:
-			}
-		}
-		s.mu.Unlock()
+		s.signalTurnDone(result)
 
 		return result, err
 	}
@@ -148,37 +115,7 @@ func (s *Session) Prompt(ctx context.Context, text string) (*TurnResult, error) 
 		}
 	}
 
-	// Build result
-	s.mu.Lock()
-	result := &TurnResult{
-		FullText:   s.text.String(),
-		Thinking:   s.thinking.String(),
-		StopReason: promptResp.StopReason,
-		DurationMs: durationMs,
-		Success:    promptResp.StopReason == "endTurn" || promptResp.StopReason == "end_turn" || promptResp.StopReason == "",
-	}
-
-	if s.turnDone != nil {
-		select {
-		case s.turnDone <- result:
-		default:
-		}
-	}
-	s.mu.Unlock()
-
-	_ = s.state.SetReady()
-
-	// Emit turn complete event
-	s.client.emit(TurnCompleteEvent{
-		SessionID:  s.id,
-		FullText:   result.FullText,
-		Thinking:   result.Thinking,
-		StopReason: result.StopReason,
-		DurationMs: durationMs,
-		Success:    result.Success,
-	})
-
-	return result, nil
+	return s.completeTurn(promptResp.StopReason, durationMs), nil
 }
 
 // Cancel sends a cancel notification for the current prompt.
@@ -207,6 +144,53 @@ func (s *Session) handleUpdate(update *SessionUpdate) {
 	}
 	// Other update types (tool_call, plan_update, etc.) are handled by
 	// the client's event emission in handleSessionUpdate.
+}
+
+// completeTurn builds a TurnResult from accumulated session updates, signals
+// the turnDone channel, transitions state to ready, and emits a TurnComplete
+// event. Used by both the normal success path and the recovery path.
+func (s *Session) completeTurn(stopReason string, durationMs int64) *TurnResult {
+	s.mu.Lock()
+	result := &TurnResult{
+		FullText:   s.text.String(),
+		Thinking:   s.thinking.String(),
+		StopReason: stopReason,
+		DurationMs: durationMs,
+		Success:    stopReason == "endTurn" || stopReason == "end_turn" || stopReason == "",
+	}
+	s.signalTurnDoneLocked(result)
+	s.mu.Unlock()
+
+	_ = s.state.SetReady()
+
+	s.client.emit(TurnCompleteEvent{
+		SessionID:  s.id,
+		FullText:   result.FullText,
+		Thinking:   result.Thinking,
+		StopReason: result.StopReason,
+		DurationMs: durationMs,
+		Success:    result.Success,
+	})
+
+	return result
+}
+
+// signalTurnDone acquires mu and sends the result to the turnDone channel.
+func (s *Session) signalTurnDone(result *TurnResult) {
+	s.mu.Lock()
+	s.signalTurnDoneLocked(result)
+	s.mu.Unlock()
+}
+
+// signalTurnDoneLocked sends the result to the turnDone channel.
+// Caller must hold s.mu.
+func (s *Session) signalTurnDoneLocked(result *TurnResult) {
+	if s.turnDone != nil {
+		select {
+		case s.turnDone <- result:
+		default:
+		}
+	}
 }
 
 // isRecoverablePromptError returns true when the prompt RPC error can be

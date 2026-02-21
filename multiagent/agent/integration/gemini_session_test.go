@@ -14,9 +14,11 @@ package integration
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +27,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// syncWriter wraps an io.Writer with a mutex for safe concurrent use.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (sw *syncWriter) Write(p []byte) (int, error) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.w.Write(p)
+}
 
 const geminiTestModel = "gemini-2.5-flash"
 
@@ -44,7 +58,7 @@ func geminiTestClientOpts(t *testing.T) ([]acp.ClientOption, string) {
 		acp.WithStderrHandler(func(data []byte) {
 			t.Logf("[gemini stderr] %s", string(data))
 		}),
-		acp.WithProtocolLogger(f),
+		acp.WithProtocolLogger(&syncWriter{w: f}),
 	}
 
 	return opts, protocolLog

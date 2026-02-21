@@ -77,7 +77,8 @@ func WithPermissionHandler(h PermissionHandler) ClientOption {
 
 // WithProtocolLogger sets a writer that receives all JSON-RPC messages
 // exchanged with the agent subprocess. Sent messages are prefixed with ">> "
-// and received messages with "<< ".
+// and received messages with "<< ". The writer must be safe for concurrent
+// use since reads and writes happen on different goroutines.
 func WithProtocolLogger(w io.Writer) ClientOption {
 	return func(c *ClientConfig) { c.ProtocolLogger = w }
 }

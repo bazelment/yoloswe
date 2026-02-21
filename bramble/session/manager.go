@@ -1542,12 +1542,14 @@ func (m *Manager) geminiProviderOptions(sessionID SessionID) ([]acp.ClientOption
 		acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
 	}
 
+	var protocolLogHint string
 	if protocolLogPath != "" {
 		opts = append(opts, acp.WithProtocolLogger(newFileAppendWriter(protocolLogPath)))
+		protocolLogHint = fmt.Sprintf("Gemini protocol log: %s", protocolLogPath)
 	}
 
 	return opts,
-		fmt.Sprintf("Gemini protocol log: %s", protocolLogPath),
+		protocolLogHint,
 		fmt.Sprintf("Gemini stderr log: %s", stderrLogPath)
 }
 
@@ -1581,25 +1583,10 @@ func (w *fileAppendWriter) Write(p []byte) (int, error) {
 }
 
 func newFileAppendHandler(path string) func([]byte) {
-	var mu sync.Mutex
+	w := newFileAppendWriter(path)
 	return func(data []byte) {
-		if len(data) == 0 || strings.TrimSpace(path) == "" {
-			return
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			log.Printf("WARNING: failed to open protocol log %q: %v", path, err)
-			return
-		}
-		if _, err := f.Write(data); err != nil {
-			log.Printf("WARNING: failed to write protocol log %q: %v", path, err)
-		}
-		if err := f.Close(); err != nil {
-			log.Printf("WARNING: failed to close protocol log %q: %v", path, err)
+		if _, err := w.Write(data); err != nil {
+			log.Printf("WARNING: failed to write log %q: %v", path, err)
 		}
 	}
 }
