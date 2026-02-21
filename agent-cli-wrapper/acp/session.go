@@ -11,13 +11,14 @@ import (
 
 // Session represents an active ACP conversation session.
 type Session struct {
-	client   *Client
-	state    *sessionStateManager
-	turnDone chan *TurnResult
-	id       string
-	text     strings.Builder
-	thinking strings.Builder
-	mu       sync.Mutex
+	client          *Client
+	state           *sessionStateManager
+	turnDone        chan *TurnResult
+	id              string
+	text            strings.Builder
+	thinking        strings.Builder
+	mu              sync.Mutex
+	sawToolActivity bool // set when tool_call or tool_call_update is received
 }
 
 // TurnResult contains the result of a completed prompt turn.
@@ -70,6 +71,7 @@ func (s *Session) Prompt(ctx context.Context, text string) (*TurnResult, error) 
 	// Reset accumulators
 	s.text.Reset()
 	s.thinking.Reset()
+	s.sawToolActivity = false
 	s.turnDone = make(chan *TurnResult, 1)
 	s.mu.Unlock()
 
@@ -141,8 +143,12 @@ func (s *Session) handleUpdate(update *SessionUpdate) {
 			s.thinking.WriteString(update.Content.Text)
 			s.mu.Unlock()
 		}
+	case UpdateTypeToolCall, UpdateTypeToolCallUpdate:
+		s.mu.Lock()
+		s.sawToolActivity = true
+		s.mu.Unlock()
 	}
-	// Other update types (tool_call, plan_update, etc.) are handled by
+	// Other update types (plan_update, etc.) are handled by
 	// the client's event emission in handleSessionUpdate.
 }
 
@@ -195,22 +201,22 @@ func (s *Session) signalTurnDoneLocked(result *TurnResult) {
 
 // isRecoverablePromptError returns true when the prompt RPC error can be
 // treated as a successful turn because tool calls already executed and
-// session updates were streamed. The Gemini CLI returns error 500
+// session updates were streamed. The Gemini CLI returns RPC error 500
 // "Model stream ended with empty response text." in this scenario.
 func (s *Session) isRecoverablePromptError(err error) bool {
 	var rpcErr *RPCError
 	if !errors.As(err, &rpcErr) {
 		return false
 	}
-	if !strings.Contains(rpcErr.Message, "empty response text") {
+	if rpcErr.Code != 500 || !strings.Contains(rpcErr.Message, "empty response text") {
 		return false
 	}
-	// Only recover when we have accumulated content from session updates,
-	// indicating tool calls were actually executed.
+	// Only recover when session updates confirm activity occurred during
+	// this turn (text/thinking streamed or tool calls executed).
 	s.mu.Lock()
-	hasContent := s.text.Len() > 0 || s.thinking.Len() > 0
+	hasActivity := s.text.Len() > 0 || s.thinking.Len() > 0 || s.sawToolActivity
 	s.mu.Unlock()
-	return hasContent
+	return hasActivity
 }
 
 // close marks the session as closed.

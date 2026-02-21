@@ -7,32 +7,45 @@ import (
 
 func TestIsRecoverablePromptError(t *testing.T) {
 	tests := []struct {
-		err         error
-		name        string
-		hasText     bool
-		hasThink    bool
-		wantRecover bool
+		err             error
+		name            string
+		hasText         bool
+		hasThink        bool
+		hasToolActivity bool
+		wantRecover     bool
 	}{
 		{
-			name:        "RPCError with empty response text and accumulated thinking",
+			name:        "RPCError 500 with empty response text and accumulated thinking",
 			err:         &RPCError{Code: 500, Message: "Model stream ended with empty response text."},
 			hasThink:    true,
 			wantRecover: true,
 		},
 		{
-			name:        "RPCError with empty response text and accumulated text",
+			name:        "RPCError 500 with empty response text and accumulated text",
 			err:         &RPCError{Code: 500, Message: "Model stream ended with empty response text."},
 			hasText:     true,
 			wantRecover: true,
 		},
 		{
-			name:        "RPCError with empty response text but no accumulated content",
+			name:            "RPCError 500 with empty response text and tool activity only",
+			err:             &RPCError{Code: 500, Message: "Model stream ended with empty response text."},
+			hasToolActivity: true,
+			wantRecover:     true,
+		},
+		{
+			name:        "RPCError 500 with empty response text but no activity",
 			err:         &RPCError{Code: 500, Message: "Model stream ended with empty response text."},
 			wantRecover: false,
 		},
 		{
-			name:        "RPCError with different message",
+			name:        "RPCError 500 with different message",
 			err:         &RPCError{Code: 500, Message: "Internal server error"},
+			hasText:     true,
+			wantRecover: false,
+		},
+		{
+			name:        "RPCError non-500 with matching message",
+			err:         &RPCError{Code: 400, Message: "Model stream ended with empty response text."},
 			hasText:     true,
 			wantRecover: false,
 		},
@@ -43,7 +56,7 @@ func TestIsRecoverablePromptError(t *testing.T) {
 			wantRecover: false,
 		},
 		{
-			name:        "wrapped RPCError with empty response text",
+			name:        "wrapped RPCError 500 with empty response text",
 			err:         fmt.Errorf("wrapped: %w", &RPCError{Code: 500, Message: "Model stream ended with empty response text."}),
 			hasThink:    true,
 			wantRecover: true,
@@ -60,6 +73,9 @@ func TestIsRecoverablePromptError(t *testing.T) {
 			}
 			if tt.hasThink {
 				s.thinking.WriteString("some thinking")
+			}
+			if tt.hasToolActivity {
+				s.sawToolActivity = true
 			}
 
 			got := s.isRecoverablePromptError(tt.err)
