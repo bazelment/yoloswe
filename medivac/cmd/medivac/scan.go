@@ -55,7 +55,7 @@ func init() {
 	rootCmd.AddCommand(scanCmd)
 	scanCmd.Flags().StringVar(&scanBranch, "branch", "main", "Branch to scan for failures")
 	scanCmd.Flags().IntVar(&scanLimit, "limit", 5, "Number of recent failed runs to check")
-	scanCmd.Flags().StringVar(&scanTriageModel, "triage-model", "haiku", "Claude model for LLM triage")
+	scanCmd.Flags().StringVar(&scanTriageModel, "triage-model", "haiku", "Model for LLM triage (e.g. haiku, gemini-2.5-flash)")
 }
 
 func printScanResult(r *engine.ScanResult) {

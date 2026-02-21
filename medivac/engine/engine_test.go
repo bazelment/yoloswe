@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/medivac/github"
 	"github.com/bazelment/yoloswe/medivac/issue"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -39,13 +39,10 @@ func (m *mockGHRunner) set(args []string, stdout string) {
 // mockTriageQuery returns a mock QueryFn that produces triage results.
 func mockTriageQuery(failures []triageItem, cost float64) github.QueryFn {
 	data, _ := json.Marshal(failures)
-	return func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
-		return &claude.QueryResult{
-			TurnResult: claude.TurnResult{
-				Text:    string(data),
-				Success: true,
-				Usage:   claude.TurnUsage{CostUSD: cost},
-			},
+	return func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
+		return &agent.QueryResult{
+			Text:  string(data),
+			Usage: agent.AgentUsage{CostUSD: cost},
 		}, nil
 	}
 }
@@ -274,17 +271,14 @@ func TestScan_SkipsReviewedRuns(t *testing.T) {
 	trackerPath := filepath.Join(dir, ".medivac", "issues.json")
 
 	callCount := 0
-	countingQuery := func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
+	countingQuery := func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
 		callCount++
 		data, _ := json.Marshal([]triageItem{
 			{Category: "lint/go", File: "main.go", Summary: "err", Details: "detail"},
 		})
-		return &claude.QueryResult{
-			TurnResult: claude.TurnResult{
-				Text:    string(data),
-				Success: true,
-				Usage:   claude.TurnUsage{CostUSD: 0.001},
-			},
+		return &agent.QueryResult{
+			Text:  string(data),
+			Usage: agent.AgentUsage{CostUSD: 0.001},
 		}, nil
 	}
 
@@ -373,14 +367,11 @@ func TestScan_MultipleRuns_SingleLLMCall(t *testing.T) {
 	responseJSON := `[{"category": "lint/go", "job": "lint", "file": "main.go", "line": 10, "summary": "unused var", "details": "x"}]`
 
 	callCount := 0
-	query := func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
+	query := func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
 		callCount++
-		return &claude.QueryResult{
-			TurnResult: claude.TurnResult{
-				Text:    responseJSON,
-				Success: true,
-				Usage:   claude.TurnUsage{CostUSD: 0.005},
-			},
+		return &agent.QueryResult{
+			Text:  responseJSON,
+			Usage: agent.AgentUsage{CostUSD: 0.005},
 		}, nil
 	}
 
@@ -461,14 +452,11 @@ func TestScan_SecondScan_OnlyNewRuns(t *testing.T) {
 
 	extractionResp := `[{"category": "lint/go", "job": "lint", "file": "main.go", "line": 10, "summary": "unused var", "details": "x"}]`
 	callCount := 0
-	query := func(_ context.Context, _ string, _ ...claude.SessionOption) (*claude.QueryResult, error) {
+	query := func(_ context.Context, _, _ string) (*agent.QueryResult, error) {
 		callCount++
-		return &claude.QueryResult{
-			TurnResult: claude.TurnResult{
-				Text:    extractionResp,
-				Success: true,
-				Usage:   claude.TurnUsage{CostUSD: 0.001},
-			},
+		return &agent.QueryResult{
+			Text:  extractionResp,
+			Usage: agent.AgentUsage{CostUSD: 0.001},
 		}, nil
 	}
 

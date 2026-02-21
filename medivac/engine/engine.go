@@ -9,6 +9,7 @@ import (
 
 	"github.com/bazelment/yoloswe/medivac/github"
 	"github.com/bazelment/yoloswe/medivac/issue"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -68,6 +69,14 @@ func New(config Config) (*Engine, error) {
 	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
+	}
+
+	// Validate model IDs against the registry.
+	if _, ok := agent.ModelByID(config.AgentModel); !ok {
+		return nil, fmt.Errorf("unknown agent model %q; see multiagent/agent AllModels for valid IDs", config.AgentModel)
+	}
+	if _, ok := agent.ModelByID(config.TriageModel); !ok {
+		return nil, fmt.Errorf("unknown triage model %q; see multiagent/agent AllModels for valid IDs", config.TriageModel)
 	}
 
 	tracker, err := issue.NewTracker(config.TrackerPath)

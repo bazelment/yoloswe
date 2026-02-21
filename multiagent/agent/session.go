@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -407,8 +411,10 @@ func (s *LongRunningSession) RecordUsage(usage claude.TurnUsage) {
 	s.turnCount++
 }
 
-// EphemeralSession creates fresh Claude sessions for each task (Designer, Builder, Reviewer).
+// EphemeralSession creates fresh sessions for each task (Designer, Builder, Reviewer).
 // Each Execute() call creates a new session, runs one interaction, and stops the session.
+// The provider is derived from the configured Model via ModelByID, so non-Claude models
+// (e.g. Gemini, Codex) are automatically routed to the correct provider.
 type EphemeralSession struct {
 	swarmSessionID string
 	baseSessionDir string
@@ -432,6 +438,7 @@ func NewEphemeralSession(config AgentConfig, swarmSessionID string) *EphemeralSe
 type ExecuteResult struct {
 	FilesCreated  []string
 	FilesModified []string
+	FilesDeleted  []string
 }
 
 // sessionRunner abstracts session operations for testing.
@@ -479,8 +486,26 @@ func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentRe
 }
 
 // ExecuteWithFiles creates a fresh session, runs the prompt, and returns the result with file tracking.
-// This method tracks Write and Edit tool calls to report which files were created/modified.
+// For Claude, it tracks Write and Edit tool calls via events.
+// For non-Claude providers, it detects file changes via git diff.
 func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
+	// Derive provider from the model to ensure the execution path
+	// is always consistent with the configured model. This prevents
+	// misrouting if SetProviderName was not called or set incorrectly.
+	providerName := ProviderClaude
+	if m, ok := ModelByID(e.config.Model); ok {
+		providerName = m.Provider
+	}
+
+	if providerName != ProviderClaude {
+		return e.executeWithProvider(ctx, prompt, providerName)
+	}
+
+	return e.executeWithClaude(ctx, prompt)
+}
+
+// executeWithClaude is the original Claude-specific execution path.
+func (e *EphemeralSession) executeWithClaude(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
 	// Generate unique task directory
 	taskID := nextTaskID()
 	taskDir := filepath.Join(e.baseSessionDir, taskID)
@@ -536,6 +561,150 @@ func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) 
 	)
 
 	return ClaudeResultToAgentResult(result), execResult, taskID, nil
+}
+
+// executeWithProvider runs the prompt using a non-Claude provider
+// and detects file changes via git diff.
+func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, providerName string) (*AgentResult, *ExecuteResult, string, error) {
+	taskID := nextTaskID()
+
+	log := e.logger()
+	log.Info("session starting",
+		"taskID", taskID,
+		"model", e.config.Model,
+		"provider", providerName,
+	)
+
+	m, ok := ModelByID(e.config.Model)
+	if !ok {
+		return nil, nil, "", fmt.Errorf("unknown model %q", e.config.Model)
+	}
+
+	provider, err := NewProviderForModel(m)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("create provider: %w", err)
+	}
+	defer provider.Close()
+
+	log.Info("sending message",
+		"prompt", prompt,
+	)
+
+	// Snapshot HEAD before running so we can detect changes even if
+	// the agent commits (which would move HEAD).
+	baseRef := gitHeadRef(e.config.WorkDir)
+
+	start := time.Now()
+	result, err := provider.Execute(ctx, prompt, nil,
+		WithProviderModel(e.config.Model),
+		WithProviderWorkDir(e.config.WorkDir),
+		WithProviderPermissionMode("bypass"),
+	)
+	if err != nil {
+		log.Info("task failed",
+			"taskID", taskID,
+			"error", err,
+			"duration", time.Since(start).Round(time.Millisecond),
+		)
+		return nil, nil, taskID, err
+	}
+
+	// Detect file changes via git diff since non-Claude providers
+	// don't emit tool events.
+	execResult := detectFileChangesGit(e.config.WorkDir, baseRef, log)
+
+	// Update metrics
+	e.mu.Lock()
+	e.totalCost += result.Usage.CostUSD
+	e.taskCount++
+	e.mu.Unlock()
+
+	log.Info("task complete",
+		"taskID", taskID,
+		"provider", providerName,
+		"cost", fmtCost(result.Usage.CostUSD),
+		"filesCreated", len(execResult.FilesCreated),
+		"filesModified", len(execResult.FilesModified),
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
+
+	return result, execResult, taskID, nil
+}
+
+// detectFileChangesGit detects files created or modified by the agent
+// using both `git diff --name-status <baseRef>` (for tracked changes) and
+// `git ls-files --others --exclude-standard` (for untracked new files).
+// baseRef is the commit to diff against (typically captured before running the agent).
+func detectFileChangesGit(workDir, baseRef string, log *slog.Logger) *ExecuteResult {
+	result := &ExecuteResult{}
+
+	// Detect tracked file changes (staged + unstaged, plus any new commits).
+	diffCmd := exec.Command("git", "diff", "--name-status", baseRef)
+	diffCmd.Dir = workDir
+	diffOut, err := diffCmd.Output()
+	if err != nil {
+		log.Warn("git diff failed for file tracking", "error", err)
+		return result
+	}
+
+	s := bufio.NewScanner(bytes.NewReader(diffOut))
+	for s.Scan() {
+		line := s.Text()
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		status := parts[0]
+		switch {
+		case status == "A":
+			result.FilesCreated = append(result.FilesCreated, parts[1])
+		case status == "D":
+			result.FilesDeleted = append(result.FilesDeleted, parts[1])
+		case strings.HasPrefix(status, "M"):
+			result.FilesModified = append(result.FilesModified, parts[1])
+		case strings.HasPrefix(status, "R"):
+			// Rename: status\told_path\tnew_path
+			if len(parts) >= 3 {
+				result.FilesDeleted = append(result.FilesDeleted, parts[1])
+				result.FilesCreated = append(result.FilesCreated, parts[2])
+			}
+		case strings.HasPrefix(status, "C"):
+			// Copy: status\tsrc_path\tdst_path
+			if len(parts) >= 3 {
+				result.FilesCreated = append(result.FilesCreated, parts[2])
+			}
+		}
+	}
+
+	// Detect untracked new files that haven't been git-added.
+	untrackedCmd := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	untrackedCmd.Dir = workDir
+	untrackedOut, err := untrackedCmd.Output()
+	if err != nil {
+		log.Warn("git ls-files failed for untracked file tracking", "error", err)
+		return result
+	}
+
+	s = bufio.NewScanner(bytes.NewReader(untrackedOut))
+	for s.Scan() {
+		file := strings.TrimSpace(s.Text())
+		if file != "" {
+			result.FilesCreated = append(result.FilesCreated, file)
+		}
+	}
+
+	return result
+}
+
+// gitHeadRef returns the current HEAD commit hash, or "HEAD" as a fallback.
+func gitHeadRef(workDir string) string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "HEAD"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // eventGoroutineTimeout is the maximum time to wait for the event processing

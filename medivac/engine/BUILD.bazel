@@ -30,9 +30,9 @@ go_test(
     ],
     embed = [":engine"],
     deps = [
-        "//agent-cli-wrapper/claude",
         "//medivac/github",
         "//medivac/issue",
+        "//multiagent/agent",
         "//wt",
     ],
 )
