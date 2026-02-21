@@ -19,6 +19,7 @@ package integration
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -280,6 +281,6 @@ func TestPlanOnlyPermissionHandler_LongRunningSession(t *testing.T) {
 
 // isBinaryAvailable checks if a binary is available in PATH.
 func isBinaryAvailable(name string) bool {
-	_, err := os.LookupPath(name)
+	_, err := exec.LookPath(name)
 	return err == nil
 }

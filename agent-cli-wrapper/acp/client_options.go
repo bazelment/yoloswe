@@ -1,11 +1,14 @@
 package acp
 
+import "io"
+
 // ClientConfig holds ACP client configuration.
 type ClientConfig struct {
 	FsHandler         FsHandler
 	TerminalHandler   TerminalHandler
 	PermissionHandler PermissionHandler
 	StderrHandler     func([]byte)
+	ProtocolLogger    io.Writer
 	Env               map[string]string
 	BinaryPath        string
 	ClientName        string
@@ -70,6 +73,13 @@ func WithTerminalHandler(h TerminalHandler) ClientOption {
 // WithPermissionHandler sets the permission handler.
 func WithPermissionHandler(h PermissionHandler) ClientOption {
 	return func(c *ClientConfig) { c.PermissionHandler = h }
+}
+
+// WithProtocolLogger sets a writer that receives all JSON-RPC messages
+// exchanged with the agent subprocess. Sent messages are prefixed with ">> "
+// and received messages with "<< ".
+func WithProtocolLogger(w io.Writer) ClientOption {
+	return func(c *ClientConfig) { c.ProtocolLogger = w }
 }
 
 // WithEnv sets additional environment variables for the agent subprocess.

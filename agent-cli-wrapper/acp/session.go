@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,40 @@ func (s *Session) Prompt(ctx context.Context, text string) (*TurnResult, error) 
 	durationMs := time.Since(start).Milliseconds()
 
 	if err != nil {
+		// Gemini CLI returns RPC error 500 "Model stream ended with empty
+		// response text." when the model completes tool calls but produces no
+		// final text. The tool calls succeeded and session updates were
+		// streamed, so treat this as a successful turn when we have
+		// accumulated content from the stream.
+		if s.isRecoverablePromptError(err) {
+			s.mu.Lock()
+			result := &TurnResult{
+				FullText:   s.text.String(),
+				Thinking:   s.thinking.String(),
+				DurationMs: durationMs,
+				Success:    true,
+			}
+			if s.turnDone != nil {
+				select {
+				case s.turnDone <- result:
+				default:
+				}
+			}
+			s.mu.Unlock()
+
+			_ = s.state.SetReady()
+
+			s.client.emit(TurnCompleteEvent{
+				SessionID:  s.id,
+				FullText:   result.FullText,
+				Thinking:   result.Thinking,
+				DurationMs: durationMs,
+				Success:    true,
+			})
+
+			return result, nil
+		}
+
 		_ = s.state.SetReady()
 
 		result := &TurnResult{
@@ -172,6 +207,26 @@ func (s *Session) handleUpdate(update *SessionUpdate) {
 	}
 	// Other update types (tool_call, plan_update, etc.) are handled by
 	// the client's event emission in handleSessionUpdate.
+}
+
+// isRecoverablePromptError returns true when the prompt RPC error can be
+// treated as a successful turn because tool calls already executed and
+// session updates were streamed. The Gemini CLI returns error 500
+// "Model stream ended with empty response text." in this scenario.
+func (s *Session) isRecoverablePromptError(err error) bool {
+	var rpcErr *RPCError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	if !strings.Contains(rpcErr.Message, "empty response text") {
+		return false
+	}
+	// Only recover when we have accumulated content from session updates,
+	// indicating tool calls were actually executed.
+	s.mu.Lock()
+	hasContent := s.text.Len() > 0 || s.thinking.Len() > 0
+	s.mu.Unlock()
+	return hasContent
 }
 
 // close marks the session as closed.
