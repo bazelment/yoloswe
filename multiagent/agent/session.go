@@ -413,22 +413,15 @@ func (s *LongRunningSession) RecordUsage(usage claude.TurnUsage) {
 
 // EphemeralSession creates fresh sessions for each task (Designer, Builder, Reviewer).
 // Each Execute() call creates a new session, runs one interaction, and stops the session.
-// When ProviderName is set to a non-Claude provider, it uses NewProviderForModel
-// instead of creating a claude.Session directly.
+// The provider is derived from the configured Model via ModelByID, so non-Claude models
+// (e.g. Gemini, Codex) are automatically routed to the correct provider.
 type EphemeralSession struct {
 	swarmSessionID string
 	baseSessionDir string
-	providerName   string // "claude", "gemini", "codex"; empty defaults to "claude"
 	config         AgentConfig
 	totalCost      float64
 	taskCount      int
 	mu             sync.Mutex
-}
-
-// SetProviderName sets the provider to use for execution.
-// Must be called before Execute/ExecuteWithFiles.
-func (e *EphemeralSession) SetProviderName(name string) {
-	e.providerName = name
 }
 
 // NewEphemeralSession creates a new ephemeral session factory.
@@ -445,6 +438,7 @@ func NewEphemeralSession(config AgentConfig, swarmSessionID string) *EphemeralSe
 type ExecuteResult struct {
 	FilesCreated  []string
 	FilesModified []string
+	FilesDeleted  []string
 }
 
 // sessionRunner abstracts session operations for testing.
@@ -495,9 +489,12 @@ func (e *EphemeralSession) Execute(ctx context.Context, prompt string) (*AgentRe
 // For Claude, it tracks Write and Edit tool calls via events.
 // For non-Claude providers, it detects file changes via git diff.
 func (e *EphemeralSession) ExecuteWithFiles(ctx context.Context, prompt string) (*AgentResult, *ExecuteResult, string, error) {
-	providerName := e.providerName
-	if providerName == "" {
-		providerName = ProviderClaude
+	// Derive provider from the model to ensure the execution path
+	// is always consistent with the configured model. This prevents
+	// misrouting if SetProviderName was not called or set incorrectly.
+	providerName := ProviderClaude
+	if m, ok := ModelByID(e.config.Model); ok {
+		providerName = m.Provider
 	}
 
 	if providerName != ProviderClaude {
@@ -593,6 +590,10 @@ func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, prov
 		"prompt", prompt,
 	)
 
+	// Snapshot HEAD before running so we can detect changes even if
+	// the agent commits (which would move HEAD).
+	baseRef := gitHeadRef(e.config.WorkDir)
+
 	start := time.Now()
 	result, err := provider.Execute(ctx, prompt, nil,
 		WithProviderModel(e.config.Model),
@@ -610,7 +611,7 @@ func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, prov
 
 	// Detect file changes via git diff since non-Claude providers
 	// don't emit tool events.
-	execResult := detectFileChangesGit(e.config.WorkDir, log)
+	execResult := detectFileChangesGit(e.config.WorkDir, baseRef, log)
 
 	// Update metrics
 	e.mu.Lock()
@@ -631,13 +632,14 @@ func (e *EphemeralSession) executeWithProvider(ctx context.Context, prompt, prov
 }
 
 // detectFileChangesGit detects files created or modified by the agent
-// using both `git diff --name-status HEAD` (for tracked changes) and
+// using both `git diff --name-status <baseRef>` (for tracked changes) and
 // `git ls-files --others --exclude-standard` (for untracked new files).
-func detectFileChangesGit(workDir string, log *slog.Logger) *ExecuteResult {
+// baseRef is the commit to diff against (typically captured before running the agent).
+func detectFileChangesGit(workDir, baseRef string, log *slog.Logger) *ExecuteResult {
 	result := &ExecuteResult{}
 
-	// Detect tracked file changes (staged + unstaged modifications).
-	diffCmd := exec.Command("git", "diff", "--name-status", "HEAD")
+	// Detect tracked file changes (staged + unstaged, plus any new commits).
+	diffCmd := exec.Command("git", "diff", "--name-status", baseRef)
 	diffCmd.Dir = workDir
 	diffOut, err := diffCmd.Output()
 	if err != nil {
@@ -648,16 +650,29 @@ func detectFileChangesGit(workDir string, log *slog.Logger) *ExecuteResult {
 	s := bufio.NewScanner(bytes.NewReader(diffOut))
 	for s.Scan() {
 		line := s.Text()
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
 			continue
 		}
-		status, file := parts[0], parts[1]
+		status := parts[0]
 		switch {
 		case status == "A":
-			result.FilesCreated = append(result.FilesCreated, file)
+			result.FilesCreated = append(result.FilesCreated, parts[1])
+		case status == "D":
+			result.FilesDeleted = append(result.FilesDeleted, parts[1])
 		case strings.HasPrefix(status, "M"):
-			result.FilesModified = append(result.FilesModified, file)
+			result.FilesModified = append(result.FilesModified, parts[1])
+		case strings.HasPrefix(status, "R"):
+			// Rename: status\told_path\tnew_path
+			if len(parts) >= 3 {
+				result.FilesDeleted = append(result.FilesDeleted, parts[1])
+				result.FilesCreated = append(result.FilesCreated, parts[2])
+			}
+		case strings.HasPrefix(status, "C"):
+			// Copy: status\tsrc_path\tdst_path
+			if len(parts) >= 3 {
+				result.FilesCreated = append(result.FilesCreated, parts[2])
+			}
 		}
 	}
 
@@ -679,6 +694,17 @@ func detectFileChangesGit(workDir string, log *slog.Logger) *ExecuteResult {
 	}
 
 	return result
+}
+
+// gitHeadRef returns the current HEAD commit hash, or "HEAD" as a fallback.
+func gitHeadRef(workDir string) string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "HEAD"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // eventGoroutineTimeout is the maximum time to wait for the event processing

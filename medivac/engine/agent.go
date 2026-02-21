@@ -27,11 +27,7 @@ type SessionFactory func(config agent.AgentConfig, sessionID string) AgentSessio
 // It resolves the provider from the model ID so that non-Claude models
 // (e.g. Gemini, Codex) are routed to the correct provider.
 func defaultSessionFactory(config agent.AgentConfig, sessionID string) AgentSession {
-	sess := agent.NewEphemeralSession(config, sessionID)
-	if m, ok := agent.ModelByID(config.Model); ok {
-		sess.SetProviderName(m.Provider)
-	}
-	return sess
+	return agent.NewEphemeralSession(config, sessionID)
 }
 
 // FixAgentConfig configures a single fix agent.
