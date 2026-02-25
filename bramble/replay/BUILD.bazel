@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "replay",
+    srcs = [
+        "claude.go",
+        "codex.go",
+        "compact.go",
+        "helpers.go",
+        "replay.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/replay",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/codex",
+        "//bramble/session",
+    ],
+)
+
+go_test(
+    name = "replay_test",
+    srcs = ["replay_test.go"],
+    embed = [":replay"],
+    deps = [
+        "//bramble/session",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

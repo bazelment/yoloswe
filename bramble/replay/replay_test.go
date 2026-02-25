@@ -1,4 +1,4 @@
-package main
+package replay
 
 import (
 	"os"
@@ -9,60 +9,74 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bazelment/yoloswe/bramble/replay"
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
-func TestParseCLIArgs_MultipleFilesWithFlags(t *testing.T) {
-	cfg, err := parseCLIArgs([]string{
-		"--width=100",
-		"--height=20",
-		"--markdown=false",
-		"--compact=true",
-		"a.jsonl",
-		"b.jsonl",
+// --- Format detection tests ---
+
+func TestDetectFormat_CodexHeader(t *testing.T) {
+	path := writeLog(t, []string{
+		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
+		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{}}`,
 	})
+	format, err := DetectFormat(path)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a.jsonl", "b.jsonl"}, cfg.paths)
-	assert.Equal(t, 100, cfg.width)
-	assert.Equal(t, 20, cfg.height)
-	assert.False(t, cfg.enableMarkdown)
-	assert.True(t, cfg.compact)
+	assert.Equal(t, FormatCodex, format)
 }
 
-func TestParseCLIArgs_Aliases(t *testing.T) {
-	cfg, err := parseCLIArgs([]string{"--plain", "--full", "a.jsonl"})
+func TestDetectFormat_ClaudeSessionJSONL(t *testing.T) {
+	path := writeLog(t, []string{
+		`{"timestamp":"2026-01-01T00:00:00Z","direction":"sent","message":{"type":"user","message":{"content":"hello"}}}`,
+		`{"timestamp":"2026-01-01T00:00:01Z","direction":"received","message":{"type":"stream_event","event":{}}}`,
+	})
+	format, err := DetectFormat(path)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a.jsonl"}, cfg.paths)
-	assert.False(t, cfg.enableMarkdown)
-	assert.False(t, cfg.compact)
+	assert.Equal(t, FormatClaude, format)
 }
 
-func TestParseCLIArgs_DefaultCompact(t *testing.T) {
-	cfg, err := parseCLIArgs([]string{"a.jsonl"})
+func TestDetectFormat_ClaudeDirectory(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "messages.jsonl"), []byte("{}"), 0o644))
+	format, err := DetectFormat(dir)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a.jsonl"}, cfg.paths)
-	assert.True(t, cfg.compact)
-	assert.True(t, cfg.enableMarkdown)
+	assert.Equal(t, FormatClaude, format)
 }
 
-func TestCompactReplayLines_MergesTurnAndTokenLines(t *testing.T) {
-	lines := []session.OutputLine{
-		{Type: session.OutputTypeText, Content: "hello"},
-		{Type: session.OutputTypeTurnEnd, TurnNumber: 1, CostUSD: 0},
-		{Type: session.OutputTypeStatus, Content: "Tokens: 8735 input / 27 output"},
-		{Type: session.OutputTypeStatus, Content: "Follow-up prompt:"},
-	}
-
-	got := replay.CompactLines(lines)
-	require.Len(t, got, 3)
-	assert.Equal(t, session.OutputTypeStatus, got[1].Type)
-	assert.Equal(t, "T1 $0.0000 in:8735 out:27", got[1].Content)
-	assert.Equal(t, "Follow-up prompt:", got[2].Content)
+func TestDetectFormat_UnknownFormat(t *testing.T) {
+	path := writeLog(t, []string{`{"random":"data"}`})
+	_, err := DetectFormat(path)
+	assert.Error(t, err)
 }
 
-func TestParseCodexProtocolLog_TrimsPromptAndFollowUp(t *testing.T) {
-	logPath := writeLog(t, []string{
+// --- Parse auto-detection tests ---
+
+func TestParse_AutoDetectsCodex(t *testing.T) {
+	path := writeLog(t, []string{
+		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
+		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"hello codex"}]}}}`,
+		`{"timestamp":"2026-02-12T00:00:02Z","direction":"received","message":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}`,
+	})
+	result, err := Parse(path)
+	require.NoError(t, err)
+	assert.Equal(t, FormatCodex, result.Format)
+	assert.Equal(t, "hello codex", result.Prompt)
+	assert.Equal(t, session.StatusCompleted, result.Status)
+}
+
+func TestParse_AutoDetectsClaude(t *testing.T) {
+	path := writeLog(t, []string{
+		`{"timestamp":"2026-01-01T00:00:00Z","direction":"sent","message":{"type":"user","message":{"content":"hello claude"}}}`,
+	})
+	result, err := Parse(path)
+	require.NoError(t, err)
+	assert.Equal(t, FormatClaude, result.Format)
+	assert.Equal(t, "hello claude", result.Prompt)
+}
+
+// --- Codex parser tests (migrated from codexlogview) ---
+
+func TestCodexParser_TrimsPromptAndFollowUp(t *testing.T) {
+	path := writeLog(t, []string{
 		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
 		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"  first prompt  "}]}}}`,
 		`{"timestamp":"2026-02-12T00:00:02Z","direction":"received","message":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}`,
@@ -70,9 +84,8 @@ func TestParseCodexProtocolLog_TrimsPromptAndFollowUp(t *testing.T) {
 		`{"timestamp":"2026-02-12T00:00:04Z","direction":"received","message":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-2","status":"completed","error":null,"items":[]}}}}`,
 	})
 
-	result, err := replay.Parse(logPath)
+	result, err := parseCodexLog(path)
 	require.NoError(t, err)
-
 	assert.Equal(t, "first prompt", result.Prompt)
 	assert.Equal(t, session.StatusCompleted, result.Status)
 
@@ -87,14 +100,14 @@ func TestParseCodexProtocolLog_TrimsPromptAndFollowUp(t *testing.T) {
 	assert.Equal(t, "follow up prompt", followUp)
 }
 
-func TestParseCodexProtocolLog_ApprovalRequestIsShownAndSetsIdle(t *testing.T) {
-	logPath := writeLog(t, []string{
+func TestCodexParser_ApprovalRequestIsShownAndSetsIdle(t *testing.T) {
+	path := writeLog(t, []string{
 		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
 		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"hello"}]}}}`,
 		`{"timestamp":"2026-02-12T00:00:02Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"0","itemId":"call_1","reason":"Need write access","command":"/bin/zsh -lc \"echo hi > out.txt\""}}}`,
 	})
 
-	result, err := replay.Parse(logPath)
+	result, err := parseCodexLog(path)
 	require.NoError(t, err)
 	assert.Equal(t, session.StatusIdle, result.Status)
 
@@ -113,15 +126,15 @@ func TestParseCodexProtocolLog_ApprovalRequestIsShownAndSetsIdle(t *testing.T) {
 	assert.Contains(t, approvalDetails, "Need write access")
 }
 
-func TestParseCodexProtocolLog_DedupesApprovalEventsByCallID(t *testing.T) {
-	logPath := writeLog(t, []string{
+func TestCodexParser_DedupesApprovalEventsByCallID(t *testing.T) {
+	path := writeLog(t, []string{
 		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
 		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"hello"}]}}}`,
 		`{"timestamp":"2026-02-12T00:00:02Z","direction":"received","message":{"method":"codex/event/exec_approval_request","params":{"id":"0","conversationId":"t1","msg":{"call_id":"call_1","command":["/bin/zsh","-lc","echo hi > out.txt"],"reason":"Need write access"}}}}`,
 		`{"timestamp":"2026-02-12T00:00:03Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"0","itemId":"call_1","reason":"Need write access","command":"/bin/zsh -lc \"echo hi > out.txt\""}}}`,
 	})
 
-	result, err := replay.Parse(logPath)
+	result, err := parseCodexLog(path)
 	require.NoError(t, err)
 
 	statusCount := 0
@@ -133,8 +146,8 @@ func TestParseCodexProtocolLog_DedupesApprovalEventsByCallID(t *testing.T) {
 	assert.Equal(t, 1, statusCount)
 }
 
-func TestParseCodexProtocolLog_ApprovalRequestReemitsAfterTurnComplete(t *testing.T) {
-	logPath := writeLog(t, []string{
+func TestCodexParser_ApprovalRequestReemitsAfterTurnComplete(t *testing.T) {
+	path := writeLog(t, []string{
 		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
 		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"turn1"}]}}}`,
 		`{"timestamp":"2026-02-12T00:00:02Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"0","itemId":"call_1","reason":"Need write access","command":"echo hi > out.txt"}}}`,
@@ -143,7 +156,7 @@ func TestParseCodexProtocolLog_ApprovalRequestReemitsAfterTurnComplete(t *testin
 		`{"timestamp":"2026-02-12T00:00:05Z","direction":"received","message":{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"1","itemId":"call_1","reason":"Need write access","command":"echo hi > out.txt"}}}`,
 	})
 
-	result, err := replay.Parse(logPath)
+	result, err := parseCodexLog(path)
 	require.NoError(t, err)
 	assert.Equal(t, session.StatusIdle, result.Status)
 
@@ -156,8 +169,8 @@ func TestParseCodexProtocolLog_ApprovalRequestReemitsAfterTurnComplete(t *testin
 	assert.Equal(t, 2, statusCount)
 }
 
-func TestParseCodexProtocolLog_TurnCompletionPreservesOtherThreadApprovals(t *testing.T) {
-	logPath := writeLog(t, []string{
+func TestCodexParser_TurnCompletionPreservesOtherThreadApprovals(t *testing.T) {
+	path := writeLog(t, []string{
 		`{"format":"codex","version":"1.0","client":"test","timestamp":"2026-02-12T00:00:00Z"}`,
 		`{"timestamp":"2026-02-12T00:00:01Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"thread1"}]}}}`,
 		`{"timestamp":"2026-02-12T00:00:02Z","direction":"sent","message":{"method":"turn/start","params":{"threadId":"t2","input":[{"type":"text","text":"thread2"}]}}}`,
@@ -166,10 +179,29 @@ func TestParseCodexProtocolLog_TurnCompletionPreservesOtherThreadApprovals(t *te
 		`{"timestamp":"2026-02-12T00:00:05Z","direction":"received","message":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}`,
 	})
 
-	result, err := replay.Parse(logPath)
+	result, err := parseCodexLog(path)
 	require.NoError(t, err)
 	assert.Equal(t, session.StatusIdle, result.Status)
 }
+
+// --- Compact tests ---
+
+func TestCompactLines_MergesTurnAndTokenLines(t *testing.T) {
+	lines := []session.OutputLine{
+		{Type: session.OutputTypeText, Content: "hello"},
+		{Type: session.OutputTypeTurnEnd, TurnNumber: 1, CostUSD: 0},
+		{Type: session.OutputTypeStatus, Content: "Tokens: 8735 input / 27 output"},
+		{Type: session.OutputTypeStatus, Content: "Follow-up prompt:"},
+	}
+
+	got := CompactLines(lines)
+	require.Len(t, got, 3)
+	assert.Equal(t, session.OutputTypeStatus, got[1].Type)
+	assert.Equal(t, "T1 $0.0000 in:8735 out:27", got[1].Content)
+	assert.Equal(t, "Follow-up prompt:", got[2].Content)
+}
+
+// --- Helpers ---
 
 func writeLog(t *testing.T, lines []string) string {
 	t.Helper()

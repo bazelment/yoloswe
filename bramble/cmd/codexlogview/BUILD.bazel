@@ -5,16 +5,14 @@ go_library(
     srcs = [
         "cli.go",
         "main.go",
-        "parser.go",
         "render.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/codexlogview",
     visibility = ["//visibility:private"],
     deps = [
-        "//agent-cli-wrapper/codex",
         "//bramble/app",
+        "//bramble/replay",
         "//bramble/session",
-        "//yoloswe/sessionplayer",
     ],
 )
 
@@ -29,6 +27,7 @@ go_test(
     srcs = ["main_test.go"],
     embed = [":codexlogview_lib"],
     deps = [
+        "//bramble/replay",
         "//bramble/session",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

@@ -1,9 +1,13 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
 go_library(
-    name = "sessview_lib",
-    srcs = ["main.go"],
-    importpath = "github.com/bazelment/yoloswe/bramble/cmd/sessview",
+    name = "logview_lib",
+    srcs = [
+        "cli.go",
+        "main.go",
+        "render.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/logview",
     visibility = ["//visibility:private"],
     deps = [
         "//bramble/app",
@@ -13,7 +17,7 @@ go_library(
 )
 
 go_binary(
-    name = "sessview",
-    embed = [":sessview_lib"],
+    name = "logview",
+    embed = [":logview_lib"],
     visibility = ["//visibility:public"],
 )
