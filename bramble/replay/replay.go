@@ -21,10 +21,10 @@ const (
 )
 
 // Result holds the parsed output from any session log format.
-type Result struct {
+type Result struct { //nolint:govet // fieldalignment: readability over packing
 	Lines  []session.OutputLine
-	Status session.SessionStatus
 	Prompt string
+	Status session.SessionStatus
 	Format Format
 }
 
