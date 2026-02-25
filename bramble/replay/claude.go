@@ -53,8 +53,8 @@ type claudeDeltaBlock struct {
 }
 
 type claudeToolResultMessage struct {
-	Role    string              `json:"role"`
-	Content []claudeToolResult  `json:"content"`
+	Role    string             `json:"role"`
+	Content []claudeToolResult `json:"content"`
 }
 
 type claudeToolResult struct {
@@ -72,7 +72,7 @@ type claudeUserMessage struct {
 }
 
 // claudeReplayParser accumulates state while parsing a Claude session log.
-type claudeReplayParser struct {
+type claudeReplayParser struct { //nolint:govet // fieldalignment: readability over packing
 	lines           []session.OutputLine
 	toolStartTimes  map[string]time.Time
 	toolInputBufs   map[string]*strings.Builder

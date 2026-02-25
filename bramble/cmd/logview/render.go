@@ -43,8 +43,8 @@ func renderLog(path string, cfg cliConfig) (string, error) {
 
 	if cfg.debug {
 		b.WriteString("\n--- RAW OUTPUT LINES ---\n")
-		for i, line := range result.Lines {
-			b.WriteString(fmt.Sprintf("[%3d] %s: %s\n", i, line.Type, truncateDebug(line.Content, 80)))
+		for i := range result.Lines {
+			b.WriteString(fmt.Sprintf("[%3d] %s: %s\n", i, result.Lines[i].Type, truncateDebug(result.Lines[i].Content, 80)))
 		}
 	}
 

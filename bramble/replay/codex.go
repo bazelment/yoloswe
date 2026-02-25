@@ -13,19 +13,19 @@ import (
 
 // codexReplayParser accumulates state while parsing a Codex protocol log.
 type codexReplayParser struct { //nolint:govet // fieldalignment: readability over packing
-	lines            []session.OutputLine
-	itemTextLine     map[string]int
-	threadActiveItem map[string]string
-	toolLineIndex    map[string]int
-	threadTokenUsage map[string]codex.TokenUsage
-	threadReasoning  map[string]bool
-	threadText       map[string]*strings.Builder
-	pendingApprovals map[string]map[string]struct{}
-	emittedApprovals map[string]map[string]struct{}
-	prompt           string
-	turnCount        int
-	turnStarts       int
-	turnCompletions  int
+	lines             []session.OutputLine
+	itemTextLine      map[string]int
+	threadActiveItem  map[string]string
+	toolLineIndex     map[string]int
+	threadTokenUsage  map[string]codex.TokenUsage
+	threadReasoning   map[string]bool
+	threadText        map[string]*strings.Builder
+	pendingApprovals  map[string]map[string]struct{}
+	emittedApprovals  map[string]map[string]struct{}
+	prompt            string
+	turnCount         int
+	turnStarts        int
+	turnCompletions   int
 	hadProviderErrors bool
 }
 
@@ -522,4 +522,3 @@ func (p *codexReplayParser) appendThreadText(threadID, delta string) {
 	}
 	b.WriteString(delta)
 }
-

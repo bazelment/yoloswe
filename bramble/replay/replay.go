@@ -23,8 +23,8 @@ const (
 // Result holds the parsed output from any session log format.
 type Result struct {
 	Lines  []session.OutputLine
-	Prompt string
 	Status session.SessionStatus
+	Prompt string
 	Format Format
 }
 
