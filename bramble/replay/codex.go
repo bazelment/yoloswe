@@ -1,9 +1,8 @@
-package main
+package replay
 
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -12,12 +11,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
-type codexReplay struct { //nolint:govet // fieldalignment: readability over packing
-	lines  []session.OutputLine
-	prompt string
-	status session.SessionStatus
-}
-
+// codexReplayParser accumulates state while parsing a Codex protocol log.
 type codexReplayParser struct { //nolint:govet // fieldalignment: readability over packing
 	lines            []session.OutputLine
 	itemTextLine     map[string]int
@@ -32,7 +26,6 @@ type codexReplayParser struct { //nolint:govet // fieldalignment: readability ov
 	turnCount        int
 	turnStarts       int
 	turnCompletions  int
-	// hadProviderErrors marks explicit provider error events from the log.
 	hadProviderErrors bool
 }
 
@@ -62,7 +55,7 @@ func newCodexReplayParser() *codexReplayParser {
 	}
 }
 
-func parseCodexProtocolLog(path string) (*codexReplay, error) {
+func parseCodexLog(path string) (*Result, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -95,10 +88,11 @@ func parseCodexProtocolLog(path string) (*codexReplay, error) {
 		return nil, err
 	}
 
-	return &codexReplay{
-		lines:  p.lines,
-		prompt: p.prompt,
-		status: p.deriveStatus(),
+	return &Result{
+		Lines:  p.lines,
+		Prompt: p.prompt,
+		Status: p.deriveStatus(),
+		Format: FormatCodex,
 	}, nil
 }
 
@@ -411,14 +405,6 @@ func (p *codexReplayParser) clearThreadApprovals(threadID string) {
 	delete(p.emittedApprovals, threadID)
 }
 
-func normalizeThreadKey(threadID string) string {
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
-		return "_global"
-	}
-	return threadID
-}
-
 func (p *codexReplayParser) appendTextDelta(ts time.Time, threadID, itemID, delta string) {
 	if delta == "" {
 		return
@@ -537,38 +523,3 @@ func (p *codexReplayParser) appendThreadText(threadID, delta string) {
 	b.WriteString(delta)
 }
 
-func firstTurnText(inputs []codex.UserInput) string {
-	for i := range inputs {
-		if strings.EqualFold(inputs[i].Type, "text") && strings.TrimSpace(inputs[i].Text) != "" {
-			return inputs[i].Text
-		}
-	}
-	return ""
-}
-
-func approvalKey(callID, command, reason string) string {
-	callID = strings.TrimSpace(callID)
-	if callID != "" {
-		return callID
-	}
-	command = strings.TrimSpace(command)
-	reason = strings.TrimSpace(reason)
-	if command == "" && reason == "" {
-		return ""
-	}
-	return command + "\n" + reason
-}
-
-func parseTimestamp(ts string) time.Time {
-	if ts == "" {
-		return time.Now()
-	}
-	if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-		return t
-	}
-	return time.Now()
-}
-
-func tokenSummaryContent(usage codex.TokenUsage) string {
-	return fmt.Sprintf("Tokens: %d input / %d output", usage.InputTokens, usage.OutputTokens)
-}

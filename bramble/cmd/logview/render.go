@@ -13,7 +13,7 @@ import (
 func renderLog(path string, cfg cliConfig) (string, error) {
 	result, err := replay.Parse(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse log: %w", err)
+		return "", err
 	}
 	if cfg.compact {
 		result.Lines = replay.CompactLines(result.Lines)
@@ -37,5 +37,24 @@ func renderLog(path string, cfg cliConfig) (string, error) {
 		model.EnableMarkdown()
 	}
 	model.SetSize(cfg.width, cfg.height)
-	return model.View(), nil
+
+	var b strings.Builder
+	b.WriteString(model.View())
+
+	if cfg.debug {
+		b.WriteString("\n--- RAW OUTPUT LINES ---\n")
+		for i, line := range result.Lines {
+			b.WriteString(fmt.Sprintf("[%3d] %s: %s\n", i, line.Type, truncateDebug(line.Content, 80)))
+		}
+	}
+
+	return b.String(), nil
+}
+
+func truncateDebug(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
 }
