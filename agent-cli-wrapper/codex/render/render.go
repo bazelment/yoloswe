@@ -128,16 +128,14 @@ func (r *Renderer) Reasoning(text string) {
 	r.inReasoning = true
 }
 
-// CommandStart prints the start of a command execution.
+// CommandStart records the start of a command execution.
+// The command header is printed later by CommandEnd — this allows compact inline
+// rendering when there is no output (e.g. cursor tool calls).
 func (r *Renderer) CommandStart(callID, command string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.commands[callID] = &commandState{command: command}
-	if r.verbose {
-		fmt.Fprintf(r.out, "\n%s[%s]%s ", r.color(ColorCyan), truncate(command, 60), r.color(ColorReset))
-	}
-	// In non-verbose mode, defer printing until CommandEnd for compact output.
 }
 
 // HasOutput returns true if any output has been accumulated for the given command.
@@ -205,28 +203,24 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 		durationStr = fmt.Sprintf(" %.2fs", float64(durationMs)/1000)
 	}
 
-	// Only print output when verbose
-	if r.verbose {
-		output := strings.TrimSpace(cmd.output.String())
-		if output != "" {
-			lines := strings.Split(output, "\n")
-			// No color for command output - works on all backgrounds
-			fmt.Fprint(r.out, output)
-			// Indicate if output was truncated due to size limit
-			if cmd.truncated {
-				fmt.Fprintf(r.out, "%s\n  [output truncated at 1MB]%s", r.color(ColorYellow), r.color(ColorReset))
-			}
-			_ = lines // unused but keeping for potential future use
-		}
+	output := strings.TrimSpace(cmd.output.String())
+	hasOutput := r.verbose && output != ""
 
-		// Print status indicator with newline (block format)
+	if hasOutput {
+		// Block format: header + output + status on its own line.
+		r.endToolRun()
+		fmt.Fprintf(r.out, "\n%s[%s]%s ", r.color(ColorCyan), truncate(cmd.command, 60), r.color(ColorReset))
+		fmt.Fprint(r.out, output)
+		if cmd.truncated {
+			fmt.Fprintf(r.out, "%s\n  [output truncated at 1MB]%s", r.color(ColorYellow), r.color(ColorReset))
+		}
 		if exitCode == 0 {
 			fmt.Fprintf(r.out, "\n  %s✓%s%s\n", r.color(ColorGreen), durationStr, r.color(ColorReset))
 		} else {
 			fmt.Fprintf(r.out, "\n  %s✗ exit %d%s%s\n", r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
 		}
 	} else {
-		// Compact inline: [command] ✓  (all on one line, consecutive tools flow together)
+		// Compact inline: [command] ✓  (consecutive tools flow on the same line)
 		if exitCode == 0 {
 			fmt.Fprintf(r.out, "%s[%s]%s %s✓%s%s  ",
 				r.color(ColorCyan), truncate(cmd.command, 50), r.color(ColorReset),
@@ -234,10 +228,7 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 			r.inToolRun = true
 		} else {
 			// Errors get their own line for visibility
-			if r.inToolRun {
-				fmt.Fprintln(r.out)
-				r.inToolRun = false
-			}
+			r.endToolRun()
 			fmt.Fprintf(r.out, "%s[%s]%s %s✗ exit %d%s%s\n",
 				r.color(ColorCyan), truncate(cmd.command, 50), r.color(ColorReset),
 				r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))

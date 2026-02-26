@@ -53,6 +53,9 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 			return nil, fmt.Errorf("thread not ready: %w", err)
 		}
 		b.thread = thread
+		if handler != nil {
+			handler.OnSessionInfo(thread.ID(), b.config.Model)
+		}
 	}
 
 	_, err := b.thread.SendMessage(ctx, prompt)
