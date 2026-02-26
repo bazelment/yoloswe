@@ -23,6 +23,7 @@ func TestModelRegistry_AllInstalled(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  true,
 		ProviderGemini: true,
+		ProviderCursor: true,
 	})
 	reg := NewModelRegistry(avail, nil)
 	assert.Len(t, reg.Models(), len(AllModels))
@@ -55,7 +56,7 @@ func TestModelRegistry_FilteredCycling(t *testing.T) {
 	next := reg.NextModel("haiku")
 	assert.Equal(t, "gemini-3.1-pro-preview", next.ID)
 
-	// Cycling from last gemini model should wrap to first claude
+	// Cycling from last gemini model should wrap to first claude (cursor not installed)
 	next = reg.NextModel("gemini-2.5-flash-lite")
 	assert.Equal(t, "opus", next.ID)
 }

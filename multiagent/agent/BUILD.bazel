@@ -8,6 +8,7 @@ go_library(
         "claude_provider.go",
         "codex_provider.go",
         "config.go",
+        "cursor_provider.go",
         "gemini_provider.go",
         "model_registry.go",
         "provider.go",
@@ -22,6 +23,7 @@ go_library(
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/cursor",
         "//wt",
     ],
 )

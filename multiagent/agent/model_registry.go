@@ -23,6 +23,7 @@ var AllModels = []AgentModel{
 	{ID: "gemini-2.5-pro", Provider: ProviderGemini, Label: "gemini-2.5-pro"},
 	{ID: "gemini-2.5-flash", Provider: ProviderGemini, Label: "gemini-2.5-flash"},
 	{ID: "gemini-2.5-flash-lite", Provider: ProviderGemini, Label: "gemini-2.5-flash-lite"},
+	{ID: "cursor-default", Provider: ProviderCursor, Label: "cursor-default"},
 }
 
 // ModelByID returns the AgentModel for the given ID from the full list, or false if not found.

@@ -22,6 +22,8 @@ func NewProviderForModel(m AgentModel) (Provider, error) {
 		return NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp", "--model", m.ID)), nil
 	case ProviderCodex:
 		return NewCodexProvider(), nil
+	case ProviderCursor:
+		return NewCursorProvider(), nil
 	default:
 		return nil, fmt.Errorf("unknown provider %q for model %q", m.Provider, m.ID)
 	}

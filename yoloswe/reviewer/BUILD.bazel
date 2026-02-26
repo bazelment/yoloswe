@@ -2,12 +2,18 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "reviewer",
-    srcs = ["reviewer.go"],
+    srcs = [
+        "backend.go",
+        "backend_codex.go",
+        "backend_cursor.go",
+        "reviewer.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/yoloswe/reviewer",
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/codex/render",
+        "//agent-cli-wrapper/cursor",
     ],
 )
 

@@ -1,0 +1,18 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# Integration tests require the Cursor Agent CLI (agent binary) installed.
+# "local" disables sandboxing so the test can access the CLI.
+# "manual" excludes from wildcard builds (bazel test //...).
+# Run with: bazel test //agent-cli-wrapper/cursor/integration:integration_test --test_tag_filters=integration
+go_test(
+    name = "integration_test",
+    srcs = ["query_test.go"],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = ["//agent-cli-wrapper/cursor"],
+)
