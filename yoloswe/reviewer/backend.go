@@ -15,6 +15,7 @@ type Backend interface {
 
 // EventHandler receives streaming events from the agent backend.
 type EventHandler interface {
+	OnSessionInfo(sessionID, model string)
 	OnText(delta string)
 	OnReasoning(delta string)
 	OnToolStart(callID, name, input string)
@@ -30,6 +31,10 @@ type rendererEventHandler struct {
 
 func newRendererEventHandler(r *render.Renderer) *rendererEventHandler {
 	return &rendererEventHandler{r: r}
+}
+
+func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
+	h.r.SessionInfo(sessionID, model)
 }
 
 func (h *rendererEventHandler) OnText(delta string) {

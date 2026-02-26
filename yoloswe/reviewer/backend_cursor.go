@@ -51,6 +51,10 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 
 	for event := range events {
 		switch e := event.(type) {
+		case cursor.ReadyEvent:
+			if handler != nil {
+				handler.OnSessionInfo(e.SessionID, e.Model)
+			}
 		case cursor.TextEvent:
 			if handler != nil {
 				handler.OnText(e.Text)
