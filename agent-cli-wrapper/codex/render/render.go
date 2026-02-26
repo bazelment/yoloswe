@@ -177,6 +177,12 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 	}
 	delete(r.commands, callID)
 
+	// Format duration string (omit when zero, e.g. cursor backend has no real durations)
+	durationStr := ""
+	if durationMs > 0 {
+		durationStr = fmt.Sprintf(" %.2fs", float64(durationMs)/1000)
+	}
+
 	// Only print output when verbose
 	if r.verbose {
 		output := strings.TrimSpace(cmd.output.String())
@@ -193,16 +199,16 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 
 		// Print status indicator with newline (block format)
 		if exitCode == 0 {
-			fmt.Fprintf(r.out, "\n  %s✓ %.2fs%s\n", r.color(ColorGreen), float64(durationMs)/1000, r.color(ColorReset))
+			fmt.Fprintf(r.out, "\n  %s✓%s%s\n", r.color(ColorGreen), durationStr, r.color(ColorReset))
 		} else {
-			fmt.Fprintf(r.out, "\n  %s✗ exit %d (%.2fs)%s\n", r.color(ColorRed), exitCode, float64(durationMs)/1000, r.color(ColorReset))
+			fmt.Fprintf(r.out, "\n  %s✗ exit %d%s%s\n", r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
 		}
 	} else {
 		// Print inline status indicator (no output shown)
 		if exitCode == 0 {
-			fmt.Fprintf(r.out, "%s✓ %.2fs%s\n", r.color(ColorGreen), float64(durationMs)/1000, r.color(ColorReset))
+			fmt.Fprintf(r.out, "%s✓%s%s\n", r.color(ColorGreen), durationStr, r.color(ColorReset))
 		} else {
-			fmt.Fprintf(r.out, "%s✗ exit %d (%.2fs)%s\n", r.color(ColorRed), exitCode, float64(durationMs)/1000, r.color(ColorReset))
+			fmt.Fprintf(r.out, "%s✗ exit %d%s%s\n", r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
 		}
 	}
 }

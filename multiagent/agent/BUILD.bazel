@@ -33,6 +33,7 @@ go_test(
     srcs = [
         "codex_provider_test.go",
         "config_test.go",
+        "cursor_provider_test.go",
         "gemini_provider_test.go",
         "git_diff_test.go",
         "model_registry_test.go",

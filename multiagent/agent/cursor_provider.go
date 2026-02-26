@@ -53,10 +53,19 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	// Tee session events: one copy for bridgeEvents (handler + AgentEvent channel),
 	// one copy for local result collection. This avoids duplicating bridgeEvents logic.
 	bridgeCh := make(chan cursor.Event, 100)
-	go bridgeEvents(bridgeCh, cfg.EventHandler, p.events, nil, "", nil)
+	bridgeStop := make(chan struct{})
+	bridgeDone := make(chan struct{})
+	go func() {
+		bridgeEvents(bridgeCh, cfg.EventHandler, p.events, bridgeStop, "", nil)
+		close(bridgeDone)
+	}()
+	defer func() {
+		close(bridgeStop)
+		<-bridgeDone
+	}()
+	defer close(bridgeCh)
 
 	var resultText strings.Builder
-	var agentResult *AgentResult
 
 	for evt := range session.Events() {
 		// Forward to bridge goroutine
@@ -70,7 +79,7 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		case cursor.TextEvent:
 			resultText.WriteString(e.Text)
 		case cursor.TurnCompleteEvent:
-			agentResult = &AgentResult{
+			agentResult := &AgentResult{
 				Text:       resultText.String(),
 				Success:    e.Success,
 				DurationMs: e.DurationMs,
@@ -78,14 +87,11 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			if e.Error != nil {
 				agentResult.Error = e.Error
 			}
-			close(bridgeCh)
 			return agentResult, nil
 		case cursor.ErrorEvent:
-			close(bridgeCh)
 			return nil, e.Error
 		}
 	}
-	close(bridgeCh)
 
 	// Channel closed without result
 	text := resultText.String()

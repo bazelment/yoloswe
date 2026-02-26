@@ -136,9 +136,9 @@ func TestParseMessage_ThinkingType(t *testing.T) {
 func TestParseMessage_UnknownSystemSubtype(t *testing.T) {
 	line := []byte(`{"type":"system","subtype":"unknown"}`)
 
-	_, err := ParseMessage(line)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown system subtype")
+	msg, err := ParseMessage(line)
+	require.NoError(t, err)
+	assert.Nil(t, msg, "unknown system subtypes should be silently skipped")
 }
 
 func TestParseToolCallDetail_EmptyToolCall(t *testing.T) {

@@ -183,22 +183,3 @@ func (pm *processManager) Stop() error {
 	return nil
 }
 
-// Wait waits for the process to exit and returns the exit code.
-func (pm *processManager) Wait() (int, error) {
-	pm.mu.Lock()
-	cmd := pm.cmd
-	pm.mu.Unlock()
-
-	if cmd == nil {
-		return 0, ErrNotStarted
-	}
-
-	err := cmd.Wait()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), err
-		}
-		return -1, err
-	}
-	return 0, nil
-}

@@ -126,7 +126,8 @@ func ParseMessage(line []byte) (Message, error) {
 			}
 			return &msg, nil
 		}
-		return nil, fmt.Errorf("unknown system subtype: %s", raw.Subtype)
+		// Unknown system subtypes are silently skipped (forward-compatible).
+		return nil, nil
 
 	case "assistant":
 		var msg AssistantMessage
