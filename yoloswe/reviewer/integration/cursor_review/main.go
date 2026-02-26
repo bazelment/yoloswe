@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -12,6 +13,9 @@ import (
 )
 
 func main() {
+	verbose := flag.Bool("verbose", false, "Show tool call details")
+	flag.Parse()
+
 	workDir := os.Getenv("WORK_DIR")
 	if workDir == "" {
 		workDir, _ = os.Getwd()
@@ -40,7 +44,7 @@ func main() {
 	config := reviewer.Config{
 		BackendType: reviewer.BackendCursor,
 		WorkDir:     workDir,
-		Verbose:     true,
+		Verbose:     *verbose,
 	}
 
 	r := reviewer.New(config)

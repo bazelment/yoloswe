@@ -1,4 +1,4 @@
-// Package render provides ANSI-colored terminal rendering for Codex sessions.
+// Package render provides ANSI-colored terminal rendering for agent sessions.
 package render
 
 import (
@@ -27,26 +27,15 @@ const (
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
 	out         io.Writer
-	commands    map[string]*commandState
-	mu          sync.Mutex
+	commands    map[string]string // callID → command name
+	mu         sync.Mutex
 	verbose     bool
 	noColor     bool
 	inReasoning bool
-	inToolRun   bool // true when consecutive tool calls are being rendered inline
-}
-
-// maxOutputBytes is the maximum size of command output to buffer (1MB).
-const maxOutputBytes = 1024 * 1024
-
-// commandState tracks an active command's state.
-type commandState struct {
-	command   string
-	output    strings.Builder
-	truncated bool
 }
 
 // NewRenderer creates a new renderer writing to the given output.
-// If verbose is false, command output is truncated.
+// If verbose is true, tool call names are shown as they execute.
 // If noColor is true, ANSI color codes are suppressed.
 func NewRenderer(out io.Writer, verbose, noColor bool) *Renderer {
 	if !noColor {
@@ -56,7 +45,7 @@ func NewRenderer(out io.Writer, verbose, noColor bool) *Renderer {
 		out:      out,
 		verbose:  verbose,
 		noColor:  noColor,
-		commands: make(map[string]*commandState),
+		commands: make(map[string]string),
 	}
 }
 
@@ -110,7 +99,6 @@ func (r *Renderer) Text(text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.endToolRun()
 	// Add newline when transitioning from reasoning to text
 	if r.inReasoning {
 		fmt.Fprintln(r.out)
@@ -129,110 +117,52 @@ func (r *Renderer) Reasoning(text string) {
 }
 
 // CommandStart records the start of a command execution.
-// The command header is printed later by CommandEnd — this allows compact inline
-// rendering when there is no output (e.g. cursor tool calls).
 func (r *Renderer) CommandStart(callID, command string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.commands[callID] = &commandState{command: command}
+	r.commands[callID] = command
 }
 
-// HasOutput returns true if any output has been accumulated for the given command.
+// HasOutput is kept for interface compatibility but always returns false.
 func (r *Renderer) HasOutput(callID string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if cmd, ok := r.commands[callID]; ok {
-		return cmd.output.Len() > 0
-	}
 	return false
 }
 
-// CommandOutput accumulates command output with memory limit.
-// When verbose=false, output is not accumulated (won't be displayed anyway).
-func (r *Renderer) CommandOutput(callID, chunk string) {
-	// Don't buffer output if we won't display it
-	if !r.verbose {
-		return
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	cmd, ok := r.commands[callID]
-	if !ok {
-		return
-	}
-
-	// Limit buffer size to prevent memory exhaustion
-	if cmd.truncated {
-		return // Already at limit, ignore further output
-	}
-
-	remaining := maxOutputBytes - cmd.output.Len()
-	if remaining <= 0 {
-		cmd.truncated = true
-		return
-	}
-
-	if len(chunk) > remaining {
-		cmd.output.WriteString(chunk[:remaining])
-		cmd.truncated = true
-	} else {
-		cmd.output.WriteString(chunk)
-	}
-}
+// CommandOutput is a no-op. Command output is not displayed.
+func (r *Renderer) CommandOutput(callID, chunk string) {}
 
 // CommandEnd prints the completion of a command execution.
-// When verbose=false, only shows inline status (✓/✗) without output.
-// When verbose=true, shows full output followed by status.
+// In verbose mode, prints one line per tool: [command] ✓ or [command] ✗ exit N
+// In non-verbose mode, tool calls are silently tracked.
 func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cmd, ok := r.commands[callID]
+	command, ok := r.commands[callID]
 	if !ok {
 		return
 	}
 	delete(r.commands, callID)
 
-	// Format duration string (omit when zero, e.g. cursor backend has no real durations)
+	if !r.verbose {
+		return
+	}
+
+	// Format duration string (omit when zero)
 	durationStr := ""
 	if durationMs > 0 {
 		durationStr = fmt.Sprintf(" %.2fs", float64(durationMs)/1000)
 	}
 
-	output := strings.TrimSpace(cmd.output.String())
-	hasOutput := r.verbose && output != ""
-
-	if hasOutput {
-		// Block format: header + output + status on its own line.
-		r.endToolRun()
-		fmt.Fprintf(r.out, "\n%s[%s]%s ", r.color(ColorCyan), truncate(cmd.command, 60), r.color(ColorReset))
-		fmt.Fprint(r.out, output)
-		if cmd.truncated {
-			fmt.Fprintf(r.out, "%s\n  [output truncated at 1MB]%s", r.color(ColorYellow), r.color(ColorReset))
-		}
-		if exitCode == 0 {
-			fmt.Fprintf(r.out, "\n  %s✓%s%s\n", r.color(ColorGreen), durationStr, r.color(ColorReset))
-		} else {
-			fmt.Fprintf(r.out, "\n  %s✗ exit %d%s%s\n", r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
-		}
+	if exitCode == 0 {
+		fmt.Fprintf(r.out, "%s[%s]%s %s✓%s%s\n",
+			r.color(ColorCyan), truncate(command, 60), r.color(ColorReset),
+			r.color(ColorGreen), durationStr, r.color(ColorReset))
 	} else {
-		// Compact inline: [command] ✓  (consecutive tools flow on the same line)
-		if exitCode == 0 {
-			fmt.Fprintf(r.out, "%s[%s]%s %s✓%s%s  ",
-				r.color(ColorCyan), truncate(cmd.command, 50), r.color(ColorReset),
-				r.color(ColorGreen), durationStr, r.color(ColorReset))
-			r.inToolRun = true
-		} else {
-			// Errors get their own line for visibility
-			r.endToolRun()
-			fmt.Fprintf(r.out, "%s[%s]%s %s✗ exit %d%s%s\n",
-				r.color(ColorCyan), truncate(cmd.command, 50), r.color(ColorReset),
-				r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
-		}
+		fmt.Fprintf(r.out, "%s[%s]%s %s✗ exit %d%s%s\n",
+			r.color(ColorCyan), truncate(command, 60), r.color(ColorReset),
+			r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
 	}
 }
 
@@ -241,7 +171,6 @@ func (r *Renderer) TurnComplete(success bool, durationMs int64, inputTokens, out
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.endToolRun()
 	fmt.Fprintf(r.out, "\n%s───────────────────────────────────────────────────────%s\n", r.color(ColorDim), r.color(ColorReset))
 
 	status := "✓"
@@ -260,17 +189,7 @@ func (r *Renderer) Error(err error, context string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.endToolRun()
 	fmt.Fprintf(r.out, "\n%s[Error: %s]%s %v\n", r.color(ColorRed), context, r.color(ColorReset), err)
-}
-
-// endToolRun ends an inline tool run sequence with a newline.
-// Must be called with r.mu held.
-func (r *Renderer) endToolRun() {
-	if r.inToolRun {
-		fmt.Fprintln(r.out)
-		r.inToolRun = false
-	}
 }
 
 // truncate truncates a string to the given max length.
