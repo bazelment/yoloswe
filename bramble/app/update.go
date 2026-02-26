@@ -472,7 +472,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			editor := m.editor
 			toastCmd := m.addToast("Opening "+fileName+" in editor", ToastSuccess)
 			return m, tea.Batch(toastCmd, func() tea.Msg {
-				cmd := exec.Command(editor, filePath)
+				cmd := editorCommand(editor, filePath)
 				err := cmd.Start()
 				return editorResultMsg{err: err}
 			})
@@ -567,7 +567,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open editor for worktree
 		if wt := m.selectedWorktree(); wt != nil {
 			return m, func() tea.Msg {
-				cmd := exec.Command(m.editor, wt.Path)
+				cmd := editorCommand(m.editor, wt.Path)
 				err := cmd.Start()
 				return editorResultMsg{err: err}
 			}
@@ -1922,4 +1922,53 @@ func extractHookWarning(messages []string) string {
 		}
 	}
 	return ""
+}
+
+// editorCommand builds an exec.Cmd from an editor string that may contain
+// flags (e.g. "emacsclient -n" or "code --wait"). Quoted tokens are
+// respected so paths with spaces work (e.g. '"/path/to/My Editor" --wait').
+func editorCommand(editor, path string) *exec.Cmd {
+	parts := shellSplit(editor)
+	if len(parts) == 0 {
+		return exec.Command("code", path)
+	}
+	args := make([]string, len(parts)-1, len(parts))
+	copy(args, parts[1:])
+	args = append(args, path)
+	return exec.Command(parts[0], args...)
+}
+
+// shellSplit splits s into tokens using shell-like quoting rules.
+// Single and double quotes preserve spaces within a token; quotes are
+// stripped from the result. Backslash escaping is not supported.
+func shellSplit(s string) []string {
+	var parts []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	hasToken := false
+
+	for _, r := range s {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+			hasToken = true
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+			hasToken = true
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			if hasToken {
+				parts = append(parts, current.String())
+				current.Reset()
+				hasToken = false
+			}
+		default:
+			current.WriteRune(r)
+			hasToken = true
+		}
+	}
+	if hasToken {
+		parts = append(parts, current.String())
+	}
+	return parts
 }
