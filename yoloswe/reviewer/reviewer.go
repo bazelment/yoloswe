@@ -118,14 +118,17 @@ type Reviewer struct {
 
 // New creates a new Reviewer with the given config.
 func New(config Config) *Reviewer {
-	if config.Model == "" {
-		config.Model = "gpt-5.2-codex"
-	}
-	if config.ApprovalPolicy == "" {
-		config.ApprovalPolicy = codex.ApprovalPolicyOnFailure
-	}
 	if config.BackendType == "" {
 		config.BackendType = BackendCodex
+	}
+	// Apply codex-specific defaults only for codex backend
+	if config.BackendType == BackendCodex {
+		if config.Model == "" {
+			config.Model = "gpt-5.2-codex"
+		}
+		if config.ApprovalPolicy == "" {
+			config.ApprovalPolicy = codex.ApprovalPolicyOnFailure
+		}
 	}
 
 	var backend Backend

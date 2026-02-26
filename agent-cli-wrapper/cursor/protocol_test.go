@@ -112,9 +112,25 @@ func TestParseMessage_MalformedJSON(t *testing.T) {
 func TestParseMessage_UnknownType(t *testing.T) {
 	line := []byte(`{"type":"unknown_type"}`)
 
-	_, err := ParseMessage(line)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown message type")
+	msg, err := ParseMessage(line)
+	require.NoError(t, err)
+	assert.Nil(t, msg, "unknown types should return nil message")
+}
+
+func TestParseMessage_UserType(t *testing.T) {
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"session_id":"sess-123"}`)
+
+	msg, err := ParseMessage(line)
+	require.NoError(t, err)
+	assert.Nil(t, msg, "user messages should be silently skipped")
+}
+
+func TestParseMessage_ThinkingType(t *testing.T) {
+	line := []byte(`{"type":"thinking","subtype":"delta","text":"let me think","session_id":"sess-123"}`)
+
+	msg, err := ParseMessage(line)
+	require.NoError(t, err)
+	assert.Nil(t, msg, "thinking messages should be silently skipped")
 }
 
 func TestParseMessage_UnknownSystemSubtype(t *testing.T) {

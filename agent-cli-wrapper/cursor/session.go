@@ -25,15 +25,16 @@ type QueryResult struct {
 
 // Session manages a one-shot interaction with the Cursor Agent CLI.
 type Session struct {
-	events  chan Event
-	process *processManager
-	info    *SessionInfo
-	done    chan struct{}
-	config  SessionConfig
-	prompt  string
-	mu      sync.RWMutex
-	started bool
-	stopped bool
+	events   chan Event
+	process  *processManager
+	info     *SessionInfo
+	done     chan struct{}
+	readDone chan struct{} // closed when readLoop exits
+	config   SessionConfig
+	prompt   string
+	mu       sync.RWMutex
+	started  bool
+	stopped  bool
 }
 
 // NewSession creates a new Cursor session with the given prompt and options.
@@ -44,10 +45,11 @@ func NewSession(prompt string, opts ...SessionOption) *Session {
 	}
 
 	return &Session{
-		prompt: prompt,
-		config: config,
-		events: make(chan Event, config.EventBufferSize),
-		done:   make(chan struct{}),
+		prompt:   prompt,
+		config:   config,
+		events:   make(chan Event, config.EventBufferSize),
+		done:     make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 }
 
@@ -91,6 +93,7 @@ func (s *Session) Info() *SessionInfo {
 }
 
 // Stop gracefully shuts down the session.
+// It signals the readLoop to exit and waits for it to close the events channel.
 func (s *Session) Stop() error {
 	s.mu.Lock()
 	if !s.started || s.stopped {
@@ -106,12 +109,22 @@ func (s *Session) Stop() error {
 		s.process.Stop()
 	}
 
-	close(s.events)
+	// Wait for readLoop to finish and close the events channel.
+	// This avoids a TOCTOU race between Stop closing events and readLoop writing to it.
+	<-s.readDone
 	return nil
 }
 
 // readLoop reads NDJSON lines from the CLI and dispatches events.
+// It owns the events channel — only this goroutine closes it (via defer).
+// When the process exits (EOF) or context is cancelled, the loop exits
+// and the deferred close signals consumers that no more events will arrive.
 func (s *Session) readLoop(ctx context.Context) {
+	defer func() {
+		close(s.events)
+		close(s.readDone)
+	}()
+
 	var textBuilder strings.Builder
 
 	for {
@@ -176,6 +189,10 @@ func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 			},
 			Context: "parse_message",
 		})
+		return
+	}
+	if msg == nil {
+		// Unknown but valid message type (e.g. "user", "thinking") — skip.
 		return
 	}
 

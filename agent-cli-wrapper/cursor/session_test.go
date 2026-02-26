@@ -30,7 +30,6 @@ func fakeSession(t *testing.T, lines []string) []Event {
 
 	reader := ndjson.NewReader(pr)
 	events := make(chan Event, 100)
-	done := make(chan struct{})
 
 	go func() {
 		defer close(events)
@@ -44,6 +43,10 @@ func fakeSession(t *testing.T, lines []string) []Event {
 			msg, err := ParseMessage(line)
 			if err != nil {
 				events <- ErrorEvent{Error: err, Context: "parse"}
+				continue
+			}
+			if msg == nil {
+				// Unknown but valid message type — skip (mirrors session.go behavior).
 				continue
 			}
 
@@ -75,7 +78,6 @@ func fakeSession(t *testing.T, lines []string) []Event {
 			}
 		}
 	}()
-	_ = done
 
 	var collected []Event
 	for evt := range events {

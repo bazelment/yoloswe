@@ -150,6 +150,7 @@ func ParseMessage(line []byte) (Message, error) {
 		return &msg, nil
 
 	default:
-		return nil, fmt.Errorf("unknown message type: %s", raw.Type)
+		// Unknown message types (e.g. "user", "thinking") are silently skipped.
+		return nil, nil
 	}
 }

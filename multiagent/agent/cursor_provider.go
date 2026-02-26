@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -41,6 +40,8 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if cfg.WorkDir != "" {
 		sessionOpts = append(sessionOpts, cursor.WithWorkDir(cfg.WorkDir))
 	}
+	// Cursor requires --trust for non-interactive use
+	sessionOpts = append(sessionOpts, cursor.WithTrust())
 
 	// Create session
 	session := cursor.NewSession(fullPrompt, sessionOpts...)
@@ -49,14 +50,22 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	}
 	defer session.Stop()
 
-	// Single consumer loop: collect result + dispatch to handler/channel
+	// Tee session events: one copy for bridgeEvents (handler + AgentEvent channel),
+	// one copy for local result collection. This avoids duplicating bridgeEvents logic.
+	bridgeCh := make(chan cursor.Event, 100)
+	go bridgeEvents(bridgeCh, cfg.EventHandler, p.events, nil, "", nil)
+
 	var resultText strings.Builder
 	var agentResult *AgentResult
 
 	for evt := range session.Events() {
-		// Forward event to handler and events channel via agentstream bridge
-		p.dispatchEvent(evt, cfg.EventHandler)
+		// Forward to bridge goroutine
+		select {
+		case bridgeCh <- evt:
+		default:
+		}
 
+		// Collect result locally
 		switch e := evt.(type) {
 		case cursor.TextEvent:
 			resultText.WriteString(e.Text)
@@ -69,11 +78,14 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			if e.Error != nil {
 				agentResult.Error = e.Error
 			}
+			close(bridgeCh)
 			return agentResult, nil
 		case cursor.ErrorEvent:
+			close(bridgeCh)
 			return nil, e.Error
 		}
 	}
+	close(bridgeCh)
 
 	// Channel closed without result
 	text := resultText.String()
@@ -81,85 +93,6 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return &AgentResult{Text: text, Success: true}, nil
 	}
 	return nil, cursor.ErrSessionClosed
-}
-
-// dispatchEvent forwards a cursor event to the EventHandler and AgentEvent channel.
-func (p *CursorProvider) dispatchEvent(evt cursor.Event, handler EventHandler) {
-	sev, ok := any(evt).(agentstream.Event)
-	if !ok {
-		return
-	}
-
-	kind := sev.StreamEventKind()
-	if kind == agentstream.KindUnknown {
-		return
-	}
-
-	switch kind {
-	case agentstream.KindText:
-		te := sev.(agentstream.Text)
-		delta := te.StreamDelta()
-		if handler != nil {
-			handler.OnText(delta)
-		}
-		select {
-		case p.events <- TextAgentEvent{Text: delta}:
-		default:
-		}
-
-	case agentstream.KindToolStart:
-		ts := sev.(agentstream.ToolStart)
-		name := ts.StreamToolName()
-		callID := ts.StreamToolCallID()
-		input := ts.StreamToolInput()
-		if handler != nil {
-			handler.OnToolStart(name, callID, input)
-		}
-		select {
-		case p.events <- ToolStartAgentEvent{Name: name, ID: callID, Input: input}:
-		default:
-		}
-
-	case agentstream.KindToolEnd:
-		te := sev.(agentstream.ToolEnd)
-		name := te.StreamToolName()
-		callID := te.StreamToolCallID()
-		input := te.StreamToolInput()
-		result := te.StreamToolResult()
-		isError := te.StreamToolIsError()
-		if handler != nil {
-			handler.OnToolComplete(name, callID, input, result, isError)
-		}
-		select {
-		case p.events <- ToolCompleteAgentEvent{Name: name, ID: callID, Input: input, Result: result, IsError: isError}:
-		default:
-		}
-
-	case agentstream.KindTurnComplete:
-		tc := sev.(agentstream.TurnComplete)
-		if handler != nil {
-			handler.OnTurnComplete(tc.StreamTurnNum(), tc.StreamIsSuccess(), tc.StreamDuration(), tc.StreamCost())
-		}
-		select {
-		case p.events <- TurnCompleteAgentEvent{
-			TurnNumber: tc.StreamTurnNum(),
-			Success:    tc.StreamIsSuccess(),
-			DurationMs: tc.StreamDuration(),
-			CostUSD:    tc.StreamCost(),
-		}:
-		default:
-		}
-
-	case agentstream.KindError:
-		ee := sev.(agentstream.Error)
-		if handler != nil {
-			handler.OnError(ee.StreamErr(), ee.StreamErrorContext())
-		}
-		select {
-		case p.events <- ErrorAgentEvent{Err: ee.StreamErr(), Context: ee.StreamErrorContext()}:
-		default:
-		}
-	}
 }
 
 func (p *CursorProvider) Events() <-chan AgentEvent { return p.events }
