@@ -172,7 +172,11 @@ func (r *Reviewer) Review(ctx context.Context, prompt string) error {
 
 // ReviewWithResult sends a review prompt and returns the result with response text.
 func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*ReviewResult, error) {
-	r.renderer.Status(fmt.Sprintf("Running review with %s (model: %s)...", r.config.BackendType, r.config.Model))
+	model := r.config.Model
+	if model == "" {
+		model = "default"
+	}
+	r.renderer.Status(fmt.Sprintf("Running review with %s (model: %s)...", r.config.BackendType, model))
 	handler := newRendererEventHandler(r.renderer)
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {

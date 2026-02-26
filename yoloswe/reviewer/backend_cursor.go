@@ -68,7 +68,11 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 			}
 		case cursor.ToolCompleteEvent:
 			if handler != nil {
-				handler.OnToolEnd(e.ID, 0, 0)
+				exitCode := 0
+				if e.IsError {
+					exitCode = 1
+				}
+				handler.OnToolEnd(e.ID, exitCode, 0)
 			}
 		case cursor.TurnCompleteEvent:
 			result.ResponseText = responseText.String()
@@ -83,11 +87,11 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		}
 	}
 
-	// Channel closed without result
+	// Channel closed without a TurnCompleteEvent — this is abnormal.
 	result.ResponseText = responseText.String()
+	result.Success = false
 	if result.ResponseText != "" {
-		result.Success = true
-		return result, nil
+		return result, fmt.Errorf("cursor session ended unexpectedly (partial response: %d chars)", len(result.ResponseText))
 	}
 	return nil, fmt.Errorf("cursor session ended without result")
 }

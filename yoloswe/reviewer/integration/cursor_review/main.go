@@ -26,6 +26,14 @@ func main() {
 	timeout := flag.Duration("timeout", 5*time.Minute, "Review timeout")
 	flag.Parse()
 
+	switch reviewer.BackendType(*backend) {
+	case reviewer.BackendCursor, reviewer.BackendCodex:
+		// valid
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown backend %q (supported: cursor, codex)\n", *backend)
+		os.Exit(1)
+	}
+
 	workDir := os.Getenv("WORK_DIR")
 	if workDir == "" {
 		workDir, _ = os.Getwd()
