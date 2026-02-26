@@ -25,6 +25,9 @@ go_library(
 
 go_test(
     name = "acp_test",
-    srcs = ["handlers_test.go"],
+    srcs = [
+        "handlers_test.go",
+        "session_test.go",
+    ],
     embed = [":acp"],
 )

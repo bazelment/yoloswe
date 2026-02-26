@@ -105,6 +105,11 @@ func (pm *processManager) ReadLine() ([]byte, error) {
 		line = line[:len(line)-1]
 	}
 
+	if w := pm.config.ProtocolLogger; w != nil {
+		// Best-effort write; ignore errors to avoid disrupting the read path.
+		_, _ = w.Write(append(append([]byte("<< "), line...), '\n'))
+	}
+
 	return line, nil
 }
 
@@ -120,7 +125,19 @@ func (pm *processManager) WriteJSON(v interface{}) error {
 		return ErrStopping
 	}
 
-	return pm.encoder.Encode(v)
+	if err := pm.encoder.Encode(v); err != nil {
+		return err
+	}
+
+	if w := pm.config.ProtocolLogger; w != nil {
+		// Best-effort: re-encode for logging. Use a separate encoder to avoid
+		// writing to stdin again.
+		if b, err := json.Marshal(v); err == nil {
+			_, _ = w.Write(append(append([]byte(">> "), b...), '\n'))
+		}
+	}
+
+	return nil
 }
 
 // Stop gracefully stops the process.

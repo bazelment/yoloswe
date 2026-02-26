@@ -786,12 +786,20 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
 			}
 
-			if stderrOpt, stderrPath := m.geminiProtocolStderrOption(session.ID); stderrOpt != nil {
-				clientOpts = append(clientOpts, stderrOpt)
+			geminiOpts, geminiLogHint, geminiStderrHint := m.geminiProviderOptions(session.ID)
+			clientOpts = append(clientOpts, geminiOpts...)
+			if geminiLogHint != "" {
 				m.addOutput(session.ID, OutputLine{
 					Timestamp: time.Now(),
 					Type:      OutputTypeStatus,
-					Content:   fmt.Sprintf("Gemini stderr log: %s", stderrPath),
+					Content:   geminiLogHint,
+				})
+			}
+			if geminiStderrHint != "" {
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeStatus,
+					Content:   geminiStderrHint,
 				})
 			}
 
@@ -1522,34 +1530,63 @@ func (m *Manager) codexProviderOptions(sessionID SessionID) ([]codex.ClientOptio
 		fmt.Sprintf("Codex stderr log: %s", stderrLogPath)
 }
 
-func (m *Manager) geminiProtocolStderrOption(sessionID SessionID) (acp.ClientOption, string) {
+func (m *Manager) geminiProviderOptions(sessionID SessionID) ([]acp.ClientOption, string, string) {
 	stderrLogPath, ok := m.protocolLogPath(sessionID, "gemini.stderr.log")
 	if !ok {
-		return nil, ""
+		return nil, "", ""
 	}
-	return acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)), stderrLogPath
+
+	protocolLogPath, _ := m.protocolLogPath(sessionID, "gemini.protocol.jsonl")
+
+	opts := []acp.ClientOption{
+		acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
+	}
+
+	var protocolLogHint string
+	if protocolLogPath != "" {
+		opts = append(opts, acp.WithProtocolLogger(newFileAppendWriter(protocolLogPath)))
+		protocolLogHint = fmt.Sprintf("Gemini protocol log: %s", protocolLogPath)
+	}
+
+	return opts,
+		protocolLogHint,
+		fmt.Sprintf("Gemini stderr log: %s", stderrLogPath)
+}
+
+// fileAppendWriter implements io.Writer by appending to a file.
+type fileAppendWriter struct {
+	path string
+	mu   sync.Mutex
+}
+
+func newFileAppendWriter(path string) *fileAppendWriter {
+	return &fileAppendWriter{path: path}
+}
+
+func (w *fileAppendWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 || strings.TrimSpace(w.path) == "" {
+		return len(p), nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	n, writeErr := f.Write(p)
+	if closeErr := f.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	return n, writeErr
 }
 
 func newFileAppendHandler(path string) func([]byte) {
-	var mu sync.Mutex
+	w := newFileAppendWriter(path)
 	return func(data []byte) {
-		if len(data) == 0 || strings.TrimSpace(path) == "" {
-			return
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			log.Printf("WARNING: failed to open protocol log %q: %v", path, err)
-			return
-		}
-		if _, err := f.Write(data); err != nil {
-			log.Printf("WARNING: failed to write protocol log %q: %v", path, err)
-		}
-		if err := f.Close(); err != nil {
-			log.Printf("WARNING: failed to close protocol log %q: %v", path, err)
+		if _, err := w.Write(data); err != nil {
+			log.Printf("WARNING: failed to write log %q: %v", path, err)
 		}
 	}
 }
