@@ -472,7 +472,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			editor := m.editor
 			toastCmd := m.addToast("Opening "+fileName+" in editor", ToastSuccess)
 			return m, tea.Batch(toastCmd, func() tea.Msg {
-				cmd := exec.Command(editor, filePath)
+				cmd := editorCommand(editor, filePath)
 				err := cmd.Start()
 				return editorResultMsg{err: err}
 			})
@@ -567,7 +567,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open editor for worktree
 		if wt := m.selectedWorktree(); wt != nil {
 			return m, func() tea.Msg {
-				cmd := exec.Command(m.editor, wt.Path)
+				cmd := editorCommand(m.editor, wt.Path)
 				err := cmd.Start()
 				return editorResultMsg{err: err}
 			}
@@ -1922,4 +1922,15 @@ func extractHookWarning(messages []string) string {
 		}
 	}
 	return ""
+}
+
+// editorCommand builds an exec.Cmd from an editor string that may contain
+// flags (e.g. "emacsclient -n" or "code --wait").
+func editorCommand(editor, path string) *exec.Cmd {
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return exec.Command("code", path)
+	}
+	args := append(parts[1:], path)
+	return exec.Command(parts[0], args...)
 }
