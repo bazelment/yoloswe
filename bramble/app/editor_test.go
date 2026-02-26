@@ -33,11 +33,11 @@ func TestShellSplit(t *testing.T) {
 
 func TestEditorCommand(t *testing.T) {
 	tests := []struct {
-		name       string
-		editor     string
-		path       string
-		wantBin    string
-		wantArgs   []string
+		name     string
+		editor   string
+		path     string
+		wantBin  string
+		wantArgs []string
 	}{
 		{
 			name:     "simple editor",

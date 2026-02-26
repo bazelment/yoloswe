@@ -1932,7 +1932,9 @@ func editorCommand(editor, path string) *exec.Cmd {
 	if len(parts) == 0 {
 		return exec.Command("code", path)
 	}
-	args := append(parts[1:], path)
+	args := make([]string, len(parts)-1, len(parts))
+	copy(args, parts[1:])
+	args = append(args, path)
 	return exec.Command(parts[0], args...)
 }
 
