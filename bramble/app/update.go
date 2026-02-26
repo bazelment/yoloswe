@@ -1925,12 +1925,48 @@ func extractHookWarning(messages []string) string {
 }
 
 // editorCommand builds an exec.Cmd from an editor string that may contain
-// flags (e.g. "emacsclient -n" or "code --wait").
+// flags (e.g. "emacsclient -n" or "code --wait"). Quoted tokens are
+// respected so paths with spaces work (e.g. '"/path/to/My Editor" --wait').
 func editorCommand(editor, path string) *exec.Cmd {
-	parts := strings.Fields(editor)
+	parts := shellSplit(editor)
 	if len(parts) == 0 {
 		return exec.Command("code", path)
 	}
 	args := append(parts[1:], path)
 	return exec.Command(parts[0], args...)
+}
+
+// shellSplit splits s into tokens using shell-like quoting rules.
+// Single and double quotes preserve spaces within a token; quotes are
+// stripped from the result. Backslash escaping is not supported.
+func shellSplit(s string) []string {
+	var parts []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	hasToken := false
+
+	for _, r := range s {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+			hasToken = true
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+			hasToken = true
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			if hasToken {
+				parts = append(parts, current.String())
+				current.Reset()
+				hasToken = false
+			}
+		default:
+			current.WriteRune(r)
+			hasToken = true
+		}
+	}
+	if hasToken {
+		parts = append(parts, current.String())
+	}
+	return parts
 }
