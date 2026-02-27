@@ -160,9 +160,8 @@ func (pm *processManager) Start(ctx context.Context) error {
 		}
 		filtered = append(filtered, e)
 	}
-	pm.cmd.Env = append(filtered,
-		"CLAUDE_CODE_ENTRYPOINT=sdk-go",
-	)
+	filtered = append(filtered, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	pm.cmd.Env = filtered
 
 	// Add custom environment variables
 	for k, v := range pm.config.Env {
