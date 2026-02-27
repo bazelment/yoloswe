@@ -45,8 +45,8 @@ type AssistantMessage struct {
 
 // ToolCallMessage represents a tool call event (started or completed).
 // The tool_call field is a map with a single key (the tool name) mapping to the tool call detail.
-// Example: {"type":"tool_call","subtype":"started","call_id":"...","tool_call":{"Read":{"args":{"file_path":"..."}}},"session_id":"..."}
-// Example: {"type":"tool_call","subtype":"completed","call_id":"...","tool_call":{"Read":{"args":{"file_path":"..."},"result":"..."}},"session_id":"..."}
+// Example: {"type":"tool_call","subtype":"started","call_id":"...","tool_call":{"readToolCall":{"args":{"path":"..."}}},"session_id":"..."}
+// Example: {"type":"tool_call","subtype":"completed","call_id":"...","tool_call":{"readToolCall":{"args":{"path":"..."},"result":"..."}},"session_id":"..."}
 type ToolCallMessage struct {
 	Type      string                            `json:"type"`
 	Subtype   string                            `json:"subtype"`

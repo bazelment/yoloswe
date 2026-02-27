@@ -26,12 +26,12 @@ func TestTextEvent_StreamMethods(t *testing.T) {
 }
 
 func TestToolStartEvent_StreamMethods(t *testing.T) {
-	e := ToolStartEvent{ID: "call-1", Name: "Read", Input: map[string]interface{}{"path": "/tmp"}}
+	e := ToolStartEvent{ID: "call-1", Name: "readToolCall", Input: map[string]interface{}{"path": "/tmp"}}
 	if e.StreamEventKind() != agentstream.KindToolStart {
 		t.Errorf("expected KindToolStart, got %v", e.StreamEventKind())
 	}
-	if e.StreamToolName() != "Read" {
-		t.Errorf("expected 'Read', got %q", e.StreamToolName())
+	if e.StreamToolName() != "readToolCall" {
+		t.Errorf("expected 'readToolCall', got %q", e.StreamToolName())
 	}
 	if e.StreamToolCallID() != "call-1" {
 		t.Errorf("expected 'call-1', got %q", e.StreamToolCallID())
@@ -41,7 +41,7 @@ func TestToolStartEvent_StreamMethods(t *testing.T) {
 func TestToolCompleteEvent_StreamMethods(t *testing.T) {
 	e := ToolCompleteEvent{
 		ID:      "call-1",
-		Name:    "Read",
+		Name:    "readToolCall",
 		Input:   map[string]interface{}{"path": "/tmp"},
 		Result:  "file contents",
 		IsError: false,

@@ -41,7 +41,7 @@ func TestParseMessage_Assistant(t *testing.T) {
 }
 
 func TestParseMessage_ToolCallStarted(t *testing.T) {
-	line := []byte(`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":{"Read":{"args":{"file_path":"/tmp/test.go"}}},"session_id":"sess-123"}`)
+	line := []byte(`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":{"readToolCall":{"args":{"path":"/tmp/test.go"}}},"session_id":"sess-123"}`)
 
 	msg, err := ParseMessage(line)
 	require.NoError(t, err)
@@ -53,13 +53,13 @@ func TestParseMessage_ToolCallStarted(t *testing.T) {
 
 	detail, err := ParseToolCallDetail(tcMsg)
 	require.NoError(t, err)
-	assert.Equal(t, "Read", detail.Name)
-	assert.Equal(t, "/tmp/test.go", detail.Args["file_path"])
+	assert.Equal(t, "readToolCall", detail.Name)
+	assert.Equal(t, "/tmp/test.go", detail.Args["path"])
 	assert.Nil(t, detail.Result)
 }
 
 func TestParseMessage_ToolCallCompleted(t *testing.T) {
-	line := []byte(`{"type":"tool_call","subtype":"completed","call_id":"call-1","tool_call":{"Read":{"args":{"file_path":"/tmp/test.go"},"result":"file contents here"}},"session_id":"sess-123"}`)
+	line := []byte(`{"type":"tool_call","subtype":"completed","call_id":"call-1","tool_call":{"readToolCall":{"args":{"path":"/tmp/test.go"},"result":"file contents here"}},"session_id":"sess-123"}`)
 
 	msg, err := ParseMessage(line)
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestParseMessage_ToolCallCompleted(t *testing.T) {
 
 	detail, err := ParseToolCallDetail(tcMsg)
 	require.NoError(t, err)
-	assert.Equal(t, "Read", detail.Name)
+	assert.Equal(t, "readToolCall", detail.Name)
 	assert.Equal(t, "file contents here", detail.Result)
 }
 

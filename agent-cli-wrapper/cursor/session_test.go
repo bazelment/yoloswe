@@ -91,8 +91,8 @@ func TestSession_FullStream(t *testing.T) {
 		`{"type":"system","subtype":"init","session_id":"s1","model":"cursor-fast","cwd":"/tmp","permissionMode":"auto","apiKeySource":"env"}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello "}]},"session_id":"s1"}`,
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"World"}]},"session_id":"s1"}`,
-		`{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"Read":{"args":{"file_path":"/tmp/test.go"}}},"session_id":"s1"}`,
-		`{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"Read":{"args":{"file_path":"/tmp/test.go"},"result":"contents"}},"session_id":"s1"}`,
+		`{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"/tmp/test.go"}}},"session_id":"s1"}`,
+		`{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"/tmp/test.go"},"result":"contents"}},"session_id":"s1"}`,
 		`{"type":"result","subtype":"success","duration_ms":1234,"duration_api_ms":1000,"is_error":false,"result":"done","session_id":"s1"}`,
 	}
 
@@ -121,13 +121,13 @@ func TestSession_FullStream(t *testing.T) {
 	toolStart, ok := events[3].(ToolStartEvent)
 	require.True(t, ok)
 	assert.Equal(t, "c1", toolStart.ID)
-	assert.Equal(t, "Read", toolStart.Name)
+	assert.Equal(t, "readToolCall", toolStart.Name)
 
 	// ToolCompleteEvent
 	toolComplete, ok := events[4].(ToolCompleteEvent)
 	require.True(t, ok)
 	assert.Equal(t, "c1", toolComplete.ID)
-	assert.Equal(t, "Read", toolComplete.Name)
+	assert.Equal(t, "readToolCall", toolComplete.Name)
 	assert.Equal(t, "contents", toolComplete.Result)
 
 	// TurnCompleteEvent

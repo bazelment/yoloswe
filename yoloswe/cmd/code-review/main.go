@@ -1,9 +1,9 @@
-// Binary agent_review runs a one-shot code review using an agent backend.
+// Binary code-review runs a one-shot code review using an agent backend.
 //
 // Usage:
 //
-//	agent_review --backend cursor [--verbose] [--goal "..."]
-//	agent_review --backend codex  [--verbose] [--goal "..."] [--model gpt-5.2-codex]
+//	code-review --backend cursor [--verbose] [--goal "..."]
+//	code-review --backend codex  [--verbose] [--goal "..."] [--model gpt-5.2-codex] [--effort medium]
 package main
 
 import (

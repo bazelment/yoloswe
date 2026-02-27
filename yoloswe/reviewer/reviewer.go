@@ -26,6 +26,7 @@ type Config struct {
 	WorkDir        string
 	Goal           string
 	SessionLogPath string
+	Effort         string // Reasoning effort level for codex (low, medium, high)
 	ApprovalPolicy codex.ApprovalPolicy
 	BackendType    BackendType
 	Verbose        bool
@@ -176,7 +177,12 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	if model == "" {
 		model = "default"
 	}
-	r.renderer.Status(fmt.Sprintf("Running review with %s (model: %s)...", r.config.BackendType, model))
+	status := fmt.Sprintf("Running review with %s (model: %s", r.config.BackendType, model)
+	if r.config.Effort != "" {
+		status += fmt.Sprintf(", effort: %s", r.config.Effort)
+	}
+	status += ")..."
+	r.renderer.Status(status)
 	handler := newRendererEventHandler(r.renderer)
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {

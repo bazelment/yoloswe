@@ -58,7 +58,11 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		}
 	}
 
-	_, err := b.thread.SendMessage(ctx, prompt)
+	var turnOpts []codex.TurnOption
+	if b.config.Effort != "" {
+		turnOpts = append(turnOpts, codex.WithEffort(b.config.Effort))
+	}
+	_, err := b.thread.SendMessage(ctx, prompt, turnOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
