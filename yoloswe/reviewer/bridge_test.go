@@ -261,6 +261,32 @@ func TestBridgeStreamEvents_UnknownEventsSkipped(t *testing.T) {
 	}
 }
 
+func TestBridgeStreamEvents_TurnCompleteFailed(t *testing.T) {
+	handler := &recordingHandler{}
+	events := sendEvents(
+		testTextEvent{delta: "partial"},
+		testTurnCompleteEvent{success: false, durationMs: 42},
+	)
+
+	result, err := bridgeStreamEvents(context.Background(), events, handler, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.success {
+		t.Error("expected success=false")
+	}
+	if result.responseText != "partial" {
+		t.Errorf("responseText = %q, want %q", result.responseText, "partial")
+	}
+	if result.durationMs != 42 {
+		t.Errorf("durationMs = %d, want 42", result.durationMs)
+	}
+	if len(handler.turns) != 1 || handler.turns[0] {
+		t.Error("expected one failed turn complete")
+	}
+}
+
 func TestBridgeStreamEvents_NilHandler(t *testing.T) {
 	events := sendEvents(
 		testTextEvent{delta: "hello"},
