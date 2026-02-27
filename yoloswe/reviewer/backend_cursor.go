@@ -45,10 +45,16 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		return nil, fmt.Errorf("cursor query failed: %w", err)
 	}
 
+	// Use a derived context so that the adapter goroutine is unblocked
+	// when RunPrompt returns early (e.g., on ErrorEvent), preventing
+	// goroutine leaks even if the parent context is still active.
+	adapterCtx, adapterCancel := context.WithCancel(ctx)
+	defer adapterCancel()
+
 	// Wrap handler to format cursor-specific tool display names and
 	// intercept ReadyEvent (which isn't part of agentstream).
 	adapter := &cursorEventAdapter{handler: handler, events: events}
-	bridged, err := bridgeStreamEvents(ctx, adapter.filtered(), handler, "")
+	bridged, err := bridgeStreamEvents(adapterCtx, adapter.filtered(adapterCtx), handler, "")
 	if err != nil {
 		return nil, fmt.Errorf("cursor: %w", err)
 	}
@@ -77,7 +83,9 @@ type cursorEventAdapter struct {
 
 // filtered returns a channel that re-emits cursor events, handling ReadyEvent
 // separately and wrapping ToolStartEvent with formatted display names.
-func (a *cursorEventAdapter) filtered() <-chan cursor.Event {
+// The context is used to unblock sends when the consumer (bridgeStreamEvents)
+// returns early, preventing goroutine leaks.
+func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 	out := make(chan cursor.Event)
 	go func() {
 		defer close(out)
@@ -91,9 +99,17 @@ func (a *cursorEventAdapter) filtered() <-chan cursor.Event {
 			case cursor.ToolStartEvent:
 				// Rewrite tool name for display before the bridge sees it.
 				e.Name = formatCursorToolDisplay(e.Name, e.Input)
-				out <- e
+				select {
+				case out <- e:
+				case <-ctx.Done():
+					return
+				}
 			default:
-				out <- ev
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
