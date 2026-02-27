@@ -22,8 +22,12 @@ go_test(
     name = "reviewer_test",
     srcs = [
         "backend_cursor_test.go",
+        "bridge_test.go",
         "reviewer_test.go",
     ],
     embed = [":reviewer"],
-    deps = ["//agent-cli-wrapper/codex"],
+    deps = [
+        "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/codex",
+    ],
 )

@@ -2,7 +2,6 @@ package reviewer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -179,14 +178,3 @@ func shortPath(p string) string {
 	return ".../" + parent + "/" + file
 }
 
-// serializeToolInput serializes tool input to a JSON string for display.
-func serializeToolInput(input map[string]interface{}) string {
-	if len(input) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(input)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}

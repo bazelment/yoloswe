@@ -127,24 +127,3 @@ func TestShortPath(t *testing.T) {
 		})
 	}
 }
-
-func TestSerializeToolInput(t *testing.T) {
-	tests := []struct {
-		name  string
-		input map[string]interface{}
-		want  string
-	}{
-		{"nil input", nil, ""},
-		{"empty input", map[string]interface{}{}, ""},
-		{"single key", map[string]interface{}{"path": "/foo"}, `{"path":"/foo"}`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := serializeToolInput(tt.input)
-			if got != tt.want {
-				t.Errorf("serializeToolInput(%v) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
