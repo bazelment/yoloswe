@@ -1,0 +1,22 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# Integration tests for protocol trace capture.
+# Requires Claude CLI in PATH and valid API key.
+# Run with: bazel test //agent-cli-wrapper/protocol/integration:integration_test --test_timeout=300
+go_test(
+    name = "integration_test",
+    srcs = [
+        "capture_test.go",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/protocol",
+    ],
+)

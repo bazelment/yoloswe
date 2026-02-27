@@ -336,7 +336,7 @@ func acpEventToAgentEvent(ev acp.Event) AgentEvent {
 		return nil
 	case acp.TurnCompleteEvent:
 		return TurnCompleteAgentEvent{
-			TurnNumber: 1,
+			TurnNumber: e.TurnNumber,
 			Success:    e.Success,
 			DurationMs: e.DurationMs,
 		}

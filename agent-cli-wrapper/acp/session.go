@@ -18,6 +18,7 @@ type Session struct {
 	text            strings.Builder
 	thinking        strings.Builder
 	mu              sync.Mutex
+	turnCount       int  // incremented each time a prompt completes
 	sawToolActivity bool // set when tool_call or tool_call_update is received
 }
 
@@ -157,6 +158,8 @@ func (s *Session) handleUpdate(update *SessionUpdate) {
 // event. Used by both the normal success path and the recovery path.
 func (s *Session) completeTurn(stopReason string, durationMs int64) *TurnResult {
 	s.mu.Lock()
+	s.turnCount++
+	turnNum := s.turnCount
 	result := &TurnResult{
 		FullText:   s.text.String(),
 		Thinking:   s.thinking.String(),
@@ -175,6 +178,7 @@ func (s *Session) completeTurn(stopReason string, durationMs int64) *TurnResult 
 		Thinking:   result.Thinking,
 		StopReason: result.StopReason,
 		DurationMs: durationMs,
+		TurnNumber: turnNum,
 		Success:    result.Success,
 	})
 

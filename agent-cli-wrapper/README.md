@@ -56,6 +56,31 @@ All interface method names use a `Stream` prefix (e.g., `StreamDelta()`,
 The optional `Scoped` interface enables per-scope event filtering (e.g.,
 codex thread ID filtering) without provider-specific code in the bridge.
 
+### Non-bridged events
+
+The following SDK events do **not** implement `agentstream.Event` and are
+silently skipped by the generic bridge. Direct SDK consumers can still
+type-switch on them.
+
+| Package | Event type | Why not bridged |
+|---------|-----------|----------------|
+| `claude` | `ReadyEvent` | Session readiness; provider handles internally before returning |
+| `claude` | `ToolProgressEvent` | Partial tool progress for display; tools use `ToolStart`/`ToolEnd` |
+| `claude` | `CLIToolResultEvent` | CLI-specific tool result detail |
+| `claude` | `StateChangeEvent` | Session lifecycle metadata |
+| `acp` | `ClientReadyEvent` | ACP client init; provider handles internally |
+| `acp` | `SessionCreatedEvent` | Session lifecycle, not agent output |
+| `acp` | `PlanUpdateEvent` | Agent planning metadata; no cross-provider equivalent |
+| `codex` | `ClientReadyEvent` | Codex client init; provider handles internally |
+| `codex` | `ThreadStartedEvent` | Thread lifecycle |
+| `codex` | `ThreadReadyEvent` | Thread-level readiness; `Start()` waits for this internally |
+| `codex` | `TurnStartedEvent` | Turn lifecycle bookend (bridge uses `TurnComplete` only) |
+| `codex` | `ItemStartedEvent` | Item lifecycle |
+| `codex` | `ItemCompletedEvent` | Item lifecycle |
+| `codex` | `TokenUsageEvent` | Token usage stats; no cross-provider equivalent yet |
+| `codex` | `CommandOutputEvent` | Streaming shell output; no cross-provider equivalent |
+| `codex` | `StateChangeEvent` | Session lifecycle metadata |
+
 ### Direct SDK consumers
 
 The `agentstream` interfaces are additive. SDK channels still return their

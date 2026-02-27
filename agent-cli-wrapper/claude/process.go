@@ -148,8 +148,19 @@ func (pm *processManager) Start(ctx context.Context) error {
 	// Create command
 	pm.cmd = exec.CommandContext(ctx, cliPath, args...)
 
-	// Set environment variables (matching Python SDK)
-	pm.cmd.Env = append(os.Environ(),
+	// Set environment variables (matching Python SDK).
+	// Strip CLAUDECODE to allow SDK invocations from within Claude Code sessions.
+	// The CLI refuses to start when CLAUDECODE is set (nesting guard), but SDK
+	// subprocess invocations are safe since they use --input-format stream-json.
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if len(e) >= 10 && e[:10] == "CLAUDECODE" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	pm.cmd.Env = append(filtered,
 		"CLAUDE_CODE_ENTRYPOINT=sdk-go",
 	)
 

@@ -8,28 +8,6 @@ import (
 	"testing"
 )
 
-// TraceEntry represents a single entry in a trace file.
-// The trace files wrap protocol messages with metadata.
-type TraceEntry struct {
-	ID         string          `json:"id"`
-	Timestamp  string          `json:"timestamp"`
-	Direction  string          `json:"direction"`
-	Message    json.RawMessage `json:"message"`
-	TurnNumber int             `json:"turnNumber"`
-}
-
-// parseTraceEntry parses a trace entry and extracts the inner message.
-func parseTraceEntry(line []byte) (Message, error) {
-	var entry TraceEntry
-	if err := json.Unmarshal(line, &entry); err != nil {
-		// Try parsing as raw message (in case it's not wrapped)
-		return ParseMessage(line)
-	}
-
-	// Parse the inner message
-	return ParseMessage(entry.Message)
-}
-
 // TestParseTraceFromCLI parses all messages from a real CLI trace file.
 // This validates that our protocol types can handle real-world data.
 func TestParseTraceFromCLI(t *testing.T) {
@@ -63,7 +41,7 @@ func TestParseTraceFromCLI(t *testing.T) {
 		lineNum++
 		line := scanner.Bytes()
 
-		msg, err := parseTraceEntry(line)
+		msg, err := ParseTraceEntry(line)
 		if err != nil {
 			parseErrors++
 			t.Logf("Line %d: parse error: %v", lineNum, err)
@@ -145,31 +123,40 @@ func TestParseTraceToCliMessages(t *testing.T) {
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
 
+	var userMsgCount, controlReqCount int
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Bytes()
 
-		msg, err := parseTraceEntry(line)
+		msg, err := ParseTraceEntry(line)
 		if err != nil {
 			t.Errorf("Line %d: failed to parse: %v", lineNum, err)
 			continue
 		}
 
-		// Messages to CLI are user messages
-		userMsg, ok := msg.(UserMessage)
-		if !ok {
-			t.Errorf("Line %d: expected UserMessage, got %T", lineNum, msg)
-			continue
+		// Messages sent to CLI are user messages or control requests (e.g., initialize)
+		switch m := msg.(type) {
+		case UserMessage:
+			userMsgCount++
+			t.Logf("Line %d: user message role=%s", lineNum, m.Message.Role)
+		case ControlRequest:
+			controlReqCount++
+			t.Logf("Line %d: control request id=%s", lineNum, m.RequestID)
+		case ControlResponse:
+			t.Logf("Line %d: control response", lineNum)
+		default:
+			t.Errorf("Line %d: unexpected message type sent to CLI: %T", lineNum, msg)
 		}
-
-		t.Logf("Line %d: user message role=%s", lineNum, userMsg.Message.Role)
 	}
 
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("Scanner error: %v", err)
 	}
 
-	t.Logf("Parsed %d messages to CLI", lineNum)
+	t.Logf("Parsed %d messages to CLI (%d user, %d control requests)", lineNum, userMsgCount, controlReqCount)
+	if userMsgCount == 0 {
+		t.Error("Expected at least one user message")
+	}
 }
 
 // TestParseStreamEventsFromTrace validates all stream event types.
@@ -192,7 +179,7 @@ func TestParseStreamEventsFromTrace(t *testing.T) {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 
-		msg, err := parseTraceEntry(line)
+		msg, err := ParseTraceEntry(line)
 		if err != nil {
 			continue
 		}
