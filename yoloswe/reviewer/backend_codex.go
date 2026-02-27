@@ -3,7 +3,6 @@ package reviewer
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
@@ -39,7 +38,7 @@ func (b *codexBackend) Stop() error {
 }
 
 func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
-	// Create a new thread if none exists, or reuse for follow-ups
+	// Create a new thread if none exists, or reuse for follow-ups.
 	if b.thread == nil {
 		thread, err := b.client.CreateThread(ctx,
 			codex.WithModel(b.config.Model),
@@ -67,65 +66,22 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
-	result := &ReviewResult{}
-	var responseText strings.Builder
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case event, ok := <-b.client.Events():
-			if !ok {
-				return nil, fmt.Errorf("event channel closed unexpectedly")
-			}
-
-			switch e := event.(type) {
-			case codex.TextDeltaEvent:
-				if e.ThreadID == b.thread.ID() {
-					if handler != nil {
-						handler.OnText(e.Delta)
-					}
-					responseText.WriteString(e.Delta)
-				}
-			case codex.ReasoningDeltaEvent:
-				if e.ThreadID == b.thread.ID() {
-					if handler != nil {
-						handler.OnReasoning(e.Delta)
-					}
-				}
-			case codex.CommandStartEvent:
-				if e.ThreadID == b.thread.ID() {
-					if handler != nil {
-						handler.OnToolStart(e.CallID, e.ParsedCmd, "")
-					}
-				}
-			case codex.CommandOutputEvent:
-				if e.ThreadID == b.thread.ID() {
-					if handler != nil {
-						handler.OnToolOutput(e.CallID, e.Chunk)
-					}
-				}
-			case codex.CommandEndEvent:
-				if e.ThreadID == b.thread.ID() {
-					if handler != nil {
-						handler.OnToolEnd(e.CallID, e.ExitCode, e.DurationMs)
-					}
-				}
-			case codex.TurnCompletedEvent:
-				if e.ThreadID == b.thread.ID() {
-					result.ResponseText = responseText.String()
-					result.Success = e.Success
-					result.DurationMs = e.DurationMs
-					result.InputTokens = e.Usage.InputTokens
-					result.OutputTokens = e.Usage.OutputTokens
-					return result, nil
-				}
-			case codex.ErrorEvent:
-				if handler != nil {
-					handler.OnError(e.Error, e.Context)
-				}
-				return nil, fmt.Errorf("error: %v", e.Error)
-			}
-		}
+	bridged, err := bridgeStreamEvents(ctx, b.client.Events(), handler, b.thread.ID())
+	if err != nil {
+		return nil, fmt.Errorf("codex: %w", err)
 	}
+
+	result := &ReviewResult{
+		ResponseText: bridged.responseText,
+		Success:      bridged.success,
+		DurationMs:   bridged.durationMs,
+	}
+
+	// Extract codex-specific token usage from the raw turn event.
+	if tc, ok := bridged.turnEvent.(codex.TurnCompletedEvent); ok {
+		result.InputTokens = tc.Usage.InputTokens
+		result.OutputTokens = tc.Usage.OutputTokens
+	}
+
+	return result, nil
 }

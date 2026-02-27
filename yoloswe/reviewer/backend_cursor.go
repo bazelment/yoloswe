@@ -46,73 +46,69 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		return nil, fmt.Errorf("cursor query failed: %w", err)
 	}
 
-	result := &ReviewResult{}
-	var responseText strings.Builder
+	// Wrap handler to format cursor-specific tool display names and
+	// intercept ReadyEvent (which isn't part of agentstream).
+	adapter := &cursorEventAdapter{handler: handler, events: events}
+	bridged, err := bridgeStreamEvents(ctx, adapter.filtered(), handler, "")
+	if err != nil {
+		return nil, fmt.Errorf("cursor: %w", err)
+	}
 
-	for event := range events {
-		switch e := event.(type) {
-		case cursor.ReadyEvent:
-			if handler != nil {
-				handler.OnSessionInfo(e.SessionID, e.Model)
-			}
-		case cursor.TextEvent:
-			if handler != nil {
-				handler.OnText(e.Text)
-			}
-			responseText.WriteString(e.Text)
-		case cursor.ToolStartEvent:
-			if handler != nil {
-				displayName := formatCursorToolDisplay(e.Name, e.Input)
-				inputStr := serializeToolInput(e.Input)
-				handler.OnToolStart(e.ID, displayName, inputStr)
-			}
-		case cursor.ToolCompleteEvent:
-			if handler != nil {
-				exitCode := 0
-				if e.IsError {
-					exitCode = 1
-				}
-				handler.OnToolEnd(e.ID, exitCode, 0)
-			}
-		case cursor.TurnCompleteEvent:
-			result.ResponseText = responseText.String()
-			result.Success = e.Success
-			result.DurationMs = e.DurationMs
-			if e.Error != nil {
-				if handler != nil {
-					handler.OnError(e.Error, "turn_complete")
-				}
-				return nil, fmt.Errorf("cursor turn failed: %w", e.Error)
-			}
-			return result, nil
-		case cursor.ErrorEvent:
-			if handler != nil {
-				handler.OnError(e.Error, e.Context)
-			}
-			return nil, fmt.Errorf("cursor error: %w", e.Error)
+	// Check for turn-level errors (TurnCompleteEvent.Error).
+	if tc, ok := bridged.turnEvent.(cursor.TurnCompleteEvent); ok && tc.Error != nil {
+		if handler != nil {
+			handler.OnError(tc.Error, "turn_complete")
 		}
+		return nil, fmt.Errorf("cursor turn failed: %w", tc.Error)
 	}
 
-	// Channel closed without a TurnCompleteEvent — this is abnormal.
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	result.ResponseText = responseText.String()
-	result.Success = false
-	if result.ResponseText != "" {
-		return nil, fmt.Errorf("cursor session ended unexpectedly (partial response: %d chars)", len(result.ResponseText))
-	}
-	return nil, fmt.Errorf("cursor session ended without result")
+	return &ReviewResult{
+		ResponseText: bridged.responseText,
+		Success:      bridged.success,
+		DurationMs:   bridged.durationMs,
+	}, nil
+}
+
+// cursorEventAdapter filters cursor events, handling ReadyEvent out-of-band
+// and formatting tool names before they reach the bridge.
+type cursorEventAdapter struct {
+	handler EventHandler
+	events  <-chan cursor.Event
+}
+
+// filtered returns a channel that re-emits cursor events, handling ReadyEvent
+// separately and wrapping ToolStartEvent with formatted display names.
+func (a *cursorEventAdapter) filtered() <-chan cursor.Event {
+	out := make(chan cursor.Event)
+	go func() {
+		defer close(out)
+		for ev := range a.events {
+			switch e := ev.(type) {
+			case cursor.ReadyEvent:
+				// ReadyEvent doesn't implement agentstream.Event; handle directly.
+				if a.handler != nil {
+					a.handler.OnSessionInfo(e.SessionID, e.Model)
+				}
+			case cursor.ToolStartEvent:
+				// Rewrite tool name for display before the bridge sees it.
+				e.Name = formatCursorToolDisplay(e.Name, e.Input)
+				out <- e
+			default:
+				out <- ev
+			}
+		}
+	}()
+	return out
 }
 
 // cursorToolNames maps Cursor tool call names to short display names.
 var cursorToolNames = map[string]string{
-	"readToolCall":       "read",
-	"shellToolCall":      "shell",
-	"globToolCall":       "glob",
-	"grepToolCall":       "grep",
-	"editToolCall":       "edit",
-	"writeToolCall":      "write",
+	"readToolCall":        "read",
+	"shellToolCall":       "shell",
+	"globToolCall":        "glob",
+	"grepToolCall":        "grep",
+	"editToolCall":        "edit",
+	"writeToolCall":       "write",
 	"updateTodosToolCall": "updateTodos",
 }
 

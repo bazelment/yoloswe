@@ -11,6 +11,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/yoloswe/reviewer",
     visibility = ["//visibility:public"],
     deps = [
+        "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/codex/render",
         "//agent-cli-wrapper/cursor",
