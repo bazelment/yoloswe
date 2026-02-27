@@ -78,20 +78,29 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 			result.ResponseText = responseText.String()
 			result.Success = e.Success
 			result.DurationMs = e.DurationMs
+			if e.Error != nil {
+				if handler != nil {
+					handler.OnError(e.Error, "turn_complete")
+				}
+				return nil, fmt.Errorf("cursor turn failed: %w", e.Error)
+			}
 			return result, nil
 		case cursor.ErrorEvent:
 			if handler != nil {
 				handler.OnError(e.Error, e.Context)
 			}
-			return nil, fmt.Errorf("cursor error: %v", e.Error)
+			return nil, fmt.Errorf("cursor error: %w", e.Error)
 		}
 	}
 
 	// Channel closed without a TurnCompleteEvent — this is abnormal.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	result.ResponseText = responseText.String()
 	result.Success = false
 	if result.ResponseText != "" {
-		return result, fmt.Errorf("cursor session ended unexpectedly (partial response: %d chars)", len(result.ResponseText))
+		return nil, fmt.Errorf("cursor session ended unexpectedly (partial response: %d chars)", len(result.ResponseText))
 	}
 	return nil, fmt.Errorf("cursor session ended without result")
 }
