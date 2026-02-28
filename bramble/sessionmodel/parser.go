@@ -131,13 +131,15 @@ func (p *MessageParser) handleAssistant(msg protocol.AssistantMessage) {
 
 func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 	// String content is the initial user prompt (common in raw JSONL).
-	// Capture it so replay can extract the prompt from OutputTypeText lines.
+	// Mark it with IsUserPrompt so callers can distinguish user prompts from
+	// assistant text — both use OutputTypeText.
 	if s, ok := msg.Message.Content.AsString(); ok {
 		if s != "" {
 			p.model.AppendOutput(OutputLine{
-				Timestamp: time.Now(),
-				Type:      OutputTypeText,
-				Content:   s,
+				Timestamp:    time.Now(),
+				Type:         OutputTypeText,
+				Content:      s,
+				IsUserPrompt: true,
 			})
 		}
 		return

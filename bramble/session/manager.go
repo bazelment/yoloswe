@@ -1476,15 +1476,17 @@ func (m *Manager) AddOutputLine(sessionID SessionID, line OutputLine) {
 
 // InitOutputBuffer initializes the output buffer for a session (for testing).
 func (m *Manager) InitOutputBuffer(sessionID SessionID) {
-	m.outputsMu.Lock()
-	m.outputs[sessionID] = make([]OutputLine, 0)
-	m.outputsMu.Unlock()
-
+	// Acquire mu before outputsMu to respect the documented lock ordering:
+	// mu > outputsMu > followUpChansMu.
 	m.mu.Lock()
 	if _, ok := m.models[sessionID]; !ok {
 		m.models[sessionID] = sessionmodel.NewSessionModel(1000)
 	}
 	m.mu.Unlock()
+
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0)
+	m.outputsMu.Unlock()
 }
 
 // GetSessionModel returns the SessionModel for a session.

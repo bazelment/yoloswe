@@ -27,16 +27,25 @@ func parseRawJSONL(path string) (*Result, error) {
 	}, nil
 }
 
-// extractPrompt finds the first user-visible text content for display.
+// extractPrompt finds the user's initial prompt for display.
+// It prefers lines explicitly marked as user prompts (IsUserPrompt), falling
+// back to the first text line if none are found.
 func extractPrompt(lines []session.OutputLine) string {
+	fallback := ""
 	for _, line := range lines {
-		if line.Type == session.OutputTypeText && line.Content != "" {
-			s := line.Content
-			if len(s) > 200 {
-				s = s[:200] + "..."
-			}
+		if line.Type != session.OutputTypeText || line.Content == "" {
+			continue
+		}
+		s := line.Content
+		if len(s) > 200 {
+			s = s[:200] + "..."
+		}
+		if line.IsUserPrompt {
 			return s
 		}
+		if fallback == "" {
+			fallback = s
+		}
 	}
-	return ""
+	return fallback
 }

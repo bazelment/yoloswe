@@ -499,17 +499,21 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 
 	case session.OutputTypePlanReady:
 		header := s.Dim.Render("  " + strings.Repeat("═", 20) + " Plan Ready " + strings.Repeat("═", 20))
-		rendered := ""
-		if m.mdRenderer != nil && line.Content != "" {
-			r, err := m.mdRenderer.Render(line.Content)
-			if err == nil {
-				rendered = strings.TrimRight(r, "\n")
+		if line.Content == "" {
+			formatted = header
+		} else {
+			rendered := ""
+			if m.mdRenderer != nil {
+				r, err := m.mdRenderer.Render(line.Content)
+				if err == nil {
+					rendered = strings.TrimRight(r, "\n")
+				}
 			}
+			if rendered == "" {
+				rendered = "  " + line.Content
+			}
+			formatted = header + "\n" + rendered
 		}
-		if rendered == "" {
-			rendered = "  " + line.Content
-		}
-		formatted = header + "\n" + rendered
 
 	case session.OutputTypeText:
 		formatted = renderTextContent(line.Content, m.mdRenderer, "  ")

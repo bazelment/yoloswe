@@ -51,6 +51,10 @@ type OutputLine struct {
 	CostUSD    float64 `json:"cost_usd,omitempty"`
 	DurationMs int64   `json:"duration_ms,omitempty"`
 	IsError    bool    `json:"is_error,omitempty"`
+	// IsUserPrompt is true for OutputTypeText lines that originate from the
+	// user's initial message (string-content UserMessage). This distinguishes
+	// user prompts from assistant text, both of which use OutputTypeText.
+	IsUserPrompt bool `json:"is_user_prompt,omitempty"`
 }
 
 // DeepCopyOutputLine returns a deep copy of an OutputLine, cloning mutable

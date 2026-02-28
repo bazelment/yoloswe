@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 )
 
@@ -26,8 +27,10 @@ func LoadFromRawJSONL(path string) (*SessionModel, error) {
 	scanner.Buffer(buf, 10*1024*1024) // 10 MB max line
 
 	var envelopeSessionID string
+	lineNum := 0
 
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -35,7 +38,8 @@ func LoadFromRawJSONL(path string) (*SessionModel, error) {
 
 		msg, meta, err := FromRawJSONL(line)
 		if err != nil {
-			continue // skip unparseable lines
+			slog.Debug("skipping unparseable JSONL line", "path", path, "line", lineNum, "error", err)
+			continue
 		}
 
 		// Vocabulary messages go through the parser.
