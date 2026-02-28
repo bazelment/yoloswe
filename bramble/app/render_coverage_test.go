@@ -203,6 +203,11 @@ func TestRenderCoverage_AllOutputTypes_ViewPath(t *testing.T) {
 			line:     session.OutputLine{Type: session.OutputTypePlanReady, Content: "# My Plan\n\n- Step 1\n- Step 2"},
 			contains: "Plan Ready",
 		},
+		{
+			name:     "plan_ready empty",
+			line:     session.OutputLine{Type: session.OutputTypePlanReady, Content: ""},
+			contains: "Plan Ready",
+		},
 	}
 
 	for _, tc := range tests {

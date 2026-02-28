@@ -27,6 +27,9 @@ func (b *OutputBuffer) Append(line OutputLine) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if len(b.lines) >= b.max {
+		// Zero the slot before reslicing so the GC can reclaim pointer-bearing
+		// fields (ToolResult, ToolInput) in the evicted element.
+		b.lines[0] = OutputLine{}
 		b.lines = append(b.lines[1:], line)
 	} else {
 		b.lines = append(b.lines, line)
@@ -114,6 +117,9 @@ func (b *OutputBuffer) Len() int {
 // appendLocked appends a line while already holding b.mu.
 func (b *OutputBuffer) appendLocked(line OutputLine) {
 	if len(b.lines) >= b.max {
+		// Zero the slot before reslicing so the GC can reclaim pointer-bearing
+		// fields (ToolResult, ToolInput) in the evicted element.
+		b.lines[0] = OutputLine{}
 		b.lines = append(b.lines[1:], line)
 	} else {
 		b.lines = append(b.lines, line)
