@@ -186,9 +186,21 @@ func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) s
 		}
 
 	case session.OutputTypeTurnEnd:
-		// Turn summary with cost
-		turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f) ───", line.TurnNumber, line.CostUSD)
+		// Turn summary with cost and duration
+		turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f)", line.TurnNumber, line.CostUSD)
+		if line.DurationMs > 0 {
+			turnInfo += fmt.Sprintf(" %.1fs", float64(line.DurationMs)/1000)
+		}
+		turnInfo += " ───"
 		formatted = s.Dim.Render(turnInfo)
+
+	case session.OutputTypePlanReady:
+		header := s.Dim.Render(strings.Repeat("═", 20) + " Plan Ready " + strings.Repeat("═", 20))
+		if line.Content != "" {
+			formatted = header + "\n" + line.Content
+		} else {
+			formatted = header
+		}
 
 	case session.OutputTypeStatus:
 		formatted = s.Dim.Render("→ " + line.Content)
@@ -197,8 +209,8 @@ func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) s
 		formatted = line.Content
 	}
 
-	// Truncate if needed (skip for multi-line content: markdown text and thinking)
-	if line.Type != session.OutputTypeText && line.Type != session.OutputTypeThinking && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
+	// Truncate if needed (skip for multi-line content: markdown text, thinking, plan)
+	if line.Type != session.OutputTypeText && line.Type != session.OutputTypePlanReady && line.Type != session.OutputTypeThinking && runewidth.StringWidth(stripAnsi(formatted)) > width-2 {
 		formatted = truncateVisual(formatted, width-2)
 	}
 

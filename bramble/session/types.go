@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
@@ -46,30 +47,49 @@ func NextModel(currentID string) AgentModel {
 	return agent.AllModels[0]
 }
 
+// --- Type aliases from sessionmodel (canonical definitions live there) ------
+
 // SessionStatus represents the lifecycle state of a session.
-type SessionStatus string
-
-const (
-	StatusPending   SessionStatus = "pending"
-	StatusRunning   SessionStatus = "running"
-	StatusIdle      SessionStatus = "idle" // Waiting for follow-up input
-	StatusCompleted SessionStatus = "completed"
-	StatusFailed    SessionStatus = "failed"
-	StatusStopped   SessionStatus = "stopped"
-)
-
-// IsTerminal returns true if the status is a terminal state.
-func (s SessionStatus) IsTerminal() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusStopped
-}
-
-// CanAcceptInput returns true if the session can accept user input.
-func (s SessionStatus) CanAcceptInput() bool {
-	return s == StatusIdle
-}
+type SessionStatus = sessionmodel.SessionStatus
 
 // SessionID is a unique identifier for a session.
-type SessionID string
+type SessionID = sessionmodel.SessionID
+
+// ToolState represents the execution state of a tool.
+type ToolState = sessionmodel.ToolState
+
+// OutputLine represents a line of session output for display.
+type OutputLine = sessionmodel.OutputLine
+
+// OutputLineType categorises output lines.
+type OutputLineType = sessionmodel.OutputLineType
+
+// Re-export constants so existing callers don't need to change imports.
+const (
+	StatusPending   = sessionmodel.StatusPending
+	StatusRunning   = sessionmodel.StatusRunning
+	StatusIdle      = sessionmodel.StatusIdle
+	StatusCompleted = sessionmodel.StatusCompleted
+	StatusFailed    = sessionmodel.StatusFailed
+	StatusStopped   = sessionmodel.StatusStopped
+
+	ToolStateRunning  = sessionmodel.ToolStateRunning
+	ToolStateComplete = sessionmodel.ToolStateComplete
+	ToolStateError    = sessionmodel.ToolStateError
+
+	OutputTypeText       = sessionmodel.OutputTypeText
+	OutputTypeThinking   = sessionmodel.OutputTypeThinking
+	OutputTypeTool       = sessionmodel.OutputTypeTool
+	OutputTypeToolStart  = sessionmodel.OutputTypeToolStart
+	OutputTypeToolResult = sessionmodel.OutputTypeToolResult
+	OutputTypeError      = sessionmodel.OutputTypeError
+	OutputTypeStatus     = sessionmodel.OutputTypeStatus
+	OutputTypeTurnEnd    = sessionmodel.OutputTypeTurnEnd
+	OutputTypePlanReady  = sessionmodel.OutputTypePlanReady
+)
+
+// DeepCopyOutputLine returns a deep copy of an OutputLine.
+var DeepCopyOutputLine = sessionmodel.DeepCopyOutputLine
 
 // Session represents a single plan or builder session.
 type Session struct {
@@ -214,63 +234,6 @@ func (s *Session) ToInfo() SessionInfo {
 	return info
 }
 
-// ToolState represents the execution state of a tool.
-type ToolState string
-
-const (
-	ToolStateRunning  ToolState = "running"
-	ToolStateComplete ToolState = "complete"
-	ToolStateError    ToolState = "error"
-)
-
-// OutputLine represents a line of session output for display.
-type OutputLine struct {
-	StartTime  time.Time `json:"start_time,omitempty"`
-	Timestamp  time.Time
-	ToolResult interface{}            `json:"tool_result,omitempty"`
-	ToolInput  map[string]interface{} `json:"tool_input,omitempty"`
-	ToolName   string                 `json:"tool_name,omitempty"`
-	ToolID     string                 `json:"tool_id,omitempty"`
-	Content    string
-	ToolState  ToolState `json:"tool_state,omitempty"`
-	Type       OutputLineType
-	TurnNumber int     `json:"turn_number,omitempty"`
-	CostUSD    float64 `json:"cost_usd,omitempty"`
-	DurationMs int64   `json:"duration_ms,omitempty"`
-	IsError    bool    `json:"is_error,omitempty"`
-}
-
-// OutputLineType categorizes output lines.
-type OutputLineType string
-
-const (
-	OutputTypeText       OutputLineType = "text"
-	OutputTypeThinking   OutputLineType = "thinking"
-	OutputTypeTool       OutputLineType = "tool"       // Legacy - kept for backward compat
-	OutputTypeToolStart  OutputLineType = "tool_start" // Tool invocation beginning
-	OutputTypeToolResult OutputLineType = "tool_result"
-	OutputTypeError      OutputLineType = "error"
-	OutputTypeStatus     OutputLineType = "status"
-	OutputTypeTurnEnd    OutputLineType = "turn_end"
-	OutputTypePlanReady  OutputLineType = "plan_ready" // Plan file content for rendering
-)
-
-// deepCopyOutputLine returns a deep copy of an OutputLine, cloning mutable
-// fields (ToolInput map, ToolResult) so that the caller's copy is independent.
-func deepCopyOutputLine(line OutputLine) OutputLine {
-	if line.ToolInput != nil {
-		newInput := make(map[string]interface{}, len(line.ToolInput))
-		for k, v := range line.ToolInput {
-			newInput[k] = v
-		}
-		line.ToolInput = newInput
-	}
-	// ToolResult is an interface{} — typically a string or JSON-decoded value.
-	// A shallow copy is sufficient for immutable types; map values are not
-	// mutated after construction so this is safe in practice.
-	return line
-}
-
 // AppendStreamingDelta appends a new streaming delta while removing duplicated
 // overlap between the end of the existing text and the start of the delta.
 // This is used to accumulate streaming text/thinking deltas into a single
@@ -306,3 +269,5 @@ type SessionStateChangeEvent struct {
 	OldStatus SessionStatus
 	NewStatus SessionStatus
 }
+
+

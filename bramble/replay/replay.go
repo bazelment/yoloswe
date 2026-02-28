@@ -16,8 +16,9 @@ import (
 type Format string
 
 const (
-	FormatClaude Format = "claude"
-	FormatCodex  Format = "codex"
+	FormatClaude  Format = "claude"
+	FormatCodex   Format = "codex"
+	FormatRawJSONL Format = "raw_jsonl" // ~/.claude/projects/ native format
 )
 
 // Result holds the parsed output from any session log format.
@@ -40,6 +41,8 @@ func Parse(path string) (*Result, error) {
 		return parseClaudeLog(path)
 	case FormatCodex:
 		return parseCodexLog(path)
+	case FormatRawJSONL:
+		return parseRawJSONL(path)
 	default:
 		return nil, fmt.Errorf("unsupported log format: %q", format)
 	}
@@ -86,6 +89,23 @@ func DetectFormat(path string) (Format, error) {
 		if json.Unmarshal(line, &claudeCheck) == nil &&
 			(claudeCheck.Direction == "sent" || claudeCheck.Direction == "received") {
 			return FormatClaude, nil
+		}
+
+		// Check for raw JSONL (~/.claude/projects/) — has known envelope types.
+		// The first line is often file-history-snapshot (no sessionId),
+		// so check the type field alone.
+		var rawCheck struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &rawCheck) == nil {
+			switch rawCheck.Type {
+			case "file-history-snapshot", "queue-operation", "pr-link":
+				return FormatRawJSONL, nil
+			case "user", "assistant", "system", "progress":
+				// These also appear in SDK recorder format, but SDK recorder
+				// lines have "direction" which we already checked above.
+				return FormatRawJSONL, nil
+			}
 		}
 	}
 

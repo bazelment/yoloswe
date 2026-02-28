@@ -7,6 +7,7 @@ go_library(
         "codex.go",
         "compact.go",
         "helpers.go",
+        "raw_jsonl.go",
         "replay.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/replay",
@@ -14,6 +15,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/codex",
         "//bramble/session",
+        "//bramble/sessionmodel",
     ],
 )
 

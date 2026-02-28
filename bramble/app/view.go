@@ -487,7 +487,11 @@ func (m Model) formatOutputLine(line session.OutputLine, width int) string {
 		}
 
 	case session.OutputTypeTurnEnd:
-		turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f) ───", line.TurnNumber, line.CostUSD)
+		turnInfo := fmt.Sprintf("─── Turn %d complete ($%.4f)", line.TurnNumber, line.CostUSD)
+		if line.DurationMs > 0 {
+			turnInfo += fmt.Sprintf(" %.1fs", float64(line.DurationMs)/1000)
+		}
+		turnInfo += " ───"
 		formatted = s.Dim.Render("  " + turnInfo)
 
 	case session.OutputTypeStatus:
