@@ -1,9 +1,40 @@
 package claude
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestBuildSubprocessEnv_StripsClaudeCodeVars(t *testing.T) {
+	t.Parallel()
+	parent := []string{
+		"HOME=/root",
+		"CLAUDECODE=1",
+		"CLAUDECODE_NESTED=true",
+		"PATH=/usr/bin",
+		"CLAUDE_CODE_ENTRYPOINT=tty",
+	}
+	result := buildSubprocessEnv(parent)
+
+	// CLAUDECODE* must be stripped
+	for _, e := range result {
+		if len(e) >= 10 && e[:10] == "CLAUDECODE" {
+			t.Errorf("env var not stripped: %s", e)
+		}
+	}
+	// SDK entrypoint must be injected
+	if !slices.Contains(result, "CLAUDE_CODE_ENTRYPOINT=sdk-go") {
+		t.Error("expected CLAUDE_CODE_ENTRYPOINT=sdk-go in result")
+	}
+	// Unrelated vars must be preserved
+	if !slices.Contains(result, "HOME=/root") {
+		t.Error("expected HOME=/root to be preserved")
+	}
+	if !slices.Contains(result, "PATH=/usr/bin") {
+		t.Error("expected PATH=/usr/bin to be preserved")
+	}
+}
 
 func TestBuildCLIArgs_AllowedTools(t *testing.T) {
 	config := defaultConfig()

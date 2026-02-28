@@ -258,3 +258,30 @@ func truncateString(s string, max int) string {
 	}
 	return s[:max] + "..."
 }
+
+// TestParseTraceEntry_WrappedAndRaw exercises both the wrapped TraceEntry path
+// and the raw-message fallback path of ParseTraceEntry.
+func TestParseTraceEntry_WrappedAndRaw(t *testing.T) {
+	t.Parallel()
+
+	rawMsg := `{"type":"system","subtype":"init","uuid":"abc","model":"claude-3","session_id":"s1","tools":[],"mcp_servers":[]}`
+
+	// Wrapped path: TraceEntry envelope around the raw message.
+	wrapped := `{"id":"msg-1","timestamp":"2024-01-01T00:00:00.000Z","direction":"received","message":` + rawMsg + `}`
+	got, err := ParseTraceEntry([]byte(wrapped))
+	if err != nil {
+		t.Fatalf("wrapped: unexpected error: %v", err)
+	}
+	if _, ok := got.(SystemMessage); !ok {
+		t.Errorf("wrapped: expected SystemMessage, got %T", got)
+	}
+
+	// Raw path: plain protocol message without TraceEntry wrapper.
+	got2, err := ParseTraceEntry([]byte(rawMsg))
+	if err != nil {
+		t.Fatalf("raw: unexpected error: %v", err)
+	}
+	if _, ok := got2.(SystemMessage); !ok {
+		t.Errorf("raw: expected SystemMessage, got %T", got2)
+	}
+}
