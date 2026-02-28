@@ -27,7 +27,7 @@ const (
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
 	out         io.Writer
-	commands    map[string]string          // callID → command name
+	commands    map[string]string
 	outputs     map[string]*strings.Builder // callID → accumulated output
 	mu          sync.Mutex
 	verbose     bool
