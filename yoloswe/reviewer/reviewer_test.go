@@ -1,6 +1,7 @@
 package reviewer
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
@@ -101,11 +102,17 @@ func TestNew_DefaultValues(t *testing.T) {
 	if r.config.ApprovalPolicy != codex.ApprovalPolicyOnFailure {
 		t.Errorf("expected default approval policy on-failure, got %s", r.config.ApprovalPolicy)
 	}
+	if r.config.BackendType != BackendCodex {
+		t.Errorf("expected default backend codex, got %s", r.config.BackendType)
+	}
 	if r.output == nil {
 		t.Error("output should not be nil")
 	}
 	if r.renderer == nil {
 		t.Error("renderer should not be nil")
+	}
+	if r.backend == nil {
+		t.Error("backend should not be nil")
 	}
 }
 
@@ -128,6 +135,27 @@ func TestNew_WithCustomValues(t *testing.T) {
 	}
 	if r.config.ApprovalPolicy != codex.ApprovalPolicyNever {
 		t.Errorf("expected approval policy never, got %s", r.config.ApprovalPolicy)
+	}
+}
+
+func TestNew_CursorBackend(t *testing.T) {
+	r := New(Config{
+		BackendType: BackendCursor,
+		Model:       "cursor-default",
+	})
+
+	if r.config.BackendType != BackendCursor {
+		t.Errorf("expected cursor backend, got %s", r.config.BackendType)
+	}
+	if r.backend == nil {
+		t.Error("backend should not be nil for cursor")
+	}
+	// Cursor backend Start is a no-op, verify it doesn't error
+	if err := r.backend.Start(context.TODO()); err != nil {
+		t.Errorf("cursor start should be no-op, got error: %v", err)
+	}
+	if err := r.backend.Stop(); err != nil {
+		t.Errorf("cursor stop should be no-op, got error: %v", err)
 	}
 }
 

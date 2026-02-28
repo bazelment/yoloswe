@@ -8,6 +8,7 @@ go_library(
         "claude_provider.go",
         "codex_provider.go",
         "config.go",
+        "cursor_provider.go",
         "gemini_provider.go",
         "model_registry.go",
         "provider.go",
@@ -22,6 +23,7 @@ go_library(
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/cursor",
         "//wt",
     ],
 )
@@ -31,6 +33,7 @@ go_test(
     srcs = [
         "codex_provider_test.go",
         "config_test.go",
+        "cursor_provider_test.go",
         "gemini_provider_test.go",
         "git_diff_test.go",
         "model_registry_test.go",

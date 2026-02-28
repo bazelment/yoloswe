@@ -2,7 +2,6 @@ package app
 
 import (
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -19,26 +18,20 @@ func TestAllSessionsOverlay_Show(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	// Start sessions on different worktrees
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task", "")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
-	require.NoError(t, err)
-
-	// Wait for sessions to be created and in non-terminal state
-	// Prevents flakiness where sessions might fail before the overlay is shown
-	require.Eventually(t, func() bool {
-		allSessions := m.sessionManager.GetAllSessions()
-		nonTerminalCount := 0
-		for i := range allSessions {
-			if !allSessions[i].Status.IsTerminal() {
-				nonTerminalCount++
-			}
-		}
-		return nonTerminalCount == 2
-	}, 2*time.Second, 50*time.Millisecond, "sessions should be in non-terminal state")
-
-	m.sessions = m.sessionManager.GetAllSessions()
+	// Inject sessions directly to avoid depending on real session startup,
+	// which requires tmux to be available and the process to be running inside tmux.
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s1",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/main",
+		Type:         session.SessionTypePlanner,
+	})
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s2",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/feature",
+		Type:         session.SessionTypeBuilder,
+	})
 
 	assert.False(t, m.allSessionsOverlay.IsVisible())
 
@@ -93,15 +86,15 @@ func TestAllSessionsOverlay_Select_TUIMode(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task", "")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
-	require.NoError(t, err)
-	m.sessions = m.sessionManager.GetAllSessions()
-
-	// Open overlay
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
-	m2 := newModel.(Model)
+	// Populate overlay directly to avoid depending on real session startup,
+	// which can fail immediately in TUI mode without a real provider.
+	sessions := []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main"},
+		{ID: "s2", Status: session.StatusRunning, WorktreePath: "/tmp/wt/feature"},
+	}
+	m.allSessionsOverlay.Show(sessions, m.width, m.height)
+	m.focus = FocusAllSessions
+	m2 := m
 	require.True(t, m2.allSessionsOverlay.IsVisible())
 	require.Len(t, m2.allSessionsOverlay.Sessions(), 2, "should have 2 sessions")
 
@@ -159,11 +152,18 @@ func TestAllSessionsOverlay_QuickSwitch(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "main task", "")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "feature task", "")
-	require.NoError(t, err)
-	m.sessions = m.sessionManager.GetAllSessions()
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s1",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/main",
+		Type:         session.SessionTypePlanner,
+	})
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s2",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/feature",
+		Type:         session.SessionTypeBuilder,
+	})
 
 	// Open overlay
 	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
@@ -188,11 +188,19 @@ func TestAllSessionsOverlay_FilterTerminal(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	// Start 2 sessions via the manager (will be running = non-terminal)
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "task 1", "")
-	require.NoError(t, err)
-	_, err = m.sessionManager.StartSession(session.SessionTypeBuilder, "/tmp/wt/feature", "task 2", "")
-	require.NoError(t, err)
+	// Inject non-terminal sessions directly to avoid depending on real session startup.
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s1",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/main",
+		Type:         session.SessionTypePlanner,
+	})
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "s2",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/feature",
+		Type:         session.SessionTypeBuilder,
+	})
 
 	// Open overlay - all sessions are running (non-terminal), so all should appear
 	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
@@ -249,10 +257,14 @@ func TestAllSessionsOverlay_FreshFromManager(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 
-	// Start a session via the manager but do NOT update m.sessions —
+	// Add a session directly to the manager but do NOT update m.sessions —
 	// simulates the case where no sessionEventMsg has arrived yet.
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "fresh task", "")
-	require.NoError(t, err)
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "fresh-session",
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/main",
+		Type:         session.SessionTypePlanner,
+	})
 	// m.sessions is intentionally left empty / stale
 
 	// Press S — overlay should still show the session from the manager

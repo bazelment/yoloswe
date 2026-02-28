@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cursor",
+    srcs = [
+        "doc.go",
+        "errors.go",
+        "events.go",
+        "process.go",
+        "protocol.go",
+        "query.go",
+        "session.go",
+        "session_options.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/cursor",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/internal/ndjson",
+        "//agent-cli-wrapper/internal/procattr",
+    ],
+)
+
+go_test(
+    name = "cursor_test",
+    srcs = [
+        "events_test.go",
+        "process_test.go",
+        "protocol_test.go",
+        "session_test.go",
+    ],
+    embed = [":cursor"],
+    deps = [
+        "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/internal/ndjson",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

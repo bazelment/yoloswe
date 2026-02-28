@@ -35,6 +35,20 @@ func TestStatus(t *testing.T) {
 	}
 }
 
+func TestSessionInfo(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, false, true)
+	r.SessionInfo("abc-123", "gpt-5")
+
+	output := buf.String()
+	if !strings.Contains(output, "session=abc-123") {
+		t.Errorf("SessionInfo missing session ID: %q", output)
+	}
+	if !strings.Contains(output, "model=gpt-5") {
+		t.Errorf("SessionInfo missing model: %q", output)
+	}
+}
+
 func TestText(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewRenderer(&buf, true, true)
@@ -57,27 +71,47 @@ func TestReasoning(t *testing.T) {
 	}
 }
 
-func TestCommandLifecycle(t *testing.T) {
+func TestCommandLifecycle_Verbose(t *testing.T) {
 	var buf bytes.Buffer
-	r := NewRenderer(&buf, true, true) // verbose=true to see all output
+	r := NewRenderer(&buf, true, true) // verbose=true
 
 	r.CommandStart("call1", "ls -la")
-	r.CommandOutput("call1", "file1.txt\n")
-	r.CommandOutput("call1", "file2.txt\n")
+	r.CommandOutput("call1", "file1.txt\n") // output is stored but not printed
+	if !r.HasOutput("call1") {
+		t.Error("HasOutput should return true after CommandOutput")
+	}
 	r.CommandEnd("call1", 0, 50)
+	if r.HasOutput("call1") {
+		t.Error("HasOutput should return false after CommandEnd")
+	}
 
 	output := buf.String()
 	if !strings.Contains(output, "ls -la") {
 		t.Errorf("Missing command: %q", output)
-	}
-	if !strings.Contains(output, "file1.txt") {
-		t.Errorf("Missing output: %q", output)
 	}
 	if !strings.Contains(output, "✓") {
 		t.Errorf("Missing success indicator: %q", output)
 	}
 	if !strings.Contains(output, "0.05s") {
 		t.Errorf("Missing duration: %q", output)
+	}
+	// Command output is stored but not printed to the writer
+	if strings.Contains(output, "file1.txt") {
+		t.Errorf("Command output should not be printed: %q", output)
+	}
+}
+
+func TestCommandLifecycle_NonVerbose(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, false, true) // verbose=false
+
+	r.CommandStart("call1", "ls -la")
+	r.CommandEnd("call1", 0, 50)
+
+	output := buf.String()
+	// Non-verbose: tool calls are hidden
+	if strings.Contains(output, "ls -la") {
+		t.Errorf("Non-verbose should hide tool calls: %q", output)
 	}
 }
 
@@ -97,55 +131,24 @@ func TestCommandError(t *testing.T) {
 	}
 }
 
-func TestCommandOutputTruncation(t *testing.T) {
-	// When verbose=false, no output should be shown (only inline status)
-	t.Run("non-verbose mode hides output", func(t *testing.T) {
-		var buf bytes.Buffer
-		r := NewRenderer(&buf, false, true) // verbose=false
+func TestCommandEnd_ZeroDuration(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, true, true)
 
-		r.CommandStart("call1", "cat bigfile")
-		for i := 0; i < 15; i++ {
-			r.CommandOutput("call1", "line "+string(rune('A'+i))+"\n")
-		}
-		r.CommandEnd("call1", 0, 100)
+	r.CommandStart("call1", "read file.go")
+	r.CommandEnd("call1", 0, 0)
 
-		output := buf.String()
-		// Should show command and inline status, but no output content
-		if !strings.Contains(output, "cat bigfile") {
-			t.Errorf("Missing command name: %q", output)
-		}
-		if !strings.Contains(output, "✓") {
-			t.Errorf("Missing success indicator: %q", output)
-		}
-		// Should NOT contain any line output
-		if strings.Contains(output, "line A") {
-			t.Errorf("Non-verbose mode should not show output: %q", output)
-		}
-	})
-
-	// When verbose=true, full output should be shown
-	t.Run("verbose mode shows output", func(t *testing.T) {
-		var buf bytes.Buffer
-		r := NewRenderer(&buf, true, true) // verbose=true
-
-		r.CommandStart("call1", "cat bigfile")
-		for i := 0; i < 15; i++ {
-			r.CommandOutput("call1", "line "+string(rune('A'+i))+"\n")
-		}
-		r.CommandEnd("call1", 0, 100)
-
-		output := buf.String()
-		// Should show command, output, and status
-		if !strings.Contains(output, "cat bigfile") {
-			t.Errorf("Missing command name: %q", output)
-		}
-		if !strings.Contains(output, "line A") {
-			t.Errorf("Missing output content: %q", output)
-		}
-		if !strings.Contains(output, "✓") {
-			t.Errorf("Missing success indicator: %q", output)
-		}
-	})
+	output := buf.String()
+	if !strings.Contains(output, "[read file.go]") {
+		t.Errorf("Missing command: %q", output)
+	}
+	if !strings.Contains(output, "✓") {
+		t.Errorf("Missing success indicator: %q", output)
+	}
+	// Zero duration should be omitted
+	if strings.Contains(output, "0.00s") {
+		t.Errorf("Zero duration should be omitted: %q", output)
+	}
 }
 
 func TestTurnComplete(t *testing.T) {

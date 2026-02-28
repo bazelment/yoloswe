@@ -1,4 +1,4 @@
-// Package render provides ANSI-colored terminal rendering for Codex sessions.
+// Package render provides ANSI-colored terminal rendering for agent sessions.
 package render
 
 import (
@@ -27,25 +27,16 @@ const (
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
 	out         io.Writer
-	commands    map[string]*commandState
+	commands    map[string]string
+	outputs     map[string]*strings.Builder // callID → accumulated output
 	mu          sync.Mutex
 	verbose     bool
 	noColor     bool
 	inReasoning bool
 }
 
-// maxOutputBytes is the maximum size of command output to buffer (1MB).
-const maxOutputBytes = 1024 * 1024
-
-// commandState tracks an active command's state.
-type commandState struct {
-	command   string
-	output    strings.Builder
-	truncated bool
-}
-
 // NewRenderer creates a new renderer writing to the given output.
-// If verbose is false, command output is truncated.
+// If verbose is true, tool call names are shown as they execute.
 // If noColor is true, ANSI color codes are suppressed.
 func NewRenderer(out io.Writer, verbose, noColor bool) *Renderer {
 	if !noColor {
@@ -55,7 +46,8 @@ func NewRenderer(out io.Writer, verbose, noColor bool) *Renderer {
 		out:      out,
 		verbose:  verbose,
 		noColor:  noColor,
-		commands: make(map[string]*commandState),
+		commands: make(map[string]string),
+		outputs:  make(map[string]*strings.Builder),
 	}
 }
 
@@ -77,6 +69,23 @@ func (r *Renderer) color(c string) string {
 		return ""
 	}
 	return c
+}
+
+// SessionInfo prints session metadata (e.g. session ID, model).
+func (r *Renderer) SessionInfo(sessionID, model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	parts := []string{}
+	if sessionID != "" {
+		parts = append(parts, "session="+sessionID)
+	}
+	if model != "" {
+		parts = append(parts, "model="+model)
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(r.out, "%s[%s]%s\n", r.color(ColorGray), strings.Join(parts, " "), r.color(ColorReset))
+	}
 }
 
 // Status prints a status message.
@@ -109,101 +118,67 @@ func (r *Renderer) Reasoning(text string) {
 	r.inReasoning = true
 }
 
-// CommandStart prints the start of a command execution.
+// CommandStart records the start of a command execution.
 func (r *Renderer) CommandStart(callID, command string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.commands[callID] = &commandState{command: command}
-	fmt.Fprintf(r.out, "\n%s[%s]%s ", r.color(ColorCyan), truncate(command, 60), r.color(ColorReset))
+	r.commands[callID] = command
 }
 
-// HasOutput returns true if any output has been accumulated for the given command.
+// HasOutput reports whether any command output has been accumulated for callID.
 func (r *Renderer) HasOutput(callID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if cmd, ok := r.commands[callID]; ok {
-		return cmd.output.Len() > 0
-	}
-	return false
+	_, ok := r.outputs[callID]
+	return ok
 }
 
-// CommandOutput accumulates command output with memory limit.
-// When verbose=false, output is not accumulated (won't be displayed anyway).
+// CommandOutput accumulates streaming command output for a given call.
+// The output is stored but not printed (it is used by sessionplayer for replay).
 func (r *Renderer) CommandOutput(callID, chunk string) {
-	// Don't buffer output if we won't display it
-	if !r.verbose {
-		return
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	cmd, ok := r.commands[callID]
+	b, ok := r.outputs[callID]
 	if !ok {
-		return
+		b = &strings.Builder{}
+		r.outputs[callID] = b
 	}
-
-	// Limit buffer size to prevent memory exhaustion
-	if cmd.truncated {
-		return // Already at limit, ignore further output
-	}
-
-	remaining := maxOutputBytes - cmd.output.Len()
-	if remaining <= 0 {
-		cmd.truncated = true
-		return
-	}
-
-	if len(chunk) > remaining {
-		cmd.output.WriteString(chunk[:remaining])
-		cmd.truncated = true
-	} else {
-		cmd.output.WriteString(chunk)
-	}
+	b.WriteString(chunk)
 }
 
 // CommandEnd prints the completion of a command execution.
-// When verbose=false, only shows inline status (✓/✗) without output.
-// When verbose=true, shows full output followed by status.
+// In verbose mode, prints one line per tool: [command] ✓ or [command] ✗ exit N
+// In non-verbose mode, tool calls are silently tracked.
 func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cmd, ok := r.commands[callID]
+	command, ok := r.commands[callID]
 	if !ok {
 		return
 	}
 	delete(r.commands, callID)
+	delete(r.outputs, callID)
 
-	// Only print output when verbose
-	if r.verbose {
-		output := strings.TrimSpace(cmd.output.String())
-		if output != "" {
-			lines := strings.Split(output, "\n")
-			// No color for command output - works on all backgrounds
-			fmt.Fprint(r.out, output)
-			// Indicate if output was truncated due to size limit
-			if cmd.truncated {
-				fmt.Fprintf(r.out, "%s\n  [output truncated at 1MB]%s", r.color(ColorYellow), r.color(ColorReset))
-			}
-			_ = lines // unused but keeping for potential future use
-		}
+	if !r.verbose {
+		return
+	}
 
-		// Print status indicator with newline (block format)
-		if exitCode == 0 {
-			fmt.Fprintf(r.out, "\n  %s✓ %.2fs%s\n", r.color(ColorGreen), float64(durationMs)/1000, r.color(ColorReset))
-		} else {
-			fmt.Fprintf(r.out, "\n  %s✗ exit %d (%.2fs)%s\n", r.color(ColorRed), exitCode, float64(durationMs)/1000, r.color(ColorReset))
-		}
+	// Format duration string (omit when zero)
+	durationStr := ""
+	if durationMs > 0 {
+		durationStr = fmt.Sprintf(" %.2fs", float64(durationMs)/1000)
+	}
+
+	if exitCode == 0 {
+		fmt.Fprintf(r.out, "%s[%s]%s %s✓%s%s\n",
+			r.color(ColorCyan), truncate(command, 60), r.color(ColorReset),
+			r.color(ColorGreen), durationStr, r.color(ColorReset))
 	} else {
-		// Print inline status indicator (no output shown)
-		if exitCode == 0 {
-			fmt.Fprintf(r.out, "%s✓ %.2fs%s\n", r.color(ColorGreen), float64(durationMs)/1000, r.color(ColorReset))
-		} else {
-			fmt.Fprintf(r.out, "%s✗ exit %d (%.2fs)%s\n", r.color(ColorRed), exitCode, float64(durationMs)/1000, r.color(ColorReset))
-		}
+		fmt.Fprintf(r.out, "%s[%s]%s %s✗ exit %d%s%s\n",
+			r.color(ColorCyan), truncate(command, 60), r.color(ColorReset),
+			r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
 	}
 }
 

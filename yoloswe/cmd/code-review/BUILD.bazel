@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "code-review_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/yoloswe/cmd/code-review",
+    visibility = ["//visibility:private"],
+    deps = ["//yoloswe/reviewer"],
+)
+
+go_binary(
+    name = "code-review",
+    embed = [":code-review_lib"],
+    visibility = ["//visibility:public"],
+)

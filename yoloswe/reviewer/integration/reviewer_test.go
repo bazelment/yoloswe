@@ -1,3 +1,5 @@
+//go:build integration
+
 package integration
 
 import (
@@ -8,38 +10,71 @@ import (
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
-// TestThreadCreation tests that thread creation and WaitReady completes
-// within a reasonable time. This test is designed to be run multiple times
-// to detect flakiness in the startup process.
-func TestThreadCreation(t *testing.T) {
+// TestReviewWithResult_Codex tests that a simple review round-trip completes
+// within a reasonable time using the codex backend.
+func TestReviewWithResult_Codex(t *testing.T) {
 	config := reviewer.Config{
-		Model:   "gpt-5.2-codex",
-		WorkDir: t.TempDir(),
-		Verbose: true,
+		BackendType: reviewer.BackendCodex,
+		Model:       "gpt-5.2-codex",
+		WorkDir:     t.TempDir(),
+		Verbose:     true,
 	}
 
 	r := reviewer.New(config)
 
-	// Start the client with a short timeout
-	startCtx, startCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer startCancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	if err := r.Start(startCtx); err != nil {
+	if err := r.Start(ctx); err != nil {
 		t.Fatalf("Failed to start reviewer: %v", err)
 	}
 	defer r.Stop()
 
-	// Create thread and wait for it to be ready
-	createCtx, createCancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer createCancel()
-
 	start := time.Now()
-	thread, err := r.CreateThread(createCtx)
+	result, err := r.ReviewWithResult(ctx, "Say 'hello' and nothing else.")
 	elapsed := time.Since(start)
 
 	if err != nil {
-		t.Fatalf("Failed to create thread after %v: %v", elapsed, err)
+		t.Fatalf("ReviewWithResult failed after %v: %v", elapsed, err)
 	}
 
-	t.Logf("Thread created and ready in %v (thread ID: %s)", elapsed, thread.ID())
+	if result.ResponseText == "" {
+		t.Fatal("Expected non-empty response text")
+	}
+
+	t.Logf("Review completed in %v (response length: %d chars)", elapsed, len(result.ResponseText))
+}
+
+// TestReviewWithResult_Cursor tests that a simple review round-trip completes
+// within a reasonable time using the cursor backend.
+func TestReviewWithResult_Cursor(t *testing.T) {
+	config := reviewer.Config{
+		BackendType: reviewer.BackendCursor,
+		WorkDir:     t.TempDir(),
+		Verbose:     true,
+	}
+
+	r := reviewer.New(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Failed to start reviewer: %v", err)
+	}
+	defer r.Stop()
+
+	start := time.Now()
+	result, err := r.ReviewWithResult(ctx, "Say 'hello' and nothing else.")
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("ReviewWithResult failed after %v: %v", elapsed, err)
+	}
+
+	if result.ResponseText == "" {
+		t.Fatal("Expected non-empty response text")
+	}
+
+	t.Logf("Review completed in %v (response length: %d chars)", elapsed, len(result.ResponseText))
 }
