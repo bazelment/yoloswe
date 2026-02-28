@@ -17,13 +17,15 @@ func TestBuildSubprocessEnv_StripsClaudeCodeVars(t *testing.T) {
 	}
 	result := buildSubprocessEnv(parent)
 
-	// CLAUDECODE* must be stripped
-	for _, e := range result {
-		if len(e) >= 10 && e[:10] == "CLAUDECODE" {
-			t.Errorf("env var not stripped: %s", e)
-		}
+	// Exact CLAUDECODE= must be stripped
+	if slices.Contains(result, "CLAUDECODE=1") {
+		t.Error("CLAUDECODE=1 should be stripped")
 	}
-	// SDK entrypoint must be injected
+	// Other CLAUDECODE-prefixed vars must be preserved
+	if !slices.Contains(result, "CLAUDECODE_NESTED=true") {
+		t.Error("expected CLAUDECODE_NESTED=true to be preserved")
+	}
+	// SDK entrypoint must be injected (overrides parent)
 	if !slices.Contains(result, "CLAUDE_CODE_ENTRYPOINT=sdk-go") {
 		t.Error("expected CLAUDE_CODE_ENTRYPOINT=sdk-go in result")
 	}

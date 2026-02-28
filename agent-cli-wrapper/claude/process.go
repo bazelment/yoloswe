@@ -310,12 +310,12 @@ func (pm *processManager) Wait() (int, error) {
 }
 
 // buildSubprocessEnv returns the environment for the Claude CLI subprocess.
-// It strips any CLAUDECODE* variables (nesting guard) from the parent env and
+// It strips the CLAUDECODE env var (nesting guard) from the parent env and
 // appends CLAUDE_CODE_ENTRYPOINT=sdk-go.
 func buildSubprocessEnv(parent []string) []string {
 	filtered := make([]string, 0, len(parent)+1)
 	for _, e := range parent {
-		if len(e) >= 10 && e[:10] == "CLAUDECODE" {
+		if len(e) >= 11 && e[:11] == "CLAUDECODE=" {
 			continue
 		}
 		filtered = append(filtered, e)
