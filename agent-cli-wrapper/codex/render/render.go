@@ -27,8 +27,8 @@ const (
 // Renderer handles terminal output with ANSI colors.
 type Renderer struct {
 	out         io.Writer
-	commands    map[string]string // callID → command name
-	outputs     map[string]string // callID → accumulated output
+	commands    map[string]string          // callID → command name
+	outputs     map[string]*strings.Builder // callID → accumulated output
 	mu          sync.Mutex
 	verbose     bool
 	noColor     bool
@@ -47,7 +47,7 @@ func NewRenderer(out io.Writer, verbose, noColor bool) *Renderer {
 		verbose:  verbose,
 		noColor:  noColor,
 		commands: make(map[string]string),
-		outputs:  make(map[string]string),
+		outputs:  make(map[string]*strings.Builder),
 	}
 }
 
@@ -139,7 +139,12 @@ func (r *Renderer) HasOutput(callID string) bool {
 func (r *Renderer) CommandOutput(callID, chunk string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.outputs[callID] += chunk
+	b, ok := r.outputs[callID]
+	if !ok {
+		b = &strings.Builder{}
+		r.outputs[callID] = b
+	}
+	b.WriteString(chunk)
 }
 
 // CommandEnd prints the completion of a command execution.

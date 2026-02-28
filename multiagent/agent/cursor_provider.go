@@ -71,10 +71,10 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	var resultText strings.Builder
 
 	for evt := range session.Events() {
-		// Forward to bridge goroutine
+		// Forward to bridge goroutine (blocking; bridgeStop signals cancellation).
 		select {
 		case bridgeCh <- evt:
-		default:
+		case <-bridgeStop:
 		}
 
 		// Collect result locally
