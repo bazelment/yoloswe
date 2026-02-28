@@ -1,6 +1,9 @@
 package sessionmodel
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 const defaultMaxLines = 1000
 
@@ -39,12 +42,18 @@ func (m *SessionModel) SetMeta(meta SessionMeta) {
 }
 
 // UpdateStatus changes the session status and notifies observers.
-func (m *SessionModel) UpdateStatus(status SessionStatus) {
+// It returns an error if the current status is already terminal.
+func (m *SessionModel) UpdateStatus(status SessionStatus) error {
 	m.mu.Lock()
 	old := m.meta.Status
+	if old.IsTerminal() {
+		m.mu.Unlock()
+		return fmt.Errorf("cannot transition from terminal status %q to %q", old, status)
+	}
 	m.meta.Status = status
 	m.mu.Unlock()
 	m.notify(StatusChanged{Old: old, New: status})
+	return nil
 }
 
 // AppendOutput adds a complete output line and notifies observers.

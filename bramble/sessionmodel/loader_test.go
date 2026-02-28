@@ -47,6 +47,21 @@ func TestLoadFromRawJSONL_FullSession(t *testing.T) {
 	assert.Equal(t, "default", meta.PermissionMode)
 	assert.Contains(t, meta.Tools, "Read")
 
+	// Invariant assertions — each maps to a bug fixed in e98f666.
+	assert.True(t, meta.Status.IsTerminal(), "status should be terminal after complete parse")
+	assert.NotEmpty(t, meta.SessionID, "session ID should be captured from envelope")
+	assert.GreaterOrEqual(t, len(lines), 10, "uncapped buffer should preserve all lines")
+
+	// First user message should appear in output (parser captures user text).
+	var foundUserPrompt bool
+	for _, line := range lines {
+		if line.Type == OutputTypeText && line.Content == "Fix the authentication bug in login.go" {
+			foundUserPrompt = true
+			break
+		}
+	}
+	assert.True(t, foundUserPrompt, "first user message should appear in output lines")
+
 	// Verify we got the expected output line types from the fixture.
 	assert.Greater(t, typeCounts[OutputTypeText], 0, "should have text lines")
 	assert.Greater(t, typeCounts[OutputTypeThinking], 0, "should have thinking lines")

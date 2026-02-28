@@ -190,10 +190,11 @@ func (p *MessageParser) handleResult(msg protocol.ResultMessage) {
 	})
 
 	// Transition the session to a terminal status now that the result is known.
+	// These transitions are from StatusRunning so the guard should never fire.
 	if msg.IsError {
-		p.model.UpdateStatus(StatusFailed)
+		_ = p.model.UpdateStatus(StatusFailed)
 	} else {
-		p.model.UpdateStatus(StatusCompleted)
+		_ = p.model.UpdateStatus(StatusCompleted)
 	}
 }
 
