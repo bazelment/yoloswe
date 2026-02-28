@@ -29,12 +29,12 @@ type EventHandler interface {
 
 // bridgeResult holds the outcome of bridgeStreamEvents.
 type bridgeResult struct {
-	responseText string
-	success      bool
-	durationMs   int64
 	// turnEvent is the raw TurnComplete event for backend-specific extraction
 	// (e.g., codex token usage).
-	turnEvent agentstream.TurnComplete
+	turnEvent    agentstream.TurnComplete
+	responseText string
+	durationMs   int64
+	success      bool
 }
 
 // bridgeStreamEvents reads SDK events from a typed channel and dispatches them

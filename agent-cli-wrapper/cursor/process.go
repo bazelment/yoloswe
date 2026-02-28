@@ -21,8 +21,8 @@ type processManager struct {
 	stderr   io.ReadCloser
 	cmd      *exec.Cmd
 	reader   *ndjson.Reader
-	config   SessionConfig
 	prompt   string
+	config   SessionConfig
 	mu       sync.Mutex
 	started  bool
 	stopping bool
@@ -182,4 +182,3 @@ func (pm *processManager) Stop() error {
 
 	return nil
 }
-

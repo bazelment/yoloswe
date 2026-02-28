@@ -1,6 +1,7 @@
 package reviewer
 
 import (
+	"context"
 	"testing"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
@@ -150,7 +151,7 @@ func TestNew_CursorBackend(t *testing.T) {
 		t.Error("backend should not be nil for cursor")
 	}
 	// Cursor backend Start is a no-op, verify it doesn't error
-	if err := r.backend.Start(nil); err != nil {
+	if err := r.backend.Start(context.TODO()); err != nil {
 		t.Errorf("cursor start should be no-op, got error: %v", err)
 	}
 	if err := r.backend.Stop(); err != nil {

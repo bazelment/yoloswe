@@ -25,13 +25,13 @@ type QueryResult struct {
 
 // Session manages a one-shot interaction with the Cursor Agent CLI.
 type Session struct {
-	events   chan Event
 	process  *processManager
 	info     *SessionInfo
+	events   chan Event
 	done     chan struct{}
-	readDone chan struct{} // closed when readLoop exits
-	config   SessionConfig
+	readDone chan struct{}
 	prompt   string
+	config   SessionConfig
 	mu       sync.RWMutex
 	started  bool
 	stopped  bool

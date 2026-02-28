@@ -146,7 +146,7 @@ func formatCursorToolDisplay(name string, input map[string]interface{}) string {
 		displayName = name
 		if strings.HasSuffix(displayName, "ToolCall") {
 			displayName = strings.TrimSuffix(displayName, "ToolCall")
-			if len(displayName) > 0 {
+			if displayName != "" {
 				displayName = strings.ToLower(displayName[:1]) + displayName[1:]
 			}
 		}
@@ -193,4 +193,3 @@ func shortPath(p string) string {
 	parent := filepath.Base(filepath.Clean(dir))
 	return ".../" + parent + "/" + file
 }
-

@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson"
 )
 
 // fakeSession simulates a cursor session by writing NDJSON lines to a pipe

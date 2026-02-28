@@ -76,8 +76,14 @@ func TestCommandLifecycle_Verbose(t *testing.T) {
 	r := NewRenderer(&buf, true, true) // verbose=true
 
 	r.CommandStart("call1", "ls -la")
-	r.CommandOutput("call1", "file1.txt\n") // output is ignored
+	r.CommandOutput("call1", "file1.txt\n") // output is stored but not printed
+	if !r.HasOutput("call1") {
+		t.Error("HasOutput should return true after CommandOutput")
+	}
 	r.CommandEnd("call1", 0, 50)
+	if r.HasOutput("call1") {
+		t.Error("HasOutput should return false after CommandEnd")
+	}
 
 	output := buf.String()
 	if !strings.Contains(output, "ls -la") {
@@ -89,9 +95,9 @@ func TestCommandLifecycle_Verbose(t *testing.T) {
 	if !strings.Contains(output, "0.05s") {
 		t.Errorf("Missing duration: %q", output)
 	}
-	// Command output is never shown
+	// Command output is stored but not printed to the writer
 	if strings.Contains(output, "file1.txt") {
-		t.Errorf("Command output should not be shown: %q", output)
+		t.Errorf("Command output should not be printed: %q", output)
 	}
 }
 

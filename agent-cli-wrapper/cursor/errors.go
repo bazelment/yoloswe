@@ -62,26 +62,3 @@ func (e *CLINotFoundError) Error() string {
 func (e *CLINotFoundError) Unwrap() error {
 	return e.Cause
 }
-
-// IsRecoverable returns true if the error is recoverable.
-func IsRecoverable(err error) bool {
-	if err == nil {
-		return true
-	}
-
-	var procErr *ProcessError
-	if errors.As(err, &procErr) {
-		return false
-	}
-
-	var cliErr *CLINotFoundError
-	if errors.As(err, &cliErr) {
-		return false
-	}
-
-	if errors.Is(err, ErrSessionClosed) {
-		return false
-	}
-
-	return true
-}

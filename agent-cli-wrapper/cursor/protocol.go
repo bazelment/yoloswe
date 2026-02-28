@@ -39,8 +39,8 @@ type AssistantMessageInner struct {
 // Example: {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"..."}]},"session_id":"..."}
 type AssistantMessage struct {
 	Type      string                `json:"type"`
-	Message   AssistantMessageInner `json:"message"`
 	SessionID string                `json:"session_id"`
+	Message   AssistantMessageInner `json:"message"`
 }
 
 // ToolCallMessage represents a tool call event (started or completed).
@@ -57,9 +57,9 @@ type ToolCallMessage struct {
 
 // ToolCallDetail holds the extracted name, args, and optional result from a tool call.
 type ToolCallDetail struct {
-	Name   string
 	Args   map[string]interface{}
 	Result interface{}
+	Name   string
 }
 
 // ParseToolCallDetail extracts the tool call detail from a ToolCallMessage.
@@ -93,11 +93,11 @@ func ParseToolCallDetail(msg *ToolCallMessage) (*ToolCallDetail, error) {
 type ResultMessage struct {
 	Type          string `json:"type"`
 	Subtype       string `json:"subtype"`
+	Result        string `json:"result"`
+	SessionID     string `json:"session_id"`
 	DurationMs    int64  `json:"duration_ms"`
 	DurationAPIMs int64  `json:"duration_api_ms"`
 	IsError       bool   `json:"is_error"`
-	Result        string `json:"result"`
-	SessionID     string `json:"session_id"`
 }
 
 // Message is the union type returned by ParseMessage.
@@ -106,9 +106,9 @@ type Message interface {
 }
 
 func (m *SystemInitMessage) messageType() string { return "system" }
-func (m *AssistantMessage) messageType() string   { return "assistant" }
-func (m *ToolCallMessage) messageType() string    { return "tool_call" }
-func (m *ResultMessage) messageType() string      { return "result" }
+func (m *AssistantMessage) messageType() string  { return "assistant" }
+func (m *ToolCallMessage) messageType() string   { return "tool_call" }
+func (m *ResultMessage) messageType() string     { return "result" }
 
 // ParseMessage parses a raw NDJSON line into a typed message.
 func ParseMessage(line []byte) (Message, error) {

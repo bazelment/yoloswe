@@ -23,29 +23,40 @@ func (e testThinkingEvent) StreamDelta() string                    { return e.de
 
 type testToolStartEvent struct{ name, callID string }
 
-func (e testToolStartEvent) StreamEventKind() agentstream.EventKind      { return agentstream.KindToolStart }
-func (e testToolStartEvent) StreamToolName() string                      { return e.name }
-func (e testToolStartEvent) StreamToolCallID() string                    { return e.callID }
-func (e testToolStartEvent) StreamToolInput() map[string]interface{}     { return nil }
+func (e testToolStartEvent) StreamEventKind() agentstream.EventKind  { return agentstream.KindToolStart }
+func (e testToolStartEvent) StreamToolName() string                  { return e.name }
+func (e testToolStartEvent) StreamToolCallID() string                { return e.callID }
+func (e testToolStartEvent) StreamToolInput() map[string]interface{} { return nil }
 
-type testToolEndEvent struct{ name, callID string; isError bool }
+type testToolEndEvent struct {
+	name, callID string
+	isError      bool
+}
 
-func (e testToolEndEvent) StreamEventKind() agentstream.EventKind      { return agentstream.KindToolEnd }
-func (e testToolEndEvent) StreamToolName() string                      { return e.name }
-func (e testToolEndEvent) StreamToolCallID() string                    { return e.callID }
-func (e testToolEndEvent) StreamToolInput() map[string]interface{}     { return nil }
-func (e testToolEndEvent) StreamToolResult() interface{}               { return nil }
-func (e testToolEndEvent) StreamToolIsError() bool                     { return e.isError }
+func (e testToolEndEvent) StreamEventKind() agentstream.EventKind  { return agentstream.KindToolEnd }
+func (e testToolEndEvent) StreamToolName() string                  { return e.name }
+func (e testToolEndEvent) StreamToolCallID() string                { return e.callID }
+func (e testToolEndEvent) StreamToolInput() map[string]interface{} { return nil }
+func (e testToolEndEvent) StreamToolResult() interface{}           { return nil }
+func (e testToolEndEvent) StreamToolIsError() bool                 { return e.isError }
 
-type testTurnCompleteEvent struct{ success bool; durationMs int64 }
+type testTurnCompleteEvent struct {
+	success    bool
+	durationMs int64
+}
 
-func (e testTurnCompleteEvent) StreamEventKind() agentstream.EventKind { return agentstream.KindTurnComplete }
-func (e testTurnCompleteEvent) StreamTurnNum() int                     { return 1 }
-func (e testTurnCompleteEvent) StreamIsSuccess() bool                  { return e.success }
-func (e testTurnCompleteEvent) StreamDuration() int64                  { return e.durationMs }
-func (e testTurnCompleteEvent) StreamCost() float64                    { return 0 }
+func (e testTurnCompleteEvent) StreamEventKind() agentstream.EventKind {
+	return agentstream.KindTurnComplete
+}
+func (e testTurnCompleteEvent) StreamTurnNum() int    { return 1 }
+func (e testTurnCompleteEvent) StreamIsSuccess() bool { return e.success }
+func (e testTurnCompleteEvent) StreamDuration() int64 { return e.durationMs }
+func (e testTurnCompleteEvent) StreamCost() float64   { return 0 }
 
-type testErrorEvent struct{ err error; ctx string }
+type testErrorEvent struct {
+	err error
+	ctx string
+}
 
 func (e testErrorEvent) StreamEventKind() agentstream.EventKind { return agentstream.KindError }
 func (e testErrorEvent) StreamErr() error                       { return e.err }
@@ -72,13 +83,17 @@ type recordingHandler struct {
 	errors     []error
 }
 
-func (h *recordingHandler) OnSessionInfo(_, _ string)                                                     {}
-func (h *recordingHandler) OnText(delta string)                                                           { h.texts = append(h.texts, delta) }
-func (h *recordingHandler) OnReasoning(delta string)                                                      { h.reasonings = append(h.reasonings, delta) }
-func (h *recordingHandler) OnToolStart(name, callID string, _ map[string]interface{})                     { h.toolStarts = append(h.toolStarts, name) }
-func (h *recordingHandler) OnToolComplete(name, callID string, _ map[string]interface{}, _ interface{}, _ bool) { h.toolEnds = append(h.toolEnds, name) }
-func (h *recordingHandler) OnTurnComplete(success bool, _ int64)                                          { h.turns = append(h.turns, success) }
-func (h *recordingHandler) OnError(err error, _ string)                                                   { h.errors = append(h.errors, err) }
+func (h *recordingHandler) OnSessionInfo(_, _ string) {}
+func (h *recordingHandler) OnText(delta string)       { h.texts = append(h.texts, delta) }
+func (h *recordingHandler) OnReasoning(delta string)  { h.reasonings = append(h.reasonings, delta) }
+func (h *recordingHandler) OnToolStart(name, callID string, _ map[string]interface{}) {
+	h.toolStarts = append(h.toolStarts, name)
+}
+func (h *recordingHandler) OnToolComplete(name, callID string, _ map[string]interface{}, _ interface{}, _ bool) {
+	h.toolEnds = append(h.toolEnds, name)
+}
+func (h *recordingHandler) OnTurnComplete(success bool, _ int64) { h.turns = append(h.turns, success) }
+func (h *recordingHandler) OnError(err error, _ string)          { h.errors = append(h.errors, err) }
 
 func sendEvents(events ...agentstream.Event) <-chan agentstream.Event {
 	ch := make(chan agentstream.Event, len(events))

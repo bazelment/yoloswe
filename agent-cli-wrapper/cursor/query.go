@@ -29,10 +29,8 @@ func Query(ctx context.Context, prompt string, opts ...SessionOption) (*QueryRes
 		}
 	}
 
-	// Channel closed without a result event
-	if result.Text != "" {
-		return result, nil
-	}
+	// Channel closed without a TurnCompleteEvent — treat as an error
+	// even if we accumulated partial text.
 	return nil, ErrSessionClosed
 }
 
@@ -54,7 +52,8 @@ func QueryStream(ctx context.Context, prompt string, opts ...SessionOption) (<-c
 			case <-ctx.Done():
 				return
 			}
-			if _, ok := evt.(TurnCompleteEvent); ok {
+			switch evt.(type) {
+			case TurnCompleteEvent, ErrorEvent:
 				return
 			}
 		}

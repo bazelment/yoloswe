@@ -28,7 +28,8 @@ const (
 type Renderer struct {
 	out         io.Writer
 	commands    map[string]string // callID → command name
-	mu         sync.Mutex
+	outputs     map[string]string // callID → accumulated output
+	mu          sync.Mutex
 	verbose     bool
 	noColor     bool
 	inReasoning bool
@@ -46,6 +47,7 @@ func NewRenderer(out io.Writer, verbose, noColor bool) *Renderer {
 		verbose:  verbose,
 		noColor:  noColor,
 		commands: make(map[string]string),
+		outputs:  make(map[string]string),
 	}
 }
 
@@ -124,13 +126,21 @@ func (r *Renderer) CommandStart(callID, command string) {
 	r.commands[callID] = command
 }
 
-// HasOutput is kept for interface compatibility but always returns false.
+// HasOutput reports whether any command output has been accumulated for callID.
 func (r *Renderer) HasOutput(callID string) bool {
-	return false
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.outputs[callID]
+	return ok
 }
 
-// CommandOutput is a no-op. Command output is not displayed.
-func (r *Renderer) CommandOutput(callID, chunk string) {}
+// CommandOutput accumulates streaming command output for a given call.
+// The output is stored but not printed (it is used by sessionplayer for replay).
+func (r *Renderer) CommandOutput(callID, chunk string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outputs[callID] += chunk
+}
 
 // CommandEnd prints the completion of a command execution.
 // In verbose mode, prints one line per tool: [command] ✓ or [command] ✗ exit N
@@ -144,6 +154,7 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 		return
 	}
 	delete(r.commands, callID)
+	delete(r.outputs, callID)
 
 	if !r.verbose {
 		return

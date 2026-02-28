@@ -32,9 +32,12 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	// Build cursor session options
+	// Build cursor session options.
+	// Only pass an explicit model if the caller overrode the default;
+	// the "sonnet" default from applyOptions is Claude-specific and
+	// should not be forwarded to cursor.
 	var sessionOpts []cursor.SessionOption
-	if cfg.Model != "" {
+	if cfg.Model != "" && cfg.Model != "sonnet" {
 		sessionOpts = append(sessionOpts, cursor.WithModel(cfg.Model))
 	}
 	if cfg.WorkDir != "" {
@@ -93,11 +96,8 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		}
 	}
 
-	// Channel closed without result
-	text := resultText.String()
-	if text != "" {
-		return &AgentResult{Text: text, Success: true}, nil
-	}
+	// Channel closed without TurnCompleteEvent — treat as an error
+	// even if we accumulated partial text.
 	return nil, cursor.ErrSessionClosed
 }
 

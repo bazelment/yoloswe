@@ -19,6 +19,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	backend := flag.String("backend", "cursor", "Backend: cursor or codex")
 	model := flag.String("model", "", "Model override (default: backend-specific)")
 	effort := flag.String("effort", "", "Reasoning effort level for codex (low, medium, high)")
@@ -32,7 +36,7 @@ func main() {
 		// valid
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown backend %q (supported: cursor, codex)\n", *backend)
-		os.Exit(1)
+		return 1
 	}
 
 	workDir := os.Getenv("WORK_DIR")
@@ -63,7 +67,7 @@ func main() {
 
 	if err := r.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start reviewer: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer r.Stop()
 
@@ -71,11 +75,12 @@ func main() {
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Review failed: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	fmt.Printf("\n\n=== Review Result ===\n")
 	fmt.Printf("Success: %v\n", result.Success)
 	fmt.Printf("Duration: %dms\n", result.DurationMs)
 	fmt.Printf("Response length: %d chars\n", len(result.ResponseText))
+	return 0
 }
