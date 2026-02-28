@@ -101,7 +101,7 @@ func DetectFormat(path string) (Format, error) {
 			switch rawCheck.Type {
 			case "file-history-snapshot", "queue-operation", "pr-link":
 				return FormatRawJSONL, nil
-			case "user", "assistant", "system", "progress":
+			case "user", "assistant", "system", "result", "progress":
 				// These also appear in SDK recorder format, but SDK recorder
 				// lines have "direction" which we already checked above.
 				return FormatRawJSONL, nil

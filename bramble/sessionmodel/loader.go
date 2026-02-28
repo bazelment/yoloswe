@@ -171,14 +171,10 @@ func handleProgressMeta(model *SessionModel, meta *RawEnvelopeMeta) {
 
 	case "mcp_progress":
 		if data.Status == "completed" || data.Status == "failed" {
-			status := "completed"
-			if data.Status == "failed" {
-				status = "failed"
-			}
 			model.AppendOutput(OutputLine{
 				Timestamp: meta.Timestamp,
 				Type:      OutputTypeStatus,
-				Content:   fmt.Sprintf("MCP %s/%s: %s", data.ServerName, data.ToolName, status),
+				Content:   fmt.Sprintf("MCP %s/%s: %s", data.ServerName, data.ToolName, data.Status),
 			})
 		}
 
