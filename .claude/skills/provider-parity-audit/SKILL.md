@@ -2,12 +2,6 @@
 name: provider-parity-audit
 description: >
   Systematically audit and improve feature parity across Claude, Codex, and Gemini providers.
-  Use this skill when you want to find and fix gaps between providers, ensure the provider
-  abstraction layer works correctly, improve conformance tests, or understand what works
-  with one provider but not others. Also use when adding a new provider, upgrading an existing
-  provider's capabilities, or investigating why a session behaves differently across backends.
-  Triggers on: provider parity, provider comparison, conformance testing, cross-provider gaps,
-  multi-provider feature matrix, provider audit, capability gap.
 ---
 
 # Provider Parity Audit

@@ -2,12 +2,6 @@
 name: protocol-research
 description: >
   Investigate and document CLI protocol behavior for Claude, Codex, and Gemini agent CLIs.
-  Use this skill whenever you need to understand how the subprocess protocols actually behave —
-  message ordering, event sequencing, MCP handshakes, control request/response flow, or any
-  protocol assumption that code depends on. Also use it when adding new provider support,
-  debugging session failures, or validating that the agentstream bridge correctly translates
-  events. Triggers on: protocol investigation, CLI tracing, event capture, MCP debugging,
-  provider protocol comparison, session lifecycle analysis.
 ---
 
 # Protocol Research

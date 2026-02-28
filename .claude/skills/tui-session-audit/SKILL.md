@@ -2,13 +2,6 @@
 name: tui-session-audit
 description: >
   Audit and improve Bramble TUI session rendering, interaction flows, and replay fidelity.
-  Use this skill when you want to systematically test what works and what doesn't in Bramble's
-  terminal UI, fix broken session output rendering, improve how events from different providers
-  display, verify session replay accuracy, or test interactive flows like follow-ups and task
-  routing. Also use when the TUI shows garbled output, missing tool results, broken layouts,
-  or when session replay doesn't match what happened live.
-  Triggers on: TUI audit, Bramble rendering, session display, output formatting, replay fidelity,
-  TUI testing, Bramble UX, session rendering gaps, broken output, layout issues.
 ---
 
 # TUI Session Audit
