@@ -36,9 +36,12 @@ To add a new dependency, please always follow these steps, don't use `go` comman
 
 ## Integration Tests as Fixture Generators
 
-Existing integration tests already run real CLI sessions with recording enabled. When you need test fixtures (e.g., protocol traces), add an optional flag to an existing integration test rather than creating a separate test that duplicates the same session setup. For example, `claude/integration/session_test.go` accepts `-update-fixtures` to export its recording as protocol trace fixtures.
+Existing integration tests already run real CLI sessions with recording enabled. When you need test fixtures (e.g., protocol traces), check an env var in an existing integration test rather than creating a separate test that duplicates the same session setup. Use env vars (not flags) so they work with `bazel test --test_env=` and `scripts/test-manual.sh`.
 
-Run `scripts/test-manual.sh` to discover all manual/integration tests.
+For example, to regenerate protocol trace fixtures:
+```
+UPDATE_FIXTURES=1 scripts/test-manual.sh --test_env=UPDATE_FIXTURES=1
+```
 
 ## Integration Tests and Gazelle
 

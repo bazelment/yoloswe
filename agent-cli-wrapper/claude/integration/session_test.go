@@ -25,7 +25,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -229,7 +228,7 @@ func TestSession_Integration_Scenario1_BypassPermissions(t *testing.T) {
 	}
 
 	// Optionally export recording as protocol trace fixtures.
-	if *updateFixtures {
+	if shouldUpdateFixtures() {
 		recPath := session.RecordingPath()
 		if recPath == "" {
 			t.Fatal("No recording path for fixture export")
@@ -526,7 +525,9 @@ turnDone:
 // Trace fixture export
 // ============================================================================
 
-var updateFixtures = flag.Bool("update-fixtures", false, "export session recording as protocol trace fixtures")
+func shouldUpdateFixtures() bool {
+	return os.Getenv("UPDATE_FIXTURES") != ""
+}
 
 // fixtureDir returns the path to testdata/traces, creating it if needed.
 func fixtureDir(t *testing.T) string {
