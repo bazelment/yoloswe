@@ -133,6 +133,7 @@ type RawEnvelopeMeta struct {
 	GitBranch     string
 	Version       string
 	UUID          string
+	SessionID     string // outer envelope sessionId (used as fallback when inner message lacks it)
 	Type          string // envelope type: system, progress, pr-link, etc.
 	Subtype       string // system subtype: api_error, compact_boundary, etc.
 	Content       string // text content from system/queue-operation envelopes

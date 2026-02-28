@@ -18,12 +18,14 @@ func LoadFromRawJSONL(path string) (*SessionModel, error) {
 	}
 	defer f.Close()
 
-	model := NewSessionModel(0) // default 1000-line cap
+	model := NewSessionModel(-1) // uncapped: replay must preserve all history
 	parser := NewMessageParser(model)
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 10*1024*1024) // 10 MB max line
+
+	var envelopeSessionID string
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -41,6 +43,12 @@ func LoadFromRawJSONL(path string) (*SessionModel, error) {
 			parser.HandleMessage(msg)
 		}
 
+		// Capture the first envelope sessionId as a fallback (raw JSONL puts
+		// the session ID in the outer envelope, not the inner message).
+		if meta != nil && meta.SessionID != "" && envelopeSessionID == "" {
+			envelopeSessionID = meta.SessionID
+		}
+
 		// Envelope-only types produce synthetic output lines.
 		if meta != nil && msg == nil {
 			handleEnvelopeMeta(model, meta)
@@ -50,6 +58,9 @@ func LoadFromRawJSONL(path string) (*SessionModel, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scan raw JSONL: %w", err)
 	}
+
+	// Patch in the envelope session ID if the inner messages didn't carry one.
+	parser.PatchSessionID(envelopeSessionID)
 
 	return model, nil
 }

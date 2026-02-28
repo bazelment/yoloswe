@@ -16,9 +16,12 @@ type SessionModel struct {
 }
 
 // NewSessionModel creates a model with the given output buffer capacity.
+// A maxLines of 0 uses the default cap (1000). Pass -1 for uncapped (replay use).
 func NewSessionModel(maxLines int) *SessionModel {
-	if maxLines <= 0 {
+	if maxLines == 0 {
 		maxLines = defaultMaxLines
+	} else if maxLines < 0 {
+		maxLines = int(^uint(0) >> 1) // math.MaxInt without importing math
 	}
 	return &SessionModel{
 		output: NewOutputBuffer(maxLines),

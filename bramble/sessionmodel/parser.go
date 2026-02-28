@@ -127,9 +127,22 @@ func (p *MessageParser) handleAssistant(msg protocol.AssistantMessage) {
 	}
 }
 
-// --- user (tool results echoed back) ----------------------------------------
+// --- user (initial prompt or tool results echoed back) ----------------------
 
 func (p *MessageParser) handleUser(msg protocol.UserMessage) {
+	// String content is the initial user prompt (common in raw JSONL).
+	// Capture it so replay can extract the prompt from OutputTypeText lines.
+	if s, ok := msg.Message.Content.AsString(); ok {
+		if s != "" {
+			p.model.AppendOutput(OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeText,
+				Content:   s,
+			})
+		}
+		return
+	}
+
 	blocks, ok := msg.Message.Content.AsBlocks()
 	if !ok {
 		return
@@ -175,6 +188,13 @@ func (p *MessageParser) handleResult(msg protocol.ResultMessage) {
 		DurationMs: msg.DurationMs,
 		IsError:    msg.IsError,
 	})
+
+	// Transition the session to a terminal status now that the result is known.
+	if msg.IsError {
+		p.model.UpdateStatus(StatusFailed)
+	} else {
+		p.model.UpdateStatus(StatusCompleted)
+	}
 }
 
 // --- stream_event (live streaming deltas) -----------------------------------
@@ -314,6 +334,20 @@ func (p *MessageParser) handleContentBlockStop(e protocol.ContentBlockStopEvent)
 	}
 
 	delete(p.blocks, e.Index)
+}
+
+// PatchSessionID fills in the session ID from the outer envelope if the model
+// metadata currently has an empty session ID. Raw JSONL stores the session ID
+// in the outer envelope rather than the inner system{init} message.
+func (p *MessageParser) PatchSessionID(id string) {
+	if id == "" {
+		return
+	}
+	meta := p.model.Meta()
+	if meta.SessionID == "" {
+		meta.SessionID = id
+		p.model.SetMeta(meta)
+	}
 }
 
 // Reset clears all accumulated streaming state.

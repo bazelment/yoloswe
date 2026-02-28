@@ -92,6 +92,7 @@ func FromRawJSONL(line []byte) (protocol.Message, *RawEnvelopeMeta, error) {
 		GitBranch:     env.GitBranch,
 		Version:       env.Version,
 		UUID:          env.UUID,
+		SessionID:     env.SessionID,
 		Timestamp:     ts,
 		ToolUseResult: env.ToolUseResult,
 	}
