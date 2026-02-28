@@ -34,12 +34,12 @@ func TestQuitConfirm_ActiveSessions_ShowsConfirmation(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session to make it active
-	sessID, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
-	require.NotEmpty(t, sessID)
-
-	// Refresh sessions in model
+	// Inject a running session directly to avoid the race where the
+	// runSession goroutine fails before m.sessions is populated.
+	m.sessionManager.AddSession(&session.Session{
+		ID: "active-session", Status: session.StatusRunning,
+		WorktreePath: "/tmp/wt/main", Type: session.SessionTypePlanner,
+	})
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// Press 'q' with an active session
@@ -63,9 +63,10 @@ func TestQuitConfirm_SecondQ_Quits(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
+	m.sessionManager.AddSession(&session.Session{
+		ID: "active-session", Status: session.StatusRunning,
+		WorktreePath: "/tmp/wt/main", Type: session.SessionTypePlanner,
+	})
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// First 'q' sets confirmQuit
@@ -88,9 +89,10 @@ func TestQuitConfirm_Y_Quits(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
+	m.sessionManager.AddSession(&session.Session{
+		ID: "active-session", Status: session.StatusRunning,
+		WorktreePath: "/tmp/wt/main", Type: session.SessionTypePlanner,
+	})
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// First 'q' sets confirmQuit
@@ -113,9 +115,10 @@ func TestQuitConfirm_OtherKey_Cancels(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
+	m.sessionManager.AddSession(&session.Session{
+		ID: "active-session", Status: session.StatusRunning,
+		WorktreePath: "/tmp/wt/main", Type: session.SessionTypePlanner,
+	})
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// First 'q' sets confirmQuit
@@ -143,9 +146,10 @@ func TestQuitConfirm_CtrlC_AlwaysQuits(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
+	m.sessionManager.AddSession(&session.Session{
+		ID: "active-session", Status: session.StatusRunning,
+		WorktreePath: "/tmp/wt/main", Type: session.SessionTypePlanner,
+	})
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// Ctrl+C should quit immediately even with active sessions
@@ -163,12 +167,11 @@ func TestQuitConfirm_IdleSessions_CountAsActive(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session and make it idle
-	_, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
-
-	// Simulate session becoming idle (normally done by session manager)
-	// For testing, we'll just check that running/idle sessions require confirmation
+	// Idle is non-terminal, so it should trigger quit confirmation.
+	m.sessionManager.AddSession(&session.Session{
+		ID: "idle-session", Status: session.StatusIdle,
+		WorktreePath: "/tmp/wt/main", Type: session.SessionTypePlanner,
+	})
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// Press 'q' - should require confirmation even for idle sessions
@@ -183,14 +186,14 @@ func TestQuitConfirm_CompletedSessions_DontCount(t *testing.T) {
 		{Branch: "main", Path: "/tmp/wt/main"},
 	}, "test-repo")
 
-	// Start a session and mark it as completed
-	sessID, err := m.sessionManager.StartSession(session.SessionTypePlanner, "/tmp/wt/main", "test prompt", "")
-	require.NoError(t, err)
-
-	// Get the internal session and mark it completed
-	sess, ok := m.sessionManager.GetSession(sessID)
-	require.True(t, ok)
-	m.sessionManager.UpdateSessionStatus(sess, session.StatusCompleted)
+	// Inject a completed session directly to avoid the race where the
+	// runSession goroutine overwrites UpdateSessionStatus with StatusFailed.
+	m.sessionManager.AddSession(&session.Session{
+		ID:           "completed-session",
+		Status:       session.StatusCompleted,
+		WorktreePath: "/tmp/wt/main",
+		Type:         session.SessionTypePlanner,
+	})
 
 	m.sessions = m.sessionManager.GetAllSessions()
 	require.Len(t, m.sessions, 1)
