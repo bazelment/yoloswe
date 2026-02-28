@@ -34,6 +34,12 @@ To add a new dependency, please always follow these steps, don't use `go` comman
 - The tests should be deterministic, try to avoid external dependencies that has unstable output. When performing validation, avoid conditional check.
 - Tests for different purpose like integration should be put into different directory so that gazelle won't blend them into a single build target.
 
+## Integration Tests as Fixture Generators
+
+Existing integration tests already run real CLI sessions with recording enabled. When you need test fixtures (e.g., protocol traces), add an optional flag to an existing integration test rather than creating a separate test that duplicates the same session setup. For example, `claude/integration/session_test.go` accepts `-update-fixtures` to export its recording as protocol trace fixtures.
+
+Run `scripts/test-manual.sh` to discover all manual/integration tests.
+
 ## Integration Tests and Gazelle
 
 Integration test `BUILD.bazel` files are hand-maintained and must include `# gazelle:ignore` as the first line. Gazelle cannot generate these correctly because:
