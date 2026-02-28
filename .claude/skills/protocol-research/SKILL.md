@@ -2,6 +2,7 @@
 name: protocol-research
 description: >
   Investigate and document CLI protocol behavior for Claude, Codex, and Gemini agent CLIs.
+disable-model-invocation: true
 ---
 
 # Protocol Research

@@ -2,6 +2,7 @@
 name: tui-session-audit
 description: >
   Audit and improve Bramble TUI session rendering, interaction flows, and replay fidelity.
+disable-model-invocation: true
 ---
 
 # TUI Session Audit

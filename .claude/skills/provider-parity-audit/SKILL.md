@@ -2,6 +2,7 @@
 name: provider-parity-audit
 description: >
   Systematically audit and improve feature parity across Claude, Codex, and Gemini providers.
+disable-model-invocation: true
 ---
 
 # Provider Parity Audit
