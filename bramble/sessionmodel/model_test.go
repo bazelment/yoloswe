@@ -104,6 +104,29 @@ func TestOutputBuffer_SnapshotIsDeepCopy(t *testing.T) {
 	assert.Equal(t, "/foo.go", original[0].ToolInput["file"])
 }
 
+func TestOutputBuffer_SnapshotDeepCopiesToolResult(t *testing.T) {
+	buf := NewOutputBuffer(10)
+	buf.Append(OutputLine{
+		Type:       OutputTypeToolStart,
+		ToolID:     "t1",
+		ToolResult: map[string]interface{}{"stdout": "hello", "nested": []interface{}{"a", "b"}},
+	})
+
+	snap := buf.Snapshot()
+	// Mutate the snapshot's ToolResult.
+	result := snap[0].ToolResult.(map[string]interface{})
+	result["stdout"] = "mutated"
+	nested := result["nested"].([]interface{})
+	nested[0] = "mutated"
+
+	// Original buffer should be unaffected.
+	original := buf.Snapshot()
+	origResult := original[0].ToolResult.(map[string]interface{})
+	assert.Equal(t, "hello", origResult["stdout"])
+	origNested := origResult["nested"].([]interface{})
+	assert.Equal(t, "a", origNested[0])
+}
+
 // --- SessionModel tests ------------------------------------------------------
 
 func TestSessionModel_StatusRejectsFromTerminal(t *testing.T) {

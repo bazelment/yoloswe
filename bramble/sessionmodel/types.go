@@ -63,7 +63,30 @@ func DeepCopyOutputLine(line OutputLine) OutputLine {
 		}
 		line.ToolInput = newInput
 	}
+	line.ToolResult = deepCopyInterface(line.ToolResult)
 	return line
+}
+
+// deepCopyInterface shallow-clones the mutable container types that JSON
+// unmarshalling produces (map[string]interface{}, []interface{}).
+// Strings, numbers, bools, and nil are immutable and returned as-is.
+func deepCopyInterface(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		cp := make(map[string]interface{}, len(val))
+		for k, v := range val {
+			cp[k] = deepCopyInterface(v)
+		}
+		return cp
+	case []interface{}:
+		cp := make([]interface{}, len(val))
+		for i, v := range val {
+			cp[i] = deepCopyInterface(v)
+		}
+		return cp
+	default:
+		return v
+	}
 }
 
 // --- Session lifecycle types ------------------------------------------------
