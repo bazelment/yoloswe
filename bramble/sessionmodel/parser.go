@@ -23,8 +23,6 @@ type MessageParser struct {
 // blockState tracks a content block being assembled from streaming deltas.
 type blockState struct {
 	blockType   string // "text", "thinking", "tool_use"
-	text        string
-	thinking    string
 	toolID      string
 	toolName    string
 	partialJSON string
@@ -288,7 +286,6 @@ func (p *MessageParser) handleContentBlockDelta(e protocol.ContentBlockDeltaEven
 		if err := json.Unmarshal(e.Delta, &delta); err != nil {
 			return
 		}
-		state.text += delta.Text
 		p.model.AppendStreamingText(delta.Text)
 
 	case "thinking_delta":
@@ -296,7 +293,6 @@ func (p *MessageParser) handleContentBlockDelta(e protocol.ContentBlockDeltaEven
 		if err := json.Unmarshal(e.Delta, &delta); err != nil {
 			return
 		}
-		state.thinking += delta.Thinking
 		p.model.AppendStreamingThinking(delta.Thinking)
 
 	case "input_json_delta":

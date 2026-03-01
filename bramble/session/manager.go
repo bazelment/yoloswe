@@ -1490,6 +1490,12 @@ func (m *Manager) InitOutputBuffer(sessionID SessionID) {
 }
 
 // GetSessionModel returns the SessionModel for a session.
+//
+// NOTE: During the current transition period, live session data flows through
+// the legacy addOutput/outputs path. The SessionModel returned here receives
+// data only from InitOutputBuffer (test helper) or future callers that write
+// directly to the model. A subsequent PR will wire addOutput into the
+// SessionModel to complete the migration.
 func (m *Manager) GetSessionModel(id SessionID) *sessionmodel.SessionModel {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
