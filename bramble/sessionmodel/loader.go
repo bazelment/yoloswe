@@ -84,7 +84,8 @@ func handleEnvelopeMeta(model *SessionModel, meta *RawEnvelopeMeta) {
 				Content:   fmt.Sprintf("PR #%d: %s", meta.PRNumber, meta.PRURL),
 			})
 		}
-	// file-history-snapshot, queue-operation: skip (internal bookkeeping)
+	default:
+		// file-history-snapshot, queue-operation: skip (internal bookkeeping)
 	}
 }
 

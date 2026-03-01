@@ -139,10 +139,10 @@ func TestLoadFromRawJSONL_NonexistentFile(t *testing.T) {
 }
 
 func TestFromRawJSONL_AllEnvelopeTypes(t *testing.T) {
-	tests := []struct {
-		name    string
-		line    string
-		wantMsg bool // expect a vocabulary message
+	tests := []struct { //nolint:govet // fieldalignment: readability over packing
+		name     string
+		line     string
+		wantMsg  bool   // expect a vocabulary message
 		wantType string // expected meta.Type
 	}{
 		{

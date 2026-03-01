@@ -10,7 +10,7 @@ const defaultMaxLines = 1000
 // SessionModel is the single source of truth for a session's state.
 // The write API is called by MessageParser / Controller; the read API
 // is called by the View.
-type SessionModel struct {
+type SessionModel struct { //nolint:govet // fieldalignment: readability over packing
 	meta      SessionMeta
 	output    *OutputBuffer
 	progress  ProgressSnapshot

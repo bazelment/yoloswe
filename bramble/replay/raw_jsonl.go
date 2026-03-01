@@ -32,7 +32,8 @@ func parseRawJSONL(path string) (*Result, error) {
 // back to the first text line if none are found.
 func extractPrompt(lines []session.OutputLine) string {
 	fallback := ""
-	for _, line := range lines {
+	for i := range lines {
+		line := &lines[i]
 		if line.Type != session.OutputTypeText || line.Content == "" {
 			continue
 		}

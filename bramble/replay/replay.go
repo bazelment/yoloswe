@@ -16,8 +16,8 @@ import (
 type Format string
 
 const (
-	FormatClaude  Format = "claude"
-	FormatCodex   Format = "codex"
+	FormatClaude   Format = "claude"
+	FormatCodex    Format = "codex"
 	FormatRawJSONL Format = "raw_jsonl" // ~/.claude/projects/ native format
 )
 

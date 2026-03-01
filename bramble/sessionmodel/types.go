@@ -123,7 +123,7 @@ type SessionID string
 // --- Session metadata -------------------------------------------------------
 
 // SessionMeta holds metadata extracted from system{init} and envelope fields.
-type SessionMeta struct {
+type SessionMeta struct { //nolint:govet // fieldalignment: readability over packing
 	SessionID         string
 	Model             string
 	CWD               string
@@ -137,7 +137,7 @@ type SessionMeta struct {
 }
 
 // RawEnvelopeMeta holds metadata from raw JSONL (~/.claude/projects/) envelopes.
-type RawEnvelopeMeta struct {
+type RawEnvelopeMeta struct { //nolint:govet // fieldalignment: readability over packing
 	Timestamp     time.Time
 	ToolUseResult json.RawMessage
 	Data          json.RawMessage // progress data payload

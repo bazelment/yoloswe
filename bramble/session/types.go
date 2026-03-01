@@ -269,5 +269,3 @@ type SessionStateChangeEvent struct {
 	OldStatus SessionStatus
 	NewStatus SessionStatus
 }
-
-

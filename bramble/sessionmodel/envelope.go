@@ -48,7 +48,7 @@ func FromSDKRecorder(line []byte) (protocol.Message, time.Time, string, error) {
 
 // --- Raw JSONL (~/.claude/projects/ native format) --------------------------
 
-type rawJSONLEnvelope struct {
+type rawJSONLEnvelope struct { //nolint:govet // fieldalignment: readability over packing
 	Timestamp     string          `json:"timestamp"`
 	Type          string          `json:"type"`
 	Subtype       string          `json:"subtype,omitempty"`

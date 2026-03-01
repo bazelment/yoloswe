@@ -198,7 +198,7 @@ func TestSessionModel_ConcurrentAccess(t *testing.T) {
 }
 
 // recordingObserver records events for test verification.
-type recordingObserver struct {
+type recordingObserver struct { //nolint:govet // fieldalignment: test fixture readability
 	mu     sync.Mutex
 	events []ModelEvent
 }
