@@ -34,9 +34,26 @@ func NewSessionModel(maxLines int) *SessionModel {
 // --- Write API (called by MessageParser / Controller) -----------------------
 
 // SetMeta replaces the session metadata and notifies observers.
+// It is intended for initialisation-time use only (e.g. system{init} handling).
+// Callers that only need to update a single field should use the targeted
+// mutators (UpdateStatus, PatchSessionID) to avoid TOCTOU races.
 func (m *SessionModel) SetMeta(meta SessionMeta) {
 	m.mu.Lock()
 	m.meta = meta
+	m.mu.Unlock()
+	m.notify(MetaUpdated{})
+}
+
+// PatchSessionID sets the session ID atomically if it is currently empty.
+// This avoids the TOCTOU race that arises from a read-then-SetMeta pattern.
+func (m *SessionModel) PatchSessionID(id string) {
+	if id == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.meta.SessionID == "" {
+		m.meta.SessionID = id
+	}
 	m.mu.Unlock()
 	m.notify(MetaUpdated{})
 }

@@ -338,15 +338,9 @@ func (p *MessageParser) handleContentBlockStop(e protocol.ContentBlockStopEvent)
 // PatchSessionID fills in the session ID from the outer envelope if the model
 // metadata currently has an empty session ID. Raw JSONL stores the session ID
 // in the outer envelope rather than the inner system{init} message.
+// Delegates to SessionModel.PatchSessionID for an atomic check-and-update.
 func (p *MessageParser) PatchSessionID(id string) {
-	if id == "" {
-		return
-	}
-	meta := p.model.Meta()
-	if meta.SessionID == "" {
-		meta.SessionID = id
-		p.model.SetMeta(meta)
-	}
+	p.model.PatchSessionID(id)
 }
 
 // Reset clears all accumulated streaming state.

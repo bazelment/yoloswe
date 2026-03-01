@@ -20,7 +20,7 @@ func FormatToolContent(name string, input map[string]interface{}) string {
 		}
 	case "Bash":
 		if cmd, ok := input["command"].(string); ok {
-			return fmt.Sprintf("%s: %s", name, truncateForDisplay(cmd, 50))
+			return fmt.Sprintf("%s: %s", name, TruncateForDisplay(cmd, 50))
 		}
 	case "Glob":
 		if pattern, ok := input["pattern"].(string); ok {
@@ -28,11 +28,11 @@ func FormatToolContent(name string, input map[string]interface{}) string {
 		}
 	case "Grep":
 		if pattern, ok := input["pattern"].(string); ok {
-			return fmt.Sprintf("%s %s", name, truncateForDisplay(pattern, 40))
+			return fmt.Sprintf("%s %s", name, TruncateForDisplay(pattern, 40))
 		}
 	case "Task":
 		if desc, ok := input["description"].(string); ok {
-			return fmt.Sprintf("%s: %s", name, truncateForDisplay(desc, 40))
+			return fmt.Sprintf("%s: %s", name, TruncateForDisplay(desc, 40))
 		}
 	}
 	return name
@@ -57,10 +57,11 @@ func truncatePathForDisplay(path string) string {
 	return string(runes[:57]) + "..."
 }
 
-// truncateForDisplay truncates s to at most max Unicode code points, appending
-// "..." if truncation occurred. Rune-based indexing avoids splitting multi-byte
-// UTF-8 sequences that byte-based slicing would corrupt.
-func truncateForDisplay(s string, max int) string {
+// TruncateForDisplay truncates s to at most max Unicode code points, appending
+// "..." if truncation occurred (the suffix counts toward max). Rune-based
+// indexing avoids splitting multi-byte UTF-8 sequences that byte-based slicing
+// would corrupt.
+func TruncateForDisplay(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
