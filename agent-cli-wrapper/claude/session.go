@@ -220,13 +220,7 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 		s.recorder.StartTurn(turn.Number, content)
 	}
 
-	msg := protocol.UserMessageToSend{
-		Type: "user",
-		Message: protocol.UserMessageToSendInner{
-			Role:    "user",
-			Content: content,
-		},
-	}
+	msg := protocol.NewUserTextMessage(content)
 
 	if err := s.process.WriteMessage(msg); err != nil {
 		return 0, err
@@ -365,14 +359,7 @@ func (s *Session) SetPermissionMode(ctx context.Context, mode PermissionMode) er
 	}
 
 	// Send control request
-	req := protocol.ControlRequestToSend{
-		Type:      "control_request",
-		RequestID: generateRequestID(),
-		Request: protocol.SetPermissionModeRequestToSend{
-			Subtype: "set_permission_mode",
-			Mode:    string(mode),
-		},
-	}
+	req := protocol.NewSetPermissionMode(generateRequestID(), string(mode))
 
 	if s.recorder != nil {
 		s.recorder.RecordSent(req)
@@ -390,13 +377,7 @@ func (s *Session) Interrupt(ctx context.Context) error {
 		return ErrNotStarted
 	}
 
-	req := protocol.ControlRequestToSend{
-		Type:      "control_request",
-		RequestID: generateRequestID(),
-		Request: protocol.InterruptRequestToSend{
-			Subtype: "interrupt",
-		},
-	}
+	req := protocol.NewInterrupt(generateRequestID())
 
 	if s.recorder != nil {
 		s.recorder.RecordSent(req)
@@ -417,14 +398,7 @@ func (s *Session) SetModel(ctx context.Context, model string) error {
 	}
 
 	// Send control request
-	req := protocol.ControlRequestToSend{
-		Type:      "control_request",
-		RequestID: generateRequestID(),
-		Request: protocol.SetModelRequestToSend{
-			Subtype: "set_model",
-			Model:   model,
-		},
-	}
+	req := protocol.NewSetModel(generateRequestID(), model)
 
 	if s.recorder != nil {
 		s.recorder.RecordSent(req)
@@ -560,6 +534,11 @@ func (s *Session) stderrLoop() {
 
 // handleLine processes a single JSON line.
 func (s *Session) handleLine(line []byte) {
+	// Record raw line before parsing — preserves unknown message types.
+	if s.recorder != nil {
+		s.recorder.RecordReceived(line)
+	}
+
 	msg, err := protocol.ParseMessage(line)
 	if err != nil {
 		s.emitError(&ProtocolError{
@@ -570,9 +549,8 @@ func (s *Session) handleLine(line []byte) {
 		return
 	}
 
-	// Record received message
-	if s.recorder != nil {
-		s.recorder.RecordReceived(msg)
+	if msg == nil {
+		return // unknown type — already recorded above
 	}
 
 	switch m := msg.(type) {
@@ -932,18 +910,8 @@ func (s *Session) handleExitPlanModeControl(ctx context.Context, requestID strin
 
 // buildDenyResponse builds a deny control response.
 func buildDenyResponse(requestID, message string, interrupt bool) *protocol.ControlResponse {
-	return &protocol.ControlResponse{
-		Type: protocol.MessageTypeControlResponse,
-		Response: protocol.ControlResponsePayload{
-			Subtype:   "success",
-			RequestID: requestID,
-			Response: protocol.PermissionResultDeny{
-				Behavior:  protocol.PermissionBehaviorDeny,
-				Message:   message,
-				Interrupt: interrupt,
-			},
-		},
-	}
+	resp := protocol.NewPermissionDeny(requestID, message, interrupt)
+	return &resp
 }
 
 // buildAllowResponseWithAnswers builds an allow response with answers embedded in updatedInput.
@@ -953,18 +921,8 @@ func buildAllowResponseWithAnswers(requestID string, originalInput map[string]in
 		updatedInput[k] = v
 	}
 	updatedInput["answers"] = answers
-
-	return &protocol.ControlResponse{
-		Type: protocol.MessageTypeControlResponse,
-		Response: protocol.ControlResponsePayload{
-			Subtype:   "success",
-			RequestID: requestID,
-			Response: protocol.PermissionResultAllow{
-				Behavior:     protocol.PermissionBehaviorAllow,
-				UpdatedInput: updatedInput,
-			},
-		},
-	}
+	resp := protocol.NewPermissionAllow(requestID, updatedInput, nil)
+	return &resp
 }
 
 // buildAllowResponseWithFeedback builds an allow response with feedback embedded in updatedInput.
@@ -974,18 +932,8 @@ func buildAllowResponseWithFeedback(requestID string, originalInput map[string]i
 		updatedInput[k] = v
 	}
 	updatedInput["feedback"] = feedback
-
-	return &protocol.ControlResponse{
-		Type: protocol.MessageTypeControlResponse,
-		Response: protocol.ControlResponsePayload{
-			Subtype:   "success",
-			RequestID: requestID,
-			Response: protocol.PermissionResultAllow{
-				Behavior:     protocol.PermissionBehaviorAllow,
-				UpdatedInput: updatedInput,
-			},
-		},
-	}
+	resp := protocol.NewPermissionAllow(requestID, updatedInput, nil)
+	return &resp
 }
 
 // emit sends an event to the events channel.
@@ -1100,26 +1048,13 @@ func (s *Session) handleMCPMessage(requestID string, mcpReq protocol.MCPMessageR
 
 // sendMCPResponse sends a successful MCP control response.
 func (s *Session) sendMCPResponse(requestID string, rpcID interface{}, result interface{}) {
-	rpcResp := protocol.JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      rpcID,
-		Result:  result,
-	}
-
-	resp := &protocol.ControlResponse{
-		Type: protocol.MessageTypeControlResponse,
-		Response: protocol.ControlResponsePayload{
-			Subtype:   "success",
-			RequestID: requestID,
-			Response:  protocol.MCPResponsePayload{MCPResponse: rpcResp},
-		},
-	}
-
-	if err := s.process.WriteMessage(resp); err != nil {
+	rpcResp := protocol.JSONRPCResponse{JSONRPC: "2.0", ID: rpcID, Result: result}
+	resp := protocol.NewMCPResponse(requestID, rpcResp)
+	if err := s.process.WriteMessage(&resp); err != nil {
 		s.emitError(err, "send_mcp_response")
 	}
 	if s.recorder != nil {
-		s.recorder.RecordSent(resp)
+		s.recorder.RecordSent(&resp)
 	}
 }
 
@@ -1128,26 +1063,14 @@ func (s *Session) sendMCPErrorResponse(requestID string, rpcID interface{}, code
 	rpcResp := protocol.JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      rpcID,
-		Error: &protocol.JSONRPCError{
-			Code:    code,
-			Message: message,
-		},
+		Error:   &protocol.JSONRPCError{Code: code, Message: message},
 	}
-
-	resp := &protocol.ControlResponse{
-		Type: protocol.MessageTypeControlResponse,
-		Response: protocol.ControlResponsePayload{
-			Subtype:   "success",
-			RequestID: requestID,
-			Response:  protocol.MCPResponsePayload{MCPResponse: rpcResp},
-		},
-	}
-
-	if err := s.process.WriteMessage(resp); err != nil {
+	resp := protocol.NewMCPResponse(requestID, rpcResp)
+	if err := s.process.WriteMessage(&resp); err != nil {
 		s.emitError(err, "send_mcp_error_response")
 	}
 	if s.recorder != nil {
-		s.recorder.RecordSent(resp)
+		s.recorder.RecordSent(&resp)
 	}
 }
 

@@ -16,6 +16,11 @@ type ControlRequest struct {
 // MsgType returns the message type.
 func (m ControlRequest) MsgType() MessageType { return MessageTypeControlRequest }
 
+// ParsedRequest parses the inner request from a ControlRequest.
+func (m ControlRequest) ParsedRequest() (ControlRequestData, error) {
+	return ParseControlRequest(m.Request)
+}
+
 // ControlRequestSubtype is the subtype of a control request.
 type ControlRequestSubtype string
 
