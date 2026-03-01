@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"log/slog"
+)
 
 // StreamEvent wraps streaming updates.
 type StreamEvent struct {
@@ -60,11 +63,19 @@ type ContentBlockDeltaEvent struct {
 // EventType returns the stream event type.
 func (e ContentBlockDeltaEvent) EventType() StreamEventType { return StreamEventTypeContentBlockDelta }
 
+// DeltaData is the interface for content block delta discrimination.
+type DeltaData interface {
+	DeltaType() string
+}
+
 // TextDelta is a delta containing text.
 type TextDelta struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
 }
+
+// DeltaType returns the delta type.
+func (d TextDelta) DeltaType() string { return d.Type }
 
 // ThinkingDelta is a delta containing thinking.
 type ThinkingDelta struct {
@@ -72,11 +83,17 @@ type ThinkingDelta struct {
 	Thinking string `json:"thinking"`
 }
 
+// DeltaType returns the delta type.
+func (d ThinkingDelta) DeltaType() string { return d.Type }
+
 // InputJSONDelta is a delta containing partial JSON for tool input.
 type InputJSONDelta struct {
 	Type        string `json:"type"`
 	PartialJSON string `json:"partial_json"`
 }
+
+// DeltaType returns the delta type.
+func (d InputJSONDelta) DeltaType() string { return d.Type }
 
 // ContentBlockStopEvent marks block completion.
 type ContentBlockStopEvent struct {
@@ -110,6 +127,50 @@ type MessageStopEvent struct {
 
 // EventType returns the stream event type.
 func (e MessageStopEvent) EventType() StreamEventType { return StreamEventTypeMessageStop }
+
+// ParseContentBlockDelta parses the inner delta from a ContentBlockDeltaEvent.
+func ParseContentBlockDelta(data json.RawMessage) (DeltaData, error) {
+	var base struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &base); err != nil {
+		return nil, err
+	}
+
+	switch base.Type {
+	case "text_delta":
+		var d TextDelta
+		if err := json.Unmarshal(data, &d); err != nil {
+			return nil, err
+		}
+		return d, nil
+	case "thinking_delta":
+		var d ThinkingDelta
+		if err := json.Unmarshal(data, &d); err != nil {
+			return nil, err
+		}
+		return d, nil
+	case "input_json_delta":
+		var d InputJSONDelta
+		if err := json.Unmarshal(data, &d); err != nil {
+			return nil, err
+		}
+		return d, nil
+	default:
+		slog.Warn("skipping unknown content block delta type", "type", base.Type)
+		return nil, nil
+	}
+}
+
+// ParsedBlock parses the content_block field of a ContentBlockStartEvent.
+func (e ContentBlockStartEvent) ParsedBlock() (ContentBlock, error) {
+	return UnmarshalContentBlock(e.ContentBlock)
+}
+
+// ParsedDelta parses the delta field of a ContentBlockDeltaEvent.
+func (e ContentBlockDeltaEvent) ParsedDelta() (DeltaData, error) {
+	return ParseContentBlockDelta(e.Delta)
+}
 
 // ParseStreamEvent parses the inner event from a StreamEvent.
 func ParseStreamEvent(data json.RawMessage) (StreamEventData, error) {
@@ -158,7 +219,7 @@ func ParseStreamEvent(data json.RawMessage) (StreamEventData, error) {
 		}
 		return e, nil
 	default:
-		// Unknown event type, return nil without error for forward compatibility
+		slog.Warn("skipping unknown stream event type", "type", base.Type)
 		return nil, nil
 	}
 }

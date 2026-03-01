@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // MessageType discriminates between message kinds.
 type MessageType string
@@ -222,6 +225,15 @@ type UserMessageToSend struct {
 type UserMessageToSendInner struct {
 	Content interface{} `json:"content"`
 	Role    string      `json:"role"`
+}
+
+// Marshal serializes the message to a JSON line ready to write to the CLI.
+func (m UserMessageToSend) Marshal() ([]byte, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("marshal UserMessageToSend: %w", err)
+	}
+	return b, nil
 }
 
 // RawMessage is used for initial type discrimination.

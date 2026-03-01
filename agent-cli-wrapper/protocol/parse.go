@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // ParseMessage parses a raw JSON line into a typed Message.
@@ -65,6 +66,7 @@ func ParseMessage(data []byte) (Message, error) {
 		return msg, nil
 
 	default:
-		return nil, fmt.Errorf("unknown message type: %s", base.Type)
+		slog.Warn("skipping unknown protocol message type", "type", base.Type)
+		return nil, nil
 	}
 }

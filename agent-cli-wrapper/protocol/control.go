@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+)
 
 // ControlRequest wraps control messages from CLI.
 type ControlRequest struct {
@@ -91,6 +95,7 @@ func ParseControlRequest(data json.RawMessage) (ControlRequestData, error) {
 		}
 		return r, nil
 	default:
+		slog.Warn("skipping unknown control request subtype", "subtype", base.Subtype)
 		return nil, nil
 	}
 }
@@ -103,6 +108,15 @@ type ControlResponse struct {
 
 // MsgType returns the message type.
 func (m ControlResponse) MsgType() MessageType { return MessageTypeControlResponse }
+
+// Marshal serializes the control response to a JSON line ready to write to the CLI.
+func (m ControlResponse) Marshal() ([]byte, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ControlResponse: %w", err)
+	}
+	return b, nil
+}
 
 // ControlResponsePayload is the inner response payload.
 type ControlResponsePayload struct {
@@ -158,6 +172,15 @@ type ControlRequestToSend struct {
 	Request   interface{} `json:"request"`
 	Type      string      `json:"type"`
 	RequestID string      `json:"request_id"`
+}
+
+// Marshal serializes the control request to a JSON line ready to write to the CLI.
+func (m ControlRequestToSend) Marshal() ([]byte, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ControlRequestToSend: %w", err)
+	}
+	return b, nil
 }
 
 // SetPermissionModeRequestToSend is the request body for setting permission mode.

@@ -7,6 +7,7 @@ go_library(
         "control.go",
         "mcp.go",
         "messages.go",
+        "output.go",
         "parse.go",
         "stream.go",
     ],
@@ -17,6 +18,7 @@ go_library(
 go_test(
     name = "protocol_test",
     srcs = [
+        "content_test.go",
         "control_test.go",
         "mcp_test.go",
         "parse_test.go",
