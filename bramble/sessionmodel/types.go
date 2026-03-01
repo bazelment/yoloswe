@@ -18,7 +18,7 @@ type OutputLineType string
 const (
 	OutputTypeText       OutputLineType = "text"
 	OutputTypeThinking   OutputLineType = "thinking"
-	OutputTypeTool       OutputLineType = "tool"       // Legacy
+	OutputTypeTool       OutputLineType = "tool" // Legacy: use OutputTypeToolStart/Result instead
 	OutputTypeToolStart  OutputLineType = "tool_start"
 	OutputTypeToolResult OutputLineType = "tool_result"
 	OutputTypeError      OutputLineType = "error"
