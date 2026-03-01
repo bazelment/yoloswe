@@ -40,26 +40,30 @@ func FormatToolContent(name string, input map[string]interface{}) string {
 
 // truncatePathForDisplay keeps the filename visible when truncating paths.
 func truncatePathForDisplay(path string) string {
-	if len(path) <= 60 {
+	runes := []rune(path)
+	if len(runes) <= 60 {
 		return path
 	}
 	lastSlash := -1
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
+	for i := len(runes) - 1; i >= 0; i-- {
+		if runes[i] == '/' {
 			lastSlash = i
 			break
 		}
 	}
-	if lastSlash > 0 && len(path)-lastSlash <= 50 {
-		return "..." + path[lastSlash:]
+	if lastSlash > 0 && len(runes)-lastSlash <= 50 {
+		return "..." + string(runes[lastSlash:])
 	}
-	return path[:57] + "..."
+	return string(runes[:57]) + "..."
 }
 
-// truncateForDisplay truncates a string to max length.
+// truncateForDisplay truncates s to at most max Unicode code points, appending
+// "..." if truncation occurred. Rune-based indexing avoids splitting multi-byte
+// UTF-8 sequences that byte-based slicing would corrupt.
 func truncateForDisplay(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max-3] + "..."
+	return string(runes[:max-3]) + "..."
 }

@@ -36,10 +36,7 @@ func extractPrompt(lines []session.OutputLine) string {
 		if line.Type != session.OutputTypeText || line.Content == "" {
 			continue
 		}
-		s := line.Content
-		if len(s) > 200 {
-			s = s[:200] + "..."
-		}
+		s := truncateRunes(line.Content, 200)
 		if line.IsUserPrompt {
 			return s
 		}
@@ -48,4 +45,15 @@ func extractPrompt(lines []session.OutputLine) string {
 		}
 	}
 	return fallback
+}
+
+// truncateRunes truncates s to at most maxRunes Unicode code points, appending
+// "..." if truncation occurred. Using rune-based indexing avoids splitting
+// multi-byte UTF-8 sequences that byte-based slicing would corrupt.
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
 }

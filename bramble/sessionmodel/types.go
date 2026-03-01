@@ -136,20 +136,6 @@ type SessionMeta struct {
 	Status            SessionStatus
 }
 
-// ToolUseResultMeta captures tool execution details from raw JSONL envelopes.
-type ToolUseResultMeta struct {
-	Stdout      string `json:"stdout,omitempty"`
-	Stderr      string `json:"stderr,omitempty"`
-	Interrupted bool   `json:"interrupted,omitempty"`
-}
-
-// TurnUsage tracks token/cost usage for a single turn.
-type TurnUsage struct {
-	InputTokens  int
-	OutputTokens int
-	CostUSD      float64
-}
-
 // RawEnvelopeMeta holds metadata from raw JSONL (~/.claude/projects/) envelopes.
 type RawEnvelopeMeta struct {
 	Timestamp     time.Time
