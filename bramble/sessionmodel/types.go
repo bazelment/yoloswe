@@ -37,7 +37,7 @@ const (
 )
 
 // OutputLine represents a line of session output for display.
-type OutputLine struct {
+type OutputLine struct { //nolint:govet // fieldalignment: readability over packing
 	StartTime  time.Time              `json:"start_time,omitempty"`
 	Timestamp  time.Time
 	ToolResult interface{}            `json:"tool_result,omitempty"`
@@ -45,12 +45,12 @@ type OutputLine struct {
 	ToolName   string                 `json:"tool_name,omitempty"`
 	ToolID     string                 `json:"tool_id,omitempty"`
 	Content    string
-	ToolState  ToolState `json:"tool_state,omitempty"`
+	ToolState  ToolState              `json:"tool_state,omitempty"`
 	Type       OutputLineType
-	TurnNumber int     `json:"turn_number,omitempty"`
-	CostUSD    float64 `json:"cost_usd,omitempty"`
-	DurationMs int64   `json:"duration_ms,omitempty"`
-	IsError    bool    `json:"is_error,omitempty"`
+	TurnNumber int                    `json:"turn_number,omitempty"`
+	CostUSD    float64                `json:"cost_usd,omitempty"`
+	DurationMs int64                  `json:"duration_ms,omitempty"`
+	IsError    bool                   `json:"is_error,omitempty"`
 	// IsUserPrompt is true for OutputTypeText lines that originate from the
 	// user's initial message (string-content UserMessage). This distinguishes
 	// user prompts from assistant text, both of which use OutputTypeText.

@@ -140,81 +140,81 @@ func TestLoadFromRawJSONL_NonexistentFile(t *testing.T) {
 
 func TestFromRawJSONL_AllEnvelopeTypes(t *testing.T) {
 	tests := []struct { //nolint:govet // fieldalignment: readability over packing
-		name    string
-		line    string
-		wantMsg bool // expect a vocabulary message
+		name     string
+		line     string
+		wantMsg  bool   // expect a vocabulary message
 		wantType string // expected meta.Type
 	}{
 		{
-			name:    "assistant message",
-			line:    `{"type":"assistant","sessionId":"s1","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{}},"timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: true,
+			name:     "assistant message",
+			line:     `{"type":"assistant","sessionId":"s1","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{}},"timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  true,
 			wantType: "assistant",
 		},
 		{
-			name:    "user message with tool result",
-			line:    `{"type":"user","sessionId":"s1","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}]},"timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: true,
+			name:     "user message with tool result",
+			line:     `{"type":"user","sessionId":"s1","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok","is_error":false}]},"timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  true,
 			wantType: "user",
 		},
 		{
-			name:    "system init",
-			line:    `{"type":"system","subtype":"init","sessionId":"s1","uuid":"s1","model":"claude-opus-4-6","cwd":"/tmp","tools":[],"timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: true,
+			name:     "system init",
+			line:     `{"type":"system","subtype":"init","sessionId":"s1","uuid":"s1","model":"claude-opus-4-6","cwd":"/tmp","tools":[],"timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  true,
 			wantType: "system",
 		},
 		{
-			name:    "system api_error",
-			line:    `{"type":"system","subtype":"api_error","sessionId":"s1","uuid":"s2","error":{"cause":{"code":"FailedToOpenSocket","path":"https://api.anthropic.com"}},"timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "system api_error",
+			line:     `{"type":"system","subtype":"api_error","sessionId":"s1","uuid":"s2","error":{"cause":{"code":"FailedToOpenSocket","path":"https://api.anthropic.com"}},"timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "system",
 		},
 		{
-			name:    "system turn_duration",
-			line:    `{"type":"system","subtype":"turn_duration","sessionId":"s1","uuid":"s3","durationMs":5000,"timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "system turn_duration",
+			line:     `{"type":"system","subtype":"turn_duration","sessionId":"s1","uuid":"s3","durationMs":5000,"timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "system",
 		},
 		{
-			name:    "system compact_boundary",
-			line:    `{"type":"system","subtype":"compact_boundary","sessionId":"s1","uuid":"s4","content":"Conversation compacted","timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "system compact_boundary",
+			line:     `{"type":"system","subtype":"compact_boundary","sessionId":"s1","uuid":"s4","content":"Conversation compacted","timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "system",
 		},
 		{
-			name:    "progress bash",
-			line:    `{"type":"progress","sessionId":"s1","data":{"type":"bash_progress","output":"ok"},"uuid":"p1","timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "progress bash",
+			line:     `{"type":"progress","sessionId":"s1","data":{"type":"bash_progress","output":"ok"},"uuid":"p1","timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "progress",
 		},
 		{
-			name:    "progress mcp",
-			line:    `{"type":"progress","sessionId":"s1","data":{"type":"mcp_progress","status":"completed","serverName":"pw","toolName":"nav"},"uuid":"p2","timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "progress mcp",
+			line:     `{"type":"progress","sessionId":"s1","data":{"type":"mcp_progress","status":"completed","serverName":"pw","toolName":"nav"},"uuid":"p2","timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "progress",
 		},
 		{
-			name:    "file-history-snapshot",
-			line:    `{"type":"file-history-snapshot","messageId":"m1","snapshot":{},"isSnapshotUpdate":false}`,
-			wantMsg: false,
+			name:     "file-history-snapshot",
+			line:     `{"type":"file-history-snapshot","messageId":"m1","snapshot":{},"isSnapshotUpdate":false}`,
+			wantMsg:  false,
 			wantType: "file-history-snapshot",
 		},
 		{
-			name:    "queue-operation",
-			line:    `{"type":"queue-operation","operation":"enqueue","sessionId":"s1","timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "queue-operation",
+			line:     `{"type":"queue-operation","operation":"enqueue","sessionId":"s1","timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "queue-operation",
 		},
 		{
-			name:    "pr-link",
-			line:    `{"type":"pr-link","sessionId":"s1","prNumber":7,"prUrl":"https://github.com/x/y/pull/7","prRepository":"x/y","timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: false,
+			name:     "pr-link",
+			line:     `{"type":"pr-link","sessionId":"s1","prNumber":7,"prUrl":"https://github.com/x/y/pull/7","prRepository":"x/y","timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  false,
 			wantType: "pr-link",
 		},
 		{
-			name:    "result message",
-			line:    `{"type":"result","session_id":"s1","uuid":"r1","num_turns":2,"total_cost_usd":0.05,"duration_ms":8000,"is_error":false,"usage":{"input_tokens":5000,"output_tokens":800},"timestamp":"2026-02-28T10:00:00.000Z"}`,
-			wantMsg: true,
+			name:     "result message",
+			line:     `{"type":"result","session_id":"s1","uuid":"r1","num_turns":2,"total_cost_usd":0.05,"duration_ms":8000,"is_error":false,"usage":{"input_tokens":5000,"output_tokens":800},"timestamp":"2026-02-28T10:00:00.000Z"}`,
+			wantMsg:  true,
 			wantType: "result",
 		},
 	}
