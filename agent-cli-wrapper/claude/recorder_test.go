@@ -22,7 +22,8 @@ func TestRecorder_SingleFile(t *testing.T) {
 
 	// Record messages before initialization
 	recorder.RecordSent(map[string]string{"type": "user", "content": "hello"})
-	recorder.RecordReceived(map[string]string{"type": "system", "subtype": "init"})
+	sentRaw, _ := json.Marshal(map[string]string{"type": "system", "subtype": "init"})
+	recorder.RecordReceived(sentRaw)
 
 	// Initialize
 	err = recorder.Initialize(RecordingMetadata{
@@ -38,7 +39,8 @@ func TestRecorder_SingleFile(t *testing.T) {
 
 	// Record more messages after initialization
 	recorder.RecordSent(map[string]string{"type": "user", "content": "follow up"})
-	recorder.RecordReceived(map[string]string{"type": "assistant", "content": "response"})
+	receivedRaw, _ := json.Marshal(map[string]string{"type": "assistant", "content": "response"})
+	recorder.RecordReceived(receivedRaw)
 
 	// Close recorder
 	recorder.Close()
@@ -85,7 +87,8 @@ func TestRecorder_ContainerFormat(t *testing.T) {
 	}
 
 	recorder.RecordSent(map[string]string{"type": "user"})
-	recorder.RecordReceived(map[string]string{"type": "assistant"})
+	receivedRaw, _ := json.Marshal(map[string]string{"type": "assistant"})
+	recorder.RecordReceived(receivedRaw)
 	recorder.Close()
 
 	messages, err := LoadMessages(recorder.Path())
@@ -125,7 +128,8 @@ func TestRecorder_BuffersReceivedMessages(t *testing.T) {
 	recorder := newSessionRecorder(tmpDir)
 
 	// Record received message BEFORE initialization
-	recorder.RecordReceived(map[string]string{"type": "system", "data": "pre-init"})
+	preInitRaw, _ := json.Marshal(map[string]string{"type": "system", "data": "pre-init"})
+	recorder.RecordReceived(preInitRaw)
 
 	err = recorder.Initialize(RecordingMetadata{
 		SessionID: "test-session",
@@ -163,7 +167,8 @@ func TestRecorder_TimestampOrder(t *testing.T) {
 	// Record messages before initialization with slight delays
 	recorder.RecordSent(map[string]int{"seq": 1})
 	time.Sleep(time.Millisecond)
-	recorder.RecordReceived(map[string]int{"seq": 2})
+	seq2Raw, _ := json.Marshal(map[string]int{"seq": 2})
+	recorder.RecordReceived(seq2Raw)
 	time.Sleep(time.Millisecond)
 	recorder.RecordSent(map[string]int{"seq": 3})
 
@@ -272,5 +277,67 @@ func TestLoadMessages_MissingFile(t *testing.T) {
 	_, err = LoadMessages(tmpDir)
 	if err == nil {
 		t.Error("expected error for missing file")
+	}
+}
+
+func TestRecorder_RecordReceivedRaw(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "recorder-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	recorder := newSessionRecorder(tmpDir)
+	err = recorder.Initialize(RecordingMetadata{
+		SessionID: "test-session",
+	})
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+
+	// Record raw JSON including an unknown message type.
+	// The raw bytes should be preserved verbatim in the recording.
+	rawUnknown := []byte(`{"type":"rate_limit_event","retry_after_ms":5000}`)
+	recorder.RecordReceived(rawUnknown)
+
+	rawKnown := []byte(`{"type":"system","subtype":"init","session_id":"abc"}`)
+	recorder.RecordReceived(rawKnown)
+
+	recorder.Close()
+
+	// Load messages and verify raw content is preserved
+	messages, err := LoadMessages(recorder.Path())
+	if err != nil {
+		t.Fatalf("LoadMessages failed: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	// Both messages should have direction "received"
+	for i, msg := range messages {
+		if msg.Direction != "received" {
+			t.Errorf("message %d: expected direction 'received', got %q", i, msg.Direction)
+		}
+	}
+
+	// Verify the raw JSON is preserved verbatim by unmarshaling the message field
+	// (which was stored as json.RawMessage in UnmarshalJSON).
+	msg0Raw, ok := messages[0].Message.(json.RawMessage)
+	if !ok {
+		t.Fatalf("expected message[0] to be json.RawMessage, got %T", messages[0].Message)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(msg0Raw, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal message[0]: %v", err)
+	}
+
+	if parsed["type"] != "rate_limit_event" {
+		t.Errorf("expected type 'rate_limit_event', got %v", parsed["type"])
+	}
+	if parsed["retry_after_ms"] != float64(5000) {
+		t.Errorf("expected retry_after_ms 5000, got %v", parsed["retry_after_ms"])
 	}
 }

@@ -199,15 +199,21 @@ func (sr *sessionRecorder) RecordSent(msg interface{}) {
 	sr.writeRecord(record)
 }
 
-// RecordReceived records a message received from the CLI.
-func (sr *sessionRecorder) RecordReceived(msg interface{}) {
+// RecordReceived records raw bytes received from the CLI.
+// The raw JSON is preserved verbatim using json.RawMessage, ensuring
+// unknown message types are never lost during recording.
+func (sr *sessionRecorder) RecordReceived(raw []byte) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
+
+	// Copy the raw bytes so the caller can reuse the buffer.
+	copied := make(json.RawMessage, len(raw))
+	copy(copied, raw)
 
 	record := RecordedMessage{
 		Timestamp: time.Now(),
 		Direction: "received",
-		Message:   msg,
+		Message:   copied,
 	}
 
 	if !sr.initialized {

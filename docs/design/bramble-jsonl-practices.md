@@ -119,6 +119,40 @@ bazel test //bramble/app:app_test --test_filter=TestRenderCoverage
 | `file-history-snapshot` | — | Skipped | Undo/redo metadata |
 | `queue-operation` | — | Skipped | Internal bookkeeping |
 
+## Discovering New Types
+
+The protocol parsers (`agent-cli-wrapper/protocol/`) are forward-compatible:
+unknown message types, stream event types, control request subtypes, and content
+block types return `nil, nil` instead of hard errors, and log at `slog.Warn`
+level.
+
+### How unknown types are preserved
+
+Recording is on by default for builder/planner/agent sessions (via
+`WithRecording`). The recorder captures raw JSON bytes **before** parsing, so
+unknown message types are always preserved verbatim in `messages.jsonl`.
+
+### Scanning recordings for discovery
+
+Look for unknown types in recorded sessions:
+
+```bash
+# Find messages with types not in the known set
+grep -o '"type":"[^"]*"' messages.jsonl | sort -u
+
+# Search for a specific unknown type across all recordings
+grep -r '"type":"rate_limit_event"' ~/.claude-sessions/
+```
+
+### Adding support for a discovered type
+
+1. **Protocol layer** (`agent-cli-wrapper/protocol/`): Add the new type constant
+   and struct, then add a case in the relevant `Parse*` function.
+2. **SDK layer** (`agent-cli-wrapper/claude/`): Handle the new message type in
+   `handleLine()` or the appropriate `handle*` method in `session.go`.
+3. **Bramble layer** (`bramble/sessionmodel/`): Follow the steps in
+   "Adding Support for New JSONL Message Types" above.
+
 ## Bazel Test Gotchas
 
 - **Runfiles:** Use `os.Getenv("TEST_SRCDIR")` + `os.Getenv("TEST_WORKSPACE")`
