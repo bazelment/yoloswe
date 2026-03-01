@@ -86,7 +86,7 @@ func TestRenderCoverage_AllOutputTypes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			formatted := formatOutputLineWithStyles(tc.line, width, styles)
+			formatted := formatOutputLineWithStyles(tc.line, width, styles, nil)
 			assert.NotEmpty(t, formatted, "output should not be empty for type %s", tc.line.Type)
 			assert.Contains(t, formatted, tc.contains, "output should contain %q", tc.contains)
 			t.Logf("  %s → %s", tc.line.Type, truncateForLog(formatted, 120))

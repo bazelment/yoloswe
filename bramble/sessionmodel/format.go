@@ -60,11 +60,15 @@ func truncatePathForDisplay(path string) string {
 // TruncateForDisplay truncates s to at most max Unicode code points, appending
 // "..." if truncation occurred (the suffix counts toward max). Rune-based
 // indexing avoids splitting multi-byte UTF-8 sequences that byte-based slicing
-// would corrupt.
+// would corrupt. If max is less than 3, the string is truncated to max runes
+// with no suffix.
 func TruncateForDisplay(s string, max int) string {
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
+	}
+	if max <= 3 {
+		return string(runes[:max])
 	}
 	return string(runes[:max-3]) + "..."
 }

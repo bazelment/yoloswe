@@ -46,16 +46,20 @@ func (m *SessionModel) SetMeta(meta SessionMeta) {
 
 // PatchSessionID sets the session ID atomically if it is currently empty.
 // This avoids the TOCTOU race that arises from a read-then-SetMeta pattern.
+// No notification is sent when the session ID was already set.
 func (m *SessionModel) PatchSessionID(id string) {
 	if id == "" {
 		return
 	}
 	m.mu.Lock()
-	if m.meta.SessionID == "" {
+	changed := m.meta.SessionID == ""
+	if changed {
 		m.meta.SessionID = id
 	}
 	m.mu.Unlock()
-	m.notify(MetaUpdated{})
+	if changed {
+		m.notify(MetaUpdated{})
+	}
 }
 
 // UpdateStatus changes the session status and notifies observers.

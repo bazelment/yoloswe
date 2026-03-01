@@ -141,7 +141,7 @@ func (m OutputModel) View() string {
 			b.WriteString("\n")
 			continue
 		}
-		b.WriteString(formatOutputLineWithStyles(line, m.width, s))
+		b.WriteString(formatOutputLineWithStyles(line, m.width, s, m.mdRenderer))
 		b.WriteString("\n")
 	}
 
@@ -149,7 +149,7 @@ func (m OutputModel) View() string {
 }
 
 // formatOutputLineWithStyles formats a single output line for display using the given styles.
-func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) string {
+func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles, md *MarkdownRenderer) string {
 	var formatted string
 	switch line.Type {
 	case session.OutputTypeError:
@@ -197,7 +197,7 @@ func formatOutputLineWithStyles(line session.OutputLine, width int, s *Styles) s
 	case session.OutputTypePlanReady:
 		header := s.Dim.Render(strings.Repeat("═", 20) + " Plan Ready " + strings.Repeat("═", 20))
 		if line.Content != "" {
-			formatted = header + "\n" + line.Content
+			formatted = header + "\n" + renderTextContent(line.Content, md, "")
 		} else {
 			formatted = header
 		}

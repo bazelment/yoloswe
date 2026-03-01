@@ -164,6 +164,11 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 					line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 				}
 			})
+			// Clear progress indicator now that the tool result has arrived.
+			p.model.UpdateProgress(func(prog *ProgressSnapshot) {
+				prog.CurrentTool = ""
+				prog.CurrentPhase = ""
+			})
 		}
 	}
 }
@@ -321,14 +326,12 @@ func (p *MessageParser) handleContentBlockStop(e protocol.ContentBlockStopEvent)
 		}
 
 		// Update the tool_start line with the parsed input.
+		// Note: CurrentTool/CurrentPhase are cleared when the tool result
+		// arrives (handleUser ToolResultBlock), not here, so the progress
+		// indicator stays visible until execution actually completes.
 		p.model.UpdateTool(state.toolID, func(line *OutputLine) {
 			line.ToolInput = input
 			line.Content = FormatToolContent(state.toolName, input)
-		})
-
-		p.model.UpdateProgress(func(prog *ProgressSnapshot) {
-			prog.CurrentTool = ""
-			prog.CurrentPhase = ""
 		})
 	}
 

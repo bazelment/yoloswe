@@ -70,7 +70,9 @@ func DetectFormat(path string) (Format, error) {
 	}
 	defer f.Close()
 
+	const maxScanTokenSize = 10 * 1024 * 1024 // 10 MB, matches LoadFromRawJSONL
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, maxScanTokenSize), maxScanTokenSize)
 	if scanner.Scan() {
 		line := scanner.Bytes()
 

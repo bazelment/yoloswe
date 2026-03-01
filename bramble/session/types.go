@@ -89,7 +89,9 @@ const (
 )
 
 // DeepCopyOutputLine returns a deep copy of an OutputLine.
-var DeepCopyOutputLine = sessionmodel.DeepCopyOutputLine
+func DeepCopyOutputLine(line OutputLine) OutputLine {
+	return sessionmodel.DeepCopyOutputLine(line)
+}
 
 // Session represents a single plan or builder session.
 type Session struct {
