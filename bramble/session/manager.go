@@ -17,6 +17,7 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
@@ -405,6 +406,7 @@ type Manager struct {
 	sessions      map[SessionID]*Session
 	events        chan interface{}
 	outputs       map[SessionID][]OutputLine
+	models        map[SessionID]*sessionmodel.SessionModel
 	followUpChans map[SessionID]chan string
 	cancel        context.CancelFunc
 	config        ManagerConfig
@@ -438,6 +440,7 @@ func NewManagerWithConfig(config ManagerConfig) *Manager {
 		sessions:      make(map[SessionID]*Session),
 		events:        make(chan interface{}, 10000),
 		outputs:       make(map[SessionID][]OutputLine),
+		models:        make(map[SessionID]*sessionmodel.SessionModel),
 		followUpChans: make(map[SessionID]chan string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -556,6 +559,7 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, mo
 
 	m.mu.Lock()
 	m.sessions[sessionID] = session
+	m.models[sessionID] = sessionmodel.NewSessionModel(1000)
 	m.mu.Unlock()
 
 	m.outputsMu.Lock()
@@ -617,6 +621,7 @@ func (m *Manager) TrackTmuxWindow(worktreePath, windowName, windowID string) (Se
 
 	m.mu.Lock()
 	m.sessions[sessionID] = session
+	m.models[sessionID] = sessionmodel.NewSessionModel(1000)
 	m.mu.Unlock()
 
 	m.outputsMu.Lock()
@@ -662,6 +667,7 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 
 			m.mu.Lock()
 			delete(m.sessions, sessionID)
+			delete(m.models, sessionID)
 			m.mu.Unlock()
 
 			m.outputsMu.Lock()
@@ -904,6 +910,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 						m.mu.Lock()
 						delete(m.sessions, sessionID)
+						delete(m.models, sessionID)
 						m.mu.Unlock()
 
 						m.outputsMu.Lock()
@@ -956,6 +963,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					// Remove from active sessions map
 					m.mu.Lock()
 					delete(m.sessions, sessionID)
+					delete(m.models, sessionID)
 					m.mu.Unlock()
 
 					// Remove outputs
@@ -1297,7 +1305,7 @@ func (m *Manager) GetSessionOutput(id SessionID) []OutputLine {
 	// Deep copy to avoid shared references to mutable fields.
 	result := make([]OutputLine, len(lines))
 	for i := range lines {
-		result[i] = deepCopyOutputLine(lines[i])
+		result[i] = DeepCopyOutputLine(lines[i])
 	}
 	return result
 }
@@ -1400,6 +1408,7 @@ func (m *Manager) DeleteSession(id SessionID) error {
 	}
 
 	delete(m.sessions, id)
+	delete(m.models, id)
 	m.mu.Unlock()
 
 	m.outputsMu.Lock()
@@ -1467,9 +1476,30 @@ func (m *Manager) AddOutputLine(sessionID SessionID, line OutputLine) {
 
 // InitOutputBuffer initializes the output buffer for a session (for testing).
 func (m *Manager) InitOutputBuffer(sessionID SessionID) {
+	// Acquire mu before outputsMu to respect the documented lock ordering:
+	// mu > outputsMu > followUpChansMu.
+	m.mu.Lock()
+	if _, ok := m.models[sessionID]; !ok {
+		m.models[sessionID] = sessionmodel.NewSessionModel(1000)
+	}
+	m.mu.Unlock()
+
 	m.outputsMu.Lock()
 	m.outputs[sessionID] = make([]OutputLine, 0)
 	m.outputsMu.Unlock()
+}
+
+// GetSessionModel returns the SessionModel for a session.
+//
+// NOTE: During the current transition period, live session data flows through
+// the legacy addOutput/outputs path. The SessionModel returned here receives
+// data only from InitOutputBuffer (test helper) or future callers that write
+// directly to the model. A subsequent PR will wire addOutput into the
+// SessionModel to complete the migration.
+func (m *Manager) GetSessionModel(id SessionID) *sessionmodel.SessionModel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.models[id]
 }
 
 // PersistSession saves a session to the store (exported for testing).

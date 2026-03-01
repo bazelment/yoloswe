@@ -18,6 +18,7 @@ go_library(
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
         "//agent-cli-wrapper/codex",
+        "//bramble/sessionmodel",
         "//multiagent/agent",
         "//yoloswe",
         "//yoloswe/planner",

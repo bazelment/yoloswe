@@ -3,7 +3,7 @@ package protocol
 
 import (
 	"encoding/json"
-	"fmt"
+	"log/slog"
 )
 
 // ContentBlockType discriminates between content block kinds.
@@ -78,6 +78,9 @@ func (c *ContentBlocks) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return err
 		}
+		if block == nil {
+			continue // skip unknown block types
+		}
 		*c = append(*c, block)
 	}
 	return nil
@@ -118,6 +121,7 @@ func UnmarshalContentBlock(data json.RawMessage) (ContentBlock, error) {
 		}
 		return block, nil
 	default:
-		return nil, fmt.Errorf("unknown content block type: %s", base.Type)
+		slog.Warn("skipping unknown content block type", "type", base.Type)
+		return nil, nil
 	}
 }

@@ -183,7 +183,7 @@ func TestFormatOutputLine(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			formatted := formatOutputLineWithStyles(tc.line, tc.width, NewStyles(Dark))
+			formatted := formatOutputLineWithStyles(tc.line, tc.width, NewStyles(Dark), nil)
 			assert.Contains(t, formatted, tc.contains)
 		})
 	}
@@ -291,7 +291,7 @@ func TestToolStateRendering(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			formatted := formatOutputLineWithStyles(tc.line, tc.width, NewStyles(Dark))
+			formatted := formatOutputLineWithStyles(tc.line, tc.width, NewStyles(Dark), nil)
 
 			assert.Contains(t, formatted, tc.wantIcon,
 				"expected icon %q in output: %s", tc.wantIcon, formatted)
@@ -403,7 +403,7 @@ func TestToolDurationCalculation(t *testing.T) {
 		DurationMs: durationMs,
 	}
 
-	formatted := formatOutputLineWithStyles(line, 80, NewStyles(Dark))
+	formatted := formatOutputLineWithStyles(line, 80, NewStyles(Dark), nil)
 
 	// Should show duration of 1.50s
 	assert.Contains(t, formatted, "1.50s")

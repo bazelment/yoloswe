@@ -34,6 +34,16 @@ To add a new dependency, please always follow these steps, don't use `go` comman
 - The tests should be deterministic, try to avoid external dependencies that has unstable output. When performing validation, avoid conditional check.
 - Tests for different purpose like integration should be put into different directory so that gazelle won't blend them into a single build target.
 
+## Bramble Session Data Pipeline
+
+MVC architecture in `bramble/sessionmodel/` → `bramble/session/` → `bramble/app/`. Canonical types live in `sessionmodel/types.go`; `session/types.go` re-exports via aliases to avoid circular deps.
+
+- Full design: `docs/design/sessionmodel-architecture.md`
+- Adding new JSONL message types: `docs/design/bramble-jsonl-practices.md`
+- Data mining with `/jsonl-mine` skill: scan real `~/.claude/projects/` files for coverage gaps
+- Visual inspection: `bazel run //bramble/cmd/logview -- <file>.jsonl`
+- Two render paths (`output.go` + `view.go`) must stay in sync — see practices doc
+
 ## Integration Tests as Fixture Generators
 
 Existing integration tests already run real CLI sessions with recording enabled. When you need test fixtures (e.g., protocol traces), check an env var in an existing integration test rather than creating a separate test that duplicates the same session setup. Use env vars (not flags) so they work with `bazel test --test_env=` and `scripts/test-manual.sh`.

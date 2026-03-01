@@ -118,18 +118,8 @@ func (pm *permissionManager) buildResponse(requestID string, resp *PermissionRes
 			updatedInput = make(map[string]interface{})
 		}
 
-		return &protocol.ControlResponse{
-			Type: protocol.MessageTypeControlResponse,
-			Response: protocol.ControlResponsePayload{
-				Subtype:   "success",
-				RequestID: requestID,
-				Response: protocol.PermissionResultAllow{
-					Behavior:           protocol.PermissionBehaviorAllow,
-					UpdatedInput:       updatedInput,
-					UpdatedPermissions: resp.UpdatedPermissions,
-				},
-			},
-		}
+		result := protocol.NewPermissionAllow(requestID, updatedInput, resp.UpdatedPermissions)
+		return &result
 	}
 
 	return pm.buildDenyResponse(requestID, resp.Message, resp.Interrupt)
@@ -137,18 +127,8 @@ func (pm *permissionManager) buildResponse(requestID string, resp *PermissionRes
 
 // buildDenyResponse builds a deny control response.
 func (pm *permissionManager) buildDenyResponse(requestID, message string, interrupt bool) *protocol.ControlResponse {
-	return &protocol.ControlResponse{
-		Type: protocol.MessageTypeControlResponse,
-		Response: protocol.ControlResponsePayload{
-			Subtype:   "success",
-			RequestID: requestID,
-			Response: protocol.PermissionResultDeny{
-				Behavior:  protocol.PermissionBehaviorDeny,
-				Message:   message,
-				Interrupt: interrupt,
-			},
-		},
-	}
+	result := protocol.NewPermissionDeny(requestID, message, interrupt)
+	return &result
 }
 
 // DefaultPermissionHandler returns a handler that denies all permissions.

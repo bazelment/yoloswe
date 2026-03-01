@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sessionmodel",
+    srcs = [
+        "envelope.go",
+        "event_adapter.go",
+        "format.go",
+        "loader.go",
+        "model.go",
+        "output_buffer.go",
+        "parser.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/sessionmodel",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/protocol",
+        "//multiagent/agent",
+    ],
+)
+
+go_test(
+    name = "sessionmodel_test",
+    srcs = [
+        "loader_test.go",
+        "model_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":sessionmodel"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

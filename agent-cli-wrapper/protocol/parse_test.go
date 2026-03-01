@@ -523,8 +523,11 @@ func TestParseMessage_InvalidJSON(t *testing.T) {
 }
 
 func TestParseMessage_UnknownType(t *testing.T) {
-	_, err := ParseMessage([]byte(`{"type":"unknown_type"}`))
-	if err == nil {
-		t.Error("expected error for unknown type")
+	msg, err := ParseMessage([]byte(`{"type":"rate_limit_event","retry_after_ms":5000}`))
+	if err != nil {
+		t.Fatalf("expected no error for unknown type, got: %v", err)
+	}
+	if msg != nil {
+		t.Fatalf("expected nil message for unknown type, got: %v", msg)
 	}
 }
