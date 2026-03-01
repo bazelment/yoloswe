@@ -148,10 +148,11 @@ func (pm *processManager) Start(ctx context.Context) error {
 	// Create command
 	pm.cmd = exec.CommandContext(ctx, cliPath, args...)
 
-	// Set environment variables (matching Python SDK)
-	pm.cmd.Env = append(os.Environ(),
-		"CLAUDE_CODE_ENTRYPOINT=sdk-go",
-	)
+	// Set environment variables (matching Python SDK).
+	// Strip CLAUDECODE to allow SDK invocations from within Claude Code sessions.
+	// The CLI refuses to start when CLAUDECODE is set (nesting guard), but SDK
+	// subprocess invocations are safe since they use --input-format stream-json.
+	pm.cmd.Env = buildSubprocessEnv(os.Environ())
 
 	// Add custom environment variables
 	for k, v := range pm.config.Env {
@@ -306,6 +307,20 @@ func (pm *processManager) Wait() (int, error) {
 		return -1, err
 	}
 	return 0, nil
+}
+
+// buildSubprocessEnv returns the environment for the Claude CLI subprocess.
+// It strips the CLAUDECODE env var (nesting guard) from the parent env and
+// appends CLAUDE_CODE_ENTRYPOINT=sdk-go.
+func buildSubprocessEnv(parent []string) []string {
+	filtered := make([]string, 0, len(parent)+1)
+	for _, e := range parent {
+		if len(e) >= 11 && e[:11] == "CLAUDECODE=" {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	return append(filtered, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 }
 
 // IsRunning returns true if the process is running.

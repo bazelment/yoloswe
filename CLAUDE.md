@@ -44,6 +44,15 @@ MVC architecture in `bramble/sessionmodel/` → `bramble/session/` → `bramble/
 - Visual inspection: `bazel run //bramble/cmd/logview -- <file>.jsonl`
 - Two render paths (`output.go` + `view.go`) must stay in sync — see practices doc
 
+## Integration Tests as Fixture Generators
+
+Existing integration tests already run real CLI sessions with recording enabled. When you need test fixtures (e.g., protocol traces), check an env var in an existing integration test rather than creating a separate test that duplicates the same session setup. Use env vars (not flags) so they work with `bazel test --test_env=` and `scripts/test-manual.sh`.
+
+For example, to regenerate protocol trace fixtures:
+```
+UPDATE_FIXTURES=1 scripts/test-manual.sh --test_env=UPDATE_FIXTURES=1
+```
+
 ## Integration Tests and Gazelle
 
 Integration test `BUILD.bazel` files are hand-maintained and must include `# gazelle:ignore` as the first line. Gazelle cannot generate these correctly because:

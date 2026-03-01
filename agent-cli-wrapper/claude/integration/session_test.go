@@ -22,13 +22,17 @@
 package integration
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
 // ============================================================================
@@ -221,6 +225,15 @@ func TestSession_Integration_Scenario1_BypassPermissions(t *testing.T) {
 	}
 	if !hasPyFile {
 		t.Error("Expected Python file to be created")
+	}
+
+	// Optionally export recording as protocol trace fixtures.
+	if shouldUpdateFixtures() {
+		recPath := session.RecordingPath()
+		if recPath == "" {
+			t.Fatal("No recording path for fixture export")
+		}
+		exportTraceFixtures(t, filepath.Join(recPath, "messages.jsonl"))
 	}
 
 	t.Log("All assertions passed for Scenario 1")
@@ -506,4 +519,153 @@ turnDone:
 	}
 
 	t.Log("All assertions passed for Scenario 4")
+}
+
+// ============================================================================
+// Trace fixture export
+// ============================================================================
+
+func shouldUpdateFixtures() bool {
+	return os.Getenv("UPDATE_FIXTURES") != ""
+}
+
+// fixtureDir returns the path to testdata/traces, creating it if needed.
+func fixtureDir(t *testing.T) string {
+	t.Helper()
+	candidates := []string{
+		"agent-cli-wrapper/testdata/traces",
+		"../testdata/traces",
+		"../../testdata/traces",
+	}
+	for _, c := range candidates {
+		abs, _ := filepath.Abs(c)
+		if info, err := os.Stat(filepath.Dir(abs)); err == nil && info.IsDir() {
+			if err := os.MkdirAll(abs, 0o755); err == nil {
+				return abs
+			}
+		}
+	}
+	dir := filepath.Join(t.TempDir(), "traces")
+	os.MkdirAll(dir, 0o755)
+	t.Logf("WARNING: Could not find testdata/traces in repo, writing to %s", dir)
+	return dir
+}
+
+// exportTraceFixtures splits a messages.jsonl recording into from_cli.jsonl
+// and to_cli.jsonl trace fixture files, then validates them.
+func exportTraceFixtures(t *testing.T, messagesPath string) {
+	t.Helper()
+
+	outDir := fixtureDir(t)
+
+	file, err := os.Open(messagesPath)
+	if err != nil {
+		t.Fatalf("Failed to open %s: %v", messagesPath, err)
+	}
+	defer file.Close()
+
+	fromFile, err := os.Create(filepath.Join(outDir, "from_cli.jsonl"))
+	if err != nil {
+		t.Fatalf("Failed to create from_cli.jsonl: %v", err)
+	}
+	defer fromFile.Close()
+
+	toFile, err := os.Create(filepath.Join(outDir, "to_cli.jsonl"))
+	if err != nil {
+		t.Fatalf("Failed to create to_cli.jsonl: %v", err)
+	}
+	defer toFile.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+	var fromCount, toCount int
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Bytes()
+
+		var record claude.RecordedMessage
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Logf("Line %d: failed to unmarshal: %v", lineNum, err)
+			continue
+		}
+
+		msgBytes, ok := record.Message.(json.RawMessage)
+		if !ok {
+			msgBytes, err = json.Marshal(record.Message)
+			if err != nil {
+				continue
+			}
+		}
+
+		entry := protocol.TraceEntry{
+			ID:        fmt.Sprintf("msg-%d", lineNum),
+			Timestamp: record.Timestamp.UTC().Format("2006-01-02T15:04:05.000Z"),
+			Direction: record.Direction,
+			Message:   msgBytes,
+		}
+		entryBytes, _ := json.Marshal(entry)
+
+		switch record.Direction {
+		case "received":
+			fromFile.Write(entryBytes)
+			fromFile.Write([]byte("\n"))
+			fromCount++
+		case "sent":
+			toFile.Write(entryBytes)
+			toFile.Write([]byte("\n"))
+			toCount++
+		}
+	}
+
+	t.Logf("Trace fixtures written to %s: from_cli=%d, to_cli=%d", outDir, fromCount, toCount)
+
+	// Validate fixtures parse correctly
+	for _, name := range []string{"from_cli.jsonl", "to_cli.jsonl"} {
+		validateFixture(t, filepath.Join(outDir, name), name)
+	}
+}
+
+// validateFixture parses a fixture file and reports stats.
+func validateFixture(t *testing.T, path, label string) {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Failed to open %s: %v", path, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+	typeCounts := make(map[string]int)
+	var lineNum, parseErrors int
+
+	for scanner.Scan() {
+		lineNum++
+		var entry protocol.TraceEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			parseErrors++
+			continue
+		}
+		msg, err := protocol.ParseMessage(entry.Message)
+		if err != nil {
+			parseErrors++
+			continue
+		}
+		typeCounts[fmt.Sprintf("%T", msg)]++
+	}
+
+	t.Logf("%s: %d lines, %d parse errors", label, lineNum, parseErrors)
+	for typ, count := range typeCounts {
+		t.Logf("  %s: %d", typ, count)
+	}
+	if parseErrors > 0 {
+		t.Errorf("%s: %d parse errors", label, parseErrors)
+	}
+	if lineNum == 0 {
+		t.Errorf("%s: fixture is empty", label)
+	}
 }

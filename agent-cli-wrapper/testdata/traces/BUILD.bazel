@@ -1,0 +1,7 @@
+# gazelle:ignore
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "trace_fixtures",
+    srcs = glob(["*.jsonl"]),
+)

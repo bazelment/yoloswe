@@ -10,6 +10,7 @@ go_library(
         "output.go",
         "parse.go",
         "stream.go",
+        "trace.go",
     ],
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/protocol",
     visibility = ["//visibility:public"],
@@ -26,5 +27,6 @@ go_test(
         "stream_test.go",
         "trace_test.go",
     ],
+    data = ["//agent-cli-wrapper/testdata/traces:trace_fixtures"],
     embed = [":protocol"],
 )
