@@ -7,6 +7,9 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+// dropdownSeparatorID is the sentinel ID for non-selectable separator rows.
+const dropdownSeparatorID = "---separator---"
+
 // DropdownItem represents an item in a dropdown menu.
 type DropdownItem struct {
 	ID       string
@@ -136,11 +139,11 @@ func (d *Dropdown) MoveSelection(delta int) {
 	if delta < 0 {
 		step = -1
 	}
-	for newIdx >= 0 && newIdx < effLen && eff[newIdx].ID == "---separator---" {
+	for newIdx >= 0 && newIdx < effLen && eff[newIdx].ID == dropdownSeparatorID {
 		newIdx += step
 	}
 	newIdx = clamp(newIdx, 0, effLen-1)
-	if eff[newIdx].ID == "---separator---" {
+	if eff[newIdx].ID == dropdownSeparatorID {
 		return
 	}
 	d.selectedIdx = newIdx
@@ -207,7 +210,7 @@ func (d *Dropdown) applyFilter() {
 	// Initialize to empty slice (not nil) to distinguish from "no filter"
 	d.filteredIndices = []int{}
 	for i, item := range d.items {
-		if item.ID == "---separator---" {
+		if item.ID == dropdownSeparatorID {
 			continue // Never include separators in filtered results
 		}
 		if strings.Contains(strings.ToLower(item.Label), lower) {

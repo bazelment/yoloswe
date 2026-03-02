@@ -82,6 +82,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case worktreesMsg:
+		// If this response is for a repo that is no longer the active one,
+		// save the data to the correct RepoContext and discard for current view.
+		if msg.repoName != m.repoName {
+			if rc, ok := m.repos[msg.repoName]; ok {
+				rc.worktrees = msg.worktrees
+			}
+			return m, nil
+		}
 		m.worktrees = msg.worktrees
 		m.updateWorktreeDropdown()
 
@@ -174,6 +182,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case historySessionsMsg:
+		// If this response is for a repo that is no longer the active one,
+		// save the data to the correct RepoContext and discard for current view.
+		if msg.repoName != m.repoName {
+			if rc, ok := m.repos[msg.repoName]; ok {
+				rc.historyBranch = msg.branch
+				rc.cachedHistory = msg.sessions
+			}
+			return m, nil
+		}
 		m.historyBranch = msg.branch
 		m.cachedHistory = msg.sessions
 		m.updateSessionDropdown()
@@ -342,6 +359,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.syncWorktree(msg.branch)
 
 	case fileTreeContextMsg:
+		// Discard stale file tree data from a repo that is no longer active.
+		if msg.repoName != m.repoName {
+			return m, nil
+		}
 		m.fileTree = NewFileTree(msg.worktreePath, msg.wtCtx)
 		return m, nil
 
@@ -396,12 +417,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if rc.sessionManager == nil {
 				continue
 			}
-			sessions := rc.sessionManager.GetAllSessions()
-			for i := range sessions {
-				if !sessions[i].Status.IsTerminal() {
-					activeCount++
-				}
-			}
+			counts := rc.sessionManager.CountByStatus()
+			activeCount += counts[session.StatusRunning] + counts[session.StatusIdle]
 		}
 		if activeCount > 0 {
 			m.confirmQuit = true
@@ -951,7 +968,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Session selected - view it
 		if item := m.sessionDropdown.SelectedItem(); item != nil {
-			if item.ID == "---separator---" {
+			if item.ID == dropdownSeparatorID {
 				// Can't select separator
 				return m, nil
 			}
@@ -2048,7 +2065,7 @@ func (m Model) handleRepoDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		item := m.repoDropdown.SelectedItem()
-		if item == nil || item.ID == "---separator---" {
+		if item == nil || item.ID == dropdownSeparatorID {
 			return m, nil
 		}
 		m.repoDropdown.Close()
@@ -2125,7 +2142,7 @@ func (m *Model) populateRepoDropdown(allRepos []string) {
 	}
 	if len(availableRepos) > 0 && len(items) > 0 {
 		items = append(items, DropdownItem{
-			ID:    "---separator---",
+			ID:    dropdownSeparatorID,
 			Label: "─── Available ───",
 		})
 	}
@@ -2159,33 +2176,17 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	// a provider start which is heavyweight); the user can still manually route tasks.
 	var router *taskrouter.Router
 
-	// Pre-load worktrees for the new repo.
-	wtMgr := wt.NewManager(m.wtRoot, repoName)
-	worktrees, _ := wtMgr.List(m.ctx)
-
 	// Build dropdowns.
 	wtDropdown := NewDropdown(nil)
 	wtDropdown.SetMaxVisible(20)
 	sessDropdown := NewDropdown(nil)
 
 	rc := &RepoContext{
-		repoName:         repoName,
 		sessionManager:   mgr,
 		taskRouter:       router,
-		worktrees:        worktrees,
 		worktreeDropdown: wtDropdown,
 		sessionDropdown:  sessDropdown,
 		scrollPositions:  make(map[session.SessionID]int),
-	}
-
-	// Populate the worktree dropdown items for the new context.
-	if len(worktrees) > 0 {
-		items := make([]DropdownItem, len(worktrees))
-		for i, w := range worktrees {
-			items[i] = DropdownItem{ID: w.Branch, Label: w.Branch}
-		}
-		wtDropdown.SetItems(items)
-		wtDropdown.SelectIndex(0)
 	}
 
 	m.repos[repoName] = rc

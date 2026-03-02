@@ -192,8 +192,16 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry, sharedManagerConfig)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
+	}
+
+	// Close secondary repo managers on exit. The initial repo's manager is
+	// closed by the defer above. This ensures tmux windows from any additionally
+	// opened repos are cleaned up properly.
+	if m, ok := finalModel.(app.Model); ok {
+		m.CloseSecondaryManagers(repoName)
 	}
 
 	return nil

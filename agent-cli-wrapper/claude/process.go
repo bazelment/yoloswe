@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -315,7 +316,7 @@ func (pm *processManager) Wait() (int, error) {
 func buildSubprocessEnv(parent []string) []string {
 	filtered := make([]string, 0, len(parent)+1)
 	for _, e := range parent {
-		if len(e) >= 11 && e[:11] == "CLAUDECODE=" {
+		if strings.HasPrefix(e, "CLAUDECODE=") {
 			continue
 		}
 		filtered = append(filtered, e)

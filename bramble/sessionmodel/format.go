@@ -1,6 +1,9 @@
 package sessionmodel
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // FormatToolContent creates a display-friendly content string for a tool call.
 // Ported from bramble/session/event_handler.go:formatToolContent.
@@ -44,15 +47,11 @@ func truncatePathForDisplay(path string) string {
 	if len(runes) <= 60 {
 		return path
 	}
-	lastSlash := -1
-	for i := len(runes) - 1; i >= 0; i-- {
-		if runes[i] == '/' {
-			lastSlash = i
-			break
+	if lastSlash := strings.LastIndexByte(path, '/'); lastSlash > 0 {
+		suffix := path[lastSlash:]
+		if len([]rune(suffix)) <= 50 {
+			return "..." + suffix
 		}
-	}
-	if lastSlash > 0 && len(runes)-lastSlash <= 50 {
-		return "..." + string(runes[lastSlash:])
 	}
 	return string(runes[:57]) + "..."
 }

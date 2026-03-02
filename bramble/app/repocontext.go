@@ -19,7 +19,6 @@ type RepoContext struct {
 	viewingHistoryData   *session.StoredSession
 	sessionDropdown      *Dropdown
 	historyBranch        string
-	repoName             string
 	viewingSessionID     session.SessionID
 	sessions             []session.SessionInfo
 	cachedHistory        []*session.SessionMeta
@@ -34,7 +33,6 @@ func (m *Model) saveActiveContext() {
 	if !ok {
 		return
 	}
-	rc.repoName = m.repoName
 	rc.sessionManager = m.sessionManager
 	rc.taskRouter = m.taskRouter
 	rc.worktrees = m.worktrees
@@ -57,7 +55,7 @@ func (m *Model) loadContext(repoName string) {
 	if !ok {
 		return
 	}
-	m.repoName = rc.repoName
+	m.repoName = repoName
 	m.sessionManager = rc.sessionManager
 	m.taskRouter = rc.taskRouter
 	m.worktrees = rc.worktrees

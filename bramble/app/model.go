@@ -181,7 +181,6 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 
 	// Create initial RepoContext for the startup repo.
 	m.repos[repoName] = &RepoContext{
-		repoName:         repoName,
 		sessionManager:   sessionManager,
 		taskRouter:       taskRouter,
 		worktrees:        m.worktrees,
@@ -236,14 +235,15 @@ func (m Model) refreshWorktrees() tea.Cmd {
 	if m.repoName == "" {
 		return nil
 	}
-	manager := wt.NewManager(m.wtRoot, m.repoName)
+	repoName := m.repoName
+	manager := wt.NewManager(m.wtRoot, repoName)
 
 	return func() tea.Msg {
 		worktrees, err := manager.List(m.ctx)
 		if err != nil {
 			return errMsg{err}
 		}
-		return worktreesMsg{worktrees}
+		return worktreesMsg{worktrees: worktrees, repoName: repoName}
 	}
 }
 
@@ -415,7 +415,7 @@ func (m *Model) updateSessionDropdown() {
 
 	if len(items) > 0 && len(historySessions) > 0 {
 		items = append(items, DropdownItem{
-			ID:    "---separator---",
+			ID:    dropdownSeparatorID,
 			Label: "─── History ───",
 		})
 	}
@@ -494,10 +494,11 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 		return nil
 	}
 	branch := w.Name()
+	repoName := m.repoName
 	mgr := m.sessionManager
 	return func() tea.Msg {
 		sessions, _ := mgr.LoadHistorySessions(branch)
-		return historySessionsMsg{branch: branch, sessions: sessions}
+		return historySessionsMsg{branch: branch, sessions: sessions, repoName: repoName}
 	}
 }
 
@@ -676,6 +677,7 @@ func (m Model) refreshFileTree() tea.Cmd {
 		return fileTreeContextMsg{
 			worktreePath: worktree.Path,
 			wtCtx:        wtCtx,
+			repoName:     repoName,
 		}
 	}
 }
@@ -689,7 +691,10 @@ type repoSessionEvent struct {
 // Message types
 type (
 	errMsg          struct{ error }
-	worktreesMsg    struct{ worktrees []wt.Worktree }
+	worktreesMsg struct {
+		worktrees []wt.Worktree
+		repoName  string
+	}
 	sessionEventMsg struct{}
 	// repoSessionEventMsg is sent when any opened repo's manager emits an event.
 	repoSessionEventMsg struct {
@@ -749,11 +754,13 @@ type (
 	fileTreeContextMsg struct {
 		wtCtx        *wt.WorktreeContext
 		worktreePath string
+		repoName     string
 	}
 	// historySessionsMsg carries async-loaded history sessions for a worktree.
 	historySessionsMsg struct {
-		branch   string
 		sessions []*session.SessionMeta
+		repoName string
+		branch   string
 	}
 	// refreshGitStatusTickMsg triggers a periodic git status refresh (30s)
 	refreshGitStatusTickMsg struct{}
@@ -861,4 +868,19 @@ func (m *Model) applyTheme(palette ColorPalette) {
 	// Update text area placeholder colors from the palette
 	m.inputArea.SetPlaceholderColor(lipgloss.Color(palette.Dim))
 	m.taskModal.SetPlaceholderColor(lipgloss.Color(palette.Dim))
+}
+
+// CloseSecondaryManagers closes all session managers for repos that are NOT
+// the initial repo. The initial manager is closed by the caller (main.go)
+// via defer. This must be called after p.Run() returns to ensure tmux windows
+// from secondary repos are properly cleaned up on exit.
+func (m Model) CloseSecondaryManagers(initialRepoName string) {
+	for repoName, rc := range m.repos {
+		if repoName == initialRepoName {
+			continue
+		}
+		if rc.sessionManager != nil {
+			rc.sessionManager.Close()
+		}
+	}
 }

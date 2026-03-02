@@ -70,7 +70,7 @@ func TestWorktreesMsg_SelectsNewWorktreeWithoutPlanner(t *testing.T) {
 	// No planner prompt (manual 'n' key)
 
 	// Simulate worktrees refresh arriving with the new worktree
-	newModel, _ := m.Update(worktreesMsg{worktrees: []wt.Worktree{
+	newModel, _ := m.Update(worktreesMsg{repoName: "test-repo", worktrees: []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
 		{Branch: "feature/new", Path: "/tmp/wt/feature-new"},
 	}})
