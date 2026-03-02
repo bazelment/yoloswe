@@ -126,6 +126,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case singleWorktreeStatusMsg:
+		// If this response is for a repo that is no longer the active one,
+		// save the data into the correct RepoContext and discard for current view.
+		if msg.repoName != m.repoName {
+			if rc, ok := m.repos[msg.repoName]; ok && msg.status != nil {
+				if rc.worktreeStatuses == nil {
+					rc.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
+				}
+				existing := rc.worktreeStatuses[msg.branch]
+				if existing == nil {
+					rc.worktreeStatuses[msg.branch] = msg.status
+				} else {
+					existing.IsDirty = msg.status.IsDirty
+					existing.Ahead = msg.status.Ahead
+					existing.Behind = msg.status.Behind
+					existing.LastCommitTime = msg.status.LastCommitTime
+					existing.LastCommitMsg = msg.status.LastCommitMsg
+					existing.Worktree = msg.status.Worktree
+				}
+			}
+			return m, nil
+		}
 		if msg.status != nil {
 			if m.worktreeStatuses == nil {
 				m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
@@ -147,6 +168,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case batchPRInfoMsg:
+		// If this response is for a repo that is no longer the active one,
+		// save the data into the correct RepoContext and discard for current view.
+		if msg.repoName != m.repoName {
+			if rc, ok := m.repos[msg.repoName]; ok {
+				if rc.worktreeStatuses == nil {
+					rc.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
+				}
+				prByBranch := make(map[string]*wt.PRInfo, len(msg.prs))
+				for i := range msg.prs {
+					prByBranch[msg.prs[i].HeadRefName] = &msg.prs[i]
+				}
+				for _, w := range rc.worktrees {
+					status := rc.worktreeStatuses[w.Branch]
+					if status == nil {
+						status = &wt.WorktreeStatus{}
+						rc.worktreeStatuses[w.Branch] = status
+					}
+					if pr, ok := prByBranch[w.Branch]; ok {
+						status.PRNumber = pr.Number
+						status.PRURL = pr.URL
+						status.PRState = pr.State
+						status.PRIsDraft = pr.IsDraft
+						status.PRReviewStatus = pr.ReviewDecision
+					} else {
+						status.PRNumber = 0
+						status.PRURL = ""
+						status.PRState = ""
+						status.PRIsDraft = false
+						status.PRReviewStatus = ""
+					}
+				}
+			}
+			return m, nil
+		}
 		if m.worktreeStatuses == nil {
 			m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
 		}
@@ -201,13 +256,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshPRStatusTickMsg:
 		return m, tea.Batch(m.fetchPRStatuses(), schedulePRStatusTick())
-
-	case sessionEventMsg:
-		// Legacy single-repo path (kept for compatibility).
-		m.sessions = m.sessionManager.GetAllSessions()
-		m.updateSessionDropdown()
-		cmds = append(cmds, m.listenForSessionEvents())
-		return m, tea.Batch(cmds...)
 
 	case repoSessionEventMsg:
 		// Update the correct RepoContext's sessions. If the event is for the
@@ -690,9 +738,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "S":
 		// Open all sessions overlay — aggregate across ALL opened repos.
+		// Use openedRepos (insertion-ordered slice) for deterministic ordering.
 		var activeSessions []session.SessionInfo
-		for _, rc := range m.repos {
-			if rc.sessionManager == nil {
+		for _, repoName := range m.openedRepos {
+			rc, ok := m.repos[repoName]
+			if !ok || rc.sessionManager == nil {
 				continue
 			}
 			sessions := rc.sessionManager.GetAllSessions()
@@ -2046,7 +2096,7 @@ func shellSplit(s string) []string {
 // handleRepoDropdownMode handles key presses when the repo dropdown is open.
 func (m Model) handleRepoDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "alt+r":
+	case "esc", "alt+r", "alt+w", "alt+s":
 		m.repoDropdown.Close()
 		m.focus = FocusOutput
 		return m, nil
@@ -2176,10 +2226,12 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	// a provider start which is heavyweight); the user can still manually route tasks.
 	var router *taskrouter.Router
 
-	// Build dropdowns.
+	// Build dropdowns with widths matching the WindowSizeMsg handler.
 	wtDropdown := NewDropdown(nil)
 	wtDropdown.SetMaxVisible(20)
+	wtDropdown.SetWidth(m.width * 2 / 3)
 	sessDropdown := NewDropdown(nil)
+	sessDropdown.SetWidth(m.width / 2)
 
 	rc := &RepoContext{
 		sessionManager:   mgr,

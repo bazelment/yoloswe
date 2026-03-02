@@ -521,7 +521,7 @@ func (m Model) fetchGitStatuses() tea.Cmd {
 			if err != nil {
 				return nil
 			}
-			return singleWorktreeStatusMsg{branch: w.Branch, status: status}
+			return singleWorktreeStatusMsg{branch: w.Branch, status: status, repoName: repoName}
 		})
 	}
 
@@ -546,7 +546,7 @@ func (m Model) fetchPRStatuses() tea.Cmd {
 		if err != nil {
 			return nil
 		}
-		return batchPRInfoMsg{prs: prs}
+		return batchPRInfoMsg{prs: prs, repoName: repoName}
 	}
 }
 
@@ -695,7 +695,6 @@ type (
 		worktrees []wt.Worktree
 		repoName  string
 	}
-	sessionEventMsg struct{}
 	// repoSessionEventMsg is sent when any opened repo's manager emits an event.
 	repoSessionEventMsg struct {
 		event    interface{}
@@ -743,12 +742,14 @@ type (
 	}
 	// singleWorktreeStatusMsg carries the git-only status for one worktree (fast, local).
 	singleWorktreeStatusMsg struct {
-		status *wt.WorktreeStatus
-		branch string
+		status   *wt.WorktreeStatus
+		branch   string
+		repoName string
 	}
 	// batchPRInfoMsg carries all open PRs fetched in a single API call.
 	batchPRInfoMsg struct {
-		prs []wt.PRInfo
+		prs      []wt.PRInfo
+		repoName string
 	}
 	// fileTreeContextMsg carries gathered worktree context for the file tree
 	fileTreeContextMsg struct {
