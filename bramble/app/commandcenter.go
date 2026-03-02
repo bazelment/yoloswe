@@ -165,7 +165,10 @@ func (cc *CommandCenter) ensureSelectedVisible() {
 // visibleRows returns how many card rows fit in the viewport.
 func (cc *CommandCenter) visibleRows() int {
 	// Header: 3 lines (title + summary + blank), Footer: 2 lines (blank + keys)
-	contentHeight := cc.height - 5
+	// Scroll indicators: up to 2 lines (one scrollUp + one scrollDown) rendered conditionally
+	// in View(). Reserve the full 2 lines here so that activating scroll never pushes content
+	// past the terminal height.
+	contentHeight := cc.height - 7
 	cardHeight := 8 // 6 content lines + 2 border lines
 	if contentHeight <= 0 {
 		return 1
