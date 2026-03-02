@@ -690,10 +690,10 @@ type repoSessionEvent struct {
 
 // Message types
 type (
-	errMsg          struct{ error }
+	errMsg       struct{ error }
 	worktreesMsg struct {
-		worktrees []wt.Worktree
 		repoName  string
+		worktrees []wt.Worktree
 	}
 	// repoSessionEventMsg is sent when any opened repo's manager emits an event.
 	repoSessionEventMsg struct {
@@ -748,8 +748,8 @@ type (
 	}
 	// batchPRInfoMsg carries all open PRs fetched in a single API call.
 	batchPRInfoMsg struct {
-		prs      []wt.PRInfo
 		repoName string
+		prs      []wt.PRInfo
 	}
 	// fileTreeContextMsg carries gathered worktree context for the file tree
 	fileTreeContextMsg struct {
@@ -759,9 +759,9 @@ type (
 	}
 	// historySessionsMsg carries async-loaded history sessions for a worktree.
 	historySessionsMsg struct {
-		sessions []*session.SessionMeta
 		repoName string
 		branch   string
+		sessions []*session.SessionMeta
 	}
 	// refreshGitStatusTickMsg triggers a periodic git status refresh (30s)
 	refreshGitStatusTickMsg struct{}
