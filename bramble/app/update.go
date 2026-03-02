@@ -466,7 +466,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			counts := rc.sessionManager.CountByStatus()
-			activeCount += counts[session.StatusRunning] + counts[session.StatusIdle]
+			activeCount += counts[session.StatusRunning] + counts[session.StatusIdle] + counts[session.StatusPending]
 		}
 		if activeCount > 0 {
 			m.confirmQuit = true
@@ -2096,6 +2096,15 @@ func shellSplit(s string) []string {
 // handleRepoDropdownMode handles key presses when the repo dropdown is open.
 func (m Model) handleRepoDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "?":
+		// Open help overlay (consistent with handleDropdownMode).
+		m.helpOverlay.previousFocus = m.focus
+		m.helpOverlay.SetSize(m.width, m.height)
+		sections := buildHelpSections(&m)
+		m.helpOverlay.SetSections(sections)
+		m.focus = FocusHelp
+		return m, nil
+
 	case "esc", "alt+r", "alt+w", "alt+s":
 		m.repoDropdown.Close()
 		m.focus = FocusOutput
