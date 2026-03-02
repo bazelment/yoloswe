@@ -272,16 +272,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rc.sessions = rc.sessionManager.GetAllSessions()
 		}
 		// Auto-refresh command center if visible.
-		if m.commandCenter.IsVisible() {
-			var prevID session.SessionID
-			if sel := m.commandCenter.SelectedSession(); sel != nil {
-				prevID = sel.ID
-			}
-			m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
-			if prevID != "" {
-				m.commandCenter.RestoreSelectionByID(prevID)
-			}
-		}
+		m.refreshCommandCenter()
 		cmds = append(cmds, m.listenForSessionEvents())
 		return m, tea.Batch(cmds...)
 
@@ -294,16 +285,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
 		// Refresh command center if visible so it shows up-to-date session state.
-		if m.commandCenter.IsVisible() {
-			var prevID session.SessionID
-			if sel := m.commandCenter.SelectedSession(); sel != nil {
-				prevID = sel.ID
-			}
-			m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
-			if prevID != "" {
-				m.commandCenter.RestoreSelectionByID(prevID)
-			}
-		}
+		m.refreshCommandCenter()
 		return m, nil
 
 	case errMsg:
@@ -931,6 +913,22 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// refreshCommandCenter re-renders the command center with up-to-date session
+// data, restoring the previously selected session if one was active.
+func (m *Model) refreshCommandCenter() {
+	if !m.commandCenter.IsVisible() {
+		return
+	}
+	var prevID session.SessionID
+	if sel := m.commandCenter.SelectedSession(); sel != nil {
+		prevID = sel.ID
+	}
+	m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
+	if prevID != "" {
+		m.commandCenter.RestoreSelectionByID(prevID)
+	}
 }
 
 // scrollOutput adjusts the scroll offset by delta.
