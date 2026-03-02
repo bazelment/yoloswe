@@ -11,21 +11,21 @@ import (
 // and view.go keep accessing Model fields directly without per-access
 // indirection through a map.
 type RepoContext struct {
-	repoName             string
+	worktreeDropdown     *Dropdown
 	sessionManager       *session.Manager
 	taskRouter           *taskrouter.Router
-	worktrees            []wt.Worktree
+	scrollPositions      map[session.SessionID]int
 	worktreeStatuses     map[string]*wt.WorktreeStatus
-	cachedHistory        []*session.SessionMeta
-	historyBranch        string
-	sessions             []session.SessionInfo
-	worktreeDropdown     *Dropdown
-	sessionDropdown      *Dropdown
-	viewingSessionID     session.SessionID
 	viewingHistoryData   *session.StoredSession
+	sessionDropdown      *Dropdown
+	historyBranch        string
+	repoName             string
+	viewingSessionID     session.SessionID
+	sessions             []session.SessionInfo
+	cachedHistory        []*session.SessionMeta
+	worktrees            []wt.Worktree
 	selectedSessionIndex int
 	scrollOffset         int
-	scrollPositions      map[session.SessionID]int
 }
 
 // saveActiveContext copies per-repo fields from Model into the active RepoContext.

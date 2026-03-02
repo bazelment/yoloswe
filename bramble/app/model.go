@@ -35,15 +35,11 @@ const (
 )
 
 // Model is the root application model.
-type Model struct { //nolint:govet // fieldalignment: readability over padding for app state
+type Model struct {
+	settings              Settings
 	ctx                   context.Context
-	worktrees             []wt.Worktree
-	sessions              []session.SessionInfo
-	cachedHistory         []*session.SessionMeta
-	worktreeOpMessages    []string
-	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
+	toasts                *ToastManager
 	confirmHandler        func(string) tea.Cmd
-	confirmCancelHandler  func() tea.Cmd
 	confirmPrompt         *ConfirmPrompt
 	worktreeStatuses      map[string]*wt.WorktreeStatus
 	scrollPositions       map[session.SessionID]int
@@ -53,36 +49,40 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	mdRenderer            *MarkdownRenderer
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
-	taskModal             *TaskModal
-	toasts                *ToastManager
-	helpOverlay           *HelpOverlay
 	allSessionsOverlay    *AllSessionsOverlay
+	confirmCancelHandler  func() tea.Cmd
+	providerAvailability  *agent.ProviderAvailability
+	taskModal             *TaskModal
 	themePicker           *ThemePicker
 	repoSettingsDialog    *RepoSettingsDialog
-	repos                 map[string]*RepoContext  // all opened repos
-	openedRepos           []string                 // ordered list of opened repo names
-	repoDropdown          *Dropdown                // repo selector dropdown
-	sharedEvents          chan repoSessionEvent     // fan-in channel for all managers
-	sharedManagerConfig   session.ManagerConfig     // template config (minus RepoName) for new repos
-	styles                *Styles
-	settings              Settings
-	providerAvailability  *agent.ProviderAvailability
-	modelRegistry         *agent.ModelRegistry
-	inputArea             *TextArea
-	splitPane             *SplitPane
+	repos                 map[string]*RepoContext
+	repoDropdown          *Dropdown
 	fileTree              *FileTree
+	splitPane             *SplitPane
+	inputArea             *TextArea
+	modelRegistry         *agent.ModelRegistry
+	sharedEvents          chan repoSessionEvent
+	helpOverlay           *HelpOverlay
+	styles                *Styles
+	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
+	sharedManagerConfig   session.ManagerConfig
+	pendingModel          string
+	repoName              string
+	historyBranch         string
+	viewingSessionID      session.SessionID
 	pendingPlannerPrompt  string
 	pendingWorktreeSelect string
-	repoName              string
+	defaultBuildModel     string
 	editor                string
 	inputPrompt           string
 	wtRoot                string
-	defaultPlanModel      string              // Remembered default model for plan sessions
-	defaultBuildModel     string              // Remembered default model for build sessions
-	pendingModel          string              // Model for the current input flow (transient)
-	pendingSessionType    session.SessionType // Session type for current input flow (transient)
-	viewingSessionID      session.SessionID
-	historyBranch         string
+	pendingSessionType    session.SessionType
+	defaultPlanModel      string
+	openedRepos           []string
+	cachedHistory         []*session.SessionMeta
+	worktrees             []wt.Worktree
+	sessions              []session.SessionInfo
+	worktreeOpMessages    []string
 	scrollOffset          int
 	selectedSessionIndex  int
 	height                int
@@ -682,22 +682,22 @@ func (m Model) refreshFileTree() tea.Cmd {
 
 // repoSessionEvent wraps a session event with the repo it came from.
 type repoSessionEvent struct {
-	repoName string
 	event    interface{}
+	repoName string
 }
 
 // Message types
 type (
 	errMsg          struct{ error }
 	worktreesMsg    struct{ worktrees []wt.Worktree }
-	sessionEventMsg struct{ event interface{} }
+	sessionEventMsg struct{}
 	// repoSessionEventMsg is sent when any opened repo's manager emits an event.
 	repoSessionEventMsg struct {
-		repoName string
 		event    interface{}
+		repoName string
 	}
 	// reposLoadedMsg is sent when the available repo list has been loaded.
-	reposLoadedMsg struct{ repos []string }
+	reposLoadedMsg  struct{ repos []string }
 	sessionsUpdated struct{}
 	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
@@ -719,18 +719,18 @@ type (
 		isNew    bool
 	}
 	// worktreeOpResultMsg contains the result of a worktree operation
-	worktreeOpResultMsg struct { //nolint:govet // fieldalignment: readability for message payload
+	worktreeOpResultMsg struct {
 		err      error
-		branch   string // non-empty for create operations, used for auto-switch
+		branch   string
+		warning  string
 		messages []string
-		warning  string // optional non-fatal warning shown in toast
 	}
 	// taskWorktreeCreatedMsg is sent when a worktree is created for a task (then planner should start)
-	taskWorktreeCreatedMsg struct { //nolint:govet // fieldalignment: readability for message payload
+	taskWorktreeCreatedMsg struct {
 		worktreeName string
 		prompt       string
+		warning      string
 		messages     []string
-		warning      string // optional non-fatal warning shown in toast
 	}
 	// tickMsg is sent periodically to update running tool timers
 	tickMsg struct {
@@ -774,11 +774,11 @@ type (
 		branch string
 	}
 	// tmuxWindowMsg carries the result of opening a new tmux window.
-	tmuxWindowMsg struct { //nolint:govet // fieldalignment: readability for message payload
+	tmuxWindowMsg struct {
+		err          error
 		worktreePath string
 		windowName   string
 		windowID     string
-		err          error
 	}
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
 	toastExpireMsg struct{}
@@ -788,11 +788,11 @@ type (
 		mergeMethod string // "squash", "rebase", "merge"
 	}
 	// mergePRDoneMsg signals merge completed, triggers post-merge prompt.
-	mergePRDoneMsg struct { //nolint:govet // fieldalignment: readability over padding
-		branch   string
-		prNumber int
-		messages []string
+	mergePRDoneMsg struct {
 		err      error
+		branch   string
+		messages []string
+		prNumber int
 	}
 	// postMergeActionMsg triggers post-merge worktree action.
 	postMergeActionMsg struct {

@@ -396,8 +396,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if rc.sessionManager == nil {
 				continue
 			}
-			for _, s := range rc.sessionManager.GetAllSessions() {
-				if !s.Status.IsTerminal() {
+			sessions := rc.sessionManager.GetAllSessions()
+			for i := range sessions {
+				if !sessions[i].Status.IsTerminal() {
 					activeCount++
 				}
 			}
@@ -677,9 +678,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if rc.sessionManager == nil {
 				continue
 			}
-			for _, s := range rc.sessionManager.GetAllSessions() {
-				if !s.Status.IsTerminal() {
-					activeSessions = append(activeSessions, s)
+			sessions := rc.sessionManager.GetAllSessions()
+			for i := range sessions {
+				if !sessions[i].Status.IsTerminal() {
+					activeSessions = append(activeSessions, sessions[i])
 				}
 			}
 		}
@@ -2153,14 +2155,9 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	cfg.RepoName = repoName
 	mgr := session.NewManagerWithConfig(cfg)
 
-	// Start a task router if possible.
+	// Task router is intentionally not started for secondary repos (it requires
+	// a provider start which is heavyweight); the user can still manually route tasks.
 	var router *taskrouter.Router
-	if m.taskRouter != nil {
-		// Use the same provider type as the existing router. We create a new
-		// one scoped to the new repo's working directory.
-		// For now, skip task router for secondary repos (it requires a provider
-		// start which is heavyweight); the user can still manually route tasks.
-	}
 
 	// Pre-load worktrees for the new repo.
 	wtMgr := wt.NewManager(m.wtRoot, repoName)
@@ -2213,22 +2210,3 @@ func (m Model) switchRepo(repoName string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
 }
 
-// allOpenedManagers returns all session managers from opened repos.
-func (m *Model) allOpenedManagers() []*session.Manager {
-	managers := make([]*session.Manager, 0, len(m.repos))
-	for _, rc := range m.repos {
-		if rc.sessionManager != nil {
-			managers = append(managers, rc.sessionManager)
-		}
-	}
-	return managers
-}
-
-// closeAllManagers closes all opened session managers.
-func (m *Model) closeAllManagers() {
-	for _, rc := range m.repos {
-		if rc.sessionManager != nil {
-			rc.sessionManager.Close()
-		}
-	}
-}

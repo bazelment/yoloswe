@@ -17,10 +17,10 @@ type DropdownItem struct {
 }
 
 // Dropdown represents a dropdown menu component.
-type Dropdown struct { //nolint:govet // fieldalignment: readability over padding
-	items           []DropdownItem
-	filteredIndices []int // indices into items; nil = no filter (show all)
+type Dropdown struct {
 	filterText      string
+	items           []DropdownItem
+	filteredIndices []int
 	selectedIdx     int
 	width           int
 	maxVisible      int

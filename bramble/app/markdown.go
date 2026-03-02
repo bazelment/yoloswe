@@ -5,10 +5,10 @@ import (
 )
 
 // MarkdownRenderer wraps glamour for terminal markdown rendering.
-type MarkdownRenderer struct { //nolint:govet // fieldalignment: readability over padding
+type MarkdownRenderer struct {
 	renderer     *glamour.TermRenderer
+	glamourStyle string
 	width        int
-	glamourStyle string // "dark", "light", or "auto"
 }
 
 // NewMarkdownRenderer creates a new markdown renderer with the given width and style.

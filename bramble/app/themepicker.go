@@ -7,9 +7,9 @@ import (
 )
 
 // ThemePicker is the overlay for selecting a color theme.
-type ThemePicker struct { //nolint:govet // fieldalignment: readability over padding
+type ThemePicker struct {
+	originalTheme string
 	themes        []ColorPalette
-	originalTheme string // theme name to revert to on Esc
 	selectedIdx   int
 	width         int
 	height        int
