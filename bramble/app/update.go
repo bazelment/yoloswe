@@ -2209,4 +2209,3 @@ func (m Model) switchRepo(repoName string) (tea.Model, tea.Cmd) {
 	// Refresh worktrees and file tree for the new repo.
 	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
 }
-
