@@ -142,7 +142,7 @@ func TestManagerNew(t *testing.T) {
 	mockGit.Results["worktree add -b feature "+filepath.Join(repoDir, "feature")+" origin/main"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	ctx := context.Background()
 	path, err := m.New(ctx, "feature", "main", "")
@@ -180,7 +180,7 @@ func TestManagerNewFetchError(t *testing.T) {
 	mockGit.Errors["fetch origin"] = os.ErrPermission
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	ctx := context.Background()
 	_, err := m.New(ctx, "feature", "main", "")
@@ -524,7 +524,7 @@ func TestNewTracksParentBranch(t *testing.T) {
 	mockGit.Results["config branch.feature-b.description parent:feature-a"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	ctx := context.Background()
 	_, err := m.New(ctx, "feature-b", "feature-a", "")
@@ -563,7 +563,7 @@ func TestNewTracksDefaultBranch(t *testing.T) {
 	mockGit.Results["config branch.feature.description parent:main"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	ctx := context.Background()
 	_, err := m.New(ctx, "feature", "main", "")

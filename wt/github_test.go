@@ -2,6 +2,7 @@ package wt
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -210,5 +211,61 @@ func TestCreatePRDraft(t *testing.T) {
 	argsStr := strings.Join(mock.Calls[0], " ")
 	if !strings.Contains(argsStr, "draft=true") {
 		t.Errorf("expected draft=true in args: %s", argsStr)
+	}
+}
+
+func TestCheckGitHubAuth_Success(t *testing.T) {
+	mock := &MockGHRunner{
+		Result: &CmdResult{Stdout: "github.com\n  Logged in"},
+	}
+	err := CheckGitHubAuth(context.Background(), mock)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(mock.Calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(mock.Calls))
+	}
+	if strings.Join(mock.Calls[0], " ") != "auth status" {
+		t.Errorf("expected 'auth status' call, got %v", mock.Calls[0])
+	}
+}
+
+func TestCheckGitHubAuth_Failure(t *testing.T) {
+	mock := &MockGHRunner{
+		Err:    errors.New("exit status 1"),
+		Result: &CmdResult{ExitCode: 1, Stderr: "not logged in"},
+	}
+	err := CheckGitHubAuth(context.Background(), mock)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrGitHubAuthRequired) {
+		t.Errorf("expected ErrGitHubAuthRequired, got: %v", err)
+	}
+}
+
+func TestIsAuthError(t *testing.T) {
+	tests := []struct {
+		stderr string
+		want   bool
+	}{
+		{"could not authenticate to GitHub", true},
+		{"Authorization failed for 'https://github.com'", true},
+		{"HTTP 401: authentication required", true},
+		{"Invalid credentials", true},
+		{"could not read Username for 'https://github.com': terminal prompts disabled", true},
+		{"terminal prompts disabled", true},
+		{"bad credentials", true},
+		{"everything is fine", false},
+		{"", false},
+		{"failed to fetch: connection refused", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.stderr, func(t *testing.T) {
+			got := IsAuthError(tt.stderr)
+			if got != tt.want {
+				t.Errorf("IsAuthError(%q) = %v, want %v", tt.stderr, got, tt.want)
+			}
+		})
 	}
 }

@@ -3,9 +3,11 @@ package wt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 // GHRunner executes gh CLI commands.
@@ -35,6 +37,48 @@ func (r *DefaultGHRunner) Run(ctx context.Context, args []string, dir string) (*
 	}
 
 	return result, err
+}
+
+// ErrGitHubAuthRequired indicates that GitHub authentication is needed.
+var ErrGitHubAuthRequired = errors.New("GitHub authentication required: run 'gh auth login' to authenticate")
+
+// CheckGitHubAuth verifies that the user is authenticated with GitHub CLI.
+func CheckGitHubAuth(ctx context.Context, runner GHRunner) error {
+	_, err := runner.Run(ctx, []string{"auth", "status"}, "")
+	if err != nil {
+		return ErrGitHubAuthRequired
+	}
+	return nil
+}
+
+// IsAuthError checks if command output indicates an authentication failure.
+func IsAuthError(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	patterns := []string{
+		"could not authenticate",
+		"authorization failed",
+		"authentication required",
+		"invalid credentials",
+		"could not read username",
+		"terminal prompts disabled",
+		"authentication token",
+		"bad credentials",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapAuthError wraps an error with a helpful auth message if the stderr
+// indicates an authentication failure.
+func wrapAuthError(err error, result *CmdResult) error {
+	if result != nil && IsAuthError(result.Stderr) {
+		return fmt.Errorf("%w: %w", ErrGitHubAuthRequired, err)
+	}
+	return err
 }
 
 // PRInfo holds GitHub PR information.

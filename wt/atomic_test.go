@@ -184,7 +184,7 @@ func TestNewAtomicSuccess(t *testing.T) {
 	mockGit.Results["config branch.feature.goal Test goal"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	path, err := m.NewAtomic(context.Background(), "feature", "main", "Test goal")
 	if err != nil {
@@ -227,7 +227,7 @@ func TestNewAtomicRollbackOnWorktreeAddFailure(t *testing.T) {
 	mockGit.Errors["worktree add -b feature "+featurePath+" origin/main"] = errors.New("worktree add failed")
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	_, err := m.NewAtomic(context.Background(), "feature", "main", "")
 	if err == nil {
@@ -265,7 +265,7 @@ func TestNewAtomicRollbackOnDescriptionFailure(t *testing.T) {
 	mockGit.Results["branch -D feature"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	_, err := m.NewAtomic(context.Background(), "feature", "main", "")
 	if err == nil {
@@ -315,7 +315,7 @@ func TestNewAtomicRollbackOnGoalFailure(t *testing.T) {
 	mockGit.Results["config --unset branch.feature.description"] = &CmdResult{}
 
 	output := NewOutput(&bytes.Buffer{}, false)
-	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
 
 	_, err := m.NewAtomic(context.Background(), "feature", "main", "Test goal")
 	if err == nil {

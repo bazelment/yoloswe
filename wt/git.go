@@ -26,6 +26,7 @@ type DefaultGitRunner struct{}
 // Run executes a git command.
 func (r *DefaultGitRunner) Run(ctx context.Context, args []string, dir string) (*CmdResult, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if dir != "" {
 		cmd.Dir = dir
 	}

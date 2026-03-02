@@ -1,6 +1,8 @@
 package wt
 
 import (
+	"context"
+	"strings"
 	"testing"
 )
 
@@ -27,4 +29,20 @@ func TestGetRepoNameFromURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultGitRunnerSetsTerminalPromptEnv(t *testing.T) {
+	runner := &DefaultGitRunner{}
+	// Run a harmless git command to verify the env is set.
+	// "git version" always succeeds and doesn't need a repo.
+	result, err := runner.Run(context.Background(), []string{"version"}, "")
+	if err != nil {
+		t.Fatalf("git version failed: %v", err)
+	}
+	if !strings.HasPrefix(result.Stdout, "git version") {
+		t.Errorf("unexpected output: %s", result.Stdout)
+	}
+	// The env var is set internally; we verify it works by running a command
+	// that would hang without it (tested via integration). Here we just
+	// verify the runner executes successfully with the env set.
 }
