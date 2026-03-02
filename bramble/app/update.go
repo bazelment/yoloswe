@@ -35,6 +35,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == FocusRepoSettings {
 			return m.handleRepoSettingsDialog(msg)
 		}
+		// Handle command center
+		if m.focus == FocusCommandCenter {
+			return m.handleCommandCenter(msg)
+		}
 		// Handle all sessions overlay
 		if m.focus == FocusAllSessions {
 			return m.handleAllSessionsOverlay(msg)
@@ -67,6 +71,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.helpOverlay.SetSize(msg.Width, msg.Height)
 		m.allSessionsOverlay.SetSize(msg.Width, msg.Height)
+		m.commandCenter.SetSize(msg.Width, msg.Height)
 		m.themePicker.SetSize(msg.Width, msg.Height)
 		m.repoSettingsDialog.SetSize(msg.Width, msg.Height)
 		// Update dropdown widths
@@ -265,6 +270,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateSessionDropdown()
 		} else if rc, ok := m.repos[msg.repoName]; ok {
 			rc.sessions = rc.sessionManager.GetAllSessions()
+		}
+		// Auto-refresh command center if visible.
+		if m.commandCenter.IsVisible() {
+			var prevID session.SessionID
+			if sel := m.commandCenter.SelectedSession(); sel != nil {
+				prevID = sel.ID
+			}
+			m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
+			if prevID != "" {
+				m.commandCenter.RestoreSelectionByID(prevID)
+			}
 		}
 		cmds = append(cmds, m.listenForSessionEvents())
 		return m, tea.Batch(cmds...)
@@ -738,22 +754,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "S":
 		// Open all sessions overlay — aggregate across ALL opened repos.
-		// Use openedRepos (insertion-ordered slice) for deterministic ordering.
-		var activeSessions []session.SessionInfo
-		for _, repoName := range m.openedRepos {
-			rc, ok := m.repos[repoName]
-			if !ok || rc.sessionManager == nil {
-				continue
-			}
-			sessions := rc.sessionManager.GetAllSessions()
-			for i := range sessions {
-				if !sessions[i].Status.IsTerminal() {
-					activeSessions = append(activeSessions, sessions[i])
-				}
-			}
-		}
+		activeSessions := m.gatherActiveSessions()
 		m.allSessionsOverlay.Show(activeSessions, m.width, m.height)
 		m.focus = FocusAllSessions
+		return m, nil
+
+	case "C":
+		// Open command center — full-screen card-based grid of all sessions.
+		activeSessions := m.gatherActiveSessions()
+		m.commandCenter.Show(activeSessions, m.width, m.height)
+		m.focus = FocusCommandCenter
 		return m, nil
 
 	case "T":
@@ -1840,6 +1850,156 @@ func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
 	}
 	m.switchViewingSession(sess.ID)
 	// Also select the correct worktree for this session.
+	if sess.WorktreeName != "" {
+		m.worktreeDropdown.SelectByID(sess.WorktreeName)
+		m.updateSessionDropdown()
+	}
+	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
+}
+
+// gatherActiveSessions aggregates non-terminal sessions across all opened repos.
+func (m *Model) gatherActiveSessions() []session.SessionInfo {
+	var activeSessions []session.SessionInfo
+	for _, repoName := range m.openedRepos {
+		rc, ok := m.repos[repoName]
+		if !ok || rc.sessionManager == nil {
+			continue
+		}
+		sessions := rc.sessionManager.GetAllSessions()
+		for i := range sessions {
+			if !sessions[i].Status.IsTerminal() {
+				activeSessions = append(activeSessions, sessions[i])
+			}
+		}
+	}
+	return activeSessions
+}
+
+// handleCommandCenter handles key presses when the command center is visible.
+func (m Model) handleCommandCenter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.commandCenter.Hide()
+		m.focus = FocusOutput
+		return m, nil
+
+	case "left", "h":
+		m.commandCenter.MoveSelection(-1)
+		return m, nil
+
+	case "right", "l":
+		m.commandCenter.MoveSelection(1)
+		return m, nil
+
+	case "up", "k":
+		m.commandCenter.MoveSelectionRow(-1)
+		return m, nil
+
+	case "down", "j":
+		m.commandCenter.MoveSelectionRow(1)
+		return m, nil
+
+	case "enter":
+		return m.switchToCommandCenterSession()
+
+	case "f":
+		// Follow-up on selected idle session
+		sess := m.commandCenter.SelectedSession()
+		if sess == nil || sess.Status != session.StatusIdle {
+			toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+			return m, toastCmd
+		}
+		sessID := sess.ID
+		sessRepoName := sess.RepoName
+		m.commandCenter.Hide()
+		m.focus = FocusOutput
+		// Switch repo if needed
+		if sessRepoName != "" && sessRepoName != m.repoName {
+			if _, ok := m.repos[sessRepoName]; ok {
+				m.saveActiveContext()
+				m.loadContext(sessRepoName)
+			}
+		}
+		return m.promptInput("Follow-up: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
+			return func() tea.Msg {
+				if err := m.sessionManager.SendFollowUp(sessID, message); err != nil {
+					return errMsg{err}
+				}
+				return sessionsUpdated{}
+			}
+		}, "Type your follow-up message...")
+
+	case "a":
+		// Approve plan on selected idle planner
+		sess := m.commandCenter.SelectedSession()
+		if sess == nil || sess.Status != session.StatusIdle ||
+			sess.Type != session.SessionTypePlanner || sess.PlanFilePath == "" {
+			toastCmd := m.addToast("No plan ready to approve", ToastInfo)
+			return m, toastCmd
+		}
+		sessRepoName := sess.RepoName
+		m.commandCenter.Hide()
+		m.focus = FocusOutput
+		// Switch repo if needed
+		if sessRepoName != "" && sessRepoName != m.repoName {
+			if _, ok := m.repos[sessRepoName]; ok {
+				m.saveActiveContext()
+				m.loadContext(sessRepoName)
+			}
+		}
+		worktreePath := sess.WorktreePath
+		planPath := sess.PlanFilePath
+		_ = m.sessionManager.CompleteSession(sess.ID)
+		m.sessions = m.sessionManager.GetAllSessions()
+		m.updateSessionDropdown()
+		planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
+		sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt, m.defaultBuildModel)
+		if err != nil {
+			toastCmd := m.addToast(err.Error(), ToastError)
+			return m, toastCmd
+		}
+		if m.viewingSessionID != "" {
+			m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+		}
+		m.viewingSessionID = sessionID
+		m.scrollOffset = 0
+		m.sessions = m.sessionManager.GetAllSessions()
+		m.updateSessionDropdown()
+		return m, nil
+
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		n := int(msg.String()[0] - '0')
+		if m.commandCenter.SelectByNumber(n) {
+			return m.switchToCommandCenterSession()
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// switchToCommandCenterSession closes the command center and switches to the selected session.
+func (m Model) switchToCommandCenterSession() (tea.Model, tea.Cmd) {
+	sess := m.commandCenter.SelectedSession()
+	if sess == nil {
+		m.commandCenter.Hide()
+		m.focus = FocusOutput
+		return m, nil
+	}
+	m.commandCenter.Hide()
+	m.focus = FocusOutput
+
+	// If session belongs to a different repo, switch repo first.
+	if sess.RepoName != "" && sess.RepoName != m.repoName {
+		if _, ok := m.repos[sess.RepoName]; ok {
+			m.saveActiveContext()
+			m.loadContext(sess.RepoName)
+		}
+	}
+
+	m.switchViewingSession(sess.ID)
 	if sess.WorktreeName != "" {
 		m.worktreeDropdown.SelectByID(sess.WorktreeName)
 		m.updateSessionDropdown()

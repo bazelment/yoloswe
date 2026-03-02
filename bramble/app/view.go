@@ -117,6 +117,11 @@ func (m Model) View() string {
 		return m.taskModal.View(m.styles)
 	}
 
+	// Show command center if visible
+	if m.commandCenter.IsVisible() {
+		return m.commandCenter.View(m.styles)
+	}
+
 	// Show all sessions overlay if visible
 	if m.allSessionsOverlay.IsVisible() {
 		return m.allSessionsOverlay.View(m.styles)

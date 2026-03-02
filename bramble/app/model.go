@@ -32,6 +32,7 @@ const (
 	FocusThemePicker                       // Theme picker overlay open
 	FocusRepoSettings                      // Repo settings overlay open
 	FocusRepoDropdown                      // Alt-R repo dropdown open
+	FocusCommandCenter                     // Command center full-screen view
 )
 
 // Model is the root application model.
@@ -50,6 +51,7 @@ type Model struct {
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
 	allSessionsOverlay    *AllSessionsOverlay
+	commandCenter         *CommandCenter
 	confirmCancelHandler  func() tea.Cmd
 	providerAvailability  *agent.ProviderAvailability
 	taskModal             *TaskModal
@@ -159,6 +161,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		toasts:               NewToastManager(),
 		helpOverlay:          NewHelpOverlay(),
 		allSessionsOverlay:   NewAllSessionsOverlay(),
+		commandCenter:        NewCommandCenter(),
 		inputArea:            NewTextArea(),
 		splitPane:            NewSplitPane(),
 		fileTree:             NewFileTree("", nil),
