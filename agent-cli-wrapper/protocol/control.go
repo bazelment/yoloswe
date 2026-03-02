@@ -29,6 +29,12 @@ const (
 	ControlRequestSubtypeSetPermissionMode ControlRequestSubtype = "set_permission_mode"
 	ControlRequestSubtypeInterrupt         ControlRequestSubtype = "interrupt"
 	ControlRequestSubtypeMCPMessage        ControlRequestSubtype = "mcp_message"
+	ControlRequestSubtypeSetModel          ControlRequestSubtype = "set_model"
+)
+
+// ControlResponseSubtype constants for response payloads.
+const (
+	ControlResponseSubtypeSuccess = "success"
 )
 
 // ControlRequestData is the interface for control request discrimination.

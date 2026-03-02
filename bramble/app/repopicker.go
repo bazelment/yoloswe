@@ -22,21 +22,21 @@ const (
 )
 
 // RepoPickerModel is the model for the repo selection screen.
-type RepoPickerModel struct { //nolint:govet // fieldalignment: readability over packed layout
+type RepoPickerModel struct {
 	ctx               context.Context
-	cloneCancel       context.CancelFunc
 	err               error
 	cloneErr          error
+	cloneCancel       context.CancelFunc
 	styles            *Styles
+	urlInput          string
+	filterText        string
 	wtRoot            string
 	chosenRepo        string
-	filterText        string
-	urlInput          string
-	urlInputField     textinput.Model
 	cloneRepoName     string
 	pendingSelectRepo string
+	filteredIndices   []int
 	repos             []string
-	filteredIndices   []int // indices into repos; nil = no filter (show all)
+	urlInputField     textinput.Model
 	selectedIdx       int
 	width             int
 	height            int

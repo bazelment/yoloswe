@@ -12,11 +12,11 @@ import (
 )
 
 // FileTree displays a navigable tree of changed files from a WorktreeContext.
-type FileTree struct { //nolint:govet // fieldalignment: readability over padding
+type FileTree struct {
+	styles  *Styles
 	root    string
 	entries []fileEntry
 	files   []fileInfo
-	styles  *Styles
 	cursor  int
 	offset  int
 	focused bool

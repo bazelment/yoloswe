@@ -72,15 +72,7 @@ func (b *OutputBuffer) UpdateToolByID(toolID string, fn func(*OutputLine)) bool 
 	defer b.mu.Unlock()
 	for i := len(b.lines) - 1; i >= 0; i-- {
 		if b.lines[i].ToolID == toolID && b.lines[i].Type == OutputTypeToolStart {
-			lineCopy := b.lines[i]
-			// Deep-copy mutable map fields before mutation.
-			if lineCopy.ToolInput != nil {
-				newInput := make(map[string]interface{}, len(lineCopy.ToolInput))
-				for k, v := range lineCopy.ToolInput {
-					newInput[k] = v
-				}
-				lineCopy.ToolInput = newInput
-			}
+			lineCopy := DeepCopyOutputLine(b.lines[i])
 			fn(&lineCopy)
 			b.lines[i] = lineCopy
 			return true
@@ -110,10 +102,12 @@ func (b *OutputBuffer) Len() int {
 // appendLocked appends a line while already holding b.mu.
 func (b *OutputBuffer) appendLocked(line OutputLine) {
 	if len(b.lines) >= b.max {
-		// Zero the slot before reslicing so the GC can reclaim pointer-bearing
-		// fields (ToolResult, ToolInput) in the evicted element.
+		// Zero the evicted slot so the GC can reclaim pointer-bearing fields.
 		b.lines[0] = OutputLine{}
-		b.lines = append(b.lines[1:], line)
+		// Shift left in-place to keep the same backing array (avoids an
+		// allocation on every eviction that append-after-reslice would cause).
+		copy(b.lines, b.lines[1:])
+		b.lines[len(b.lines)-1] = line
 	} else {
 		b.lines = append(b.lines, line)
 	}

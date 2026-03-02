@@ -14,10 +14,10 @@ type RepoSettings struct {
 }
 
 // Settings holds persistent user preferences.
-type Settings struct { //nolint:govet // fieldalignment: keep JSON field order readable
-	ThemeName        string                  `json:"theme_name"`
+type Settings struct {
 	EnabledProviders *[]string               `json:"enabled_providers,omitempty"`
 	Repos            map[string]RepoSettings `json:"repos,omitempty"`
+	ThemeName        string                  `json:"theme_name"`
 }
 
 // GetEnabledProviders returns the enabled providers slice for use with model registry.

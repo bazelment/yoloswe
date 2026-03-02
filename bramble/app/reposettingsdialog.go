@@ -35,18 +35,18 @@ const (
 )
 
 // RepoSettingsDialog is an overlay for editing per-repo worktree hook commands.
-type RepoSettingsDialog struct { //nolint:govet // fieldalignment: readability over packing
-	createInput      textarea.Model
+type RepoSettingsDialog struct {
 	deleteInput      textarea.Model
-	themes           []ColorPalette
-	providerStatuses []agent.ProviderStatus
+	createInput      textarea.Model
 	enabledProviders map[string]bool
 	repoName         string
 	original         string
+	providerStatuses []agent.ProviderStatus
+	themes           []ColorPalette
 	width            int
 	height           int
 	selectedIdx      int
-	providerCursor   int // which provider row is highlighted
+	providerCursor   int
 	focus            RepoSettingsDialogFocus
 	visible          bool
 }

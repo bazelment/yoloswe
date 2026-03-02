@@ -115,7 +115,7 @@ func TestDropdownFilter_OpenResetsFilter(t *testing.T) {
 func TestDropdownFilter_SeparatorsExcluded(t *testing.T) {
 	items := []DropdownItem{
 		{ID: "live1", Label: "Live Session"},
-		{ID: "---separator---", Label: "--- History ---"},
+		{ID: dropdownSeparatorID, Label: "--- History ---"},
 		{ID: "hist1", Label: "History Session"},
 	}
 	d := NewDropdown(items)
@@ -124,7 +124,7 @@ func TestDropdownFilter_SeparatorsExcluded(t *testing.T) {
 	d.AppendFilter('s') // matches "Live Session" and "History Session"
 	eff := d.effectiveItems()
 	for _, item := range eff {
-		assert.NotEqual(t, "---separator---", item.ID)
+		assert.NotEqual(t, dropdownSeparatorID, item.ID)
 	}
 }
 

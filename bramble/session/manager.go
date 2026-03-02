@@ -551,6 +551,7 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, mo
 		Prompt:       prompt,
 		Title:        generateTitle(prompt, 20),
 		Model:        model,
+		RepoName:     m.config.RepoName,
 		Progress:     &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:    time.Now(),
 		ctx:          ctx,

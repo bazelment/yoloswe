@@ -160,6 +160,7 @@ func buildHelpSections(m *Model) []HelpSection {
 	// Always show navigation
 	nav := HelpSection{Title: "Navigation"}
 	nav.Bindings = append(nav.Bindings,
+		HelpBinding{"Alt-R", "Open repo selector"},
 		HelpBinding{"Alt-W", "Open worktree selector"},
 		HelpBinding{"?", "Toggle this help"},
 		HelpBinding{"F2", "Toggle file tree split"},

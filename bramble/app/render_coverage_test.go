@@ -17,10 +17,10 @@ func TestRenderCoverage_AllOutputTypes(t *testing.T) {
 	styles := NewStyles(Dark)
 	width := 100
 
-	tests := []struct { //nolint:govet // fieldalignment: readability over packing
+	tests := []struct {
 		name     string
+		contains string
 		line     session.OutputLine
-		contains string // expected substring in output
 	}{
 		{
 			name:     "text",
@@ -148,10 +148,10 @@ func TestRenderCoverage_AllOutputTypes_ViewPath(t *testing.T) {
 	m := Model{styles: styles}
 	width := 100
 
-	tests := []struct { //nolint:govet // fieldalignment: readability over packing
+	tests := []struct {
 		name     string
-		line     session.OutputLine
 		contains string
+		line     session.OutputLine
 	}{
 		{
 			name:     "text",

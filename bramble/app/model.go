@@ -31,18 +31,15 @@ const (
 	FocusAllSessions                       // All sessions overlay open
 	FocusThemePicker                       // Theme picker overlay open
 	FocusRepoSettings                      // Repo settings overlay open
+	FocusRepoDropdown                      // Alt-R repo dropdown open
 )
 
 // Model is the root application model.
-type Model struct { //nolint:govet // fieldalignment: readability over padding for app state
+type Model struct {
+	settings              Settings
 	ctx                   context.Context
-	worktrees             []wt.Worktree
-	sessions              []session.SessionInfo
-	cachedHistory         []*session.SessionMeta
-	worktreeOpMessages    []string
-	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
+	toasts                *ToastManager
 	confirmHandler        func(string) tea.Cmd
-	confirmCancelHandler  func() tea.Cmd
 	confirmPrompt         *ConfirmPrompt
 	worktreeStatuses      map[string]*wt.WorktreeStatus
 	scrollPositions       map[session.SessionID]int
@@ -52,31 +49,40 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	mdRenderer            *MarkdownRenderer
 	worktreeDropdown      *Dropdown
 	sessionDropdown       *Dropdown
-	taskModal             *TaskModal
-	toasts                *ToastManager
-	helpOverlay           *HelpOverlay
 	allSessionsOverlay    *AllSessionsOverlay
+	confirmCancelHandler  func() tea.Cmd
+	providerAvailability  *agent.ProviderAvailability
+	taskModal             *TaskModal
 	themePicker           *ThemePicker
 	repoSettingsDialog    *RepoSettingsDialog
-	styles                *Styles
-	settings              Settings
-	providerAvailability  *agent.ProviderAvailability
-	modelRegistry         *agent.ModelRegistry
-	inputArea             *TextArea
-	splitPane             *SplitPane
+	repos                 map[string]*RepoContext
+	repoDropdown          *Dropdown
 	fileTree              *FileTree
+	splitPane             *SplitPane
+	inputArea             *TextArea
+	modelRegistry         *agent.ModelRegistry
+	sharedEvents          chan repoSessionEvent
+	helpOverlay           *HelpOverlay
+	styles                *Styles
+	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
+	sharedManagerConfig   session.ManagerConfig
+	pendingModel          string
+	repoName              string
+	historyBranch         string
+	viewingSessionID      session.SessionID
 	pendingPlannerPrompt  string
 	pendingWorktreeSelect string
-	repoName              string
+	defaultBuildModel     string
 	editor                string
 	inputPrompt           string
 	wtRoot                string
-	defaultPlanModel      string              // Remembered default model for plan sessions
-	defaultBuildModel     string              // Remembered default model for build sessions
-	pendingModel          string              // Model for the current input flow (transient)
-	pendingSessionType    session.SessionType // Session type for current input flow (transient)
-	viewingSessionID      session.SessionID
-	historyBranch         string
+	pendingSessionType    session.SessionType
+	defaultPlanModel      string
+	openedRepos           []string
+	cachedHistory         []*session.SessionMeta
+	worktrees             []wt.Worktree
+	sessions              []session.SessionInfo
+	worktreeOpMessages    []string
 	scrollOffset          int
 	selectedSessionIndex  int
 	height                int
@@ -91,7 +97,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 // render shows branch names immediately without waiting for an async refresh.
 // width/height set the initial terminal dimensions so the first View() can
 // render a proper layout without waiting for WindowSizeMsg.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry, sharedManagerConfig session.ManagerConfig) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -122,6 +128,8 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		}
 	}
 
+	sharedEvents := make(chan repoSessionEvent, 64)
+
 	m := Model{
 		ctx:                  ctx,
 		wtRoot:               wtRoot,
@@ -131,6 +139,11 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		taskRouter:           taskRouter,
 		providerAvailability: providerAvailability,
 		modelRegistry:        modelRegistry,
+		repos:                make(map[string]*RepoContext),
+		openedRepos:          []string{repoName},
+		repoDropdown:         NewDropdown(nil),
+		sharedEvents:         sharedEvents,
+		sharedManagerConfig:  sharedManagerConfig,
 		styles:               styles,
 		settings:             settings,
 		themePicker:          NewThemePicker(),
@@ -165,6 +178,19 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		m.worktreeDropdown.SelectIndex(0)
 		m.updateSessionDropdown()
 	}
+
+	// Create initial RepoContext for the startup repo.
+	m.repos[repoName] = &RepoContext{
+		sessionManager:   sessionManager,
+		taskRouter:       taskRouter,
+		worktrees:        m.worktrees,
+		worktreeDropdown: m.worktreeDropdown,
+		sessionDropdown:  m.sessionDropdown,
+		scrollPositions:  m.scrollPositions,
+	}
+
+	// Start fan-in goroutine for the initial manager.
+	go fanInEvents(m.ctx, repoName, sessionManager, sharedEvents)
 
 	return m
 }
@@ -209,25 +235,46 @@ func (m Model) refreshWorktrees() tea.Cmd {
 	if m.repoName == "" {
 		return nil
 	}
-	manager := wt.NewManager(m.wtRoot, m.repoName)
+	repoName := m.repoName
+	manager := wt.NewManager(m.wtRoot, repoName)
 
 	return func() tea.Msg {
 		worktrees, err := manager.List(m.ctx)
 		if err != nil {
 			return errMsg{err}
 		}
-		return worktreesMsg{worktrees}
+		return worktreesMsg{worktrees: worktrees, repoName: repoName}
 	}
 }
 
-// listenForSessionEvents listens for session manager events.
+// listenForSessionEvents listens for session events from all opened repos
+// via the shared fan-in channel.
 func (m Model) listenForSessionEvents() tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-m.ctx.Done():
 			return nil
-		case event := <-m.sessionManager.Events():
-			return sessionEventMsg{event}
+		case ev := <-m.sharedEvents:
+			return repoSessionEventMsg{repoName: ev.repoName, event: ev.event}
+		}
+	}
+}
+
+// fanInEvents forwards events from a single manager to the shared channel.
+func fanInEvents(ctx context.Context, repoName string, mgr *session.Manager, out chan<- repoSessionEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-mgr.Events():
+			if !ok {
+				return
+			}
+			select {
+			case out <- repoSessionEvent{repoName: repoName, event: event}:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -368,7 +415,7 @@ func (m *Model) updateSessionDropdown() {
 
 	if len(items) > 0 && len(historySessions) > 0 {
 		items = append(items, DropdownItem{
-			ID:    "---separator---",
+			ID:    dropdownSeparatorID,
 			Label: "─── History ───",
 		})
 	}
@@ -447,10 +494,11 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 		return nil
 	}
 	branch := w.Name()
+	repoName := m.repoName
 	mgr := m.sessionManager
 	return func() tea.Msg {
 		sessions, _ := mgr.LoadHistorySessions(branch)
-		return historySessionsMsg{branch: branch, sessions: sessions}
+		return historySessionsMsg{branch: branch, sessions: sessions, repoName: repoName}
 	}
 }
 
@@ -473,7 +521,7 @@ func (m Model) fetchGitStatuses() tea.Cmd {
 			if err != nil {
 				return nil
 			}
-			return singleWorktreeStatusMsg{branch: w.Branch, status: status}
+			return singleWorktreeStatusMsg{branch: w.Branch, status: status, repoName: repoName}
 		})
 	}
 
@@ -498,7 +546,7 @@ func (m Model) fetchPRStatuses() tea.Cmd {
 		if err != nil {
 			return nil
 		}
-		return batchPRInfoMsg{prs: prs}
+		return batchPRInfoMsg{prs: prs, repoName: repoName}
 	}
 }
 
@@ -629,15 +677,31 @@ func (m Model) refreshFileTree() tea.Cmd {
 		return fileTreeContextMsg{
 			worktreePath: worktree.Path,
 			wtCtx:        wtCtx,
+			repoName:     repoName,
 		}
 	}
 }
 
+// repoSessionEvent wraps a session event with the repo it came from.
+type repoSessionEvent struct {
+	event    interface{}
+	repoName string
+}
+
 // Message types
 type (
-	errMsg          struct{ error }
-	worktreesMsg    struct{ worktrees []wt.Worktree }
-	sessionEventMsg struct{ event interface{} }
+	errMsg       struct{ error }
+	worktreesMsg struct {
+		repoName  string
+		worktrees []wt.Worktree
+	}
+	// repoSessionEventMsg is sent when any opened repo's manager emits an event.
+	repoSessionEventMsg struct {
+		event    interface{}
+		repoName string
+	}
+	// reposLoadedMsg is sent when the available repo list has been loaded.
+	reposLoadedMsg  struct{ repos []string }
 	sessionsUpdated struct{}
 	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
@@ -659,18 +723,18 @@ type (
 		isNew    bool
 	}
 	// worktreeOpResultMsg contains the result of a worktree operation
-	worktreeOpResultMsg struct { //nolint:govet // fieldalignment: readability for message payload
+	worktreeOpResultMsg struct {
 		err      error
-		branch   string // non-empty for create operations, used for auto-switch
+		branch   string
+		warning  string
 		messages []string
-		warning  string // optional non-fatal warning shown in toast
 	}
 	// taskWorktreeCreatedMsg is sent when a worktree is created for a task (then planner should start)
-	taskWorktreeCreatedMsg struct { //nolint:govet // fieldalignment: readability for message payload
+	taskWorktreeCreatedMsg struct {
 		worktreeName string
 		prompt       string
+		warning      string
 		messages     []string
-		warning      string // optional non-fatal warning shown in toast
 	}
 	// tickMsg is sent periodically to update running tool timers
 	tickMsg struct {
@@ -678,20 +742,24 @@ type (
 	}
 	// singleWorktreeStatusMsg carries the git-only status for one worktree (fast, local).
 	singleWorktreeStatusMsg struct {
-		status *wt.WorktreeStatus
-		branch string
+		status   *wt.WorktreeStatus
+		branch   string
+		repoName string
 	}
 	// batchPRInfoMsg carries all open PRs fetched in a single API call.
 	batchPRInfoMsg struct {
-		prs []wt.PRInfo
+		repoName string
+		prs      []wt.PRInfo
 	}
 	// fileTreeContextMsg carries gathered worktree context for the file tree
 	fileTreeContextMsg struct {
 		wtCtx        *wt.WorktreeContext
 		worktreePath string
+		repoName     string
 	}
 	// historySessionsMsg carries async-loaded history sessions for a worktree.
 	historySessionsMsg struct {
+		repoName string
 		branch   string
 		sessions []*session.SessionMeta
 	}
@@ -714,11 +782,11 @@ type (
 		branch string
 	}
 	// tmuxWindowMsg carries the result of opening a new tmux window.
-	tmuxWindowMsg struct { //nolint:govet // fieldalignment: readability for message payload
+	tmuxWindowMsg struct {
+		err          error
 		worktreePath string
 		windowName   string
 		windowID     string
-		err          error
 	}
 	// toastExpireMsg is sent when a toast timer fires to check for expired toasts.
 	toastExpireMsg struct{}
@@ -728,11 +796,11 @@ type (
 		mergeMethod string // "squash", "rebase", "merge"
 	}
 	// mergePRDoneMsg signals merge completed, triggers post-merge prompt.
-	mergePRDoneMsg struct { //nolint:govet // fieldalignment: readability over padding
-		branch   string
-		prNumber int
-		messages []string
+	mergePRDoneMsg struct {
 		err      error
+		branch   string
+		messages []string
+		prNumber int
 	}
 	// postMergeActionMsg triggers post-merge worktree action.
 	postMergeActionMsg struct {
@@ -801,4 +869,19 @@ func (m *Model) applyTheme(palette ColorPalette) {
 	// Update text area placeholder colors from the palette
 	m.inputArea.SetPlaceholderColor(lipgloss.Color(palette.Dim))
 	m.taskModal.SetPlaceholderColor(lipgloss.Color(palette.Dim))
+}
+
+// CloseSecondaryManagers closes all session managers for repos that are NOT
+// the initial repo. The initial manager is closed by the caller (main.go)
+// via defer. This must be called after p.Run() returns to ensure tmux windows
+// from secondary repos are properly cleaned up on exit.
+func (m Model) CloseSecondaryManagers(initialRepoName string) {
+	for repoName, rc := range m.repos {
+		if repoName == initialRepoName {
+			continue
+		}
+		if rc.sessionManager != nil {
+			rc.sessionManager.Close()
+		}
+	}
 }

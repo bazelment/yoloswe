@@ -13,7 +13,7 @@ func TestThemeShortcutOpensSettingsDialog(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
 
 	nextModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
 	m2 := nextModel.(Model)
@@ -30,7 +30,7 @@ func TestSettingsShortcutCtrlLOpensSettingsDialog(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
 
 	nextModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlL})
 	m2 := nextModel.(Model)
@@ -47,7 +47,7 @@ func TestSettingsDialogCancelRevertsThemePreview(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil)
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
 	orig := m.styles.Palette.Name
 
 	nextModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})

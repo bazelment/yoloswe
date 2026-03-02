@@ -110,6 +110,7 @@ type Session struct {
 	TmuxWindowName string // tmux window name (empty for TUI mode)
 	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
 	RunnerType     string // "tui" or "tmux"
+	RepoName       string // Repository this session belongs to
 	ID             SessionID
 	WorktreePath   string
 	Status         SessionStatus
@@ -185,6 +186,7 @@ type SessionInfo struct {
 	TmuxWindowName string // tmux window name (empty for TUI mode)
 	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
 	RunnerType     string // "tui" or "tmux"
+	RepoName       string // Repository this session belongs to
 	ID             SessionID
 	Status         SessionStatus
 	Type           SessionType
@@ -210,6 +212,7 @@ func (s *Session) ToInfo() SessionInfo {
 		TmuxWindowName: s.TmuxWindowName,
 		TmuxWindowID:   s.TmuxWindowID,
 		RunnerType:     s.RunnerType,
+		RepoName:       s.RepoName,
 		CreatedAt:      s.CreatedAt,
 		StartedAt:      s.StartedAt,
 		CompletedAt:    s.CompletedAt,

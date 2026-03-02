@@ -38,7 +38,7 @@ func TestRouteTaskWithRealRouter(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := app.NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, router, nil, 80, 24, nil, nil)
+	m := app.NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, router, nil, 80, 24, nil, nil, session.ManagerConfig{})
 
 	// Use RouteTask (exported from taskmodal.go) directly to verify wiring
 	req := taskrouter.RouteRequest{

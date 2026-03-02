@@ -110,14 +110,36 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 	if len(o.sessions) == 0 {
 		lines = append(lines, s.Dim.Render("  No active sessions across any worktree."), "")
 	} else {
+		// Check if sessions span multiple repos to decide whether to show a Repo column.
+		multiRepo := false
+		if len(o.sessions) > 1 {
+			first := o.sessions[0].RepoName
+			for i := 1; i < len(o.sessions); i++ {
+				if o.sessions[i].RepoName != first {
+					multiRepo = true
+					break
+				}
+			}
+		}
+
 		// Scale column widths to fit contentWidth.
 		// Fixed overhead: " #. 🔨  " prefix (~9 cols) + status (~12 cols) + gaps = ~27 cols
-		// Remaining budget is split among Worktree, Name, and Prompt.
 		fixedCols := 27 // num(3) + icon(4) + status(12) + spacing(8)
 		flexBudget := contentWidth - fixedCols
 		if flexBudget < 30 {
 			flexBudget = 30
 		}
+
+		// Allocate flex budget; add a Repo column when multiple repos are present.
+		var repoColWidth int
+		if multiRepo {
+			repoColWidth = flexBudget * 15 / 100
+			if repoColWidth < 8 {
+				repoColWidth = 8
+			}
+			flexBudget -= repoColWidth
+		}
+
 		// Allocate: 30% worktree, 25% name, 45% prompt (with minimums)
 		wtColWidth := flexBudget * 30 / 100
 		if wtColWidth < 8 {
@@ -135,19 +157,25 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 		// Table header
 		wtFmt := fmt.Sprintf("%%-%ds", wtColWidth)
 		nameFmt := fmt.Sprintf("%%-%ds", nameColWidth)
-		// Prefix: " #.  T  " = 1 space + 2 num + 1 space + 2 icon + 2 spaces = 8 visual cols
-		headerFmt := " %-3s %-4s " + wtFmt + " " + nameFmt + " %-12s %s"
-		header := s.Dim.Render(fmt.Sprintf(headerFmt, "#", "Type", "Worktree", "Name", "Status", "Prompt"))
-		lines = append(lines, header)
+
+		var headerFmt, rowFmt string
+		if multiRepo {
+			repoFmt := fmt.Sprintf("%%-%ds", repoColWidth)
+			headerFmt = " %-3s %-4s " + repoFmt + " " + wtFmt + " " + nameFmt + " %-12s %s"
+			rowFmt = " %-3s %s  " + repoFmt + " " + wtFmt + " " + nameFmt + " %-12s %s"
+			header := s.Dim.Render(fmt.Sprintf(headerFmt, "#", "Type", "Repo", "Worktree", "Name", "Status", "Prompt"))
+			lines = append(lines, header)
+		} else {
+			headerFmt = " %-3s %-4s " + wtFmt + " " + nameFmt + " %-12s %s"
+			rowFmt = " %-3s %s  " + wtFmt + " " + nameFmt + " %-12s %s"
+			header := s.Dim.Render(fmt.Sprintf(headerFmt, "#", "Type", "Worktree", "Name", "Status", "Prompt"))
+			lines = append(lines, header)
+		}
 		sepWidth := contentWidth - 1
 		if sepWidth < 20 {
 			sepWidth = 20
 		}
 		lines = append(lines, " "+strings.Repeat("─", sepWidth))
-
-		// Row format string: " 1. 🔨  " — emoji is 2 display cols but 1 %s arg
-		// %-3s for num ("1." padded to 3), %s for icon (2 display cols + 2 spaces)
-		rowFmt := " %-3s %s  " + wtFmt + " " + nameFmt + " %-12s %s"
 
 		// Session rows
 		for i := range o.sessions {
@@ -190,7 +218,13 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 			}
 			promptDisplay := truncate(prompt, promptWidth)
 
-			line := fmt.Sprintf(rowFmt, num, typeIcon, wtName, nameDisplay, statusStr, promptDisplay)
+			var line string
+			if multiRepo {
+				repoName := truncate(sess.RepoName, repoColWidth-1)
+				line = fmt.Sprintf(rowFmt, num, typeIcon, repoName, wtName, nameDisplay, statusStr, promptDisplay)
+			} else {
+				line = fmt.Sprintf(rowFmt, num, typeIcon, wtName, nameDisplay, statusStr, promptDisplay)
+			}
 
 			if i == o.selectedIdx {
 				line = s.Selected.Render(line)

@@ -23,7 +23,7 @@ func NewPermissionAllow(requestID string, input map[string]interface{}, perms []
 	return ControlResponse{
 		Type: MessageTypeControlResponse,
 		Response: ControlResponsePayload{
-			Subtype:   "success",
+			Subtype:   ControlResponseSubtypeSuccess,
 			RequestID: requestID,
 			Response: PermissionResultAllow{
 				Behavior:           PermissionBehaviorAllow,
@@ -42,7 +42,7 @@ func NewPermissionDeny(requestID string, message string, interrupt bool) Control
 	return ControlResponse{
 		Type: MessageTypeControlResponse,
 		Response: ControlResponsePayload{
-			Subtype:   "success",
+			Subtype:   ControlResponseSubtypeSuccess,
 			RequestID: requestID,
 			Response: PermissionResultDeny{
 				Behavior:  PermissionBehaviorDeny,
@@ -59,7 +59,7 @@ func NewMCPResponse(requestID string, result interface{}) ControlResponse {
 	return ControlResponse{
 		Type: MessageTypeControlResponse,
 		Response: ControlResponsePayload{
-			Subtype:   "success",
+			Subtype:   ControlResponseSubtypeSuccess,
 			RequestID: requestID,
 			Response:  MCPResponsePayload{MCPResponse: result},
 		},
@@ -89,6 +89,6 @@ func NewSetModel(requestID, model string) ControlRequestToSend {
 	return ControlRequestToSend{
 		Type:      "control_request",
 		RequestID: requestID,
-		Request:   SetModelRequestToSend{Subtype: "set_model", Model: model},
+		Request:   SetModelRequestToSend{Subtype: string(ControlRequestSubtypeSetModel), Model: model},
 	}
 }
