@@ -1,0 +1,53 @@
+name: Daily Release
+
+on:
+  schedule:
+    # Run daily at 10:00 UTC
+    - cron: "0 10 * * *"
+  workflow_dispatch: {} # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  daily-release:
+    name: Tag Daily Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for changes since last release
+        id: check
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found, will create release"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(git rev-list "${LAST_TAG}..HEAD" --count)" -gt 0 ]; then
+            echo "Found new commits since ${LAST_TAG}"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes since ${LAST_TAG}, skipping"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          TAG="v$(date -u +%Y.%m.%d)"
+
+          # Handle multiple releases on the same day
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            SUFFIX=1
+            while git rev-parse "${TAG}.${SUFFIX}" >/dev/null 2>&1; do
+              SUFFIX=$((SUFFIX + 1))
+            done
+            TAG="${TAG}.${SUFFIX}"
+          fi
+
+          echo "Creating tag ${TAG}"
+          git tag "${TAG}"
+          git push origin "${TAG}"
