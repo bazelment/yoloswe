@@ -231,8 +231,9 @@ func TestCheckGitHubAuth_Success(t *testing.T) {
 }
 
 func TestCheckGitHubAuth_Failure(t *testing.T) {
+	originalErr := errors.New("exit status 1")
 	mock := &MockGHRunner{
-		Err:    errors.New("exit status 1"),
+		Err:    originalErr,
 		Result: &CmdResult{ExitCode: 1, Stderr: "not logged in"},
 	}
 	err := CheckGitHubAuth(context.Background(), mock)
@@ -240,7 +241,11 @@ func TestCheckGitHubAuth_Failure(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 	if !errors.Is(err, ErrGitHubAuthRequired) {
-		t.Errorf("expected ErrGitHubAuthRequired, got: %v", err)
+		t.Errorf("expected ErrGitHubAuthRequired in chain, got: %v", err)
+	}
+	// The original error should be preserved in the chain for diagnostic context.
+	if !errors.Is(err, originalErr) {
+		t.Errorf("expected original error in chain, got: %v", err)
 	}
 }
 

@@ -46,7 +46,7 @@ var ErrGitHubAuthRequired = errors.New("GitHub authentication required: run 'gh 
 func CheckGitHubAuth(ctx context.Context, runner GHRunner) error {
 	_, err := runner.Run(ctx, []string{"auth", "status"}, "")
 	if err != nil {
-		return ErrGitHubAuthRequired
+		return fmt.Errorf("%w: %w", ErrGitHubAuthRequired, err)
 	}
 	return nil
 }
