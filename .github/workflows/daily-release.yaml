@@ -19,6 +19,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: bazelment
+          repositories: yoloswe
+
       - name: Check for changes since last release
         id: check
         run: |
@@ -36,6 +45,8 @@ jobs:
 
       - name: Create and push tag
         if: steps.check.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           TAG="v$(date -u +%Y.%m.%d)"
 
@@ -49,5 +60,8 @@ jobs:
           fi
 
           echo "Creating tag ${TAG}"
+          # Use GitHub App token so the tag push triggers release.yaml.
+          # Tags pushed with the default GITHUB_TOKEN don't trigger workflows.
+          git config url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
           git tag "${TAG}"
           git push origin "${TAG}"
