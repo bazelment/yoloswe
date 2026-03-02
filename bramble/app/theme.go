@@ -74,9 +74,6 @@ type Styles struct {
 	// All sessions overlay
 	AllSessionsBox lipgloss.Style
 
-	// Command center card box
-	CommandCenterBox lipgloss.Style
-
 	// Split pane divider
 	Divider lipgloss.Style
 
@@ -210,12 +207,6 @@ func NewStyles(p ColorPalette) *Styles {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(border).
 			Padding(1, 2),
-
-		// Command center card box
-		CommandCenterBox: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(border).
-			Padding(0, 1),
 
 		// Split pane divider
 		Divider: lipgloss.NewStyle().

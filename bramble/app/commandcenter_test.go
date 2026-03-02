@@ -39,7 +39,7 @@ func makeSessions() []session.SessionInfo {
 		},
 		{
 			ID: "sess-completed", Type: session.SessionTypeBuilder, Status: session.StatusCompleted,
-			Title: "Done task",
+			Title:    "Done task",
 			Progress: session.SessionProgressSnapshot{LastActivity: now.Add(-10 * time.Minute)},
 		},
 	}

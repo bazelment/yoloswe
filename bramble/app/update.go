@@ -293,6 +293,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionsUpdated:
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
+		// Refresh command center if visible so it shows up-to-date session state.
+		if m.commandCenter.IsVisible() {
+			var prevID session.SessionID
+			if sel := m.commandCenter.SelectedSession(); sel != nil {
+				prevID = sel.ID
+			}
+			m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
+			if prevID != "" {
+				m.commandCenter.RestoreSelectionByID(prevID)
+			}
+		}
 		return m, nil
 
 	case errMsg:
@@ -1999,7 +2010,21 @@ func (m Model) switchToCommandCenterSession() (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.sessionManager.IsInTmuxMode() {
+		if sess.TmuxWindowName != "" {
+			return m, func() tea.Msg {
+				cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+				if err := cmd.Run(); err != nil {
+					return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+				}
+				return nil
+			}
+		}
+		toastCmd := m.addToast("Session has no tmux window", ToastInfo)
+		return m, toastCmd
+	}
 	m.switchViewingSession(sess.ID)
+	// Also select the correct worktree for this session.
 	if sess.WorktreeName != "" {
 		m.worktreeDropdown.SelectByID(sess.WorktreeName)
 		m.updateSessionDropdown()

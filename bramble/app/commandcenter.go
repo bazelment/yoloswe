@@ -38,6 +38,7 @@ func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	if cc.selectedIdx >= len(cc.sessions) {
 		cc.selectedIdx = 0
 	}
+	cc.clampScrollY()
 }
 
 // Hide closes the command center.
@@ -54,6 +55,25 @@ func (cc *CommandCenter) IsVisible() bool {
 func (cc *CommandCenter) SetSize(w, h int) {
 	cc.width = w
 	cc.height = h
+	cc.clampScrollY()
+}
+
+// clampScrollY ensures scrollY is within valid bounds for the current sessions/dimensions.
+// Must be called only from update-path methods, not from View().
+func (cc *CommandCenter) clampScrollY() {
+	if len(cc.sessions) == 0 {
+		cc.scrollY = 0
+		return
+	}
+	cols := cc.gridColumns()
+	totalRows := (len(cc.sessions) + cols - 1) / cols
+	visibleRows := cc.visibleRows()
+	if cc.scrollY > totalRows-visibleRows {
+		cc.scrollY = totalRows - visibleRows
+	}
+	if cc.scrollY < 0 {
+		cc.scrollY = 0
+	}
 }
 
 // MoveSelection moves selection horizontally by delta (±1).
@@ -101,8 +121,8 @@ func (cc *CommandCenter) Sessions() []session.SessionInfo {
 
 // RestoreSelectionByID finds a session by ID and restores selection to it.
 func (cc *CommandCenter) RestoreSelectionByID(id session.SessionID) {
-	for i, s := range cc.sessions {
-		if s.ID == id {
+	for i := range cc.sessions {
+		if cc.sessions[i].ID == id {
 			cc.selectedIdx = i
 			cc.ensureSelectedVisible()
 			return
@@ -139,6 +159,7 @@ func (cc *CommandCenter) ensureSelectedVisible() {
 	if selectedRow >= cc.scrollY+visibleRows {
 		cc.scrollY = selectedRow - visibleRows + 1
 	}
+	cc.clampScrollY()
 }
 
 // visibleRows returns how many card rows fit in the viewport.
@@ -185,24 +206,25 @@ func (cc *CommandCenter) View(s *Styles) string {
 		allRows = append(allRows, lipgloss.JoinHorizontal(lipgloss.Top, rowCards...))
 	}
 
-	// Apply vertical scrolling
+	// Apply vertical scrolling — use local variables only; View() must not mutate state.
 	totalRows := len(allRows)
 	visibleRows := cc.visibleRows()
-	if cc.scrollY > totalRows-visibleRows {
-		cc.scrollY = totalRows - visibleRows
+	scrollY := cc.scrollY
+	if scrollY > totalRows-visibleRows {
+		scrollY = totalRows - visibleRows
 	}
-	if cc.scrollY < 0 {
-		cc.scrollY = 0
+	if scrollY < 0 {
+		scrollY = 0
 	}
-	endRow := cc.scrollY + visibleRows
+	endRow := scrollY + visibleRows
 	if endRow > totalRows {
 		endRow = totalRows
 	}
-	visibleCardRows := allRows[cc.scrollY:endRow]
+	visibleCardRows := allRows[scrollY:endRow]
 
 	// Scroll indicators
 	var scrollUp, scrollDown string
-	if cc.scrollY > 0 {
+	if scrollY > 0 {
 		scrollUp = s.Dim.Render("  ▲ scroll up")
 	}
 	if endRow < totalRows {
@@ -344,21 +366,20 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 	line3 := truncate(context+modelTag, innerWidth)
 	line3 = s.Dim.Render(line3)
 
-	// Line 4: Current activity
+	// Line 4: Current activity — truncate plain text before applying ANSI styles.
 	var line4 string
 	switch {
 	case sess.Status == session.StatusRunning && sess.Progress.CurrentTool != "":
-		line4 = fmt.Sprintf("[%s]", sess.Progress.CurrentTool)
+		line4 = truncate(fmt.Sprintf("[%s]", sess.Progress.CurrentTool), innerWidth)
 	case sess.Status == session.StatusIdle && sess.Type == session.SessionTypePlanner && sess.PlanFilePath != "":
-		line4 = s.Idle.Render("PLAN READY")
+		line4 = s.Idle.Render(truncate("PLAN READY", innerWidth))
 	case sess.Status == session.StatusIdle:
-		line4 = s.Idle.Render("AWAITING FOLLOW-UP")
+		line4 = s.Idle.Render(truncate("AWAITING FOLLOW-UP", innerWidth))
 	case sess.Status == session.StatusRunning && sess.Progress.CurrentPhase != "":
-		line4 = sess.Progress.CurrentPhase
+		line4 = truncate(sess.Progress.CurrentPhase, innerWidth)
 	default:
-		line4 = s.Dim.Render("-")
+		line4 = s.Dim.Render(truncate("-", innerWidth))
 	}
-	line4 = truncate(line4, innerWidth)
 
 	// Line 5: Progress stats
 	var stats []string
