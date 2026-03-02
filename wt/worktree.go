@@ -294,9 +294,13 @@ func (m *Manager) FetchOrigin(ctx context.Context) error {
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return ErrRepoNotInitialized
 	}
+	if err := CheckGitHubAuth(ctx, m.gh); err != nil {
+		return err
+	}
 	m.output.Info("Fetching latest from origin...")
-	if _, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir); err != nil {
-		return fmt.Errorf("failed to fetch from origin: %w", err)
+	result, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir)
+	if err != nil {
+		return fmt.Errorf("failed to fetch from origin: %w", wrapAuthError(err, result))
 	}
 	return nil
 }
@@ -695,8 +699,12 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 		}
 
 		m.output.Info(fmt.Sprintf("Deleting remote branch %s...", branchName))
-		if _, err := m.git.Run(ctx, []string{"push", "origin", "--delete", branchName}, bareDir); err != nil {
-			m.output.Warn(fmt.Sprintf("Remote branch %s may not exist", branchName))
+		if result, err := m.git.Run(ctx, []string{"push", "origin", "--delete", branchName}, bareDir); err != nil {
+			if result != nil && IsAuthError(result.Stderr) {
+				m.output.Error(fmt.Sprintf("Failed to delete remote branch %s: %v", branchName, ErrGitHubAuthRequired))
+			} else {
+				m.output.Warn(fmt.Sprintf("Remote branch %s may not exist", branchName))
+			}
 		} else {
 			m.output.Success(fmt.Sprintf("Deleted remote branch %s", branchName))
 		}
@@ -714,9 +722,14 @@ func (m *Manager) Sync(ctx context.Context, branch string) error {
 		return ErrRepoNotInitialized
 	}
 
+	if err := CheckGitHubAuth(ctx, m.gh); err != nil {
+		return err
+	}
+
 	m.output.Info("Fetching from origin...")
-	if _, err := m.git.Run(ctx, []string{"fetch", "--all", "--prune"}, bareDir); err != nil {
-		return fmt.Errorf("failed to fetch: %w", err)
+	result, err := m.git.Run(ctx, []string{"fetch", "--all", "--prune"}, bareDir)
+	if err != nil {
+		return fmt.Errorf("failed to fetch: %w", wrapAuthError(err, result))
 	}
 	m.output.Success("Fetched latest changes")
 
@@ -1083,8 +1096,8 @@ func (m *Manager) handleChildBranches(ctx context.Context, children []BranchDepe
 			}
 
 			// Force push
-			if _, err := m.git.Run(ctx, []string{"push", "--force-with-lease"}, child.WorktreePath); err != nil {
-				m.output.Error(fmt.Sprintf("Failed to push %s: %v", child.Branch, err))
+			if result, err := m.git.Run(ctx, []string{"push", "--force-with-lease"}, child.WorktreePath); err != nil {
+				m.output.Error(fmt.Sprintf("Failed to push %s: %v", child.Branch, wrapAuthError(err, result)))
 				failedBranches[child.Branch] = true
 				continue
 			}
@@ -1264,9 +1277,9 @@ func (m *Manager) CreatePR(ctx context.Context, opts PROptions) (*PRResult, erro
 	// Push branch to remote
 	if !opts.NoPush {
 		m.output.Info(fmt.Sprintf("Pushing %s to origin...", currentBranch))
-		_, err := m.git.Run(ctx, []string{"push", "-u", "origin", currentBranch}, cwd)
+		result, err := m.git.Run(ctx, []string{"push", "-u", "origin", currentBranch}, cwd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to push branch: %w", err)
+			return nil, fmt.Errorf("failed to push branch: %w", wrapAuthError(err, result))
 		}
 	}
 
