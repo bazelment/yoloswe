@@ -55,6 +55,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == FocusWorktreeDropdown || m.focus == FocusSessionDropdown {
 			return m.handleDropdownMode(msg)
 		}
+		// Handle repo dropdown
+		if m.focus == FocusRepoDropdown {
+			return m.handleRepoDropdownMode(msg)
+		}
 		// Handle normal key presses
 		return m.handleKeyPress(msg)
 
@@ -68,6 +72,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update dropdown widths
 		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
 		m.sessionDropdown.SetWidth(m.width / 2)
+		m.repoDropdown.SetWidth(m.width / 3)
 		// Initialize or update markdown renderer
 		if m.mdRenderer == nil {
 			m.mdRenderer, _ = NewMarkdownRenderer(m.width-8, m.styles.Palette.GlamourStyle)
@@ -181,13 +186,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.fetchPRStatuses(), schedulePRStatusTick())
 
 	case sessionEventMsg:
-		// Update sessions list
+		// Legacy single-repo path (kept for compatibility).
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()
-
-		// Keep listening for events
 		cmds = append(cmds, m.listenForSessionEvents())
 		return m, tea.Batch(cmds...)
+
+	case repoSessionEventMsg:
+		// Update the correct RepoContext's sessions. If the event is for the
+		// active repo, also update Model's cached fields directly.
+		if msg.repoName == m.repoName {
+			m.sessions = m.sessionManager.GetAllSessions()
+			m.updateSessionDropdown()
+		} else if rc, ok := m.repos[msg.repoName]; ok {
+			rc.sessions = rc.sessionManager.GetAllSessions()
+		}
+		cmds = append(cmds, m.listenForSessionEvents())
+		return m, tea.Batch(cmds...)
+
+	case reposLoadedMsg:
+		// Populate repo dropdown with opened repos (top) + available repos (below).
+		m.populateRepoDropdown(msg.repos)
+		return m, nil
 
 	case sessionsUpdated:
 		m.sessions = m.sessionManager.GetAllSessions()
@@ -370,17 +390,21 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "q":
-		// Check for active sessions
-		var activeSessions []session.SessionInfo
-		allSessions := m.sessionManager.GetAllSessions()
-		for i := range allSessions {
-			if !allSessions[i].Status.IsTerminal() {
-				activeSessions = append(activeSessions, allSessions[i])
+		// Check for active sessions across ALL opened repos
+		activeCount := 0
+		for _, rc := range m.repos {
+			if rc.sessionManager == nil {
+				continue
+			}
+			for _, s := range rc.sessionManager.GetAllSessions() {
+				if !s.Status.IsTerminal() {
+					activeCount++
+				}
 			}
 		}
-		if len(activeSessions) > 0 {
+		if activeCount > 0 {
 			m.confirmQuit = true
-			toastMsg := fmt.Sprintf("%d active session(s). Press 'q' or 'y' to confirm quit, any other key to cancel", len(activeSessions))
+			toastMsg := fmt.Sprintf("%d active session(s). Press 'q' or 'y' to confirm quit, any other key to cancel", activeCount)
 			toastCmd := m.addToast(toastMsg, ToastInfo)
 			return m, toastCmd
 		}
@@ -419,6 +443,12 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sessionDropdown.Open()
 		m.focus = FocusSessionDropdown
 		return m, nil
+
+	case "alt+r":
+		// Open repo selector dropdown: load available repos async
+		m.repoDropdown.Open()
+		m.focus = FocusRepoDropdown
+		return m, m.loadAvailableRepos()
 
 	// Output scrolling (TUI mode) or session list navigation (tmux mode)
 	case "up", "k":
@@ -641,12 +671,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, toastCmd
 
 	case "S":
-		// Open all sessions overlay — fetch fresh from manager to avoid stale cache
-		allSessions := m.sessionManager.GetAllSessions()
+		// Open all sessions overlay — aggregate across ALL opened repos.
 		var activeSessions []session.SessionInfo
-		for i := range allSessions {
-			if !allSessions[i].Status.IsTerminal() {
-				activeSessions = append(activeSessions, allSessions[i])
+		for _, rc := range m.repos {
+			if rc.sessionManager == nil {
+				continue
+			}
+			for _, s := range rc.sessionManager.GetAllSessions() {
+				if !s.Status.IsTerminal() {
+					activeSessions = append(activeSessions, s)
+				}
 			}
 		}
 		m.allSessionsOverlay.Show(activeSessions, m.width, m.height)
@@ -854,7 +888,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = FocusHelp
 		return m, nil
 
-	case "alt+w", "alt+s":
+	case "alt+w", "alt+s", "alt+r":
 		// Always close dropdown immediately
 		m.worktreeDropdown.Close()
 		m.sessionDropdown.Close()
@@ -1703,6 +1737,7 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // switchToOverlaySession closes the overlay and switches to the selected session.
+// If the session belongs to a different repo, switches repo first.
 func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
 	sess := m.allSessionsOverlay.SelectedSession()
 	if sess == nil {
@@ -1712,6 +1747,15 @@ func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
 	}
 	m.allSessionsOverlay.Hide()
 	m.focus = FocusOutput
+
+	// If session belongs to a different repo, switch repo first.
+	if sess.RepoName != "" && sess.RepoName != m.repoName {
+		if _, ok := m.repos[sess.RepoName]; ok {
+			m.saveActiveContext()
+			m.loadContext(sess.RepoName)
+		}
+	}
+
 	if m.sessionManager.IsInTmuxMode() {
 		if sess.TmuxWindowName != "" {
 			return m, func() tea.Msg {
@@ -1726,7 +1770,12 @@ func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
 		return m, toastCmd
 	}
 	m.switchViewingSession(sess.ID)
-	return m, nil
+	// Also select the correct worktree for this session.
+	if sess.WorktreeName != "" {
+		m.worktreeDropdown.SelectByID(sess.WorktreeName)
+		m.updateSessionDropdown()
+	}
+	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
 }
 
 // handleHelpOverlay handles key presses when the help overlay is visible.
@@ -1971,4 +2020,215 @@ func shellSplit(s string) []string {
 		parts = append(parts, current.String())
 	}
 	return parts
+}
+
+// ---------- Multi-repo: dropdown handler, open, switch ----------
+
+// handleRepoDropdownMode handles key presses when the repo dropdown is open.
+func (m Model) handleRepoDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "alt+r":
+		m.repoDropdown.Close()
+		m.focus = FocusOutput
+		return m, nil
+
+	case "j", "down":
+		m.repoDropdown.MoveSelection(1)
+		return m, nil
+
+	case "k", "up":
+		m.repoDropdown.MoveSelection(-1)
+		return m, nil
+
+	case "backspace":
+		m.repoDropdown.BackspaceFilter()
+		return m, nil
+
+	case "enter":
+		item := m.repoDropdown.SelectedItem()
+		if item == nil || item.ID == "---separator---" {
+			return m, nil
+		}
+		m.repoDropdown.Close()
+		m.focus = FocusOutput
+
+		selectedRepo := item.ID
+		if _, alreadyOpen := m.repos[selectedRepo]; alreadyOpen {
+			// Already opened — just switch.
+			return m.switchRepo(selectedRepo)
+		}
+		// New repo — open it.
+		return m.openRepo(selectedRepo)
+
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	default:
+		if r, ok := printableRune(msg); ok {
+			m.repoDropdown.AppendFilter(r)
+			return m, nil
+		}
+		return m, nil
+	}
+}
+
+// loadAvailableRepos returns a command that loads all available repos from wtRoot.
+func (m Model) loadAvailableRepos() tea.Cmd {
+	wtRoot := m.wtRoot
+	return func() tea.Msg {
+		repos, err := wt.ListAllRepos(wtRoot)
+		if err != nil {
+			return errMsg{err}
+		}
+		return reposLoadedMsg{repos: repos}
+	}
+}
+
+// populateRepoDropdown builds the repo dropdown items: opened repos (top, with
+// session count badges) + separator + available repos (below).
+func (m *Model) populateRepoDropdown(allRepos []string) {
+	var items []DropdownItem
+
+	// Opened repos first.
+	for _, name := range m.openedRepos {
+		badge := ""
+		if rc, ok := m.repos[name]; ok && rc.sessionManager != nil {
+			counts := rc.sessionManager.CountByStatus()
+			active := counts[session.StatusRunning] + counts[session.StatusIdle]
+			if active > 0 {
+				badge = fmt.Sprintf("%d active", active)
+			}
+		}
+		label := name
+		if name == m.repoName {
+			label = name + " (current)"
+		}
+		items = append(items, DropdownItem{
+			ID:    name,
+			Label: label,
+			Badge: badge,
+		})
+	}
+
+	// Separator and available (not yet opened) repos.
+	openedSet := make(map[string]bool, len(m.openedRepos))
+	for _, name := range m.openedRepos {
+		openedSet[name] = true
+	}
+	var availableRepos []string
+	for _, name := range allRepos {
+		if !openedSet[name] {
+			availableRepos = append(availableRepos, name)
+		}
+	}
+	if len(availableRepos) > 0 && len(items) > 0 {
+		items = append(items, DropdownItem{
+			ID:    "---separator---",
+			Label: "─── Available ───",
+		})
+	}
+	for _, name := range availableRepos {
+		items = append(items, DropdownItem{
+			ID:    name,
+			Label: name,
+		})
+	}
+
+	m.repoDropdown.SetItems(items)
+	m.repoDropdown.SetWidth(m.width / 3)
+}
+
+// openRepo creates a new session manager for the given repo, adds it to the
+// repos map, and switches to it.
+func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
+	// Verify the repo exists.
+	repoPath := filepath.Join(m.wtRoot, repoName)
+	if _, err := os.Stat(filepath.Join(repoPath, ".bare")); err != nil {
+		toastCmd := m.addToast("Repo not found: "+repoName, ToastError)
+		return m, toastCmd
+	}
+
+	// Create a new session manager for this repo.
+	cfg := m.sharedManagerConfig
+	cfg.RepoName = repoName
+	mgr := session.NewManagerWithConfig(cfg)
+
+	// Start a task router if possible.
+	var router *taskrouter.Router
+	if m.taskRouter != nil {
+		// Use the same provider type as the existing router. We create a new
+		// one scoped to the new repo's working directory.
+		// For now, skip task router for secondary repos (it requires a provider
+		// start which is heavyweight); the user can still manually route tasks.
+	}
+
+	// Pre-load worktrees for the new repo.
+	wtMgr := wt.NewManager(m.wtRoot, repoName)
+	worktrees, _ := wtMgr.List(m.ctx)
+
+	// Build dropdowns.
+	wtDropdown := NewDropdown(nil)
+	wtDropdown.SetMaxVisible(20)
+	sessDropdown := NewDropdown(nil)
+
+	rc := &RepoContext{
+		repoName:         repoName,
+		sessionManager:   mgr,
+		taskRouter:       router,
+		worktrees:        worktrees,
+		worktreeDropdown: wtDropdown,
+		sessionDropdown:  sessDropdown,
+		scrollPositions:  make(map[session.SessionID]int),
+	}
+
+	// Populate the worktree dropdown items for the new context.
+	if len(worktrees) > 0 {
+		items := make([]DropdownItem, len(worktrees))
+		for i, w := range worktrees {
+			items[i] = DropdownItem{ID: w.Branch, Label: w.Branch}
+		}
+		wtDropdown.SetItems(items)
+		wtDropdown.SelectIndex(0)
+	}
+
+	m.repos[repoName] = rc
+	m.openedRepos = append(m.openedRepos, repoName)
+
+	// Start event fan-in for the new manager.
+	go fanInEvents(m.ctx, repoName, mgr, m.sharedEvents)
+
+	return m.switchRepo(repoName)
+}
+
+// switchRepo saves the current repo context and loads the target repo.
+func (m Model) switchRepo(repoName string) (tea.Model, tea.Cmd) {
+	if repoName == m.repoName {
+		return m, nil
+	}
+
+	m.saveActiveContext()
+	m.loadContext(repoName)
+
+	// Refresh worktrees and file tree for the new repo.
+	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
+}
+
+// allOpenedManagers returns all session managers from opened repos.
+func (m *Model) allOpenedManagers() []*session.Manager {
+	managers := make([]*session.Manager, 0, len(m.repos))
+	for _, rc := range m.repos {
+		if rc.sessionManager != nil {
+			managers = append(managers, rc.sessionManager)
+		}
+	}
+	return managers
+}
+
+// closeAllManagers closes all opened session managers.
+func (m *Model) closeAllManagers() {
+	for _, rc := range m.repos {
+		if rc.sessionManager != nil {
+			rc.sessionManager.Close()
+		}
+	}
 }

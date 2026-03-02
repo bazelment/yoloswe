@@ -91,6 +91,11 @@ func (m Model) View() string {
 		// Position overlay below the top bar
 		content = overlayAt(content, overlay, 2, 1)
 	}
+	if m.focus == FocusRepoDropdown && m.repoDropdown.IsOpen() {
+		overlay := m.repoDropdown.ViewOverlay(m.styles)
+		// Position overlay below the top bar, at the repo name position
+		content = overlayAt(content, overlay, 2, 1)
+	}
 	if m.focus == FocusSessionDropdown && m.sessionDropdown.IsOpen() {
 		overlay := m.sessionDropdown.ViewOverlay(m.styles)
 		// Right-align the session dropdown overlay
@@ -133,8 +138,18 @@ func (m Model) View() string {
 // renderTopBar renders the top bar with repo, worktree dropdown, and session dropdown.
 func (m Model) renderTopBar() string {
 	s := m.styles
-	// Left side: repo name + worktree dropdown
-	left := s.Dim.Render(m.repoName)
+	// Left side: repo name (with dropdown trigger when multiple repos opened) + worktree dropdown
+	repoLabel := m.repoName
+	if len(m.openedRepos) > 1 {
+		repoLabel += " ▼"
+	}
+	var left string
+	if m.focus == FocusRepoDropdown {
+		left = s.Selected.Render(repoLabel)
+	} else {
+		left = s.Dim.Render(repoLabel)
+	}
+	left += "  " + s.Dim.Render("[Alt-R]")
 
 	// Worktree dropdown header
 	left += "  "
@@ -600,7 +615,7 @@ func (m Model) renderStatusBar() string {
 		if hasWorktree {
 			hints = append(hints, "[m] Merge", "[p] Plan", "[b] Build", "[w] Window")
 		}
-		hints = append(hints, "[F2]split", "[Ctrl+L]settings", "[Alt-W] Worktree", "[?]help", "[q] Quit")
+		hints = append(hints, "[F2]split", "[Ctrl+L]settings", "[Alt-R]repo", "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()

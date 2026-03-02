@@ -392,3 +392,27 @@ Use it whenever new message types appear:
 
 4. **Remove `event_handler.go`** — once the event adapter path is the sole
    consumer, delete `bramble/session/event_handler.go`.
+
+## Multi-Repo Support
+
+Bramble supports opening multiple repos mid-session (Alt-R). The design uses a
+**save/load context** pattern (`bramble/app/repocontext.go`):
+
+- `RepoContext` bundles per-repo state (session manager, task router, worktrees,
+  dropdowns, scroll positions, etc.)
+- `Model.repos map[string]*RepoContext` holds all opened repos
+- On repo switch: `saveActiveContext()` copies Model fields → active RepoContext,
+  `loadContext(newRepo)` copies RepoContext → Model fields
+- `update.go` and `view.go` continue accessing Model fields directly — no
+  per-access indirection required
+
+**Event fan-in**: each repo's `session.Manager` has its own event channel. A
+per-manager goroutine (`fanInEvents`) forwards events to a shared
+`sharedEvents` channel. `listenForSessionEvents()` listens on the shared channel
+and dispatches `repoSessionEventMsg` to update the correct RepoContext.
+
+**Key files**:
+- `bramble/app/repocontext.go` — RepoContext type, save/load methods
+- `bramble/app/model.go` — multi-repo fields, FocusRepoDropdown, fan-in setup
+- `bramble/app/update.go` — Alt-R handler, repo dropdown, openRepo, switchRepo
+- `bramble/session/types.go` — RepoName field on Session/SessionInfo

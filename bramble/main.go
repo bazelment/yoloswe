@@ -38,10 +38,13 @@ var rootCmd = &cobra.Command{
 and building sessions (yoloswe). Allows managing multiple parallel sessions
 per worktree.
 
-One TUI session operates on a single repo at a time. The repo can be:
+The initial repo is chosen at startup via:
   - Auto-detected from current directory (if inside a wt-managed repo)
   - Specified via --repo flag
   - Selected from a menu at startup (if not specified)
+
+Additional repos can be opened mid-session with Alt-R. All sessions across
+all opened repos are visible in the Shift-S overlay.
 
 Environment:
   WT_ROOT     Base directory for worktrees (default: ~/worktrees)
@@ -141,9 +144,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	settings := app.LoadSettings()
 	modelRegistry := agent.NewModelRegistry(providerAvailability, settings.GetEnabledProviders())
 
-	// Initialize session manager (after registry so it can enforce provider availability)
-	sessionManager := session.NewManagerWithConfig(session.ManagerConfig{
-		RepoName:       repoName,
+	// Build a shared manager config template (minus RepoName) so the TUI
+	// can create new managers when opening additional repos mid-session.
+	sharedManagerConfig := session.ManagerConfig{
 		Store:          store,
 		SessionMode:    session.SessionMode(sessionModeFlag),
 		TmuxExitOnQuit: tmuxExitOnQuit,
@@ -155,7 +158,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			}
 			return os.Getenv("BRAMBLE_PROTOCOL_LOG_DIR")
 		}(),
-	})
+	}
+
+	// Initialize session manager for the initial repo.
+	initialConfig := sharedManagerConfig
+	initialConfig.RepoName = repoName
+	sessionManager := session.NewManagerWithConfig(initialConfig)
 	defer sessionManager.Close()
 
 	// Start the AI task router using the best available provider.
@@ -181,7 +189,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
 
 	// Create and run TUI
-	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry)
+	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry, sharedManagerConfig)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

@@ -31,6 +31,7 @@ const (
 	FocusAllSessions                       // All sessions overlay open
 	FocusThemePicker                       // Theme picker overlay open
 	FocusRepoSettings                      // Repo settings overlay open
+	FocusRepoDropdown                      // Alt-R repo dropdown open
 )
 
 // Model is the root application model.
@@ -58,6 +59,11 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 	allSessionsOverlay    *AllSessionsOverlay
 	themePicker           *ThemePicker
 	repoSettingsDialog    *RepoSettingsDialog
+	repos                 map[string]*RepoContext  // all opened repos
+	openedRepos           []string                 // ordered list of opened repo names
+	repoDropdown          *Dropdown                // repo selector dropdown
+	sharedEvents          chan repoSessionEvent     // fan-in channel for all managers
+	sharedManagerConfig   session.ManagerConfig     // template config (minus RepoName) for new repos
 	styles                *Styles
 	settings              Settings
 	providerAvailability  *agent.ProviderAvailability
@@ -91,7 +97,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over padding f
 // render shows branch names immediately without waiting for an async refresh.
 // width/height set the initial terminal dimensions so the first View() can
 // render a proper layout without waiting for WindowSizeMsg.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry, sharedManagerConfig session.ManagerConfig) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -122,6 +128,8 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		}
 	}
 
+	sharedEvents := make(chan repoSessionEvent, 64)
+
 	m := Model{
 		ctx:                  ctx,
 		wtRoot:               wtRoot,
@@ -131,6 +139,11 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		taskRouter:           taskRouter,
 		providerAvailability: providerAvailability,
 		modelRegistry:        modelRegistry,
+		repos:                make(map[string]*RepoContext),
+		openedRepos:          []string{repoName},
+		repoDropdown:         NewDropdown(nil),
+		sharedEvents:         sharedEvents,
+		sharedManagerConfig:  sharedManagerConfig,
 		styles:               styles,
 		settings:             settings,
 		themePicker:          NewThemePicker(),
@@ -165,6 +178,20 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		m.worktreeDropdown.SelectIndex(0)
 		m.updateSessionDropdown()
 	}
+
+	// Create initial RepoContext for the startup repo.
+	m.repos[repoName] = &RepoContext{
+		repoName:         repoName,
+		sessionManager:   sessionManager,
+		taskRouter:       taskRouter,
+		worktrees:        m.worktrees,
+		worktreeDropdown: m.worktreeDropdown,
+		sessionDropdown:  m.sessionDropdown,
+		scrollPositions:  m.scrollPositions,
+	}
+
+	// Start fan-in goroutine for the initial manager.
+	go fanInEvents(m.ctx, repoName, sessionManager, sharedEvents)
 
 	return m
 }
@@ -220,14 +247,34 @@ func (m Model) refreshWorktrees() tea.Cmd {
 	}
 }
 
-// listenForSessionEvents listens for session manager events.
+// listenForSessionEvents listens for session events from all opened repos
+// via the shared fan-in channel.
 func (m Model) listenForSessionEvents() tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-m.ctx.Done():
 			return nil
-		case event := <-m.sessionManager.Events():
-			return sessionEventMsg{event}
+		case ev := <-m.sharedEvents:
+			return repoSessionEventMsg{repoName: ev.repoName, event: ev.event}
+		}
+	}
+}
+
+// fanInEvents forwards events from a single manager to the shared channel.
+func fanInEvents(ctx context.Context, repoName string, mgr *session.Manager, out chan<- repoSessionEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-mgr.Events():
+			if !ok {
+				return
+			}
+			select {
+			case out <- repoSessionEvent{repoName: repoName, event: event}:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -633,11 +680,24 @@ func (m Model) refreshFileTree() tea.Cmd {
 	}
 }
 
+// repoSessionEvent wraps a session event with the repo it came from.
+type repoSessionEvent struct {
+	repoName string
+	event    interface{}
+}
+
 // Message types
 type (
 	errMsg          struct{ error }
 	worktreesMsg    struct{ worktrees []wt.Worktree }
 	sessionEventMsg struct{ event interface{} }
+	// repoSessionEventMsg is sent when any opened repo's manager emits an event.
+	repoSessionEventMsg struct {
+		repoName string
+		event    interface{}
+	}
+	// reposLoadedMsg is sent when the available repo list has been loaded.
+	reposLoadedMsg struct{ repos []string }
 	sessionsUpdated struct{}
 	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
