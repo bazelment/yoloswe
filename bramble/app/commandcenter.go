@@ -331,7 +331,12 @@ func sortSessionsByPriority(sessions []session.SessionInfo) {
 
 // renderSessionCard renders a single session card.
 func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected bool, s *Styles) string {
-	innerWidth := cardWidth - 4 // border + padding
+	// styleWidth is passed to lipgloss Width(). With Padding(0, 1), lipgloss wraps text at
+	// styleWidth - 2 (subtracting left+right padding). We use styleWidth = cardWidth - 2
+	// (border only) so the rendered card occupies cardWidth columns. For text truncation we
+	// use innerWidth = styleWidth - 2 (= cardWidth - 4) to match the actual character area.
+	styleWidth := cardWidth - 2  // border left + border right
+	innerWidth := styleWidth - 2 // left padding + right padding (Padding(0, 1))
 
 	// Line 1: Number + type icon + type label + status
 	typeIcon := "[P]"
@@ -423,7 +428,7 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 	cardStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
-		Width(innerWidth).
+		Width(styleWidth).
 		Padding(0, 1)
 
 	return cardStyle.Render(content)
