@@ -1826,18 +1826,10 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// switchToOverlaySession closes the overlay and switches to the selected session.
-// If the session belongs to a different repo, switches repo first.
-func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
-	sess := m.allSessionsOverlay.SelectedSession()
-	if sess == nil {
-		m.allSessionsOverlay.Hide()
-		m.focus = FocusOutput
-		return m, nil
-	}
-	m.allSessionsOverlay.Hide()
-	m.focus = FocusOutput
-
+// switchToSession switches to the given session, handling repo switching,
+// tmux window selection, and view/worktree refresh. It is the shared
+// implementation used by switchToOverlaySession and switchToCommandCenterSession.
+func (m Model) switchToSession(sess *session.SessionInfo) (tea.Model, tea.Cmd) {
 	// If session belongs to a different repo, switch repo first.
 	if sess.RepoName != "" && sess.RepoName != m.repoName {
 		if _, ok := m.repos[sess.RepoName]; ok {
@@ -1866,6 +1858,20 @@ func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
 		m.updateSessionDropdown()
 	}
 	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
+}
+
+// switchToOverlaySession closes the overlay and switches to the selected session.
+// If the session belongs to a different repo, switches repo first.
+func (m Model) switchToOverlaySession() (tea.Model, tea.Cmd) {
+	sess := m.allSessionsOverlay.SelectedSession()
+	if sess == nil {
+		m.allSessionsOverlay.Hide()
+		m.focus = FocusOutput
+		return m, nil
+	}
+	m.allSessionsOverlay.Hide()
+	m.focus = FocusOutput
+	return m.switchToSession(sess)
 }
 
 // gatherActiveSessions aggregates non-terminal sessions across all opened repos.
@@ -1914,7 +1920,11 @@ func (m Model) handleCommandCenter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchToCommandCenterSession()
 
 	case "f":
-		// Follow-up on selected idle session
+		// Follow-up on selected idle session (TUI mode only)
+		if m.sessionManager.IsInTmuxMode() {
+			toastCmd := m.addToast("Follow-ups must be done in the tmux window directly", ToastInfo)
+			return m, toastCmd
+		}
 		sess := m.commandCenter.SelectedSession()
 		if sess == nil || sess.Status != session.StatusIdle {
 			toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
@@ -1941,7 +1951,11 @@ func (m Model) handleCommandCenter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}, "Type your follow-up message...")
 
 	case "a":
-		// Approve plan on selected idle planner
+		// Approve plan on selected idle planner (TUI mode only)
+		if m.sessionManager.IsInTmuxMode() {
+			toastCmd := m.addToast("Plan approval must be done in the tmux window directly", ToastInfo)
+			return m, toastCmd
+		}
 		sess := m.commandCenter.SelectedSession()
 		if sess == nil || sess.Status != session.StatusIdle ||
 			sess.Type != session.SessionTypePlanner || sess.PlanFilePath == "" {
@@ -2001,35 +2015,7 @@ func (m Model) switchToCommandCenterSession() (tea.Model, tea.Cmd) {
 	}
 	m.commandCenter.Hide()
 	m.focus = FocusOutput
-
-	// If session belongs to a different repo, switch repo first.
-	if sess.RepoName != "" && sess.RepoName != m.repoName {
-		if _, ok := m.repos[sess.RepoName]; ok {
-			m.saveActiveContext()
-			m.loadContext(sess.RepoName)
-		}
-	}
-
-	if m.sessionManager.IsInTmuxMode() {
-		if sess.TmuxWindowName != "" {
-			return m, func() tea.Msg {
-				cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
-				if err := cmd.Run(); err != nil {
-					return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
-				}
-				return nil
-			}
-		}
-		toastCmd := m.addToast("Session has no tmux window", ToastInfo)
-		return m, toastCmd
-	}
-	m.switchViewingSession(sess.ID)
-	// Also select the correct worktree for this session.
-	if sess.WorktreeName != "" {
-		m.worktreeDropdown.SelectByID(sess.WorktreeName)
-		m.updateSessionDropdown()
-	}
-	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
+	return m.switchToSession(sess)
 }
 
 // handleHelpOverlay handles key presses when the help overlay is visible.
