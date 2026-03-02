@@ -2138,7 +2138,7 @@ func (m Model) handleRepoDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// New repo — open it.
 		return m.openRepo(selectedRepo)
 
-	case "q", "ctrl+c":
+	case "ctrl+c":
 		return m, tea.Quit
 
 	default:
@@ -2172,7 +2172,7 @@ func (m *Model) populateRepoDropdown(allRepos []string) {
 		badge := ""
 		if rc, ok := m.repos[name]; ok && rc.sessionManager != nil {
 			counts := rc.sessionManager.CountByStatus()
-			active := counts[session.StatusRunning] + counts[session.StatusIdle]
+			active := counts[session.StatusRunning] + counts[session.StatusIdle] + counts[session.StatusPending]
 			if active > 0 {
 				badge = fmt.Sprintf("%d active", active)
 			}
