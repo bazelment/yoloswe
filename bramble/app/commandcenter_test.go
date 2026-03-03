@@ -21,7 +21,7 @@ func makeSessions() []session.SessionInfo {
 			Model: "sonnet", StartedAt: &started,
 			Progress: session.SessionProgressSnapshot{
 				TurnCount: 5, TotalCostUSD: 0.1234, CurrentTool: "Edit",
-				LastActivity:  now.Add(-1 * time.Minute),
+				LastActivity: now.Add(-1 * time.Minute),
 				RecentOutput: []string{"Reading login.go...", "Found the issue in validateToken()"},
 			},
 		},
@@ -32,7 +32,7 @@ func makeSessions() []session.SessionInfo {
 			Model: "opus", PlanFilePath: "/tmp/plan.md",
 			Progress: session.SessionProgressSnapshot{
 				TurnCount: 3, TotalCostUSD: 0.05, StatusLine: "Awaiting approval",
-				LastActivity:  now,
+				LastActivity: now,
 				RecentOutput: []string{"Here is my plan for the refactor:"},
 			},
 		},

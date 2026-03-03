@@ -719,13 +719,13 @@ func TestManagerRecentOutputLines(t *testing.T) {
 	// Populate a mix of output types and user/assistant lines.
 	m.outputsMu.Lock()
 	m.outputs[sessionID] = []OutputLine{
-		{Type: OutputTypeText, IsUserPrompt: true, Content: "user input"},         // should be skipped
-		{Type: OutputTypeTool, Content: "tool call"},                              // not OutputTypeText, skipped
-		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 1"},  // included
-		{Type: OutputTypeText, IsUserPrompt: false, Content: "   "},               // blank, skipped
-		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 2"},  // included
-		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 3"},  // included
-		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 4"},  // included (most recent)
+		{Type: OutputTypeText, IsUserPrompt: true, Content: "user input"},        // should be skipped
+		{Type: OutputTypeTool, Content: "tool call"},                             // not OutputTypeText, skipped
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 1"}, // included
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "   "},              // blank, skipped
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 2"}, // included
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 3"}, // included
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 4"}, // included (most recent)
 	}
 	m.outputsMu.Unlock()
 
