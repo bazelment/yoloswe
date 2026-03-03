@@ -252,3 +252,87 @@ func TestSessionModel_ObserverNotified(t *testing.T) {
 	assert.True(t, hasOutput, "should have OutputAppended event")
 	assert.True(t, hasProgress, "should have ProgressUpdated event")
 }
+
+// --- RecentAssistantTextFromSlice tests --------------------------------------
+
+func TestRecentAssistantTextFromSlice_Empty(t *testing.T) {
+	t.Parallel()
+	got := RecentAssistantTextFromSlice(nil, 3)
+	assert.Nil(t, got)
+}
+
+func TestRecentAssistantTextFromSlice_NZero(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeText, Content: "hello"},
+	}
+	got := RecentAssistantTextFromSlice(lines, 0)
+	assert.Nil(t, got)
+}
+
+func TestRecentAssistantTextFromSlice_NNegative(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeText, Content: "hello"},
+	}
+	got := RecentAssistantTextFromSlice(lines, -1)
+	assert.Nil(t, got)
+}
+
+func TestRecentAssistantTextFromSlice_ExcludesUserPrompt(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeText, Content: "user msg", IsUserPrompt: true},
+		{Type: OutputTypeText, Content: "assistant reply"},
+	}
+	got := RecentAssistantTextFromSlice(lines, 3)
+	require.Len(t, got, 1)
+	assert.Equal(t, "assistant reply", got[0])
+}
+
+func TestRecentAssistantTextFromSlice_ExcludesBlank(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeText, Content: "first"},
+		{Type: OutputTypeText, Content: "   "},
+		{Type: OutputTypeText, Content: "second"},
+	}
+	got := RecentAssistantTextFromSlice(lines, 3)
+	require.Len(t, got, 2)
+	assert.Equal(t, []string{"first", "second"}, got)
+}
+
+func TestRecentAssistantTextFromSlice_ExcludesNonText(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeToolStart, Content: "some tool"},
+		{Type: OutputTypeText, Content: "reply"},
+	}
+	got := RecentAssistantTextFromSlice(lines, 3)
+	require.Len(t, got, 1)
+	assert.Equal(t, "reply", got[0])
+}
+
+func TestRecentAssistantTextFromSlice_ChronologicalOrder(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeText, Content: "a"},
+		{Type: OutputTypeText, Content: "b"},
+		{Type: OutputTypeText, Content: "c"},
+		{Type: OutputTypeText, Content: "d"},
+	}
+	// Ask for last 3: should be b, c, d in chronological order.
+	got := RecentAssistantTextFromSlice(lines, 3)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{"b", "c", "d"}, got)
+}
+
+func TestRecentAssistantTextFromSlice_NLargerThanSlice(t *testing.T) {
+	t.Parallel()
+	lines := []OutputLine{
+		{Type: OutputTypeText, Content: "only"},
+	}
+	got := RecentAssistantTextFromSlice(lines, 10)
+	require.Len(t, got, 1)
+	assert.Equal(t, "only", got[0])
+}

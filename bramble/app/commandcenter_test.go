@@ -172,6 +172,21 @@ func TestCommandCenter_CardRendering(t *testing.T) {
 	assert.Contains(t, card, "feature-auth [sonnet]") // repo context on line 1
 }
 
+func TestCommandCenter_CardRendering_ZeroProgress(t *testing.T) {
+	s := NewStyles(Dark)
+	// Session with zero-value Progress (no RecentOutput, no CurrentTool, etc.)
+	sess := session.SessionInfo{
+		ID: "sess-zero", Type: session.SessionTypeBuilder, Status: session.StatusPending,
+		Prompt: "do something",
+		// Progress is zero-value: no RecentOutput, no tool, no phase
+		Progress: session.SessionProgressSnapshot{},
+	}
+	// Must not panic; "-" should be rendered for missing output lines.
+	card := renderSessionCard(&sess, 60, 0, false, s)
+	assert.Contains(t, card, "> do something")
+	assert.Contains(t, card, "-") // placeholder for empty recent output
+}
+
 func TestCommandCenter_OpenClose(t *testing.T) {
 	cc := NewCommandCenter()
 	assert.False(t, cc.IsVisible())
