@@ -13,6 +13,16 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
+// newAppView wraps content in a tea.View with AltScreen and Kitty keyboard
+// enhancements enabled. All View() return paths use this helper to ensure the
+// settings are applied consistently.
+func newAppView(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.KeyboardEnhancements.ReportEventTypes = true
+	return v
+}
+
 // View renders the model.
 func (m Model) View() tea.View {
 	// Use sensible defaults before WindowSizeMsg arrives so the first
@@ -109,56 +119,35 @@ func (m Model) View() tea.View {
 
 	// Show help overlay if active
 	if m.focus == FocusHelp {
-		v := tea.NewView(m.helpOverlay.View(m.styles))
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+		return newAppView(m.helpOverlay.View(m.styles))
 	}
 
 	// Show task modal if visible
 	if m.taskModal.IsVisible() {
-		v := tea.NewView(m.taskModal.View(m.styles))
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+		return newAppView(m.taskModal.View(m.styles))
 	}
 
 	// Show command center if visible
 	if m.commandCenter.IsVisible() {
-		v := tea.NewView(m.commandCenter.View(m.styles))
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+		return newAppView(m.commandCenter.View(m.styles))
 	}
 
 	// Show all sessions overlay if visible
 	if m.allSessionsOverlay.IsVisible() {
-		v := tea.NewView(m.allSessionsOverlay.View(m.styles))
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+		return newAppView(m.allSessionsOverlay.View(m.styles))
 	}
 
 	// Show repo settings overlay if visible
 	if m.repoSettingsDialog.IsVisible() {
-		v := tea.NewView(m.repoSettingsDialog.View(m.styles))
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+		return newAppView(m.repoSettingsDialog.View(m.styles))
 	}
 
 	// Show theme picker overlay if visible
 	if m.themePicker.IsVisible() {
-		v := tea.NewView(m.themePicker.View(m.styles))
-		v.AltScreen = true
-		v.KeyboardEnhancements.ReportEventTypes = true
-		return v
+		return newAppView(m.themePicker.View(m.styles))
 	}
 
-	v := tea.NewView(content)
-	v.AltScreen = true
-	v.KeyboardEnhancements.ReportEventTypes = true
-	return v
+	return newAppView(content)
 }
 
 // renderTopBar renders the top bar with repo, worktree dropdown, and session dropdown.

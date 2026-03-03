@@ -371,7 +371,7 @@ func (m RepoPickerModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the repo picker.
 func (m RepoPickerModel) View() tea.View {
 	if m.width == 0 || m.height == 0 {
-		return tea.NewView("Loading...")
+		return newAppView("Loading...")
 	}
 
 	// Build the picker box
@@ -401,13 +401,11 @@ func (m RepoPickerModel) View() tea.View {
 	box := m.styles.ModalBox.Width(boxWidth).Render(content.String())
 
 	// Center the box
-	v := tea.NewView(lipgloss.Place(
+	return newAppView(lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		box,
 	))
-	v.AltScreen = true
-	return v
 }
 
 func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {

@@ -472,6 +472,27 @@ func TestRepoPickerCloning_RepoLoadedMsgHandled(t *testing.T) {
 
 // --- View tests ---
 
+// TestRepoPickerView_KittyFlagsEnabled verifies that every View() return path
+// (including the loading guard) sets the AltScreen and ReportEventTypes flags
+// that are required for instant ESC response via the Kitty keyboard protocol.
+func TestRepoPickerView_KittyFlagsEnabled(t *testing.T) {
+	t.Parallel()
+
+	// Normal state (width/height set).
+	normal := newTestRepoPicker([]string{"alpha"})
+	v := normal.View()
+	assert.True(t, v.AltScreen, "normal view: AltScreen must be enabled")
+	assert.True(t, v.KeyboardEnhancements.ReportEventTypes, "normal view: ReportEventTypes must be enabled")
+
+	// Loading state (width/height zero).
+	loading := newTestRepoPicker(nil)
+	loading.width = 0
+	loading.height = 0
+	vl := loading.View()
+	assert.True(t, vl.AltScreen, "loading view: AltScreen must be enabled")
+	assert.True(t, vl.KeyboardEnhancements.ReportEventTypes, "loading view: ReportEventTypes must be enabled")
+}
+
 func TestRepoPickerView_EmptyStateShowsAddHint(t *testing.T) {
 	m := newTestRepoPicker(nil)
 	m.wtRoot = "/tmp/wt"

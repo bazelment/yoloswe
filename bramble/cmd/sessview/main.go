@@ -63,7 +63,7 @@ func processSessionFile(filePath string, width, height int) error {
 
 	model := app.NewOutputModelWithMarkdown(info, result.Lines, width)
 	model.SetSize(width, height)
-	fmt.Println(model.View())
+	fmt.Println(model.View().Content)
 
 	fmt.Println(strings.Repeat("=", width))
 
