@@ -7,6 +7,7 @@ package sessionmodel
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,10 @@ const (
 	OutputTypeTurnEnd    OutputLineType = "turn_end"
 	OutputTypePlanReady  OutputLineType = "plan_ready"
 )
+
+// RecentOutputDisplayLines is the number of recent assistant text lines
+// surfaced in command center session cards.
+const RecentOutputDisplayLines = 3
 
 // ToolState represents the execution state of a tool.
 type ToolState string
@@ -91,6 +96,28 @@ func deepCopyInterface(v interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+// RecentAssistantTextFromSlice returns the last n non-blank assistant text
+// lines from lines, in chronological order. It is the shared implementation
+// used by both OutputBuffer.RecentAssistantText and session.Manager.RecentOutputLines
+// so that any future changes to filtering criteria stay in one place.
+func RecentAssistantTextFromSlice(lines []OutputLine, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	var result []string
+	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
+		line := &lines[i]
+		if line.Type == OutputTypeText && !line.IsUserPrompt && strings.TrimSpace(line.Content) != "" {
+			result = append(result, line.Content)
+		}
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result
 }
 
 // --- Session lifecycle types ------------------------------------------------
@@ -168,6 +195,7 @@ type ProgressSnapshot struct {
 	CurrentPhase string
 	CurrentTool  string
 	StatusLine   string
+	RecentOutput []string // last N lines of assistant text for command center display
 	TurnCount    int
 	TotalCostUSD float64
 	InputTokens  int

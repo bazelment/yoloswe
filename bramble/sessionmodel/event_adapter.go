@@ -39,10 +39,12 @@ func FromClaudeEvent(model *SessionModel, event claude.Event) {
 			ToolState: ToolStateRunning,
 			StartTime: e.Timestamp,
 		})
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = e.Name
 			p.CurrentPhase = "tool_execution"
 			p.LastActivity = time.Now()
+			p.RecentOutput = recent
 		})
 
 	case claude.ToolCompleteEvent:
@@ -67,19 +69,23 @@ func FromClaudeEvent(model *SessionModel, event claude.Event) {
 				line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 			}
 		})
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = ""
 			p.CurrentPhase = ""
 			p.LastActivity = time.Now()
+			p.RecentOutput = recent
 		})
 
 	case claude.TurnCompleteEvent:
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.TurnCount = e.TurnNumber
 			p.TotalCostUSD = e.Usage.CostUSD
 			p.InputTokens = e.Usage.InputTokens
 			p.OutputTokens = e.Usage.OutputTokens
 			p.LastActivity = time.Now()
+			p.RecentOutput = recent
 		})
 		model.AppendOutput(OutputLine{
 			Timestamp:  time.Now(),
@@ -123,10 +129,12 @@ func FromAgentEvent(model *SessionModel, event agent.AgentEvent) {
 			ToolState: ToolStateRunning,
 			StartTime: now,
 		})
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = e.Name
 			p.CurrentPhase = "tool_execution"
 			p.LastActivity = time.Now()
+			p.RecentOutput = recent
 		})
 
 	case agent.ToolCompleteAgentEvent:
@@ -147,17 +155,21 @@ func FromAgentEvent(model *SessionModel, event agent.AgentEvent) {
 				line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 			}
 		})
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = ""
 			p.CurrentPhase = ""
 			p.LastActivity = time.Now()
+			p.RecentOutput = recent
 		})
 
 	case agent.TurnCompleteAgentEvent:
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.TurnCount = e.TurnNumber
 			p.TotalCostUSD = e.CostUSD
 			p.LastActivity = time.Now()
+			p.RecentOutput = recent
 		})
 		model.AppendOutput(OutputLine{
 			Timestamp:  time.Now(),

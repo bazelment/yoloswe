@@ -16,20 +16,24 @@ func makeSessions() []session.SessionInfo {
 	return []session.SessionInfo{
 		{
 			ID: "sess-running", Type: session.SessionTypeBuilder, Status: session.StatusRunning,
-			Title: "Fix auth bug", WorktreeName: "feature-auth", RepoName: "myrepo",
+			Title: "Fix auth bug", Prompt: "fix the auth bug in login.go",
+			WorktreeName: "feature-auth", RepoName: "myrepo",
 			Model: "sonnet", StartedAt: &started,
 			Progress: session.SessionProgressSnapshot{
 				TurnCount: 5, TotalCostUSD: 0.1234, CurrentTool: "Edit",
 				LastActivity: now.Add(-1 * time.Minute),
+				RecentOutput: []string{"Reading login.go...", "Found the issue in validateToken()"},
 			},
 		},
 		{
 			ID: "sess-idle", Type: session.SessionTypePlanner, Status: session.StatusIdle,
-			Title: "Plan refactor", WorktreeName: "refactor-branch", RepoName: "myrepo",
+			Title: "Plan refactor", Prompt: "plan the auth refactor",
+			WorktreeName: "refactor-branch", RepoName: "myrepo",
 			Model: "opus", PlanFilePath: "/tmp/plan.md",
 			Progress: session.SessionProgressSnapshot{
 				TurnCount: 3, TotalCostUSD: 0.05, StatusLine: "Awaiting approval",
 				LastActivity: now,
+				RecentOutput: []string{"Here is my plan for the refactor:"},
 			},
 		},
 		{
@@ -150,18 +154,37 @@ func TestCommandCenter_CardRendering(t *testing.T) {
 	sortSessionsByPriority(sessions)
 
 	// Render the idle planner card (first after sort)
-	card := renderSessionCard(&sessions[0], 50, 0, false, s)
+	card := renderSessionCard(&sessions[0], 60, 0, false, s)
 	assert.Contains(t, card, "[P]")
 	assert.Contains(t, card, "planner")
 	assert.Contains(t, card, "PLAN READY")
-	assert.Contains(t, card, "Plan refactor")
+	assert.Contains(t, card, "> plan the auth refactor") // prompt with > prefix
+	assert.Contains(t, card, "Here is my plan")          // recent output
 
 	// Render the running builder card
-	card = renderSessionCard(&sessions[1], 50, 1, true, s)
+	card = renderSessionCard(&sessions[1], 60, 1, true, s)
 	assert.Contains(t, card, "[B]")
 	assert.Contains(t, card, "builder")
-	assert.Contains(t, card, "Fix auth bug")
 	assert.Contains(t, card, "[Edit]")
+	assert.Contains(t, card, "> fix the auth bug")    // prompt with > prefix
+	assert.Contains(t, card, "Reading login.go")      // recent output line 1
+	assert.Contains(t, card, "Found the issue")       // recent output line 2
+	assert.Contains(t, card, "feature-auth [sonnet]") // repo context on line 1
+}
+
+func TestCommandCenter_CardRendering_ZeroProgress(t *testing.T) {
+	s := NewStyles(Dark)
+	// Session with zero-value Progress (no RecentOutput, no CurrentTool, etc.)
+	sess := session.SessionInfo{
+		ID: "sess-zero", Type: session.SessionTypeBuilder, Status: session.StatusPending,
+		Prompt: "do something",
+		// Progress is zero-value: no RecentOutput, no tool, no phase
+		Progress: session.SessionProgressSnapshot{},
+	}
+	// Must not panic; "-" should be rendered for missing output lines.
+	card := renderSessionCard(&sess, 60, 0, false, s)
+	assert.Contains(t, card, "> do something")
+	assert.Contains(t, card, "-") // placeholder for empty recent output
 }
 
 func TestCommandCenter_OpenClose(t *testing.T) {
@@ -191,13 +214,6 @@ func TestCommandCenter_View(t *testing.T) {
 	assert.Contains(t, view, "Command Center")
 	assert.Contains(t, view, "running")
 	assert.Contains(t, view, "idle")
-}
-
-func TestFormatDuration(t *testing.T) {
-	assert.Equal(t, "0m00s", formatDuration(0))
-	assert.Equal(t, "0m30s", formatDuration(30*time.Second))
-	assert.Equal(t, "3m12s", formatDuration(3*time.Minute+12*time.Second))
-	assert.Equal(t, "1h5m", formatDuration(1*time.Hour+5*time.Minute))
 }
 
 func TestSessionPriority(t *testing.T) {

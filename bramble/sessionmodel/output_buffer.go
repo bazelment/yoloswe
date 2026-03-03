@@ -92,6 +92,15 @@ func (b *OutputBuffer) Snapshot() []OutputLine {
 	return result
 }
 
+// RecentAssistantText returns the last n lines of non-user assistant text content.
+// It walks backwards through the buffer collecting OutputTypeText lines where
+// IsUserPrompt is false, returning them in chronological order.
+func (b *OutputBuffer) RecentAssistantText(n int) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return RecentAssistantTextFromSlice(b.lines, n)
+}
+
 // Len returns the current number of lines.
 func (b *OutputBuffer) Len() int {
 	b.mu.RLock()

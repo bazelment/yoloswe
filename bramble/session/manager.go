@@ -1042,6 +1042,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				m.updateSessionStatus(session, StatusCompleted)
 				return
 			}
+			// Update session prompt so command center shows the latest input.
+			session.mu.Lock()
+			session.Prompt = followUp
+			session.mu.Unlock()
 			m.updateSessionStatus(session, StatusRunning)
 			now := time.Now()
 			m.addOutput(session.ID, OutputLine{
@@ -1050,9 +1054,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				Content:   "Follow-up prompt:",
 			})
 			m.addOutput(session.ID, OutputLine{
-				Timestamp: now,
-				Type:      OutputTypeText,
-				Content:   followUp,
+				Timestamp:    now,
+				Type:         OutputTypeText,
+				Content:      followUp,
+				IsUserPrompt: true,
 			})
 			currentPrompt = followUp
 		}
@@ -1270,13 +1275,18 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 }
 
 // GetAllSessions returns all sessions sorted by creation time (newest first).
+// RecentOutput is populated from the live output buffer so it's always fresh.
 func (m *Manager) GetAllSessions() []SessionInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	result := make([]SessionInfo, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		result = append(result, s.ToInfo())
+		info := s.ToInfo()
+		// Always populate RecentOutput from the live output buffer so the
+		// command center shows the latest agent text, not a stale snapshot.
+		info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
+		result = append(result, info)
 	}
 	sortSessionsByTime(result)
 	return result
@@ -1309,6 +1319,18 @@ func (m *Manager) GetSessionOutput(id SessionID) []OutputLine {
 		result[i] = DeepCopyOutputLine(lines[i])
 	}
 	return result
+}
+
+// RecentOutputLines returns the last n lines of non-user assistant text for a session.
+func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
+	m.outputsMu.RLock()
+	defer m.outputsMu.RUnlock()
+
+	lines, ok := m.outputs[id]
+	if !ok {
+		return nil
+	}
+	return sessionmodel.RecentAssistantTextFromSlice(lines, n)
 }
 
 // CountByStatus returns counts of sessions by status.

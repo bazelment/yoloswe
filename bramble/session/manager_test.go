@@ -707,3 +707,70 @@ func TestAppendOrAddText(t *testing.T) {
 	require.Equal(t, 3, len(lines), "should still be 3 lines")
 	assert.Equal(t, "After tool more", lines[2].Content)
 }
+
+func TestManagerRecentOutputLines(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	sessionID := SessionID("test-recent")
+
+	// Populate a mix of output types and user/assistant lines.
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = []OutputLine{
+		{Type: OutputTypeText, IsUserPrompt: true, Content: "user input"},        // should be skipped
+		{Type: OutputTypeTool, Content: "tool call"},                             // not OutputTypeText, skipped
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 1"}, // included
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "   "},              // blank, skipped
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 2"}, // included
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 3"}, // included
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "assistant line 4"}, // included (most recent)
+	}
+	m.outputsMu.Unlock()
+
+	// Request last 3 — should skip user prompt, blank, and non-text, return chronological order.
+	got := m.RecentOutputLines(sessionID, 3)
+	require.Len(t, got, 3)
+	assert.Equal(t, "assistant line 2", got[0])
+	assert.Equal(t, "assistant line 3", got[1])
+	assert.Equal(t, "assistant line 4", got[2])
+
+	// Request more than available (only 4 qualifying lines).
+	got = m.RecentOutputLines(sessionID, 10)
+	require.Len(t, got, 4)
+	assert.Equal(t, "assistant line 1", got[0])
+	assert.Equal(t, "assistant line 4", got[3])
+
+	// Non-existing session returns nil.
+	got = m.RecentOutputLines("nonexistent", 3)
+	assert.Nil(t, got)
+}
+
+func TestManagerGetAllSessions_RecentOutputFromBuffer(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	sess := &Session{
+		ID:       "test-all",
+		Progress: &SessionProgress{},
+	}
+	m.mu.Lock()
+	m.sessions[sess.ID] = sess
+	m.mu.Unlock()
+
+	// Add output lines to the live buffer — RecentOutput on SessionProgress is empty.
+	m.outputsMu.Lock()
+	m.outputs[sess.ID] = []OutputLine{
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "live line 1"},
+		{Type: OutputTypeText, IsUserPrompt: false, Content: "live line 2"},
+	}
+	m.outputsMu.Unlock()
+
+	all := m.GetAllSessions()
+	require.Len(t, all, 1)
+	// GetAllSessions must populate RecentOutput from the live buffer, not the stale snapshot.
+	assert.Equal(t, []string{"live line 1", "live line 2"}, all[0].Progress.RecentOutput)
+}

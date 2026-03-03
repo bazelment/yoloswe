@@ -124,6 +124,7 @@ type SessionProgress struct {
 	CurrentPhase string
 	CurrentTool  string
 	StatusLine   string
+	RecentOutput []string // last N lines of assistant text for command center display
 	TurnCount    int
 	TotalCostUSD float64
 	InputTokens  int
@@ -142,6 +143,11 @@ func (p *SessionProgress) Update(fn func(*SessionProgress)) {
 func (p *SessionProgress) Clone() SessionProgress {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	var recentOutput []string
+	if len(p.RecentOutput) > 0 {
+		recentOutput = make([]string, len(p.RecentOutput))
+		copy(recentOutput, p.RecentOutput)
+	}
 	return SessionProgress{
 		CurrentPhase: p.CurrentPhase,
 		CurrentTool:  p.CurrentTool,
@@ -151,6 +157,7 @@ func (p *SessionProgress) Clone() SessionProgress {
 		OutputTokens: p.OutputTokens,
 		LastActivity: p.LastActivity,
 		StatusLine:   p.StatusLine,
+		RecentOutput: recentOutput,
 	}
 }
 
@@ -166,6 +173,7 @@ type SessionProgressSnapshot struct {
 	CurrentPhase string
 	CurrentTool  string
 	StatusLine   string
+	RecentOutput []string // last N lines of assistant text for command center display
 	TurnCount    int
 	TotalCostUSD float64
 	InputTokens  int
@@ -229,6 +237,7 @@ func (s *Session) ToInfo() SessionInfo {
 			OutputTokens: p.OutputTokens,
 			LastActivity: p.LastActivity,
 			StatusLine:   p.StatusLine,
+			RecentOutput: p.RecentOutput,
 		}
 	}
 

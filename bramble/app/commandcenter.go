@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 )
 
 // CommandCenter provides a full-screen card-based grid view of all sessions.
@@ -338,86 +338,75 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 	styleWidth := cardWidth - 2  // border left + border right
 	innerWidth := styleWidth - 2 // left padding + right padding (Padding(0, 1))
 
-	// Line 1: Number + type icon + type label + status
+	// Line 1: Number + type icon + type label + status + repo/model context
 	typeIcon := "[P]"
 	typeLabel := "planner"
 	if sess.Type == session.SessionTypeBuilder {
 		typeIcon = "[B]"
 		typeLabel = "builder"
 	}
-	statusText := statusText(sess.Status)
-	line1 := fmt.Sprintf("%d. %s %s  %s %s",
+	statusStr := statusText(sess.Status)
+	line1Left := fmt.Sprintf("%d. %s %s  %s %s",
 		idx+1, typeIcon, typeLabel,
-		statusIconPlain(sess.Status), statusText)
-	line1 = truncate(line1, innerWidth)
+		statusIconPlain(sess.Status), statusStr)
 
-	// Line 2: Title or session ID
-	title := sess.Title
-	if title == "" {
-		title = string(sess.ID)
-	}
-	line2 := truncate(title, innerWidth)
-
-	// Line 3: Repo/worktree context + model (dim)
+	// Append repo/model context to the right of status
 	var context string
-	if sess.RepoName != "" && sess.WorktreeName != "" {
-		context = sess.RepoName + "/" + sess.WorktreeName
-	} else if sess.WorktreeName != "" {
+	if sess.WorktreeName != "" {
 		context = sess.WorktreeName
 	} else if sess.RepoName != "" {
 		context = sess.RepoName
 	}
-	modelTag := ""
 	if sess.Model != "" {
-		modelTag = " [" + sess.Model + "]"
+		if context != "" {
+			context += " [" + sess.Model + "]"
+		} else {
+			context = "[" + sess.Model + "]"
+		}
 	}
-	line3 := truncate(context+modelTag, innerWidth)
-	line3 = s.Dim.Render(line3)
+	if context != "" {
+		line1Left += "  " + context
+	}
+	line1 := truncate(line1Left, innerWidth)
 
-	// Line 4: Current activity — truncate plain text before applying ANSI styles.
-	var line4 string
+	// Line 2: User prompt with > prefix (dim)
+	prompt := sess.Prompt
+	if prompt == "" && sess.Title != "" {
+		prompt = sess.Title
+	}
+	var line2 string
+	if prompt != "" {
+		line2 = s.Dim.Render(truncate("> "+prompt, innerWidth))
+	} else {
+		line2 = s.Dim.Render(truncate("-", innerWidth))
+	}
+
+	// Line 3: Current activity — truncate plain text before applying ANSI styles.
+	var line3 string
 	switch {
 	case sess.Status == session.StatusRunning && sess.Progress.CurrentTool != "":
-		line4 = truncate(fmt.Sprintf("[%s]", sess.Progress.CurrentTool), innerWidth)
+		line3 = truncate(fmt.Sprintf("[%s]", sess.Progress.CurrentTool), innerWidth)
 	case sess.Status == session.StatusIdle && sess.Type == session.SessionTypePlanner && sess.PlanFilePath != "":
-		line4 = s.Idle.Render(truncate("PLAN READY", innerWidth))
+		line3 = s.Idle.Render(truncate("PLAN READY", innerWidth))
 	case sess.Status == session.StatusIdle:
-		line4 = s.Idle.Render(truncate("AWAITING FOLLOW-UP", innerWidth))
+		line3 = s.Idle.Render(truncate("AWAITING FOLLOW-UP", innerWidth))
 	case sess.Status == session.StatusRunning && sess.Progress.CurrentPhase != "":
-		line4 = truncate(sess.Progress.CurrentPhase, innerWidth)
+		line3 = truncate(sess.Progress.CurrentPhase, innerWidth)
 	default:
-		line4 = s.Dim.Render(truncate("-", innerWidth))
+		line3 = s.Dim.Render(truncate("-", innerWidth))
 	}
 
-	// Line 5: Progress stats
-	var stats []string
-	if sess.Progress.TurnCount > 0 {
-		stats = append(stats, fmt.Sprintf("T:%d", sess.Progress.TurnCount))
+	// Lines 4-6: Recent agent output (dim)
+	outputLines := make([]string, sessionmodel.RecentOutputDisplayLines)
+	for i := range outputLines {
+		if i < len(sess.Progress.RecentOutput) {
+			outputLines[i] = s.Dim.Render(truncate(sess.Progress.RecentOutput[i], innerWidth))
+		} else {
+			outputLines[i] = s.Dim.Render(truncate("-", innerWidth))
+		}
 	}
-	if sess.Progress.TotalCostUSD > 0 {
-		stats = append(stats, fmt.Sprintf("$%.4f", sess.Progress.TotalCostUSD))
-	}
-	if sess.StartedAt != nil {
-		elapsed := time.Since(*sess.StartedAt)
-		stats = append(stats, formatDuration(elapsed))
-	}
-	line5 := strings.Join(stats, "  ")
-	if line5 == "" {
-		line5 = "-"
-	}
-	line5 = truncate(line5, innerWidth)
 
-	// Line 6: Status line or prompt excerpt (dim)
-	var line6 string
-	if sess.Progress.StatusLine != "" {
-		line6 = sess.Progress.StatusLine
-	} else if sess.Prompt != "" {
-		line6 = sess.Prompt
-	}
-	line6 = truncate(line6, innerWidth)
-	line6 = s.Dim.Render(line6)
-
-	content := strings.Join([]string{line1, line2, line3, line4, line5, line6}, "\n")
+	content := strings.Join([]string{line1, line2, line3, outputLines[0], outputLines[1], outputLines[2]}, "\n")
 
 	// Card border
 	borderColor := cardBorderColor(sess, s.Palette)
@@ -486,19 +475,4 @@ func statusIconPlain(status session.SessionStatus) string {
 	default:
 		return "?"
 	}
-}
-
-// formatDuration formats a duration for display (e.g., "3m12s", "1h5m").
-func formatDuration(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	d = d.Round(time.Second)
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	if h > 0 {
-		return fmt.Sprintf("%dh%dm", h, m)
-	}
-	return fmt.Sprintf("%dm%02ds", m, s)
 }
