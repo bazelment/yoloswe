@@ -169,6 +169,7 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 			p.model.UpdateProgress(func(prog *ProgressSnapshot) {
 				prog.CurrentTool = ""
 				prog.CurrentPhase = ""
+				prog.LastActivity = time.Now()
 				prog.RecentOutput = recent
 			})
 		}

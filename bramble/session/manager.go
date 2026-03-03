@@ -1054,9 +1054,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				Content:   "Follow-up prompt:",
 			})
 			m.addOutput(session.ID, OutputLine{
-				Timestamp: now,
-				Type:      OutputTypeText,
-				Content:   followUp,
+				Timestamp:    now,
+				Type:         OutputTypeText,
+				Content:      followUp,
+				IsUserPrompt: true,
 			})
 			currentPrompt = followUp
 		}
