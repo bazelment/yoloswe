@@ -3,7 +3,7 @@ package app
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ConfirmOption is a single-keypress choice in a confirmation prompt.
@@ -38,7 +38,7 @@ type ConfirmResult struct {
 }
 
 // HandleKey processes a single key press and returns the result.
-func (c *ConfirmPrompt) HandleKey(msg tea.KeyMsg) ConfirmResult {
+func (c *ConfirmPrompt) HandleKey(msg tea.KeyPressMsg) ConfirmResult {
 	switch msg.String() {
 	case "esc":
 		return ConfirmResult{Cancelled: true}

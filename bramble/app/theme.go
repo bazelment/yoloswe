@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // ColorPalette holds all semantic color values for a theme.

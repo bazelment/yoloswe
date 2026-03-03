@@ -2,10 +2,11 @@ package app
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/sessionmodel"
@@ -406,7 +407,7 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 		}
 	}
 
-	content := strings.Join([]string{line1, line2, line3, outputLines[0], outputLines[1], outputLines[2]}, "\n")
+	content := strings.Join(append([]string{line1, line2, line3}, outputLines...), "\n")
 
 	// Card border
 	borderColor := cardBorderColor(sess, s.Palette)
@@ -424,7 +425,7 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 }
 
 // cardBorderColor returns the border color for a session card based on status.
-func cardBorderColor(sess *session.SessionInfo, palette ColorPalette) lipgloss.Color {
+func cardBorderColor(sess *session.SessionInfo, palette ColorPalette) color.Color {
 	switch sess.Status {
 	case session.StatusIdle:
 		return lipgloss.Color(palette.Idle)

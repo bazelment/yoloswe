@@ -3,7 +3,6 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -12,7 +11,7 @@ import (
 )
 
 func pressKey(m Model, key rune) Model {
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+	newModel, _ := m.handleKeyPress(keyPress(key))
 	return newModel.(Model)
 }
 

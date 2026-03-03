@@ -3,7 +3,7 @@ package app
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // ThemePicker is the overlay for selecting a color theme.

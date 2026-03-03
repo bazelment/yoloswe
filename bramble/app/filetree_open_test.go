@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
@@ -113,8 +113,7 @@ func TestHandleKeyPress_EnterInSplitPane(t *testing.T) {
 	}
 
 	// Send Enter key
-	msg := tea.KeyMsg{Type: tea.KeyEnter}
-	newModel, cmd := m.handleKeyPress(msg)
+	newModel, cmd := m.handleKeyPress(specialKey(tea.KeyEnter))
 
 	if cmd == nil {
 		t.Error("expected non-nil command for opening file")
@@ -147,8 +146,7 @@ func TestHandleKeyPress_EnterInSplitPane_NoFile(t *testing.T) {
 	}
 
 	// Send Enter key
-	msg := tea.KeyMsg{Type: tea.KeyEnter}
-	newModel, _ := m.handleKeyPress(msg)
+	newModel, _ := m.handleKeyPress(specialKey(tea.KeyEnter))
 
 	// Check toast message
 	m2 := newModel.(Model)
@@ -162,8 +160,7 @@ func TestHandleKeyPress_EnterNotInSplitPane(t *testing.T) {
 
 	// Don't activate split pane
 	// Send Enter key
-	msg := tea.KeyMsg{Type: tea.KeyEnter}
-	newModel, cmd := m.handleKeyPress(msg)
+	newModel, cmd := m.handleKeyPress(specialKey(tea.KeyEnter))
 
 	// Should not execute file open command (returns nil for non-tmux, non-split mode)
 	// The model should be unchanged
@@ -223,8 +220,7 @@ func TestHandleKeyPress_F2TogglesSplitInTmuxMode(t *testing.T) {
 	}
 
 	// Press F2
-	msg := tea.KeyMsg{Type: tea.KeyF2}
-	newModel, _ := m.handleKeyPress(msg)
+	newModel, _ := m.handleKeyPress(specialKey(tea.KeyF2))
 	m2 := newModel.(Model)
 
 	if !m2.splitPane.IsSplit() {
@@ -251,8 +247,7 @@ func TestHandleKeyPress_UpDownNavigatesFileTreeInTmuxSplit(t *testing.T) {
 	startCursor := m.fileTree.cursor
 
 	// Press down
-	msg := tea.KeyMsg{Type: tea.KeyDown}
-	newModel, _ := m.handleKeyPress(msg)
+	newModel, _ := m.handleKeyPress(specialKey(tea.KeyDown))
 	m2 := newModel.(Model)
 
 	if m2.fileTree.cursor != startCursor+1 {
@@ -260,8 +255,7 @@ func TestHandleKeyPress_UpDownNavigatesFileTreeInTmuxSplit(t *testing.T) {
 	}
 
 	// Press up
-	msgUp := tea.KeyMsg{Type: tea.KeyUp}
-	newModel2, _ := m2.handleKeyPress(msgUp)
+	newModel2, _ := m2.handleKeyPress(specialKey(tea.KeyUp))
 	m3 := newModel2.(Model)
 
 	if m3.fileTree.cursor != startCursor {
@@ -289,8 +283,7 @@ func TestHandleKeyPress_UpDownNavigatesSessionListInTmuxSplitRightFocus(t *testi
 	m.worktreeDropdown.SelectIndex(0)
 
 	// Press down — should navigate session list, not file tree
-	msg := tea.KeyMsg{Type: tea.KeyDown}
-	newModel, _ := m.handleKeyPress(msg)
+	newModel, _ := m.handleKeyPress(specialKey(tea.KeyDown))
 	m2 := newModel.(Model)
 
 	if m2.selectedSessionIndex != 1 {
@@ -350,8 +343,7 @@ func TestHandleKeyPress_TabTogglesFocusInTmuxSplit(t *testing.T) {
 	}
 
 	// Press Tab
-	msg := tea.KeyMsg{Type: tea.KeyTab}
-	newModel, _ := m.handleKeyPress(msg)
+	newModel, _ := m.handleKeyPress(specialKey(tea.KeyTab))
 	m2 := newModel.(Model)
 
 	if m2.splitPane.FocusLeft() {
@@ -359,7 +351,7 @@ func TestHandleKeyPress_TabTogglesFocusInTmuxSplit(t *testing.T) {
 	}
 
 	// Press Tab again
-	newModel2, _ := m2.handleKeyPress(msg)
+	newModel2, _ := m2.handleKeyPress(specialKey(tea.KeyTab))
 	m3 := newModel2.(Model)
 
 	if !m3.splitPane.FocusLeft() {
@@ -389,8 +381,7 @@ func TestHandleKeyPress_EnterOpensFileInTmuxSplit(t *testing.T) {
 	}
 
 	// Press Enter — should open file, not switch tmux window
-	msg := tea.KeyMsg{Type: tea.KeyEnter}
-	newModel, cmd := m.handleKeyPress(msg)
+	newModel, cmd := m.handleKeyPress(specialKey(tea.KeyEnter))
 	m2 := newModel.(Model)
 
 	if cmd == nil {

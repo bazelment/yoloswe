@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -157,7 +157,7 @@ func TestTextAreaMultipleLines(t *testing.T) {
 
 func TestTextAreaHandleKey_CharInsertion(t *testing.T) {
 	ta := NewTextArea()
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	action := ta.HandleKey(keyPress('a'))
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "a", ta.Value())
 }
@@ -165,7 +165,7 @@ func TestTextAreaHandleKey_CharInsertion(t *testing.T) {
 func TestTextAreaHandleKey_Space(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello")
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	action := ta.HandleKey(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "hello ", ta.Value())
 }
@@ -173,7 +173,7 @@ func TestTextAreaHandleKey_Space(t *testing.T) {
 func TestTextAreaHandleKey_EnterSubmitsWhenNonEmpty(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("line1")
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	action := ta.HandleKey(specialKey(tea.KeyEnter))
 	assert.Equal(t, TextAreaSubmit, action)
 	assert.Equal(t, "line1", ta.Value()) // Value unchanged, submit triggered
 }
@@ -181,7 +181,7 @@ func TestTextAreaHandleKey_EnterSubmitsWhenNonEmpty(t *testing.T) {
 func TestTextAreaHandleKey_EnterNoOpWhenEmpty(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("")
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	action := ta.HandleKey(specialKey(tea.KeyEnter))
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "", ta.Value())
 }
@@ -189,7 +189,7 @@ func TestTextAreaHandleKey_EnterNoOpWhenEmpty(t *testing.T) {
 func TestTextAreaHandleKey_EnterNoOpWhenWhitespace(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("   \n  \t  ")
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	action := ta.HandleKey(specialKey(tea.KeyEnter))
 	assert.Equal(t, TextAreaHandled, action)
 }
 
@@ -204,7 +204,7 @@ func TestTextAreaHandleKey_ShiftEnterInsertsNewline(t *testing.T) {
 func TestTextAreaHandleKey_Backspace(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("abc")
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	action := ta.HandleKey(specialKey(tea.KeyBackspace))
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "ab", ta.Value())
 }
@@ -214,19 +214,19 @@ func TestTextAreaHandleKey_CursorMovement(t *testing.T) {
 	ta.SetValue("line1\nline2")
 
 	// Move up
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyUp})
+	action := ta.HandleKey(specialKey(tea.KeyUp))
 	assert.Equal(t, TextAreaHandled, action)
 
 	// Move down
-	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyDown})
+	action = ta.HandleKey(specialKey(tea.KeyDown))
 	assert.Equal(t, TextAreaHandled, action)
 
 	// Move left
-	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
+	action = ta.HandleKey(specialKey(tea.KeyLeft))
 	assert.Equal(t, TextAreaHandled, action)
 
 	// Move right
-	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyRight})
+	action = ta.HandleKey(specialKey(tea.KeyRight))
 	assert.Equal(t, TextAreaHandled, action)
 }
 
@@ -234,11 +234,11 @@ func TestTextAreaHandleKey_TabCycling(t *testing.T) {
 	ta := NewTextArea()
 	assert.Equal(t, FocusTextInput, ta.Focus())
 
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
+	action := ta.HandleKey(specialKey(tea.KeyTab))
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, FocusSendButton, ta.Focus())
 
-	action = ta.HandleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	action = ta.HandleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, FocusTextInput, ta.Focus())
 }
@@ -246,26 +246,26 @@ func TestTextAreaHandleKey_TabCycling(t *testing.T) {
 func TestTextAreaHandleKey_EnterOnSendButton(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetFocus(FocusSendButton)
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	action := ta.HandleKey(specialKey(tea.KeyEnter))
 	assert.Equal(t, TextAreaSubmit, action)
 }
 
 func TestTextAreaHandleKey_EnterOnCancelButton(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetFocus(FocusCancelButton)
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	action := ta.HandleKey(specialKey(tea.KeyEnter))
 	assert.Equal(t, TextAreaCancel, action)
 }
 
 func TestTextAreaHandleKey_Escape(t *testing.T) {
 	ta := NewTextArea()
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyEscape})
+	action := ta.HandleKey(specialKey(tea.KeyEscape))
 	assert.Equal(t, TextAreaCancel, action)
 }
 
 func TestTextAreaHandleKey_CtrlC(t *testing.T) {
 	ta := NewTextArea()
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	action := ta.HandleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	assert.Equal(t, TextAreaQuit, action)
 }
 
@@ -273,7 +273,7 @@ func TestTextAreaHandleKey_IgnoredWhenNotFocused(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetFocus(FocusSendButton)
 	// Typing 'a' when send button focused should not insert text
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	action := ta.HandleKey(keyPress('a'))
 	assert.Equal(t, TextAreaUnhandled, action)
 	assert.Equal(t, "", ta.Value())
 }
@@ -282,9 +282,9 @@ func TestTextAreaHandleKey_Delete(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("abc")
 	// Bubbles places cursor at end after SetValue. Move left twice so cursor is after 'a'.
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
-	action := ta.HandleKey(tea.KeyMsg{Type: tea.KeyDelete})
+	ta.HandleKey(specialKey(tea.KeyLeft))
+	ta.HandleKey(specialKey(tea.KeyLeft))
+	action := ta.HandleKey(specialKey(tea.KeyDelete))
 	assert.Equal(t, TextAreaHandled, action)
 	assert.Equal(t, "ac", ta.Value())
 }
@@ -317,7 +317,7 @@ func TestTextAreaResetPreservesPlaceholder(t *testing.T) {
 	// Placeholder should survive Reset
 	ta.SetWidth(40)
 	view := ta.View(NewStyles(Dark))
-	assert.Contains(t, view, "Enter text here...")
+	assert.Contains(t, stripAnsi(view), "Enter text here...")
 }
 
 // --- Readline keybinding tests ---
@@ -326,7 +326,7 @@ func TestTextAreaReadline_CtrlA_LineStart(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Cursor is at end after SetValue; ctrl+a should move to start
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	// Insert 'X' at start to verify cursor position
 	ta.InsertChar('X')
 	assert.Equal(t, "Xhello world", ta.Value())
@@ -336,9 +336,9 @@ func TestTextAreaReadline_CtrlE_LineEnd(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Move cursor to start first
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	// ctrl+e should move to end
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlE})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
 	ta.InsertChar('X')
 	assert.Equal(t, "hello worldX", ta.Value())
 }
@@ -347,7 +347,7 @@ func TestTextAreaReadline_CtrlW_DeleteWordBackward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// ctrl+w should delete "world"
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlW})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl})
 	assert.Equal(t, "hello ", ta.Value())
 }
 
@@ -355,13 +355,13 @@ func TestTextAreaReadline_CtrlK_DeleteAfterCursor(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Move to start
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	// Move right 5 chars to position after "hello"
 	for i := 0; i < 5; i++ {
-		ta.HandleKey(tea.KeyMsg{Type: tea.KeyRight})
+		ta.HandleKey(specialKey(tea.KeyRight))
 	}
 	// ctrl+k should delete from cursor to end of line
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlK})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	assert.Equal(t, "hello", ta.Value())
 }
 
@@ -369,7 +369,7 @@ func TestTextAreaReadline_CtrlU_DeleteBeforeCursor(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Cursor at end; ctrl+u should delete everything before cursor on this line
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
 	assert.Equal(t, "", ta.Value())
 }
 
@@ -377,9 +377,9 @@ func TestTextAreaReadline_CtrlD_DeleteCharForward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("abc")
 	// Move to start
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	// ctrl+d deletes char forward
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
 	assert.Equal(t, "bc", ta.Value())
 }
 
@@ -387,7 +387,7 @@ func TestTextAreaReadline_CtrlB_CharBackward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("abc")
 	// ctrl+b moves cursor one char backward
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	ta.InsertChar('X')
 	assert.Equal(t, "abXc", ta.Value())
 }
@@ -396,8 +396,8 @@ func TestTextAreaReadline_CtrlF_CharForward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("abc")
 	// Move to start, then ctrl+f to move forward
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlF})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 	ta.InsertChar('X')
 	assert.Equal(t, "aXbc", ta.Value())
 }
@@ -406,7 +406,7 @@ func TestTextAreaReadline_AltB_WordBackward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Cursor at end; alt+b should jump back one word to "world"
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}, Alt: true})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'b', Mod: tea.ModAlt})
 	ta.InsertChar('X')
 	assert.Equal(t, "hello Xworld", ta.Value())
 }
@@ -415,8 +415,8 @@ func TestTextAreaReadline_AltF_WordForward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Move to start, then alt+f to jump forward one word
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}, Alt: true})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModAlt})
 	ta.InsertChar('X')
 	assert.Equal(t, "helloX world", ta.Value())
 }
@@ -425,7 +425,7 @@ func TestTextAreaReadline_AltD_DeleteWordForward(t *testing.T) {
 	ta := NewTextArea()
 	ta.SetValue("hello world")
 	// Move to start, then alt+d to delete "hello"
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
-	ta.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	ta.HandleKey(tea.KeyPressMsg{Code: 'd', Mod: tea.ModAlt})
 	assert.Equal(t, " world", ta.Value())
 }

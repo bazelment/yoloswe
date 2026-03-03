@@ -39,7 +39,7 @@ func renderLog(path string, cfg cliConfig) (string, error) {
 	model.SetSize(cfg.width, cfg.height)
 
 	var b strings.Builder
-	b.WriteString(model.View())
+	b.WriteString(model.View().Content)
 
 	if cfg.debug {
 		b.WriteString("\n--- RAW OUTPUT LINES ---\n")

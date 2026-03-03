@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -90,7 +90,7 @@ func (m OutputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "q" {
 			return m, tea.Quit
 		}
@@ -99,13 +99,13 @@ func (m OutputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the output.
-func (m OutputModel) View() string {
+func (m OutputModel) View() tea.View {
 	s := m.styles
 	var b strings.Builder
 
 	if m.info == nil {
 		b.WriteString(s.Dim.Render("  No session"))
-		return b.String()
+		return tea.NewView(b.String())
 	}
 
 	// Session header
@@ -145,7 +145,7 @@ func (m OutputModel) View() string {
 		b.WriteString("\n")
 	}
 
-	return b.String()
+	return tea.NewView(b.String())
 }
 
 // formatOutputLineWithStyles formats a single output line for display using the given styles.
