@@ -51,7 +51,7 @@ func (h *sessionEventHandler) OnToolStart(name, id string, input map[string]inte
 	})
 
 	// Update session progress
-	recent := h.manager.RecentOutputLines(h.sessionID, 3)
+	recent := h.manager.RecentOutputLines(h.sessionID, sessionmodel.RecentOutputDisplayLines)
 	h.manager.updateSessionProgress(h.sessionID, func(p *SessionProgress) {
 		p.CurrentTool = name
 		p.CurrentPhase = "tool_execution"
@@ -83,7 +83,7 @@ func (h *sessionEventHandler) OnToolComplete(name, id string, input map[string]i
 		}
 	})
 
-	recent := h.manager.RecentOutputLines(h.sessionID, 3)
+	recent := h.manager.RecentOutputLines(h.sessionID, sessionmodel.RecentOutputDisplayLines)
 	h.manager.updateSessionProgress(h.sessionID, func(p *SessionProgress) {
 		p.CurrentTool = ""
 		p.CurrentPhase = ""

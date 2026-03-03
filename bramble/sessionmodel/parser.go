@@ -165,7 +165,7 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 				}
 			})
 			// Clear progress indicator now that the tool result has arrived.
-			recent := p.model.RecentOutputLines(3)
+			recent := p.model.RecentOutputLines(RecentOutputDisplayLines)
 			p.model.UpdateProgress(func(prog *ProgressSnapshot) {
 				prog.CurrentTool = ""
 				prog.CurrentPhase = ""
@@ -179,7 +179,7 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 // --- result (turn completion metrics) ---------------------------------------
 
 func (p *MessageParser) handleResult(msg protocol.ResultMessage) {
-	recent := p.model.RecentOutputLines(3)
+	recent := p.model.RecentOutputLines(RecentOutputDisplayLines)
 	p.model.UpdateProgress(func(prog *ProgressSnapshot) {
 		prog.TurnCount = msg.NumTurns
 		prog.TotalCostUSD = msg.TotalCostUSD
@@ -267,7 +267,7 @@ func (p *MessageParser) handleContentBlockStart(e protocol.ContentBlockStartEven
 			StartTime: now,
 		})
 
-		recent := p.model.RecentOutputLines(3)
+		recent := p.model.RecentOutputLines(RecentOutputDisplayLines)
 		p.model.UpdateProgress(func(prog *ProgressSnapshot) {
 			prog.CurrentTool = base.Name
 			prog.CurrentPhase = "tool_execution"

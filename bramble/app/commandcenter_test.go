@@ -216,13 +216,6 @@ func TestCommandCenter_View(t *testing.T) {
 	assert.Contains(t, view, "idle")
 }
 
-func TestFormatDuration(t *testing.T) {
-	assert.Equal(t, "0m00s", formatDuration(0))
-	assert.Equal(t, "0m30s", formatDuration(30*time.Second))
-	assert.Equal(t, "3m12s", formatDuration(3*time.Minute+12*time.Second))
-	assert.Equal(t, "1h5m", formatDuration(1*time.Hour+5*time.Minute))
-}
-
 func TestSessionPriority(t *testing.T) {
 	idle := &session.SessionInfo{Status: session.StatusIdle}
 	running := &session.SessionInfo{Status: session.StatusRunning}

@@ -1285,7 +1285,7 @@ func (m *Manager) GetAllSessions() []SessionInfo {
 		info := s.ToInfo()
 		// Always populate RecentOutput from the live output buffer so the
 		// command center shows the latest agent text, not a stale snapshot.
-		info.Progress.RecentOutput = m.RecentOutputLines(s.ID, 3)
+		info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
 		result = append(result, info)
 	}
 	sortSessionsByTime(result)
@@ -1330,19 +1330,7 @@ func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
 	if !ok {
 		return nil
 	}
-
-	var result []string
-	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
-		line := &lines[i]
-		if line.Type == OutputTypeText && !line.IsUserPrompt && strings.TrimSpace(line.Content) != "" {
-			result = append(result, line.Content)
-		}
-	}
-	// Reverse to chronological order.
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
-	}
-	return result
+	return sessionmodel.RecentAssistantTextFromSlice(lines, n)
 }
 
 // CountByStatus returns counts of sessions by status.

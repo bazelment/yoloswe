@@ -228,11 +228,6 @@ func (s *Session) ToInfo() SessionInfo {
 
 	if s.Progress != nil {
 		p := s.Progress.Clone()
-		var recentOutput []string
-		if len(p.RecentOutput) > 0 {
-			recentOutput = make([]string, len(p.RecentOutput))
-			copy(recentOutput, p.RecentOutput)
-		}
 		info.Progress = SessionProgressSnapshot{
 			CurrentPhase: p.CurrentPhase,
 			CurrentTool:  p.CurrentTool,
@@ -242,7 +237,7 @@ func (s *Session) ToInfo() SessionInfo {
 			OutputTokens: p.OutputTokens,
 			LastActivity: p.LastActivity,
 			StatusLine:   p.StatusLine,
-			RecentOutput: recentOutput,
+			RecentOutput: p.RecentOutput,
 		}
 	}
 

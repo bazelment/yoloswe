@@ -98,18 +98,7 @@ func (b *OutputBuffer) Snapshot() []OutputLine {
 func (b *OutputBuffer) RecentAssistantText(n int) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	var result []string
-	for i := len(b.lines) - 1; i >= 0 && len(result) < n; i-- {
-		line := &b.lines[i]
-		if line.Type == OutputTypeText && !line.IsUserPrompt && strings.TrimSpace(line.Content) != "" {
-			result = append(result, line.Content)
-		}
-	}
-	// Reverse to chronological order.
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
-	}
-	return result
+	return RecentAssistantTextFromSlice(b.lines, n)
 }
 
 // Len returns the current number of lines.

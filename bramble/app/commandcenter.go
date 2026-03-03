@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 )
 
 // CommandCenter provides a full-screen card-based grid view of all sessions.
@@ -397,7 +397,7 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 	}
 
 	// Lines 4-6: Recent agent output (dim)
-	outputLines := make([]string, 3)
+	outputLines := make([]string, sessionmodel.RecentOutputDisplayLines)
 	for i := range outputLines {
 		if i < len(sess.Progress.RecentOutput) {
 			outputLines[i] = s.Dim.Render(truncate(sess.Progress.RecentOutput[i], innerWidth))
@@ -475,19 +475,4 @@ func statusIconPlain(status session.SessionStatus) string {
 	default:
 		return "?"
 	}
-}
-
-// formatDuration formats a duration for display (e.g., "3m12s", "1h5m").
-func formatDuration(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	d = d.Round(time.Second)
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	if h > 0 {
-		return fmt.Sprintf("%dh%dm", h, m)
-	}
-	return fmt.Sprintf("%dm%02ds", m, s)
 }

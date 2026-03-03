@@ -39,7 +39,7 @@ func FromClaudeEvent(model *SessionModel, event claude.Event) {
 			ToolState: ToolStateRunning,
 			StartTime: e.Timestamp,
 		})
-		recent := model.RecentOutputLines(3)
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = e.Name
 			p.CurrentPhase = "tool_execution"
@@ -69,7 +69,7 @@ func FromClaudeEvent(model *SessionModel, event claude.Event) {
 				line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 			}
 		})
-		recent := model.RecentOutputLines(3)
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = ""
 			p.CurrentPhase = ""
@@ -78,7 +78,7 @@ func FromClaudeEvent(model *SessionModel, event claude.Event) {
 		})
 
 	case claude.TurnCompleteEvent:
-		recent := model.RecentOutputLines(3)
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.TurnCount = e.TurnNumber
 			p.TotalCostUSD = e.Usage.CostUSD
@@ -129,7 +129,7 @@ func FromAgentEvent(model *SessionModel, event agent.AgentEvent) {
 			ToolState: ToolStateRunning,
 			StartTime: now,
 		})
-		recent := model.RecentOutputLines(3)
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = e.Name
 			p.CurrentPhase = "tool_execution"
@@ -155,7 +155,7 @@ func FromAgentEvent(model *SessionModel, event agent.AgentEvent) {
 				line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 			}
 		})
-		recent := model.RecentOutputLines(3)
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.CurrentTool = ""
 			p.CurrentPhase = ""
@@ -164,7 +164,7 @@ func FromAgentEvent(model *SessionModel, event agent.AgentEvent) {
 		})
 
 	case agent.TurnCompleteAgentEvent:
-		recent := model.RecentOutputLines(3)
+		recent := model.RecentOutputLines(RecentOutputDisplayLines)
 		model.UpdateProgress(func(p *ProgressSnapshot) {
 			p.TurnCount = e.TurnNumber
 			p.TotalCostUSD = e.CostUSD
