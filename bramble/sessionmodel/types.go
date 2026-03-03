@@ -168,6 +168,7 @@ type ProgressSnapshot struct {
 	CurrentPhase string
 	CurrentTool  string
 	StatusLine   string
+	RecentOutput []string // last N lines of assistant text for command center display
 	TurnCount    int
 	TotalCostUSD float64
 	InputTokens  int

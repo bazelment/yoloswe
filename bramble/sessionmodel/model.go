@@ -131,6 +131,11 @@ func (m *SessionModel) Progress() ProgressSnapshot {
 	return m.progress
 }
 
+// RecentOutputLines returns the last n lines of assistant text from the output buffer.
+func (m *SessionModel) RecentOutputLines(n int) []string {
+	return m.output.RecentAssistantText(n)
+}
+
 // --- Observer management ----------------------------------------------------
 
 // AddObserver registers an observer that will be notified on model mutations.

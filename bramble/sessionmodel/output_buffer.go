@@ -92,6 +92,26 @@ func (b *OutputBuffer) Snapshot() []OutputLine {
 	return result
 }
 
+// RecentAssistantText returns the last n lines of non-user assistant text content.
+// It walks backwards through the buffer collecting OutputTypeText lines where
+// IsUserPrompt is false, returning them in chronological order.
+func (b *OutputBuffer) RecentAssistantText(n int) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var result []string
+	for i := len(b.lines) - 1; i >= 0 && len(result) < n; i-- {
+		line := &b.lines[i]
+		if line.Type == OutputTypeText && !line.IsUserPrompt && strings.TrimSpace(line.Content) != "" {
+			result = append(result, line.Content)
+		}
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result
+}
+
 // Len returns the current number of lines.
 func (b *OutputBuffer) Len() int {
 	b.mu.RLock()

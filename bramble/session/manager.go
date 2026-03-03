@@ -1311,6 +1311,30 @@ func (m *Manager) GetSessionOutput(id SessionID) []OutputLine {
 	return result
 }
 
+// RecentOutputLines returns the last n lines of non-user assistant text for a session.
+func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
+	m.outputsMu.RLock()
+	defer m.outputsMu.RUnlock()
+
+	lines, ok := m.outputs[id]
+	if !ok {
+		return nil
+	}
+
+	var result []string
+	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
+		line := &lines[i]
+		if line.Type == OutputTypeText && !line.IsUserPrompt && strings.TrimSpace(line.Content) != "" {
+			result = append(result, line.Content)
+		}
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result
+}
+
 // CountByStatus returns counts of sessions by status.
 func (m *Manager) CountByStatus() map[SessionStatus]int {
 	m.mu.RLock()
