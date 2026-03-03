@@ -752,7 +752,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = FocusAllSessions
 		return m, nil
 
-	case "C":
+	case "alt+c":
 		// Open command center — full-screen card-based grid of all sessions.
 		activeSessions := m.gatherActiveSessions()
 		m.commandCenter.Show(activeSessions, m.width, m.height)
