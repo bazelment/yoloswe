@@ -204,6 +204,7 @@ func buildHelpSections(m *Model) []HelpSection {
 	}
 	sess.Bindings = append(sess.Bindings,
 		HelpBinding{"S", "Show all sessions across worktrees"},
+		HelpBinding{"Alt-C", "Open command center (full-screen dashboard)"},
 	)
 	if len(sess.Bindings) > 0 {
 		sections = append(sections, sess)

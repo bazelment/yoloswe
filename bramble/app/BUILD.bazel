@@ -4,6 +4,7 @@ go_library(
     name = "app",
     srcs = [
         "allsessions.go",
+        "commandcenter.go",
         "confirmprompt.go",
         "dropdown.go",
         "filetree.go",
@@ -48,6 +49,7 @@ go_test(
     srcs = [
         "aggregate_cost_test.go",
         "auto_switch_test.go",
+        "commandcenter_test.go",
         "confirmprompt_test.go",
         "dropdown_test.go",
         "editor_test.go",
