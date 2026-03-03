@@ -123,7 +123,7 @@ func TestRenderCoverage_FullSessionFromFixture(t *testing.T) {
 	model := NewOutputModel(info, lines)
 	model.SetSize(120, 40)
 
-	view := model.View()
+	view := model.View().Content
 	assert.NotEmpty(t, view)
 	assert.Contains(t, view, "test-coverage")
 	assert.Contains(t, view, "Fix the authentication bug")
@@ -218,6 +218,24 @@ func TestRenderCoverage_AllOutputTypes_ViewPath(t *testing.T) {
 			t.Logf("  %s → %s", tc.line.Type, truncateForLog(formatted, 120))
 		})
 	}
+}
+
+// TestModelView_KittyFlagsEnabled verifies that Model.View() always enables
+// AltScreen and ReportEventTypes regardless of which overlay is active.
+// These flags are required for instant ESC response via the Kitty keyboard
+// protocol — the core goal of the bubbletea v2 migration.
+func TestModelView_KittyFlagsEnabled(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
+	defer mgr.Close()
+
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
+
+	v := m.View()
+	assert.True(t, v.AltScreen, "Model.View(): AltScreen must be enabled")
+	assert.True(t, v.KeyboardEnhancements.ReportEventTypes, "Model.View(): ReportEventTypes must be enabled")
 }
 
 func truncateForLog(s string, max int) string {

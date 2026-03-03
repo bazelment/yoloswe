@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,7 +36,7 @@ func TestAllSessionsOverlay_Show(t *testing.T) {
 	assert.False(t, m.allSessionsOverlay.IsVisible())
 
 	// Press 'S' to open overlay
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := m.handleKeyPress(keyPress('S'))
 	m2 := newModel.(Model)
 
 	assert.True(t, m2.allSessionsOverlay.IsVisible())
@@ -64,17 +64,17 @@ func TestAllSessionsOverlay_Navigate(t *testing.T) {
 	assert.Equal(t, 0, m2.allSessionsOverlay.selectedIdx)
 
 	// Navigate down
-	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
+	newModel2, _ := m2.handleAllSessionsOverlay(specialKey(tea.KeyDown))
 	m3 := newModel2.(Model)
 	assert.Equal(t, 1, m3.allSessionsOverlay.selectedIdx)
 
 	// Navigate down again -- should clamp
-	newModel3, _ := m3.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
+	newModel3, _ := m3.handleAllSessionsOverlay(specialKey(tea.KeyDown))
 	m4 := newModel3.(Model)
 	assert.Equal(t, 1, m4.allSessionsOverlay.selectedIdx)
 
 	// Navigate up
-	newModel4, _ := m4.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyUp})
+	newModel4, _ := m4.handleAllSessionsOverlay(specialKey(tea.KeyUp))
 	m5 := newModel4.(Model)
 	assert.Equal(t, 0, m5.allSessionsOverlay.selectedIdx)
 }
@@ -104,7 +104,7 @@ func TestAllSessionsOverlay_Select_TUIMode(t *testing.T) {
 	initialSelectedID := initialSelected.ID
 
 	// Navigate to second session
-	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyDown})
+	newModel2, _ := m2.handleAllSessionsOverlay(specialKey(tea.KeyDown))
 	m3 := newModel2.(Model)
 
 	// Get the newly selected session after navigation
@@ -114,7 +114,7 @@ func TestAllSessionsOverlay_Select_TUIMode(t *testing.T) {
 	require.NotEqual(t, initialSelectedID, expectedID, "should have selected a different session")
 
 	// Press Enter to select
-	newModel3, _ := m3.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel3, _ := m3.handleAllSessionsOverlay(specialKey(tea.KeyEnter))
 	m4 := newModel3.(Model)
 
 	assert.False(t, m4.allSessionsOverlay.IsVisible())
@@ -133,12 +133,12 @@ func TestAllSessionsOverlay_Close(t *testing.T) {
 	}
 
 	// Open overlay
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := m.handleKeyPress(keyPress('S'))
 	m2 := newModel.(Model)
 	assert.True(t, m2.allSessionsOverlay.IsVisible())
 
 	// Press Esc to close
-	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyEsc})
+	newModel2, _ := m2.handleAllSessionsOverlay(specialKey(tea.KeyEsc))
 	m3 := newModel2.(Model)
 
 	assert.False(t, m3.allSessionsOverlay.IsVisible())
@@ -166,14 +166,14 @@ func TestAllSessionsOverlay_QuickSwitch(t *testing.T) {
 	})
 
 	// Open overlay
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := m.handleKeyPress(keyPress('S'))
 	m2 := newModel.(Model)
 
 	// The first session in the overlay list
 	expectedID := m2.allSessionsOverlay.Sessions()[0].ID
 
 	// Press '1' to select first session
-	newModel2, _ := m2.handleAllSessionsOverlay(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	newModel2, _ := m2.handleAllSessionsOverlay(keyPress('1'))
 	m3 := newModel2.(Model)
 
 	assert.False(t, m3.allSessionsOverlay.IsVisible())
@@ -203,7 +203,7 @@ func TestAllSessionsOverlay_FilterTerminal(t *testing.T) {
 	})
 
 	// Open overlay - all sessions are running (non-terminal), so all should appear
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := m.handleKeyPress(keyPress('S'))
 	m2 := newModel.(Model)
 
 	sessions := m2.allSessionsOverlay.Sessions()
@@ -268,7 +268,7 @@ func TestAllSessionsOverlay_FreshFromManager(t *testing.T) {
 	// m.sessions is intentionally left empty / stale
 
 	// Press S — overlay should still show the session from the manager
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	newModel, _ := m.handleKeyPress(keyPress('S'))
 	m2 := newModel.(Model)
 
 	assert.True(t, m2.allSessionsOverlay.IsVisible())

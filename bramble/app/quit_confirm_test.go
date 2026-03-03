@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,7 +17,7 @@ func TestQuitConfirm_NoActiveSessions_QuitsImmediately(t *testing.T) {
 	}, "test-repo")
 
 	// Press 'q' with no active sessions
-	newModel, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, cmd := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 
 	// Should quit immediately
@@ -43,7 +43,7 @@ func TestQuitConfirm_ActiveSessions_ShowsConfirmation(t *testing.T) {
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// Press 'q' with an active session
-	newModel, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, cmd := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 
 	// Should set confirmQuit and show toast
@@ -70,12 +70,12 @@ func TestQuitConfirm_SecondQ_Quits(t *testing.T) {
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// First 'q' sets confirmQuit
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, _ := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 	assert.True(t, m2.confirmQuit)
 
 	// Second 'q' should quit
-	newModel2, cmd := m2.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel2, cmd := m2.handleKeyPress(keyPress('q'))
 	m3 := newModel2.(Model)
 	assert.False(t, m3.confirmQuit)
 	assert.NotNil(t, cmd)
@@ -96,12 +96,12 @@ func TestQuitConfirm_Y_Quits(t *testing.T) {
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// First 'q' sets confirmQuit
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, _ := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 	assert.True(t, m2.confirmQuit)
 
 	// Press 'y' should quit
-	newModel2, cmd := m2.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	newModel2, cmd := m2.handleKeyPress(keyPress('y'))
 	m3 := newModel2.(Model)
 	assert.False(t, m3.confirmQuit)
 	assert.NotNil(t, cmd)
@@ -122,12 +122,12 @@ func TestQuitConfirm_OtherKey_Cancels(t *testing.T) {
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// First 'q' sets confirmQuit
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, _ := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 	assert.True(t, m2.confirmQuit)
 
 	// Press 'n' should cancel
-	newModel2, cmd := m2.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	newModel2, cmd := m2.handleKeyPress(keyPress('n'))
 	m3 := newModel2.(Model)
 	assert.False(t, m3.confirmQuit)
 	assert.True(t, m3.toasts.HasToasts())
@@ -153,7 +153,7 @@ func TestQuitConfirm_CtrlC_AlwaysQuits(t *testing.T) {
 	m.sessions = m.sessionManager.GetAllSessions()
 
 	// Ctrl+C should quit immediately even with active sessions
-	newModel, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC})
+	newModel, cmd := m.handleKeyPress(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	m2 := newModel.(Model)
 	assert.False(t, m2.confirmQuit)
 	assert.NotNil(t, cmd)
@@ -176,7 +176,7 @@ func TestQuitConfirm_IdleSessions_CountAsActive(t *testing.T) {
 
 	// Press 'q' - should require confirmation even for idle sessions
 	// (idle is not terminal)
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, _ := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 	assert.True(t, m2.confirmQuit)
 }
@@ -200,7 +200,7 @@ func TestQuitConfirm_CompletedSessions_DontCount(t *testing.T) {
 	require.True(t, m.sessions[0].Status.IsTerminal(), "session should be in terminal state")
 
 	// Press 'q' with only completed sessions - should quit immediately
-	newModel, cmd := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	newModel, cmd := m.handleKeyPress(keyPress('q'))
 	m2 := newModel.(Model)
 	assert.False(t, m2.confirmQuit)
 	assert.NotNil(t, cmd)

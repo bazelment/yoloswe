@@ -139,6 +139,6 @@ func TestToastViaModelUpdate(t *testing.T) {
 	assert.NotNil(t, cmd)
 
 	// View should contain the error message
-	view := m2.View()
+	view := m2.View().Content
 	assert.Contains(t, view, "test error")
 }

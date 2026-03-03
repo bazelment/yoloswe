@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -89,7 +89,7 @@ func TestOutputModelRendering(t *testing.T) {
 			m := NewOutputModel(tc.info, tc.lines)
 			m.SetSize(tc.width, tc.height)
 
-			view := m.View()
+			view := m.View().Content
 			assert.NotEmpty(t, view)
 
 			// Basic assertions about content
@@ -134,7 +134,7 @@ func TestOutputModelReplay(t *testing.T) {
 	m := NewReplayOutputModel(stored)
 	m.SetSize(80, 24)
 
-	view := m.View()
+	view := m.View().Content
 
 	// Replay should show the [Replay] indicator
 	assert.Contains(t, view, "[Replay]")
@@ -209,7 +209,7 @@ func TestOutputModelLongPromptNoTruncation(t *testing.T) {
 	m := NewOutputModel(info, lines)
 	m.SetSize(40, 10) // Small terminal
 
-	view := m.View()
+	view := m.View().Content
 	assert.NotEmpty(t, view)
 	assert.Contains(t, view, info.Prompt)
 	assert.NotContains(t, view, "...\"")
@@ -432,7 +432,7 @@ func TestVisualLineCountInOutput(t *testing.T) {
 	m := NewOutputModel(info, lines)
 	m.SetSize(80, 15) // Small height
 
-	view := m.View()
+	view := m.View().Content
 
 	// Count actual lines in output
 	viewLines := strings.Split(view, "\n")
@@ -790,18 +790,18 @@ func TestScrollViaUpdate(t *testing.T) {
 	m.viewingSessionID = sessID
 
 	// Verify initial state shows latest
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "Line-049", "initial view should show latest")
 
 	// Simulate pressing "up" key via Update
-	upKey := tea.KeyMsg{Type: tea.KeyUp}
+	upKey := specialKey(tea.KeyUp)
 	newModel, _ := m.Update(upKey)
 	m2 := newModel.(Model)
 
 	t.Logf("After 1 up: scrollOffset=%d", m2.scrollOffset)
 	assert.Equal(t, 1, m2.scrollOffset, "scrollOffset should be 1 after pressing up")
 
-	view = m2.View()
+	view = m2.View().Content
 	t.Logf("View after up:\n%s", view)
 	// Should NOT show the very last line anymore
 	assert.NotContains(t, view, "Line-049", "should not show last line after scrolling up")
@@ -817,19 +817,19 @@ func TestScrollViaUpdate(t *testing.T) {
 	assert.Equal(t, 6, current.scrollOffset)
 
 	// Press down to scroll back
-	downKey := tea.KeyMsg{Type: tea.KeyDown}
+	downKey := specialKey(tea.KeyDown)
 	newModel, _ = current.Update(downKey)
 	current = newModel.(Model)
 	t.Logf("After 1 down: scrollOffset=%d", current.scrollOffset)
 	assert.Equal(t, 5, current.scrollOffset)
 
 	// Press End to jump to bottom
-	endKey := tea.KeyMsg{Type: tea.KeyEnd}
+	endKey := specialKey(tea.KeyEnd)
 	newModel, _ = current.Update(endKey)
 	current = newModel.(Model)
 	assert.Equal(t, 0, current.scrollOffset, "End should reset scrollOffset to 0")
 
-	view = current.View()
+	view = current.View().Content
 	assert.Contains(t, view, "Line-049", "should show latest after End")
 }
 
@@ -882,13 +882,13 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 	m.viewingSessionID = sessID
 
 	// Default view (scrollOffset=0): should show the end (tool call + last text lines)
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "[Read]", "should show tool call at bottom")
 	t.Logf("Default view:\n%s", view)
 
 	// Scroll up — should now see different text lines
 	m.scrollOffset = 5
-	view = m.View()
+	view = m.View().Content
 	t.Logf("Scrolled up 5:\n%s", view)
 	assert.Contains(t, view, "more lines", "should show scroll indicator")
 	// Tool call should no longer be visible (it was at the very bottom)
@@ -896,7 +896,7 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 
 	// Scroll further up — should see earlier lines than when scrolled up 5
 	m.scrollOffset = 20
-	view = m.View()
+	view = m.View().Content
 	t.Logf("Scrolled up 20:\n%s", view)
 	assert.Contains(t, view, "more lines", "should still show scroll indicator")
 	// Should see earlier text than the scrolled-up-5 view
@@ -904,7 +904,7 @@ func TestScrollWithMultiLineContent(t *testing.T) {
 
 	// Scroll all the way to top — should see the very first lines
 	m.scrollOffset = 100 // More than maxScrollOffset, gets clamped
-	view = m.View()
+	view = m.View().Content
 	t.Logf("Scrolled to top:\n%s", view)
 	assert.Contains(t, view, "Text line 0", "should show first text when scrolled to top")
 }
@@ -1002,8 +1002,9 @@ func TestFormatWorktreeStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result := formatWorktreeStatus(tc.status, 0, NewStyles(Dark))
+			stripped := stripAnsi(result)
 			for _, substr := range tc.want {
-				assert.Contains(t, result, substr)
+				assert.Contains(t, stripped, substr)
 			}
 		})
 	}
@@ -1044,7 +1045,7 @@ func TestWindowKeyOutsideTmux(t *testing.T) {
 	}, 80, 24, nil, nil, session.ManagerConfig{})
 	m.worktreeDropdown.SelectIndex(0)
 
-	wKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}}
+	wKey := keyPress('w')
 	newModel, cmd := m.Update(wKey)
 	m2 := newModel.(Model)
 
@@ -1069,7 +1070,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 		}, 80, 24, nil, nil, session.ManagerConfig{})
 		m.worktreeDropdown.SelectIndex(0)
 
-		view := m.View()
+		view := m.View().Content
 		assert.Contains(t, view, "[w] Window")
 	})
 
@@ -1084,7 +1085,7 @@ func TestStatusBarWindowHint(t *testing.T) {
 		}, 80, 24, nil, nil, session.ManagerConfig{})
 		m.worktreeDropdown.SelectIndex(0)
 
-		view := m.View()
+		view := m.View().Content
 		assert.NotContains(t, view, "[w] Window")
 	})
 }
@@ -1111,7 +1112,7 @@ func TestSessionDropdownUsesTitle(t *testing.T) {
 	// Verify the model display in the session header
 	model := NewOutputModel(info, nil)
 	model.SetSize(80, 24)
-	view := model.View()
+	view := model.View().Content
 
 	// Should contain the session info
 	assert.Contains(t, view, "test-session")

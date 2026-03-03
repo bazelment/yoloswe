@@ -1,12 +1,13 @@
 package app
 
 import (
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -44,13 +45,16 @@ func NewTextArea() *TextArea {
 	inner.MaxHeight = 10
 	inner.SetHeight(3)
 	inner.SetWidth(60)
-	inner.FocusedStyle = textarea.Style{
+	styleState := textarea.StyleState{
 		Base:        lipgloss.NewStyle(),
 		Placeholder: lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		Text:        lipgloss.NewStyle(),
 		CursorLine:  lipgloss.NewStyle(),
 	}
-	inner.BlurredStyle = inner.FocusedStyle
+	inner.SetStyles(textarea.Styles{
+		Focused: styleState,
+		Blurred: styleState,
+	})
 
 	// Rebind InsertNewline from enter → shift+enter (Bramble convention)
 	inner.KeyMap.InsertNewline = key.NewBinding(
@@ -154,9 +158,11 @@ func (t *TextArea) SetPlaceholder(p string) {
 }
 
 // SetPlaceholderColor updates the placeholder foreground color from the palette.
-func (t *TextArea) SetPlaceholderColor(c lipgloss.Color) {
-	t.inner.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(c)
-	t.inner.BlurredStyle.Placeholder = t.inner.FocusedStyle.Placeholder
+func (t *TextArea) SetPlaceholderColor(c color.Color) {
+	s := t.inner.Styles()
+	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(c)
+	s.Blurred.Placeholder = s.Focused.Placeholder
+	t.inner.SetStyles(s)
 }
 
 // SetValue sets the text content.
@@ -227,7 +233,7 @@ const (
 // resulting action. The TextArea is mutated in place for cursor movement,
 // character insertion, focus cycling, etc. The caller is responsible for
 // acting on Submit, Cancel, and Quit.
-func (t *TextArea) HandleKey(msg tea.KeyMsg) TextAreaAction {
+func (t *TextArea) HandleKey(msg tea.KeyPressMsg) TextAreaAction {
 	switch msg.String() {
 	case "tab":
 		t.CycleForward()

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestRepoSettingsDialogRoundTrip(t *testing.T) {
@@ -49,11 +49,11 @@ func TestRepoSettingsDialogSaveShortcut(t *testing.T) {
 	d := NewRepoSettingsDialog()
 	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"), nil, nil)
 
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Theme → Providers
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Providers → Create
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Create → Delete
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab}) // Delete → Save
-	action, _ := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = d.Update(specialKey(tea.KeyTab)) // Theme → Providers
+	_, _ = d.Update(specialKey(tea.KeyTab)) // Providers → Create
+	_, _ = d.Update(specialKey(tea.KeyTab)) // Create → Delete
+	_, _ = d.Update(specialKey(tea.KeyTab)) // Delete → Save
+	action, _ := d.Update(specialKey(tea.KeyEnter))
 	if action != RepoSettingsActionSave {
 		t.Fatalf("action = %v, want RepoSettingsActionSave", action)
 	}
@@ -64,7 +64,7 @@ func TestRepoSettingsDialogThemeSelection(t *testing.T) {
 	d.Show("repo-a", RepoSettings{}, "dark", 100, 40, lipgloss.Color("245"), nil, nil)
 
 	original := d.SelectedTheme().Name
-	_, _ = d.Update(tea.KeyMsg{Type: tea.KeyRight})
+	_, _ = d.Update(specialKey(tea.KeyRight))
 	next := d.SelectedTheme().Name
 	if next == original {
 		t.Fatalf("expected theme to change from %q", original)
@@ -88,49 +88,49 @@ func TestRepoSettingsDialogThemeGridNavigation(t *testing.T) {
 	}
 
 	// Right: 0 → 1
-	d.Update(tea.KeyMsg{Type: tea.KeyRight})
+	d.Update(specialKey(tea.KeyRight))
 	if d.selectedIdx != 1 {
 		t.Fatalf("after right: selectedIdx = %d, want 1", d.selectedIdx)
 	}
 
 	// Right: 1 → 2
-	d.Update(tea.KeyMsg{Type: tea.KeyRight})
+	d.Update(specialKey(tea.KeyRight))
 	if d.selectedIdx != 2 {
 		t.Fatalf("after right: selectedIdx = %d, want 2", d.selectedIdx)
 	}
 
 	// Right wraps: 2 → 0
-	d.Update(tea.KeyMsg{Type: tea.KeyRight})
+	d.Update(specialKey(tea.KeyRight))
 	if d.selectedIdx != 0 {
 		t.Fatalf("after right wrap: selectedIdx = %d, want 0", d.selectedIdx)
 	}
 
 	// Down: 0 → 3
-	d.Update(tea.KeyMsg{Type: tea.KeyDown})
+	d.Update(specialKey(tea.KeyDown))
 	if d.selectedIdx != 3 {
 		t.Fatalf("after down: selectedIdx = %d, want 3", d.selectedIdx)
 	}
 
 	// Down wraps: 3 → 0
-	d.Update(tea.KeyMsg{Type: tea.KeyDown})
+	d.Update(specialKey(tea.KeyDown))
 	if d.selectedIdx != 0 {
 		t.Fatalf("after down wrap: selectedIdx = %d, want 0", d.selectedIdx)
 	}
 
 	// Up wraps: 0 → 3
-	d.Update(tea.KeyMsg{Type: tea.KeyUp})
+	d.Update(specialKey(tea.KeyUp))
 	if d.selectedIdx != 3 {
 		t.Fatalf("after up wrap: selectedIdx = %d, want 3", d.selectedIdx)
 	}
 
 	// Up: 3 → 0
-	d.Update(tea.KeyMsg{Type: tea.KeyUp})
+	d.Update(specialKey(tea.KeyUp))
 	if d.selectedIdx != 0 {
 		t.Fatalf("after up: selectedIdx = %d, want 0", d.selectedIdx)
 	}
 
 	// Left wraps: 0 → 2
-	d.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	d.Update(specialKey(tea.KeyLeft))
 	if d.selectedIdx != 2 {
 		t.Fatalf("after left wrap: selectedIdx = %d, want 2", d.selectedIdx)
 	}
@@ -152,31 +152,31 @@ func TestRepoSettingsDialogThemeGrid2Cols(t *testing.T) {
 	//   row2: 4 5
 
 	// Right: 0 → 1
-	d.Update(tea.KeyMsg{Type: tea.KeyRight})
+	d.Update(specialKey(tea.KeyRight))
 	if d.selectedIdx != 1 {
 		t.Fatalf("after right: selectedIdx = %d, want 1", d.selectedIdx)
 	}
 
 	// Right wraps: 1 → 0
-	d.Update(tea.KeyMsg{Type: tea.KeyRight})
+	d.Update(specialKey(tea.KeyRight))
 	if d.selectedIdx != 0 {
 		t.Fatalf("after right wrap: selectedIdx = %d, want 0", d.selectedIdx)
 	}
 
 	// Down: 0 → 2
-	d.Update(tea.KeyMsg{Type: tea.KeyDown})
+	d.Update(specialKey(tea.KeyDown))
 	if d.selectedIdx != 2 {
 		t.Fatalf("after down: selectedIdx = %d, want 2", d.selectedIdx)
 	}
 
 	// Down: 2 → 4
-	d.Update(tea.KeyMsg{Type: tea.KeyDown})
+	d.Update(specialKey(tea.KeyDown))
 	if d.selectedIdx != 4 {
 		t.Fatalf("after down: selectedIdx = %d, want 4", d.selectedIdx)
 	}
 
 	// Down wraps: 4 → 0
-	d.Update(tea.KeyMsg{Type: tea.KeyDown})
+	d.Update(specialKey(tea.KeyDown))
 	if d.selectedIdx != 0 {
 		t.Fatalf("after down wrap: selectedIdx = %d, want 0", d.selectedIdx)
 	}

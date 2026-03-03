@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -13,7 +13,7 @@ func TestConfirmPrompt_MatchesOptionKey(t *testing.T) {
 		{Key: "d", Label: "yes + delete branch"},
 	})
 
-	result := cp.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	result := cp.HandleKey(keyPress('y'))
 	assert.Equal(t, "y", result.Matched)
 	assert.False(t, result.Cancelled)
 	assert.False(t, result.Quit)
@@ -25,7 +25,7 @@ func TestConfirmPrompt_MatchesSecondOption(t *testing.T) {
 		{Key: "d", Label: "yes + delete branch"},
 	})
 
-	result := cp.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	result := cp.HandleKey(keyPress('d'))
 	assert.Equal(t, "d", result.Matched)
 }
 
@@ -34,7 +34,7 @@ func TestConfirmPrompt_EscCancels(t *testing.T) {
 		{Key: "y", Label: "yes"},
 	})
 
-	result := cp.HandleKey(tea.KeyMsg{Type: tea.KeyEscape})
+	result := cp.HandleKey(specialKey(tea.KeyEscape))
 	assert.True(t, result.Cancelled)
 	assert.Equal(t, "", result.Matched)
 }
@@ -44,7 +44,7 @@ func TestConfirmPrompt_CtrlCQuits(t *testing.T) {
 		{Key: "y", Label: "yes"},
 	})
 
-	result := cp.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	result := cp.HandleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	assert.True(t, result.Quit)
 	assert.Equal(t, "", result.Matched)
 }
@@ -54,7 +54,7 @@ func TestConfirmPrompt_UnrecognizedKeyIgnored(t *testing.T) {
 		{Key: "y", Label: "yes"},
 	})
 
-	result := cp.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	result := cp.HandleKey(keyPress('x'))
 	assert.Equal(t, "", result.Matched)
 	assert.False(t, result.Cancelled)
 	assert.False(t, result.Quit)

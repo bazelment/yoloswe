@@ -6,15 +6,25 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
+// newAppView wraps content in a tea.View with AltScreen and Kitty keyboard
+// enhancements enabled. All View() return paths use this helper to ensure the
+// settings are applied consistently.
+func newAppView(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.KeyboardEnhancements.ReportEventTypes = true
+	return v
+}
+
 // View renders the model.
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	// Use sensible defaults before WindowSizeMsg arrives so the first
 	// render shows the real UI instead of a blank "Loading..." screen.
 	if m.width == 0 {
@@ -109,35 +119,35 @@ func (m Model) View() string {
 
 	// Show help overlay if active
 	if m.focus == FocusHelp {
-		return m.helpOverlay.View(m.styles)
+		return newAppView(m.helpOverlay.View(m.styles))
 	}
 
 	// Show task modal if visible
 	if m.taskModal.IsVisible() {
-		return m.taskModal.View(m.styles)
+		return newAppView(m.taskModal.View(m.styles))
 	}
 
 	// Show command center if visible
 	if m.commandCenter.IsVisible() {
-		return m.commandCenter.View(m.styles)
+		return newAppView(m.commandCenter.View(m.styles))
 	}
 
 	// Show all sessions overlay if visible
 	if m.allSessionsOverlay.IsVisible() {
-		return m.allSessionsOverlay.View(m.styles)
+		return newAppView(m.allSessionsOverlay.View(m.styles))
 	}
 
 	// Show repo settings overlay if visible
 	if m.repoSettingsDialog.IsVisible() {
-		return m.repoSettingsDialog.View(m.styles)
+		return newAppView(m.repoSettingsDialog.View(m.styles))
 	}
 
 	// Show theme picker overlay if visible
 	if m.themePicker.IsVisible() {
-		return m.themePicker.View(m.styles)
+		return newAppView(m.themePicker.View(m.styles))
 	}
 
-	return content
+	return newAppView(content)
 }
 
 // renderTopBar renders the top bar with repo, worktree dropdown, and session dropdown.
@@ -682,16 +692,15 @@ func formatKeyHints(key, action string) string {
 
 // printableRune extracts a printable rune from a key message, returning false
 // if the key does not represent a single printable character.
-func printableRune(msg tea.KeyMsg) (rune, bool) {
-	keyStr := msg.String()
-	var r rune
-	if len(keyStr) == 1 {
-		r = rune(keyStr[0])
-	} else if len(msg.Runes) == 1 {
-		r = msg.Runes[0]
-	}
-	if r != 0 && r >= ' ' && r != 127 {
-		return r, true
+func printableRune(msg tea.KeyPressMsg) (rune, bool) {
+	if msg.Text != "" {
+		runes := []rune(msg.Text)
+		if len(runes) == 1 {
+			r := runes[0]
+			if r >= ' ' && r != 127 {
+				return r, true
+			}
+		}
 	}
 	return 0, false
 }

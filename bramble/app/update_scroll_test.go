@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -44,7 +44,7 @@ func TestScrollPositionPreservedOnSessionSwitch(t *testing.T) {
 
 	// Trigger Enter key in dropdown mode
 	m.focus = FocusSessionDropdown
-	newModel, _ := m.handleDropdownMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := m.handleDropdownMode(specialKey(tea.KeyEnter))
 	m2 := newModel.(Model)
 
 	// Check that session A's scroll was saved
@@ -63,7 +63,7 @@ func TestScrollPositionPreservedOnSessionSwitch(t *testing.T) {
 	}
 	m2.focus = FocusSessionDropdown
 	m2.sessionDropdown.Open()
-	newModel2, _ := m2.handleDropdownMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel2, _ := m2.handleDropdownMode(specialKey(tea.KeyEnter))
 	m3 := newModel2.(Model)
 
 	// Check that scroll was restored for session A
@@ -93,7 +93,7 @@ func TestScrollPositionClearedOnWorktreeSwitch(t *testing.T) {
 	m.worktreeDropdown.SelectIndex(1)
 	m.focus = FocusWorktreeDropdown
 	m.worktreeDropdown.Open()
-	newModel, _ := m.handleDropdownMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel, _ := m.handleDropdownMode(specialKey(tea.KeyEnter))
 	m2 := newModel.(Model)
 
 	// Check that session A's scroll was saved

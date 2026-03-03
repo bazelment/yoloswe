@@ -3,7 +3,6 @@ package app
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,7 +30,7 @@ func TestQuickSwitch_SwitchesToSession(t *testing.T) {
 	require.Len(t, liveSessions, 2)
 
 	// Press '1' to switch to first session in the list
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	newModel, _ := m.handleKeyPress(keyPress('1'))
 	m2 := newModel.(Model)
 
 	// Should switch to the first session in currentWorktreeSessions
@@ -54,7 +53,7 @@ func TestQuickSwitch_OutOfRange_ShowsToast(t *testing.T) {
 	m.updateSessionDropdown()
 
 	// Press '5' when only 1 session exists
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+	newModel, _ := m.handleKeyPress(keyPress('5'))
 	m2 := newModel.(Model)
 
 	// Should show toast
@@ -70,7 +69,7 @@ func TestQuickSwitch_NoSessions_ShowsToast(t *testing.T) {
 	m.updateSessionDropdown()
 
 	// Press '1' when no sessions exist
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	newModel, _ := m.handleKeyPress(keyPress('1'))
 	m2 := newModel.(Model)
 
 	// Should show toast
@@ -96,7 +95,7 @@ func TestQuickSwitch_TmuxMode_SelectsIndex(t *testing.T) {
 	m.selectedSessionIndex = 0
 
 	// Press '3' to select third session in list (index 2)
-	newModel, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	newModel, _ := m.handleKeyPress(keyPress('3'))
 	m2 := newModel.(Model)
 
 	// Should set selectedSessionIndex to 2
