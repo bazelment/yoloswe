@@ -44,15 +44,15 @@ use_repo(
     "com_github_bazelment_yoloswe_multiagent",
     "com_github_bazelment_yoloswe_wt",
     "com_github_bazelment_yoloswe_yoloswe",
-    "com_github_charmbracelet_bubbles",
-    "com_github_charmbracelet_bubbletea",
     "com_github_charmbracelet_glamour",
-    "com_github_charmbracelet_lipgloss",
     "com_github_invopop_jsonschema",
     "com_github_mattn_go_runewidth",
     "com_github_spf13_cobra",
     "com_github_stretchr_testify",
     "in_gopkg_yaml_v3",
+    "land_charm_bubbles_v2",
+    "land_charm_bubbletea_v2",
+    "land_charm_lipgloss_v2",
     "org_golang_x_term",
 )
 

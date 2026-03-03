@@ -2,12 +2,13 @@ package app
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
@@ -69,13 +70,16 @@ func newRepoSettingsTextArea() textarea.Model {
 	ta.SetWidth(60)
 	ta.SetHeight(4)
 	ta.MaxHeight = 8
-	ta.FocusedStyle = textarea.Style{
+	styleState := textarea.StyleState{
 		Base:        lipgloss.NewStyle(),
 		Placeholder: lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
 		Text:        lipgloss.NewStyle(),
 		CursorLine:  lipgloss.NewStyle(),
 	}
-	ta.BlurredStyle = ta.FocusedStyle
+	ta.SetStyles(textarea.Styles{
+		Focused: styleState,
+		Blurred: styleState,
+	})
 
 	// Keep Enter for text input; use Ctrl+Enter to save dialog.
 	ta.KeyMap.InsertNewline = key.NewBinding(
@@ -87,7 +91,7 @@ func newRepoSettingsTextArea() textarea.Model {
 }
 
 // Show opens the dialog with repo settings.
-func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentTheme string, w, h int, placeholderColor lipgloss.Color, providerStatuses []agent.ProviderStatus, enabledProviders []string) {
+func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentTheme string, w, h int, placeholderColor color.Color, providerStatuses []agent.ProviderStatus, enabledProviders []string) {
 	d.repoName = repoName
 	d.width = w
 	d.height = h
@@ -133,10 +137,15 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 	d.deleteInput.SetValue(strings.Join(cfg.OnWorktreeDelete, "\n"))
 	d.createInput.Placeholder = "One shell command per line"
 	d.deleteInput.Placeholder = "One shell command per line"
-	d.createInput.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(placeholderColor)
-	d.createInput.BlurredStyle.Placeholder = d.createInput.FocusedStyle.Placeholder
-	d.deleteInput.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(placeholderColor)
-	d.deleteInput.BlurredStyle.Placeholder = d.deleteInput.FocusedStyle.Placeholder
+	placeholderStyle := lipgloss.NewStyle().Foreground(placeholderColor)
+	createStyles := d.createInput.Styles()
+	createStyles.Focused.Placeholder = placeholderStyle
+	createStyles.Blurred.Placeholder = placeholderStyle
+	d.createInput.SetStyles(createStyles)
+	deleteStyles := d.deleteInput.Styles()
+	deleteStyles.Focused.Placeholder = placeholderStyle
+	deleteStyles.Blurred.Placeholder = placeholderStyle
+	d.deleteInput.SetStyles(deleteStyles)
 
 	d.createInput.Blur()
 	d.deleteInput.Blur()
@@ -249,7 +258,7 @@ func (d *RepoSettingsDialog) moveFocus(delta int) {
 }
 
 // Update handles key presses and returns an action + optional cmd.
-func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, tea.Cmd) {
+func (d *RepoSettingsDialog) Update(msg tea.KeyPressMsg) (RepoSettingsDialogAction, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		return RepoSettingsActionCancel, nil
@@ -268,7 +277,7 @@ func (d *RepoSettingsDialog) Update(msg tea.KeyMsg) (RepoSettingsDialogAction, t
 	case "shift+tab":
 		d.moveFocus(-1)
 		return RepoSettingsActionNone, nil
-	case " ":
+	case "space":
 		// Space toggles provider enabled state
 		if d.focus == RepoSettingsFocusProviders && len(d.providerStatuses) > 0 {
 			ps := d.providerStatuses[d.providerCursor]

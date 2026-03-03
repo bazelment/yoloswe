@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
@@ -22,7 +22,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Handle help overlay first (highest visual priority)
 		if m.focus == FocusHelp {
 			return m.handleHelpOverlay(msg)
@@ -441,7 +441,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleKeyPress handles key presses in normal mode (not input, not dropdown).
-func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Handle quit confirmation at the top
 	if m.confirmQuit {
 		m.confirmQuit = false
@@ -965,7 +965,7 @@ func (m *Model) switchViewingSession(newID session.SessionID) {
 }
 
 // handleDropdownMode handles key presses when a dropdown is open.
-func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleDropdownMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "?":
 		// Open help overlay
@@ -1080,7 +1080,7 @@ func (m Model) handleDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleInputMode handles key presses in input mode.
 // Tab cycles focus between text input and buttons.
 // Enter activates the focused element.
-func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleInputMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Alt+M: cycle model selection when in a plan/build prompt.
 	// Note: Ctrl+M is aliased to Enter in terminals, so we use Alt+M instead.
 	if msg.String() == "alt+m" && m.pendingModel != "" {
@@ -1131,7 +1131,7 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleConfirmMode handles key presses in the single-keypress confirmation prompt.
-func (m Model) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleConfirmMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	result := m.confirmPrompt.HandleKey(msg)
 
 	switch {
@@ -1532,7 +1532,7 @@ func (m Model) syncWorktree(branch string) (tea.Model, tea.Cmd) {
 }
 
 // handleTaskModal handles key presses in the task modal.
-func (m Model) handleTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleTaskModal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	state := m.taskModal.State()
 
 	switch state {
@@ -1793,7 +1793,7 @@ func clamp(v, lo, hi int) int {
 }
 
 // handleAllSessionsOverlay handles key presses when the all sessions overlay is visible.
-func (m Model) handleAllSessionsOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleAllSessionsOverlay(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.allSessionsOverlay.Hide()
@@ -1891,7 +1891,7 @@ func (m *Model) gatherActiveSessions() []session.SessionInfo {
 }
 
 // handleCommandCenter handles key presses when the command center is visible.
-func (m Model) handleCommandCenter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.commandCenter.Hide()
@@ -2017,7 +2017,7 @@ func (m Model) switchToCommandCenterSession() (tea.Model, tea.Cmd) {
 }
 
 // handleHelpOverlay handles key presses when the help overlay is visible.
-func (m Model) handleHelpOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleHelpOverlay(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "?", "esc":
 		// Close help, restore previous focus
@@ -2037,7 +2037,7 @@ func (m Model) handleHelpOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleThemePicker handles key presses when the theme picker overlay is visible.
-func (m Model) handleThemePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleThemePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		// Revert to original theme
@@ -2089,7 +2089,7 @@ func (m Model) handleThemePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleRepoSettingsDialog handles key presses when the repo settings dialog is visible.
-func (m Model) handleRepoSettingsDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleRepoSettingsDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	prevTheme := m.repoSettingsDialog.SelectedTheme().Name
 	action, cmd := m.repoSettingsDialog.Update(msg)
 	if sel := m.repoSettingsDialog.SelectedTheme(); sel.Name != prevTheme {
@@ -2263,7 +2263,7 @@ func shellSplit(s string) []string {
 // ---------- Multi-repo: dropdown handler, open, switch ----------
 
 // handleRepoDropdownMode handles key presses when the repo dropdown is open.
-func (m Model) handleRepoDropdownMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleRepoDropdownMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "?":
 		// Open help overlay (consistent with handleDropdownMode).

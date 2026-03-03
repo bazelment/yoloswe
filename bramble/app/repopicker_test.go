@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +26,7 @@ func TestRepoPickerFilter_TypeToFilter(t *testing.T) {
 	m := newTestRepoPicker([]string{"foo", "bar", "baz"})
 
 	// Type 'b' — should filter to bar and baz
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m2, _ := m.Update(keyPress('b'))
 	m = m2.(RepoPickerModel)
 
 	eff := m.effectiveRepos()
@@ -40,9 +40,9 @@ func TestRepoPickerFilter_TypeMultipleChars(t *testing.T) {
 	m := newTestRepoPicker([]string{"alpha", "beta", "gamma"})
 
 	// Type "be" — should filter to just beta
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m2, _ := m.Update(keyPress('b'))
 	m = m2.(RepoPickerModel)
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m2, _ = m.Update(keyPress('e'))
 	m = m2.(RepoPickerModel)
 
 	eff := m.effectiveRepos()
@@ -54,9 +54,9 @@ func TestRepoPickerFilter_BackspaceRemovesChar(t *testing.T) {
 	m := newTestRepoPicker([]string{"foo", "bar", "baz"})
 
 	// Type "ba"
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m2, _ := m.Update(keyPress('b'))
 	m = m2.(RepoPickerModel)
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m2, _ = m.Update(keyPress('a'))
 	m = m2.(RepoPickerModel)
 	require.Equal(t, "ba", m.filterText)
 
@@ -64,7 +64,7 @@ func TestRepoPickerFilter_BackspaceRemovesChar(t *testing.T) {
 	require.Len(t, eff, 2) // bar and baz
 
 	// Backspace — back to "b"
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m2, _ = m.Update(specialKey(tea.KeyBackspace))
 	m = m2.(RepoPickerModel)
 	assert.Equal(t, "b", m.filterText)
 
@@ -76,12 +76,12 @@ func TestRepoPickerFilter_EscClearsFilter(t *testing.T) {
 	m := newTestRepoPicker([]string{"alpha", "beta", "gamma"})
 
 	// Type "g"
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m2, _ := m.Update(keyPress('g'))
 	m = m2.(RepoPickerModel)
 	require.Equal(t, "g", m.filterText)
 
 	// Esc clears filter (does not quit)
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m2, cmd := m.Update(specialKey(tea.KeyEscape))
 	m = m2.(RepoPickerModel)
 	assert.Equal(t, "", m.filterText)
 	assert.Nil(t, cmd) // Should NOT quit
@@ -94,7 +94,7 @@ func TestRepoPickerFilter_EscQuitsWhenNoFilter(t *testing.T) {
 	m := newTestRepoPicker([]string{"alpha", "beta"})
 
 	// Esc with no filter should quit
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	_, cmd := m.Update(specialKey(tea.KeyEscape))
 	assert.NotNil(t, cmd) // Should be tea.Quit
 }
 
@@ -102,9 +102,9 @@ func TestRepoPickerFilter_EnterSelectsFromFiltered(t *testing.T) {
 	m := newTestRepoPicker([]string{"alpha", "beta", "gamma"})
 
 	// Type "be" to filter to beta
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m2, _ := m.Update(keyPress('b'))
 	m = m2.(RepoPickerModel)
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m2, _ = m.Update(keyPress('e'))
 	m = m2.(RepoPickerModel)
 
 	eff := m.effectiveRepos()
@@ -112,7 +112,7 @@ func TestRepoPickerFilter_EnterSelectsFromFiltered(t *testing.T) {
 	assert.Equal(t, "beta", eff[0])
 
 	// Enter should select beta
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2, _ = m.Update(specialKey(tea.KeyEnter))
 	m = m2.(RepoPickerModel)
 	assert.Equal(t, "beta", m.SelectedRepo())
 }
@@ -122,7 +122,7 @@ func TestRepoPickerFilter_CaseInsensitive(t *testing.T) {
 
 	// Type "beta" in lowercase — should match "BETA"
 	for _, r := range "beta" {
-		m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m2, _ := m.Update(keyPress(r))
 		m = m2.(RepoPickerModel)
 	}
 
@@ -136,14 +136,14 @@ func TestRepoPickerFilter_NoMatchesShowsMessage(t *testing.T) {
 
 	// Type "xyz" — no matches
 	for _, r := range "xyz" {
-		m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m2, _ := m.Update(keyPress(r))
 		m = m2.(RepoPickerModel)
 	}
 
 	eff := m.effectiveRepos()
 	assert.Len(t, eff, 0)
 
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "No matches")
 }
 
@@ -152,14 +152,14 @@ func TestRepoPickerFilter_EscAfterNoMatchesRestoresSelection(t *testing.T) {
 
 	// Type "xyz" — no matches, selectedIdx becomes -1
 	for _, r := range "xyz" {
-		m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m2, _ := m.Update(keyPress(r))
 		m = m2.(RepoPickerModel)
 	}
 	require.Equal(t, -1, m.selectedIdx)
 	require.Len(t, m.effectiveRepos(), 0)
 
 	// Esc clears filter — selection should be valid (not -1)
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m2, cmd := m.Update(specialKey(tea.KeyEscape))
 	m = m2.(RepoPickerModel)
 	assert.Nil(t, cmd) // Should not quit
 	assert.Equal(t, "", m.filterText)
@@ -167,7 +167,7 @@ func TestRepoPickerFilter_EscAfterNoMatchesRestoresSelection(t *testing.T) {
 	assert.GreaterOrEqual(t, m.selectedIdx, 0)
 
 	// Enter should now select a repo
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2, _ = m.Update(specialKey(tea.KeyEnter))
 	m = m2.(RepoPickerModel)
 	assert.NotEmpty(t, m.SelectedRepo())
 }
@@ -176,12 +176,12 @@ func TestRepoPickerFilter_QFilterCharWhenActive(t *testing.T) {
 	m := newTestRepoPicker([]string{"query-service", "beta"})
 
 	// Start filter with 'b'
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m2, _ := m.Update(keyPress('b'))
 	m = m2.(RepoPickerModel)
 	require.Equal(t, "b", m.filterText)
 
 	// Now 'q' should be appended to filter, not quit
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m2, cmd := m.Update(keyPress('q'))
 	m = m2.(RepoPickerModel)
 	assert.Equal(t, "bq", m.filterText)
 	assert.Nil(t, cmd) // Should NOT quit
@@ -193,7 +193,7 @@ func TestRepoPickerURLInput_AEntersURLMode(t *testing.T) {
 	m := newTestRepoPicker([]string{"foo", "bar"})
 
 	// Press 'a' with no filter — enters URL input mode
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m2, cmd := m.Update(keyPress('a'))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeURLInput, m.mode)
@@ -205,12 +205,12 @@ func TestRepoPickerURLInput_AIsFilterCharWhenFilterActive(t *testing.T) {
 	m := newTestRepoPicker([]string{"alpha", "beta"})
 
 	// Start filter with 'b'
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	m2, _ := m.Update(keyPress('b'))
 	m = m2.(RepoPickerModel)
 	require.Equal(t, "b", m.filterText)
 
 	// Now 'a' should be appended to filter, not enter URL mode
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m2, _ = m.Update(keyPress('a'))
 	m = m2.(RepoPickerModel)
 	assert.Equal(t, pickerModeList, m.mode)
 	assert.Equal(t, "ba", m.filterText)
@@ -222,7 +222,7 @@ func TestRepoPickerURLInput_CharacterAccumulation(t *testing.T) {
 
 	// Type characters
 	for _, r := range "https://github.com/user/repo" {
-		m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m2, _ := m.Update(keyPress(r))
 		m = m2.(RepoPickerModel)
 	}
 
@@ -233,7 +233,7 @@ func TestRepoPickerURLInput_PasteInsertsMultipleRunes(t *testing.T) {
 	m := newTestRepoPicker([]string{"foo"})
 	m.mode = pickerModeURLInput
 
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://github.com/user/repo")})
+	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyExtended, Text: "https://github.com/user/repo"})
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, "https://github.com/user/repo", m.urlInput)
@@ -243,19 +243,19 @@ func TestRepoPickerURLInput_ReadlineLineStartAndEnd(t *testing.T) {
 	m := newTestRepoPicker([]string{"foo"})
 	m.mode = pickerModeURLInput
 
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello world")})
+	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyExtended, Text: "hello world"})
 	m = m2.(RepoPickerModel)
 
 	// Ctrl+A moves to start, so X is inserted at the beginning.
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	m2, _ = m.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	m = m2.(RepoPickerModel)
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	m2, _ = m.Update(keyPress('X'))
 	m = m2.(RepoPickerModel)
 
 	// Ctrl+E moves to end, so Y is inserted at the end.
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	m2, _ = m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
 	m = m2.(RepoPickerModel)
-	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	m2, _ = m.Update(keyPress('Y'))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, "Xhello worldY", m.urlInput)
@@ -266,7 +266,7 @@ func TestRepoPickerURLInput_BackspaceRemovesChar(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = "https"
 
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m2, _ := m.Update(specialKey(tea.KeyBackspace))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, "http", m.urlInput)
@@ -277,7 +277,7 @@ func TestRepoPickerURLInput_BackspaceOnEmptyIsNoop(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = ""
 
-	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m2, _ := m.Update(specialKey(tea.KeyBackspace))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, "", m.urlInput)
@@ -289,7 +289,7 @@ func TestRepoPickerURLInput_EscReturnsToList(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = "https://example.com"
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m2, cmd := m.Update(specialKey(tea.KeyEscape))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeList, m.mode)
@@ -303,7 +303,7 @@ func TestRepoPickerURLInput_EnterWithEmptyURLDoesNothing(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = ""
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2, cmd := m.Update(specialKey(tea.KeyEnter))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeURLInput, m.mode)
@@ -315,7 +315,7 @@ func TestRepoPickerURLInput_EnterWithWhitespaceOnlyDoesNothing(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = "   "
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2, cmd := m.Update(specialKey(tea.KeyEnter))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeURLInput, m.mode)
@@ -327,7 +327,7 @@ func TestRepoPickerURLInput_EnterWithURLStartsCloning(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = "https://github.com/user/repo"
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2, cmd := m.Update(specialKey(tea.KeyEnter))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeCloning, m.mode)
@@ -341,7 +341,7 @@ func TestRepoPickerURLInput_CtrlCQuits(t *testing.T) {
 	m := newTestRepoPicker(nil)
 	m.mode = pickerModeURLInput
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	assert.NotNil(t, cmd) // Should be tea.Quit
 }
 
@@ -387,7 +387,7 @@ func TestRepoPickerCloning_CtrlCQuits(t *testing.T) {
 	m := newTestRepoPicker(nil)
 	m.mode = pickerModeCloning
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	assert.NotNil(t, cmd) // Should be tea.Quit
 }
 
@@ -397,7 +397,7 @@ func TestRepoPickerCloning_OtherKeysIgnored(t *testing.T) {
 	m.cloneRepoName = "https://example.com/repo"
 
 	// Regular keys are ignored during cloning
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m2, cmd := m.Update(keyPress('x'))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeCloning, m.mode)
@@ -476,7 +476,7 @@ func TestRepoPickerView_EmptyStateShowsAddHint(t *testing.T) {
 	m := newTestRepoPicker(nil)
 	m.wtRoot = "/tmp/wt"
 
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "[a] to add a repository")
 	assert.NotContains(t, view, "wt init")
 }
@@ -484,7 +484,7 @@ func TestRepoPickerView_EmptyStateShowsAddHint(t *testing.T) {
 func TestRepoPickerView_NormalStateFooterShowsAddRepo(t *testing.T) {
 	m := newTestRepoPicker([]string{"foo", "bar"})
 
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "[a] add repo")
 }
 
@@ -493,7 +493,7 @@ func TestRepoPickerView_URLInputMode(t *testing.T) {
 	m.mode = pickerModeURLInput
 	m.urlInput = "https://github.com/test"
 
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "Add repository")
 	assert.Contains(t, view, "Enter a git URL")
 	assert.Contains(t, view, "https://github.com/test")
@@ -507,7 +507,7 @@ func TestRepoPickerView_URLInputModeWithError(t *testing.T) {
 	m.urlInput = "https://bad.url"
 	m.cloneErr = fmt.Errorf("clone failed")
 
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "clone failed")
 	assert.Contains(t, view, "https://bad.url")
 }
@@ -517,7 +517,7 @@ func TestRepoPickerView_CloningMode(t *testing.T) {
 	m.mode = pickerModeCloning
 	m.cloneRepoName = "https://github.com/user/repo"
 
-	view := m.View()
+	view := m.View().Content
 	assert.Contains(t, view, "Cloning")
 	assert.Contains(t, view, "https://github.com/user/repo")
 	assert.Contains(t, view, "This may take a moment")
@@ -527,7 +527,7 @@ func TestRepoPickerURLInput_AFromEmptyRepoList(t *testing.T) {
 	// When there are zero repos, 'a' should still enter URL mode
 	m := newTestRepoPicker(nil)
 
-	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m2, cmd := m.Update(keyPress('a'))
 	m = m2.(RepoPickerModel)
 
 	assert.Equal(t, pickerModeURLInput, m.mode)
@@ -586,7 +586,7 @@ func TestRepoPickerCloning_CtrlCCancelsCloneContext(t *testing.T) {
 	cloneCtx, cloneCancel := context.WithCancel(ctx)
 	m.cloneCancel = cloneCancel
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	assert.NotNil(t, cmd) // Should be tea.Quit
 
 	// The clone context should be cancelled

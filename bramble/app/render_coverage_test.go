@@ -123,7 +123,7 @@ func TestRenderCoverage_FullSessionFromFixture(t *testing.T) {
 	model := NewOutputModel(info, lines)
 	model.SetSize(120, 40)
 
-	view := model.View()
+	view := model.View().Content
 	assert.NotEmpty(t, view)
 	assert.Contains(t, view, "test-coverage")
 	assert.Contains(t, view, "Fix the authentication bug")

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
@@ -84,8 +84,7 @@ func TestHelpOverlayFocusRestoration(t *testing.T) {
 	m.focus = FocusHelp
 
 	// Close help
-	msg := tea.KeyMsg{Type: tea.KeyEsc}
-	newModel, _ := m.handleHelpOverlay(msg)
+	newModel, _ := m.handleHelpOverlay(specialKey(tea.KeyEsc))
 	m2 := newModel.(Model)
 
 	if m2.focus != FocusOutput {
@@ -103,8 +102,7 @@ func TestHelpOverlayKeyHandling(t *testing.T) {
 	m.helpOverlay.previousFocus = FocusOutput
 
 	// Test '?' closes overlay
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}}
-	newModel, _ := m.handleHelpOverlay(msg)
+	newModel, _ := m.handleHelpOverlay(keyPress('?'))
 	m2 := newModel.(Model)
 	if m2.focus != FocusOutput {
 		t.Error("'?' should close overlay")
@@ -112,8 +110,7 @@ func TestHelpOverlayKeyHandling(t *testing.T) {
 
 	// Test 'Esc' closes overlay
 	m.focus = FocusHelp
-	msg2 := tea.KeyMsg{Type: tea.KeyEsc}
-	newModel2, _ := m.handleHelpOverlay(msg2)
+	newModel2, _ := m.handleHelpOverlay(specialKey(tea.KeyEsc))
 	m3 := newModel2.(Model)
 	if m3.focus != FocusOutput {
 		t.Error("'Esc' should close overlay")
@@ -122,15 +119,13 @@ func TestHelpOverlayKeyHandling(t *testing.T) {
 	// Test scrolling
 	m.focus = FocusHelp
 	m.helpOverlay.scrollOffset = 5
-	msgUp := tea.KeyMsg{Type: tea.KeyUp}
-	newModel3, _ := m.handleHelpOverlay(msgUp)
+	newModel3, _ := m.handleHelpOverlay(specialKey(tea.KeyUp))
 	m4 := newModel3.(Model)
 	if m4.helpOverlay.scrollOffset != 4 {
 		t.Errorf("Up should scroll up, got offset %d", m4.helpOverlay.scrollOffset)
 	}
 
-	msgDown := tea.KeyMsg{Type: tea.KeyDown}
-	newModel4, _ := m4.handleHelpOverlay(msgDown)
+	newModel4, _ := m4.handleHelpOverlay(specialKey(tea.KeyDown))
 	m5 := newModel4.(Model)
 	if m5.helpOverlay.scrollOffset != 5 {
 		t.Errorf("Down should scroll down, got offset %d", m5.helpOverlay.scrollOffset)

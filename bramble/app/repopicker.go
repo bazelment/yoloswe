@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -64,12 +64,21 @@ func newRepoPickerURLInput(styles *Styles) textinput.Model {
 	ti.Prompt = "> "
 	ti.Placeholder = "https://github.com/user/repo"
 	ti.CharLimit = 0
-	ti.PromptStyle = lipgloss.NewStyle()
-	ti.TextStyle = lipgloss.NewStyle()
-	ti.Cursor.Style = lipgloss.NewStyle()
-	if styles != nil {
-		ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(styles.Palette.Dim))
+	s := textinput.Styles{
+		Focused: textinput.StyleState{
+			Prompt: lipgloss.NewStyle(),
+			Text:   lipgloss.NewStyle(),
+		},
+		Blurred: textinput.StyleState{
+			Prompt: lipgloss.NewStyle(),
+			Text:   lipgloss.NewStyle(),
+		},
 	}
+	if styles != nil {
+		s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(styles.Palette.Dim))
+		s.Blurred.Placeholder = s.Focused.Placeholder
+	}
+	ti.SetStyles(s)
 	ti.Blur()
 	return ti
 }
@@ -142,7 +151,7 @@ func (m RepoPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.ensureURLInputReady()
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -189,7 +198,7 @@ func (m RepoPickerModel) updateURLInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.ensureURLInputReady()
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			if m.cloneCancel != nil {
 				m.cloneCancel()
@@ -240,7 +249,7 @@ func (m RepoPickerModel) updateCloning(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m RepoPickerModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.ensureURLInputReady()
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -360,9 +369,9 @@ func (m RepoPickerModel) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the repo picker.
-func (m RepoPickerModel) View() string {
+func (m RepoPickerModel) View() tea.View {
 	if m.width == 0 || m.height == 0 {
-		return "Loading..."
+		return tea.NewView("Loading...")
 	}
 
 	// Build the picker box
@@ -392,11 +401,13 @@ func (m RepoPickerModel) View() string {
 	box := m.styles.ModalBox.Width(boxWidth).Render(content.String())
 
 	// Center the box
-	return lipgloss.Place(
+	v := tea.NewView(lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		box,
-	)
+	))
+	v.AltScreen = true
+	return v
 }
 
 func (m RepoPickerModel) viewURLInput(content *strings.Builder, boxWidth int) {
@@ -457,7 +468,7 @@ func (m *RepoPickerModel) resizeURLInputField() {
 	if inputWidth < 12 {
 		inputWidth = 12
 	}
-	m.urlInputField.Width = inputWidth
+	m.urlInputField.SetWidth(inputWidth)
 }
 
 func (m RepoPickerModel) urlDialogInputWidth() int {

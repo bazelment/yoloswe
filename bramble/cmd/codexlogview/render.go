@@ -37,5 +37,5 @@ func renderLog(path string, cfg cliConfig) (string, error) {
 		model.EnableMarkdown()
 	}
 	model.SetSize(cfg.width, cfg.height)
-	return model.View(), nil
+	return model.View().Content, nil
 }

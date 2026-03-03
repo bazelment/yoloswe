@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -190,7 +190,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Create and run TUI
 	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry, sharedManagerConfig)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model)
 
 	finalModel, err := p.Run()
 	if err != nil {
@@ -215,7 +215,7 @@ func runRepoPicker(ctx context.Context, wtRoot string) (string, error) {
 		palette = p
 	}
 	picker := app.NewRepoPickerModel(ctx, wtRoot, app.NewStyles(palette))
-	p := tea.NewProgram(picker, tea.WithAltScreen())
+	p := tea.NewProgram(picker)
 
 	finalModel, err := p.Run()
 	if err != nil {

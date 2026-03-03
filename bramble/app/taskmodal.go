@@ -2,9 +2,10 @@ package app
 
 import (
 	"context"
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 )
@@ -59,7 +60,7 @@ func (m *TaskModal) SetSize(w, h int) {
 }
 
 // SetPlaceholderColor updates the placeholder color on both text areas.
-func (m *TaskModal) SetPlaceholderColor(c lipgloss.Color) {
+func (m *TaskModal) SetPlaceholderColor(c color.Color) {
 	m.textArea.SetPlaceholderColor(c)
 	m.adjustTextArea.SetPlaceholderColor(c)
 }
