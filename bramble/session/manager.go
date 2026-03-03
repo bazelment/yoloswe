@@ -28,6 +28,9 @@ type sessionRunner interface {
 	Start(ctx context.Context) error
 	RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error)
 	Stop() error
+	// CLISessionID returns the CLI session ID (from system{init}) after Start().
+	// Returns "" if the runner doesn't support resume (e.g. tmux, provider).
+	CLISessionID() string
 }
 
 // plannerRunner adapts PlannerWrapper to the sessionRunner interface.
@@ -41,6 +44,7 @@ type plannerRunner struct {
 
 func (r *plannerRunner) Start(ctx context.Context) error { return r.pw.Start(ctx) }
 func (r *plannerRunner) Stop() error                     { return r.pw.Stop() }
+func (r *plannerRunner) CLISessionID() string            { return r.pw.CLISessionID() }
 
 func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
 	if !r.firstRun {
@@ -59,6 +63,7 @@ type builderRunner struct {
 
 func (r *builderRunner) Start(ctx context.Context) error { return r.builder.Start(ctx) }
 func (r *builderRunner) Stop() error                     { return r.builder.Stop() }
+func (r *builderRunner) CLISessionID() string            { return r.builder.CLISessionID() }
 
 func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
 	return r.builder.RunTurn(ctx, message)
@@ -346,6 +351,8 @@ func (r *providerRunner) emitFallbackFromResult(turnObsSeq uint64, result *agent
 	}
 }
 
+func (r *providerRunner) CLISessionID() string { return "" }
+
 func (r *providerRunner) Stop() error {
 	// Stop event bridge
 	if r.eventBridgeDone != nil {
@@ -573,6 +580,123 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, mo
 	return sessionID, nil
 }
 
+// ResumeSession resumes a stopped/completed/failed session using --resume.
+// It reuses the same bramble session ID and passes the CLI session ID to
+// the runner so the Claude conversation continues where it left off.
+// The prompt is sent as the first message in the resumed conversation.
+// If the session isn't in memory (e.g. a historical session), it is
+// re-hydrated from the stored data.
+func (m *Manager) ResumeSession(id SessionID, prompt string) error {
+	m.mu.Lock()
+	session, ok := m.sessions[id]
+	m.mu.Unlock()
+
+	if !ok {
+		// Try to re-hydrate from stored history
+		session, ok = m.rehydrateSession(id)
+		if !ok {
+			return fmt.Errorf("session %s not found", id)
+		}
+	}
+
+	session.mu.RLock()
+	status := session.Status
+	cliSessionID := session.CLISessionID
+	session.mu.RUnlock()
+
+	if cliSessionID == "" {
+		return fmt.Errorf("session has no CLI session ID — cannot resume")
+	}
+
+	switch status {
+	case StatusCompleted, StatusFailed, StatusStopped:
+		// OK to resume
+	default:
+		return fmt.Errorf("session is %s — can only resume completed/failed/stopped sessions", status)
+	}
+
+	// Reset session state for the new run
+	ctx, cancel := context.WithCancel(m.ctx)
+	session.mu.Lock()
+	session.Status = StatusPending
+	session.Error = nil
+	session.CompletedAt = nil
+	session.ctx = ctx
+	session.cancel = cancel
+	session.mu.Unlock()
+
+	// Re-initialize the session model and output buffer
+	m.mu.Lock()
+	m.models[id] = sessionmodel.NewSessionModel(1000)
+	m.mu.Unlock()
+
+	m.outputsMu.Lock()
+	m.outputs[id] = make([]OutputLine, 0, 1000)
+	m.outputsMu.Unlock()
+
+	m.addOutput(id, OutputLine{
+		Timestamp: time.Now(),
+		Type:      OutputTypeStatus,
+		Content:   fmt.Sprintf("Resuming session (CLI session: %s)...", cliSessionID[:12]),
+	})
+
+	m.wg.Add(1)
+	go m.runSession(session, prompt)
+
+	return nil
+}
+
+// rehydrateSession loads a session from the store and adds it back to the
+// in-memory sessions map. Returns the session and true if found.
+func (m *Manager) rehydrateSession(id SessionID) (*Session, bool) {
+	if m.config.Store == nil || m.config.RepoName == "" {
+		return nil, false
+	}
+
+	// We need the worktree name to load from the store.
+	// Try all worktrees to find the session.
+	worktrees, err := m.config.Store.ListWorktrees(m.config.RepoName)
+	if err != nil {
+		return nil, false
+	}
+
+	for _, wt := range worktrees {
+		stored, err := m.config.Store.LoadSession(m.config.RepoName, wt, id)
+		if err != nil {
+			continue
+		}
+
+		// Re-create the live session from stored data
+		ctx, cancel := context.WithCancel(m.ctx)
+		session := &Session{
+			ID:           stored.ID,
+			Type:         stored.Type,
+			Status:       stored.Status,
+			WorktreePath: stored.WorktreePath,
+			WorktreeName: stored.WorktreeName,
+			Prompt:       stored.Prompt,
+			Title:        stored.Title,
+			Model:        stored.Model,
+			RepoName:     stored.RepoName,
+			CLISessionID: stored.CLISessionID,
+			CreatedAt:    stored.CreatedAt,
+			StartedAt:    stored.StartedAt,
+			CompletedAt:  stored.CompletedAt,
+			Progress:     &SessionProgress{LastActivity: time.Now()},
+			ctx:          ctx,
+			cancel:       cancel,
+		}
+
+		m.mu.Lock()
+		m.sessions[id] = session
+		m.mu.Unlock()
+
+		return session, true
+	}
+
+	return nil, false
+}
+
 // StartPlannerSession creates and starts a new planner session.
 func (m *Manager) StartPlannerSession(worktreePath, prompt, model string) (SessionID, error) {
 	return m.StartSession(SessionTypePlanner, worktreePath, prompt, model)
@@ -734,14 +858,15 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		}
 
 		runner = &tmuxRunner{
-			windowName:     tmuxName,
-			workDir:        session.WorktreePath,
-			prompt:         prompt,
-			model:          agentModel.ID,
-			provider:       agentModel.Provider,
-			permissionMode: permissionMode,
-			yoloMode:       m.config.YoloMode,
-			killOnStop:     false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
+			windowName:      tmuxName,
+			workDir:         session.WorktreePath,
+			prompt:          prompt,
+			model:           agentModel.ID,
+			provider:        agentModel.Provider,
+			permissionMode:  permissionMode,
+			resumeSessionID: session.CLISessionID,
+			yoloMode:        m.config.YoloMode,
+			killOnStop:      false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}
 		// No event handler for tmux mode - all output is in the tmux window
 	} else {
@@ -828,18 +953,20 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			switch session.Type {
 			case SessionTypePlanner:
 				pw := planner.NewPlannerWrapper(planner.Config{
-					Model:        session.Model,
-					WorkDir:      session.WorktreePath,
-					Simple:       true,
-					BuildMode:    planner.BuildModeReturn,
-					Output:       io.Discard,
-					EventHandler: eventHandler,
+					Model:           session.Model,
+					WorkDir:         session.WorktreePath,
+					Simple:          true,
+					BuildMode:       planner.BuildModeReturn,
+					Output:          io.Discard,
+					EventHandler:    eventHandler,
+					ResumeSessionID: session.CLISessionID,
 				})
 				runner = &plannerRunner{pw: pw}
 			case SessionTypeBuilder:
 				builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
-					Model:   session.Model,
-					WorkDir: session.WorktreePath,
+					Model:           session.Model,
+					WorkDir:         session.WorktreePath,
+					ResumeSessionID: session.CLISessionID,
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
 			}
@@ -858,6 +985,14 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		})
 		m.persistSession(session)
 		return
+	}
+
+	// Capture the CLI session ID right after Start() — the system{init}
+	// message has already been processed so the ID is available immediately.
+	if cliID := runner.CLISessionID(); cliID != "" {
+		session.mu.Lock()
+		session.CLISessionID = cliID
+		session.mu.Unlock()
 	}
 
 	defer func() {

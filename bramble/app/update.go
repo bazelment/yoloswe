@@ -794,20 +794,33 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "f":
-		// Follow-up on idle session (TUI mode only)
+		// Follow-up on idle session, or resume a terminal session (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
 			toastCmd := m.addToast("Follow-ups must be done in the tmux window directly", ToastInfo)
 			return m, toastCmd
 		}
-		if sess := m.selectedSession(); sess != nil && sess.Status == session.StatusIdle {
-			return m.promptInput("Follow-up: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
-				return func() tea.Msg {
-					if err := m.sessionManager.SendFollowUp(sess.ID, message); err != nil {
-						return errMsg{err}
+		if sess := m.selectedSession(); sess != nil {
+			if sess.Status == session.StatusIdle {
+				return m.promptInput("Follow-up: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
+					return func() tea.Msg {
+						if err := m.sessionManager.SendFollowUp(sess.ID, message); err != nil {
+							return errMsg{err}
+						}
+						return sessionsUpdated{}
 					}
-					return sessionsUpdated{}
-				}
-			}, "Type your follow-up message...")
+				}, "Type your follow-up message...")
+			}
+			if sess.CLISessionID != "" && (sess.Status == session.StatusCompleted || sess.Status == session.StatusFailed || sess.Status == session.StatusStopped) {
+				sessID := sess.ID
+				return m.promptInput("Resume: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
+					return func() tea.Msg {
+						if err := m.sessionManager.ResumeSession(sessID, message); err != nil {
+							return errMsg{err}
+						}
+						return sessionsUpdated{}
+					}
+				}, "Type a message to resume the session...")
+			}
 		}
 		toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
 		return m, toastCmd
@@ -1918,18 +1931,23 @@ func (m Model) handleCommandCenter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.switchToCommandCenterSession()
 
 	case "f":
-		// Follow-up on selected idle session (TUI mode only)
+		// Follow-up on selected idle session, or resume terminal session (TUI mode only)
 		if m.sessionManager.IsInTmuxMode() {
 			toastCmd := m.addToast("Follow-ups must be done in the tmux window directly", ToastInfo)
 			return m, toastCmd
 		}
 		sess := m.commandCenter.SelectedSession()
-		if sess == nil || sess.Status != session.StatusIdle {
-			toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+		if sess == nil {
+			toastCmd := m.addToast("No session selected", ToastInfo)
 			return m, toastCmd
 		}
 		sessID := sess.ID
 		sessRepoName := sess.RepoName
+		isResumable := sess.CLISessionID != "" && (sess.Status == session.StatusCompleted || sess.Status == session.StatusFailed || sess.Status == session.StatusStopped)
+		if sess.Status != session.StatusIdle && !isResumable {
+			toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+			return m, toastCmd
+		}
 		m.commandCenter.Hide()
 		m.focus = FocusOutput
 		// Switch repo if needed
@@ -1938,6 +1956,16 @@ func (m Model) handleCommandCenter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.saveActiveContext()
 				m.loadContext(sessRepoName)
 			}
+		}
+		if isResumable {
+			return m.promptInput("Resume: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
+				return func() tea.Msg {
+					if err := m.sessionManager.ResumeSession(sessID, message); err != nil {
+						return errMsg{err}
+					}
+					return sessionsUpdated{}
+				}
+			}, "Type a message to resume the session...")
 		}
 		return m.promptInput("Follow-up: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
 			return func() tea.Msg {

@@ -145,6 +145,19 @@ func (h *builderInteractiveHandler) HandleExitPlanMode(ctx context.Context, plan
 	return "Approved. Please proceed with implementation.", nil
 }
 
+// CLISessionID returns the CLI session ID from the underlying claude session.
+// Available after Start() completes.
+func (b *BuilderSession) CLISessionID() string {
+	if b.session == nil {
+		return ""
+	}
+	info := b.session.Info()
+	if info == nil {
+		return ""
+	}
+	return info.SessionID
+}
+
 // Stop gracefully shuts down the session. Safe to call before Start.
 func (b *BuilderSession) Stop() error {
 	if b.session == nil {

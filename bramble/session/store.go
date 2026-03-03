@@ -33,6 +33,7 @@ type StoredSession struct {
 	StartedAt    *time.Time      `json:"started_at,omitempty"`
 	CompletedAt  *time.Time      `json:"completed_at,omitempty"`
 	ErrorMsg     string          `json:"error_msg,omitempty"`
+	CLISessionID string          `json:"cli_session_id,omitempty"`
 	Progress     *StoredProgress `json:"progress,omitempty"`
 	Output       []OutputLine    `json:"output,omitempty"`
 }
@@ -57,6 +58,7 @@ type SessionMeta struct {
 	Prompt       string        `json:"prompt"`
 	Title        string        `json:"title,omitempty"`
 	Model        string        `json:"model,omitempty"`
+	CLISessionID string        `json:"cli_session_id,omitempty"`
 }
 
 // DefaultStoreDir returns the default store directory (~/.bramble/sessions).
@@ -241,6 +243,7 @@ func (s *Store) ListSessions(repoName, worktreeName string) ([]*SessionMeta, err
 			Prompt:       stored.Prompt,
 			Title:        stored.Title,
 			Model:        stored.Model,
+			CLISessionID: stored.CLISessionID,
 			CreatedAt:    stored.CreatedAt,
 			CompletedAt:  stored.CompletedAt,
 		})
@@ -291,6 +294,7 @@ func (s *Store) ListAllSessions() ([]*SessionMeta, error) {
 			Prompt:       stored.Prompt,
 			Title:        stored.Title,
 			Model:        stored.Model,
+			CLISessionID: stored.CLISessionID,
 			CreatedAt:    stored.CreatedAt,
 			CompletedAt:  stored.CompletedAt,
 		})
@@ -379,6 +383,7 @@ func SessionToStored(session *Session, repoName string, output []OutputLine) *St
 		Prompt:       session.Prompt,
 		Title:        session.Title,
 		Model:        session.Model,
+		CLISessionID: session.CLISessionID,
 		CreatedAt:    session.CreatedAt,
 		StartedAt:    session.StartedAt,
 		CompletedAt:  session.CompletedAt,
@@ -417,6 +422,7 @@ func StoredToSessionInfo(stored *StoredSession) SessionInfo {
 		Prompt:       stored.Prompt,
 		Title:        stored.Title,
 		Model:        stored.Model,
+		CLISessionID: stored.CLISessionID,
 		CreatedAt:    stored.CreatedAt,
 		StartedAt:    stored.StartedAt,
 		CompletedAt:  stored.CompletedAt,

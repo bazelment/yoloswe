@@ -166,6 +166,7 @@ type Config struct {
 	BuildMode           BuildMode
 	ExternalBuilderPath string
 	BuildModel          string
+	ResumeSessionID     string
 	Verbose             bool
 	Simple              bool
 }
@@ -322,6 +323,10 @@ func (p *PlannerWrapper) Start(ctx context.Context) error {
 		opts = append(opts, claude.WithSystemPrompt(p.config.SystemPrompt))
 	}
 
+	if p.config.ResumeSessionID != "" {
+		opts = append(opts, claude.WithResume(p.config.ResumeSessionID))
+	}
+
 	p.session = claude.NewSession(opts...)
 
 	// Print CLI flags that will be used
@@ -335,6 +340,19 @@ func (p *PlannerWrapper) Start(ctx context.Context) error {
 
 	// Switch to plan mode via control message (per experiments/plan_mode_analysis/ANALYSIS.md)
 	return p.session.SetPermissionMode(ctx, claude.PermissionModePlan)
+}
+
+// CLISessionID returns the CLI session ID from the underlying claude session.
+// Available after Start() completes.
+func (p *PlannerWrapper) CLISessionID() string {
+	if p.session == nil {
+		return ""
+	}
+	info := p.session.Info()
+	if info == nil {
+		return ""
+	}
+	return info.SessionID
 }
 
 // Stop gracefully shuts down the session.

@@ -628,6 +628,9 @@ func (m Model) renderStatusBar() string {
 		if sess != nil && sess.Status == session.StatusIdle {
 			hints = append(hints, "[f]ollow-up")
 		}
+		if sess != nil && sess.CLISessionID != "" && (sess.Status == session.StatusCompleted || sess.Status == session.StatusFailed || sess.Status == session.StatusStopped) {
+			hints = append(hints, "[f]resume")
+		}
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {
 			hints = append(hints, "[s]top")
 		}

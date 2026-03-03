@@ -12,14 +12,15 @@ import (
 
 // tmuxRunner implements sessionRunner by creating a tmux window that runs the agent CLI.
 type tmuxRunner struct {
-	windowName     string // tmux window name (e.g., "happy-tiger")
-	workDir        string // working directory for the window
-	prompt         string // initial prompt
-	model          string // model ID (e.g. "opus", "gpt-5.3-codex")
-	provider       string // binary name: "claude" or "codex"
-	permissionMode string // permission mode: "" (default) or "plan" (claude only)
-	yoloMode       bool   // skip all permission prompts
-	killOnStop     bool   // kill tmux window on Stop()
+	windowName      string // tmux window name (e.g., "happy-tiger")
+	workDir         string // working directory for the window
+	prompt          string // initial prompt
+	model           string // model ID (e.g. "opus", "gpt-5.3-codex")
+	provider        string // binary name: "claude" or "codex"
+	permissionMode  string // permission mode: "" (default) or "plan" (claude only)
+	resumeSessionID string // CLI session ID to resume (empty for new sessions)
+	yoloMode        bool   // skip all permission prompts
+	killOnStop      bool   // kill tmux window on Stop()
 }
 
 // Start creates a new tmux window in the current session and launches the claude CLI in it.
@@ -74,6 +75,8 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 
 	return nil
 }
+
+func (r *tmuxRunner) CLISessionID() string { return "" }
 
 // RunTurn is not supported for tmux windows - all interaction happens in the tmux window directly.
 // This returns nil to satisfy the interface, but should not be called in practice.
@@ -147,10 +150,15 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.permissionMode == "plan" {
 			args = append(args, "--permission-mode", "plan")
 		}
+		if r.resumeSessionID != "" {
+			args = append(args, "--resume", r.resumeSessionID)
+		}
 	}
 
-	// Add the prompt last
-	args = append(args, r.prompt)
+	// Add the prompt last (skip if resuming — the conversation continues automatically)
+	if r.resumeSessionID == "" {
+		args = append(args, r.prompt)
+	}
 	return binary, args
 }
 

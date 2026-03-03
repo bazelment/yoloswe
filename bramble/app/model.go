@@ -302,10 +302,15 @@ func (m *Model) selectedSession() *session.SessionInfo {
 		return nil
 	}
 	info, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID)
-	if !ok {
-		return nil
+	if ok {
+		return &info
 	}
-	return &info
+	// Fall back to history data if viewing a persisted session
+	if m.viewingHistoryData != nil {
+		si := session.StoredToSessionInfo(m.viewingHistoryData)
+		return &si
+	}
+	return nil
 }
 
 // aggregateCost returns the sum of TotalCostUSD across all sessions.
