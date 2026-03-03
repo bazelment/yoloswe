@@ -407,7 +407,7 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 		}
 	}
 
-	content := strings.Join([]string{line1, line2, line3, outputLines[0], outputLines[1], outputLines[2]}, "\n")
+	content := strings.Join(append([]string{line1, line2, line3}, outputLines...), "\n")
 
 	// Card border
 	borderColor := cardBorderColor(sess, s.Palette)
