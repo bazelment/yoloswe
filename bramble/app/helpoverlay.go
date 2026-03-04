@@ -192,8 +192,7 @@ func buildHelpSections(m *Model) []HelpSection {
 		sess.Bindings = append(sess.Bindings,
 			HelpBinding{"f", "Resume session"},
 		)
-	}
-	if hasSession && sessIdle && !inTmux {
+	} else if hasSession && sessIdle && !inTmux {
 		sess.Bindings = append(sess.Bindings,
 			HelpBinding{"f", "Follow-up on idle session"},
 		)

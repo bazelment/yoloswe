@@ -155,10 +155,10 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 	}
 
-	// Add the prompt last (skip if resuming — the conversation continues automatically)
-	if r.resumeSessionID == "" {
-		args = append(args, r.prompt)
-	}
+	// Add the prompt last. When resuming, Claude CLI supports "--resume <id> <message>"
+	// to resume the conversation and deliver the message in one command. Always pass
+	// the prompt so the user's message is not silently discarded.
+	args = append(args, r.prompt)
 	return binary, args
 }
 
