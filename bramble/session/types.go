@@ -251,6 +251,14 @@ func (s *Session) ToInfo() SessionInfo {
 	return info
 }
 
+// IsResumable reports whether the session can be resumed via --resume.
+// A session is resumable when it has a CLI session ID and is in a terminal
+// state (completed, failed, or stopped) so a new run can continue the
+// Claude conversation where it left off.
+func (s SessionInfo) IsResumable() bool {
+	return s.CLISessionID != "" && (s.Status == StatusCompleted || s.Status == StatusFailed || s.Status == StatusStopped)
+}
+
 // AppendStreamingDelta appends a new streaming delta while removing duplicated
 // overlap between the end of the existing text and the start of the delta.
 // This is used to accumulate streaming text/thinking deltas into a single

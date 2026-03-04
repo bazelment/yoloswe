@@ -634,10 +634,14 @@ func (m *Manager) ResumeSession(id SessionID, prompt string) error {
 	m.outputs[id] = make([]OutputLine, 0, 1000)
 	m.outputsMu.Unlock()
 
+	displayID := cliSessionID
+	if len(displayID) > 12 {
+		displayID = displayID[:12]
+	}
 	m.addOutput(id, OutputLine{
 		Timestamp: time.Now(),
 		Type:      OutputTypeStatus,
-		Content:   fmt.Sprintf("Resuming session (CLI session: %s)...", cliSessionID[:12]),
+		Content:   fmt.Sprintf("Resuming session (CLI session: %s)...", displayID),
 	})
 
 	m.wg.Add(1)
@@ -666,8 +670,10 @@ func (m *Manager) rehydrateSession(id SessionID) (*Session, bool) {
 			continue
 		}
 
-		// Re-create the live session from stored data
-		ctx, cancel := context.WithCancel(m.ctx)
+		// Re-create the live session from stored data.
+		// Do not allocate a context here — the session is in a terminal state
+		// (completed/failed/stopped) and ResumeSession will set ctx/cancel
+		// before running. Allocating one here would leak it immediately.
 		session := &Session{
 			ID:           stored.ID,
 			Type:         stored.Type,
@@ -683,8 +689,6 @@ func (m *Manager) rehydrateSession(id SessionID) (*Session, bool) {
 			StartedAt:    stored.StartedAt,
 			CompletedAt:  stored.CompletedAt,
 			Progress:     &SessionProgress{LastActivity: time.Now()},
-			ctx:          ctx,
-			cancel:       cancel,
 		}
 
 		m.mu.Lock()

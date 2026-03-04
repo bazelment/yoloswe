@@ -810,7 +810,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					}
 				}, "Type your follow-up message...")
 			}
-			if sess.CLISessionID != "" && (sess.Status == session.StatusCompleted || sess.Status == session.StatusFailed || sess.Status == session.StatusStopped) {
+			if sess.IsResumable() {
 				sessID := sess.ID
 				return m.promptInput("Resume: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
 					return func() tea.Msg {
@@ -1943,7 +1943,7 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		sessID := sess.ID
 		sessRepoName := sess.RepoName
-		isResumable := sess.CLISessionID != "" && (sess.Status == session.StatusCompleted || sess.Status == session.StatusFailed || sess.Status == session.StatusStopped)
+		isResumable := sess.IsResumable()
 		if sess.Status != session.StatusIdle && !isResumable {
 			toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
 			return m, toastCmd
