@@ -944,6 +944,9 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 
 			m.updateSessionStatus(session, StatusCompleted)
 
+			// Persist before removing from memory so the completed status is written to disk.
+			m.persistSession(session)
+
 			m.mu.Lock()
 			delete(m.sessions, sessionID)
 			delete(m.models, sessionID)
