@@ -338,8 +338,13 @@ func (p *PlannerWrapper) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Switch to plan mode via control message (per experiments/plan_mode_analysis/ANALYSIS.md)
-	return p.session.SetPermissionMode(ctx, claude.PermissionModePlan)
+	// Switch to plan mode via control message (per experiments/plan_mode_analysis/ANALYSIS.md).
+	// When resuming, the CLI restores the previous conversation state including its permission
+	// mode, so sending another SetPermissionMode is redundant and could disrupt the session.
+	if p.config.ResumeSessionID == "" {
+		return p.session.SetPermissionMode(ctx, claude.PermissionModePlan)
+	}
+	return nil
 }
 
 // CLISessionID returns the CLI session ID from the underlying claude session.
