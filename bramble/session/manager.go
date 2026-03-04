@@ -599,31 +599,42 @@ func (m *Manager) ResumeSession(id SessionID, prompt string) error {
 		}
 	}
 
-	session.mu.RLock()
-	status := session.Status
-	cliSessionID := session.CLISessionID
-	session.mu.RUnlock()
-
-	if cliSessionID == "" {
-		return fmt.Errorf("session has no CLI session ID — cannot resume")
-	}
-
-	switch status {
-	case StatusCompleted, StatusFailed, StatusStopped:
-		// OK to resume
-	default:
-		return fmt.Errorf("session is %s — can only resume completed/failed/stopped sessions", status)
-	}
-
-	// Reset session state for the new run
+	// Combine status read, validation, and state update under a single lock to
+	// prevent TOCTOU races where two concurrent callers both read a terminal
+	// status and both proceed to start a new runner.
 	ctx, cancel := context.WithCancel(m.ctx)
-	session.mu.Lock()
-	session.Status = StatusPending
-	session.Error = nil
-	session.CompletedAt = nil
-	session.ctx = ctx
-	session.cancel = cancel
-	session.mu.Unlock()
+	var (
+		cliSessionID string
+		resumeErr    error
+	)
+	func() {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+
+		cliSessionID = session.CLISessionID
+		if cliSessionID == "" {
+			cancel()
+			resumeErr = fmt.Errorf("session has no CLI session ID — cannot resume")
+			return
+		}
+
+		switch session.Status {
+		case StatusCompleted, StatusFailed, StatusStopped:
+			// OK to resume — reset state while still holding the lock.
+			session.Status = StatusPending
+			session.Error = nil
+			session.CompletedAt = nil
+			session.ctx = ctx
+			session.cancel = cancel
+		default:
+			cancel()
+			resumeErr = fmt.Errorf("session is %s — can only resume completed/failed/stopped sessions", session.Status)
+		}
+	}()
+
+	if resumeErr != nil {
+		return resumeErr
+	}
 
 	// Re-initialize the session model and output buffer
 	m.mu.Lock()

@@ -822,7 +822,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				}, "Type a message to resume the session...")
 			}
 		}
-		toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+		toastCmd := m.addToast("Session not available for follow-up or resume", ToastInfo)
 		return m, toastCmd
 
 	case "a":
@@ -1945,7 +1945,7 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		sessRepoName := sess.RepoName
 		isResumable := sess.IsResumable()
 		if sess.Status != session.StatusIdle && !isResumable {
-			toastCmd := m.addToast("No idle session for follow-up", ToastInfo)
+			toastCmd := m.addToast("Session not available for follow-up or resume", ToastInfo)
 			return m, toastCmd
 		}
 		m.commandCenter.Hide()
