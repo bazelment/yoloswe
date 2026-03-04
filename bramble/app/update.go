@@ -801,9 +801,10 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if sess := m.selectedSession(); sess != nil {
 			if sess.Status == session.StatusIdle {
+				sessID := sess.ID
 				return m.promptInput("Follow-up: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
 					return func() tea.Msg {
-						if err := m.sessionManager.SendFollowUp(sess.ID, message); err != nil {
+						if err := m.sessionManager.SendFollowUp(sessID, message); err != nil {
 							return errMsg{err}
 						}
 						return sessionsUpdated{}
@@ -1957,6 +1958,7 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.loadContext(sessRepoName)
 			}
 		}
+		m.switchViewingSession(sessID)
 		if isResumable {
 			return m.promptInput("Resume: ", func(message string, _ string, _ session.SessionType) tea.Cmd {
 				return func() tea.Msg {
