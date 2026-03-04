@@ -961,20 +961,24 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				}
 				if TmuxWindowPaneDead(windowTarget) {
 					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
-					if gotStatus && exitCode != 0 {
-						// Non-zero exit — mark failed
+					if gotStatus && exitCode == 0 {
+						// Clean exit — mark completed
+						m.updateSessionStatus(session, StatusCompleted)
+					} else {
+						// Non-zero exit or couldn't read status — mark failed
 						m.updateSessionStatus(session, StatusFailed)
 						session.mu.Lock()
-						session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, windowName)
+						if gotStatus {
+							session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, windowName)
+						} else {
+							session.Error = fmt.Errorf("claude process exited with unknown status (window %q still open — check it for error details)", windowName)
+						}
 						session.mu.Unlock()
 						m.addOutput(sessionID, OutputLine{
 							Timestamp: time.Now(),
 							Type:      OutputTypeError,
 							Content:   fmt.Sprintf("Session failed: claude exited in tmux window %q. Switch to that window to see the error.", windowName),
 						})
-					} else {
-						// Clean exit (code 0) or couldn't read status — mark completed
-						m.updateSessionStatus(session, StatusCompleted)
 					}
 
 					m.persistSession(session)
