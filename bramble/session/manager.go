@@ -566,7 +566,18 @@ func (m *Manager) ReconcileTmuxSessions() error {
 			m.outputs[session.ID] = make([]OutputLine, 0, 16)
 			m.outputsMu.Unlock()
 
-			m.updateSessionStatus(session, StatusRunning)
+			// Emit the state-change event without calling updateSessionStatus, which
+			// would overwrite session.StartedAt with time.Now() and lose the
+			// historical start time preserved from the stored session.
+			select {
+			case m.events <- SessionStateChangeEvent{
+				SessionID: session.ID,
+				OldStatus: StatusRunning,
+				NewStatus: StatusRunning,
+			}:
+			default:
+				log.Printf("WARNING: events channel full, dropping state change event for re-adopted session %s", session.ID)
+			}
 
 			// Monitor the window lifecycle
 			if IsInsideTmux() && IsTmuxAvailable() {
