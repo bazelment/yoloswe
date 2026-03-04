@@ -581,9 +581,10 @@ func (m *Manager) ReconcileTmuxSessions() error {
 
 // Close shuts down the manager and all sessions.
 func (m *Manager) Close() {
-	m.cancel()
-
-	// Persist all active tmux sessions so they can be reconciled on restart.
+	// Persist all active tmux sessions BEFORE canceling so that goroutines
+	// (monitorTrackedTmuxWindow, runSession) have not yet transitioned the
+	// status to StatusStopped. ReconcileTmuxSessions only re-adopts sessions
+	// whose persisted status is StatusRunning or StatusPending.
 	if m.config.SessionMode == SessionModeTmux && m.config.Store != nil {
 		m.mu.RLock()
 		sessions := make([]*Session, 0, len(m.sessions))
@@ -595,6 +596,8 @@ func (m *Manager) Close() {
 			m.persistSession(s)
 		}
 	}
+
+	m.cancel()
 
 	// If TmuxExitOnQuit is enabled, kill tmux windows before canceling sessions
 	if m.config.TmuxExitOnQuit && m.config.SessionMode == SessionModeTmux {
@@ -1146,6 +1149,23 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		session.mu.Unlock()
 	}
 
+	// For manager-started tmux sessions, resolve the stable window ID from the
+	// window name so that UI "switch to window" operations use select-window -t
+	// with a stable ID rather than a potentially-renamed name.
+	if m.config.SessionMode == SessionModeTmux {
+		session.mu.RLock()
+		windowName := session.TmuxWindowName
+		hasID := session.TmuxWindowID != ""
+		session.mu.RUnlock()
+		if !hasID && windowName != "" {
+			if id, ok := TmuxWindowIDByName(windowName); ok {
+				session.mu.Lock()
+				session.TmuxWindowID = id
+				session.mu.Unlock()
+			}
+		}
+	}
+
 	defer func() {
 		runner.Stop()
 		if m.config.SessionMode != SessionModeTmux {
@@ -1172,24 +1192,33 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				m.updateSessionStatus(session, StatusStopped)
 				return
 			case <-ticker.C:
-				// Check if tmux window still exists
+				// Check if tmux window still exists. Prefer stable window ID
+				// so renames don't cause false "window gone" completions.
 				session.mu.RLock()
 				tmuxName := session.TmuxWindowName
+				tmuxID := session.TmuxWindowID
 				sessionID := session.ID
 				session.mu.RUnlock()
 
-				if tmuxName == "" {
+				if tmuxName == "" && tmuxID == "" {
 					continue
 				}
 
-				windowExists := TmuxWindowExists(tmuxName)
-				paneDead := windowExists && TmuxWindowPaneDead(tmuxName)
+				// windowTarget is the most stable identifier available for
+				// pane-dead / exit-status queries (list-panes -t <target>).
+				windowTarget := tmuxName
+				if tmuxID != "" {
+					windowTarget = tmuxID
+				}
+
+				windowExists := tmuxWindowAlive(tmuxID, tmuxName)
+				paneDead := windowExists && TmuxWindowPaneDead(windowTarget)
 
 				if paneDead {
 					// The process in the tmux window has exited but the window
 					// remains (due to remain-on-exit). Check exit code to
 					// determine whether it completed successfully or failed.
-					exitCode, gotStatus := TmuxWindowPaneExitStatus(tmuxName)
+					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
 
 					if gotStatus && exitCode == 0 {
 						// Clean exit — session completed successfully

@@ -116,7 +116,7 @@ type Session struct {
 	PlanFilePath   string // Path to plan file (planner sessions only)
 	TmuxWindowName string // tmux window name (empty for TUI mode)
 	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
-	RunnerType     string // "tui" or "tmux"
+	RunnerType     string // "tui", "tmux", or "tmux-tracked"
 	RepoName       string // Repository this session belongs to
 	CLISessionID   string // CLI session ID (from system{init}), used for --resume
 	ID             SessionID
@@ -201,7 +201,7 @@ type SessionInfo struct {
 	PlanFilePath   string
 	TmuxWindowName string // tmux window name (empty for TUI mode)
 	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
-	RunnerType     string // "tui" or "tmux"
+	RunnerType     string // "tui", "tmux", or "tmux-tracked"
 	RepoName       string // Repository this session belongs to
 	CLISessionID   string // CLI session ID, used for --resume
 	ID             SessionID

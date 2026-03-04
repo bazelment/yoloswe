@@ -113,6 +113,41 @@ func parsePaneDeadOutput(output string) bool {
 	return false
 }
 
+// TmuxWindowIDByName looks up the window ID for a window with the given name
+// by running `tmux list-windows -F "#{window_name} #{window_id}"`. It returns
+// the ID and true on success, or empty string and false if the window is not
+// found or tmux is unavailable.
+func TmuxWindowIDByName(name string) (string, bool) {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return "", false
+	}
+
+	cmd := exec.Command("tmux", "list-windows", "-F", "#{window_name} #{window_id}")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Format: "<name> <id>" — split on the LAST space so window names with
+		// spaces are handled correctly.
+		idx := strings.LastIndex(line, " ")
+		if idx < 0 {
+			continue
+		}
+		windowName := line[:idx]
+		windowID := line[idx+1:]
+		if windowName == name {
+			return windowID, true
+		}
+	}
+	return "", false
+}
+
 // KillTmuxWindowByID kills a tmux window by its window ID (e.g., "@1").
 // Window IDs are stable and unique, unlike window names which can be renamed.
 func KillTmuxWindowByID(windowID string) error {
