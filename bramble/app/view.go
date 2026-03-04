@@ -635,7 +635,9 @@ func (m Model) renderStatusBar() string {
 		// SDK mode: session is selected - show contextual actions
 		sess := m.selectedSession()
 		hints = []string{"[↑/↓]scroll"}
-		if sess != nil && sess.Status == session.StatusIdle {
+		if sess != nil && sess.IsResumable() {
+			hints = append(hints, "[f]resume")
+		} else if sess != nil && sess.Status == session.StatusIdle {
 			hints = append(hints, "[f]ollow-up")
 		}
 		if sess != nil && (sess.Status == session.StatusRunning || sess.Status == session.StatusIdle) {

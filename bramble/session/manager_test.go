@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -773,4 +774,246 @@ func TestManagerGetAllSessions_RecentOutputFromBuffer(t *testing.T) {
 	require.Len(t, all, 1)
 	// GetAllSessions must populate RecentOutput from the live buffer, not the stale snapshot.
 	assert.Equal(t, []string{"live line 1", "live line 2"}, all[0].Progress.RecentOutput)
+}
+
+// --- ResumeSession tests ---
+
+func TestResumeSession_NotFound(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	err := m.ResumeSession("nonexistent", "hello")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestResumeSession_NoCLISessionID(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	sess := &Session{
+		ID:       "test-session",
+		Status:   StatusCompleted,
+		Progress: &SessionProgress{},
+		// CLISessionID intentionally empty
+	}
+	m.mu.Lock()
+	m.sessions[sess.ID] = sess
+	m.mu.Unlock()
+
+	err := m.ResumeSession("test-session", "hello")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no CLI session ID")
+}
+
+func TestResumeSession_WrongStatus(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	for _, status := range []SessionStatus{StatusPending, StatusRunning, StatusIdle} {
+		sess := &Session{
+			ID:           SessionID("sess-" + string(status)),
+			Status:       status,
+			CLISessionID: "some-cli-id",
+			Progress:     &SessionProgress{},
+		}
+		m.mu.Lock()
+		m.sessions[sess.ID] = sess
+		m.mu.Unlock()
+
+		err := m.ResumeSession(sess.ID, "hello")
+		require.Error(t, err, "expected error for status %s", status)
+		assert.Contains(t, err.Error(), string(status))
+	}
+}
+
+func TestResumeSession_ResetsStateAndSchedulesRun(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	sess := &Session{
+		ID:           "resume-test",
+		Type:         SessionTypePlanner,
+		Status:       StatusCompleted,
+		CLISessionID: "abc123defghi",
+		WorktreePath: "/tmp/wt",
+		WorktreeName: "feature",
+		Prompt:       "original prompt",
+		Progress:     &SessionProgress{},
+	}
+	m.mu.Lock()
+	m.sessions[sess.ID] = sess
+	m.mu.Unlock()
+	m.InitOutputBuffer(sess.ID)
+
+	// ResumeSession should schedule a goroutine and return immediately.
+	// We cannot wait for the goroutine to actually run a real runner,
+	// but we can verify the synchronous state changes it makes.
+	//
+	// The goroutine will fail quickly because there is no real runner
+	// configured; we just check the state was reset before the run.
+	//
+	// Wait up to 2 seconds for the session status to transition away from
+	// StatusPending (either to running or failed), which means the goroutine
+	// was scheduled and started.
+	err := m.ResumeSession("resume-test", "new prompt")
+	require.NoError(t, err)
+
+	// Status must have been reset to StatusPending synchronously.
+	sess.mu.RLock()
+	statusAfterResume := sess.Status
+	ctxAfterResume := sess.ctx
+	sess.mu.RUnlock()
+	assert.Equal(t, StatusPending, statusAfterResume, "status should be reset to Pending")
+	assert.NotNil(t, ctxAfterResume, "ctx should be set by ResumeSession")
+
+	// Output buffer should have been re-initialized and contain the status line.
+	require.Eventually(t, func() bool {
+		output := m.GetSessionOutput("resume-test")
+		for _, line := range output {
+			if line.Type == OutputTypeStatus && strings.Contains(line.Content, "Resuming") {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "expected 'Resuming' status line in output")
+}
+
+func TestResumeSession_ShortCLISessionIDNoPanic(t *testing.T) {
+	t.Parallel()
+
+	m := NewManager()
+	defer m.Close()
+
+	// A CLISessionID shorter than 12 characters must not cause a panic.
+	sess := &Session{
+		ID:           "short-id-test",
+		Type:         SessionTypePlanner,
+		Status:       StatusCompleted,
+		CLISessionID: "short", // only 5 chars
+		WorktreePath: "/tmp/wt",
+		WorktreeName: "feature",
+		Prompt:       "original",
+		Progress:     &SessionProgress{},
+	}
+	m.mu.Lock()
+	m.sessions[sess.ID] = sess
+	m.mu.Unlock()
+	m.InitOutputBuffer(sess.ID)
+
+	// Must not panic regardless of runner outcome.
+	require.NotPanics(t, func() {
+		_ = m.ResumeSession("short-id-test", "hello")
+	})
+}
+
+// --- rehydrateSession tests ---
+
+func TestRehydrateSession_NoStore(t *testing.T) {
+	t.Parallel()
+
+	// Manager without a store should return (nil, false).
+	m := NewManager()
+	defer m.Close()
+
+	sess, ok := m.rehydrateSession("does-not-exist")
+	assert.Nil(t, sess)
+	assert.False(t, ok)
+}
+
+func TestRehydrateSession_NotInStore(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName: "test-repo",
+		Store:    store,
+	})
+	defer m.Close()
+
+	sess, ok := m.rehydrateSession("missing-session")
+	assert.Nil(t, sess)
+	assert.False(t, ok)
+}
+
+func TestRehydrateSession_FoundInStore(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	stored := &StoredSession{
+		ID:           "stored-sess",
+		Type:         SessionTypeBuilder,
+		Status:       StatusCompleted,
+		RepoName:     "test-repo",
+		WorktreePath: "/path/wt",
+		WorktreeName: "feature",
+		Prompt:       "do the thing",
+		CLISessionID: "clisessid123",
+		CreatedAt:    time.Now(),
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName: "test-repo",
+		Store:    store,
+	})
+	defer m.Close()
+
+	sess, ok := m.rehydrateSession("stored-sess")
+	require.True(t, ok)
+	require.NotNil(t, sess)
+
+	assert.Equal(t, SessionID("stored-sess"), sess.ID)
+	assert.Equal(t, "do the thing", sess.Prompt)
+	assert.Equal(t, "clisessid123", sess.CLISessionID)
+	assert.Equal(t, StatusCompleted, sess.Status)
+	// ctx and cancel must NOT be set — ResumeSession sets them.
+	assert.Nil(t, sess.ctx, "rehydrated session should not have a context yet")
+	assert.Nil(t, sess.cancel, "rehydrated session should not have a cancel func yet")
+
+	// Session must have been added to the manager's in-memory map.
+	_, inMap := m.GetSession("stored-sess")
+	assert.True(t, inMap, "rehydrated session should be in manager's sessions map")
+}
+
+func TestSessionInfoIsResumable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		status       SessionStatus
+		cliSessionID string
+		want         bool
+	}{
+		{"completed with ID", StatusCompleted, "abc123", true},
+		{"failed with ID", StatusFailed, "abc123", true},
+		{"stopped with ID", StatusStopped, "abc123", true},
+		{"completed no ID", StatusCompleted, "", false},
+		{"idle with ID", StatusIdle, "abc123", false},
+		{"running with ID", StatusRunning, "abc123", false},
+		{"pending with ID", StatusPending, "abc123", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := SessionInfo{
+				Status:       tc.status,
+				CLISessionID: tc.cliSessionID,
+			}
+			assert.Equal(t, tc.want, info.IsResumable())
+		})
+	}
 }

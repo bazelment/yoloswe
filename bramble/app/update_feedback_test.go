@@ -88,7 +88,7 @@ func TestKeyFeedback_F_NoIdleSession(t *testing.T) {
 	m2 := newModel.(Model)
 
 	assert.True(t, m2.toasts.HasToasts())
-	assert.Contains(t, m2.toasts.toasts[0].Message, "No idle session")
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Session not available for follow-up or resume")
 }
 
 func TestKeyFeedback_A_NoPlan(t *testing.T) {
