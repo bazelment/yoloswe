@@ -588,16 +588,16 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 			if m.selectedSessionIndex >= 0 && m.selectedSessionIndex < len(currentSessions) {
 				sess := currentSessions[m.selectedSessionIndex]
-				if sess.TmuxWindowName != "" {
+				if sess.TmuxWindowID != "" {
+					windowID := sess.TmuxWindowID
 					return m, func() tea.Msg {
-						cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+						cmd := exec.Command("tmux", "select-window", "-t", windowID)
 						if err := cmd.Run(); err != nil {
 							return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
 						}
 						return nil
 					}
 				}
-				// No toast for missing tmux window name - it's a rare edge case
 			} else {
 				toastCmd := m.addToast("No sessions to switch to", ToastInfo)
 				return m, toastCmd
@@ -1049,13 +1049,29 @@ func (m Model) handleDropdownMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.focus = FocusOutput
 			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())
 		}
-		// Session selected - view it
+		// Session selected - view or switch to it
 		if item := m.sessionDropdown.SelectedItem(); item != nil {
 			if item.ID == dropdownSeparatorID {
 				// Can't select separator
 				return m, nil
 			}
-			m.switchViewingSession(session.SessionID(item.ID))
+			sessID := session.SessionID(item.ID)
+			// In tmux mode, switch to the tmux window if available
+			if m.sessionManager.IsInTmuxMode() {
+				if info, ok := m.sessionManager.GetSessionInfo(sessID); ok && info.TmuxWindowID != "" {
+					windowID := info.TmuxWindowID
+					m.sessionDropdown.Close()
+					m.focus = FocusOutput
+					return m, func() tea.Msg {
+						cmd := exec.Command("tmux", "select-window", "-t", windowID)
+						if err := cmd.Run(); err != nil {
+							return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+						}
+						return nil
+					}
+				}
+			}
+			m.switchViewingSession(sessID)
 			// Check if this is a live session or history
 			if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
 				// Live session -- viewingHistoryData already nil from switchViewingSession
@@ -1851,9 +1867,10 @@ func (m Model) switchToSession(sess *session.SessionInfo) (tea.Model, tea.Cmd) {
 	}
 
 	if m.sessionManager.IsInTmuxMode() {
-		if sess.TmuxWindowName != "" {
+		if sess.TmuxWindowID != "" {
+			windowID := sess.TmuxWindowID
 			return m, func() tea.Msg {
-				cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
+				cmd := exec.Command("tmux", "select-window", "-t", windowID)
 				if err := cmd.Run(); err != nil {
 					return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
 				}
