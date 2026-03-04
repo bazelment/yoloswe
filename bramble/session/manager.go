@@ -941,15 +941,60 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 			windowID := session.TmuxWindowID
 			windowName := session.TmuxWindowName
 			sessionID := session.ID
+			runnerType := session.RunnerType
 			session.mu.RUnlock()
 
 			if windowID == "" && windowName == "" {
 				// No identification available — assume still alive to avoid false completions
 				continue
 			}
+
+			windowAlive := tmuxWindowAlive(windowID, windowName)
+
+			// For RunnerTypeTmux sessions (not tmux-tracked), the window persists
+			// after process exit due to remain-on-exit. Detect pane-dead so that
+			// re-adopted RunnerTypeTmux sessions complete properly.
+			if windowAlive && runnerType == RunnerTypeTmux {
+				windowTarget := windowName
+				if windowID != "" {
+					windowTarget = windowID
+				}
+				if TmuxWindowPaneDead(windowTarget) {
+					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
+					if gotStatus && exitCode != 0 {
+						// Non-zero exit — mark failed
+						m.updateSessionStatus(session, StatusFailed)
+						session.mu.Lock()
+						session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, windowName)
+						session.mu.Unlock()
+						m.addOutput(sessionID, OutputLine{
+							Timestamp: time.Now(),
+							Type:      OutputTypeError,
+							Content:   fmt.Sprintf("Session failed: claude exited in tmux window %q. Switch to that window to see the error.", windowName),
+						})
+					} else {
+						// Clean exit (code 0) or couldn't read status — mark completed
+						m.updateSessionStatus(session, StatusCompleted)
+					}
+
+					m.persistSession(session)
+
+					m.mu.Lock()
+					delete(m.sessions, sessionID)
+					delete(m.models, sessionID)
+					m.mu.Unlock()
+
+					m.outputsMu.Lock()
+					delete(m.outputs, sessionID)
+					m.outputsMu.Unlock()
+					return
+				}
+				continue
+			}
+
 			// Prefer stable window ID; fall back to name for re-adopted sessions
 			// that may not have a window ID.
-			if tmuxWindowAlive(windowID, windowName) {
+			if windowAlive {
 				continue
 			}
 
