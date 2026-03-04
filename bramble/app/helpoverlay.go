@@ -148,11 +148,12 @@ func buildHelpSections(m *Model) []HelpSection {
 	inTmux := m.sessionManager.IsInTmuxMode()
 	hasWorktree := m.selectedWorktree() != nil
 	hasSession := m.viewingSessionID != ""
-	var sessIdle, sessRunning, sessIsPlanner bool
+	var sessIdle, sessRunning, sessIsPlanner, sessResumable bool
 	if sess := m.selectedSession(); sess != nil {
 		sessIdle = sess.Status == session.StatusIdle
 		sessRunning = sess.Status == session.StatusRunning
 		sessIsPlanner = sess.Type == session.SessionTypePlanner
+		sessResumable = sess.IsResumable()
 	}
 
 	var sections []HelpSection
@@ -185,6 +186,11 @@ func buildHelpSections(m *Model) []HelpSection {
 	if !inTmux {
 		sess.Bindings = append(sess.Bindings,
 			HelpBinding{"1..9", "Quick switch to session N"},
+		)
+	}
+	if hasSession && sessResumable && !inTmux {
+		sess.Bindings = append(sess.Bindings,
+			HelpBinding{"f", "Resume session"},
 		)
 	}
 	if hasSession && sessIdle && !inTmux {

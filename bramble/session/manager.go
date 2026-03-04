@@ -634,6 +634,7 @@ func (m *Manager) ResumeSession(id SessionID, prompt string) error {
 	m.outputs[id] = make([]OutputLine, 0, 1000)
 	m.outputsMu.Unlock()
 
+	// Truncate to 12 chars for display only; avoid slicing short IDs.
 	displayID := cliSessionID
 	if len(displayID) > 12 {
 		displayID = displayID[:12]
