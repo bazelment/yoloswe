@@ -464,6 +464,20 @@ func (m *Manager) IsInTmuxMode() bool {
 	return m.config.SessionMode == SessionModeTmux
 }
 
+// tmuxWindowAlive reports whether the tmux window identified by windowID and/or
+// windowName is still alive. It prefers ID-based lookup (stable); falls back to
+// name-based lookup when no ID is available. Returns false if neither identifier
+// is provided.
+func tmuxWindowAlive(windowID, windowName string) bool {
+	if windowID != "" {
+		return TmuxWindowExistsByID(windowID)
+	}
+	if windowName != "" {
+		return TmuxWindowExists(windowName)
+	}
+	return false
+}
+
 // ReconcileTmuxSessions checks stored sessions for previously-running tmux sessions
 // and re-adopts any whose tmux windows are still alive. Sessions whose windows
 // have disappeared are marked as completed.
@@ -489,7 +503,7 @@ func (m *Manager) ReconcileTmuxSessions() error {
 
 		for _, meta := range sessions {
 			// Only consider tmux sessions that were running or pending
-			if meta.RunnerType != "tmux" && meta.RunnerType != "tmux-tracked" {
+			if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
 				continue
 			}
 			if meta.Status != StatusRunning && meta.Status != StatusPending {
@@ -511,15 +525,7 @@ func (m *Manager) ReconcileTmuxSessions() error {
 			}
 
 			// Check if the tmux window is still alive
-			windowAlive := false
-			if stored.TmuxWindowID != "" {
-				windowAlive = TmuxWindowExistsByID(stored.TmuxWindowID)
-			}
-			if !windowAlive && stored.TmuxWindowName != "" {
-				windowAlive = TmuxWindowExists(stored.TmuxWindowName)
-			}
-
-			if !windowAlive {
+			if !tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
 				// Window is gone — mark as completed
 				now := time.Now()
 				stored.Status = StatusCompleted
@@ -875,7 +881,7 @@ func (m *Manager) TrackTmuxWindow(worktreePath, windowName, windowID string) (Se
 		Title:          windowName,
 		TmuxWindowName: windowName,
 		TmuxWindowID:   windowID,
-		RunnerType:     "tmux-tracked",
+		RunnerType:     RunnerTypeTmuxTracked,
 		RepoName:       m.config.RepoName,
 		Progress:       &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:      time.Now(),
@@ -919,11 +925,17 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 		case <-ticker.C:
 			session.mu.RLock()
 			windowID := session.TmuxWindowID
+			windowName := session.TmuxWindowName
 			sessionID := session.ID
 			session.mu.RUnlock()
 
-			// Use window ID for stable identification
-			if windowID == "" || TmuxWindowExistsByID(windowID) {
+			if windowID == "" && windowName == "" {
+				// No identification available — assume still alive to avoid false completions
+				continue
+			}
+			// Prefer stable window ID; fall back to name for re-adopted sessions
+			// that may not have a window ID.
+			if tmuxWindowAlive(windowID, windowName) {
 				continue
 			}
 
@@ -988,7 +1000,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		tmuxName := GenerateTmuxWindowName(m.config.RepoName, session.WorktreeName)
 		session.mu.Lock()
 		session.TmuxWindowName = tmuxName
-		session.RunnerType = "tmux"
+		session.RunnerType = RunnerTypeTmux
 		session.mu.Unlock()
 
 		permissionMode := ""
@@ -1011,7 +1023,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	} else {
 		// TUI mode: create in-process runner
 		session.mu.Lock()
-		session.RunnerType = "tui"
+		session.RunnerType = RunnerTypeTUI
 		session.mu.Unlock()
 
 		eventHandler = newSessionEventHandler(m, session.ID)

@@ -1,12 +1,15 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 )
 
 func TestNewManager(t *testing.T) {
@@ -1038,7 +1041,7 @@ func TestReconcileTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
 		Prompt:         "build something",
 		TmuxWindowName: "test-repo/feature:0",
 		TmuxWindowID:   "@99",
-		RunnerType:     "tmux",
+		RunnerType:     RunnerTypeTmux,
 		CreatedAt:      now,
 		StartedAt:      &startedAt,
 	}
@@ -1078,7 +1081,7 @@ func TestReconcileTmuxSessions_SkipsNonTmux(t *testing.T) {
 		WorktreePath: "/path/to/wt",
 		WorktreeName: "feature",
 		Prompt:       "build something",
-		RunnerType:   "tui",
+		RunnerType:   RunnerTypeTUI,
 		CreatedAt:    time.Now(),
 	}
 	require.NoError(t, store.SaveSession(stored))
@@ -1114,7 +1117,7 @@ func TestReconcileTmuxSessions_SkipsCompletedSessions(t *testing.T) {
 		Prompt:         "done",
 		TmuxWindowName: "test-repo/feature:0",
 		TmuxWindowID:   "@42",
-		RunnerType:     "tmux",
+		RunnerType:     RunnerTypeTmux,
 		CreatedAt:      time.Now(),
 		CompletedAt:    &completedAt,
 	}
@@ -1160,4 +1163,55 @@ func TestReconcileTmuxSessions_NoopInTUIMode(t *testing.T) {
 
 	err = m.ReconcileTmuxSessions()
 	assert.NoError(t, err)
+}
+
+func TestClose_PersistsTmuxSessions(t *testing.T) {
+	// Verify that Close() persists all active tmux-tracked sessions to the store
+	// so they can be reconciled on the next restart.
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+
+	// Inject a tracked session directly (TrackTmuxWindow would start a goroutine
+	// that requires a real tmux environment, so we inject the session struct).
+	sessionID := SessionID("persist-test-session")
+	ctx, cancel := context.WithCancel(m.ctx)
+	s := &Session{
+		ID:             sessionID,
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "build it",
+		TmuxWindowName: "test-repo/feature:0",
+		TmuxWindowID:   "@11",
+		RunnerType:     RunnerTypeTmuxTracked,
+		RepoName:       "test-repo",
+		Progress:       &SessionProgress{LastActivity: time.Now()},
+		CreatedAt:      time.Now(),
+		ctx:            ctx,
+		cancel:         cancel,
+	}
+	m.mu.Lock()
+	m.sessions[sessionID] = s
+	m.models[sessionID] = sessionmodel.NewSessionModel(1000)
+	m.mu.Unlock()
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0)
+	m.outputsMu.Unlock()
+
+	// Close should persist all in-memory tmux sessions.
+	m.Close()
+
+	// The session should now be findable in the store.
+	loaded, err := store.LoadSession("test-repo", "feature", sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, "test-repo/feature:0", loaded.TmuxWindowName)
+	assert.Equal(t, "@11", loaded.TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmuxTracked, loaded.RunnerType)
 }

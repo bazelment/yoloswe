@@ -629,7 +629,7 @@ func TestTmuxFieldsRoundtrip(t *testing.T) {
 		Prompt:         "build it",
 		TmuxWindowName: "myrepo/feature:0",
 		TmuxWindowID:   "@5",
-		RunnerType:     "tmux",
+		RunnerType:     RunnerTypeTmux,
 		CreatedAt:      now,
 	}
 
@@ -640,7 +640,7 @@ func TestTmuxFieldsRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "myrepo/feature:0", loaded.TmuxWindowName)
 	assert.Equal(t, "@5", loaded.TmuxWindowID)
-	assert.Equal(t, "tmux", loaded.RunnerType)
+	assert.Equal(t, RunnerTypeTmux, loaded.RunnerType)
 
 	// Verify fields appear in ListSessions
 	list, err := store.ListSessions("myrepo", "feature")
@@ -648,7 +648,7 @@ func TestTmuxFieldsRoundtrip(t *testing.T) {
 	require.Len(t, list, 1)
 	assert.Equal(t, "myrepo/feature:0", list[0].TmuxWindowName)
 	assert.Equal(t, "@5", list[0].TmuxWindowID)
-	assert.Equal(t, "tmux", list[0].RunnerType)
+	assert.Equal(t, RunnerTypeTmux, list[0].RunnerType)
 
 	// Verify fields appear in ListAllSessions
 	allList, err := store.ListAllSessions()
@@ -656,7 +656,7 @@ func TestTmuxFieldsRoundtrip(t *testing.T) {
 	require.Len(t, allList, 1)
 	assert.Equal(t, "myrepo/feature:0", allList[0].TmuxWindowName)
 	assert.Equal(t, "@5", allList[0].TmuxWindowID)
-	assert.Equal(t, "tmux", allList[0].RunnerType)
+	assert.Equal(t, RunnerTypeTmux, allList[0].RunnerType)
 }
 
 func TestTmuxFieldsInSessionToStored(t *testing.T) {
@@ -669,7 +669,7 @@ func TestTmuxFieldsInSessionToStored(t *testing.T) {
 		Prompt:         "build it",
 		TmuxWindowName: "repo/feature:1",
 		TmuxWindowID:   "@3",
-		RunnerType:     "tmux",
+		RunnerType:     RunnerTypeTmux,
 		CreatedAt:      time.Now(),
 		Progress:       &SessionProgress{},
 	}
@@ -678,7 +678,7 @@ func TestTmuxFieldsInSessionToStored(t *testing.T) {
 
 	assert.Equal(t, "repo/feature:1", stored.TmuxWindowName)
 	assert.Equal(t, "@3", stored.TmuxWindowID)
-	assert.Equal(t, "tmux", stored.RunnerType)
+	assert.Equal(t, RunnerTypeTmux, stored.RunnerType)
 }
 
 func TestTmuxFieldsInStoredToSessionInfo(t *testing.T) {
@@ -691,12 +691,12 @@ func TestTmuxFieldsInStoredToSessionInfo(t *testing.T) {
 		Prompt:         "build it",
 		TmuxWindowName: "repo/feature:2",
 		TmuxWindowID:   "@7",
-		RunnerType:     "tmux-tracked",
+		RunnerType:     RunnerTypeTmuxTracked,
 		CreatedAt:      time.Now(),
 	}
 
 	info := StoredToSessionInfo(stored)
 	assert.Equal(t, "repo/feature:2", info.TmuxWindowName)
 	assert.Equal(t, "@7", info.TmuxWindowID)
-	assert.Equal(t, "tmux-tracked", info.RunnerType)
+	assert.Equal(t, RunnerTypeTmuxTracked, info.RunnerType)
 }

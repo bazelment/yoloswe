@@ -17,7 +17,8 @@ func GenerateTmuxWindowName(repoName, worktreeName string) string {
 
 	prefix := repoName + "/" + worktreeName + ":"
 
-	// Scan existing tmux windows for ones matching our prefix
+	// Scan existing tmux windows for ones matching our prefix.
+	// Ignore errors: if listing fails we fall back to the TmuxWindowExists check below.
 	windows, _ := ListTmuxWindows()
 	used := make(map[int]bool)
 	for _, w := range windows {

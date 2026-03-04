@@ -93,6 +93,13 @@ func DeepCopyOutputLine(line OutputLine) OutputLine {
 	return sessionmodel.DeepCopyOutputLine(line)
 }
 
+// RunnerType constants identify how a session is executing.
+const (
+	RunnerTypeTUI         = "tui"
+	RunnerTypeTmux        = "tmux"
+	RunnerTypeTmuxTracked = "tmux-tracked"
+)
+
 // Session represents a single plan or builder session.
 type Session struct {
 	CreatedAt      time.Time
