@@ -1017,3 +1017,147 @@ func TestSessionInfoIsResumable(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcileTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
+	// When not inside tmux, all tmux windows appear "gone",
+	// so reconciliation should mark running sessions as completed.
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now()
+	startedAt := now.Add(-time.Minute)
+
+	// Save a session that looks like it was running in tmux
+	stored := &StoredSession{
+		ID:             "tmux-session-1",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "test-repo",
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "build something",
+		TmuxWindowName: "test-repo/feature:0",
+		TmuxWindowID:   "@99",
+		RunnerType:     "tmux",
+		CreatedAt:      now,
+		StartedAt:      &startedAt,
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	require.NoError(t, err)
+
+	// Session should now be completed in the store since the window doesn't exist
+	reloaded, err := store.LoadSession("test-repo", "feature", "tmux-session-1")
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, reloaded.Status)
+	assert.NotNil(t, reloaded.CompletedAt)
+
+	// Session should NOT be in the manager's in-memory map (window was gone)
+	_, inMap := m.GetSession("tmux-session-1")
+	assert.False(t, inMap, "gone session should not be tracked in memory")
+}
+
+func TestReconcileTmuxSessions_SkipsNonTmux(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	// Save a TUI session that was running — should be ignored by reconciliation
+	stored := &StoredSession{
+		ID:           "tui-session-1",
+		Type:         SessionTypeBuilder,
+		Status:       StatusRunning,
+		RepoName:     "test-repo",
+		WorktreePath: "/path/to/wt",
+		WorktreeName: "feature",
+		Prompt:       "build something",
+		RunnerType:   "tui",
+		CreatedAt:    time.Now(),
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	require.NoError(t, err)
+
+	// TUI session should remain untouched
+	reloaded, err := store.LoadSession("test-repo", "feature", "tui-session-1")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, reloaded.Status, "TUI session should not be modified by reconciliation")
+}
+
+func TestReconcileTmuxSessions_SkipsCompletedSessions(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	completedAt := time.Now()
+	stored := &StoredSession{
+		ID:             "tmux-done",
+		Type:           SessionTypeBuilder,
+		Status:         StatusCompleted,
+		RepoName:       "test-repo",
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "done",
+		TmuxWindowName: "test-repo/feature:0",
+		TmuxWindowID:   "@42",
+		RunnerType:     "tmux",
+		CreatedAt:      time.Now(),
+		CompletedAt:    &completedAt,
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	require.NoError(t, err)
+
+	// Already-completed session should remain completed with same CompletedAt
+	reloaded, err := store.LoadSession("test-repo", "feature", "tmux-done")
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, reloaded.Status)
+	assert.Equal(t, completedAt.Unix(), reloaded.CompletedAt.Unix())
+}
+
+func TestReconcileTmuxSessions_NoopWithoutStore(t *testing.T) {
+	m := NewManagerWithConfig(ManagerConfig{
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err := m.ReconcileTmuxSessions()
+	assert.NoError(t, err)
+}
+
+func TestReconcileTmuxSessions_NoopInTUIMode(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTUI,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	assert.NoError(t, err)
+}

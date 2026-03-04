@@ -4,7 +4,64 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strings"
 )
+
+// GenerateTmuxWindowName creates a tmux window name in the format "repo/worktree:N"
+// where N is the lowest available per-worktree index. If repo or worktree info is
+// unavailable, falls back to random two-word names.
+func GenerateTmuxWindowName(repoName, worktreeName string) string {
+	if repoName == "" || worktreeName == "" {
+		return generateRandomTmuxWindowName()
+	}
+
+	prefix := repoName + "/" + worktreeName + ":"
+
+	// Scan existing tmux windows for ones matching our prefix
+	windows, _ := ListTmuxWindows()
+	used := make(map[int]bool)
+	for _, w := range windows {
+		if strings.HasPrefix(w, prefix) {
+			suffix := w[len(prefix):]
+			var idx int
+			if _, err := fmt.Sscanf(suffix, "%d", &idx); err == nil {
+				used[idx] = true
+			}
+		}
+	}
+
+	// Find the lowest unused index
+	for i := 0; ; i++ {
+		if !used[i] {
+			name := fmt.Sprintf("%s%d", prefix, i)
+			// Double-check it doesn't collide with an existing window
+			if !TmuxWindowExists(name) {
+				return name
+			}
+			// Mark as used and keep searching
+			used[i] = true
+		}
+	}
+}
+
+// generateRandomTmuxWindowName creates a random two-word window name as fallback.
+// It checks for uniqueness against existing tmux windows and retries up to maxAttempts times.
+// Format: "{adjective}-{noun}" (e.g., "happy-tiger")
+func generateRandomTmuxWindowName() string {
+	const maxAttempts = 10
+
+	for i := 0; i < maxAttempts; i++ {
+		name := randomTwoWordName()
+		if !TmuxWindowExists(name) {
+			return name
+		}
+	}
+
+	// If all attempts fail, append a random suffix
+	name := randomTwoWordName()
+	suffix := randomHex(4)
+	return fmt.Sprintf("%s-%s", name, suffix)
+}
 
 // Word lists for generating two-word session names.
 var (
@@ -28,25 +85,6 @@ var (
 		"trail", "path", "bridge", "gate",
 	}
 )
-
-// GenerateTmuxWindowName creates a random two-word window name.
-// It checks for uniqueness against existing tmux windows and retries up to maxAttempts times.
-// Format: "{adjective}-{noun}" (e.g., "happy-tiger")
-func GenerateTmuxWindowName() string {
-	const maxAttempts = 10
-
-	for i := 0; i < maxAttempts; i++ {
-		name := randomTwoWordName()
-		if !TmuxWindowExists(name) {
-			return name
-		}
-	}
-
-	// If all attempts fail, append a random suffix
-	name := randomTwoWordName()
-	suffix := randomHex(4)
-	return fmt.Sprintf("%s-%s", name, suffix)
-}
 
 // randomTwoWordName generates a random two-word name from the word lists.
 func randomTwoWordName() string {

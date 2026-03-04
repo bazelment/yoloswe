@@ -691,7 +691,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			toastCmd := m.addToast("Opening tmux window in "+filepath.Base(wtPath), ToastSuccess)
 			return m, tea.Batch(toastCmd, func() tea.Msg {
 				// Generate unique window name like build/plan sessions
-				windowName := session.GenerateTmuxWindowName()
+				windowName := session.GenerateTmuxWindowName(m.repoName, filepath.Base(wtPath))
 
 				// Create window with unique name and capture both name and ID
 				cmd := exec.Command("tmux", "new-window", "-n", windowName, "-c", wtPath, "-P", "-F", "#{window_name},#{window_id}")

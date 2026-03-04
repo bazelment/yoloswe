@@ -166,6 +166,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	sessionManager := session.NewManagerWithConfig(initialConfig)
 	defer sessionManager.Close()
 
+	// Reconcile previously-running tmux sessions against live tmux windows.
+	if err := sessionManager.ReconcileTmuxSessions(); err != nil {
+		log.Printf("Warning: tmux session reconciliation failed: %v", err)
+	}
+
 	// Start the AI task router using the best available provider.
 	// Priority: codex (original default) → claude → gemini.
 	var taskRouter *taskrouter.Router

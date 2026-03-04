@@ -464,9 +464,131 @@ func (m *Manager) IsInTmuxMode() bool {
 	return m.config.SessionMode == SessionModeTmux
 }
 
+// ReconcileTmuxSessions checks stored sessions for previously-running tmux sessions
+// and re-adopts any whose tmux windows are still alive. Sessions whose windows
+// have disappeared are marked as completed.
+func (m *Manager) ReconcileTmuxSessions() error {
+	if m.config.Store == nil || m.config.RepoName == "" {
+		return nil
+	}
+	if m.config.SessionMode != SessionModeTmux {
+		return nil
+	}
+
+	// List all worktrees for this repo
+	worktrees, err := m.config.Store.ListWorktrees(m.config.RepoName)
+	if err != nil {
+		return fmt.Errorf("failed to list worktrees: %w", err)
+	}
+
+	for _, wtName := range worktrees {
+		sessions, err := m.config.Store.ListSessions(m.config.RepoName, wtName)
+		if err != nil {
+			continue
+		}
+
+		for _, meta := range sessions {
+			// Only consider tmux sessions that were running or pending
+			if meta.RunnerType != "tmux" && meta.RunnerType != "tmux-tracked" {
+				continue
+			}
+			if meta.Status != StatusRunning && meta.Status != StatusPending {
+				continue
+			}
+
+			// Check if already tracked by this manager
+			m.mu.RLock()
+			_, alreadyTracked := m.sessions[meta.ID]
+			m.mu.RUnlock()
+			if alreadyTracked {
+				continue
+			}
+
+			// Load full session data
+			stored, err := m.config.Store.LoadSession(m.config.RepoName, wtName, meta.ID)
+			if err != nil {
+				continue
+			}
+
+			// Check if the tmux window is still alive
+			windowAlive := false
+			if stored.TmuxWindowID != "" {
+				windowAlive = TmuxWindowExistsByID(stored.TmuxWindowID)
+			}
+			if !windowAlive && stored.TmuxWindowName != "" {
+				windowAlive = TmuxWindowExists(stored.TmuxWindowName)
+			}
+
+			if !windowAlive {
+				// Window is gone — mark as completed
+				now := time.Now()
+				stored.Status = StatusCompleted
+				stored.CompletedAt = &now
+				_ = m.config.Store.SaveSession(stored)
+				continue
+			}
+
+			// Re-adopt: create in-memory session and start monitoring
+			ctx, cancel := context.WithCancel(m.ctx)
+			session := &Session{
+				ID:             stored.ID,
+				Type:           stored.Type,
+				Status:         StatusRunning,
+				WorktreePath:   stored.WorktreePath,
+				WorktreeName:   stored.WorktreeName,
+				Prompt:         stored.Prompt,
+				Title:          stored.Title,
+				Model:          stored.Model,
+				TmuxWindowName: stored.TmuxWindowName,
+				TmuxWindowID:   stored.TmuxWindowID,
+				RunnerType:     stored.RunnerType,
+				RepoName:       m.config.RepoName,
+				CLISessionID:   stored.CLISessionID,
+				Progress:       &SessionProgress{LastActivity: time.Now()},
+				CreatedAt:      stored.CreatedAt,
+				StartedAt:      stored.StartedAt,
+				ctx:            ctx,
+				cancel:         cancel,
+			}
+
+			m.mu.Lock()
+			m.sessions[session.ID] = session
+			m.models[session.ID] = sessionmodel.NewSessionModel(1000)
+			m.mu.Unlock()
+
+			m.outputsMu.Lock()
+			m.outputs[session.ID] = make([]OutputLine, 0, 16)
+			m.outputsMu.Unlock()
+
+			m.updateSessionStatus(session, StatusRunning)
+
+			// Monitor the window lifecycle
+			if IsInsideTmux() && IsTmuxAvailable() {
+				m.wg.Add(1)
+				go m.monitorTrackedTmuxWindow(session)
+			}
+		}
+	}
+
+	return nil
+}
+
 // Close shuts down the manager and all sessions.
 func (m *Manager) Close() {
 	m.cancel()
+
+	// Persist all active tmux sessions so they can be reconciled on restart.
+	if m.config.SessionMode == SessionModeTmux && m.config.Store != nil {
+		m.mu.RLock()
+		sessions := make([]*Session, 0, len(m.sessions))
+		for _, s := range m.sessions {
+			sessions = append(sessions, s)
+		}
+		m.mu.RUnlock()
+		for _, s := range sessions {
+			m.persistSession(s)
+		}
+	}
 
 	// If TmuxExitOnQuit is enabled, kill tmux windows before canceling sessions
 	if m.config.TmuxExitOnQuit && m.config.SessionMode == SessionModeTmux {
@@ -754,6 +876,7 @@ func (m *Manager) TrackTmuxWindow(worktreePath, windowName, windowID string) (Se
 		TmuxWindowName: windowName,
 		TmuxWindowID:   windowID,
 		RunnerType:     "tmux-tracked",
+		RepoName:       m.config.RepoName,
 		Progress:       &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:      time.Now(),
 		ctx:            ctx,
@@ -862,7 +985,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 	if m.config.SessionMode == SessionModeTmux {
 		// Tmux mode: create tmux window running the agent CLI
-		tmuxName := GenerateTmuxWindowName()
+		tmuxName := GenerateTmuxWindowName(m.config.RepoName, session.WorktreeName)
 		session.mu.Lock()
 		session.TmuxWindowName = tmuxName
 		session.RunnerType = "tmux"
