@@ -19,6 +19,7 @@ type tmuxRunner struct {
 	provider        string // binary name: "claude" or "codex"
 	permissionMode  string // permission mode: "" (default) or "plan" (claude only)
 	resumeSessionID string // CLI session ID to resume (empty for new sessions)
+	windowID        string // stable window ID captured atomically at creation time
 	yoloMode        bool   // skip all permission prompts
 	killOnStop      bool   // kill tmux window on Stop()
 }
@@ -44,14 +45,19 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 	// Build the full command string for tmux
 	cmdStr := buildShellCommand(binary, args)
 
-	// Create tmux window with the claude command
-	// -n: window name
-	// -c: working directory
-	createCmd := exec.Command("tmux", "new-window", "-n", r.windowName, "-c", r.workDir, cmdStr)
+	// Create tmux window with the claude command.
+	// -P -F "#{window_id}" prints the new window's stable ID to stdout, capturing
+	// it atomically at creation time to avoid the TOCTOU race of a post-hoc name
+	// lookup (TmuxWindowIDByName) when two sessions start concurrently with the
+	// same window name.
+	// -n: window name, -c: working directory
+	createCmd := exec.Command("tmux", "new-window", "-P", "-F", "#{window_id}", "-n", r.windowName, "-c", r.workDir, cmdStr)
 
-	if err := createCmd.Run(); err != nil {
+	out, err := createCmd.Output()
+	if err != nil {
 		return fmt.Errorf("failed to create tmux window %q: %w", r.windowName, err)
 	}
+	r.windowID = strings.TrimSpace(string(out))
 
 	// Set remain-on-exit so the window stays open if claude crashes,
 	// allowing the user to see the error output instead of the window
@@ -77,6 +83,10 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 }
 
 func (r *tmuxRunner) CLISessionID() string { return "" }
+
+// WindowID returns the stable tmux window ID captured atomically during Start.
+// Returns empty string if Start has not been called or if capture failed.
+func (r *tmuxRunner) WindowID() string { return r.windowID }
 
 // RunTurn is not supported for tmux windows - all interaction happens in the tmux window directly.
 // This returns nil to satisfy the interface, but should not be called in practice.

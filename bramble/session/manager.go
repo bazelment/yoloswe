@@ -464,8 +464,230 @@ func (m *Manager) IsInTmuxMode() bool {
 	return m.config.SessionMode == SessionModeTmux
 }
 
+// tmuxWindowAlive reports whether the tmux window identified by windowID and/or
+// windowName is still alive. It prefers ID-based lookup (stable); falls back to
+// name-based lookup when no ID is available. Returns false if neither identifier
+// is provided.
+func tmuxWindowAlive(windowID, windowName string) bool {
+	if windowID != "" {
+		return TmuxWindowExistsByID(windowID)
+	}
+	if windowName != "" {
+		return TmuxWindowExists(windowName)
+	}
+	return false
+}
+
+// ReconcileTmuxSessions checks stored sessions for previously-running tmux sessions
+// and re-adopts any whose tmux windows are still alive. Sessions whose windows
+// have disappeared are marked as completed.
+func (m *Manager) ReconcileTmuxSessions() error {
+	if m.config.Store == nil || m.config.RepoName == "" {
+		return nil
+	}
+	if m.config.SessionMode != SessionModeTmux {
+		return nil
+	}
+	// Only reconcile when actually inside tmux; outside tmux all window-alive checks
+	// return false, which would incorrectly mark live sessions as completed.
+	if !IsInsideTmux() || !IsTmuxAvailable() {
+		return nil
+	}
+
+	// List all worktrees for this repo
+	worktrees, err := m.config.Store.ListWorktrees(m.config.RepoName)
+	if err != nil {
+		return fmt.Errorf("failed to list worktrees: %w", err)
+	}
+
+	for _, wtName := range worktrees {
+		sessions, err := m.config.Store.ListSessions(m.config.RepoName, wtName)
+		if err != nil {
+			continue
+		}
+
+		for _, meta := range sessions {
+			// Only consider tmux sessions that were running or pending
+			if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
+				continue
+			}
+			if meta.Status != StatusRunning && meta.Status != StatusPending {
+				continue
+			}
+
+			// Check if already tracked by this manager
+			m.mu.RLock()
+			_, alreadyTracked := m.sessions[meta.ID]
+			m.mu.RUnlock()
+			if alreadyTracked {
+				continue
+			}
+
+			// Load full session data
+			stored, err := m.config.Store.LoadSession(m.config.RepoName, wtName, meta.ID)
+			if err != nil {
+				continue
+			}
+
+			// Check if the tmux window is still alive
+			if !tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
+				// Window is gone — mark as completed
+				now := time.Now()
+				stored.Status = StatusCompleted
+				stored.CompletedAt = &now
+				_ = m.config.Store.SaveSession(stored)
+				continue
+			}
+
+			// Re-adopt: create in-memory session and start monitoring
+			ctx, cancel := context.WithCancel(m.ctx)
+			session := &Session{
+				ID:             stored.ID,
+				Type:           stored.Type,
+				Status:         StatusRunning,
+				WorktreePath:   stored.WorktreePath,
+				WorktreeName:   stored.WorktreeName,
+				Prompt:         stored.Prompt,
+				Title:          stored.Title,
+				Model:          stored.Model,
+				TmuxWindowName: stored.TmuxWindowName,
+				TmuxWindowID:   stored.TmuxWindowID,
+				RunnerType:     stored.RunnerType,
+				RepoName:       m.config.RepoName,
+				CLISessionID:   stored.CLISessionID,
+				Progress:       &SessionProgress{LastActivity: time.Now()},
+				CreatedAt:      stored.CreatedAt,
+				StartedAt:      stored.StartedAt,
+				ctx:            ctx,
+				cancel:         cancel,
+			}
+
+			m.mu.Lock()
+			m.sessions[session.ID] = session
+			m.models[session.ID] = sessionmodel.NewSessionModel(1000)
+			m.mu.Unlock()
+
+			m.outputsMu.Lock()
+			m.outputs[session.ID] = make([]OutputLine, 0, 16)
+			m.outputsMu.Unlock()
+
+			// Emit the state-change event without calling updateSessionStatus, which
+			// would overwrite session.StartedAt with time.Now() and lose the
+			// historical start time preserved from the stored session.
+			select {
+			case m.events <- SessionStateChangeEvent{
+				SessionID: session.ID,
+				OldStatus: StatusRunning,
+				NewStatus: StatusRunning,
+			}:
+			default:
+				log.Printf("WARNING: events channel full, dropping state change event for re-adopted session %s", session.ID)
+			}
+
+			// Monitor the window lifecycle
+			if IsInsideTmux() && IsTmuxAvailable() {
+				m.wg.Add(1)
+				go m.monitorTrackedTmuxWindow(session)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ReposWithLiveTmuxSessions returns repo names (other than activeRepo) that
+// have at least one tmux session whose window is still alive. Repos that only
+// have dead tmux sessions are cleaned up in place (marked completed).
+// The caller can use the returned list to auto-open those repos so their
+// sessions are fully re-adopted by a Manager.
+func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
+	if store == nil {
+		return nil
+	}
+	// Only scan for live sessions when inside tmux; outside tmux all window-alive
+	// checks return false, which would incorrectly mark live sessions as completed.
+	if !IsInsideTmux() || !IsTmuxAvailable() {
+		return nil
+	}
+
+	repos, err := store.ListRepos()
+	if err != nil {
+		return nil
+	}
+
+	var liveRepos []string
+	for _, repo := range repos {
+		if repo == activeRepo {
+			continue // handled by the active manager's ReconcileTmuxSessions
+		}
+
+		hasLive := false
+
+		worktrees, err := store.ListWorktrees(repo)
+		if err != nil {
+			continue
+		}
+
+		for _, wtName := range worktrees {
+			sessions, err := store.ListSessions(repo, wtName)
+			if err != nil {
+				continue
+			}
+
+			for _, meta := range sessions {
+				if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
+					continue
+				}
+				if meta.Status != StatusRunning && meta.Status != StatusPending {
+					continue
+				}
+
+				stored, err := store.LoadSession(repo, wtName, meta.ID)
+				if err != nil {
+					continue
+				}
+
+				if tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
+					hasLive = true
+					continue
+				}
+
+				// Window is gone — mark as completed
+				now := time.Now()
+				stored.Status = StatusCompleted
+				stored.CompletedAt = &now
+				if err := store.SaveSession(stored); err != nil {
+					log.Printf("Warning: failed to mark stale session %s as completed: %v", stored.ID, err)
+				}
+			}
+		}
+
+		if hasLive {
+			liveRepos = append(liveRepos, repo)
+		}
+	}
+
+	return liveRepos
+}
+
 // Close shuts down the manager and all sessions.
 func (m *Manager) Close() {
+	// Persist all active tmux sessions BEFORE canceling so that goroutines
+	// (monitorTrackedTmuxWindow, runSession) have not yet transitioned the
+	// status to StatusStopped. ReconcileTmuxSessions only re-adopts sessions
+	// whose persisted status is StatusRunning or StatusPending.
+	if m.config.SessionMode == SessionModeTmux && m.config.Store != nil {
+		m.mu.RLock()
+		sessions := make([]*Session, 0, len(m.sessions))
+		for _, s := range m.sessions {
+			sessions = append(sessions, s)
+		}
+		m.mu.RUnlock()
+		for _, s := range sessions {
+			m.persistSession(s)
+		}
+	}
+
 	m.cancel()
 
 	// If TmuxExitOnQuit is enabled, kill tmux windows before canceling sessions
@@ -753,7 +975,8 @@ func (m *Manager) TrackTmuxWindow(worktreePath, windowName, windowID string) (Se
 		Title:          windowName,
 		TmuxWindowName: windowName,
 		TmuxWindowID:   windowID,
-		RunnerType:     "tmux-tracked",
+		RunnerType:     RunnerTypeTmuxTracked,
+		RepoName:       m.config.RepoName,
 		Progress:       &SessionProgress{LastActivity: time.Now()},
 		CreatedAt:      time.Now(),
 		ctx:            ctx,
@@ -789,22 +1012,93 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	for {
 		select {
 		case <-session.ctx.Done():
-			// Window cleanup is handled in Close() if TmuxExitOnQuit is enabled
-			// This ensures cleanup only happens on app quit, not on individual session stops
+			// Window cleanup is handled in Close() if TmuxExitOnQuit is enabled.
+			// This ensures cleanup only happens on app quit, not on individual session stops.
 			m.updateSessionStatus(session, StatusStopped)
+			// If the manager is still alive (not a Close), this was an explicit
+			// StopSession call. Persist the stopped status so it won't be
+			// re-adopted on restart.
+			if m.ctx.Err() == nil {
+				m.persistSession(session)
+				m.mu.Lock()
+				delete(m.sessions, session.ID)
+				delete(m.models, session.ID)
+				m.mu.Unlock()
+				m.outputsMu.Lock()
+				delete(m.outputs, session.ID)
+				m.outputsMu.Unlock()
+			}
 			return
 		case <-ticker.C:
 			session.mu.RLock()
 			windowID := session.TmuxWindowID
+			windowName := session.TmuxWindowName
 			sessionID := session.ID
+			runnerType := session.RunnerType
 			session.mu.RUnlock()
 
-			// Use window ID for stable identification
-			if windowID == "" || TmuxWindowExistsByID(windowID) {
+			if windowID == "" && windowName == "" {
+				// No identification available — assume still alive to avoid false completions
+				continue
+			}
+
+			windowAlive := tmuxWindowAlive(windowID, windowName)
+
+			// For RunnerTypeTmux sessions (not tmux-tracked), the window persists
+			// after process exit due to remain-on-exit. Detect pane-dead so that
+			// re-adopted RunnerTypeTmux sessions complete properly.
+			if windowAlive && runnerType == RunnerTypeTmux {
+				windowTarget := windowName
+				if windowID != "" {
+					windowTarget = windowID
+				}
+				if TmuxWindowPaneDead(windowTarget) {
+					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
+					if gotStatus && exitCode == 0 {
+						// Clean exit — mark completed
+						m.updateSessionStatus(session, StatusCompleted)
+					} else {
+						// Non-zero exit or couldn't read status — mark failed
+						m.updateSessionStatus(session, StatusFailed)
+						session.mu.Lock()
+						if gotStatus {
+							session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, windowName)
+						} else {
+							session.Error = fmt.Errorf("claude process exited with unknown status (window %q still open — check it for error details)", windowName)
+						}
+						session.mu.Unlock()
+						m.addOutput(sessionID, OutputLine{
+							Timestamp: time.Now(),
+							Type:      OutputTypeError,
+							Content:   fmt.Sprintf("Session failed: claude exited in tmux window %q. Switch to that window to see the error.", windowName),
+						})
+					}
+
+					m.persistSession(session)
+
+					m.mu.Lock()
+					delete(m.sessions, sessionID)
+					delete(m.models, sessionID)
+					m.mu.Unlock()
+
+					m.outputsMu.Lock()
+					delete(m.outputs, sessionID)
+					m.outputsMu.Unlock()
+					return
+				}
+				continue
+			}
+
+			// Prefer stable window ID; fall back to name for re-adopted sessions
+			// that may not have a window ID.
+			if windowAlive {
 				continue
 			}
 
 			m.updateSessionStatus(session, StatusCompleted)
+
+			// Persist before removing from memory so the completed status is written to disk.
+			m.persistSession(session)
 
 			m.mu.Lock()
 			delete(m.sessions, sessionID)
@@ -862,10 +1156,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 	if m.config.SessionMode == SessionModeTmux {
 		// Tmux mode: create tmux window running the agent CLI
-		tmuxName := GenerateTmuxWindowName()
+		tmuxName := GenerateTmuxWindowName(m.config.RepoName, session.WorktreeName)
 		session.mu.Lock()
 		session.TmuxWindowName = tmuxName
-		session.RunnerType = "tmux"
+		session.RunnerType = RunnerTypeTmux
 		session.mu.Unlock()
 
 		permissionMode := ""
@@ -888,7 +1182,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	} else {
 		// TUI mode: create in-process runner
 		session.mu.Lock()
-		session.RunnerType = "tui"
+		session.RunnerType = RunnerTypeTUI
 		session.mu.Unlock()
 
 		eventHandler = newSessionEventHandler(m, session.ID)
@@ -1011,12 +1305,59 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		session.mu.Unlock()
 	}
 
+	// For manager-started tmux sessions, capture the stable window ID from the
+	// runner. tmuxRunner.Start() captures it atomically via "new-window -P -F
+	// #{window_id}", so no post-hoc name lookup (and no TOCTOU race) is needed.
+	// Fall back to TmuxWindowIDByName only if the runner didn't supply an ID
+	// (e.g. non-tmux runners or sessions started before this field was added).
+	if m.config.SessionMode == SessionModeTmux {
+		session.mu.RLock()
+		windowName := session.TmuxWindowName
+		hasID := session.TmuxWindowID != ""
+		session.mu.RUnlock()
+		if !hasID {
+			if tr, ok := runner.(*tmuxRunner); ok && tr.WindowID() != "" {
+				session.mu.Lock()
+				session.TmuxWindowID = tr.WindowID()
+				session.mu.Unlock()
+			} else if windowName != "" {
+				if id, ok := TmuxWindowIDByName(windowName); ok {
+					session.mu.Lock()
+					session.TmuxWindowID = id
+					session.mu.Unlock()
+				}
+			}
+		}
+	}
+
+	// naturallyPersisted is set to true by the tmux natural-completion paths
+	// (pane-dead clean exit, window-gone normal) that call persistSession and
+	// then delete m.outputs[sessionID]. The defer below must not call
+	// persistSession a second time in those cases, because m.outputs is already
+	// gone and the second persist would overwrite the on-disk record with an
+	// empty output slice.
+	naturallyPersisted := false
+
 	defer func() {
 		runner.Stop()
 		if m.config.SessionMode != SessionModeTmux {
 			m.followUpChansMu.Lock()
 			delete(m.followUpChans, session.ID)
 			m.followUpChansMu.Unlock()
+		}
+		// In tmux mode, Close() persists sessions as StatusRunning before
+		// canceling the context. Don't overwrite that with the StatusStopped
+		// set by the ctx.Done handler above.
+		// Only skip if the manager context is also canceled (meaning Close()
+		// was called). If the manager is still alive, this is an explicit
+		// StopSession call — persist the stopped status.
+		if m.config.SessionMode == SessionModeTmux && m.ctx.Err() != nil {
+			return
+		}
+		// Natural tmux completion paths already called persistSession before
+		// removing m.outputs. Don't call it again with the now-empty slice.
+		if naturallyPersisted {
+			return
 		}
 		m.persistSession(session)
 	}()
@@ -1037,28 +1378,41 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				m.updateSessionStatus(session, StatusStopped)
 				return
 			case <-ticker.C:
-				// Check if tmux window still exists
+				// Check if tmux window still exists. Prefer stable window ID
+				// so renames don't cause false "window gone" completions.
 				session.mu.RLock()
 				tmuxName := session.TmuxWindowName
+				tmuxID := session.TmuxWindowID
 				sessionID := session.ID
 				session.mu.RUnlock()
 
-				if tmuxName == "" {
+				if tmuxName == "" && tmuxID == "" {
 					continue
 				}
 
-				windowExists := TmuxWindowExists(tmuxName)
-				paneDead := windowExists && TmuxWindowPaneDead(tmuxName)
+				// windowTarget is the most stable identifier available for
+				// pane-dead / exit-status queries (list-panes -t <target>).
+				windowTarget := tmuxName
+				if tmuxID != "" {
+					windowTarget = tmuxID
+				}
+
+				windowExists := tmuxWindowAlive(tmuxID, tmuxName)
+				paneDead := windowExists && TmuxWindowPaneDead(windowTarget)
 
 				if paneDead {
 					// The process in the tmux window has exited but the window
 					// remains (due to remain-on-exit). Check exit code to
 					// determine whether it completed successfully or failed.
-					exitCode, gotStatus := TmuxWindowPaneExitStatus(tmuxName)
+					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
 
 					if gotStatus && exitCode == 0 {
 						// Clean exit — session completed successfully
 						m.updateSessionStatus(session, StatusCompleted)
+
+						// Persist before removing from memory so output history is written to disk.
+						m.persistSession(session)
+						naturallyPersisted = true
 
 						m.mu.Lock()
 						delete(m.sessions, sessionID)
@@ -1069,7 +1423,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 						delete(m.outputs, sessionID)
 						m.outputsMu.Unlock()
 
-						m.persistSession(session)
 						return
 					}
 
@@ -1112,6 +1465,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					// Window disappeared after running for a while — normal completion
 					m.updateSessionStatus(session, StatusCompleted)
 
+					// Persist before removing from memory so output history is written to disk.
+					m.persistSession(session)
+					naturallyPersisted = true
+
 					// Remove from active sessions map
 					m.mu.Lock()
 					delete(m.sessions, sessionID)
@@ -1122,9 +1479,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					m.outputsMu.Lock()
 					delete(m.outputs, sessionID)
 					m.outputsMu.Unlock()
-
-					// Persist before removal (for history)
-					m.persistSession(session)
 
 					return
 				}

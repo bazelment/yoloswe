@@ -81,6 +81,7 @@ type Model struct {
 	pendingSessionType    session.SessionType
 	defaultPlanModel      string
 	openedRepos           []string
+	resumeRepos           []string
 	cachedHistory         []*session.SessionMeta
 	worktrees             []wt.Worktree
 	sessions              []session.SessionInfo
@@ -99,7 +100,7 @@ type Model struct {
 // render shows branch names immediately without waiting for an async refresh.
 // width/height set the initial terminal dimensions so the first View() can
 // render a proper layout without waiting for WindowSizeMsg.
-func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry, sharedManagerConfig session.ManagerConfig) Model {
+func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManager *session.Manager, taskRouter *taskrouter.Router, initialWorktrees []wt.Worktree, width, height int, providerAvailability *agent.ProviderAvailability, modelRegistry *agent.ModelRegistry, sharedManagerConfig session.ManagerConfig, resumeRepos []string) Model {
 	if editor == "" {
 		editor = "code"
 	}
@@ -166,6 +167,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		splitPane:            NewSplitPane(),
 		fileTree:             NewFileTree("", nil),
 		scrollPositions:      make(map[session.SessionID]int),
+		resumeRepos:          resumeRepos,
 	}
 
 	// Sync placeholder colors with the loaded theme (NewTextArea defaults to "245")
@@ -212,6 +214,14 @@ func (m Model) Init() tea.Cmd {
 	} else {
 		// No pre-loaded data; fetch worktrees asynchronously.
 		cmds = append(cmds, m.refreshWorktrees())
+	}
+
+	// Auto-open repos that have live tmux sessions from a previous run.
+	if len(m.resumeRepos) > 0 {
+		repos := m.resumeRepos
+		cmds = append(cmds, func() tea.Msg {
+			return resumeReposMsg{repos: repos}
+		})
 	}
 
 	return tea.Batch(cmds...)
@@ -384,8 +394,11 @@ func (m *Model) updateSessionDropdown() {
 		// Status badge
 		badge := statusIcon(sess.Status, m.styles)
 
-		// Use title if available, otherwise derive from prompt
+		// Prefer a human-readable title; fall back to tmux window name, then prompt.
 		label := sess.Title
+		if label == "" {
+			label = sess.TmuxWindowName
+		}
 		if label == "" {
 			label = generateDropdownTitle(sess.Prompt, 20)
 		}
@@ -778,6 +791,9 @@ type (
 	// deferredRefreshMsg is sent after a short delay so the initial UI
 	// renders with just worktree names before loading statuses/file tree.
 	deferredRefreshMsg struct{}
+	// resumeReposMsg triggers auto-opening of repos that have live tmux sessions
+	// from a previous run.
+	resumeReposMsg struct{ repos []string }
 	// deleteWorktreeMsg is sent to delete a worktree
 	deleteWorktreeMsg struct {
 		branch       string

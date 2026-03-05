@@ -130,6 +130,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshFileTree(), m.refreshHistorySessions(),
 		)
 
+	case resumeReposMsg:
+		var cmds []tea.Cmd
+		for _, repo := range msg.repos {
+			if _, ok := m.repos[repo]; ok {
+				continue // already opened
+			}
+			m2, cmd := m.openRepo(repo)
+			m = m2.(Model)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		// Switch back to the initial repo so the user sees the same view.
+		if len(msg.repos) > 0 {
+			m2, cmd := m.switchRepo(m.openedRepos[0])
+			m = m2.(Model)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
 	case singleWorktreeStatusMsg:
 		// If this response is for a repo that is no longer the active one,
 		// save the data into the correct RepoContext and discard for current view.
@@ -588,16 +610,11 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 			if m.selectedSessionIndex >= 0 && m.selectedSessionIndex < len(currentSessions) {
 				sess := currentSessions[m.selectedSessionIndex]
-				if sess.TmuxWindowName != "" {
-					return m, func() tea.Msg {
-						cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
-						if err := cmd.Run(); err != nil {
-							return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
-						}
-						return nil
-					}
+				if sess.TmuxWindowID != "" {
+					return m, selectTmuxWindowCmd(sess.TmuxWindowID)
+				} else if sess.TmuxWindowName != "" {
+					return m, selectTmuxWindowCmd(sess.TmuxWindowName)
 				}
-				// No toast for missing tmux window name - it's a rare edge case
 			} else {
 				toastCmd := m.addToast("No sessions to switch to", ToastInfo)
 				return m, toastCmd
@@ -691,7 +708,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			toastCmd := m.addToast("Opening tmux window in "+filepath.Base(wtPath), ToastSuccess)
 			return m, tea.Batch(toastCmd, func() tea.Msg {
 				// Generate unique window name like build/plan sessions
-				windowName := session.GenerateTmuxWindowName()
+				windowName := session.GenerateTmuxWindowName(m.repoName, filepath.Base(wtPath))
 
 				// Create window with unique name and capture both name and ID
 				cmd := exec.Command("tmux", "new-window", "-n", windowName, "-c", wtPath, "-P", "-F", "#{window_name},#{window_id}")
@@ -1049,13 +1066,28 @@ func (m Model) handleDropdownMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.focus = FocusOutput
 			return m, tea.Batch(m.refreshFileTree(), m.refreshHistorySessions())
 		}
-		// Session selected - view it
+		// Session selected - view or switch to it
 		if item := m.sessionDropdown.SelectedItem(); item != nil {
 			if item.ID == dropdownSeparatorID {
 				// Can't select separator
 				return m, nil
 			}
-			m.switchViewingSession(session.SessionID(item.ID))
+			sessID := session.SessionID(item.ID)
+			// In tmux mode, switch to the tmux window if available
+			if m.sessionManager.IsInTmuxMode() {
+				if info, ok := m.sessionManager.GetSessionInfo(sessID); ok {
+					if info.TmuxWindowID != "" {
+						m.sessionDropdown.Close()
+						m.focus = FocusOutput
+						return m, selectTmuxWindowCmd(info.TmuxWindowID)
+					} else if info.TmuxWindowName != "" {
+						m.sessionDropdown.Close()
+						m.focus = FocusOutput
+						return m, selectTmuxWindowCmd(info.TmuxWindowName)
+					}
+				}
+			}
+			m.switchViewingSession(sessID)
 			// Check if this is a live session or history
 			if _, ok := m.sessionManager.GetSessionInfo(m.viewingSessionID); ok {
 				// Live session -- viewingHistoryData already nil from switchViewingSession
@@ -1838,6 +1870,19 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	return m, nil
 }
 
+// selectTmuxWindowCmd returns a tea.Cmd that switches the tmux client to the
+// window identified by windowID. All three switch-to-session call-sites use
+// this helper so the implementation lives in exactly one place.
+func selectTmuxWindowCmd(windowID string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("tmux", "select-window", "-t", windowID)
+		if err := cmd.Run(); err != nil {
+			return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
+		}
+		return nil
+	}
+}
+
 // switchToSession switches to the given session, handling repo switching,
 // tmux window selection, and view/worktree refresh. It is the shared
 // implementation used by switchToOverlaySession and switchToCommandCenterSession.
@@ -1851,14 +1896,10 @@ func (m Model) switchToSession(sess *session.SessionInfo) (tea.Model, tea.Cmd) {
 	}
 
 	if m.sessionManager.IsInTmuxMode() {
-		if sess.TmuxWindowName != "" {
-			return m, func() tea.Msg {
-				cmd := exec.Command("tmux", "select-window", "-t", sess.TmuxWindowName)
-				if err := cmd.Run(); err != nil {
-					return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
-				}
-				return nil
-			}
+		if sess.TmuxWindowID != "" {
+			return m, selectTmuxWindowCmd(sess.TmuxWindowID)
+		} else if sess.TmuxWindowName != "" {
+			return m, selectTmuxWindowCmd(sess.TmuxWindowName)
 		}
 		toastCmd := m.addToast("Session has no tmux window", ToastInfo)
 		return m, toastCmd
@@ -2454,6 +2495,16 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 
 	// Start event fan-in for the new manager.
 	go fanInEvents(m.ctx, repoName, mgr, m.sharedEvents)
+
+	// Re-adopt any tmux sessions that were running for this repo before the
+	// last restart. ReconcileTmuxSessions is a no-op in TUI mode or when no
+	// store is configured.
+	if err := mgr.ReconcileTmuxSessions(); err != nil {
+		// Non-fatal: log via a toast but continue.
+		toastCmd := m.addToast("Failed to reconcile tmux sessions for "+repoName+": "+err.Error(), ToastError)
+		m2, cmd := m.switchRepo(repoName)
+		return m2, tea.Batch(toastCmd, cmd)
+	}
 
 	return m.switchRepo(repoName)
 }

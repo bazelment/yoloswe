@@ -1,12 +1,15 @@
 package session
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 )
 
 func TestNewManager(t *testing.T) {
@@ -867,12 +870,16 @@ func TestResumeSession_ResetsStateAndSchedulesRun(t *testing.T) {
 	err := m.ResumeSession("resume-test", "new prompt")
 	require.NoError(t, err)
 
-	// Status must have been reset to StatusPending synchronously.
+	// ResumeSession resets status to StatusPending synchronously before
+	// returning, but the goroutine it spawns immediately transitions the
+	// session to StatusRunning (and quickly to StatusFailed since there is
+	// no real runner). Verify that the session is no longer StatusCompleted
+	// (i.e., the reset happened) and that a new ctx was installed.
 	sess.mu.RLock()
 	statusAfterResume := sess.Status
 	ctxAfterResume := sess.ctx
 	sess.mu.RUnlock()
-	assert.Equal(t, StatusPending, statusAfterResume, "status should be reset to Pending")
+	assert.NotEqual(t, StatusCompleted, statusAfterResume, "status should no longer be Completed after resume")
 	assert.NotNil(t, ctxAfterResume, "ctx should be set by ResumeSession")
 
 	// Output buffer should have been re-initialized and contain the status line.
@@ -1016,4 +1023,291 @@ func TestSessionInfoIsResumable(t *testing.T) {
 			assert.Equal(t, tc.want, info.IsResumable())
 		})
 	}
+}
+
+func TestReconcileTmuxSessions_NoopOutsideTmux(t *testing.T) {
+	// When not inside tmux, ReconcileTmuxSessions should be a no-op.
+	// Previously it would mark sessions as completed because tmuxWindowAlive
+	// returns false outside tmux — which would incorrectly mark live sessions
+	// as completed if the user runs bramble outside their tmux session.
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now()
+	startedAt := now.Add(-time.Minute)
+
+	// Save a session that looks like it was running in tmux
+	stored := &StoredSession{
+		ID:             "tmux-session-1",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "test-repo",
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "build something",
+		TmuxWindowName: "test-repo/feature:0",
+		TmuxWindowID:   "@99",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      now,
+		StartedAt:      &startedAt,
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	require.NoError(t, err)
+
+	// Session should remain StatusRunning — ReconcileTmuxSessions is a no-op
+	// when not inside tmux so it can't falsely mark live sessions as completed.
+	reloaded, err := store.LoadSession("test-repo", "feature", "tmux-session-1")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, reloaded.Status)
+	assert.Nil(t, reloaded.CompletedAt)
+
+	// Session should NOT be in the manager's in-memory map (reconcile was a no-op)
+	_, inMap := m.GetSession("tmux-session-1")
+	assert.False(t, inMap, "session should not be adopted in memory when outside tmux")
+}
+
+func TestReconcileTmuxSessions_SkipsNonTmux(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	// Save a TUI session that was running — should be ignored by reconciliation
+	stored := &StoredSession{
+		ID:           "tui-session-1",
+		Type:         SessionTypeBuilder,
+		Status:       StatusRunning,
+		RepoName:     "test-repo",
+		WorktreePath: "/path/to/wt",
+		WorktreeName: "feature",
+		Prompt:       "build something",
+		RunnerType:   RunnerTypeTUI,
+		CreatedAt:    time.Now(),
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	require.NoError(t, err)
+
+	// TUI session should remain untouched
+	reloaded, err := store.LoadSession("test-repo", "feature", "tui-session-1")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, reloaded.Status, "TUI session should not be modified by reconciliation")
+}
+
+func TestReconcileTmuxSessions_SkipsCompletedSessions(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	completedAt := time.Now()
+	stored := &StoredSession{
+		ID:             "tmux-done",
+		Type:           SessionTypeBuilder,
+		Status:         StatusCompleted,
+		RepoName:       "test-repo",
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "done",
+		TmuxWindowName: "test-repo/feature:0",
+		TmuxWindowID:   "@42",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      time.Now(),
+		CompletedAt:    &completedAt,
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	require.NoError(t, err)
+
+	// Already-completed session should remain completed with same CompletedAt
+	reloaded, err := store.LoadSession("test-repo", "feature", "tmux-done")
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, reloaded.Status)
+	assert.Equal(t, completedAt.Unix(), reloaded.CompletedAt.Unix())
+}
+
+func TestReconcileTmuxSessions_NoopWithoutStore(t *testing.T) {
+	m := NewManagerWithConfig(ManagerConfig{
+		SessionMode: SessionModeTmux,
+	})
+	defer m.Close()
+
+	err := m.ReconcileTmuxSessions()
+	assert.NoError(t, err)
+}
+
+func TestReconcileTmuxSessions_NoopInTUIMode(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTUI,
+	})
+	defer m.Close()
+
+	err = m.ReconcileTmuxSessions()
+	assert.NoError(t, err)
+}
+
+func TestClose_PersistsTmuxSessions(t *testing.T) {
+	// Verify that Close() persists all active tmux-tracked sessions to the store
+	// so they can be reconciled on the next restart.
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	m := NewManagerWithConfig(ManagerConfig{
+		RepoName:    "test-repo",
+		Store:       store,
+		SessionMode: SessionModeTmux,
+	})
+
+	// Inject a tracked session directly (TrackTmuxWindow would start a goroutine
+	// that requires a real tmux environment, so we inject the session struct).
+	sessionID := SessionID("persist-test-session")
+	ctx, cancel := context.WithCancel(m.ctx)
+	s := &Session{
+		ID:             sessionID,
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "build it",
+		TmuxWindowName: "test-repo/feature:0",
+		TmuxWindowID:   "@11",
+		RunnerType:     RunnerTypeTmuxTracked,
+		RepoName:       "test-repo",
+		Progress:       &SessionProgress{LastActivity: time.Now()},
+		CreatedAt:      time.Now(),
+		ctx:            ctx,
+		cancel:         cancel,
+	}
+	m.mu.Lock()
+	m.sessions[sessionID] = s
+	m.models[sessionID] = sessionmodel.NewSessionModel(1000)
+	m.mu.Unlock()
+	m.outputsMu.Lock()
+	m.outputs[sessionID] = make([]OutputLine, 0)
+	m.outputsMu.Unlock()
+
+	// Close should persist all in-memory tmux sessions.
+	m.Close()
+
+	// The session should now be findable in the store.
+	loaded, err := store.LoadSession("test-repo", "feature", sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, "test-repo/feature:0", loaded.TmuxWindowName)
+	assert.Equal(t, "@11", loaded.TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmuxTracked, loaded.RunnerType)
+}
+
+func TestReposWithLiveTmuxSessions_NoopOutsideTmux(t *testing.T) {
+	// ReposWithLiveTmuxSessions must be a no-op when not inside tmux.
+	// Outside tmux, tmuxWindowAlive always returns false, which would
+	// incorrectly mark still-live sessions as completed.
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now()
+	startedAt := now.Add(-time.Minute)
+
+	// Save running sessions in two different repos
+	activeRepoSession := &StoredSession{
+		ID:             "active-repo-session",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "active-repo",
+		WorktreePath:   "/path/to/active",
+		WorktreeName:   "main",
+		TmuxWindowName: "active-repo/main:0",
+		TmuxWindowID:   "@100",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      now,
+		StartedAt:      &startedAt,
+	}
+	require.NoError(t, store.SaveSession(activeRepoSession))
+
+	staleRepoSession := &StoredSession{
+		ID:             "stale-repo-session",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "stale-repo",
+		WorktreePath:   "/path/to/stale",
+		WorktreeName:   "feature",
+		TmuxWindowName: "stale-repo/feature:0",
+		TmuxWindowID:   "@101",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      now,
+		StartedAt:      &startedAt,
+	}
+	require.NoError(t, store.SaveSession(staleRepoSession))
+
+	// Not inside tmux → no-op; neither repo is returned and no sessions are mutated.
+	liveRepos := ReposWithLiveTmuxSessions(store, "active-repo")
+	assert.Empty(t, liveRepos)
+
+	// Active repo session should be untouched (skipped by activeRepo filter)
+	active, err := store.LoadSession("active-repo", "main", "active-repo-session")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, active.Status)
+	assert.Nil(t, active.CompletedAt)
+
+	// Stale repo session should also remain untouched (not inside tmux → no-op)
+	stale, err := store.LoadSession("stale-repo", "feature", "stale-repo-session")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, stale.Status)
+	assert.Nil(t, stale.CompletedAt)
+}
+
+func TestReposWithLiveTmuxSessions_SkipsNonTmuxSessions(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now()
+	// A non-tmux running session in another repo should not be touched
+	stored := &StoredSession{
+		ID:           "non-tmux-session",
+		Type:         SessionTypeBuilder,
+		Status:       StatusRunning,
+		RepoName:     "other-repo",
+		WorktreePath: "/path/to/other",
+		WorktreeName: "main",
+		RunnerType:   RunnerTypeTUI,
+		CreatedAt:    now,
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	liveRepos := ReposWithLiveTmuxSessions(store, "active-repo")
+	assert.Empty(t, liveRepos)
+
+	reloaded, err := store.LoadSession("other-repo", "main", "non-tmux-session")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, reloaded.Status)
+}
+
+func TestReposWithLiveTmuxSessions_NilStore(t *testing.T) {
+	liveRepos := ReposWithLiveTmuxSessions(nil, "active-repo")
+	assert.Nil(t, liveRepos)
 }

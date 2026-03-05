@@ -166,6 +166,16 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	sessionManager := session.NewManagerWithConfig(initialConfig)
 	defer sessionManager.Close()
 
+	// Reconcile previously-running tmux sessions against live tmux windows.
+	if err := sessionManager.ReconcileTmuxSessions(); err != nil {
+		log.Printf("Warning: tmux session reconciliation failed: %v", err)
+	}
+
+	// Discover repos (other than the initial one) that have live tmux sessions.
+	// Dead sessions from those repos are cleaned up; live ones will be auto-opened
+	// by the TUI so their sessions are fully re-adopted.
+	resumeRepos := session.ReposWithLiveTmuxSessions(store, repoName)
+
 	// Start the AI task router using the best available provider.
 	// Priority: codex (original default) → claude → gemini.
 	var taskRouter *taskrouter.Router
@@ -189,7 +199,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
 
 	// Create and run TUI
-	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry, sharedManagerConfig)
+	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry, sharedManagerConfig, resumeRepos)
 	p := tea.NewProgram(model)
 
 	finalModel, err := p.Run()

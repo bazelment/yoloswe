@@ -612,3 +612,91 @@ func TestTitleAndModelInListSessions(t *testing.T) {
 	assert.Equal(t, "plan the migration", list[0].Title)
 	assert.Equal(t, "sonnet", list[0].Model)
 }
+
+func TestTmuxFieldsRoundtrip(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now().Truncate(time.Second)
+
+	session := &StoredSession{
+		ID:             "tmux-test",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "myrepo",
+		WorktreePath:   "/path/to/wt",
+		WorktreeName:   "feature",
+		Prompt:         "build it",
+		TmuxWindowName: "myrepo/feature:0",
+		TmuxWindowID:   "@5",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      now,
+	}
+
+	require.NoError(t, store.SaveSession(session))
+
+	// Verify fields survive save/load roundtrip
+	loaded, err := store.LoadSession("myrepo", "feature", "tmux-test")
+	require.NoError(t, err)
+	assert.Equal(t, "myrepo/feature:0", loaded.TmuxWindowName)
+	assert.Equal(t, "@5", loaded.TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmux, loaded.RunnerType)
+
+	// Verify fields appear in ListSessions
+	list, err := store.ListSessions("myrepo", "feature")
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "myrepo/feature:0", list[0].TmuxWindowName)
+	assert.Equal(t, "@5", list[0].TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmux, list[0].RunnerType)
+
+	// Verify fields appear in ListAllSessions
+	allList, err := store.ListAllSessions()
+	require.NoError(t, err)
+	require.Len(t, allList, 1)
+	assert.Equal(t, "myrepo/feature:0", allList[0].TmuxWindowName)
+	assert.Equal(t, "@5", allList[0].TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmux, allList[0].RunnerType)
+}
+
+func TestTmuxFieldsInSessionToStored(t *testing.T) {
+	session := &Session{
+		ID:             "test-id",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		WorktreePath:   "/path",
+		WorktreeName:   "feature",
+		Prompt:         "build it",
+		TmuxWindowName: "repo/feature:1",
+		TmuxWindowID:   "@3",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      time.Now(),
+		Progress:       &SessionProgress{},
+	}
+
+	stored := SessionToStored(session, "repo", nil)
+
+	assert.Equal(t, "repo/feature:1", stored.TmuxWindowName)
+	assert.Equal(t, "@3", stored.TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmux, stored.RunnerType)
+}
+
+func TestTmuxFieldsInStoredToSessionInfo(t *testing.T) {
+	stored := &StoredSession{
+		ID:             "test-id",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		WorktreePath:   "/path",
+		WorktreeName:   "feature",
+		Prompt:         "build it",
+		TmuxWindowName: "repo/feature:2",
+		TmuxWindowID:   "@7",
+		RunnerType:     RunnerTypeTmuxTracked,
+		CreatedAt:      time.Now(),
+	}
+
+	info := StoredToSessionInfo(stored)
+	assert.Equal(t, "repo/feature:2", info.TmuxWindowName)
+	assert.Equal(t, "@7", info.TmuxWindowID)
+	assert.Equal(t, RunnerTypeTmuxTracked, info.RunnerType)
+}
