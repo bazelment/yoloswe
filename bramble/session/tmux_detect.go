@@ -242,28 +242,41 @@ func activateITermWindowForTmux(windowTarget string) {
 	windowName := strings.TrimSpace(string(nameOut))
 
 	// Shorten home prefix to ~ for matching iTerm2's title format.
+	// Require a path-separator boundary so that e.g. HOME=/Users/alice does
+	// not incorrectly match /Users/alicebob/project.
 	home := os.Getenv("HOME")
 	displayDir := paneDir
-	if home != "" && strings.HasPrefix(displayDir, home) {
-		displayDir = "~" + displayDir[len(home):]
+	if home != "" && strings.HasPrefix(paneDir, home) &&
+		(len(paneDir) == len(home) || paneDir[len(home)] == '/') {
+		displayDir = "~" + paneDir[len(home):]
 	}
 
-	// Try path match first, then window name fallback.
 	// Guard against empty match strings: AppleScript's `n contains ""` is always
 	// true, which would activate the wrong iTerm2 window.
 	if displayDir == "" && windowName == "" {
 		return
 	}
 
-	// AppleScript: iterate CC windows (prefixed with ↣) and select the match.
-	// Only include the path loop when we have a non-empty path to match.
+	// AppleScript matching strategy:
+	//   1. Primary: look for a CC window whose title is exactly "↣ <displayDir>"
+	//      or starts with "↣ <displayDir> " (i.e. path is followed by a space or
+	//      is the whole title after the arrow). This prevents "~/repo" from
+	//      matching "~/repo-old".
+	//   2. Fallback: match window name substring (used only when displayDir is
+	//      empty or no exact path match is found).
+	//
+	// iTerm2 CC window titles have the form "↣ <path>" or "↣ <path> — <proc>".
 	var script string
 	if displayDir != "" && windowName != "" {
 		script = fmt.Sprintf(`tell application "iTerm2"
+    set arrow to "↣ "
+    set targetPath to %q
+    set targetName to %q
     repeat with w in windows
         set n to name of w
-        if n starts with "↣" then
-            if n contains %q then
+        if n starts with arrow then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetPath or rest starts with (targetPath & " ") then
                 select w
                 return
             end if
@@ -271,8 +284,8 @@ func activateITermWindowForTmux(windowTarget string) {
     end repeat
     repeat with w in windows
         set n to name of w
-        if n starts with "↣" then
-            if n contains %q then
+        if n starts with arrow then
+            if n contains targetName then
                 select w
                 return
             end if
@@ -281,10 +294,13 @@ func activateITermWindowForTmux(windowTarget string) {
 end tell`, displayDir, windowName)
 	} else if displayDir != "" {
 		script = fmt.Sprintf(`tell application "iTerm2"
+    set arrow to "↣ "
+    set targetPath to %q
     repeat with w in windows
         set n to name of w
-        if n starts with "↣" then
-            if n contains %q then
+        if n starts with arrow then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetPath or rest starts with (targetPath & " ") then
                 select w
                 return
             end if
@@ -293,10 +309,12 @@ end tell`, displayDir, windowName)
 end tell`, displayDir)
 	} else {
 		script = fmt.Sprintf(`tell application "iTerm2"
+    set arrow to "↣ "
+    set targetName to %q
     repeat with w in windows
         set n to name of w
-        if n starts with "↣" then
-            if n contains %q then
+        if n starts with arrow then
+            if n contains targetName then
                 select w
                 return
             end if
