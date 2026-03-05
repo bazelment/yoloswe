@@ -1021,9 +1021,11 @@ func TestSessionInfoIsResumable(t *testing.T) {
 	}
 }
 
-func TestReconcileTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
-	// When not inside tmux, all tmux windows appear "gone",
-	// so reconciliation should mark running sessions as completed.
+func TestReconcileTmuxSessions_NoopOutsideTmux(t *testing.T) {
+	// When not inside tmux, ReconcileTmuxSessions should be a no-op.
+	// Previously it would mark sessions as completed because tmuxWindowAlive
+	// returns false outside tmux — which would incorrectly mark live sessions
+	// as completed if the user runs bramble outside their tmux session.
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
 
@@ -1057,15 +1059,16 @@ func TestReconcileTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
 	err = m.ReconcileTmuxSessions()
 	require.NoError(t, err)
 
-	// Session should now be completed in the store since the window doesn't exist
+	// Session should remain StatusRunning — ReconcileTmuxSessions is a no-op
+	// when not inside tmux so it can't falsely mark live sessions as completed.
 	reloaded, err := store.LoadSession("test-repo", "feature", "tmux-session-1")
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, reloaded.Status)
-	assert.NotNil(t, reloaded.CompletedAt)
+	assert.Equal(t, StatusRunning, reloaded.Status)
+	assert.Nil(t, reloaded.CompletedAt)
 
-	// Session should NOT be in the manager's in-memory map (window was gone)
+	// Session should NOT be in the manager's in-memory map (reconcile was a no-op)
 	_, inMap := m.GetSession("tmux-session-1")
-	assert.False(t, inMap, "gone session should not be tracked in memory")
+	assert.False(t, inMap, "session should not be adopted in memory when outside tmux")
 }
 
 func TestReconcileTmuxSessions_SkipsNonTmux(t *testing.T) {
@@ -1216,7 +1219,10 @@ func TestClose_PersistsTmuxSessions(t *testing.T) {
 	assert.Equal(t, RunnerTypeTmuxTracked, loaded.RunnerType)
 }
 
-func TestReposWithLiveTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
+func TestReposWithLiveTmuxSessions_NoopOutsideTmux(t *testing.T) {
+	// ReposWithLiveTmuxSessions must be a no-op when not inside tmux.
+	// Outside tmux, tmuxWindowAlive always returns false, which would
+	// incorrectly mark still-live sessions as completed.
 	store, err := NewStore(t.TempDir())
 	require.NoError(t, err)
 
@@ -1254,23 +1260,21 @@ func TestReposWithLiveTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
 	}
 	require.NoError(t, store.SaveSession(staleRepoSession))
 
-	// Since we're not in tmux, all windows appear gone.
-	// stale-repo should not be returned (no live windows) and its session
-	// should be marked completed. active-repo is skipped entirely.
+	// Not inside tmux → no-op; neither repo is returned and no sessions are mutated.
 	liveRepos := ReposWithLiveTmuxSessions(store, "active-repo")
 	assert.Empty(t, liveRepos)
 
-	// Active repo session should be untouched (skipped)
+	// Active repo session should be untouched (skipped by activeRepo filter)
 	active, err := store.LoadSession("active-repo", "main", "active-repo-session")
 	require.NoError(t, err)
 	assert.Equal(t, StatusRunning, active.Status)
 	assert.Nil(t, active.CompletedAt)
 
-	// Stale repo session should be marked completed
+	// Stale repo session should also remain untouched (not inside tmux → no-op)
 	stale, err := store.LoadSession("stale-repo", "feature", "stale-repo-session")
 	require.NoError(t, err)
-	assert.Equal(t, StatusCompleted, stale.Status)
-	assert.NotNil(t, stale.CompletedAt)
+	assert.Equal(t, StatusRunning, stale.Status)
+	assert.Nil(t, stale.CompletedAt)
 }
 
 func TestReposWithLiveTmuxSessions_SkipsNonTmuxSessions(t *testing.T) {

@@ -488,6 +488,11 @@ func (m *Manager) ReconcileTmuxSessions() error {
 	if m.config.SessionMode != SessionModeTmux {
 		return nil
 	}
+	// Only reconcile when actually inside tmux; outside tmux all window-alive checks
+	// return false, which would incorrectly mark live sessions as completed.
+	if !IsInsideTmux() || !IsTmuxAvailable() {
+		return nil
+	}
 
 	// List all worktrees for this repo
 	worktrees, err := m.config.Store.ListWorktrees(m.config.RepoName)
@@ -597,6 +602,11 @@ func (m *Manager) ReconcileTmuxSessions() error {
 // sessions are fully re-adopted by a Manager.
 func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
 	if store == nil {
+		return nil
+	}
+	// Only scan for live sessions when inside tmux; outside tmux all window-alive
+	// checks return false, which would incorrectly mark live sessions as completed.
+	if !IsInsideTmux() || !IsTmuxAvailable() {
 		return nil
 	}
 
@@ -1002,9 +1012,22 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	for {
 		select {
 		case <-session.ctx.Done():
-			// Window cleanup is handled in Close() if TmuxExitOnQuit is enabled
-			// This ensures cleanup only happens on app quit, not on individual session stops
+			// Window cleanup is handled in Close() if TmuxExitOnQuit is enabled.
+			// This ensures cleanup only happens on app quit, not on individual session stops.
 			m.updateSessionStatus(session, StatusStopped)
+			// If the manager is still alive (not a Close), this was an explicit
+			// StopSession call. Persist the stopped status so it won't be
+			// re-adopted on restart.
+			if m.ctx.Err() == nil {
+				m.persistSession(session)
+				m.mu.Lock()
+				delete(m.sessions, session.ID)
+				delete(m.models, session.ID)
+				m.mu.Unlock()
+				m.outputsMu.Lock()
+				delete(m.outputs, session.ID)
+				m.outputsMu.Unlock()
+			}
 			return
 		case <-ticker.C:
 			session.mu.RLock()
@@ -1282,19 +1305,27 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		session.mu.Unlock()
 	}
 
-	// For manager-started tmux sessions, resolve the stable window ID from the
-	// window name so that UI "switch to window" operations use select-window -t
-	// with a stable ID rather than a potentially-renamed name.
+	// For manager-started tmux sessions, capture the stable window ID from the
+	// runner. tmuxRunner.Start() captures it atomically via "new-window -P -F
+	// #{window_id}", so no post-hoc name lookup (and no TOCTOU race) is needed.
+	// Fall back to TmuxWindowIDByName only if the runner didn't supply an ID
+	// (e.g. non-tmux runners or sessions started before this field was added).
 	if m.config.SessionMode == SessionModeTmux {
 		session.mu.RLock()
 		windowName := session.TmuxWindowName
 		hasID := session.TmuxWindowID != ""
 		session.mu.RUnlock()
-		if !hasID && windowName != "" {
-			if id, ok := TmuxWindowIDByName(windowName); ok {
+		if !hasID {
+			if tr, ok := runner.(*tmuxRunner); ok && tr.WindowID() != "" {
 				session.mu.Lock()
-				session.TmuxWindowID = id
+				session.TmuxWindowID = tr.WindowID()
 				session.mu.Unlock()
+			} else if windowName != "" {
+				if id, ok := TmuxWindowIDByName(windowName); ok {
+					session.mu.Lock()
+					session.TmuxWindowID = id
+					session.mu.Unlock()
+				}
 			}
 		}
 	}
@@ -1309,7 +1340,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		// In tmux mode, Close() persists sessions as StatusRunning before
 		// canceling the context. Don't overwrite that with the StatusStopped
 		// set by the ctx.Done handler above.
-		if m.config.SessionMode == SessionModeTmux && session.ctx.Err() != nil {
+		// Only skip if the manager context is also canceled (meaning Close()
+		// was called). If the manager is still alive, this is an explicit
+		// StopSession call — persist the stopped status.
+		if m.config.SessionMode == SessionModeTmux && m.ctx.Err() != nil {
 			return
 		}
 		m.persistSession(session)
