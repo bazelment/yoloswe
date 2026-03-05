@@ -590,6 +590,76 @@ func (m *Manager) ReconcileTmuxSessions() error {
 	return nil
 }
 
+// ReposWithLiveTmuxSessions returns repo names (other than activeRepo) that
+// have at least one tmux session whose window is still alive. Repos that only
+// have dead tmux sessions are cleaned up in place (marked completed).
+// The caller can use the returned list to auto-open those repos so their
+// sessions are fully re-adopted by a Manager.
+func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
+	if store == nil {
+		return nil
+	}
+
+	repos, err := store.ListRepos()
+	if err != nil {
+		return nil
+	}
+
+	var liveRepos []string
+	for _, repo := range repos {
+		if repo == activeRepo {
+			continue // handled by the active manager's ReconcileTmuxSessions
+		}
+
+		hasLive := false
+
+		worktrees, err := store.ListWorktrees(repo)
+		if err != nil {
+			continue
+		}
+
+		for _, wtName := range worktrees {
+			sessions, err := store.ListSessions(repo, wtName)
+			if err != nil {
+				continue
+			}
+
+			for _, meta := range sessions {
+				if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
+					continue
+				}
+				if meta.Status != StatusRunning && meta.Status != StatusPending {
+					continue
+				}
+
+				stored, err := store.LoadSession(repo, wtName, meta.ID)
+				if err != nil {
+					continue
+				}
+
+				if tmuxWindowAlive(stored.TmuxWindowID, stored.TmuxWindowName) {
+					hasLive = true
+					continue
+				}
+
+				// Window is gone — mark as completed
+				now := time.Now()
+				stored.Status = StatusCompleted
+				stored.CompletedAt = &now
+				if err := store.SaveSession(stored); err != nil {
+					log.Printf("Warning: failed to mark stale session %s as completed: %v", stored.ID, err)
+				}
+			}
+		}
+
+		if hasLive {
+			liveRepos = append(liveRepos, repo)
+		}
+	}
+
+	return liveRepos
+}
+
 // Close shuts down the manager and all sessions.
 func (m *Manager) Close() {
 	// Persist all active tmux sessions BEFORE canceling so that goroutines
@@ -1235,6 +1305,12 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			m.followUpChansMu.Lock()
 			delete(m.followUpChans, session.ID)
 			m.followUpChansMu.Unlock()
+		}
+		// In tmux mode, Close() persists sessions as StatusRunning before
+		// canceling the context. Don't overwrite that with the StatusStopped
+		// set by the ctx.Done handler above.
+		if m.config.SessionMode == SessionModeTmux && session.ctx.Err() != nil {
+			return
 		}
 		m.persistSession(session)
 	}()

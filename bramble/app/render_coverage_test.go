@@ -231,7 +231,7 @@ func TestModelView_KittyFlagsEnabled(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 
 	v := m.View()
 	assert.True(t, v.AltScreen, "Model.View(): AltScreen must be enabled")

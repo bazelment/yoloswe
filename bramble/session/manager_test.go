@@ -1215,3 +1215,91 @@ func TestClose_PersistsTmuxSessions(t *testing.T) {
 	assert.Equal(t, "@11", loaded.TmuxWindowID)
 	assert.Equal(t, RunnerTypeTmuxTracked, loaded.RunnerType)
 }
+
+func TestReposWithLiveTmuxSessions_MarksGoneWindowsCompleted(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now()
+	startedAt := now.Add(-time.Minute)
+
+	// Save running sessions in two different repos
+	activeRepoSession := &StoredSession{
+		ID:             "active-repo-session",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "active-repo",
+		WorktreePath:   "/path/to/active",
+		WorktreeName:   "main",
+		TmuxWindowName: "active-repo/main:0",
+		TmuxWindowID:   "@100",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      now,
+		StartedAt:      &startedAt,
+	}
+	require.NoError(t, store.SaveSession(activeRepoSession))
+
+	staleRepoSession := &StoredSession{
+		ID:             "stale-repo-session",
+		Type:           SessionTypeBuilder,
+		Status:         StatusRunning,
+		RepoName:       "stale-repo",
+		WorktreePath:   "/path/to/stale",
+		WorktreeName:   "feature",
+		TmuxWindowName: "stale-repo/feature:0",
+		TmuxWindowID:   "@101",
+		RunnerType:     RunnerTypeTmux,
+		CreatedAt:      now,
+		StartedAt:      &startedAt,
+	}
+	require.NoError(t, store.SaveSession(staleRepoSession))
+
+	// Since we're not in tmux, all windows appear gone.
+	// stale-repo should not be returned (no live windows) and its session
+	// should be marked completed. active-repo is skipped entirely.
+	liveRepos := ReposWithLiveTmuxSessions(store, "active-repo")
+	assert.Empty(t, liveRepos)
+
+	// Active repo session should be untouched (skipped)
+	active, err := store.LoadSession("active-repo", "main", "active-repo-session")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, active.Status)
+	assert.Nil(t, active.CompletedAt)
+
+	// Stale repo session should be marked completed
+	stale, err := store.LoadSession("stale-repo", "feature", "stale-repo-session")
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, stale.Status)
+	assert.NotNil(t, stale.CompletedAt)
+}
+
+func TestReposWithLiveTmuxSessions_SkipsNonTmuxSessions(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	now := time.Now()
+	// A non-tmux running session in another repo should not be touched
+	stored := &StoredSession{
+		ID:           "non-tmux-session",
+		Type:         SessionTypeBuilder,
+		Status:       StatusRunning,
+		RepoName:     "other-repo",
+		WorktreePath: "/path/to/other",
+		WorktreeName: "main",
+		RunnerType:   RunnerTypeTUI,
+		CreatedAt:    now,
+	}
+	require.NoError(t, store.SaveSession(stored))
+
+	liveRepos := ReposWithLiveTmuxSessions(store, "active-repo")
+	assert.Empty(t, liveRepos)
+
+	reloaded, err := store.LoadSession("other-repo", "main", "non-tmux-session")
+	require.NoError(t, err)
+	assert.Equal(t, StatusRunning, reloaded.Status)
+}
+
+func TestReposWithLiveTmuxSessions_NilStore(t *testing.T) {
+	liveRepos := ReposWithLiveTmuxSessions(nil, "active-repo")
+	assert.Nil(t, liveRepos)
+}

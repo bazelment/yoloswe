@@ -130,6 +130,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshFileTree(), m.refreshHistorySessions(),
 		)
 
+	case resumeReposMsg:
+		var cmds []tea.Cmd
+		for _, repo := range msg.repos {
+			if _, ok := m.repos[repo]; ok {
+				continue // already opened
+			}
+			m2, cmd := m.openRepo(repo)
+			m = m2.(Model)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		// Switch back to the initial repo so the user sees the same view.
+		if len(msg.repos) > 0 {
+			m2, cmd := m.switchRepo(m.openedRepos[0])
+			m = m2.(Model)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
 	case singleWorktreeStatusMsg:
 		// If this response is for a repo that is no longer the active one,
 		// save the data into the correct RepoContext and discard for current view.

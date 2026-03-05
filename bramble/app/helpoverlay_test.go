@@ -17,7 +17,7 @@ func TestHelpOverlayContextAwareness(t *testing.T) {
 	defer mgr.Close()
 
 	// Case 1: No worktree, no session -> Sessions section should be minimal
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 	sections := buildHelpSections(&m)
 
 	// Should have navigation and general sections
@@ -39,7 +39,7 @@ func TestHelpOverlayContextAwareness(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m2 := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{})
+	m2 := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 	sections2 := buildHelpSections(&m2)
 
 	hasWorktrees := false
@@ -57,7 +57,7 @@ func TestHelpOverlayContextAwareness(t *testing.T) {
 	}
 
 	// Case 3: Previous focus was dropdown -> Dropdown section should appear
-	m3 := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{})
+	m3 := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 	m3.helpOverlay.previousFocus = FocusWorktreeDropdown
 	sections3 := buildHelpSections(&m3)
 
@@ -77,7 +77,7 @@ func TestHelpOverlayFocusRestoration(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 
 	// Open help from FocusOutput
 	m.helpOverlay.previousFocus = FocusOutput
@@ -97,7 +97,7 @@ func TestHelpOverlayKeyHandling(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 	m.focus = FocusHelp
 	m.helpOverlay.previousFocus = FocusOutput
 
@@ -140,7 +140,7 @@ func TestHelpOverlayRendering(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 
 	sections := buildHelpSections(&m)
 	m.helpOverlay.SetSections(sections)
@@ -177,7 +177,7 @@ func TestHelpOverlayIncludesSettingsBinding(t *testing.T) {
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTUI})
 	defer mgr.Close()
 
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 	sections := buildHelpSections(&m)
 
 	found := false
@@ -225,7 +225,7 @@ func TestBuildHelpSectionsWithSession(t *testing.T) {
 	worktrees := []wt.Worktree{
 		{Branch: "feature-auth", Path: "/tmp/wt/feature-auth"},
 	}
-	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{})
+	m := NewModel(ctx, "/tmp/wt", "test-repo", "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 
 	// Add a session
 	sessionID, err := mgr.StartSession(session.SessionTypePlanner, "/tmp/wt/feature-auth", "test plan", "")
