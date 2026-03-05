@@ -666,3 +666,161 @@ on_worktree_delete:
 		t.Fatalf("Expected worktree remove call, got calls: %v", mockGit.Calls)
 	}
 }
+
+func TestSyncDefaultBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(mainPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "main\n"}
+	mockGit.Results["status --porcelain"] = &CmdResult{Stdout: ""}
+	mockGit.Results["merge --ff-only origin/main"] = &CmdResult{}
+
+	var buf bytes.Buffer
+	output := NewOutput(&buf, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	err := m.SyncDefaultBranch(context.Background())
+	if err != nil {
+		t.Fatalf("SyncDefaultBranch() error = %v", err)
+	}
+
+	ffCalled := false
+	for _, call := range mockGit.Calls {
+		if len(call) >= 3 && call[0] == "merge" && call[1] == "--ff-only" && call[2] == "origin/main" {
+			ffCalled = true
+			break
+		}
+	}
+	if !ffCalled {
+		t.Errorf("Expected merge --ff-only origin/main call, got calls: %v", mockGit.Calls)
+	}
+}
+
+func TestSyncDefaultBranchSkipsWithUncommittedChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(mainPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "main\n"}
+	mockGit.Results["status --porcelain"] = &CmdResult{Stdout: " M dirty-file.go\n"}
+
+	var buf bytes.Buffer
+	output := NewOutput(&buf, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	err := m.SyncDefaultBranch(context.Background())
+	if err != nil {
+		t.Fatalf("SyncDefaultBranch() error = %v", err)
+	}
+
+	// Should NOT call merge
+	for _, call := range mockGit.Calls {
+		if len(call) >= 2 && call[0] == "merge" {
+			t.Error("Should not call merge when worktree has uncommitted changes")
+		}
+	}
+
+	if !strings.Contains(buf.String(), "uncommitted changes") {
+		t.Error("Expected warning about uncommitted changes")
+	}
+}
+
+func TestSyncDefaultBranchNoMainWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No main worktree directory exists
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+
+	var buf bytes.Buffer
+	output := NewOutput(&buf, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	err := m.SyncDefaultBranch(context.Background())
+	if err != nil {
+		t.Fatalf("SyncDefaultBranch() error = %v", err)
+	}
+
+	// Should not call any branch or merge commands
+	for _, call := range mockGit.Calls {
+		if len(call) >= 1 && (call[0] == "merge" || call[0] == "branch") {
+			t.Errorf("Should not call %s when main worktree doesn't exist", call[0])
+		}
+	}
+}
+
+func TestRemoveIncludesWorktreePrune(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree remove "+wtPath] = &CmdResult{}
+	mockGit.Results["worktree prune"] = &CmdResult{}
+	mockGit.Results["branch -D feature"] = &CmdResult{}
+	mockGit.Results["push origin --delete feature"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	err := m.Remove(context.Background(), "feature", true)
+	if err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+
+	// Verify worktree prune was called before branch -D
+	pruneIdx := -1
+	branchDeleteIdx := -1
+	for i, call := range mockGit.Calls {
+		if len(call) >= 2 && call[0] == "worktree" && call[1] == "prune" {
+			pruneIdx = i
+		}
+		if len(call) >= 2 && call[0] == "branch" && call[1] == "-D" {
+			branchDeleteIdx = i
+		}
+	}
+	if pruneIdx == -1 {
+		t.Fatal("Expected worktree prune call")
+	}
+	if branchDeleteIdx == -1 {
+		t.Fatal("Expected branch -D call")
+	}
+	if pruneIdx >= branchDeleteIdx {
+		t.Errorf("worktree prune (idx=%d) should be called before branch -D (idx=%d)", pruneIdx, branchDeleteIdx)
+	}
+}

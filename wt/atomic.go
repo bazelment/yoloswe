@@ -104,6 +104,9 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 		}
 	}
 
+	// Step 1.5: Keep the main worktree current
+	m.SyncDefaultBranch(ctx)
+
 	// Step 2: Create worktree + branch
 	m.output.Info(fmt.Sprintf("Creating worktree %s from %s...", branch, baseBranch))
 	if _, err := m.git.Run(ctx, []string{
