@@ -394,10 +394,10 @@ func (m *Model) updateSessionDropdown() {
 		// Status badge
 		badge := statusIcon(sess.Status, m.styles)
 
-		// Use tmux window name in tmux mode, otherwise title or prompt
-		label := sess.TmuxWindowName
+		// Prefer a human-readable title; fall back to tmux window name, then prompt.
+		label := sess.Title
 		if label == "" {
-			label = sess.Title
+			label = sess.TmuxWindowName
 		}
 		if label == "" {
 			label = generateDropdownTitle(sess.Prompt, 20)
