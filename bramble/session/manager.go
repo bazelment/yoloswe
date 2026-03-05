@@ -1330,6 +1330,14 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		}
 	}
 
+	// naturallyPersisted is set to true by the tmux natural-completion paths
+	// (pane-dead clean exit, window-gone normal) that call persistSession and
+	// then delete m.outputs[sessionID]. The defer below must not call
+	// persistSession a second time in those cases, because m.outputs is already
+	// gone and the second persist would overwrite the on-disk record with an
+	// empty output slice.
+	naturallyPersisted := false
+
 	defer func() {
 		runner.Stop()
 		if m.config.SessionMode != SessionModeTmux {
@@ -1344,6 +1352,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		// was called). If the manager is still alive, this is an explicit
 		// StopSession call — persist the stopped status.
 		if m.config.SessionMode == SessionModeTmux && m.ctx.Err() != nil {
+			return
+		}
+		// Natural tmux completion paths already called persistSession before
+		// removing m.outputs. Don't call it again with the now-empty slice.
+		if naturallyPersisted {
 			return
 		}
 		m.persistSession(session)
@@ -1399,6 +1412,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 						// Persist before removing from memory so output history is written to disk.
 						m.persistSession(session)
+						naturallyPersisted = true
 
 						m.mu.Lock()
 						delete(m.sessions, sessionID)
@@ -1453,6 +1467,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 					// Persist before removing from memory so output history is written to disk.
 					m.persistSession(session)
+					naturallyPersisted = true
 
 					// Remove from active sessions map
 					m.mu.Lock()
