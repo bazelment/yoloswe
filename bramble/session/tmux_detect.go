@@ -180,6 +180,157 @@ func TmuxWindowPaneExitStatus(name string) (int, bool) {
 	return parsePaneExitStatus(string(output))
 }
 
+// SelectTmuxWindow switches to the given tmux window.
+//
+// In normal tmux mode, select-window is sufficient. In control mode
+// (tmux -CC with iTerm2), select-window updates the tmux server state but
+// does NOT cause iTerm2 to bring the corresponding native window/tab to
+// front. We detect this case (client_control_mode=1 + LC_TERMINAL=iTerm2)
+// and use AppleScript to activate the matching iTerm2 window.
+//
+// This is iTerm2-specific, but tmux CC mode is itself an iTerm2-only
+// feature — no other terminal implements it. The AppleScript path is
+// best-effort: if it fails, select-window already succeeded so tmux
+// state is correct.
+func SelectTmuxWindow(windowTarget string) error {
+	if err := exec.Command("tmux", "select-window", "-t", windowTarget).Run(); err != nil {
+		return fmt.Errorf("tmux select-window -t %s: %w", windowTarget, err)
+	}
+
+	// In CC mode with iTerm2, also activate the native window.
+	if isITermControlMode() {
+		activateITermWindowForTmux(windowTarget)
+	}
+	return nil
+}
+
+// isITermControlMode returns true when running inside tmux CC mode under iTerm2.
+func isITermControlMode() bool {
+	if os.Getenv("LC_TERMINAL") != "iTerm2" {
+		return false
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "#{client_control_mode}").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+// activateITermWindowForTmux finds the iTerm2 window that corresponds to
+// the given tmux window target and brings it to front using AppleScript.
+//
+// Matching strategy: extract the working directory from the tmux window
+// (pane_current_path) and look for an iTerm2 CC window whose title
+// contains that path. This is robust against processes changing the pane
+// title (e.g. spinner + "Claude Code") because the path portion of the
+// iTerm2 CC window title always reflects the pane's working directory.
+//
+// If path matching finds no hit, falls back to matching the tmux window
+// name against the iTerm2 window title.
+func activateITermWindowForTmux(windowTarget string) {
+	// Get the working directory for the target tmux window.
+	out, err := exec.Command("tmux", "display-message", "-t", windowTarget,
+		"-p", "#{pane_current_path}").Output()
+	if err != nil {
+		return
+	}
+	paneDir := strings.TrimSpace(string(out))
+
+	// Also get the tmux window name for fallback matching.
+	nameOut, _ := exec.Command("tmux", "display-message", "-t", windowTarget,
+		"-p", "#{window_name}").Output()
+	windowName := strings.TrimSpace(string(nameOut))
+
+	// Shorten home prefix to ~ for matching iTerm2's title format.
+	// Require a path-separator boundary so that e.g. HOME=/Users/alice does
+	// not incorrectly match /Users/alicebob/project.
+	home := os.Getenv("HOME")
+	displayDir := paneDir
+	if home != "" && strings.HasPrefix(paneDir, home) &&
+		(len(paneDir) == len(home) || paneDir[len(home)] == '/') {
+		displayDir = "~" + paneDir[len(home):]
+	}
+
+	// Guard against empty match strings: AppleScript's `n contains ""` is always
+	// true, which would activate the wrong iTerm2 window.
+	if displayDir == "" && windowName == "" {
+		return
+	}
+
+	// AppleScript matching strategy:
+	//   1. Primary: look for a CC window whose title is exactly "↣ <displayDir>"
+	//      or starts with "↣ <displayDir> " (path followed by a space separator).
+	//      This prevents "~/repo" from matching "~/repo-old".
+	//   2. Fallback: match on window name using the same exact/prefix rule.
+	//      Using exact match prevents "wt:1" from matching "wt:10".
+	//
+	// iTerm2 CC window titles have the form "↣ <path>" or "↣ <path> — <proc>".
+	// Note: when two windows share the same pane path, both will match the
+	// primary criterion and the first one encountered will be selected. This is
+	// a best-effort approximation; select-window already set the correct tmux
+	// server state regardless.
+	var script string
+	if displayDir != "" && windowName != "" {
+		script = fmt.Sprintf(`tell application "iTerm2"
+    set arrow to "↣ "
+    set targetPath to %q
+    set targetName to %q
+    repeat with w in windows
+        set n to name of w
+        if n starts with arrow then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetPath or rest starts with (targetPath & " ") then
+                select w
+                return
+            end if
+        end if
+    end repeat
+    repeat with w in windows
+        set n to name of w
+        if n starts with arrow then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetName or rest starts with (targetName & " ") then
+                select w
+                return
+            end if
+        end if
+    end repeat
+end tell`, displayDir, windowName)
+	} else if displayDir != "" {
+		script = fmt.Sprintf(`tell application "iTerm2"
+    set arrow to "↣ "
+    set targetPath to %q
+    repeat with w in windows
+        set n to name of w
+        if n starts with arrow then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetPath or rest starts with (targetPath & " ") then
+                select w
+                return
+            end if
+        end if
+    end repeat
+end tell`, displayDir)
+	} else {
+		script = fmt.Sprintf(`tell application "iTerm2"
+    set arrow to "↣ "
+    set targetName to %q
+    repeat with w in windows
+        set n to name of w
+        if n starts with arrow then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetName or rest starts with (targetName & " ") then
+                select w
+                return
+            end if
+        end if
+    end repeat
+end tell`, windowName)
+	}
+
+	_ = exec.Command("osascript", "-e", script).Run()
+}
+
 // parsePaneExitStatus parses the output of `tmux list-panes -F "#{pane_dead} #{pane_dead_status}"`.
 // Returns (exitCode, true) for the first dead pane found, or (0, false) if none.
 func parsePaneExitStatus(output string) (int, bool) {

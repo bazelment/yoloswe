@@ -545,10 +545,13 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "alt+s":
-		// In tmux mode, Alt-S does nothing (no dropdown)
 		if m.sessionManager.IsInTmuxMode() {
-			toastCmd := m.addToast("Sessions are in tmux windows; use prefix+w to list", ToastInfo)
-			return m, toastCmd
+			// Tmux mode: open all sessions overlay so the user can switch
+			// to a session's tmux window via select-window.
+			activeSessions := m.gatherActiveSessions()
+			m.allSessionsOverlay.Show(activeSessions, m.width, m.height)
+			m.focus = FocusAllSessions
+			return m, nil
 		}
 		// TUI mode: open session dropdown
 		m.sessionDropdown.Open()
@@ -1908,8 +1911,7 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 // this helper so the implementation lives in exactly one place.
 func selectTmuxWindowCmd(windowID string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("tmux", "select-window", "-t", windowID)
-		if err := cmd.Run(); err != nil {
+		if err := session.SelectTmuxWindow(windowID); err != nil {
 			return errMsg{fmt.Errorf("failed to switch to tmux window: %w", err)}
 		}
 		return nil
