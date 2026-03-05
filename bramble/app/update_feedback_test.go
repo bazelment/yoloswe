@@ -138,8 +138,9 @@ func TestKeyFeedback_AltS_TmuxMode(t *testing.T) {
 	newModel, _ := m.handleKeyPress(tea.KeyPressMsg{Code: 's', Mod: tea.ModAlt})
 	m2 := newModel.(Model)
 
-	assert.True(t, m2.toasts.HasToasts())
-	assert.Contains(t, m2.toasts.toasts[0].Message, "Sessions are in tmux windows")
+	// In tmux mode, Alt+S now opens the all-sessions overlay instead of showing a toast.
+	assert.Equal(t, FocusAllSessions, m2.focus)
+	assert.True(t, m2.allSessionsOverlay.IsVisible())
 }
 
 func TestTmuxWindowMsg_TracksWindowForSelectedWorktree(t *testing.T) {

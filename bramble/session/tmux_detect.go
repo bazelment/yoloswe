@@ -249,8 +249,17 @@ func activateITermWindowForTmux(windowTarget string) {
 	}
 
 	// Try path match first, then window name fallback.
+	// Guard against empty match strings: AppleScript's `n contains ""` is always
+	// true, which would activate the wrong iTerm2 window.
+	if displayDir == "" && windowName == "" {
+		return
+	}
+
 	// AppleScript: iterate CC windows (prefixed with ↣) and select the match.
-	script := fmt.Sprintf(`tell application "iTerm2"
+	// Only include the path loop when we have a non-empty path to match.
+	var script string
+	if displayDir != "" && windowName != "" {
+		script = fmt.Sprintf(`tell application "iTerm2"
     repeat with w in windows
         set n to name of w
         if n starts with "↣" then
@@ -270,6 +279,31 @@ func activateITermWindowForTmux(windowTarget string) {
         end if
     end repeat
 end tell`, displayDir, windowName)
+	} else if displayDir != "" {
+		script = fmt.Sprintf(`tell application "iTerm2"
+    repeat with w in windows
+        set n to name of w
+        if n starts with "↣" then
+            if n contains %q then
+                select w
+                return
+            end if
+        end if
+    end repeat
+end tell`, displayDir)
+	} else {
+		script = fmt.Sprintf(`tell application "iTerm2"
+    repeat with w in windows
+        set n to name of w
+        if n starts with "↣" then
+            if n contains %q then
+                select w
+                return
+            end if
+        end if
+    end repeat
+end tell`, windowName)
+	}
 
 	_ = exec.Command("osascript", "-e", script).Run()
 }
