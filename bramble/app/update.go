@@ -1736,8 +1736,8 @@ func (m Model) handleTaskModalPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 
 // handleRepoSettingsPaste routes paste events to the repo settings dialog.
 func (m Model) handleRepoSettingsPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
-	m.repoSettingsDialog.HandlePaste(msg)
-	return m, nil
+	cmd := m.repoSettingsDialog.HandlePaste(msg)
+	return m, cmd
 }
 
 // routeTask runs the task router asynchronously.
