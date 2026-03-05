@@ -310,6 +310,47 @@ type NewOptions struct {
 	SkipFetch bool // skip git-fetch (caller already fetched)
 }
 
+// SyncDefaultBranch fast-forwards the local default branch to match origin.
+// This keeps the main worktree current when creating new worktrees.
+// It's safe to call even if the main worktree doesn't exist (no-op in that case).
+// All errors are handled internally; the function is intentionally best-effort.
+func (m *Manager) SyncDefaultBranch(ctx context.Context) {
+	bareDir := m.BareDir()
+	defaultBranch, err := GetDefaultBranch(ctx, m.git, bareDir)
+	if err != nil {
+		m.output.Warn(fmt.Sprintf("Skipping default branch sync: could not determine default branch: %v", err))
+		return
+	}
+
+	mainPath := filepath.Join(m.RepoDir(), defaultBranch)
+	if _, err := os.Stat(mainPath); os.IsNotExist(err) {
+		return // main worktree doesn't exist, nothing to sync
+	}
+
+	// Check if currently on the default branch in that worktree
+	result, err := m.git.Run(ctx, []string{"branch", "--show-current"}, mainPath)
+	if err != nil || strings.TrimSpace(result.Stdout) != defaultBranch {
+		return // not on default branch (detached HEAD, etc.), skip
+	}
+
+	// Check for uncommitted changes that would block a pull
+	statusResult, err := m.git.Run(ctx, []string{"status", "--porcelain"}, mainPath)
+	if err != nil {
+		return // can't check status, skip silently
+	}
+	if strings.TrimSpace(statusResult.Stdout) != "" {
+		m.output.Warn(fmt.Sprintf("Skipping %s sync: worktree has uncommitted changes", defaultBranch))
+		return
+	}
+
+	m.output.Info(fmt.Sprintf("Fast-forwarding %s to origin/%s...", defaultBranch, defaultBranch))
+	if _, err := m.git.Run(ctx, []string{"merge", "--ff-only", "origin/" + defaultBranch}, mainPath); err != nil {
+		m.output.Warn(fmt.Sprintf("Could not fast-forward %s (may have local commits)", defaultBranch))
+		return // non-fatal: don't block worktree creation
+	}
+	m.output.Success(fmt.Sprintf("Updated %s to latest", defaultBranch))
+}
+
 // New creates a new worktree with a new branch.
 func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts ...NewOptions) (string, error) {
 	var o NewOptions
@@ -354,6 +395,9 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 			return "", err
 		}
 	}
+
+	// Keep the main worktree current
+	m.SyncDefaultBranch(ctx)
 
 	m.output.Info(fmt.Sprintf("Creating worktree %s from %s...", branch, baseBranch))
 	if _, err := m.git.Run(ctx, []string{
@@ -691,9 +735,21 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	m.output.Success(fmt.Sprintf("Removed worktree %s", branchName))
 
 	if deleteBranch {
+		// Prune stale worktree metadata so git doesn't think the branch
+		// is still checked out (this prevents exit code 128 errors).
+		m.git.Run(ctx, []string{"worktree", "prune"}, bareDir)
+
 		m.output.Info(fmt.Sprintf("Deleting local branch %s...", branchName))
-		if _, err := m.git.Run(ctx, []string{"branch", "-D", branchName}, bareDir); err != nil {
-			m.output.Error(fmt.Sprintf("Failed to delete local branch %s", branchName))
+		if result, err := m.git.Run(ctx, []string{"branch", "-D", branchName}, bareDir); err != nil {
+			stderr := ""
+			if result != nil {
+				stderr = strings.TrimSpace(result.Stderr)
+			}
+			if stderr != "" {
+				m.output.Error(fmt.Sprintf("Failed to delete local branch %s: %s", branchName, stderr))
+			} else {
+				m.output.Error(fmt.Sprintf("Failed to delete local branch %s: %v", branchName, err))
+			}
 		} else {
 			m.output.Success(fmt.Sprintf("Deleted local branch %s", branchName))
 		}
@@ -703,7 +759,15 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 			if result != nil && IsAuthError(result.Stderr) {
 				m.output.Error(fmt.Sprintf("Failed to delete remote branch %s: %v", branchName, ErrGitHubAuthRequired))
 			} else {
-				m.output.Warn(fmt.Sprintf("Remote branch %s may not exist", branchName))
+				stderr := ""
+				if result != nil {
+					stderr = strings.TrimSpace(result.Stderr)
+				}
+				if stderr != "" {
+					m.output.Warn(fmt.Sprintf("Remote branch %s may not exist: %s", branchName, stderr))
+				} else {
+					m.output.Warn(fmt.Sprintf("Remote branch %s may not exist: %v", branchName, err))
+				}
 			}
 		} else {
 			m.output.Success(fmt.Sprintf("Deleted remote branch %s", branchName))
