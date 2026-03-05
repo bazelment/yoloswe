@@ -1397,6 +1397,9 @@ func (m *Manager) runSession(session *Session, prompt string) {
 						// Clean exit — session completed successfully
 						m.updateSessionStatus(session, StatusCompleted)
 
+						// Persist before removing from memory so output history is written to disk.
+						m.persistSession(session)
+
 						m.mu.Lock()
 						delete(m.sessions, sessionID)
 						delete(m.models, sessionID)
@@ -1406,7 +1409,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 						delete(m.outputs, sessionID)
 						m.outputsMu.Unlock()
 
-						m.persistSession(session)
 						return
 					}
 
@@ -1449,6 +1451,9 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					// Window disappeared after running for a while — normal completion
 					m.updateSessionStatus(session, StatusCompleted)
 
+					// Persist before removing from memory so output history is written to disk.
+					m.persistSession(session)
+
 					// Remove from active sessions map
 					m.mu.Lock()
 					delete(m.sessions, sessionID)
@@ -1459,9 +1464,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					m.outputsMu.Lock()
 					delete(m.outputs, sessionID)
 					m.outputsMu.Unlock()
-
-					// Persist before removal (for history)
-					m.persistSession(session)
 
 					return
 				}
