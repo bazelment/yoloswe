@@ -259,13 +259,16 @@ func activateITermWindowForTmux(windowTarget string) {
 
 	// AppleScript matching strategy:
 	//   1. Primary: look for a CC window whose title is exactly "↣ <displayDir>"
-	//      or starts with "↣ <displayDir> " (i.e. path is followed by a space or
-	//      is the whole title after the arrow). This prevents "~/repo" from
-	//      matching "~/repo-old".
-	//   2. Fallback: match window name substring (used only when displayDir is
-	//      empty or no exact path match is found).
+	//      or starts with "↣ <displayDir> " (path followed by a space separator).
+	//      This prevents "~/repo" from matching "~/repo-old".
+	//   2. Fallback: match on window name using the same exact/prefix rule.
+	//      Using exact match prevents "wt:1" from matching "wt:10".
 	//
 	// iTerm2 CC window titles have the form "↣ <path>" or "↣ <path> — <proc>".
+	// Note: when two windows share the same pane path, both will match the
+	// primary criterion and the first one encountered will be selected. This is
+	// a best-effort approximation; select-window already set the correct tmux
+	// server state regardless.
 	var script string
 	if displayDir != "" && windowName != "" {
 		script = fmt.Sprintf(`tell application "iTerm2"
@@ -285,7 +288,8 @@ func activateITermWindowForTmux(windowTarget string) {
     repeat with w in windows
         set n to name of w
         if n starts with arrow then
-            if n contains targetName then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetName or rest starts with (targetName & " ") then
                 select w
                 return
             end if
@@ -314,7 +318,8 @@ end tell`, displayDir)
     repeat with w in windows
         set n to name of w
         if n starts with arrow then
-            if n contains targetName then
+            set rest to text ((length of arrow) + 1) thru -1 of n
+            if rest is equal to targetName or rest starts with (targetName & " ") then
                 select w
                 return
             end if
