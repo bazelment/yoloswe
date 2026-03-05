@@ -429,3 +429,28 @@ func TestTextAreaReadline_AltD_DeleteWordForward(t *testing.T) {
 	ta.HandleKey(tea.KeyPressMsg{Code: 'd', Mod: tea.ModAlt})
 	assert.Equal(t, " world", ta.Value())
 }
+
+func TestTextAreaHandlePaste(t *testing.T) {
+	ta := NewTextArea()
+	ta.HandlePaste(tea.PasteMsg{Content: "pasted text"})
+	assert.Equal(t, "pasted text", ta.Value())
+}
+
+func TestTextAreaHandlePaste_InsertsAtCursor(t *testing.T) {
+	ta := NewTextArea()
+	ta.SetValue("hello world")
+	// Move cursor to after "hello " (beginning, then forward 6)
+	ta.HandleKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	for i := 0; i < 6; i++ {
+		ta.HandleKey(specialKey(tea.KeyRight))
+	}
+	ta.HandlePaste(tea.PasteMsg{Content: "beautiful "})
+	assert.Equal(t, "hello beautiful world", ta.Value())
+}
+
+func TestTextAreaHandlePaste_Multiline(t *testing.T) {
+	ta := NewTextArea()
+	ta.HandlePaste(tea.PasteMsg{Content: "line1\nline2\nline3"})
+	assert.Equal(t, "line1\nline2\nline3", ta.Value())
+	assert.Equal(t, 3, ta.LineCount())
+}

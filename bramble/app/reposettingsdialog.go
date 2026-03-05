@@ -257,6 +257,16 @@ func (d *RepoSettingsDialog) moveFocus(delta int) {
 	d.setFocus(RepoSettingsDialogFocus(next))
 }
 
+// HandlePaste forwards a paste message to the focused text input.
+func (d *RepoSettingsDialog) HandlePaste(msg tea.PasteMsg) {
+	switch d.focus {
+	case RepoSettingsFocusCreate:
+		d.createInput, _ = d.createInput.Update(msg)
+	case RepoSettingsFocusDelete:
+		d.deleteInput, _ = d.deleteInput.Update(msg)
+	}
+}
+
 // Update handles key presses and returns an action + optional cmd.
 func (d *RepoSettingsDialog) Update(msg tea.KeyPressMsg) (RepoSettingsDialogAction, tea.Cmd) {
 	switch msg.String() {

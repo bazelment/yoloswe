@@ -229,6 +229,12 @@ const (
 	TextAreaUnhandled
 )
 
+// HandlePaste forwards a paste message to the inner textarea, inserting the
+// pasted content at the cursor position.
+func (t *TextArea) HandlePaste(msg tea.PasteMsg) {
+	t.inner, t.pendingCmd = t.inner.Update(msg)
+}
+
 // HandleKey processes a key message against this TextArea and returns the
 // resulting action. The TextArea is mutated in place for cursor movement,
 // character insertion, focus cycling, etc. The caller is responsible for
