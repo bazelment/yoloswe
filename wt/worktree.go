@@ -313,41 +313,42 @@ type NewOptions struct {
 // SyncDefaultBranch fast-forwards the local default branch to match origin.
 // This keeps the main worktree current when creating new worktrees.
 // It's safe to call even if the main worktree doesn't exist (no-op in that case).
-func (m *Manager) SyncDefaultBranch(ctx context.Context) error {
+// All errors are handled internally; the function is intentionally best-effort.
+func (m *Manager) SyncDefaultBranch(ctx context.Context) {
 	bareDir := m.BareDir()
 	defaultBranch, err := GetDefaultBranch(ctx, m.git, bareDir)
 	if err != nil {
-		return err
+		m.output.Warn(fmt.Sprintf("Skipping default branch sync: could not determine default branch: %v", err))
+		return
 	}
 
 	mainPath := filepath.Join(m.RepoDir(), defaultBranch)
 	if _, err := os.Stat(mainPath); os.IsNotExist(err) {
-		return nil // main worktree doesn't exist, nothing to sync
+		return // main worktree doesn't exist, nothing to sync
 	}
 
 	// Check if currently on the default branch in that worktree
 	result, err := m.git.Run(ctx, []string{"branch", "--show-current"}, mainPath)
 	if err != nil || strings.TrimSpace(result.Stdout) != defaultBranch {
-		return nil // not on default branch (detached HEAD, etc.), skip
+		return // not on default branch (detached HEAD, etc.), skip
 	}
 
 	// Check for uncommitted changes that would block a pull
 	statusResult, err := m.git.Run(ctx, []string{"status", "--porcelain"}, mainPath)
 	if err != nil {
-		return nil // can't check status, skip silently
+		return // can't check status, skip silently
 	}
 	if strings.TrimSpace(statusResult.Stdout) != "" {
 		m.output.Warn(fmt.Sprintf("Skipping %s sync: worktree has uncommitted changes", defaultBranch))
-		return nil
+		return
 	}
 
 	m.output.Info(fmt.Sprintf("Fast-forwarding %s to origin/%s...", defaultBranch, defaultBranch))
 	if _, err := m.git.Run(ctx, []string{"merge", "--ff-only", "origin/" + defaultBranch}, mainPath); err != nil {
 		m.output.Warn(fmt.Sprintf("Could not fast-forward %s (may have local commits)", defaultBranch))
-		return nil // non-fatal: don't block worktree creation
+		return // non-fatal: don't block worktree creation
 	}
 	m.output.Success(fmt.Sprintf("Updated %s to latest", defaultBranch))
-	return nil
 }
 
 // New creates a new worktree with a new branch.

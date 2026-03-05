@@ -690,10 +690,7 @@ func TestSyncDefaultBranch(t *testing.T) {
 	output := NewOutput(&buf, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
-	err := m.SyncDefaultBranch(context.Background())
-	if err != nil {
-		t.Fatalf("SyncDefaultBranch() error = %v", err)
-	}
+	m.SyncDefaultBranch(context.Background())
 
 	ffCalled := false
 	for _, call := range mockGit.Calls {
@@ -729,10 +726,7 @@ func TestSyncDefaultBranchSkipsWithUncommittedChanges(t *testing.T) {
 	output := NewOutput(&buf, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
-	err := m.SyncDefaultBranch(context.Background())
-	if err != nil {
-		t.Fatalf("SyncDefaultBranch() error = %v", err)
-	}
+	m.SyncDefaultBranch(context.Background())
 
 	// Should NOT call merge
 	for _, call := range mockGit.Calls {
@@ -763,10 +757,7 @@ func TestSyncDefaultBranchNoMainWorktree(t *testing.T) {
 	output := NewOutput(&buf, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
-	err := m.SyncDefaultBranch(context.Background())
-	if err != nil {
-		t.Fatalf("SyncDefaultBranch() error = %v", err)
-	}
+	m.SyncDefaultBranch(context.Background())
 
 	// Should not call any branch or merge commands
 	for _, call := range mockGit.Calls {
