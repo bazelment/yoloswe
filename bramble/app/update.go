@@ -66,6 +66,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle normal key presses
 		return m.handleKeyPress(msg)
 
+	case tea.PasteMsg:
+		// Route paste events to the active text input
+		if m.inputMode {
+			m.inputArea.HandlePaste(msg)
+			return m, m.inputArea.Cmd()
+		}
+		if m.taskModal.IsVisible() {
+			return m.handleTaskModalPaste(msg)
+		}
+		if m.focus == FocusRepoSettings {
+			return m.handleRepoSettingsPaste(msg)
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1705,6 +1719,25 @@ func (m Model) handleTaskModal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// handleTaskModalPaste routes paste events to the active task modal textarea.
+func (m Model) handleTaskModalPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	switch m.taskModal.State() {
+	case TaskModalInput:
+		m.taskModal.TextArea().HandlePaste(msg)
+		return m, m.taskModal.TextArea().Cmd()
+	case TaskModalAdjust:
+		m.taskModal.AdjustTextArea().HandlePaste(msg)
+		return m, m.taskModal.AdjustTextArea().Cmd()
+	}
+	return m, nil
+}
+
+// handleRepoSettingsPaste routes paste events to the repo settings dialog.
+func (m Model) handleRepoSettingsPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	cmd := m.repoSettingsDialog.HandlePaste(msg)
+	return m, cmd
 }
 
 // routeTask runs the task router asynchronously.
