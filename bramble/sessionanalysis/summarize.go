@@ -43,6 +43,7 @@ func GeminiQueryFunc() QueryFunc {
 		if client == nil {
 			client = acp.NewClient()
 			if err := client.Start(ctx); err != nil {
+				client = nil
 				return "", fmt.Errorf("gemini start: %w", err)
 			}
 			var err error
