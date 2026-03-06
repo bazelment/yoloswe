@@ -316,6 +316,27 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		return handleListSessions(sessionManager), nil
 	})
 
+	srv.Handle(ipc.RequestNotify, func(_ context.Context, req *ipc.Request) (any, error) {
+		params, ok := req.Params.(*ipc.NotifyParams)
+		if !ok {
+			return nil, fmt.Errorf("invalid params")
+		}
+		sid := session.SessionID(params.SessionID)
+		info, ok := sessionManager.GetSessionInfo(sid)
+		if !ok {
+			return nil, fmt.Errorf("session not found: %s", params.SessionID)
+		}
+		windowTarget := info.TmuxWindowID
+		if windowTarget == "" {
+			windowTarget = info.TmuxWindowName
+		}
+		if windowTarget != "" && info.TmuxWindowName != "" {
+			session.NotifyTmuxWindow(windowTarget, info.TmuxWindowName)
+		}
+		sessionManager.SetSessionIdle(sid)
+		return "ok", nil
+	})
+
 	if err := srv.Start(); err != nil {
 		log.Printf("Warning: IPC server failed to start: %v", err)
 		return nil, ""
@@ -442,6 +463,30 @@ var newSessionCmd = &cobra.Command{
 	},
 }
 
+var notifyCmd = &cobra.Command{
+	Use:   "notify",
+	Short: "Notify bramble that a session needs attention",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := ipc.NewClientFromEnv()
+		if err != nil {
+			return err
+		}
+		sessionID, _ := cmd.Flags().GetString("session-id")
+		resp, err := client.Send(&ipc.Request{
+			Type:   ipc.RequestNotify,
+			ID:     "cli-notify",
+			Params: &ipc.NotifyParams{SessionID: sessionID},
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("server error: %s", resp.Error)
+		}
+		return nil
+	},
+}
+
 var listSessionsCmd = &cobra.Command{
 	Use:   "list-sessions",
 	Short: "List active sessions from the running bramble TUI",
@@ -478,9 +523,13 @@ func init() {
 	newSessionCmd.Flags().StringP("goal", "g", "", "Goal for new worktree")
 	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")
 
+	notifyCmd.Flags().String("session-id", "", "Session ID to notify")
+	_ = notifyCmd.MarkFlagRequired("session-id")
+
 	rootCmd.AddCommand(pingCmd)
 	rootCmd.AddCommand(newSessionCmd)
 	rootCmd.AddCommand(listSessionsCmd)
+	rootCmd.AddCommand(notifyCmd)
 }
 
 // pickRouterProvider selects the best available provider for the task router.

@@ -9,6 +9,7 @@ const (
 	RequestPing         RequestType = "ping"
 	RequestNewSession   RequestType = "new-session"
 	RequestListSessions RequestType = "list-sessions"
+	RequestNotify       RequestType = "notify"
 )
 
 // Request is the envelope sent by the client to the server.
@@ -57,6 +58,11 @@ type SessionSummary struct {
 	WorktreeName string `json:"worktree_name"`
 	Prompt       string `json:"prompt"`
 	Model        string `json:"model"`
+}
+
+// NotifyParams are the parameters for a notify request.
+type NotifyParams struct {
+	SessionID string `json:"session_id"`
 }
 
 // SockEnvVar is the environment variable name used to discover the socket path.

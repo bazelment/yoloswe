@@ -473,7 +473,9 @@ func tmuxWindowAlive(windowID, windowName string) bool {
 		return TmuxWindowExistsByID(windowID)
 	}
 	if windowName != "" {
-		return TmuxWindowExists(windowName)
+		// Also check for the "!"-prefixed name used by NotifyTmuxWindow,
+		// so the liveness check still succeeds after a notification rename.
+		return TmuxWindowExists(windowName) || TmuxWindowExists(TmuxNotifyPrefix+windowName)
 	}
 	return false
 }
@@ -1051,7 +1053,44 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				windowTarget := windowName
 				if windowID != "" {
 					windowTarget = windowID
+				} else if TmuxWindowExists(TmuxNotifyPrefix + windowName) {
+					// Window was renamed by NotifyTmuxWindow; use the current
+					// name so pane-dead/exit-status checks find the window.
+					windowTarget = TmuxNotifyPrefix + windowName
 				}
+
+				// Clear notification prefix when user is viewing this window.
+				// This must be inside the RunnerTypeTmux branch because only
+				// tmux-mode sessions receive the Notification hook.
+				session.mu.RLock()
+				status := session.Status
+				session.mu.RUnlock()
+				if status == StatusIdle {
+					activeID := GetActiveTmuxWindowID()
+					isActive := false
+					if windowID != "" {
+						isActive = activeID != "" && activeID == windowID
+					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
+						isActive = activeID != "" && activeID == nameID
+					} else if nameID, ok := TmuxWindowIDByName(TmuxNotifyPrefix + windowName); ok {
+						isActive = activeID != "" && activeID == nameID
+					}
+					if isActive {
+						// Use windowID as target when available; for re-adopted
+						// sessions without an ID, target the renamed "!name" only
+						// while it exists (after first clear the window is just windowName).
+						clearTarget := windowTarget
+						if windowID == "" {
+							if TmuxWindowExists(TmuxNotifyPrefix + windowName) {
+								clearTarget = TmuxNotifyPrefix + windowName
+							} else {
+								clearTarget = windowName
+							}
+						}
+						ClearTmuxWindowNotification(clearTarget, windowName)
+					}
+				}
+
 				if TmuxWindowPaneDead(windowTarget) {
 					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
 					if gotStatus && exitCode == 0 {
@@ -1167,6 +1206,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			permissionMode = "plan"
 		}
 
+		brambleBin, _ := os.Executable()
+		if brambleBin == "" {
+			brambleBin = "bramble" // fallback to PATH lookup
+		}
 		runner = &tmuxRunner{
 			windowName:      tmuxName,
 			workDir:         session.WorktreePath,
@@ -1175,6 +1218,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			provider:        agentModel.Provider,
 			permissionMode:  permissionMode,
 			resumeSessionID: session.CLISessionID,
+			sessionID:       string(session.ID),
+			brambleBin:      brambleBin,
 			yoloMode:        m.config.YoloMode,
 			killOnStop:      false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}
@@ -1777,6 +1822,25 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 	}
 	sortSessionsByTime(result)
 	return result
+}
+
+// SetSessionIdle transitions a session to StatusIdle (waiting for user input).
+// It only transitions from StatusRunning to avoid reverting terminal states
+// (completed, failed, stopped) that may have been set by the monitor loop.
+func (m *Manager) SetSessionIdle(id SessionID) {
+	m.mu.RLock()
+	s, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	status := s.Status
+	s.mu.RUnlock()
+	if status != StatusRunning {
+		return
+	}
+	m.updateSessionStatus(s, StatusIdle)
 }
 
 // GetAllSessions returns all sessions sorted by creation time (newest first).

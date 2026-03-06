@@ -8,6 +8,7 @@ go_library(
         "store.go",
         "tmux_detect.go",
         "tmux_name.go",
+        "tmux_notify.go",
         "tmux_runner.go",
         "types.go",
     ],

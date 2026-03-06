@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -20,6 +21,8 @@ type tmuxRunner struct {
 	permissionMode  string // permission mode: "" (default) or "plan" (claude only)
 	resumeSessionID string // CLI session ID to resume (empty for new sessions)
 	windowID        string // stable window ID captured atomically at creation time
+	sessionID       string // bramble session ID for IPC notification hook
+	brambleBin      string // absolute path to the bramble binary for hook commands
 	yoloMode        bool   // skip all permission prompts
 	killOnStop      bool   // kill tmux window on Stop()
 }
@@ -162,6 +165,45 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 		if r.resumeSessionID != "" {
 			args = append(args, "--resume", r.resumeSessionID)
+		}
+		// Inject a Stop hook so Claude calls back when a turn finishes and
+		// the CLI is waiting for user input (Claude provider only).
+		// The hook command is run by a shell, so the session ID must be
+		// single-quoted to handle spaces or special characters safely.
+		// The hook relies on BRAMBLE_SOCK being set in the tmux window's
+		// environment, which is inherited from bramble's process via os.Setenv.
+		if r.sessionID != "" {
+			shellQuote := func(s string) string {
+				return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+			}
+			quotedBin := shellQuote(r.brambleBin)
+			quotedID := shellQuote(r.sessionID)
+			type hookEntry struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			}
+			type hookGroup struct {
+				Hooks []hookEntry `json:"hooks"`
+			}
+			hookSettings := struct {
+				Hooks struct {
+					Stop []hookGroup `json:"Stop"`
+				} `json:"hooks"`
+			}{
+				Hooks: struct {
+					Stop []hookGroup `json:"Stop"`
+				}{
+					Stop: []hookGroup{{
+						Hooks: []hookEntry{{
+							Type:    "command",
+							Command: quotedBin + " notify --session-id " + quotedID,
+						}},
+					}},
+				},
+			}
+			if hookJSON, err := json.Marshal(hookSettings); err == nil {
+				args = append(args, "--settings", string(hookJSON))
+			}
 		}
 	}
 
