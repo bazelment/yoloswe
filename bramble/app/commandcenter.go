@@ -15,16 +15,18 @@ import (
 // CommandCenter provides a full-screen card-based grid view of all sessions.
 type CommandCenter struct {
 	sessions    []session.SessionInfo
+	previewText []string // captured pane text lines for expanded preview
 	selectedIdx int
 	width       int
 	height      int
-	visible     bool
 	scrollY     int // scroll offset in card-rows
+	previewIdx  int // index of session with expanded pane preview, -1 if none
+	visible     bool
 }
 
 // NewCommandCenter creates a new command center.
 func NewCommandCenter() *CommandCenter {
-	return &CommandCenter{}
+	return &CommandCenter{previewIdx: -1}
 }
 
 // Show populates the command center with sessions, sorts by priority, and makes it visible.
@@ -36,6 +38,8 @@ func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	cc.height = h
 	cc.visible = true
 	cc.scrollY = 0
+	cc.previewIdx = -1
+	cc.previewText = nil
 	if cc.selectedIdx >= len(cc.sessions) {
 		cc.selectedIdx = 0
 	}
@@ -138,6 +142,30 @@ func (cc *CommandCenter) RestoreSelectionByID(id session.SessionID) {
 	}
 }
 
+// TogglePreview toggles the expanded pane preview for the selected session.
+// Returns the selected session if preview is being opened, nil if being closed.
+func (cc *CommandCenter) TogglePreview() *session.SessionInfo {
+	if cc.previewIdx == cc.selectedIdx {
+		// Close preview
+		cc.previewIdx = -1
+		cc.previewText = nil
+		return nil
+	}
+	cc.previewIdx = cc.selectedIdx
+	cc.previewText = nil // will be populated by SetPreviewText
+	return cc.SelectedSession()
+}
+
+// SetPreviewText sets the captured pane text lines for the preview.
+func (cc *CommandCenter) SetPreviewText(lines []string) {
+	cc.previewText = lines
+}
+
+// IsPreviewOpen returns true if a pane preview is currently showing.
+func (cc *CommandCenter) IsPreviewOpen() bool {
+	return cc.previewIdx >= 0
+}
+
 // gridColumns returns the responsive column count based on width.
 func (cc *CommandCenter) gridColumns() int {
 	if cc.width >= 160 {
@@ -208,6 +236,15 @@ func (cc *CommandCenter) View(s *Styles) string {
 			rowCards = append(rowCards, card)
 		}
 		allRows = append(allRows, lipgloss.JoinHorizontal(lipgloss.Top, rowCards...))
+
+		// If the preview is open and the previewed card is in this row,
+		// insert an expanded preview row right after the card row.
+		if cc.previewIdx >= i && cc.previewIdx < i+cols {
+			preview := cc.renderPreviewRow(s)
+			if preview != "" {
+				allRows = append(allRows, preview)
+			}
+		}
 	}
 
 	// Apply vertical scrolling — use local variables only; View() must not mutate state.
@@ -293,15 +330,54 @@ func (cc *CommandCenter) renderHeader(s *Styles) string {
 
 // renderFooter renders the footer keybinding hints.
 func (cc *CommandCenter) renderFooter(s *Styles) string {
+	previewKey := "[p] Preview pane"
+	if cc.previewIdx >= 0 {
+		previewKey = "[p] Close preview"
+	}
 	keys := []string{
 		"[←/→/↑/↓] Navigate",
 		"[Enter] Jump in",
 		"[1-9] Quick select",
+		previewKey,
 		"[f] Follow-up",
 		"[a] Approve plan",
 		"[Esc] Close",
 	}
 	return "\n" + s.Dim.Render(strings.Join(keys, "  "))
+}
+
+// renderPreviewRow renders the expanded pane preview below the card row.
+func (cc *CommandCenter) renderPreviewRow(s *Styles) string {
+	if cc.previewIdx < 0 || cc.previewIdx >= len(cc.sessions) {
+		return ""
+	}
+
+	sess := &cc.sessions[cc.previewIdx]
+	previewWidth := cc.width - 6
+
+	var content string
+	if len(cc.previewText) == 0 {
+		if sess.RunnerType != "tmux" && sess.RunnerType != "tmux-tracked" {
+			content = s.Dim.Render("Preview is only available for tmux sessions")
+		} else {
+			content = s.Dim.Render("Capturing pane...")
+		}
+	} else {
+		var lines []string
+		for _, line := range cc.previewText {
+			lines = append(lines, truncate(line, previewWidth-4))
+		}
+		content = s.Dim.Render(strings.Join(lines, "\n"))
+	}
+
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(s.Palette.Accent)).
+		Width(previewWidth).
+		Padding(0, 1)
+
+	title := s.Title.Render(fmt.Sprintf("Pane Preview — %s", sess.TmuxWindowName))
+	return previewStyle.Render(title + "\n" + content)
 }
 
 // sessionPriority returns a sort priority for a session (lower = higher priority).

@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "tmuxwatch_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/tmuxwatch",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//bramble/session",
+    ],
+)
+
+go_binary(
+    name = "tmuxwatch",
+    embed = [":tmuxwatch_lib"],
+    visibility = ["//visibility:public"],
+)

@@ -154,6 +154,12 @@ func (s *Server) decodeParams(req *Request) error {
 			return err
 		}
 		req.Params = &p
+	case RequestCapturePane:
+		var p CapturePaneParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return err
+		}
+		req.Params = &p
 	default:
 		// No typed params needed
 	}

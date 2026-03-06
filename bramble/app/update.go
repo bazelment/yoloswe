@@ -2096,6 +2096,21 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.updateSessionDropdown()
 		return m, nil
 
+	case "p":
+		sess := m.commandCenter.TogglePreview()
+		if sess != nil {
+			// Preview opened — capture pane text
+			if sess.RunnerType == session.RunnerTypeTmux || sess.RunnerType == session.RunnerTypeTmuxTracked {
+				lines, err := m.sessionManager.CapturePaneText(sess.ID, 10)
+				if err == nil {
+					m.commandCenter.SetPreviewText(lines)
+				} else {
+					m.commandCenter.SetPreviewText([]string{"(capture failed: " + err.Error() + ")"})
+				}
+			}
+		}
+		return m, nil
+
 	case "q", "ctrl+c":
 		return m, tea.Quit
 

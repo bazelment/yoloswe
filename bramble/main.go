@@ -316,6 +316,23 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		return handleListSessions(sessionManager), nil
 	})
 
+	srv.Handle(ipc.RequestCapturePane, func(_ context.Context, req *ipc.Request) (any, error) {
+		params, ok := req.Params.(*ipc.CapturePaneParams)
+		if !ok {
+			return nil, fmt.Errorf("invalid params")
+		}
+		sid := session.SessionID(params.SessionID)
+		n := params.Lines
+		if n <= 0 {
+			n = 10
+		}
+		lines, err := sessionManager.CapturePaneText(sid, n)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.CapturePaneResult{Lines: lines}, nil
+	})
+
 	srv.Handle(ipc.RequestNotify, func(_ context.Context, req *ipc.Request) (any, error) {
 		params, ok := req.Params.(*ipc.NotifyParams)
 		if !ok {
@@ -487,6 +504,36 @@ var notifyCmd = &cobra.Command{
 	},
 }
 
+var capturePaneCmd = &cobra.Command{
+	Use:   "capture-pane",
+	Short: "Capture text from a tmux session's pane",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := ipc.NewClientFromEnv()
+		if err != nil {
+			return err
+		}
+		sessionID, _ := cmd.Flags().GetString("session-id")
+		lines, _ := cmd.Flags().GetInt("lines")
+		resp, err := client.Send(&ipc.Request{
+			Type: ipc.RequestCapturePane,
+			ID:   "cli-capture-pane",
+			Params: &ipc.CapturePaneParams{
+				SessionID: sessionID,
+				Lines:     lines,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("server error: %s", resp.Error)
+		}
+		out, _ := json.MarshalIndent(resp.Result, "", "  ")
+		fmt.Println(string(out))
+		return nil
+	},
+}
+
 var listSessionsCmd = &cobra.Command{
 	Use:   "list-sessions",
 	Short: "List active sessions from the running bramble TUI",
@@ -526,10 +573,15 @@ func init() {
 	notifyCmd.Flags().String("session-id", "", "Session ID to notify")
 	_ = notifyCmd.MarkFlagRequired("session-id")
 
+	capturePaneCmd.Flags().String("session-id", "", "Session ID to capture pane from")
+	capturePaneCmd.Flags().Int("lines", 10, "Number of lines to capture")
+	_ = capturePaneCmd.MarkFlagRequired("session-id")
+
 	rootCmd.AddCommand(pingCmd)
 	rootCmd.AddCommand(newSessionCmd)
 	rootCmd.AddCommand(listSessionsCmd)
 	rootCmd.AddCommand(notifyCmd)
+	rootCmd.AddCommand(capturePaneCmd)
 }
 
 // pickRouterProvider selects the best available provider for the task router.
