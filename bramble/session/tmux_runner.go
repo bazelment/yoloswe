@@ -23,6 +23,7 @@ type tmuxRunner struct {
 	windowID        string // stable window ID captured atomically at creation time
 	sessionID       string // bramble session ID for IPC notification hook
 	brambleBin      string // absolute path to the bramble binary for hook commands
+	brambleSock     string // IPC socket path to pass to hook commands
 	yoloMode        bool   // skip all permission prompts
 	killOnStop      bool   // kill tmux window on Stop()
 }
@@ -53,8 +54,14 @@ func (r *tmuxRunner) Start(ctx context.Context) error {
 	// it atomically at creation time to avoid the TOCTOU race of a post-hoc name
 	// lookup (TmuxWindowIDByName) when two sessions start concurrently with the
 	// same window name.
+	// -e: set environment variable in the new window
 	// -n: window name, -c: working directory
-	createCmd := exec.Command("tmux", "new-window", "-P", "-F", "#{window_id}", "-n", r.windowName, "-c", r.workDir, cmdStr)
+	tmuxArgs := []string{"new-window", "-P", "-F", "#{window_id}"}
+	if r.brambleSock != "" {
+		tmuxArgs = append(tmuxArgs, "-e", "BRAMBLE_SOCK="+r.brambleSock)
+	}
+	tmuxArgs = append(tmuxArgs, "-n", r.windowName, "-c", r.workDir, cmdStr)
+	createCmd := exec.Command("tmux", tmuxArgs...)
 
 	out, err := createCmd.Output()
 	if err != nil {
@@ -170,8 +177,9 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		// the CLI is waiting for user input (Claude provider only).
 		// The hook command is run by a shell, so the session ID must be
 		// single-quoted to handle spaces or special characters safely.
-		// The hook relies on BRAMBLE_SOCK being set in the tmux window's
-		// environment, which is inherited from bramble's process via os.Setenv.
+		// Inject a Stop hook so Claude calls back when a turn finishes.
+		// BRAMBLE_SOCK is set via "tmux new-window -e" so the hook process
+		// inherits it from the tmux window environment.
 		if r.sessionID != "" {
 			shellQuote := func(s string) string {
 				return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
