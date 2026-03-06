@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
@@ -28,19 +29,30 @@ func HaikuQueryFunc() QueryFunc {
 }
 
 // GeminiQueryFunc returns a QueryFunc that uses Gemini Flash via ACP.
+// The ACP client and session are lazily initialized on first call and reused
+// across subsequent calls to avoid spawning a new subprocess per invocation.
 func GeminiQueryFunc() QueryFunc {
+	var (
+		mu     sync.Mutex
+		client *acp.Client
+		sess   *acp.Session
+	)
 	return func(ctx context.Context, prompt string) (string, error) {
-		client := acp.NewClient()
-		if err := client.Start(ctx); err != nil {
-			return "", fmt.Errorf("gemini start: %w", err)
+		mu.Lock()
+		defer mu.Unlock()
+		if client == nil {
+			client = acp.NewClient()
+			if err := client.Start(ctx); err != nil {
+				return "", fmt.Errorf("gemini start: %w", err)
+			}
+			var err error
+			sess, err = client.NewSession(ctx)
+			if err != nil {
+				client.Stop()
+				client = nil
+				return "", fmt.Errorf("gemini session: %w", err)
+			}
 		}
-		defer client.Stop()
-
-		sess, err := client.NewSession(ctx)
-		if err != nil {
-			return "", fmt.Errorf("gemini session: %w", err)
-		}
-
 		result, err := sess.Prompt(ctx, prompt)
 		if err != nil {
 			return "", fmt.Errorf("gemini prompt: %w", err)
