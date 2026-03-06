@@ -119,6 +119,35 @@ func TestStaleSocketRemoved(t *testing.T) {
 	require.NoError(t, client.Ping())
 }
 
+func TestNotifyRoundTrip(t *testing.T) {
+	t.Parallel()
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+
+	var receivedSessionID string
+	srv := NewServer(sockPath)
+	srv.Handle(RequestNotify, func(_ context.Context, req *Request) (any, error) {
+		params, ok := req.Params.(*NotifyParams)
+		if !ok {
+			return nil, fmt.Errorf("invalid params type")
+		}
+		receivedSessionID = params.SessionID
+		return "ok", nil
+	})
+	require.NoError(t, srv.Start())
+	defer srv.Close()
+
+	client := NewClient(sockPath)
+	resp, err := client.Send(&Request{
+		Type:   RequestNotify,
+		ID:     "req-notify",
+		Params: &NotifyParams{SessionID: "main-builder-abc123"},
+	})
+	require.NoError(t, err)
+	require.True(t, resp.OK, "expected OK, got error: %s", resp.Error)
+	require.Equal(t, "req-notify", resp.ID)
+	require.Equal(t, "main-builder-abc123", receivedSessionID)
+}
+
 func TestHandlerError(t *testing.T) {
 	t.Parallel()
 	sockPath := filepath.Join(t.TempDir(), "test.sock")

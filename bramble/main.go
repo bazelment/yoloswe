@@ -524,6 +524,7 @@ func init() {
 	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")
 
 	notifyCmd.Flags().String("session-id", "", "Session ID to notify")
+	_ = notifyCmd.MarkFlagRequired("session-id")
 
 	rootCmd.AddCommand(pingCmd)
 	rootCmd.AddCommand(newSessionCmd)

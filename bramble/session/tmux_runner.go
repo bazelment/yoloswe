@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -165,9 +166,32 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 			args = append(args, "--resume", r.resumeSessionID)
 		}
 		// Inject Notification hook so Claude calls back when waiting for input
+		// (Claude provider only; Codex and Gemini don't support this hook).
+		// The hook command is run by a shell, so the session ID must be
+		// single-quoted to handle spaces or special characters safely.
+		// encoding/json is used for the outer --settings JSON payload.
+		// The hook relies on BRAMBLE_SOCK being set in the tmux window's
+		// environment, which is inherited from bramble's process via os.Setenv.
 		if r.sessionID != "" {
-			hookJSON := fmt.Sprintf(`{"hooks":{"Notification":[{"matcher":"","command":"bramble notify --session-id %s"}]}}`, r.sessionID)
-			args = append(args, "--settings", hookJSON)
+			quotedID := "'" + strings.ReplaceAll(r.sessionID, "'", "'\\''") + "'"
+			hookSettings := struct {
+				Hooks struct {
+					Notification []struct {
+						Matcher string `json:"matcher"`
+						Command string `json:"command"`
+					} `json:"Notification"`
+				} `json:"hooks"`
+			}{}
+			hookSettings.Hooks.Notification = append(hookSettings.Hooks.Notification, struct {
+				Matcher string `json:"matcher"`
+				Command string `json:"command"`
+			}{
+				Matcher: "",
+				Command: "bramble notify --session-id " + quotedID,
+			})
+			if hookJSON, err := json.Marshal(hookSettings); err == nil {
+				args = append(args, "--settings", string(hookJSON))
+			}
 		}
 	}
 

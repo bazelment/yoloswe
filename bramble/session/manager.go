@@ -1102,7 +1102,15 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 					if windowID != "" {
 						windowTarget = windowID
 					}
-					if activeID != "" && activeID == windowID {
+					// Match by window ID when available; fall back to name-based
+					// lookup for re-adopted sessions that lack a window ID.
+					isActive := false
+					if windowID != "" {
+						isActive = activeID != "" && activeID == windowID
+					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
+						isActive = activeID != "" && activeID == nameID
+					}
+					if isActive {
 						ClearTmuxWindowNotification(windowTarget, windowName)
 					}
 				}

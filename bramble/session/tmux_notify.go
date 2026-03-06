@@ -12,6 +12,9 @@ import (
 //  2. Disable automatic-rename so the prefix isn't overwritten
 //  3. Send BEL character to trigger tmux bell monitoring
 //  4. Display a message overlay
+//
+// All tmux commands are best-effort; errors are silently ignored because
+// failures (e.g. tmux not available, window already gone) are non-fatal.
 func NotifyTmuxWindow(windowTarget, windowName string) {
 	// Prefix window name with "!"
 	notifyName := "!" + windowName
@@ -23,7 +26,8 @@ func NotifyTmuxWindow(windowTarget, windowName string) {
 	// Send BEL character to the pane
 	_ = exec.Command("tmux", "run-shell", "-t", windowTarget, `printf "\a"`).Run()
 
-	// Display a message for 5 seconds
+	// Display a message for 5 seconds on the current client (no -t),
+	// so the overlay appears wherever the user is currently looking.
 	msg := fmt.Sprintf("Session %q waiting for input", windowName)
 	_ = exec.Command("tmux", "display-message", "-d", "5000", msg).Run()
 }
