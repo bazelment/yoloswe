@@ -37,6 +37,7 @@ go_test(
     ],
     embed = [":session"],
     deps = [
+        "//bramble/sessionmodel",
         "//multiagent/agent",
         "//wt",
         "@com_github_stretchr_testify//assert",

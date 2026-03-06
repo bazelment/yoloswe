@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ipc",
+    srcs = [
+        "client.go",
+        "protocol.go",
+        "server.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/ipc",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "ipc_test",
+    srcs = ["server_test.go"],
+    embed = [":ipc"],
+    deps = ["@com_github_stretchr_testify//require"],
+)

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/bramble/app"
+	"github.com/bazelment/yoloswe/bramble/ipc"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/multiagent/agent"
@@ -194,6 +196,15 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Start IPC server so child processes can request new sessions.
+	// NOTE: the IPC server is wired to the initial repo's session manager only;
+	// repos opened later via Alt-R are not reachable through IPC.
+	ipcServer, ipcSockPath := startIPCServer(sessionManager, wtRoot, repoName)
+	if ipcServer != nil {
+		defer ipcServer.Close()
+		os.Setenv(ipc.SockEnvVar, ipcSockPath)
+	}
+
 	// Query terminal size synchronously so the first View() renders a
 	// properly laid-out UI instead of waiting for the async WindowSizeMsg.
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
@@ -275,6 +286,201 @@ func detectRepoFromPath(cwd, wtRoot string) (string, error) {
 	}
 
 	return "", fmt.Errorf("not in a wt-managed repo")
+}
+
+// --- IPC server setup --------------------------------------------------------
+
+func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*ipc.Server, string) {
+	// Prefer $XDG_RUNTIME_DIR (user-private, tmpfs) over /tmp to avoid
+	// symlink/TOCTOU risks in world-writable directories.
+	runDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runDir == "" {
+		runDir = os.TempDir()
+	}
+	sockPath := filepath.Join(runDir, fmt.Sprintf("bramble-%d.sock", os.Getpid()))
+	srv := ipc.NewServer(sockPath)
+
+	srv.Handle(ipc.RequestPing, func(_ context.Context, _ *ipc.Request) (any, error) {
+		return "pong", nil
+	})
+
+	srv.Handle(ipc.RequestNewSession, func(ctx context.Context, req *ipc.Request) (any, error) {
+		params, ok := req.Params.(*ipc.NewSessionParams)
+		if !ok {
+			return nil, fmt.Errorf("invalid params")
+		}
+		return handleNewSession(ctx, sessionManager, wtRoot, repoName, params)
+	})
+
+	srv.Handle(ipc.RequestListSessions, func(_ context.Context, _ *ipc.Request) (any, error) {
+		return handleListSessions(sessionManager), nil
+	})
+
+	if err := srv.Start(); err != nil {
+		log.Printf("Warning: IPC server failed to start: %v", err)
+		return nil, ""
+	}
+	socketPath := srv.SocketPath()
+	return srv, socketPath
+}
+
+func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams) (*ipc.NewSessionResult, error) {
+	worktreePath := params.WorktreePath
+
+	// Create worktree if requested
+	if params.CreateWorktree && params.Branch != "" {
+		m := wt.NewManager(wtRoot, repoName)
+		path, err := m.New(ctx, params.Branch, params.BaseBranch, params.Goal)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create worktree: %w", err)
+		}
+		worktreePath = path
+	}
+
+	if worktreePath == "" {
+		return nil, fmt.Errorf("either worktree_path or branch with create_worktree is required")
+	}
+
+	var sessionType session.SessionType
+	switch params.SessionType {
+	case "planner", "":
+		sessionType = session.SessionTypePlanner
+	case "builder":
+		sessionType = session.SessionTypeBuilder
+	default:
+		return nil, fmt.Errorf("unknown session_type %q (expected \"planner\" or \"builder\")", params.SessionType)
+	}
+
+	id, err := mgr.StartSession(sessionType, worktreePath, params.Prompt, params.Model)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start session: %w", err)
+	}
+
+	return &ipc.NewSessionResult{
+		SessionID:    string(id),
+		WorktreePath: worktreePath,
+	}, nil
+}
+
+func handleListSessions(mgr *session.Manager) *ipc.ListSessionsResult {
+	sessions := mgr.GetAllSessions()
+	summaries := make([]ipc.SessionSummary, len(sessions))
+	for i := range sessions {
+		s := &sessions[i]
+		summaries[i] = ipc.SessionSummary{
+			ID:           string(s.ID),
+			Type:         string(s.Type),
+			Status:       string(s.Status),
+			WorktreeName: s.WorktreeName,
+			Prompt:       s.Prompt,
+			Model:        s.Model,
+		}
+	}
+	return &ipc.ListSessionsResult{Sessions: summaries}
+}
+
+// --- CLI subcommands (client mode) -------------------------------------------
+
+var pingCmd = &cobra.Command{
+	Use:   "ping",
+	Short: "Check if the bramble TUI server is alive",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := ipc.NewClientFromEnv()
+		if err != nil {
+			return err
+		}
+		if err := client.Ping(); err != nil {
+			return err
+		}
+		fmt.Println("pong")
+		return nil
+	},
+}
+
+var newSessionCmd = &cobra.Command{
+	Use:   "new-session",
+	Short: "Request the running bramble TUI to create a new session",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := ipc.NewClientFromEnv()
+		if err != nil {
+			return err
+		}
+
+		sessionType, _ := cmd.Flags().GetString("type")
+		branch, _ := cmd.Flags().GetString("branch")
+		baseBranch, _ := cmd.Flags().GetString("from")
+		worktreePath, _ := cmd.Flags().GetString("worktree")
+		prompt, _ := cmd.Flags().GetString("prompt")
+		model, _ := cmd.Flags().GetString("model")
+		goal, _ := cmd.Flags().GetString("goal")
+		createWT, _ := cmd.Flags().GetBool("create-worktree")
+
+		resp, err := client.Send(&ipc.Request{
+			Type: ipc.RequestNewSession,
+			ID:   "cli-new-session",
+			Params: &ipc.NewSessionParams{
+				SessionType:    sessionType,
+				Branch:         branch,
+				BaseBranch:     baseBranch,
+				WorktreePath:   worktreePath,
+				CreateWorktree: createWT,
+				Prompt:         prompt,
+				Model:          model,
+				Goal:           goal,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("server error: %s", resp.Error)
+		}
+
+		out, _ := json.MarshalIndent(resp.Result, "", "  ")
+		fmt.Println(string(out))
+		return nil
+	},
+}
+
+var listSessionsCmd = &cobra.Command{
+	Use:   "list-sessions",
+	Short: "List active sessions from the running bramble TUI",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := ipc.NewClientFromEnv()
+		if err != nil {
+			return err
+		}
+
+		resp, err := client.Send(&ipc.Request{
+			Type: ipc.RequestListSessions,
+			ID:   "cli-list-sessions",
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			return fmt.Errorf("server error: %s", resp.Error)
+		}
+
+		out, _ := json.MarshalIndent(resp.Result, "", "  ")
+		fmt.Println(string(out))
+		return nil
+	},
+}
+
+func init() {
+	newSessionCmd.Flags().StringP("type", "t", "planner", "Session type: planner or builder")
+	newSessionCmd.Flags().StringP("branch", "b", "", "Branch name (creates worktree if --create-worktree)")
+	newSessionCmd.Flags().StringP("from", "f", "", "Base branch for new worktree")
+	newSessionCmd.Flags().StringP("worktree", "w", "", "Existing worktree path")
+	newSessionCmd.Flags().StringP("prompt", "p", "", "Prompt for the session")
+	newSessionCmd.Flags().StringP("model", "m", "", "Model ID (e.g. opus, sonnet)")
+	newSessionCmd.Flags().StringP("goal", "g", "", "Goal for new worktree")
+	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")
+
+	rootCmd.AddCommand(pingCmd)
+	rootCmd.AddCommand(newSessionCmd)
+	rootCmd.AddCommand(listSessionsCmd)
 }
 
 // pickRouterProvider selects the best available provider for the task router.
