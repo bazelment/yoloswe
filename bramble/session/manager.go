@@ -1202,6 +1202,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			permissionMode = "plan"
 		}
 
+		brambleBin, _ := os.Executable()
+		if brambleBin == "" {
+			brambleBin = "bramble" // fallback to PATH lookup
+		}
 		runner = &tmuxRunner{
 			windowName:      tmuxName,
 			workDir:         session.WorktreePath,
@@ -1211,6 +1215,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			permissionMode:  permissionMode,
 			resumeSessionID: session.CLISessionID,
 			sessionID:       string(session.ID),
+			brambleBin:      brambleBin,
 			yoloMode:        m.config.YoloMode,
 			killOnStop:      false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}

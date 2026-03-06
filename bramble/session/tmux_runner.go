@@ -22,6 +22,7 @@ type tmuxRunner struct {
 	resumeSessionID string // CLI session ID to resume (empty for new sessions)
 	windowID        string // stable window ID captured atomically at creation time
 	sessionID       string // bramble session ID for IPC notification hook
+	brambleBin      string // absolute path to the bramble binary for hook commands
 	yoloMode        bool   // skip all permission prompts
 	killOnStop      bool   // kill tmux window on Stop()
 }
@@ -191,7 +192,7 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 					Stop: []hookGroup{{
 						Hooks: []hookEntry{{
 							Type:    "command",
-							Command: "bramble notify --session-id " + quotedID,
+							Command: r.brambleBin + " notify --session-id " + quotedID,
 						}},
 					}},
 				},
