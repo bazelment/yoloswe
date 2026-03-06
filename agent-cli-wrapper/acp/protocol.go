@@ -70,14 +70,22 @@ type NewSessionRequest struct {
 // NewSessionResponse returns the created session info.
 type NewSessionResponse struct {
 	SessionID     string                `json:"sessionId"`
-	Modes         []SessionModeState    `json:"modes,omitempty"`
+	Modes         *SessionModes         `json:"modes,omitempty"`
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+}
+
+// SessionModes describes available session modes.
+type SessionModes struct {
+	AvailableModes []SessionModeState `json:"availableModes,omitempty"`
+	CurrentModeID  string             `json:"currentModeId,omitempty"`
 }
 
 // SessionModeState describes an available session mode.
 type SessionModeState struct {
 	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
 	IsCurrent   bool   `json:"isCurrent,omitempty"`
 }
 
