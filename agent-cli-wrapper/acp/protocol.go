@@ -74,10 +74,32 @@ type NewSessionResponse struct {
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 }
 
-// SessionModes describes available session modes.
+// SessionModes describes available session modes. It supports two JSON shapes:
+//   - Object with currentModeId + availableModes (Gemini CLI v0.32+)
+//   - Array of SessionModeState (older agents)
 type SessionModes struct {
 	CurrentModeID  string             `json:"currentModeId,omitempty"`
 	AvailableModes []SessionModeState `json:"availableModes,omitempty"`
+}
+
+// UnmarshalJSON handles both the new object format and the legacy array format.
+func (m *SessionModes) UnmarshalJSON(data []byte) error {
+	// Try array format first (legacy).
+	var arr []SessionModeState
+	if json.Unmarshal(data, &arr) == nil {
+		m.AvailableModes = arr
+		// Infer current mode from legacy isCurrent field.
+		for _, mode := range arr {
+			if mode.IsCurrent {
+				m.CurrentModeID = mode.ID
+				break
+			}
+		}
+		return nil
+	}
+	// Object format (Gemini CLI v0.32+).
+	type plain SessionModes
+	return json.Unmarshal(data, (*plain)(m))
 }
 
 // SessionModeState describes an available session mode.

@@ -473,9 +473,9 @@ func updateToolResult(t *Turn, tr protocol.ToolResultBlock) {
 	}
 }
 
-// isEmptyTurn returns true if a turn has no meaningful agent response or tool calls.
+// isEmptyTurn returns true if a turn has no meaningful agent response, tool calls, or errors.
 func isEmptyTurn(t *Turn) bool {
-	return strings.TrimSpace(t.Response) == "" && len(t.ToolCalls) == 0
+	return strings.TrimSpace(t.Response) == "" && len(t.ToolCalls) == 0 && len(t.Errors) == 0
 }
 
 // cleanUserInput uses envelope metadata to classify the message type and

@@ -89,6 +89,7 @@ func main() {
 	}
 
 	exitCode := 0
+	var allSessions []*sessionanalysis.Session
 	for _, path := range flags.Args() {
 		sessions, err := parsePath(path, analysisCfg)
 		if err != nil {
@@ -96,12 +97,13 @@ func main() {
 			exitCode = 1
 			continue
 		}
-		sessions = limitSessions(sessions, cfg.limit)
-		if cfg.summarize {
-			summarizeWithProgress(sessions, cfg.summaryWordLimit, queryFunc)
-		}
-		render(os.Stdout, sessions, cfg)
+		allSessions = append(allSessions, sessions...)
 	}
+	allSessions = limitSessions(allSessions, cfg.limit)
+	if cfg.summarize {
+		summarizeWithProgress(allSessions, cfg.summaryWordLimit, queryFunc)
+	}
+	render(os.Stdout, allSessions, cfg)
 	os.Exit(exitCode)
 }
 
@@ -120,7 +122,7 @@ func parseFlags(args []string) config {
 	flags.BoolVar(&cfg.listProjects, "list", false, "list available projects")
 	flags.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
 	flags.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
-	flags.BoolVar(&cfg.summarize, "summarize", true, "use an LLM to generate session summaries")
+	flags.BoolVar(&cfg.summarize, "summarize", false, "use an LLM to generate session summaries")
 	flags.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
 	flags.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
 	flags.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
