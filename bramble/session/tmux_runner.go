@@ -177,7 +177,6 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		// the CLI is waiting for user input (Claude provider only).
 		// The hook command is run by a shell, so the session ID must be
 		// single-quoted to handle spaces or special characters safely.
-		// Inject a Stop hook so Claude calls back when a turn finishes.
 		// BRAMBLE_SOCK is set via "tmux new-window -e" so the hook process
 		// inherits it from the tmux window environment.
 		if r.sessionID != "" {
