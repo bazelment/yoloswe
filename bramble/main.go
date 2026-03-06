@@ -304,12 +304,12 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		return "pong", nil
 	})
 
-	srv.Handle(ipc.RequestNewSession, func(_ context.Context, req *ipc.Request) (any, error) {
+	srv.Handle(ipc.RequestNewSession, func(ctx context.Context, req *ipc.Request) (any, error) {
 		params, ok := req.Params.(*ipc.NewSessionParams)
 		if !ok {
 			return nil, fmt.Errorf("invalid params")
 		}
-		return handleNewSession(sessionManager, wtRoot, repoName, params)
+		return handleNewSession(ctx, sessionManager, wtRoot, repoName, params)
 	})
 
 	srv.Handle(ipc.RequestListSessions, func(_ context.Context, _ *ipc.Request) (any, error) {
@@ -320,16 +320,17 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		log.Printf("Warning: IPC server failed to start: %v", err)
 		return nil, ""
 	}
-	return srv, sockPath
+	socketPath := srv.SocketPath()
+	return srv, socketPath
 }
 
-func handleNewSession(mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams) (*ipc.NewSessionResult, error) {
+func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams) (*ipc.NewSessionResult, error) {
 	worktreePath := params.WorktreePath
 
 	// Create worktree if requested
 	if params.CreateWorktree && params.Branch != "" {
 		m := wt.NewManager(wtRoot, repoName)
-		path, err := m.New(context.Background(), params.Branch, params.BaseBranch, params.Goal)
+		path, err := m.New(ctx, params.Branch, params.BaseBranch, params.Goal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create worktree: %w", err)
 		}
