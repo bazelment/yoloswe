@@ -63,6 +63,46 @@ func SummarizeSessions(ctx context.Context, sessions []*Session) {
 	}
 }
 
+// SummarizeTurns uses Haiku to summarize long agent responses within sessions.
+// Turns with responses exceeding wordLimit words get their ResponseSummary populated.
+func SummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int) {
+	if wordLimit <= 0 {
+		return
+	}
+	for _, sess := range sessions {
+		for i := range sess.Turns {
+			t := &sess.Turns[i]
+			if t.ResponseWordCount() <= wordLimit {
+				continue
+			}
+			summary, err := summarizeText(ctx, t.Response)
+			if err != nil {
+				continue
+			}
+			t.ResponseSummary = summary
+		}
+	}
+}
+
+// summarizeText uses Haiku to produce a concise summary of a long agent response.
+func summarizeText(ctx context.Context, text string) (string, error) {
+	// Truncate input to ~6K chars to stay within Haiku context.
+	if len(text) > 6000 {
+		text = text[:3000] + "\n[...]\n" + text[len(text)-3000:]
+	}
+
+	prompt := "Summarize this Claude Code agent response concisely, preserving key actions, decisions, and outcomes. Keep it under 100 words.\n\nIMPORTANT: Return ONLY the plain summary text. No headers or formatting prefixes.\n\n" + text
+
+	result, err := claude.Query(ctx, prompt,
+		claude.WithModel("haiku"),
+		claude.WithDisablePlugins(),
+	)
+	if err != nil {
+		return "", fmt.Errorf("haiku query: %w", err)
+	}
+	return cleanSummary(result.Text), nil
+}
+
 // buildSummaryPrompt constructs the prompt sent to Haiku for summarization.
 func buildSummaryPrompt(sess *Session) string {
 	var b strings.Builder

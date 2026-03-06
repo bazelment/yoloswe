@@ -50,9 +50,8 @@ func main() {
 	}
 
 	analysisCfg := sessionanalysis.Config{
-		SummaryWordLimit: cfg.summaryWordLimit,
-		SkipEmpty:        true,
-		MinTurns:         cfg.minTurns,
+		SkipEmpty: true,
+		MinTurns:  cfg.minTurns,
 	}
 
 	if cfg.sinceStr != "" {
@@ -72,7 +71,7 @@ func main() {
 		}
 		sessions = limitSessions(sessions, cfg.limit)
 		if cfg.summarize {
-			summarizeWithProgress(sessions)
+			summarizeWithProgress(sessions, cfg.summaryWordLimit)
 		}
 		render(os.Stdout, sessions, cfg)
 		return
@@ -93,7 +92,7 @@ func main() {
 		}
 		sessions = limitSessions(sessions, cfg.limit)
 		if cfg.summarize {
-			summarizeWithProgress(sessions)
+			summarizeWithProgress(sessions, cfg.summaryWordLimit)
 		}
 		render(os.Stdout, sessions, cfg)
 	}
@@ -102,10 +101,10 @@ func main() {
 
 func parseFlags(args []string) config {
 	cfg := config{
-		summaryWordLimit: 200,
+		summaryWordLimit: 100,
 	}
-	flag.IntVar(&cfg.summaryWordLimit, "summary-limit", 200,
-		"word limit before summarizing agent responses (0=no summarization)")
+	flag.IntVar(&cfg.summaryWordLimit, "summary-limit", 100,
+		"word limit before summarizing agent responses with Haiku (0=no summarization)")
 	flag.BoolVar(&cfg.jsonOutput, "json", false, "output as JSON")
 	flag.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
 	flag.BoolVar(&cfg.listProjects, "list", false, "list available projects")
@@ -118,7 +117,7 @@ func parseFlags(args []string) config {
 	return cfg
 }
 
-func summarizeWithProgress(sessions []*sessionanalysis.Session) {
+func summarizeWithProgress(sessions []*sessionanalysis.Session, wordLimit int) {
 	ctx := context.Background()
 	for i, sess := range sessions {
 		if len(sess.Turns) == 0 {
@@ -131,6 +130,11 @@ func summarizeWithProgress(sessions []*sessionanalysis.Session) {
 			continue
 		}
 		sess.Summary = summary
+	}
+	// Summarize long turn responses.
+	if wordLimit > 0 {
+		fmt.Fprintf(os.Stderr, "Summarizing long responses (>%d words)...\n", wordLimit)
+		sessionanalysis.SummarizeTurns(ctx, sessions, wordLimit)
 	}
 }
 

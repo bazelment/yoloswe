@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 )
 
 func TestParseSession_FullSession(t *testing.T) {
@@ -30,68 +32,6 @@ func TestParseSession_FullSession(t *testing.T) {
 	assert.NotEmpty(t, sess.Summary, "session should have a summary")
 	assert.Contains(t, sess.Summary, "Goal:")
 	assert.Contains(t, sess.Summary, "Outcome:")
-}
-
-func TestParseSession_WithSummaryLimit(t *testing.T) {
-	fixturePath := filepath.Join("..", "sessionmodel", "testdata", "full_session.jsonl")
-	if _, err := os.Stat(fixturePath); os.IsNotExist(err) {
-		t.Skip("test fixture not found")
-	}
-
-	cfg := Config{SummaryWordLimit: 5} // Very low limit to trigger summarization
-	sess, err := ParseSessionWithConfig(fixturePath, cfg)
-	require.NoError(t, err)
-
-	// Check that long responses get summarized.
-	for _, turn := range sess.Turns {
-		if turn.ResponseWordCount() > 5 {
-			assert.NotEmpty(t, turn.ResponseSummary,
-				"turn %d with %d words should be summarized", turn.Number, turn.ResponseWordCount())
-		}
-	}
-}
-
-func TestParseSession_NoSummaryWhenDisabled(t *testing.T) {
-	fixturePath := filepath.Join("..", "sessionmodel", "testdata", "full_session.jsonl")
-	if _, err := os.Stat(fixturePath); os.IsNotExist(err) {
-		t.Skip("test fixture not found")
-	}
-
-	cfg := Config{SummaryWordLimit: 0}
-	sess, err := ParseSessionWithConfig(fixturePath, cfg)
-	require.NoError(t, err)
-
-	for _, turn := range sess.Turns {
-		assert.Empty(t, turn.ResponseSummary,
-			"turn %d should not be summarized when limit is 0", turn.Number)
-	}
-}
-
-func TestSummarizeText(t *testing.T) {
-	// Short text should pass through.
-	short := "hello world"
-	assert.Equal(t, short, summarizeText(short, 10))
-
-	// Long text should be summarized.
-	words := make([]string, 100)
-	for i := range words {
-		words[i] = "word"
-	}
-	long := "start " + joinWords(words) + " end"
-	summary := summarizeText(long, 20)
-	assert.Contains(t, summary, "words omitted")
-	assert.Contains(t, summary, "start")
-}
-
-func joinWords(words []string) string {
-	result := ""
-	for i, w := range words {
-		if i > 0 {
-			result += " "
-		}
-		result += w
-	}
-	return result
 }
 
 func TestResponseWordCount(t *testing.T) {
@@ -125,4 +65,35 @@ func TestTotalToolCalls(t *testing.T) {
 func TestParseSession_NonexistentFile(t *testing.T) {
 	_, err := ParseSession("/nonexistent/path.jsonl")
 	assert.Error(t, err)
+}
+
+func TestCleanUserInput_TaskNotification(t *testing.T) {
+	input := `<task-notification><task-id>abc123</task-id><summary>Background command completed</summary></task-notification>`
+	meta := &sessionmodel.RawEnvelopeMeta{IsMeta: true}
+	result := cleanUserInput(input, meta)
+	assert.Equal(t, "[task notification] Background command completed", result)
+}
+
+func TestCleanUserInput_PlainText(t *testing.T) {
+	input := "fix the bug in main.go"
+	meta := &sessionmodel.RawEnvelopeMeta{}
+	assert.Equal(t, input, cleanUserInput(input, meta))
+}
+
+func TestCleanUserInput_AgentMessage(t *testing.T) {
+	input := `<teammate-message teammate_id="team-lead">Your task is to instrument the service</teammate-message>`
+	meta := &sessionmodel.RawEnvelopeMeta{AgentName: "tua-agent"}
+	result := cleanUserInput(input, meta)
+	assert.Equal(t, "[tua-agent] Your task is to instrument the service", result)
+}
+
+func TestCleanUserInput_NilMeta(t *testing.T) {
+	input := "plain text"
+	assert.Equal(t, "plain text", cleanUserInput(input, nil))
+}
+
+func TestCleanSummary(t *testing.T) {
+	assert.Equal(t, "The session did X.", cleanSummary("**Session Summary:**\n\nThe session did X."))
+	assert.Equal(t, "The session did X.", cleanSummary("## Summary\n\nThe session did X."))
+	assert.Equal(t, "Plain text.", cleanSummary("Plain text."))
 }

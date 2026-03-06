@@ -165,24 +165,27 @@ type SessionMeta struct { //nolint:govet // fieldalignment: readability over pac
 
 // RawEnvelopeMeta holds metadata from raw JSONL (~/.claude/projects/) envelopes.
 type RawEnvelopeMeta struct { //nolint:govet // fieldalignment: readability over packing
-	Timestamp     time.Time
-	ToolUseResult json.RawMessage
-	Data          json.RawMessage // progress data payload
-	ErrorJSON     json.RawMessage // system error payload
-	ParentUUID    string
-	GitBranch     string
-	Version       string
-	UUID          string
-	SessionID     string // outer envelope sessionId (used as fallback when inner message lacks it)
-	Type          string // envelope type: system, progress, pr-link, etc.
-	Subtype       string // system subtype: api_error, compact_boundary, etc.
-	Content       string // text content from system/queue-operation envelopes
-	Operation     string // queue-operation operation type
-	PRURL         string // pr-link URL
-	PRRepository  string // pr-link repository
-	PRNumber      int    // pr-link PR number
-	DurationMs    int64  // system/turn_duration milliseconds
-	IsSidechain   bool
+	Timestamp       time.Time
+	ToolUseResult   json.RawMessage
+	Data            json.RawMessage // progress data payload
+	ErrorJSON       json.RawMessage // system error payload
+	ParentUUID      string
+	GitBranch       string
+	Version         string
+	UUID            string
+	SessionID       string // outer envelope sessionId (used as fallback when inner message lacks it)
+	Type            string // envelope type: system, progress, pr-link, etc.
+	Subtype         string // system subtype: api_error, compact_boundary, etc.
+	Content         string // text content from system/queue-operation envelopes
+	Operation       string // queue-operation operation type
+	PRURL           string // pr-link URL
+	PRRepository    string // pr-link repository
+	PRNumber        int    // pr-link PR number
+	DurationMs      int64  // system/turn_duration milliseconds
+	IsMeta          bool
+	IsSidechain     bool
+	AgentName       string
+	SourceToolUseID string
 }
 
 // --- Progress ---------------------------------------------------------------

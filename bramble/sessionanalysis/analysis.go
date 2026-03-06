@@ -155,10 +155,6 @@ type ToolCall struct {
 
 // Config controls analysis behavior.
 type Config struct { //nolint:govet // fieldalignment: readability over packing
-	// SummaryWordLimit triggers summarization of agent responses exceeding
-	// this word count. 0 means no summarization. Default: 200.
-	SummaryWordLimit int
-
 	// Since filters sessions to only include those started after this time.
 	// Zero value means no filtering.
 	Since time.Time
@@ -174,8 +170,7 @@ type Config struct { //nolint:govet // fieldalignment: readability over packing
 // DefaultConfig returns the default analysis configuration.
 func DefaultConfig() Config {
 	return Config{
-		SummaryWordLimit: 200,
-		SkipEmpty:        true,
+		SkipEmpty: true,
 	}
 }
 
@@ -277,7 +272,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				turnNum++
 				currentTurn = &Turn{
 					Number:    turnNum,
-					UserInput: cleanUserInput(s),
+					UserInput: cleanUserInput(s, meta),
 					StartTime: meta.Timestamp,
 				}
 			}
@@ -453,9 +448,6 @@ type ProjectInfo struct {
 // finalizeTurn applies post-processing to a completed turn.
 func finalizeTurn(t *Turn, cfg Config) {
 	t.Response = strings.TrimSpace(t.Response)
-	if cfg.SummaryWordLimit > 0 && t.ResponseWordCount() > cfg.SummaryWordLimit {
-		t.ResponseSummary = summarizeText(t.Response, cfg.SummaryWordLimit)
-	}
 }
 
 // updateToolResult updates the matching tool call state in the turn.
@@ -473,74 +465,88 @@ func updateToolResult(t *Turn, tr protocol.ToolResultBlock) {
 	}
 }
 
-// summarizeText produces a truncated summary of text that exceeds the word limit.
-// It takes the first and last portions to give context about the start and end.
-func summarizeText(text string, wordLimit int) string {
-	words := strings.Fields(text)
-	if len(words) <= wordLimit {
-		return text
-	}
-
-	// Take ~60% from the start and ~40% from the end.
-	headWords := wordLimit * 3 / 5
-	tailWords := wordLimit - headWords
-
-	head := strings.Join(words[:headWords], " ")
-	tail := strings.Join(words[len(words)-tailWords:], " ")
-	return fmt.Sprintf("%s\n\n[... %d words omitted ...]\n\n%s", head, len(words)-wordLimit, tail)
-}
-
 // isEmptyTurn returns true if a turn has no meaningful agent response or tool calls.
 func isEmptyTurn(t *Turn) bool {
 	return strings.TrimSpace(t.Response) == "" && len(t.ToolCalls) == 0
 }
 
-// cleanUserInput strips common wrapper tags from user input for readability.
-func cleanUserInput(s string) string {
-	// Strip local-command-caveat wrappers.
-	s = stripXMLTag(s, "local-command-caveat")
-	s = stripXMLTag(s, "local-command-stdout")
-	s = stripXMLTag(s, "command-name")
-	s = stripXMLTag(s, "command-message")
-	s = stripXMLTag(s, "command-args")
+// cleanUserInput uses envelope metadata to classify the message type and
+// returns a cleaned representation. This avoids brittle XML tag parsing by
+// relying on structured envelope fields (IsMeta, AgentName, SourceToolUseID).
+func cleanUserInput(s string, meta *sessionmodel.RawEnvelopeMeta) string {
+	if meta == nil {
+		return strings.TrimSpace(s)
+	}
 
-	// Filter out system auto-messages.
-	s = stripXMLTag(s, "system-reminder")
+	// Meta messages are system-generated (local command output, task notifications).
+	if meta.IsMeta {
+		return cleanMetaMessage(s)
+	}
 
-	// Replace task notification blocks with a short label.
+	// Agent messages are from teammate/subagent systems.
+	if meta.AgentName != "" {
+		return cleanAgentMessage(s, meta.AgentName)
+	}
+
+	// Human-typed message — check for task notifications (which lack
+	// envelope metadata) and strip system-reminder injections.
 	if strings.Contains(s, "<task-notification>") || strings.Contains(s, "<task-id>") {
-		// Extract the summary if present.
+		return cleanMetaMessage(s)
+	}
+	s = stripXMLTag(s, "system-reminder")
+	return strings.TrimSpace(s)
+}
+
+// cleanMetaMessage extracts a readable label from a system meta-message.
+func cleanMetaMessage(s string) string {
+	// Task notifications: extract the <summary> content.
+	if strings.Contains(s, "<task-notification>") || strings.Contains(s, "<task-id>") {
 		if start := strings.Index(s, "<summary>"); start != -1 {
 			inner := s[start+len("<summary>"):]
 			if end := strings.Index(inner, "</summary>"); end != -1 {
-				s = "[task notification] " + strings.TrimSpace(inner[:end])
-			} else {
-				s = "[task notification]"
+				return "[task notification] " + strings.TrimSpace(inner[:end])
 			}
-		} else {
-			s = "[task notification]"
 		}
+		return "[task notification]"
 	}
 
-	// Clean teammate-message wrappers: extract the task description.
+	// Local command output: strip wrapper tags, keep the content.
+	for _, tag := range []string{"local-command-caveat", "local-command-stdout", "command-name", "command-message", "command-args"} {
+		s = stripXMLTag(s, tag)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "[system meta]"
+	}
+	return s
+}
+
+// cleanAgentMessage extracts a readable description from a teammate message.
+func cleanAgentMessage(s string, agentName string) string {
+	prefix := fmt.Sprintf("[%s] ", agentName)
+
+	// Extract content from <teammate-message> wrapper if present.
 	if strings.Contains(s, "<teammate-message") {
-		// Extract content between the tags.
 		if start := strings.Index(s, ">"); start != -1 {
 			inner := s[start+1:]
 			if end := strings.Index(inner, "</teammate-message>"); end != -1 {
 				inner = inner[:end]
 			}
-			// Extract the task line.
 			inner = strings.TrimSpace(inner)
 			if taskIdx := strings.Index(inner, "Your task"); taskIdx != -1 {
-				s = "[teammate] " + strings.TrimSpace(inner[taskIdx:])
-			} else {
-				s = "[teammate] " + inner
+				return prefix + strings.TrimSpace(inner[taskIdx:])
 			}
+			if len(inner) > 300 {
+				inner = inner[:300] + "..."
+			}
+			return prefix + inner
 		}
 	}
 
-	return strings.TrimSpace(s)
+	if len(s) > 300 {
+		s = s[:300] + "..."
+	}
+	return prefix + strings.TrimSpace(s)
 }
 
 // stripXMLTag removes a simple XML tag and returns the inner text.
@@ -549,7 +555,7 @@ func stripXMLTag(s, tag string) string {
 	close := "</" + tag + ">"
 	s = strings.ReplaceAll(s, open, "")
 	s = strings.ReplaceAll(s, close, "")
-	// Also handle self-closing and tags with attributes.
+	// Also handle tags with attributes.
 	for {
 		start := strings.Index(s, "<"+tag+" ")
 		if start == -1 {

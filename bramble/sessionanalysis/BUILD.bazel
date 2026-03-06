@@ -20,6 +20,7 @@ go_test(
     srcs = ["analysis_test.go"],
     embed = [":sessionanalysis"],
     deps = [
+        "//bramble/sessionmodel",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
