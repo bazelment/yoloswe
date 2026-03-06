@@ -1053,6 +1053,10 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				windowTarget := windowName
 				if windowID != "" {
 					windowTarget = windowID
+				} else if TmuxWindowExists(TmuxNotifyPrefix + windowName) {
+					// Window was renamed by NotifyTmuxWindow; use the current
+					// name so pane-dead/exit-status checks find the window.
+					windowTarget = TmuxNotifyPrefix + windowName
 				}
 
 				// Clear notification prefix when user is viewing this window.

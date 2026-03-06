@@ -173,7 +173,11 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		// The hook relies on BRAMBLE_SOCK being set in the tmux window's
 		// environment, which is inherited from bramble's process via os.Setenv.
 		if r.sessionID != "" {
-			quotedID := "'" + strings.ReplaceAll(r.sessionID, "'", "'\\''") + "'"
+			shellQuote := func(s string) string {
+				return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+			}
+			quotedBin := shellQuote(r.brambleBin)
+			quotedID := shellQuote(r.sessionID)
 			type hookEntry struct {
 				Type    string `json:"type"`
 				Command string `json:"command"`
@@ -192,7 +196,7 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 					Stop: []hookGroup{{
 						Hooks: []hookEntry{{
 							Type:    "command",
-							Command: r.brambleBin + " notify --session-id " + quotedID,
+							Command: quotedBin + " notify --session-id " + quotedID,
 						}},
 					}},
 				},
