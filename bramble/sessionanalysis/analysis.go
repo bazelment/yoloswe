@@ -253,7 +253,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 			if s, ok := m.Message.Content.AsString(); ok && s != "" {
 				// Finalize previous turn.
 				if currentTurn != nil {
-					finalizeTurn(currentTurn, cfg)
+					finalizeTurn(currentTurn)
 					if !cfg.SkipEmpty || !isEmptyTurn(currentTurn) {
 						sess.Turns = append(sess.Turns, *currentTurn)
 					}
@@ -324,7 +324,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 
 	// Finalize the last turn.
 	if currentTurn != nil {
-		finalizeTurn(currentTurn, cfg)
+		finalizeTurn(currentTurn)
 		if !cfg.SkipEmpty || !isEmptyTurn(currentTurn) {
 			sess.Turns = append(sess.Turns, *currentTurn)
 		}
@@ -436,7 +436,7 @@ type ProjectInfo struct {
 }
 
 // finalizeTurn applies post-processing to a completed turn.
-func finalizeTurn(t *Turn, cfg Config) {
+func finalizeTurn(t *Turn) {
 	t.Response = strings.TrimSpace(t.Response)
 }
 
@@ -480,7 +480,7 @@ func isEmptyTurn(t *Turn) bool {
 
 // cleanUserInput uses envelope metadata to classify the message type and
 // returns a cleaned representation. This avoids brittle XML tag parsing by
-// relying on structured envelope fields (IsMeta, AgentName, SourceToolUseID).
+// relying on structured envelope fields (IsMeta, AgentName).
 func cleanUserInput(s string, meta *sessionmodel.RawEnvelopeMeta) string {
 	if meta == nil {
 		return strings.TrimSpace(s)
