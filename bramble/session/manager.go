@@ -1811,11 +1811,19 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 }
 
 // SetSessionIdle transitions a session to StatusIdle (waiting for user input).
+// It only transitions from StatusRunning to avoid reverting terminal states
+// (completed, failed, stopped) that may have been set by the monitor loop.
 func (m *Manager) SetSessionIdle(id SessionID) {
 	m.mu.RLock()
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
 	if !ok {
+		return
+	}
+	s.mu.RLock()
+	status := s.Status
+	s.mu.RUnlock()
+	if status != StatusRunning {
 		return
 	}
 	m.updateSessionStatus(s, StatusIdle)
