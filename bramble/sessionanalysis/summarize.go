@@ -6,27 +6,62 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
-// SummarizeSession uses Claude Haiku to generate a concise session summary.
-// It sends the session's turn-by-turn conversation to Haiku and asks for a
-// 2-3 sentence summary of what was accomplished.
-func SummarizeSession(ctx context.Context, sess *Session) (string, error) {
-	prompt := buildSummaryPrompt(sess)
+// QueryFunc sends a prompt to an LLM and returns the response text.
+type QueryFunc func(ctx context.Context, prompt string) (string, error)
 
-	result, err := claude.Query(ctx, prompt,
-		claude.WithModel("haiku"),
-		claude.WithDisablePlugins(),
-	)
-	if err != nil {
-		return "", fmt.Errorf("haiku query: %w", err)
+// HaikuQueryFunc returns a QueryFunc that uses Claude Haiku.
+func HaikuQueryFunc() QueryFunc {
+	return func(ctx context.Context, prompt string) (string, error) {
+		result, err := claude.Query(ctx, prompt,
+			claude.WithModel("haiku"),
+			claude.WithDisablePlugins(),
+		)
+		if err != nil {
+			return "", err
+		}
+		return result.Text, nil
 	}
-
-	return cleanSummary(result.Text), nil
 }
 
-// cleanSummary strips unwanted headers/prefixes that Haiku sometimes adds.
+// GeminiQueryFunc returns a QueryFunc that uses Gemini Flash via ACP.
+func GeminiQueryFunc() QueryFunc {
+	return func(ctx context.Context, prompt string) (string, error) {
+		client := acp.NewClient()
+		if err := client.Start(ctx); err != nil {
+			return "", fmt.Errorf("gemini start: %w", err)
+		}
+		defer client.Stop()
+
+		sess, err := client.NewSession(ctx)
+		if err != nil {
+			return "", fmt.Errorf("gemini session: %w", err)
+		}
+
+		result, err := sess.Prompt(ctx, prompt)
+		if err != nil {
+			return "", fmt.Errorf("gemini prompt: %w", err)
+		}
+		return result.FullText, nil
+	}
+}
+
+// SummarizeSession uses an LLM to generate a concise session summary.
+func SummarizeSession(ctx context.Context, sess *Session, query QueryFunc) (string, error) {
+	prompt := buildSummaryPrompt(sess)
+
+	text, err := query(ctx, prompt)
+	if err != nil {
+		return "", fmt.Errorf("summarize session: %w", err)
+	}
+
+	return cleanSummary(text), nil
+}
+
+// cleanSummary strips unwanted headers/prefixes that LLMs sometimes add.
 func cleanSummary(s string) string {
 	s = strings.TrimSpace(s)
 	// Strip markdown headers like "## Summary\n\n"
@@ -50,12 +85,12 @@ func cleanSummary(s string) string {
 }
 
 // SummarizeSessions summarizes multiple sessions, skipping failures.
-func SummarizeSessions(ctx context.Context, sessions []*Session) {
+func SummarizeSessions(ctx context.Context, sessions []*Session, query QueryFunc) {
 	for _, sess := range sessions {
 		if len(sess.Turns) == 0 {
 			continue
 		}
-		summary, err := SummarizeSession(ctx, sess)
+		summary, err := SummarizeSession(ctx, sess, query)
 		if err != nil {
 			continue
 		}
@@ -63,9 +98,9 @@ func SummarizeSessions(ctx context.Context, sessions []*Session) {
 	}
 }
 
-// SummarizeTurns uses Haiku to summarize long agent responses within sessions.
+// SummarizeTurns summarizes long agent responses within sessions.
 // Turns with responses exceeding wordLimit words get their ResponseSummary populated.
-func SummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int) {
+func SummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int, query QueryFunc) {
 	if wordLimit <= 0 {
 		return
 	}
@@ -75,7 +110,7 @@ func SummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int) {
 			if t.ResponseWordCount() <= wordLimit {
 				continue
 			}
-			summary, err := summarizeText(ctx, t.Response)
+			summary, err := summarizeText(ctx, t.Response, query)
 			if err != nil {
 				continue
 			}
@@ -84,26 +119,23 @@ func SummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int) {
 	}
 }
 
-// summarizeText uses Haiku to produce a concise summary of a long agent response.
-func summarizeText(ctx context.Context, text string) (string, error) {
-	// Truncate input to ~6K chars to stay within Haiku context.
+// summarizeText produces a concise summary of a long agent response.
+func summarizeText(ctx context.Context, text string, query QueryFunc) (string, error) {
+	// Truncate input to ~6K chars to stay within context.
 	if len(text) > 6000 {
 		text = text[:3000] + "\n[...]\n" + text[len(text)-3000:]
 	}
 
 	prompt := "Summarize this Claude Code agent response concisely, preserving key actions, decisions, and outcomes. Keep it under 100 words.\n\nIMPORTANT: Return ONLY the plain summary text. No headers or formatting prefixes.\n\n" + text
 
-	result, err := claude.Query(ctx, prompt,
-		claude.WithModel("haiku"),
-		claude.WithDisablePlugins(),
-	)
+	result, err := query(ctx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("haiku query: %w", err)
+		return "", fmt.Errorf("summarize text: %w", err)
 	}
-	return cleanSummary(result.Text), nil
+	return cleanSummary(result), nil
 }
 
-// buildSummaryPrompt constructs the prompt sent to Haiku for summarization.
+// buildSummaryPrompt constructs the prompt sent to the LLM for summarization.
 func buildSummaryPrompt(sess *Session) string {
 	var b strings.Builder
 
@@ -125,7 +157,7 @@ func buildSummaryPrompt(sess *Session) string {
 		}
 		b.WriteString(fmt.Sprintf("USER: %s\n", input))
 
-		// Agent response (truncated for Haiku context)
+		// Agent response (truncated for context)
 		response := t.Response
 		if len(response) > 800 {
 			response = response[:400] + "\n[...]\n" + response[len(response)-400:]
@@ -140,7 +172,7 @@ func buildSummaryPrompt(sess *Session) string {
 		}
 		b.WriteString("\n")
 
-		// Cap total prompt size to ~8K chars to stay within Haiku context.
+		// Cap total prompt size to ~8K chars to stay within context.
 		if b.Len() > 8000 {
 			b.WriteString("[... remaining turns omitted ...]\n")
 			break
