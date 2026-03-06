@@ -165,11 +165,10 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.resumeSessionID != "" {
 			args = append(args, "--resume", r.resumeSessionID)
 		}
-		// Inject Notification hook so Claude calls back when waiting for input
-		// (Claude provider only; Codex and Gemini don't support this hook).
+		// Inject a Stop hook so Claude calls back when a turn finishes and
+		// the CLI is waiting for user input (Claude provider only).
 		// The hook command is run by a shell, so the session ID must be
 		// single-quoted to handle spaces or special characters safely.
-		// encoding/json is used for the outer --settings JSON payload.
 		// The hook relies on BRAMBLE_SOCK being set in the tmux window's
 		// environment, which is inherited from bramble's process via os.Setenv.
 		if r.sessionID != "" {
@@ -179,18 +178,17 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 				Command string `json:"command"`
 			}
 			type hookGroup struct {
-				Matcher struct{}    `json:"matcher"`
-				Hooks   []hookEntry `json:"hooks"`
+				Hooks []hookEntry `json:"hooks"`
 			}
 			hookSettings := struct {
 				Hooks struct {
-					Notification []hookGroup `json:"Notification"`
+					Stop []hookGroup `json:"Stop"`
 				} `json:"hooks"`
 			}{
 				Hooks: struct {
-					Notification []hookGroup `json:"Notification"`
+					Stop []hookGroup `json:"Stop"`
 				}{
-					Notification: []hookGroup{{
+					Stop: []hookGroup{{
 						Hooks: []hookEntry{{
 							Type:    "command",
 							Command: "bramble notify --session-id " + quotedID,
