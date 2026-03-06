@@ -20,6 +20,7 @@ type tmuxRunner struct {
 	permissionMode  string // permission mode: "" (default) or "plan" (claude only)
 	resumeSessionID string // CLI session ID to resume (empty for new sessions)
 	windowID        string // stable window ID captured atomically at creation time
+	sessionID       string // bramble session ID for IPC notification hook
 	yoloMode        bool   // skip all permission prompts
 	killOnStop      bool   // kill tmux window on Stop()
 }
@@ -162,6 +163,11 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		}
 		if r.resumeSessionID != "" {
 			args = append(args, "--resume", r.resumeSessionID)
+		}
+		// Inject Notification hook so Claude calls back when waiting for input
+		if r.sessionID != "" {
+			hookJSON := fmt.Sprintf(`{"hooks":{"Notification":[{"matcher":"","command":"bramble notify --session-id %s"}]}}`, r.sessionID)
+			args = append(args, "--settings", hookJSON)
 		}
 	}
 

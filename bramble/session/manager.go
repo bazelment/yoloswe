@@ -1092,6 +1092,20 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 			// Prefer stable window ID; fall back to name for re-adopted sessions
 			// that may not have a window ID.
 			if windowAlive {
+				// Clear notification prefix when user is viewing this window
+				session.mu.RLock()
+				status := session.Status
+				session.mu.RUnlock()
+				if status == StatusIdle {
+					activeID := GetActiveTmuxWindowID()
+					windowTarget := windowName
+					if windowID != "" {
+						windowTarget = windowID
+					}
+					if activeID != "" && activeID == windowID {
+						ClearTmuxWindowNotification(windowTarget, windowName)
+					}
+				}
 				continue
 			}
 
@@ -1175,6 +1189,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			provider:        agentModel.Provider,
 			permissionMode:  permissionMode,
 			resumeSessionID: session.CLISessionID,
+			sessionID:       string(session.ID),
 			yoloMode:        m.config.YoloMode,
 			killOnStop:      false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}
@@ -1777,6 +1792,17 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 	}
 	sortSessionsByTime(result)
 	return result
+}
+
+// SetSessionIdle transitions a session to StatusIdle (waiting for user input).
+func (m *Manager) SetSessionIdle(id SessionID) {
+	m.mu.RLock()
+	s, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	m.updateSessionStatus(s, StatusIdle)
 }
 
 // GetAllSessions returns all sessions sorted by creation time (newest first).
