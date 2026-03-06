@@ -65,7 +65,7 @@ type rawJSONLEnvelope struct { //nolint:govet // fieldalignment: readability ove
 	IsMeta          bool            `json:"isMeta,omitempty"`
 	IsSidechain     bool            `json:"isSidechain,omitempty"`
 	AgentName       string          `json:"agentName,omitempty"`
-	SourceToolUseID string          `json:"sourceToolUseID,omitempty"`
+	SourceToolUseID string          `json:"sourceToolUseId,omitempty"`
 	DurationMs      int64           `json:"durationMs,omitempty"`
 	Message         json.RawMessage `json:"message,omitempty"`
 	Data            json.RawMessage `json:"data,omitempty"`
