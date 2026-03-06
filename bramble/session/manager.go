@@ -1297,6 +1297,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			resumeSessionID: session.CLISessionID,
 			sessionID:       string(session.ID),
 			brambleBin:      brambleBin,
+			brambleSock:     os.Getenv("BRAMBLE_SOCK"),
 			yoloMode:        m.config.YoloMode,
 			killOnStop:      false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}

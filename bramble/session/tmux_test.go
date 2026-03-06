@@ -91,10 +91,11 @@ func TestBuildShellCommandCodex(t *testing.T) {
 
 func TestTmuxRunnerBuildCommand(t *testing.T) {
 	tests := []struct {
-		name     string
-		runner   tmuxRunner
-		wantBin  string
-		wantArgs []string
+		wantCheck func(t *testing.T, args []string) // optional custom check
+		name      string
+		runner    tmuxRunner
+		wantBin   string
+		wantArgs  []string
 	}{
 		{
 			name: "claude planner with model",
@@ -148,13 +149,39 @@ func TestTmuxRunnerBuildCommand(t *testing.T) {
 			wantBin:  "claude",
 			wantArgs: []string{"--model", "haiku", "quick task"},
 		},
+		{
+			name: "claude with session ID injects notify hook",
+			runner: tmuxRunner{
+				model:       "opus",
+				provider:    ProviderClaude,
+				prompt:      "do it",
+				sessionID:   "sess-1",
+				brambleBin:  "/usr/bin/bramble",
+				brambleSock: "/tmp/bramble-123.sock",
+			},
+			wantBin: "claude",
+			wantCheck: func(t *testing.T, args []string) {
+				for i, a := range args {
+					if a == "--settings" && i+1 < len(args) {
+						assert.Contains(t, args[i+1], "notify")
+						assert.Contains(t, args[i+1], "sess-1")
+						return
+					}
+				}
+				t.Fatal("expected --settings arg with hook")
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotBin, gotArgs := tt.runner.buildCommand()
 			assert.Equal(t, tt.wantBin, gotBin)
-			assert.Equal(t, tt.wantArgs, gotArgs)
+			if tt.wantCheck != nil {
+				tt.wantCheck(t, gotArgs)
+			} else {
+				assert.Equal(t, tt.wantArgs, gotArgs)
+			}
 		})
 	}
 }
