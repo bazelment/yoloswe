@@ -76,8 +76,8 @@ type NewSessionResponse struct {
 
 // SessionModes describes available session modes.
 type SessionModes struct {
-	AvailableModes []SessionModeState `json:"availableModes,omitempty"`
 	CurrentModeID  string             `json:"currentModeId,omitempty"`
+	AvailableModes []SessionModeState `json:"availableModes,omitempty"`
 }
 
 // SessionModeState describes an available session mode.

@@ -77,13 +77,13 @@ func main() {
 		return
 	}
 
-	if flag.NArg() == 0 {
+	if flags.NArg() == 0 {
 		listProjects()
 		return
 	}
 
 	exitCode := 0
-	for _, path := range flag.Args() {
+	for _, path := range flags.Args() {
 		sessions, err := parsePath(path, analysisCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
@@ -99,21 +99,25 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// flags is the FlagSet used by parseFlags, stored at package level so that
+// flag.NArg() / flag.Args() callers can reference it after parsing.
+var flags = flag.NewFlagSet("sessanalyze", flag.ExitOnError)
+
 func parseFlags(args []string) config {
 	cfg := config{
 		summaryWordLimit: 100,
 	}
-	flag.IntVar(&cfg.summaryWordLimit, "summary-limit", 100,
+	flags.IntVar(&cfg.summaryWordLimit, "summary-limit", 100,
 		"word limit before summarizing agent responses with Haiku (0=no summarization)")
-	flag.BoolVar(&cfg.jsonOutput, "json", false, "output as JSON")
-	flag.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
-	flag.BoolVar(&cfg.listProjects, "list", false, "list available projects")
-	flag.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
-	flag.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
-	flag.BoolVar(&cfg.summarize, "summarize", false, "use Claude Haiku to generate session summaries")
-	flag.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
-	flag.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
-	flag.Parse()
+	flags.BoolVar(&cfg.jsonOutput, "json", false, "output as JSON")
+	flags.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
+	flags.BoolVar(&cfg.listProjects, "list", false, "list available projects")
+	flags.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
+	flags.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
+	flags.BoolVar(&cfg.summarize, "summarize", false, "use Claude Haiku to generate session summaries")
+	flags.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
+	flags.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
+	flags.Parse(args) //nolint:errcheck // ExitOnError mode handles errors
 	return cfg
 }
 
@@ -123,7 +127,11 @@ func summarizeWithProgress(sessions []*sessionanalysis.Session, wordLimit int) {
 		if len(sess.Turns) == 0 {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "Summarizing session %d/%d (%s)...\n", i+1, len(sessions), sess.ID[:8])
+		shortID := sess.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		fmt.Fprintf(os.Stderr, "Summarizing session %d/%d (%s)...\n", i+1, len(sessions), shortID)
 		summary, err := sessionanalysis.SummarizeSession(ctx, sess)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
@@ -175,6 +183,16 @@ func parsePath(path string, cfg sessionanalysis.Config) ([]*sessionanalysis.Sess
 	if err != nil {
 		return nil, err
 	}
+	// Apply the same filters as ParseProjectWithConfig for consistency.
+	if len(sess.Turns) == 0 {
+		return nil, nil
+	}
+	if cfg.MinTurns > 0 && len(sess.Turns) < cfg.MinTurns {
+		return nil, nil
+	}
+	if !cfg.Since.IsZero() && sess.StartTime.Before(cfg.Since) {
+		return nil, nil
+	}
 	return []*sessionanalysis.Session{sess}, nil
 }
 
@@ -195,7 +213,11 @@ func renderMarkdown(w io.Writer, sessions []*sessionanalysis.Session, cfg config
 
 func renderSessionMD(w io.Writer, sess *sessionanalysis.Session, cfg config) {
 	// Session header
-	fmt.Fprintf(w, "# Session `%s`\n\n", sess.ID[:12])
+	shortID := sess.ID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+	fmt.Fprintf(w, "# Session `%s`\n\n", shortID)
 
 	// Metadata table
 	fmt.Fprintln(w, "| Field | Value |")

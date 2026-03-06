@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,11 +45,12 @@ func TestResponseWordCount(t *testing.T) {
 
 func TestSessionDuration(t *testing.T) {
 	sess := Session{}
-	assert.Equal(t, 0*1, int(sess.Duration()))
+	assert.Equal(t, 0, int(sess.Duration()), "zero-value times should give zero duration")
 
-	sess.StartTime = sess.StartTime.Add(0)
-	sess.EndTime = sess.EndTime.Add(0)
-	assert.Equal(t, 0*1, int(sess.Duration()))
+	now := time.Now()
+	sess.StartTime = now
+	sess.EndTime = now.Add(5 * time.Minute)
+	assert.Equal(t, 5*time.Minute, sess.Duration(), "should return correct positive duration")
 }
 
 func TestTotalToolCalls(t *testing.T) {

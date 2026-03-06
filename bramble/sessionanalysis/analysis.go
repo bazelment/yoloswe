@@ -43,27 +43,7 @@ func (s *Session) ToolCountsAggregate() map[string]int {
 
 // FormatToolCounts returns a compact string like "Bash:10, Read:5, Edit:3".
 func (s *Session) FormatToolCounts() string {
-	counts := s.ToolCountsAggregate()
-	if len(counts) == 0 {
-		return ""
-	}
-	// Sort by count descending.
-	type kv struct {
-		name  string
-		count int
-	}
-	var pairs []kv
-	for name, count := range counts {
-		pairs = append(pairs, kv{name, count})
-	}
-	sort.Slice(pairs, func(i, j int) bool {
-		return pairs[i].count > pairs[j].count
-	})
-	var parts []string
-	for _, p := range pairs {
-		parts = append(parts, fmt.Sprintf("%s:%d", p.name, p.count))
-	}
-	return strings.Join(parts, ", ")
+	return formatCountMap(s.ToolCountsAggregate())
 }
 
 // Duration returns the total session duration.
@@ -127,6 +107,14 @@ func (t *Turn) FormatToolCounts() string {
 	for _, tc := range t.ToolCalls {
 		counts[tc.Name]++
 	}
+	return formatCountMap(counts)
+}
+
+// formatCountMap formats a name→count map as "Name:N, ..." sorted by count descending.
+func formatCountMap(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
 	type kv struct {
 		name  string
 		count int
@@ -147,6 +135,7 @@ func (t *Turn) FormatToolCounts() string {
 
 // ToolCall represents a single tool invocation within a turn.
 type ToolCall struct {
+	ID       string                 `json:"id,omitempty"`
 	Name     string                 `json:"name"`
 	Input    map[string]interface{} `json:"input,omitempty"`
 	State    string                 `json:"state"` // "running", "complete", "error"
@@ -308,6 +297,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				case protocol.ToolUseBlock:
 					currentTurn.ToolCalls = append(currentTurn.ToolCalls, ToolCall{
 						Name:  b.Name,
+						ID:    b.ID,
 						Input: b.Input,
 						State: "running",
 					})
@@ -451,17 +441,35 @@ func finalizeTurn(t *Turn, cfg Config) {
 }
 
 // updateToolResult updates the matching tool call state in the turn.
+// It matches by tool use ID when available, falling back to the first
+// running tool call for backward compatibility.
 func updateToolResult(t *Turn, tr protocol.ToolResultBlock) {
-	for i := range t.ToolCalls {
-		if t.ToolCalls[i].State == "running" {
-			isError := tr.IsError != nil && *tr.IsError
-			if isError {
-				t.ToolCalls[i].State = "error"
-			} else {
-				t.ToolCalls[i].State = "complete"
+	idx := -1
+	if tr.ToolUseID != "" {
+		for i := range t.ToolCalls {
+			if t.ToolCalls[i].ID == tr.ToolUseID {
+				idx = i
+				break
 			}
-			break
 		}
+	}
+	if idx == -1 {
+		// Fallback: match the first running tool call by order.
+		for i := range t.ToolCalls {
+			if t.ToolCalls[i].State == "running" {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx == -1 {
+		return
+	}
+	isError := tr.IsError != nil && *tr.IsError
+	if isError {
+		t.ToolCalls[idx].State = "error"
+	} else {
+		t.ToolCalls[idx].State = "complete"
 	}
 }
 
@@ -526,9 +534,9 @@ func cleanAgentMessage(s string, agentName string) string {
 	prefix := fmt.Sprintf("[%s] ", agentName)
 
 	// Extract content from <teammate-message> wrapper if present.
-	if strings.Contains(s, "<teammate-message") {
-		if start := strings.Index(s, ">"); start != -1 {
-			inner := s[start+1:]
+	if tagStart := strings.Index(s, "<teammate-message"); tagStart != -1 {
+		if start := strings.Index(s[tagStart:], ">"); start != -1 {
+			inner := s[tagStart+start+1:]
 			if end := strings.Index(inner, "</teammate-message>"); end != -1 {
 				inner = inner[:end]
 			}
