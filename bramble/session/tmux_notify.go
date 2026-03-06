@@ -36,6 +36,8 @@ func NotifyTmuxWindow(windowTarget, windowName string) {
 // restoring the original name.
 func ClearTmuxWindowNotification(windowTarget, windowName string) {
 	_ = exec.Command("tmux", "rename-window", "-t", windowTarget, windowName).Run()
+	// Re-enable automatic-rename that was disabled by NotifyTmuxWindow
+	_ = exec.Command("tmux", "set-option", "-t", windowTarget, "automatic-rename", "on").Run()
 }
 
 // GetActiveTmuxWindowID returns the window_id of the currently focused tmux window.

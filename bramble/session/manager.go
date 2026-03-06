@@ -473,7 +473,9 @@ func tmuxWindowAlive(windowID, windowName string) bool {
 		return TmuxWindowExistsByID(windowID)
 	}
 	if windowName != "" {
-		return TmuxWindowExists(windowName)
+		// Also check for the "!"-prefixed name used by NotifyTmuxWindow,
+		// so the liveness check still succeeds after a notification rename.
+		return TmuxWindowExists(windowName) || TmuxWindowExists("!"+windowName)
 	}
 	return false
 }
@@ -1108,6 +1110,9 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 					if windowID != "" {
 						isActive = activeID != "" && activeID == windowID
 					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
+						isActive = activeID != "" && activeID == nameID
+					} else if nameID, ok := TmuxWindowIDByName("!" + windowName); ok {
+						// Window may have been renamed with "!" prefix by NotifyTmuxWindow
 						isActive = activeID != "" && activeID == nameID
 					}
 					if isActive {
