@@ -1054,6 +1054,34 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				if windowID != "" {
 					windowTarget = windowID
 				}
+
+				// Clear notification prefix when user is viewing this window.
+				// This must be inside the RunnerTypeTmux branch because only
+				// tmux-mode sessions receive the Notification hook.
+				session.mu.RLock()
+				status := session.Status
+				session.mu.RUnlock()
+				if status == StatusIdle {
+					activeID := GetActiveTmuxWindowID()
+					isActive := false
+					if windowID != "" {
+						isActive = activeID != "" && activeID == windowID
+					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
+						isActive = activeID != "" && activeID == nameID
+					} else if nameID, ok := TmuxWindowIDByName("!" + windowName); ok {
+						isActive = activeID != "" && activeID == nameID
+					}
+					if isActive {
+						// Use windowID as target when available; for re-adopted
+						// sessions without an ID, target the renamed "!name".
+						clearTarget := windowTarget
+						if windowID == "" {
+							clearTarget = "!" + windowName
+						}
+						ClearTmuxWindowNotification(clearTarget, windowName)
+					}
+				}
+
 				if TmuxWindowPaneDead(windowTarget) {
 					exitCode, gotStatus := TmuxWindowPaneExitStatus(windowTarget)
 					if gotStatus && exitCode == 0 {
@@ -1094,31 +1122,6 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 			// Prefer stable window ID; fall back to name for re-adopted sessions
 			// that may not have a window ID.
 			if windowAlive {
-				// Clear notification prefix when user is viewing this window
-				session.mu.RLock()
-				status := session.Status
-				session.mu.RUnlock()
-				if status == StatusIdle {
-					activeID := GetActiveTmuxWindowID()
-					windowTarget := windowName
-					if windowID != "" {
-						windowTarget = windowID
-					}
-					// Match by window ID when available; fall back to name-based
-					// lookup for re-adopted sessions that lack a window ID.
-					isActive := false
-					if windowID != "" {
-						isActive = activeID != "" && activeID == windowID
-					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
-						isActive = activeID != "" && activeID == nameID
-					} else if nameID, ok := TmuxWindowIDByName("!" + windowName); ok {
-						// Window may have been renamed with "!" prefix by NotifyTmuxWindow
-						isActive = activeID != "" && activeID == nameID
-					}
-					if isActive {
-						ClearTmuxWindowNotification(windowTarget, windowName)
-					}
-				}
 				continue
 			}
 
