@@ -101,7 +101,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 	var req Request
 	if err := dec.Decode(&req); err != nil {
-		resp := Response{OK: false, Error: "invalid request: " + err.Error()}
+		resp := Response{ID: req.ID, OK: false, Error: "invalid request: " + err.Error()}
 		enc.Encode(resp) //nolint:errcheck
 		return
 	}

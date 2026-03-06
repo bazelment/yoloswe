@@ -197,6 +197,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start IPC server so child processes can request new sessions.
+	// NOTE: the IPC server is wired to the initial repo's session manager only;
+	// repos opened later via Alt-R are not reachable through IPC.
 	ipcServer, ipcSockPath := startIPCServer(sessionManager, wtRoot, repoName)
 	if ipcServer != nil {
 		defer ipcServer.Close()
@@ -289,7 +291,13 @@ func detectRepoFromPath(cwd, wtRoot string) (string, error) {
 // --- IPC server setup --------------------------------------------------------
 
 func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*ipc.Server, string) {
-	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("bramble-%d.sock", os.Getpid()))
+	// Prefer $XDG_RUNTIME_DIR (user-private, tmpfs) over /tmp to avoid
+	// symlink/TOCTOU risks in world-writable directories.
+	runDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runDir == "" {
+		runDir = os.TempDir()
+	}
+	sockPath := filepath.Join(runDir, fmt.Sprintf("bramble-%d.sock", os.Getpid()))
 	srv := ipc.NewServer(sockPath)
 
 	srv.Handle(ipc.RequestPing, func(_ context.Context, _ *ipc.Request) (any, error) {
@@ -332,9 +340,14 @@ func handleNewSession(mgr *session.Manager, wtRoot, repoName string, params *ipc
 		return nil, fmt.Errorf("either worktree_path or branch with create_worktree is required")
 	}
 
-	sessionType := session.SessionTypePlanner
-	if params.SessionType == "builder" {
+	var sessionType session.SessionType
+	switch params.SessionType {
+	case "planner", "":
+		sessionType = session.SessionTypePlanner
+	case "builder":
 		sessionType = session.SessionTypeBuilder
+	default:
+		return nil, fmt.Errorf("unknown session_type %q (expected \"planner\" or \"builder\")", params.SessionType)
 	}
 
 	id, err := mgr.StartSession(sessionType, worktreePath, params.Prompt, params.Model)

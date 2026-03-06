@@ -2,6 +2,8 @@ package ipc
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -102,22 +104,40 @@ func TestStaleSocketRemoved(t *testing.T) {
 	t.Parallel()
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 
-	// Start first server
-	srv1 := NewServer(sockPath)
-	srv1.Handle(RequestPing, func(_ context.Context, _ *Request) (any, error) {
-		return "pong1", nil
-	})
-	require.NoError(t, srv1.Start())
-	require.NoError(t, srv1.Close())
+	// Create a stale file at the socket path before any server starts.
+	require.NoError(t, os.WriteFile(sockPath, []byte("stale"), 0o600))
 
-	// Start second server on the same path (should remove stale socket)
-	srv2 := NewServer(sockPath)
-	srv2.Handle(RequestPing, func(_ context.Context, _ *Request) (any, error) {
-		return "pong2", nil
+	// Server should remove the stale file and start successfully.
+	srv := NewServer(sockPath)
+	srv.Handle(RequestPing, func(_ context.Context, _ *Request) (any, error) {
+		return "pong", nil
 	})
-	require.NoError(t, srv2.Start())
-	defer srv2.Close()
+	require.NoError(t, srv.Start())
+	defer srv.Close()
 
 	client := NewClient(sockPath)
 	require.NoError(t, client.Ping())
+}
+
+func TestHandlerError(t *testing.T) {
+	t.Parallel()
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+
+	srv := NewServer(sockPath)
+	srv.Handle(RequestNewSession, func(_ context.Context, _ *Request) (any, error) {
+		return nil, fmt.Errorf("worktree not found")
+	})
+	require.NoError(t, srv.Start())
+	defer srv.Close()
+
+	client := NewClient(sockPath)
+	resp, err := client.Send(&Request{
+		Type:   RequestNewSession,
+		ID:     "req-err",
+		Params: &NewSessionParams{Prompt: "test"},
+	})
+	require.NoError(t, err)
+	require.False(t, resp.OK)
+	require.Equal(t, "req-err", resp.ID)
+	require.Contains(t, resp.Error, "worktree not found")
 }
