@@ -330,7 +330,7 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		if windowTarget == "" {
 			windowTarget = info.TmuxWindowName
 		}
-		if windowTarget != "" {
+		if windowTarget != "" && info.TmuxWindowName != "" {
 			session.NotifyTmuxWindow(windowTarget, info.TmuxWindowName)
 		}
 		sessionManager.SetSessionIdle(sid)
