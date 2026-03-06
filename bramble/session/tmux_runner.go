@@ -174,21 +174,30 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		// environment, which is inherited from bramble's process via os.Setenv.
 		if r.sessionID != "" {
 			quotedID := "'" + strings.ReplaceAll(r.sessionID, "'", "'\\''") + "'"
+			type hookEntry struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			}
+			type hookGroup struct {
+				Matcher struct{}    `json:"matcher"`
+				Hooks   []hookEntry `json:"hooks"`
+			}
 			hookSettings := struct {
 				Hooks struct {
-					Notification []struct {
-						Matcher string `json:"matcher"`
-						Command string `json:"command"`
-					} `json:"Notification"`
+					Notification []hookGroup `json:"Notification"`
 				} `json:"hooks"`
-			}{}
-			hookSettings.Hooks.Notification = append(hookSettings.Hooks.Notification, struct {
-				Matcher string `json:"matcher"`
-				Command string `json:"command"`
 			}{
-				Matcher: "",
-				Command: "bramble notify --session-id " + quotedID,
-			})
+				Hooks: struct {
+					Notification []hookGroup `json:"Notification"`
+				}{
+					Notification: []hookGroup{{
+						Hooks: []hookEntry{{
+							Type:    "command",
+							Command: "bramble notify --session-id " + quotedID,
+						}},
+					}},
+				},
+			}
 			if hookJSON, err := json.Marshal(hookSettings); err == nil {
 				args = append(args, "--settings", string(hookJSON))
 			}
