@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -354,4 +355,413 @@ func parsePaneExitStatus(output string) (int, bool) {
 		return exitCode, true
 	}
 	return 0, false
+}
+
+// ansiRe matches ANSI escape sequences (CSI sequences, OSC sequences, and simple escapes).
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x1b\x07]*[\x07\x1b\\]|\x1b[^[\]()]`)
+
+// StripANSI removes ANSI escape sequences from a string.
+func StripANSI(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
+}
+
+// CaptureTmuxPane captures the last n lines of text from a tmux pane.
+// Uses `tmux capture-pane -t <target> -p -J -S -<n>` to get joined wrapped lines.
+// Returns non-empty, ANSI-stripped lines.
+func CaptureTmuxPane(windowTarget string, n int) ([]string, error) {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return nil, fmt.Errorf("tmux is not available or not inside tmux")
+	}
+
+	startLine := fmt.Sprintf("-%d", n)
+	cmd := exec.Command("tmux", "capture-pane", "-t", windowTarget, "-p", "-J", "-S", startLine)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("tmux capture-pane -t %s: %w", windowTarget, err)
+	}
+
+	raw := strings.Split(string(output), "\n")
+	var lines []string
+	for _, line := range raw {
+		cleaned := strings.TrimRight(StripANSI(line), " ")
+		if cleaned != "" {
+			lines = append(lines, cleaned)
+		}
+	}
+	return lines, nil
+}
+
+// PaneCursorY returns the cursor Y position (0-indexed row) for the active
+// pane in the given tmux window. In Claude Code's TUI, the cursor always sits
+// on the empty line immediately after the permissions line when idle:
+//
+//	cursor_y - 3: status bar separator (────────)
+//	cursor_y - 2: info line (path branch model ctx:XX% tokens:NNk)
+//	cursor_y - 1: permissions line (⏵⏵ ...)
+//	cursor_y:     empty (cursor)
+//
+// For unfilled terminals (e.g. freshly started sessions), cursor_y < pane_height,
+// which tells us exactly where content ends without needing to scan for separators.
+func PaneCursorY(windowTarget string) (int, error) {
+	if !IsTmuxAvailable() || !IsInsideTmux() {
+		return 0, fmt.Errorf("tmux is not available or not inside tmux")
+	}
+
+	// Use display-message with the window target — tmux resolves it to the
+	// active pane of that window, so multi-pane windows get the right cursor.
+	cursorCmd := exec.Command("tmux", "display-message", "-t", windowTarget, "-p", "#{cursor_y}")
+	cursorOut, err := cursorCmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("tmux display-message cursor_y: %w", err)
+	}
+	y, err := strconv.Atoi(strings.TrimSpace(string(cursorOut)))
+	if err != nil {
+		return 0, fmt.Errorf("parse cursor_y %q: %w", string(cursorOut), err)
+	}
+	return y, nil
+}
+
+// CaptureTmuxPaneFull captures the entire visible pane from line 0 to cursor_y,
+// returning ANSI-stripped lines with their original positions preserved (empty
+// lines kept as empty strings). Also returns cursor_y.
+//
+// Unlike CaptureTmuxPane which captures from the bottom and strips empty lines,
+// this captures from the top with positional fidelity, which allows correlating
+// line indices with cursor_y for precise status bar location.
+func CaptureTmuxPaneFull(windowTarget string) (lines []string, cursorY int, err error) {
+	cursorY, err = PaneCursorY(windowTarget)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	cmd := exec.Command("tmux", "capture-pane", "-t", windowTarget, "-p", "-S", "0")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("tmux capture-pane -t %s: %w", windowTarget, err)
+	}
+
+	raw := strings.Split(string(output), "\n")
+	// Keep lines up to and including cursor_y (trim trailing newline artifact).
+	limit := cursorY + 1
+	if limit > len(raw) {
+		limit = len(raw)
+	}
+	lines = make([]string, limit)
+	for i := 0; i < limit; i++ {
+		lines[i] = strings.TrimRight(StripANSI(raw[i]), " ")
+	}
+	return lines, cursorY, nil
+}
+
+// ParseClaudeStatusBarWithCursor extracts structured data using the cursor
+// position to precisely locate the status bar. This is more reliable than
+// separator scanning, especially for unfilled terminals.
+//
+// The Claude Code TUI layout relative to cursor_y:
+//
+//	cursor_y - 4: ❯ (input prompt) — may have user text
+//	cursor_y - 3: status bar separator (────────)
+//	cursor_y - 2: info line (path branch model ctx:XX% tokens:NNk)
+//	cursor_y - 1: permissions line (⏵⏵ ...)
+//	cursor_y:     empty (cursor)
+//
+// Content ends at cursor_y - 5 (input area separator with ▪▪▪).
+func ParseClaudeStatusBarWithCursor(lines []string, cursorY int) *PaneStatus {
+	if cursorY < 3 || cursorY >= len(lines) {
+		return nil
+	}
+
+	// The status bar separator should be at cursor_y - 3.
+	sepIdx := cursorY - 3
+	if sepIdx < 0 || sepIdx >= len(lines) {
+		return nil
+	}
+	if !separatorRe.MatchString(strings.TrimSpace(lines[sepIdx])) {
+		// Cursor might be offset by completion/spinner lines between ❯ and separator.
+		// Fall back to scanning from cursor_y upward.
+		sepIdx = -1
+		for i := cursorY - 2; i >= cursorY-6 && i >= 0; i-- {
+			if separatorRe.MatchString(strings.TrimSpace(lines[i])) {
+				sepIdx = i
+				break
+			}
+		}
+		if sepIdx < 0 {
+			return nil
+		}
+	}
+
+	ps := &PaneStatus{SepIdx: sepIdx}
+
+	// Parse info line (right after status separator)
+	if sepIdx+1 < len(lines) {
+		if m := statusBarRe.FindStringSubmatch(lines[sepIdx+1]); m != nil {
+			ps.WorkDir = m[1]
+			ps.Branch = m[2]
+			ps.Model = m[3]
+			ps.ContextPct = m[4]
+			ps.TokenCount = m[5]
+		}
+	}
+
+	// Parse permissions line
+	if sepIdx+2 < len(lines) {
+		permLine := strings.TrimSpace(lines[sepIdx+2])
+		if strings.Contains(permLine, "permissions") {
+			if idx := strings.Index(permLine, "⏵⏵ "); idx >= 0 {
+				rest := permLine[idx+len("⏵⏵ "):]
+				if end := strings.Index(rest, " ("); end > 0 {
+					ps.Permissions = rest[:end]
+				} else {
+					ps.Permissions = rest
+				}
+			}
+			if m := prRe.FindStringSubmatch(permLine); m != nil {
+				ps.PRNumber = m[1]
+			}
+		}
+	}
+
+	// Find the input area separator (above the ❯ prompt, contains ▪▪▪).
+	// This marks the boundary between agent content and the input chrome.
+	// We use this as the content boundary rather than SepIdx.
+	inputSepIdx := -1
+	for i := sepIdx - 1; i >= sepIdx-4 && i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if separatorRe.MatchString(trimmed) && strings.Contains(trimmed, "▪") {
+			inputSepIdx = i
+			break
+		}
+	}
+	if inputSepIdx >= 0 {
+		ps.SepIdx = inputSepIdx // Use input separator as content boundary
+	}
+
+	// Look for idle/working state between input separator and status separator.
+	scanEnd := sepIdx
+	scanStart := scanEnd - 5
+	if inputSepIdx >= 0 {
+		scanStart = inputSepIdx + 1
+	}
+	if scanStart < 0 {
+		scanStart = 0
+	}
+	for i := scanEnd - 1; i >= scanStart; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "❯") {
+			ps.IsIdle = true
+			break
+		}
+		if completionRe.MatchString(line) {
+			ps.IsIdle = true
+			ps.StatusLine = line
+			break
+		}
+		if spinnerRe.MatchString(line) {
+			ps.IsWorking = true
+			ps.StatusLine = line
+			break
+		}
+		if strings.HasPrefix(line, "●") {
+			ps.IsWorking = true
+			ps.StatusLine = line
+			break
+		}
+		break
+	}
+
+	return ps
+}
+
+// PaneStatus holds structured data parsed from a Claude Code status bar.
+type PaneStatus struct {
+	Model       string // e.g. "Opus 4.6"
+	ContextPct  string // e.g. "43%"
+	TokenCount  string // e.g. "20k"
+	PRNumber    string // e.g. "930" (empty if no PR)
+	Branch      string // e.g. "feature/better-ci"
+	WorkDir     string // e.g. "~/worktrees/kernel/feature/better-ci"
+	StatusLine  string // e.g. "✻ Worked for 36m 36s" or "* Frosting…"
+	Permissions string // e.g. "bypass permissions on"
+	IsIdle      bool   // true if "❯" prompt visible (awaiting user input)
+	IsWorking   bool   // true if spinner/activity indicator visible
+	SepIdx      int    // index of separator line in the source slice (-1 if not found)
+}
+
+// separatorRe matches the "───" separator line in Claude Code TUI.
+var separatorRe = regexp.MustCompile(`^─{10,}`)
+
+// statusBarRe parses the Claude Code status bar info line:
+//
+//	"  ~/path  branch  Model  ctx:XX%  tokens:NNk"
+//
+// The line may have trailing text after the token count (e.g. context
+// compaction warnings), so we don't anchor to end-of-line.
+var statusBarRe = regexp.MustCompile(
+	`^\s+(\S+)\s+(\S+)\s+(.+?)\s+ctx:(\d+%)\s+tokens:(\d+[kKmMbB]?)`,
+)
+
+// prRe extracts PR number from the permissions line.
+var prRe = regexp.MustCompile(`PR #(\d+)`)
+
+// completionRe matches "✻ Worked for ...", "✢ Baked for ...", "✽ Cooked for ...", etc.
+// These indicate the agent just finished a turn. Claude Code uses various star/sparkle
+// characters (✻ ✢ ✽ ✹) with food-themed verbs.
+var completionRe = regexp.MustCompile(`^[✻✢✽✹]\s+\w+`)
+
+// spinnerRe matches Claude Code spinner characters at the start of a line.
+// These indicate the agent is actively working (e.g. "* Frosting…", "· Creating…").
+var spinnerRe = regexp.MustCompile(`^[*·⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s`)
+
+// isChromeLine returns true if the line is Claude TUI chrome (separator,
+// idle prompt, completion indicator) rather than meaningful content.
+func isChromeLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+	if separatorRe.MatchString(trimmed) {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "❯") {
+		return true
+	}
+	if completionRe.MatchString(trimmed) {
+		return true
+	}
+	if spinnerRe.MatchString(trimmed) {
+		return true
+	}
+	return false
+}
+
+// splashRe matches Claude Code splash banner lines (logo art).
+var splashRe = regexp.MustCompile(`^\s*[▐▛█▜▌▝▘]+\s|^\s*▘▘\s+▝▝`)
+
+// ContentLines extracts meaningful agent output from captured pane lines,
+// stripping TUI chrome (separator, status bar, permissions, idle prompt,
+// completion indicators, and spinner lines).
+func ContentLines(lines []string, ps *PaneStatus) []string {
+	end := len(lines)
+	if ps != nil && ps.SepIdx >= 0 {
+		end = ps.SepIdx
+	}
+	var result []string
+	for i := 0; i < end; i++ {
+		if !isChromeLine(lines[i]) && !isSplashLine(lines[i]) {
+			result = append(result, lines[i])
+		}
+	}
+	return result
+}
+
+// isSplashLine returns true if the line is part of the Claude Code splash
+// banner that appears at the top of a freshly started session.
+func isSplashLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	return splashRe.MatchString(line)
+}
+
+// ParseClaudeStatusBar extracts structured data from the last lines of a
+// Claude Code tmux pane capture. The expected layout (bottom of pane):
+//
+//	❯                                           ← idle prompt (or spinner line)
+//	─────────────────────────────────────────── ← separator
+//	  ~/path  branch  Model  ctx:XX%  tokens:NNk
+//	  ⏵⏵ bypass permissions on ... · PR #NNN
+func ParseClaudeStatusBar(lines []string) *PaneStatus {
+	if len(lines) < 2 {
+		return nil
+	}
+
+	// Find the separator line scanning from the bottom, then extract the
+	// two lines below it (status bar + permissions).
+	sepIdx := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if separatorRe.MatchString(lines[i]) {
+			sepIdx = i
+			break
+		}
+	}
+	if sepIdx < 0 || sepIdx+1 >= len(lines) {
+		return nil
+	}
+
+	ps := &PaneStatus{SepIdx: sepIdx}
+
+	// Parse info line (right after separator)
+	infoLine := strings.TrimSpace(lines[sepIdx+1])
+	if m := statusBarRe.FindStringSubmatch(lines[sepIdx+1]); m != nil {
+		ps.WorkDir = m[1]
+		ps.Branch = m[2]
+		ps.Model = m[3]
+		ps.ContextPct = m[4]
+		ps.TokenCount = m[5]
+	} else if infoLine != "" {
+		// Fallback: couldn't parse but line exists
+		ps.StatusLine = infoLine
+	}
+
+	// Parse permissions line (two after separator)
+	if sepIdx+2 < len(lines) {
+		permLine := strings.TrimSpace(lines[sepIdx+2])
+		if strings.Contains(permLine, "permissions") {
+			// Extract permission mode
+			if idx := strings.Index(permLine, "⏵⏵ "); idx >= 0 {
+				rest := permLine[idx+len("⏵⏵ "):]
+				if end := strings.Index(rest, " ("); end > 0 {
+					ps.Permissions = rest[:end]
+				} else {
+					ps.Permissions = rest
+				}
+			}
+			if m := prRe.FindStringSubmatch(permLine); m != nil {
+				ps.PRNumber = m[1]
+			}
+		}
+	}
+
+	// Look above the separator for idle/working state.
+	// Scan upward, skipping blank lines, to find the first meaningful indicator.
+	for i := sepIdx - 1; i >= 0 && i >= sepIdx-5; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		// Check for idle prompt — user is being asked for input
+		if strings.HasPrefix(line, "❯") {
+			ps.IsIdle = true
+			break
+		}
+		// Check for completion indicator (✻ Worked for ...) — turn just finished,
+		// effectively idle but the prompt may be on the next repaint.
+		if completionRe.MatchString(line) {
+			ps.IsIdle = true
+			ps.StatusLine = line
+			break
+		}
+		// Check for spinner — actively processing
+		if spinnerRe.MatchString(line) {
+			ps.IsWorking = true
+			ps.StatusLine = line
+			break
+		}
+		// Tool execution lines start with ●
+		if strings.HasPrefix(line, "●") {
+			ps.IsWorking = true
+			ps.StatusLine = line
+			break
+		}
+		// Any other non-empty line — likely agent output, state is ambiguous.
+		// Don't set idle or working; break to avoid false positives.
+		break
+	}
+
+	return ps
 }

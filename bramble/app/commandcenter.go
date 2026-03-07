@@ -15,16 +15,18 @@ import (
 // CommandCenter provides a full-screen card-based grid view of all sessions.
 type CommandCenter struct {
 	sessions    []session.SessionInfo
+	previewText []string // captured pane text lines for expanded preview
 	selectedIdx int
 	width       int
 	height      int
-	visible     bool
 	scrollY     int // scroll offset in card-rows
+	previewIdx  int // index of session with expanded pane preview, -1 if none
+	visible     bool
 }
 
 // NewCommandCenter creates a new command center.
 func NewCommandCenter() *CommandCenter {
-	return &CommandCenter{}
+	return &CommandCenter{previewIdx: -1}
 }
 
 // Show populates the command center with sessions, sorts by priority, and makes it visible.
@@ -36,6 +38,8 @@ func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	cc.height = h
 	cc.visible = true
 	cc.scrollY = 0
+	cc.previewIdx = -1
+	cc.previewText = nil
 	if cc.selectedIdx >= len(cc.sessions) {
 		cc.selectedIdx = 0
 	}
@@ -59,6 +63,17 @@ func (cc *CommandCenter) SetSize(w, h int) {
 	cc.clampScrollY()
 }
 
+// totalCardAndPreviewRows returns the total number of display rows,
+// including the preview row if a preview is open.
+func (cc *CommandCenter) totalCardAndPreviewRows() int {
+	cols := cc.gridColumns()
+	rows := (len(cc.sessions) + cols - 1) / cols
+	if cc.previewIdx >= 0 {
+		rows++ // preview row is inserted after the card row containing the previewed session
+	}
+	return rows
+}
+
 // clampScrollY ensures scrollY is within valid bounds for the current sessions/dimensions.
 // Must be called only from update-path methods, not from View().
 func (cc *CommandCenter) clampScrollY() {
@@ -66,8 +81,7 @@ func (cc *CommandCenter) clampScrollY() {
 		cc.scrollY = 0
 		return
 	}
-	cols := cc.gridColumns()
-	totalRows := (len(cc.sessions) + cols - 1) / cols
+	totalRows := cc.totalCardAndPreviewRows()
 	visibleRows := cc.visibleRows()
 	if cc.scrollY > totalRows-visibleRows {
 		cc.scrollY = totalRows - visibleRows
@@ -138,6 +152,36 @@ func (cc *CommandCenter) RestoreSelectionByID(id session.SessionID) {
 	}
 }
 
+// TogglePreview toggles the expanded pane preview for the selected session.
+// Returns the selected session if preview is being opened, nil if being closed.
+func (cc *CommandCenter) TogglePreview() *session.SessionInfo {
+	if cc.previewIdx == cc.selectedIdx {
+		// Close preview
+		cc.previewIdx = -1
+		cc.previewText = nil
+		return nil
+	}
+	cc.previewIdx = cc.selectedIdx
+	cc.previewText = nil // will be populated by SetPreviewText
+	// Ensure both the selected card and the preview row below it are visible.
+	// ensureSelectedVisible handles the card row; we additionally scroll so the
+	// preview row (one display-row below the card) is also in view.
+	cc.ensureSelectedVisible()
+	cols := cc.gridColumns()
+	previewDisplayRow := cc.selectedIdx/cols + 1 // preview row sits right below the card row
+	visibleRows := cc.visibleRows()
+	if previewDisplayRow >= cc.scrollY+visibleRows {
+		cc.scrollY = previewDisplayRow - visibleRows + 1
+	}
+	cc.clampScrollY()
+	return cc.SelectedSession()
+}
+
+// SetPreviewText sets the captured pane text lines for the preview.
+func (cc *CommandCenter) SetPreviewText(lines []string) {
+	cc.previewText = lines
+}
+
 // gridColumns returns the responsive column count based on width.
 func (cc *CommandCenter) gridColumns() int {
 	if cc.width >= 160 {
@@ -152,18 +196,46 @@ func (cc *CommandCenter) gridColumns() int {
 // ensureSelectedVisible auto-scrolls to keep the selected card's row visible.
 func (cc *CommandCenter) ensureSelectedVisible() {
 	cols := cc.gridColumns()
-	selectedRow := cc.selectedIdx / cols
-	if selectedRow < cc.scrollY {
-		cc.scrollY = selectedRow
+	selectedCardRow := cc.selectedIdx / cols
+
+	// Convert card-row index to display-row index, accounting for the preview
+	// row that is inserted after the card row containing the previewed session.
+	selectedDisplayRow := selectedCardRow
+	if cc.previewIdx >= 0 {
+		previewAfterCardRow := cc.previewIdx / cols
+		if selectedCardRow > previewAfterCardRow {
+			selectedDisplayRow++ // selected card is below the preview row
+		}
+	}
+
+	if selectedDisplayRow < cc.scrollY {
+		cc.scrollY = selectedDisplayRow
 	}
 	visibleRows := cc.visibleRows()
-	if selectedRow >= cc.scrollY+visibleRows {
-		cc.scrollY = selectedRow - visibleRows + 1
+	if selectedDisplayRow >= cc.scrollY+visibleRows {
+		cc.scrollY = selectedDisplayRow - visibleRows + 1
 	}
 	cc.clampScrollY()
 }
 
+// previewRowHeight returns the rendered height of the preview row in terminal lines.
+// The preview box has: top border (1) + title line (1) + up to previewMaxLines content
+// lines + bottom border (1) = previewMaxLines + 3.
+func (cc *CommandCenter) previewRowHeight() int {
+	const previewMaxLines = 10
+	n := len(cc.previewText)
+	if n == 0 {
+		n = 1 // "Capturing pane..." or unavailable message
+	}
+	if n > previewMaxLines {
+		n = previewMaxLines
+	}
+	return n + 3 // top border + title + content lines + bottom border
+}
+
 // visibleRows returns how many card rows fit in the viewport.
+// When a preview is open, its actual height is subtracted from the available
+// space before dividing by cardHeight, so the visible content never overflows.
 func (cc *CommandCenter) visibleRows() int {
 	// Header: 3 lines (title + summary + blank), Footer: 2 lines (blank + keys)
 	// Scroll indicators: up to 2 lines (one scrollUp + one scrollDown) rendered conditionally
@@ -171,10 +243,20 @@ func (cc *CommandCenter) visibleRows() int {
 	// past the terminal height.
 	contentHeight := cc.height - 7
 	cardHeight := 8 // 6 content lines + 2 border lines
+
+	// When the preview is open, its row is taller than a card row. Subtract the
+	// extra height so that scroll calculations don't overcount available space.
+	if cc.previewIdx >= 0 {
+		contentHeight -= cc.previewRowHeight()
+	}
+
 	if contentHeight <= 0 {
 		return 1
 	}
 	rows := contentHeight / cardHeight
+	if cc.previewIdx >= 0 {
+		rows++ // add back 1 slot for the preview row (already accounted for by height subtraction)
+	}
 	if rows < 1 {
 		rows = 1
 	}
@@ -208,6 +290,15 @@ func (cc *CommandCenter) View(s *Styles) string {
 			rowCards = append(rowCards, card)
 		}
 		allRows = append(allRows, lipgloss.JoinHorizontal(lipgloss.Top, rowCards...))
+
+		// If the preview is open and the previewed card is in this row,
+		// insert an expanded preview row right after the card row.
+		if cc.previewIdx >= i && cc.previewIdx < i+cols {
+			preview := cc.renderPreviewRow(s)
+			if preview != "" {
+				allRows = append(allRows, preview)
+			}
+		}
 	}
 
 	// Apply vertical scrolling — use local variables only; View() must not mutate state.
@@ -293,15 +384,59 @@ func (cc *CommandCenter) renderHeader(s *Styles) string {
 
 // renderFooter renders the footer keybinding hints.
 func (cc *CommandCenter) renderFooter(s *Styles) string {
+	previewKey := "[p] Preview pane"
+	if cc.previewIdx >= 0 {
+		previewKey = "[p] Close preview"
+	}
 	keys := []string{
 		"[←/→/↑/↓] Navigate",
 		"[Enter] Jump in",
 		"[1-9] Quick select",
+		previewKey,
 		"[f] Follow-up",
 		"[a] Approve plan",
 		"[Esc] Close",
 	}
 	return "\n" + s.Dim.Render(strings.Join(keys, "  "))
+}
+
+// renderPreviewRow renders the expanded pane preview below the card row.
+func (cc *CommandCenter) renderPreviewRow(s *Styles) string {
+	if cc.previewIdx < 0 || cc.previewIdx >= len(cc.sessions) {
+		return ""
+	}
+
+	sess := &cc.sessions[cc.previewIdx]
+	previewWidth := cc.width - 6
+
+	var content string
+	if len(cc.previewText) == 0 {
+		if sess.RunnerType != session.RunnerTypeTmux && sess.RunnerType != session.RunnerTypeTmuxTracked {
+			content = s.Dim.Render("Preview is only available for tmux sessions")
+		} else {
+			content = s.Dim.Render("Capturing pane...")
+		}
+	} else {
+		const previewMaxLines = 10
+		text := cc.previewText
+		if len(text) > previewMaxLines {
+			text = text[len(text)-previewMaxLines:]
+		}
+		var lines []string
+		for _, line := range text {
+			lines = append(lines, truncate(line, previewWidth-4))
+		}
+		content = s.Dim.Render(strings.Join(lines, "\n"))
+	}
+
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(s.Palette.Accent)).
+		Width(previewWidth).
+		Padding(0, 1)
+
+	title := s.Title.Render(fmt.Sprintf("Pane Preview — %s", sess.TmuxWindowName))
+	return previewStyle.Render(title + "\n" + content)
 }
 
 // sessionPriority returns a sort priority for a session (lower = higher priority).

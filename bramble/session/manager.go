@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1011,6 +1012,89 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	captureTicker := time.NewTicker(15 * time.Second)
+	defer captureTicker.Stop()
+
+	// captureRecentOutput grabs the last lines from the tmux pane and updates
+	// the session's RecentOutput and status bar fields so the command center
+	// can display rich information about the session.
+	var prevCapturedOutput []string
+	captureRecentOutput := func() {
+		session.mu.RLock()
+		wID := session.TmuxWindowID
+		wName := session.TmuxWindowName
+		status := session.Status
+		session.mu.RUnlock()
+
+		if status != StatusRunning && status != StatusIdle {
+			return
+		}
+		target := wID
+		if target == "" {
+			target = wName
+		}
+		if target == "" {
+			return
+		}
+		// Use cursor-based capture for precise status bar location.
+		// Falls back to legacy capture+scan if cursor detection fails.
+		lines, cursorY, err := CaptureTmuxPaneFull(target)
+		var paneStatus *PaneStatus
+		if err == nil && len(lines) > 0 {
+			paneStatus = ParseClaudeStatusBarWithCursor(lines, cursorY)
+		}
+		if paneStatus == nil {
+			// Fallback: use legacy bottom-N capture + separator scanning.
+			legacyLines, legacyErr := CaptureTmuxPane(target, 30)
+			if legacyErr != nil {
+				return
+			}
+			lines = legacyLines
+			paneStatus = ParseClaudeStatusBar(lines)
+		}
+
+		// Extract meaningful content lines, stripping TUI chrome.
+		displayLines := ContentLines(lines, paneStatus)
+		if len(displayLines) > sessionmodel.RecentOutputDisplayLines {
+			displayLines = displayLines[len(displayLines)-sessionmodel.RecentOutputDisplayLines:]
+		}
+
+		contentChanged := !slices.Equal(displayLines, prevCapturedOutput)
+		if contentChanged {
+			prevCapturedOutput = displayLines
+		}
+
+		session.Progress.Update(func(p *SessionProgress) {
+			p.RecentOutput = displayLines
+			if contentChanged {
+				p.LastActivity = time.Now()
+			}
+			if paneStatus != nil {
+				p.StatusLine = paneStatus.StatusLine
+				if paneStatus.Model != "" {
+					p.CurrentPhase = paneStatus.Model + " ctx:" + paneStatus.ContextPct
+				}
+				if paneStatus.IsWorking && paneStatus.StatusLine != "" {
+					p.CurrentTool = paneStatus.StatusLine
+				} else {
+					p.CurrentTool = ""
+				}
+			}
+		})
+
+		// Update session model if parsed status indicates idle
+		if paneStatus != nil && paneStatus.Model != "" {
+			session.mu.Lock()
+			if session.Model == "" {
+				session.Model = paneStatus.Model
+			}
+			session.mu.Unlock()
+		}
+	}
+
+	// Do an initial capture so the command center has data immediately.
+	captureRecentOutput()
+
 	for {
 		select {
 		case <-session.ctx.Done():
@@ -1031,6 +1115,8 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				m.outputsMu.Unlock()
 			}
 			return
+		case <-captureTicker.C:
+			captureRecentOutput()
 		case <-ticker.C:
 			session.mu.RLock()
 			windowID := session.TmuxWindowID
@@ -1853,9 +1939,13 @@ func (m *Manager) GetAllSessions() []SessionInfo {
 	result := make([]SessionInfo, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		info := s.ToInfo()
-		// Always populate RecentOutput from the live output buffer so the
-		// command center shows the latest agent text, not a stale snapshot.
-		info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
+		// For TUI sessions, populate RecentOutput from the live output buffer
+		// so the command center shows the latest agent text, not a stale snapshot.
+		// For tmux sessions, RecentOutput is already set by captureRecentOutput()
+		// in the session's Progress struct, so we keep it from ToInfo().
+		if info.RunnerType != RunnerTypeTmux && info.RunnerType != RunnerTypeTmuxTracked {
+			info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
+		}
 		result = append(result, info)
 	}
 	sortSessionsByTime(result)
@@ -1901,6 +1991,40 @@ func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
 		return nil
 	}
 	return sessionmodel.RecentAssistantTextFromSlice(lines, n)
+}
+
+// CapturePaneText captures the last n lines of text from a tmux session's pane.
+// Returns an error if the session is not a tmux session or capture fails.
+func (m *Manager) CapturePaneText(id SessionID, n int) ([]string, error) {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("session %q not found", id)
+	}
+
+	session.mu.RLock()
+	windowID := session.TmuxWindowID
+	windowName := session.TmuxWindowName
+	runnerType := session.RunnerType
+	session.mu.RUnlock()
+
+	if runnerType != RunnerTypeTmux && runnerType != RunnerTypeTmuxTracked {
+		return nil, fmt.Errorf("session %q is not a tmux session (runner type: %s)", id, runnerType)
+	}
+
+	target := windowID
+	if target == "" {
+		target = windowName
+	}
+	if target == "" {
+		return nil, fmt.Errorf("session %q has no tmux window target", id)
+	}
+
+	if n <= 0 {
+		n = 10
+	}
+	return CaptureTmuxPane(target, n)
 }
 
 // CountByStatus returns counts of sessions by status.

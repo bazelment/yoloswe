@@ -10,6 +10,7 @@ const (
 	RequestNewSession   RequestType = "new-session"
 	RequestListSessions RequestType = "list-sessions"
 	RequestNotify       RequestType = "notify"
+	RequestCapturePane  RequestType = "capture-pane"
 )
 
 // Request is the envelope sent by the client to the server.
@@ -63,6 +64,17 @@ type SessionSummary struct {
 // NotifyParams are the parameters for a notify request.
 type NotifyParams struct {
 	SessionID string `json:"session_id"`
+}
+
+// CapturePaneParams are the parameters for a capture-pane request.
+type CapturePaneParams struct {
+	SessionID string `json:"session_id"`
+	Lines     int    `json:"lines,omitempty"` // number of lines to capture (default: 10)
+}
+
+// CapturePaneResult is the result of a successful capture-pane request.
+type CapturePaneResult struct {
+	Lines []string `json:"lines"`
 }
 
 // SockEnvVar is the environment variable name used to discover the socket path.
