@@ -163,6 +163,17 @@ func (cc *CommandCenter) TogglePreview() *session.SessionInfo {
 	}
 	cc.previewIdx = cc.selectedIdx
 	cc.previewText = nil // will be populated by SetPreviewText
+	// Ensure both the selected card and the preview row below it are visible.
+	// ensureSelectedVisible handles the card row; we additionally scroll so the
+	// preview row (one display-row below the card) is also in view.
+	cc.ensureSelectedVisible()
+	cols := cc.gridColumns()
+	previewDisplayRow := cc.selectedIdx/cols + 1 // preview row sits right below the card row
+	visibleRows := cc.visibleRows()
+	if previewDisplayRow >= cc.scrollY+visibleRows {
+		cc.scrollY = previewDisplayRow - visibleRows + 1
+	}
+	cc.clampScrollY()
 	return cc.SelectedSession()
 }
 

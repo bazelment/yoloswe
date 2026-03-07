@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1017,6 +1018,7 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	// captureRecentOutput grabs the last lines from the tmux pane and updates
 	// the session's RecentOutput and status bar fields so the command center
 	// can display rich information about the session.
+	var prevCapturedOutput []string
 	captureRecentOutput := func() {
 		session.mu.RLock()
 		wID := session.TmuxWindowID
@@ -1057,9 +1059,16 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 			displayLines = displayLines[len(displayLines)-sessionmodel.RecentOutputDisplayLines:]
 		}
 
+		contentChanged := !slices.Equal(displayLines, prevCapturedOutput)
+		if contentChanged {
+			prevCapturedOutput = displayLines
+		}
+
 		session.Progress.Update(func(p *SessionProgress) {
 			p.RecentOutput = displayLines
-			p.LastActivity = time.Now()
+			if contentChanged {
+				p.LastActivity = time.Now()
+			}
 			if paneStatus != nil {
 				p.StatusLine = paneStatus.StatusLine
 				if paneStatus.Model != "" {
