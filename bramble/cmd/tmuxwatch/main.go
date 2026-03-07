@@ -113,6 +113,18 @@ func runesTruncate(s string, maxRunes int) string {
 	return string(runes[:maxRunes])
 }
 
+// runesPad pads s with trailing spaces so that the total rune count equals
+// targetWidth. If s is already at least targetWidth runes, it is returned
+// unchanged. This avoids fmt's byte-based %-*s padding which misaligns
+// columns when s contains multi-byte UTF-8 characters.
+func runesPad(s string, targetWidth int) string {
+	n := utf8.RuneCountInString(s)
+	if n >= targetWidth {
+		return s
+	}
+	return s + strings.Repeat(" ", targetWidth-n)
+}
+
 func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width int) string {
 	var b strings.Builder
 
@@ -122,14 +134,14 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 	// Header line
 	header := fmt.Sprintf(" Window %s [%s] %s ", w.Index, w.ID, w.Name)
 	header = runesTruncate(header, width)
-	b.WriteString(fmt.Sprintf("│%-*s│\n", width, header))
+	b.WriteString("│" + runesPad(header, width) + "│\n")
 
 	// Status bar info
 	if ps != nil {
 		info := fmt.Sprintf(" Model: %-12s  Branch: %-30s  ctx:%s  tokens:%s",
 			ps.Model, ps.Branch, ps.ContextPct, ps.TokenCount)
 		info = runesTruncate(info, width)
-		b.WriteString(fmt.Sprintf("│%-*s│\n", width, info))
+		b.WriteString("│" + runesPad(info, width) + "│\n")
 
 		stateStr := "unknown"
 		if ps.IsIdle {
@@ -145,15 +157,15 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 			state += fmt.Sprintf("  Perms: %s", ps.Permissions)
 		}
 		state = runesTruncate(state, width)
-		b.WriteString(fmt.Sprintf("│%-*s│\n", width, state))
+		b.WriteString("│" + runesPad(state, width) + "│\n")
 
 		if ps.StatusLine != "" {
 			sl := fmt.Sprintf(" Status: %s", ps.StatusLine)
 			sl = runesTruncate(sl, width)
-			b.WriteString(fmt.Sprintf("│%-*s│\n", width, sl))
+			b.WriteString("│" + runesPad(sl, width) + "│\n")
 		}
 	} else {
-		b.WriteString(fmt.Sprintf("│%-*s│\n", width, " (no status bar parsed)"))
+		b.WriteString("│" + runesPad(" (no status bar parsed)", width) + "│\n")
 	}
 
 	// Separator
@@ -169,11 +181,11 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 		if utf8.RuneCountInString(truncated) > width {
 			truncated = runesTruncate(truncated, width-1) + "…"
 		}
-		b.WriteString(fmt.Sprintf("│%-*s│\n", width, " "+truncated))
+		b.WriteString("│" + runesPad(" "+truncated, width) + "│\n")
 	}
 	// Pad to 6 lines
 	for i := len(displayLines); i < 6; i++ {
-		b.WriteString(fmt.Sprintf("│%-*s│\n", width, ""))
+		b.WriteString("│" + runesPad("", width) + "│\n")
 	}
 
 	b.WriteString(fmt.Sprintf("╰%s╯", sep))

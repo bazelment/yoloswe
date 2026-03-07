@@ -434,7 +434,7 @@ func CaptureTmuxPaneFull(windowTarget string) (lines []string, cursorY int, err 
 		return nil, 0, err
 	}
 
-	cmd := exec.Command("tmux", "capture-pane", "-t", windowTarget, "-p", "-J", "-S", "0")
+	cmd := exec.Command("tmux", "capture-pane", "-t", windowTarget, "-p", "-S", "0")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, 0, fmt.Errorf("tmux capture-pane -t %s: %w", windowTarget, err)
