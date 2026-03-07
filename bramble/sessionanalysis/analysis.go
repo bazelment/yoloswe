@@ -26,6 +26,7 @@ type Session struct { //nolint:govet // fieldalignment: readability over packing
 	Model     string    `json:"model,omitempty"`
 	CWD       string    `json:"cwd,omitempty"`
 	GitBranch string    `json:"git_branch,omitempty"`
+	Project   string    `json:"project,omitempty"`
 	Turns     []Turn    `json:"turns"`
 	Summary   string    `json:"summary,omitempty"`
 }
@@ -391,6 +392,11 @@ func ParseAllProjects(cfg Config) ([]*Session, error) {
 		sessions, err := ParseProjectWithConfig(p.Path, cfg)
 		if err != nil {
 			continue
+		}
+		for _, s := range sessions {
+			if s.Project == "" {
+				s.Project = p.Name
+			}
 		}
 		all = append(all, sessions...)
 	}

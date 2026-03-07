@@ -99,37 +99,128 @@ func cleanSummary(s string) string {
 
 // SummarizeSessions summarizes multiple sessions, skipping failures.
 func SummarizeSessions(ctx context.Context, sessions []*Session, query QueryFunc) {
-	for _, sess := range sessions {
+	ConcurrentSummarizeSessions(ctx, sessions, query, 1, nil)
+}
+
+// ConcurrentSummarizeSessions summarizes sessions with up to maxWorkers in parallel.
+// If progress is non-nil, it is called after each session completes with (completed, total).
+func ConcurrentSummarizeSessions(ctx context.Context, sessions []*Session, query QueryFunc, maxWorkers int, progress func(done, total int)) {
+	if maxWorkers <= 1 {
+		for i, sess := range sessions {
+			if len(sess.Turns) == 0 {
+				continue
+			}
+			summary, err := SummarizeSession(ctx, sess, query)
+			if err == nil {
+				sess.Summary = summary
+			}
+			if progress != nil {
+				progress(i+1, len(sessions))
+			}
+		}
+		return
+	}
+
+	type work struct {
+		sess *Session
+		idx  int
+	}
+	ch := make(chan work)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	done := 0
+
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range ch {
+				summary, err := SummarizeSession(ctx, item.sess, query)
+				if err == nil {
+					item.sess.Summary = summary
+				}
+				if progress != nil {
+					mu.Lock()
+					done++
+					progress(done, len(sessions))
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	for i, sess := range sessions {
 		if len(sess.Turns) == 0 {
 			continue
 		}
-		summary, err := SummarizeSession(ctx, sess, query)
-		if err != nil {
-			continue
-		}
-		sess.Summary = summary
+		ch <- work{idx: i, sess: sess}
 	}
+	close(ch)
+	wg.Wait()
 }
 
 // SummarizeTurns summarizes long agent responses within sessions.
 // Turns with responses exceeding wordLimit words get their ResponseSummary populated.
 func SummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int, query QueryFunc) {
+	ConcurrentSummarizeTurns(ctx, sessions, wordLimit, query, 1)
+}
+
+// ConcurrentSummarizeTurns summarizes long turns with up to maxWorkers in parallel.
+func ConcurrentSummarizeTurns(ctx context.Context, sessions []*Session, wordLimit int, query QueryFunc, maxWorkers int) {
 	if wordLimit <= 0 {
 		return
 	}
+
+	type turnRef struct {
+		turn *Turn
+	}
+
+	// Collect all turns that need summarization.
+	var refs []turnRef
 	for _, sess := range sessions {
 		for i := range sess.Turns {
 			t := &sess.Turns[i]
-			if t.ResponseWordCount() <= wordLimit {
-				continue
+			if t.ResponseWordCount() > wordLimit {
+				refs = append(refs, turnRef{turn: t})
 			}
-			summary, err := summarizeText(ctx, t.Response, query)
-			if err != nil {
-				continue
-			}
-			t.ResponseSummary = summary
 		}
 	}
+
+	if len(refs) == 0 {
+		return
+	}
+
+	if maxWorkers <= 1 {
+		for _, ref := range refs {
+			summary, err := summarizeText(ctx, ref.turn.Response, query)
+			if err == nil {
+				ref.turn.ResponseSummary = summary
+			}
+		}
+		return
+	}
+
+	ch := make(chan turnRef)
+	var wg sync.WaitGroup
+
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ref := range ch {
+				summary, err := summarizeText(ctx, ref.turn.Response, query)
+				if err == nil {
+					ref.turn.ResponseSummary = summary
+				}
+			}
+		}()
+	}
+
+	for _, ref := range refs {
+		ch <- ref
+	}
+	close(ch)
+	wg.Wait()
 }
 
 // summarizeText produces a concise summary of a long agent response.

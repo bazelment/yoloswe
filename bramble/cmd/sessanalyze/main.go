@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type config struct { //nolint:govet // fieldalignment: readability over packing
 	modelStr         string
 	limit            int
 	minTurns         int
+	concurrency      int
 	jsonOutput       bool
 	verbose          bool
 	listProjects     bool
@@ -77,7 +79,7 @@ func main() {
 		}
 		sessions = limitSessions(sessions, cfg.limit)
 		if cfg.summarize {
-			summarizeWithProgress(sessions, cfg.summaryWordLimit, queryFunc)
+			summarizeWithProgress(sessions, cfg.summaryWordLimit, queryFunc, cfg.concurrency)
 		}
 		render(os.Stdout, sessions, cfg)
 		return
@@ -101,7 +103,7 @@ func main() {
 	}
 	allSessions = limitSessions(allSessions, cfg.limit)
 	if cfg.summarize {
-		summarizeWithProgress(allSessions, cfg.summaryWordLimit, queryFunc)
+		summarizeWithProgress(allSessions, cfg.summaryWordLimit, queryFunc, cfg.concurrency)
 	}
 	render(os.Stdout, allSessions, cfg)
 	os.Exit(exitCode)
@@ -126,6 +128,7 @@ func parseFlags(args []string) config {
 	flags.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
 	flags.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
 	flags.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
+	flags.IntVar(&cfg.concurrency, "j", 10, "number of concurrent LLM summarization workers")
 	flags.Parse(args) //nolint:errcheck // ExitOnError mode handles errors
 	return cfg
 }
@@ -139,28 +142,19 @@ func buildQueryFunc(model string) sessionanalysis.QueryFunc {
 	}
 }
 
-func summarizeWithProgress(sessions []*sessionanalysis.Session, wordLimit int, query sessionanalysis.QueryFunc) {
+func summarizeWithProgress(sessions []*sessionanalysis.Session, wordLimit int, query sessionanalysis.QueryFunc, concurrency int) {
 	ctx := context.Background()
-	for i, sess := range sessions {
-		if len(sess.Turns) == 0 {
-			continue
-		}
-		shortID := sess.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		fmt.Fprintf(os.Stderr, "Summarizing session %d/%d (%s)...\n", i+1, len(sessions), shortID)
-		summary, err := sessionanalysis.SummarizeSession(ctx, sess, query)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
-			continue
-		}
-		sess.Summary = summary
-	}
+	fmt.Fprintf(os.Stderr, "Summarizing %d sessions (concurrency=%d)...\n", len(sessions), concurrency)
+	sessionanalysis.ConcurrentSummarizeSessions(ctx, sessions, query, concurrency,
+		func(done, total int) {
+			fmt.Fprintf(os.Stderr, "\rSummarized %d/%d sessions", done, total)
+		},
+	)
+	fmt.Fprintln(os.Stderr)
 	// Summarize long turn responses.
 	if wordLimit > 0 {
 		fmt.Fprintf(os.Stderr, "Summarizing long responses (>%d words)...\n", wordLimit)
-		sessionanalysis.SummarizeTurns(ctx, sessions, wordLimit, query)
+		sessionanalysis.ConcurrentSummarizeTurns(ctx, sessions, wordLimit, query, concurrency)
 	}
 }
 
@@ -221,11 +215,42 @@ func renderJSON(w io.Writer, sessions []*sessionanalysis.Session) {
 }
 
 func renderMarkdown(w io.Writer, sessions []*sessionanalysis.Session, cfg config) {
-	for i, sess := range sessions {
-		if i > 0 {
+	// Group by project, sort each group by end time.
+	groups := make(map[string][]*sessionanalysis.Session)
+	var projectOrder []string
+	for _, sess := range sessions {
+		proj := sess.Project
+		if proj == "" {
+			proj = "(unknown)"
+		}
+		if _, exists := groups[proj]; !exists {
+			projectOrder = append(projectOrder, proj)
+		}
+		groups[proj] = append(groups[proj], sess)
+	}
+
+	// Sort projects alphabetically.
+	sort.Strings(projectOrder)
+
+	// Sort sessions within each project by end time.
+	for _, proj := range projectOrder {
+		sort.Slice(groups[proj], func(i, j int) bool {
+			return groups[proj][i].EndTime.Before(groups[proj][j].EndTime)
+		})
+	}
+
+	first := true
+	for _, proj := range projectOrder {
+		if !first {
 			fmt.Fprintln(w)
 		}
-		renderSessionMD(w, sess, cfg)
+		first = false
+		fmt.Fprintf(w, "# Project: `%s`\n\n", proj)
+		fmt.Fprintf(w, "*%d sessions*\n\n---\n", len(groups[proj]))
+		for _, sess := range groups[proj] {
+			fmt.Fprintln(w)
+			renderSessionMD(w, sess, cfg)
+		}
 	}
 }
 
@@ -235,7 +260,7 @@ func renderSessionMD(w io.Writer, sess *sessionanalysis.Session, cfg config) {
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
 	}
-	fmt.Fprintf(w, "# Session `%s`\n\n", shortID)
+	fmt.Fprintf(w, "## Session `%s`\n\n", shortID)
 
 	// Metadata table
 	fmt.Fprintln(w, "| Field | Value |")
@@ -272,7 +297,7 @@ func renderTurnMD(w io.Writer, turn *sessionanalysis.Turn, cfg config) {
 	fmt.Fprintln(w)
 
 	// Turn header
-	header := fmt.Sprintf("## Turn %d", turn.Number)
+	header := fmt.Sprintf("### Turn %d", turn.Number)
 	if !turn.StartTime.IsZero() {
 		header += fmt.Sprintf(" — %s", turn.StartTime.Format("15:04:05"))
 	}
