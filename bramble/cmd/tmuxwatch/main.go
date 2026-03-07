@@ -59,6 +59,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 )
@@ -102,6 +103,16 @@ func isClaudeWindow(windowID string) bool {
 	return false
 }
 
+// runesTruncate truncates s to at most maxRunes runes, avoiding mid-character
+// byte slicing that would corrupt multi-byte UTF-8 (─, ❯, ●, ✻, etc.).
+func runesTruncate(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes])
+}
+
 func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width int) string {
 	var b strings.Builder
 
@@ -110,18 +121,14 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 
 	// Header line
 	header := fmt.Sprintf(" Window %s [%s] %s ", w.Index, w.ID, w.Name)
-	if len(header) > width {
-		header = header[:width]
-	}
+	header = runesTruncate(header, width)
 	b.WriteString(fmt.Sprintf("│%-*s│\n", width, header))
 
 	// Status bar info
 	if ps != nil {
 		info := fmt.Sprintf(" Model: %-12s  Branch: %-30s  ctx:%s  tokens:%s",
 			ps.Model, ps.Branch, ps.ContextPct, ps.TokenCount)
-		if len(info) > width {
-			info = info[:width]
-		}
+		info = runesTruncate(info, width)
 		b.WriteString(fmt.Sprintf("│%-*s│\n", width, info))
 
 		stateStr := "unknown"
@@ -137,16 +144,12 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 		if ps.Permissions != "" {
 			state += fmt.Sprintf("  Perms: %s", ps.Permissions)
 		}
-		if len(state) > width {
-			state = state[:width]
-		}
+		state = runesTruncate(state, width)
 		b.WriteString(fmt.Sprintf("│%-*s│\n", width, state))
 
 		if ps.StatusLine != "" {
 			sl := fmt.Sprintf(" Status: %s", ps.StatusLine)
-			if len(sl) > width {
-				sl = sl[:width]
-			}
+			sl = runesTruncate(sl, width)
 			b.WriteString(fmt.Sprintf("│%-*s│\n", width, sl))
 		}
 	} else {
@@ -163,8 +166,8 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 	}
 	for _, line := range displayLines {
 		truncated := line
-		if len(truncated) > width {
-			truncated = truncated[:width-1] + "…"
+		if utf8.RuneCountInString(truncated) > width {
+			truncated = runesTruncate(truncated, width-1) + "…"
 		}
 		b.WriteString(fmt.Sprintf("│%-*s│\n", width, " "+truncated))
 	}

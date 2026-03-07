@@ -212,7 +212,24 @@ func (cc *CommandCenter) ensureSelectedVisible() {
 	cc.clampScrollY()
 }
 
+// previewRowHeight returns the rendered height of the preview row in terminal lines.
+// The preview box has: top border (1) + title line (1) + up to previewMaxLines content
+// lines + bottom border (1) = previewMaxLines + 3.
+func (cc *CommandCenter) previewRowHeight() int {
+	const previewMaxLines = 10
+	n := len(cc.previewText)
+	if n == 0 {
+		n = 1 // "Capturing pane..." or unavailable message
+	}
+	if n > previewMaxLines {
+		n = previewMaxLines
+	}
+	return n + 3 // top border + title + content lines + bottom border
+}
+
 // visibleRows returns how many card rows fit in the viewport.
+// When a preview is open, its actual height is subtracted from the available
+// space before dividing by cardHeight, so the visible content never overflows.
 func (cc *CommandCenter) visibleRows() int {
 	// Header: 3 lines (title + summary + blank), Footer: 2 lines (blank + keys)
 	// Scroll indicators: up to 2 lines (one scrollUp + one scrollDown) rendered conditionally
@@ -220,10 +237,20 @@ func (cc *CommandCenter) visibleRows() int {
 	// past the terminal height.
 	contentHeight := cc.height - 7
 	cardHeight := 8 // 6 content lines + 2 border lines
+
+	// When the preview is open, its row is taller than a card row. Subtract the
+	// extra height so that scroll calculations don't overcount available space.
+	if cc.previewIdx >= 0 {
+		contentHeight -= cc.previewRowHeight()
+	}
+
 	if contentHeight <= 0 {
 		return 1
 	}
 	rows := contentHeight / cardHeight
+	if cc.previewIdx >= 0 {
+		rows++ // add back 1 slot for the preview row (already accounted for by height subtraction)
+	}
 	if rows < 1 {
 		rows = 1
 	}
