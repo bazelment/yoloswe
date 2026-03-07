@@ -63,6 +63,17 @@ func (cc *CommandCenter) SetSize(w, h int) {
 	cc.clampScrollY()
 }
 
+// totalCardAndPreviewRows returns the total number of display rows,
+// including the preview row if a preview is open.
+func (cc *CommandCenter) totalCardAndPreviewRows() int {
+	cols := cc.gridColumns()
+	rows := (len(cc.sessions) + cols - 1) / cols
+	if cc.previewIdx >= 0 {
+		rows++ // preview row is inserted after the card row containing the previewed session
+	}
+	return rows
+}
+
 // clampScrollY ensures scrollY is within valid bounds for the current sessions/dimensions.
 // Must be called only from update-path methods, not from View().
 func (cc *CommandCenter) clampScrollY() {
@@ -70,8 +81,7 @@ func (cc *CommandCenter) clampScrollY() {
 		cc.scrollY = 0
 		return
 	}
-	cols := cc.gridColumns()
-	totalRows := (len(cc.sessions) + cols - 1) / cols
+	totalRows := cc.totalCardAndPreviewRows()
 	visibleRows := cc.visibleRows()
 	if cc.scrollY > totalRows-visibleRows {
 		cc.scrollY = totalRows - visibleRows
@@ -180,13 +190,24 @@ func (cc *CommandCenter) gridColumns() int {
 // ensureSelectedVisible auto-scrolls to keep the selected card's row visible.
 func (cc *CommandCenter) ensureSelectedVisible() {
 	cols := cc.gridColumns()
-	selectedRow := cc.selectedIdx / cols
-	if selectedRow < cc.scrollY {
-		cc.scrollY = selectedRow
+	selectedCardRow := cc.selectedIdx / cols
+
+	// Convert card-row index to display-row index, accounting for the preview
+	// row that is inserted after the card row containing the previewed session.
+	selectedDisplayRow := selectedCardRow
+	if cc.previewIdx >= 0 {
+		previewAfterCardRow := cc.previewIdx / cols
+		if selectedCardRow > previewAfterCardRow {
+			selectedDisplayRow++ // selected card is below the preview row
+		}
+	}
+
+	if selectedDisplayRow < cc.scrollY {
+		cc.scrollY = selectedDisplayRow
 	}
 	visibleRows := cc.visibleRows()
-	if selectedRow >= cc.scrollY+visibleRows {
-		cc.scrollY = selectedRow - visibleRows + 1
+	if selectedDisplayRow >= cc.scrollY+visibleRows {
+		cc.scrollY = selectedDisplayRow - visibleRows + 1
 	}
 	cc.clampScrollY()
 }
@@ -357,7 +378,7 @@ func (cc *CommandCenter) renderPreviewRow(s *Styles) string {
 
 	var content string
 	if len(cc.previewText) == 0 {
-		if sess.RunnerType != "tmux" && sess.RunnerType != "tmux-tracked" {
+		if sess.RunnerType != session.RunnerTypeTmux && sess.RunnerType != session.RunnerTypeTmuxTracked {
 			content = s.Dim.Render("Preview is only available for tmux sessions")
 		} else {
 			content = s.Dim.Render("Capturing pane...")

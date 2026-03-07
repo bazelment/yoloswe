@@ -1930,9 +1930,13 @@ func (m *Manager) GetAllSessions() []SessionInfo {
 	result := make([]SessionInfo, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		info := s.ToInfo()
-		// Always populate RecentOutput from the live output buffer so the
-		// command center shows the latest agent text, not a stale snapshot.
-		info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
+		// For TUI sessions, populate RecentOutput from the live output buffer
+		// so the command center shows the latest agent text, not a stale snapshot.
+		// For tmux sessions, RecentOutput is already set by captureRecentOutput()
+		// in the session's Progress struct, so we keep it from ToInfo().
+		if info.RunnerType != RunnerTypeTmux && info.RunnerType != RunnerTypeTmuxTracked {
+			info.Progress.RecentOutput = m.RecentOutputLines(s.ID, sessionmodel.RecentOutputDisplayLines)
+		}
 		result = append(result, info)
 	}
 	sortSessionsByTime(result)

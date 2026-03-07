@@ -225,15 +225,8 @@ func main() {
 			}
 			box := renderStatusBox(w, lines, ps, 118)
 			fmt.Println(box)
-		}
 
-		// Log state changes to stderr for post-analysis
-		for _, w := range claudeWindows {
-			lines, cursorY, _ := session.CaptureTmuxPaneFull(w.ID)
-			ps := session.ParseClaudeStatusBarWithCursor(lines, cursorY)
-			if ps == nil {
-				ps = session.ParseClaudeStatusBar(lines)
-			}
+			// Log state to stderr for post-analysis (reuses captured data)
 			if ps != nil {
 				state := "unknown"
 				if ps.IsIdle {

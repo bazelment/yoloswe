@@ -407,18 +407,9 @@ func PaneCursorY(windowTarget string) (int, error) {
 		return 0, fmt.Errorf("tmux is not available or not inside tmux")
 	}
 
-	// Get the pane ID for the window target (cursor_y needs a pane target).
-	paneCmd := exec.Command("tmux", "list-panes", "-t", windowTarget, "-F", "#{pane_id}")
-	paneOut, err := paneCmd.Output()
-	if err != nil {
-		return 0, fmt.Errorf("tmux list-panes -t %s: %w", windowTarget, err)
-	}
-	paneID := strings.TrimSpace(strings.Split(string(paneOut), "\n")[0])
-	if paneID == "" {
-		return 0, fmt.Errorf("no pane found for %s", windowTarget)
-	}
-
-	cursorCmd := exec.Command("tmux", "display-message", "-t", paneID, "-p", "#{cursor_y}")
+	// Use display-message with the window target — tmux resolves it to the
+	// active pane of that window, so multi-pane windows get the right cursor.
+	cursorCmd := exec.Command("tmux", "display-message", "-t", windowTarget, "-p", "#{cursor_y}")
 	cursorOut, err := cursorCmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("tmux display-message cursor_y: %w", err)
