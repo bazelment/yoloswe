@@ -171,11 +171,6 @@ func (cc *CommandCenter) SetPreviewText(lines []string) {
 	cc.previewText = lines
 }
 
-// IsPreviewOpen returns true if a pane preview is currently showing.
-func (cc *CommandCenter) IsPreviewOpen() bool {
-	return cc.previewIdx >= 0
-}
-
 // gridColumns returns the responsive column count based on width.
 func (cc *CommandCenter) gridColumns() int {
 	if cc.width >= 160 {
@@ -411,8 +406,13 @@ func (cc *CommandCenter) renderPreviewRow(s *Styles) string {
 			content = s.Dim.Render("Capturing pane...")
 		}
 	} else {
+		const previewMaxLines = 10
+		text := cc.previewText
+		if len(text) > previewMaxLines {
+			text = text[len(text)-previewMaxLines:]
+		}
 		var lines []string
-		for _, line := range cc.previewText {
+		for _, line := range text {
 			lines = append(lines, truncate(line, previewWidth-4))
 		}
 		content = s.Dim.Render(strings.Join(lines, "\n"))
