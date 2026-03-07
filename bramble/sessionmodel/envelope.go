@@ -49,25 +49,28 @@ func FromSDKRecorder(line []byte) (protocol.Message, time.Time, string, error) {
 // --- Raw JSONL (~/.claude/projects/ native format) --------------------------
 
 type rawJSONLEnvelope struct { //nolint:govet // fieldalignment: readability over packing
-	Timestamp     string          `json:"timestamp"`
-	Type          string          `json:"type"`
-	Subtype       string          `json:"subtype,omitempty"`
-	ParentUUID    string          `json:"parentUuid,omitempty"`
-	UUID          string          `json:"uuid,omitempty"`
-	GitBranch     string          `json:"gitBranch,omitempty"`
-	Version       string          `json:"version,omitempty"`
-	SessionID     string          `json:"sessionId,omitempty"`
-	Content       string          `json:"content,omitempty"`
-	Operation     string          `json:"operation,omitempty"`
-	PRNumber      int             `json:"prNumber,omitempty"`
-	PRURL         string          `json:"prUrl,omitempty"`
-	PRRepository  string          `json:"prRepository,omitempty"`
-	IsSidechain   bool            `json:"isSidechain,omitempty"`
-	DurationMs    int64           `json:"durationMs,omitempty"`
-	Message       json.RawMessage `json:"message,omitempty"`
-	Data          json.RawMessage `json:"data,omitempty"`
-	ToolUseResult json.RawMessage `json:"toolUseResult,omitempty"`
-	Error         json.RawMessage `json:"error,omitempty"`
+	Timestamp       string          `json:"timestamp"`
+	Type            string          `json:"type"`
+	Subtype         string          `json:"subtype,omitempty"`
+	ParentUUID      string          `json:"parentUuid,omitempty"`
+	UUID            string          `json:"uuid,omitempty"`
+	GitBranch       string          `json:"gitBranch,omitempty"`
+	Version         string          `json:"version,omitempty"`
+	SessionID       string          `json:"sessionId,omitempty"`
+	Content         string          `json:"content,omitempty"`
+	Operation       string          `json:"operation,omitempty"`
+	PRNumber        int             `json:"prNumber,omitempty"`
+	PRURL           string          `json:"prUrl,omitempty"`
+	PRRepository    string          `json:"prRepository,omitempty"`
+	IsMeta          bool            `json:"isMeta,omitempty"`
+	IsSidechain     bool            `json:"isSidechain,omitempty"`
+	AgentName       string          `json:"agentName,omitempty"`
+	SourceToolUseID string          `json:"sourceToolUseId,omitempty"`
+	DurationMs      int64           `json:"durationMs,omitempty"`
+	Message         json.RawMessage `json:"message,omitempty"`
+	Data            json.RawMessage `json:"data,omitempty"`
+	ToolUseResult   json.RawMessage `json:"toolUseResult,omitempty"`
+	Error           json.RawMessage `json:"error,omitempty"`
 }
 
 // FromRawJSONL strips the native ~/.claude/projects/ envelope and returns the
@@ -87,14 +90,17 @@ func FromRawJSONL(line []byte) (protocol.Message, *RawEnvelopeMeta, error) {
 
 	ts, _ := time.Parse(time.RFC3339Nano, env.Timestamp)
 	meta := &RawEnvelopeMeta{
-		ParentUUID:    env.ParentUUID,
-		IsSidechain:   env.IsSidechain,
-		GitBranch:     env.GitBranch,
-		Version:       env.Version,
-		UUID:          env.UUID,
-		SessionID:     env.SessionID,
-		Timestamp:     ts,
-		ToolUseResult: env.ToolUseResult,
+		ParentUUID:      env.ParentUUID,
+		IsSidechain:     env.IsSidechain,
+		IsMeta:          env.IsMeta,
+		GitBranch:       env.GitBranch,
+		Version:         env.Version,
+		UUID:            env.UUID,
+		SessionID:       env.SessionID,
+		AgentName:       env.AgentName,
+		SourceToolUseID: env.SourceToolUseID,
+		Timestamp:       ts,
+		ToolUseResult:   env.ToolUseResult,
 	}
 
 	meta.Type = env.Type

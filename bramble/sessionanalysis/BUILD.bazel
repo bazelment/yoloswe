@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sessionanalysis",
+    srcs = [
+        "analysis.go",
+        "summarize.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/sessionanalysis",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/protocol",
+        "//bramble/sessionmodel",
+    ],
+)
+
+go_test(
+    name = "sessionanalysis_test",
+    srcs = ["analysis_test.go"],
+    embed = [":sessionanalysis"],
+    deps = [
+        "//bramble/sessionmodel",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

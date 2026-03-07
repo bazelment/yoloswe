@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "sessanalyze_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/sessanalyze",
+    visibility = ["//visibility:private"],
+    deps = ["//bramble/sessionanalysis"],
+)
+
+go_binary(
+    name = "sessanalyze",
+    embed = [":sessanalyze_lib"],
+    visibility = ["//visibility:public"],
+)
