@@ -977,9 +977,29 @@ func (m *Model) refreshCommandCenter() {
 	if sel := m.commandCenter.SelectedSession(); sel != nil {
 		prevID = sel.ID
 	}
-	m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
+	m.commandCenter.UpdateSessions(m.gatherActiveSessions(), m.width, m.height)
 	if prevID != "" {
 		m.commandCenter.RestoreSelectionByID(prevID)
+	}
+	// Re-capture preview content if a preview is still open.
+	if sid := m.commandCenter.PreviewedSessionID(); sid != "" {
+		// Resolve the correct session manager: the previewed session may belong to a
+		// different repo than the currently active one (multi-repo support).
+		mgr := m.sessionManager
+		for i, sessions := 0, m.commandCenter.Sessions(); i < len(sessions); i++ {
+			if sessions[i].ID == sid {
+				if sessions[i].RepoName != "" {
+					if rc, ok := m.repos[sessions[i].RepoName]; ok && rc.sessionManager != nil {
+						mgr = rc.sessionManager
+					}
+				}
+				break
+			}
+		}
+		lines, err := mgr.CapturePaneText(sid, 10)
+		if err == nil {
+			m.commandCenter.SetPreviewText(lines)
+		}
 	}
 }
 
@@ -2120,24 +2140,25 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		n := int(msg.String()[0] - '0')
-		if m.commandCenter.SelectByNumber(n) {
-			return m.switchToCommandCenterSession()
-		}
+		m.commandCenter.SelectByNumber(n)
 		return m, nil
 	}
 	return m, nil
 }
 
-// switchToCommandCenterSession closes the command center and switches to the selected session.
+// switchToCommandCenterSession goes to the selected session.
+// In tmux mode, it switches the tmux window but keeps the command center open.
+// In TUI mode, it hides the command center and delegates to switchToSession.
 func (m Model) switchToCommandCenterSession() (tea.Model, tea.Cmd) {
 	sess := m.commandCenter.SelectedSession()
 	if sess == nil {
-		m.commandCenter.Hide()
-		m.focus = FocusOutput
 		return m, nil
 	}
-	m.commandCenter.Hide()
-	m.focus = FocusOutput
+	if !m.sessionManager.IsInTmuxMode() {
+		// TUI mode: leave command center before delegating to the shared implementation.
+		m.commandCenter.Hide()
+		m.focus = FocusOutput
+	}
 	return m.switchToSession(sess)
 }
 
