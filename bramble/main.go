@@ -355,18 +355,7 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		if windowTarget != "" && info.TmuxWindowName != "" {
 			// Skip visual notification if user is already viewing this window —
 			// the alerts are designed for background sessions, not the active one.
-			activeID := session.GetActiveTmuxWindowID()
-			sessionWindowID := info.TmuxWindowID
-			if sessionWindowID == "" {
-				// Fallback for sessions without a stored window ID (e.g. old data).
-				sessionWindowID, _ = session.TmuxWindowIDByName(info.TmuxWindowName)
-				if sessionWindowID == "" {
-					// Try with notification prefix in case window was already renamed.
-					sessionWindowID, _ = session.TmuxWindowIDByName(session.TmuxNotifyPrefix + info.TmuxWindowName)
-				}
-			}
-			alreadyViewing := activeID != "" && sessionWindowID != "" && activeID == sessionWindowID
-			if !alreadyViewing {
+			if !session.IsSessionWindowActive(info.TmuxWindowID, info.TmuxWindowName) {
 				session.NotifyTmuxWindow(windowTarget, info.TmuxWindowName)
 			}
 		}

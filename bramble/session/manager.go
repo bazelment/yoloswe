@@ -1168,16 +1168,7 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				status := session.Status
 				session.mu.RUnlock()
 				if status == StatusIdle {
-					activeID := GetActiveTmuxWindowID()
-					isActive := false
-					if windowID != "" {
-						isActive = activeID != "" && activeID == windowID
-					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
-						isActive = activeID != "" && activeID == nameID
-					} else if nameID, ok := TmuxWindowIDByName(TmuxNotifyPrefix + windowName); ok {
-						isActive = activeID != "" && activeID == nameID
-					}
-					if isActive {
+					if IsSessionWindowActive(windowID, windowName) {
 						// Use windowID as target when available; for re-adopted
 						// sessions without an ID, target the renamed "!name" only
 						// while it exists (after first clear the window is just windowName).

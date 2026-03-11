@@ -33,6 +33,23 @@ func TestNewManagerWithConfig(t *testing.T) {
 	assert.NotNil(t, m.config.Store)
 }
 
+func TestManagerIPCSockPath(t *testing.T) {
+	t.Parallel()
+
+	// IPCSockPath should be empty by default.
+	m := NewManager()
+	assert.Equal(t, "", m.IPCSockPath())
+
+	// SetIPCSockPath should update the path; IPCSockPath() should reflect it.
+	const sockPath = "/tmp/bramble-test.sock"
+	m.SetIPCSockPath(sockPath)
+	assert.Equal(t, sockPath, m.IPCSockPath())
+
+	// ManagerConfig.IPCSockPath is wired through to the getter.
+	m2 := NewManagerWithConfig(ManagerConfig{IPCSockPath: sockPath})
+	assert.Equal(t, sockPath, m2.IPCSockPath())
+}
+
 func TestSessionStatusIsTerminal(t *testing.T) {
 	tests := []struct {
 		status   SessionStatus
