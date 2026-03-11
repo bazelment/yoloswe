@@ -30,32 +30,34 @@ func NewCommandCenter() *CommandCenter {
 	return &CommandCenter{previewIdx: -1}
 }
 
-// Show populates the command center with sessions, sorts by priority, and makes it visible.
-func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
+// loadSessions copies, sorts, and resizes the session list, then clamps selectedIdx and scrollY.
+// It is the shared core of Show() and UpdateSessions().
+func (cc *CommandCenter) loadSessions(sessions []session.SessionInfo, w, h int) {
 	cc.sessions = make([]session.SessionInfo, len(sessions))
 	copy(cc.sessions, sessions)
 	sortSessionsByPriority(cc.sessions)
 	cc.width = w
 	cc.height = h
-	cc.visible = true
-	cc.scrollY = 0
-	cc.previewIdx = -1
-	cc.previewText = nil
-	cc.previewSessionID = ""
 	if cc.selectedIdx >= len(cc.sessions) {
 		cc.selectedIdx = 0
 	}
 	cc.clampScrollY()
 }
 
+// Show populates the command center with sessions, sorts by priority, and makes it visible.
+func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
+	cc.visible = true
+	cc.scrollY = 0
+	cc.previewIdx = -1
+	cc.previewText = nil
+	cc.previewSessionID = ""
+	cc.loadSessions(sessions, w, h)
+}
+
 // UpdateSessions replaces the session list while preserving preview state.
 // Used by refreshCommandCenter() to avoid losing the open preview on session events.
 func (cc *CommandCenter) UpdateSessions(sessions []session.SessionInfo, w, h int) {
-	cc.sessions = make([]session.SessionInfo, len(sessions))
-	copy(cc.sessions, sessions)
-	sortSessionsByPriority(cc.sessions)
-	cc.width = w
-	cc.height = h
+	cc.loadSessions(sessions, w, h)
 
 	// Restore preview position by session ID after re-sort.
 	if cc.previewSessionID != "" {
@@ -72,11 +74,6 @@ func (cc *CommandCenter) UpdateSessions(sessions []session.SessionInfo, w, h int
 			cc.previewText = nil
 		}
 	}
-
-	if cc.selectedIdx >= len(cc.sessions) {
-		cc.selectedIdx = 0
-	}
-	cc.clampScrollY()
 }
 
 // PreviewedSessionID returns the ID of the session currently being previewed,
