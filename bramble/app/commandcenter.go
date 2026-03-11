@@ -41,6 +41,7 @@ func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	cc.scrollY = 0
 	cc.previewIdx = -1
 	cc.previewText = nil
+	cc.previewSessionID = ""
 	if cc.selectedIdx >= len(cc.sessions) {
 		cc.selectedIdx = 0
 	}
