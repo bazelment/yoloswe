@@ -274,3 +274,21 @@ func TestAllSessionsOverlay_FreshFromManager(t *testing.T) {
 	assert.True(t, m2.allSessionsOverlay.IsVisible())
 	assert.Len(t, m2.allSessionsOverlay.Sessions(), 1, "overlay should fetch fresh sessions from manager")
 }
+
+func TestAllSessionsOverlay_BoxDimensions_UseViewportSpace(t *testing.T) {
+	o := NewAllSessionsOverlay()
+	o.SetSize(200, 50)
+
+	assert.Equal(t, 196, o.boxWidth())
+	assert.Equal(t, 48, o.boxHeight())
+}
+
+func TestAllSessionsOverlay_VisibleSessionRange_FollowsSelection(t *testing.T) {
+	o := NewAllSessionsOverlay()
+	o.sessions = make([]session.SessionInfo, 20)
+	o.selectedIdx = 13
+
+	start, end := o.visibleSessionRange(6)
+	assert.Equal(t, 8, start)
+	assert.Equal(t, 14, end)
+}
