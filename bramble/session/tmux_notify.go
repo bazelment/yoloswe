@@ -64,3 +64,34 @@ func GetActiveTmuxWindowID() string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// ResolveSessionWindowID returns the stable tmux window ID (@N) for a session
+// identified by (windowID, windowName). It tries, in order:
+//  1. windowID directly (already a stable ID)
+//  2. TmuxWindowIDByName(windowName)
+//  3. TmuxWindowIDByName(TmuxNotifyPrefix + windowName) — the window may have
+//     been renamed by NotifyTmuxWindow while it was waiting for input
+//
+// Returns empty string if the window cannot be resolved.
+func ResolveSessionWindowID(windowID, windowName string) string {
+	if windowID != "" {
+		return windowID
+	}
+	if id, ok := TmuxWindowIDByName(windowName); ok {
+		return id
+	}
+	if id, ok := TmuxWindowIDByName(TmuxNotifyPrefix + windowName); ok {
+		return id
+	}
+	return ""
+}
+
+// IsSessionWindowActive reports whether the current tmux client is focused on
+// the window identified by (windowID, windowName). Returns false when tmux is
+// not available, when either ID cannot be resolved, or when the resolved ID
+// does not match the active window.
+func IsSessionWindowActive(windowID, windowName string) bool {
+	activeID := GetActiveTmuxWindowID()
+	resolvedID := ResolveSessionWindowID(windowID, windowName)
+	return activeID != "" && resolvedID != "" && activeID == resolvedID
+}

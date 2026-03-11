@@ -203,6 +203,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if ipcServer != nil {
 		defer ipcServer.Close()
 		os.Setenv(ipc.SockEnvVar, ipcSockPath)
+		// Propagate the socket path to the session manager (and the shared
+		// config template used when opening additional repos) so that tmux
+		// windows receive BRAMBLE_SOCK without relying on os.Getenv.
+		sessionManager.SetIPCSockPath(ipcSockPath)
+		sharedManagerConfig.IPCSockPath = ipcSockPath
 	}
 
 	// Query terminal size synchronously so the first View() renders a
@@ -348,7 +353,11 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 			windowTarget = info.TmuxWindowName
 		}
 		if windowTarget != "" && info.TmuxWindowName != "" {
-			session.NotifyTmuxWindow(windowTarget, info.TmuxWindowName)
+			// Skip visual notification if user is already viewing this window —
+			// the alerts are designed for background sessions, not the active one.
+			if !session.IsSessionWindowActive(info.TmuxWindowID, info.TmuxWindowName) {
+				session.NotifyTmuxWindow(windowTarget, info.TmuxWindowName)
+			}
 		}
 		sessionManager.SetSessionIdle(sid)
 		return "ok", nil

@@ -406,6 +406,10 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ProtocolLogDir captures provider protocol/session logs for debugging.
 	// If empty, protocol logging is disabled.
 	ProtocolLogDir string
+	// IPCSockPath is the path to the bramble IPC Unix domain socket.
+	// Used to propagate BRAMBLE_SOCK to tmux windows so hook commands
+	// can call back to the TUI. Set by main after startIPCServer.
+	IPCSockPath string
 }
 
 // Manager handles multiple concurrent sessions.
@@ -463,6 +467,18 @@ func (m *Manager) Events() <-chan interface{} {
 // IsInTmuxMode returns true if the manager is configured to use tmux mode.
 func (m *Manager) IsInTmuxMode() bool {
 	return m.config.SessionMode == SessionModeTmux
+}
+
+// IPCSockPath returns the IPC socket path, if configured.
+func (m *Manager) IPCSockPath() string {
+	return m.config.IPCSockPath
+}
+
+// SetIPCSockPath updates the IPC socket path after the server has started.
+// This is called from main after startIPCServer since the manager is created
+// before the IPC server.
+func (m *Manager) SetIPCSockPath(path string) {
+	m.config.IPCSockPath = path
 }
 
 // tmuxWindowAlive reports whether the tmux window identified by windowID and/or
@@ -1152,16 +1168,7 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 				status := session.Status
 				session.mu.RUnlock()
 				if status == StatusIdle {
-					activeID := GetActiveTmuxWindowID()
-					isActive := false
-					if windowID != "" {
-						isActive = activeID != "" && activeID == windowID
-					} else if nameID, ok := TmuxWindowIDByName(windowName); ok {
-						isActive = activeID != "" && activeID == nameID
-					} else if nameID, ok := TmuxWindowIDByName(TmuxNotifyPrefix + windowName); ok {
-						isActive = activeID != "" && activeID == nameID
-					}
-					if isActive {
+					if IsSessionWindowActive(windowID, windowName) {
 						// Use windowID as target when available; for re-adopted
 						// sessions without an ID, target the renamed "!name" only
 						// while it exists (after first clear the window is just windowName).
@@ -1306,7 +1313,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			resumeSessionID: session.CLISessionID,
 			sessionID:       string(session.ID),
 			brambleBin:      brambleBin,
-			brambleSock:     os.Getenv("BRAMBLE_SOCK"),
+			brambleSock:     m.config.IPCSockPath,
 			yoloMode:        m.config.YoloMode,
 			killOnStop:      false, // Never kill on Stop(); cleanup happens in Close() if TmuxExitOnQuit is set
 		}
