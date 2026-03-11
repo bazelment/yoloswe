@@ -725,8 +725,14 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				// Generate unique window name like build/plan sessions
 				windowName := session.GenerateTmuxWindowName(m.repoName, filepath.Base(wtPath))
 
-				// Create window with unique name and capture both name and ID
-				cmd := exec.Command("tmux", "new-window", "-n", windowName, "-c", wtPath, "-P", "-F", "#{window_name},#{window_id}")
+				// Create window with unique name and capture both name and ID.
+				// Pass BRAMBLE_SOCK via -e so the window can call back to the TUI.
+				tmuxArgs := []string{"new-window"}
+				if sock := m.sessionManager.IPCSockPath(); sock != "" {
+					tmuxArgs = append(tmuxArgs, "-e", "BRAMBLE_SOCK="+sock)
+				}
+				tmuxArgs = append(tmuxArgs, "-n", windowName, "-c", wtPath, "-P", "-F", "#{window_name},#{window_id}")
+				cmd := exec.Command("tmux", tmuxArgs...)
 				out, err := cmd.CombinedOutput()
 				if err != nil {
 					detail := strings.TrimSpace(string(out))
