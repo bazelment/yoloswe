@@ -977,9 +977,16 @@ func (m *Model) refreshCommandCenter() {
 	if sel := m.commandCenter.SelectedSession(); sel != nil {
 		prevID = sel.ID
 	}
-	m.commandCenter.Show(m.gatherActiveSessions(), m.width, m.height)
+	m.commandCenter.UpdateSessions(m.gatherActiveSessions(), m.width, m.height)
 	if prevID != "" {
 		m.commandCenter.RestoreSelectionByID(prevID)
+	}
+	// Re-capture preview content if a preview is still open.
+	if sid := m.commandCenter.PreviewedSessionID(); sid != "" {
+		lines, err := m.sessionManager.CapturePaneText(sid, 10)
+		if err == nil {
+			m.commandCenter.SetPreviewText(lines)
+		}
 	}
 }
 
@@ -2120,25 +2127,49 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		n := int(msg.String()[0] - '0')
-		if m.commandCenter.SelectByNumber(n) {
-			return m.switchToCommandCenterSession()
-		}
+		m.commandCenter.SelectByNumber(n)
 		return m, nil
 	}
 	return m, nil
 }
 
-// switchToCommandCenterSession closes the command center and switches to the selected session.
+// switchToCommandCenterSession goes to the selected session.
+// In tmux mode, it switches the tmux window but keeps the command center open.
+// In TUI mode, it hides the command center and switches to the session view.
 func (m Model) switchToCommandCenterSession() (tea.Model, tea.Cmd) {
 	sess := m.commandCenter.SelectedSession()
 	if sess == nil {
-		m.commandCenter.Hide()
-		m.focus = FocusOutput
 		return m, nil
 	}
+
+	// Handle cross-repo switch (needed in both modes).
+	if sess.RepoName != "" && sess.RepoName != m.repoName {
+		if _, ok := m.repos[sess.RepoName]; ok {
+			m.saveActiveContext()
+			m.loadContext(sess.RepoName)
+		}
+	}
+
+	if m.sessionManager.IsInTmuxMode() {
+		// Tmux mode: switch tmux window, but stay in command center.
+		if sess.TmuxWindowID != "" {
+			return m, selectTmuxWindowCmd(sess.TmuxWindowID)
+		} else if sess.TmuxWindowName != "" {
+			return m, selectTmuxWindowCmd(sess.TmuxWindowName)
+		}
+		toastCmd := m.addToast("Session has no tmux window", ToastInfo)
+		return m, toastCmd
+	}
+
+	// TUI mode: leave command center, switch to session view.
 	m.commandCenter.Hide()
 	m.focus = FocusOutput
-	return m.switchToSession(sess)
+	m.switchViewingSession(sess.ID)
+	if sess.WorktreeName != "" {
+		m.worktreeDropdown.SelectByID(sess.WorktreeName)
+		m.updateSessionDropdown()
+	}
+	return m, tea.Batch(m.refreshWorktrees(), m.refreshFileTree(), m.refreshHistorySessions())
 }
 
 // handleHelpOverlay handles key presses when the help overlay is visible.

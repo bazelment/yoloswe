@@ -216,6 +216,74 @@ func TestCommandCenter_View(t *testing.T) {
 	assert.Contains(t, view, "idle")
 }
 
+func TestCommandCenter_UpdateSessionsPreservesPreview(t *testing.T) {
+	cc := NewCommandCenter()
+	sessions := makeSessions()
+	cc.Show(sessions, 120, 40)
+
+	// Select second session and open preview
+	cc.selectedIdx = 1
+	sess := cc.TogglePreview()
+	require.NotNil(t, sess)
+	assert.Equal(t, 1, cc.previewIdx)
+	previewedID := sess.ID
+	assert.Equal(t, previewedID, cc.PreviewedSessionID())
+	cc.SetPreviewText([]string{"line1", "line2"})
+
+	// UpdateSessions should preserve the preview
+	cc.UpdateSessions(sessions, 120, 40)
+	assert.Equal(t, previewedID, cc.PreviewedSessionID())
+	assert.NotEqual(t, -1, cc.previewIdx)
+	// Preview text is preserved (not cleared by UpdateSessions)
+	assert.Equal(t, []string{"line1", "line2"}, cc.previewText)
+}
+
+func TestCommandCenter_UpdateSessionsClearsPreviewIfGone(t *testing.T) {
+	cc := NewCommandCenter()
+	sessions := makeSessions()
+	cc.Show(sessions, 120, 40)
+
+	// Open preview on a session
+	cc.selectedIdx = 0
+	cc.TogglePreview()
+	cc.SetPreviewText([]string{"some text"})
+
+	// UpdateSessions with a list that doesn't contain the previewed session
+	cc.UpdateSessions([]session.SessionInfo{sessions[2], sessions[3]}, 120, 40)
+	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Equal(t, -1, cc.previewIdx)
+	assert.Nil(t, cc.previewText)
+}
+
+func TestCommandCenter_HideClearsPreviewState(t *testing.T) {
+	cc := NewCommandCenter()
+	cc.Show(makeSessions(), 120, 40)
+	cc.selectedIdx = 0
+	cc.TogglePreview()
+	cc.SetPreviewText([]string{"text"})
+
+	cc.Hide()
+	assert.Equal(t, -1, cc.previewIdx)
+	assert.Nil(t, cc.previewText)
+	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+}
+
+func TestCommandCenter_TogglePreviewTracksSessionID(t *testing.T) {
+	cc := NewCommandCenter()
+	cc.Show(makeSessions(), 120, 40)
+
+	// Open preview
+	cc.selectedIdx = 1
+	sess := cc.TogglePreview()
+	require.NotNil(t, sess)
+	assert.Equal(t, sess.ID, cc.PreviewedSessionID())
+
+	// Close preview
+	result := cc.TogglePreview()
+	assert.Nil(t, result)
+	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+}
+
 func TestSessionPriority(t *testing.T) {
 	idle := &session.SessionInfo{Status: session.StatusIdle}
 	running := &session.SessionInfo{Status: session.StatusRunning}

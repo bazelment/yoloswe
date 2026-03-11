@@ -14,14 +14,15 @@ import (
 
 // CommandCenter provides a full-screen card-based grid view of all sessions.
 type CommandCenter struct {
-	sessions    []session.SessionInfo
-	previewText []string // captured pane text lines for expanded preview
-	selectedIdx int
-	width       int
-	height      int
-	scrollY     int // scroll offset in card-rows
-	previewIdx  int // index of session with expanded pane preview, -1 if none
-	visible     bool
+	previewSessionID session.SessionID // ID of the session being previewed (survives re-sorts)
+	sessions         []session.SessionInfo
+	previewText      []string // captured pane text lines for expanded preview
+	selectedIdx      int
+	width            int
+	height           int
+	scrollY          int // scroll offset in card-rows
+	previewIdx       int // index of session with expanded pane preview, -1 if none
+	visible          bool
 }
 
 // NewCommandCenter creates a new command center.
@@ -46,9 +47,49 @@ func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	cc.clampScrollY()
 }
 
+// UpdateSessions replaces the session list while preserving preview state.
+// Used by refreshCommandCenter() to avoid losing the open preview on session events.
+func (cc *CommandCenter) UpdateSessions(sessions []session.SessionInfo, w, h int) {
+	cc.sessions = make([]session.SessionInfo, len(sessions))
+	copy(cc.sessions, sessions)
+	sortSessionsByPriority(cc.sessions)
+	cc.width = w
+	cc.height = h
+
+	// Restore preview position by session ID after re-sort.
+	if cc.previewSessionID != "" {
+		cc.previewIdx = -1
+		for i := range cc.sessions {
+			if cc.sessions[i].ID == cc.previewSessionID {
+				cc.previewIdx = i
+				break
+			}
+		}
+		if cc.previewIdx == -1 {
+			// Previewed session no longer in the active list.
+			cc.previewSessionID = ""
+			cc.previewText = nil
+		}
+	}
+
+	if cc.selectedIdx >= len(cc.sessions) {
+		cc.selectedIdx = 0
+	}
+	cc.clampScrollY()
+}
+
+// PreviewedSessionID returns the ID of the session currently being previewed,
+// or empty if no preview is open.
+func (cc *CommandCenter) PreviewedSessionID() session.SessionID {
+	return cc.previewSessionID
+}
+
 // Hide closes the command center.
 func (cc *CommandCenter) Hide() {
 	cc.visible = false
+	cc.previewIdx = -1
+	cc.previewText = nil
+	cc.previewSessionID = ""
 }
 
 // IsVisible returns whether the command center is visible.
@@ -159,10 +200,12 @@ func (cc *CommandCenter) TogglePreview() *session.SessionInfo {
 		// Close preview
 		cc.previewIdx = -1
 		cc.previewText = nil
+		cc.previewSessionID = ""
 		return nil
 	}
 	cc.previewIdx = cc.selectedIdx
 	cc.previewText = nil // will be populated by SetPreviewText
+	cc.previewSessionID = cc.sessions[cc.selectedIdx].ID
 	// Ensure both the selected card and the preview row below it are visible.
 	// ensureSelectedVisible handles the card row; we additionally scroll so the
 	// preview row (one display-row below the card) is also in view.
@@ -390,8 +433,8 @@ func (cc *CommandCenter) renderFooter(s *Styles) string {
 	}
 	keys := []string{
 		"[←/→/↑/↓] Navigate",
-		"[Enter] Jump in",
 		"[1-9] Quick select",
+		"[Enter] Go to session",
 		previewKey,
 		"[f] Follow-up",
 		"[a] Approve plan",
