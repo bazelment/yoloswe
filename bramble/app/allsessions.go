@@ -18,6 +18,11 @@ type AllSessionsOverlay struct {
 	visible     bool
 }
 
+const (
+	allSessionsMinBoxWidth  = 40
+	allSessionsMinBoxHeight = 10
+)
+
 // NewAllSessionsOverlay creates a new overlay.
 func NewAllSessionsOverlay() *AllSessionsOverlay {
 	return &AllSessionsOverlay{}
@@ -85,6 +90,43 @@ func (o *AllSessionsOverlay) Sessions() []session.SessionInfo {
 	return o.sessions
 }
 
+func (o *AllSessionsOverlay) boxWidth() int {
+	w := o.width - 4
+	if w < allSessionsMinBoxWidth {
+		return allSessionsMinBoxWidth
+	}
+	return w
+}
+
+func (o *AllSessionsOverlay) boxHeight() int {
+	h := o.height - 2
+	if h < allSessionsMinBoxHeight {
+		return allSessionsMinBoxHeight
+	}
+	return h
+}
+
+// visibleSessionRange returns the [start, end) range for rows that fit in maxRows.
+func (o *AllSessionsOverlay) visibleSessionRange(maxRows int) (int, int) {
+	total := len(o.sessions)
+	if total == 0 || maxRows <= 0 {
+		return 0, 0
+	}
+	if total <= maxRows {
+		return 0, total
+	}
+	start := o.selectedIdx - maxRows + 1
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxRows
+	if end > total {
+		end = total
+		start = end - maxRows
+	}
+	return start, end
+}
+
 // View renders the overlay as a centered box.
 func (o *AllSessionsOverlay) View(s *Styles) string {
 	// Build content lines
@@ -92,19 +134,19 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 
 	lines = append(lines, s.Title.Render("All Active Sessions"), "")
 
-	// Calculate box width — use most of the terminal but cap at 140
-	boxWidth := o.width - 4
-	if boxWidth > 140 {
-		boxWidth = 140
-	}
-	if boxWidth < 40 {
-		boxWidth = 40
-	}
+	// Calculate box dimensions based on viewport size.
+	boxWidth := o.boxWidth()
+	boxHeight := o.boxHeight()
 
 	// Content width inside box (subtract border + padding: 2 border + 4 padding)
 	contentWidth := boxWidth - 6
 	if contentWidth < 30 {
 		contentWidth = 30
+	}
+	// Content height inside box (subtract border + padding: 2 border + 2*padding(1))
+	contentHeight := boxHeight - 4
+	if contentHeight < 1 {
+		contentHeight = 1
 	}
 
 	if len(o.sessions) == 0 {
@@ -178,7 +220,14 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 		lines = append(lines, " "+strings.Repeat("─", sepWidth))
 
 		// Session rows
-		for i := range o.sessions {
+		// Reserve lines for: title+blank(2), header+separator(2), blank+footer(2)
+		maxSessionRows := contentHeight - 6
+		if maxSessionRows < 1 {
+			maxSessionRows = 1
+		}
+		start, end := o.visibleSessionRange(maxSessionRows)
+
+		for i := start; i < end; i++ {
 			sess := &o.sessions[i]
 
 			// Number (1-9 for quick select, blank otherwise)
@@ -238,12 +287,26 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 
 	// Footer
 	footer := s.Dim.Render("[↑/↓] Navigate  [Enter] Switch  [1-9] Quick select  [Esc] Close")
+	if len(o.sessions) > 0 {
+		maxSessionRows := contentHeight - 6
+		if maxSessionRows < 1 {
+			maxSessionRows = 1
+		}
+		start, end := o.visibleSessionRange(maxSessionRows)
+		if start > 0 || end < len(o.sessions) {
+			footer = s.Dim.Render(fmt.Sprintf(
+				"[↑/↓] Navigate  [Enter] Switch  [1-9] Quick select  [Esc] Close   (%d-%d/%d)",
+				start+1, end, len(o.sessions),
+			))
+		}
+	}
 	lines = append(lines, footer)
 
 	contentStr := strings.Join(lines, "\n")
 
 	box := s.AllSessionsBox.
 		Width(boxWidth).
+		Height(boxHeight).
 		Render(contentStr)
 
 	// Center the box
