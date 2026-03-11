@@ -105,7 +105,6 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		editor = "code"
 	}
 	wtDropdown := NewDropdown(nil)
-	wtDropdown.SetMaxVisible(20)
 
 	// Load settings and resolve theme
 	settings := LoadSettings()
@@ -175,6 +174,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	m.inputArea.SetPlaceholderColor(dimColor)
 	m.taskModal.SetPlaceholderColor(dimColor)
 	m.repoSettingsDialog.SetSize(width, height)
+	m.configureAllDropdownsForViewport()
 
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {

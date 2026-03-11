@@ -88,10 +88,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandCenter.SetSize(msg.Width, msg.Height)
 		m.themePicker.SetSize(msg.Width, msg.Height)
 		m.repoSettingsDialog.SetSize(msg.Width, msg.Height)
-		// Update dropdown widths
-		m.worktreeDropdown.SetWidth(m.width * 2 / 3)
-		m.sessionDropdown.SetWidth(m.width / 2)
-		m.repoDropdown.SetWidth(m.width / 3)
+		// Update dropdown sizing to maximize visible menu space.
+		m.configureAllDropdownsForViewport()
 		// Initialize or update markdown renderer
 		if m.mdRenderer == nil {
 			m.mdRenderer, _ = NewMarkdownRenderer(m.width-8, m.styles.Palette.GlamourStyle)
@@ -2503,7 +2501,7 @@ func (m *Model) populateRepoDropdown(allRepos []string) {
 	}
 
 	m.repoDropdown.SetItems(items)
-	m.repoDropdown.SetWidth(m.width / 3)
+	m.configureDropdownForViewport(m.repoDropdown)
 }
 
 // openRepo creates a new session manager for the given repo, adds it to the
@@ -2527,10 +2525,9 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 
 	// Build dropdowns with widths matching the WindowSizeMsg handler.
 	wtDropdown := NewDropdown(nil)
-	wtDropdown.SetMaxVisible(20)
-	wtDropdown.SetWidth(m.width * 2 / 3)
+	m.configureDropdownForViewport(wtDropdown)
 	sessDropdown := NewDropdown(nil)
-	sessDropdown.SetWidth(m.width / 2)
+	m.configureDropdownForViewport(sessDropdown)
 
 	rc := &RepoContext{
 		sessionManager:   mgr,
