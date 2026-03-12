@@ -84,13 +84,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Get WT_ROOT (same as wt command)
-	wtRoot := os.Getenv("WT_ROOT")
-	if wtRoot == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to get home directory: %w", err)
-		}
-		wtRoot = filepath.Join(home, "worktrees")
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return err
 	}
 
 	// Determine repo to use (priority: --repo flag > auto-detect from cwd > picker)
@@ -257,6 +253,18 @@ func runRepoPicker(ctx context.Context, wtRoot string) (string, error) {
 	}
 
 	return "", nil
+}
+
+// resolveWTRoot returns the worktree root directory from $WT_ROOT or ~/worktrees.
+func resolveWTRoot() (string, error) {
+	if v := os.Getenv("WT_ROOT"); v != "" {
+		return v, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(home, "worktrees"), nil
 }
 
 // detectRepoFromPath finds the repo name if cwd is within a wt-managed repo.
@@ -479,13 +487,10 @@ var newSessionCmd = &cobra.Command{
 
 		// Auto-detect repo from cwd if not explicitly specified.
 		if repo == "" {
-			wtRoot := os.Getenv("WT_ROOT")
-			if wtRoot == "" {
-				home, _ := os.UserHomeDir()
-				wtRoot = filepath.Join(home, "worktrees")
+			if wtRoot, err := resolveWTRoot(); err == nil {
+				cwd, _ := os.Getwd()
+				repo, _ = detectRepoFromPath(cwd, wtRoot)
 			}
-			cwd, _ := os.Getwd()
-			repo, _ = detectRepoFromPath(cwd, wtRoot)
 		}
 
 		resp, err := client.Send(&ipc.Request{
