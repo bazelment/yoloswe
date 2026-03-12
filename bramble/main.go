@@ -197,9 +197,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start IPC server so child processes can request new sessions.
-	// NOTE: the IPC server is wired to the initial repo's session manager only;
-	// repos opened later via Alt-R are not reachable through IPC.
-	ipcServer, ipcSockPath := startIPCServer(sessionManager, wtRoot, repoName)
+	// The registry aggregates all repo managers so IPC handlers can find
+	// sessions from any repo, including those opened later via Alt-R.
+	registry := session.NewSessionRegistry()
+	registry.Register(sessionManager)
+	sharedManagerConfig.Registry = registry
+	ipcServer, ipcSockPath := startIPCServer(registry, sessionManager, wtRoot, repoName)
 	if ipcServer != nil {
 		defer ipcServer.Close()
 		os.Setenv(ipc.SockEnvVar, ipcSockPath)
@@ -295,7 +298,7 @@ func detectRepoFromPath(cwd, wtRoot string) (string, error) {
 
 // --- IPC server setup --------------------------------------------------------
 
-func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*ipc.Server, string) {
+func startIPCServer(registry *session.SessionRegistry, sessionManager *session.Manager, wtRoot, repoName string) (*ipc.Server, string) {
 	// Prefer $XDG_RUNTIME_DIR (user-private, tmpfs) over /tmp to avoid
 	// symlink/TOCTOU risks in world-writable directories.
 	runDir := os.Getenv("XDG_RUNTIME_DIR")
@@ -309,6 +312,8 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		return "pong", nil
 	})
 
+	// New-session and worktree creation always target the initial repo.
+	// Multi-repo new-session support is a future extension.
 	srv.Handle(ipc.RequestNewSession, func(ctx context.Context, req *ipc.Request) (any, error) {
 		params, ok := req.Params.(*ipc.NewSessionParams)
 		if !ok {
@@ -318,7 +323,7 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 	})
 
 	srv.Handle(ipc.RequestListSessions, func(_ context.Context, _ *ipc.Request) (any, error) {
-		return handleListSessions(sessionManager), nil
+		return handleListSessions(registry), nil
 	})
 
 	srv.Handle(ipc.RequestCapturePane, func(_ context.Context, req *ipc.Request) (any, error) {
@@ -331,7 +336,7 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 		if n <= 0 {
 			n = 10
 		}
-		lines, err := sessionManager.CapturePaneText(sid, n)
+		lines, err := registry.CapturePaneText(sid, n)
 		if err != nil {
 			return nil, err
 		}
@@ -344,7 +349,7 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 			return nil, fmt.Errorf("invalid params")
 		}
 		sid := session.SessionID(params.SessionID)
-		info, ok := sessionManager.GetSessionInfo(sid)
+		info, _, ok := registry.GetSessionInfo(sid)
 		if !ok {
 			return nil, fmt.Errorf("session not found: %s", params.SessionID)
 		}
@@ -359,7 +364,7 @@ func startIPCServer(sessionManager *session.Manager, wtRoot, repoName string) (*
 				session.NotifyTmuxWindow(windowTarget, info.TmuxWindowName)
 			}
 		}
-		sessionManager.SetSessionIdle(sid)
+		registry.SetSessionIdle(sid)
 		return "ok", nil
 	})
 
@@ -409,8 +414,8 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 	}, nil
 }
 
-func handleListSessions(mgr *session.Manager) *ipc.ListSessionsResult {
-	sessions := mgr.GetAllSessions()
+func handleListSessions(registry *session.SessionRegistry) *ipc.ListSessionsResult {
+	sessions := registry.GetAllSessions()
 	summaries := make([]ipc.SessionSummary, len(sessions))
 	for i := range sessions {
 		s := &sessions[i]

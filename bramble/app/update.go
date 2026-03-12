@@ -985,17 +985,14 @@ func (m *Model) refreshCommandCenter() {
 	if sid := m.commandCenter.PreviewedSessionID(); sid != "" {
 		// Resolve the correct session manager: the previewed session may belong to a
 		// different repo than the currently active one (multi-repo support).
-		mgr := m.sessionManager
+		var previewSess *session.SessionInfo
 		for i, sessions := 0, m.commandCenter.Sessions(); i < len(sessions); i++ {
 			if sessions[i].ID == sid {
-				if sessions[i].RepoName != "" {
-					if rc, ok := m.repos[sessions[i].RepoName]; ok && rc.sessionManager != nil {
-						mgr = rc.sessionManager
-					}
-				}
+				previewSess = &sessions[i]
 				break
 			}
 		}
+		mgr := m.managerForSession(previewSess)
 		lines, err := mgr.CapturePaneText(sid, 10)
 		if err == nil {
 			m.commandCenter.SetPreviewText(lines)
@@ -2123,9 +2120,10 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		sess := m.commandCenter.TogglePreview()
 		if sess != nil {
-			// Preview opened — capture pane text
+			// Preview opened — capture pane text.
+			// Use managerForSession to handle sessions from other repos (Alt-R).
 			if sess.RunnerType == session.RunnerTypeTmux || sess.RunnerType == session.RunnerTypeTmuxTracked {
-				lines, err := m.sessionManager.CapturePaneText(sess.ID, 10)
+				lines, err := m.managerForSession(sess).CapturePaneText(sess.ID, 10)
 				if err == nil {
 					m.commandCenter.SetPreviewText(lines)
 				} else {
@@ -2545,6 +2543,9 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	cfg := m.sharedManagerConfig
 	cfg.RepoName = repoName
 	mgr := session.NewManagerWithConfig(cfg)
+	if cfg.Registry != nil {
+		cfg.Registry.Register(mgr)
+	}
 
 	// Task router is intentionally not started for secondary repos (it requires
 	// a provider start which is heavyweight); the user can still manually route tasks.

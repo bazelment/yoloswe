@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "event_handler.go",
         "manager.go",
+        "registry.go",
         "store.go",
         "tmux_detect.go",
         "tmux_name.go",
@@ -32,6 +33,7 @@ go_test(
         "manager_provider_fallback_test.go",
         "manager_test.go",
         "provider_runner_test.go",
+        "registry_test.go",
         "store_test.go",
         "tmux_name_test.go",
         "tmux_test.go",

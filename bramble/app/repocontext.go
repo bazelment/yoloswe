@@ -49,6 +49,19 @@ func (m *Model) saveActiveContext() {
 	rc.scrollPositions = m.scrollPositions
 }
 
+// managerForSession returns the session manager that owns the given session.
+// When the session belongs to a different repo (multi-repo support) the
+// relevant manager is retrieved from m.repos; otherwise m.sessionManager is
+// returned as the default.
+func (m *Model) managerForSession(sess *session.SessionInfo) *session.Manager {
+	if sess != nil && sess.RepoName != "" {
+		if rc, ok := m.repos[sess.RepoName]; ok && rc.sessionManager != nil {
+			return rc.sessionManager
+		}
+	}
+	return m.sessionManager
+}
+
 // loadContext restores per-repo fields from a RepoContext into Model.
 func (m *Model) loadContext(repoName string) {
 	rc, ok := m.repos[repoName]
