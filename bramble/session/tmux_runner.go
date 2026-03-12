@@ -203,7 +203,7 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 					Stop: []hookGroup{{
 						Hooks: []hookEntry{{
 							Type:    "command",
-							Command: quotedBin + " notify --session-id " + quotedID,
+							Command: quotedBin + " notify --silent --session-id " + quotedID,
 						}},
 					}},
 				},

@@ -498,10 +498,10 @@ var notifyCmd = &cobra.Command{
 	Use:   "notify",
 	Short: "Notify bramble that a session needs attention",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// When triggered by Claude's stop hook (CLAUDECODE=1), errors are
+		// When triggered by Claude's stop hook (--silent), errors are
 		// non-actionable (socket gone, session cleaned up, etc.), so
 		// suppress them to avoid noisy stderr in the Claude session.
-		silent := os.Getenv("CLAUDECODE") == "1"
+		silent, _ := cmd.Flags().GetBool("silent")
 
 		client, err := ipc.NewClientFromEnv()
 		if err != nil {
@@ -599,6 +599,7 @@ func init() {
 	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")
 
 	notifyCmd.Flags().String("session-id", "", "Session ID to notify")
+	notifyCmd.Flags().Bool("silent", false, "Suppress errors silently (used by stop hooks)")
 	_ = notifyCmd.MarkFlagRequired("session-id")
 
 	capturePaneCmd.Flags().String("session-id", "", "Session ID to capture pane from")
