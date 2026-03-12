@@ -306,6 +306,25 @@ func (m *Manager) FetchOrigin(ctx context.Context) error {
 	return nil
 }
 
+// fetchBaseBranchIfStacked fetches baseBranch from origin when it differs from
+// the default branch. This is needed for stacked/dependent worktrees whose
+// parent is not the repo's default branch (e.g. feature-a → feature-b).
+// It is a no-op when baseBranch is already the default branch (already fetched
+// by FetchOrigin).
+func (m *Manager) fetchBaseBranchIfStacked(ctx context.Context, baseBranch string) error {
+	bareDir := m.BareDir()
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+	if baseBranch == defaultBranch {
+		return nil
+	}
+	m.output.Info(fmt.Sprintf("Fetching base branch %s...", baseBranch))
+	result, err := m.git.Run(ctx, []string{"fetch", "origin", baseBranch}, bareDir)
+	if err != nil {
+		return fmt.Errorf("failed to fetch base branch %s: %w", baseBranch, wrapAuthError(err, result))
+	}
+	return nil
+}
+
 // SyncOptions configures optional behavior for Sync.
 type SyncOptions struct {
 	FetchAll bool // fetch all remote branches instead of only the default branch
@@ -400,13 +419,8 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 		if err := m.FetchOrigin(ctx); err != nil {
 			return "", err
 		}
-		// For stacked branches, also fetch the base branch
-		defaultBranchForFetch, _ := GetDefaultBranch(ctx, m.git, bareDir)
-		if baseBranch != defaultBranchForFetch {
-			m.output.Info(fmt.Sprintf("Fetching base branch %s...", baseBranch))
-			if result, err := m.git.Run(ctx, []string{"fetch", "origin", baseBranch}, bareDir); err != nil {
-				return "", fmt.Errorf("failed to fetch base branch %s: %w", baseBranch, wrapAuthError(err, result))
-			}
+		if err := m.fetchBaseBranchIfStacked(ctx, baseBranch); err != nil {
+			return "", err
 		}
 	}
 
