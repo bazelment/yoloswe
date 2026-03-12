@@ -2545,6 +2545,9 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	cfg := m.sharedManagerConfig
 	cfg.RepoName = repoName
 	mgr := session.NewManagerWithConfig(cfg)
+	if cfg.Registry != nil {
+		cfg.Registry.Register(mgr)
+	}
 
 	// Task router is intentionally not started for secondary repos (it requires
 	// a provider start which is heavyweight); the user can still manually route tasks.

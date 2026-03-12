@@ -410,6 +410,10 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// Used to propagate BRAMBLE_SOCK to tmux windows so hook commands
 	// can call back to the TUI. Set by main after startIPCServer.
 	IPCSockPath string
+	// Registry is the shared session registry for cross-repo IPC lookups.
+	// Propagated through sharedManagerConfig so that openRepo can register
+	// new managers automatically.
+	Registry *SessionRegistry
 }
 
 // Manager handles multiple concurrent sessions.
