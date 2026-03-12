@@ -37,6 +37,7 @@ type NewSessionParams struct {
 	Prompt         string `json:"prompt"`
 	Model          string `json:"model,omitempty"`           // model ID (default: provider default)
 	Goal           string `json:"goal,omitempty"`            // worktree goal (used when creating)
+	RepoName       string `json:"repo_name,omitempty"`       // target repo; auto-detected from cwd if empty
 	CreateWorktree bool   `json:"create_worktree,omitempty"` // if true, create a new worktree for Branch
 }
 
