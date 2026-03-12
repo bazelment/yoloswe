@@ -569,8 +569,11 @@ when a parent branch has been merged and rebases onto the default branch.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		syncAll, _ := cmd.Flags().GetBool("all")
 		allRepos, _ := cmd.Flags().GetBool("all-repos")
+		fetchAll, _ := cmd.Flags().GetBool("fetch-all")
 		ctx := context.Background()
 		output := wt.DefaultOutput()
+
+		syncOpts := wt.SyncOptions{FetchAll: fetchAll}
 
 		// --all-repos: sync every repo in wtRoot
 		if allRepos {
@@ -588,7 +591,7 @@ when a parent branch has been merged and rebases onto the default branch.`,
 				}
 				fmt.Printf("%s\n", output.Colorize(wt.ColorBold, repoName))
 				m := wt.NewManager(wtRoot, repoName)
-				if err := m.Sync(ctx, ""); err != nil {
+				if err := m.Sync(ctx, "", syncOpts); err != nil {
 					output.Error(fmt.Sprintf("Failed to sync %s: %v", repoName, err))
 				}
 			}
@@ -602,7 +605,7 @@ when a parent branch has been merged and rebases onto the default branch.`,
 
 		// --all: sync all worktrees in the current repo
 		if syncAll {
-			return m.Sync(ctx, "")
+			return m.Sync(ctx, "", syncOpts)
 		}
 
 		// Default: sync only the current worktree
@@ -620,13 +623,14 @@ when a parent branch has been merged and rebases onto the default branch.`,
 			return fmt.Errorf("not on a branch (detached HEAD?)")
 		}
 
-		return m.Sync(ctx, branch)
+		return m.Sync(ctx, branch, syncOpts)
 	},
 }
 
 func init() {
 	syncCmd.Flags().BoolP("all", "a", false, "Sync all worktrees in the current repository")
 	syncCmd.Flags().Bool("all-repos", false, "Sync all worktrees across all repositories")
+	syncCmd.Flags().Bool("fetch-all", false, "Fetch all remote branches instead of only the default branch")
 }
 
 // mergeCmd: wt merge [--keep] [--squash|--rebase|--merge]

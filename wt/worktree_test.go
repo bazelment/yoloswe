@@ -177,7 +177,7 @@ func TestManagerNewFetchError(t *testing.T) {
 	}
 
 	mockGit := NewMockGitRunner()
-	mockGit.Errors["fetch origin"] = os.ErrPermission
+	mockGit.Errors["fetch origin main"] = os.ErrPermission
 
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))

@@ -287,7 +287,7 @@ func (m *Manager) Init(ctx context.Context, url string) (string, error) {
 	return mainPath, nil
 }
 
-// FetchOrigin fetches the latest refs from origin for this repo's bare clone.
+// FetchOrigin fetches the default branch from origin for this repo's bare clone.
 // Call this before parallel New calls to avoid concurrent git-fetch conflicts.
 func (m *Manager) FetchOrigin(ctx context.Context) error {
 	bareDir := m.BareDir()
@@ -297,12 +297,18 @@ func (m *Manager) FetchOrigin(ctx context.Context) error {
 	if err := CheckGitHubAuth(ctx, m.gh); err != nil {
 		return err
 	}
-	m.output.Info("Fetching latest from origin...")
-	result, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir)
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+	m.output.Info(fmt.Sprintf("Fetching %s from origin...", defaultBranch))
+	result, err := m.git.Run(ctx, []string{"fetch", "origin", defaultBranch}, bareDir)
 	if err != nil {
 		return fmt.Errorf("failed to fetch from origin: %w", wrapAuthError(err, result))
 	}
 	return nil
+}
+
+// SyncOptions configures optional behavior for Sync.
+type SyncOptions struct {
+	FetchAll bool // fetch all remote branches instead of only the default branch
 }
 
 // NewOptions configures optional behavior for New.
@@ -394,6 +400,14 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 		if err := m.FetchOrigin(ctx); err != nil {
 			return "", err
 		}
+		// For stacked branches, also fetch the base branch
+		defaultBranchForFetch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+		if baseBranch != defaultBranchForFetch {
+			m.output.Info(fmt.Sprintf("Fetching base branch %s...", baseBranch))
+			if result, err := m.git.Run(ctx, []string{"fetch", "origin", baseBranch}, bareDir); err != nil {
+				return "", fmt.Errorf("failed to fetch base branch %s: %w", baseBranch, wrapAuthError(err, result))
+			}
+		}
 	}
 
 	// Keep the main worktree current
@@ -454,9 +468,9 @@ func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error)
 		return "", ErrWorktreeExists
 	}
 
-	m.output.Info("Fetching latest from origin...")
-	if _, err := m.git.Run(ctx, []string{"fetch", "origin"}, bareDir); err != nil {
-		return "", fmt.Errorf("failed to fetch from origin: %w", err)
+	m.output.Info(fmt.Sprintf("Fetching %s from origin...", branch))
+	if _, err := m.git.Run(ctx, []string{"fetch", "origin", branch}, bareDir); err != nil {
+		return "", fmt.Errorf("failed to fetch %s from origin: %w", branch, err)
 	}
 
 	// Check if branch exists on remote
@@ -780,7 +794,12 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 // Sync fetches the latest changes and rebases worktrees.
 // If branch is non-empty, only that worktree is synced.
 // If branch is empty, all worktrees in the repo are synced.
-func (m *Manager) Sync(ctx context.Context, branch string) error {
+func (m *Manager) Sync(ctx context.Context, branch string, opts ...SyncOptions) error {
+	var o SyncOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return ErrRepoNotInitialized
@@ -790,19 +809,45 @@ func (m *Manager) Sync(ctx context.Context, branch string) error {
 		return err
 	}
 
-	m.output.Info("Fetching from origin...")
-	result, err := m.git.Run(ctx, []string{"fetch", "--all", "--prune"}, bareDir)
-	if err != nil {
-		return fmt.Errorf("failed to fetch: %w", wrapAuthError(err, result))
-	}
-	m.output.Success("Fetched latest changes")
-
 	worktrees, err := m.List(ctx)
 	if err != nil {
 		return err
 	}
 
 	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+
+	if o.FetchAll {
+		m.output.Info("Fetching all branches from origin...")
+		result, err := m.git.Run(ctx, []string{"fetch", "--all", "--prune"}, bareDir)
+		if err != nil {
+			return fmt.Errorf("failed to fetch: %w", wrapAuthError(err, result))
+		}
+	} else {
+		// Fetch only the default branch and any non-merged parent branches needed for stacked worktrees
+		m.output.Info(fmt.Sprintf("Fetching %s from origin...", defaultBranch))
+		result, err := m.git.Run(ctx, []string{"fetch", "origin", defaultBranch}, bareDir)
+		if err != nil {
+			return fmt.Errorf("failed to fetch %s: %w", defaultBranch, wrapAuthError(err, result))
+		}
+
+		// Collect unique parent branches that need fetching (non-default, non-local-only)
+		fetched := map[string]bool{defaultBranch: true}
+		for _, wt := range worktrees {
+			if wt.IsDetached {
+				continue
+			}
+			parent, _ := m.GetParentBranch(ctx, wt.Branch, wt.Path)
+			if parent != "" && parent != defaultBranch && !fetched[parent] {
+				fetched[parent] = true
+				m.output.Info(fmt.Sprintf("Fetching parent branch %s...", parent))
+				if result, err := m.git.Run(ctx, []string{"fetch", "origin", parent}, bareDir); err != nil {
+					// Non-fatal: parent branch may have been deleted (merged)
+					m.output.Warn(fmt.Sprintf("Could not fetch %s (may be merged/deleted): %v", parent, wrapAuthError(err, result)))
+				}
+			}
+		}
+	}
+	m.output.Success("Fetched latest changes")
 
 	// Find a worktree to run gh commands from
 	var ghDir string
