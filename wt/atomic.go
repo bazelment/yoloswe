@@ -102,6 +102,9 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 		if err := m.FetchOrigin(ctx); err != nil {
 			return "", err
 		}
+		if err := m.fetchBaseBranchIfStacked(ctx, baseBranch); err != nil {
+			return "", err
+		}
 	}
 
 	// Step 1.5: Keep the main worktree current

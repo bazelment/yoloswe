@@ -177,7 +177,7 @@ func TestManagerNewFetchError(t *testing.T) {
 	}
 
 	mockGit := NewMockGitRunner()
-	mockGit.Errors["fetch origin"] = os.ErrPermission
+	mockGit.Errors["fetch origin main"] = os.ErrPermission
 
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
@@ -813,5 +813,231 @@ func TestRemoveIncludesWorktreePrune(t *testing.T) {
 	}
 	if pruneIdx >= branchDeleteIdx {
 		t.Errorf("worktree prune (idx=%d) should be called before branch -D (idx=%d)", pruneIdx, branchDeleteIdx)
+	}
+}
+
+// newMockGHRunnerWithPRError returns a MockGHRunner configured to return an error
+// for all PR-related commands, so Sync() tests don't panic on nil JSON unmarshal.
+// auth status succeeds so CheckGitHubAuth passes; everything else returns an error.
+func newMockGHRunnerWithPRError() *MockGHRunner {
+	gh := NewMockGHRunner()
+	gh.Results["auth status"] = &CmdResult{Stdout: "Logged in", ExitCode: 0}
+	gh.Err = os.ErrNotExist // default for all other calls (e.g. pr view)
+	return gh
+}
+
+// TestSyncFetchesOnlyDefaultBranch verifies that Sync() without FetchAll fetches
+// only the default branch (not all remotes).
+func TestSyncFetchesOnlyDefaultBranch(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + mainPath + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	// fetch origin main should succeed
+	mockGit.Results["fetch origin main"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(newMockGHRunnerWithPRError()), WithOutput(output))
+
+	ctx := context.Background()
+	// Sync may fail later (e.g., no commits to rebase), but what matters here is fetch behavior.
+	_ = m.Sync(ctx, "")
+
+	// Verify fetch origin main was called, but NOT fetch --all --prune
+	fetchMainCalled := false
+	fetchAllCalled := false
+	for _, call := range mockGit.Calls {
+		key := strings.Join(call, " ")
+		if key == "fetch origin main" {
+			fetchMainCalled = true
+		}
+		if key == "fetch --all --prune" {
+			fetchAllCalled = true
+		}
+	}
+	if !fetchMainCalled {
+		t.Error("Expected 'fetch origin main' to be called in narrow fetch mode")
+	}
+	if fetchAllCalled {
+		t.Error("Expected 'fetch --all --prune' NOT to be called in narrow fetch mode")
+	}
+}
+
+// TestSyncFetchAllFlagUsesWideScope verifies that Sync() with FetchAll uses fetch --all --prune.
+func TestSyncFetchAllFlagUsesWideScope(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + mainPath + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	mockGit.Results["fetch --all --prune"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(newMockGHRunnerWithPRError()), WithOutput(output))
+
+	ctx := context.Background()
+	_ = m.Sync(ctx, "", SyncOptions{FetchAll: true})
+
+	fetchAllCalled := false
+	for _, call := range mockGit.Calls {
+		if strings.Join(call, " ") == "fetch --all --prune" {
+			fetchAllCalled = true
+		}
+	}
+	if !fetchAllCalled {
+		t.Error("Expected 'fetch --all --prune' to be called when FetchAll=true")
+	}
+}
+
+// TestSyncFetchesParentBranchForStackedWorktrees verifies that Sync() fetches
+// non-default parent branches for stacked worktrees.
+func TestSyncFetchesParentBranchForStackedWorktrees(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+	featureAPath := filepath.Join(repoDir, "feature-a")
+	featureBPath := filepath.Join(repoDir, "feature-b")
+
+	for _, dir := range []string{bareDir, mainPath, featureAPath, featureBPath} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + mainPath + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n" +
+			"worktree " + featureAPath + "\nHEAD bcd2345678901\nbranch refs/heads/feature-a\n\n" +
+			"worktree " + featureBPath + "\nHEAD cde3456789012\nbranch refs/heads/feature-b\n\n",
+	}
+	// feature-b tracks feature-a as parent
+	mockGit.Results["config branch.feature-b.description"] = &CmdResult{Stdout: "parent:feature-a\n"}
+	mockGit.Results["fetch origin main"] = &CmdResult{}
+	mockGit.Results["fetch origin feature-a"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(newMockGHRunnerWithPRError()), WithOutput(output))
+
+	ctx := context.Background()
+	_ = m.Sync(ctx, "")
+
+	fetchFeatureACalled := false
+	for _, call := range mockGit.Calls {
+		if strings.Join(call, " ") == "fetch origin feature-a" {
+			fetchFeatureACalled = true
+		}
+	}
+	if !fetchFeatureACalled {
+		t.Error("Expected 'fetch origin feature-a' to be called for stacked parent branch")
+	}
+}
+
+// TestSyncParentFetchFailureFatal verifies that Sync() returns an error when
+// fetching a parent branch fails but the branch still exists on remote.
+func TestSyncParentFetchFailureFatal(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+	featureBPath := filepath.Join(repoDir, "feature-b")
+
+	for _, dir := range []string{bareDir, mainPath, featureBPath} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + mainPath + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n" +
+			"worktree " + featureBPath + "\nHEAD cde3456789012\nbranch refs/heads/feature-b\n\n",
+	}
+	mockGit.Results["config branch.feature-b.description"] = &CmdResult{Stdout: "parent:feature-a\n"}
+	mockGit.Results["fetch origin main"] = &CmdResult{}
+	// fetch for parent branch fails (simulating network/auth error)
+	mockGit.Errors["fetch origin feature-a"] = os.ErrPermission
+	// ls-remote says branch still exists on remote
+	mockGit.Results["ls-remote --heads origin feature-a"] = &CmdResult{Stdout: "abc123 refs/heads/feature-a\n"}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(newMockGHRunnerWithPRError()), WithOutput(output))
+
+	ctx := context.Background()
+	err := m.Sync(ctx, "")
+	if err == nil {
+		t.Fatal("Expected Sync() to return error when parent branch fetch fails and branch still exists on remote")
+	}
+	if !strings.Contains(err.Error(), "failed to fetch parent branch") {
+		t.Errorf("Error = %q, want to contain 'failed to fetch parent branch'", err.Error())
+	}
+}
+
+// TestSyncParentFetchFailureNonFatalWhenDeleted verifies that Sync() does not
+// return an error when a parent branch no longer exists on remote (merged/deleted).
+func TestSyncParentFetchFailureNonFatalWhenDeleted(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	mainPath := filepath.Join(repoDir, "main")
+	featureBPath := filepath.Join(repoDir, "feature-b")
+
+	for _, dir := range []string{bareDir, mainPath, featureBPath} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + mainPath + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n" +
+			"worktree " + featureBPath + "\nHEAD cde3456789012\nbranch refs/heads/feature-b\n\n",
+	}
+	mockGit.Results["config branch.feature-b.description"] = &CmdResult{Stdout: "parent:feature-a\n"}
+	mockGit.Results["fetch origin main"] = &CmdResult{}
+	// fetch for parent branch fails
+	mockGit.Errors["fetch origin feature-a"] = os.ErrPermission
+	// ls-remote returns empty: branch no longer exists on remote
+	mockGit.Results["ls-remote --heads origin feature-a"] = &CmdResult{Stdout: ""}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(newMockGHRunnerWithPRError()), WithOutput(output))
+
+	ctx := context.Background()
+	// Sync should not return an error for the fetch; it may fail later for other reasons.
+	// We verify by checking the error does NOT mention the parent fetch.
+	err := m.Sync(ctx, "")
+	if err != nil && strings.Contains(err.Error(), "failed to fetch parent branch") {
+		t.Errorf("Sync() should not return parent fetch error when branch is gone from remote, got: %v", err)
 	}
 }
