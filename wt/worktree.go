@@ -483,11 +483,18 @@ func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error)
 	}
 
 	m.output.Info(fmt.Sprintf("Fetching %s from origin...", branch))
-	if _, err := m.git.Run(ctx, []string{"fetch", "origin", branch}, bareDir); err != nil {
-		return "", fmt.Errorf("failed to fetch %s from origin: %w", branch, err)
+	if _, fetchErr := m.git.Run(ctx, []string{"fetch", "origin", branch}, bareDir); fetchErr != nil {
+		// If the fetch failed, check whether the branch actually exists on the remote.
+		// A missing branch is the most common cause of fetch failure for a specific ref.
+		if _, revErr := m.git.Run(ctx, []string{
+			"ls-remote", "--exit-code", "origin", "refs/heads/" + branch,
+		}, bareDir); revErr != nil {
+			return "", ErrBranchNotFound
+		}
+		return "", fmt.Errorf("failed to fetch %s from origin: %w", branch, fetchErr)
 	}
 
-	// Check if branch exists on remote
+	// Confirm the ref landed locally after a successful fetch
 	if _, err := m.git.Run(ctx, []string{
 		"rev-parse", "refs/remotes/origin/" + branch,
 	}, bareDir); err != nil {
