@@ -37,15 +37,23 @@ func (r *SessionRegistry) GetSessionInfo(id SessionID) (SessionInfo, *Manager, b
 	return SessionInfo{}, nil, false
 }
 
+// findManager returns the first registered manager that owns the given session.
+// Must be called with r.mu held (at least RLock).
+func (r *SessionRegistry) findManager(id SessionID) *Manager {
+	for _, mgr := range r.managers {
+		if _, ok := mgr.GetSessionInfo(id); ok {
+			return mgr
+		}
+	}
+	return nil
+}
+
 // SetSessionIdle finds the owning manager for the session and marks it idle.
 func (r *SessionRegistry) SetSessionIdle(id SessionID) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, mgr := range r.managers {
-		if _, ok := mgr.GetSessionInfo(id); ok {
-			mgr.SetSessionIdle(id)
-			return
-		}
+	if mgr := r.findManager(id); mgr != nil {
+		mgr.SetSessionIdle(id)
 	}
 }
 
@@ -53,12 +61,11 @@ func (r *SessionRegistry) SetSessionIdle(id SessionID) {
 func (r *SessionRegistry) CapturePaneText(id SessionID, n int) ([]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, mgr := range r.managers {
-		if _, ok := mgr.GetSessionInfo(id); ok {
-			return mgr.CapturePaneText(id, n)
-		}
+	mgr := r.findManager(id)
+	if mgr == nil {
+		return nil, fmt.Errorf("session not found: %s", id)
 	}
-	return nil, fmt.Errorf("session not found: %s", id)
+	return mgr.CapturePaneText(id, n)
 }
 
 // GetAllSessions returns sessions from all registered managers.

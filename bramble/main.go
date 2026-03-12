@@ -312,6 +312,8 @@ func startIPCServer(registry *session.SessionRegistry, sessionManager *session.M
 		return "pong", nil
 	})
 
+	// New-session and worktree creation always target the initial repo.
+	// Multi-repo new-session support is a future extension.
 	srv.Handle(ipc.RequestNewSession, func(ctx context.Context, req *ipc.Request) (any, error) {
 		params, ok := req.Params.(*ipc.NewSessionParams)
 		if !ok {
