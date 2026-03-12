@@ -102,6 +102,14 @@ func (m *Manager) NewAtomic(ctx context.Context, branch, baseBranch, goal string
 		if err := m.FetchOrigin(ctx); err != nil {
 			return "", err
 		}
+		// For stacked branches, also fetch the base branch
+		defaultBranchForFetch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+		if baseBranch != defaultBranchForFetch {
+			m.output.Info(fmt.Sprintf("Fetching base branch %s...", baseBranch))
+			if result, err := m.git.Run(ctx, []string{"fetch", "origin", baseBranch}, bareDir); err != nil {
+				return "", fmt.Errorf("failed to fetch base branch %s: %w", baseBranch, wrapAuthError(err, result))
+			}
+		}
 	}
 
 	// Step 1.5: Keep the main worktree current

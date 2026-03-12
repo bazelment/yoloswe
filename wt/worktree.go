@@ -830,9 +830,22 @@ func (m *Manager) Sync(ctx context.Context, branch string, opts ...SyncOptions) 
 			return fmt.Errorf("failed to fetch %s: %w", defaultBranch, wrapAuthError(err, result))
 		}
 
-		// Collect unique parent branches that need fetching (non-default, non-local-only)
+		// Collect unique parent branches that need fetching (non-default, non-local-only).
+		// When syncing a single branch, only fetch that branch's parent chain.
+		// When syncing all branches, fetch parents for all worktrees.
+		var worktreesToCheck []Worktree
+		if branch != "" {
+			for _, wt := range worktrees {
+				if wt.Branch == branch {
+					worktreesToCheck = []Worktree{wt}
+					break
+				}
+			}
+		} else {
+			worktreesToCheck = worktrees
+		}
 		fetched := map[string]bool{defaultBranch: true}
-		for _, wt := range worktrees {
+		for _, wt := range worktreesToCheck {
 			if wt.IsDetached {
 				continue
 			}
@@ -841,8 +854,14 @@ func (m *Manager) Sync(ctx context.Context, branch string, opts ...SyncOptions) 
 				fetched[parent] = true
 				m.output.Info(fmt.Sprintf("Fetching parent branch %s...", parent))
 				if result, err := m.git.Run(ctx, []string{"fetch", "origin", parent}, bareDir); err != nil {
-					// Non-fatal: parent branch may have been deleted (merged)
-					m.output.Warn(fmt.Sprintf("Could not fetch %s (may be merged/deleted): %v", parent, wrapAuthError(err, result)))
+					// Check if the branch was deleted/merged on remote (non-fatal) vs a real
+					// network/auth error (fatal: continuing would rebase onto stale refs).
+					exists, existsErr := RemoteBranchExists(ctx, m.git, parent, bareDir)
+					if existsErr == nil && !exists {
+						m.output.Warn(fmt.Sprintf("Skipping %s: branch no longer exists on remote (merged?)", parent))
+						continue
+					}
+					return fmt.Errorf("failed to fetch parent branch %s: %w", parent, wrapAuthError(err, result))
 				}
 			}
 		}
