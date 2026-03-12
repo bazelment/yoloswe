@@ -498,8 +498,16 @@ var notifyCmd = &cobra.Command{
 	Use:   "notify",
 	Short: "Notify bramble that a session needs attention",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// When triggered by Claude's stop hook (CLAUDECODE=1), errors are
+		// non-actionable (socket gone, session cleaned up, etc.), so
+		// suppress them to avoid noisy stderr in the Claude session.
+		silent := os.Getenv("CLAUDECODE") == "1"
+
 		client, err := ipc.NewClientFromEnv()
 		if err != nil {
+			if silent {
+				return nil
+			}
 			return err
 		}
 		sessionID, _ := cmd.Flags().GetString("session-id")
@@ -509,9 +517,15 @@ var notifyCmd = &cobra.Command{
 			Params: &ipc.NotifyParams{SessionID: sessionID},
 		})
 		if err != nil {
+			if silent {
+				return nil
+			}
 			return err
 		}
 		if !resp.OK {
+			if silent {
+				return nil
+			}
 			return fmt.Errorf("server error: %s", resp.Error)
 		}
 		return nil
