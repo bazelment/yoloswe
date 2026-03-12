@@ -130,6 +130,33 @@ func TestRegistry_GetAllSessions(t *testing.T) {
 	assert.True(t, ids["sess-b1"])
 }
 
+func TestRegistry_FindManagerByRepo(t *testing.T) {
+	t.Parallel()
+
+	reg := NewSessionRegistry()
+	mgr1 := newTestManager(t, "repo-a")
+	mgr2 := newTestManager(t, "repo-b")
+	reg.Register(mgr1)
+	reg.Register(mgr2)
+
+	// Known repo returns the correct manager.
+	got, ok := reg.FindManagerByRepo("repo-a")
+	require.True(t, ok)
+	assert.Equal(t, mgr1, got)
+
+	got, ok = reg.FindManagerByRepo("repo-b")
+	require.True(t, ok)
+	assert.Equal(t, mgr2, got)
+
+	// Unknown repo returns false.
+	_, ok = reg.FindManagerByRepo("no-such-repo")
+	assert.False(t, ok)
+
+	// Empty string does not match either registered manager.
+	_, ok = reg.FindManagerByRepo("")
+	assert.False(t, ok)
+}
+
 func TestRegistry_ConcurrentRegisterAndLookup(t *testing.T) {
 	reg := NewSessionRegistry()
 

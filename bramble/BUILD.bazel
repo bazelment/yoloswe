@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "bramble_lib",
@@ -22,4 +22,14 @@ go_binary(
     name = "bramble",
     embed = [":bramble_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "bramble_test",
+    srcs = ["main_test.go"],
+    embed = [":bramble_lib"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
 )

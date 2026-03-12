@@ -202,7 +202,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	registry := session.NewSessionRegistry()
 	registry.Register(sessionManager)
 	sharedManagerConfig.Registry = registry
-	ipcServer, ipcSockPath := startIPCServer(registry, sessionManager, wtRoot, repoName)
+	ipcServer, ipcSockPath := startIPCServer(registry, wtRoot, repoName)
 	if ipcServer != nil {
 		defer ipcServer.Close()
 		os.Setenv(ipc.SockEnvVar, ipcSockPath)
@@ -298,7 +298,7 @@ func detectRepoFromPath(cwd, wtRoot string) (string, error) {
 
 // --- IPC server setup --------------------------------------------------------
 
-func startIPCServer(registry *session.SessionRegistry, sessionManager *session.Manager, wtRoot, repoName string) (*ipc.Server, string) {
+func startIPCServer(registry *session.SessionRegistry, wtRoot, repoName string) (*ipc.Server, string) {
 	// Prefer $XDG_RUNTIME_DIR (user-private, tmpfs) over /tmp to avoid
 	// symlink/TOCTOU risks in world-writable directories.
 	runDir := os.Getenv("XDG_RUNTIME_DIR")
