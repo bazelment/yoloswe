@@ -312,14 +312,23 @@ func startIPCServer(registry *session.SessionRegistry, sessionManager *session.M
 		return "pong", nil
 	})
 
-	// New-session and worktree creation always target the initial repo.
-	// Multi-repo new-session support is a future extension.
 	srv.Handle(ipc.RequestNewSession, func(ctx context.Context, req *ipc.Request) (any, error) {
 		params, ok := req.Params.(*ipc.NewSessionParams)
 		if !ok {
 			return nil, fmt.Errorf("invalid params")
 		}
-		return handleNewSession(ctx, sessionManager, wtRoot, repoName, params)
+
+		targetRepo := params.RepoName
+		if targetRepo == "" {
+			targetRepo = repoName // fall back to initial repo
+		}
+
+		mgr, ok := registry.FindManagerByRepo(targetRepo)
+		if !ok {
+			return nil, fmt.Errorf("repo %q is not open in bramble; open it with Alt-R first", targetRepo)
+		}
+
+		return handleNewSession(ctx, mgr, wtRoot, targetRepo, params)
 	})
 
 	srv.Handle(ipc.RequestListSessions, func(_ context.Context, _ *ipc.Request) (any, error) {
@@ -466,6 +475,18 @@ var newSessionCmd = &cobra.Command{
 		model, _ := cmd.Flags().GetString("model")
 		goal, _ := cmd.Flags().GetString("goal")
 		createWT, _ := cmd.Flags().GetBool("create-worktree")
+		repo, _ := cmd.Flags().GetString("repo")
+
+		// Auto-detect repo from cwd if not explicitly specified.
+		if repo == "" {
+			wtRoot := os.Getenv("WT_ROOT")
+			if wtRoot == "" {
+				home, _ := os.UserHomeDir()
+				wtRoot = filepath.Join(home, "worktrees")
+			}
+			cwd, _ := os.Getwd()
+			repo, _ = detectRepoFromPath(cwd, wtRoot)
+		}
 
 		resp, err := client.Send(&ipc.Request{
 			Type: ipc.RequestNewSession,
@@ -479,6 +500,7 @@ var newSessionCmd = &cobra.Command{
 				Prompt:         prompt,
 				Model:          model,
 				Goal:           goal,
+				RepoName:       repo,
 			},
 		})
 		if err != nil {
@@ -597,6 +619,7 @@ func init() {
 	newSessionCmd.Flags().StringP("model", "m", "", "Model ID (e.g. opus, sonnet)")
 	newSessionCmd.Flags().StringP("goal", "g", "", "Goal for new worktree")
 	newSessionCmd.Flags().Bool("create-worktree", false, "Create a new worktree for the branch")
+	newSessionCmd.Flags().StringP("repo", "r", "", "Target repo name (auto-detected from cwd if omitted)")
 
 	notifyCmd.Flags().String("session-id", "", "Session ID to notify")
 	notifyCmd.Flags().Bool("silent", false, "Suppress errors silently (used by stop hooks)")

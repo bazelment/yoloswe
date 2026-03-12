@@ -68,6 +68,18 @@ func (r *SessionRegistry) CapturePaneText(id SessionID, n int) ([]string, error)
 	return mgr.CapturePaneText(id, n)
 }
 
+// FindManagerByRepo returns the manager registered for the given repo name.
+func (r *SessionRegistry) FindManagerByRepo(repoName string) (*Manager, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, mgr := range r.managers {
+		if mgr.RepoName() == repoName {
+			return mgr, true
+		}
+	}
+	return nil, false
+}
+
 // GetAllSessions returns sessions from all registered managers.
 func (r *SessionRegistry) GetAllSessions() []SessionInfo {
 	r.mu.RLock()

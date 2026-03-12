@@ -433,6 +433,11 @@ type Manager struct {
 	followUpChansMu sync.RWMutex
 }
 
+// RepoName returns the repo name this manager is configured for.
+func (m *Manager) RepoName() string {
+	return m.config.RepoName
+}
+
 // NewManager creates a new session manager.
 func NewManager() *Manager {
 	return NewManagerWithConfig(ManagerConfig{})
