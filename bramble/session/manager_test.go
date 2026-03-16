@@ -1324,6 +1324,40 @@ func TestReposWithLiveTmuxSessions_SkipsNonTmuxSessions(t *testing.T) {
 	assert.Equal(t, StatusRunning, reloaded.Status)
 }
 
+func TestUpdateSessionStatus_IdleToRunningPreservesStartedAt(t *testing.T) {
+	m := NewManager()
+
+	originalStart := time.Now().Add(-5 * time.Minute)
+
+	session := &Session{
+		ID:        "test-session",
+		Status:    StatusIdle,
+		StartedAt: &originalStart,
+	}
+	m.sessions["test-session"] = session
+
+	m.updateSessionStatus(session, StatusRunning)
+
+	assert.Equal(t, StatusRunning, session.Status)
+	assert.Equal(t, originalStart, *session.StartedAt, "StartedAt should be preserved when resuming from idle")
+}
+
+func TestUpdateSessionStatus_PendingToRunningSetsStartedAt(t *testing.T) {
+	m := NewManager()
+
+	session := &Session{
+		ID:     "test-session",
+		Status: StatusPending,
+	}
+	m.sessions["test-session"] = session
+
+	m.updateSessionStatus(session, StatusRunning)
+
+	assert.Equal(t, StatusRunning, session.Status)
+	require.NotNil(t, session.StartedAt, "StartedAt should be set when transitioning from pending")
+	assert.WithinDuration(t, time.Now(), *session.StartedAt, time.Second)
+}
+
 func TestReposWithLiveTmuxSessions_NilStore(t *testing.T) {
 	liveRepos := ReposWithLiveTmuxSessions(nil, "active-repo")
 	assert.Nil(t, liveRepos)

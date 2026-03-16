@@ -1107,6 +1107,11 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 			}
 		})
 
+		// If pane shows working state but session is idle, transition back to running.
+		if paneStatus != nil && paneStatus.IsWorking && status == StatusIdle {
+			m.updateSessionStatus(session, StatusRunning)
+		}
+
 		// Update session model if parsed status indicates idle
 		if paneStatus != nil && paneStatus.Model != "" {
 			session.mu.Lock()
@@ -1726,7 +1731,9 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 	now := time.Now()
 	switch newStatus {
 	case StatusRunning:
-		session.StartedAt = &now
+		if oldStatus == StatusPending || session.StartedAt == nil {
+			session.StartedAt = &now
+		}
 	case StatusCompleted, StatusFailed, StatusStopped:
 		session.CompletedAt = &now
 	}
