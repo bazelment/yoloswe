@@ -1326,6 +1326,7 @@ func TestReposWithLiveTmuxSessions_SkipsNonTmuxSessions(t *testing.T) {
 
 func TestUpdateSessionStatus_IdleToRunningPreservesStartedAt(t *testing.T) {
 	m := NewManager()
+	defer m.Close()
 
 	originalStart := time.Now().Add(-5 * time.Minute)
 
@@ -1334,7 +1335,9 @@ func TestUpdateSessionStatus_IdleToRunningPreservesStartedAt(t *testing.T) {
 		Status:    StatusIdle,
 		StartedAt: &originalStart,
 	}
+	m.mu.Lock()
 	m.sessions["test-session"] = session
+	m.mu.Unlock()
 
 	m.updateSessionStatus(session, StatusRunning)
 
@@ -1344,12 +1347,15 @@ func TestUpdateSessionStatus_IdleToRunningPreservesStartedAt(t *testing.T) {
 
 func TestUpdateSessionStatus_PendingToRunningSetsStartedAt(t *testing.T) {
 	m := NewManager()
+	defer m.Close()
 
 	session := &Session{
 		ID:     "test-session",
 		Status: StatusPending,
 	}
+	m.mu.Lock()
 	m.sessions["test-session"] = session
+	m.mu.Unlock()
 
 	m.updateSessionStatus(session, StatusRunning)
 

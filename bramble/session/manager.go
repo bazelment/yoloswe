@@ -599,9 +599,9 @@ func (m *Manager) ReconcileTmuxSessions() error {
 			m.outputs[session.ID] = make([]OutputLine, 0, 16)
 			m.outputsMu.Unlock()
 
-			// Emit the state-change event without calling updateSessionStatus, which
-			// would overwrite session.StartedAt with time.Now() and lose the
-			// historical start time preserved from the stored session.
+			// Emit the state-change event directly rather than calling updateSessionStatus,
+			// so we avoid any side-effects on StartedAt or other fields for this
+			// re-adoption path that restores a stored session.
 			select {
 			case m.events <- SessionStateChangeEvent{
 				SessionID: session.ID,
@@ -1731,6 +1731,8 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 	now := time.Now()
 	switch newStatus {
 	case StatusRunning:
+		// Set StartedAt only when first starting (Pending→Running) or when missing;
+		// preserve the original start time when resuming from Idle.
 		if oldStatus == StatusPending || session.StartedAt == nil {
 			session.StartedAt = &now
 		}
