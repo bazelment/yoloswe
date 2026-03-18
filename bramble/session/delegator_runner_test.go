@@ -15,7 +15,6 @@ func TestDelegatorRunnerConstruction(t *testing.T) {
 	eventHandler := newSessionEventHandler(m, "test-session")
 
 	runner := &delegatorRunner{
-		manager:      m,
 		toolHandler:  handler,
 		eventHandler: eventHandler,
 		worktreePath: "/tmp/test-worktree",
@@ -43,7 +42,6 @@ func TestDelegatorRunnerImplementsInterface(t *testing.T) {
 	eventHandler := newSessionEventHandler(m, "test-session")
 
 	var _ sessionRunner = &delegatorRunner{
-		manager:      m,
 		toolHandler:  handler,
 		eventHandler: eventHandler,
 		worktreePath: "/tmp/test-worktree",

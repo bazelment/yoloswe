@@ -33,7 +33,6 @@ type delegatorRunner struct {
 	claudeSession *claude.Session
 	toolHandler   *DelegatorToolHandler
 	eventHandler  *sessionEventHandler
-	manager       *Manager
 	worktreePath  string
 	model         string
 }

@@ -1503,7 +1503,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			case SessionTypeDelegator:
 				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath)
 				runner = &delegatorRunner{
-					manager:      m,
 					toolHandler:  toolHandler,
 					eventHandler: eventHandler,
 					worktreePath: session.WorktreePath,
@@ -1856,6 +1855,7 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 		select {
 		case ch <- evt:
 		default:
+			log.Printf("WARNING: state subscriber channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
 		}
 	}
 	m.stateSubscribersMu.Unlock()
