@@ -4,6 +4,7 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "integration_test",
     srcs = [
+        "delegator_test.go",
         "live_provider_session_test.go",
         "provider_test.go",
         "session_test.go",

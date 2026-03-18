@@ -417,7 +417,7 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 }
 
 // Manager handles multiple concurrent sessions.
-type Manager struct {
+type Manager struct { //nolint:govet // fieldalignment: readability over packing
 	ctx           context.Context
 	sessions      map[SessionID]*Session
 	events        chan interface{}
@@ -431,6 +431,11 @@ type Manager struct {
 	mu              sync.RWMutex
 	outputsMu       sync.RWMutex
 	followUpChansMu sync.RWMutex
+	// stateSubscribers receive copies of SessionStateChangeEvent. Used by
+	// delegator sessions to watch child state changes without consuming the
+	// primary events channel.
+	stateSubscribers   []chan<- SessionStateChangeEvent
+	stateSubscribersMu sync.Mutex
 }
 
 // RepoName returns the repo name this manager is configured for.
@@ -488,6 +493,25 @@ func (m *Manager) IPCSockPath() string {
 // before the IPC server.
 func (m *Manager) SetIPCSockPath(path string) {
 	m.config.IPCSockPath = path
+}
+
+// SubscribeStateChanges registers a channel to receive copies of all
+// SessionStateChangeEvent emissions. Returns an unsubscribe function.
+func (m *Manager) SubscribeStateChanges(ch chan<- SessionStateChangeEvent) func() {
+	m.stateSubscribersMu.Lock()
+	m.stateSubscribers = append(m.stateSubscribers, ch)
+	m.stateSubscribersMu.Unlock()
+
+	return func() {
+		m.stateSubscribersMu.Lock()
+		defer m.stateSubscribersMu.Unlock()
+		for i, sub := range m.stateSubscribers {
+			if sub == ch {
+				m.stateSubscribers = slices.Delete(m.stateSubscribers, i, i+1)
+				break
+			}
+		}
+	}
 }
 
 // tmuxWindowAlive reports whether the tmux window identified by windowID and/or
@@ -793,9 +817,13 @@ func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, mo
 	ctx, cancel := context.WithCancel(m.ctx)
 
 	if model == "" {
-		model = "sonnet"
-		if sessionType == SessionTypePlanner {
+		switch sessionType {
+		case SessionTypePlanner:
 			model = "opus"
+		case SessionTypeDelegator:
+			model = "sonnet"
+		default:
+			model = "sonnet"
 		}
 	}
 
@@ -1432,6 +1460,15 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					ResumeSessionID: session.CLISessionID,
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
+			case SessionTypeDelegator:
+				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath)
+				runner = &delegatorRunner{
+					manager:      m,
+					toolHandler:  toolHandler,
+					eventHandler: eventHandler,
+					worktreePath: session.WorktreePath,
+					model:        session.Model,
+				}
 			}
 		}
 	}
@@ -1645,6 +1682,16 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	m.followUpChans[session.ID] = followUpChan
 	m.followUpChansMu.Unlock()
 
+	// For delegator sessions, watch for child session state changes so the
+	// delegator auto-resumes when a child goes idle, completes, or fails.
+	var childNotifyChan <-chan SessionStateChangeEvent
+	if dr, ok := runner.(*delegatorRunner); ok {
+		ch := make(chan SessionStateChangeEvent, 10)
+		childNotifyChan = ch
+		unsub := watchChildSessionChanges(session.ctx, m, dr.toolHandler, ch)
+		defer unsub()
+	}
+
 	currentPrompt := prompt
 	for {
 		usage, err := runner.RunTurn(session.ctx, currentPrompt)
@@ -1691,33 +1738,70 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 		m.updateSessionStatus(session, StatusIdle)
 
-		select {
-		case <-session.ctx.Done():
-			m.updateSessionStatus(session, StatusStopped)
-			return
-		case followUp, ok := <-followUpChan:
-			if !ok {
-				m.updateSessionStatus(session, StatusCompleted)
+		// Build the select cases. For delegator sessions, also watch for
+		// child state changes so the delegator auto-resumes.
+		if childNotifyChan != nil {
+			select {
+			case <-session.ctx.Done():
+				m.updateSessionStatus(session, StatusStopped)
 				return
+			case followUp, ok := <-followUpChan:
+				if !ok {
+					m.updateSessionStatus(session, StatusCompleted)
+					return
+				}
+				session.mu.Lock()
+				session.Prompt = followUp
+				session.mu.Unlock()
+				m.updateSessionStatus(session, StatusRunning)
+				now := time.Now()
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: now,
+					Type:      OutputTypeStatus,
+					Content:   "Follow-up prompt:",
+				})
+				m.addOutput(session.ID, OutputLine{
+					Timestamp:    now,
+					Type:         OutputTypeText,
+					Content:      followUp,
+					IsUserPrompt: true,
+				})
+				currentPrompt = followUp
+			case notif := <-childNotifyChan:
+				currentPrompt = fmt.Sprintf(
+					"Child session %s status changed to %s. Use get_session_progress to check details and decide next steps.",
+					notif.SessionID, notif.NewStatus)
+				m.updateSessionStatus(session, StatusRunning)
 			}
-			// Update session prompt so command center shows the latest input.
-			session.mu.Lock()
-			session.Prompt = followUp
-			session.mu.Unlock()
-			m.updateSessionStatus(session, StatusRunning)
-			now := time.Now()
-			m.addOutput(session.ID, OutputLine{
-				Timestamp: now,
-				Type:      OutputTypeStatus,
-				Content:   "Follow-up prompt:",
-			})
-			m.addOutput(session.ID, OutputLine{
-				Timestamp:    now,
-				Type:         OutputTypeText,
-				Content:      followUp,
-				IsUserPrompt: true,
-			})
-			currentPrompt = followUp
+		} else {
+			select {
+			case <-session.ctx.Done():
+				m.updateSessionStatus(session, StatusStopped)
+				return
+			case followUp, ok := <-followUpChan:
+				if !ok {
+					m.updateSessionStatus(session, StatusCompleted)
+					return
+				}
+				// Update session prompt so command center shows the latest input.
+				session.mu.Lock()
+				session.Prompt = followUp
+				session.mu.Unlock()
+				m.updateSessionStatus(session, StatusRunning)
+				now := time.Now()
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: now,
+					Type:      OutputTypeStatus,
+					Content:   "Follow-up prompt:",
+				})
+				m.addOutput(session.ID, OutputLine{
+					Timestamp:    now,
+					Type:         OutputTypeText,
+					Content:      followUp,
+					IsUserPrompt: true,
+				})
+				currentPrompt = followUp
+			}
 		}
 	}
 }
@@ -1741,16 +1825,28 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 	}
 	session.mu.Unlock()
 
-	// Emit state change event
-	select {
-	case m.events <- SessionStateChangeEvent{
+	evt := SessionStateChangeEvent{
 		SessionID: session.ID,
 		OldStatus: oldStatus,
 		NewStatus: newStatus,
-	}:
+	}
+
+	// Emit state change event
+	select {
+	case m.events <- evt:
 	default:
 		log.Printf("WARNING: events channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
 	}
+
+	// Notify state subscribers (used by delegator child watchers)
+	m.stateSubscribersMu.Lock()
+	for _, ch := range m.stateSubscribers {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+	m.stateSubscribersMu.Unlock()
 }
 
 // addOutput adds an output line and emits event.
