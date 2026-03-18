@@ -102,6 +102,14 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 
 func (h *DelegatorToolHandler) handleStopSession(_ context.Context, params stopSessionParams) (string, error) {
 	id := SessionID(params.SessionID)
+
+	h.mu.Lock()
+	_, isChild := h.childIDs[id]
+	h.mu.Unlock()
+	if !isChild {
+		return "", fmt.Errorf("session %s is not owned by this delegator", id)
+	}
+
 	if err := h.manager.StopSession(id); err != nil {
 		return "", fmt.Errorf("failed to stop session: %w", err)
 	}

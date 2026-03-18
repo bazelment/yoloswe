@@ -1738,70 +1738,42 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 		m.updateSessionStatus(session, StatusIdle)
 
-		// Build the select cases. For delegator sessions, also watch for
-		// child state changes so the delegator auto-resumes.
-		if childNotifyChan != nil {
-			select {
-			case <-session.ctx.Done():
-				m.updateSessionStatus(session, StatusStopped)
+		// Wait for a follow-up prompt, a child state change (delegator only),
+		// or context cancellation. childNotifyChan is nil for non-delegator
+		// sessions; receiving from a nil channel blocks forever, so the case
+		// is simply never selected.
+		select {
+		case <-session.ctx.Done():
+			m.updateSessionStatus(session, StatusStopped)
+			return
+		case followUp, ok := <-followUpChan:
+			if !ok {
+				m.updateSessionStatus(session, StatusCompleted)
 				return
-			case followUp, ok := <-followUpChan:
-				if !ok {
-					m.updateSessionStatus(session, StatusCompleted)
-					return
-				}
-				session.mu.Lock()
-				session.Prompt = followUp
-				session.mu.Unlock()
-				m.updateSessionStatus(session, StatusRunning)
-				now := time.Now()
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: now,
-					Type:      OutputTypeStatus,
-					Content:   "Follow-up prompt:",
-				})
-				m.addOutput(session.ID, OutputLine{
-					Timestamp:    now,
-					Type:         OutputTypeText,
-					Content:      followUp,
-					IsUserPrompt: true,
-				})
-				currentPrompt = followUp
-			case notif := <-childNotifyChan:
-				currentPrompt = fmt.Sprintf(
-					"Child session %s status changed to %s. Use get_session_progress to check details and decide next steps.",
-					notif.SessionID, notif.NewStatus)
-				m.updateSessionStatus(session, StatusRunning)
 			}
-		} else {
-			select {
-			case <-session.ctx.Done():
-				m.updateSessionStatus(session, StatusStopped)
-				return
-			case followUp, ok := <-followUpChan:
-				if !ok {
-					m.updateSessionStatus(session, StatusCompleted)
-					return
-				}
-				// Update session prompt so command center shows the latest input.
-				session.mu.Lock()
-				session.Prompt = followUp
-				session.mu.Unlock()
-				m.updateSessionStatus(session, StatusRunning)
-				now := time.Now()
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: now,
-					Type:      OutputTypeStatus,
-					Content:   "Follow-up prompt:",
-				})
-				m.addOutput(session.ID, OutputLine{
-					Timestamp:    now,
-					Type:         OutputTypeText,
-					Content:      followUp,
-					IsUserPrompt: true,
-				})
-				currentPrompt = followUp
-			}
+			// Update session prompt so command center shows the latest input.
+			session.mu.Lock()
+			session.Prompt = followUp
+			session.mu.Unlock()
+			m.updateSessionStatus(session, StatusRunning)
+			now := time.Now()
+			m.addOutput(session.ID, OutputLine{
+				Timestamp: now,
+				Type:      OutputTypeStatus,
+				Content:   "Follow-up prompt:",
+			})
+			m.addOutput(session.ID, OutputLine{
+				Timestamp:    now,
+				Type:         OutputTypeText,
+				Content:      followUp,
+				IsUserPrompt: true,
+			})
+			currentPrompt = followUp
+		case notif := <-childNotifyChan:
+			currentPrompt = fmt.Sprintf(
+				"Child session %s status changed to %s. Use get_session_progress to check details and decide next steps.",
+				notif.SessionID, notif.NewStatus)
+			m.updateSessionStatus(session, StatusRunning)
 		}
 	}
 }

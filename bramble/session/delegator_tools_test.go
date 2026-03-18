@@ -69,9 +69,16 @@ func TestStopSessionTool(t *testing.T) {
 
 	handler := NewDelegatorToolHandler(m, t.TempDir())
 
-	// Start a session first
-	id, err := m.StartSession(SessionTypeBuilder, t.TempDir(), "test", "sonnet")
+	// Start a child session via the handler so ownership is tracked
+	startResult, err := handler.handleStartSession(context.Background(), startSessionParams{
+		Type:   "builder",
+		Prompt: "test",
+	})
 	require.NoError(t, err)
+
+	childIDs := handler.ChildIDs()
+	require.Len(t, childIDs, 1)
+	id := childIDs[0]
 
 	// Wait for it to be running or fail (it will fail since there's no CLI)
 	require.Eventually(t, func() bool {
@@ -86,6 +93,25 @@ func TestStopSessionTool(t *testing.T) {
 	if err == nil {
 		assert.Contains(t, result, "Stopped session:")
 	}
+
+	_ = startResult
+}
+
+func TestStopSessionToolNotOwned(t *testing.T) {
+	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
+	defer m.Close()
+
+	handler := NewDelegatorToolHandler(m, t.TempDir())
+
+	// Start a session directly (not via handler — not owned by this delegator)
+	id, err := m.StartSession(SessionTypeBuilder, t.TempDir(), "test", "sonnet")
+	require.NoError(t, err)
+
+	_, err = handler.handleStopSession(context.Background(), stopSessionParams{
+		SessionID: string(id),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not owned by this delegator")
 }
 
 func TestGetSessionProgressTool(t *testing.T) {
