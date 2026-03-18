@@ -778,7 +778,13 @@ func (m *Manager) Close() {
 	}
 }
 
-// generateSessionID creates a unique session ID.
+// GenerateSessionID creates a random session ID for the given worktree and
+// session type. Exported so callers can pre-register an ID before starting a
+// session, avoiding races between the start goroutine and ID registration.
+func GenerateSessionID(worktreeName string, sessionType SessionType) SessionID {
+	return generateSessionID(worktreeName, sessionType)
+}
+
 func generateSessionID(worktreeName string, sessionType SessionType) SessionID {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
@@ -813,15 +819,20 @@ func generateTitle(prompt string, maxLen int) string {
 func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, model string) (SessionID, error) {
 	worktreeName := filepath.Base(worktreePath)
 	sessionID := generateSessionID(worktreeName, sessionType)
+	return m.startSessionWithID(sessionID, sessionType, worktreePath, worktreeName, prompt, model)
+}
 
+// startSessionWithID starts a session using a caller-supplied session ID.
+// This allows callers (e.g. DelegatorToolHandler) to pre-register the ID
+// before spawning the child goroutine, closing the window where a very fast
+// state transition could be missed by watchChildSessionChanges.
+func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionType, worktreePath, worktreeName, prompt, model string) (SessionID, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 
 	if model == "" {
 		switch sessionType {
 		case SessionTypePlanner:
 			model = "opus"
-		case SessionTypeDelegator:
-			model = "sonnet"
 		default:
 			model = "sonnet"
 		}
@@ -1326,6 +1337,35 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		})
 		m.persistSession(session)
 		return
+	}
+
+	// Delegator sessions require the default Claude SDK path.  They are not
+	// supported in tmux mode, with a pluggable provider, or with a non-Claude
+	// model provider.  Fail fast so the problem is obvious instead of silently
+	// falling through to a providerRunner that has no delegator tools.
+	if session.Type == SessionTypeDelegator {
+		unsupported := ""
+		switch {
+		case m.config.SessionMode == SessionModeTmux:
+			unsupported = "tmux session mode"
+		case m.config.Provider != nil:
+			unsupported = "pluggable provider backend"
+		case agentModel.Provider != ProviderClaude:
+			unsupported = fmt.Sprintf("provider %q (only Claude is supported for delegator sessions)", agentModel.Provider)
+		}
+		if unsupported != "" {
+			m.updateSessionStatus(session, StatusFailed)
+			session.mu.Lock()
+			session.Error = fmt.Errorf("delegator sessions are not supported with %s", unsupported)
+			session.mu.Unlock()
+			m.addOutput(session.ID, OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeError,
+				Content:   fmt.Sprintf("Delegator session requires the Claude SDK backend; %s is not supported.", unsupported),
+			})
+			m.persistSession(session)
+			return
+		}
 	}
 
 	if m.config.SessionMode == SessionModeTmux {

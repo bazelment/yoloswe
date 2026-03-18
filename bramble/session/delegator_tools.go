@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -88,14 +89,25 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 		return "", fmt.Errorf("invalid session type %q: must be planner or builder", params.Type)
 	}
 
-	id, err := h.manager.StartSession(sessionType, h.worktreePath, params.Prompt, params.Model)
-	if err != nil {
-		return "", fmt.Errorf("failed to start session: %w", err)
-	}
+	// Pre-register the child ID *before* spawning the session goroutine.
+	// GenerateSessionID + startSessionWithID are the two halves of StartSession;
+	// registering first ensures watchChildSessionChanges never misses a state
+	// transition that fires before the caller returns from this function.
+	worktreeName := filepath.Base(h.worktreePath)
+	id := GenerateSessionID(worktreeName, sessionType)
 
 	h.mu.Lock()
 	h.childIDs[id] = struct{}{}
 	h.mu.Unlock()
+
+	_, err := h.manager.startSessionWithID(id, sessionType, h.worktreePath, worktreeName, params.Prompt, params.Model)
+	if err != nil {
+		// Clean up the pre-registration on failure.
+		h.mu.Lock()
+		delete(h.childIDs, id)
+		h.mu.Unlock()
+		return "", fmt.Errorf("failed to start session: %w", err)
+	}
 
 	return fmt.Sprintf("Started %s session: %s", params.Type, id), nil
 }
