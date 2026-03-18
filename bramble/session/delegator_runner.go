@@ -105,6 +105,8 @@ func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler
 				return
 			case evt, ok := <-stateCh:
 				if !ok {
+					// stateCh was closed by the unsubscribe wrapper below,
+					// meaning the delegator session has ended. Exit cleanly.
 					return
 				}
 				// Only forward if this is a child session we're tracking
@@ -134,7 +136,10 @@ func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler
 		}
 	}()
 
-	return unsub
+	return func() {
+		unsub()
+		close(stateCh)
+	}
 }
 
 // forwardEvents reads events from the Claude session and forwards them to the

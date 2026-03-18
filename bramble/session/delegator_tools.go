@@ -90,11 +90,11 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 	}
 
 	// Pre-register the child ID *before* spawning the session goroutine.
-	// GenerateSessionID + startSessionWithID are the two halves of StartSession;
+	// generateSessionID + startSessionWithID are the two halves of StartSession;
 	// registering first ensures watchChildSessionChanges never misses a state
 	// transition that fires before the caller returns from this function.
 	worktreeName := filepath.Base(h.worktreePath)
-	id := GenerateSessionID(worktreeName, sessionType)
+	id := generateSessionID(worktreeName, sessionType)
 
 	h.mu.Lock()
 	h.childIDs[id] = struct{}{}

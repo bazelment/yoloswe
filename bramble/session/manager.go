@@ -778,13 +778,6 @@ func (m *Manager) Close() {
 	}
 }
 
-// GenerateSessionID creates a random session ID for the given worktree and
-// session type. Exported so callers can pre-register an ID before starting a
-// session, avoiding races between the start goroutine and ID registration.
-func GenerateSessionID(worktreeName string, sessionType SessionType) SessionID {
-	return generateSessionID(worktreeName, sessionType)
-}
-
 func generateSessionID(worktreeName string, sessionType SessionType) SessionID {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
