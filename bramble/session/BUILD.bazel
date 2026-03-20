@@ -3,7 +3,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "session",
     srcs = [
+        "delegator_mock.go",
         "delegator_runner.go",
+        "delegator_scenario.go",
         "delegator_tools.go",
         "event_handler.go",
         "manager.go",

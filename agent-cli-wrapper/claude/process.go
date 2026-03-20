@@ -88,6 +88,11 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 		args = append(args, "--resume", pm.config.Resume)
 	}
 
+	// Add tools flag (base set of available built-in tools)
+	if pm.config.Tools != nil {
+		args = append(args, "--tools", *pm.config.Tools)
+	}
+
 	// Add allowed/disallowed tools
 	for _, tool := range pm.config.AllowedTools {
 		args = append(args, "--allowed-tools", tool)

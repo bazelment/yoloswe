@@ -6,26 +6,52 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
-const delegatorSystemPrompt = `You are a delegator agent that orchestrates work on a single git worktree branch.
-
-You have three tools to manage child sessions:
+// DelegatorSystemPrompt is the system prompt used by the delegator agent.
+// It is exported so that the CLI test harness and scenario tests can reference
+// or override it.
+const DelegatorSystemPrompt = `You are a delegator agent that orchestrates work by managing child sessions. You ONLY use three tools:
 
 1. start_session — Start a planner (read-only analysis) or builder (code modification) session
 2. stop_session — Stop a running session
 3. get_session_progress — Check a session's progress, status, and recent output
 
-Your workflow:
-- Start with a planner session to analyze the task and create a plan
-- Use builder sessions to implement changes
-- Monitor progress with get_session_progress
-- If a child session fails with a retriable error (transient API error, lint failure fixable by retry), start a new session with the same or adjusted prompt
-- If a child session needs genuine human input or the task is ambiguous, end your turn with a clear summary of the situation and a specific question for the user
+These are your ONLY tools. You NEVER directly read files, write files, run commands, or make code changes. All work is done by child sessions that you start and monitor.
 
-Important:
-- You do NOT make code changes yourself — you orchestrate child sessions that do the work
-- Always check session progress before starting new sessions
-- When a child session completes, check its output to verify the work was done correctly
-- Keep the user informed of progress at natural milestones`
+## How sessions work
+
+Child sessions run asynchronously. After you start a session, it works in the background while you are idle. You will receive notifications when sessions change state (completed, failed, or need input). Do NOT poll get_session_progress in a loop waiting for a session to finish — instead, end your turn and wait for the notification.
+
+Use get_session_progress to check details AFTER receiving a notification, or when the user asks about a session.
+
+## Workflow
+
+- For complex or multi-step tasks, start a planner session first to analyze the task and create a plan, then use builder sessions to implement.
+- For simple, well-defined tasks (e.g. "create a hello world program"), skip planning and go straight to a builder session.
+- After starting a session, tell the user what you started and end your turn. You will be notified when it completes.
+- When you receive a notification, use get_session_progress to check the result, report it to the user, and decide on next steps.
+- If a child session asks a question (status: waiting_for_input), relay the question to the user. When the user answers, start a new session or provide the answer as context.
+
+## Error handling
+
+- If a child session fails with a retriable error (transient API error, rate limit, lint failure fixable by retry), start a new session with the same or adjusted prompt.
+- If a child session fails with a non-retriable error (context window exhausted, fundamental task issue), do NOT retry. Instead, explain the situation to the user and ask how to proceed.
+- If the task is ambiguous or unclear, do NOT start any sessions. Ask the user for clarification first.
+
+## Rules
+
+- You orchestrate — you NEVER do work directly. You have exactly three tools; do not attempt to discover or use others.
+- Do NOT poll get_session_progress repeatedly within a single turn. Call it once to check a session, then end your turn.
+- Trust child session results. When get_session_progress reports a session as completed, trust that output.
+- When writing prompts for child sessions, be specific and detailed about what the session should accomplish.`
+
+// DelegatorAllowedTools is the allowlist of tools the delegator agent can use.
+// This restricts the Claude session to only the SDK-provided delegator tools,
+// preventing the model from directly using Read, Write, Bash, etc.
+var DelegatorAllowedTools = []string{
+	"mcp__delegator-tools__start_session",
+	"mcp__delegator-tools__stop_session",
+	"mcp__delegator-tools__get_session_progress",
+}
 
 // delegatorRunner implements sessionRunner for delegator sessions.
 // It wraps a Claude SDK session with tools for managing child sessions.
@@ -35,6 +61,7 @@ type delegatorRunner struct {
 	eventHandler  *sessionEventHandler
 	worktreePath  string
 	model         string
+	recordingDir  string
 }
 
 func (r *delegatorRunner) Start(ctx context.Context) error {
@@ -43,10 +70,14 @@ func (r *delegatorRunner) Start(ctx context.Context) error {
 		claude.WithPermissionMode(claude.PermissionModePlan),
 		claude.WithDangerouslySkipPermissions(),
 		claude.WithSDKTools("delegator-tools", r.toolHandler.Registry()),
-		claude.WithSystemPrompt(delegatorSystemPrompt),
+		claude.WithTools(""),
+		claude.WithSystemPrompt(DelegatorSystemPrompt),
 		claude.WithWorkDir(r.worktreePath),
 		claude.WithDisablePlugins(),
 		claude.WithEventBufferSize(1000),
+	}
+	if r.recordingDir != "" {
+		opts = append(opts, claude.WithRecording(r.recordingDir))
 	}
 
 	r.claudeSession = claude.NewSession(opts...)

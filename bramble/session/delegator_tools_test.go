@@ -13,7 +13,7 @@ func TestStartSessionTool(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	result, err := handler.handleStartSession(context.Background(), startSessionParams{
 		Type:   "builder",
@@ -33,7 +33,7 @@ func TestStartSessionToolPlanner(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	result, err := handler.handleStartSession(context.Background(), startSessionParams{
 		Type:   "planner",
@@ -53,7 +53,7 @@ func TestStartSessionToolInvalidType(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	_, err := handler.handleStartSession(context.Background(), startSessionParams{
 		Type:   "invalid",
@@ -67,7 +67,7 @@ func TestStopSessionTool(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	// Start a child session via the handler so ownership is tracked
 	startResult, err := handler.handleStartSession(context.Background(), startSessionParams{
@@ -101,7 +101,7 @@ func TestStopSessionToolNotOwned(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	// Start a session directly (not via handler — not owned by this delegator)
 	id, err := m.StartSession(SessionTypeBuilder, t.TempDir(), "test", "sonnet")
@@ -118,7 +118,7 @@ func TestGetSessionProgressTool(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	// Start a session
 	id, err := m.StartSession(SessionTypeBuilder, t.TempDir(), "test prompt", "sonnet")
@@ -137,7 +137,7 @@ func TestGetSessionProgressToolNotFound(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	_, err := handler.handleGetSessionProgress(context.Background(), getSessionProgressParams{
 		SessionID: "nonexistent",
@@ -150,7 +150,7 @@ func TestStartSessionTracksChildren(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	// Start two sessions
 	_, err := handler.handleStartSession(context.Background(), startSessionParams{
@@ -173,7 +173,7 @@ func TestChildNotificationChannel(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 
 	// Start a child session via the handler
 	result, err := handler.handleStartSession(context.Background(), startSessionParams{

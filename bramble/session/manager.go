@@ -52,7 +52,17 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 		r.firstRun = true
 		err := r.pw.Run(ctx, message)
 		r.PlanFilePath = r.pw.PlanFilePath()
-		return nil, err
+		// Run() doesn't return usage directly, but the planner accumulates
+		// stats internally via TurnComplete events. Extract them so the
+		// caller can update Progress (fixes $0.0000 cost display).
+		stats := r.pw.TotalStats()
+		usage := &claude.TurnUsage{
+			InputTokens:     stats.InputTokens,
+			OutputTokens:    stats.OutputTokens,
+			CacheReadTokens: stats.CacheReadTokens,
+			CostUSD:         stats.CostUSD,
+		}
+		return usage, err
 	}
 	return r.pw.RunTurn(ctx, message)
 }
@@ -406,6 +416,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ProtocolLogDir captures provider protocol/session logs for debugging.
 	// If empty, protocol logging is disabled.
 	ProtocolLogDir string
+	// RecordingDir enables JSONL session recording for all sessions.
+	// If empty, recording is disabled.
+	RecordingDir string
 	// IPCSockPath is the path to the bramble IPC Unix domain socket.
 	// Used to propagate BRAMBLE_SOCK to tmux windows so hook commands
 	// can call back to the TUI. Set by main after startIPCServer.
@@ -1484,6 +1497,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					Output:          io.Discard,
 					EventHandler:    eventHandler,
 					ResumeSessionID: session.CLISessionID,
+					RecordingDir:    m.config.RecordingDir,
 				})
 				runner = &plannerRunner{pw: pw}
 			case SessionTypeBuilder:
@@ -1491,15 +1505,17 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					Model:           session.Model,
 					WorkDir:         session.WorktreePath,
 					ResumeSessionID: session.CLISessionID,
+					RecordingDir:    m.config.RecordingDir,
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
 			case SessionTypeDelegator:
-				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath)
+				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, session.Model)
 				runner = &delegatorRunner{
 					toolHandler:  toolHandler,
 					eventHandler: eventHandler,
 					worktreePath: session.WorktreePath,
 					model:        session.Model,
+					recordingDir: m.config.RecordingDir,
 				}
 			}
 		}

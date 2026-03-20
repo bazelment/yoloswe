@@ -492,10 +492,18 @@ func (c *Client) handleThreadStarted(params json.RawMessage) {
 
 	c.mu.Lock()
 	thread, ok := c.threads[notif.Thread.ID]
+	if !ok {
+		// Thread not registered yet — remember so CreateThread can apply it.
+		c.readyBefore[notif.Thread.ID] = struct{}{}
+	}
 	c.mu.Unlock()
 
 	if ok {
 		thread.setInfo(&notif.Thread)
+		// Mark thread as ready.  Codex ≥0.115 no longer sends the
+		// codex/event/mcp_startup_complete notification, so thread/started
+		// is the definitive readiness signal.
+		thread.setReady()
 	}
 }
 
@@ -536,7 +544,6 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 			errMsg = s
 		}
 	}
-
 	fullText := ""
 	var usage TurnUsage
 	if ok {

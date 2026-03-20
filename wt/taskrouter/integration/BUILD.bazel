@@ -6,6 +6,7 @@ go_test(
     srcs = ["router_test.go"],
     tags = [
         "integration",
+        "local",
         "manual",
     ],
     deps = [

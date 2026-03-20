@@ -17,6 +17,7 @@ type DelegatorToolHandler struct { //nolint:govet // fieldalignment: keep relate
 	registry     *claude.TypedToolRegistry
 	manager      *Manager
 	worktreePath string
+	model        string // delegator's model, used as default for child sessions
 	childIDs     map[SessionID]struct{}
 	mu           sync.Mutex
 }
@@ -40,10 +41,11 @@ type getSessionProgressParams struct {
 
 // NewDelegatorToolHandler creates a new DelegatorToolHandler that manages
 // child sessions on the given worktree path.
-func NewDelegatorToolHandler(manager *Manager, worktreePath string) *DelegatorToolHandler {
+func NewDelegatorToolHandler(manager *Manager, worktreePath string, model string) *DelegatorToolHandler {
 	h := &DelegatorToolHandler{
 		manager:      manager,
 		worktreePath: worktreePath,
+		model:        model,
 		childIDs:     make(map[SessionID]struct{}),
 	}
 
@@ -89,6 +91,13 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 		return "", fmt.Errorf("invalid session type %q: must be planner or builder", params.Type)
 	}
 
+	// Use the delegator's model as default for child sessions, unless the
+	// LLM explicitly requested a different model.
+	model := params.Model
+	if model == "" {
+		model = h.model
+	}
+
 	// Pre-register the child ID *before* spawning the session goroutine.
 	// generateSessionID + startSessionWithID are the two halves of StartSession;
 	// registering first ensures watchChildSessionChanges never misses a state
@@ -100,7 +109,7 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 	h.childIDs[id] = struct{}{}
 	h.mu.Unlock()
 
-	_, err := h.manager.startSessionWithID(id, sessionType, h.worktreePath, worktreeName, params.Prompt, params.Model)
+	_, err := h.manager.startSessionWithID(id, sessionType, h.worktreePath, worktreeName, params.Prompt, model)
 	if err != nil {
 		// Clean up the pre-registration on failure.
 		h.mu.Lock()

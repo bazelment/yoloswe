@@ -45,13 +45,20 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		p.client = client
 	}
 
-	// Build thread options
+	// Build thread options.
+	// Only pass an explicit model if the caller overrode the default;
+	// Claude-specific aliases (haiku, sonnet, opus) are not valid for codex
+	// and should not be forwarded — let codex use its own configured default.
 	var threadOpts []codex.ThreadOption
-	if cfg.Model != "" {
+	if cfg.Model != "" && !isClaudeModelAlias(cfg.Model) {
 		threadOpts = append(threadOpts, codex.WithModel(cfg.Model))
 	}
 	if policy, ok := codexApprovalPolicyForPermissionMode(cfg.PermissionMode); ok {
 		threadOpts = append(threadOpts, codex.WithApprovalPolicy(policy))
+	} else {
+		// Default to auto-approve since CodexProvider is used programmatically
+		// with no interactive approval handler.
+		threadOpts = append(threadOpts, codex.WithApprovalPolicy(codex.ApprovalPolicyNever))
 	}
 	if cfg.WorkDir != "" {
 		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
@@ -124,6 +131,17 @@ func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 			OutputTokens:    int(r.Usage.OutputTokens),
 			CacheReadTokens: int(r.Usage.CachedInputTokens),
 		},
+	}
+}
+
+// isClaudeModelAlias returns true for model names that are Claude-specific
+// shorthand (haiku, sonnet, opus) and not valid for non-Claude providers.
+func isClaudeModelAlias(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "haiku", "sonnet", "opus":
+		return true
+	default:
+		return false
 	}
 }
 

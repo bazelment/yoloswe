@@ -66,7 +66,7 @@ func ParseMessage(data []byte) (Message, error) {
 		return msg, nil
 
 	default:
-		slog.Warn("skipping unknown protocol message type", "type", base.Type)
+		slog.Debug("skipping unknown protocol message type", "type", base.Type)
 		return nil, nil
 	}
 }

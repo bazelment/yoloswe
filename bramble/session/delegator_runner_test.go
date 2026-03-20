@@ -11,7 +11,7 @@ func TestDelegatorRunnerConstruction(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree")
+	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree", "")
 	eventHandler := newSessionEventHandler(m, "test-session")
 
 	runner := &delegatorRunner{
@@ -38,7 +38,7 @@ func TestDelegatorRunnerImplementsInterface(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree")
+	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree", "")
 	eventHandler := newSessionEventHandler(m, "test-session")
 
 	var _ sessionRunner = &delegatorRunner{
@@ -50,16 +50,16 @@ func TestDelegatorRunnerImplementsInterface(t *testing.T) {
 }
 
 func TestDelegatorSystemPromptContainsTools(t *testing.T) {
-	assert.Contains(t, delegatorSystemPrompt, "start_session")
-	assert.Contains(t, delegatorSystemPrompt, "stop_session")
-	assert.Contains(t, delegatorSystemPrompt, "get_session_progress")
+	assert.Contains(t, DelegatorSystemPrompt, "start_session")
+	assert.Contains(t, DelegatorSystemPrompt, "stop_session")
+	assert.Contains(t, DelegatorSystemPrompt, "get_session_progress")
 }
 
 func TestDelegatorToolRegistry(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir())
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
 	registry := handler.Registry()
 	tools := registry.Tools()
 

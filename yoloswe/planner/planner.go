@@ -200,6 +200,7 @@ type PlannerWrapper struct {
 	waitingForUserInput bool
 	inBuildPhase        bool
 	pendingBuildStart   bool
+	pendingBuildReturn  bool // BuildModeReturn: wait for TurnComplete before exiting
 }
 
 // NewPlannerWrapper creates a new planner wrapper with the given configuration.
@@ -329,9 +330,11 @@ func (p *PlannerWrapper) Start(ctx context.Context) error {
 
 	p.session = claude.NewSession(opts...)
 
-	// Print CLI flags that will be used
-	if args, err := p.session.CLIArgs(); err == nil {
-		fmt.Fprintf(os.Stderr, "Starting claude with flags: %s\n", strings.Join(args, " "))
+	// Print CLI flags that will be used (only in verbose mode)
+	if p.config.Verbose {
+		if args, err := p.session.CLIArgs(); err == nil {
+			fmt.Fprintf(os.Stderr, "Starting claude with flags: %s\n", strings.Join(args, " "))
+		}
 	}
 
 	if err := p.session.Start(ctx); err != nil {
@@ -464,6 +467,13 @@ func (p *PlannerWrapper) handleEvent(ctx context.Context, event claude.Event) (b
 			return false, nil
 		}
 
+		// BuildModeReturn: we deferred exit from handleExitPlanMode to
+		// capture this TurnComplete. Record stats and exit now.
+		if p.pendingBuildReturn {
+			p.planningStats.Add(e.Usage)
+			return true, nil
+		}
+
 		// Normal stats accumulation
 		if p.inBuildPhase {
 			p.buildingStats.Add(e.Usage)
@@ -514,7 +524,10 @@ func (p *PlannerWrapper) handleExitPlanMode(ctx context.Context, toolUseID strin
 	if p.config.Simple {
 		switch p.config.BuildMode {
 		case BuildModeReturn:
-			return true, nil // Return to caller, let them handle the plan
+			// Don't exit yet — wait for TurnCompleteEvent so stats are
+			// accumulated and the event handler's OnTurnComplete fires.
+			p.pendingBuildReturn = true
+			return false, nil
 		case BuildModeCurrent:
 			return p.executeInCurrentSession(ctx)
 		case BuildModeNewSession:
@@ -961,6 +974,19 @@ func (p *PlannerWrapper) exportPlanToFile(destPath string) error {
 // PlanFilePath returns the path to the detected plan file.
 func (p *PlannerWrapper) PlanFilePath() string {
 	return p.planFilePath
+}
+
+// TotalStats returns the combined planning + building usage stats accumulated
+// during Run(). This is useful for callers that need usage data from Run(),
+// which doesn't return it directly (unlike RunTurn which returns *TurnUsage).
+func (p *PlannerWrapper) TotalStats() SessionStats {
+	return SessionStats{
+		InputTokens:     p.planningStats.InputTokens + p.buildingStats.InputTokens,
+		OutputTokens:    p.planningStats.OutputTokens + p.buildingStats.OutputTokens,
+		CacheReadTokens: p.planningStats.CacheReadTokens + p.buildingStats.CacheReadTokens,
+		CostUSD:         p.planningStats.CostUSD + p.buildingStats.CostUSD,
+		TurnCount:       p.planningStats.TurnCount + p.buildingStats.TurnCount,
+	}
 }
 
 // PrintUsageSummary prints the cumulative token usage and cost for both phases.
