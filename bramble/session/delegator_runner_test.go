@@ -11,7 +11,7 @@ func TestDelegatorRunnerConstruction(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree", "")
+	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree", "", nil)
 	eventHandler := newSessionEventHandler(m, "test-session")
 
 	runner := &delegatorRunner{
@@ -38,7 +38,7 @@ func TestDelegatorRunnerImplementsInterface(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree", "")
+	handler := NewDelegatorToolHandler(m, "/tmp/test-worktree", "", nil)
 	eventHandler := newSessionEventHandler(m, "test-session")
 
 	var _ sessionRunner = &delegatorRunner{
@@ -59,7 +59,7 @@ func TestDelegatorToolRegistry(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir(), "")
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "", nil)
 	registry := handler.Registry()
 	tools := registry.Tools()
 
@@ -72,4 +72,21 @@ func TestDelegatorToolRegistry(t *testing.T) {
 	assert.Contains(t, toolNames, "start_session")
 	assert.Contains(t, toolNames, "stop_session")
 	assert.Contains(t, toolNames, "get_session_progress")
+}
+
+func TestDelegatorSystemPromptWithModels(t *testing.T) {
+	t.Run("empty models returns base prompt", func(t *testing.T) {
+		result := delegatorSystemPromptWithModels("")
+		assert.Equal(t, DelegatorSystemPrompt, result)
+	})
+
+	t.Run("appends model list", func(t *testing.T) {
+		models := "- claude: opus, sonnet\n- gemini: gemini-2.5-pro\n"
+		result := delegatorSystemPromptWithModels(models)
+
+		assert.Contains(t, result, DelegatorSystemPrompt)
+		assert.Contains(t, result, "## Available models")
+		assert.Contains(t, result, "claude: opus, sonnet")
+		assert.Contains(t, result, "gemini: gemini-2.5-pro")
+	})
 }

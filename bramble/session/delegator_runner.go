@@ -44,6 +44,16 @@ Use get_session_progress to check details AFTER receiving a notification, or whe
 - Trust child session results. When get_session_progress reports a session as completed, trust that output.
 - When writing prompts for child sessions, be specific and detailed about what the session should accomplish.`
 
+// delegatorSystemPromptWithModels appends an "Available models" section to the
+// base DelegatorSystemPrompt. If availableModels is empty, the base prompt is
+// returned unchanged.
+func delegatorSystemPromptWithModels(availableModels string) string {
+	if availableModels == "" {
+		return DelegatorSystemPrompt
+	}
+	return DelegatorSystemPrompt + "\n\n## Available models\n\nYou can use any of these models when starting child sessions:\n" + availableModels
+}
+
 // DelegatorAllowedTools is the allowlist of tools the delegator agent can use.
 // This restricts the Claude session to only the SDK-provided delegator tools,
 // preventing the model from directly using Read, Write, Bash, etc.
@@ -71,7 +81,7 @@ func (r *delegatorRunner) Start(ctx context.Context) error {
 		claude.WithDangerouslySkipPermissions(),
 		claude.WithSDKTools("delegator-tools", r.toolHandler.Registry()),
 		claude.WithTools(""),
-		claude.WithSystemPrompt(DelegatorSystemPrompt),
+		claude.WithSystemPrompt(delegatorSystemPromptWithModels(r.toolHandler.AvailableModelsDescription())),
 		claude.WithWorkDir(r.worktreePath),
 		claude.WithDisablePlugins(),
 		claude.WithEventBufferSize(1000),

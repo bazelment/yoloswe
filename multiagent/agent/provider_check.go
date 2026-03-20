@@ -63,6 +63,13 @@ func NewProviderAvailability() *ProviderAvailability {
 	return &ProviderAvailability{statuses: statuses}
 }
 
+// NewProviderAvailabilityFromMap creates a ProviderAvailability from a
+// pre-populated status map. This is useful for testing without probing
+// the actual filesystem.
+func NewProviderAvailabilityFromMap(statuses map[string]ProviderStatus) *ProviderAvailability {
+	return &ProviderAvailability{statuses: statuses}
+}
+
 // IsInstalled returns true if the provider's CLI binary is in PATH.
 func (pa *ProviderAvailability) IsInstalled(provider string) bool {
 	if s, ok := pa.statuses[provider]; ok {

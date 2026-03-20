@@ -1509,7 +1509,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
 			case SessionTypeDelegator:
-				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, session.Model)
+				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, session.Model, m.config.ModelRegistry)
 				runner = &delegatorRunner{
 					toolHandler:  toolHandler,
 					eventHandler: eventHandler,

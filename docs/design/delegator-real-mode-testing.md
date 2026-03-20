@@ -225,6 +225,113 @@ Same prompt as Test Run 2, after fixing planner cost, ToolSearch display, and mo
 - 5-minute timeout insufficient for complex tasks — builder needs more time
 - stderr noise from child processes leaks to terminal (addressed separately)
 
+## Test Run 5: Non-Claude Child Sessions (codex + gemini)
+
+**Purpose:** Verify that the delegator can launch child sessions on non-Claude providers (codex, gemini) after adding `ModelRegistry` support.
+
+**Changes applied:**
+- `DelegatorToolHandler` now accepts a `*agent.ModelRegistry` and validates model names
+- `AvailableModelsDescription()` method formats available models grouped by provider for system prompt injection
+- `delegatorSystemPromptWithModels()` appends an "Available models" section to the delegator system prompt
+- `delegator-test` harness probes installed providers via `NewProviderAvailability()` and passes the registry to `ManagerConfig`
+
+**Test 1: Codex child (gpt-5.3-codex)**
+```
+echo 'Create greeting.go with Greet function. Use gpt-5.3-codex model.' | delegator-test --mode real --model sonnet
+```
+- Delegator correctly selected `gpt-5.3-codex` for the builder session
+- Codex builder ran but hit a read-only workspace restriction (codex CLI limitation, not our code)
+- Delegator self-recovered: started a second builder using Claude sonnet as fallback
+- File was successfully created by the fallback session
+- 3 delegator turns, $0.14 total
+
+**Test 2: Gemini child (gemini-2.5-flash)**
+```
+echo 'Create greeting.go with Greet function. Use gemini-2.5-flash model.' | delegator-test --mode real --model sonnet
+```
+- Delegator correctly selected `gemini-2.5-flash` for the builder session
+- Gemini builder completed successfully on first attempt
+- File was successfully created
+- 2 delegator turns, $0.04 total
+- Clean stderr (no noise)
+
+**Observations:**
+- Non-Claude child sessions report `$0.0000` cost — these providers don't report cost through the same mechanism
+- Codex workspace read-only issue is external (codex CLI needs different permission config)
+- Model validation prevents the delegator from requesting unavailable models
+- The delegator's self-recovery behavior (falling back to Claude when codex failed) was emergent and useful
+
+## Test Run 6: Protocol Logging & Token Count Display for Non-Claude Children
+
+**Purpose:** Verify that `ProtocolLogDir` propagation produces protocol logs for codex/gemini children, and that token counts appear in status/summary lines.
+
+**Changes applied:**
+- `ManagerConfig.ProtocolLogDir` now set alongside `RecordingDir` when `--log-dir` is provided
+- `renderChildStatus` uses `formatProgressDetail()` which shows `Xin/Yout tokens` when cost is zero but tokens are available
+- Progress ticker and final summary both include token counts
+
+**Test 1: Codex builder (gpt-5.3-codex) — REST API server**
+```
+echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gpt-5.3-codex model.' | delegator-test --mode real --model sonnet --log-dir /tmp/dt-logs-codex
+```
+- Protocol log created: `test-project-codex-builder-cd0f263e-codex.protocol.jsonl` ✅
+- Planner (Claude sonnet) completed with cost: `$0.3491` and tokens: `28in/5605out`
+- Summary line shows aggregated tokens: `planner: 1 session, $0.3491, 28in/5605out tokens`
+- Codex builder shows `$0.0000` (codex doesn't report cost or tokens through TurnUsage)
+- 3 delegator turns, $0.48 total
+- Clean stderr
+
+**Test 2: Gemini builder (gemini-2.5-flash) — REST API server**
+```
+echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gemini-2.5-flash model.' | delegator-test --mode real --model sonnet --log-dir /tmp/dt-logs-gemini
+```
+- Protocol log created: `test-project-gemini-builder-273c915b-gemini.protocol.jsonl` ✅
+- Gemini stderr log created: `test-project-gemini-builder-273c915b-gemini.stderr.log` ✅
+- Builder shows `$0.0000` (gemini ACP doesn't report tokens)
+- 2 delegator turns, $0.06 total
+- Clean stderr
+
+**Observations:**
+- Protocol logging now works for all non-Claude providers (was completely absent before)
+- Token count display works correctly in both `renderChildStatus` and the summary line
+- The `formatProgressDetail()` function correctly falls through: cost > tokens > zero-cost
+- Non-Claude providers still don't report tokens through the session progress mechanism — this is a provider limitation, not a harness issue
+
+## Test Run 7: Model Name Format Fix + Multi-Scenario Validation
+
+**Purpose:** Fix the "gemini: gemini-2.5-flash" model name parsing issue and validate both codex and gemini across simple and complex real-world scenarios.
+
+**Fix applied:**
+- `AvailableModelsDescription()` in `delegator_tools.go` changed from grouped format (`- gemini: model1, model2`) to flat list with parenthetical provider (`- model1 (gemini)`). This eliminates ambiguity where the LLM would include the provider prefix as part of the model name.
+
+**4 test scenarios run (before fix):**
+
+| Test | Provider | Prompt | Result | Turns | Cost |
+|------|----------|--------|--------|-------|------|
+| Simple | codex | Greeting function + tests | Pass | 2 | $0.05 |
+| Simple | gemini | Greeting function + tests | Pass | 2 | $0.05 |
+| Complex | codex | Task manager CLI (add/list/done, JSON storage, separate packages) | Pass | 2 | $0.10 |
+| Complex | gemini | Calculator package (4 ops, table-driven tests, CLI) | Pass, but **duplicate `start_session`** | 2 | $0.09 |
+
+**Finding: Duplicate `start_session` in gemini complex test**
+- Delegator first called `start_session` with `model="gemini: gemini-2.5-flash"` (provider prefix included)
+- Tool handler returned error: `unknown model "gemini: gemini-2.5-flash"`
+- Delegator self-recovered, retried with correct `model="gemini-2.5-flash"`
+- Root cause: `AvailableModelsDescription()` format `- gemini: gemini-2.5-flash, ...` was ambiguous
+
+**2 retest scenarios run (after fix):**
+
+| Test | Provider | Result | start_session calls |
+|------|----------|--------|---------------------|
+| Complex | gemini | Pass, 2 turns, $0.07 | **1** (correct model name) |
+| Complex | codex | Pass, 2 turns, $0.08 | 1 |
+
+**Verified:**
+- Gemini retest: exactly 1 `start_session` call with `model=gemini-2.5-flash` (no prefix)
+- Codex retest: 1 `start_session` call with correct model name
+- All 6 runs: clean stderr, correct file creation, proper child lifecycle
+- All 6 runs: protocol logs created for non-Claude children
+
 ## Known Limitations
 
 1. **Stderr noise** — ~~Fixed.~~ `planner.go` debug output is now gated on the `Verbose` flag, and `protocol/parse.go` `slog.Warn` was changed to `slog.Debug`. No more stderr leakage during normal operation.
@@ -234,6 +341,10 @@ Same prompt as Test Run 2, after fixing planner cost, ToolSearch display, and mo
 3. **Pipe buffering** — interactive mode doesn't work well with piped stdin (`echo "line1\nline2" |`). The `bufio.Scanner` reads all lines eagerly, so follow-up lines may be consumed before the delegator is ready. Use a real terminal for interactive testing.
 
 4. **`ToolSearch` tool call** — ~~Fixed.~~ The `--tools ""` flag now disables ALL built-in tools in the delegator session. The delegator only has 3 MCP tools available — no built-in tools at all. ToolSearch is completely unavailable, verified across 3 test runs. The previous `--allowed-tools` approach and `WithAllowedTools(DelegatorAllowedTools...)` have been removed.
+
+5. **Non-Claude child session cost reporting** — ~~Partially addressed.~~ The harness now shows token counts when cost is zero (`Xin/Yout tokens` format), and protocol logs are captured for debugging. However, codex and gemini providers still don't report usage through the `TurnUsage` mechanism, so both cost and token counts remain zero for these providers. The total cost summary underreports when non-Claude children are involved.
+
+6. **Codex read-only workspace** — The codex CLI doesn't write files in the workspace by default. This is a codex CLI configuration issue, not a delegator bug. The delegator correctly self-recovers by spawning a Claude fallback session.
 
 ## Architecture: Why Turn-Based Rendering
 

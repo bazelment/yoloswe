@@ -15,6 +15,7 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/bramble/session"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 func main() {
@@ -177,11 +178,17 @@ func runMockConversation(ctx context.Context, s *claude.Session, mock *session.M
 }
 
 func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, timeout time.Duration) {
+	// Probe installed providers so the delegator knows which models are available.
+	pa := agent.NewProviderAvailability()
+	registry := agent.NewModelRegistry(pa, nil)
+
 	cfg := session.ManagerConfig{
-		SessionMode: session.SessionModeTUI,
+		SessionMode:   session.SessionModeTUI,
+		ModelRegistry: registry,
 	}
 	if logDir != "" {
 		cfg.RecordingDir = logDir
+		cfg.ProtocolLogDir = logDir
 	}
 
 	m := session.NewManagerWithConfig(cfg)
@@ -304,9 +311,9 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 			if len(info.Progress.RecentOutput) > 0 {
 				summary = " — " + info.Progress.RecentOutput[len(info.Progress.RecentOutput)-1]
 			}
-			fmt.Fprintf(os.Stdout, "  %s✓ %s completed (turns: %d, $%.4f)%s%s\n",
+			fmt.Fprintf(os.Stdout, "  %s✓ %s completed (%s)%s%s\n",
 				render.ColorGreen, label,
-				info.Progress.TurnCount, info.Progress.TotalCostUSD,
+				formatProgressDetail(info.Progress),
 				summary, render.ColorReset)
 		case session.StatusIdle:
 			summary := ""
@@ -314,8 +321,8 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 				summary = " — " + info.Progress.RecentOutput[len(info.Progress.RecentOutput)-1]
 			}
 			detail := ""
-			if info.Progress.TurnCount > 0 || info.Progress.TotalCostUSD > 0 {
-				detail = fmt.Sprintf(" (turns: %d, $%.4f)", info.Progress.TurnCount, info.Progress.TotalCostUSD)
+			if info.Progress.TurnCount > 0 || info.Progress.TotalCostUSD > 0 || info.Progress.InputTokens > 0 {
+				detail = fmt.Sprintf(" (%s)", formatProgressDetail(info.Progress))
 			}
 			fmt.Fprintf(os.Stdout, "  %s✓ %s done%s%s%s\n",
 				render.ColorGreen, label,
@@ -356,7 +363,7 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 					}
 					detail := ""
 					if sessions[i].Progress.TurnCount > 0 {
-						detail = fmt.Sprintf(", turns: %d, $%.4f", sessions[i].Progress.TurnCount, sessions[i].Progress.TotalCostUSD)
+						detail = ", " + formatProgressDetail(sessions[i].Progress)
 					}
 					fmt.Fprintf(os.Stdout, "  %s⏳ %s (%s)%s%s%s\n",
 						render.ColorDim, sessions[i].ID, sessions[i].Type, elapsed, detail, render.ColorReset)
@@ -480,27 +487,43 @@ done:
 		}
 	}
 	totalCost := delegatorCost
-	// Count child sessions by type and aggregate their costs.
-	childCounts := make(map[session.SessionType]int)
-	childCosts := make(map[session.SessionType]float64)
+	// Count child sessions by type and aggregate their costs and tokens.
+	type childStats struct {
+		count        int
+		cost         float64
+		inputTokens  int
+		outputTokens int
+	}
+	childByType := make(map[session.SessionType]*childStats)
 	allSessions := m.GetAllSessions()
 	for i := range allSessions {
 		if allSessions[i].ID != delegatorID {
 			t := allSessions[i].Type
-			childCounts[t]++
-			childCosts[t] += allSessions[i].Progress.TotalCostUSD
+			s, ok := childByType[t]
+			if !ok {
+				s = &childStats{}
+				childByType[t] = s
+			}
+			s.count++
+			s.cost += allSessions[i].Progress.TotalCostUSD
+			s.inputTokens += allSessions[i].Progress.InputTokens
+			s.outputTokens += allSessions[i].Progress.OutputTokens
 			totalCost += allSessions[i].Progress.TotalCostUSD
 		}
 	}
 	// Build summary: "delegator: N turns | planner: M sessions | builder: K sessions"
 	parts := []string{fmt.Sprintf("delegator: %d turns, $%.4f", delegatorTurns, delegatorCost)}
 	for _, t := range []session.SessionType{session.SessionTypePlanner, session.SessionTypeBuilder} {
-		if cnt, ok := childCounts[t]; ok {
+		if s, ok := childByType[t]; ok {
 			noun := "sessions"
-			if cnt == 1 {
+			if s.count == 1 {
 				noun = "session"
 			}
-			parts = append(parts, fmt.Sprintf("%s: %d %s, $%.4f", t, cnt, noun, childCosts[t]))
+			tokenInfo := ""
+			if s.inputTokens > 0 || s.outputTokens > 0 {
+				tokenInfo = fmt.Sprintf(", %din/%dout tokens", s.inputTokens, s.outputTokens)
+			}
+			parts = append(parts, fmt.Sprintf("%s: %d %s, $%.4f%s", t, s.count, noun, s.cost, tokenInfo))
 		} else {
 			parts = append(parts, fmt.Sprintf("%s: 0 sessions", t))
 		}
@@ -510,6 +533,18 @@ done:
 	if logDir != "" {
 		fmt.Printf("\nSession JSONL logs saved to: %s\n", logDir)
 	}
+}
+
+// formatProgressDetail formats a progress summary showing turns and either cost
+// or token counts (preferring cost when non-zero, falling back to tokens).
+func formatProgressDetail(p session.SessionProgressSnapshot) string {
+	if p.TotalCostUSD > 0 {
+		return fmt.Sprintf("turns: %d, $%.4f", p.TurnCount, p.TotalCostUSD)
+	}
+	if p.InputTokens > 0 || p.OutputTokens > 0 {
+		return fmt.Sprintf("turns: %d, %din/%dout tokens", p.TurnCount, p.InputTokens, p.OutputTokens)
+	}
+	return fmt.Sprintf("turns: %d, $%.4f", p.TurnCount, p.TotalCostUSD)
 }
 
 // formatToolSummary returns a short description of a tool invocation's input.

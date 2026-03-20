@@ -63,6 +63,14 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	if cfg.WorkDir != "" {
 		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
 	}
+	// For bypass mode (builders), disable sandboxing entirely so codex
+	// can write files and run commands. The "workspace-write" mode still
+	// uses bubblewrap, which may fail in container/VM environments that
+	// lack network namespace permissions. Since the delegator runs in a
+	// controlled environment, full access is appropriate.
+	if cfg.PermissionMode == "bypass" {
+		threadOpts = append(threadOpts, codex.WithSandbox("danger-full-access"))
+	}
 
 	// Create thread and execute
 	thread, err := p.client.CreateThread(ctx, threadOpts...)
