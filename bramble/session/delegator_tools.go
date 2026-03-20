@@ -185,6 +185,14 @@ func (h *DelegatorToolHandler) AvailableModelsDescription() string {
 
 func (h *DelegatorToolHandler) handleGetSessionProgress(_ context.Context, params getSessionProgressParams) (string, error) {
 	id := SessionID(params.SessionID)
+
+	h.mu.Lock()
+	_, isChild := h.childIDs[id]
+	h.mu.Unlock()
+	if !isChild {
+		return "", fmt.Errorf("session %s is not owned by this delegator", id)
+	}
+
 	info, ok := h.manager.GetSessionInfo(id)
 	if !ok {
 		return "", fmt.Errorf("session not found: %s", id)

@@ -88,7 +88,7 @@ func RunDelegatorScenario(ctx context.Context, cfg DelegatorScenarioConfig) (*De
 		claude.WithSystemPrompt(systemPrompt),
 		claude.WithDisablePlugins(),
 		claude.WithEventBufferSize(1000),
-		claude.WithAllowedTools(DelegatorAllowedTools...),
+		claude.WithTools(""),
 	}
 	opts = append(opts, cfg.SessionOpts...)
 

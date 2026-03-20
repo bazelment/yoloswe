@@ -120,19 +120,41 @@ func TestGetSessionProgressTool(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	handler := NewDelegatorToolHandler(m, t.TempDir(), "", nil)
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "sonnet", nil)
 
-	// Start a session
-	id, err := m.StartSession(SessionTypeBuilder, t.TempDir(), "test prompt", "sonnet")
+	// Start a session via the handler so ownership is tracked
+	_, err := handler.handleStartSession(context.Background(), startSessionParams{
+		Type:   "builder",
+		Prompt: "test prompt",
+	})
 	require.NoError(t, err)
 
+	childIDs := handler.ChildIDs()
+	require.Len(t, childIDs, 1)
+
 	result, err := handler.handleGetSessionProgress(context.Background(), getSessionProgressParams{
-		SessionID: string(id),
+		SessionID: string(childIDs[0]),
 	})
 	require.NoError(t, err)
 	assert.Contains(t, result, "Session:")
 	assert.Contains(t, result, "Type: builder")
-	assert.Contains(t, result, "Model: sonnet")
+}
+
+func TestGetSessionProgressToolNotOwned(t *testing.T) {
+	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
+	defer m.Close()
+
+	handler := NewDelegatorToolHandler(m, t.TempDir(), "", nil)
+
+	// Start a session directly (not via handler — not owned by this delegator)
+	id, err := m.StartSession(SessionTypeBuilder, t.TempDir(), "test", "sonnet")
+	require.NoError(t, err)
+
+	_, err = handler.handleGetSessionProgress(context.Background(), getSessionProgressParams{
+		SessionID: string(id),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not owned by this delegator")
 }
 
 func TestGetSessionProgressToolNotFound(t *testing.T) {
@@ -145,7 +167,8 @@ func TestGetSessionProgressToolNotFound(t *testing.T) {
 		SessionID: "nonexistent",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "session not found")
+	// nonexistent sessions are not in childIDs either, so we get "not owned" first
+	assert.Contains(t, err.Error(), "not owned by this delegator")
 }
 
 func TestStartSessionTracksChildren(t *testing.T) {

@@ -54,15 +54,6 @@ func delegatorSystemPromptWithModels(availableModels string) string {
 	return DelegatorSystemPrompt + "\n\n## Available models\n\nYou can use any of these models when starting child sessions:\n" + availableModels
 }
 
-// DelegatorAllowedTools is the allowlist of tools the delegator agent can use.
-// This restricts the Claude session to only the SDK-provided delegator tools,
-// preventing the model from directly using Read, Write, Bash, etc.
-var DelegatorAllowedTools = []string{
-	"mcp__delegator-tools__start_session",
-	"mcp__delegator-tools__stop_session",
-	"mcp__delegator-tools__get_session_progress",
-}
-
 // delegatorRunner implements sessionRunner for delegator sessions.
 // It wraps a Claude SDK session with tools for managing child sessions.
 type delegatorRunner struct {
