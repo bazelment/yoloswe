@@ -344,6 +344,25 @@ echo 'Add a REST API with /health and /echo endpoints using separate packages. U
 
 **Verified:** Simple ($0.075) and complex ($0.74) non-interactive tests pass all 8 checklist items with no regressions. Interactive feature verified by code inspection (piped stdin cannot test follow-ups).
 
+## Test Run 9: Interactive Mid-Session Questions (PTY Test)
+
+**Purpose:** End-to-end verification of mid-session interaction using `script` + FIFO to simulate a real PTY with timed user input.
+
+**Test setup:** Complex prompt (REST API + CLI) with two mid-session questions sent at 20s and 40s while the planner was running:
+1. "What's the current status? Is the planner still working?"
+2. "How much has it cost so far?"
+
+**Results:**
+- `You (children active)>` prompt appeared after Turn 1 (delegator idle, planner running) ✅
+- Question 1: delegator called `get_session_progress`, reported planner running with 0 turns (Turn 2, $0.028) ✅
+- Question 2: delegator answered from cached knowledge, no tool call needed (Turn 3, $0.030) ✅
+- After planner completed: normal notification flow resumed, builder started and finished (Turns 4-5) ✅
+- 5 delegator turns total, $1.06 overall
+- No deadlock, no race condition, no dropped notifications
+- JSONL verified: delegator 3 tools, planner 26, builder 26
+
+**Non-interactive regression:** Simple test ($0.076, 2 turns) passed all 8 checklist items.
+
 ## Known Limitations
 
 1. **Stderr noise** — ~~Fixed.~~ `planner.go` debug output is now gated on the `Verbose` flag, and `protocol/parse.go` `slog.Warn` was changed to `slog.Debug`. No more stderr leakage during normal operation.

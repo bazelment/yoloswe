@@ -27,3 +27,12 @@ Fixes: removed hasActiveChildren guard on idle prompt in delegator.go; user now 
 Verdict: Clean
 Notes: Simple ($0.075, 2 turns) and complex ($0.74, 2 turns) pass all 8 checklist items. Interactive mid-session feature verified by code inspection (can't pipe follow-ups in non-interactive mode). SendFollowUp/childNotifyChan already coexist safely in manager.go select.
 ---
+
+---
+Date: 2026-03-21
+Rounds: 1
+Findings: none
+Fixes: none
+Verdict: Clean
+Notes: Interactive test via script+FIFO PTY confirmed mid-session interaction works. User asked 2 questions while planner was running; delegator answered both (one with get_session_progress, one from cached knowledge). 5 delegator turns total ($1.06). "You (children active)>" prompt appeared correctly. Non-interactive regression also clean ($0.076, 2 turns). All JSONL checks pass.
+---
