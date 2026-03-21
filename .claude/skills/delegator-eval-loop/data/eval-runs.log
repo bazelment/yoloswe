@@ -9,3 +9,21 @@
 # Verdict: Clean | Gaps remain (list)
 # Notes: anything useful for next run
 # ---
+
+---
+Date: 2026-03-21
+Rounds: 1
+Findings: none
+Fixes: none
+Verdict: Clean
+Notes: Simple ($0.08, 2 turns) and complex ($0.92, 3 turns) both pass all 8 checklist items. JSONL verified: delegator 3 tools, children 26. No regressions from known-gaps table. Planner cost still high ($0.68) on complex — model behavior, not harness bug.
+---
+
+---
+Date: 2026-03-21
+Rounds: 1
+Findings: user couldn't interact while children running (interactive mode blocked prompt)
+Fixes: removed hasActiveChildren guard on idle prompt in delegator.go; user now sees "You (children active)>" prompt when delegator idle with running children
+Verdict: Clean
+Notes: Simple ($0.075, 2 turns) and complex ($0.74, 2 turns) pass all 8 checklist items. Interactive mid-session feature verified by code inspection (can't pipe follow-ups in non-interactive mode). SendFollowUp/childNotifyChan already coexist safely in manager.go select.
+---

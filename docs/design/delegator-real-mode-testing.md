@@ -2,21 +2,21 @@
 
 ## Overview
 
-This document captures the iterative testing and review process for adding `--mode real` to `delegator-test`, from initial implementation through multiple rounds of output readability improvements.
+This document captures the iterative testing and review process for adding `--mode real` to `bramble delegator`, from initial implementation through multiple rounds of output readability improvements.
 
 ## Files Changed
 
 | File | Change |
 |------|--------|
-| `bramble/cmd/delegator-test/main.go` | `--mode`, `--log-dir`, `--timeout` flags; `runReal()` with turn-based rendering |
-| `bramble/cmd/delegator-test/BUILD.bazel` | No changes needed (gazelle-ignored, deps unchanged) |
+| `bramble/cmd/delegator/delegator.go` | `--mode`, `--log-dir`, `--timeout` flags; `runReal()` with turn-based rendering |
+| `bramble/cmd/delegator/BUILD.bazel` | Bazel library target for the delegator subcommand |
 | `bramble/session/manager.go` | `RecordingDir` field on `ManagerConfig`; threaded to planner/builder/delegator in `runSession()` |
 | `bramble/session/delegator_runner.go` | `recordingDir` field; `claude.WithRecording()` in `Start()` |
 
 ## Test Run 1: First Working Real Mode (haiku delegator)
 
 ```
-echo "What files are in this project?" | delegator-test --mode real --work-dir /tmp/test-project --model haiku
+echo "What files are in this project?" | bramble delegator --mode real --work-dir /tmp/test-project --model haiku
 ```
 
 **Raw output (ANSI stripped):**
@@ -124,7 +124,7 @@ Trigger `renderNewOutput()` on:
 
 ```
 echo "Add a REST API server with /health and /echo endpoints, and also add a CLI tool that calls the API. Use separate packages." \
-  | delegator-test --mode real --work-dir /tmp/test-project --model sonnet --log-dir /tmp/delegator-real-logs
+  | bramble delegator --mode real --work-dir /tmp/test-project --model sonnet --log-dir /tmp/delegator-real-logs
 ```
 
 **Clean output (ANSI stripped, stderr noise filtered):**
@@ -233,11 +233,11 @@ Same prompt as Test Run 2, after fixing planner cost, ToolSearch display, and mo
 - `DelegatorToolHandler` now accepts a `*agent.ModelRegistry` and validates model names
 - `AvailableModelsDescription()` method formats available models grouped by provider for system prompt injection
 - `delegatorSystemPromptWithModels()` appends an "Available models" section to the delegator system prompt
-- `delegator-test` harness probes installed providers via `NewProviderAvailability()` and passes the registry to `ManagerConfig`
+- `bramble delegator` harness probes installed providers via `NewProviderAvailability()` and passes the registry to `ManagerConfig`
 
 **Test 1: Codex child (gpt-5.3-codex)**
 ```
-echo 'Create greeting.go with Greet function. Use gpt-5.3-codex model.' | delegator-test --mode real --model sonnet
+echo 'Create greeting.go with Greet function. Use gpt-5.3-codex model.' | bramble delegator --mode real --model sonnet
 ```
 - Delegator correctly selected `gpt-5.3-codex` for the builder session
 - Codex builder ran but hit a read-only workspace restriction (codex CLI limitation, not our code)
@@ -247,7 +247,7 @@ echo 'Create greeting.go with Greet function. Use gpt-5.3-codex model.' | delega
 
 **Test 2: Gemini child (gemini-2.5-flash)**
 ```
-echo 'Create greeting.go with Greet function. Use gemini-2.5-flash model.' | delegator-test --mode real --model sonnet
+echo 'Create greeting.go with Greet function. Use gemini-2.5-flash model.' | bramble delegator --mode real --model sonnet
 ```
 - Delegator correctly selected `gemini-2.5-flash` for the builder session
 - Gemini builder completed successfully on first attempt
@@ -272,7 +272,7 @@ echo 'Create greeting.go with Greet function. Use gemini-2.5-flash model.' | del
 
 **Test 1: Codex builder (gpt-5.3-codex) — REST API server**
 ```
-echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gpt-5.3-codex model.' | delegator-test --mode real --model sonnet --log-dir /tmp/dt-logs-codex
+echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gpt-5.3-codex model.' | bramble delegator --mode real --model sonnet --log-dir /tmp/dt-logs-codex
 ```
 - Protocol log created: `test-project-codex-builder-cd0f263e-codex.protocol.jsonl` ✅
 - Planner (Claude sonnet) completed with cost: `$0.3491` and tokens: `28in/5605out`
@@ -283,7 +283,7 @@ echo 'Add a REST API with /health and /echo endpoints using separate packages. U
 
 **Test 2: Gemini builder (gemini-2.5-flash) — REST API server**
 ```
-echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gemini-2.5-flash model.' | delegator-test --mode real --model sonnet --log-dir /tmp/dt-logs-gemini
+echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gemini-2.5-flash model.' | bramble delegator --mode real --model sonnet --log-dir /tmp/dt-logs-gemini
 ```
 - Protocol log created: `test-project-gemini-builder-273c915b-gemini.protocol.jsonl` ✅
 - Gemini stderr log created: `test-project-gemini-builder-273c915b-gemini.stderr.log` ✅
@@ -331,6 +331,18 @@ echo 'Add a REST API with /health and /echo endpoints using separate packages. U
 - Codex retest: 1 `start_session` call with correct model name
 - All 6 runs: clean stderr, correct file creation, proper child lifecycle
 - All 6 runs: protocol logs created for non-Claude children
+
+## Test Run 8: Mid-Session User Interaction
+
+**Purpose:** Allow the user to interact with the delegator while child sessions are running, asking questions about progress that the delegator answers via `get_session_progress`.
+
+**Problem:** In interactive mode, when the delegator went idle after starting a child session, `hasActiveChildren()` returned true and the code skipped the `You>` prompt. The user couldn't type until all children finished.
+
+**Fix:** Removed the `hasActiveChildren` gate on the idle prompt. Now whenever the delegator goes idle (including while children are running), the user sees a prompt. The prompt text differentiates: `You (children active)>` vs `You>`.
+
+**Why this is safe:** `SendFollowUp` and child notifications (`watchChildSessionChanges`) both feed into the same `select` in `runSession` (manager.go lines 1787-1825). They are processed sequentially — no race. If a child notification transitions the delegator from idle to running between the prompt display and the user's send, `SendFollowUp` returns an error (status check at manager.go:2200), which is displayed to the user.
+
+**Verified:** Simple ($0.075) and complex ($0.74) non-interactive tests pass all 8 checklist items with no regressions. Interactive feature verified by code inspection (piped stdin cannot test follow-ups).
 
 ## Known Limitations
 
