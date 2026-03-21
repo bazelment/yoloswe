@@ -46,7 +46,7 @@ delegator's system prompt. Real mode uses the Manager with real Claude sessions.
 }
 
 func init() {
-	Cmd.Flags().StringVar(&mode, "mode", "mock", "Mode: mock (scripted children) or real (Manager-based with real sessions)")
+	Cmd.Flags().StringVar(&mode, "mode", "real", "Mode: real (Manager-based with real sessions) or mock (scripted children)")
 	Cmd.Flags().StringVar(&model, "model", "sonnet", "Claude model for the delegator")
 	Cmd.Flags().BoolVar(&autoAdvance, "auto-advance", true, "Auto-send child state notifications (mock mode only)")
 	Cmd.Flags().StringVar(&behaviorFlag, "behavior", "", "State progressions, e.g. planner=running,completed;builder=running,completed (mock mode only)")
