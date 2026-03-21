@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -356,14 +357,23 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 		}
 	}
 
+	// stopCh is closed by the main goroutine when it exits the event wait,
+	// signaling the event loop goroutine to stop writing to stdout.
+	stopCh := make(chan struct{})
+	var eventLoopDone sync.WaitGroup
+	eventLoopDone.Add(1)
+
 	// Event loop goroutine — drains Manager events and signals turn/state
 	// boundaries. Rendering happens in response to these signals rather
 	// than per-event, so we always see fully accumulated text.
 	go func() {
+		defer eventLoopDone.Done()
 		progressTicker := time.NewTicker(30 * time.Second)
 		defer progressTicker.Stop()
 		for {
 			select {
+			case <-stopCh:
+				return
 			case <-ctx.Done():
 				return
 			case <-progressTicker.C:
@@ -448,7 +458,15 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 
 	if interactive {
 		// Interactive loop: wait for delegator to go idle, then prompt for input.
-		scanner := bufio.NewScanner(os.Stdin)
+		// Read stdin in a goroutine so we can select on doneCh without blocking.
+		stdinCh := make(chan string)
+		go func() {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				stdinCh <- scanner.Text()
+			}
+			close(stdinCh)
+		}()
 		for {
 			select {
 			case <-doneCh:
@@ -461,18 +479,26 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 				} else {
 					fmt.Print("\nYou> ")
 				}
-				if !scanner.Scan() {
+				// Wait for stdin input or completion.
+				select {
+				case <-doneCh:
 					goto done
-				}
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" {
-					continue
-				}
-				if line == "quit" || line == "exit" {
+				case <-ctx.Done():
 					goto done
-				}
-				if err := m.SendFollowUp(delegatorID, line); err != nil {
-					fmt.Fprintf(os.Stderr, "SendFollowUp error: %v (delegator may be processing a notification, try again)\n", err)
+				case text, ok := <-stdinCh:
+					if !ok {
+						goto done
+					}
+					line := strings.TrimSpace(text)
+					if line == "" {
+						continue
+					}
+					if line == "quit" || line == "exit" {
+						goto done
+					}
+					if err := m.SendFollowUp(delegatorID, line); err != nil {
+						fmt.Fprintf(os.Stderr, "SendFollowUp error: %v (delegator may be processing a notification, try again)\n", err)
+					}
 				}
 			}
 		}
@@ -490,8 +516,10 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 	}
 
 done:
-	// Let events settle before reading final state.
-	time.Sleep(100 * time.Millisecond)
+	// Signal event loop goroutine to stop and wait for it to finish
+	// before reading final state, preventing concurrent stdout writes.
+	close(stopCh)
+	eventLoopDone.Wait()
 
 	// Print total summary across all sessions.
 	lines := m.GetSessionOutput(delegatorID)
