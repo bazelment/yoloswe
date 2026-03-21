@@ -237,10 +237,7 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 			}
 
 			// Type icon
-			typeIcon := "📋"
-			if sess.Type == session.SessionTypeBuilder {
-				typeIcon = "🔨"
-			}
+			typeIcon := sessionTypeEmojiIcon(sess.Type)
 
 			// Worktree name
 			wtName := truncate(sess.WorktreeName, wtColWidth-1)

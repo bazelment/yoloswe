@@ -93,6 +93,7 @@ func (ct *CodeTalkSession) Start(ctx context.Context) error {
 		claude.WithModel(ct.config.Model),
 		claude.WithSystemPrompt(systemPrompt),
 		claude.WithPermissionMode(claude.PermissionModeDefault),
+		claude.WithPermissionHandler(claude.AllowAllPermissionHandler()),
 		claude.WithPermissionPromptToolStdio(),
 		claude.WithInteractiveToolHandler(&codetalkInteractiveHandler{ct}),
 		claude.WithRecording(ct.config.RecordingDir),

@@ -304,6 +304,13 @@ func TestRenderTimelineNoOverflow(t *testing.T) {
 func TestSessionTypeIcon(t *testing.T) {
 	assert.Equal(t, "[P]", sessionTypeIcon(session.SessionTypePlanner))
 	assert.Equal(t, "[B]", sessionTypeIcon(session.SessionTypeBuilder))
+	assert.Equal(t, "[C]", sessionTypeIcon(session.SessionTypeCodeTalk))
+}
+
+func TestSessionTypeEmojiIcon(t *testing.T) {
+	assert.Equal(t, "📋", sessionTypeEmojiIcon(session.SessionTypePlanner))
+	assert.Equal(t, "🔨", sessionTypeEmojiIcon(session.SessionTypeBuilder))
+	assert.Equal(t, "💬", sessionTypeEmojiIcon(session.SessionTypeCodeTalk))
 }
 
 func TestSessionStatusEvent(t *testing.T) {

@@ -204,10 +204,27 @@ func (m Model) buildTimeline() []timelineEntry {
 // sessionTypeIcon returns a fixed-width ASCII icon for a session type.
 // Uses ASCII glyphs instead of emoji to avoid inconsistent terminal widths.
 func sessionTypeIcon(t session.SessionType) string {
-	if t == session.SessionTypeBuilder {
+	switch t {
+	case session.SessionTypeBuilder:
 		return "[B]"
+	case session.SessionTypeCodeTalk:
+		return "[C]"
+	default:
+		return "[P]"
 	}
-	return "[P]"
+}
+
+// sessionTypeEmojiIcon returns an emoji icon for a session type.
+// Used in contexts where emoji rendering is consistent (e.g., TUI panes).
+func sessionTypeEmojiIcon(t session.SessionType) string {
+	switch t {
+	case session.SessionTypeBuilder:
+		return "🔨"
+	case session.SessionTypeCodeTalk:
+		return "💬"
+	default:
+		return "📋"
+	}
 }
 
 // sessionStatusEvent maps a session status to a human-readable event name.

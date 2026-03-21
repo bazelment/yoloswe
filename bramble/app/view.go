@@ -255,12 +255,7 @@ func (m Model) renderSessionListView(width, height int) string {
 	// Render sessions
 	for i := range currentSessions {
 		sess := &currentSessions[i]
-		typeIcon := "📋"
-		if sess.Type == session.SessionTypeBuilder {
-			typeIcon = "🔨"
-		} else if sess.Type == session.SessionTypeCodeTalk {
-			typeIcon = "💬"
-		}
+		typeIcon := sessionTypeEmojiIcon(sess.Type)
 
 		// Session name (tmux window name or ID)
 		nameDisplay := sess.TmuxWindowName
@@ -361,12 +356,7 @@ func (m Model) renderOutputArea(width, height int) string {
 	}
 
 	// Session header
-	typeIcon := "📋"
-	if info.Type == session.SessionTypeBuilder {
-		typeIcon = "🔨"
-	} else if info.Type == session.SessionTypeCodeTalk {
-		typeIcon = "💬"
-	}
+	typeIcon := sessionTypeEmojiIcon(info.Type)
 	title := info.Title
 	if title == "" {
 		title = string(info.ID)
@@ -576,12 +566,7 @@ func (m Model) renderHistorySession(width, height int) string {
 	data := m.viewingHistoryData
 
 	// Session header with replay indicator
-	typeIcon := "📋"
-	if data.Type == session.SessionTypeBuilder {
-		typeIcon = "🔨"
-	} else if data.Type == session.SessionTypeCodeTalk {
-		typeIcon = "💬"
-	}
+	typeIcon := sessionTypeEmojiIcon(data.Type)
 	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, data.Type, data.ID, s.Dim.Render("[Replay]"))
 	b.WriteString(headerLine)
 	b.WriteString("\n")

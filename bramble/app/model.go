@@ -391,12 +391,7 @@ func (m *Model) updateSessionDropdown() {
 	for i := range sessions {
 		sess := &sessions[i]
 		// Type icon
-		icon := "📋" // planner
-		if sess.Type == session.SessionTypeBuilder {
-			icon = "🔨"
-		} else if sess.Type == session.SessionTypeCodeTalk {
-			icon = "💬"
-		}
+		icon := sessionTypeEmojiIcon(sess.Type)
 
 		// Status badge
 		badge := statusIcon(sess.Status, m.styles)
