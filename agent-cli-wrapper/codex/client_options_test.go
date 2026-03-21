@@ -169,20 +169,36 @@ func TestThreadOption_WithApprovalPolicy(t *testing.T) {
 }
 
 func TestThreadOption_WithSandbox(t *testing.T) {
-	cfg := defaultCodexThreadConfig()
-	sandbox := &SandboxConfig{
-		Type:          "docker",
-		WritableRoots: []string{"/tmp"},
-		NetworkAccess: false,
-	}
-	WithSandbox(sandbox)(&cfg)
+	t.Run("struct config", func(t *testing.T) {
+		cfg := defaultCodexThreadConfig()
+		sandbox := &SandboxConfig{
+			Type:          "docker",
+			WritableRoots: []string{"/tmp"},
+			NetworkAccess: false,
+		}
+		WithSandbox(sandbox)(&cfg)
 
-	if cfg.Sandbox != sandbox {
-		t.Error("Sandbox not set correctly")
-	}
-	if cfg.Sandbox.Type != "docker" {
-		t.Errorf("unexpected Sandbox.Type: %q", cfg.Sandbox.Type)
-	}
+		got, ok := cfg.Sandbox.(*SandboxConfig)
+		if !ok {
+			t.Fatal("Sandbox should be *SandboxConfig")
+		}
+		if got.Type != "docker" {
+			t.Errorf("unexpected Sandbox.Type: %q", got.Type)
+		}
+	})
+
+	t.Run("string policy", func(t *testing.T) {
+		cfg := defaultCodexThreadConfig()
+		WithSandbox("workspace-write")(&cfg)
+
+		got, ok := cfg.Sandbox.(string)
+		if !ok {
+			t.Fatal("Sandbox should be string")
+		}
+		if got != "workspace-write" {
+			t.Errorf("unexpected Sandbox: %q", got)
+		}
+	})
 }
 
 func TestThreadOption_WithThreadConfig(t *testing.T) {

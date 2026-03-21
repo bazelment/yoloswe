@@ -25,5 +25,11 @@ echo "=== Running manual tests ==="
 echo "These tests require real CLI tools and authentication tokens."
 echo ""
 
+# Pass HOME and PATH so tests can find CLI tools (gh, claude, codex, agent)
+# and their authentication configs (~/.config/gh/hosts.yml, etc.).
+# Bazel sandboxing strips these by default.
 # shellcheck disable=SC2086
-bazel test ${MANUAL_TESTS} "$@"
+bazel test ${MANUAL_TESTS} \
+    --test_env=HOME="${HOME}" \
+    --test_env=PATH="${PATH}" \
+    "$@"

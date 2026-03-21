@@ -14,8 +14,9 @@ import (
 type SessionType string
 
 const (
-	SessionTypePlanner SessionType = "planner"
-	SessionTypeBuilder SessionType = "builder"
+	SessionTypePlanner   SessionType = "planner"
+	SessionTypeBuilder   SessionType = "builder"
+	SessionTypeDelegator SessionType = "delegator"
 )
 
 // Provider name aliases — canonical definitions are in multiagent/agent.

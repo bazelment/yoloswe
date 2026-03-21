@@ -75,7 +75,9 @@ type ClientInfo struct {
 
 // ThreadStartParams for starting a new thread.
 type ThreadStartParams struct {
-	Sandbox        *SandboxConfig         `json:"sandbox,omitempty"`
+	// Sandbox can be a string ("read-only", "workspace-write", "danger-full-access")
+	// or a *SandboxConfig struct for detailed configuration.
+	Sandbox        interface{}            `json:"sandbox,omitempty"`
 	Config         map[string]interface{} `json:"config,omitempty"`
 	Model          string                 `json:"model,omitempty"`
 	ModelProvider  string                 `json:"modelProvider,omitempty"`

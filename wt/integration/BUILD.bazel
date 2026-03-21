@@ -8,6 +8,7 @@ go_test(
         "branch_change_test.go",
         "integration_test.go",
     ],
+    env_inherit = ["HOME"],
     tags = [
         "local",
         "manual",

@@ -44,6 +44,18 @@ MVC architecture in `bramble/sessionmodel/` → `bramble/session/` → `bramble/
 - Visual inspection: `bazel run //bramble/cmd/logview -- <file>.jsonl`
 - Two render paths (`output.go` + `view.go`) must stay in sync — see practices doc
 
+## Streaming Text Event Pipeline
+
+Claude SDK emits `TextEvent` with arbitrary chunk boundaries (word fragments, partial sentences). Three layers handle accumulation — use the right one for your context:
+
+1. **`render.Renderer`** (`agent-cli-wrapper/claude/render/`) — for terminal/CLI output. Prints text to stdout immediately (streaming), buffers internally, and flushes to `EventHandler.OnText()` at semantic boundaries (tool start, newline, 80+ chars). Use this when building CLI tools that consume `claude.Session` events. Example: `bramble/cmd/delegator/`.
+
+2. **`sessionEventHandler.OnText()`** (`bramble/session/event_handler.go`) — for bramble's Manager. Calls `appendOrAddText()` which appends to the last `OutputLine` if its type is `OutputTypeText`, otherwise creates a new line. Text accumulates at the data model level.
+
+3. **`OutputBuffer.AppendStreamingText()`** (`bramble/sessionmodel/output_buffer.go`) — for the sessionmodel layer. Same append-if-matching pattern as the Manager.
+
+When consuming raw `claude.Session.Events()` channel directly (e.g. in `forwardEvents()` goroutines), text chunks arrive per-delta. Do **not** print each chunk on its own line — either use `render.Renderer` or accumulate in a `strings.Builder` and flush at semantic boundaries.
+
 ## Integration Tests as Fixture Generators
 
 Existing integration tests already run real CLI sessions with recording enabled. When you need test fixtures (e.g., protocol traces), check an env var in an existing integration test rather than creating a separate test that duplicates the same session setup. Use env vars (not flags) so they work with `bazel test --test_env=` and `scripts/test-manual.sh`.

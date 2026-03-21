@@ -3,12 +3,15 @@ load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "integration_test",
+    timeout = "long",
     srcs = [
         "build_test.go",
         "integration_test.go",
     ],
+    shard_count = 4,
     tags = [
         "integration",
+        "local",
         "manual",
     ],
     deps = [

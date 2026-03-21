@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "delegator",
+    srcs = ["delegator.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/delegator",
+    visibility = ["//bramble:__subpackages__"],
+    deps = [
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/claude/render",
+        "//bramble/session",
+        "//multiagent/agent",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

@@ -52,7 +52,17 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 		r.firstRun = true
 		err := r.pw.Run(ctx, message)
 		r.PlanFilePath = r.pw.PlanFilePath()
-		return nil, err
+		// Run() doesn't return usage directly, but the planner accumulates
+		// stats internally via TurnComplete events. Extract them so the
+		// caller can update Progress (fixes $0.0000 cost display).
+		stats := r.pw.TotalStats()
+		usage := &claude.TurnUsage{
+			InputTokens:     stats.InputTokens,
+			OutputTokens:    stats.OutputTokens,
+			CacheReadTokens: stats.CacheReadTokens,
+			CostUSD:         stats.CostUSD,
+		}
+		return usage, err
 	}
 	return r.pw.RunTurn(ctx, message)
 }
@@ -406,6 +416,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ProtocolLogDir captures provider protocol/session logs for debugging.
 	// If empty, protocol logging is disabled.
 	ProtocolLogDir string
+	// RecordingDir enables JSONL session recording for all sessions.
+	// If empty, recording is disabled.
+	RecordingDir string
 	// IPCSockPath is the path to the bramble IPC Unix domain socket.
 	// Used to propagate BRAMBLE_SOCK to tmux windows so hook commands
 	// can call back to the TUI. Set by main after startIPCServer.
@@ -417,7 +430,7 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 }
 
 // Manager handles multiple concurrent sessions.
-type Manager struct {
+type Manager struct { //nolint:govet // fieldalignment: readability over packing
 	ctx           context.Context
 	sessions      map[SessionID]*Session
 	events        chan interface{}
@@ -431,6 +444,11 @@ type Manager struct {
 	mu              sync.RWMutex
 	outputsMu       sync.RWMutex
 	followUpChansMu sync.RWMutex
+	// stateSubscribers receive copies of SessionStateChangeEvent. Used by
+	// delegator sessions to watch child state changes without consuming the
+	// primary events channel.
+	stateSubscribers   []chan<- SessionStateChangeEvent
+	stateSubscribersMu sync.Mutex
 }
 
 // RepoName returns the repo name this manager is configured for.
@@ -488,6 +506,25 @@ func (m *Manager) IPCSockPath() string {
 // before the IPC server.
 func (m *Manager) SetIPCSockPath(path string) {
 	m.config.IPCSockPath = path
+}
+
+// SubscribeStateChanges registers a channel to receive copies of all
+// SessionStateChangeEvent emissions. Returns an unsubscribe function.
+func (m *Manager) SubscribeStateChanges(ch chan<- SessionStateChangeEvent) func() {
+	m.stateSubscribersMu.Lock()
+	m.stateSubscribers = append(m.stateSubscribers, ch)
+	m.stateSubscribersMu.Unlock()
+
+	return func() {
+		m.stateSubscribersMu.Lock()
+		defer m.stateSubscribersMu.Unlock()
+		for i, sub := range m.stateSubscribers {
+			if sub == ch {
+				m.stateSubscribers = slices.Delete(m.stateSubscribers, i, i+1)
+				break
+			}
+		}
+	}
 }
 
 // tmuxWindowAlive reports whether the tmux window identified by windowID and/or
@@ -754,7 +791,6 @@ func (m *Manager) Close() {
 	}
 }
 
-// generateSessionID creates a unique session ID.
 func generateSessionID(worktreeName string, sessionType SessionType) SessionID {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
@@ -789,13 +825,22 @@ func generateTitle(prompt string, maxLen int) string {
 func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, model string) (SessionID, error) {
 	worktreeName := filepath.Base(worktreePath)
 	sessionID := generateSessionID(worktreeName, sessionType)
+	return m.startSessionWithID(sessionID, sessionType, worktreePath, worktreeName, prompt, model)
+}
 
+// startSessionWithID starts a session using a caller-supplied session ID.
+// This allows callers (e.g. DelegatorToolHandler) to pre-register the ID
+// before spawning the child goroutine, closing the window where a very fast
+// state transition could be missed by watchChildSessionChanges.
+func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionType, worktreePath, worktreeName, prompt, model string) (SessionID, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 
 	if model == "" {
-		model = "sonnet"
-		if sessionType == SessionTypePlanner {
+		switch sessionType {
+		case SessionTypePlanner:
 			model = "opus"
+		default:
+			model = "sonnet"
 		}
 	}
 
@@ -1300,6 +1345,35 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		return
 	}
 
+	// Delegator sessions require the default Claude SDK path.  They are not
+	// supported in tmux mode, with a pluggable provider, or with a non-Claude
+	// model provider.  Fail fast so the problem is obvious instead of silently
+	// falling through to a providerRunner that has no delegator tools.
+	if session.Type == SessionTypeDelegator {
+		unsupported := ""
+		switch {
+		case m.config.SessionMode == SessionModeTmux:
+			unsupported = "tmux session mode"
+		case m.config.Provider != nil:
+			unsupported = "pluggable provider backend"
+		case agentModel.Provider != ProviderClaude:
+			unsupported = fmt.Sprintf("provider %q (only Claude is supported for delegator sessions)", agentModel.Provider)
+		}
+		if unsupported != "" {
+			m.updateSessionStatus(session, StatusFailed)
+			session.mu.Lock()
+			session.Error = fmt.Errorf("delegator sessions are not supported with %s", unsupported)
+			session.mu.Unlock()
+			m.addOutput(session.ID, OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeError,
+				Content:   fmt.Sprintf("Delegator session requires the Claude SDK backend; %s is not supported.", unsupported),
+			})
+			m.persistSession(session)
+			return
+		}
+	}
+
 	if m.config.SessionMode == SessionModeTmux {
 		// Tmux mode: create tmux window running the agent CLI
 		tmuxName := GenerateTmuxWindowName(m.config.RepoName, session.WorktreeName)
@@ -1423,6 +1497,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					Output:          io.Discard,
 					EventHandler:    eventHandler,
 					ResumeSessionID: session.CLISessionID,
+					RecordingDir:    m.config.RecordingDir,
 				})
 				runner = &plannerRunner{pw: pw}
 			case SessionTypeBuilder:
@@ -1430,8 +1505,31 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					Model:           session.Model,
 					WorkDir:         session.WorktreePath,
 					ResumeSessionID: session.CLISessionID,
+					RecordingDir:    m.config.RecordingDir,
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
+			case SessionTypeDelegator:
+				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, session.Model, m.config.ModelRegistry)
+				runner = &delegatorRunner{
+					toolHandler:  toolHandler,
+					eventHandler: eventHandler,
+					worktreePath: session.WorktreePath,
+					model:        session.Model,
+					recordingDir: m.config.RecordingDir,
+				}
+			default:
+				m.updateSessionStatus(session, StatusFailed)
+				err := fmt.Errorf("unknown session type: %s", session.Type)
+				session.mu.Lock()
+				session.Error = err
+				session.mu.Unlock()
+				m.addOutput(session.ID, OutputLine{
+					Timestamp: time.Now(),
+					Type:      OutputTypeError,
+					Content:   err.Error(),
+					IsError:   true,
+				})
+				return
 			}
 		}
 	}
@@ -1645,6 +1743,16 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	m.followUpChans[session.ID] = followUpChan
 	m.followUpChansMu.Unlock()
 
+	// For delegator sessions, watch for child session state changes so the
+	// delegator auto-resumes when a child goes idle, completes, or fails.
+	var childNotifyChan <-chan SessionStateChangeEvent
+	if dr, ok := runner.(*delegatorRunner); ok {
+		ch := make(chan SessionStateChangeEvent, 10)
+		childNotifyChan = ch
+		unsub := watchChildSessionChanges(session.ctx, m, dr.toolHandler, ch)
+		defer unsub()
+	}
+
 	currentPrompt := prompt
 	for {
 		usage, err := runner.RunTurn(session.ctx, currentPrompt)
@@ -1691,6 +1799,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 		m.updateSessionStatus(session, StatusIdle)
 
+		// Wait for a follow-up prompt, a child state change (delegator only),
+		// or context cancellation. childNotifyChan is nil for non-delegator
+		// sessions; receiving from a nil channel blocks forever, so the case
+		// is simply never selected.
 		select {
 		case <-session.ctx.Done():
 			m.updateSessionStatus(session, StatusStopped)
@@ -1718,6 +1830,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				IsUserPrompt: true,
 			})
 			currentPrompt = followUp
+		case notif := <-childNotifyChan:
+			currentPrompt = fmt.Sprintf(
+				"Child session %s status changed to %s. Use get_session_progress to check details and decide next steps.",
+				notif.SessionID, notif.NewStatus)
+			m.updateSessionStatus(session, StatusRunning)
 		}
 	}
 }
@@ -1741,16 +1858,29 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 	}
 	session.mu.Unlock()
 
-	// Emit state change event
-	select {
-	case m.events <- SessionStateChangeEvent{
+	evt := SessionStateChangeEvent{
 		SessionID: session.ID,
 		OldStatus: oldStatus,
 		NewStatus: newStatus,
-	}:
+	}
+
+	// Emit state change event
+	select {
+	case m.events <- evt:
 	default:
 		log.Printf("WARNING: events channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
 	}
+
+	// Notify state subscribers (used by delegator child watchers)
+	m.stateSubscribersMu.Lock()
+	for _, ch := range m.stateSubscribers {
+		select {
+		case ch <- evt:
+		default:
+			log.Printf("WARNING: state subscriber channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
+		}
+	}
+	m.stateSubscribersMu.Unlock()
 }
 
 // addOutput adds an output line and emits event.

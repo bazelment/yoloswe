@@ -88,8 +88,10 @@ func WithSessionLogPath(path string) ClientOption {
 
 // ThreadConfig holds thread-specific configuration.
 type ThreadConfig struct {
-	// Sandbox configures the sandbox settings.
-	Sandbox *SandboxConfig
+	// Sandbox configures the sandbox settings. Can be a string
+	// ("read-only", "workspace-write", "danger-full-access") or a
+	// *SandboxConfig struct for detailed configuration.
+	Sandbox interface{}
 
 	// Config is additional configuration options.
 	Config map[string]interface{}
@@ -152,10 +154,12 @@ func WithApprovalPolicy(policy ApprovalPolicy) ThreadOption {
 	}
 }
 
-// WithSandbox sets the sandbox configuration.
-func WithSandbox(cfg *SandboxConfig) ThreadOption {
+// WithSandbox sets the sandbox configuration. The value can be a string
+// ("read-only", "workspace-write", "danger-full-access") or a *SandboxConfig
+// struct for detailed configuration.
+func WithSandbox(sandbox interface{}) ThreadOption {
 	return func(c *ThreadConfig) {
-		c.Sandbox = cfg
+		c.Sandbox = sandbox
 	}
 }
 

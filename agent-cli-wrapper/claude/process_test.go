@@ -38,6 +38,61 @@ func TestBuildSubprocessEnv_StripsClaudeCodeVars(t *testing.T) {
 	}
 }
 
+func ptr(s string) *string { return &s }
+
+func TestBuildCLIArgs_Tools(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		tools    *string
+		name     string
+		wantVal  string
+		wantFlag bool
+	}{
+		{name: "nil omits flag", tools: nil, wantFlag: false},
+		{name: "empty string passes empty", tools: ptr(""), wantFlag: true, wantVal: ""},
+		{name: "specific tools", tools: ptr("Bash,Read"), wantFlag: true, wantVal: "Bash,Read"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := defaultConfig()
+			config.Tools = tt.tools
+
+			pm := newProcessManager(config)
+			args, err := pm.BuildCLIArgs()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			foundIdx := -1
+			for i, arg := range args {
+				if arg == "--tools" {
+					foundIdx = i
+					break
+				}
+			}
+
+			if tt.wantFlag {
+				if foundIdx == -1 {
+					t.Fatal("expected --tools flag but not found")
+				}
+				if foundIdx+1 >= len(args) {
+					t.Fatal("--tools flag has no value")
+				}
+				if args[foundIdx+1] != tt.wantVal {
+					t.Errorf("--tools value = %q, want %q", args[foundIdx+1], tt.wantVal)
+				}
+			} else {
+				if foundIdx != -1 {
+					t.Error("unexpected --tools flag")
+				}
+			}
+		})
+	}
+}
+
 func TestBuildCLIArgs_AllowedTools(t *testing.T) {
 	config := defaultConfig()
 	config.AllowedTools = []string{"Read", "Write", "Bash"}

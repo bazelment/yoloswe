@@ -45,16 +45,30 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		p.client = client
 	}
 
-	// Build thread options
+	// Build thread options.
+	// Only pass an explicit model if the caller overrode the default;
+	// Claude-specific aliases (haiku, sonnet, opus) are not valid for codex
+	// and should not be forwarded — let codex use its own configured default.
 	var threadOpts []codex.ThreadOption
-	if cfg.Model != "" {
+	if cfg.Model != "" && !isClaudeModelAlias(cfg.Model) {
 		threadOpts = append(threadOpts, codex.WithModel(cfg.Model))
 	}
 	if policy, ok := codexApprovalPolicyForPermissionMode(cfg.PermissionMode); ok {
 		threadOpts = append(threadOpts, codex.WithApprovalPolicy(policy))
 	}
+	// When no explicit permission mode is set (empty/"default"), don't override
+	// codex's own default approval policy — callers that need auto-approve should
+	// set PermissionMode to "bypass" explicitly.
 	if cfg.WorkDir != "" {
 		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
+	}
+	// For bypass mode (builders), disable sandboxing entirely so codex
+	// can write files and run commands. The "workspace-write" mode still
+	// uses bubblewrap, which may fail in container/VM environments that
+	// lack network namespace permissions. Since the delegator runs in a
+	// controlled environment, full access is appropriate.
+	if strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) == "bypass" {
+		threadOpts = append(threadOpts, codex.WithSandbox("danger-full-access"))
 	}
 
 	// Create thread and execute
@@ -124,6 +138,17 @@ func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 			OutputTokens:    int(r.Usage.OutputTokens),
 			CacheReadTokens: int(r.Usage.CachedInputTokens),
 		},
+	}
+}
+
+// isClaudeModelAlias returns true for model names that are Claude-specific
+// shorthand (haiku, sonnet, opus) and not valid for non-Claude providers.
+func isClaudeModelAlias(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "haiku", "sonnet", "opus":
+		return true
+	default:
+		return false
 	}
 }
 

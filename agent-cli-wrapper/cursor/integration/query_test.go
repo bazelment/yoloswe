@@ -14,7 +14,7 @@ func TestQuery_Simple(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	result, err := cursor.Query(ctx, "What is 2+2? Reply with just the number.")
+	result, err := cursor.Query(ctx, "What is 2+2? Reply with just the number.", cursor.WithTrust())
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestQueryStream_Simple(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	events, err := cursor.QueryStream(ctx, "What is 2+2? Reply with just the number.")
+	events, err := cursor.QueryStream(ctx, "What is 2+2? Reply with just the number.", cursor.WithTrust())
 	if err != nil {
 		t.Fatalf("QueryStream failed: %v", err)
 	}

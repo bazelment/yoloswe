@@ -42,6 +42,7 @@ type SessionConfig struct {
 	DisallowedTools            []string
 	Betas                      []string
 	Agents                     []AgentDefinition
+	Tools                      *string // Base set of built-in tools. nil=default, ""=none, "Bash,Read"=specific
 	ExtraArgs                  []string
 	MaxTurns                   int
 	MaxBudgetUSD               float64
@@ -228,6 +229,15 @@ func WithAgents(agents ...AgentDefinition) SessionOption {
 func WithEnv(env map[string]string) SessionOption {
 	return func(c *SessionConfig) {
 		c.Env = env
+	}
+}
+
+// WithTools sets the base set of available built-in tools.
+// Use "" to disable all built-in tools (useful when only MCP tools should be available).
+// Use "default" to use all tools. Use comma-separated names for specific tools.
+func WithTools(tools string) SessionOption {
+	return func(c *SessionConfig) {
+		c.Tools = &tools
 	}
 }
 
