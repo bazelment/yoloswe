@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
@@ -44,31 +42,25 @@ type CodeTalkConfig struct {
 // Unlike PlannerWrapper, it has no ExitPlanMode state machine or plan files.
 // Every turn is uniform: send message, drain events until TurnComplete.
 type CodeTalkSession struct {
-	output   io.Writer
-	session  *claude.Session
-	renderer *render.Renderer
-	config   CodeTalkConfig
+	baseSession
+	config CodeTalkConfig
 }
 
 // NewCodeTalkSession creates a new code understanding session.
+// If output is nil, text output goes to os.Stdout.
 func NewCodeTalkSession(config CodeTalkConfig, output io.Writer) *CodeTalkSession {
 	if config.Model == "" {
 		config.Model = "opus"
 	}
 	if config.RecordingDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			config.RecordingDir = filepath.Join(homeDir, ".yoloswe")
-		} else {
-			config.RecordingDir = ".yoloswe"
-		}
+		config.RecordingDir = defaultRecordingDir()
 	}
 	if output == nil {
 		output = os.Stdout
 	}
 	return &CodeTalkSession{
-		config:   config,
-		output:   output,
-		renderer: render.NewRenderer(output, config.Verbose),
+		config:      config,
+		baseSession: newBaseSession(output, config.Verbose, "CodeTalk", "codetalk"),
 	}
 }
 
@@ -79,19 +71,14 @@ func NewCodeTalkSessionWithEvents(config CodeTalkConfig, output io.Writer, event
 		config.Model = "opus"
 	}
 	if config.RecordingDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			config.RecordingDir = filepath.Join(homeDir, ".yoloswe")
-		} else {
-			config.RecordingDir = ".yoloswe"
-		}
+		config.RecordingDir = defaultRecordingDir()
 	}
 	if output == nil {
 		output = io.Discard
 	}
 	return &CodeTalkSession{
-		config:   config,
-		output:   output,
-		renderer: render.NewRendererWithEvents(output, config.Verbose, eventHandler),
+		config:      config,
+		baseSession: newBaseSessionWithEvents(output, config.Verbose, eventHandler, "CodeTalk", "codetalk"),
 	}
 }
 
@@ -107,7 +94,6 @@ func (ct *CodeTalkSession) Start(ctx context.Context) error {
 		claude.WithSystemPrompt(systemPrompt),
 		claude.WithPermissionMode(claude.PermissionModeDefault),
 		claude.WithPermissionPromptToolStdio(),
-		claude.WithPermissionHandler(claude.AllowAllPermissionHandler()),
 		claude.WithInteractiveToolHandler(&codetalkInteractiveHandler{ct}),
 		claude.WithRecording(ct.config.RecordingDir),
 	}
@@ -141,104 +127,16 @@ type codetalkInteractiveHandler struct {
 
 // HandleAskUserQuestion auto-answers questions by selecting the first option.
 func (h *codetalkInteractiveHandler) HandleAskUserQuestion(ctx context.Context, questions []claude.Question) (map[string]string, error) {
-	answers := make(map[string]string)
-	for _, q := range questions {
-		var response string
-		if len(q.Options) > 0 {
-			response = q.Options[0].Label
-			h.ct.renderer.Status(fmt.Sprintf("Auto-answering: %s -> %s", q.Text, response))
-		} else {
-			response = "yes"
-			h.ct.renderer.Status(fmt.Sprintf("Auto-answering (no options): %s -> %s", q.Text, response))
-		}
-		answers[q.Text] = response
-	}
-	return answers, nil
+	return autoAnswerQuestions(h.ct.renderer, questions)
 }
 
-// HandleExitPlanMode auto-approves (codetalk doesn't use plan files).
+// HandleExitPlanMode denies any attempt to exit plan mode. CodeTalk sessions
+// are intentionally read-only; the LLM must not be granted write access.
 func (h *codetalkInteractiveHandler) HandleExitPlanMode(ctx context.Context, plan claude.PlanInfo) (string, error) {
-	return "Continue with your analysis.", nil
-}
-
-// CLISessionID returns the CLI session ID from the underlying claude session.
-func (ct *CodeTalkSession) CLISessionID() string {
-	if ct.session == nil {
-		return ""
-	}
-	info := ct.session.Info()
-	if info == nil {
-		return ""
-	}
-	return info.SessionID
-}
-
-// Stop gracefully shuts down the session. Safe to call before Start.
-func (ct *CodeTalkSession) Stop() error {
-	if ct.session == nil {
-		return nil
-	}
-	return ct.session.Stop()
+	return "", fmt.Errorf("codetalk sessions are read-only; exiting plan mode is not allowed")
 }
 
 // RunTurn sends a message and processes the turn until completion.
 func (ct *CodeTalkSession) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
-	if strings.TrimSpace(message) == "" {
-		return nil, fmt.Errorf("message cannot be empty")
-	}
-
-	_, err := ct.session.SendMessage(ctx, message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case event, ok := <-ct.session.Events():
-			if !ok {
-				return nil, fmt.Errorf("session ended unexpectedly")
-			}
-
-			switch e := event.(type) {
-			case claude.ReadyEvent:
-				ct.renderer.Status(fmt.Sprintf("CodeTalk session started: %s (model: %s)", e.Info.SessionID, e.Info.Model))
-
-			case claude.TextEvent:
-				ct.renderer.Text(e.Text)
-
-			case claude.ThinkingEvent:
-				ct.renderer.Thinking(e.Thinking)
-
-			case claude.ToolStartEvent:
-				ct.renderer.ToolStart(e.Name, e.ID)
-
-			case claude.ToolCompleteEvent:
-				ct.renderer.ToolComplete(e.Name, e.Input)
-
-			case claude.CLIToolResultEvent:
-				ct.renderer.ToolResult(e.Content, e.IsError)
-
-			case claude.TurnCompleteEvent:
-				ct.renderer.TurnSummary(e.TurnNumber, e.Success, e.DurationMs, e.Usage.CostUSD)
-				if !e.Success {
-					return &e.Usage, fmt.Errorf("turn completed with success=false")
-				}
-				return &e.Usage, nil
-
-			case claude.ErrorEvent:
-				ct.renderer.Error(e.Error, e.Context)
-				return nil, fmt.Errorf("codetalk error: %v (context: %s)", e.Error, e.Context)
-			}
-		}
-	}
-}
-
-// RecordingPath returns the path to the session recording directory.
-func (ct *CodeTalkSession) RecordingPath() string {
-	if ct.session == nil {
-		return ""
-	}
-	return ct.session.RecordingPath()
+	return ct.baseSession.RunTurn(ctx, message)
 }

@@ -3,11 +3,7 @@ package yoloswe
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
@@ -26,10 +22,8 @@ type BuilderConfig struct {
 
 // BuilderSession wraps a claude.Session for builder operations.
 type BuilderSession struct {
-	output   io.Writer
-	session  *claude.Session
-	renderer *render.Renderer
-	config   BuilderConfig
+	baseSession
+	config BuilderConfig
 }
 
 // NewBuilderSession creates a new builder session with the given config.
@@ -38,16 +32,11 @@ func NewBuilderSession(config BuilderConfig, output io.Writer) *BuilderSession {
 		config.Model = "sonnet"
 	}
 	if config.RecordingDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			config.RecordingDir = filepath.Join(homeDir, ".yoloswe")
-		} else {
-			config.RecordingDir = ".yoloswe"
-		}
+		config.RecordingDir = defaultRecordingDir()
 	}
 	return &BuilderSession{
-		config:   config,
-		output:   output,
-		renderer: render.NewRenderer(output, config.Verbose),
+		config:      config,
+		baseSession: newBaseSession(output, config.Verbose, "Builder", "builder"),
 	}
 }
 
@@ -60,19 +49,14 @@ func NewBuilderSessionWithEvents(config BuilderConfig, output io.Writer, eventHa
 		config.Model = "sonnet"
 	}
 	if config.RecordingDir == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			config.RecordingDir = filepath.Join(homeDir, ".yoloswe")
-		} else {
-			config.RecordingDir = ".yoloswe"
-		}
+		config.RecordingDir = defaultRecordingDir()
 	}
 	if output == nil {
 		output = io.Discard
 	}
 	return &BuilderSession{
-		config:   config,
-		output:   output,
-		renderer: render.NewRendererWithEvents(output, config.Verbose, eventHandler),
+		config:      config,
+		baseSession: newBaseSessionWithEvents(output, config.Verbose, eventHandler, "Builder", "builder"),
 	}
 }
 
@@ -121,23 +105,7 @@ type builderInteractiveHandler struct {
 
 // HandleAskUserQuestion auto-answers questions by selecting the first option.
 func (h *builderInteractiveHandler) HandleAskUserQuestion(ctx context.Context, questions []claude.Question) (map[string]string, error) {
-	answers := make(map[string]string)
-
-	for _, q := range questions {
-		var response string
-		if len(q.Options) > 0 {
-			// Select first option
-			response = q.Options[0].Label
-			h.b.renderer.Status(fmt.Sprintf("Auto-answering: %s -> %s", q.Text, response))
-		} else {
-			// No options, use default "yes"
-			response = "yes"
-			h.b.renderer.Status(fmt.Sprintf("Auto-answering (no options): %s -> %s", q.Text, response))
-		}
-		answers[q.Text] = response
-	}
-
-	return answers, nil
+	return autoAnswerQuestions(h.b.renderer, questions)
 }
 
 // HandleExitPlanMode auto-approves plans (builder doesn't use plan mode).
@@ -145,89 +113,8 @@ func (h *builderInteractiveHandler) HandleExitPlanMode(ctx context.Context, plan
 	return "Approved. Please proceed with implementation.", nil
 }
 
-// CLISessionID returns the CLI session ID from the underlying claude session.
-// Available after Start() completes.
-func (b *BuilderSession) CLISessionID() string {
-	if b.session == nil {
-		return ""
-	}
-	info := b.session.Info()
-	if info == nil {
-		return ""
-	}
-	return info.SessionID
-}
-
-// Stop gracefully shuts down the session. Safe to call before Start.
-func (b *BuilderSession) Stop() error {
-	if b.session == nil {
-		return nil
-	}
-	return b.session.Stop()
-}
-
 // RunTurn sends a message and processes the turn until completion.
 // Returns the turn usage for budget tracking.
 func (b *BuilderSession) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
-	if strings.TrimSpace(message) == "" {
-		return nil, fmt.Errorf("message cannot be empty")
-	}
-
-	_, err := b.session.SendMessage(ctx, message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case event, ok := <-b.session.Events():
-			if !ok {
-				return nil, fmt.Errorf("session ended unexpectedly")
-			}
-
-			switch e := event.(type) {
-			case claude.ReadyEvent:
-				b.renderer.Status(fmt.Sprintf("Builder session started: %s (model: %s)", e.Info.SessionID, e.Info.Model))
-
-			case claude.TextEvent:
-				b.renderer.Text(e.Text)
-
-			case claude.ThinkingEvent:
-				b.renderer.Thinking(e.Thinking)
-
-			case claude.ToolStartEvent:
-				b.renderer.ToolStart(e.Name, e.ID)
-
-			case claude.ToolCompleteEvent:
-				b.renderer.ToolComplete(e.Name, e.Input)
-				// Note: AskUserQuestion is now handled by InteractiveToolHandler
-
-			case claude.CLIToolResultEvent:
-				b.renderer.ToolResult(e.Content, e.IsError)
-
-			case claude.TurnCompleteEvent:
-				b.renderer.TurnSummary(e.TurnNumber, e.Success, e.DurationMs, e.Usage.CostUSD)
-				if !e.Success {
-					return &e.Usage, fmt.Errorf("turn completed with success=false")
-				}
-				return &e.Usage, nil
-
-			case claude.ErrorEvent:
-				b.renderer.Error(e.Error, e.Context)
-				// Return partial usage if available, along with error
-				return nil, fmt.Errorf("builder error: %v (context: %s)", e.Error, e.Context)
-			}
-		}
-	}
-}
-
-// RecordingPath returns the path to the session recording directory.
-// Returns empty string if session not started.
-func (b *BuilderSession) RecordingPath() string {
-	if b.session == nil {
-		return ""
-	}
-	return b.session.RecordingPath()
+	return b.baseSession.RunTurn(ctx, message)
 }

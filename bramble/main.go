@@ -709,7 +709,7 @@ After the initial exploration, it accepts follow-up questions interactively.`,
 }
 
 func init() {
-	newSessionCmd.Flags().StringP("type", "t", "planner", "Session type: planner or builder")
+	newSessionCmd.Flags().StringP("type", "t", "planner", "Session type: planner, builder, or codetalk")
 	newSessionCmd.Flags().StringP("branch", "b", "", "Branch name (creates worktree if --create-worktree)")
 	newSessionCmd.Flags().StringP("from", "f", "", "Base branch for new worktree")
 	newSessionCmd.Flags().StringP("worktree", "w", "", "Existing worktree path")

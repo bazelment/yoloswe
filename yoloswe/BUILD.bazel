@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "builder.go",
         "codetalk.go",
+        "session.go",
         "swe.go",
         "validation.go",
     ],
@@ -21,6 +22,7 @@ go_test(
     name = "yoloswe_test",
     srcs = [
         "builder_test.go",
+        "codetalk_test.go",
         "runtime_test.go",
         "swe_test.go",
         "validation_test.go",
