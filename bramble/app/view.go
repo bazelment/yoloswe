@@ -193,6 +193,8 @@ func (m Model) renderTopBar() string {
 			icon := "📋"
 			if sess.Type == session.SessionTypeBuilder {
 				icon = "🔨"
+			} else if sess.Type == session.SessionTypeCodeTalk {
+				icon = "💬"
 			}
 			title := sess.Title
 			if title == "" {
@@ -256,6 +258,8 @@ func (m Model) renderSessionListView(width, height int) string {
 		typeIcon := "📋"
 		if sess.Type == session.SessionTypeBuilder {
 			typeIcon = "🔨"
+		} else if sess.Type == session.SessionTypeCodeTalk {
+			typeIcon = "💬"
 		}
 
 		// Session name (tmux window name or ID)
@@ -360,6 +364,8 @@ func (m Model) renderOutputArea(width, height int) string {
 	typeIcon := "📋"
 	if info.Type == session.SessionTypeBuilder {
 		typeIcon = "🔨"
+	} else if info.Type == session.SessionTypeCodeTalk {
+		typeIcon = "💬"
 	}
 	title := info.Title
 	if title == "" {
@@ -376,6 +382,8 @@ func (m Model) renderOutputArea(width, height int) string {
 	if info.Status == session.StatusIdle {
 		if info.Type == session.SessionTypePlanner {
 			headerLine += s.Idle.Render("  (plan ready - 'a' approve & build / 'f' iterate)")
+		} else if info.Type == session.SessionTypeCodeTalk {
+			headerLine += s.Idle.Render("  (ready for questions - press 'f')")
 		} else {
 			headerLine += s.Idle.Render("  (awaiting follow-up - press 'f')")
 		}
@@ -571,6 +579,8 @@ func (m Model) renderHistorySession(width, height int) string {
 	typeIcon := "📋"
 	if data.Type == session.SessionTypeBuilder {
 		typeIcon = "🔨"
+	} else if data.Type == session.SessionTypeCodeTalk {
+		typeIcon = "💬"
 	}
 	headerLine := fmt.Sprintf("  %s %s  %s  %s", typeIcon, data.Type, data.ID, s.Dim.Render("[Replay]"))
 	b.WriteString(headerLine)
@@ -628,7 +638,7 @@ func (m Model) renderStatusBar() string {
 		// Tmux mode: show session list navigation hints
 		hints = []string{"[S] All sessions"}
 		if hasWorktree {
-			hints = append(hints, "[m] Merge", "[p] Plan", "[b] Build", "[w] Window")
+			hints = append(hints, "[m] Merge", "[p] Plan", "[b] Build", "[c] CodeTalk", "[w] Window")
 		}
 		hints = append(hints, "[F2]split", "[Ctrl+L]settings", "[Alt-R]repo", "[Alt-W] Worktree", "[?]help", "[q] Quit")
 	} else if m.viewingSessionID != "" {
@@ -648,7 +658,7 @@ func (m Model) renderStatusBar() string {
 		// SDK mode: no session selected - show worktree-dependent actions
 		hints = []string{"[Alt-W]worktree", "[Alt-S]session", "[Ctrl+L]settings", "[t]ask", "[F2]split"}
 		if hasWorktree {
-			hints = append(hints, "[e]dit", "[m]erge", "[p]lan", "[b]uild", "[n]ew wt", "[d]elete wt")
+			hints = append(hints, "[e]dit", "[m]erge", "[p]lan", "[b]uild", "[c]odetalk", "[n]ew wt", "[d]elete wt")
 		} else {
 			hints = append(hints, "[n]ew wt")
 		}

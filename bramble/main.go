@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +25,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
+	"github.com/bazelment/yoloswe/yoloswe"
 )
 
 var (
@@ -417,8 +420,10 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 		sessionType = session.SessionTypePlanner
 	case "builder":
 		sessionType = session.SessionTypeBuilder
+	case "codetalk":
+		sessionType = session.SessionTypeCodeTalk
 	default:
-		return nil, fmt.Errorf("unknown session_type %q (expected \"planner\" or \"builder\")", params.SessionType)
+		return nil, fmt.Errorf("unknown session_type %q (expected \"planner\", \"builder\", or \"codetalk\")", params.SessionType)
 	}
 
 	id, err := mgr.StartSession(sessionType, worktreePath, params.Prompt, params.Model)
@@ -616,6 +621,93 @@ var listSessionsCmd = &cobra.Command{
 	},
 }
 
+var codetalkCmd = &cobra.Command{
+	Use:   "codetalk [flags] <prompt>",
+	Short: "Start a code understanding session",
+	Long: `CodeTalk deeply explores a codebase area and provides structured analysis.
+After the initial exploration, it accepts follow-up questions interactively.`,
+	Example: `  bramble codetalk "the happy path of search handling"
+  bramble codetalk --model opus "how does auth middleware work"
+  bramble codetalk --dir /path/to/repo "explain the session lifecycle"`,
+	Args: cobra.ArbitraryArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		prompt := strings.Join(args, " ")
+		if prompt == "" {
+			return fmt.Errorf("prompt is required")
+		}
+
+		model, _ := cmd.Flags().GetString("model")
+		workDir, _ := cmd.Flags().GetString("dir")
+		recordDir, _ := cmd.Flags().GetString("record")
+		systemPrompt, _ := cmd.Flags().GetString("system")
+		verbose, _ := cmd.Flags().GetBool("verbose")
+
+		if workDir == "" {
+			var err error
+			workDir, err = os.Getwd()
+			if err != nil {
+				return fmt.Errorf("failed to get working directory: %w", err)
+			}
+		}
+
+		ct := yoloswe.NewCodeTalkSession(yoloswe.CodeTalkConfig{
+			Model:        model,
+			WorkDir:      workDir,
+			RecordingDir: recordDir,
+			SystemPrompt: systemPrompt,
+			Verbose:      verbose,
+		}, os.Stdout)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			fmt.Fprintln(os.Stderr, "\nInterrupted, shutting down...")
+			cancel()
+		}()
+
+		if err := ct.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start session: %w", err)
+		}
+		defer ct.Stop()
+
+		// Initial exploration
+		if _, err := ct.RunTurn(ctx, prompt); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+
+		// Interactive follow-up loop
+		scanner := bufio.NewScanner(os.Stdin)
+		for {
+			fmt.Fprint(os.Stderr, "\n> ")
+			if !scanner.Scan() {
+				break
+			}
+			input := strings.TrimSpace(scanner.Text())
+			if input == "" {
+				continue
+			}
+			if _, err := ct.RunTurn(ctx, input); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
+		}
+
+		if path := ct.RecordingPath(); path != "" {
+			fmt.Fprintf(os.Stderr, "\nSession recorded to: %s\n", path)
+		}
+		return nil
+	},
+}
+
 func init() {
 	newSessionCmd.Flags().StringP("type", "t", "planner", "Session type: planner or builder")
 	newSessionCmd.Flags().StringP("branch", "b", "", "Branch name (creates worktree if --create-worktree)")
@@ -635,12 +727,19 @@ func init() {
 	capturePaneCmd.Flags().Int("lines", 10, "Number of lines to capture")
 	_ = capturePaneCmd.MarkFlagRequired("session-id")
 
+	codetalkCmd.Flags().StringP("model", "m", "opus", "Model to use (e.g. opus, sonnet)")
+	codetalkCmd.Flags().String("dir", "", "Working directory (defaults to current directory)")
+	codetalkCmd.Flags().String("record", "", "Directory for session recordings (defaults to ~/.yoloswe)")
+	codetalkCmd.Flags().String("system", "", "Custom system prompt")
+	codetalkCmd.Flags().BoolP("verbose", "v", false, "Show detailed tool results")
+
 	rootCmd.AddCommand(pingCmd)
 	rootCmd.AddCommand(newSessionCmd)
 	rootCmd.AddCommand(listSessionsCmd)
 	rootCmd.AddCommand(notifyCmd)
 	rootCmd.AddCommand(capturePaneCmd)
 	rootCmd.AddCommand(delegator.Cmd)
+	rootCmd.AddCommand(codetalkCmd)
 }
 
 // pickRouterProvider selects the best available provider for the task router.

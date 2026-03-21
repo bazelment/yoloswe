@@ -350,6 +350,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.defaultPlanModel = msg.model
 			case session.SessionTypeBuilder:
 				m.defaultBuildModel = msg.model
+			case session.SessionTypeCodeTalk:
+				m.defaultPlanModel = msg.model
 			}
 		}
 		return m.startSession(msg.sessionType, msg.prompt, msg.model)
@@ -696,6 +698,20 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					return startSessionMsg{session.SessionTypeBuilder, prompt, model}
 				}
 			}, "Describe what to build...")
+		}
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
+
+	case "c":
+		// Start codetalk (code understanding)
+		if m.selectedWorktree() != nil {
+			m.pendingModel = m.defaultPlanModel
+			m.pendingSessionType = session.SessionTypeCodeTalk
+			return m.promptInput(fmt.Sprintf("CodeTalk prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
+				return func() tea.Msg {
+					return startSessionMsg{session.SessionTypeCodeTalk, prompt, model}
+				}
+			}, "What code area do you want to understand?")
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd

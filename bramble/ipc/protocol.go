@@ -30,7 +30,7 @@ type Response struct {
 
 // NewSessionParams are the parameters for a new-session request.
 type NewSessionParams struct {
-	SessionType    string `json:"session_type"`            // "planner" or "builder"
+	SessionType    string `json:"session_type"`            // "planner", "builder", or "codetalk"
 	WorktreePath   string `json:"worktree_path,omitempty"` // existing worktree path (mutually exclusive with Branch)
 	Branch         string `json:"branch,omitempty"`        // create new worktree with this branch name
 	BaseBranch     string `json:"base_branch,omitempty"`   // base branch for new worktree (default: main)

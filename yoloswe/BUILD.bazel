@@ -4,6 +4,7 @@ go_library(
     name = "yoloswe",
     srcs = [
         "builder.go",
+        "codetalk.go",
         "swe.go",
         "validation.go",
     ],

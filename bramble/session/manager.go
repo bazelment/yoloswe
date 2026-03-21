@@ -80,6 +80,19 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 	return r.builder.RunTurn(ctx, message)
 }
 
+// codetalkRunner adapts CodeTalkSession to the sessionRunner interface.
+type codetalkRunner struct {
+	ct *yoloswe.CodeTalkSession
+}
+
+func (r *codetalkRunner) Start(ctx context.Context) error { return r.ct.Start(ctx) }
+func (r *codetalkRunner) Stop() error                     { return r.ct.Stop() }
+func (r *codetalkRunner) CLISessionID() string            { return r.ct.CLISessionID() }
+
+func (r *codetalkRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	return r.ct.RunTurn(ctx, message)
+}
+
 // providerRunner adapts agent.Provider to the sessionRunner interface.
 // This allows plugging in any provider backend (Claude, Codex, Gemini)
 // via the ManagerConfig.Provider field.
@@ -837,7 +850,7 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 
 	if model == "" {
 		switch sessionType {
-		case SessionTypePlanner:
+		case SessionTypePlanner, SessionTypeCodeTalk:
 			model = "opus"
 		default:
 			model = "sonnet"
@@ -1383,7 +1396,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		session.mu.Unlock()
 
 		permissionMode := ""
-		if session.Type == SessionTypePlanner {
+		if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
 			permissionMode = "plan"
 		}
 
@@ -1442,7 +1455,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				eventHandler: eventHandler,
 				model:        session.Model,
 				permissionMode: func() string {
-					if session.Type == SessionTypePlanner {
+					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
 						return "plan"
 					}
 					return "bypass"
@@ -1473,8 +1486,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			}
 
 			// Configure permission handler based on session type
-			if session.Type == SessionTypePlanner {
-				// Planner sessions should only be able to read, not write
+			if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
+				// Planner/codetalk sessions should only be able to read, not write
 				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
 			}
 			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
@@ -1517,6 +1530,13 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					model:        session.Model,
 					recordingDir: m.config.RecordingDir,
 				}
+			case SessionTypeCodeTalk:
+				ct := yoloswe.NewCodeTalkSessionWithEvents(yoloswe.CodeTalkConfig{
+					Model:           session.Model,
+					WorkDir:         session.WorktreePath,
+					ResumeSessionID: session.CLISessionID,
+				}, nil, eventHandler)
+				runner = &codetalkRunner{ct: ct}
 			default:
 				m.updateSessionStatus(session, StatusFailed)
 				err := fmt.Errorf("unknown session type: %s", session.Type)

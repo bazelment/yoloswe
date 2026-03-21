@@ -112,6 +112,8 @@ func (m OutputModel) View() tea.View {
 	typeIcon := "📋"
 	if m.info.Type == session.SessionTypeBuilder {
 		typeIcon = "🔨"
+	} else if m.info.Type == session.SessionTypeCodeTalk {
+		typeIcon = "💬"
 	}
 
 	if m.isReplay {

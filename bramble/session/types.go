@@ -17,6 +17,7 @@ const (
 	SessionTypePlanner   SessionType = "planner"
 	SessionTypeBuilder   SessionType = "builder"
 	SessionTypeDelegator SessionType = "delegator"
+	SessionTypeCodeTalk  SessionType = "codetalk"
 )
 
 // Provider name aliases — canonical definitions are in multiagent/agent.
