@@ -55,11 +55,10 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	}
 	if policy, ok := codexApprovalPolicyForPermissionMode(cfg.PermissionMode); ok {
 		threadOpts = append(threadOpts, codex.WithApprovalPolicy(policy))
-	} else {
-		// Default to auto-approve since CodexProvider is used programmatically
-		// with no interactive approval handler.
-		threadOpts = append(threadOpts, codex.WithApprovalPolicy(codex.ApprovalPolicyNever))
 	}
+	// When no explicit permission mode is set (empty/"default"), don't override
+	// codex's own default approval policy — callers that need auto-approve should
+	// set PermissionMode to "bypass" explicitly.
 	if cfg.WorkDir != "" {
 		threadOpts = append(threadOpts, codex.WithWorkDir(cfg.WorkDir))
 	}

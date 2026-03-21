@@ -1517,6 +1517,18 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					model:        session.Model,
 					recordingDir: m.config.RecordingDir,
 				}
+			default:
+				m.updateSessionStatus(session, StatusFailed)
+				err := fmt.Errorf("unknown session type: %s", session.Type)
+				session.mu.Lock()
+				session.Error = err
+				session.mu.Unlock()
+				m.addOutput(session.ID, OutputLine{
+					Type:    OutputTypeError,
+					Content: err.Error(),
+					IsError: true,
+				})
+				return
 			}
 		}
 	}
