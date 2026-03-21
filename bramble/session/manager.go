@@ -1524,9 +1524,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				session.Error = err
 				session.mu.Unlock()
 				m.addOutput(session.ID, OutputLine{
-					Type:    OutputTypeError,
-					Content: err.Error(),
-					IsError: true,
+					Timestamp: time.Now(),
+					Type:      OutputTypeError,
+					Content:   err.Error(),
+					IsError:   true,
 				})
 				return
 			}
