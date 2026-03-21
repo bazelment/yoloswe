@@ -363,6 +363,22 @@ echo 'Add a REST API with /health and /echo endpoints using separate packages. U
 
 **Non-interactive regression:** Simple test ($0.076, 2 turns) passed all 8 checklist items.
 
+## Test Run 10: Stress Test — 12 Rapid-Fire Mid-Session Questions
+
+**Purpose:** Verify the mid-session interaction mechanism handles sustained rapid questioning without deadlocks, dropped notifications, or race conditions.
+
+**Test setup:** Complex prompt (REST API + CLI) with 12 questions sent every ~10s via `script` + FIFO PTY while the planner was running.
+
+**Results:**
+- All 12 questions answered correctly across 15 delegator turns
+- Delegator was efficient: called `get_session_progress` only 3 times, answered 9 questions from cached knowledge
+- Planner completion notification delivered correctly after Q12 — not lost despite 12 intervening follow-ups
+- Total cost: $1.56 (delegator: $0.80 for 15 turns, planner: $0.58, builder: $0.18)
+- No deadlocks, no race conditions, no dropped events
+- All JSONL checks pass: delegator 3 tools, planner 26, builder 26
+
+**Cost observation:** Delegator turn cost increases slightly with conversation length ($0.022 for Turn 1 → $0.106 for Turn 15) due to growing context window. 12 mid-session questions added ~$0.60 to the delegator cost. This is expected behavior — the context grows with each question/answer pair.
+
 ## Known Limitations
 
 1. **Stderr noise** — ~~Fixed.~~ `planner.go` debug output is now gated on the `Verbose` flag, and `protocol/parse.go` `slog.Warn` was changed to `slog.Debug`. No more stderr leakage during normal operation.

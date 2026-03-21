@@ -36,3 +36,12 @@ Fixes: none
 Verdict: Clean
 Notes: Interactive test via script+FIFO PTY confirmed mid-session interaction works. User asked 2 questions while planner was running; delegator answered both (one with get_session_progress, one from cached knowledge). 5 delegator turns total ($1.06). "You (children active)>" prompt appeared correctly. Non-interactive regression also clean ($0.076, 2 turns). All JSONL checks pass.
 ---
+
+---
+Date: 2026-03-21
+Rounds: 1
+Findings: none
+Fixes: none
+Verdict: Clean
+Notes: Stress test — 12 rapid-fire questions (~10s apart) while planner running. All 12 answered correctly across 15 delegator turns ($1.56 total). Delegator used get_session_progress 3 times, cached answers for 9 others. No deadlocks, no dropped notifications, no race conditions. Planner completion notification delivered correctly after Q12.
+---
