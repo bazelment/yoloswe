@@ -1,0 +1,11 @@
+# Delegator Eval Run Log
+#
+# Append after each eval run. Format:
+# ---
+# Date: YYYY-MM-DD
+# Rounds: N
+# Findings: brief list
+# Fixes: brief list
+# Verdict: Clean | Gaps remain (list)
+# Notes: anything useful for next run
+# ---
