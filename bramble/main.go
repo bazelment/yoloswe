@@ -701,8 +701,9 @@ After the initial exploration, it accepts follow-up questions interactively.`,
 			}
 		}
 
+		ct.PrintUsageSummary()
 		if path := ct.RecordingPath(); path != "" {
-			fmt.Fprintf(os.Stderr, "\nSession recorded to: %s\n", path)
+			fmt.Fprintf(os.Stderr, "Session recorded to: %s\n", path)
 		}
 		return nil
 	},

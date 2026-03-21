@@ -21,7 +21,7 @@ type BuilderConfig struct {
 }
 
 // BuilderSession wraps a claude.Session for builder operations.
-type BuilderSession struct {
+type BuilderSession struct { //nolint:govet // fieldalignment: baseSession embedding controls layout
 	baseSession
 	config BuilderConfig
 }

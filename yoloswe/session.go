@@ -32,6 +32,8 @@ type baseSession struct {
 	renderer     *render.Renderer
 	sessionLabel string
 	errorPrefix  string
+	stats        SessionStats
+	readyEmitted bool // suppress duplicate ReadyEvent on follow-up turns
 }
 
 // newBaseSession initialises a baseSession with a plain renderer.
@@ -85,6 +87,35 @@ func (b *baseSession) RecordingPath() string {
 	return b.session.RecordingPath()
 }
 
+// SessionStats tracks cumulative token usage and cost across turns.
+type SessionStats struct {
+	InputTokens     int
+	OutputTokens    int
+	CacheReadTokens int
+	CostUSD         float64
+	TurnCount       int
+}
+
+// Stats returns the cumulative session statistics.
+func (b *baseSession) Stats() SessionStats {
+	return b.stats
+}
+
+// PrintUsageSummary prints cumulative token usage and cost to stderr.
+func (b *baseSession) PrintUsageSummary() {
+	fmt.Fprintln(os.Stderr, "\n"+strings.Repeat("═", 50))
+	fmt.Fprintln(os.Stderr, "SESSION USAGE SUMMARY")
+	fmt.Fprintln(os.Stderr, strings.Repeat("─", 50))
+	fmt.Fprintf(os.Stderr, "  Turns:         %d\n", b.stats.TurnCount)
+	fmt.Fprintf(os.Stderr, "  Input tokens:  %d\n", b.stats.InputTokens)
+	fmt.Fprintf(os.Stderr, "  Output tokens: %d\n", b.stats.OutputTokens)
+	if b.stats.CacheReadTokens > 0 {
+		fmt.Fprintf(os.Stderr, "  Cache read:    %d\n", b.stats.CacheReadTokens)
+	}
+	fmt.Fprintf(os.Stderr, "  Total cost:    $%.4f\n", b.stats.CostUSD)
+	fmt.Fprintln(os.Stderr, strings.Repeat("═", 50))
+}
+
 // RunTurn sends a message and drains events until TurnComplete or an error.
 func (b *baseSession) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
 	if strings.TrimSpace(message) == "" {
@@ -107,7 +138,10 @@ func (b *baseSession) RunTurn(ctx context.Context, message string) (*claude.Turn
 
 			switch e := event.(type) {
 			case claude.ReadyEvent:
-				b.renderer.Status(fmt.Sprintf("%s session started: %s (model: %s)", b.sessionLabel, e.Info.SessionID, e.Info.Model))
+				if !b.readyEmitted {
+					b.readyEmitted = true
+					b.renderer.Status(fmt.Sprintf("%s session started: %s (model: %s)", b.sessionLabel, e.Info.SessionID, e.Info.Model))
+				}
 
 			case claude.TextEvent:
 				b.renderer.Text(e.Text)
@@ -125,6 +159,11 @@ func (b *baseSession) RunTurn(ctx context.Context, message string) (*claude.Turn
 				b.renderer.ToolResult(e.Content, e.IsError)
 
 			case claude.TurnCompleteEvent:
+				b.stats.TurnCount++
+				b.stats.InputTokens += e.Usage.InputTokens
+				b.stats.OutputTokens += e.Usage.OutputTokens
+				b.stats.CacheReadTokens += e.Usage.CacheReadTokens
+				b.stats.CostUSD += e.Usage.CostUSD
 				b.renderer.TurnSummary(e.TurnNumber, e.Success, e.DurationMs, e.Usage.CostUSD)
 				if !e.Success {
 					return &e.Usage, fmt.Errorf("turn completed with success=false")

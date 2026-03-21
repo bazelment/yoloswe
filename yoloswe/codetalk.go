@@ -41,7 +41,7 @@ type CodeTalkConfig struct {
 // CodeTalkSession wraps a claude.Session for read-only code understanding.
 // Unlike PlannerWrapper, it has no ExitPlanMode state machine or plan files.
 // Every turn is uniform: send message, drain events until TurnComplete.
-type CodeTalkSession struct {
+type CodeTalkSession struct { //nolint:govet // fieldalignment: baseSession embedding controls layout
 	baseSession
 	config CodeTalkConfig
 }
