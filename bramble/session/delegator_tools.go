@@ -85,6 +85,15 @@ func (h *DelegatorToolHandler) ChildIDs() []SessionID {
 	return ids
 }
 
+// IsChild reports whether the given session ID is a child of this delegator.
+// This is an O(1) map lookup, suitable for use in hot-path event handlers.
+func (h *DelegatorToolHandler) IsChild(id SessionID) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.childIDs[id]
+	return ok
+}
+
 func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params startSessionParams) (string, error) {
 	var sessionType SessionType
 	switch params.Type {
@@ -211,6 +220,10 @@ func (h *DelegatorToolHandler) handleGetSessionProgress(_ context.Context, param
 
 	if info.ErrorMsg != "" {
 		fmt.Fprintf(&b, "Error: %s\n", info.ErrorMsg)
+	}
+
+	if info.PlanFilePath != "" {
+		fmt.Fprintf(&b, "Plan file: %s\n", info.PlanFilePath)
 	}
 
 	if len(recentLines) > 0 {

@@ -65,45 +65,39 @@ func runDelegator(cmd *cobra.Command, args []string) error {
 
 	switch mode {
 	case "mock":
-		runMock(ctx, renderer, model, workDir, prompt, logDir, autoAdvance, behaviorFlag, systemPromptFile)
+		if err := runMock(ctx, renderer, model, workDir, prompt, logDir, autoAdvance, behaviorFlag, systemPromptFile); err != nil {
+			return err
+		}
 	case "real":
 		info, err := os.Stat(workDir)
 		if err != nil || !info.IsDir() {
 			return fmt.Errorf("--work-dir must be a valid directory in real mode")
 		}
-		runReal(ctx, model, workDir, prompt, logDir, timeout)
+		if err := runReal(ctx, model, workDir, prompt, logDir, timeout); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown mode %q: use mock or real", mode)
 	}
 	return nil
 }
 
-func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, prompt, logDir string, autoAdvance bool, behaviorFlag, systemPromptFile string) {
+func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, prompt, logDir string, autoAdvance bool, behaviorFlag, systemPromptFile string) error {
 	behaviors := parseBehaviors(behaviorFlag)
 
 	systemPrompt := session.DelegatorSystemPrompt
 	if systemPromptFile != "" {
 		data, err := os.ReadFile(systemPromptFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading system prompt file: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("error reading system prompt file: %w", err)
 		}
 		systemPrompt = string(data)
 	}
 
 	mock := session.NewMockDelegatorToolHandler(behaviors)
 
-	opts := []claude.SessionOption{
-		claude.WithModel(model),
-		claude.WithPermissionMode(claude.PermissionModePlan),
-		claude.WithDangerouslySkipPermissions(),
-		claude.WithSDKTools("delegator-tools", mock.Registry()),
-		claude.WithTools(""),
-		claude.WithSystemPrompt(systemPrompt),
-		claude.WithWorkDir(workDir),
-		claude.WithDisablePlugins(),
-		claude.WithEventBufferSize(1000),
-	}
+	opts := session.DelegatorBaseSessionOpts(model, mock.Registry(), systemPrompt)
+	opts = append(opts, claude.WithWorkDir(workDir))
 	if logDir != "" {
 		opts = append(opts, claude.WithRecording(logDir))
 	}
@@ -111,8 +105,7 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 	s := claude.NewSession(opts...)
 
 	if err := s.Start(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start session: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start session: %w", err)
 	}
 	defer s.Stop()
 
@@ -123,7 +116,7 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 		if logDir != "" {
 			fmt.Printf("\nSession JSONL logs saved to: %s\n", logDir)
 		}
-		return
+		return nil
 	}
 
 	// Interactive mode.
@@ -145,6 +138,7 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 	if logDir != "" {
 		fmt.Printf("\nSession JSONL logs saved to: %s\n", logDir)
 	}
+	return nil
 }
 
 func runMockConversation(ctx context.Context, s *claude.Session, mock *session.MockDelegatorToolHandler, r *render.Renderer, msg string, autoAdvance bool) {
@@ -203,7 +197,7 @@ func runMockConversation(ctx context.Context, s *claude.Session, mock *session.M
 	}
 }
 
-func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, timeout time.Duration) {
+func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, timeout time.Duration) error {
 	// Probe installed providers so the delegator knows which models are available.
 	pa := agent.NewProviderAvailability()
 	registry := agent.NewModelRegistry(pa, nil)
@@ -234,7 +228,7 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 				prompt = strings.TrimSpace(scanner.Text())
 			}
 			if prompt == "" {
-				return
+				return nil
 			}
 		}
 	}
@@ -245,18 +239,17 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 		fmt.Print("You> ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
-			return
+			return nil
 		}
 		prompt = strings.TrimSpace(scanner.Text())
 		if prompt == "" || prompt == "quit" || prompt == "exit" {
-			return
+			return nil
 		}
 	}
 
 	delegatorID, err := m.StartSession(session.SessionTypeDelegator, workDir, prompt, model)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start delegator session: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start delegator session: %w", err)
 	}
 
 	// doneCh signals when the delegator reaches a terminal state.
@@ -557,6 +550,7 @@ done:
 	if logDir != "" {
 		fmt.Printf("\nSession JSONL logs saved to: %s\n", logDir)
 	}
+	return nil
 }
 
 // formatProgressDetail formats a progress summary showing turns and either cost
@@ -578,7 +572,7 @@ func formatToolSummary(name string, input map[string]interface{}) string {
 	}
 	switch name {
 	case "start_session":
-		typ, _ := input["session_type"].(string)
+		typ, _ := input["type"].(string)
 		p, _ := input["prompt"].(string)
 		if len(p) > 80 {
 			p = p[:77] + "..."

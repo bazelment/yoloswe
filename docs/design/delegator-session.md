@@ -241,14 +241,15 @@ The `SessionOpts` field allows the same scenario framework to test alternative
 delegator implementations (e.g. native `--agents` mode via `claude.WithAgents()`)
 without rewriting test infrastructure.
 
-### CLI Harness (`bramble/cmd/delegator-test/`)
+### CLI Harness (`bramble/cmd/delegator/`)
 
-Interactive tool for prompt engineering. Uses `render.Renderer` for terminal
-output, which handles streaming text buffering and ANSI-colored formatting
-(see "Streaming Text Event Pipeline" in CLAUDE.md).
+Interactive tool for prompt engineering, available as a subcommand of the
+bramble CLI. Uses `render.Renderer` for terminal output, which handles
+streaming text buffering and ANSI-colored formatting (see "Streaming Text
+Event Pipeline" in CLAUDE.md).
 
 ```
-bazel run //bramble/cmd/delegator-test -- --prompt "Create a hello world" --model haiku
+bazel run //bramble -- delegator --prompt "Create a hello world" --model haiku
 ```
 
 Flags: `--model`, `--auto-advance`, `--behavior`, `--system-prompt`, `--prompt`,
@@ -259,10 +260,10 @@ Flags: `--model`, `--auto-advance`, `--behavior`, `--system-prompt`, `--prompt`,
 - **`get_session_progress` is read-only**: The mock does not advance state on
   reads. This prevents the delegator from polling the same session repeatedly
   within a turn and seeing artificial progress.
-- **`WithAllowedTools` defense-in-depth**: The delegator session is restricted to
-  only the three SDK tools via `WithAllowedTools(DelegatorAllowedTools...)`. This
-  prevents the model from directly using Read, Write, Bash even if the prompt
-  instructions are insufficient.
+- **Tool isolation defense-in-depth**: The delegator session is restricted to
+  only the three SDK tools via `WithTools("")` (disables all built-in CLI tools)
+  and `WithDisablePlugins()` (prevents MCP plugins). This prevents the model from
+  directly using Read, Write, Bash even if the prompt instructions are insufficient.
 - **Async notification model**: The prompt explicitly tells the delegator that
   child sessions are async and it should yield after starting them. The test
   harness simulates this by calling `AdvanceUntilNotification()` between turns.
@@ -274,15 +275,15 @@ Flags: `--model`, `--auto-advance`, `--behavior`, `--system-prompt`, `--prompt`,
 | `bramble/session/types.go` | Add `SessionTypeDelegator` constant |
 | `bramble/session/manager.go` | Wire `delegatorRunner` into `runSession()`, add child-state watcher to turn loop, default model to sonnet for delegator |
 | `bramble/session/delegator_tools.go` | **NEW** — `DelegatorToolHandler` with start/stop/get_session_progress |
-| `bramble/session/delegator_runner.go` | **NEW** — `delegatorRunner` implementing `sessionRunner`, exported `DelegatorSystemPrompt` and `DelegatorAllowedTools` |
+| `bramble/session/delegator_runner.go` | **NEW** — `delegatorRunner` implementing `sessionRunner`, exported `DelegatorSystemPrompt` |
 | `bramble/session/delegator_mock.go` | **NEW** — `MockDelegatorToolHandler` with scripted state machines |
 | `bramble/session/delegator_scenario.go` | **NEW** — `RunDelegatorScenario` helper + config/result types |
 | `bramble/session/delegator_tools_test.go` | **NEW** — Unit tests for tool handler |
 | `bramble/session/delegator_runner_test.go` | **NEW** — Unit tests for runner and child watcher |
 | `bramble/session/integration/delegator_test.go` | **NEW** — Integration test with real Manager |
 | `bramble/session/integration/delegator_scenario_test.go` | **NEW** — 5 scenario integration tests |
-| `bramble/cmd/delegator-test/main.go` | **NEW** — Interactive CLI harness |
-| `bramble/cmd/delegator-test/BUILD.bazel` | **NEW** — Bazel binary target |
+| `bramble/cmd/delegator/delegator.go` | **NEW** — Interactive CLI harness (bramble subcommand) |
+| `bramble/cmd/delegator/BUILD.bazel` | **NEW** — Bazel library target |
 
 ## Testing Strategy
 

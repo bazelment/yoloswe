@@ -48,7 +48,7 @@ MVC architecture in `bramble/sessionmodel/` → `bramble/session/` → `bramble/
 
 Claude SDK emits `TextEvent` with arbitrary chunk boundaries (word fragments, partial sentences). Three layers handle accumulation — use the right one for your context:
 
-1. **`render.Renderer`** (`agent-cli-wrapper/claude/render/`) — for terminal/CLI output. Prints text to stdout immediately (streaming), buffers internally, and flushes to `EventHandler.OnText()` at semantic boundaries (tool start, newline, 80+ chars). Use this when building CLI tools that consume `claude.Session` events. Example: `bramble/cmd/delegator-test/`.
+1. **`render.Renderer`** (`agent-cli-wrapper/claude/render/`) — for terminal/CLI output. Prints text to stdout immediately (streaming), buffers internally, and flushes to `EventHandler.OnText()` at semantic boundaries (tool start, newline, 80+ chars). Use this when building CLI tools that consume `claude.Session` events. Example: `bramble/cmd/delegator/`.
 
 2. **`sessionEventHandler.OnText()`** (`bramble/session/event_handler.go`) — for bramble's Manager. Calls `appendOrAddText()` which appends to the last `OutputLine` if its type is `OutputTypeText`, otherwise creates a new line. Text accumulates at the data model level.
 

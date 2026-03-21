@@ -29,6 +29,7 @@ Use get_session_progress to check details AFTER receiving a notification, or whe
 - For simple, well-defined tasks (e.g. "create a hello world program"), skip planning and go straight to a builder session.
 - After starting a session, tell the user what you started and end your turn. You will be notified when it completes.
 - When you receive a notification, use get_session_progress to check the result, report it to the user, and decide on next steps.
+- When a planner completes and reports a plan file path, start a builder session with a prompt like: "Implement the plan in <plan-file-path>". This gives the builder the structured plan directly instead of paraphrased instructions.
 - If a child session asks a question (status: waiting_for_input), relay the question to the user. When the user answers, start a new session or provide the answer as context.
 
 ## Error handling
@@ -54,6 +55,25 @@ func delegatorSystemPromptWithModels(availableModels string) string {
 	return DelegatorSystemPrompt + "\n\n## Available models\n\nYou can use any of these models when starting child sessions:\n" + availableModels
 }
 
+// DelegatorBaseSessionOpts returns the security-critical Claude session options
+// that are common to all delegator session instantiations (production runner,
+// scenario tests, and CLI mock mode). These options ensure the delegator can
+// only access its three SDK tools and cannot directly use file or command tools.
+// Callers may append additional options (e.g. WithWorkDir, WithRecording) after
+// calling this function.
+func DelegatorBaseSessionOpts(model string, registry *claude.TypedToolRegistry, systemPrompt string) []claude.SessionOption {
+	return []claude.SessionOption{
+		claude.WithModel(model),
+		claude.WithPermissionMode(claude.PermissionModePlan),
+		claude.WithDangerouslySkipPermissions(),
+		claude.WithSDKTools("delegator-tools", registry),
+		claude.WithTools(""),
+		claude.WithSystemPrompt(systemPrompt),
+		claude.WithDisablePlugins(),
+		claude.WithEventBufferSize(1000),
+	}
+}
+
 // delegatorRunner implements sessionRunner for delegator sessions.
 // It wraps a Claude SDK session with tools for managing child sessions.
 type delegatorRunner struct {
@@ -66,17 +86,12 @@ type delegatorRunner struct {
 }
 
 func (r *delegatorRunner) Start(ctx context.Context) error {
-	opts := []claude.SessionOption{
-		claude.WithModel(r.model),
-		claude.WithPermissionMode(claude.PermissionModePlan),
-		claude.WithDangerouslySkipPermissions(),
-		claude.WithSDKTools("delegator-tools", r.toolHandler.Registry()),
-		claude.WithTools(""),
-		claude.WithSystemPrompt(delegatorSystemPromptWithModels(r.toolHandler.AvailableModelsDescription())),
-		claude.WithWorkDir(r.worktreePath),
-		claude.WithDisablePlugins(),
-		claude.WithEventBufferSize(1000),
-	}
+	opts := DelegatorBaseSessionOpts(
+		r.model,
+		r.toolHandler.Registry(),
+		delegatorSystemPromptWithModels(r.toolHandler.AvailableModelsDescription()),
+	)
+	opts = append(opts, claude.WithWorkDir(r.worktreePath))
 	if r.recordingDir != "" {
 		opts = append(opts, claude.WithRecording(r.recordingDir))
 	}
@@ -104,6 +119,11 @@ func (r *delegatorRunner) RunTurn(ctx context.Context, message string) (*claude.
 	return &result.Usage, nil
 }
 
+// Stop stops the delegator's Claude session. Child sessions spawned by the
+// delegator are parented to the Manager's context, not the delegator session
+// context, so they continue running after the delegator stops. Callers that
+// want to terminate children should call Manager.StopSession on each child ID
+// returned by DelegatorToolHandler.ChildIDs() before stopping the delegator.
 func (r *delegatorRunner) Stop() error {
 	if r.claudeSession != nil {
 		return r.claudeSession.Stop()
@@ -142,15 +162,7 @@ func watchChildSessionChanges(ctx context.Context, manager *Manager, toolHandler
 					return
 				}
 				// Only forward if this is a child session we're tracking
-				childIDs := toolHandler.ChildIDs()
-				isChild := false
-				for _, id := range childIDs {
-					if evt.SessionID == id {
-						isChild = true
-						break
-					}
-				}
-				if !isChild {
+				if !toolHandler.IsChild(evt.SessionID) {
 					continue
 				}
 				// Only notify on meaningful state transitions

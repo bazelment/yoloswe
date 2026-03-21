@@ -68,7 +68,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	// uses bubblewrap, which may fail in container/VM environments that
 	// lack network namespace permissions. Since the delegator runs in a
 	// controlled environment, full access is appropriate.
-	if cfg.PermissionMode == "bypass" {
+	if strings.ToLower(strings.TrimSpace(cfg.PermissionMode)) == "bypass" {
 		threadOpts = append(threadOpts, codex.WithSandbox("danger-full-access"))
 	}
 

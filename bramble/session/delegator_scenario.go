@@ -80,16 +80,7 @@ func RunDelegatorScenario(ctx context.Context, cfg DelegatorScenarioConfig) (*De
 
 	mock := NewMockDelegatorToolHandler(cfg.Behaviors)
 
-	opts := []claude.SessionOption{
-		claude.WithModel(cfg.Model),
-		claude.WithPermissionMode(claude.PermissionModePlan),
-		claude.WithDangerouslySkipPermissions(),
-		claude.WithSDKTools("delegator-tools", mock.Registry()),
-		claude.WithSystemPrompt(systemPrompt),
-		claude.WithDisablePlugins(),
-		claude.WithEventBufferSize(1000),
-		claude.WithTools(""),
-	}
+	opts := DelegatorBaseSessionOpts(cfg.Model, mock.Registry(), systemPrompt)
 	opts = append(opts, cfg.SessionOpts...)
 
 	s := claude.NewSession(opts...)
@@ -111,6 +102,9 @@ func RunDelegatorScenario(ctx context.Context, cfg DelegatorScenarioConfig) (*De
 		cancel()
 		if err != nil {
 			return result, fmt.Errorf("turn %d collect failed: %w", turn, err)
+		}
+		if turnResult == nil {
+			return result, fmt.Errorf("turn %d: nil result with no error", turn)
 		}
 
 		tr := DelegatorTurnResult{

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/bramble/app"
+	"github.com/bazelment/yoloswe/bramble/cmd/delegator"
 	"github.com/bazelment/yoloswe/bramble/ipc"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
@@ -639,6 +640,7 @@ func init() {
 	rootCmd.AddCommand(listSessionsCmd)
 	rootCmd.AddCommand(notifyCmd)
 	rootCmd.AddCommand(capturePaneCmd)
+	rootCmd.AddCommand(delegator.Cmd)
 }
 
 // pickRouterProvider selects the best available provider for the task router.

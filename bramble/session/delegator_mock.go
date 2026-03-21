@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -169,8 +170,16 @@ func (h *MockDelegatorToolHandler) DrainNotifications() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Sort session IDs for deterministic notification ordering.
+	ids := make([]string, 0, len(h.sessions))
+	for id := range h.sessions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
 	var parts []string
-	for id, entry := range h.sessions {
+	for _, id := range ids {
+		entry := h.sessions[id]
 		st := entry.current.Status
 		if !isNotifiableStatus(st) {
 			continue
