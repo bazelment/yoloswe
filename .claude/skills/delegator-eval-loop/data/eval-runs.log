@@ -297,3 +297,54 @@ All 14 checklist items pass. No regressions. Exiting after 1 round.
 ### Verdict
 PASS — inverted pyramid style working. Dramatic reduction in visual formatting, responses
 read naturally as prose. Zero high/medium findings, no regressions. Exiting after 1 round.
+
+## Multi-Turn Codewalk Eval (Post Idle Signal Fix) — 2026-03-22
+
+### Bugs found and fixed (3 bugs)
+
+**Bug 1 — Lost idle signals (drain-before-send)**: The event loop goroutine used a
+non-blocking send on the buffer-1 `idleCh` channel. During rapid Idle→Running→Idle cycles
+from child notification processing, intermediate signals were silently dropped, causing the
+final "all children done" idle to never reach the interactive loop.
+Fix: drain-then-blocking-send pattern guarantees the latest signal is never lost.
+
+**Bug 2 — Nested select deadlock**: The interactive loop had an inner select waiting for
+stdin that couldn't see new `idleCh` signals from child-notification turns. After all
+questions were sent, the loop blocked forever on stdin.
+Fix: Flattened into a single `for/select` with a `promptReady` state flag. Both `idleCh`
+and `stdinCh` are in the same select.
+
+**Bug 3 — Child notification starvation (manager.go)**: Go's `select` randomly picked
+between `followUpChan` and `childNotifyChan`, causing child completions to pile up during
+rapid follow-ups.
+Fix: Non-blocking drain of `childNotifyChan` before the blocking `select`.
+
+### Also added
+- `idle-children-active` vs `idle` status-fd protocol for eval script
+- `SendFollowUp` retry with backoff in CLI (5 attempts, 500ms-2.5s)
+- Extracted `runInteractiveLoop` with `interactiveLoopConfig` for testability
+- 4 regression tests in `bramble/cmd/delegator/delegator_test.go`
+
+Files changed: `bramble/cmd/delegator/delegator.go`, `bramble/cmd/delegator/delegator_test.go`,
+`bramble/cmd/delegator/BUILD.bazel`, `bramble/session/manager.go`, `scripts/delegator-eval.py`
+
+### Test results (codewalk eval via delegator-eval.py)
+
+Questions: 11/11 | Elapsed: 166s (~2.8 min) | Cost: $0.69 total ($0.06/question)
+Delegator: 13 turns, $0.69 | Child: 1 Gemini codetalk session, 2 turns
+Tools used: start_session, get_session_progress, send_followup, Read
+
+Flow: delegator queued 11 questions → spawned 1 codetalk child → read research file →
+sent 1 follow-up for gaps → synthesized all 11 answers in Turn 13 → eval script received
+"idle" (no children) → sent quit → clean exit.
+
+### Quality assessment
+All 11 answers use inverted pyramid style: lead sentence with the key takeaway, then
+mechanism, then detail. No markdown headers in answers. Each answer is a prose paragraph
+that reads naturally aloud. Topics covered: session lifecycle, mutex ordering, delegator
+vs planner/builder, error paths, SendFollowUp internals, streaming pipeline, codetalkRunner,
+providerRunner dedup, ReconcileTmuxSessions, concurrency gotchas, adding a new session type.
+
+### Verdict
+PASS — all 3 idle signal bugs fixed and verified with 4 regression tests. 11/11 questions
+answered in 166s at $0.69. Clean exit via status-fd protocol. No regressions.

@@ -18,6 +18,9 @@ Gaps found and fixed in past eval iterations. Check for **regressions** every ro
 | Non-Claude child cost/tokens show $0.00 | `agentUsageToTurnUsage` doesn't capture Gemini/Codex billing | `manager.go`: providerRunner cost pipeline | Multi-Provider v1 (unfixed) |
 | Codex unusable for multi-turn codetalk | Ephemeral provider (no LongRunningProvider), each turn loses context | Architecture limitation | Multi-Provider v1 (won't fix) |
 | TurnEnd/StatusIdle race: stdout empty | `forwardEvents` async processing lags behind `runSession`'s synchronous `StatusIdle` | `manager.go`: emit TurnEnd synchronously after RunTurn, skip in forwardEvents | Gemini Codetalk Eval (2026-03-22) |
+| Lost idle signals in interactive mode | Non-blocking send on buffer-1 `idleCh` drops signals during rapid Idle→Running→Idle cycles | `delegator.go`: drain-before-send on idleCh | Multi-Turn Codewalk (2026-03-22) |
+| Nested select deadlock (interactive) | Inner select waiting for stdin can't see new `idleCh` from child-notification turns | `delegator.go`: flatten to single for/select with `promptReady` flag | Multi-Turn Codewalk (2026-03-22) |
+| Child notification starvation | Go select randomly picks followUpChan vs childNotifyChan, child completions pile up | `manager.go`: non-blocking drain of childNotifyChan before blocking select | Multi-Turn Codewalk (2026-03-22) |
 
 ## Adding New Entries
 
