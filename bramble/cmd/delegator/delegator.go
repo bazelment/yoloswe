@@ -472,10 +472,16 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 								close(doneCh)
 								return
 							}
+							// Drain any stale signal so the latest idle
+							// is never lost. Without this, rapid
+							// Idle→Running→Idle cycles (from child
+							// notification processing) drop the final
+							// idle when the buffer-1 channel is full.
 							select {
-							case idleCh <- struct{}{}:
+							case <-idleCh:
 							default:
 							}
+							idleCh <- struct{}{}
 						}
 					}
 				}
@@ -494,42 +500,15 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			}
 			close(stdinCh)
 		}()
-		for {
-			select {
-			case <-doneCh:
-				goto done
-			case <-ctx.Done():
-				goto done
-			case <-idleCh:
-				writeStatus("idle")
-				if hasActiveChildren(m, delegatorID) {
-					fmt.Fprint(os.Stderr, "\n(children active) >>> ")
-				} else {
-					fmt.Fprint(os.Stderr, "\n>>> ")
-				}
-				// Wait for stdin input or completion.
-				select {
-				case <-doneCh:
-					goto done
-				case <-ctx.Done():
-					goto done
-				case text, ok := <-stdinCh:
-					if !ok {
-						goto done
-					}
-					line := strings.TrimSpace(text)
-					if line == "" {
-						continue
-					}
-					if line == "quit" || line == "exit" {
-						goto done
-					}
-					if err := m.SendFollowUp(delegatorID, line); err != nil {
-						fmt.Fprintf(os.Stderr, "SendFollowUp error: %v (delegator may be processing a notification, try again)\n", err)
-					}
-				}
-			}
-		}
+		runInteractiveLoop(interactiveLoopConfig{
+			hasActiveChildren: func() bool { return hasActiveChildren(m, delegatorID) },
+			sendFollowUp:      func(msg string) error { return m.SendFollowUp(delegatorID, msg) },
+			idleCh:            idleCh,
+			doneCh:            doneCh,
+			stdinCh:           stdinCh,
+			writeStatus:       writeStatus,
+			ctx:               ctx,
+		})
 	} else {
 		// Non-interactive: wait for completion or timeout.
 		timer := time.NewTimer(timeout)
@@ -543,7 +522,6 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 		}
 	}
 
-done:
 	writeStatus("done")
 	if statusFile != nil {
 		statusFile.Close()
@@ -694,6 +672,77 @@ func hasActiveChildren(m *session.Manager, delegatorID session.SessionID) bool {
 		}
 	}
 	return false
+}
+
+// interactiveLoopConfig holds dependencies for the interactive event loop,
+// enabling unit testing without real API calls or sessions.
+type interactiveLoopConfig struct {
+	hasActiveChildren func() bool
+	sendFollowUp      func(msg string) error
+	idleCh            <-chan struct{}
+	doneCh            <-chan struct{}
+	stdinCh           <-chan string
+	writeStatus       func(string)
+	ctx               context.Context
+}
+
+// runInteractiveLoop drives the interactive prompt loop. It waits for idle
+// signals, emits status, and dispatches stdin input as follow-ups. Returns
+// when doneCh closes, context is cancelled, or stdin sends "quit"/"exit".
+//
+// The loop uses a single select (not nested) so that idleCh signals from
+// child-notification turn cycles are never missed. A promptReady flag
+// prevents duplicate stderr prompts.
+func runInteractiveLoop(cfg interactiveLoopConfig) {
+	promptReady := false
+	for {
+		select {
+		case <-cfg.doneCh:
+			return
+		case <-cfg.ctx.Done():
+			return
+		case <-cfg.idleCh:
+			// Delegator went idle — either after processing user input or
+			// after a child-notification turn cycle. Emit status every time
+			// so the eval script can track children-active vs all-done.
+			if cfg.hasActiveChildren() {
+				cfg.writeStatus("idle-children-active")
+			} else {
+				cfg.writeStatus("idle")
+			}
+			if !promptReady {
+				if cfg.hasActiveChildren() {
+					fmt.Fprint(os.Stderr, "\n(children active) >>> ")
+				} else {
+					fmt.Fprint(os.Stderr, "\n>>> ")
+				}
+				promptReady = true
+			}
+		case text, ok := <-cfg.stdinCh:
+			if !ok {
+				return
+			}
+			line := strings.TrimSpace(text)
+			if line == "" {
+				continue
+			}
+			if line == "quit" || line == "exit" {
+				return
+			}
+			promptReady = false
+			// Retry with backoff — the delegator may be momentarily
+			// non-idle while processing a child notification.
+			for attempt := 0; attempt < 5; attempt++ {
+				if err := cfg.sendFollowUp(line); err == nil {
+					break
+				} else if attempt == 4 {
+					fmt.Fprintf(os.Stderr, "SendFollowUp error after retries: %v\n", err)
+				} else {
+					time.Sleep(time.Duration(500*(attempt+1)) * time.Millisecond)
+				}
+			}
+		}
+	}
 }
 
 // parseBehaviors parses the --behavior flag value.

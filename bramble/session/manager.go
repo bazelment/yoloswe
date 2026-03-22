@@ -1865,10 +1865,37 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 		m.updateSessionStatus(session, StatusIdle)
 
-		// Wait for a follow-up prompt, a child state change (delegator only),
-		// or context cancellation. childNotifyChan is nil for non-delegator
-		// sessions; receiving from a nil channel blocks forever, so the case
-		// is simply never selected.
+		// Prioritize child notifications over user follow-ups. When rapid
+		// follow-ups arrive (e.g. multi-turn eval), Go's select picks
+		// randomly between ready channels, so child completion events can
+		// pile up in the buffer and never get processed. Drain all pending
+		// child notifications first as a single combined prompt.
+		var childNotifs []SessionStateChangeEvent
+		if childNotifyChan != nil {
+		drainChildNotifs:
+			for {
+				select {
+				case notif := <-childNotifyChan:
+					childNotifs = append(childNotifs, notif)
+				default:
+					break drainChildNotifs
+				}
+			}
+		}
+		if len(childNotifs) > 0 {
+			var parts []string
+			for _, notif := range childNotifs {
+				parts = append(parts, fmt.Sprintf(
+					"Child session %s status changed to %s.",
+					notif.SessionID, notif.NewStatus))
+			}
+			currentPrompt = strings.Join(parts, "\n") + "\nUse get_session_progress to check details and decide next steps."
+			m.updateSessionStatus(session, StatusRunning)
+			continue
+		}
+
+		// No pending child notifications — block until a follow-up,
+		// child notification, or context cancellation arrives.
 		select {
 		case <-session.ctx.Done():
 			m.updateSessionStatus(session, StatusStopped)

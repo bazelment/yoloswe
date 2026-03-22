@@ -80,6 +80,12 @@ def run_eval(args: argparse.Namespace) -> None:
     )
 
     question_idx = 0
+    all_questions_sent = False
+    # After all questions are sent, the next idle means the delegator has
+    # finished processing. The child-notification priority fix in
+    # manager.go ensures child completions are drained before idle, so a
+    # single post-questions idle is sufficient.
+    post_questions_idle = False
     start = time.monotonic()
     deadline = start + args.timeout
     stdout_path = os.path.join(args.log_dir, "stdout.txt") if args.log_dir else None
@@ -104,7 +110,8 @@ def run_eval(args: argparse.Namespace) -> None:
                     while b"\n" in status_buf:
                         line, status_buf = status_buf.split(b"\n", 1)
                         msg = line.decode().strip()
-                        if msg == "idle":
+                        if msg in ("idle", "idle-children-active"):
+                            children_active = msg == "idle-children-active"
                             if question_idx < len(questions):
                                 q = questions[question_idx]
                                 question_idx += 1
@@ -114,7 +121,18 @@ def run_eval(args: argparse.Namespace) -> None:
                                     file=sys.stderr,
                                 )
                                 os.write(master_fd, (q + "\n").encode())
-                            else:
+                                all_questions_sent = (
+                                    question_idx >= len(questions)
+                                )
+                            elif all_questions_sent and not children_active:
+                                # No more questions and no active children
+                                # — the delegator has finished everything.
+                                post_questions_idle = True
+                                print(
+                                    "\nAll questions answered,"
+                                    " sending quit.",
+                                    file=sys.stderr,
+                                )
                                 os.write(master_fd, b"quit\n")
                         elif msg == "done":
                             pass  # Process will exit shortly.
