@@ -261,12 +261,17 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 
 	if interactive {
 		writeStatus("idle")
-		fmt.Fprint(os.Stderr, ">>> ")
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
+		// Use readline for the initial prompt to get line editing support.
+		initReader, err := NewInputReader(">>> ")
+		if err != nil {
+			return fmt.Errorf("failed to create input reader: %w", err)
+		}
+		line, ok := <-initReader.Lines()
+		initReader.Close()
+		if !ok {
 			return nil
 		}
-		prompt = strings.TrimSpace(scanner.Text())
+		prompt = strings.TrimSpace(line)
 		if prompt == "" || prompt == "quit" || prompt == "exit" {
 			return nil
 		}
@@ -491,23 +496,30 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 
 	if interactive {
 		// Interactive loop: wait for delegator to go idle, then prompt for input.
-		// Read stdin in a goroutine so we can select on doneCh without blocking.
-		stdinCh := make(chan string)
-		go func() {
-			scanner := bufio.NewScanner(os.Stdin)
-			for scanner.Scan() {
-				stdinCh <- scanner.Text()
-			}
-			close(stdinCh)
-		}()
+		inputReader, err := NewInputReader(">>> ")
+		if err != nil {
+			return fmt.Errorf("failed to create input reader: %w", err)
+		}
+		defer inputReader.Close()
+
+		spinner := NewSpinner(os.Stderr)
+		// Start spinner immediately — the initial prompt is already being processed.
+		spinner.Start("Thinking...")
+
 		runInteractiveLoop(interactiveLoopConfig{
 			hasActiveChildren: func() bool { return hasActiveChildren(m, delegatorID) },
 			sendFollowUp:      func(msg string) error { return m.SendFollowUp(delegatorID, msg) },
 			idleCh:            idleCh,
 			doneCh:            doneCh,
-			stdinCh:           stdinCh,
+			stdinCh:           inputReader.Lines(),
 			writeStatus:       writeStatus,
 			ctx:               ctx,
+			onInputSent:       func() { spinner.Start("Thinking...") },
+			onIdle:            func() { spinner.Stop() },
+			setPrompt: func(prompt string) {
+				inputReader.SetPrompt(prompt)
+				inputReader.RefreshPrompt()
+			},
 		})
 	} else {
 		// Non-interactive: wait for completion or timeout.
@@ -684,6 +696,12 @@ type interactiveLoopConfig struct {
 	stdinCh           <-chan string
 	writeStatus       func(string)
 	ctx               context.Context
+
+	// Optional callbacks for spinner and prompt management.
+	// Nil-safe: callers that don't set these get no-op behavior.
+	onInputSent func() // called after sendFollowUp succeeds
+	onIdle      func() // called when delegator goes idle
+	setPrompt   func(string)
 }
 
 // runInteractiveLoop drives the interactive prompt loop. It waits for idle
@@ -705,16 +723,23 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 			// Delegator went idle — either after processing user input or
 			// after a child-notification turn cycle. Emit status every time
 			// so the eval script can track children-active vs all-done.
+			if cfg.onIdle != nil {
+				cfg.onIdle()
+			}
 			if cfg.hasActiveChildren() {
 				cfg.writeStatus("idle-children-active")
 			} else {
 				cfg.writeStatus("idle")
 			}
 			if !promptReady {
+				prompt := "\n>>> "
 				if cfg.hasActiveChildren() {
-					fmt.Fprint(os.Stderr, "\n(children active) >>> ")
+					prompt = "\n(children active) >>> "
+				}
+				if cfg.setPrompt != nil {
+					cfg.setPrompt(prompt)
 				} else {
-					fmt.Fprint(os.Stderr, "\n>>> ")
+					fmt.Fprint(os.Stderr, prompt)
 				}
 				promptReady = true
 			}
@@ -732,14 +757,19 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 			promptReady = false
 			// Retry with backoff — the delegator may be momentarily
 			// non-idle while processing a child notification.
+			sent := false
 			for attempt := 0; attempt < 5; attempt++ {
 				if err := cfg.sendFollowUp(line); err == nil {
+					sent = true
 					break
 				} else if attempt == 4 {
 					fmt.Fprintf(os.Stderr, "SendFollowUp error after retries: %v\n", err)
 				} else {
 					time.Sleep(time.Duration(500*(attempt+1)) * time.Millisecond)
 				}
+			}
+			if sent && cfg.onInputSent != nil {
+				cfg.onInputSent()
 			}
 		}
 	}

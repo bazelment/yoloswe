@@ -1,6 +1,7 @@
 package delegator
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
@@ -196,6 +197,99 @@ func TestInteractiveLoop_QuitExits(t *testing.T) {
 			ctx:               ctx,
 		})
 	}()
+
+	stdinCh <- "quit"
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("interactive loop did not exit after quit")
+	}
+}
+
+// TestSpinner_StartStopIdempotent verifies that Start/Stop are safe to call
+// multiple times and that Stop is safe when the spinner was never started.
+func TestSpinner_StartStopIdempotent(t *testing.T) {
+	t.Parallel()
+
+	// Spinner with a non-terminal writer should be a no-op.
+	buf := &bytes.Buffer{}
+	s := NewSpinner(buf)
+
+	// Stop without Start is safe.
+	s.Stop()
+
+	// Start with non-terminal writer is a no-op (no goroutine spawned).
+	s.Start("test")
+	s.Stop()
+
+	// Double stop is safe.
+	s.Stop()
+	s.Stop()
+}
+
+// TestInteractiveLoop_CallbacksInvoked verifies that onInputSent is called
+// after a successful sendFollowUp and onIdle is called on idle signals.
+func TestInteractiveLoop_CallbacksInvoked(t *testing.T) {
+	t.Parallel()
+
+	idleCh := make(chan struct{}, 1)
+	doneCh := make(chan struct{})
+	stdinCh := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var events []string
+	var eventsMu sync.Mutex
+	record := func(name string) {
+		eventsMu.Lock()
+		events = append(events, name)
+		eventsMu.Unlock()
+	}
+
+	var promptSet string
+	var promptMu sync.Mutex
+
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		runInteractiveLoop(interactiveLoopConfig{
+			hasActiveChildren: func() bool { return false },
+			sendFollowUp:      func(msg string) error { return nil },
+			idleCh:            idleCh,
+			doneCh:            doneCh,
+			stdinCh:           stdinCh,
+			writeStatus:       func(string) {},
+			ctx:               ctx,
+			onInputSent:       func() { record("inputSent") },
+			onIdle:            func() { record("idle") },
+			setPrompt: func(p string) {
+				promptMu.Lock()
+				promptSet = p
+				promptMu.Unlock()
+			},
+		})
+	}()
+
+	// Send input — should trigger onInputSent.
+	stdinCh <- "hello"
+
+	// Wait for idle to come back, which triggers onIdle and setPrompt.
+	idleCh <- struct{}{}
+
+	require.Eventually(t, func() bool {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		return len(events) >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	eventsMu.Lock()
+	require.Contains(t, events, "inputSent")
+	require.Contains(t, events, "idle")
+	eventsMu.Unlock()
+
+	promptMu.Lock()
+	require.Equal(t, "\n>>> ", promptSet)
+	promptMu.Unlock()
 
 	stdinCh <- "quit"
 	select {

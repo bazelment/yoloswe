@@ -45,6 +45,7 @@ use_repo(
     "com_github_bazelment_yoloswe_wt",
     "com_github_bazelment_yoloswe_yoloswe",
     "com_github_charmbracelet_glamour",
+    "com_github_ergochat_readline",
     "com_github_invopop_jsonschema",
     "com_github_mattn_go_runewidth",
     "com_github_spf13_cobra",
