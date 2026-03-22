@@ -34,6 +34,10 @@ func NewInputReader(prompt string) (*InputReader, error) {
 		rl, err := readline.NewEx(&readline.Config{
 			Prompt:      prompt,
 			HistoryFile: historyFile,
+			// Write prompts and line-editing output to stderr, not stdout.
+			// The delegator reserves stdout for LLM answer text only.
+			Stdout: os.Stderr,
+			Stderr: os.Stderr,
 		})
 		if err != nil {
 			// Fall back to scanner if readline fails to initialize.

@@ -259,15 +259,19 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 	}
 	fmt.Fprintf(os.Stderr, "Delegator Test Harness (real) | Model: %s | Child: %s | Work dir: %s\n\n", model, effectiveChild, workDir)
 
+	// Create a single InputReader for the entire interactive session.
+	// This avoids creating multiple readline instances on the same terminal.
+	var inputReader *InputReader
 	if interactive {
-		writeStatus("idle")
-		// Use readline for the initial prompt to get line editing support.
-		initReader, err := NewInputReader(">>> ")
+		var err error
+		inputReader, err = NewInputReader(">>> ")
 		if err != nil {
 			return fmt.Errorf("failed to create input reader: %w", err)
 		}
-		line, ok := <-initReader.Lines()
-		initReader.Close()
+		defer inputReader.Close()
+
+		writeStatus("idle")
+		line, ok := <-inputReader.Lines()
 		if !ok {
 			return nil
 		}
@@ -305,6 +309,9 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			line := lines[i]
 			switch line.Type {
 			case session.OutputTypeText:
+				if line.IsUserPrompt {
+					continue
+				}
 				fmt.Println(strings.TrimRight(line.Content, "\n"))
 			case session.OutputTypeThinking:
 				if verbose {
@@ -496,12 +503,6 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 
 	if interactive {
 		// Interactive loop: wait for delegator to go idle, then prompt for input.
-		inputReader, err := NewInputReader(">>> ")
-		if err != nil {
-			return fmt.Errorf("failed to create input reader: %w", err)
-		}
-		defer inputReader.Close()
-
 		spinner := NewSpinner(os.Stderr)
 		// Start spinner immediately — the initial prompt is already being processed.
 		spinner.Start("Thinking...")
