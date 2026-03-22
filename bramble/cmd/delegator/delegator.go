@@ -627,7 +627,7 @@ func formatToolSummary(name string, input map[string]interface{}) string {
 		return id
 	case "send_followup":
 		id, _ := input["session_id"].(string)
-		msg, _ := input["message"].(string)
+		msg, _ := input["prompt"].(string)
 		if len(msg) > 60 {
 			msg = msg[:57] + "..."
 		}

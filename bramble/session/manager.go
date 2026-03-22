@@ -1544,6 +1544,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					Model:           session.Model,
 					WorkDir:         session.WorktreePath,
 					ResumeSessionID: session.CLISessionID,
+					RecordingDir:    m.config.RecordingDir,
 				}, nil, eventHandler)
 				runner = &codetalkRunner{ct: ct}
 			default:
