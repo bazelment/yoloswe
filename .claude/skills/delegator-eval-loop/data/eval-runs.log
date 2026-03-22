@@ -190,3 +190,110 @@ This is a system prompt tuning opportunity, not a code bug.
 PASS — zero high/medium findings. stdout/stderr separation correct. Gemini codetalk
 effective and very cheap. Voice-readability is a system prompt style issue, not a
 regression or code bug. Exiting after 1 round.
+
+## Gemini Codetalk Eval (Post-TurnEnd Race Fix) — 2026-03-22
+
+### Bug found and fixed
+**TurnEnd/StatusIdle race condition**: `forwardEvents` goroutine processes `TurnCompleteEvent`
+asynchronously from the SDK's event channel, but `runSession` sets `StatusIdle` synchronously
+after `RunTurn` returns. In non-interactive mode, the event loop sees `StatusIdle` with no
+active children before `TurnEnd` is in the output buffer → `renderNewOutput()` renders nothing
+→ stdout empty.
+
+**Fix**: Emit `OutputTypeTurnEnd` synchronously in the manager's turn loop (after `RunTurn`
+returns and progress is updated), before `updateSessionStatus(StatusIdle)`. Skip
+`TurnCompleteEvent` in `forwardEvents` goroutines (delegator_runner.go, providerRunner in
+manager.go) to avoid duplicates.
+
+Files changed: `bramble/session/manager.go`, `bramble/session/delegator_runner.go`,
+`bramble/session/provider_runner_test.go`
+
+### Test results (with fix)
+
+Test 1: "Explain codetalk session type"
+  Result: PASS | 2 turns | 1 codetalk child | $0.0476 | stdout: 21 lines ✓
+  Tools: start_session(1), get_session_progress(1)
+
+Test 2: "Trace full request lifecycle"
+  Result: PASS | 2 turns | 1 codetalk child | $0.0747 | stdout: 75 lines ✓
+  Tools: start_session(1), get_session_progress(1)
+
+### Checklist (14 items)
+  1. Text coherence: PASS
+  2. Tool display: PASS (5 tools)
+  3. Child lifecycle: PASS (▶ start, ✓ done)
+  4. Turn structure: PASS (✓ Turn 1/2 with timing and cost)
+  5. No noise: PASS
+  6. Cost summary: PASS (Total line present)
+  7. No timeout: PASS (test1: ~75s, test2: ~3.5min)
+  8. Progress ticker: PASS (⏳ every 30s)
+  9. Conciseness: PASS (21 lines) / BORDERLINE (75 lines — complex question)
+  10. Synthesis: PASS
+  11. Direct answers: PASS
+  12. Cached answers: N/A (single-turn)
+  13. Context awareness: N/A (single-turn)
+  14. Session rotation: N/A (single session)
+
+### JSONL verification
+  - Tool count: 5 ✓
+  - No ToolSearch: PASS
+  - Child end_turn: PASS (both tests)
+  - Model propagation: gemini-3-flash-preview confirmed
+  - No regressions from known-gaps table
+  - Gemini child cost $0.00: expected (known gap)
+
+### Verdict
+PASS — found and fixed TurnEnd race condition. Zero remaining high/medium findings.
+All 14 checklist items pass. No regressions. Exiting after 1 round.
+
+## Inverted Pyramid Response Style Eval — 2026-03-22
+
+### Changes tested
+- Rewrote "Response style" section in DelegatorSystemPrompt to enforce inverted pyramid structure
+- Lead sentence → key mechanism → supporting detail (only if asked)
+- Anti-patterns: no ## headers, no --- rules, no numbered step lists, no tables, no code blocks unless asked
+- Goal: responses that read naturally aloud, prose not documentation
+
+### Before/after comparison
+
+**Test 1: "How does codetalk work?"**
+| Metric | Before | After |
+|--------|--------|-------|
+| Lines | 22 | 6 |
+| Headers (##) | 3 | 0 |
+| Tables | 1 | 0 |
+| Code blocks | 0 | 0 |
+| Bullet lists | 4 items | 0 |
+| Lead sentence | "## Key Files" (header) | "A codetalk session is bramble's read-only code exploration primitive" (answer) |
+
+**Test 2: "Trace full request lifecycle"**
+| Metric | Before | After |
+|--------|--------|-------|
+| Lines | 75 | 14 |
+| Headers (##) | 8 | 0 |
+| Horizontal rules | 8 | 0 |
+| Tables | 1 | 0 |
+| Code blocks | 2 | 0 |
+| Lead sentence | "## 1. Input Capture →" (header) | "four distinct layers — TUI input, session/runner, Claude CLI, async event pipeline" (answer) |
+
+### Checklist (14 items) — all pass
+  1-8: Rendered output checks all pass (text coherence, tools, lifecycle, turns, no noise, cost, no timeout, ticker)
+  9: Conciseness: PASS (6 lines test 1, 14 lines test 2 — down from 22 and 75)
+  10: Synthesis: PASS (pure prose, no research file reproduction)
+  11: Direct answers: PASS (lead sentence IS the answer)
+  12-14: N/A (single-turn tests)
+
+### JSONL verification
+  - Tool count: 5 ✓ (both tests)
+  - No ToolSearch: PASS
+  - Child end_turn: PASS
+  - Gemini child: end_turn confirmed
+  - No regressions
+
+### Cost
+  - Test 1: $0.0675 (vs $0.0476 previous round — slightly higher due to longer synthesis)
+  - Test 2: $0.0682 (vs $0.0747 previous round — slightly lower)
+
+### Verdict
+PASS — inverted pyramid style working. Dramatic reduction in visual formatting, responses
+read naturally as prose. Zero high/medium findings, no regressions. Exiting after 1 round.

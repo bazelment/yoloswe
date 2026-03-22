@@ -217,7 +217,9 @@ func (r *providerRunner) bridgeProviderEvents() {
 				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, e.Result, e.IsError)
 			case agent.TurnCompleteAgentEvent:
 				r.markTurnDone(turnObsSeq)
-				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.CostUSD)
+				// TurnEnd is emitted synchronously by the manager after
+				// RunTurn returns, so we skip OnTurnComplete here to
+				// avoid duplicates. See the addOutput call after RunTurn.
 			case agent.ErrorAgentEvent:
 				r.eventHandler.OnError(e.Err, e.Context)
 			}
@@ -1782,7 +1784,9 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 	currentPrompt := prompt
 	for {
+		turnStart := time.Now()
 		usage, err := runner.RunTurn(session.ctx, currentPrompt)
+		turnDurationMs := time.Since(turnStart).Milliseconds()
 		if err != nil {
 			if session.ctx.Err() != nil {
 				m.updateSessionStatus(session, StatusStopped)
@@ -1801,8 +1805,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		}
 
 		if usage != nil {
+			var turnCount int
 			session.Progress.Update(func(p *SessionProgress) {
 				p.TurnCount++
+				turnCount = p.TurnCount
 				p.TotalCostUSD += usage.CostUSD
 				p.InputTokens += usage.InputTokens
 				p.OutputTokens += usage.OutputTokens
@@ -1815,6 +1821,21 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				if total := usage.TotalInputTokens(); total > 0 {
 					p.LastTurnInputTotal = total
 				}
+			})
+
+			// Emit TurnEnd synchronously so it's guaranteed to be in the
+			// output buffer before StatusIdle. The async forwardEvents
+			// goroutine may still be processing events from the SDK's
+			// channel when RunTurn returns, causing a race where StatusIdle
+			// arrives at consumers before TurnEnd.
+			m.addOutput(session.ID, OutputLine{
+				Timestamp:  time.Now(),
+				Type:       OutputTypeTurnEnd,
+				Content:    fmt.Sprintf("Turn %d complete", turnCount),
+				TurnNumber: turnCount,
+				CostUSD:    usage.CostUSD,
+				DurationMs: turnDurationMs,
+				IsError:    false,
 			})
 		}
 

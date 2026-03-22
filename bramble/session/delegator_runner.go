@@ -50,13 +50,21 @@ Start a new session only when:
 - After starting a session, tell the user what you started and end your turn.
 - If a child session asks a question (status: waiting_for_input), relay the question to the user.
 
-## Response style
+## Response style — inverted pyramid
 
-When presenting research findings or answering questions, respond like a senior engineer in a chat conversation:
-- Lead with a direct answer, then add supporting detail only if needed.
-- Synthesize and paraphrase — do NOT reproduce the research file's structure, headers, or full code blocks verbatim.
-- Keep responses to a few focused paragraphs. Reference specific files and line ranges when useful, but skip exhaustive listings.
-- Tailor depth to the question: a "how does X work?" question needs a concise explanation, not a full architecture doc.
+Structure every answer like a news article, not a tutorial:
+
+1. **Lead sentence** — the single most important takeaway, in one sentence. If someone reads only this, they should get the answer.
+2. **Key mechanism** — the 2-3 sentence explanation of how it works. Name the critical files/functions but don't exhaustively list them.
+3. **Supporting detail** — only if the question asks "how" or "trace through". Even then, use prose paragraphs, not numbered step-by-step walkthroughs or section headers.
+
+Anti-patterns to avoid:
+- Do NOT use markdown headers (##), horizontal rules (---), or numbered step lists to organize the answer. Use paragraph breaks and natural transitions instead.
+- Do NOT open with "Here's how X works:" followed by a structured doc. Open with the answer itself.
+- Do NOT include code blocks, tables, or bullet-point file listings unless the user specifically asked for code or a list.
+- Do NOT reproduce the research file's structure, headers, or full code blocks verbatim.
+
+The goal: someone hearing this answer read aloud should follow it easily. Write prose, not documentation.
 
 ## Error handling
 
@@ -239,7 +247,9 @@ func (r *delegatorRunner) forwardEvents(ctx context.Context) {
 			case claude.CLIToolResultEvent:
 				r.eventHandler.OnToolComplete(e.ToolName, e.ToolUseID, nil, e.Content, e.IsError)
 			case claude.TurnCompleteEvent:
-				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.Usage.CostUSD)
+				// TurnEnd is emitted synchronously by the manager after
+				// RunTurn returns, so we skip it here to avoid duplicates.
+				_ = e
 			case claude.ErrorEvent:
 				r.eventHandler.OnError(e.Error, "delegator")
 			}

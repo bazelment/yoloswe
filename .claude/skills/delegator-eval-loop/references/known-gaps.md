@@ -17,6 +17,7 @@ Gaps found and fixed in past eval iterations. Check for **regressions** every ro
 | Verbose delegator responses (doc-style dumps) | No response style guidance in system prompt | `delegator_runner.go`: added Response style section | Multi-Turn v2 |
 | Non-Claude child cost/tokens show $0.00 | `agentUsageToTurnUsage` doesn't capture Gemini/Codex billing | `manager.go`: providerRunner cost pipeline | Multi-Provider v1 (unfixed) |
 | Codex unusable for multi-turn codetalk | Ephemeral provider (no LongRunningProvider), each turn loses context | Architecture limitation | Multi-Provider v1 (won't fix) |
+| TurnEnd/StatusIdle race: stdout empty | `forwardEvents` async processing lags behind `runSession`'s synchronous `StatusIdle` | `manager.go`: emit TurnEnd synchronously after RunTurn, skip in forwardEvents | Gemini Codetalk Eval (2026-03-22) |
 
 ## Adding New Entries
 
