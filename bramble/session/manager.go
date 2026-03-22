@@ -1519,12 +1519,13 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				})
 				runner = &plannerRunner{pw: pw}
 			case SessionTypeBuilder:
+				builderHandler := newSessionEventHandlerNoTurnEnd(m, session.ID)
 				builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
 					Model:           session.Model,
 					WorkDir:         session.WorktreePath,
 					ResumeSessionID: session.CLISessionID,
 					RecordingDir:    m.config.RecordingDir,
-				}, nil, eventHandler)
+				}, nil, builderHandler)
 				runner = &builderRunner{builder: builder}
 			case SessionTypeDelegator:
 				childModel := session.Model
@@ -1540,12 +1541,13 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					recordingDir: m.config.RecordingDir,
 				}
 			case SessionTypeCodeTalk:
+				codetalkHandler := newSessionEventHandlerNoTurnEnd(m, session.ID)
 				ct := yoloswe.NewCodeTalkSessionWithEvents(yoloswe.CodeTalkConfig{
 					Model:           session.Model,
 					WorkDir:         session.WorktreePath,
 					ResumeSessionID: session.CLISessionID,
 					RecordingDir:    m.config.RecordingDir,
-				}, nil, eventHandler)
+				}, nil, codetalkHandler)
 				runner = &codetalkRunner{ct: ct}
 			default:
 				m.updateSessionStatus(session, StatusFailed)
