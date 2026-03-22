@@ -8,10 +8,19 @@ import (
 
 // TurnUsage contains token usage for a turn.
 type TurnUsage struct {
-	InputTokens     int
-	OutputTokens    int
-	CacheReadTokens int
-	CostUSD         float64
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	CostUSD             float64
+	ContextWindow       int // total context window size for the model
+}
+
+// TotalInputTokens returns the total input context size: fresh input tokens +
+// cache creation tokens + cache read tokens. This represents the full context
+// window utilization for the turn.
+func (u TurnUsage) TotalInputTokens() int {
+	return u.InputTokens + u.CacheCreationTokens + u.CacheReadTokens
 }
 
 // TurnResult contains the result of a completed turn.

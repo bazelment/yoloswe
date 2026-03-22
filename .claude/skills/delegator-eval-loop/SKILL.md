@@ -57,6 +57,7 @@ Always produce a summary table (rounds, findings fixed, remaining gaps, verdict)
 | Area | Files |
 |------|-------|
 | Harness & rendering | `bramble/cmd/delegator/delegator.go` |
+| Multi-turn eval | `scripts/delegator-eval.py` + `scripts/delegator-eval-questions.txt` |
 | Session setup | `bramble/session/delegator_runner.go` |
 | Tool handlers | `bramble/session/delegator_tools.go` |
 | Session lifecycle | `bramble/session/manager.go` |

@@ -1,0 +1,192 @@
+## Codetalk Eval Run — 2026-03-21
+
+### Round 1 (exit: all checks pass)
+
+Test 1: Simple codetalk — "Explain the CodeTalkSession type in yoloswe/codetalk.go"
+  Result: PASS | 2 delegator turns | 1 codetalk child | $0.3043 total
+  Tools used: start_session(1), get_session_progress(1)
+  Research file: created (5589 bytes), exposed in get_session_progress
+  Read tool: NOT used (delegator answered from get_session_progress output)
+
+Test 2: Complex multi-concept — "Understand session lifecycle + concurrency model"
+  Result: PASS | 2 delegator turns | 1 codetalk child | $0.3368 total
+  Tools used: start_session(1), get_session_progress(1), Read(1)
+  Research file: created (9571 bytes, 223 lines), read by delegator via Read tool
+  Read tool: USED — delegator read /tmp/bramble-research/<id>.md after get_session_progress
+
+Checklist results (all items):
+  1. Text coherence: PASS (both tests)
+  2. Tool display: PASS (5 tools: 4 SDK + Read)
+  3. Child lifecycle: PASS
+  4. Turn structure: PASS
+  5. No noise: PASS (zero stderr leakage)
+  6. Cost summary: PASS
+  7. No timeout: PASS (test1: ~2.5min, test2: ~3min)
+  8. Progress ticker: PASS
+
+JSONL verification:
+  - Tool count: 5 (expected, checklist updated from 3→5)
+  - No ToolSearch: PASS
+  - Child completion: PASS (end_turn present)
+  - Model propagation: sonnet as configured
+  - No regressions from known-gaps table
+
+Verdict: PASS — zero high/medium findings. Exiting after 1 round.
+
+## Multi-Turn Eval v3 — 2026-03-21
+
+### Changes tested
+- Response style guidance in DelegatorSystemPrompt
+- Context window tracking: LastTurnInputTotal = InputTokens + CacheCreationTokens + CacheReadTokens
+- send_followup parameter renamed: message → prompt (consistency fix)
+- Eval timeout reduced to 15 minutes
+
+### Results: 6 of 11 Qs | 15min | $2.36 total | $0.39/question
+
+Sessions: 1 codetalk child, 3 send_followups, 8 delegator turns
+Context window tracking: 24% → 40% (accurate, growing with follow-ups)
+
+Checklist (14 items):
+  1. Text coherence: PASS
+  2. Tool display: PASS (5 tools)
+  3. Child lifecycle: PASS
+  4. Turn structure: PASS
+  5. No noise: PASS
+  6. Cost summary: PASS
+  7. No timeout: FAIL (Q6 child ran 5+ min, hit 15min total timeout)
+  8. Progress ticker: PASS
+  9. Conciseness: PASS (Q1:64, Q2:15, Q3:54, Q4:87, Q5:44 lines)
+  10. Synthesis: PASS (conversational, no verbatim dumps)
+  11. Direct answers: PASS
+  12. Cached answers: PASS (Q2, Q4, Q5 from memory — no new sessions)
+  13. Context awareness: PASS (24% → 40% in get_session_progress)
+  14. Session rotation: N/A (40% < 70% threshold)
+
+JSONL verification:
+  - Tool count: 5 (correct)
+  - No ToolSearch: PASS
+  - send_followup uses "prompt" key: PASS (no "message" key)
+  - Context: 48608/200000 (24%) → 80900/200000 (40%)
+  - Child end_turn: PASS
+
+Key improvements vs v1 ($8.69, 7 Qs):
+  - Cost/question: $0.39 vs $1.24 (3.2x cheaper)
+  - Responses much more concise and conversational
+  - Context window tracking working with real token counts
+  - send_followup parameter bug fixed
+
+Remaining: child sessions can run 5+ min on complex follow-ups, consuming eval budget.
+Verdict: PASS with known limitation on child session duration.
+
+## Multi-Provider Eval — 2026-03-21
+
+### Changes tested
+- ChildModel on ManagerConfig: decouple delegator model from child model
+- Eval harness parameterized: --delegator-model, --child-model flags
+- System prompt includes default child model info
+- delegatorSystemPromptWithModels() takes defaultChildModel parameter
+
+### Results: 3-way comparison (11 questions, 15min timeout)
+
+| Metric | Gemini Flash 3 | Claude Sonnet | Codex gpt-5.3 |
+|--------|---------------|---------------|----------------|
+| Questions answered | 11/11 | 8/11 | 2/11 |
+| Wall clock | 8m36s | 15m0s (timeout) | 15m0s (timeout) |
+| Total cost | $6.11 | $4.05 | $0.17 |
+| Delegator cost | $6.11 | $2.11 | $0.17 |
+| Child cost (reported) | $0.00* | $1.94 | $0.00* |
+| Cost/question | $0.56 | $0.51 | $0.09 |
+| Child sessions | 1 | 2 | 1 |
+| Follow-ups sent | 10 | 5 | 1 |
+| Delegator turns | 21 | 11 | 3 |
+| Research file size | 46KB (500 lines) | 23KB + 7KB | 17KB |
+
+\* Gemini/Codex providers don't report costs through the SessionProgress pipeline.
+
+### Analysis
+
+**Gemini Flash 3 (gemini-3-flash-preview)**: Best throughput. Answered all 11 questions
+in 8.5 minutes — fast child turns enabled 10 follow-ups on a single session. Research
+output was comprehensive (46KB). Higher delegator cost ($6.11) because the delegator ran
+21 turns synthesizing answers. Child cost not tracked (provider gap).
+
+**Claude Sonnet**: Best cost tracking but hit timeout. Child sessions ran 5+ min each,
+limiting to 8 questions. Started a 2nd child when context hit 90% — session rotation
+working. $0.51/question with accurate cost tracking.
+
+**Codex (gpt-5.3-codex)**: Too slow for multi-turn codetalk. First turn took ~5 min,
+follow-up hung for 9+ min. Ephemeral provider (no LongRunningProvider) means each
+send_followup creates a fresh session with no context — fundamentally unsuitable for
+iterative code exploration.
+
+### Known gaps found
+- Non-Claude providers report $0.00 cost and 0 tokens in SessionProgress
+  (providerRunner → agentUsageToTurnUsage doesn't capture Gemini/Codex billing)
+- Codex ephemeral provider incompatible with multi-turn codetalk pattern
+
+### Verdict
+Gemini Flash 3 is the most effective codetalk backend for throughput. Claude Sonnet
+remains the most observable (full cost/token tracking). Codex is not viable for
+codetalk use cases.
+
+## Voice-Readability Eval (Gemini Codetalk) — 2026-03-21
+
+### Changes tested
+- `--child-model` flag added to `bramble delegator` CLI (was only on delegator-eval binary)
+- stdout/stderr separation verified: answer text → stdout, metadata → stderr
+- Gemini Flash 3 as codetalk child, evaluating responses for voice delivery
+
+### Test 1: Simple prompt — "How does session manager handle follow-ups? Quick explanation for a teammate."
+  Result: PASS | 2 delegator turns | 1 codetalk child | $0.0544 total
+  Response: 20 lines, conversational tone
+  Voice score: 7/10 — good structure but uses markdown bold, backticked code refs, line numbers
+
+### Test 2: Complex prompt — "Walk me through concurrency model, keep it casual like over coffee."
+  Result: PASS | 2 delegator turns | 1 codetalk child | $0.0648 total
+  Response: 44 lines, excellent conversational tone ("grab your coffee")
+  Voice score: 6/10 — section headers (##), horizontal rules (---), heavy code references
+
+### Checklist (14 items)
+  1. Text coherence: PASS
+  2. Tool display: PASS (5 tools: Read + 4 SDK)
+  3. Child lifecycle: PASS
+  4. Turn structure: PASS
+  5. No noise: PASS
+  6. Cost summary: PASS
+  7. No timeout: PASS (both under 3min)
+  8. Progress ticker: PASS (⏳ shown for >30s children)
+  9. Conciseness: PASS (20 and 44 lines)
+  10. Synthesis: PASS (paraphrased, not dumped)
+  11. Direct answers: PASS
+  12. Cached answers: N/A (single-turn)
+  13. Context awareness: N/A (single-turn)
+  14. Session rotation: N/A (single session)
+
+### JSONL verification
+  - Tool count: 5 (correct)
+  - No ToolSearch: PASS
+  - Child end_turn: PASS (4 end_turn events per test)
+  - Model propagation: gemini-3-flash-preview confirmed
+  - No regressions from known-gaps table
+  - Gemini child cost $0.00: expected (known gap)
+
+### Voice-readability observations
+Responses are conversational and well-synthesized but still use visual formatting:
+- Markdown headers (##), bold (**...**), horizontal rules (---)
+- Backticked code references (`runSession`, `followUpChans`)
+- Specific line number citations (~line 1768)
+
+These work fine for text but are awkward when read aloud. A voice-mode system
+prompt addition could request plain prose without markdown, using natural
+transitions ("First...", "The key thing to know is...") instead of visual structure.
+This is a system prompt tuning opportunity, not a code bug.
+
+### Cost comparison (Gemini codetalk single-question)
+- $0.05-$0.07 per question (vs $0.39 with Claude child, $0.56 with Gemini multi-turn)
+- Gemini child runs in ~1min (vs 2-5min for Claude children)
+- Drastically cheaper for single-question codetalk
+
+### Verdict
+PASS — zero high/medium findings. stdout/stderr separation correct. Gemini codetalk
+effective and very cheap. Voice-readability is a system prompt style issue, not a
+regression or code bug. Exiting after 1 round.

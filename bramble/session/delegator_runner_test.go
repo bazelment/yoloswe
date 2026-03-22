@@ -63,7 +63,7 @@ func TestDelegatorToolRegistry(t *testing.T) {
 	registry := handler.Registry()
 	tools := registry.Tools()
 
-	require.Len(t, tools, 3)
+	require.Len(t, tools, 4)
 
 	toolNames := make([]string, len(tools))
 	for i, tool := range tools {
@@ -72,21 +72,29 @@ func TestDelegatorToolRegistry(t *testing.T) {
 	assert.Contains(t, toolNames, "start_session")
 	assert.Contains(t, toolNames, "stop_session")
 	assert.Contains(t, toolNames, "get_session_progress")
+	assert.Contains(t, toolNames, "send_followup")
 }
 
 func TestDelegatorSystemPromptWithModels(t *testing.T) {
 	t.Run("empty models returns base prompt", func(t *testing.T) {
-		result := delegatorSystemPromptWithModels("")
+		result := delegatorSystemPromptWithModels("", "")
 		assert.Equal(t, DelegatorSystemPrompt, result)
 	})
 
 	t.Run("appends model list", func(t *testing.T) {
 		models := "- claude: opus, sonnet\n- gemini: gemini-2.5-pro\n"
-		result := delegatorSystemPromptWithModels(models)
+		result := delegatorSystemPromptWithModels(models, "sonnet")
 
 		assert.Contains(t, result, DelegatorSystemPrompt)
 		assert.Contains(t, result, "## Available models")
 		assert.Contains(t, result, "claude: opus, sonnet")
 		assert.Contains(t, result, "gemini: gemini-2.5-pro")
+		assert.Contains(t, result, "Your default model for child sessions is: sonnet")
+	})
+
+	t.Run("includes child model without available models", func(t *testing.T) {
+		result := delegatorSystemPromptWithModels("", "gemini-3-flash-preview")
+		assert.Contains(t, result, "Your default model for child sessions is: gemini-3-flash-preview")
+		assert.NotContains(t, result, "## Available models")
 	})
 }

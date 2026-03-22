@@ -76,7 +76,7 @@ func NewMockDelegatorToolHandler(behaviors map[string][]*MockSessionBehavior) *M
 
 	registry := claude.NewTypedToolRegistry()
 	claude.AddTool(registry, "start_session",
-		"Start a new child session (planner or builder) on the worktree. Returns the session ID.",
+		"Start a new child session (planner, builder, or codetalk) on the worktree. Returns the session ID.",
 		h.handleStartSession)
 	claude.AddTool(registry, "stop_session",
 		"Stop a running child session.",
@@ -84,6 +84,9 @@ func NewMockDelegatorToolHandler(behaviors map[string][]*MockSessionBehavior) *M
 	claude.AddTool(registry, "get_session_progress",
 		"Get the current progress and recent output of a child session.",
 		h.handleGetSessionProgress)
+	claude.AddTool(registry, "send_followup",
+		"Send a follow-up message to an idle child session.",
+		h.handleSendFollowUp)
 
 	h.registry = registry
 	return h
@@ -245,8 +248,8 @@ func (h *MockDelegatorToolHandler) handleStartSession(_ context.Context, params 
 		"model":  params.Model,
 	})
 
-	if params.Type != "planner" && params.Type != "builder" {
-		return "", fmt.Errorf("invalid session type %q: must be planner or builder", params.Type)
+	if params.Type != "planner" && params.Type != "builder" && params.Type != "codetalk" {
+		return "", fmt.Errorf("invalid session type %q: must be planner, builder, or codetalk", params.Type)
 	}
 
 	h.nextID++
@@ -254,9 +257,10 @@ func (h *MockDelegatorToolHandler) handleStartSession(_ context.Context, params 
 
 	model := params.Model
 	if model == "" {
-		if params.Type == "planner" {
+		switch params.Type {
+		case "planner", "codetalk":
 			model = "opus"
-		} else {
+		default:
 			model = "sonnet"
 		}
 	}
@@ -348,4 +352,24 @@ func (h *MockDelegatorToolHandler) handleGetSessionProgress(_ context.Context, p
 	}
 
 	return b.String(), nil
+}
+
+func (h *MockDelegatorToolHandler) handleSendFollowUp(_ context.Context, params sendFollowUpParams) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.record("send_followup", map[string]any{
+		"session_id": params.SessionID,
+		"prompt":     params.Prompt,
+	})
+
+	entry, ok := h.sessions[params.SessionID]
+	if !ok {
+		return "", fmt.Errorf("session not found: %s", params.SessionID)
+	}
+	if entry.current.Status != "idle" {
+		return "", fmt.Errorf("session %s is not idle (status: %s)", params.SessionID, entry.current.Status)
+	}
+	entry.current.Status = "running"
+	return fmt.Sprintf("Follow-up sent to session %s. It will resume and you will be notified when it completes.", params.SessionID), nil
 }

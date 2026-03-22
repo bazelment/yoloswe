@@ -440,6 +440,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// Propagated through sharedManagerConfig so that openRepo can register
 	// new managers automatically.
 	Registry *SessionRegistry
+	// ChildModel overrides the default model for child sessions spawned by
+	// the delegator. If empty, children default to the delegator's own model.
+	ChildModel string
 }
 
 // Manager handles multiple concurrent sessions.
@@ -1522,7 +1525,11 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				}, nil, eventHandler)
 				runner = &builderRunner{builder: builder}
 			case SessionTypeDelegator:
-				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, session.Model, m.config.ModelRegistry)
+				childModel := session.Model
+				if m.config.ChildModel != "" {
+					childModel = m.config.ChildModel
+				}
+				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, childModel, m.config.ModelRegistry)
 				runner = &delegatorRunner{
 					toolHandler:  toolHandler,
 					eventHandler: eventHandler,
@@ -1799,6 +1806,15 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				p.TotalCostUSD += usage.CostUSD
 				p.InputTokens += usage.InputTokens
 				p.OutputTokens += usage.OutputTokens
+				if usage.ContextWindow > 0 {
+					p.ContextWindow = usage.ContextWindow
+				}
+				// Store last turn's total input for context utilization.
+				// TotalInputTokens() = InputTokens + CacheCreationTokens + CacheReadTokens,
+				// representing the full prompt size sent for this turn.
+				if total := usage.TotalInputTokens(); total > 0 {
+					p.LastTurnInputTotal = total
+				}
 			})
 		}
 
@@ -1814,6 +1830,15 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					Type:      OutputTypePlanReady,
 					Content:   string(planContent),
 				})
+			}
+		}
+
+		// After codetalk turn: write research output to a file for delegator consumption.
+		if session.Type == SessionTypeCodeTalk {
+			if researchPath, err := m.writeResearchFile(session); err == nil {
+				session.mu.Lock()
+				session.ResearchFilePath = researchPath
+				session.mu.Unlock()
 			}
 		}
 
@@ -2166,6 +2191,32 @@ func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
 		return nil
 	}
 	return sessionmodel.RecentAssistantTextFromSlice(lines, n)
+}
+
+// writeResearchFile writes a codetalk session's text output to a markdown file
+// in /tmp/bramble-research/. Returns the file path on success.
+func (m *Manager) writeResearchFile(session *Session) (string, error) {
+	researchDir := filepath.Join(os.TempDir(), "bramble-research")
+	if err := os.MkdirAll(researchDir, 0o755); err != nil {
+		return "", fmt.Errorf("create research dir: %w", err)
+	}
+
+	researchPath := filepath.Join(researchDir, string(session.ID)+".md")
+	lines := m.GetSessionOutput(session.ID)
+
+	f, err := os.Create(researchPath)
+	if err != nil {
+		return "", fmt.Errorf("create research file: %w", err)
+	}
+	defer f.Close()
+
+	for i := range lines {
+		if lines[i].Type == OutputTypeText && !lines[i].IsUserPrompt {
+			fmt.Fprintln(f, lines[i].Content)
+		}
+	}
+
+	return researchPath, nil
 }
 
 // CapturePaneText captures the last n lines of text from a tmux session's pane.

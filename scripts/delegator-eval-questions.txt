@@ -1,0 +1,15 @@
+# Delegator multi-turn eval questions
+# One question per line. Blank lines and # comments are skipped.
+# Edit this file for each eval campaign — questions are data, not code.
+
+Explain the session lifecycle in bramble/session/ — how sessions are created, started, go idle, receive follow-ups, and complete.
+What mutex lock ordering is enforced and why?
+How does the delegator session differ from planner/builder sessions?
+What happens when a child session fails — trace the error path.
+How does SendFollowUp work internally? What are the edge cases?
+Explain the streaming text pipeline — how do TextEvent chunks become OutputLines?
+What is the codetalkRunner and how does it write research files?
+How does the providerRunner bridge async events? What is the dedup logic?
+What is ReconcileTmuxSessions and when does it run?
+Summarize the top 3 concurrency gotchas a new contributor should know.
+If I wanted to add a new session type, what files would I need to modify?
