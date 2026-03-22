@@ -21,6 +21,8 @@ Gaps found and fixed in past eval iterations. Check for **regressions** every ro
 | Lost idle signals in interactive mode | Non-blocking send on buffer-1 `idleCh` drops signals during rapid Idle→Running→Idle cycles | `delegator.go`: drain-before-send on idleCh | Multi-Turn Codewalk (2026-03-22) |
 | Nested select deadlock (interactive) | Inner select waiting for stdin can't see new `idleCh` from child-notification turns | `delegator.go`: flatten to single for/select with `promptReady` flag | Multi-Turn Codewalk (2026-03-22) |
 | Child notification starvation | Go select randomly picks followUpChan vs childNotifyChan, child completions pile up | `manager.go`: non-blocking drain of childNotifyChan before blocking select | Multi-Turn Codewalk (2026-03-22) |
+| Parallel children (7 instead of 1) | System prompt "start new session when topic is unrelated" too permissive under rapid question input | `delegator_runner.go`: explicit "PREFER REUSE OVER SPAWNING" guidance, ban on multiple same-type children | Gemini Codewalk Eval (2026-03-22) |
+| Markdown formatting in multi-turn answers | Model falls back to ---, **, ## when delivering batched answers despite anti-pattern guidance | `delegator_runner.go`: replaced inverted pyramid with hard "plain prose only" ban | Gemini Codewalk Eval (2026-03-22) |
 
 ## Adding New Entries
 
