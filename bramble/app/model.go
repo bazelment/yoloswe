@@ -80,6 +80,7 @@ type Model struct {
 	wtRoot                string
 	pendingSessionType    session.SessionType
 	defaultPlanModel      string
+	defaultCodeTalkModel  string
 	openedRepos           []string
 	resumeRepos           []string
 	cachedHistory         []*session.SessionMeta
@@ -116,12 +117,15 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 
 	// Resolve default models from the registry (prefer claude if available)
 	defaultPlanModel := "opus"
+	defaultCodeTalkModel := "opus"
 	defaultBuildModel := "sonnet"
 	if modelRegistry != nil {
 		if m, ok := modelRegistry.ModelByID("opus"); ok {
 			defaultPlanModel = m.ID
+			defaultCodeTalkModel = m.ID
 		} else if models := modelRegistry.Models(); len(models) > 0 {
 			defaultPlanModel = models[0].ID
+			defaultCodeTalkModel = models[0].ID
 		}
 		if m, ok := modelRegistry.ModelByID("sonnet"); ok {
 			defaultBuildModel = m.ID
@@ -154,6 +158,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		width:                width,
 		height:               height,
 		defaultPlanModel:     defaultPlanModel,
+		defaultCodeTalkModel: defaultCodeTalkModel,
 		defaultBuildModel:    defaultBuildModel,
 		worktreeDropdown:     wtDropdown,
 		sessionDropdown:      NewDropdown(nil),
@@ -386,10 +391,7 @@ func (m *Model) updateSessionDropdown() {
 	for i := range sessions {
 		sess := &sessions[i]
 		// Type icon
-		icon := "📋" // planner
-		if sess.Type == session.SessionTypeBuilder {
-			icon = "🔨"
-		}
+		icon := sessionTypeEmojiIcon(sess.Type)
 
 		// Status badge
 		badge := statusIcon(sess.Status, m.styles)
@@ -454,6 +456,8 @@ func (m *Model) updateSessionDropdown() {
 		icon := "📋"
 		if hist.Type == session.SessionTypeBuilder {
 			icon = "🔨"
+		} else if hist.Type == session.SessionTypeCodeTalk {
+			icon = "💬"
 		}
 
 		badge := m.styles.Dim.Render("(history)")

@@ -11,6 +11,18 @@ Gaps found and fixed in past eval iterations. Check for **regressions** every ro
 | Planner cost $0.0000 | Reading from wrong progress field | `delegator.go`: aggregate from `OutputTypeTurnEnd` lines | Round 2 |
 | Child model wrong | Not propagating from delegator config | `manager.go`: thread model to all child sessions | Round 2 |
 | Premature "You>" prompt | `hasActiveChildren()` only checked `StatusRunning` | `delegator.go`: check all non-terminal states | Round 2 |
+| Delegator tool count changed 3→5 | Added `send_followup` SDK tool + `Read` built-in for codetalk support | `delegator_tools.go`, `delegator_runner.go` | Codetalk Round 1 |
+| send_followup param naming (message→prompt) | LLM confused `start_session.prompt` with `send_followup.message`, sent empty messages | `delegator_tools.go`: rename to `prompt` + validate | Multi-Turn v2 |
+| Context window shows 0% (InputTokens only 4) | Protocol `input_tokens` excludes cached tokens; need `input + cache_creation + cache_read` | `turn.go`: `TotalInputTokens()`, `types.go`: `LastTurnInputTotal`, `manager.go`: propagate | Multi-Turn v3 |
+| Verbose delegator responses (doc-style dumps) | No response style guidance in system prompt | `delegator_runner.go`: added Response style section | Multi-Turn v2 |
+| Non-Claude child cost/tokens show $0.00 | `agentUsageToTurnUsage` doesn't capture Gemini/Codex billing | `manager.go`: providerRunner cost pipeline | Multi-Provider v1 (unfixed) |
+| Codex unusable for multi-turn codetalk | Ephemeral provider (no LongRunningProvider), each turn loses context | Architecture limitation | Multi-Provider v1 (won't fix) |
+| TurnEnd/StatusIdle race: stdout empty | `forwardEvents` async processing lags behind `runSession`'s synchronous `StatusIdle` | `manager.go`: emit TurnEnd synchronously after RunTurn, skip in forwardEvents | Gemini Codetalk Eval (2026-03-22) |
+| Lost idle signals in interactive mode | Non-blocking send on buffer-1 `idleCh` drops signals during rapid Idle→Running→Idle cycles | `delegator.go`: drain-before-send on idleCh | Multi-Turn Codewalk (2026-03-22) |
+| Nested select deadlock (interactive) | Inner select waiting for stdin can't see new `idleCh` from child-notification turns | `delegator.go`: flatten to single for/select with `promptReady` flag | Multi-Turn Codewalk (2026-03-22) |
+| Child notification starvation | Go select randomly picks followUpChan vs childNotifyChan, child completions pile up | `manager.go`: non-blocking drain of childNotifyChan before blocking select | Multi-Turn Codewalk (2026-03-22) |
+| Parallel children (7 instead of 1) | System prompt "start new session when topic is unrelated" too permissive under rapid question input | `delegator_runner.go`: explicit "PREFER REUSE OVER SPAWNING" guidance, ban on multiple same-type children | Gemini Codewalk Eval (2026-03-22) |
+| Markdown formatting in multi-turn answers | Model falls back to ---, **, ## when delivering batched answers despite anti-pattern guidance | `delegator_runner.go`: replaced inverted pyramid with hard "plain prose only" ban | Gemini Codewalk Eval (2026-03-22) |
 
 ## Adding New Entries
 

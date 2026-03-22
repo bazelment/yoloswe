@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "delegator",
@@ -12,4 +12,11 @@ go_library(
         "//multiagent/agent",
         "@com_github_spf13_cobra//:cobra",
     ],
+)
+
+go_test(
+    name = "delegator_test",
+    srcs = ["delegator_test.go"],
+    embed = [":delegator"],
+    deps = ["@com_github_stretchr_testify//require"],
 )

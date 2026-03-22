@@ -12,8 +12,9 @@ import (
 // It converts semantic events from the renderer into structured OutputLine
 // entries that the TUI can display.
 type sessionEventHandler struct {
-	manager   *Manager
-	sessionID SessionID
+	manager         *Manager
+	sessionID       SessionID
+	suppressTurnEnd bool // true when manager emits TurnEnd synchronously after RunTurn
 }
 
 // Ensure interface compliance at compile time
@@ -24,6 +25,17 @@ func newSessionEventHandler(manager *Manager, sessionID SessionID) *sessionEvent
 	return &sessionEventHandler{
 		manager:   manager,
 		sessionID: sessionID,
+	}
+}
+
+// newSessionEventHandlerNoTurnEnd creates a handler that suppresses OnTurnComplete
+// emissions. Use this for runner types (builder, codetalk) where the manager
+// emits OutputTypeTurnEnd synchronously after RunTurn to avoid duplicates.
+func newSessionEventHandlerNoTurnEnd(manager *Manager, sessionID SessionID) *sessionEventHandler {
+	return &sessionEventHandler{
+		manager:         manager,
+		sessionID:       sessionID,
+		suppressTurnEnd: true,
 	}
 }
 
@@ -99,6 +111,12 @@ func formatToolContent(name string, input map[string]interface{}) string {
 }
 
 func (h *sessionEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
+	// When suppressTurnEnd is set, the manager emits OutputTypeTurnEnd
+	// synchronously after RunTurn returns. Emitting it here too would produce
+	// a duplicate for builder and codetalk sessions that use baseSession.
+	if h.suppressTurnEnd {
+		return
+	}
 	h.manager.addOutput(h.sessionID, OutputLine{
 		Timestamp:  time.Now(),
 		Type:       OutputTypeTurnEnd,

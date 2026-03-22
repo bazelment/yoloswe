@@ -17,6 +17,7 @@ const (
 	SessionTypePlanner   SessionType = "planner"
 	SessionTypeBuilder   SessionType = "builder"
 	SessionTypeDelegator SessionType = "delegator"
+	SessionTypeCodeTalk  SessionType = "codetalk"
 )
 
 // Provider name aliases — canonical definitions are in multiagent/agent.
@@ -103,42 +104,45 @@ const (
 
 // Session represents a single plan or builder session.
 type Session struct {
-	CreatedAt      time.Time
-	ctx            context.Context
-	Error          error
-	Progress       *SessionProgress
-	StartedAt      *time.Time
-	CompletedAt    *time.Time
-	cancel         context.CancelFunc
-	WorktreeName   string
-	Prompt         string
-	Title          string
-	Model          string
-	PlanFilePath   string // Path to plan file (planner sessions only)
-	TmuxWindowName string // tmux window name (empty for TUI mode)
-	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
-	RunnerType     string // "tui", "tmux", or "tmux-tracked"
-	RepoName       string // Repository this session belongs to
-	CLISessionID   string // CLI session ID (from system{init}), used for --resume
-	ID             SessionID
-	WorktreePath   string
-	Status         SessionStatus
-	Type           SessionType
-	mu             sync.RWMutex
+	CreatedAt        time.Time
+	ctx              context.Context
+	Error            error
+	Progress         *SessionProgress
+	StartedAt        *time.Time
+	CompletedAt      *time.Time
+	cancel           context.CancelFunc
+	WorktreeName     string
+	Prompt           string
+	Title            string
+	Model            string
+	PlanFilePath     string // Path to plan file (planner sessions only)
+	TmuxWindowName   string // tmux window name (empty for TUI mode)
+	TmuxWindowID     string // tmux window ID like @1, @2 (empty for TUI mode)
+	RunnerType       string // "tui", "tmux", or "tmux-tracked"
+	RepoName         string // Repository this session belongs to
+	CLISessionID     string // CLI session ID (from system{init}), used for --resume
+	ResearchFilePath string // Path to research output file (codetalk sessions only)
+	ID               SessionID
+	WorktreePath     string
+	Status           SessionStatus
+	Type             SessionType
+	mu               sync.RWMutex
 }
 
 // SessionProgress tracks real-time progress.
 type SessionProgress struct {
-	LastActivity time.Time
-	CurrentPhase string
-	CurrentTool  string
-	StatusLine   string
-	RecentOutput []string // last N lines of assistant text for command center display
-	TurnCount    int
-	TotalCostUSD float64
-	InputTokens  int
-	OutputTokens int
-	mu           sync.RWMutex
+	LastActivity       time.Time
+	CurrentPhase       string
+	CurrentTool        string
+	StatusLine         string
+	RecentOutput       []string // last N lines of assistant text for command center display
+	TurnCount          int
+	TotalCostUSD       float64
+	InputTokens        int
+	OutputTokens       int
+	ContextWindow      int // total context window size for the model (from protocol)
+	LastTurnInputTotal int // last turn's total input tokens (input + cache_creation + cache_read) for context utilization
+	mu                 sync.RWMutex
 }
 
 // Update updates progress safely.
@@ -158,15 +162,17 @@ func (p *SessionProgress) Clone() SessionProgress {
 		copy(recentOutput, p.RecentOutput)
 	}
 	return SessionProgress{
-		CurrentPhase: p.CurrentPhase,
-		CurrentTool:  p.CurrentTool,
-		TurnCount:    p.TurnCount,
-		TotalCostUSD: p.TotalCostUSD,
-		InputTokens:  p.InputTokens,
-		OutputTokens: p.OutputTokens,
-		LastActivity: p.LastActivity,
-		StatusLine:   p.StatusLine,
-		RecentOutput: recentOutput,
+		CurrentPhase:       p.CurrentPhase,
+		CurrentTool:        p.CurrentTool,
+		TurnCount:          p.TurnCount,
+		TotalCostUSD:       p.TotalCostUSD,
+		InputTokens:        p.InputTokens,
+		OutputTokens:       p.OutputTokens,
+		ContextWindow:      p.ContextWindow,
+		LastTurnInputTotal: p.LastTurnInputTotal,
+		LastActivity:       p.LastActivity,
+		StatusLine:         p.StatusLine,
+		RecentOutput:       recentOutput,
 	}
 }
 
@@ -178,38 +184,41 @@ type SessionEvent struct {
 
 // SessionProgressSnapshot is a mutex-free copy of SessionProgress for display.
 type SessionProgressSnapshot struct {
-	LastActivity time.Time
-	CurrentPhase string
-	CurrentTool  string
-	StatusLine   string
-	RecentOutput []string // last N lines of assistant text for command center display
-	TurnCount    int
-	TotalCostUSD float64
-	InputTokens  int
-	OutputTokens int
+	LastActivity       time.Time
+	CurrentPhase       string
+	CurrentTool        string
+	StatusLine         string
+	RecentOutput       []string // last N lines of assistant text for command center display
+	TurnCount          int
+	TotalCostUSD       float64
+	InputTokens        int
+	OutputTokens       int
+	ContextWindow      int
+	LastTurnInputTotal int
 }
 
 // SessionInfo provides a snapshot of session state for display.
 type SessionInfo struct {
-	CreatedAt      time.Time
-	CompletedAt    *time.Time
-	StartedAt      *time.Time
-	WorktreePath   string
-	WorktreeName   string
-	Prompt         string
-	Title          string
-	Model          string
-	PlanFilePath   string
-	TmuxWindowName string // tmux window name (empty for TUI mode)
-	TmuxWindowID   string // tmux window ID like @1, @2 (empty for TUI mode)
-	RunnerType     string // "tui", "tmux", or "tmux-tracked"
-	RepoName       string // Repository this session belongs to
-	CLISessionID   string // CLI session ID, used for --resume
-	ID             SessionID
-	Status         SessionStatus
-	Type           SessionType
-	ErrorMsg       string
-	Progress       SessionProgressSnapshot
+	CreatedAt        time.Time
+	CompletedAt      *time.Time
+	StartedAt        *time.Time
+	WorktreePath     string
+	WorktreeName     string
+	Prompt           string
+	Title            string
+	Model            string
+	PlanFilePath     string
+	TmuxWindowName   string // tmux window name (empty for TUI mode)
+	TmuxWindowID     string // tmux window ID like @1, @2 (empty for TUI mode)
+	RunnerType       string // "tui", "tmux", or "tmux-tracked"
+	RepoName         string // Repository this session belongs to
+	CLISessionID     string // CLI session ID, used for --resume
+	ResearchFilePath string // Path to research output file (codetalk sessions only)
+	ID               SessionID
+	Status           SessionStatus
+	Type             SessionType
+	ErrorMsg         string
+	Progress         SessionProgressSnapshot
 }
 
 // ToInfo converts a Session to SessionInfo for safe display.
@@ -218,37 +227,40 @@ func (s *Session) ToInfo() SessionInfo {
 	defer s.mu.RUnlock()
 
 	info := SessionInfo{
-		ID:             s.ID,
-		Type:           s.Type,
-		Status:         s.Status,
-		WorktreePath:   s.WorktreePath,
-		WorktreeName:   s.WorktreeName,
-		Prompt:         s.Prompt,
-		Title:          s.Title,
-		Model:          s.Model,
-		PlanFilePath:   s.PlanFilePath,
-		TmuxWindowName: s.TmuxWindowName,
-		TmuxWindowID:   s.TmuxWindowID,
-		RunnerType:     s.RunnerType,
-		RepoName:       s.RepoName,
-		CLISessionID:   s.CLISessionID,
-		CreatedAt:      s.CreatedAt,
-		StartedAt:      s.StartedAt,
-		CompletedAt:    s.CompletedAt,
+		ID:               s.ID,
+		Type:             s.Type,
+		Status:           s.Status,
+		WorktreePath:     s.WorktreePath,
+		WorktreeName:     s.WorktreeName,
+		Prompt:           s.Prompt,
+		Title:            s.Title,
+		Model:            s.Model,
+		PlanFilePath:     s.PlanFilePath,
+		TmuxWindowName:   s.TmuxWindowName,
+		TmuxWindowID:     s.TmuxWindowID,
+		RunnerType:       s.RunnerType,
+		RepoName:         s.RepoName,
+		CLISessionID:     s.CLISessionID,
+		ResearchFilePath: s.ResearchFilePath,
+		CreatedAt:        s.CreatedAt,
+		StartedAt:        s.StartedAt,
+		CompletedAt:      s.CompletedAt,
 	}
 
 	if s.Progress != nil {
 		p := s.Progress.Clone()
 		info.Progress = SessionProgressSnapshot{
-			CurrentPhase: p.CurrentPhase,
-			CurrentTool:  p.CurrentTool,
-			TurnCount:    p.TurnCount,
-			TotalCostUSD: p.TotalCostUSD,
-			InputTokens:  p.InputTokens,
-			OutputTokens: p.OutputTokens,
-			LastActivity: p.LastActivity,
-			StatusLine:   p.StatusLine,
-			RecentOutput: p.RecentOutput,
+			CurrentPhase:       p.CurrentPhase,
+			CurrentTool:        p.CurrentTool,
+			TurnCount:          p.TurnCount,
+			TotalCostUSD:       p.TotalCostUSD,
+			InputTokens:        p.InputTokens,
+			OutputTokens:       p.OutputTokens,
+			ContextWindow:      p.ContextWindow,
+			LastTurnInputTotal: p.LastTurnInputTotal,
+			LastActivity:       p.LastActivity,
+			StatusLine:         p.StatusLine,
+			RecentOutput:       p.RecentOutput,
 		}
 	}
 

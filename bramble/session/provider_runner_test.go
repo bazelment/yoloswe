@@ -354,7 +354,11 @@ func TestProviderRunner_ToolCompleteWithResult(t *testing.T) {
 }
 
 // Test that providerRunner forwards turn cost correctly in TurnCompleteAgentEvent.
-func TestProviderRunner_TurnCompleteWithCost(t *testing.T) {
+func TestProviderRunner_TurnCompleteNotDuplicated(t *testing.T) {
+	// TurnEnd output lines are emitted synchronously by the manager's
+	// runSession loop after RunTurn returns. The providerRunner's event
+	// bridge intentionally skips TurnCompleteAgentEvent to avoid
+	// duplicate TurnEnd entries. Verify that behavior here.
 	mockProvider := newMockLongRunningProvider()
 
 	manager := NewManager()
@@ -380,33 +384,22 @@ func TestProviderRunner_TurnCompleteWithCost(t *testing.T) {
 	err := runner.Start(ctx)
 	require.NoError(t, err)
 
-	// Emit a turn complete event with a cost
-	testCostUSD := 0.00123
+	// Emit a turn complete event — bridge should ignore it.
 	mockProvider.emitEvent(agent.TurnCompleteAgentEvent{
 		TurnNumber: 1,
 		Success:    true,
 		DurationMs: 5000,
-		CostUSD:    testCostUSD,
+		CostUSD:    0.00123,
 	})
 
 	// Give bridge time to process
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify the turn complete event was recorded with the cost in the output line
+	// Verify no TurnEnd output was created by the bridge.
 	output := manager.GetSessionOutput(sessionID)
-	require.NotEmpty(t, output)
-
-	// Find turn end output
-	var foundTurnWithCost bool
 	for _, line := range output {
-		if line.Type == OutputTypeTurnEnd && line.TurnNumber == 1 {
-			// The cost should be preserved in the output line
-			assert.Equal(t, testCostUSD, line.CostUSD, "turn cost should be included in output line")
-			foundTurnWithCost = true
-			break
-		}
+		assert.NotEqual(t, OutputTypeTurnEnd, line.Type, "bridge should not emit TurnEnd — that's the manager's job")
 	}
-	assert.True(t, foundTurnWithCost, "expected to find turn end output with cost field")
 
 	err = runner.Stop()
 	require.NoError(t, err)

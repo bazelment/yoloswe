@@ -13,12 +13,31 @@ Autonomous test→diagnose→fix cycle for the delegator agent. **Max 5 rounds.*
 1. **Build:** `bazel build //bramble:bramble`
 2. **Read context:** `docs/design/delegator-real-mode-testing.md` and `bramble/cmd/delegator/delegator.go`
 3. **Check prior runs:** Read `.claude/skills/delegator-eval-loop/data/eval-runs.log` for patterns from past iterations
-4. **Run tests** — at least two prompts per round (simple single-file task + complex multi-package task). Each needs a fresh `git init`'d directory with a minimal `go.mod` + `main.go`. Run sequentially (real API calls). Capture stderr separately.
+4. **Run tests** — choose the right harness for the eval type:
+
+   **Codewalk eval** (multi-turn, questions from file):
+   ```bash
+   python3 scripts/delegator-eval.py \
+     --questions-file scripts/delegator-eval-questions.txt \
+     --work-dir /path/to/repo \
+     --model sonnet --child-model gemini-3-flash-preview \
+     --log-dir "$LOG_DIR" --timeout 900 2>"$LOG_DIR/stderr.txt"
+   ```
+   The script drives interactive mode via PTY + `--status-fd` pipe. It sends
+   questions one per idle, waits for children to complete, then sends `quit`.
+   Edit `scripts/delegator-eval-questions.txt` to change the question set.
+
+   **Single-prompt eval** (one-shot task, non-interactive):
    ```bash
    echo "<PROMPT>" | bazel-bin/bramble/bramble_/bramble delegator \
      --mode real --work-dir "$TEST_DIR" --model sonnet \
      --log-dir "$LOG_DIR" --timeout 8m 2>"$LOG_DIR/stderr.txt"
    ```
+   Each single-prompt test needs a fresh `git init`'d directory with a minimal
+   `go.mod` + `main.go`.
+
+   Run sequentially (real API calls). Use `run_in_background` + `timeout=600000`
+   so you can analyze completed results while the next runs.
 5. **Analyze** — read `.claude/skills/delegator-eval-loop/references/checklist.md` and check every item against both rendered output and JSONL logs. Check `.claude/skills/delegator-eval-loop/references/known-gaps.md` for regressions.
 6. **Exit check** — zero high/medium findings, tool restriction correct, no regressions, costs reasonable → exit to summary
 7. **Fix** — spawn Plan agents for diagnosis, then worker agents (sonnet) for implementation. Fix root causes, not symptoms.
@@ -44,7 +63,7 @@ Always produce a summary table (rounds, findings fixed, remaining gaps, verdict)
 
 4. **The 8-minute timeout is real.** Complex prompts can hit it. If a test times out, check whether the child session hung (JSONL will show no `end_turn` after the last message) vs. the task was genuinely too large.
 
-5. **Fresh directories are mandatory.** Never reuse test directories between prompts or rounds. Git state from a prior run will confuse the delegator's child sessions.
+5. **Fresh directories for single-prompt evals.** Never reuse test directories between single-prompt tests. Git state from a prior run will confuse the delegator's child sessions. Codewalk evals use the real repo as work-dir (read-only codetalk sessions).
 
 6. **Tests must run sequentially.** Each test makes real Claude API calls. Run one at a time, but use `run_in_background` + `timeout=600000` so you can analyze completed results while the next runs.
 
@@ -57,6 +76,7 @@ Always produce a summary table (rounds, findings fixed, remaining gaps, verdict)
 | Area | Files |
 |------|-------|
 | Harness & rendering | `bramble/cmd/delegator/delegator.go` |
+| Multi-turn eval | `scripts/delegator-eval.py` + `scripts/delegator-eval-questions.txt` |
 | Session setup | `bramble/session/delegator_runner.go` |
 | Tool handlers | `bramble/session/delegator_tools.go` |
 | Session lifecycle | `bramble/session/manager.go` |

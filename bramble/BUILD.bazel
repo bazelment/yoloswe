@@ -13,6 +13,7 @@ go_library(
         "//bramble/taskrouter",
         "//multiagent/agent",
         "//wt",
+        "//yoloswe",
         "@com_github_spf13_cobra//:cobra",
         "@land_charm_bubbletea_v2//:bubbletea",
         "@org_golang_x_term//:term",

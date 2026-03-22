@@ -181,6 +181,7 @@ func buildHelpSections(m *Model) []HelpSection {
 			HelpBinding{"t", "New task (AI picks worktree)"},
 			HelpBinding{"p", "Start planner session"},
 			HelpBinding{"b", "Start builder session"},
+			HelpBinding{"c", "Start code understanding session"},
 		)
 	}
 	if !inTmux {

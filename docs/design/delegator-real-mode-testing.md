@@ -404,3 +404,181 @@ The Manager's event model was designed for the TUI (bramble app), which re-rende
 | `updateToolOutput(complete)` | Re-render tool line in-place | Don't reprint tool header |
 
 Turn-based rendering sidesteps all of this by reading the final accumulated state at clean boundaries (turn ends, state changes). The tradeoff is no streaming output, but for a test harness this is acceptable.
+
+## Test Run: Codetalk Children (2026-03-21)
+
+Added codetalk child session support + `send_followup` tool + `Read` built-in to the delegator. Ran eval loop to verify.
+
+### Changes Tested
+
+- Delegator now has 5 tools: `start_session`, `stop_session`, `get_session_progress`, `send_followup` (new), `Read` (built-in)
+- `start_session` accepts `type=codetalk` alongside `planner`/`builder`
+- Manager writes codetalk research to `/tmp/bramble-research/<session-id>.md` after each turn
+- `get_session_progress` exposes `research_file` path
+- Delegator reads research files via the `Read` built-in tool
+
+### Test 1: Simple codetalk — "Explain CodeTalkSession type"
+
+| Metric | Value |
+|--------|-------|
+| Delegator turns | 2 |
+| Codetalk children | 1 |
+| Total cost | $0.3043 |
+| Child duration | ~2 min |
+| Research file | 5,589 bytes |
+| Read tool used | No (answered from get_session_progress output) |
+
+### Test 2: Complex multi-concept — "Session lifecycle + concurrency model"
+
+| Metric | Value |
+|--------|-------|
+| Delegator turns | 2 |
+| Codetalk children | 1 |
+| Total cost | $0.3368 |
+| Child duration | ~2 min |
+| Research file | 9,571 bytes (223 lines) |
+| Read tool used | Yes — read research file after get_session_progress |
+
+### Results
+
+All 8 checklist items pass. No regressions from known-gaps table. Delegator correctly:
+1. Starts codetalk child with descriptive prompt
+2. Waits for child to complete (progress ticker shows updates)
+3. Calls `get_session_progress` to get research file path
+4. Uses `Read` to access full research (Test 2)
+5. Presents comprehensive analysis to user
+6. Cost summary includes codetalk child stats
+
+**Comparison to standalone codetalk:** The v3 standalone codetalk eval cost $48 for 11 turns (escalating from $1.13→$7.31/turn). The delegator approach costs ~$0.33 per question with no cost escalation, since each codetalk child starts with a clean context.
+
+### Complex Multi-Turn Eval: 11 Questions with Follow-ups
+
+Ran a continuous 11-question eval using `scripts/delegator-eval.py`, a PTY wrapper that drives `bramble delegator` in interactive mode, feeding questions from a text file as the delegator goes idle.
+
+**Questions covered:** session lifecycle, mutex ordering, delegator vs planner/builder, error paths, SendFollowUp internals, streaming text pipeline, codetalkRunner, providerRunner, ReconcileTmuxSessions, concurrency gotchas, adding new session types.
+
+| Metric | Value |
+|--------|-------|
+| Questions completed | 8 of 11 (hit 20-min timeout) |
+| Total time | 20 minutes |
+| Total cost | $8.64 |
+| Cost per question | $1.08 |
+| Delegator turns | 13 |
+| Delegator cost | $3.75 |
+| Codetalk children | 2 sessions |
+| Children cost | $4.89 (36,746 output tokens) |
+
+#### Per-turn delegator cost progression
+
+```
+Turn  1: $0.01   Turn  8: $0.33
+Turn  2: $0.07   Turn  9: $0.37
+Turn  3: $0.09   Turn 10: $0.44
+Turn  4: $0.11   Turn 11: $0.49
+Turn  5: $0.14   Turn 12: $0.60
+Turn  6: $0.20   Turn 13: $0.65
+Turn  7: $0.24
+```
+
+#### Delegator strategy per question
+
+| Q# | Topic | Strategy | New Child? |
+|----|-------|----------|------------|
+| 1 | Session lifecycle | New codetalk child | Yes |
+| 2 | Mutex lock ordering | Answered from cached research | No |
+| 3 | Delegator vs planner | Answered from cached research | No |
+| 4 | Error path tracing | New codetalk child (topic shift) | Yes |
+| 5 | SendFollowUp internals | send_followup to existing child | No |
+| 6 | Streaming text pipeline | send_followup to existing child | No |
+| 7 | codetalkRunner | send_followup to existing child | No |
+| 8 | providerRunner dedup | send_followup to existing child (timeout) | No |
+
+#### Key findings
+
+1. **Cost 70-75% lower than standalone**: $8.64 for 8 questions vs $48.43 for 11 in standalone. Extrapolating to 11 questions: ~$12-15.
+2. **Delegator costs escalate but slowly**: $0.01→$0.65 over 13 turns (vs $1.13→$7.31 in standalone).
+3. **Correct tool selection**: delegator answered Q2-Q3 from cached research (zero tools), started new children for topic shifts, used `send_followup` for related questions.
+4. **Only 2 codetalk children for 8 questions**: demonstrates effective session reuse via `send_followup`.
+5. **Timeout at 20 min**: Q8 was in-progress when timeout hit. The child codetalk's context was getting large (~4 follow-ups on session 2). Future improvement: could start fresh children when child context grows large.
+
+#### Comparison to standalone codetalk
+
+| Metric | Standalone v3 | Delegator |
+|--------|--------------|-----------|
+| Questions | 11 | 8 (timeout) |
+| Total cost | $48.43 | $8.64 |
+| Cost/question (avg) | $4.40 | $1.08 |
+| Cost escalation | $1.13→$7.31 (6.5x) | $0.01→$0.65 (65x but from low base) |
+| Sessions | 1 monolithic | 1 delegator + 2 children |
+| Follow-up strategy | Same bloated context | Reuse child or answer from cache |
+
+## Test Run 7: Multi-Provider Eval (Gemini vs Claude vs Codex)
+
+Added `--child-model` flag to `bramble delegator` so the delegator (always Claude) can route
+child codetalk sessions to different providers. The infrastructure already routes based on
+model ID; this change just decouples the delegator's model from the child default.
+
+### Running the eval
+
+```bash
+# Build bramble
+bazel build //bramble:bramble
+
+# Run with Gemini Flash 3 as the codetalk backend (recommended)
+python3 scripts/delegator-eval.py \
+  --questions-file scripts/delegator-eval-questions.txt \
+  --work-dir /path/to/repo \
+  --log-dir /tmp/eval-gemini \
+  --child-model gemini-3-flash-preview
+
+# Run with Claude Sonnet (baseline)
+python3 scripts/delegator-eval.py \
+  --questions-file scripts/delegator-eval-questions.txt \
+  --work-dir /path/to/repo \
+  --log-dir /tmp/eval-sonnet
+
+# Run with Codex (not recommended — too slow for multi-turn)
+python3 scripts/delegator-eval.py \
+  --questions-file scripts/delegator-eval-questions.txt \
+  --work-dir /path/to/repo \
+  --log-dir /tmp/eval-codex \
+  --child-model gpt-5.3-codex
+```
+
+### Results (11 questions, 15-minute timeout)
+
+| Metric | Gemini Flash 3 | Claude Sonnet | Codex gpt-5.3 |
+|--------|---------------|---------------|----------------|
+| Questions answered | **11/11** | 8/11 | 2/11 |
+| Wall clock | **8m36s** | 15m0s (timeout) | 15m0s (timeout) |
+| Total cost | $6.11 | $4.05 | $0.17 |
+| Delegator cost | $6.11 | $2.11 | $0.17 |
+| Child cost (reported) | $0.00* | $1.94 | $0.00* |
+| Cost/question | $0.56 | $0.51 | $0.09 |
+| Child sessions | 1 | 2 | 1 |
+| Follow-ups sent | 10 | 5 | 1 |
+| Delegator turns | 21 | 11 | 3 |
+| Research file | 46KB (500 lines) | 23KB + 7KB | 17KB |
+
+\* Gemini/Codex providers don't report costs through SessionProgress — actual costs are non-zero but not captured.
+
+### Analysis
+
+**Gemini Flash 3** is the best codetalk backend for throughput. Fast child turns (~30s–90s)
+let the delegator send 10 follow-ups on a single session and answer all 11 questions in
+8.5 minutes. The research output was comprehensive (46KB, 500 lines). The delegator ran 21
+turns synthesizing answers — higher delegator cost ($6.11) because it processed more
+questions, but cost/question is comparable ($0.56 vs $0.51).
+
+**Claude Sonnet** has the best observability (real cost/token tracking) but child sessions
+run 5+ minutes each, limiting throughput. It correctly rotated to a 2nd child when context
+hit 90%. Only 8 questions before the 15-minute timeout.
+
+**Codex** is not viable for multi-turn codetalk. The provider is ephemeral-only (no
+`LongRunningProvider`), so each `send_followup` creates a fresh session with no context
+preservation. First turn took ~5 minutes, follow-up hung for 9+ minutes.
+
+### Recommendation
+
+Use `gemini-3-flash-preview` as the default child model for codetalk sessions when Gemini
+is available. It provides the best balance of speed, answer quality, and research depth.

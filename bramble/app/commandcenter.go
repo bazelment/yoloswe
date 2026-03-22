@@ -516,12 +516,8 @@ func renderSessionCard(sess *session.SessionInfo, cardWidth, idx int, selected b
 	innerWidth := styleWidth - 2 // left padding + right padding (Padding(0, 1))
 
 	// Line 1: Number + type icon + type label + status + repo/model context
-	typeIcon := "[P]"
-	typeLabel := "planner"
-	if sess.Type == session.SessionTypeBuilder {
-		typeIcon = "[B]"
-		typeLabel = "builder"
-	}
+	typeIcon := sessionTypeIcon(sess.Type)
+	typeLabel := string(sess.Type)
 	statusStr := statusText(sess.Status)
 	line1Left := fmt.Sprintf("%d. %s %s  %s %s",
 		idx+1, typeIcon, typeLabel,

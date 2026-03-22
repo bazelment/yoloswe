@@ -27,7 +27,7 @@ type DelegatorToolHandler struct { //nolint:govet // fieldalignment: keep relate
 
 // startSessionParams are the parameters for the start_session tool.
 type startSessionParams struct {
-	Type   string `json:"type" jsonschema:"required,description=Session type to start: planner (read-only analysis) or builder (code modification),enum=planner,enum=builder"`
+	Type   string `json:"type" jsonschema:"required,description=Session type to start: planner (read-only analysis) or builder (code modification) or codetalk (read-only code exploration and understanding),enum=planner,enum=builder,enum=codetalk"`
 	Prompt string `json:"prompt" jsonschema:"required,description=The task prompt for the child session"`
 	Model  string `json:"model,omitempty" jsonschema:"description=Model to use for the child session. See the system prompt for a list of available models. Defaults to the delegator's own model if not specified."`
 }
@@ -40,6 +40,12 @@ type stopSessionParams struct {
 // getSessionProgressParams are the parameters for the get_session_progress tool.
 type getSessionProgressParams struct {
 	SessionID string `json:"session_id" jsonschema:"required,description=The session ID to check progress for"`
+}
+
+// sendFollowUpParams are the parameters for the send_followup tool.
+type sendFollowUpParams struct {
+	SessionID string `json:"session_id" jsonschema:"required,description=The session ID to send a follow-up to (must be idle)"`
+	Prompt    string `json:"prompt" jsonschema:"required,description=The follow-up message to send"`
 }
 
 // NewDelegatorToolHandler creates a new DelegatorToolHandler that manages
@@ -56,7 +62,7 @@ func NewDelegatorToolHandler(manager *Manager, worktreePath string, model string
 
 	toolRegistry := claude.NewTypedToolRegistry()
 	claude.AddTool(toolRegistry, "start_session",
-		"Start a new child session (planner or builder) on the worktree. Returns the session ID.",
+		"Start a new child session (planner, builder, or codetalk) on the worktree. Returns the session ID.",
 		h.handleStartSession)
 	claude.AddTool(toolRegistry, "stop_session",
 		"Stop a running child session.",
@@ -64,6 +70,9 @@ func NewDelegatorToolHandler(manager *Manager, worktreePath string, model string
 	claude.AddTool(toolRegistry, "get_session_progress",
 		"Get the current progress and recent output of a child session.",
 		h.handleGetSessionProgress)
+	claude.AddTool(toolRegistry, "send_followup",
+		"Send a follow-up message to an idle child session. The session resumes with the new message in its existing conversation context.",
+		h.handleSendFollowUp)
 
 	h.registry = toolRegistry
 	return h
@@ -85,6 +94,11 @@ func (h *DelegatorToolHandler) ChildIDs() []SessionID {
 	return ids
 }
 
+// DefaultModel returns the default model used for child sessions.
+func (h *DelegatorToolHandler) DefaultModel() string {
+	return h.model
+}
+
 // IsChild reports whether the given session ID is a child of this delegator.
 // This is an O(1) map lookup, suitable for use in hot-path event handlers.
 func (h *DelegatorToolHandler) IsChild(id SessionID) bool {
@@ -101,8 +115,10 @@ func (h *DelegatorToolHandler) handleStartSession(_ context.Context, params star
 		sessionType = SessionTypePlanner
 	case "builder":
 		sessionType = SessionTypeBuilder
+	case "codetalk":
+		sessionType = SessionTypeCodeTalk
 	default:
-		return "", fmt.Errorf("invalid session type %q: must be planner or builder", params.Type)
+		return "", fmt.Errorf("invalid session type %q: must be planner, builder, or codetalk", params.Type)
 	}
 
 	// Use the delegator's model as default for child sessions, unless the
@@ -162,6 +178,26 @@ func (h *DelegatorToolHandler) handleStopSession(_ context.Context, params stopS
 	return fmt.Sprintf("Stopped session: %s", id), nil
 }
 
+func (h *DelegatorToolHandler) handleSendFollowUp(_ context.Context, params sendFollowUpParams) (string, error) {
+	if strings.TrimSpace(params.Prompt) == "" {
+		return "", fmt.Errorf("prompt must not be empty")
+	}
+
+	id := SessionID(params.SessionID)
+
+	h.mu.Lock()
+	_, isChild := h.childIDs[id]
+	h.mu.Unlock()
+	if !isChild {
+		return "", fmt.Errorf("session %s is not owned by this delegator", id)
+	}
+
+	if err := h.manager.SendFollowUp(id, params.Prompt); err != nil {
+		return "", fmt.Errorf("failed to send follow-up: %w", err)
+	}
+	return fmt.Sprintf("Follow-up sent to session %s. It will resume and you will be notified when it completes.", id), nil
+}
+
 // AvailableModelsDescription returns a human-readable description of available
 // models, suitable for injection into the system prompt. Each model is listed
 // on its own line with the provider in parentheses, so the model ID is
@@ -217,6 +253,10 @@ func (h *DelegatorToolHandler) handleGetSessionProgress(_ context.Context, param
 	fmt.Fprintf(&b, "Turns: %d\n", info.Progress.TurnCount)
 	fmt.Fprintf(&b, "Cost: $%.4f\n", info.Progress.TotalCostUSD)
 	fmt.Fprintf(&b, "Tokens: %d in / %d out\n", info.Progress.InputTokens, info.Progress.OutputTokens)
+	if info.Progress.ContextWindow > 0 && info.Progress.LastTurnInputTotal > 0 {
+		pct := float64(info.Progress.LastTurnInputTotal) * 100 / float64(info.Progress.ContextWindow)
+		fmt.Fprintf(&b, "Context: %d / %d tokens (%.0f%% used)\n", info.Progress.LastTurnInputTotal, info.Progress.ContextWindow, pct)
+	}
 
 	if info.ErrorMsg != "" {
 		fmt.Fprintf(&b, "Error: %s\n", info.ErrorMsg)
@@ -224,6 +264,10 @@ func (h *DelegatorToolHandler) handleGetSessionProgress(_ context.Context, param
 
 	if info.PlanFilePath != "" {
 		fmt.Fprintf(&b, "Plan file: %s\n", info.PlanFilePath)
+	}
+
+	if info.ResearchFilePath != "" {
+		fmt.Fprintf(&b, "Research file: %s\n", info.ResearchFilePath)
 	}
 
 	if len(recentLines) > 0 {

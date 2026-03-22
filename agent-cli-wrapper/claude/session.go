@@ -745,11 +745,20 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		Success:    !msg.IsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
-			InputTokens:     msg.Usage.InputTokens,
-			OutputTokens:    msg.Usage.OutputTokens,
-			CacheReadTokens: msg.Usage.CacheReadInputTokens,
-			CostUSD:         msg.TotalCostUSD,
+			InputTokens:         msg.Usage.InputTokens,
+			OutputTokens:        msg.Usage.OutputTokens,
+			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
+			CostUSD:             msg.TotalCostUSD,
 		},
+	}
+
+	// Extract context window size from per-model usage if available.
+	for _, mu := range msg.ModelUsage {
+		if mu.ContextWindow > 0 {
+			result.Usage.ContextWindow = mu.ContextWindow
+			break
+		}
 	}
 
 	// Populate text fields and content blocks from turn state

@@ -80,6 +80,19 @@ func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 	return r.builder.RunTurn(ctx, message)
 }
 
+// codetalkRunner adapts CodeTalkSession to the sessionRunner interface.
+type codetalkRunner struct {
+	ct *yoloswe.CodeTalkSession
+}
+
+func (r *codetalkRunner) Start(ctx context.Context) error { return r.ct.Start(ctx) }
+func (r *codetalkRunner) Stop() error                     { return r.ct.Stop() }
+func (r *codetalkRunner) CLISessionID() string            { return r.ct.CLISessionID() }
+
+func (r *codetalkRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
+	return r.ct.RunTurn(ctx, message)
+}
+
 // providerRunner adapts agent.Provider to the sessionRunner interface.
 // This allows plugging in any provider backend (Claude, Codex, Gemini)
 // via the ManagerConfig.Provider field.
@@ -204,7 +217,9 @@ func (r *providerRunner) bridgeProviderEvents() {
 				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, e.Result, e.IsError)
 			case agent.TurnCompleteAgentEvent:
 				r.markTurnDone(turnObsSeq)
-				r.eventHandler.OnTurnComplete(e.TurnNumber, e.Success, e.DurationMs, e.CostUSD)
+				// TurnEnd is emitted synchronously by the manager after
+				// RunTurn returns, so we skip OnTurnComplete here to
+				// avoid duplicates. See the addOutput call after RunTurn.
 			case agent.ErrorAgentEvent:
 				r.eventHandler.OnError(e.Err, e.Context)
 			}
@@ -427,6 +442,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// Propagated through sharedManagerConfig so that openRepo can register
 	// new managers automatically.
 	Registry *SessionRegistry
+	// ChildModel overrides the default model for child sessions spawned by
+	// the delegator. If empty, children default to the delegator's own model.
+	ChildModel string
 }
 
 // Manager handles multiple concurrent sessions.
@@ -837,7 +855,7 @@ func (m *Manager) startSessionWithID(sessionID SessionID, sessionType SessionTyp
 
 	if model == "" {
 		switch sessionType {
-		case SessionTypePlanner:
+		case SessionTypePlanner, SessionTypeCodeTalk:
 			model = "opus"
 		default:
 			model = "sonnet"
@@ -1383,7 +1401,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		session.mu.Unlock()
 
 		permissionMode := ""
-		if session.Type == SessionTypePlanner {
+		if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
 			permissionMode = "plan"
 		}
 
@@ -1442,7 +1460,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				eventHandler: eventHandler,
 				model:        session.Model,
 				permissionMode: func() string {
-					if session.Type == SessionTypePlanner {
+					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
 						return "plan"
 					}
 					return "bypass"
@@ -1473,8 +1491,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			}
 
 			// Configure permission handler based on session type
-			if session.Type == SessionTypePlanner {
-				// Planner sessions should only be able to read, not write
+			if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
+				// Planner/codetalk sessions should only be able to read, not write
 				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
 			}
 			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
@@ -1501,15 +1519,20 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				})
 				runner = &plannerRunner{pw: pw}
 			case SessionTypeBuilder:
+				builderHandler := newSessionEventHandlerNoTurnEnd(m, session.ID)
 				builder := yoloswe.NewBuilderSessionWithEvents(yoloswe.BuilderConfig{
 					Model:           session.Model,
 					WorkDir:         session.WorktreePath,
 					ResumeSessionID: session.CLISessionID,
 					RecordingDir:    m.config.RecordingDir,
-				}, nil, eventHandler)
+				}, nil, builderHandler)
 				runner = &builderRunner{builder: builder}
 			case SessionTypeDelegator:
-				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, session.Model, m.config.ModelRegistry)
+				childModel := session.Model
+				if m.config.ChildModel != "" {
+					childModel = m.config.ChildModel
+				}
+				toolHandler := NewDelegatorToolHandler(m, session.WorktreePath, childModel, m.config.ModelRegistry)
 				runner = &delegatorRunner{
 					toolHandler:  toolHandler,
 					eventHandler: eventHandler,
@@ -1517,6 +1540,15 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					model:        session.Model,
 					recordingDir: m.config.RecordingDir,
 				}
+			case SessionTypeCodeTalk:
+				codetalkHandler := newSessionEventHandlerNoTurnEnd(m, session.ID)
+				ct := yoloswe.NewCodeTalkSessionWithEvents(yoloswe.CodeTalkConfig{
+					Model:           session.Model,
+					WorkDir:         session.WorktreePath,
+					ResumeSessionID: session.CLISessionID,
+					RecordingDir:    m.config.RecordingDir,
+				}, nil, codetalkHandler)
+				runner = &codetalkRunner{ct: ct}
 			default:
 				m.updateSessionStatus(session, StatusFailed)
 				err := fmt.Errorf("unknown session type: %s", session.Type)
@@ -1755,7 +1787,9 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 	currentPrompt := prompt
 	for {
+		turnStart := time.Now()
 		usage, err := runner.RunTurn(session.ctx, currentPrompt)
+		turnDurationMs := time.Since(turnStart).Milliseconds()
 		if err != nil {
 			if session.ctx.Err() != nil {
 				m.updateSessionStatus(session, StatusStopped)
@@ -1774,11 +1808,37 @@ func (m *Manager) runSession(session *Session, prompt string) {
 		}
 
 		if usage != nil {
+			var turnCount int
 			session.Progress.Update(func(p *SessionProgress) {
 				p.TurnCount++
+				turnCount = p.TurnCount
 				p.TotalCostUSD += usage.CostUSD
 				p.InputTokens += usage.InputTokens
 				p.OutputTokens += usage.OutputTokens
+				if usage.ContextWindow > 0 {
+					p.ContextWindow = usage.ContextWindow
+				}
+				// Store last turn's total input for context utilization.
+				// TotalInputTokens() = InputTokens + CacheCreationTokens + CacheReadTokens,
+				// representing the full prompt size sent for this turn.
+				if total := usage.TotalInputTokens(); total > 0 {
+					p.LastTurnInputTotal = total
+				}
+			})
+
+			// Emit TurnEnd synchronously so it's guaranteed to be in the
+			// output buffer before StatusIdle. The async forwardEvents
+			// goroutine may still be processing events from the SDK's
+			// channel when RunTurn returns, causing a race where StatusIdle
+			// arrives at consumers before TurnEnd.
+			m.addOutput(session.ID, OutputLine{
+				Timestamp:  time.Now(),
+				Type:       OutputTypeTurnEnd,
+				Content:    fmt.Sprintf("Turn %d complete", turnCount),
+				TurnNumber: turnCount,
+				CostUSD:    usage.CostUSD,
+				DurationMs: turnDurationMs,
+				IsError:    false,
 			})
 		}
 
@@ -1797,12 +1857,48 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			}
 		}
 
+		// After codetalk turn: write research output to a file for delegator consumption.
+		if session.Type == SessionTypeCodeTalk {
+			if researchPath, err := m.writeResearchFile(session); err == nil {
+				session.mu.Lock()
+				session.ResearchFilePath = researchPath
+				session.mu.Unlock()
+			}
+		}
+
 		m.updateSessionStatus(session, StatusIdle)
 
-		// Wait for a follow-up prompt, a child state change (delegator only),
-		// or context cancellation. childNotifyChan is nil for non-delegator
-		// sessions; receiving from a nil channel blocks forever, so the case
-		// is simply never selected.
+		// Prioritize child notifications over user follow-ups. When rapid
+		// follow-ups arrive (e.g. multi-turn eval), Go's select picks
+		// randomly between ready channels, so child completion events can
+		// pile up in the buffer and never get processed. Drain all pending
+		// child notifications first as a single combined prompt.
+		var childNotifs []SessionStateChangeEvent
+		if childNotifyChan != nil {
+		drainChildNotifs:
+			for {
+				select {
+				case notif := <-childNotifyChan:
+					childNotifs = append(childNotifs, notif)
+				default:
+					break drainChildNotifs
+				}
+			}
+		}
+		if len(childNotifs) > 0 {
+			var parts []string
+			for _, notif := range childNotifs {
+				parts = append(parts, fmt.Sprintf(
+					"Child session %s status changed to %s.",
+					notif.SessionID, notif.NewStatus))
+			}
+			currentPrompt = strings.Join(parts, "\n") + "\nUse get_session_progress to check details and decide next steps."
+			m.updateSessionStatus(session, StatusRunning)
+			continue
+		}
+
+		// No pending child notifications — block until a follow-up,
+		// child notification, or context cancellation arrives.
 		select {
 		case <-session.ctx.Done():
 			m.updateSessionStatus(session, StatusStopped)
@@ -2146,6 +2242,32 @@ func (m *Manager) RecentOutputLines(id SessionID, n int) []string {
 		return nil
 	}
 	return sessionmodel.RecentAssistantTextFromSlice(lines, n)
+}
+
+// writeResearchFile writes a codetalk session's text output to a markdown file
+// in /tmp/bramble-research/. Returns the file path on success.
+func (m *Manager) writeResearchFile(session *Session) (string, error) {
+	researchDir := filepath.Join(os.TempDir(), "bramble-research")
+	if err := os.MkdirAll(researchDir, 0o755); err != nil {
+		return "", fmt.Errorf("create research dir: %w", err)
+	}
+
+	researchPath := filepath.Join(researchDir, string(session.ID)+".md")
+	lines := m.GetSessionOutput(session.ID)
+
+	f, err := os.Create(researchPath)
+	if err != nil {
+		return "", fmt.Errorf("create research file: %w", err)
+	}
+	defer f.Close()
+
+	for i := range lines {
+		if lines[i].Type == OutputTypeText && !lines[i].IsUserPrompt {
+			fmt.Fprintln(f, lines[i].Content)
+		}
+	}
+
+	return researchPath, nil
 }
 
 // CapturePaneText captures the last n lines of text from a tmux session's pane.

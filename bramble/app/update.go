@@ -350,6 +350,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.defaultPlanModel = msg.model
 			case session.SessionTypeBuilder:
 				m.defaultBuildModel = msg.model
+			case session.SessionTypeCodeTalk:
+				m.defaultCodeTalkModel = msg.model
 			}
 		}
 		return m.startSession(msg.sessionType, msg.prompt, msg.model)
@@ -696,6 +698,20 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					return startSessionMsg{session.SessionTypeBuilder, prompt, model}
 				}
 			}, "Describe what to build...")
+		}
+		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
+		return m, toastCmd
+
+	case "c":
+		// Start codetalk (code understanding)
+		if m.selectedWorktree() != nil {
+			m.pendingModel = m.defaultCodeTalkModel
+			m.pendingSessionType = session.SessionTypeCodeTalk
+			return m.promptInput(fmt.Sprintf("CodeTalk prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
+				return func() tea.Msg {
+					return startSessionMsg{session.SessionTypeCodeTalk, prompt, model}
+				}
+			}, "What code area do you want to understand?")
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd
@@ -1176,8 +1192,11 @@ func (m Model) handleInputMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingModel = next.ID
 		prefix := "Plan"
-		if m.pendingSessionType == session.SessionTypeBuilder {
+		switch m.pendingSessionType {
+		case session.SessionTypeBuilder:
 			prefix = "Build"
+		case session.SessionTypeCodeTalk:
+			prefix = "CodeTalk"
 		}
 		m.inputPrompt = fmt.Sprintf("%s prompt [%s]:", prefix, m.pendingModel)
 		return m, nil
@@ -2268,6 +2287,11 @@ func (m Model) handleRepoSettingsDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 			if _, ok := m.modelRegistry.ModelByID(m.defaultPlanModel); !ok {
 				if models := m.modelRegistry.Models(); len(models) > 0 {
 					m.defaultPlanModel = models[0].ID
+				}
+			}
+			if _, ok := m.modelRegistry.ModelByID(m.defaultCodeTalkModel); !ok {
+				if models := m.modelRegistry.Models(); len(models) > 0 {
+					m.defaultCodeTalkModel = models[0].ID
 				}
 			}
 			if _, ok := m.modelRegistry.ModelByID(m.defaultBuildModel); !ok {

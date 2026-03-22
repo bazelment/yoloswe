@@ -109,10 +109,7 @@ func (m OutputModel) View() tea.View {
 	}
 
 	// Session header
-	typeIcon := "📋"
-	if m.info.Type == session.SessionTypeBuilder {
-		typeIcon = "🔨"
-	}
+	typeIcon := sessionTypeEmojiIcon(m.info.Type)
 
 	if m.isReplay {
 		b.WriteString(typeIcon + " " + string(m.info.ID) + "  " + s.Dim.Render("[Replay]"))

@@ -23,6 +23,7 @@ import (
 var (
 	mode             string
 	model            string
+	childModel       string
 	autoAdvance      bool
 	behaviorFlag     string
 	systemPromptFile string
@@ -31,6 +32,7 @@ var (
 	verbose          bool
 	logDir           string
 	timeout          time.Duration
+	statusFD         int
 )
 
 // Cmd is the cobra command for the delegator test harness.
@@ -48,6 +50,7 @@ delegator's system prompt. Real mode uses the Manager with real Claude sessions.
 func init() {
 	Cmd.Flags().StringVar(&mode, "mode", "real", "Mode: real (Manager-based with real sessions) or mock (scripted children)")
 	Cmd.Flags().StringVar(&model, "model", "sonnet", "Claude model for the delegator")
+	Cmd.Flags().StringVar(&childModel, "child-model", "", "Model for child sessions (default: same as delegator)")
 	Cmd.Flags().BoolVar(&autoAdvance, "auto-advance", true, "Auto-send child state notifications (mock mode only)")
 	Cmd.Flags().StringVar(&behaviorFlag, "behavior", "", "State progressions, e.g. planner=running,completed;builder=running,completed (mock mode only)")
 	Cmd.Flags().StringVar(&systemPromptFile, "system-prompt", "", "Override system prompt from file (mock mode only)")
@@ -56,6 +59,7 @@ func init() {
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show non-error tool results / child session output")
 	Cmd.Flags().StringVar(&logDir, "log-dir", "", "Directory for JSONL session recording")
 	Cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Timeout for non-interactive mode (real mode only)")
+	Cmd.Flags().IntVar(&statusFD, "status-fd", 0, "File descriptor to write status events (idle/done) for programmatic control")
 }
 
 func runDelegator(cmd *cobra.Command, args []string) error {
@@ -74,7 +78,7 @@ func runDelegator(cmd *cobra.Command, args []string) error {
 		if err != nil || !info.IsDir() {
 			return fmt.Errorf("--work-dir must be a valid directory in real mode")
 		}
-		if err := runReal(ctx, model, workDir, prompt, logDir, timeout); err != nil {
+		if err := runReal(ctx, model, childModel, workDir, prompt, logDir, timeout, statusFD); err != nil {
 			return err
 		}
 	default:
@@ -122,11 +126,11 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 
 	// Interactive mode.
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Print("You> ")
+	fmt.Print(">>> ")
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
-			fmt.Print("You> ")
+			fmt.Print(">>> ")
 			continue
 		}
 		if line == "quit" || line == "exit" {
@@ -134,7 +138,7 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 		}
 
 		runMockConversation(ctx, s, mock, renderer, line, autoAdvance)
-		fmt.Print("\nYou> ")
+		fmt.Print("\n>>> ")
 	}
 	if logDir != "" {
 		fmt.Printf("\nSession JSONL logs saved to: %s\n", logDir)
@@ -198,7 +202,7 @@ func runMockConversation(ctx context.Context, s *claude.Session, mock *session.M
 	}
 }
 
-func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, timeout time.Duration) error {
+func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, logDir string, timeout time.Duration, statusFD int) error {
 	// Probe installed providers so the delegator knows which models are available.
 	pa := agent.NewProviderAvailability()
 	registry := agent.NewModelRegistry(pa, nil)
@@ -206,6 +210,7 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 	cfg := session.ManagerConfig{
 		SessionMode:   session.SessionModeTUI,
 		ModelRegistry: registry,
+		ChildModel:    childModel,
 	}
 	if logDir != "" {
 		cfg.RecordingDir = logDir
@@ -234,10 +239,29 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 		}
 	}
 
-	fmt.Printf("Delegator Test Harness (real) | Model: %s | Work dir: %s\n\n", model, workDir)
+	// statusFile is an optional pipe for programmatic status events.
+	// When set via --status-fd, the delegator writes "idle\n" when ready
+	// for input and "done\n" on exit, enabling reliable IPC without
+	// parsing stderr prompts.
+	var statusFile *os.File
+	if statusFD > 0 {
+		statusFile = os.NewFile(uintptr(statusFD), "status-fd")
+	}
+	writeStatus := func(msg string) {
+		if statusFile != nil {
+			fmt.Fprintln(statusFile, msg)
+		}
+	}
+
+	effectiveChild := childModel
+	if effectiveChild == "" {
+		effectiveChild = model
+	}
+	fmt.Fprintf(os.Stderr, "Delegator Test Harness (real) | Model: %s | Child: %s | Work dir: %s\n\n", model, effectiveChild, workDir)
 
 	if interactive {
-		fmt.Print("You> ")
+		writeStatus("idle")
+		fmt.Fprint(os.Stderr, ">>> ")
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
 			return nil
@@ -265,58 +289,58 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 	// linesRendered tracks how many OutputLines we've already printed for the
 	// delegator so we can render only new lines on each turn boundary.
 	linesRendered := 0
-	var prevLineType session.OutputLineType
 
 	// renderNewOutput reads the delegator's accumulated output from the Manager
 	// and prints any lines added since the last render.
+	// Only user-facing text goes to stdout; everything else goes to stderr
+	// (some items gated behind --verbose).
 	renderNewOutput := func() {
 		lines := m.GetSessionOutput(delegatorID)
 		for i := linesRendered; i < len(lines); i++ {
 			line := lines[i]
-			// Add separator between thinking and text blocks.
-			if (line.Type == session.OutputTypeText && prevLineType == session.OutputTypeThinking) ||
-				(line.Type == session.OutputTypeThinking && prevLineType == session.OutputTypeText) {
-				fmt.Println()
-			}
 			switch line.Type {
 			case session.OutputTypeText:
 				fmt.Println(strings.TrimRight(line.Content, "\n"))
 			case session.OutputTypeThinking:
-				fmt.Fprintf(os.Stdout, "%s%s%s%s\n",
-					render.ColorDim, render.ColorItalic,
-					strings.TrimRight(line.Content, "\n"),
-					render.ColorReset)
-			case session.OutputTypeToolStart:
-				name := shortToolName(line.ToolName)
-				if !isDelegatorTool(name) {
-					continue
+				if verbose {
+					fmt.Fprintf(os.Stderr, "%s%s%s%s\n",
+						render.ColorDim, render.ColorItalic,
+						strings.TrimRight(line.Content, "\n"),
+						render.ColorReset)
 				}
-				input := formatToolSummary(name, line.ToolInput)
-				if input != "" {
-					fmt.Fprintf(os.Stdout, "  %s%s%s %s\n", render.ColorCyan, name, render.ColorReset, input)
-				} else {
-					fmt.Fprintf(os.Stdout, "  %s%s%s\n", render.ColorCyan, name, render.ColorReset)
+			case session.OutputTypeToolStart:
+				if verbose {
+					name := shortToolName(line.ToolName)
+					if !isDelegatorTool(name) {
+						continue
+					}
+					input := formatToolSummary(name, line.ToolInput)
+					if input != "" {
+						fmt.Fprintf(os.Stderr, "  %s%s%s %s\n", render.ColorCyan, name, render.ColorReset, input)
+					} else {
+						fmt.Fprintf(os.Stderr, "  %s%s%s\n", render.ColorCyan, name, render.ColorReset)
+					}
 				}
 			case session.OutputTypeTurnEnd:
-				status, color := "✓", render.ColorGreen
-				if line.IsError {
-					status, color = "✗", render.ColorRed
+				if verbose {
+					status, color := "✓", render.ColorGreen
+					if line.IsError {
+						status, color = "✗", render.ColorRed
+					}
+					fmt.Fprintf(os.Stderr, "%s%s Turn %d (%.1fs, $%.4f)%s\n\n",
+						color, status, line.TurnNumber,
+						float64(line.DurationMs)/1000, line.CostUSD, render.ColorReset)
 				}
-				fmt.Fprintf(os.Stdout, "%s%s Turn %d (%.1fs, $%.4f)%s\n\n",
-					color, status, line.TurnNumber,
-					float64(line.DurationMs)/1000, line.CostUSD, render.ColorReset)
 			case session.OutputTypeError:
 				fmt.Fprintf(os.Stderr, "%sError: %s%s\n",
 					render.ColorRed, line.Content, render.ColorReset)
-			}
-			if line.Type == session.OutputTypeText || line.Type == session.OutputTypeThinking {
-				prevLineType = line.Type
 			}
 		}
 		linesRendered = len(lines)
 	}
 
 	// renderChildStatus prints a summary line for a child session state change.
+	// Always goes to stderr — lifecycle events are not user-facing output.
 	renderChildStatus := func(childID session.SessionID, newStatus session.SessionStatus) {
 		info, ok := m.GetSessionInfo(childID)
 		if !ok {
@@ -325,13 +349,13 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 		label := fmt.Sprintf("%s (%s)", childID, info.Type)
 		switch newStatus {
 		case session.StatusRunning:
-			fmt.Fprintf(os.Stdout, "  %s▶ %s%s\n", render.ColorCyan, label, render.ColorReset)
+			fmt.Fprintf(os.Stderr, "  %s▶ %s%s\n", render.ColorCyan, label, render.ColorReset)
 		case session.StatusCompleted:
 			summary := ""
 			if len(info.Progress.RecentOutput) > 0 {
 				summary = " — " + info.Progress.RecentOutput[len(info.Progress.RecentOutput)-1]
 			}
-			fmt.Fprintf(os.Stdout, "  %s✓ %s completed (%s)%s%s\n",
+			fmt.Fprintf(os.Stderr, "  %s✓ %s completed (%s)%s%s\n",
 				render.ColorGreen, label,
 				formatProgressDetail(info.Progress),
 				summary, render.ColorReset)
@@ -344,7 +368,7 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 			if info.Progress.TurnCount > 0 || info.Progress.TotalCostUSD > 0 || info.Progress.InputTokens > 0 {
 				detail = fmt.Sprintf(" (%s)", formatProgressDetail(info.Progress))
 			}
-			fmt.Fprintf(os.Stdout, "  %s✓ %s done%s%s%s\n",
+			fmt.Fprintf(os.Stderr, "  %s✓ %s done%s%s%s\n",
 				render.ColorGreen, label,
 				detail, summary, render.ColorReset)
 		case session.StatusFailed:
@@ -352,7 +376,7 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 			if errMsg == "" {
 				errMsg = "unknown error"
 			}
-			fmt.Fprintf(os.Stdout, "  %s✗ %s failed: %s%s\n",
+			fmt.Fprintf(os.Stderr, "  %s✗ %s failed: %s%s\n",
 				render.ColorRed, label, errMsg, render.ColorReset)
 		}
 	}
@@ -377,7 +401,10 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 			case <-ctx.Done():
 				return
 			case <-progressTicker.C:
-				// Show progress for active child sessions.
+				if !verbose {
+					continue
+				}
+				// Show progress for active child sessions (verbose only, stderr).
 				sessions := m.GetAllSessions()
 				for i := range sessions {
 					if sessions[i].ID == delegatorID {
@@ -394,7 +421,7 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 					if sessions[i].Progress.TurnCount > 0 {
 						detail = ", " + formatProgressDetail(sessions[i].Progress)
 					}
-					fmt.Fprintf(os.Stdout, "  %s⏳ %s (%s)%s%s%s\n",
+					fmt.Fprintf(os.Stderr, "  %s⏳ %s (%s)%s%s%s\n",
 						render.ColorDim, sessions[i].ID, sessions[i].Type, elapsed, detail, render.ColorReset)
 				}
 			case evt, ok := <-m.Events():
@@ -445,10 +472,16 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 								close(doneCh)
 								return
 							}
+							// Drain any stale signal so the latest idle
+							// is never lost. Without this, rapid
+							// Idle→Running→Idle cycles (from child
+							// notification processing) drop the final
+							// idle when the buffer-1 channel is full.
 							select {
-							case idleCh <- struct{}{}:
+							case <-idleCh:
 							default:
 							}
+							idleCh <- struct{}{}
 						}
 					}
 				}
@@ -467,41 +500,15 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 			}
 			close(stdinCh)
 		}()
-		for {
-			select {
-			case <-doneCh:
-				goto done
-			case <-ctx.Done():
-				goto done
-			case <-idleCh:
-				if hasActiveChildren(m, delegatorID) {
-					fmt.Print("\nYou (children active)> ")
-				} else {
-					fmt.Print("\nYou> ")
-				}
-				// Wait for stdin input or completion.
-				select {
-				case <-doneCh:
-					goto done
-				case <-ctx.Done():
-					goto done
-				case text, ok := <-stdinCh:
-					if !ok {
-						goto done
-					}
-					line := strings.TrimSpace(text)
-					if line == "" {
-						continue
-					}
-					if line == "quit" || line == "exit" {
-						goto done
-					}
-					if err := m.SendFollowUp(delegatorID, line); err != nil {
-						fmt.Fprintf(os.Stderr, "SendFollowUp error: %v (delegator may be processing a notification, try again)\n", err)
-					}
-				}
-			}
-		}
+		runInteractiveLoop(interactiveLoopConfig{
+			hasActiveChildren: func() bool { return hasActiveChildren(m, delegatorID) },
+			sendFollowUp:      func(msg string) error { return m.SendFollowUp(delegatorID, msg) },
+			idleCh:            idleCh,
+			doneCh:            doneCh,
+			stdinCh:           stdinCh,
+			writeStatus:       writeStatus,
+			ctx:               ctx,
+		})
 	} else {
 		// Non-interactive: wait for completion or timeout.
 		timer := time.NewTimer(timeout)
@@ -515,7 +522,10 @@ func runReal(ctx context.Context, model, workDir, initialPrompt, logDir string, 
 		}
 	}
 
-done:
+	writeStatus("done")
+	if statusFile != nil {
+		statusFile.Close()
+	}
 	// Signal event loop goroutine to stop and wait for it to finish
 	// before reading final state, preventing concurrent stdout writes.
 	close(stopCh)
@@ -558,7 +568,7 @@ done:
 	}
 	// Build summary: "delegator: N turns | planner: M sessions | builder: K sessions"
 	parts := []string{fmt.Sprintf("delegator: %d turns, $%.4f", delegatorTurns, delegatorCost)}
-	for _, t := range []session.SessionType{session.SessionTypePlanner, session.SessionTypeBuilder} {
+	for _, t := range []session.SessionType{session.SessionTypePlanner, session.SessionTypeBuilder, session.SessionTypeCodeTalk} {
 		if s, ok := childByType[t]; ok {
 			noun := "sessions"
 			if s.count == 1 {
@@ -573,10 +583,10 @@ done:
 			parts = append(parts, fmt.Sprintf("%s: 0 sessions", t))
 		}
 	}
-	fmt.Fprintf(os.Stdout, "Total: $%.4f (%s)\n", totalCost, strings.Join(parts, " | "))
+	fmt.Fprintf(os.Stderr, "Total: $%.4f (%s)\n", totalCost, strings.Join(parts, " | "))
 
 	if logDir != "" {
-		fmt.Printf("\nSession JSONL logs saved to: %s\n", logDir)
+		fmt.Fprintf(os.Stderr, "\nSession JSONL logs saved to: %s\n", logDir)
 	}
 	return nil
 }
@@ -615,6 +625,13 @@ func formatToolSummary(name string, input map[string]interface{}) string {
 	case "stop_session":
 		id, _ := input["session_id"].(string)
 		return id
+	case "send_followup":
+		id, _ := input["session_id"].(string)
+		msg, _ := input["prompt"].(string)
+		if len(msg) > 60 {
+			msg = msg[:57] + "..."
+		}
+		return fmt.Sprintf("%s: %s", id, msg)
 	}
 	return ""
 }
@@ -634,7 +651,7 @@ func shortToolName(name string) string {
 // and may appear in the event stream; this filter keeps them out of the display.
 func isDelegatorTool(name string) bool {
 	switch name {
-	case "start_session", "stop_session", "get_session_progress":
+	case "start_session", "stop_session", "get_session_progress", "send_followup":
 		return true
 	}
 	return false
@@ -655,6 +672,77 @@ func hasActiveChildren(m *session.Manager, delegatorID session.SessionID) bool {
 		}
 	}
 	return false
+}
+
+// interactiveLoopConfig holds dependencies for the interactive event loop,
+// enabling unit testing without real API calls or sessions.
+type interactiveLoopConfig struct {
+	hasActiveChildren func() bool
+	sendFollowUp      func(msg string) error
+	idleCh            <-chan struct{}
+	doneCh            <-chan struct{}
+	stdinCh           <-chan string
+	writeStatus       func(string)
+	ctx               context.Context
+}
+
+// runInteractiveLoop drives the interactive prompt loop. It waits for idle
+// signals, emits status, and dispatches stdin input as follow-ups. Returns
+// when doneCh closes, context is cancelled, or stdin sends "quit"/"exit".
+//
+// The loop uses a single select (not nested) so that idleCh signals from
+// child-notification turn cycles are never missed. A promptReady flag
+// prevents duplicate stderr prompts.
+func runInteractiveLoop(cfg interactiveLoopConfig) {
+	promptReady := false
+	for {
+		select {
+		case <-cfg.doneCh:
+			return
+		case <-cfg.ctx.Done():
+			return
+		case <-cfg.idleCh:
+			// Delegator went idle — either after processing user input or
+			// after a child-notification turn cycle. Emit status every time
+			// so the eval script can track children-active vs all-done.
+			if cfg.hasActiveChildren() {
+				cfg.writeStatus("idle-children-active")
+			} else {
+				cfg.writeStatus("idle")
+			}
+			if !promptReady {
+				if cfg.hasActiveChildren() {
+					fmt.Fprint(os.Stderr, "\n(children active) >>> ")
+				} else {
+					fmt.Fprint(os.Stderr, "\n>>> ")
+				}
+				promptReady = true
+			}
+		case text, ok := <-cfg.stdinCh:
+			if !ok {
+				return
+			}
+			line := strings.TrimSpace(text)
+			if line == "" {
+				continue
+			}
+			if line == "quit" || line == "exit" {
+				return
+			}
+			promptReady = false
+			// Retry with backoff — the delegator may be momentarily
+			// non-idle while processing a child notification.
+			for attempt := 0; attempt < 5; attempt++ {
+				if err := cfg.sendFollowUp(line); err == nil {
+					break
+				} else if attempt == 4 {
+					fmt.Fprintf(os.Stderr, "SendFollowUp error after retries: %v\n", err)
+				} else {
+					time.Sleep(time.Duration(500*(attempt+1)) * time.Millisecond)
+				}
+			}
+		}
+	}
 }
 
 // parseBehaviors parses the --behavior flag value.
