@@ -389,6 +389,17 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 
 	worktreePath := filepath.Join(m.RepoDir(), branch)
 	if _, err := os.Stat(worktreePath); err == nil {
+		// If the existing worktree already has the requested branch, reuse it.
+		result, gitErr := m.git.Run(ctx, []string{"branch", "--show-current"}, worktreePath)
+		if gitErr == nil && strings.TrimSpace(result.Stdout) == branch {
+			m.output.Info(fmt.Sprintf("Reusing existing worktree for %s", branch))
+			if goal != "" {
+				if err := SetBranchGoal(ctx, m.git, branch, goal, worktreePath); err != nil {
+					m.output.Warn(fmt.Sprintf("Failed to set goal: %v", err))
+				}
+			}
+			return worktreePath, nil
+		}
 		return "", ErrWorktreeExists
 	}
 
@@ -427,10 +438,18 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 	// Keep the main worktree current
 	m.SyncDefaultBranch(ctx)
 
+	// Prune stale worktree metadata (prevents exit 128 from deleted worktrees).
+	m.git.Run(ctx, []string{"worktree", "prune"}, bareDir)
+
 	m.output.Info(fmt.Sprintf("Creating worktree %s from %s...", branch, baseBranch))
-	if _, err := m.git.Run(ctx, []string{
+	if result, err := m.git.Run(ctx, []string{
 		"worktree", "add", "-b", branch, worktreePath, "origin/" + baseBranch,
 	}, bareDir); err != nil {
+		if result != nil {
+			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+				return "", fmt.Errorf("failed to create worktree: %s: %w", stderr, err)
+			}
+		}
 		return "", fmt.Errorf("failed to create worktree: %w", err)
 	}
 
@@ -502,9 +521,14 @@ func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error)
 	}
 
 	m.output.Info(fmt.Sprintf("Creating worktree for %s...", branch))
-	if _, err := m.git.Run(ctx, []string{
+	if result, err := m.git.Run(ctx, []string{
 		"worktree", "add", worktreePath, branch,
 	}, bareDir); err != nil {
+		if result != nil {
+			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+				return "", fmt.Errorf("failed to create worktree: %s: %w", stderr, err)
+			}
+		}
 		return "", fmt.Errorf("failed to create worktree: %w", err)
 	}
 

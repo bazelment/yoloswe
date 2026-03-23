@@ -405,7 +405,7 @@ func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoNam
 		m := wt.NewManager(wtRoot, repoName)
 		path, err := m.New(ctx, params.Branch, params.BaseBranch, params.Goal)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create worktree: %w", err)
+			return nil, err
 		}
 		worktreePath = path
 	}
