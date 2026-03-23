@@ -17,6 +17,7 @@ import (
 type InputReader struct {
 	rl    *readline.Instance // nil when falling back to scanner
 	lines chan string
+	quit  chan struct{} // closed by Close() to unblock goroutines stuck on channel send
 }
 
 // NewInputReader creates an InputReader. If stdin is a real terminal,
@@ -27,6 +28,7 @@ type InputReader struct {
 func NewInputReader(prompt string) *InputReader {
 	ir := &InputReader{
 		lines: make(chan string),
+		quit:  make(chan struct{}),
 	}
 
 	if render.IsTerminal(os.Stdin) {
@@ -76,7 +78,10 @@ func (ir *InputReader) RefreshPrompt() {
 }
 
 // Close shuts down the input reader and releases resources.
+// It closes the internal quit channel so that goroutines blocked on channel
+// sends exit immediately, even if the consumer has stopped reading Lines().
 func (ir *InputReader) Close() {
+	close(ir.quit)
 	if ir.rl != nil {
 		ir.rl.Close()
 	}
@@ -91,7 +96,11 @@ func (ir *InputReader) startReadline() {
 				// EOF, Ctrl-C, or terminal error.
 				return
 			}
-			ir.lines <- line
+			select {
+			case ir.lines <- line:
+			case <-ir.quit:
+				return
+			}
 		}
 	}()
 }
@@ -106,7 +115,11 @@ func (ir *InputReader) startScanner(r io.Reader, prompt string) {
 			fmt.Fprint(os.Stderr, prompt)
 		}
 		for scanner.Scan() {
-			ir.lines <- scanner.Text()
+			select {
+			case ir.lines <- scanner.Text():
+			case <-ir.quit:
+				return
+			}
 			if prompt != "" {
 				fmt.Fprint(os.Stderr, prompt)
 			}

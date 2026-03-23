@@ -3,6 +3,7 @@ package delegator
 import (
 	"bytes"
 	"context"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -301,6 +302,55 @@ func TestInteractiveLoop_CallbacksInvoked(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("interactive loop did not exit after quit")
 	}
+}
+
+// TestInputReader_CloseUnblocksGoroutine verifies that calling Close() on an
+// InputReader causes its internal goroutine to exit even when the consumer has
+// stopped reading from Lines(). This guards against the goroutine-leak scenario
+// where the goroutine is blocked on an unbuffered channel send.
+func TestInputReader_CloseUnblocksGoroutine(t *testing.T) {
+	t.Parallel()
+
+	// Use a pipe so we can control both ends: the scanner goroutine reads from
+	// pr, and we write to pw to simulate a line of input.
+	pr, pw := io.Pipe()
+
+	ir := &InputReader{
+		lines: make(chan string),
+		quit:  make(chan struct{}),
+	}
+	ir.startScanner(pr, "")
+
+	// Write a line into the pipe so the scanner unblocks and tries to send on
+	// ir.lines. Since nobody is reading ir.lines, the goroutine will block on
+	// the channel send — exactly the leak scenario.
+	go func() {
+		pw.Write([]byte("hello\n")) //nolint:errcheck
+	}()
+
+	// Give the goroutine a moment to reach the blocked channel send, then close.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close should unblock the goroutine via the quit channel.
+	ir.Close()
+
+	// After Close(), the goroutine must exit and close ir.lines. Drain any
+	// pending values and then confirm the channel is closed.
+	goroutineExited := false
+	for !goroutineExited {
+		select {
+		case _, ok := <-ir.lines:
+			if !ok {
+				goroutineExited = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("InputReader goroutine did not exit after Close()")
+		}
+	}
+
+	// Close the pipe to clean up.
+	pw.Close()
+	pr.Close()
 }
 
 // TestInteractiveLoop_DoneChExits verifies the loop exits when doneCh closes.
