@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "delegator",
-    srcs = ["delegator.go"],
+    srcs = [
+        "delegator.go",
+        "input.go",
+        "spinner.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/delegator",
     visibility = ["//bramble:__subpackages__"],
     deps = [
@@ -10,6 +14,7 @@ go_library(
         "//agent-cli-wrapper/claude/render",
         "//bramble/session",
         "//multiagent/agent",
+        "@com_github_ergochat_readline//:readline",
         "@com_github_spf13_cobra//:cobra",
     ],
 )

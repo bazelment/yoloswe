@@ -11,6 +11,7 @@ require (
 	github.com/bazelment/yoloswe/wt v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/charmbracelet/glamour v0.10.0
+	github.com/ergochat/readline v0.1.3
 	github.com/mattn/go-runewidth v0.0.20
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1

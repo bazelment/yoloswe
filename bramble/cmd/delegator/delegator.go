@@ -124,7 +124,11 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 		return nil
 	}
 
-	// Interactive mode.
+	// Interactive mode (mock).
+	// Note: mock mode uses a simple bufio.Scanner rather than InputReader/Spinner.
+	// This is intentional — mock mode is a fast-iteration harness for the system
+	// prompt, not a polished UX, and adding readline/spinner there would complicate
+	// the mock execution path without meaningful benefit.
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print(">>> ")
 	for scanner.Scan() {
@@ -223,8 +227,7 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 	prompt := initialPrompt
 	interactive := false
 	if prompt == "" {
-		stat, _ := os.Stdin.Stat()
-		if (stat.Mode() & os.ModeCharDevice) != 0 {
+		if render.IsTerminal(os.Stdin) {
 			// Real terminal — interactive mode.
 			interactive = true
 		} else {
@@ -259,14 +262,19 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 	}
 	fmt.Fprintf(os.Stderr, "Delegator Test Harness (real) | Model: %s | Child: %s | Work dir: %s\n\n", model, effectiveChild, workDir)
 
+	// Create a single InputReader for the entire interactive session.
+	// This avoids creating multiple readline instances on the same terminal.
+	var inputReader *InputReader
 	if interactive {
+		inputReader = NewInputReader(">>> ")
+		defer inputReader.Close()
+
 		writeStatus("idle")
-		fmt.Fprint(os.Stderr, ">>> ")
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
+		line, ok := <-inputReader.Lines()
+		if !ok {
 			return nil
 		}
-		prompt = strings.TrimSpace(scanner.Text())
+		prompt = strings.TrimSpace(line)
 		if prompt == "" || prompt == "quit" || prompt == "exit" {
 			return nil
 		}
@@ -300,6 +308,9 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			line := lines[i]
 			switch line.Type {
 			case session.OutputTypeText:
+				if line.IsUserPrompt {
+					continue
+				}
 				fmt.Println(strings.TrimRight(line.Content, "\n"))
 			case session.OutputTypeThinking:
 				if verbose {
@@ -491,23 +502,27 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 
 	if interactive {
 		// Interactive loop: wait for delegator to go idle, then prompt for input.
-		// Read stdin in a goroutine so we can select on doneCh without blocking.
-		stdinCh := make(chan string)
-		go func() {
-			scanner := bufio.NewScanner(os.Stdin)
-			for scanner.Scan() {
-				stdinCh <- scanner.Text()
-			}
-			close(stdinCh)
-		}()
+		spinner := NewSpinner(os.Stderr)
+		// Ensure spinner is always stopped on exit, even if onIdle is never called
+		// (e.g. when doneCh closes or ctx is cancelled).
+		defer spinner.Stop()
+		// Start spinner immediately — the initial prompt is already being processed.
+		spinner.Start("Thinking...")
+
 		runInteractiveLoop(interactiveLoopConfig{
 			hasActiveChildren: func() bool { return hasActiveChildren(m, delegatorID) },
 			sendFollowUp:      func(msg string) error { return m.SendFollowUp(delegatorID, msg) },
 			idleCh:            idleCh,
 			doneCh:            doneCh,
-			stdinCh:           stdinCh,
+			stdinCh:           inputReader.Lines(),
 			writeStatus:       writeStatus,
 			ctx:               ctx,
+			onInputSent:       func() { spinner.Start("Thinking...") },
+			onIdle:            func() { spinner.Stop() },
+			setPrompt: func(prompt string) {
+				inputReader.SetPrompt(prompt)
+				inputReader.RefreshPrompt()
+			},
 		})
 	} else {
 		// Non-interactive: wait for completion or timeout.
@@ -684,6 +699,12 @@ type interactiveLoopConfig struct {
 	stdinCh           <-chan string
 	writeStatus       func(string)
 	ctx               context.Context
+
+	// Optional callbacks for spinner and prompt management.
+	// Nil-safe: callers that don't set these get no-op behavior.
+	onInputSent func() // called after sendFollowUp succeeds
+	onIdle      func() // called when delegator goes idle
+	setPrompt   func(string)
 }
 
 // runInteractiveLoop drives the interactive prompt loop. It waits for idle
@@ -694,6 +715,17 @@ type interactiveLoopConfig struct {
 // child-notification turn cycles are never missed. A promptReady flag
 // prevents duplicate stderr prompts.
 func runInteractiveLoop(cfg interactiveLoopConfig) {
+	// Normalize optional callbacks to no-ops so the body never needs nil checks.
+	if cfg.onInputSent == nil {
+		cfg.onInputSent = func() {}
+	}
+	if cfg.onIdle == nil {
+		cfg.onIdle = func() {}
+	}
+	if cfg.setPrompt == nil {
+		cfg.setPrompt = func(p string) { fmt.Fprint(os.Stderr, p) }
+	}
+
 	promptReady := false
 	for {
 		select {
@@ -705,17 +737,19 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 			// Delegator went idle — either after processing user input or
 			// after a child-notification turn cycle. Emit status every time
 			// so the eval script can track children-active vs all-done.
+			cfg.onIdle()
 			if cfg.hasActiveChildren() {
 				cfg.writeStatus("idle-children-active")
 			} else {
 				cfg.writeStatus("idle")
 			}
 			if !promptReady {
+				fmt.Fprintln(os.Stderr)
+				inputPrompt := ">>> "
 				if cfg.hasActiveChildren() {
-					fmt.Fprint(os.Stderr, "\n(children active) >>> ")
-				} else {
-					fmt.Fprint(os.Stderr, "\n>>> ")
+					inputPrompt = "(children active) >>> "
 				}
+				cfg.setPrompt(inputPrompt)
 				promptReady = true
 			}
 		case text, ok := <-cfg.stdinCh:
@@ -732,14 +766,27 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 			promptReady = false
 			// Retry with backoff — the delegator may be momentarily
 			// non-idle while processing a child notification.
+			// Use ctx-aware sleeps so Ctrl-C or doneCh can interrupt.
+			sent := false
 			for attempt := 0; attempt < 5; attempt++ {
 				if err := cfg.sendFollowUp(line); err == nil {
+					sent = true
 					break
 				} else if attempt == 4 {
 					fmt.Fprintf(os.Stderr, "SendFollowUp error after retries: %v\n", err)
 				} else {
-					time.Sleep(time.Duration(500*(attempt+1)) * time.Millisecond)
+					delay := time.Duration(500*(attempt+1)) * time.Millisecond
+					select {
+					case <-cfg.ctx.Done():
+						return
+					case <-cfg.doneCh:
+						return
+					case <-time.After(delay):
+					}
 				}
+			}
+			if sent {
+				cfg.onInputSent()
 			}
 		}
 	}
