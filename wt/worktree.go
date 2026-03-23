@@ -393,6 +393,11 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 		result, gitErr := m.git.Run(ctx, []string{"branch", "--show-current"}, worktreePath)
 		if gitErr == nil && strings.TrimSpace(result.Stdout) == branch {
 			m.output.Info(fmt.Sprintf("Reusing existing worktree for %s", branch))
+			if goal != "" {
+				if err := SetBranchGoal(ctx, m.git, branch, goal, worktreePath); err != nil {
+					m.output.Warn(fmt.Sprintf("Failed to set goal: %v", err))
+				}
+			}
 			return worktreePath, nil
 		}
 		return "", ErrWorktreeExists
@@ -442,7 +447,7 @@ func (m *Manager) New(ctx context.Context, branch, baseBranch, goal string, opts
 	}, bareDir); err != nil {
 		if result != nil {
 			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
-				return "", fmt.Errorf("failed to create worktree: %s", stderr)
+				return "", fmt.Errorf("failed to create worktree: %s: %w", stderr, err)
 			}
 		}
 		return "", fmt.Errorf("failed to create worktree: %w", err)
@@ -521,7 +526,7 @@ func (m *Manager) Open(ctx context.Context, branch, goal string) (string, error)
 	}, bareDir); err != nil {
 		if result != nil {
 			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
-				return "", fmt.Errorf("failed to create worktree: %s", stderr)
+				return "", fmt.Errorf("failed to create worktree: %s: %w", stderr, err)
 			}
 		}
 		return "", fmt.Errorf("failed to create worktree: %w", err)

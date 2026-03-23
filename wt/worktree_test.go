@@ -3,6 +3,7 @@ package wt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1074,6 +1075,10 @@ func TestManagerNewGitErrorIncludesStderr(t *testing.T) {
 	if !strings.Contains(err.Error(), "already checked out") {
 		t.Errorf("Error should contain git stderr, got: %q", err.Error())
 	}
+	// Original error must remain in chain so callers can use errors.Is/As.
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("Error chain should wrap original error, got: %q", err.Error())
+	}
 }
 
 func TestManagerNewPrunesBeforeCreate(t *testing.T) {
@@ -1146,6 +1151,47 @@ func TestManagerNewReusesExistingWorktree(t *testing.T) {
 	}
 	if path != wtPath {
 		t.Errorf("New() path = %q, want %q", path, wtPath)
+	}
+}
+
+func TestManagerNewReusesExistingWorktreeSetsGoal(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature\n"}
+	goalKey := "config branch.feature.goal my goal"
+	mockGit.Results[goalKey] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	_, err := m.New(context.Background(), "feature", "main", "my goal")
+	if err != nil {
+		t.Fatalf("New() should reuse existing worktree, got error: %v", err)
+	}
+
+	// Verify goal was set on reuse.
+	found := false
+	for _, call := range mockGit.Calls {
+		if len(call) >= 3 && call[0] == "config" && call[1] == "branch.feature.goal" {
+			found = true
+			if call[2] != "my goal" {
+				t.Errorf("goal = %q, want %q", call[2], "my goal")
+			}
+		}
+	}
+	if !found {
+		t.Error("Expected git config branch.feature.goal to be called on worktree reuse")
 	}
 }
 
