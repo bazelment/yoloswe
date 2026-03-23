@@ -67,8 +67,8 @@ func (r *Renderer) SetEventHandler(handler EventHandler) {
 	r.eventHandler = handler
 }
 
-// isTerminal checks if the writer is a terminal.
-func isTerminal(w io.Writer) bool {
+// IsTerminal checks if the writer is backed by a terminal file descriptor.
+func IsTerminal(w io.Writer) bool {
 	if f, ok := w.(*os.File); ok {
 		stat, err := f.Stat()
 		if err != nil {
@@ -78,6 +78,9 @@ func isTerminal(w io.Writer) bool {
 	}
 	return false
 }
+
+// isTerminal is the package-internal alias for IsTerminal.
+func isTerminal(w io.Writer) bool { return IsTerminal(w) }
 
 // color returns the color code if colors are enabled, empty string otherwise.
 func (r *Renderer) color(c string) string {

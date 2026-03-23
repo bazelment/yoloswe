@@ -2,11 +2,14 @@ package delegator
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/ergochat/readline"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 )
 
 // InputReader provides line-editing and history for interactive input.
@@ -14,22 +17,19 @@ import (
 type InputReader struct {
 	rl    *readline.Instance // nil when falling back to scanner
 	lines chan string
-	done  chan struct{}
 }
 
 // NewInputReader creates an InputReader. If stdin is a real terminal,
 // it uses readline for line editing and history; otherwise it falls back
 // to a plain bufio.Scanner.
-func NewInputReader(prompt string) (*InputReader, error) {
+// NewInputReader always succeeds: readline initialization errors cause a
+// silent fallback to the scanner path.
+func NewInputReader(prompt string) *InputReader {
 	ir := &InputReader{
 		lines: make(chan string),
-		done:  make(chan struct{}),
 	}
 
-	stat, _ := os.Stdin.Stat()
-	isTerminal := (stat.Mode() & os.ModeCharDevice) != 0
-
-	if isTerminal {
+	if render.IsTerminal(os.Stdin) {
 		historyFile := defaultHistoryFile()
 		rl, err := readline.NewEx(&readline.Config{
 			Prompt:      prompt,
@@ -42,14 +42,14 @@ func NewInputReader(prompt string) (*InputReader, error) {
 		if err != nil {
 			// Fall back to scanner if readline fails to initialize.
 			ir.startScanner(os.Stdin, prompt)
-			return ir, nil
+			return ir
 		}
 		ir.rl = rl
 		ir.startReadline()
 	} else {
 		ir.startScanner(os.Stdin, "")
 	}
-	return ir, nil
+	return ir
 }
 
 // Lines returns a channel that receives each line of user input.
@@ -100,8 +100,16 @@ func (ir *InputReader) startScanner(r io.Reader, prompt string) {
 	go func() {
 		defer close(ir.lines)
 		scanner := bufio.NewScanner(r)
+		// Print prompt before the first read and before each subsequent read,
+		// so the user always sees the prompt before they need to type.
+		if prompt != "" {
+			fmt.Fprint(os.Stderr, prompt)
+		}
 		for scanner.Scan() {
 			ir.lines <- scanner.Text()
+			if prompt != "" {
+				fmt.Fprint(os.Stderr, prompt)
+			}
 		}
 	}()
 }

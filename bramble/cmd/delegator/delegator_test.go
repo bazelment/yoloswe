@@ -208,6 +208,10 @@ func TestInteractiveLoop_QuitExits(t *testing.T) {
 
 // TestSpinner_StartStopIdempotent verifies that Start/Stop are safe to call
 // multiple times and that Stop is safe when the spinner was never started.
+//
+// Note: these tests only exercise the no-op (non-terminal) path because
+// bytes.Buffer is not a PTY. The animation goroutine, ticker cleanup, and
+// ANSI clear sequence can only be exercised on a real terminal.
 func TestSpinner_StartStopIdempotent(t *testing.T) {
 	t.Parallel()
 

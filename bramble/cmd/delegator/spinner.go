@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 )
 
 // Spinner displays a braille animation on stderr while the LLM is thinking.
@@ -42,7 +44,7 @@ func (s *Spinner) Start(message string) {
 		return
 	}
 	// Only animate if the writer is a terminal.
-	if !isWriterTerminal(s.writer) {
+	if !render.IsTerminal(s.writer) {
 		return
 	}
 	s.active = true
@@ -82,17 +84,4 @@ func (s *Spinner) Stop() {
 	doneCh := s.doneCh
 	s.mu.Unlock()
 	<-doneCh
-}
-
-// isWriterTerminal checks if w is backed by a terminal file descriptor.
-func isWriterTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	stat, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
 }
