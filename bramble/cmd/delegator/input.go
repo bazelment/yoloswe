@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/ergochat/readline"
 
@@ -15,9 +16,10 @@ import (
 // InputReader provides line-editing and history for interactive input.
 // When stdin is not a terminal, it falls back to bufio.Scanner.
 type InputReader struct {
-	rl    *readline.Instance // nil when falling back to scanner
-	lines chan string
-	quit  chan struct{} // closed by Close() to unblock goroutines stuck on channel send
+	rl        *readline.Instance // nil when falling back to scanner
+	lines     chan string
+	quit      chan struct{} // closed by Close() to unblock goroutines stuck on channel send
+	closeOnce sync.Once
 }
 
 // NewInputReader creates an InputReader. If stdin is a real terminal,
@@ -80,11 +82,14 @@ func (ir *InputReader) RefreshPrompt() {
 // Close shuts down the input reader and releases resources.
 // It closes the internal quit channel so that goroutines blocked on channel
 // sends exit immediately, even if the consumer has stopped reading Lines().
+// Close is idempotent and safe to call multiple times.
 func (ir *InputReader) Close() {
-	close(ir.quit)
-	if ir.rl != nil {
-		ir.rl.Close()
-	}
+	ir.closeOnce.Do(func() {
+		close(ir.quit)
+		if ir.rl != nil {
+			ir.rl.Close()
+		}
+	})
 }
 
 func (ir *InputReader) startReadline() {

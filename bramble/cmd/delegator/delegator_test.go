@@ -293,7 +293,7 @@ func TestInteractiveLoop_CallbacksInvoked(t *testing.T) {
 	eventsMu.Unlock()
 
 	promptMu.Lock()
-	require.Equal(t, "\n>>> ", promptSet)
+	require.Equal(t, ">>> ", promptSet)
 	promptMu.Unlock()
 
 	stdinCh <- "quit"

@@ -744,9 +744,10 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 				cfg.writeStatus("idle")
 			}
 			if !promptReady {
-				inputPrompt := "\n>>> "
+				fmt.Fprintln(os.Stderr)
+				inputPrompt := ">>> "
 				if cfg.hasActiveChildren() {
-					inputPrompt = "\n(children active) >>> "
+					inputPrompt = "(children active) >>> "
 				}
 				cfg.setPrompt(inputPrompt)
 				promptReady = true
