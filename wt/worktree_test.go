@@ -119,6 +119,11 @@ func (m *MockGitRunner) Run(ctx context.Context, args []string, dir string) (*Cm
 	m.Calls = append(m.Calls, args)
 	key := strings.Join(args, " ")
 	if err, ok := m.Errors[key]; ok {
+		// Return the matching Result (if any) alongside the error so callers
+		// can inspect Stderr.  Fall back to a bare CmdResult.
+		if result, ok := m.Results[key]; ok {
+			return result, err
+		}
 		return &CmdResult{ExitCode: 1}, err
 	}
 	if result, ok := m.Results[key]; ok {
@@ -1039,5 +1044,133 @@ func TestSyncParentFetchFailureNonFatalWhenDeleted(t *testing.T) {
 	err := m.Sync(ctx, "")
 	if err != nil && strings.Contains(err.Error(), "failed to fetch parent branch") {
 		t.Errorf("Sync() should not return parent fetch error when branch is gone from remote, got: %v", err)
+	}
+}
+
+func TestManagerNewGitErrorIncludesStderr(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := filepath.Join(repoDir, "feature")
+	mockGit := NewMockGitRunner()
+	mockGit.Results["fetch origin"] = &CmdResult{Stdout: ""}
+	// Set both a Result (with Stderr) and an Error for the worktree add command.
+	addKey := "worktree add -b feature " + wtPath + " origin/main"
+	mockGit.Results[addKey] = &CmdResult{ExitCode: 128, Stderr: "fatal: 'feature' is already checked out at '/other/path'\n"}
+	mockGit.Errors[addKey] = os.ErrPermission
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	_, err := m.New(context.Background(), "feature", "main", "")
+	if err == nil {
+		t.Fatal("Expected error from New()")
+	}
+	if !strings.Contains(err.Error(), "already checked out") {
+		t.Errorf("Error should contain git stderr, got: %q", err.Error())
+	}
+}
+
+func TestManagerNewPrunesBeforeCreate(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["fetch origin"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree add -b feature "+filepath.Join(repoDir, "feature")+" origin/main"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	_, err := m.New(context.Background(), "feature", "main", "")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// Verify worktree prune was called before worktree add.
+	pruneIdx := -1
+	addIdx := -1
+	for i, call := range mockGit.Calls {
+		if len(call) >= 2 && call[0] == "worktree" && call[1] == "prune" {
+			pruneIdx = i
+		}
+		if len(call) >= 2 && call[0] == "worktree" && call[1] == "add" {
+			addIdx = i
+		}
+	}
+	if pruneIdx == -1 {
+		t.Fatal("Expected worktree prune to be called")
+	}
+	if addIdx == -1 {
+		t.Fatal("Expected worktree add to be called")
+	}
+	if pruneIdx >= addIdx {
+		t.Errorf("worktree prune (call %d) should come before worktree add (call %d)", pruneIdx, addIdx)
+	}
+}
+
+func TestManagerNewReusesExistingWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create worktree directory so it "already exists"
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	// branch --show-current returns matching branch
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature\n"}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	path, err := m.New(context.Background(), "feature", "main", "")
+	if err != nil {
+		t.Fatalf("New() should reuse existing worktree, got error: %v", err)
+	}
+	if path != wtPath {
+		t.Errorf("New() path = %q, want %q", path, wtPath)
+	}
+}
+
+func TestManagerNewRejectsExistingWorktreeWrongBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	// branch --show-current returns a different branch
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "other-branch\n"}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	_, err := m.New(context.Background(), "feature", "main", "")
+	if err != ErrWorktreeExists {
+		t.Errorf("New() error = %v, want ErrWorktreeExists", err)
 	}
 }
