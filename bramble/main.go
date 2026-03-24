@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/bazelment/yoloswe/bramble/app"
+	"github.com/bazelment/yoloswe/bramble/cmd/codereview"
 	"github.com/bazelment/yoloswe/bramble/cmd/delegator"
 	"github.com/bazelment/yoloswe/bramble/ipc"
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -739,6 +740,7 @@ func init() {
 	rootCmd.AddCommand(listSessionsCmd)
 	rootCmd.AddCommand(notifyCmd)
 	rootCmd.AddCommand(capturePaneCmd)
+	rootCmd.AddCommand(codereview.Cmd)
 	rootCmd.AddCommand(delegator.Cmd)
 	rootCmd.AddCommand(codetalkCmd)
 }
