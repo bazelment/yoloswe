@@ -88,8 +88,29 @@ Notes:
 - cursor-composer2 gave "correct" for 3rd consecutive round, confidence rising (0.84→0.86→0.88)
 - codex-5.4-mini found build ordering issue that others missed
 
-## Cross-round patterns (4 rounds)
+## 2026-03-24 (round 5) — feature/code-review-eval-skill
 
-- codex-5.4: most architecturally significant findings, strictest verdicts, never said "correct"
-- cursor-composer2: broadest coverage, rates severity lower, most lenient — 3 consecutive "correct"
-- codex-5.4-mini: fewest findings but catches subtle inconsistencies and implementation details
+Diff: 7 files, +215 lines (added unit test for ReadOnly approval policy)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 4 | 0 | correct | 0.88 | 124s |
+| codex-5.4 | 4 | 0 | incorrect | 0.93 | ~140s |
+| codex-5.4-mini | 3 | 0 | incorrect | 0.89 | ~90s |
+
+Consensus: default backend is cursor which ignores --read-only (both codex models)
+Unique to codex-5.4: swe.go reviewer path without ReadOnly; build-then-checkout ordering
+Unique to codex-5.4-mini: origin/main hardcoded in skill
+Unique to cursor-composer2: noted swe.go as follow-up not bug; CLI flag wiring acknowledged
+
+Notes:
+- Findings have stabilized — same themes repeating across rounds 3-5
+- cursor-composer2 4th consecutive "correct" verdict, steady at 0.88 confidence
+- codex-5.4 continues to never say "correct" — it treats inherent backend limitations as blockers
+- The "default backend is cursor so --read-only is moot" is valid but by design (Cursor is the safer review backend for file mutation since it can't do Bash)
+
+## Cross-round patterns (5 rounds)
+
+- codex-5.4: strictest — never said "correct". Finds architectural gaps (swe.go, benchmark isolation). Best for safety-critical reviews.
+- cursor-composer2: most thorough — reads Go source deeply, broadest findings. 4 consecutive "correct" verdicts. Best for comprehensive review.
+- codex-5.4-mini: sharpest on subtle details (prose vs template, --read-only scope, build ordering). Fewest findings but highest signal-to-noise.
