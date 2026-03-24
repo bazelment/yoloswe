@@ -128,7 +128,7 @@ func New(config Config) *Reviewer {
 			config.Model = "gpt-5.2-codex"
 		}
 		if config.ApprovalPolicy == "" {
-			config.ApprovalPolicy = codex.ApprovalPolicyOnFailure
+			config.ApprovalPolicy = codex.ApprovalPolicyNever
 		}
 	}
 

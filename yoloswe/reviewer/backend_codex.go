@@ -48,6 +48,9 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 			codex.WithModel(b.config.Model),
 			codex.WithWorkDir(b.config.WorkDir),
 			codex.WithApprovalPolicy(b.config.ApprovalPolicy),
+			// Disable sandbox so git and shell commands work without
+			// bubblewrap restrictions (the reviewer is read-only by design).
+			codex.WithSandbox("danger-full-access"),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create thread: %w", err)

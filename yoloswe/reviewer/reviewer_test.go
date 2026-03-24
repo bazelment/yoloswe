@@ -99,8 +99,8 @@ func TestNew_DefaultValues(t *testing.T) {
 	if r.config.Model != "gpt-5.2-codex" {
 		t.Errorf("expected default model gpt-5.2-codex, got %s", r.config.Model)
 	}
-	if r.config.ApprovalPolicy != codex.ApprovalPolicyOnFailure {
-		t.Errorf("expected default approval policy on-failure, got %s", r.config.ApprovalPolicy)
+	if r.config.ApprovalPolicy != codex.ApprovalPolicyNever {
+		t.Errorf("expected default approval policy never, got %s", r.config.ApprovalPolicy)
 	}
 	if r.config.BackendType != BackendCodex {
 		t.Errorf("expected default backend codex, got %s", r.config.BackendType)
