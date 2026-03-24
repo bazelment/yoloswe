@@ -13,9 +13,9 @@ then compare their findings side-by-side.
 
 | Name | Backend | Model | Flags |
 |------|---------|-------|-------|
-| cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
 | codex-5.4 | codex | gpt-5.4 | `--backend codex --model gpt-5.4` |
 | codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini` |
+| cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
 
 ## Step 1: Build and identify target
 
@@ -67,6 +67,9 @@ Identify:
 - **Unique findings**: only one config caught it (investigate — real issue or FP?)
 - **False positives**: findings that are clearly not issues
 - **Disagreements**: findings where configs differ on severity or applicability
+
+Check `.claude/skills/code-review-eval/references/known-blind-spots.md` for previously
+identified blind spots and note if any recur.
 
 ## Step 4: Log results
 
