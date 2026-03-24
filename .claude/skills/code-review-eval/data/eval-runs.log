@@ -1,0 +1,4 @@
+# Review Eval Run History
+
+Append new eval results below. Each entry records the target, ground truth,
+per-backend scores, blind spots, and false positive patterns.
