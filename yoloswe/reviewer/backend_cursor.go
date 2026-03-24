@@ -37,8 +37,9 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	if b.config.WorkDir != "" {
 		opts = append(opts, cursor.WithWorkDir(b.config.WorkDir))
 	}
-	// Cursor requires --trust for non-interactive use (like --dangerously-skip-permissions for Claude)
-	opts = append(opts, cursor.WithTrust())
+	// --trust: trust the workspace without prompting (non-interactive mode)
+	// --force: allow all tool calls (shell, write, etc.) without approval prompts
+	opts = append(opts, cursor.WithTrust(), cursor.WithForce())
 
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
 	if err != nil {
