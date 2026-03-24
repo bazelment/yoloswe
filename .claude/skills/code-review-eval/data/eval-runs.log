@@ -44,3 +44,31 @@ Notes:
 - Cursor-composer2 expanded scope to review Go code (not just skill docs), found 7 findings
 - Both codex models stayed focused on skill correctness, found fewer but higher-severity issues
 - codex-5.4-mini caught a subtle inconsistency (prose vs template) that others missed
+
+## 2026-03-24 (round 3) — feature/code-review-eval-skill
+
+Diff: 3 files, +170 lines (after fixing round 2 findings)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 8 | 0 | correct | 0.86 | 82s |
+| codex-5.4 | 2 | 0 | incorrect | 0.92 | ~120s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.89 | ~90s |
+
+Consensus: origin/main assumption in merge-base (cursor + codex-5.4)
+Unique to codex-5.4: cursor --force worktree isolation needed (high — inherent backend limitation)
+Unique to codex-5.4-mini: --read-only only blocks Write tool not shell edits (valid nuance from reviewer.go doc)
+Unique to cursor-composer2: log table inconsistency, bazel binary path portability, stale eval note
+
+Notes:
+- Round 2 findings (command template flags, argument-hint, cursor-last ordering) were all fixed
+- Cursor-composer2 gave "correct" verdict for second consecutive round
+- Codex models remain stricter — both still say "incorrect" due to inherent Cursor backend limitation
+- The remaining high finding (Cursor can mutate checkout) requires worktree isolation to fully solve
+- codex-5.4-mini found the deepest implementation detail (--read-only scope limitation)
+
+## Cross-round patterns
+
+- codex-5.4: most architecturally significant findings, strictest verdicts, never said "correct"
+- cursor-composer2: broadest coverage (6-8 findings/round), rates severity lower, more lenient verdicts
+- codex-5.4-mini: fewest findings but catches subtle inconsistencies others miss
