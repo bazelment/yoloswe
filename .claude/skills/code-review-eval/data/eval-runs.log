@@ -1,4 +1,25 @@
 # Review Eval Run History
 
-Append new eval results below. Each entry records the target, ground truth,
-per-backend scores, blind spots, and false positive patterns.
+Append new eval results below.
+
+## 2026-03-24 — feature/code-review-eval-skill
+
+Diff: 3 files, +130 lines (docs/skill only, no Go code)
+
+| Config | Findings | FPs | Verdict | Confidence | Time | Tokens |
+|--------|----------|-----|---------|------------|------|--------|
+| cursor-composer2 | 6 | 0 | incorrect | 0.82 | 74s | n/a (cursor) |
+| codex-5.4 | 3 | 0 | incorrect | 0.95 | ~120s | 0/0 (not reported) |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.89 | ~90s | 0/0 (not reported) |
+
+Consensus: branch/PR argument not wired to review commands; token counts unavailable for cursor
+Unique to cursor-composer2: incomplete sentence in known-blind-spots.md, origin/main assumption, log merge conflicts, run_in_background tooling-specific, security/logs
+Unique to codex-5.4: write-capable defaults can mutate checkout between runs (highest severity finding)
+Unique to codex-5.4-mini: config name mismatch (nano vs mini in uncommitted edit)
+Blind spots: none of the three caught that eval-runs.log header still references "ground truth" (stale from pre-simplification)
+
+Notes:
+- codex-5.4-nano run failed (model does not exist, correct name is gpt-5.4-mini)
+- Token counts show 0/0 for all codex runs — reporting issue in codex backend
+- Cursor backend never reports tokens (known limitation)
+- codex-5.4 found the most architecturally significant issue (benchmark invariant violation)
