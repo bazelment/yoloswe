@@ -24,8 +24,21 @@ func (b *codexBackend) Start(ctx context.Context) error {
 		codex.WithClientName("codex-review"),
 		codex.WithClientVersion("1.0.0"),
 		codex.WithStderrHandler(func(data []byte) {
-			fmt.Fprintf(os.Stderr, "[codex stderr] %s", data)
+			s := string(data)
+			if s != "" && s[len(s)-1] != '\n' {
+				s += "\n"
+			}
+			fmt.Fprintf(os.Stderr, "[codex stderr] %s", s)
 		}),
+	}
+	// Wire the read-only approval handler at the client level. This is
+	// paired with ApprovalPolicyOnFailure on the thread (set in
+	// reviewer.New) so that Codex sends approval requests to us instead
+	// of auto-approving. The handler denies Write tool calls while
+	// allowing Bash/read tools—a software-level guard since bwrap
+	// sandboxing is unavailable on most hosts (see Config doc).
+	if b.config.ReadOnly {
+		opts = append(opts, codex.WithApprovalHandler(codex.ReadOnlyHandler()))
 	}
 	if b.config.SessionLogPath != "" {
 		opts = append(opts, codex.WithSessionLogPath(b.config.SessionLogPath))
@@ -48,9 +61,7 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 			codex.WithModel(b.config.Model),
 			codex.WithWorkDir(b.config.WorkDir),
 			codex.WithApprovalPolicy(b.config.ApprovalPolicy),
-			// Disable sandbox so git and shell commands work without
-			// bubblewrap restrictions (the reviewer is read-only by design).
-			codex.WithSandbox("danger-full-access"),
+			codex.WithSandbox(b.config.Sandbox),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create thread: %w", err)

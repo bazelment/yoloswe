@@ -5,9 +5,7 @@ package codereview
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -20,6 +18,8 @@ var (
 	backend        string
 	model          string
 	effort         string
+	sandbox        string
+	readOnly       bool
 	verbose        bool
 	goal           string
 	timeout        time.Duration
@@ -36,6 +36,7 @@ Supported backends: cursor, codex.`,
 	Example: `  bramble code-review --backend cursor
   bramble code-review --backend codex --model gpt-5.2-codex --effort medium
   bramble code-review --backend cursor --verbose --goal "review auth changes"`,
+	Args: cobra.NoArgs,
 	RunE: runCodeReview,
 }
 
@@ -43,23 +44,22 @@ func init() {
 	Cmd.Flags().StringVar(&backend, "backend", "cursor", "Backend: cursor or codex")
 	Cmd.Flags().StringVar(&model, "model", "", "Model override (default: backend-specific)")
 	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high)")
+	Cmd.Flags().StringVar(&sandbox, "sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
+	Cmd.Flags().BoolVar(&readOnly, "read-only", false, "Deny file writes via approval handler (Codex only)")
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
 	Cmd.Flags().StringVar(&goal, "goal", "", "Review goal (default: infer from branch)")
 	Cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Review timeout")
-	Cmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for protocol session logs")
+	Cmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for protocol session logs (Codex only; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) error {
-	switch reviewer.BackendType(backend) {
-	case reviewer.BackendCursor, reviewer.BackendCodex:
-		// valid
-	default:
-		return fmt.Errorf("unknown backend %q (supported: cursor, codex)", backend)
+	if err := reviewer.ValidateBackend(backend); err != nil {
+		return err
 	}
 
-	workDir := os.Getenv("WORK_DIR")
-	if workDir == "" {
-		workDir, _ = os.Getwd()
+	workDir, err := reviewer.ResolveWorkDir()
+	if err != nil {
+		return err
 	}
 
 	config := reviewer.Config{
@@ -67,14 +67,16 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 		WorkDir:     workDir,
 		Model:       model,
 		Effort:      effort,
+		Sandbox:     sandbox,
+		ReadOnly:    readOnly,
 		Verbose:     verbose,
 	}
-	if protocolLogDir != "" {
-		if err := os.MkdirAll(protocolLogDir, 0o755); err != nil {
-			return fmt.Errorf("failed to create protocol log dir: %w", err)
-		}
-		config.SessionLogPath = filepath.Join(protocolLogDir, "reviewer-session.jsonl")
+
+	logPath, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
+	if err != nil {
+		return err
 	}
+	config.SessionLogPath = logPath
 
 	r := reviewer.New(config)
 

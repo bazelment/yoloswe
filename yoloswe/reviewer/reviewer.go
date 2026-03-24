@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
@@ -21,14 +23,59 @@ const (
 )
 
 // Config holds reviewer configuration.
+//
+// # Sandbox challenges (affects both Codex and Cursor)
+//
+// Both Codex and Cursor use bubblewrap (bwrap) for sandboxing. On
+// Ubuntu 24.04+ (kernel ≥ 6.5) with AppArmor, the sysctl
+// kernel.apparmor_restrict_unprivileged_userns=1 is enabled by default.
+// When an unprivileged process creates a user namespace, AppArmor
+// transitions it into the "unprivileged_userns" profile which denies all
+// capabilities—including CAP_NET_ADMIN that bwrap needs for loopback
+// network setup. This breaks sandboxing for both backends:
+//
+//   - Codex: "read-only" and "workspace-write" sandbox modes fail with
+//     "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+//     Only "danger-full-access" (which bypasses bwrap) works.
+//   - Cursor: --sandbox causes the session to end immediately without
+//     producing any result, regardless of whether --force is also set.
+//
+// Until the host is reconfigured (e.g. adding a per-binary AppArmor
+// profile with "userns," or setting the sysctl to 0), sandboxing is
+// unavailable for both backends.
+//
+// # Codex sandbox modes
+//
+// Codex offers three sandbox modes:
+//
+//   - "read-only"        – strictest; no file writes, shell runs inside bwrap
+//   - "workspace-write"  – writes allowed only under the workspace root
+//   - "danger-full-access" – no bwrap; tools run directly on the host
+//
+// # Codex approval policy and --read-only mitigation
+//
+// To mitigate the lack of bwrap, the --read-only flag provides a
+// software-level guard: it sets the approval policy to "on-failure" and
+// wires a ReadOnlyHandler that auto-approves Bash tool calls but denies
+// Write tool calls. This prevents file writes through the Codex Write
+// tool but cannot block destructive shell commands (rm, git reset, etc.)—
+// the review prompt's instructions are the remaining constraint there.
+//
+// Without --read-only, the default is ApprovalPolicyNever (auto-approve
+// everything) which avoids hanging on approval requests in non-interactive
+// automation. Any approval policy other than "never" requires a wired
+// ApprovalHandler; without one the codex process blocks indefinitely
+// waiting for approval responses.
 type Config struct {
 	Model          string
 	WorkDir        string
 	Goal           string
 	SessionLogPath string
-	Effort         string // Reasoning effort level for codex (low, medium, high)
-	ApprovalPolicy codex.ApprovalPolicy
+	Effort         string               // Reasoning effort level for codex (low, medium, high)
+	Sandbox        string               // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
+	ApprovalPolicy codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
 	BackendType    BackendType
+	ReadOnly       bool // Deny file writes via approval handler (Codex only)
 	Verbose        bool
 	NoColor        bool
 	JSONOutput     bool
@@ -122,13 +169,26 @@ func New(config Config) *Reviewer {
 	if config.BackendType == "" {
 		config.BackendType = BackendCodex
 	}
-	// Apply codex-specific defaults only for codex backend
+	// Apply codex-specific defaults only for codex backend.
+	// See Config doc for why danger-full-access is the default sandbox.
 	if config.BackendType == BackendCodex {
 		if config.Model == "" {
 			config.Model = "gpt-5.2-codex"
 		}
 		if config.ApprovalPolicy == "" {
-			config.ApprovalPolicy = codex.ApprovalPolicyNever
+			if config.ReadOnly {
+				// on-failure triggers the approval handler so
+				// ReadOnlyHandler can deny Write tool calls.
+				config.ApprovalPolicy = codex.ApprovalPolicyOnFailure
+			} else {
+				// never = auto-approve; avoids hanging without a handler.
+				config.ApprovalPolicy = codex.ApprovalPolicyNever
+			}
+		}
+		if config.Sandbox == "" {
+			// bwrap-based modes (read-only, workspace-write) fail on
+			// systems with AppArmor unprivileged userns restrictions.
+			config.Sandbox = "danger-full-access"
 		}
 	}
 
@@ -201,4 +261,49 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	}
 	r.renderer.TurnComplete(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
+}
+
+// ValidateBackend returns an error if the given backend string is not supported.
+func ValidateBackend(backend string) error {
+	switch BackendType(backend) {
+	case BackendCursor, BackendCodex:
+		return nil
+	default:
+		return fmt.Errorf("unknown backend %q (supported: cursor, codex)", backend)
+	}
+}
+
+// ResolveWorkDir returns the working directory from the WORK_DIR env var,
+// falling back to os.Getwd().
+func ResolveWorkDir() (string, error) {
+	if dir := os.Getenv("WORK_DIR"); dir != "" {
+		return dir, nil
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to determine working directory: %w", err)
+	}
+	return dir, nil
+}
+
+// ResolveProtocolLogPath resolves the session log path from a flag value and
+// the BRAMBLE_PROTOCOL_LOG_DIR env var fallback. It creates the directory if
+// needed and returns a unique filename including a timestamp to avoid
+// collisions between concurrent runs. Returns "" if no log dir is configured.
+//
+// Note: protocol session logging is currently only supported by the Codex
+// backend; the Cursor backend silently ignores SessionLogPath.
+func ResolveProtocolLogPath(flagValue string) (string, error) {
+	dir := flagValue
+	if dir == "" {
+		dir = os.Getenv("BRAMBLE_PROTOCOL_LOG_DIR")
+	}
+	if dir == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create protocol log dir: %w", err)
+	}
+	filename := fmt.Sprintf("reviewer-session-%s.jsonl", time.Now().Format("20060102-150405"))
+	return filepath.Join(dir, filename), nil
 }

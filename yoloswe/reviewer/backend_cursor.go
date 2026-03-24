@@ -38,10 +38,20 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	if b.config.WorkDir != "" {
 		opts = append(opts, cursor.WithWorkDir(b.config.WorkDir))
 	}
-	// --trust: trust the workspace without prompting (non-interactive mode)
-	// --force: allow all tool calls (shell, write, etc.) without approval prompts
+	// Non-interactive flags for automation:
+	// --trust: trust the workspace without prompting
+	// --force: allow all tool calls (shell, write, etc.) without approval
+	//
+	// Cursor also supports --sandbox, but it fails immediately on systems
+	// with AppArmor unprivileged userns restrictions (same bwrap issue as
+	// Codex—see Config doc in reviewer.go). With or without --force, the
+	// session ends without result when --sandbox is enabled.
 	opts = append(opts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(func(data []byte) {
-		fmt.Fprintf(os.Stderr, "[cursor stderr] %s", data)
+		s := string(data)
+		if s != "" && s[len(s)-1] != '\n' {
+			s += "\n"
+		}
+		fmt.Fprintf(os.Stderr, "[cursor stderr] %s", s)
 	}))
 
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
