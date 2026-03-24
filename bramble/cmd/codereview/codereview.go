@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,12 +17,13 @@ import (
 )
 
 var (
-	backend string
-	model   string
-	effort  string
-	verbose bool
-	goal    string
-	timeout time.Duration
+	backend        string
+	model          string
+	effort         string
+	verbose        bool
+	goal           string
+	timeout        time.Duration
+	protocolLogDir string
 )
 
 // Cmd is the cobra command for code review.
@@ -44,6 +46,7 @@ func init() {
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
 	Cmd.Flags().StringVar(&goal, "goal", "", "Review goal (default: infer from branch)")
 	Cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Review timeout")
+	Cmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for protocol session logs")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) error {
@@ -65,6 +68,12 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 		Model:       model,
 		Effort:      effort,
 		Verbose:     verbose,
+	}
+	if protocolLogDir != "" {
+		if err := os.MkdirAll(protocolLogDir, 0o755); err != nil {
+			return fmt.Errorf("failed to create protocol log dir: %w", err)
+		}
+		config.SessionLogPath = filepath.Join(protocolLogDir, "reviewer-session.jsonl")
 	}
 
 	r := reviewer.New(config)

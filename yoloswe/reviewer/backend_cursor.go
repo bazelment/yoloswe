@@ -3,6 +3,7 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -39,7 +40,9 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	}
 	// --trust: trust the workspace without prompting (non-interactive mode)
 	// --force: allow all tool calls (shell, write, etc.) without approval prompts
-	opts = append(opts, cursor.WithTrust(), cursor.WithForce())
+	opts = append(opts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(func(data []byte) {
+		fmt.Fprintf(os.Stderr, "[cursor stderr] %s", data)
+	}))
 
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
 	if err != nil {

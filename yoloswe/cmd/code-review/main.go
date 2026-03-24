@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ func run() int {
 	verbose := flag.Bool("verbose", false, "Show tool call details")
 	goal := flag.String("goal", "", "Review goal (default: infer from branch)")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Review timeout")
+	protocolLogDir := flag.String("protocol-log-dir", "", "Directory for protocol session logs")
 	flag.Parse()
 
 	switch reviewer.BackendType(*backend) {
@@ -50,6 +52,13 @@ func run() int {
 		Model:       *model,
 		Effort:      *effort,
 		Verbose:     *verbose,
+	}
+	if *protocolLogDir != "" {
+		if err := os.MkdirAll(*protocolLogDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create protocol log dir: %v\n", err)
+			return 1
+		}
+		config.SessionLogPath = filepath.Join(*protocolLogDir, "reviewer-session.jsonl")
 	}
 
 	r := reviewer.New(config)

@@ -3,6 +3,7 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
@@ -22,6 +23,9 @@ func (b *codexBackend) Start(ctx context.Context) error {
 	opts := []codex.ClientOption{
 		codex.WithClientName("codex-review"),
 		codex.WithClientVersion("1.0.0"),
+		codex.WithStderrHandler(func(data []byte) {
+			fmt.Fprintf(os.Stderr, "[codex stderr] %s", data)
+		}),
 	}
 	if b.config.SessionLogPath != "" {
 		opts = append(opts, codex.WithSessionLogPath(b.config.SessionLogPath))
