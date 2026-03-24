@@ -45,7 +45,7 @@ func init() {
 	Cmd.Flags().StringVar(&model, "model", "", "Model override (default: backend-specific)")
 	Cmd.Flags().StringVar(&effort, "effort", "", "Reasoning effort level for codex (low, medium, high)")
 	Cmd.Flags().StringVar(&sandbox, "sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
-	Cmd.Flags().BoolVar(&readOnly, "read-only", false, "Deny file writes via approval handler (Codex only)")
+	Cmd.Flags().BoolVar(&readOnly, "read-only", true, "Deny file writes via approval handler (Codex only; default true)")
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
 	Cmd.Flags().StringVar(&goal, "goal", "", "Review goal (default: infer from branch)")
 	Cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Review timeout")

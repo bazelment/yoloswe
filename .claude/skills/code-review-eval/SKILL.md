@@ -14,8 +14,8 @@ then compare their findings side-by-side.
 | Name | Backend | Model | Flags |
 |------|---------|-------|-------|
 | cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
-| codex-5.4 | codex | gpt-5.4 | `--backend codex --model gpt-5.4 --read-only` |
-| codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini --read-only` |
+| codex-5.4 | codex | gpt-5.4 | `--backend codex --model gpt-5.4` |
+| codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini` |
 
 ## Step 1: Build and identify target
 
@@ -32,9 +32,8 @@ git diff $(git merge-base origin/main HEAD)..HEAD --stat
 
 ## Step 2: Run each config
 
-Run `bramble code-review` for each config sequentially. Use the exact flags from the
-config table above — codex configs include `--read-only` to prevent file writes that
-would mutate the checkout between runs. Cursor has no read-only mode, so run it last.
+Run `bramble code-review` for each config sequentially. Codex defaults to `--read-only`
+(denies file writes via approval handler). Cursor has no read-only mode, so run it last.
 
 ```bash
 WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
@@ -42,7 +41,7 @@ WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
   2>"$LOG_DIR/{NAME}-stderr.txt" | tee "$LOG_DIR/{NAME}-stdout.txt"
 ```
 
-Where `{FLAGS}` are taken from the config table (e.g. `--backend codex --model gpt-5.4 --read-only`).
+Where `{FLAGS}` are taken from the config table (e.g. `--backend codex --model gpt-5.4`).
 
 Use `run_in_background` + `timeout=600000` so you can read completed results while
 the next config runs. Create a fresh `$LOG_DIR` under `/tmp/code-review-eval-{timestamp}/`.

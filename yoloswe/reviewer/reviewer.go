@@ -75,7 +75,7 @@ type Config struct {
 	Sandbox        string               // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
 	ApprovalPolicy codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
 	BackendType    BackendType
-	ReadOnly       bool // Deny file writes via approval handler (Codex only)
+	ReadOnly       bool // Deny file writes via approval handler (Codex only; default true for code-review)
 	Verbose        bool
 	NoColor        bool
 	JSONOutput     bool
