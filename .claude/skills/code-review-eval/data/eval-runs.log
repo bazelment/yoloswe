@@ -67,8 +67,29 @@ Notes:
 - The remaining high finding (Cursor can mutate checkout) requires worktree isolation to fully solve
 - codex-5.4-mini found the deepest implementation detail (--read-only scope limitation)
 
-## Cross-round patterns
+## 2026-03-24 (round 4) — feature/code-review-eval-skill
+
+Diff: 6 files, +205 lines (now includes Go code: --read-only default change)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 4 | 0 | correct | 0.88 | 76s |
+| codex-5.4 | 4 | 0 | incorrect | 0.93 | ~130s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.84 | ~90s |
+
+Consensus: missing unit test for ReadOnly:true → ApprovalPolicyOnFailure path
+Unique to codex-5.4: yoloswe/swe.go also uses reviewer without ReadOnly (high); cursor --force (high)
+Unique to codex-5.4-mini: build-then-checkout ordering in skill (high); --read-only scope limitation
+Unique to cursor-composer2: ReadOnly comment misleading (CLI vs struct); eval-runs.log merge conflicts
+
+Notes:
+- First round with Go code changes in the diff — all three reviewers engaged more deeply
+- codex-5.4 found that swe.go is another caller that doesn't get the new default (real gap)
+- cursor-composer2 gave "correct" for 3rd consecutive round, confidence rising (0.84→0.86→0.88)
+- codex-5.4-mini found build ordering issue that others missed
+
+## Cross-round patterns (4 rounds)
 
 - codex-5.4: most architecturally significant findings, strictest verdicts, never said "correct"
-- cursor-composer2: broadest coverage (6-8 findings/round), rates severity lower, more lenient verdicts
-- codex-5.4-mini: fewest findings but catches subtle inconsistencies others miss
+- cursor-composer2: broadest coverage, rates severity lower, most lenient — 3 consecutive "correct"
+- codex-5.4-mini: fewest findings but catches subtle inconsistencies and implementation details

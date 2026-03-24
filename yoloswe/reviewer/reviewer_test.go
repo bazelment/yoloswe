@@ -192,6 +192,14 @@ func TestNew_DefaultApprovalPolicyCodex(t *testing.T) {
 	}
 }
 
+func TestNew_ReadOnlyApprovalPolicyCodex(t *testing.T) {
+	r := New(Config{BackendType: BackendCodex, ReadOnly: true})
+	if r.config.ApprovalPolicy != codex.ApprovalPolicyOnFailure {
+		t.Errorf("expected codex read-only approval policy %q, got %q",
+			codex.ApprovalPolicyOnFailure, r.config.ApprovalPolicy)
+	}
+}
+
 func TestNew_ApprovalPolicyNotOverriddenForCursor(t *testing.T) {
 	r := New(Config{BackendType: BackendCursor})
 	if r.config.ApprovalPolicy != "" {
