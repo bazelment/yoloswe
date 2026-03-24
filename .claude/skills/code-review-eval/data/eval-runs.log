@@ -23,3 +23,24 @@ Notes:
 - Token counts show 0/0 for all codex runs — reporting issue in codex backend
 - Cursor backend never reports tokens (known limitation)
 - codex-5.4 found the most architecturally significant issue (benchmark invariant violation)
+
+## 2026-03-24 (round 2) — feature/code-review-eval-skill
+
+Diff: 3 files, +155 lines (after fixing round 1 findings)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 7 | 0 | correct | 0.84 | 78s |
+| codex-5.4 | 3 | 0 | incorrect | 0.96 | ~150s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.93 | ~90s |
+
+Consensus: cursor --force has no read-only guard; branch/PR argument mismatch with cobra.NoArgs
+Unique to cursor-composer2: protocol log filename collision, duplicated CLI wiring, custom containsString, run_in_background specificity, stale eval-runs.log commentary
+Unique to codex-5.4: base branch hardcoded to origin/main
+Unique to codex-5.4-mini: --read-only missing from command template (valid — prose said it but template didn't)
+
+Notes:
+- Round 1 findings (model name, blind spots concept, token column) were all fixed
+- Cursor-composer2 expanded scope to review Go code (not just skill docs), found 7 findings
+- Both codex models stayed focused on skill correctness, found fewer but higher-severity issues
+- codex-5.4-mini caught a subtle inconsistency (prose vs template) that others missed
