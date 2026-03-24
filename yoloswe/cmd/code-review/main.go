@@ -26,22 +26,23 @@ func run() int {
 	backend := flag.String("backend", "cursor", "Backend: cursor or codex")
 	model := flag.String("model", "", "Model override (default: backend-specific)")
 	effort := flag.String("effort", "", "Reasoning effort level for codex (low, medium, high)")
+	sandbox := flag.String("sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
+	readOnly := flag.Bool("read-only", false, "Deny file writes via approval handler (Codex only)")
 	verbose := flag.Bool("verbose", false, "Show tool call details")
 	goal := flag.String("goal", "", "Review goal (default: infer from branch)")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Review timeout")
+	protocolLogDir := flag.String("protocol-log-dir", "", "Directory for protocol session logs (Codex only; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 	flag.Parse()
 
-	switch reviewer.BackendType(*backend) {
-	case reviewer.BackendCursor, reviewer.BackendCodex:
-		// valid
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown backend %q (supported: cursor, codex)\n", *backend)
+	if err := reviewer.ValidateBackend(*backend); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
 
-	workDir := os.Getenv("WORK_DIR")
-	if workDir == "" {
-		workDir, _ = os.Getwd()
+	workDir, err := reviewer.ResolveWorkDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
 	}
 
 	config := reviewer.Config{
@@ -49,8 +50,17 @@ func run() int {
 		WorkDir:     workDir,
 		Model:       *model,
 		Effort:      *effort,
+		Sandbox:     *sandbox,
+		ReadOnly:    *readOnly,
 		Verbose:     *verbose,
 	}
+
+	logPath, err := reviewer.ResolveProtocolLogPath(*protocolLogDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	config.SessionLogPath = logPath
 
 	r := reviewer.New(config)
 

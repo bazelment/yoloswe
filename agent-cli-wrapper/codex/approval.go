@@ -68,3 +68,29 @@ func DenyAllHandler() ApprovalHandler {
 		}, nil
 	})
 }
+
+// ReadOnlyHandler returns a handler that approves Bash (shell/read) tools
+// but denies Write tools. This is a software-level read-only guard for use
+// when the bubblewrap sandbox modes ("read-only", "workspace-write") are
+// unavailable—e.g. on Ubuntu 24.04+ where AppArmor's
+// apparmor_restrict_unprivileged_userns sysctl blocks bwrap from creating
+// user namespaces.
+//
+// Limitation: this only blocks the Codex "Write" tool. Destructive shell
+// commands (rm, git reset --hard, etc.) pass through Bash and cannot be
+// reliably filtered here. The review prompt's instructions are the
+// remaining constraint for shell behavior.
+//
+// Requires a non-"never" approval policy (e.g. "on-failure") on the thread
+// so that Codex actually sends approval requests to the handler.
+func ReadOnlyHandler() ApprovalHandler {
+	return ApprovalHandlerFunc(func(ctx context.Context, req *ApprovalRequest) (*ApprovalResponse, error) {
+		if req.ToolName == "Write" {
+			return &ApprovalResponse{
+				Approved: false,
+				Message:  "file writes denied by read-only review policy",
+			}, nil
+		}
+		return &ApprovalResponse{Approved: true}, nil
+	})
+}

@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "codereview",
+    srcs = ["codereview.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/codereview",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//yoloswe/reviewer",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
