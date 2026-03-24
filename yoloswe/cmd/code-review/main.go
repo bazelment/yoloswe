@@ -27,7 +27,7 @@ func run() int {
 	model := flag.String("model", "", "Model override (default: backend-specific)")
 	effort := flag.String("effort", "", "Reasoning effort level for codex (low, medium, high)")
 	sandbox := flag.String("sandbox", "", "Codex sandbox mode: read-only, workspace-write, danger-full-access (default: danger-full-access)")
-	readOnly := flag.Bool("read-only", false, "Deny file writes via approval handler (Codex only)")
+	readOnly := flag.Bool("read-only", true, "Deny file writes via approval handler (Codex only; default true)")
 	verbose := flag.Bool("verbose", false, "Show tool call details")
 	goal := flag.String("goal", "", "Review goal (default: infer from branch)")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Review timeout")

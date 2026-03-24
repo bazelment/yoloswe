@@ -1,0 +1,116 @@
+# Review Eval Run History
+
+Append new eval results below.
+
+## 2026-03-24 — feature/code-review-eval-skill
+
+Diff: 3 files, +130 lines (docs/skill only, no Go code)
+
+| Config | Findings | FPs | Verdict | Confidence | Time | Tokens |
+|--------|----------|-----|---------|------------|------|--------|
+| cursor-composer2 | 6 | 0 | incorrect | 0.82 | 74s | n/a (cursor) |
+| codex-5.4 | 3 | 0 | incorrect | 0.95 | ~120s | 0/0 (not reported) |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.89 | ~90s | 0/0 (not reported) |
+
+Consensus: branch/PR argument not wired to review commands; token counts unavailable for cursor
+Unique to cursor-composer2: incomplete sentence in known-blind-spots.md, origin/main assumption, log merge conflicts, run_in_background tooling-specific, security/logs
+Unique to codex-5.4: write-capable defaults can mutate checkout between runs (highest severity finding)
+Unique to codex-5.4-mini: config name mismatch (nano vs mini in uncommitted edit)
+Blind spots: none of the three caught that eval-runs.log header still references "ground truth" (stale from pre-simplification)
+
+Notes:
+- codex-5.4-nano run failed (model does not exist, correct name is gpt-5.4-mini)
+- Token counts show 0/0 for all codex runs — reporting issue in codex backend
+- Cursor backend never reports tokens (known limitation)
+- codex-5.4 found the most architecturally significant issue (benchmark invariant violation)
+
+## 2026-03-24 (round 2) — feature/code-review-eval-skill
+
+Diff: 3 files, +155 lines (after fixing round 1 findings)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 7 | 0 | correct | 0.84 | 78s |
+| codex-5.4 | 3 | 0 | incorrect | 0.96 | ~150s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.93 | ~90s |
+
+Consensus: cursor --force has no read-only guard; branch/PR argument mismatch with cobra.NoArgs
+Unique to cursor-composer2: protocol log filename collision, duplicated CLI wiring, custom containsString, run_in_background specificity, stale eval-runs.log commentary
+Unique to codex-5.4: base branch hardcoded to origin/main
+Unique to codex-5.4-mini: --read-only missing from command template (valid — prose said it but template didn't)
+
+Notes:
+- Round 1 findings (model name, blind spots concept, token column) were all fixed
+- Cursor-composer2 expanded scope to review Go code (not just skill docs), found 7 findings
+- Both codex models stayed focused on skill correctness, found fewer but higher-severity issues
+- codex-5.4-mini caught a subtle inconsistency (prose vs template) that others missed
+
+## 2026-03-24 (round 3) — feature/code-review-eval-skill
+
+Diff: 3 files, +170 lines (after fixing round 2 findings)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 8 | 0 | correct | 0.86 | 82s |
+| codex-5.4 | 2 | 0 | incorrect | 0.92 | ~120s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.89 | ~90s |
+
+Consensus: origin/main assumption in merge-base (cursor + codex-5.4)
+Unique to codex-5.4: cursor --force worktree isolation needed (high — inherent backend limitation)
+Unique to codex-5.4-mini: --read-only only blocks Write tool not shell edits (valid nuance from reviewer.go doc)
+Unique to cursor-composer2: log table inconsistency, bazel binary path portability, stale eval note
+
+Notes:
+- Round 2 findings (command template flags, argument-hint, cursor-last ordering) were all fixed
+- Cursor-composer2 gave "correct" verdict for second consecutive round
+- Codex models remain stricter — both still say "incorrect" due to inherent Cursor backend limitation
+- The remaining high finding (Cursor can mutate checkout) requires worktree isolation to fully solve
+- codex-5.4-mini found the deepest implementation detail (--read-only scope limitation)
+
+## 2026-03-24 (round 4) — feature/code-review-eval-skill
+
+Diff: 6 files, +205 lines (now includes Go code: --read-only default change)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 4 | 0 | correct | 0.88 | 76s |
+| codex-5.4 | 4 | 0 | incorrect | 0.93 | ~130s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.84 | ~90s |
+
+Consensus: missing unit test for ReadOnly:true → ApprovalPolicyOnFailure path
+Unique to codex-5.4: yoloswe/swe.go also uses reviewer without ReadOnly (high); cursor --force (high)
+Unique to codex-5.4-mini: build-then-checkout ordering in skill (high); --read-only scope limitation
+Unique to cursor-composer2: ReadOnly comment misleading (CLI vs struct); eval-runs.log merge conflicts
+
+Notes:
+- First round with Go code changes in the diff — all three reviewers engaged more deeply
+- codex-5.4 found that swe.go is another caller that doesn't get the new default (real gap)
+- cursor-composer2 gave "correct" for 3rd consecutive round, confidence rising (0.84→0.86→0.88)
+- codex-5.4-mini found build ordering issue that others missed
+
+## 2026-03-24 (round 5) — feature/code-review-eval-skill
+
+Diff: 7 files, +215 lines (added unit test for ReadOnly approval policy)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 4 | 0 | correct | 0.88 | 124s |
+| codex-5.4 | 4 | 0 | incorrect | 0.93 | ~140s |
+| codex-5.4-mini | 3 | 0 | incorrect | 0.89 | ~90s |
+
+Consensus: default backend is cursor which ignores --read-only (both codex models)
+Unique to codex-5.4: swe.go reviewer path without ReadOnly; build-then-checkout ordering
+Unique to codex-5.4-mini: origin/main hardcoded in skill
+Unique to cursor-composer2: noted swe.go as follow-up not bug; CLI flag wiring acknowledged
+
+Notes:
+- Findings have stabilized — same themes repeating across rounds 3-5
+- cursor-composer2 4th consecutive "correct" verdict, steady at 0.88 confidence
+- codex-5.4 continues to never say "correct" — it treats inherent backend limitations as blockers
+- The "default backend is cursor so --read-only is moot" is valid but by design (Cursor is the safer review backend for file mutation since it can't do Bash)
+
+## Cross-round patterns (5 rounds)
+
+- codex-5.4: strictest — never said "correct". Finds architectural gaps (swe.go, benchmark isolation). Best for safety-critical reviews.
+- cursor-composer2: most thorough — reads Go source deeply, broadest findings. 4 consecutive "correct" verdicts. Best for comprehensive review.
+- codex-5.4-mini: sharpest on subtle details (prose vs template, --read-only scope, build ordering). Fewest findings but highest signal-to-noise.
