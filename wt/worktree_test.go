@@ -1462,3 +1462,46 @@ func TestGCContinuesOnPartialFailure(t *testing.T) {
 		t.Errorf("expected only feature-b deleted, got %v", result.DeletedBranches)
 	}
 }
+
+func TestGCRemoteOnlyDeletesLocallyDeletedBranches(t *testing.T) {
+	// Regression test: remote deletion must only target branches whose local
+	// deletion succeeded. Previously it iterated OrphanedBranches, which could
+	// cause a remote branch to be deleted even when the local deletion failed.
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature-a\nfeature-b\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	// feature-a local deletion fails; feature-b succeeds
+	mockGit.Errors["branch -D feature-a"] = errors.New("branch not fully merged")
+	mockGit.Results["branch -D feature-b"] = &CmdResult{}
+	mockGit.Results["push origin --delete feature-b"] = &CmdResult{}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{DeleteBranches: true, DeleteRemote: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	// Only feature-b should be remotely deleted; feature-a's local deletion failed
+	if len(result.DeletedRemote) != 1 || result.DeletedRemote[0] != "feature-b" {
+		t.Errorf("expected only feature-b in DeletedRemote, got %v", result.DeletedRemote)
+	}
+	// Verify push for feature-a was never called
+	for _, call := range mockGit.Calls {
+		key := strings.Join(call, " ")
+		if key == "push origin --delete feature-a" {
+			t.Error("should not have attempted to delete remote feature-a since local deletion failed")
+		}
+	}
+}

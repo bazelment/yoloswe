@@ -1447,9 +1447,14 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 		}
 	}
 
-	// Step 5: Delete remote branches
-	if opts.DeleteBranches && opts.DeleteRemote && len(result.OrphanedBranches) > 0 {
-		for _, branch := range result.OrphanedBranches {
+	// Step 5: Delete remote branches (only for branches whose local deletion succeeded)
+	if opts.DeleteBranches && opts.DeleteRemote {
+		remoteBranches := result.DeletedBranches
+		if opts.DryRun {
+			// In dry-run mode, no local deletions have happened yet; use orphaned list
+			remoteBranches = result.OrphanedBranches
+		}
+		for _, branch := range remoteBranches {
 			if opts.DryRun {
 				m.output.Info(fmt.Sprintf("[dry-run] Would delete remote branch: %s", branch))
 				continue
