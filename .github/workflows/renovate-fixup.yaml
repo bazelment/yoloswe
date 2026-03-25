@@ -1,0 +1,66 @@
+name: Renovate Fixup
+
+# After Renovate updates go.mod or MODULE.bazel, regenerate BUILD files
+# and tidy all modules via Bazel. The Mend-hosted Renovate app cannot run
+# arbitrary post-upgrade commands, so this workflow fills that gap.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/go.mod"
+      - "**/go.sum"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixup:
+    name: Tidy and Gazelle
+    # Only run on Renovate branches
+    if: startsWith(github.head_ref, 'renovate/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+          bazelrc: |
+            common --enable_bzlmod
+
+      - name: Run tidy and gazelle
+        run: |
+          bazel run //:tidy || true
+          bazel run //:gazelle
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "chore: regenerate BUILD files and tidy modules"
+            git push
+          else
+            echo "No changes needed"
+          fi
