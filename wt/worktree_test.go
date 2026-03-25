@@ -1220,3 +1220,245 @@ func TestManagerNewRejectsExistingWorktreeWrongBranch(t *testing.T) {
 		t.Errorf("New() error = %v, want ErrWorktreeExists", err)
 	}
 }
+
+func TestGCPrunesWorktrees(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if !result.FetchPruned {
+		t.Error("expected FetchPruned to be true")
+	}
+	if !result.GCRan {
+		t.Error("expected GCRan to be true")
+	}
+	if len(result.OrphanedBranches) != 0 {
+		t.Errorf("expected no orphaned branches, got %v", result.OrphanedBranches)
+	}
+}
+
+func TestGCDetectsOrphanedBranches(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature-a\nfeature-b\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if len(result.OrphanedBranches) != 2 {
+		t.Fatalf("expected 2 orphaned branches, got %v", result.OrphanedBranches)
+	}
+	if result.OrphanedBranches[0] != "feature-a" || result.OrphanedBranches[1] != "feature-b" {
+		t.Errorf("unexpected orphaned branches: %v", result.OrphanedBranches)
+	}
+	if len(result.DeletedBranches) != 0 {
+		t.Error("expected no branches deleted without DeleteBranches option")
+	}
+}
+
+func TestGCDeletesOrphanedBranches(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature-a\nfeature-b\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	mockGit.Results["branch -D feature-a"] = &CmdResult{}
+	mockGit.Results["branch -D feature-b"] = &CmdResult{}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{DeleteBranches: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if len(result.DeletedBranches) != 2 {
+		t.Fatalf("expected 2 deleted branches, got %v", result.DeletedBranches)
+	}
+}
+
+func TestGCDeletesRemoteBranches(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature-a\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	mockGit.Results["branch -D feature-a"] = &CmdResult{}
+	mockGit.Results["push origin --delete feature-a"] = &CmdResult{}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{DeleteBranches: true, DeleteRemote: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if len(result.DeletedRemote) != 1 || result.DeletedRemote[0] != "feature-a" {
+		t.Errorf("expected deleted remote [feature-a], got %v", result.DeletedRemote)
+	}
+}
+
+func TestGCProtectsDefaultBranch(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	// main and master have no worktrees but should still be protected
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nmaster\nfeature-a\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n",
+	}
+	mockGit.Results["branch -D feature-a"] = &CmdResult{}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{DeleteBranches: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if len(result.OrphanedBranches) != 1 || result.OrphanedBranches[0] != "feature-a" {
+		t.Errorf("expected only feature-a as orphan, got %v", result.OrphanedBranches)
+	}
+}
+
+func TestGCDryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune --dry-run -v"] = &CmdResult{Stdout: "Removing worktrees/stale\n"}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature-a\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{DryRun: true, DeleteBranches: true, DeleteRemote: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+
+	// Verify no destructive calls were made
+	for _, call := range mockGit.Calls {
+		key := strings.Join(call, " ")
+		if key == "fetch --prune" || key == "gc" || strings.HasPrefix(key, "branch -D") || strings.HasPrefix(key, "push origin --delete") {
+			t.Errorf("dry-run should not call %q", key)
+		}
+	}
+	if result.FetchPruned || result.GCRan {
+		t.Error("dry-run should not set FetchPruned or GCRan")
+	}
+	if len(result.DeletedBranches) != 0 || len(result.DeletedRemote) != 0 {
+		t.Error("dry-run should not delete any branches")
+	}
+	if len(result.PrunedWorktrees) != 1 {
+		t.Errorf("expected 1 pruned worktree line, got %v", result.PrunedWorktrees)
+	}
+}
+
+func TestGCRepoNotInitialized(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	mockGit := NewMockGitRunner()
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	_, err := m.GC(context.Background(), GCOptions{})
+	if !errors.Is(err, ErrRepoNotInitialized) {
+		t.Errorf("GC() error = %v, want ErrRepoNotInitialized", err)
+	}
+}
+
+func TestGCContinuesOnPartialFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature-a\nfeature-b\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\nworktree " + filepath.Join(repoDir, "main") + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n",
+	}
+	// feature-a fails, feature-b succeeds
+	mockGit.Errors["branch -D feature-a"] = errors.New("branch not fully merged")
+	mockGit.Results["branch -D feature-b"] = &CmdResult{}
+	mockGit.Results["gc"] = &CmdResult{}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{DeleteBranches: true})
+	if err != nil {
+		t.Fatalf("GC() should not return error on partial failure, got %v", err)
+	}
+	if len(result.DeletedBranches) != 1 || result.DeletedBranches[0] != "feature-b" {
+		t.Errorf("expected only feature-b deleted, got %v", result.DeletedBranches)
+	}
+}

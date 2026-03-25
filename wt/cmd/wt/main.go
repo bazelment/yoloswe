@@ -62,6 +62,7 @@ func init() {
 	rootCmd.AddCommand(cdCmd)
 	rootCmd.AddCommand(goalCmd)
 	rootCmd.AddCommand(pruneCmd)
+	rootCmd.AddCommand(gcCmd)
 	rootCmd.AddCommand(shellenvCmd)
 }
 
@@ -870,6 +871,50 @@ func init() {
 	pruneCmd.Flags().BoolP("dry-run", "n", false, "Show what would be removed")
 }
 
+// gcCmd: wt gc [--dry-run] [-D] [-r]
+var gcCmd = &cobra.Command{
+	Use:   "gc",
+	Short: "Garbage collect stale worktrees, branches, and objects",
+	Long: `GC performs comprehensive garbage collection:
+
+1. Prunes stale worktree metadata (git worktree prune)
+2. Fetches and prunes remote tracking refs (git fetch --prune)
+3. Detects orphaned local branches (no corresponding worktree)
+4. Optionally deletes orphaned local branches (-D)
+5. Optionally deletes corresponding remote branches (-D -r)
+6. Garbage collects loose objects (git gc)
+
+Protected branches (main, master, default branch) are never deleted.
+
+Without -D, orphaned branches are listed but not deleted.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		m, err := getManager()
+		if err != nil {
+			return err
+		}
+
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		deleteBranches, _ := cmd.Flags().GetBool("delete-branches")
+		deleteRemote, _ := cmd.Flags().GetBool("remote")
+		ctx := context.Background()
+
+		opts := wt.GCOptions{
+			DryRun:         dryRun,
+			DeleteBranches: deleteBranches,
+			DeleteRemote:   deleteRemote,
+		}
+
+		_, err = m.GC(ctx, opts)
+		return err
+	},
+}
+
+func init() {
+	gcCmd.Flags().BoolP("dry-run", "n", false, "Preview what would be done")
+	gcCmd.Flags().BoolP("delete-branches", "D", false, "Delete orphaned local branches")
+	gcCmd.Flags().BoolP("remote", "r", false, "Also delete remote branches (requires -D)")
+}
+
 // shellenvCmd: wt shellenv
 var shellenvCmd = &cobra.Command{
 	Use:   "shellenv",
@@ -936,7 +981,7 @@ _wt_completions() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     case "$prev" in
         --repo|-R) COMPREPLY=($(compgen -W "$(ls ~/worktrees 2>/dev/null)" -- "$cur")) ;;
-        wt) COMPREPLY=($(compgen -W "--repo -R init new open ls rm status sync merge pr cd prune shellenv" -- "$cur")) ;;
+        wt) COMPREPLY=($(compgen -W "--repo -R init new open ls rm status sync merge pr cd prune gc shellenv" -- "$cur")) ;;
         rm|cd|open) COMPREPLY=($(compgen -W "$(command wt ls --json 2>/dev/null | grep -o '"branch": "[^"]*"' | cut -d'"' -f4)" -- "$cur")) ;;
     esac
 }
@@ -977,6 +1022,7 @@ _wt_completions() {
         'pr:Push and create GitHub PR'
         'cd:Navigate to worktree'
         'prune:Clean stale metadata'
+        'gc:Garbage collect stale worktrees and branches'
         'shellenv:Print shell integration'
     )
     local -a repos=($(ls ~/worktrees 2>/dev/null))
