@@ -25,10 +25,10 @@ jobs:
           cache: true
 
       - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.1.6
-          install-only: true
+        run: |
+          GOLANGCI_LINT_VERSION="2.1.6"
+          curl -sSfL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C "$(go env GOPATH)/bin" --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
       - name: Install buildifier
         run: |
