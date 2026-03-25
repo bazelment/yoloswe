@@ -1319,6 +1319,171 @@ func (m *Manager) Prune(ctx context.Context, dryRun bool) ([]string, error) {
 	return nil, nil
 }
 
+// GCOptions configures garbage collection behavior.
+type GCOptions struct {
+	DryRun         bool // Preview only, no changes
+	DeleteBranches bool // Delete orphaned local branches
+	DeleteRemote   bool // Also delete remote branches (requires DeleteBranches)
+}
+
+// GCResult contains the results of garbage collection.
+type GCResult struct {
+	PrunedWorktrees  []string // Lines from git worktree prune
+	OrphanedBranches []string // Local branches with no worktree
+	DeletedBranches  []string // Actually deleted local branches
+	DeletedRemote    []string // Actually deleted remote branches
+	FetchPruned      bool     // Whether fetch --prune ran
+	GCRan            bool     // Whether git gc ran
+}
+
+// GC performs comprehensive garbage collection: prunes stale worktree metadata,
+// fetches and prunes remote refs, detects and optionally deletes orphaned branches,
+// and runs git gc.
+func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
+	bareDir := m.BareDir()
+	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
+		return nil, ErrRepoNotInitialized
+	}
+
+	result := &GCResult{}
+
+	// Step 1: git worktree prune — delegate to m.Prune to avoid duplicating logic.
+	pruned, err := m.Prune(ctx, opts.DryRun)
+	if err != nil {
+		return nil, fmt.Errorf("worktree prune failed: %w", err)
+	}
+	result.PrunedWorktrees = pruned
+	for _, line := range pruned {
+		m.output.Info(fmt.Sprintf("Pruned: %s", line))
+	}
+
+	// Step 2: git fetch --prune
+	if !opts.DryRun {
+		m.output.Info("Fetching and pruning remote refs...")
+		if _, err := m.git.Run(ctx, []string{"fetch", "--prune"}, bareDir); err != nil {
+			m.output.Warn(fmt.Sprintf("fetch --prune failed: %v", err))
+		} else {
+			result.FetchPruned = true
+			m.output.Success("Fetched and pruned remote refs")
+		}
+	} else {
+		m.output.Info("[dry-run] Would run: git fetch --prune")
+	}
+
+	// Step 3: Detect orphaned branches
+	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
+	protectedBranches := map[string]bool{
+		defaultBranch: true,
+		"main":        true,
+		"master":      true,
+	}
+
+	branchResult, err := m.git.Run(ctx, []string{"branch", "--list", "--format=%(refname:short)"}, bareDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list branches: %w", err)
+	}
+
+	var allBranches []string
+	for _, line := range strings.Split(strings.TrimSpace(branchResult.Stdout), "\n") {
+		branch := strings.TrimSpace(line)
+		if branch != "" {
+			allBranches = append(allBranches, branch)
+		}
+	}
+
+	worktrees, err := m.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+	activeBranches := make(map[string]bool)
+	for _, wt := range worktrees {
+		activeBranches[wt.Branch] = true
+	}
+
+	for _, branch := range allBranches {
+		if !protectedBranches[branch] && !activeBranches[branch] {
+			result.OrphanedBranches = append(result.OrphanedBranches, branch)
+		}
+	}
+
+	if len(result.OrphanedBranches) > 0 {
+		m.output.Info(fmt.Sprintf("Found %d orphaned branch(es):", len(result.OrphanedBranches)))
+		for _, branch := range result.OrphanedBranches {
+			m.output.Info(fmt.Sprintf("  %s", branch))
+		}
+	} else {
+		m.output.Success("No orphaned branches found")
+	}
+
+	// Step 4: Delete orphaned local branches
+	if opts.DeleteBranches && len(result.OrphanedBranches) > 0 {
+		for _, branch := range result.OrphanedBranches {
+			if opts.DryRun {
+				m.output.Info(fmt.Sprintf("[dry-run] Would delete local branch: %s", branch))
+				continue
+			}
+			if delResult, err := m.git.Run(ctx, []string{"branch", "-D", branch}, bareDir); err != nil {
+				stderr := ""
+				if delResult != nil {
+					stderr = strings.TrimSpace(delResult.Stderr)
+				}
+				if stderr != "" {
+					m.output.Error(fmt.Sprintf("Failed to delete %s: %s", branch, stderr))
+				} else {
+					m.output.Error(fmt.Sprintf("Failed to delete %s: %v", branch, err))
+				}
+			} else {
+				result.DeletedBranches = append(result.DeletedBranches, branch)
+				m.output.Success(fmt.Sprintf("Deleted local branch %s", branch))
+			}
+		}
+	}
+
+	// Step 5: Delete remote branches (only for branches whose local deletion succeeded)
+	if opts.DeleteBranches && opts.DeleteRemote {
+		remoteBranches := result.DeletedBranches
+		if opts.DryRun {
+			// In dry-run mode, no local deletions have happened yet; use orphaned list
+			remoteBranches = result.OrphanedBranches
+		}
+		for _, branch := range remoteBranches {
+			if opts.DryRun {
+				m.output.Info(fmt.Sprintf("[dry-run] Would delete remote branch: %s", branch))
+				continue
+			}
+			if delResult, err := m.git.Run(ctx, []string{"push", "origin", "--delete", branch}, bareDir); err != nil {
+				stderr := ""
+				if delResult != nil {
+					stderr = strings.TrimSpace(delResult.Stderr)
+				}
+				if stderr != "" {
+					m.output.Warn(fmt.Sprintf("Remote branch %s may not exist: %s", branch, stderr))
+				} else {
+					m.output.Warn(fmt.Sprintf("Remote branch %s may not exist: %v", branch, err))
+				}
+			} else {
+				result.DeletedRemote = append(result.DeletedRemote, branch)
+				m.output.Success(fmt.Sprintf("Deleted remote branch %s", branch))
+			}
+		}
+	}
+
+	// Step 6: git gc
+	if !opts.DryRun {
+		m.output.Info("Running git gc...")
+		if _, err := m.git.Run(ctx, []string{"gc"}, bareDir); err != nil {
+			m.output.Warn(fmt.Sprintf("git gc failed: %v", err))
+		} else {
+			result.GCRan = true
+			m.output.Success("Git garbage collection complete")
+		}
+	} else {
+		m.output.Info("[dry-run] Would run: git gc")
+	}
+
+	return result, nil
+}
+
 // GetWorktreePath returns the path to a worktree by branch name.
 func (m *Manager) GetWorktreePath(branch string) (string, error) {
 	if branch == "" {
