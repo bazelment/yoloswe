@@ -1,6 +1,6 @@
 module github.com/bazelment/yoloswe/agent-cli-wrapper
 
-go 1.24.6
+go 1.25.0
 
 require (
 	github.com/invopop/jsonschema v0.13.0
