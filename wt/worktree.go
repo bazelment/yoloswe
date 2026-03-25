@@ -1347,22 +1347,14 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 
 	result := &GCResult{}
 
-	// Step 1: git worktree prune
-	pruneArgs := []string{"worktree", "prune"}
-	if opts.DryRun {
-		pruneArgs = append(pruneArgs, "--dry-run", "-v")
-	}
-	pruneResult, err := m.git.Run(ctx, pruneArgs, bareDir)
+	// Step 1: git worktree prune — delegate to m.Prune to avoid duplicating logic.
+	pruned, err := m.Prune(ctx, opts.DryRun)
 	if err != nil {
 		return nil, fmt.Errorf("worktree prune failed: %w", err)
 	}
-	if pruneResult.Stdout != "" {
-		result.PrunedWorktrees = strings.Split(strings.TrimSpace(pruneResult.Stdout), "\n")
-		for _, line := range result.PrunedWorktrees {
-			m.output.Info(fmt.Sprintf("Pruned: %s", line))
-		}
-	} else {
-		m.output.Success("No stale worktrees to prune")
+	result.PrunedWorktrees = pruned
+	for _, line := range pruned {
+		m.output.Info(fmt.Sprintf("Pruned: %s", line))
 	}
 
 	// Step 2: git fetch --prune
