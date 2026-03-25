@@ -24,7 +24,8 @@ formatters:
 
     goimports:
       # Put local imports after 3rd party
-      local-prefixes: github.com/bazelment/yoloswe
+      local-prefixes:
+        - github.com/bazelment/yoloswe
 
 linters:
   # Disable all linters by default, enable specific ones
