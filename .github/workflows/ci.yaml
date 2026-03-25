@@ -21,12 +21,12 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.24.6"
+          go-version: "1.26.1"
           cache: true
 
       - name: Install golangci-lint
         run: |
-          GOLANGCI_LINT_VERSION="2.1.6"
+          GOLANGCI_LINT_VERSION="2.11.4"
           curl -sSfL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C "$(go env GOPATH)/bin" --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
