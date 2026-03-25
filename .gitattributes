@@ -1,0 +1,11 @@
+# Enforce Unix line endings for source files
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+
+# Mark generated files to hide from diffs and language stats
+go.sum linguist-generated
+go.work.sum linguist-generated
