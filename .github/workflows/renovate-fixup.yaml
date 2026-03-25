@@ -50,15 +50,15 @@ jobs:
 
       - name: Run tidy and gazelle
         run: |
-          bazel run //:tidy || true
+          bazel run //:tidy
           bazel run //:gazelle
 
       - name: Commit and push if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet; then
-            git add -A
+          git add -A
+          if ! git diff --cached --quiet; then
             git commit -m "chore: regenerate BUILD files and tidy modules"
             git push
           else
