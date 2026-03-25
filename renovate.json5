@@ -1,0 +1,69 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":separateMultipleMajorReleases"
+  ],
+
+  // Run once a week, Monday mornings UTC
+  "schedule": ["before 6am on Monday"],
+
+  // Avoid bleeding-edge releases
+  "minimumReleaseAge": "3 days",
+
+  // Limit PR noise
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 10,
+
+  // Run go mod tidy after updating go.mod
+  "postUpdateOptions": ["gomodTidy"],
+
+  "packageRules": [
+    // Go: group all non-major updates into one PR
+    {
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "go non-major dependencies",
+      "automerge": true
+    },
+    // Go: major updates need manual review
+    {
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    // Go: don't let Renovate bump the go directive independently —
+    // it doesn't know about go.work, MODULE.bazel, or CI workflows
+    {
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "enabled": false
+    },
+
+    // Bazel MODULE.bazel: group non-major, automerge
+    {
+      "matchManagers": ["bazel-module"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "bazel non-major dependencies",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["bazel-module"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+
+    // GitHub Actions: group non-major, automerge
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "github-actions non-major",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}
