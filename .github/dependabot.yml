@@ -1,0 +1,56 @@
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Go modules
+  - package-ecosystem: "gomod"
+    directory: "/agent-cli-wrapper"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directory: "/bramble"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directory: "/medivac"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directory: "/multiagent"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directory: "/wt"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directory: "/yoloswe"
+    schedule:
+      interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns: ["*"]
