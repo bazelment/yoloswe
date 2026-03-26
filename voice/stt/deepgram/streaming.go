@@ -42,7 +42,7 @@ func (p *StreamingProvider) StartSession(ctx context.Context, cfg stt.AudioConfi
 		events:          make(chan stt.Event, 64),
 		done:            make(chan struct{}),
 		livenessTimeout: 10 * time.Second,
-		sending:         &atomic.Bool{},
+		lastSendAt:      &atomic.Int64{},
 		lastEventAt:     &atomic.Int64{},
 	}
 	s.lastEventAt.Store(time.Now().UnixMilli())
@@ -107,7 +107,7 @@ type session struct {
 	done            chan struct{}
 	ctx             context.Context
 	cancel          context.CancelFunc
-	sending         *atomic.Bool
+	lastSendAt      *atomic.Int64 // unix millis of last SendAudio call; 0 means no audio sent
 	lastEventAt     *atomic.Int64
 	livenessTimeout time.Duration
 	closeOnce       sync.Once
@@ -115,7 +115,7 @@ type session struct {
 }
 
 func (s *session) SendAudio(data []byte) error {
-	s.sending.Store(true)
+	s.lastSendAt.Store(time.Now().UnixMilli())
 	_, err := s.ws.Write(data)
 	if err != nil {
 		return fmt.Errorf("deepgram: send audio: %w", err)
@@ -155,7 +155,8 @@ func (s *session) livenessWatchdog() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			if !s.sending.Load() {
+			lastSend := s.lastSendAt.Load()
+			if lastSend == 0 || time.Since(time.UnixMilli(lastSend)) > s.livenessTimeout {
 				continue
 			}
 			lastEvt := time.UnixMilli(s.lastEventAt.Load())
@@ -171,6 +172,9 @@ func (s *session) livenessWatchdog() {
 }
 
 func (s *session) emitEvent(evt stt.Event) {
+	if s.eventsClosed.Load() {
+		return
+	}
 	s.lastEventAt.Store(time.Now().UnixMilli())
 	select {
 	case s.events <- evt:
