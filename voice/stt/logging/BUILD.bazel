@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "logging",
+    srcs = ["logger.go"],
+    importpath = "github.com/bazelment/yoloswe/voice/stt/logging",
+    visibility = ["//visibility:public"],
+    deps = ["//voice/stt"],
+)
+
+go_test(
+    name = "logging_test",
+    srcs = ["logger_test.go"],
+    deps = [
+        ":logging",
+        "//voice/stt",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

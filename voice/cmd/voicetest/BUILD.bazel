@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "voicetest_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/voice/cmd/voicetest",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//voice/stt",
+        "//voice/stt/deepgram",
+        "//voice/stt/logging",
+    ],
+)
+
+go_binary(
+    name = "voicetest",
+    embed = [":voicetest_lib"],
+    visibility = ["//visibility:public"],
+)

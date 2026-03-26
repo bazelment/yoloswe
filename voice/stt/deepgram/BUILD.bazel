@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "deepgram",
+    srcs = ["streaming.go"],
+    importpath = "github.com/bazelment/yoloswe/voice/stt/deepgram",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//voice/stt",
+        "@com_github_deepgram_deepgram_go_sdk_v3//pkg/api/listen/v1/websocket/interfaces",
+        "@com_github_deepgram_deepgram_go_sdk_v3//pkg/client/interfaces",
+        "@com_github_deepgram_deepgram_go_sdk_v3//pkg/client/listen/v1/websocket",
+    ],
+)
+
+go_test(
+    name = "deepgram_test",
+    srcs = ["streaming_test.go"],
+    deps = [
+        ":deepgram",
+        "//voice/stt",
+        "@com_github_gorilla_websocket//:websocket",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
