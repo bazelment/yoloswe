@@ -78,6 +78,10 @@ func (p *StreamingProvider) StartSession(ctx context.Context, cfg stt.AudioConfi
 		cOptions.Host = p.host
 	}
 
+	// Initialise context before Connect so that emitEvent can safely reference
+	// s.ctx from any SDK callback that fires as soon as the connection is live.
+	s.ctx, s.cancel = context.WithCancel(ctx)
+
 	// The callback adapter bridges Deepgram's LiveMessageCallback to our session.
 	// This avoids method signature conflicts between stt.Session.Close() and
 	// LiveMessageCallback.Close(*CloseResponse).
@@ -86,15 +90,16 @@ func (p *StreamingProvider) StartSession(ctx context.Context, cfg stt.AudioConfi
 	var err error
 	s.ws, err = dgclient.NewUsingCallback(ctx, "", cOptions, tOptions, cb)
 	if err != nil {
+		s.cancel()
 		return nil, fmt.Errorf("deepgram: create client: %w", err)
 	}
 
 	if !s.ws.Connect() {
+		s.cancel()
 		return nil, fmt.Errorf("deepgram: failed to connect")
 	}
 
 	// Start liveness watchdog.
-	s.ctx, s.cancel = context.WithCancel(ctx)
 	go s.livenessWatchdog()
 
 	return s, nil
@@ -251,6 +256,10 @@ func (c *callbackAdapter) Metadata(_ *dginterfaces.MetadataResponse) error {
 }
 
 func (c *callbackAdapter) Close(_ *dginterfaces.CloseResponse) error {
+	// Cancel the session context before closing the events channel so that any
+	// concurrent emitEvent call can escape via the ctx.Done() select arm
+	// instead of sending on a closed channel.
+	c.session.cancel()
 	c.session.closeEvents()
 	return nil
 }

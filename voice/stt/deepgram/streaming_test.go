@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -183,11 +182,7 @@ func TestStreamingSession_DoubleClose(t *testing.T) {
 func TestStreamingSession_ContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	var serverConnClosed sync.WaitGroup
-	serverConnClosed.Add(1)
-
 	server := mockDeepgramServer(t, func(t *testing.T, conn *websocket.Conn) {
-		defer serverConnClosed.Done()
 		for {
 			_, _, err := conn.ReadMessage()
 			if err != nil {
@@ -201,26 +196,21 @@ func TestStreamingSession_ContextCancellation(t *testing.T) {
 	sess, err := provider.StartSession(ctx, stt.DefaultAudioConfig(), stt.StreamOpts{})
 	require.NoError(t, err)
 
-	// Cancel context.
+	// Cancel context — the session should close cleanly.
 	cancel()
 
-	// Events channel should eventually close.
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	for {
+	// Close explicitly to ensure Events() drains.
+	require.NoError(t, sess.Close())
+
+	// After Close(), Events() channel must be closed within a short timeout.
+	require.Eventually(t, func() bool {
 		select {
 		case _, ok := <-sess.Events():
-			if !ok {
-				// Channel closed — success.
-				sess.Close()
-				return
-			}
-		case <-timer.C:
-			// If we can still close cleanly, that's also acceptable.
-			sess.Close()
-			return
+			return !ok
+		default:
+			return false
 		}
-	}
+	}, 5*time.Second, 10*time.Millisecond, "Events() channel should be closed after Close()")
 }
 
 func TestStreamingSession_ServerDisconnect(t *testing.T) {
@@ -236,14 +226,21 @@ func TestStreamingSession_ServerDisconnect(t *testing.T) {
 	sess, err := provider.StartSession(context.Background(), stt.DefaultAudioConfig(), stt.StreamOpts{})
 	require.NoError(t, err)
 
-	// Send audio — should eventually result in an error or closed channel.
+	// Send audio — the abrupt server close should cause the events channel to
+	// close (via the SDK's Close callback) within a reasonable timeout.
 	audio := make([]byte, 640)
 	sess.SendAudio(audio)
 
+	// Collect events; after a server disconnect the channel should close.
 	events := collectEvents(t, sess, 5*time.Second)
 	sess.Close()
 
-	// We should get either an error event or just a closed channel.
-	// Both are acceptable behaviors for a server disconnect.
+	// The events channel must now be closed (drained by collectEvents or Close).
+	select {
+	case _, ok := <-sess.Events():
+		assert.False(t, ok, "Events() channel should be closed after server disconnect and Close()")
+	default:
+		// Channel already drained.
+	}
 	_ = events
 }

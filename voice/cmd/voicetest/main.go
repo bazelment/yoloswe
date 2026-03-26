@@ -75,41 +75,53 @@ func run(providerName, file, logPath string) error {
 
 	// Start audio source.
 	if file != "" {
-		go streamFile(ctx, sess, file, cfg)
-	} else {
-		fmt.Fprintln(os.Stderr, "Live mic capture not yet implemented. Use --file to stream a WAV file.")
-		return fmt.Errorf("mic capture requires Phase 1 audio library spike")
-	}
-
-	// Print events.
-	fmt.Fprintln(os.Stderr, "Listening for transcription events... (Ctrl+C to stop)")
-	for {
-		select {
-		case evt, ok := <-sess.Events():
-			if !ok {
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- streamFile(ctx, sess, file, cfg)
+		}()
+		// Print events, and stop if the audio goroutine exits with an error.
+		fmt.Fprintln(os.Stderr, "Listening for transcription events... (Ctrl+C to stop)")
+		for {
+			select {
+			case fileErr := <-errCh:
+				if fileErr != nil {
+					return fileErr
+				}
+				// Drain remaining events until channel closes.
+				for evt := range sess.Events() {
+					printEvent(evt)
+					if logger != nil {
+						logger.LogEvent(providerName, evt)
+					}
+				}
+				return nil
+			case evt, ok := <-sess.Events():
+				if !ok {
+					return nil
+				}
+				printEvent(evt)
+				if logger != nil {
+					logger.LogEvent(providerName, evt)
+				}
+			case <-ctx.Done():
 				return nil
 			}
-			printEvent(evt)
-			if logger != nil {
-				logger.LogEvent(providerName, evt)
-			}
-		case <-ctx.Done():
-			return nil
 		}
 	}
+
+	fmt.Fprintln(os.Stderr, "Live mic capture not yet implemented. Use --file to stream a WAV file.")
+	return fmt.Errorf("mic capture requires Phase 1 audio library spike")
 }
 
-func streamFile(ctx context.Context, sess stt.Session, path string, cfg stt.AudioConfig) {
+func streamFile(ctx context.Context, sess stt.Session, path string, cfg stt.AudioConfig) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read file: %v\n", err)
-		return
+		return fmt.Errorf("read file: %w", err)
 	}
 
 	pcm, err := stt.PCMFromWAV(data)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "decode WAV: %v\n", err)
-		return
+		return fmt.Errorf("decode WAV: %w", err)
 	}
 
 	chunkSize := cfg.ChunkBytes()
@@ -122,11 +134,10 @@ func streamFile(ctx context.Context, sess stt.Session, path string, cfg stt.Audi
 	for _, chunk := range chunks {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 			if err := sess.SendAudio(chunk); err != nil {
-				fmt.Fprintf(os.Stderr, "send audio: %v\n", err)
-				return
+				return fmt.Errorf("send audio: %w", err)
 			}
 		}
 	}
@@ -134,6 +145,7 @@ func streamFile(ctx context.Context, sess stt.Session, path string, cfg stt.Audi
 	// Signal end of audio — give the provider time to finalize.
 	time.Sleep(2 * time.Second)
 	sess.Close()
+	return nil
 }
 
 func printEvent(evt stt.Event) {

@@ -24,9 +24,10 @@ type StreamingTranscriber interface {
 //
 // Thread safety: SendAudio is safe to call concurrently with reading Events().
 // SendAudio and Close are NOT safe to call concurrently with each other.
-// Cancelling the context passed to StartSession closes the underlying connection
-// and drains the Events() channel (all pending events are delivered, then channel closes).
-// Close() is idempotent and also drains Events().
+// Cancelling the context passed to StartSession closes the underlying connection;
+// the Events() channel will close once the provider's close callback fires.
+// In-flight events may be dropped after context cancellation.
+// Close() is idempotent; calling it causes Events() to close.
 type Session interface {
 	SendAudio(data []byte) error
 	Events() <-chan Event
