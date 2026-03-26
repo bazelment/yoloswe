@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "stt",
+    srcs = [
+        "audio.go",
+        "stt.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/voice/stt",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "stt_test",
+    srcs = ["audio_test.go"],
+    deps = [
+        ":stt",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

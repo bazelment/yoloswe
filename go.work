@@ -5,6 +5,7 @@ use (
 	./bramble
 	./medivac
 	./multiagent
+	./voice
 	./wt
 	./yoloswe
 )
