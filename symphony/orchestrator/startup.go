@@ -14,7 +14,7 @@ func (o *Orchestrator) startupCleanup(ctx context.Context, cfg *config.ServiceCo
 		return
 	}
 
-	issues, err := o.tracker.FetchIssuesByStates(ctx, cfg.TerminalStates)
+	issues, err := o.tracker.FetchIssuesByStates(ctx, cfg.TerminalStates, cfg.TrackerProjectSlug)
 	if err != nil {
 		o.logger.Warn("startup terminal cleanup fetch failed, continuing", "error", err)
 		return

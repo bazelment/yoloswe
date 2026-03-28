@@ -136,11 +136,22 @@ func issueStatesByIDsQuery(ids []string) graphqlRequest {
 	}
 }
 
-// issuesByStatesQuery builds the query for fetching issues by state names.
-// Used for startup terminal cleanup (Spec Section 11.1).
-func issuesByStatesQuery(states []string) graphqlRequest {
-	query := `query IssuesByStates($states: [String!]!) {
-  issues(filter: { state: { name: { in: $states } } }) {
+// issuesByStatesQuery builds the paginated query for fetching issues by state names,
+// scoped to a project. Used for startup terminal cleanup (Spec Section 11.1).
+func issuesByStatesQuery(states []string, projectSlug string, afterCursor string) graphqlRequest {
+	query := `query IssuesByStates($states: [String!]!, $projectSlug: String!, $first: Int!, $after: String) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      state: { name: { in: $states } }
+    }
+    first: $first
+    after: $after
+  ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     nodes {
       id
       identifier
@@ -187,8 +198,13 @@ func issuesByStatesQuery(states []string) graphqlRequest {
   }
 }`
 
-	return graphqlRequest{
-		Query:     query,
-		Variables: map[string]any{"states": states},
+	vars := map[string]any{
+		"states":      states,
+		"projectSlug": projectSlug,
+		"first":       pageSize,
 	}
+	if afterCursor != "" {
+		vars["after"] = afterCursor
+	}
+	return graphqlRequest{Query: query, Variables: vars}
 }

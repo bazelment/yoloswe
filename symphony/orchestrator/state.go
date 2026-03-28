@@ -44,10 +44,11 @@ func (o *Orchestrator) handleTickResult(ctx context.Context, tr tickResult) {
 		case reconcileTerminate:
 			o.terminateRunning(action.IssueID, action.CleanupWorkspace, cfg)
 		case reconcileStalled:
-			o.terminateRunning(action.IssueID, false, cfg)
 			entry := o.running[action.IssueID]
 			if entry != nil {
-				o.scheduleRetry(action.IssueID, entry.Identifier, 1, "stalled", false)
+				identifier := entry.Identifier
+				o.terminateRunning(action.IssueID, false, cfg)
+				o.scheduleRetry(action.IssueID, identifier, 1, "stalled", false)
 			}
 		}
 	}
@@ -112,14 +113,35 @@ func (o *Orchestrator) handleWorkerExit(result WorkerResult) {
 		delete(o.running, result.IssueID)
 	}
 
+	cfg := o.cfg()
+
 	switch result.ExitReason {
 	case model.ExitReasonNormal:
 		o.completed[result.IssueID] = struct{}{} // bookkeeping only
-		o.scheduleRetry(result.IssueID, result.Identifier, 1, "", true)
+		// Cap continuation re-dispatches at MaxTurns to prevent infinite loops.
+		continuationAttempt := 1
+		if entry != nil {
+			continuationAttempt = entry.RetryAttempt + 1
+		}
+		if continuationAttempt > cfg.MaxTurns {
+			o.logger.Warn("max continuation re-dispatches reached, releasing issue",
+				"issue_id", result.IssueID, "attempts", continuationAttempt)
+			delete(o.claimed, result.IssueID)
+			return
+		}
+		o.scheduleRetry(result.IssueID, result.Identifier, continuationAttempt, "", true)
 	default:
 		nextAttempt := 1
 		if entry != nil {
 			nextAttempt = entry.RetryAttempt + 1
+		}
+		// Cap failure retries: give up after enough attempts.
+		maxRetries := cfg.MaxTurns // reuse max_turns as a reasonable retry cap
+		if nextAttempt > maxRetries {
+			o.logger.Warn("max retry attempts reached, releasing issue",
+				"issue_id", result.IssueID, "attempts", nextAttempt)
+			delete(o.claimed, result.IssueID)
+			return
 		}
 		errMsg := ""
 		if result.Error != nil {

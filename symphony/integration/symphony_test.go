@@ -93,7 +93,7 @@ func (m *mockTracker) FetchIssueStatesByIDs(_ context.Context, ids []string) ([]
 	return result, nil
 }
 
-func (m *mockTracker) FetchIssuesByStates(_ context.Context, _ []string) ([]model.Issue, error) {
+func (m *mockTracker) FetchIssuesByStates(_ context.Context, _ []string, _ string) ([]model.Issue, error) {
 	return nil, nil
 }
 

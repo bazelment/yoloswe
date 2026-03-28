@@ -162,22 +162,3 @@ func (p *Process) drainStderr() {
 		p.logger.Debug("codex stderr", "line", scanner.Text())
 	}
 }
-
-// Exited returns a channel that is closed when the process exits.
-func (p *Process) Exited() <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		p.cmd.Wait()
-		close(ch)
-	}()
-	return ch
-}
-
-// ExitCode returns the exit code of the process, or -1 if still running or unknown.
-func (p *Process) ExitCode() int {
-	if p.cmd.ProcessState == nil {
-		return -1
-	}
-	code := p.cmd.ProcessState.ExitCode()
-	return code
-}

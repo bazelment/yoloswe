@@ -97,18 +97,38 @@ func (c *Client) FetchIssueStatesByIDs(ctx context.Context, ids []string) ([]mod
 	return normalizeIssues(resp.Data.Issues.Nodes), nil
 }
 
-// FetchIssuesByStates returns issues in the given state names.
-// Used for startup terminal cleanup.
-func (c *Client) FetchIssuesByStates(ctx context.Context, states []string) ([]model.Issue, error) {
+// FetchIssuesByStates returns issues in the given state names for the given project.
+// Used for startup terminal cleanup. Paginates through all results.
+func (c *Client) FetchIssuesByStates(ctx context.Context, states []string, projectSlug string) ([]model.Issue, error) {
 	if len(states) == 0 {
 		return nil, nil
 	}
-	req := issuesByStatesQuery(states)
-	resp, err := c.execute(ctx, req)
-	if err != nil {
-		return nil, err
+
+	var allIssues []model.Issue
+	var cursor string
+
+	for {
+		req := issuesByStatesQuery(states, projectSlug, cursor)
+		resp, err := c.execute(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
+		allIssues = append(allIssues, normalizeIssues(resp.Data.Issues.Nodes)...)
+
+		if !resp.Data.Issues.PageInfo.HasNextPage {
+			break
+		}
+		if resp.Data.Issues.PageInfo.EndCursor == nil {
+			return nil, &Error{
+				Category: ErrLinearMissingEndCursor,
+				Message:  "pagination has next page but endCursor is nil",
+			}
+		}
+		cursor = *resp.Data.Issues.PageInfo.EndCursor
 	}
-	return normalizeIssues(resp.Data.Issues.Nodes), nil
+
+	return allIssues, nil
 }
 
 // execute sends a GraphQL request to the Linear API and returns the parsed response.
@@ -131,7 +151,12 @@ func (c *Client) execute(ctx context.Context, gqlReq graphqlRequest) (*graphqlRe
 		}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", c.apiKey)
+	// Linear API expects "Bearer <key>". Add prefix if not already present.
+	authValue := c.apiKey
+	if !strings.HasPrefix(authValue, "Bearer ") {
+		authValue = "Bearer " + authValue
+	}
+	httpReq.Header.Set("Authorization", authValue)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {

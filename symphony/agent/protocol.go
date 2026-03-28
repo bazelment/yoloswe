@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 )
 
@@ -24,12 +25,13 @@ type RPCError struct {
 // Protocol manages JSON-RPC request/response tracking.
 type Protocol struct {
 	process *Process
+	logger  *slog.Logger
 	nextID  atomic.Int64
 }
 
 // NewProtocol wraps a process with JSON-RPC protocol handling.
-func NewProtocol(p *Process) *Protocol {
-	return &Protocol{process: p}
+func NewProtocol(p *Process, logger *slog.Logger) *Protocol {
+	return &Protocol{process: p, logger: logger}
 }
 
 // Send sends a JSON-RPC request and returns the response.
@@ -72,8 +74,21 @@ func (pr *Protocol) Send(method string, params any) (*Message, error) {
 			}
 		}
 
-		// Not our response — it's a notification or event. Skip for now.
-		// In the full session, events would be dispatched to handlers.
+		// Not our response — handle interleaved requests inline to prevent deadlock.
+		// If the server sends an approval or tool call while we're waiting for
+		// a response, we must reply or the server blocks and never sends our response.
+		if msg.ID != nil && msg.Method != "" {
+			switch msg.Method {
+			case "item/tool/requestApproval":
+				HandleApproval(pr, &msg, pr.logger)
+			case "item/tool/call":
+				HandleToolCall(pr, &msg, pr.logger)
+			case "item/tool/requestUserInput":
+				pr.RespondError(msg.ID, -1, "user input not supported in automated mode")
+			default:
+				pr.logger.Debug("ignoring interleaved request during handshake", "method", msg.Method)
+			}
+		}
 	}
 }
 

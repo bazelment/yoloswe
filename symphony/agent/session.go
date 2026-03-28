@@ -45,7 +45,7 @@ func NewSession(ctx context.Context, cfg SessionConfig, logger *slog.Logger) (*S
 
 	s := &Session{
 		process:  proc,
-		protocol: NewProtocol(proc),
+		protocol: NewProtocol(proc, logger),
 		config:   cfg,
 		logger:   logger,
 	}
@@ -192,38 +192,52 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(Event
 	return s.streamTurn(turnCtx, onEvent)
 }
 
+// readResult holds a message or error from an async ReadMessage call.
+type readResult struct {
+	msg *Message
+	err error
+}
+
 // streamTurn reads messages until turn completion.
+// Uses a goroutine for ReadMessage so the context can preempt blocking reads.
 func (s *Session) streamTurn(ctx context.Context, onEvent func(Event)) (TurnResult, error) {
+	msgCh := make(chan readResult, 1)
+
+	// Start async reader.
+	readNext := func() {
+		msg, err := s.protocol.ReadMessage()
+		msgCh <- readResult{msg, err}
+	}
+	go readNext()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return TurnResult{Status: TurnTimedOut, Error: fmt.Errorf("turn_timeout")}, ctx.Err()
-		default:
-		}
+		case r := <-msgCh:
+			if r.err != nil {
+				return TurnResult{Status: TurnFailed, Error: fmt.Errorf("port_exit: %w", r.err)}, r.err
+			}
 
-		// Read with a short deadline to check context regularly.
-		msg, err := s.protocol.ReadMessage()
-		if err != nil {
-			return TurnResult{Status: TurnFailed, Error: fmt.Errorf("port_exit: %w", err)}, err
-		}
+			event := ExtractEvent(r.msg)
+			if onEvent != nil && event.Type != "" {
+				onEvent(event)
+			}
 
-		event := ExtractEvent(msg)
-		if onEvent != nil && event.Type != "" {
-			onEvent(event)
-		}
+			switch r.msg.Method {
+			case "turn/completed":
+				return TurnResult{Status: TurnCompleted}, nil
+			case "turn/failed":
+				return TurnResult{Status: TurnFailed, Error: fmt.Errorf("turn_failed")}, nil
+			case "turn/cancelled":
+				return TurnResult{Status: TurnCancelled, Error: fmt.Errorf("turn_cancelled")}, nil
+			}
 
-		switch msg.Method {
-		case "turn/completed":
-			return TurnResult{Status: TurnCompleted}, nil
-		case "turn/failed":
-			return TurnResult{Status: TurnFailed, Error: fmt.Errorf("turn_failed")}, nil
-		case "turn/cancelled":
-			return TurnResult{Status: TurnCancelled, Error: fmt.Errorf("turn_cancelled")}, nil
-		}
+			// Handle approval requests and tool calls.
+			s.handleInteraction(r.msg)
 
-		// Handle approval requests and tool calls.
-		if s.handleInteraction(msg) {
-			continue
+			// Start next read.
+			go readNext()
 		}
 	}
 }

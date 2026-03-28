@@ -28,9 +28,9 @@ func TestFetchCandidateIssues_QueryConstruction(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &captured)
 
-		// Verify Authorization header.
-		if got := r.Header.Get("Authorization"); got != "test-api-key" {
-			t.Errorf("Authorization header = %q, want %q", got, "test-api-key")
+		// Verify Authorization header includes Bearer prefix.
+		if got := r.Header.Get("Authorization"); got != "Bearer test-api-key" {
+			t.Errorf("Authorization header = %q, want %q", got, "Bearer test-api-key")
 		}
 
 		resp := graphqlResponse{
@@ -472,7 +472,7 @@ func TestFetchIssuesByStates_EmptyReturnsWithoutAPICall(t *testing.T) {
 		t.Fatal("should not make API call with empty states")
 	})
 
-	issues, err := client.FetchIssuesByStates(context.Background(), []string{})
+	issues, err := client.FetchIssuesByStates(context.Background(), []string{}, "test-project")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestFetchIssuesByStates_ReturnsIssues(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	issues, err := client.FetchIssuesByStates(context.Background(), []string{"Done"})
+	issues, err := client.FetchIssuesByStates(context.Background(), []string{"Done"}, "test-project")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

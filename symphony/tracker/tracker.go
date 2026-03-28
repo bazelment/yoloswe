@@ -21,9 +21,9 @@ type Tracker interface {
 	// issue IDs. Used for active-run reconciliation.
 	FetchIssueStatesByIDs(ctx context.Context, ids []string) ([]model.Issue, error)
 
-	// FetchIssuesByStates returns issues in the given state names.
-	// Used for startup terminal cleanup.
-	FetchIssuesByStates(ctx context.Context, states []string) ([]model.Issue, error)
+	// FetchIssuesByStates returns issues in the given state names
+	// for the specified project slug. Used for startup terminal cleanup.
+	FetchIssuesByStates(ctx context.Context, states []string, projectSlug string) ([]model.Issue, error)
 }
 
 // New creates a Tracker for the given kind.
