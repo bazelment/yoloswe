@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 // If newly created and cfg.HookAfterCreate is set, the after_create hook runs;
 // hook failure is fatal and the partially created directory is removed.
 // Spec Section 9.2.
-func CreateForIssue(cfg *config.ServiceConfig, identifier string) (*model.Workspace, error) {
+func CreateForIssue(ctx context.Context, cfg *config.ServiceConfig, identifier string) (*model.Workspace, error) {
 	workspaceKey := model.SanitizeIdentifier(identifier)
 
 	if err := ValidateWorkspaceKey(workspaceKey); err != nil {
@@ -45,7 +46,7 @@ func CreateForIssue(cfg *config.ServiceConfig, identifier string) (*model.Worksp
 
 	// Run after_create hook if the directory was just created.
 	if createdNow && cfg.HookAfterCreate != "" {
-		if hookErr := RunHook(cfg.HookAfterCreate, wsPath, cfg.HookTimeoutMs); hookErr != nil {
+		if hookErr := RunHook(ctx, cfg.HookAfterCreate, wsPath, cfg.HookTimeoutMs); hookErr != nil {
 			// Remove partially prepared directory on hook failure.
 			_ = os.RemoveAll(wsPath)
 			return nil, fmt.Errorf("after_create hook failed for %q: %w", identifier, hookErr)

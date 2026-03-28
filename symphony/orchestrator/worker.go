@@ -30,7 +30,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 	}()
 
 	// 1. Create/reuse workspace.
-	ws, err := workspace.CreateForIssue(cfg, issue.Identifier)
+	ws, err := workspace.CreateForIssue(ctx, cfg, issue.Identifier)
 	if err != nil {
 		logger.Error("workspace creation failed", "error", err)
 		result.ExitReason = model.ExitReasonFailed
@@ -40,7 +40,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 
 	// 2. Run before_run hook.
 	if cfg.HookBeforeRun != "" {
-		if err := workspace.RunHook(cfg.HookBeforeRun, ws.Path, cfg.HookTimeoutMs); err != nil {
+		if err := workspace.RunHook(ctx, cfg.HookBeforeRun, ws.Path, cfg.HookTimeoutMs); err != nil {
 			logger.Error("before_run hook failed", "error", err)
 			result.ExitReason = model.ExitReasonFailed
 			result.Error = fmt.Errorf("before_run hook error: %w", err)
@@ -167,6 +167,8 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 
 func runAfterRunHook(cfg *config.ServiceConfig, workDir string, logger *slog.Logger) {
 	if cfg.HookAfterRun != "" {
-		workspace.RunHookBestEffort(cfg.HookAfterRun, workDir, cfg.HookTimeoutMs, logger)
+		// Use a fresh background context: after_run is best-effort cleanup that should
+		// run regardless of whether the worker's context has been cancelled.
+		workspace.RunHookBestEffort(context.Background(), cfg.HookAfterRun, workDir, cfg.HookTimeoutMs, logger)
 	}
 }

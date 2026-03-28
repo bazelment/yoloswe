@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,11 +24,11 @@ func TestCreateForIssue_DeterministicPath(t *testing.T) {
 	t.Parallel()
 	cfg := newTestConfig(t)
 
-	ws1, err := CreateForIssue(cfg, "ABC-123")
+	ws1, err := CreateForIssue(context.Background(), cfg, "ABC-123")
 	if err != nil {
 		t.Fatalf("CreateForIssue: %v", err)
 	}
-	ws2, err := CreateForIssue(cfg, "ABC-123")
+	ws2, err := CreateForIssue(context.Background(), cfg, "ABC-123")
 	if err != nil {
 		t.Fatalf("CreateForIssue (second): %v", err)
 	}
@@ -44,7 +45,7 @@ func TestCreateForIssue_CreateVsReuse(t *testing.T) {
 	t.Parallel()
 	cfg := newTestConfig(t)
 
-	ws1, err := CreateForIssue(cfg, "NEW-1")
+	ws1, err := CreateForIssue(context.Background(), cfg, "NEW-1")
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestCreateForIssue_CreateVsReuse(t *testing.T) {
 		t.Error("first call should have CreatedNow=true")
 	}
 
-	ws2, err := CreateForIssue(cfg, "NEW-1")
+	ws2, err := CreateForIssue(context.Background(), cfg, "NEW-1")
 	if err != nil {
 		t.Fatalf("second create: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestCreateForIssue_SanitizesIdentifier(t *testing.T) {
 	t.Parallel()
 	cfg := newTestConfig(t)
 
-	ws, err := CreateForIssue(cfg, "feature/special chars@here!")
+	ws, err := CreateForIssue(context.Background(), cfg, "feature/special chars@here!")
 	if err != nil {
 		t.Fatalf("CreateForIssue: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestCreateForIssue_PathTraversalRejected(t *testing.T) {
 	// identifier is blocked by sanitization. But let's verify the containment
 	// check also works by testing with an identifier that sanitizes cleanly
 	// but where root is manipulated.
-	_, err := CreateForIssue(cfg, "normal-issue")
+	_, err := CreateForIssue(context.Background(), cfg, "normal-issue")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestCreateForIssue_PathTraversalRejected(t *testing.T) {
 	// containment should catch /root/.. == /root's parent.
 	// Actually ".." contains only dots and that IS valid chars. Let's test it.
 	// filepath.Join(root, "..") resolves to root's parent, which should fail containment.
-	_, err = CreateForIssue(cfg, "..")
+	_, err = CreateForIssue(context.Background(), cfg, "..")
 	if err == nil {
 		t.Error("expected error for '..' identifier (path traversal), got nil")
 	}
@@ -115,7 +116,7 @@ func TestCreateForIssue_AfterCreateHookSuccess(t *testing.T) {
 	markerFile := filepath.Join(cfg.WorkspaceRoot, "hook-ran")
 	cfg.HookAfterCreate = "touch " + markerFile
 
-	ws, err := CreateForIssue(cfg, "HOOK-1")
+	ws, err := CreateForIssue(context.Background(), cfg, "HOOK-1")
 	if err != nil {
 		t.Fatalf("CreateForIssue: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestCreateForIssue_AfterCreateHookFailure(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.HookAfterCreate = "exit 1"
 
-	_, err := CreateForIssue(cfg, "HOOKFAIL-1")
+	_, err := CreateForIssue(context.Background(), cfg, "HOOKFAIL-1")
 	if err == nil {
 		t.Fatal("expected error when after_create hook fails")
 	}
@@ -151,14 +152,14 @@ func TestCreateForIssue_AfterCreateHookSkippedOnReuse(t *testing.T) {
 	cfg := newTestConfig(t)
 
 	// Create the workspace first without a hook.
-	_, err := CreateForIssue(cfg, "REUSE-1")
+	_, err := CreateForIssue(context.Background(), cfg, "REUSE-1")
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
 	// Now set a hook that would fail. On reuse it should not run.
 	cfg.HookAfterCreate = "exit 1"
-	ws, err := CreateForIssue(cfg, "REUSE-1")
+	ws, err := CreateForIssue(context.Background(), cfg, "REUSE-1")
 	if err != nil {
 		t.Fatalf("reuse should not run after_create hook: %v", err)
 	}
@@ -173,7 +174,7 @@ func TestCleanupWorkspace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create a workspace.
-	ws, err := CreateForIssue(cfg, "CLEAN-1")
+	ws, err := CreateForIssue(context.Background(), cfg, "CLEAN-1")
 	if err != nil {
 		t.Fatalf("CreateForIssue: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestCleanupWorkspace_BeforeRemoveHookRuns(t *testing.T) {
 	cfg.HookBeforeRemove = "touch " + markerFile
 
 	// Create workspace.
-	_, err := CreateForIssue(cfg, "RMHOOK-1")
+	_, err := CreateForIssue(context.Background(), cfg, "RMHOOK-1")
 	if err != nil {
 		t.Fatalf("CreateForIssue: %v", err)
 	}
@@ -237,7 +238,7 @@ func TestCleanupWorkspace_BeforeRemoveHookFailureIgnored(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create workspace.
-	ws, err := CreateForIssue(cfg, "RMFAIL-1")
+	ws, err := CreateForIssue(context.Background(), cfg, "RMFAIL-1")
 	if err != nil {
 		t.Fatalf("CreateForIssue: %v", err)
 	}

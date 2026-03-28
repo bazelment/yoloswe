@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -44,7 +45,9 @@ func CleanupWorkspace(cfg *config.ServiceConfig, identifier string, logger *slog
 
 	// Run before_remove hook best-effort.
 	if cfg.HookBeforeRemove != "" {
-		RunHookBestEffort(cfg.HookBeforeRemove, wsPath, cfg.HookTimeoutMs, logger)
+		// Use a fresh background context: before_remove is best-effort cleanup that
+		// should run regardless of whether the caller's context has been cancelled.
+		RunHookBestEffort(context.Background(), cfg.HookBeforeRemove, wsPath, cfg.HookTimeoutMs, logger)
 	}
 
 	// Remove the workspace directory.

@@ -21,7 +21,12 @@ func (o *Orchestrator) startupCleanup(ctx context.Context, cfg *config.ServiceCo
 	}
 
 	for i := range issues {
-		workspace.CleanupWorkspace(cfg, issues[i].Identifier, o.logger)
+		if err := workspace.CleanupWorkspace(cfg, issues[i].Identifier, o.logger); err != nil {
+			o.logger.Warn("startup terminal cleanup failed for issue",
+				"identifier", issues[i].Identifier,
+				"error", err,
+			)
+		}
 	}
 
 	if len(issues) > 0 {
