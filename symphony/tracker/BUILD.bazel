@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "tracker",
+    srcs = ["tracker.go"],
+    importpath = "github.com/bazelment/yoloswe/symphony/tracker",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//symphony/model",
+        "//symphony/tracker/linear",
+    ],
+)

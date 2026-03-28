@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "config",
+    srcs = [
+        "config.go",
+        "reload.go",
+        "validation.go",
+        "workflow.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/symphony/config",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//symphony/model",
+        "@com_github_fsnotify_fsnotify//:fsnotify",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = [
+        "config_test.go",
+        "validation_test.go",
+        "workflow_test.go",
+    ],
+    embed = [":config"],
+    deps = ["//symphony/model"],
+)
