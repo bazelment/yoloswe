@@ -150,16 +150,23 @@ func (o *Orchestrator) handleWorkerExit(result WorkerResult) {
 		delete(o.claimed, result.IssueID)
 
 	case model.ExitReasonCanceled:
-		// Explicitly cancelled (e.g. via terminateRunning). The claim has already
-		// been released by terminateRunning; nothing more to do here.
-		o.logger.Info("worker cancelled, claim already released",
+		// Cancelled — may be from terminateRunning (claim already released) or from
+		// parent context cancellation during shutdown (terminateRunning not called).
+		// Delete from claimed defensively so the issue is not stuck after restart.
+		delete(o.claimed, result.IssueID)
+		o.logger.Info("worker cancelled, releasing claim",
 			"issue_id", result.IssueID)
 
 	default:
-		nextAttempt := 1
-		if entry != nil {
-			nextAttempt = entry.RetryAttempt + 1
+		// If entry is nil the worker was already removed by terminateRunning
+		// (reconcile-driven termination). Skip retry scheduling to avoid phantom
+		// retries for issues that were intentionally terminated.
+		if entry == nil {
+			o.logger.Info("worker exit for terminated issue, skipping retry",
+				"issue_id", result.IssueID)
+			return
 		}
+		nextAttempt := entry.RetryAttempt + 1
 		// Cap failure retries: give up after enough attempts.
 		maxRetries := cfg.MaxTurns // reuse max_turns as a reasonable retry cap
 		if nextAttempt > maxRetries {

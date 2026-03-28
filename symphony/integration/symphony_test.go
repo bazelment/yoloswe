@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -482,17 +481,3 @@ func TestIssueEndpoint(t *testing.T) {
 	<-orchDone
 }
 
-// readJSONLine reads one JSON line from a bufio.Scanner.
-func readJSONLine(scanner *bufio.Scanner) (map[string]any, error) {
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("EOF")
-	}
-	var msg map[string]any
-	if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w: %s", err, scanner.Text())
-	}
-	return msg, nil
-}
