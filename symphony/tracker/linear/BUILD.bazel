@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "linear",
+    srcs = [
+        "client.go",
+        "errors.go",
+        "normalize.go",
+        "queries.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/symphony/tracker/linear",
+    visibility = ["//visibility:public"],
+    deps = ["//symphony/model"],
+)
+
+go_test(
+    name = "linear_test",
+    srcs = ["client_test.go"],
+    embed = [":linear"],
+)

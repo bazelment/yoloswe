@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "model",
+    srcs = [
+        "normalize.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/symphony/model",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "model_test",
+    srcs = ["normalize_test.go"],
+    embed = [":model"],
+)

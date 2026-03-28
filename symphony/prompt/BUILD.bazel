@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "prompt",
+    srcs = [
+        "continuation.go",
+        "prompt.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/symphony/prompt",
+    visibility = ["//visibility:public"],
+    deps = ["//symphony/model"],
+)
+
+go_test(
+    name = "prompt_test",
+    srcs = ["prompt_test.go"],
+    embed = [":prompt"],
+    deps = ["//symphony/model"],
+)

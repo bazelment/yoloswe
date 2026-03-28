@@ -1,0 +1,25 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = ["symphony_test.go"],
+    data = ["//symphony/integration/testdata:fake_codex"],
+    env_inherit = [
+        "HOME",
+        "PATH",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+    ],
+    deps = [
+        "//symphony/config",
+        "//symphony/http",
+        "//symphony/model",
+        "//symphony/orchestrator",
+        "@com_github_stretchr_testify//require",
+        "@rules_go//go/tools/bazel:go_default_library",
+    ],
+)

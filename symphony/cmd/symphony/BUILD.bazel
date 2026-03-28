@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "symphony_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/symphony/cmd/symphony",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//symphony/config",
+        "//symphony/http",
+        "//symphony/logging",
+        "//symphony/orchestrator",
+        "//symphony/tracker",
+    ],
+)
+
+go_binary(
+    name = "symphony",
+    embed = [":symphony_lib"],
+    visibility = ["//visibility:public"],
+)
