@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bazelment/yoloswe/symphony/agent"
 	"github.com/bazelment/yoloswe/symphony/config"
 	"github.com/bazelment/yoloswe/symphony/model"
 	"github.com/bazelment/yoloswe/symphony/workspace"
@@ -90,12 +91,16 @@ func (o *Orchestrator) dispatchIssue(ctx context.Context, issue model.Issue, att
 		RetryAttempt: retryAttempt,
 		StartedAt:    now,
 	}
+
+	// Create a per-worker context so terminateRunning can cancel it individually.
+	workerCtx, workerCancel := context.WithCancel(ctx)
 	o.running[issue.ID] = entry
+	o.workerCancels[issue.ID] = workerCancel
 	o.claimed[issue.ID] = struct{}{}
 	delete(o.retryAttempts, issue.ID)
 
 	o.wg.Add(1)
-	go o.runWorker(ctx, issue, attempt, cfg)
+	go o.runWorker(workerCtx, issue, attempt, cfg)
 }
 
 // handleWorkerExit processes a worker exit. Spec Section 16.6.
@@ -111,6 +116,12 @@ func (o *Orchestrator) handleWorkerExit(result WorkerResult) {
 		o.totals.TotalTokens += entry.Session.CodexTotalTokens
 
 		delete(o.running, result.IssueID)
+
+		// Release the per-worker cancel function.
+		if cancel, ok := o.workerCancels[result.IssueID]; ok {
+			cancel()
+			delete(o.workerCancels, result.IssueID)
+		}
 	}
 
 	cfg := o.cfg()
@@ -130,6 +141,20 @@ func (o *Orchestrator) handleWorkerExit(result WorkerResult) {
 			return
 		}
 		o.scheduleRetry(result.IssueID, result.Identifier, continuationAttempt, "", true)
+
+	case model.ExitReasonInactive:
+		// Issue transitioned out of active states mid-run. Release the claim
+		// without retrying — reconciliation will handle any needed cleanup.
+		o.logger.Info("issue left active states during run, releasing claim",
+			"issue_id", result.IssueID)
+		delete(o.claimed, result.IssueID)
+
+	case model.ExitReasonCanceled:
+		// Explicitly cancelled (e.g. via terminateRunning). The claim has already
+		// been released by terminateRunning; nothing more to do here.
+		o.logger.Info("worker cancelled, claim already released",
+			"issue_id", result.IssueID)
+
 	default:
 		nextAttempt := 1
 		if entry != nil {
@@ -166,6 +191,21 @@ func (o *Orchestrator) handleCodexUpdate(update CodexUpdate) {
 	}
 	if update.Event.Message != "" {
 		entry.Session.LastCodexMessage = update.Event.Message
+	}
+
+	// Propagate session identity from the session_started event.
+	// EventSessionStarted carries SessionID/ThreadID/TurnID set in session.go.
+	if update.Event.Type == agent.EventSessionStarted {
+		if update.Event.SessionID != "" {
+			entry.Session.SessionID = update.Event.SessionID
+		}
+		if update.Event.ThreadID != "" {
+			entry.Session.ThreadID = update.Event.ThreadID
+		}
+		if update.Event.TurnID != "" {
+			entry.Session.TurnID = update.Event.TurnID
+		}
+		entry.Session.TurnCount++
 	}
 
 	// Update token totals using delta-based accounting. Spec Section 13.5.
@@ -208,6 +248,14 @@ func (o *Orchestrator) handleRetryFired(ctx context.Context, rf retryFired) {
 
 	cfg := o.cfg()
 
+	// Enforce retry cap to prevent infinite scheduling on persistent tracker failures.
+	if entry.Attempt > cfg.MaxTurns {
+		o.logger.Warn("retry cap reached on poll failure, releasing issue",
+			"issue_id", rf.IssueID, "attempts", entry.Attempt)
+		delete(o.claimed, rf.IssueID)
+		return
+	}
+
 	// Fetch active candidates and find this issue.
 	candidates, err := o.tracker.FetchCandidateIssues(ctx, cfg.ActiveStates, cfg.TrackerProjectSlug)
 	if err != nil {
@@ -237,7 +285,7 @@ func (o *Orchestrator) handleRetryFired(ctx context.Context, rf retryFired) {
 	o.dispatchIssue(ctx, *found, &entry.Attempt, cfg)
 }
 
-// terminateRunning stops a running issue and optionally cleans its workspace.
+// terminateRunning cancels and removes a running issue, optionally cleaning its workspace.
 func (o *Orchestrator) terminateRunning(issueID string, cleanWorkspace bool, cfg *config.ServiceConfig) {
 	entry, ok := o.running[issueID]
 	if !ok {
@@ -249,6 +297,12 @@ func (o *Orchestrator) terminateRunning(issueID string, cleanWorkspace bool, cfg
 		"identifier", entry.Identifier,
 		"cleanup", cleanWorkspace,
 	)
+
+	// Cancel the per-worker context to stop the Codex subprocess promptly.
+	if cancel, ok := o.workerCancels[issueID]; ok {
+		cancel()
+		delete(o.workerCancels, issueID)
+	}
 
 	delete(o.running, issueID)
 	delete(o.claimed, issueID)

@@ -213,7 +213,12 @@ func (s *Session) streamTurn(ctx context.Context, onEvent func(Event)) (TurnResu
 	for {
 		select {
 		case <-ctx.Done():
-			return TurnResult{Status: TurnTimedOut, Error: fmt.Errorf("turn_timeout")}, ctx.Err()
+			// Distinguish between a context deadline (turn timeout) and an
+			// explicit cancellation (e.g. reconcile-driven termination).
+			if ctx.Err() == context.DeadlineExceeded {
+				return TurnResult{Status: TurnTimedOut, Error: fmt.Errorf("turn_timeout")}, ctx.Err()
+			}
+			return TurnResult{Status: TurnCancelled, Error: fmt.Errorf("turn_cancelled: %w", ctx.Err())}, ctx.Err()
 		case r := <-msgCh:
 			if r.err != nil {
 				return TurnResult{Status: TurnFailed, Error: fmt.Errorf("port_exit: %w", r.err)}, r.err

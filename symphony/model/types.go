@@ -123,4 +123,8 @@ const (
 	ExitReasonTimedOut ExitReason = "timed_out"
 	ExitReasonStalled  ExitReason = "stalled"
 	ExitReasonCanceled ExitReason = "canceled"
+	// ExitReasonInactive means the issue left active states while the worker was
+	// running (e.g. moved to Done/Cancelled). The orchestrator should release
+	// the claim without scheduling a continuation.
+	ExitReasonInactive ExitReason = "inactive"
 )

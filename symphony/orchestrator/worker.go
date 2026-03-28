@@ -88,6 +88,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 	// 5. Turn loop (up to max_turns). Spec Section 7.1.
 	maxTurns := cfg.MaxTurns
 	currentPrompt := rendered
+	issueLeftActiveStates := false
 
 	for turnNumber := 1; turnNumber <= maxTurns; turnNumber++ {
 		turnResult, err := session.RunTurn(ctx, currentPrompt, onEvent)
@@ -103,7 +104,13 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 			default:
 				result.ExitReason = model.ExitReasonFailed
 			}
-			result.Error = err
+			// Prefer the structured error from the turn result; fall back to
+			// the transport-level error returned by RunTurn itself.
+			if turnResult.Error != nil {
+				result.Error = turnResult.Error
+			} else {
+				result.Error = err
+			}
 			return
 		}
 
@@ -132,6 +139,9 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 			}
 		}
 		if !isActive {
+			// Issue left active states (completed, cancelled, etc.): stop work
+			// and do NOT schedule a continuation. Reconciliation handles cleanup.
+			issueLeftActiveStates = true
 			break
 		}
 
@@ -146,7 +156,13 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 	// Normal exit.
 	session.Stop()
 	runAfterRunHook(cfg, ws.Path, logger)
-	result.ExitReason = model.ExitReasonNormal
+	if issueLeftActiveStates {
+		// Signal that the issue is no longer active so the orchestrator releases
+		// the claim rather than scheduling a continuation retry.
+		result.ExitReason = model.ExitReasonInactive
+	} else {
+		result.ExitReason = model.ExitReasonNormal
+	}
 }
 
 func runAfterRunHook(cfg *config.ServiceConfig, workDir string, logger *slog.Logger) {

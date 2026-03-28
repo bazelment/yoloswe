@@ -94,6 +94,7 @@ type Orchestrator struct {
 	clock         Clock
 	tracker       tracker.Tracker
 	running       map[string]*model.RunningEntry
+	workerCancels map[string]context.CancelFunc // per-worker cancel, keyed by issue ID
 	claimed       map[string]struct{}
 	workerResults chan WorkerResult
 	codexUpdates  chan CodexUpdate
@@ -127,6 +128,7 @@ func New(cfgFn func() *config.ServiceConfig, t tracker.Tracker, clock Clock, log
 		snapshotReqs:  make(chan chan *Snapshot, 8),
 		refreshReqs:   make(chan chan struct{}, 8),
 		running:       make(map[string]*model.RunningEntry),
+		workerCancels: make(map[string]context.CancelFunc),
 		claimed:       make(map[string]struct{}),
 		retryAttempts: make(map[string]*model.RetryEntry),
 		completed:     make(map[string]struct{}),

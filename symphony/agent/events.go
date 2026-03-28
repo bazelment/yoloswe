@@ -71,6 +71,11 @@ func ExtractEvent(msg *Message) Event {
 		}
 	}
 
+	// Extract rate limits from any message that carries them.
+	if rl := ExtractRateLimits(msg); rl != nil {
+		ev.RateLimits = rl
+	}
+
 	return ev
 }
 
