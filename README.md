@@ -16,18 +16,42 @@ Bramble is a terminal UI for managing AI-assisted software engineering workflows
 - **Cost tracking** — per-session token counts and USD estimates
 - **IPC interface** — CLI commands to create sessions, send notifications, and integrate with external tools
 
+## Installation
+
+### Quick install (Linux / macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bazelment/yoloswe/main/scripts/install.sh | bash
+```
+
+This installs both `bramble` and `wt` to `~/.local/bin`.
+
+### Homebrew
+
+```bash
+brew install bazelment/tap/bramble
+brew install bazelment/tap/wt
+```
+
+### Install script options
+
+```bash
+# Install only bramble
+curl -fsSL https://raw.githubusercontent.com/bazelment/yoloswe/main/scripts/install.sh | bash -s -- --tool bramble
+
+# Install a specific version
+curl -fsSL https://raw.githubusercontent.com/bazelment/yoloswe/main/scripts/install.sh | bash -s -- --version v2026.03.29
+
+# Install to a custom directory
+curl -fsSL https://raw.githubusercontent.com/bazelment/yoloswe/main/scripts/install.sh | bash -s -- --dir /usr/local/bin
+```
+
 ## Quick Start
 
 ```bash
-# Build
-bazel build //bramble
-
-# Run (auto-detects TUI vs tmux mode based on $TMUX)
-bazel run //bramble
-
-# Force a specific mode
-bazel run //bramble -- --session-mode tui
-bazel run //bramble -- --session-mode tmux
+bramble                              # auto-detect mode (TUI or tmux)
+bramble --session-mode tui           # force TUI mode
+bramble --session-mode tmux          # force tmux mode
 ```
 
 ## Session Modes
@@ -190,6 +214,24 @@ bazel run //bramble/cmd/logview -- path/to/session.jsonl
 | `bramble/cmd/logview` | Render JSONL session logs in the terminal |
 | `bramble/cmd/tmuxwatch` | Live monitoring dashboard for tmux-mode sessions |
 | `bramble/cmd/sessanalyze` | Analyze session recordings |
+
+## Development
+
+To build from source (requires [Bazel](https://bazel.build)):
+
+```bash
+# Build
+bazel build //bramble
+
+# Run
+bazel run //bramble
+
+# Run with flags
+bazel run //bramble -- --session-mode tui
+
+# Run tests
+bazel test //...
+```
 
 ## Architecture
 
