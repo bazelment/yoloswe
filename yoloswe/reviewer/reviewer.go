@@ -202,8 +202,8 @@ func New(config Config) *Reviewer {
 
 	return &Reviewer{
 		config:   config,
-		output:   os.Stdout,
-		renderer: render.NewRenderer(os.Stdout, config.Verbose, config.NoColor),
+		output:   os.Stderr,
+		renderer: render.NewRenderer(os.Stderr, config.Verbose, config.NoColor),
 		backend:  backend,
 	}
 }

@@ -88,9 +88,11 @@ func run() int {
 		return 1
 	}
 
-	fmt.Printf("\n\n=== Review Result ===\n")
-	fmt.Printf("Success: %v\n", result.Success)
-	fmt.Printf("Duration: %dms\n", result.DurationMs)
-	fmt.Printf("Response length: %d chars\n", len(result.ResponseText))
+	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
+	fmt.Fprintf(os.Stderr, "Success: %v\n", result.Success)
+	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
+	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
+
+	fmt.Print(result.ResponseText)
 	return 0
 }

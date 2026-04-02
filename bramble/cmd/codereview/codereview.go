@@ -5,6 +5,7 @@ package codereview
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -97,9 +98,11 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("review failed: %w", err)
 	}
 
-	fmt.Printf("\n\n=== Review Result ===\n")
-	fmt.Printf("Success: %v\n", result.Success)
-	fmt.Printf("Duration: %dms\n", result.DurationMs)
-	fmt.Printf("Response length: %d chars\n", len(result.ResponseText))
+	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
+	fmt.Fprintf(os.Stderr, "Success: %v\n", result.Success)
+	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
+	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
+
+	fmt.Print(result.ResponseText)
 	return nil
 }
