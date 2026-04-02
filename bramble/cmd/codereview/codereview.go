@@ -103,6 +103,11 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
 	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
 
-	fmt.Println(result.ResponseText)
+	// Only print the verdict to stdout when it's piped/redirected.
+	// In an interactive terminal both stderr (streaming) and stdout are visible,
+	// so printing again would duplicate the response.
+	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+		fmt.Println(result.ResponseText)
+	}
 	return nil
 }
