@@ -189,6 +189,7 @@ func New(config Config) *SWEWrapper {
 		JSONOutput:     true,
 	}
 	rev := reviewer.New(reviewerConfig)
+	rev.SetOutput(output)
 
 	return &SWEWrapper{
 		builder:    builder,

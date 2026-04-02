@@ -103,6 +103,6 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
 	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
 
-	fmt.Print(result.ResponseText)
+	fmt.Println(result.ResponseText)
 	return nil
 }
