@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
 )
@@ -306,4 +308,25 @@ func ResolveProtocolLogPath(flagValue string) (string, error) {
 	}
 	filename := fmt.Sprintf("reviewer-session-%s.jsonl", time.Now().Format("20060102-150405"))
 	return filepath.Join(dir, filename), nil
+}
+
+// PrintResultSummary writes the review metadata to stderr and conditionally
+// prints the full response text to stdout.
+//
+// The verdict is printed to stdout only when the user won't see it via the
+// streaming path on stderr — specifically, when stdout and stderr are NOT both
+// real terminals. This avoids duplicate output in interactive use while still
+// emitting the verdict for pipes/redirections. It uses term.IsTerminal (not
+// ModeCharDevice) to correctly handle character devices like /dev/null.
+func PrintResultSummary(result *ReviewResult) {
+	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
+	fmt.Fprintf(os.Stderr, "Success: %v\n", result.Success)
+	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
+	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
+
+	stdoutIsTerminal := term.IsTerminal(int(os.Stdout.Fd()))
+	stderrIsTerminal := term.IsTerminal(int(os.Stderr.Fd()))
+	if !(stdoutIsTerminal && stderrIsTerminal) {
+		fmt.Println(result.ResponseText)
+	}
 }

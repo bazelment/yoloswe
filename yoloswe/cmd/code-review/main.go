@@ -88,25 +88,6 @@ func run() int {
 		return 1
 	}
 
-	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
-	fmt.Fprintf(os.Stderr, "Success: %v\n", result.Success)
-	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
-	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
-
-	// Print the verdict to stdout unless both stdout and stderr are the
-	// same interactive terminal (where the streamed output is already visible).
-	// This covers: stdout piped/redirected, stderr redirected (e.g. 2>log),
-	// both redirected, and any Stat() failure (default to printing).
-	stdoutIsTTY := false
-	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		stdoutIsTTY = true
-	}
-	stderrIsTTY := false
-	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		stderrIsTTY = true
-	}
-	if !(stdoutIsTTY && stderrIsTTY) {
-		fmt.Println(result.ResponseText)
-	}
+	reviewer.PrintResultSummary(result)
 	return 0
 }

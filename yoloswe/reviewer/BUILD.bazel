@@ -15,6 +15,7 @@ go_library(
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/codex/render",
         "//agent-cli-wrapper/cursor",
+        "@org_golang_x_term//:term",
     ],
 )
 
