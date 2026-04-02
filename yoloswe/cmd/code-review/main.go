@@ -93,10 +93,19 @@ func run() int {
 	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
 	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
 
-	// Only print the verdict to stdout when it's piped/redirected.
-	// In an interactive terminal both stderr (streaming) and stdout are visible,
-	// so printing again would duplicate the response.
-	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+	// Print the verdict to stdout unless both stdout and stderr are the
+	// same interactive terminal (where the streamed output is already visible).
+	// This covers: stdout piped/redirected, stderr redirected (e.g. 2>log),
+	// both redirected, and any Stat() failure (default to printing).
+	stdoutIsTTY := false
+	if fi, err := os.Stdout.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		stdoutIsTTY = true
+	}
+	stderrIsTTY := false
+	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		stderrIsTTY = true
+	}
+	if !(stdoutIsTTY && stderrIsTTY) {
 		fmt.Println(result.ResponseText)
 	}
 	return 0
