@@ -97,9 +97,6 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("review failed: %w", err)
 	}
 
-	fmt.Printf("\n\n=== Review Result ===\n")
-	fmt.Printf("Success: %v\n", result.Success)
-	fmt.Printf("Duration: %dms\n", result.DurationMs)
-	fmt.Printf("Response length: %d chars\n", len(result.ResponseText))
+	reviewer.PrintResultSummary(result)
 	return nil
 }
