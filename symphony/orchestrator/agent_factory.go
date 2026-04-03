@@ -13,9 +13,9 @@ import (
 // Empty or "codex" type creates a Codex app-server session.
 func newAgent(ctx context.Context, cfg agent.SessionConfig, logger *slog.Logger) (agent.Agent, error) {
 	switch cfg.Type {
-	case "", "codex":
+	case "", agent.AgentTypeCodex:
 		return codex.NewSession(ctx, cfg, logger)
 	default:
-		return nil, fmt.Errorf("unsupported agent type: %q", cfg.Type)
+		return nil, fmt.Errorf("unsupported agent_session.type: %q", cfg.Type)
 	}
 }

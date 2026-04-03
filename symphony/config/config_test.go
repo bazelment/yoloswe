@@ -226,6 +226,24 @@ func TestNewServiceConfig_ServerPort(t *testing.T) {
 	}
 }
 
+func TestNewServiceConfig_AgentSessionEmptyOverridesCodexFallback(t *testing.T) {
+	wf := &model.WorkflowDefinition{
+		Config: map[string]any{
+			"codex": map[string]any{
+				"approval_policy": "auto-edit",
+			},
+			"agent_session": map[string]any{
+				"approval_policy": "",
+			},
+		},
+	}
+	cfg := NewServiceConfig(wf)
+
+	if cfg.AgentApprovalPolicy != "" {
+		t.Errorf("AgentApprovalPolicy = %q, want empty (explicit override)", cfg.AgentApprovalPolicy)
+	}
+}
+
 func TestNewServiceConfig_NoServerPort(t *testing.T) {
 	wf := &model.WorkflowDefinition{
 		Config: map[string]any{},

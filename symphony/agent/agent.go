@@ -25,6 +25,20 @@ type Agent interface {
 	PID() *int
 }
 
+// AgentTypeCodex is the agent type identifier for the Codex backend.
+const AgentTypeCodex = "codex"
+
+// IsValidAgentType returns true if the given type is a recognized agent type.
+// Empty string is valid and defaults to codex.
+func IsValidAgentType(t string) bool {
+	switch t {
+	case "", AgentTypeCodex:
+		return true
+	default:
+		return false
+	}
+}
+
 // SessionConfig holds configuration for creating an agent session.
 type SessionConfig struct {
 	Type              string // Agent type (e.g. "codex"). Empty defaults to "codex".

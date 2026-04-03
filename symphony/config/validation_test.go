@@ -95,6 +95,37 @@ func TestValidateForDispatch_MissingProjectSlug(t *testing.T) {
 	}
 }
 
+func TestValidateForDispatch_UnsupportedAgentType(t *testing.T) {
+	cfg := NewServiceConfig(&model.WorkflowDefinition{
+		Config: map[string]any{
+			"tracker": map[string]any{
+				"kind":         "linear",
+				"api_key":      "test-key",
+				"project_slug": "MY-PROJ",
+			},
+			"agent_session": map[string]any{
+				"type": "codxe",
+			},
+		},
+	})
+
+	err := ValidateForDispatch(cfg)
+	if err == nil {
+		t.Fatal("expected error for unsupported agent type")
+	}
+	vErr := err.(*ValidationError)
+	found := false
+	for _, c := range vErr.Checks {
+		if c == `unsupported agent_session.type: "codxe" (supported: "codex")` {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected unsupported agent type check, got %v", vErr.Checks)
+	}
+}
+
 func TestValidateForDispatch_EmptyAgentCommand(t *testing.T) {
 	cfg := NewServiceConfig(&model.WorkflowDefinition{
 		Config: map[string]any{

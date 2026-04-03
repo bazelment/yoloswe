@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/bazelment/yoloswe/symphony/agent"
@@ -211,6 +212,10 @@ func (o *Orchestrator) handleAgentUpdate(update AgentUpdate) {
 		}
 		if update.Event.TurnID != "" {
 			entry.Session.TurnID = update.Event.TurnID
+		}
+		if update.Event.PID != nil {
+			pidStr := fmt.Sprintf("%d", *update.Event.PID)
+			entry.Session.AgentPID = &pidStr
 		}
 		entry.Session.TurnCount++
 	}

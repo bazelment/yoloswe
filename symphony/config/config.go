@@ -307,11 +307,27 @@ func getIntMap(config map[string]any, section, key string) map[string]int {
 // getStringWithFallback tries the primary section first, then falls back to the
 // fallback section. This supports backward-compat: new configs use "agent_session"
 // while old configs use "codex".
+// Checks field presence (not non-empty value) so that an explicit empty string in
+// the primary section wins over a non-empty fallback value.
 func getStringWithFallback(config map[string]any, primary, fallback, key, defaultVal string) string {
-	if v := getString(config, primary, key, ""); v != "" {
-		return v
+	if hasKey(config, primary, key) {
+		return getString(config, primary, key, defaultVal)
 	}
 	return getString(config, fallback, key, defaultVal)
+}
+
+// hasKey returns true if config[section][key] exists, regardless of its value.
+func hasKey(config map[string]any, section, key string) bool {
+	sec, ok := config[section]
+	if !ok {
+		return false
+	}
+	secMap, ok := sec.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = secMap[key]
+	return ok
 }
 
 // getIntWithFallback tries the primary section first, then falls back to the

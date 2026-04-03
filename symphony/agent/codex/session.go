@@ -170,7 +170,7 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(agent
 	s.logger.Info("turn started", "session_id", sessionID, "thread_id", s.threadID, "turn_id", s.turnID)
 
 	if onEvent != nil {
-		onEvent(agent.Event{Type: agent.EventSessionStarted, SessionID: sessionID, ThreadID: s.threadID, TurnID: s.turnID})
+		onEvent(agent.Event{Type: agent.EventSessionStarted, SessionID: sessionID, ThreadID: s.threadID, TurnID: s.turnID, PID: s.process.PID()})
 	}
 
 	// Stream events until turn completion.

@@ -30,11 +30,13 @@ go_library(
 go_test(
     name = "orchestrator_test",
     srcs = [
+        "agent_factory_test.go",
         "dispatch_test.go",
         "retry_test.go",
     ],
     embed = [":orchestrator"],
     deps = [
+        "//symphony/agent",
         "//symphony/config",
         "//symphony/model",
     ],
