@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -45,9 +44,9 @@ func SynthesizeAndPlay(ctx context.Context, provider tts.TextToSpeech, handler P
 		if title == "" {
 			title = string(info.ID)
 		}
-		log.Printf("voice report for %s: saved to %s", title, result.FilePath)
+		fmt.Fprintf(os.Stderr, "voice report for %s: saved to %s\n", title, result.FilePath)
 	}
 }
 
-// synthesisTimeout is the maximum time allowed for TTS synthesis + playback.
-const synthesisTimeout = 30 * time.Second
+// SynthesisTimeout is the maximum time allowed for TTS synthesis + playback.
+const SynthesisTimeout = 30 * time.Second

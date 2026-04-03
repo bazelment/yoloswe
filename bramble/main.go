@@ -42,6 +42,7 @@ var (
 	elevenLabsAPIKey   string
 	ttsVoice           string
 	voiceReportMode    string
+	voiceSaveDir       string
 )
 
 var rootCmd = &cobra.Command{
@@ -77,6 +78,7 @@ func init() {
 	rootCmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
 	rootCmd.Flags().StringVar(&ttsVoice, "tts-voice", "", "ElevenLabs voice ID for TTS synthesis")
 	rootCmd.Flags().StringVar(&voiceReportMode, "voice-report-mode", "auto", "Voice report playback mode: local, file, or auto")
+	rootCmd.Flags().StringVar(&voiceSaveDir, "voice-save-dir", "", "Directory for file-mode voice reports (default: ~/.bramble/voice-reports)")
 }
 
 func main() {
@@ -237,12 +239,13 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			Enabled: true,
 			Mode:    voiceReportMode,
 			Voice:   ttsVoice,
+			SaveDir: voiceSaveDir,
 		}
 		provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
 		if err != nil {
 			log.Printf("Warning: voice reports disabled: %v", err)
 		} else {
-			handler := app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), "")
+			handler := app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), voiceSaveDir)
 			model.SetVoiceReporting(provider, handler, voiceCfg)
 		}
 	}

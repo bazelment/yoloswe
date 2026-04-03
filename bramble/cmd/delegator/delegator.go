@@ -41,6 +41,7 @@ var (
 	elevenLabsAPIKey   string
 	ttsVoice           string
 	voiceReportMode    string
+	voiceSaveDir       string
 )
 
 // Cmd is the cobra command for the delegator test harness.
@@ -72,6 +73,7 @@ func init() {
 	Cmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
 	Cmd.Flags().StringVar(&ttsVoice, "tts-voice", "", "ElevenLabs voice ID for TTS synthesis")
 	Cmd.Flags().StringVar(&voiceReportMode, "voice-report-mode", "auto", "Voice report playback mode: local, file, or auto")
+	Cmd.Flags().StringVar(&voiceSaveDir, "voice-save-dir", "", "Directory for file-mode voice reports (default: ~/.bramble/voice-reports)")
 }
 
 func runDelegator(cmd *cobra.Command, args []string) error {
@@ -239,6 +241,7 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			Enabled: true,
 			Mode:    voiceReportMode,
 			Voice:   ttsVoice,
+			SaveDir: voiceSaveDir,
 		}
 		provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
 		if err != nil {
@@ -246,7 +249,7 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			cfg.VoiceReporting = nil
 		} else {
 			voiceTTS = provider
-			voicePlayback = app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), "")
+			voicePlayback = app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), voiceSaveDir)
 		}
 	}
 
@@ -848,7 +851,7 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 // It delegates to app.SynthesizeAndPlay which handles synthesis, playback, and
 // temp-file cleanup, so no manual file management is needed here.
 func reportVoice(provider tts.TextToSpeech, handler app.PlaybackHandler, cfg *session.VoiceReportingConfig, info session.SessionInfo) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), app.SynthesisTimeout)
 	defer cancel()
 	app.SynthesizeAndPlay(ctx, provider, handler, cfg, info)
 }

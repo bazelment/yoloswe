@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,7 @@ type PlaybackHandler interface {
 	Play(ctx context.Context, data []byte, format string) (*PlaybackResult, error)
 }
 
-// LocalPlayback plays audio using a system command (ffplay, paplay, afplay).
+// LocalPlayback plays audio using a system command (ffplay, afplay).
 type LocalPlayback struct{}
 
 // Play attempts to play audio using available system players.
@@ -51,14 +52,14 @@ func (lp *LocalPlayback) Play(ctx context.Context, data []byte, format string) (
 	tmpFile.Close()
 
 	// Try players in order of preference.
+	// Only include players that support MP3 (ElevenLabs always returns MP3).
+	// paplay and aplay are excluded because they only handle WAV/PCM.
 	players := []struct {
 		name string
 		args []string
 	}{
 		{"ffplay", []string{"-nodisp", "-autoexit", "-loglevel", "quiet", tmpFile.Name()}},
-		{"paplay", []string{tmpFile.Name()}},
 		{"afplay", []string{tmpFile.Name()}},
-		{"aplay", []string{tmpFile.Name()}},
 	}
 
 	for _, player := range players {
@@ -73,7 +74,7 @@ func (lp *LocalPlayback) Play(ctx context.Context, data []byte, format string) (
 		return &PlaybackResult{}, nil
 	}
 
-	return nil, fmt.Errorf("no audio player found (tried ffplay, paplay, afplay, aplay)")
+	return nil, fmt.Errorf("no audio player found (tried ffplay, afplay)")
 }
 
 // FilePlayback saves audio to a directory on disk.
@@ -87,7 +88,9 @@ func (fp *FilePlayback) Play(_ context.Context, data []byte, format string) (*Pl
 		return nil, fmt.Errorf("create voice reports dir: %w", err)
 	}
 
-	filename := fmt.Sprintf("voice-report-%s.%s", time.Now().Format("20060102-150405"), format)
+	// Use a random suffix to avoid collisions when two reports land in the same second.
+	suffix := rand.Int63() //nolint:gosec // non-crypto random is fine for uniqueness
+	filename := fmt.Sprintf("voice-report-%s-%x.%s", time.Now().Format("20060102-150405"), suffix, format)
 	path := filepath.Join(fp.Dir, filename)
 
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -98,16 +101,18 @@ func (fp *FilePlayback) Play(_ context.Context, data []byte, format string) (*Pl
 }
 
 // DetectPlaybackMode determines the best playback mode for the current
-// environment. Returns PlaybackModeLocal if a TTY and audio player are
-// available, otherwise PlaybackModeFile.
+// environment. Returns PlaybackModeLocal if no SSH environment variables are
+// set and an MP3-capable audio player (ffplay or afplay) is available,
+// otherwise returns PlaybackModeFile.
 func DetectPlaybackMode() PlaybackMode {
 	// If running over SSH, prefer file mode.
 	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" {
 		return PlaybackModeFile
 	}
 
-	// Check if any audio player is available.
-	players := []string{"ffplay", "paplay", "afplay", "aplay"}
+	// Check if any MP3-capable audio player is available.
+	// paplay and aplay are excluded because they only handle WAV/PCM.
+	players := []string{"ffplay", "afplay"}
 	for _, player := range players {
 		if _, err := exec.LookPath(player); err == nil {
 			return PlaybackModeLocal

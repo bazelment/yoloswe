@@ -230,7 +230,7 @@ func (m *Model) reportSessionVoice(info session.SessionInfo) {
 	cfg := m.voiceReportingOpts
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), synthesisTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), SynthesisTimeout)
 		defer cancel()
 		SynthesizeAndPlay(ctx, provider, handler, cfg, info)
 	}()
