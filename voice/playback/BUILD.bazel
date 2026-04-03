@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "playback",
+    srcs = ["player.go"],
+    importpath = "github.com/bazelment/yoloswe/voice/playback",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "playback_test",
+    srcs = ["player_test.go"],
+    embed = [":playback"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

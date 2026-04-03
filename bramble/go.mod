@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
 	github.com/bazelment/yoloswe/multiagent v0.0.0-20260207203406-ad2b626fcc6a
+	github.com/bazelment/yoloswe/voice v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/wt v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/charmbracelet/glamour v1.0.0
@@ -15,7 +16,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/term v0.36.0
+	golang.org/x/term v0.41.0
 )
 
 require (
@@ -63,6 +64,8 @@ require (
 )
 
 replace github.com/bazelment/yoloswe/agent-cli-wrapper => ../agent-cli-wrapper
+
+replace github.com/bazelment/yoloswe/voice => ../voice
 
 replace github.com/bazelment/yoloswe/wt => ../wt
 

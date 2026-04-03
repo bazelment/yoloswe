@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "speak",
+    srcs = ["speak.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/speak",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//voice/playback",
+        "//voice/tts",
+        "//voice/tts/elevenlabs",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

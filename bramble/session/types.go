@@ -302,6 +302,13 @@ func AppendStreamingDelta(existing, delta string) string {
 	return existing + delta
 }
 
+// VoiceReportingConfig configures voice reporting for session completions.
+type VoiceReportingConfig struct {
+	// Voice is the provider-specific voice ID for TTS synthesis.
+	// If empty, the provider uses its default voice.
+	Voice string
+}
+
 // SessionOutputEvent is sent when session produces output.
 type SessionOutputEvent struct {
 	SessionID SessionID

@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
+        "//bramble/app",
         "//bramble/session",
         "//multiagent/agent",
         "@com_github_ergochat_readline//:readline",

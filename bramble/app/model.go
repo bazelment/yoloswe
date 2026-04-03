@@ -36,7 +36,7 @@ const (
 )
 
 // Model is the root application model.
-type Model struct {
+type Model struct { //nolint:govet // fieldalignment: readability over packing
 	settings              Settings
 	ctx                   context.Context
 	toasts                *ToastManager
@@ -94,6 +94,8 @@ type Model struct {
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
+	// Voice reporting.
+	voiceReporter *VoiceReporter
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -203,6 +205,27 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	go fanInEvents(m.ctx, repoName, sessionManager, sharedEvents)
 
 	return m
+}
+
+// SetVoiceReporter configures voice reporting on the model.
+// Must be called after NewModel and before Init.
+func (m *Model) SetVoiceReporter(reporter *VoiceReporter) {
+	m.voiceReporter = reporter
+}
+
+// reportSessionVoice generates a voice report for a completed session.
+// Runs in a background goroutine to avoid blocking the TUI event loop.
+func (m *Model) reportSessionVoice(info session.SessionInfo) {
+	if m.voiceReporter == nil {
+		return
+	}
+
+	reporter := m.voiceReporter
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), SynthesisTimeout)
+		defer cancel()
+		reporter.Report(ctx, info)
+	}()
 }
 
 // Init initializes the model.

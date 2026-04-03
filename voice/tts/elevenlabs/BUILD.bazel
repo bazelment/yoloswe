@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "elevenlabs",
+    srcs = ["elevenlabs.go"],
+    importpath = "github.com/bazelment/yoloswe/voice/tts/elevenlabs",
+    visibility = ["//visibility:public"],
+    deps = ["//voice/tts"],
+)
+
+go_test(
+    name = "elevenlabs_test",
+    srcs = ["elevenlabs_test.go"],
+    deps = [
+        ":elevenlabs",
+        "//voice/tts",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

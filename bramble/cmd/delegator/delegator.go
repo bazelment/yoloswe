@@ -16,6 +16,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
@@ -33,6 +34,12 @@ var (
 	logDir           string
 	timeout          time.Duration
 	statusFD         int
+	// Voice reporting flags.
+	enableVoiceReports bool
+	elevenLabsAPIKey   string
+	ttsVoice           string
+	voiceReportMode    string
+	voiceSaveDir       string
 )
 
 // Cmd is the cobra command for the delegator test harness.
@@ -60,6 +67,11 @@ func init() {
 	Cmd.Flags().StringVar(&logDir, "log-dir", "", "Directory for JSONL session recording")
 	Cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Timeout for non-interactive mode (real mode only)")
 	Cmd.Flags().IntVar(&statusFD, "status-fd", 0, "File descriptor to write status events (idle/done) for programmatic control")
+	Cmd.Flags().BoolVar(&enableVoiceReports, "enable-voice-reports", false, "Enable voice reporting on session completion (requires ELEVENLABS_API_KEY)")
+	Cmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
+	Cmd.Flags().StringVar(&ttsVoice, "tts-voice", "", "ElevenLabs voice ID for TTS synthesis")
+	Cmd.Flags().StringVar(&voiceReportMode, "voice-report-mode", "auto", "Voice report playback mode: auto, direct, file, redirect (local is deprecated alias for direct)")
+	Cmd.Flags().StringVar(&voiceSaveDir, "voice-save-dir", "", "Directory for file-mode voice reports (default: ~/.bramble/voice-reports)")
 }
 
 func runDelegator(cmd *cobra.Command, args []string) error {
@@ -220,6 +232,17 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 		cfg.RecordingDir = logDir
 		cfg.ProtocolLogDir = logDir
 	}
+	var voiceReporter *app.VoiceReporter
+	if enableVoiceReports {
+		voiceReporter = app.BuildVoiceReporter(elevenLabsAPIKey, ttsVoice, voiceReportMode, voiceSaveDir)
+		if voiceReporter != nil {
+			defer voiceReporter.Close()
+		}
+	}
+
+	// voiceWG tracks in-flight voice report goroutines so runReal can wait for
+	// them to finish before returning (preventing premature process exit).
+	var voiceWG sync.WaitGroup
 
 	m := session.NewManagerWithConfig(cfg)
 	defer m.Close()
@@ -452,6 +475,22 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 						renderChildStatus(e.SessionID, e.NewStatus)
 					}
 
+					// Trigger voice report for terminal session states.
+					if voiceReporter != nil {
+						switch e.NewStatus {
+						case session.StatusCompleted, session.StatusFailed, session.StatusStopped:
+							if info, ok := m.GetSessionInfo(e.SessionID); ok {
+								voiceWG.Add(1)
+								go func(i session.SessionInfo) {
+									defer voiceWG.Done()
+									ctx, cancel := context.WithTimeout(context.Background(), app.SynthesisTimeout)
+									defer cancel()
+									voiceReporter.Report(ctx, i)
+								}(info)
+							}
+						}
+					}
+
 					if e.SessionID == delegatorID {
 						switch e.NewStatus {
 						case session.StatusCompleted, session.StatusFailed, session.StatusStopped:
@@ -603,6 +642,10 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 	if logDir != "" {
 		fmt.Fprintf(os.Stderr, "\nSession JSONL logs saved to: %s\n", logDir)
 	}
+
+	// Wait for any in-flight voice report goroutines to finish before exiting.
+	voiceWG.Wait()
+
 	return nil
 }
 
