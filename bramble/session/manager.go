@@ -445,12 +445,6 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ChildModel overrides the default model for child sessions spawned by
 	// the delegator. If empty, children default to the delegator's own model.
 	ChildModel string
-	// VoiceReporting carries voice-reporting configuration for callers that
-	// need to thread it alongside a ManagerConfig (e.g. the delegator CLI and
-	// the TUI main.go). The Manager itself does NOT read this field — voice
-	// synthesis and playback are handled by the caller (app.Model or the
-	// delegator's event loop) after receiving session state-change events.
-	VoiceReporting *VoiceReportingConfig
 }
 
 // Manager handles multiple concurrent sessions.

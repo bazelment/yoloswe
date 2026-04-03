@@ -99,10 +99,7 @@ func (vr *VoiceReporter) Report(ctx context.Context, info session.SessionInfo) {
 // file-mode save directory (empty for default).
 func BuildVoiceReporter(apiKey, voice, mode, saveDir string) *VoiceReporter {
 	voiceCfg := &session.VoiceReportingConfig{
-		Enabled: true,
-		Mode:    mode,
-		Voice:   voice,
-		SaveDir: saveDir,
+		Voice: voice,
 	}
 
 	resolvedMode := PlaybackMode(mode)

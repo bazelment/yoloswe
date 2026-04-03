@@ -234,16 +234,8 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 	}
 	var voiceReporter *app.VoiceReporter
 	if enableVoiceReports {
-		cfg.VoiceReporting = &session.VoiceReportingConfig{
-			Enabled: true,
-			Mode:    voiceReportMode,
-			Voice:   ttsVoice,
-			SaveDir: voiceSaveDir,
-		}
 		voiceReporter = app.BuildVoiceReporter(elevenLabsAPIKey, ttsVoice, voiceReportMode, voiceSaveDir)
-		if voiceReporter == nil {
-			cfg.VoiceReporting = nil
-		} else {
+		if voiceReporter != nil {
 			defer voiceReporter.Close()
 		}
 	}

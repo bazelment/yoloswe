@@ -303,14 +303,7 @@ func AppendStreamingDelta(existing, delta string) string {
 }
 
 // VoiceReportingConfig configures voice reporting for session completions.
-type VoiceReportingConfig struct { //nolint:govet // fieldalignment: readability over packing
-	// Enabled activates voice reporting on session completion.
-	Enabled bool
-	// Mode controls how audio is played: "auto", "direct", "file", "redirect" (local is deprecated alias for direct).
-	Mode string
-	// SaveDir is the directory for file-mode playback.
-	// Defaults to ~/.bramble/voice-reports/ if empty.
-	SaveDir string
+type VoiceReportingConfig struct {
 	// Voice is the provider-specific voice ID for TTS synthesis.
 	// If empty, the provider uses its default voice.
 	Voice string
