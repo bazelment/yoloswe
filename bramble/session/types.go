@@ -306,7 +306,7 @@ func AppendStreamingDelta(existing, delta string) string {
 type VoiceReportingConfig struct { //nolint:govet // fieldalignment: readability over packing
 	// Enabled activates voice reporting on session completion.
 	Enabled bool
-	// Mode controls how audio is played: "local", "file", or "auto".
+	// Mode controls how audio is played: "auto", "direct", "file", "redirect" (local is deprecated alias for direct).
 	Mode string
 	// SaveDir is the directory for file-mode playback.
 	// Defaults to ~/.bramble/voice-reports/ if empty.

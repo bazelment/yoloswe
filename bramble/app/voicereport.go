@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/voice/tts"
+	"github.com/bazelment/yoloswe/voice/tts/elevenlabs"
 )
 
 // SynthesisTimeout is the maximum time allowed for TTS synthesis + playback.
@@ -90,6 +92,62 @@ func (vr *VoiceReporter) Report(ctx context.Context, info session.SessionInfo) {
 	}
 }
 
+// BuildVoiceReporter creates a VoiceReporter from CLI flags.
+// Returns nil if voice reporting is not enabled or cannot be configured.
+// apiKey is the ElevenLabs API key; voice is the TTS voice ID; mode is the
+// playback mode string (auto/direct/local/file/redirect); saveDir is the
+// file-mode save directory (empty for default).
+func BuildVoiceReporter(apiKey, voice, mode, saveDir string) *VoiceReporter {
+	voiceCfg := &session.VoiceReportingConfig{
+		Enabled: true,
+		Mode:    mode,
+		Voice:   voice,
+		SaveDir: saveDir,
+	}
+
+	resolvedMode := PlaybackMode(mode)
+	if resolvedMode == PlaybackModeAuto {
+		resolvedMode = DetectPlaybackMode()
+	}
+	if resolvedMode == PlaybackModeLocal {
+		resolvedMode = PlaybackModeDirect
+	}
+
+	switch resolvedMode {
+	case PlaybackModeDirect, PlaybackModeFile, PlaybackModeRedirect:
+		// valid
+	default:
+		fmt.Fprintf(os.Stderr, "Warning: unknown voice-report-mode %q, falling back to file\n", mode)
+		resolvedMode = PlaybackModeFile
+	}
+
+	reporterCfg := VoiceReporterConfig{
+		Mode:     resolvedMode,
+		VoiceCfg: voiceCfg,
+	}
+
+	if resolvedMode == PlaybackModeRedirect {
+		if saveDir == "" {
+			home, _ := os.UserHomeDir()
+			saveDir = filepath.Join(home, ".bramble", "voice-reports")
+		}
+		reporterCfg.Redirector = &RedirectTextWriter{Dir: saveDir}
+	} else {
+		provider, err := elevenlabs.NewProvider(apiKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: voice reports disabled: %v\n", err)
+			return nil
+		}
+		reporterCfg.Provider = provider
+		reporterCfg.Handler = NewPlaybackHandler(resolvedMode, saveDir)
+	}
+
+	if reporterCfg.Provider == nil && reporterCfg.Redirector == nil {
+		return nil
+	}
+	return NewVoiceReporter(reporterCfg)
+}
+
 // Close cleans up resources. Safe to call on nil receiver.
 func (vr *VoiceReporter) Close() error {
 	if vr == nil {
@@ -99,20 +157,4 @@ func (vr *VoiceReporter) Close() error {
 		return dp.Close()
 	}
 	return nil
-}
-
-// SynthesizeAndPlay synthesizes a voice summary for the given session and plays
-// it via the provided PlaybackHandler. It is a shared helper used by both the
-// TUI model (app.Model.reportSessionVoice) and the delegator CLI.
-//
-// Deprecated: Use VoiceReporter.Report instead. Kept for backward compatibility
-// with the delegator CLI.
-func SynthesizeAndPlay(ctx context.Context, provider tts.TextToSpeech, handler PlaybackHandler, cfg *session.VoiceReportingConfig, info session.SessionInfo) {
-	vr := &VoiceReporter{
-		mode:     PlaybackModeDirect,
-		provider: provider,
-		handler:  handler,
-		voiceCfg: cfg,
-	}
-	vr.Report(ctx, info)
 }

@@ -72,7 +72,7 @@ type FilePlayback struct {
 
 // Play saves the audio data to a file and returns the path.
 func (fp *FilePlayback) Play(_ context.Context, data []byte, format string) (*PlaybackResult, error) {
-	if err := os.MkdirAll(fp.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(fp.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create voice reports dir: %w", err)
 	}
 
@@ -81,7 +81,7 @@ func (fp *FilePlayback) Play(_ context.Context, data []byte, format string) (*Pl
 	filename := fmt.Sprintf("voice-report-%s-%x.%s", time.Now().Format("20060102-150405"), suffix, format)
 	path := filepath.Join(fp.Dir, filename)
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return nil, fmt.Errorf("write audio file: %w", err)
 	}
 
@@ -98,21 +98,21 @@ type RedirectTextWriter struct {
 // WriteText writes summary text to the redirect directory.
 // On failure (disk full, permissions), logs a warning and discards — never blocks.
 func (r *RedirectTextWriter) WriteText(text string) error {
-	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+	if err := os.MkdirAll(r.Dir, 0o700); err != nil {
 		log.Printf("voice redirect: failed to create dir %s: %v", r.Dir, err)
 		return nil //nolint:nilerr // discard on failure per design
 	}
 
 	// Write latest (overwrite).
 	latestPath := filepath.Join(r.Dir, "voice-report-latest.txt")
-	if err := os.WriteFile(latestPath, []byte(text+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(latestPath, []byte(text+"\n"), 0o600); err != nil {
 		log.Printf("voice redirect: failed to write latest: %v", err)
 		return nil //nolint:nilerr // discard on failure per design
 	}
 
 	// Append to log with timestamp.
 	logPath := filepath.Join(r.Dir, "voice-report-log.txt")
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		log.Printf("voice redirect: failed to open log: %v", err)
 		return nil //nolint:nilerr // discard on failure per design
@@ -129,15 +129,14 @@ func (r *RedirectTextWriter) WriteText(text string) error {
 
 // DetectPlaybackMode determines the best playback mode for the current
 // environment. Returns PlaybackModeRedirect if SSH environment variables are
-// set, PlaybackModeDirect for local environments (Go-native audio),
-// and PlaybackModeFile as a last resort.
+// set, or PlaybackModeDirect for local environments.
 func DetectPlaybackMode() PlaybackMode {
 	// If running over SSH, prefer redirect mode.
 	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" {
 		return PlaybackModeRedirect
 	}
 
-	// Go-native audio (beep) works on any local machine with audio support.
+	// Local machine — play via system audio player (ffplay/afplay).
 	return PlaybackModeDirect
 }
 

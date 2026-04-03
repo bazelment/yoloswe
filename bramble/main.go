@@ -26,7 +26,6 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/multiagent/agent"
-	"github.com/bazelment/yoloswe/voice/tts/elevenlabs"
 	"github.com/bazelment/yoloswe/wt"
 	"github.com/bazelment/yoloswe/yoloswe"
 )
@@ -78,7 +77,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&enableVoiceReports, "enable-voice-reports", false, "Enable voice reporting on session completion (requires ELEVENLABS_API_KEY)")
 	rootCmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
 	rootCmd.Flags().StringVar(&ttsVoice, "tts-voice", "", "ElevenLabs voice ID for TTS synthesis")
-	rootCmd.Flags().StringVar(&voiceReportMode, "voice-report-mode", "auto", "Voice report playback mode: local, file, or auto")
+	rootCmd.Flags().StringVar(&voiceReportMode, "voice-report-mode", "auto", "Voice report playback mode: auto, direct, file, redirect (local is deprecated alias for direct)")
 	rootCmd.Flags().StringVar(&voiceSaveDir, "voice-save-dir", "", "Directory for file-mode voice reports (default: ~/.bramble/voice-reports)")
 }
 
@@ -236,46 +235,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Wire up voice reporting if requested.
 	if enableVoiceReports {
-		voiceCfg := &session.VoiceReportingConfig{
-			Enabled: true,
-			Mode:    voiceReportMode,
-			Voice:   ttsVoice,
-			SaveDir: voiceSaveDir,
-		}
-		resolvedMode := app.PlaybackMode(voiceReportMode)
-		if resolvedMode == app.PlaybackModeAuto {
-			resolvedMode = app.DetectPlaybackMode()
-		}
-		// Accept "local" as deprecated alias for "direct".
-		if resolvedMode == app.PlaybackModeLocal {
-			log.Printf("Note: --voice-report-mode=local is deprecated, use 'direct' instead")
-			resolvedMode = app.PlaybackModeDirect
-		}
-
-		reporterCfg := app.VoiceReporterConfig{
-			Mode:     resolvedMode,
-			VoiceCfg: voiceCfg,
-		}
-
-		if resolvedMode == app.PlaybackModeRedirect {
-			saveDir := voiceSaveDir
-			if saveDir == "" {
-				home, _ := os.UserHomeDir()
-				saveDir = filepath.Join(home, ".bramble", "voice-reports")
-			}
-			reporterCfg.Redirector = &app.RedirectTextWriter{Dir: saveDir}
-		} else {
-			provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
-			if err != nil {
-				log.Printf("Warning: voice reports disabled: %v", err)
-			} else {
-				reporterCfg.Provider = provider
-				reporterCfg.Handler = app.NewPlaybackHandler(resolvedMode, voiceSaveDir)
-			}
-		}
-
-		if reporterCfg.Provider != nil || reporterCfg.Redirector != nil {
-			model.SetVoiceReporter(app.NewVoiceReporter(reporterCfg))
+		if reporter := app.BuildVoiceReporter(elevenLabsAPIKey, ttsVoice, voiceReportMode, voiceSaveDir); reporter != nil {
+			model.SetVoiceReporter(reporter)
 		}
 	}
 

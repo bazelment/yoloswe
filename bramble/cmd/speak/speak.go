@@ -3,10 +3,12 @@
 package speak
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -26,7 +28,7 @@ var Cmd = &cobra.Command{
 	Use:   "speak",
 	Short: "Synthesize and speak text from stdin",
 	Long: `Reads text from stdin, synthesizes speech via TTS, and plays it through
-the system speaker using Go-native audio.
+the system speaker using an available audio player (ffplay or afplay).
 
 Useful for remote playback of bramble voice reports:
   ssh remote "cat ~/.bramble/voice-reports/voice-report-latest.txt" | bramble speak`,
@@ -57,7 +59,8 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create TTS provider: %w", err)
 	}
 
-	ctx := cmd.Context()
+	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+	defer cancel()
 
 	// Synthesize.
 	audio, err := provider.Synthesize(ctx, text, tts.SynthOpts{
