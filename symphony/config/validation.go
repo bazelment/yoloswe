@@ -30,8 +30,8 @@ func ValidateForDispatch(cfg *ServiceConfig) error {
 		checks = append(checks, "tracker.project_slug is required for linear tracker")
 	}
 
-	if cfg.CodexCommand == "" {
-		checks = append(checks, "codex.command must be present and non-empty")
+	if cfg.AgentCommand == "" {
+		checks = append(checks, "agent command must be present and non-empty (set via agent_session.command or codex.command)")
 	}
 
 	if len(checks) > 0 {

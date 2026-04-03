@@ -74,13 +74,13 @@ type LiveSession struct {
 	SessionID              string
 	ThreadID               string
 	TurnID                 string
-	CodexAppServerPID      *string
-	LastCodexEvent         *string
-	LastCodexTimestamp     *time.Time
-	LastCodexMessage       string
-	CodexInputTokens       int64
-	CodexOutputTokens      int64
-	CodexTotalTokens       int64
+	AgentPID               *string
+	LastAgentEvent         *string
+	LastAgentTimestamp     *time.Time
+	LastAgentMessage       string
+	InputTokens            int64
+	OutputTokens           int64
+	TotalTokens            int64
 	LastReportedInputToks  int64
 	LastReportedOutputToks int64
 	LastReportedTotalToks  int64
@@ -97,8 +97,8 @@ type RetryEntry struct {
 	Generation uint64
 }
 
-// CodexTotals holds aggregate token and runtime totals. Spec Section 13.5.
-type CodexTotals struct {
+// AgentTotals holds aggregate token and runtime totals. Spec Section 13.5.
+type AgentTotals struct {
 	InputTokens    int64
 	OutputTokens   int64
 	TotalTokens    int64

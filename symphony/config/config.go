@@ -19,25 +19,26 @@ type ServiceConfig struct {
 	ServerPort             *int
 	HookAfterCreate        string
 	HookAfterRun           string
-	CodexCommand           string
+	AgentType              string
+	AgentCommand           string
 	TrackerKind            string
 	WorkspaceRoot          string
-	CodexApprovalPolicy    string
+	AgentApprovalPolicy    string
 	HookBeforeRun          string
 	TrackerEndpoint        string
 	HookBeforeRemove       string
 	TrackerProjectSlug     string
 	TrackerAPIKey          string
-	CodexTurnSandboxPolicy string
-	CodexThreadSandbox     string
+	AgentTurnSandboxPolicy string
+	AgentThreadSandbox     string
 	ActiveStates           []string
 	TerminalStates         []string
 	PollIntervalMs         int
 	MaxRetryBackoffMs      int
 	MaxTurns               int
-	CodexTurnTimeoutMs     int
-	CodexReadTimeoutMs     int
-	CodexStallTimeoutMs    int
+	AgentTurnTimeoutMs     int
+	AgentReadTimeoutMs     int
+	AgentStallTimeoutMs    int
 	MaxConcurrentAgents    int
 	HookTimeoutMs          int
 }
@@ -77,14 +78,16 @@ func NewServiceConfig(wf *model.WorkflowDefinition) *ServiceConfig {
 		MaxRetryBackoffMs:    getInt(c, "agent", "max_retry_backoff_ms", 300000),
 		MaxConcurrentByState: getIntMap(c, "agent", "max_concurrent_agents_by_state"),
 
-		// Codex defaults (Spec Section 5.3.6)
-		CodexCommand:           getString(c, "codex", "command", "codex app-server"),
-		CodexApprovalPolicy:    getString(c, "codex", "approval_policy", ""),
-		CodexThreadSandbox:     getString(c, "codex", "thread_sandbox", ""),
-		CodexTurnSandboxPolicy: getString(c, "codex", "turn_sandbox_policy", ""),
-		CodexTurnTimeoutMs:     getInt(c, "codex", "turn_timeout_ms", 3600000),
-		CodexReadTimeoutMs:     getInt(c, "codex", "read_timeout_ms", 5000),
-		CodexStallTimeoutMs:    getInt(c, "codex", "stall_timeout_ms", 300000),
+		// Agent session defaults (Spec Section 5.3.6).
+		// Reads from "agent_session" section first, falls back to "codex" for backward compat.
+		AgentType:              getStringWithFallback(c, "agent_session", "codex", "type", ""),
+		AgentCommand:           getStringWithFallback(c, "agent_session", "codex", "command", "codex app-server"),
+		AgentApprovalPolicy:    getStringWithFallback(c, "agent_session", "codex", "approval_policy", ""),
+		AgentThreadSandbox:     getStringWithFallback(c, "agent_session", "codex", "thread_sandbox", ""),
+		AgentTurnSandboxPolicy: getStringWithFallback(c, "agent_session", "codex", "turn_sandbox_policy", ""),
+		AgentTurnTimeoutMs:     getIntWithFallback(c, "agent_session", "codex", "turn_timeout_ms", 3600000),
+		AgentReadTimeoutMs:     getIntWithFallback(c, "agent_session", "codex", "read_timeout_ms", 5000),
+		AgentStallTimeoutMs:    getIntWithFallback(c, "agent_session", "codex", "stall_timeout_ms", 300000),
 	}
 
 	// Non-positive hook timeout falls back to default (Spec Section 5.3.4).
@@ -299,4 +302,28 @@ func getIntMap(config map[string]any, section, key string) map[string]int {
 		return nil
 	}
 	return result
+}
+
+// getStringWithFallback tries the primary section first, then falls back to the
+// fallback section. This supports backward-compat: new configs use "agent_session"
+// while old configs use "codex".
+func getStringWithFallback(config map[string]any, primary, fallback, key, defaultVal string) string {
+	if v := getString(config, primary, key, ""); v != "" {
+		return v
+	}
+	return getString(config, fallback, key, defaultVal)
+}
+
+// getIntWithFallback tries the primary section first, then falls back to the
+// fallback section.
+func getIntWithFallback(config map[string]any, primary, fallback, key string, defaultVal int) int {
+	if _, ok := config[primary]; ok {
+		sec, _ := config[primary].(map[string]any)
+		if sec != nil {
+			if _, ok := sec[key]; ok {
+				return getInt(config, primary, key, defaultVal)
+			}
+		}
+	}
+	return getInt(config, fallback, key, defaultVal)
 }

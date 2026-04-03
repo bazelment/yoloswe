@@ -1,24 +1,11 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "agent",
     srcs = [
-        "approval.go",
+        "agent.go",
         "events.go",
-        "process.go",
-        "protocol.go",
-        "session.go",
     ],
     importpath = "github.com/bazelment/yoloswe/symphony/agent",
     visibility = ["//visibility:public"],
-    deps = ["//symphony/model"],
-)
-
-go_test(
-    name = "agent_test",
-    srcs = [
-        "events_test.go",
-        "protocol_test.go",
-    ],
-    embed = [":agent"],
 )

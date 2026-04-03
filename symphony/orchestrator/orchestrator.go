@@ -22,8 +22,8 @@ type WorkerResult struct {
 	Duration   time.Duration
 }
 
-// CodexUpdate is sent from a worker goroutine to the orchestrator on agent events.
-type CodexUpdate struct {
+// AgentUpdate is sent from a worker goroutine to the orchestrator on agent events.
+type AgentUpdate struct {
 	IssueID string
 	Event   agent.Event
 }
@@ -63,7 +63,7 @@ type Snapshot struct {
 	Running     []RunningSnapshot
 	Retrying    []RetrySnapshot
 	RateLimits  json.RawMessage
-	Totals      model.CodexTotals
+	Totals      model.AgentTotals
 }
 
 // RunningSnapshot is one running entry for the snapshot.
@@ -76,7 +76,7 @@ type RunningSnapshot struct {
 	SessionID       string
 	LastEvent       string
 	LastMessage     string
-	Tokens          model.CodexTotals
+	Tokens          model.AgentTotals
 	TurnCount       int
 }
 
@@ -97,7 +97,7 @@ type Orchestrator struct {
 	workerCancels map[string]context.CancelFunc // per-worker cancel, keyed by issue ID
 	claimed       map[string]struct{}
 	workerResults chan WorkerResult
-	codexUpdates  chan CodexUpdate
+	agentUpdates  chan AgentUpdate
 	retryTimers   chan retryFired
 	tickResults   chan tickResult
 	snapshotReqs  chan chan *Snapshot
@@ -109,7 +109,7 @@ type Orchestrator struct {
 	retryTimerMap map[string]Timer
 	cancel        context.CancelFunc
 	rateLimits    json.RawMessage
-	totals        model.CodexTotals
+	totals        model.AgentTotals
 	wg            sync.WaitGroup
 	nextGen       uint64
 }
@@ -122,7 +122,7 @@ func New(cfgFn func() *config.ServiceConfig, t tracker.Tracker, clock Clock, log
 		clock:         clock,
 		logger:        logger,
 		workerResults: make(chan WorkerResult, 64),
-		codexUpdates:  make(chan CodexUpdate, 256),
+		agentUpdates:  make(chan AgentUpdate, 256),
 		retryTimers:   make(chan retryFired, 64),
 		tickResults:   make(chan tickResult, 1),
 		snapshotReqs:  make(chan chan *Snapshot, 8),
@@ -180,8 +180,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		case result := <-o.workerResults:
 			o.handleWorkerExit(result)
 
-		case update := <-o.codexUpdates:
-			o.handleCodexUpdate(update)
+		case update := <-o.agentUpdates:
+			o.handleAgentUpdate(update)
 
 		case rf := <-o.retryTimers:
 			o.handleRetryFired(ctx, rf)

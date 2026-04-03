@@ -14,7 +14,7 @@ type stateResponse struct {
 	Running     []runningJSON   `json:"running"`
 	Retrying    []retryJSON     `json:"retrying"`
 	RateLimits  json.RawMessage `json:"rate_limits"`
-	CodexTotals codexTotalsJSON `json:"codex_totals"`
+	AgentTotals agentTotalsJSON `json:"agent_totals"`
 }
 
 type runningJSON struct {
@@ -26,7 +26,7 @@ type runningJSON struct {
 	LastEvent       string          `json:"last_event"`
 	LastMessage     string          `json:"last_message"`
 	StartedAt       string          `json:"started_at"`
-	Tokens          codexTotalsJSON `json:"tokens"`
+	Tokens          agentTotalsJSON `json:"tokens"`
 	TurnCount       int             `json:"turn_count"`
 }
 
@@ -38,7 +38,7 @@ type retryJSON struct {
 	Attempt         int    `json:"attempt"`
 }
 
-type codexTotalsJSON struct {
+type agentTotalsJSON struct {
 	InputTokens    int64   `json:"input_tokens"`
 	OutputTokens   int64   `json:"output_tokens"`
 	TotalTokens    int64   `json:"total_tokens"`
@@ -78,7 +78,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			LastEvent:       rs.LastEvent,
 			LastMessage:     rs.LastMessage,
 			StartedAt:       rs.StartedAt.UTC().Format(time.RFC3339),
-			Tokens: codexTotalsJSON{
+			Tokens: agentTotalsJSON{
 				InputTokens:  rs.Tokens.InputTokens,
 				OutputTokens: rs.Tokens.OutputTokens,
 				TotalTokens:  rs.Tokens.TotalTokens,
@@ -110,7 +110,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		},
 		Running:  running,
 		Retrying: retrying,
-		CodexTotals: codexTotalsJSON{
+		AgentTotals: agentTotalsJSON{
 			InputTokens:    snap.Totals.InputTokens,
 			OutputTokens:   snap.Totals.OutputTokens,
 			TotalTokens:    snap.Totals.TotalTokens,
@@ -154,7 +154,7 @@ func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 				LastEvent:       rs.LastEvent,
 				LastMessage:     rs.LastMessage,
 				StartedAt:       rs.StartedAt.UTC().Format(time.RFC3339),
-				Tokens: codexTotalsJSON{
+				Tokens: agentTotalsJSON{
 					InputTokens:  rs.Tokens.InputTokens,
 					OutputTokens: rs.Tokens.OutputTokens,
 					TotalTokens:  rs.Tokens.TotalTokens,

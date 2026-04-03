@@ -1,7 +1,7 @@
-// Package agent implements the Codex app-server client for Symphony.
+// Package codex implements the Codex app-server client for Symphony.
 // Symphony owns the subprocess lifecycle and JSON-RPC protocol directly,
 // launching via `bash -lc <command>` per spec Section 10.1.
-package agent
+package codex
 
 import (
 	"bufio"

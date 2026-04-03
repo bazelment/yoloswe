@@ -95,7 +95,7 @@ func TestValidateForDispatch_MissingProjectSlug(t *testing.T) {
 	}
 }
 
-func TestValidateForDispatch_EmptyCodexCommand(t *testing.T) {
+func TestValidateForDispatch_EmptyAgentCommand(t *testing.T) {
 	cfg := NewServiceConfig(&model.WorkflowDefinition{
 		Config: map[string]any{
 			"tracker": map[string]any{
@@ -111,6 +111,6 @@ func TestValidateForDispatch_EmptyCodexCommand(t *testing.T) {
 
 	err := ValidateForDispatch(cfg)
 	if err == nil {
-		t.Fatal("expected error for empty codex command")
+		t.Fatal("expected error for empty agent command")
 	}
 }

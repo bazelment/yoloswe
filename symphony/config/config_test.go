@@ -29,17 +29,17 @@ func TestNewServiceConfig_Defaults(t *testing.T) {
 	if cfg.HookTimeoutMs != 60000 {
 		t.Errorf("HookTimeoutMs = %d, want 60000", cfg.HookTimeoutMs)
 	}
-	if cfg.CodexCommand != "codex app-server" {
-		t.Errorf("CodexCommand = %q, want codex app-server", cfg.CodexCommand)
+	if cfg.AgentCommand != "codex app-server" {
+		t.Errorf("AgentCommand = %q, want codex app-server", cfg.AgentCommand)
 	}
-	if cfg.CodexTurnTimeoutMs != 3600000 {
-		t.Errorf("CodexTurnTimeoutMs = %d, want 3600000", cfg.CodexTurnTimeoutMs)
+	if cfg.AgentTurnTimeoutMs != 3600000 {
+		t.Errorf("AgentTurnTimeoutMs = %d, want 3600000", cfg.AgentTurnTimeoutMs)
 	}
-	if cfg.CodexReadTimeoutMs != 5000 {
-		t.Errorf("CodexReadTimeoutMs = %d, want 5000", cfg.CodexReadTimeoutMs)
+	if cfg.AgentReadTimeoutMs != 5000 {
+		t.Errorf("AgentReadTimeoutMs = %d, want 5000", cfg.AgentReadTimeoutMs)
 	}
-	if cfg.CodexStallTimeoutMs != 300000 {
-		t.Errorf("CodexStallTimeoutMs = %d, want 300000", cfg.CodexStallTimeoutMs)
+	if cfg.AgentStallTimeoutMs != 300000 {
+		t.Errorf("AgentStallTimeoutMs = %d, want 300000", cfg.AgentStallTimeoutMs)
 	}
 	if cfg.WorkspaceRoot != filepath.Join(os.TempDir(), "symphony_workspaces") {
 		t.Errorf("WorkspaceRoot = %q", cfg.WorkspaceRoot)

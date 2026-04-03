@@ -60,18 +60,19 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 
 	// 4. Start agent session.
 	sessionCfg := agent.SessionConfig{
-		Command:           cfg.CodexCommand,
+		Type:              cfg.AgentType,
+		Command:           cfg.AgentCommand,
 		WorkDir:           ws.Path,
-		ApprovalPolicy:    cfg.CodexApprovalPolicy,
-		ThreadSandbox:     cfg.CodexThreadSandbox,
-		TurnSandboxPolicy: cfg.CodexTurnSandboxPolicy,
-		TurnTimeoutMs:     cfg.CodexTurnTimeoutMs,
-		ReadTimeoutMs:     cfg.CodexReadTimeoutMs,
+		ApprovalPolicy:    cfg.AgentApprovalPolicy,
+		ThreadSandbox:     cfg.AgentThreadSandbox,
+		TurnSandboxPolicy: cfg.AgentTurnSandboxPolicy,
+		TurnTimeoutMs:     cfg.AgentTurnTimeoutMs,
+		ReadTimeoutMs:     cfg.AgentReadTimeoutMs,
 		IssueIdentifier:   issue.Identifier,
 		IssueTitle:        issue.Title,
 	}
 
-	session, err := agent.NewSession(ctx, sessionCfg, logger)
+	session, err := newAgent(ctx, sessionCfg, logger)
 	if err != nil {
 		logger.Error("agent session start failed", "error", err)
 		runAfterRunHook(cfg, ws.Path, logger)
@@ -82,7 +83,7 @@ func (o *Orchestrator) runWorker(ctx context.Context, issue model.Issue, attempt
 
 	// Event callback sends updates to orchestrator.
 	onEvent := func(ev agent.Event) {
-		o.codexUpdates <- CodexUpdate{IssueID: issue.ID, Event: ev}
+		o.agentUpdates <- AgentUpdate{IssueID: issue.ID, Event: ev}
 	}
 
 	// 5. Turn loop (up to max_turns). Spec Section 7.1.

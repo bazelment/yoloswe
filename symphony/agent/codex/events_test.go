@@ -1,8 +1,10 @@
-package agent
+package codex
 
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/bazelment/yoloswe/symphony/agent"
 )
 
 func TestExtractEvent_TurnCompleted(t *testing.T) {
@@ -21,7 +23,7 @@ func TestExtractEvent_TurnCompleted(t *testing.T) {
 	}
 
 	ev := ExtractEvent(msg)
-	if ev.Type != EventTurnCompleted {
+	if ev.Type != agent.EventTurnCompleted {
 		t.Errorf("Type = %q, want turn_completed", ev.Type)
 	}
 	if ev.InputTokens != 1000 {
@@ -66,7 +68,7 @@ func TestExtractEvent_TokenUsageUpdated(t *testing.T) {
 	}
 
 	ev := ExtractEvent(msg)
-	if ev.Type != EventTokenUsage {
+	if ev.Type != agent.EventTokenUsage {
 		t.Errorf("Type = %q, want token_usage", ev.Type)
 	}
 	if ev.TotalTokens != 7500 {
@@ -78,7 +80,7 @@ func TestExtractEvent_TurnFailed(t *testing.T) {
 	t.Parallel()
 	msg := &Message{Method: "turn/failed"}
 	ev := ExtractEvent(msg)
-	if ev.Type != EventTurnFailed {
+	if ev.Type != agent.EventTurnFailed {
 		t.Errorf("Type = %q, want turn_failed", ev.Type)
 	}
 }
@@ -87,7 +89,7 @@ func TestExtractEvent_TurnCancelled(t *testing.T) {
 	t.Parallel()
 	msg := &Message{Method: "turn/cancelled"}
 	ev := ExtractEvent(msg)
-	if ev.Type != EventTurnCancelled {
+	if ev.Type != agent.EventTurnCancelled {
 		t.Errorf("Type = %q, want turn_cancelled", ev.Type)
 	}
 }
@@ -99,7 +101,7 @@ func TestExtractEvent_Notification(t *testing.T) {
 		Params: json.RawMessage(`{"message": "Working on tests"}`),
 	}
 	ev := ExtractEvent(msg)
-	if ev.Type != EventNotification {
+	if ev.Type != agent.EventNotification {
 		t.Errorf("Type = %q, want notification", ev.Type)
 	}
 	if ev.Message != "Working on tests" {
@@ -111,7 +113,7 @@ func TestExtractEvent_Unknown(t *testing.T) {
 	t.Parallel()
 	msg := &Message{Method: "some/other/method"}
 	ev := ExtractEvent(msg)
-	if ev.Type != EventOther {
+	if ev.Type != agent.EventOther {
 		t.Errorf("Type = %q, want other_message", ev.Type)
 	}
 }

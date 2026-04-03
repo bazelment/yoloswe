@@ -111,9 +111,9 @@ func (o *Orchestrator) handleWorkerExit(result WorkerResult) {
 		o.totals.SecondsRunning += result.Duration.Seconds()
 
 		// Add per-session tokens to aggregate.
-		o.totals.InputTokens += entry.Session.CodexInputTokens
-		o.totals.OutputTokens += entry.Session.CodexOutputTokens
-		o.totals.TotalTokens += entry.Session.CodexTotalTokens
+		o.totals.InputTokens += entry.Session.InputTokens
+		o.totals.OutputTokens += entry.Session.OutputTokens
+		o.totals.TotalTokens += entry.Session.TotalTokens
 
 		delete(o.running, result.IssueID)
 
@@ -183,21 +183,21 @@ func (o *Orchestrator) handleWorkerExit(result WorkerResult) {
 	}
 }
 
-// handleCodexUpdate processes a codex event from a worker.
-func (o *Orchestrator) handleCodexUpdate(update CodexUpdate) {
+// handleAgentUpdate processes an agent event from a worker.
+func (o *Orchestrator) handleAgentUpdate(update AgentUpdate) {
 	entry, ok := o.running[update.IssueID]
 	if !ok {
 		return
 	}
 
 	now := o.clock.Now()
-	entry.Session.LastCodexTimestamp = &now
+	entry.Session.LastAgentTimestamp = &now
 	if string(update.Event.Type) != "" {
 		eventStr := string(update.Event.Type)
-		entry.Session.LastCodexEvent = &eventStr
+		entry.Session.LastAgentEvent = &eventStr
 	}
 	if update.Event.Message != "" {
-		entry.Session.LastCodexMessage = update.Event.Message
+		entry.Session.LastAgentMessage = update.Event.Message
 	}
 
 	// Propagate session identity from the session_started event.
@@ -221,14 +221,14 @@ func (o *Orchestrator) handleCodexUpdate(update CodexUpdate) {
 		outputDelta := update.Event.OutputTokens - entry.Session.LastReportedOutputToks
 
 		if inputDelta > 0 {
-			entry.Session.CodexInputTokens += inputDelta
+			entry.Session.InputTokens += inputDelta
 			entry.Session.LastReportedInputToks = update.Event.InputTokens
 		}
 		if outputDelta > 0 {
-			entry.Session.CodexOutputTokens += outputDelta
+			entry.Session.OutputTokens += outputDelta
 			entry.Session.LastReportedOutputToks = update.Event.OutputTokens
 		}
-		entry.Session.CodexTotalTokens = entry.Session.CodexInputTokens + entry.Session.CodexOutputTokens
+		entry.Session.TotalTokens = entry.Session.InputTokens + entry.Session.OutputTokens
 		entry.Session.LastReportedTotalToks = update.Event.TotalTokens
 	}
 
@@ -305,7 +305,7 @@ func (o *Orchestrator) terminateRunning(issueID string, cleanWorkspace bool, cfg
 		"cleanup", cleanWorkspace,
 	)
 
-	// Cancel the per-worker context to stop the Codex subprocess promptly.
+	// Cancel the per-worker context to stop the agent subprocess promptly.
 	if cancel, ok := o.workerCancels[issueID]; ok {
 		cancel()
 		delete(o.workerCancels, issueID)
@@ -331,17 +331,17 @@ func (o *Orchestrator) buildSnapshot() *Snapshot {
 			State:           entry.Issue.State,
 			SessionID:       entry.Session.SessionID,
 			TurnCount:       entry.Session.TurnCount,
-			LastMessage:     entry.Session.LastCodexMessage,
+			LastMessage:     entry.Session.LastAgentMessage,
 			StartedAt:       entry.StartedAt,
-			LastEventAt:     entry.Session.LastCodexTimestamp,
-			Tokens: model.CodexTotals{
-				InputTokens:  entry.Session.CodexInputTokens,
-				OutputTokens: entry.Session.CodexOutputTokens,
-				TotalTokens:  entry.Session.CodexTotalTokens,
+			LastEventAt:     entry.Session.LastAgentTimestamp,
+			Tokens: model.AgentTotals{
+				InputTokens:  entry.Session.InputTokens,
+				OutputTokens: entry.Session.OutputTokens,
+				TotalTokens:  entry.Session.TotalTokens,
 			},
 		}
-		if entry.Session.LastCodexEvent != nil {
-			rs.LastEvent = *entry.Session.LastCodexEvent
+		if entry.Session.LastAgentEvent != nil {
+			rs.LastEvent = *entry.Session.LastAgentEvent
 		}
 		running = append(running, rs)
 	}

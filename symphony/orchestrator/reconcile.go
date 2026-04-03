@@ -14,17 +14,17 @@ func (o *Orchestrator) reconcileAndFetch(ctx context.Context, cfg *config.Servic
 	var actions []reconcileAction
 
 	// Part A: Stall detection. Spec Section 8.5 Part A.
-	if cfg.CodexStallTimeoutMs > 0 {
+	if cfg.AgentStallTimeoutMs > 0 {
 		now := o.clock.Now()
 		for issueID, entry := range runningSnapshot {
 			var elapsed int64
-			if entry.Session.LastCodexTimestamp != nil {
-				elapsed = now.Sub(*entry.Session.LastCodexTimestamp).Milliseconds()
+			if entry.Session.LastAgentTimestamp != nil {
+				elapsed = now.Sub(*entry.Session.LastAgentTimestamp).Milliseconds()
 			} else {
 				elapsed = now.Sub(entry.StartedAt).Milliseconds()
 			}
 
-			if elapsed > int64(cfg.CodexStallTimeoutMs) {
+			if elapsed > int64(cfg.AgentStallTimeoutMs) {
 				actions = append(actions, reconcileAction{
 					IssueID: issueID,
 					Action:  reconcileStalled,

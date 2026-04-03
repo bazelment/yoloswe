@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "codex",
+    srcs = [
+        "approval.go",
+        "events.go",
+        "process.go",
+        "protocol.go",
+        "session.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/symphony/agent/codex",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//symphony/agent",
+        "//symphony/model",
+    ],
+)
+
+go_test(
+    name = "codex_test",
+    srcs = [
+        "events_test.go",
+        "protocol_test.go",
+    ],
+    embed = [":codex"],
+    deps = ["//symphony/agent"],
+)
