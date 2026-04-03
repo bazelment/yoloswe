@@ -25,6 +25,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/multiagent/agent"
+	"github.com/bazelment/yoloswe/voice/tts/elevenlabs"
 	"github.com/bazelment/yoloswe/wt"
 	"github.com/bazelment/yoloswe/yoloswe"
 )
@@ -36,6 +37,11 @@ var (
 	tmuxExitOnQuit  bool
 	protocolLogDir  string
 	yoloFlag        bool
+	// Voice reporting flags.
+	enableVoiceReports bool
+	elevenLabsAPIKey   string
+	ttsVoice           string
+	voiceReportMode    string
 )
 
 var rootCmd = &cobra.Command{
@@ -67,6 +73,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&tmuxExitOnQuit, "tmux-exit-on-quit", false, "Kill Bramble-created tmux windows when quitting Bramble")
 	rootCmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for provider protocol/stderr logs (optional; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 	rootCmd.Flags().BoolVar(&yoloFlag, "yolo", false, "Skip all permission prompts (dangerous!)")
+	rootCmd.Flags().BoolVar(&enableVoiceReports, "enable-voice-reports", false, "Enable voice reporting on session completion (requires ELEVENLABS_API_KEY)")
+	rootCmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
+	rootCmd.Flags().StringVar(&ttsVoice, "tts-voice", "", "ElevenLabs voice ID for TTS synthesis")
+	rootCmd.Flags().StringVar(&voiceReportMode, "voice-report-mode", "auto", "Voice report playback mode: local, file, or auto")
 }
 
 func main() {
@@ -220,6 +230,23 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Create and run TUI
 	model := app.NewModel(ctx, wtRoot, repoName, editor, sessionManager, taskRouter, worktrees, termWidth, termHeight, providerAvailability, modelRegistry, sharedManagerConfig, resumeRepos)
+
+	// Wire up voice reporting if requested.
+	if enableVoiceReports {
+		voiceCfg := &session.VoiceReportingConfig{
+			Enabled: true,
+			Mode:    voiceReportMode,
+			Voice:   ttsVoice,
+		}
+		provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
+		if err != nil {
+			log.Printf("Warning: voice reports disabled: %v", err)
+		} else {
+			handler := app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), "")
+			model.SetVoiceReporting(provider, handler, voiceCfg)
+		}
+	}
+
 	p := tea.NewProgram(model)
 
 	finalModel, err := p.Run()

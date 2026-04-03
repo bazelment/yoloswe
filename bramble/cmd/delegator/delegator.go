@@ -16,6 +16,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/voice/tts"
@@ -232,6 +233,7 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 		cfg.ProtocolLogDir = logDir
 	}
 	var voiceTTS tts.TextToSpeech
+	var voicePlayback app.PlaybackHandler
 	if enableVoiceReports {
 		cfg.VoiceReporting = &session.VoiceReportingConfig{
 			Enabled: true,
@@ -244,8 +246,13 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			cfg.VoiceReporting = nil
 		} else {
 			voiceTTS = provider
+			voicePlayback = app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), "")
 		}
 	}
+
+	// voiceWG tracks in-flight voice report goroutines so runReal can wait for
+	// them to finish before returning (preventing premature process exit).
+	var voiceWG sync.WaitGroup
 
 	m := session.NewManagerWithConfig(cfg)
 	defer m.Close()
@@ -479,11 +486,15 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 					}
 
 					// Trigger voice report for terminal session states.
-					if voiceTTS != nil && cfg.VoiceReporting != nil {
+					if voiceTTS != nil && voicePlayback != nil && cfg.VoiceReporting != nil {
 						switch e.NewStatus {
 						case session.StatusCompleted, session.StatusFailed, session.StatusStopped:
 							if info, ok := m.GetSessionInfo(e.SessionID); ok {
-								go reportVoice(voiceTTS, cfg.VoiceReporting, info)
+								voiceWG.Add(1)
+								go func(i session.SessionInfo) {
+									defer voiceWG.Done()
+									reportVoice(voiceTTS, voicePlayback, cfg.VoiceReporting, i)
+								}(info)
 							}
 						}
 					}
@@ -639,6 +650,10 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 	if logDir != "" {
 		fmt.Fprintf(os.Stderr, "\nSession JSONL logs saved to: %s\n", logDir)
 	}
+
+	// Wait for any in-flight voice report goroutines to finish before exiting.
+	voiceWG.Wait()
+
 	return nil
 }
 
@@ -830,39 +845,12 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 
 // reportVoice synthesizes and plays a voice summary for a completed session.
 // Called as a goroutine to avoid blocking the event loop.
-func reportVoice(provider tts.TextToSpeech, cfg *session.VoiceReportingConfig, info session.SessionInfo) {
-	summaryText := session.GenerateSummary(info)
-
+// It delegates to app.SynthesizeAndPlay which handles synthesis, playback, and
+// temp-file cleanup, so no manual file management is needed here.
+func reportVoice(provider tts.TextToSpeech, handler app.PlaybackHandler, cfg *session.VoiceReportingConfig, info session.SessionInfo) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	audio, err := provider.Synthesize(ctx, summaryText, tts.SynthOpts{
-		Voice: cfg.Voice,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "voice report: synthesis failed for session %s: %v\n", info.ID, err)
-		return
-	}
-
-	// Write audio to a temp file for playback or archival.
-	tmpFile, writeErr := os.CreateTemp("", "bramble-voice-*."+audio.Format)
-	if writeErr != nil {
-		fmt.Fprintf(os.Stderr, "voice report: create temp file: %v\n", writeErr)
-		return
-	}
-	if _, writeErr = tmpFile.Write(audio.Data); writeErr != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		fmt.Fprintf(os.Stderr, "voice report: write audio: %v\n", writeErr)
-		return
-	}
-	tmpFile.Close()
-
-	title := info.Title
-	if title == "" {
-		title = string(info.ID)
-	}
-	fmt.Fprintf(os.Stderr, "Voice report for %s: %s\n", title, tmpFile.Name())
+	app.SynthesizeAndPlay(ctx, provider, handler, cfg, info)
 }
 
 // parseBehaviors parses the --behavior flag value.

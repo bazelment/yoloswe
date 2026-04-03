@@ -4,7 +4,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -226,33 +225,14 @@ func (m *Model) reportSessionVoice(info session.SessionInfo) {
 		return
 	}
 
-	summaryText := session.GenerateSummary(info)
+	provider := m.ttsProvider
+	handler := m.playbackHandler
+	cfg := m.voiceReportingOpts
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), synthesisTimeout)
 		defer cancel()
-
-		var synthVoice string
-		if m.voiceReportingOpts != nil {
-			synthVoice = m.voiceReportingOpts.Voice
-		}
-		audio, err := m.ttsProvider.Synthesize(ctx, summaryText, tts.SynthOpts{
-			Voice: synthVoice,
-		})
-		if err != nil {
-			log.Printf("voice report: synthesis failed for session %s: %v", info.ID, err)
-			return
-		}
-
-		result, err := m.playbackHandler.Play(ctx, audio.Data, audio.Format)
-		if err != nil {
-			log.Printf("voice report: playback failed for session %s: %v", info.ID, err)
-			return
-		}
-
-		if result != nil && result.FilePath != "" {
-			log.Printf("voice report: saved to %s", result.FilePath)
-		}
+		SynthesizeAndPlay(ctx, provider, handler, cfg, info)
 	}()
 }
 

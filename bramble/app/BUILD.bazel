@@ -27,6 +27,7 @@ go_library(
         "toast.go",
         "update.go",
         "view.go",
+        "voicereport.go",
         "welcome.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/app",
