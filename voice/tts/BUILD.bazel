@@ -1,0 +1,11 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "tts",
+    srcs = [
+        "tts.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/voice/tts",
+    visibility = ["//visibility:public"],
+)

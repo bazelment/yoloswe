@@ -305,6 +305,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if rc, ok := m.repos[msg.repoName]; ok {
 			rc.sessions = rc.sessionManager.GetAllSessions()
 		}
+
+		// Trigger voice reporting on session completion.
+		if stateEvt, ok := msg.event.(session.SessionStateChangeEvent); ok {
+			switch stateEvt.NewStatus {
+			case session.StatusCompleted, session.StatusFailed, session.StatusStopped:
+				if m.ttsProvider != nil {
+					// Look up the session info for the voice report.
+					mgr := m.sessionManager
+					if msg.repoName != m.repoName {
+						if rc, ok := m.repos[msg.repoName]; ok {
+							mgr = rc.sessionManager
+						}
+					}
+					if mgr != nil {
+						if info, ok := mgr.GetSessionInfo(stateEvt.SessionID); ok {
+							title := info.Title
+							if title == "" {
+								title = string(info.ID)
+							}
+							m.reportSessionVoice(info)
+							cmds = append(cmds, m.addToast(
+								fmt.Sprintf("Voice report for %s", title), ToastInfo))
+						}
+					}
+				}
+			}
+		}
+
 		// Auto-refresh command center if visible.
 		m.refreshCommandCenter()
 		cmds = append(cmds, m.listenForSessionEvents())

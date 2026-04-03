@@ -4,6 +4,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/multiagent/agent"
+	"github.com/bazelment/yoloswe/voice/tts"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -36,7 +38,7 @@ const (
 )
 
 // Model is the root application model.
-type Model struct {
+type Model struct { //nolint:govet // fieldalignment: readability over packing
 	settings              Settings
 	ctx                   context.Context
 	toasts                *ToastManager
@@ -94,6 +96,9 @@ type Model struct {
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
+	// Voice reporting fields.
+	ttsProvider     tts.TextToSpeech
+	playbackHandler PlaybackHandler
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -203,6 +208,44 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	go fanInEvents(m.ctx, repoName, sessionManager, sharedEvents)
 
 	return m
+}
+
+// SetVoiceReporting configures voice reporting on the model.
+// Must be called after NewModel and before Init.
+func (m *Model) SetVoiceReporting(provider tts.TextToSpeech, handler PlaybackHandler) {
+	m.ttsProvider = provider
+	m.playbackHandler = handler
+}
+
+// reportSessionVoice synthesizes and plays a voice summary for a completed session.
+// Runs in a background goroutine to avoid blocking the TUI event loop.
+func (m *Model) reportSessionVoice(info session.SessionInfo) {
+	if m.ttsProvider == nil || m.playbackHandler == nil {
+		return
+	}
+
+	summaryText := session.GenerateSummary(info)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		audio, err := m.ttsProvider.Synthesize(ctx, summaryText, tts.SynthOpts{})
+		if err != nil {
+			log.Printf("voice report: synthesis failed for session %s: %v", info.ID, err)
+			return
+		}
+
+		result, err := m.playbackHandler.Play(ctx, audio.Data, audio.Format)
+		if err != nil {
+			log.Printf("voice report: playback failed for session %s: %v", info.ID, err)
+			return
+		}
+
+		if result != nil && result.FilePath != "" {
+			log.Printf("voice report: saved to %s", result.FilePath)
+		}
+	}()
 }
 
 // Init initializes the model.

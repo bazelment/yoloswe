@@ -445,6 +445,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ChildModel overrides the default model for child sessions spawned by
 	// the delegator. If empty, children default to the delegator's own model.
 	ChildModel string
+	// VoiceReporting configures voice reporting for session completions.
+	// If nil, voice reporting is disabled.
+	VoiceReporting *VoiceReportingConfig
 }
 
 // Manager handles multiple concurrent sessions.

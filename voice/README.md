@@ -1,14 +1,16 @@
 # Voice
 
-Speech-to-text package with a provider-agnostic streaming interface. Currently implements Deepgram's WebSocket API for real-time transcription with voice activity detection.
+Speech-to-text and text-to-speech packages with provider-agnostic interfaces. Currently implements Deepgram's WebSocket API for real-time transcription and ElevenLabs HTTP API for speech synthesis.
 
 ## Packages
 
 | Package | Purpose |
 |---------|---------|
-| `stt` | Core interfaces (`StreamingTranscriber`, `Session`) and types (`Event`, `AudioConfig`) |
+| `stt` | Core STT interfaces (`StreamingTranscriber`, `Session`) and types (`Event`, `AudioConfig`) |
 | `stt/deepgram` | Deepgram WebSocket streaming implementation |
 | `stt/logging` | JSONL event logger for session analysis and latency measurement |
+| `tts` | Core TTS interface (`TextToSpeech`) and types (`Audio`, `SynthOpts`) |
+| `tts/elevenlabs` | ElevenLabs HTTP API implementation |
 | `cmd/voicetest` | CLI tool for testing transcription end-to-end |
 
 ## How It Works
@@ -80,6 +82,36 @@ Output:
 [final] "hello world" (confidence: 0.95)
 [speech-end]
 ```
+
+## Text-to-Speech (TTS)
+
+The `tts` package provides a provider-agnostic interface for speech synthesis:
+
+```go
+provider, err := elevenlabs.NewProvider("") // reads ELEVENLABS_API_KEY from env
+audio, err := provider.Synthesize(ctx, "Hello world", tts.SynthOpts{
+    Voice: "custom-voice-id",  // optional, uses default voice if empty
+    Speed: 1.0,                // speech rate multiplier
+})
+// audio.Data contains MP3 bytes, audio.Format is "mp3"
+```
+
+### Adding a new TTS provider
+
+1. Create a new package under `tts/` (e.g., `tts/google/`)
+2. Implement the `tts.TextToSpeech` interface
+3. The `Synthesize` method should return `*tts.Audio` with the audio bytes and format
+
+### Voice Reporting in Bramble
+
+When `--enable-voice-reports` is set, bramble synthesizes a spoken summary whenever a session completes, fails, or is stopped. Configuration:
+
+- `--enable-voice-reports` — enable voice reports (default: false)
+- `--elevenlabs-api-key` — API key (or set `ELEVENLABS_API_KEY` env var)
+- `--tts-voice` — ElevenLabs voice ID
+- `--voice-report-mode` — `local` (system audio player), `file` (save to `~/.bramble/voice-reports/`), or `auto` (detect)
+
+For SSH sessions, use `--voice-report-mode file` to save reports locally for later playback.
 
 ## Thread Safety
 
