@@ -244,6 +244,39 @@ func TestNewServiceConfig_AgentSessionEmptyOverridesCodexFallback(t *testing.T) 
 	}
 }
 
+func TestNewServiceConfig_AgentSessionIntOverridesCodexFallback(t *testing.T) {
+	wf := &model.WorkflowDefinition{
+		Config: map[string]any{
+			"codex": map[string]any{
+				"turn_timeout_ms": 7200000,
+			},
+			"agent_session": map[string]any{
+				"turn_timeout_ms": 1800000,
+			},
+		},
+	}
+	cfg := NewServiceConfig(wf)
+
+	if cfg.AgentTurnTimeoutMs != 1800000 {
+		t.Errorf("AgentTurnTimeoutMs = %d, want 1800000 (agent_session should override codex)", cfg.AgentTurnTimeoutMs)
+	}
+}
+
+func TestNewServiceConfig_IntFallbackToCodex(t *testing.T) {
+	wf := &model.WorkflowDefinition{
+		Config: map[string]any{
+			"codex": map[string]any{
+				"turn_timeout_ms": 7200000,
+			},
+		},
+	}
+	cfg := NewServiceConfig(wf)
+
+	if cfg.AgentTurnTimeoutMs != 7200000 {
+		t.Errorf("AgentTurnTimeoutMs = %d, want 7200000 (should fall back to codex)", cfg.AgentTurnTimeoutMs)
+	}
+}
+
 func TestNewServiceConfig_NoServerPort(t *testing.T) {
 	wf := &model.WorkflowDefinition{
 		Config: map[string]any{},
