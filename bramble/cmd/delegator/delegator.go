@@ -243,6 +243,8 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 		voiceReporter = app.BuildVoiceReporter(elevenLabsAPIKey, ttsVoice, voiceReportMode, voiceSaveDir)
 		if voiceReporter == nil {
 			cfg.VoiceReporting = nil
+		} else {
+			defer voiceReporter.Close()
 		}
 	}
 

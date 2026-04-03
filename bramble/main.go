@@ -236,6 +236,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Wire up voice reporting if requested.
 	if enableVoiceReports {
 		if reporter := app.BuildVoiceReporter(elevenLabsAPIKey, ttsVoice, voiceReportMode, voiceSaveDir); reporter != nil {
+			defer reporter.Close()
 			model.SetVoiceReporter(reporter)
 		}
 	}
