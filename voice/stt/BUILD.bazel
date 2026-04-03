@@ -4,6 +4,7 @@ go_library(
     name = "stt",
     srcs = [
         "audio.go",
+        "fake_session.go",
         "stt.go",
         "types.go",
     ],
