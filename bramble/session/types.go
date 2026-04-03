@@ -311,6 +311,9 @@ type VoiceReportingConfig struct { //nolint:govet // fieldalignment: readability
 	// SaveDir is the directory for file-mode playback.
 	// Defaults to ~/.bramble/voice-reports/ if empty.
 	SaveDir string
+	// Voice is the provider-specific voice ID for TTS synthesis.
+	// If empty, the provider uses its default voice.
+	Voice string
 }
 
 // SessionOutputEvent is sent when session produces output.

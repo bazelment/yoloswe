@@ -14,6 +14,7 @@ go_library(
         "//agent-cli-wrapper/claude/render",
         "//bramble/session",
         "//multiagent/agent",
+        "//voice/tts",
         "//voice/tts/elevenlabs",
         "@com_github_ergochat_readline//:readline",
         "@com_github_spf13_cobra//:cobra",

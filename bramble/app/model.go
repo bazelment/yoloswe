@@ -97,8 +97,9 @@ type Model struct { //nolint:govet // fieldalignment: readability over packing
 	inputMode             bool
 	confirmQuit           bool
 	// Voice reporting fields.
-	ttsProvider     tts.TextToSpeech
-	playbackHandler PlaybackHandler
+	ttsProvider        tts.TextToSpeech
+	playbackHandler    PlaybackHandler
+	voiceReportingOpts *session.VoiceReportingConfig
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -212,9 +213,10 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 
 // SetVoiceReporting configures voice reporting on the model.
 // Must be called after NewModel and before Init.
-func (m *Model) SetVoiceReporting(provider tts.TextToSpeech, handler PlaybackHandler) {
+func (m *Model) SetVoiceReporting(provider tts.TextToSpeech, handler PlaybackHandler, cfg *session.VoiceReportingConfig) {
 	m.ttsProvider = provider
 	m.playbackHandler = handler
+	m.voiceReportingOpts = cfg
 }
 
 // reportSessionVoice synthesizes and plays a voice summary for a completed session.
@@ -230,7 +232,13 @@ func (m *Model) reportSessionVoice(info session.SessionInfo) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		audio, err := m.ttsProvider.Synthesize(ctx, summaryText, tts.SynthOpts{})
+		var synthVoice string
+		if m.voiceReportingOpts != nil {
+			synthVoice = m.voiceReportingOpts.Voice
+		}
+		audio, err := m.ttsProvider.Synthesize(ctx, summaryText, tts.SynthOpts{
+			Voice: synthVoice,
+		})
 		if err != nil {
 			log.Printf("voice report: synthesis failed for session %s: %v", info.ID, err)
 			return
