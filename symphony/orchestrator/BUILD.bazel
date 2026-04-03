@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "orchestrator",
     srcs = [
+        "agent_factory.go",
         "clock.go",
         "dispatch.go",
         "metrics.go",
@@ -17,6 +18,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//symphony/agent",
+        "//symphony/agent/codex",
         "//symphony/config",
         "//symphony/model",
         "//symphony/prompt",
@@ -28,11 +30,13 @@ go_library(
 go_test(
     name = "orchestrator_test",
     srcs = [
+        "agent_factory_test.go",
         "dispatch_test.go",
         "retry_test.go",
     ],
     embed = [":orchestrator"],
     deps = [
+        "//symphony/agent",
         "//symphony/config",
         "//symphony/model",
     ],

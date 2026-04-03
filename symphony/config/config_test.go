@@ -29,17 +29,17 @@ func TestNewServiceConfig_Defaults(t *testing.T) {
 	if cfg.HookTimeoutMs != 60000 {
 		t.Errorf("HookTimeoutMs = %d, want 60000", cfg.HookTimeoutMs)
 	}
-	if cfg.CodexCommand != "codex app-server" {
-		t.Errorf("CodexCommand = %q, want codex app-server", cfg.CodexCommand)
+	if cfg.AgentCommand != "codex app-server" {
+		t.Errorf("AgentCommand = %q, want codex app-server", cfg.AgentCommand)
 	}
-	if cfg.CodexTurnTimeoutMs != 3600000 {
-		t.Errorf("CodexTurnTimeoutMs = %d, want 3600000", cfg.CodexTurnTimeoutMs)
+	if cfg.AgentTurnTimeoutMs != 3600000 {
+		t.Errorf("AgentTurnTimeoutMs = %d, want 3600000", cfg.AgentTurnTimeoutMs)
 	}
-	if cfg.CodexReadTimeoutMs != 5000 {
-		t.Errorf("CodexReadTimeoutMs = %d, want 5000", cfg.CodexReadTimeoutMs)
+	if cfg.AgentReadTimeoutMs != 5000 {
+		t.Errorf("AgentReadTimeoutMs = %d, want 5000", cfg.AgentReadTimeoutMs)
 	}
-	if cfg.CodexStallTimeoutMs != 300000 {
-		t.Errorf("CodexStallTimeoutMs = %d, want 300000", cfg.CodexStallTimeoutMs)
+	if cfg.AgentStallTimeoutMs != 300000 {
+		t.Errorf("AgentStallTimeoutMs = %d, want 300000", cfg.AgentStallTimeoutMs)
 	}
 	if cfg.WorkspaceRoot != filepath.Join(os.TempDir(), "symphony_workspaces") {
 		t.Errorf("WorkspaceRoot = %q", cfg.WorkspaceRoot)
@@ -223,6 +223,57 @@ func TestNewServiceConfig_ServerPort(t *testing.T) {
 	}
 	if *cfg.ServerPort != 8080 {
 		t.Errorf("ServerPort = %d, want 8080", *cfg.ServerPort)
+	}
+}
+
+func TestNewServiceConfig_AgentSessionEmptyOverridesCodexFallback(t *testing.T) {
+	wf := &model.WorkflowDefinition{
+		Config: map[string]any{
+			"codex": map[string]any{
+				"approval_policy": "auto-edit",
+			},
+			"agent_session": map[string]any{
+				"approval_policy": "",
+			},
+		},
+	}
+	cfg := NewServiceConfig(wf)
+
+	if cfg.AgentApprovalPolicy != "" {
+		t.Errorf("AgentApprovalPolicy = %q, want empty (explicit override)", cfg.AgentApprovalPolicy)
+	}
+}
+
+func TestNewServiceConfig_AgentSessionIntOverridesCodexFallback(t *testing.T) {
+	wf := &model.WorkflowDefinition{
+		Config: map[string]any{
+			"codex": map[string]any{
+				"turn_timeout_ms": 7200000,
+			},
+			"agent_session": map[string]any{
+				"turn_timeout_ms": 1800000,
+			},
+		},
+	}
+	cfg := NewServiceConfig(wf)
+
+	if cfg.AgentTurnTimeoutMs != 1800000 {
+		t.Errorf("AgentTurnTimeoutMs = %d, want 1800000 (agent_session should override codex)", cfg.AgentTurnTimeoutMs)
+	}
+}
+
+func TestNewServiceConfig_IntFallbackToCodex(t *testing.T) {
+	wf := &model.WorkflowDefinition{
+		Config: map[string]any{
+			"codex": map[string]any{
+				"turn_timeout_ms": 7200000,
+			},
+		},
+	}
+	cfg := NewServiceConfig(wf)
+
+	if cfg.AgentTurnTimeoutMs != 7200000 {
+		t.Errorf("AgentTurnTimeoutMs = %d, want 7200000 (should fall back to codex)", cfg.AgentTurnTimeoutMs)
 	}
 }
 

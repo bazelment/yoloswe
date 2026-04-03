@@ -1,4 +1,4 @@
-package agent
+package codex
 
 import (
 	"context"
@@ -7,37 +7,26 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bazelment/yoloswe/symphony/agent"
 	"github.com/bazelment/yoloswe/symphony/model"
 )
 
 // Session manages a Codex app-server session lifecycle:
 // handshake, multi-turn on the same thread, turn timeout.
+// Implements agent.Agent.
 type Session struct {
 	process  *Process
 	protocol *Protocol
 	logger   *slog.Logger
 	threadID string
 	turnID   string
-	config   SessionConfig
-}
-
-// SessionConfig holds configuration for an agent session.
-type SessionConfig struct {
-	Command           string
-	WorkDir           string
-	ApprovalPolicy    string
-	ThreadSandbox     string
-	TurnSandboxPolicy string
-	IssueIdentifier   string
-	IssueTitle        string
-	TurnTimeoutMs     int
-	ReadTimeoutMs     int
+	config   agent.SessionConfig
 }
 
 // NewSession creates and starts a new Codex app-server session.
 // Performs the full handshake: initialize → initialized → thread/start.
 // Spec Section 10.2.
-func NewSession(ctx context.Context, cfg SessionConfig, logger *slog.Logger) (*Session, error) {
+func NewSession(ctx context.Context, cfg agent.SessionConfig, logger *slog.Logger) (*Session, error) {
 	proc, err := StartProcess(ctx, cfg.Command, cfg.WorkDir, logger)
 	if err != nil {
 		return nil, fmt.Errorf("codex_not_found: %w", err)
@@ -143,7 +132,7 @@ func (s *Session) handshake(ctx context.Context) error {
 // RunTurn starts a turn and streams events until completion.
 // Returns the turn result and any events collected.
 // Spec Section 10.3.
-func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(Event)) (TurnResult, error) {
+func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(agent.Event)) (agent.TurnResult, error) {
 	turnParams := map[string]any{
 		"threadId": s.threadID,
 		"input":    []map[string]any{{"type": "text", "text": prompt}},
@@ -160,9 +149,12 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(Event
 	// Send turn/start and get turn ID.
 	resp, err := s.protocol.Send("turn/start", turnParams)
 	if err != nil {
-		return TurnResult{Status: TurnFailed, Error: err}, err
+		return agent.TurnResult{Status: agent.TurnFailed, Error: err}, err
 	}
 
+	// Reset turnID before parsing so a missing ID in a later turn doesn't
+	// silently reuse the previous turn's value.
+	s.turnID = ""
 	if resp != nil && resp.Result != nil {
 		var result struct {
 			Turn struct {
@@ -181,7 +173,7 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(Event
 	s.logger.Info("turn started", "session_id", sessionID, "thread_id", s.threadID, "turn_id", s.turnID)
 
 	if onEvent != nil {
-		onEvent(Event{Type: EventSessionStarted, SessionID: sessionID, ThreadID: s.threadID, TurnID: s.turnID})
+		onEvent(agent.Event{Type: agent.EventSessionStarted, SessionID: sessionID, ThreadID: s.threadID, TurnID: s.turnID, PID: s.process.PID()})
 	}
 
 	// Stream events until turn completion.
@@ -200,7 +192,7 @@ type readResult struct {
 
 // streamTurn reads messages until turn completion.
 // Uses a goroutine for ReadMessage so the context can preempt blocking reads.
-func (s *Session) streamTurn(ctx context.Context, onEvent func(Event)) (TurnResult, error) {
+func (s *Session) streamTurn(ctx context.Context, onEvent func(agent.Event)) (agent.TurnResult, error) {
 	msgCh := make(chan readResult, 1)
 
 	// Start async reader.
@@ -216,12 +208,12 @@ func (s *Session) streamTurn(ctx context.Context, onEvent func(Event)) (TurnResu
 			// Distinguish between a context deadline (turn timeout) and an
 			// explicit cancellation (e.g. reconcile-driven termination).
 			if ctx.Err() == context.DeadlineExceeded {
-				return TurnResult{Status: TurnTimedOut, Error: fmt.Errorf("turn_timeout")}, ctx.Err()
+				return agent.TurnResult{Status: agent.TurnTimedOut, Error: fmt.Errorf("turn_timeout")}, ctx.Err()
 			}
-			return TurnResult{Status: TurnCancelled, Error: fmt.Errorf("turn_cancelled: %w", ctx.Err())}, ctx.Err()
+			return agent.TurnResult{Status: agent.TurnCancelled, Error: fmt.Errorf("turn_cancelled: %w", ctx.Err())}, ctx.Err()
 		case r := <-msgCh:
 			if r.err != nil {
-				return TurnResult{Status: TurnFailed, Error: fmt.Errorf("port_exit: %w", r.err)}, r.err
+				return agent.TurnResult{Status: agent.TurnFailed, Error: fmt.Errorf("port_exit: %w", r.err)}, r.err
 			}
 
 			event := ExtractEvent(r.msg)
@@ -231,11 +223,11 @@ func (s *Session) streamTurn(ctx context.Context, onEvent func(Event)) (TurnResu
 
 			switch r.msg.Method {
 			case "turn/completed":
-				return TurnResult{Status: TurnCompleted}, nil
+				return agent.TurnResult{Status: agent.TurnCompleted}, nil
 			case "turn/failed":
-				return TurnResult{Status: TurnFailed, Error: fmt.Errorf("turn_failed")}, nil
+				return agent.TurnResult{Status: agent.TurnFailed, Error: fmt.Errorf("turn_failed")}, nil
 			case "turn/cancelled":
-				return TurnResult{Status: TurnCancelled, Error: fmt.Errorf("turn_cancelled")}, nil
+				return agent.TurnResult{Status: agent.TurnCancelled, Error: fmt.Errorf("turn_cancelled")}, nil
 			}
 
 			// Handle approval requests and tool calls.
@@ -285,20 +277,4 @@ func (s *Session) PID() *int { return s.process.PID() }
 // Stop gracefully stops the session.
 func (s *Session) Stop() error {
 	return s.process.Stop()
-}
-
-// TurnStatus represents the outcome of a turn.
-type TurnStatus string
-
-const (
-	TurnCompleted TurnStatus = "completed"
-	TurnFailed    TurnStatus = "failed"
-	TurnTimedOut  TurnStatus = "timed_out"
-	TurnCancelled TurnStatus = "cancelled"
-)
-
-// TurnResult holds the outcome of a turn.
-type TurnResult struct {
-	Error  error
-	Status TurnStatus
 }

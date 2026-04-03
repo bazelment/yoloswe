@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/bazelment/yoloswe/symphony/agent"
+)
 
 // ValidationError represents a dispatch preflight validation failure.
 type ValidationError struct {
@@ -30,8 +34,14 @@ func ValidateForDispatch(cfg *ServiceConfig) error {
 		checks = append(checks, "tracker.project_slug is required for linear tracker")
 	}
 
-	if cfg.CodexCommand == "" {
-		checks = append(checks, "codex.command must be present and non-empty")
+	if cfg.AgentCommand == "" {
+		checks = append(checks, "agent command must be present and non-empty (set via agent_session.command or codex.command)")
+	}
+
+	// Validate agent type early so a typo like "codxe" fails at preflight,
+	// not after workspace/hook setup in the worker loop.
+	if !agent.IsValidAgentType(cfg.AgentType) {
+		checks = append(checks, fmt.Sprintf("unsupported agent_session.type: %q (supported: %q)", cfg.AgentType, agent.AgentTypeCodex))
 	}
 
 	if len(checks) > 0 {

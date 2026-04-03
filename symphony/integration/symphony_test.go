@@ -228,7 +228,7 @@ func TestDispatchAndComplete(t *testing.T) {
 	var stateResp map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&stateResp))
 	require.Contains(t, stateResp, "generated_at")
-	require.Contains(t, stateResp, "codex_totals")
+	require.Contains(t, stateResp, "agent_totals")
 
 	cancel()
 	select {
