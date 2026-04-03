@@ -130,16 +130,17 @@ func NewPlaybackHandler(mode PlaybackMode, saveDir string) PlaybackHandler {
 		mode = DetectPlaybackMode()
 	}
 
+	// Apply default save directory for any file-based playback.
+	if saveDir == "" {
+		home, _ := os.UserHomeDir()
+		saveDir = filepath.Join(home, ".bramble", "voice-reports")
+	}
+
 	switch mode {
 	case PlaybackModeLocal:
 		return &LocalPlayback{}
-	case PlaybackModeFile:
-		if saveDir == "" {
-			home, _ := os.UserHomeDir()
-			saveDir = filepath.Join(home, ".bramble", "voice-reports")
-		}
-		return &FilePlayback{Dir: saveDir}
 	default:
+		// PlaybackModeFile and any unrecognized mode fall through to file playback.
 		return &FilePlayback{Dir: saveDir}
 	}
 }
