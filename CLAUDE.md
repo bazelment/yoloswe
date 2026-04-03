@@ -72,23 +72,38 @@ Bramble supports optional voice reporting: when a session completes, fails, or i
 - **TTS interface**: `voice/tts/tts.go` — provider-agnostic `TextToSpeech` interface
 - **ElevenLabs provider**: `voice/tts/elevenlabs/` — first implementation
 - **Session summary**: `bramble/session/summary.go` — generates text summaries for voice synthesis
-- **Playback**: `bramble/app/playback.go` — local audio player, file save, or auto-detect
+- **VoiceReporter**: `bramble/app/voicereport.go` — orchestrates reporting (TTS + playback or redirect)
+- **Playback**: `bramble/app/playback.go` — direct audio player, file save, redirect, or auto-detect
+- **Player**: `voice/playback/player.go` — MP3 playback via system audio players (ffplay, afplay)
+- **Speak CLI**: `bramble/cmd/speak/speak.go` — `bramble speak` reads stdin, synthesizes, and plays
 - **Integration**: hooked into `repoSessionEventMsg` in `bramble/app/update.go`
 
 ### Configuration
 
 - `--enable-voice-reports` flag on delegator (default: false)
 - `ELEVENLABS_API_KEY` env var or `--elevenlabs-api-key` flag
-- `--voice-report-mode`: `local` (system audio player), `file` (save to `~/.bramble/voice-reports/`), `auto` (detect)
+- `--voice-report-mode`: `direct`, `file`, `redirect`, or `auto` (`local` accepted as alias for `direct`)
 - `--tts-voice`: ElevenLabs voice ID override
 
 ### Playback modes
 
 | Mode | When to use | How it works |
 |------|-------------|--------------|
-| `local` | Desktop/local terminal | Plays via `ffplay`, `paplay`, `afplay`, or `aplay` |
-| `file` | SSH / no audio device | Saves MP3 to `~/.bramble/voice-reports/` |
-| `auto` | Default | Detects SSH vs local, picks best mode |
+| `direct` | Desktop/local terminal | Plays via `ffplay` or `afplay` |
+| `file` | Save for later | Saves MP3 to `~/.bramble/voice-reports/` |
+| `redirect` | SSH / remote | Writes text to `~/.bramble/voice-reports/voice-report-latest.txt` |
+| `auto` | Default | SSH → redirect, otherwise → direct |
+| `local` | (deprecated alias) | Same as `direct` |
+
+### SSH remote playback
+
+```
+# On remote server (bramble running with --voice-report-mode=redirect):
+# Voice reports write to ~/.bramble/voice-reports/voice-report-latest.txt
+
+# On local machine:
+ssh remote "cat ~/.bramble/voice-reports/voice-report-latest.txt" | bramble speak
+```
 
 ## Integration Tests and Gazelle
 

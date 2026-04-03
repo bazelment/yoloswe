@@ -9,6 +9,7 @@ go_library(
         "//bramble/app",
         "//bramble/cmd/codereview",
         "//bramble/cmd/delegator",
+        "//bramble/cmd/speak",
         "//bramble/ipc",
         "//bramble/session",
         "//bramble/taskrouter",

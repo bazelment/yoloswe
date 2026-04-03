@@ -14,7 +14,6 @@ import (
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/multiagent/agent"
-	"github.com/bazelment/yoloswe/voice/tts"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -95,10 +94,8 @@ type Model struct { //nolint:govet // fieldalignment: readability over packing
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
-	// Voice reporting fields.
-	ttsProvider        tts.TextToSpeech
-	playbackHandler    PlaybackHandler
-	voiceReportingOpts *session.VoiceReportingConfig
+	// Voice reporting.
+	voiceReporter *VoiceReporter
 }
 
 // NewModel creates a new root model for a specific repo.
@@ -210,29 +207,24 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	return m
 }
 
-// SetVoiceReporting configures voice reporting on the model.
+// SetVoiceReporter configures voice reporting on the model.
 // Must be called after NewModel and before Init.
-func (m *Model) SetVoiceReporting(provider tts.TextToSpeech, handler PlaybackHandler, cfg *session.VoiceReportingConfig) {
-	m.ttsProvider = provider
-	m.playbackHandler = handler
-	m.voiceReportingOpts = cfg
+func (m *Model) SetVoiceReporter(reporter *VoiceReporter) {
+	m.voiceReporter = reporter
 }
 
-// reportSessionVoice synthesizes and plays a voice summary for a completed session.
+// reportSessionVoice generates a voice report for a completed session.
 // Runs in a background goroutine to avoid blocking the TUI event loop.
 func (m *Model) reportSessionVoice(info session.SessionInfo) {
-	if m.ttsProvider == nil || m.playbackHandler == nil {
+	if m.voiceReporter == nil {
 		return
 	}
 
-	provider := m.ttsProvider
-	handler := m.playbackHandler
-	cfg := m.voiceReportingOpts
-
+	reporter := m.voiceReporter
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), SynthesisTimeout)
 		defer cancel()
-		SynthesizeAndPlay(ctx, provider, handler, cfg, info)
+		reporter.Report(ctx, info)
 	}()
 }
 

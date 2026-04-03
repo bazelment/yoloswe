@@ -310,7 +310,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if stateEvt, ok := msg.event.(session.SessionStateChangeEvent); ok {
 			switch stateEvt.NewStatus {
 			case session.StatusCompleted, session.StatusFailed, session.StatusStopped:
-				if m.ttsProvider != nil && m.playbackHandler != nil {
+				if m.voiceReporter != nil {
 					// Look up the session info for the voice report.
 					mgr := m.sessionManager
 					if msg.repoName != m.repoName {

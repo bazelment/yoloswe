@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/bazelment/yoloswe/voice/playback"
 )
 
 // PlaybackMode identifies how audio should be played.
@@ -16,10 +18,14 @@ type PlaybackMode string
 const (
 	// PlaybackModeAuto auto-detects the best playback method.
 	PlaybackModeAuto PlaybackMode = "auto"
-	// PlaybackModeLocal plays audio using a system audio player.
+	// PlaybackModeDirect plays audio using Go-native PCM output.
+	PlaybackModeDirect PlaybackMode = "direct"
+	// PlaybackModeLocal is a deprecated alias for PlaybackModeDirect.
 	PlaybackModeLocal PlaybackMode = "local"
 	// PlaybackModeFile saves audio to disk and returns the path.
 	PlaybackModeFile PlaybackMode = "file"
+	// PlaybackModeRedirect writes summary text to a file for remote consumption.
+	PlaybackModeRedirect PlaybackMode = "redirect"
 )
 
 // PlaybackResult contains the result of a playback attempt.
@@ -33,48 +39,30 @@ type PlaybackHandler interface {
 	Play(ctx context.Context, data []byte, format string) (*PlaybackResult, error)
 }
 
-// LocalPlayback plays audio using a system command (ffplay, afplay).
-type LocalPlayback struct{}
+// DirectPlayback plays audio using a system audio player (ffplay, afplay).
+type DirectPlayback struct {
+	player *playback.Player
+}
 
-// Play attempts to play audio using available system players.
-func (lp *LocalPlayback) Play(ctx context.Context, data []byte, format string) (*PlaybackResult, error) {
-	// Write to temp file for the player.
-	tmpFile, err := os.CreateTemp("", "bramble-voice-*."+format)
-	if err != nil {
-		return nil, fmt.Errorf("create temp file: %w", err)
+// NewDirectPlayback creates a DirectPlayback handler.
+func NewDirectPlayback() *DirectPlayback {
+	return &DirectPlayback{player: playback.NewPlayer()}
+}
+
+// Play plays MP3 audio through an available system audio player.
+func (dp *DirectPlayback) Play(ctx context.Context, data []byte, format string) (*PlaybackResult, error) {
+	if format != "mp3" {
+		return nil, fmt.Errorf("direct playback only supports mp3, got %s", format)
 	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		return nil, fmt.Errorf("write audio: %w", err)
+	if err := dp.player.PlayMP3(ctx, data); err != nil {
+		return nil, fmt.Errorf("direct playback: %w", err)
 	}
-	tmpFile.Close()
+	return &PlaybackResult{}, nil
+}
 
-	// Try players in order of preference.
-	// Only include players that support MP3 (ElevenLabs always returns MP3).
-	// paplay and aplay are excluded because they only handle WAV/PCM.
-	players := []struct {
-		name string
-		args []string
-	}{
-		{"ffplay", []string{"-nodisp", "-autoexit", "-loglevel", "quiet", tmpFile.Name()}},
-		{"afplay", []string{tmpFile.Name()}},
-	}
-
-	for _, player := range players {
-		path, err := exec.LookPath(player.name)
-		if err != nil {
-			continue
-		}
-		cmd := exec.CommandContext(ctx, path, player.args...)
-		if err := cmd.Run(); err != nil {
-			continue
-		}
-		return &PlaybackResult{}, nil
-	}
-
-	return nil, fmt.Errorf("no audio player found (tried ffplay, afplay)")
+// Close shuts down the underlying player.
+func (dp *DirectPlayback) Close() error {
+	return dp.player.Close()
 }
 
 // FilePlayback saves audio to a directory on disk.
@@ -100,34 +88,71 @@ func (fp *FilePlayback) Play(_ context.Context, data []byte, format string) (*Pl
 	return &PlaybackResult{FilePath: path}, nil
 }
 
+// RedirectTextWriter writes voice report text to files for remote consumption.
+// It writes the latest report to voice-report-latest.txt (overwrite) and appends
+// timestamped entries to voice-report-log.txt for history.
+type RedirectTextWriter struct {
+	Dir string
+}
+
+// WriteText writes summary text to the redirect directory.
+// On failure (disk full, permissions), logs a warning and discards — never blocks.
+func (r *RedirectTextWriter) WriteText(text string) error {
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		log.Printf("voice redirect: failed to create dir %s: %v", r.Dir, err)
+		return nil //nolint:nilerr // discard on failure per design
+	}
+
+	// Write latest (overwrite).
+	latestPath := filepath.Join(r.Dir, "voice-report-latest.txt")
+	if err := os.WriteFile(latestPath, []byte(text+"\n"), 0o644); err != nil {
+		log.Printf("voice redirect: failed to write latest: %v", err)
+		return nil //nolint:nilerr // discard on failure per design
+	}
+
+	// Append to log with timestamp.
+	logPath := filepath.Join(r.Dir, "voice-report-log.txt")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("voice redirect: failed to open log: %v", err)
+		return nil //nolint:nilerr // discard on failure per design
+	}
+	defer f.Close()
+
+	entry := fmt.Sprintf("[%s] %s\n", time.Now().Format(time.RFC3339), text)
+	if _, err := f.WriteString(entry); err != nil {
+		log.Printf("voice redirect: failed to append log: %v", err)
+	}
+
+	return nil
+}
+
 // DetectPlaybackMode determines the best playback mode for the current
-// environment. Returns PlaybackModeLocal if no SSH environment variables are
-// set and an MP3-capable audio player (ffplay or afplay) is available,
-// otherwise returns PlaybackModeFile.
+// environment. Returns PlaybackModeRedirect if SSH environment variables are
+// set, PlaybackModeDirect for local environments (Go-native audio),
+// and PlaybackModeFile as a last resort.
 func DetectPlaybackMode() PlaybackMode {
-	// If running over SSH, prefer file mode.
+	// If running over SSH, prefer redirect mode.
 	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" {
-		return PlaybackModeFile
+		return PlaybackModeRedirect
 	}
 
-	// Check if any MP3-capable audio player is available.
-	// paplay and aplay are excluded because they only handle WAV/PCM.
-	players := []string{"ffplay", "afplay"}
-	for _, player := range players {
-		if _, err := exec.LookPath(player); err == nil {
-			return PlaybackModeLocal
-		}
-	}
-
-	return PlaybackModeFile
+	// Go-native audio (beep) works on any local machine with audio support.
+	return PlaybackModeDirect
 }
 
 // NewPlaybackHandler creates a PlaybackHandler for the given mode.
 // For PlaybackModeAuto, it auto-detects the best mode.
 // saveDir is the directory for file-mode playback (defaults to ~/.bramble/voice-reports/).
+// Returns nil for PlaybackModeRedirect (handled at a higher level by VoiceReporter).
 func NewPlaybackHandler(mode PlaybackMode, saveDir string) PlaybackHandler {
 	if mode == PlaybackModeAuto {
 		mode = DetectPlaybackMode()
+	}
+
+	// Treat "local" as alias for "direct".
+	if mode == PlaybackModeLocal {
+		mode = PlaybackModeDirect
 	}
 
 	// Apply default save directory for any file-based playback.
@@ -137,8 +162,10 @@ func NewPlaybackHandler(mode PlaybackMode, saveDir string) PlaybackHandler {
 	}
 
 	switch mode {
-	case PlaybackModeLocal:
-		return &LocalPlayback{}
+	case PlaybackModeDirect:
+		return NewDirectPlayback()
+	case PlaybackModeRedirect:
+		return nil // handled by VoiceReporter
 	default:
 		// PlaybackModeFile and any unrecognized mode fall through to file playback.
 		return &FilePlayback{Dir: saveDir}

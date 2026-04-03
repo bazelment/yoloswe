@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
 	github.com/bazelment/yoloswe/multiagent v0.0.0-20260207203406-ad2b626fcc6a
+	github.com/bazelment/yoloswe/voice v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/wt v0.0.0-00010101000000-000000000000
 	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/charmbracelet/glamour v1.0.0
@@ -63,6 +64,8 @@ require (
 )
 
 replace github.com/bazelment/yoloswe/agent-cli-wrapper => ../agent-cli-wrapper
+
+replace github.com/bazelment/yoloswe/voice => ../voice
 
 replace github.com/bazelment/yoloswe/wt => ../wt
 

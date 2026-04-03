@@ -37,6 +37,7 @@ go_library(
         "//bramble/sessionmodel",
         "//bramble/taskrouter",
         "//multiagent/agent",
+        "//voice/playback",
         "//voice/tts",
         "//wt",
         "@com_github_charmbracelet_glamour//:glamour",

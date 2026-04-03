@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,6 @@ import (
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/multiagent/agent"
-	"github.com/bazelment/yoloswe/voice/tts"
 	"github.com/bazelment/yoloswe/voice/tts/elevenlabs"
 )
 
@@ -234,8 +234,7 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 		cfg.RecordingDir = logDir
 		cfg.ProtocolLogDir = logDir
 	}
-	var voiceTTS tts.TextToSpeech
-	var voicePlayback app.PlaybackHandler
+	var voiceReporter *app.VoiceReporter
 	if enableVoiceReports {
 		cfg.VoiceReporting = &session.VoiceReportingConfig{
 			Enabled: true,
@@ -243,13 +242,36 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 			Voice:   ttsVoice,
 			SaveDir: voiceSaveDir,
 		}
-		provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: voice reports disabled: %v\n", err)
-			cfg.VoiceReporting = nil
+		resolvedMode := app.PlaybackMode(voiceReportMode)
+		if resolvedMode == app.PlaybackModeAuto {
+			resolvedMode = app.DetectPlaybackMode()
+		}
+		if resolvedMode == app.PlaybackModeLocal {
+			resolvedMode = app.PlaybackModeDirect
+		}
+		reporterCfg := app.VoiceReporterConfig{
+			Mode:     resolvedMode,
+			VoiceCfg: cfg.VoiceReporting,
+		}
+		if resolvedMode == app.PlaybackModeRedirect {
+			saveDir := voiceSaveDir
+			if saveDir == "" {
+				home, _ := os.UserHomeDir()
+				saveDir = filepath.Join(home, ".bramble", "voice-reports")
+			}
+			reporterCfg.Redirector = &app.RedirectTextWriter{Dir: saveDir}
 		} else {
-			voiceTTS = provider
-			voicePlayback = app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), voiceSaveDir)
+			provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: voice reports disabled: %v\n", err)
+				cfg.VoiceReporting = nil
+			} else {
+				reporterCfg.Provider = provider
+				reporterCfg.Handler = app.NewPlaybackHandler(resolvedMode, voiceSaveDir)
+			}
+		}
+		if reporterCfg.Provider != nil || reporterCfg.Redirector != nil {
+			voiceReporter = app.NewVoiceReporter(reporterCfg)
 		}
 	}
 
@@ -489,14 +511,16 @@ func runReal(ctx context.Context, model, childModel, workDir, initialPrompt, log
 					}
 
 					// Trigger voice report for terminal session states.
-					if voiceTTS != nil && voicePlayback != nil && cfg.VoiceReporting != nil {
+					if voiceReporter != nil {
 						switch e.NewStatus {
 						case session.StatusCompleted, session.StatusFailed, session.StatusStopped:
 							if info, ok := m.GetSessionInfo(e.SessionID); ok {
 								voiceWG.Add(1)
 								go func(i session.SessionInfo) {
 									defer voiceWG.Done()
-									reportVoice(voiceTTS, voicePlayback, cfg.VoiceReporting, i)
+									ctx, cancel := context.WithTimeout(context.Background(), app.SynthesisTimeout)
+									defer cancel()
+									voiceReporter.Report(ctx, i)
 								}(info)
 							}
 						}
@@ -844,16 +868,6 @@ func runInteractiveLoop(cfg interactiveLoopConfig) {
 			}
 		}
 	}
-}
-
-// reportVoice synthesizes and plays a voice summary for a completed session.
-// Called as a goroutine to avoid blocking the event loop.
-// It delegates to app.SynthesizeAndPlay which handles synthesis, playback, and
-// temp-file cleanup, so no manual file management is needed here.
-func reportVoice(provider tts.TextToSpeech, handler app.PlaybackHandler, cfg *session.VoiceReportingConfig, info session.SessionInfo) {
-	ctx, cancel := context.WithTimeout(context.Background(), app.SynthesisTimeout)
-	defer cancel()
-	app.SynthesizeAndPlay(ctx, provider, handler, cfg, info)
 }
 
 // parseBehaviors parses the --behavior flag value.

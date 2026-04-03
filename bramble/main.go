@@ -21,6 +21,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/cmd/codereview"
 	"github.com/bazelment/yoloswe/bramble/cmd/delegator"
+	"github.com/bazelment/yoloswe/bramble/cmd/speak"
 	"github.com/bazelment/yoloswe/bramble/ipc"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
@@ -241,12 +242,40 @@ func runTUI(cmd *cobra.Command, args []string) error {
 			Voice:   ttsVoice,
 			SaveDir: voiceSaveDir,
 		}
-		provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
-		if err != nil {
-			log.Printf("Warning: voice reports disabled: %v", err)
+		resolvedMode := app.PlaybackMode(voiceReportMode)
+		if resolvedMode == app.PlaybackModeAuto {
+			resolvedMode = app.DetectPlaybackMode()
+		}
+		// Accept "local" as deprecated alias for "direct".
+		if resolvedMode == app.PlaybackModeLocal {
+			log.Printf("Note: --voice-report-mode=local is deprecated, use 'direct' instead")
+			resolvedMode = app.PlaybackModeDirect
+		}
+
+		reporterCfg := app.VoiceReporterConfig{
+			Mode:     resolvedMode,
+			VoiceCfg: voiceCfg,
+		}
+
+		if resolvedMode == app.PlaybackModeRedirect {
+			saveDir := voiceSaveDir
+			if saveDir == "" {
+				home, _ := os.UserHomeDir()
+				saveDir = filepath.Join(home, ".bramble", "voice-reports")
+			}
+			reporterCfg.Redirector = &app.RedirectTextWriter{Dir: saveDir}
 		} else {
-			handler := app.NewPlaybackHandler(app.PlaybackMode(voiceReportMode), voiceSaveDir)
-			model.SetVoiceReporting(provider, handler, voiceCfg)
+			provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
+			if err != nil {
+				log.Printf("Warning: voice reports disabled: %v", err)
+			} else {
+				reporterCfg.Provider = provider
+				reporterCfg.Handler = app.NewPlaybackHandler(resolvedMode, voiceSaveDir)
+			}
+		}
+
+		if reporterCfg.Provider != nil || reporterCfg.Redirector != nil {
+			model.SetVoiceReporter(app.NewVoiceReporter(reporterCfg))
 		}
 	}
 
@@ -773,6 +802,7 @@ func init() {
 	rootCmd.AddCommand(codereview.Cmd)
 	rootCmd.AddCommand(delegator.Cmd)
 	rootCmd.AddCommand(codetalkCmd)
+	rootCmd.AddCommand(speak.Cmd)
 }
 
 // pickRouterProvider selects the best available provider for the task router.
