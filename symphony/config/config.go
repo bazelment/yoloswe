@@ -331,15 +331,10 @@ func hasKey(config map[string]any, section, key string) bool {
 }
 
 // getIntWithFallback tries the primary section first, then falls back to the
-// fallback section.
+// fallback section. Uses hasKey for consistency with getStringWithFallback.
 func getIntWithFallback(config map[string]any, primary, fallback, key string, defaultVal int) int {
-	if _, ok := config[primary]; ok {
-		sec, _ := config[primary].(map[string]any)
-		if sec != nil {
-			if _, ok := sec[key]; ok {
-				return getInt(config, primary, key, defaultVal)
-			}
-		}
+	if hasKey(config, primary, key) {
+		return getInt(config, primary, key, defaultVal)
 	}
 	return getInt(config, fallback, key, defaultVal)
 }

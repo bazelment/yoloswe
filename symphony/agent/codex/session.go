@@ -152,6 +152,9 @@ func (s *Session) RunTurn(ctx context.Context, prompt string, onEvent func(agent
 		return agent.TurnResult{Status: agent.TurnFailed, Error: err}, err
 	}
 
+	// Reset turnID before parsing so a missing ID in a later turn doesn't
+	// silently reuse the previous turn's value.
+	s.turnID = ""
 	if resp != nil && resp.Result != nil {
 		var result struct {
 			Turn struct {
