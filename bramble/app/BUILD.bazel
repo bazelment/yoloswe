@@ -39,6 +39,7 @@ go_library(
         "//multiagent/agent",
         "//voice/playback",
         "//voice/tts",
+        "//voice/tts/elevenlabs",
         "//wt",
         "@com_github_charmbracelet_glamour//:glamour",
         "@com_github_mattn_go_runewidth//:go-runewidth",

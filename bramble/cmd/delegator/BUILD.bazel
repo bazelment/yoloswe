@@ -15,7 +15,6 @@ go_library(
         "//bramble/app",
         "//bramble/session",
         "//multiagent/agent",
-        "//voice/tts/elevenlabs",
         "@com_github_ergochat_readline//:readline",
         "@com_github_spf13_cobra//:cobra",
     ],

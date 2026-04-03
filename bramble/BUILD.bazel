@@ -14,7 +14,6 @@ go_library(
         "//bramble/session",
         "//bramble/taskrouter",
         "//multiagent/agent",
-        "//voice/tts/elevenlabs",
         "//wt",
         "//yoloswe",
         "@com_github_spf13_cobra//:cobra",
