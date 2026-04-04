@@ -105,6 +105,9 @@ func (c *Config) validate() error {
 	if c.Agent.Model == "" {
 		return fmt.Errorf("agent.model is required")
 	}
+	if c.PollInterval <= 0 {
+		c.PollInterval = 15 * time.Second
+	}
 	return nil
 }
 
