@@ -115,6 +115,7 @@ var validTransitions = map[int]bool{
 	key(StepShipping, StepFailed):     true,
 
 	// ShipReview
+	key(StepShipReview, StepShipping): true, // redo ship (e.g. PR-only issue)
 	key(StepShipReview, StepBuilding): true, // fix CI issues
 	key(StepShipReview, StepDone):     true, // approved + CI green
 	key(StepShipReview, StepFailed):   true,

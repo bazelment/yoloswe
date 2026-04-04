@@ -78,7 +78,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 		case StepShipping:
 			w.runStep(ctx, "ship", w.config.Ship, StepShipReview, "ship_complete")
 		case StepShipReview:
-			w.runReview(ctx, StepDone, StepBuilding)
+			w.runReview(ctx, StepDone, StepShipping)
 		case StepDone:
 			w.logger.Info("workflow completed successfully")
 			if id, ok := w.stateIDs["done"]; ok {

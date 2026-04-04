@@ -90,7 +90,10 @@ func (c *Client) FetchComments(ctx context.Context, issueID string, since time.T
 		}
 
 		for _, n := range resp.Data.Comments.Nodes {
-			createdAt, _ := time.Parse(time.RFC3339, n.CreatedAt)
+			createdAt, err := time.Parse(time.RFC3339, n.CreatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("parse comment timestamp %q: %w", n.CreatedAt, err)
+			}
 			if !since.IsZero() && createdAt.Before(since) {
 				continue
 			}

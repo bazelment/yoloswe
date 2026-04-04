@@ -32,7 +32,7 @@ func fetchIssueByIdentifierQuery(identifier string) graphqlRequest {
 // fetchCommentsQuery returns comments on an issue, ordered by creation time.
 func fetchCommentsQuery(issueID string, afterCursor string) graphqlRequest {
 	query := `query FetchComments($issueId: String!, $first: Int!, $after: String) {
-  comments(filter: { issue: { id: { eq: $issueId } } }, first: $first, after: $after) {
+  comments(filter: { issue: { id: { eq: $issueId } } }, first: $first, after: $after, orderBy: createdAt) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
