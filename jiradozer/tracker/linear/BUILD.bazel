@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "linear",
+    srcs = [
+        "client.go",
+        "queries.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/jiradozer/tracker/linear",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//jiradozer/tracker",
+    ],
+)
+
+go_test(
+    name = "linear_test",
+    srcs = ["client_test.go"],
+    embed = [":linear"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
