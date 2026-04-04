@@ -79,10 +79,7 @@ type StepTransition struct {
 // Key is from*100 + to.
 var validTransitions = map[int]bool{
 	// Init
-	key(StepInit, StepPlanning):   true,
-	key(StepInit, StepBuilding):   true, // --skip-to build
-	key(StepInit, StepValidating): true, // --skip-to validate
-	key(StepInit, StepShipping):   true, // --skip-to ship
+	key(StepInit, StepPlanning): true,
 
 	// Planning
 	key(StepPlanning, StepPlanReview): true,
@@ -105,7 +102,6 @@ var validTransitions = map[int]bool{
 
 	// Validating
 	key(StepValidating, StepValidateReview): true,
-	key(StepValidating, StepShipping):       true, // no validation commands configured
 	key(StepValidating, StepFailed):         true,
 
 	// ValidateReview

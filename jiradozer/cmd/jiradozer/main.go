@@ -27,9 +27,8 @@ func main() {
 		modelID      string
 		pollInterval time.Duration
 		maxBudget    float64
-		skipTo       string
+		runStep      string
 		verbose      bool
-		dryRun       bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -44,9 +43,8 @@ func main() {
 				modelID:      modelID,
 				pollInterval: pollInterval,
 				maxBudget:    maxBudget,
-				skipTo:       skipTo,
+				runStep:      runStep,
 				verbose:      verbose,
-				dryRun:       dryRun,
 			})
 		},
 	}
@@ -57,9 +55,8 @@ func main() {
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
-	rootCmd.Flags().StringVar(&skipTo, "skip-to", "", "Skip to step: plan, build, validate, ship")
+	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, validate, ship")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
-	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Run plan step only and print without posting")
 
 	_ = rootCmd.MarkFlagRequired("issue")
 
@@ -76,11 +73,10 @@ type runArgs struct {
 	configPath   string
 	workDir      string
 	modelID      string
-	skipTo       string
+	runStep      string
 	pollInterval time.Duration
 	maxBudget    float64
 	verbose      bool
-	dryRun       bool
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -111,12 +107,11 @@ func run(ctx context.Context, args runArgs) error {
 		cfg.MaxBudgetUSD = args.maxBudget
 	}
 
-	// Resolve agent model.
-	model, ok := agent.ModelByID(cfg.Agent.Model)
-	if !ok {
+	// Validate agent model.
+	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
 		return fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
 	}
-	logger.Info("using agent", "model", model.ID, "provider", model.Provider)
+	logger.Info("using agent", "model", cfg.Agent.Model)
 
 	// Create tracker client.
 	tracker, err := createTracker(cfg)
@@ -132,17 +127,23 @@ func run(ctx context.Context, args runArgs) error {
 	}
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
 
-	if args.dryRun {
-		plan, err := jiradozer.RunPlanAgent(ctx, model, issue, cfg.Plan, cfg.WorkDir, cfg.MaxBudgetUSD, "", logger)
-		if err != nil {
-			return fmt.Errorf("dry-run plan: %w", err)
+	if args.runStep != "" {
+		stepCfg, ok := cfg.StepByName(args.runStep)
+		if !ok {
+			return fmt.Errorf("unknown step %q (valid: plan, build, validate, ship)", args.runStep)
 		}
-		fmt.Println(plan)
+		resolved := cfg.ResolveStep(stepCfg)
+		data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
+		output, _, err := jiradozer.RunStepAgent(ctx, args.runStep, issue, data, resolved, cfg.WorkDir, "", "", logger)
+		if err != nil {
+			return fmt.Errorf("run-step %s: %w", args.runStep, err)
+		}
+		fmt.Println(output)
 		return nil
 	}
 
-	// Run the workflow.
-	wf := jiradozer.NewWorkflow(tracker, issue, model, cfg, logger, args.skipTo)
+	// Run the full workflow.
+	wf := jiradozer.NewWorkflow(tracker, issue, cfg, logger)
 	return wf.Run(ctx)
 }
 

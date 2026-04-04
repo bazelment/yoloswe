@@ -152,7 +152,7 @@ func TestStateMachineFailFromAnyStep(t *testing.T) {
 			// Walk to the target step via the happy path
 			walkTo(t, sm, step)
 			if step == StepInit {
-				// Init can't go to Failed directly, only to Planning/Building
+				// Init can't go to Failed directly, only to Planning
 				err := sm.Transition(StepFailed, "error")
 				require.Error(t, err)
 				return
@@ -161,35 +161,6 @@ func TestStateMachineFailFromAnyStep(t *testing.T) {
 			assert.Equal(t, StepFailed, sm.Current())
 		})
 	}
-}
-
-func TestStateMachineSkipTo(t *testing.T) {
-	t.Run("skip to building", func(t *testing.T) {
-		sm := NewStateMachine()
-		require.NoError(t, sm.Transition(StepBuilding, "skip_to_build"))
-		assert.Equal(t, StepBuilding, sm.Current())
-	})
-	t.Run("skip to validating", func(t *testing.T) {
-		sm := NewStateMachine()
-		require.NoError(t, sm.Transition(StepValidating, "skip_to_validate"))
-		assert.Equal(t, StepValidating, sm.Current())
-	})
-	t.Run("skip to shipping", func(t *testing.T) {
-		sm := NewStateMachine()
-		require.NoError(t, sm.Transition(StepShipping, "skip_to_ship"))
-		assert.Equal(t, StepShipping, sm.Current())
-	})
-}
-
-func TestStateMachineValidatingSkipsToShipping(t *testing.T) {
-	sm := NewStateMachine()
-	require.NoError(t, sm.Transition(StepPlanning, "start"))
-	require.NoError(t, sm.Transition(StepPlanReview, "done"))
-	require.NoError(t, sm.Transition(StepBuilding, "approved"))
-	require.NoError(t, sm.Transition(StepBuildReview, "done"))
-	require.NoError(t, sm.Transition(StepValidating, "approved"))
-	require.NoError(t, sm.Transition(StepShipping, "no_validation"))
-	assert.Equal(t, StepShipping, sm.Current())
 }
 
 func TestStateMachineHistory(t *testing.T) {

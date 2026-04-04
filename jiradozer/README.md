@@ -37,19 +37,19 @@ max_budget_usd: 50.0
 
 plan:
   max_turns: 10
-  system_prompt: |
-    You are analyzing an issue and creating an implementation plan.
+  permission_mode: plan       # default for plan step
 
 build:
   max_turns: 30
-  system_prompt: |
-    You are implementing changes based on an approved plan.
+  permission_mode: bypass     # default for build step
 
-validation:
-  commands:
-    - "bazel test //..."
-    - "scripts/lint.sh"
-  timeout_seconds: 300
+validate:
+  max_turns: 10
+  permission_mode: bypass     # default for validate step
+
+ship:
+  max_turns: 10
+  permission_mode: bypass     # default for ship step
 
 states:
   in_progress: "In Progress"
@@ -58,6 +58,48 @@ states:
 ```
 
 The `states` section maps logical workflow states to your tracker's state names. Jiradozer uses these to transition the issue as it moves through the workflow.
+
+### Step configuration
+
+Each step (`plan`, `build`, `validate`, `ship`) is a self-contained agent session definition. All fields are optional with sensible defaults; unset `model` and `max_budget_usd` inherit from top-level config.
+
+| Field | plan | build | validate | ship | Description |
+|-------|------|-------|----------|------|-------------|
+| `prompt` | built-in | built-in | built-in | built-in | Go `text/template` for the initial prompt |
+| `system_prompt` | | | | | Optional system prompt |
+| `model` | inherit | inherit | inherit | inherit | Model override for this step |
+| `permission_mode` | `plan` | `bypass` | `bypass` | `bypass` | Agent permission mode |
+| `max_turns` | `10` | `30` | `10` | `10` | Max agent turns |
+| `max_budget_usd` | inherit | inherit | inherit | inherit | Budget override for this step |
+
+### Prompt templates
+
+The `prompt` field supports Go `text/template` syntax with issue data:
+
+| Variable | Description |
+|----------|-------------|
+| `{{.Identifier}}` | Issue identifier (e.g. `ENG-123`) |
+| `{{.Title}}` | Issue title |
+| `{{.Description}}` | Issue description (empty string if unset) |
+| `{{.URL}}` | Issue URL (empty string if unset) |
+| `{{.Labels}}` | Comma-separated labels |
+| `{{.Plan}}` | Approved plan text (available after plan step) |
+| `{{.BuildOutput}}` | Build output text (available after build step) |
+| `{{.BaseBranch}}` | Base branch name (e.g. `main`) |
+
+Example custom prompt:
+
+```yaml
+plan:
+  prompt: |
+    Implement {{.Identifier}}: {{.Title}}
+    {{if .Description}}{{.Description}}{{end}}
+    Focus on backend changes only. Skip frontend.
+  model: opus
+  max_turns: 5
+```
+
+If `prompt` is omitted, a built-in default is used. The prompt is only rendered for the **first** execution in a phase. When a reviewer requests a redo or leaves feedback, the existing agent session is resumed and the feedback text is sent directly — no re-rendering.
 
 ## CLI flags
 
@@ -73,18 +115,17 @@ jiradozer --issue ENG-123 [flags]
 | `--model` | from config | Agent model ID (overrides config) |
 | `--poll-interval` | from config | How often to check for new comments |
 | `--max-budget` | from config | Max spend in USD |
-| `--skip-to` | | Skip to a step: `plan`, `build`, `validate`, `ship` |
+| `--run-step` | | Run a single step and exit (for debugging): `plan`, `build`, `validate`, `ship` |
 | `--verbose` | `false` | Debug logging |
-| `--dry-run` | `false` | Run plan step only, print to stdout without posting |
 
 ## Workflow
 
 Each run goes through four steps. After each step, results are posted as a comment on the issue and the tool waits for human feedback:
 
-1. **Plan** -- Agent runs in plan mode, produces an implementation plan
-2. **Build** -- Agent executes the approved plan
-3. **Validate** -- Runs configured validation commands (tests, lint, etc.)
-4. **Ship** -- Creates a GitHub PR via `gh`
+1. **Plan** -- Agent creates an implementation plan
+2. **Build** -- Agent implements the approved plan
+3. **Validate** -- Agent runs tests/linters and fixes any failures
+4. **Ship** -- Agent creates a GitHub PR
 
 At each review gate, comment on the issue:
 
@@ -116,8 +157,9 @@ To add a new tracker, implement the `IssueTracker` interface in a new subpackage
 ## Examples
 
 ```bash
-# Dry run -- plan only, no posting
-jiradozer --issue ENG-123 --dry-run
+# Run a single step for debugging (no tracker interaction)
+jiradozer --issue ENG-123 --run-step plan
+jiradozer --issue ENG-123 --run-step build
 
 # Use a specific model
 jiradozer --issue ENG-123 --model opus
@@ -127,7 +169,4 @@ jiradozer --issue ENG-123 --model gpt-5.3-codex
 
 # Custom config and working directory
 jiradozer --issue ENG-123 --config ~/myproject/jiradozer.yaml --work-dir ~/myproject
-
-# Skip planning, jump straight to build (e.g. resuming after a crash)
-jiradozer --issue ENG-123 --skip-to build
 ```

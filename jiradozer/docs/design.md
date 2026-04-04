@@ -55,16 +55,14 @@ jiradozer/
   state.go               # Workflow state machine
   state_test.go
   workflow.go            # Core workflow engine
-  agent.go               # Thin wrapper around agent.Provider for plan/build
-  validation.go          # Validation command runner
-  pr.go                  # PR creation via gh CLI
+  agent.go               # Unified agent runner for all steps (plan/build/validate/ship)
   poller.go              # Comment polling for feedback
   poller_test.go
   go.mod
   BUILD.bazel
 ```
 
-New top-level module — same pattern as `yoloswe/`. Depends on `multiagent/agent` (provider interface) and `wt` (PR creation).
+New top-level module — same pattern as `yoloswe/`. Depends on `multiagent/agent` (provider interface).
 
 ## Key Components
 
@@ -131,60 +129,51 @@ Follows same HTTP patterns as `symphony/tracker/linear/client.go`: Bearer auth, 
 
 ### 3. Agent Integration (`agent.go`)
 
-Uses `multiagent/agent.Provider` interface — all bramble-supported agents work automatically.
+All four workflow steps (plan, build, validate, ship) are uniform agent sessions driven by a single `RunStepAgent` function. Uses `multiagent/agent.Provider` interface — all bramble-supported agents work automatically.
+
+**Prompt system**: Each step has a `prompt` field (Go `text/template`) rendered with issue data on first execution. If omitted, a built-in default is used. On follow-up (redo/feedback), the existing agent session is resumed via `WithProviderResumeSessionID` and the feedback text is sent directly — no prompt re-rendering.
 
 ```go
-// runPlanStep runs the agent in plan mode and returns the plan text.
-func (w *Workflow) runPlanStep(ctx context.Context, feedback string) (string, error) {
-    provider, err := agent.NewProviderForModel(w.agentModel)
-    // ...
-    result, err := provider.Execute(ctx, prompt, nil,
-        agent.WithProviderWorkDir(w.config.WorkDir),
-        agent.WithProviderSystemPrompt(w.config.Plan.SystemPrompt),
-        agent.WithProviderPermissionMode("plan"),
-        agent.WithProviderModel(w.agentModel.ID),
-        agent.WithProviderEventHandler(w.eventHandler),
-    )
-    // Extract plan from result.Text
-    return result.Text, nil
+// PromptData is the template context for rendering step prompts.
+type PromptData struct {
+    Identifier  string // e.g. "ENG-123"
+    Title       string
+    Description string // empty string if nil
+    URL         string // empty string if nil
+    Labels      string // comma-separated
+    BaseBranch  string // e.g. "main"
+    Plan        string // plan output from the planning step
+    BuildOutput string // build output from the build step
 }
 
-// runBuildStep runs the agent in bypass mode to execute the plan.
-func (w *Workflow) runBuildStep(ctx context.Context, plan string, feedback string) error {
-    provider, err := agent.NewProviderForModel(w.agentModel)
-    // ...
-    prompt := buildExecutionPrompt(w.issue, plan, feedback)
-    result, err := provider.Execute(ctx, prompt, nil,
-        agent.WithProviderWorkDir(w.config.WorkDir),
-        agent.WithProviderSystemPrompt(w.config.Build.SystemPrompt),
-        agent.WithProviderPermissionMode("bypass"),
-        agent.WithProviderModel(w.agentModel.ID),
-        agent.WithProviderEventHandler(w.eventHandler),
-    )
-    return nil
-}
+// RunStepAgent is the single entry point for all steps.
+// First call: renders prompt template. Follow-up: resumes session with feedback.
+func RunStepAgent(ctx context.Context, stepName string, issue *tracker.Issue, data PromptData,
+    cfg StepConfig, workDir string, feedback string, resumeSessionID string,
+    logger *slog.Logger) (string, string, error)
 ```
 
-The `ExecuteConfig.PermissionMode` already maps correctly for each backend:
+Each step has a built-in default prompt template:
+- **plan**: asks the agent to create a detailed implementation plan
+- **build**: gives the agent the approved plan to implement
+- **validate**: asks the agent to run tests/linters and fix failures
+- **ship**: asks the agent to create a PR against the base branch
+
+Prompt resolution logic:
+1. **Resume** (`resumeSessionID != ""` and `feedback != ""`): send feedback as prompt, resume session
+2. **First execution**: render config prompt (or built-in default) with issue data
+3. **Fallback** (feedback but no session): render template + append feedback
+
+The `ExecuteConfig.PermissionMode` maps correctly for each backend:
 - Claude: `"plan"` → `PermissionModePlan`, `"bypass"` → `PermissionModeBypass`
 - Codex: `"plan"` → `ApprovalPolicyOnRequest`, `"bypass"` → `ApprovalPolicyNever`
 - Gemini/Cursor: equivalent mappings
 
 Key files:
-- `multiagent/agent/provider.go:121` — `Provider` interface
-- `multiagent/agent/query.go:17` — `NewProviderForModel()` factory
+- `multiagent/agent/provider.go` — `Provider` interface, `ExecuteConfig` (with `ResumeSessionID`), `AgentResult` (with `SessionID`)
+- `multiagent/agent/query.go` — `NewProviderForModel()` factory
 - `multiagent/agent/model_registry.go` — `AllModels`, `ModelByID()`
-- `multiagent/agent/claude_provider.go:48` — plan mode mapping
-- `multiagent/agent/codex_provider.go:155` — plan mode mapping
-
-For multi-turn (redo with feedback), use `LongRunningProvider` when available:
-```go
-if lrp, ok := provider.(agent.LongRunningProvider); ok {
-    lrp.Start(ctx)
-    defer lrp.Stop()
-    result, _ := lrp.SendMessage(ctx, feedbackPrompt)
-}
-```
+- `multiagent/agent/claude_provider.go` — wires `WithResume`, extracts `SessionID`
 
 ### 4. State Machine (`state.go`)
 
@@ -198,9 +187,9 @@ const (
     StepPlanReview     // Plan posted, waiting for human
     StepBuilding       // Agent running in bypass mode
     StepBuildReview    // Build done, waiting for human
-    StepValidating     // Running validation commands
+    StepValidating     // Agent running tests/linters
     StepValidateReview
-    StepShipping       // Creating PR
+    StepShipping       // Agent creating PR
     StepShipReview     // Waiting for CI + human
     StepDone
     StepFailed
@@ -213,80 +202,49 @@ Transitions with feedback loops:
 - `ValidateReview → Building` (fix failures)
 - `ShipReview → Building` (fix CI failures)
 
-### 5. Validation (`validation.go`)
-
-Runs configurable shell commands in the work directory via `os/exec`:
-
-```go
-func RunValidation(ctx context.Context, workDir string, commands []string, timeout time.Duration) ([]ValidationResult, error)
-```
-
-Commands from config or extracted from issue description (`<!-- validation: ... -->`). Results formatted as markdown for posting as a comment.
-
-### 6. PR Creation (`pr.go`)
-
-Reuses `wt.CreatePR()` (`wt/github.go:199`) and `wt.CheckGitHubAuth()`. Branch name from `issue.BranchName` or generated. Polls CI status via `gh pr checks`.
-
-### 7. Comment Poller (`poller.go`)
+### 5. Comment Poller (`poller.go`)
 
 Polls tracker every N seconds for new comments. Filters out bot comments. Parses keywords:
 - `approve` / `lgtm` / `ship it` → `FeedbackApprove`
 - `redo` / `retry` → `FeedbackRedo`
 - Anything else → `FeedbackComment` (incorporated into next agent prompt)
 
-### 8. Workflow Engine (`workflow.go`)
+### 6. Workflow Engine (`workflow.go`)
+
+All four steps are driven by the same `runStep` method. The workflow tracks session IDs per step so redo/feedback resumes the agent session instead of starting fresh.
 
 ```go
 type Workflow struct {
     tracker    tracker.IssueTracker
     issue      *tracker.Issue
     state      *StateMachine
-    agentModel agent.AgentModel
     config     *Config
     logger     *slog.Logger
+    sessionIDs map[WorkflowStep]string // per-step session IDs for resume
+    plan       string
+    buildOutput string
 }
 
-func (w *Workflow) Run(ctx context.Context) error {
-    w.state.Transition(StepPlanning, "start")
-    var plan string
-    var feedback string
+// runStep is the uniform handler for all workflow steps.
+func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepConfig,
+    reviewStep WorkflowStep, trigger string) {
+    cfg := w.config.ResolveStep(stepCfg)
+    data := newPromptData(w.issue, w.config.BaseBranch)
+    data.Plan = w.plan
+    data.BuildOutput = w.buildOutput
 
-    for {
-        switch w.state.Current() {
-        case StepPlanning:
-            var err error
-            plan, err = w.runPlanStep(ctx, feedback)
-            w.tracker.PostComment(ctx, w.issue.ID, formatPlan(plan))
-            w.state.Transition(StepPlanReview)
-            feedback = ""
-
-        case StepPlanReview:
-            fb := w.pollForFeedback(ctx)
-            if fb.Action == FeedbackApprove {
-                w.state.Transition(StepBuilding)
-            } else {
-                feedback = fb.Message
-                w.state.Transition(StepPlanning)
-            }
-
-        case StepBuilding:
-            err := w.runBuildStep(ctx, plan, feedback)
-            w.tracker.PostComment(ctx, w.issue.ID, formatBuildResult(err))
-            w.state.Transition(StepBuildReview)
-            feedback = ""
-
-        // ... Validate, Ship steps follow same pattern
-
-        case StepDone:
-            return nil
-        case StepFailed:
-            return w.lastError
-        }
-    }
+    output, sessionID, err := RunStepAgent(ctx, stepName, w.issue, data, cfg,
+        w.config.WorkDir, w.feedback, w.sessionIDs[w.state.Current()], w.logger)
+    // ...
+    w.sessionIDs[w.state.Current()] = sessionID
 }
 ```
 
+On approve → next phase starts fresh (session ID is ""). On redo/feedback → same phase resumes the stored session.
+
 ## Configuration (`jiradozer.yaml`)
+
+Each step (`plan`, `build`) is a self-contained agent session config. All step fields are optional — unset `model` and `max_budget_usd` inherit from top-level config via `Config.ResolveStep()`.
 
 ```yaml
 tracker:
@@ -294,29 +252,33 @@ tracker:
   api_key: $LINEAR_API_KEY
 
 agent:
-  model: sonnet           # any model from agent.AllModels
+  model: sonnet           # any model from agent.AllModels; fallback for steps
   # provider auto-detected from model ID
 
 work_dir: .
 base_branch: main
 poll_interval: 15s
-max_budget_usd: 50.0
+max_budget_usd: 50.0          # fallback for steps
 
 plan:
+  # prompt: Go text/template; omit to use built-in default
+  # system_prompt: optional system prompt
+  # model: override agent.model for this step
+  permission_mode: plan        # default
   max_turns: 10
-  system_prompt: |
-    You are analyzing an issue and creating an implementation plan.
+  # max_budget_usd: override top-level for this step
 
 build:
+  permission_mode: bypass      # default
   max_turns: 30
-  system_prompt: |
-    You are implementing changes based on an approved plan.
 
-validation:
-  commands:
-    - "bazel test //..."
-    - "scripts/lint.sh"
-  timeout_seconds: 300
+validate:
+  permission_mode: bypass      # default
+  max_turns: 10
+
+ship:
+  permission_mode: bypass      # default
+  max_turns: 10
 
 states:
   in_progress: "In Progress"
@@ -324,15 +286,23 @@ states:
   done: "Done"
 ```
 
+### Prompt templates
+
+The `prompt` field uses Go `text/template` syntax. Available variables: `{{.Identifier}}`, `{{.Title}}`, `{{.Description}}`, `{{.URL}}`, `{{.Labels}}`, `{{.BaseBranch}}`, `{{.Plan}}`, `{{.BuildOutput}}`. Templates are validated at config load time.
+
+The prompt is only rendered for the first execution in a phase. On redo/feedback, the agent session is resumed and the feedback text is sent directly.
+
 ## CLI Flags
 
 ```
 jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
               [--model sonnet] [--poll-interval 15s] [--max-budget 50]
-              [--skip-to build] [--verbose] [--dry-run]
+              [--run-step plan] [--verbose]
 ```
 
 `--model` accepts any model ID from `agent.AllModels` (opus, sonnet, haiku, gpt-5.3-codex, gemini-3.1-pro-preview, cursor-default, etc.). Provider is auto-detected.
+
+`--run-step` runs a single step and exits without tracker interaction — useful for debugging prompts and agent behavior.
 
 ## Files to Create
 
@@ -348,9 +318,7 @@ jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
 | `jiradozer/state.go` | State machine |
 | `jiradozer/state_test.go` | State machine tests |
 | `jiradozer/workflow.go` | Core workflow engine |
-| `jiradozer/agent.go` | Provider wrapper for plan/build |
-| `jiradozer/validation.go` | Command runner |
-| `jiradozer/pr.go` | PR creation via wt.CreatePR |
+| `jiradozer/agent.go` | Unified agent runner for all steps |
 | `jiradozer/poller.go` | Comment polling |
 | `jiradozer/poller_test.go` | Poller tests |
 | `jiradozer/cmd/jiradozer/main.go` | CLI entrypoint |
@@ -366,10 +334,9 @@ jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
 ## Dependencies (existing in monorepo)
 
 - `multiagent/agent` — Provider interface, NewProviderForModel, ModelRegistry
-- `wt` — CreatePR, GHRunner, CheckGitHubAuth
 - `cobra` — CLI framework
 - `gopkg.in/yaml.v3` — config loading
-- Standard library: `net/http`, `encoding/json`, `os/exec`, `log/slog`
+- Standard library: `net/http`, `encoding/json`, `text/template`, `log/slog`
 
 ## Implementation Order
 
@@ -378,16 +345,14 @@ jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
 3. `config.go` — config loading
 4. `tracker/linear/` — Linear implementation + tests
 5. `poller.go` + `poller_test.go` — comment polling
-6. `agent.go` — provider wrapper for plan/build
-7. `validation.go` — command runner
-8. `pr.go` — PR creation
-9. `workflow.go` — compose everything
-10. `cmd/jiradozer/main.go` — CLI entrypoint
-11. Build files: `go.mod`, `BUILD.bazel`, update `go.work`, run gazelle
+6. `agent.go` — unified agent runner for all steps
+7. `workflow.go` — compose everything
+8. `cmd/jiradozer/main.go` — CLI entrypoint
+9. Build files: `go.mod`, `BUILD.bazel`, update `go.work`, run gazelle
 
 ## Verification
 
-1. **Unit tests**: `bazel test //jiradozer/...` — state machine transitions, config parsing, comment action parsing, validation formatting
+1. **Unit tests**: `bazel test //jiradozer/...` — state machine transitions, config parsing, comment action parsing
 2. **Integration test with httptest**: Linear client against mock GraphQL server
 3. **Manual test**: `jiradozer --issue ENG-123 --dry-run` against real Linear
 4. **Full run**: `jiradozer --issue ENG-123 --model sonnet`

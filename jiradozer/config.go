@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"text/template"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -11,16 +12,17 @@ import (
 
 // Config is the top-level configuration for jiradozer.
 type Config struct {
-	States       StatesConfig     `yaml:"states"`
-	Tracker      TrackerConfig    `yaml:"tracker"`
-	Plan         StepConfig       `yaml:"plan"`
-	Build        StepConfig       `yaml:"build"`
-	Agent        AgentConfig      `yaml:"agent"`
-	WorkDir      string           `yaml:"work_dir"`
-	BaseBranch   string           `yaml:"base_branch"`
-	Validation   ValidationConfig `yaml:"validation"`
-	PollInterval time.Duration    `yaml:"poll_interval"`
-	MaxBudgetUSD float64          `yaml:"max_budget_usd"`
+	Tracker      TrackerConfig `yaml:"tracker"`
+	States       StatesConfig  `yaml:"states"`
+	Agent        AgentConfig   `yaml:"agent"`
+	WorkDir      string        `yaml:"work_dir"`
+	BaseBranch   string        `yaml:"base_branch"`
+	Plan         StepConfig    `yaml:"plan"`
+	Build        StepConfig    `yaml:"build"`
+	Validate     StepConfig    `yaml:"validate"`
+	Ship         StepConfig    `yaml:"ship"`
+	PollInterval time.Duration `yaml:"poll_interval"`
+	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
 }
 
 // TrackerConfig specifies the issue tracker backend.
@@ -36,14 +38,12 @@ type AgentConfig struct {
 
 // StepConfig configures a single workflow step (plan or build).
 type StepConfig struct {
-	SystemPrompt string `yaml:"system_prompt"`
-	MaxTurns     int    `yaml:"max_turns"`
-}
-
-// ValidationConfig specifies validation commands to run.
-type ValidationConfig struct {
-	Commands       []string `yaml:"commands"`
-	TimeoutSeconds int      `yaml:"timeout_seconds"`
+	Prompt         string  `yaml:"prompt"`          // Go text/template; empty = built-in default
+	SystemPrompt   string  `yaml:"system_prompt"`   // optional system prompt passed to the agent
+	Model          string  `yaml:"model"`           // override agent.model; empty = inherit
+	PermissionMode string  `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
+	MaxTurns       int     `yaml:"max_turns"`
+	MaxBudgetUSD   float64 `yaml:"max_budget_usd"` // override top-level; 0 = inherit
 }
 
 // StatesConfig maps logical workflow states to tracker-specific state names.
@@ -76,13 +76,12 @@ func LoadConfig(path string) (*Config, error) {
 
 func defaultConfig() Config {
 	return Config{
-		Tracker: TrackerConfig{Kind: "linear"},
-		Agent:   AgentConfig{Model: "sonnet"},
-		Plan:    StepConfig{MaxTurns: 10},
-		Build:   StepConfig{MaxTurns: 30},
-		Validation: ValidationConfig{
-			TimeoutSeconds: 300,
-		},
+		Tracker:  TrackerConfig{Kind: "linear"},
+		Agent:    AgentConfig{Model: "sonnet"},
+		Plan:     StepConfig{PermissionMode: "plan", MaxTurns: 10},
+		Build:    StepConfig{PermissionMode: "bypass", MaxTurns: 30},
+		Validate: StepConfig{PermissionMode: "bypass", MaxTurns: 10},
+		Ship:     StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		States: StatesConfig{
 			InProgress: "In Progress",
 			InReview:   "In Review",
@@ -108,7 +107,43 @@ func (c *Config) validate() error {
 	if c.PollInterval <= 0 {
 		c.PollInterval = 15 * time.Second
 	}
+	for name, step := range map[string]StepConfig{
+		"plan": c.Plan, "build": c.Build, "validate": c.Validate, "ship": c.Ship,
+	} {
+		if step.Prompt != "" {
+			if _, err := template.New(name).Parse(step.Prompt); err != nil {
+				return fmt.Errorf("%s.prompt template: %w", name, err)
+			}
+		}
+	}
 	return nil
+}
+
+// StepByName returns the StepConfig for a named step.
+func (c *Config) StepByName(name string) (StepConfig, bool) {
+	switch name {
+	case "plan":
+		return c.Plan, true
+	case "build":
+		return c.Build, true
+	case "validate":
+		return c.Validate, true
+	case "ship":
+		return c.Ship, true
+	default:
+		return StepConfig{}, false
+	}
+}
+
+// ResolveStep fills zero-value fields in a StepConfig from top-level defaults.
+func (c *Config) ResolveStep(step StepConfig) StepConfig {
+	if step.Model == "" {
+		step.Model = c.Agent.Model
+	}
+	if step.MaxBudgetUSD == 0 {
+		step.MaxBudgetUSD = c.MaxBudgetUSD
+	}
+	return step
 }
 
 // resolveEnv expands a value that starts with $ as an environment variable.

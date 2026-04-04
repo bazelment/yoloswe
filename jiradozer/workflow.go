@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
-	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // Workflow drives the issue through plan → build → validate → ship.
@@ -19,25 +19,23 @@ type Workflow struct {
 	state         *StateMachine
 	config        *Config
 	logger        *slog.Logger
+	sessionIDs    map[WorkflowStep]string // per-step session IDs for resume
 	stateIDs      map[string]string
-	agentModel    agent.AgentModel
 	plan          string
+	buildOutput   string
 	feedback      string
-	skipTo        string
 }
 
 // NewWorkflow creates a new workflow for the given issue.
-// skipTo optionally skips to a specific step (e.g. "build", "validate", "ship").
-func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, model agent.AgentModel, cfg *Config, logger *slog.Logger, skipTo string) *Workflow {
+func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
 	return &Workflow{
 		tracker:    t,
 		issue:      issue,
 		state:      NewStateMachine(),
-		agentModel: model,
 		config:     cfg,
 		logger:     logger,
 		stateIDs:   make(map[string]string),
-		skipTo:     skipTo,
+		sessionIDs: make(map[WorkflowStep]string),
 	}
 }
 
@@ -48,21 +46,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 		return fmt.Errorf("resolve workflow states: %w", err)
 	}
 
-	// Transition to first step (or skip-to target).
-	firstStep, trigger := StepPlanning, "start"
-	switch w.skipTo {
-	case "build":
-		firstStep, trigger = StepBuilding, "skip_to_build"
-	case "validate":
-		firstStep, trigger = StepValidating, "skip_to_validate"
-	case "ship":
-		firstStep, trigger = StepShipping, "skip_to_ship"
-	case "", "plan":
-		// default: start at planning
-	default:
-		return fmt.Errorf("unknown --skip-to value: %q (valid: plan, build, validate, ship)", w.skipTo)
-	}
-	if err := w.state.Transition(firstStep, trigger); err != nil {
+	if err := w.state.Transition(StepPlanning, "start"); err != nil {
 		return err
 	}
 
@@ -80,19 +64,19 @@ func (w *Workflow) Run(ctx context.Context) error {
 
 		switch w.state.Current() {
 		case StepPlanning:
-			w.runPlanning(ctx)
+			w.runStep(ctx, "plan", w.config.Plan, StepPlanReview, "plan_complete")
 		case StepPlanReview:
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
-			w.runBuilding(ctx)
+			w.runStep(ctx, "build", w.config.Build, StepBuildReview, "build_complete")
 		case StepBuildReview:
 			w.runReview(ctx, StepValidating, StepBuilding)
 		case StepValidating:
-			w.runValidating(ctx)
+			w.runStep(ctx, "validate", w.config.Validate, StepValidateReview, "validation_complete")
 		case StepValidateReview:
 			w.runReview(ctx, StepShipping, StepValidating)
 		case StepShipping:
-			w.runShipping(ctx)
+			w.runStep(ctx, "ship", w.config.Ship, StepShipReview, "ship_complete")
 		case StepShipReview:
 			w.runReview(ctx, StepDone, StepBuilding)
 		case StepDone:
@@ -110,95 +94,46 @@ func (w *Workflow) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Workflow) runPlanning(ctx context.Context) {
-	w.logger.Info("step: planning", "feedback", w.feedback != "")
+// runStep runs an agent session for the current workflow step.
+func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
+	currentStep := w.state.Current()
+	sessionID := w.sessionIDs[currentStep]
 
-	plan, err := RunPlanAgent(ctx, w.agentModel, w.issue, w.config.Plan, w.config.WorkDir, w.config.MaxBudgetUSD, w.feedback, w.logger)
+	w.logger.Info("step: "+stepName, "feedback", w.feedback != "", "resume", sessionID != "")
+
+	cfg := w.config.ResolveStep(stepCfg)
+	data := NewPromptData(w.issue, w.config.BaseBranch)
+	data.Plan = w.plan
+	data.BuildOutput = w.buildOutput
+
+	output, newSessionID, err := RunStepAgent(ctx, stepName, w.issue, data, cfg, w.config.WorkDir, w.feedback, sessionID, w.logger)
 	if err != nil {
-		w.fail(ctx, fmt.Errorf("plan step: %w", err))
+		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return
 	}
 
-	w.plan = plan
+	w.sessionIDs[currentStep] = newSessionID
 
-	// Post plan as comment.
-	comment := fmt.Sprintf("## Implementation Plan\n\n%s", plan)
-	if err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
-		w.logger.Warn("failed to post plan comment", "error", err)
+	// Capture outputs for downstream steps.
+	switch stepName {
+	case "plan":
+		w.plan = output
+	case "build":
+		w.buildOutput = output
 	}
 
-	w.transitionToReview(ctx, StepPlanReview, "plan_complete")
-}
-
-func (w *Workflow) runBuilding(ctx context.Context) {
-	w.logger.Info("step: building", "feedback", w.feedback != "")
-
-	if w.plan == "" {
-		w.logger.Warn("no plan available (likely --skip-to build); agent will work from issue description only")
-	}
-
-	output, err := RunBuildAgent(ctx, w.agentModel, w.issue, w.plan, w.config.Build, w.config.WorkDir, w.config.MaxBudgetUSD, w.feedback, w.logger)
-	if err != nil {
-		w.fail(ctx, fmt.Errorf("build step: %w", err))
-		return
-	}
-
-	// Post build summary as comment.
+	// Post result as comment.
 	summary := output
 	if len(summary) > 3000 {
 		summary = summary[:3000] + "\n\n... (truncated)"
 	}
-	comment := fmt.Sprintf("## Build Complete\n\n%s", summary)
+	heading := strings.ToUpper(stepName[:1]) + stepName[1:]
+	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, summary)
 	if err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
-		w.logger.Warn("failed to post build comment", "error", err)
+		w.logger.Warn("failed to post "+stepName+" comment", "error", err)
 	}
 
-	w.transitionToReview(ctx, StepBuildReview, "build_complete")
-}
-
-func (w *Workflow) runValidating(ctx context.Context) {
-	w.logger.Info("step: validating")
-
-	commands := w.config.Validation.Commands
-	if len(commands) == 0 {
-		w.logger.Info("no validation commands configured, skipping")
-		if err := w.state.Transition(StepShipping, "no_validation"); err != nil {
-			w.fail(ctx, err)
-		}
-		return
-	}
-
-	timeout := time.Duration(w.config.Validation.TimeoutSeconds) * time.Second
-	results, err := RunValidation(ctx, w.config.WorkDir, commands, timeout)
-	if err != nil {
-		w.fail(ctx, fmt.Errorf("validation step: %w", err))
-		return
-	}
-
-	// Post results as comment.
-	comment := FormatValidationResults(results)
-	if err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
-		w.logger.Warn("failed to post validation comment", "error", err)
-	}
-
-	w.transitionToReview(ctx, StepValidateReview, "validation_complete")
-}
-
-func (w *Workflow) runShipping(ctx context.Context) {
-	w.logger.Info("step: shipping")
-
-	pr, err := CreatePR(ctx, w.issue, w.config.BaseBranch, w.config.WorkDir, w.logger)
-	if err != nil {
-		w.fail(ctx, fmt.Errorf("ship step: %w", err))
-		return
-	}
-
-	comment := fmt.Sprintf("## Pull Request Created\n\n[PR #%d](%s)", pr.Number, pr.URL)
-	if err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
-		w.logger.Warn("failed to post PR comment", "error", err)
-	}
-
-	w.transitionToReview(ctx, StepShipReview, "pr_created")
+	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
 // runReview waits for human feedback and transitions accordingly.

@@ -6,9 +6,7 @@ go_library(
         "agent.go",
         "config.go",
         "poller.go",
-        "pr.go",
         "state.go",
-        "validation.go",
         "workflow.go",
     ],
     importpath = "github.com/bazelment/yoloswe/jiradozer",
@@ -16,7 +14,6 @@ go_library(
     deps = [
         "//jiradozer/tracker",
         "//multiagent/agent",
-        "//wt",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
