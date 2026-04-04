@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -141,7 +142,7 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Run the workflow.
-	wf := jiradozer.NewWorkflow(tracker, issue, model, cfg, logger)
+	wf := jiradozer.NewWorkflow(tracker, issue, model, cfg, logger, args.skipTo)
 	return wf.Run(ctx)
 }
 
@@ -159,16 +160,5 @@ func availableModels() string {
 	for _, m := range agent.AllModels {
 		names = append(names, m.ID)
 	}
-	return fmt.Sprintf("[%s]", joinStrings(names))
-}
-
-func joinStrings(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += ", "
-		}
-		result += s
-	}
-	return result
+	return fmt.Sprintf("[%s]", strings.Join(names, ", "))
 }

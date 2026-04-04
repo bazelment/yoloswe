@@ -186,6 +186,16 @@ func WithProviderEventHandler(h EventHandler) ExecuteOption {
 	return func(c *ExecuteConfig) { c.EventHandler = h }
 }
 
+// WithProviderMaxTurns sets the maximum number of agent turns for a provider execution.
+func WithProviderMaxTurns(n int) ExecuteOption {
+	return func(c *ExecuteConfig) { c.MaxTurns = n }
+}
+
+// WithProviderMaxBudgetUSD sets the maximum budget in USD for a provider execution.
+func WithProviderMaxBudgetUSD(budget float64) ExecuteOption {
+	return func(c *ExecuteConfig) { c.MaxBudgetUSD = budget }
+}
+
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.
 func applyOptions(opts []ExecuteOption) ExecuteConfig {
 	cfg := ExecuteConfig{

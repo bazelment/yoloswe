@@ -23,10 +23,12 @@ type Workflow struct {
 	agentModel    agent.AgentModel
 	plan          string
 	feedback      string
+	skipTo        string
 }
 
 // NewWorkflow creates a new workflow for the given issue.
-func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, model agent.AgentModel, cfg *Config, logger *slog.Logger) *Workflow {
+// skipTo optionally skips to a specific step (e.g. "build", "validate", "ship").
+func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, model agent.AgentModel, cfg *Config, logger *slog.Logger, skipTo string) *Workflow {
 	return &Workflow{
 		tracker:    t,
 		issue:      issue,
@@ -35,6 +37,7 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, model agent.Agent
 		config:     cfg,
 		logger:     logger,
 		stateIDs:   make(map[string]string),
+		skipTo:     skipTo,
 	}
 }
 
@@ -45,8 +48,21 @@ func (w *Workflow) Run(ctx context.Context) error {
 		return fmt.Errorf("resolve workflow states: %w", err)
 	}
 
-	// Transition to first step.
-	if err := w.state.Transition(StepPlanning, "start"); err != nil {
+	// Transition to first step (or skip-to target).
+	firstStep, trigger := StepPlanning, "start"
+	switch w.skipTo {
+	case "build":
+		firstStep, trigger = StepBuilding, "skip_to_build"
+	case "validate":
+		firstStep, trigger = StepValidating, "skip_to_validate"
+	case "ship":
+		firstStep, trigger = StepShipping, "skip_to_ship"
+	case "", "plan":
+		// default: start at planning
+	default:
+		return fmt.Errorf("unknown --skip-to value: %q (valid: plan, build, validate, ship)", w.skipTo)
+	}
+	if err := w.state.Transition(firstStep, trigger); err != nil {
 		return err
 	}
 
@@ -74,7 +90,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 		case StepValidating:
 			w.runValidating(ctx)
 		case StepValidateReview:
-			w.runReview(ctx, StepShipping, StepBuilding)
+			w.runReview(ctx, StepShipping, StepValidating)
 		case StepShipping:
 			w.runShipping(ctx)
 		case StepShipReview:
@@ -116,6 +132,10 @@ func (w *Workflow) runPlanning(ctx context.Context) {
 
 func (w *Workflow) runBuilding(ctx context.Context) {
 	w.logger.Info("step: building", "feedback", w.feedback != "")
+
+	if w.plan == "" {
+		w.logger.Warn("no plan available (likely --skip-to build); agent will work from issue description only")
+	}
 
 	output, err := RunBuildAgent(ctx, w.agentModel, w.issue, w.plan, w.config.Build, w.config.WorkDir, w.config.MaxBudgetUSD, w.feedback, w.logger)
 	if err != nil {
