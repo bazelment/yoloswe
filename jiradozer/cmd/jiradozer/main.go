@@ -134,7 +134,7 @@ func run(ctx context.Context, args runArgs) error {
 		}
 		resolved := cfg.ResolveStep(stepCfg)
 		data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
-		output, _, err := jiradozer.RunStepAgent(ctx, args.runStep, issue, data, resolved, cfg.WorkDir, "", "", logger)
+		output, _, err := jiradozer.RunStepAgent(ctx, args.runStep, data, resolved, cfg.WorkDir, "", "", logger)
 		if err != nil {
 			return fmt.Errorf("run-step %s: %w", args.runStep, err)
 		}

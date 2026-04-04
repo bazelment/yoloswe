@@ -99,8 +99,8 @@ func TestFetchComments(t *testing.T) {
 	require.Len(t, comments, 2)
 	assert.Equal(t, "approve", comments[0].Body)
 	assert.Equal(t, "Alice", comments[0].UserName)
-	assert.False(t, comments[0].IsBot)
-	assert.True(t, comments[1].IsBot)
+	assert.False(t, comments[0].IsSelf)
+	assert.True(t, comments[1].IsSelf)
 }
 
 func TestFetchCommentsSinceFilter(t *testing.T) {

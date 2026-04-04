@@ -21,7 +21,7 @@ type Comment struct {
 	ID        string
 	Body      string
 	UserName  string
-	IsBot     bool
+	IsSelf    bool // true if posted by the authenticated API user (our bot)
 }
 
 // WorkflowState is a possible state in the issue tracker's workflow.

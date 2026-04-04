@@ -32,28 +32,34 @@ func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Check immediately on the first iteration, then wait for ticker.
+	first := true
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			comments, err := t.FetchComments(ctx, issueID, since)
-			if err != nil {
-				logger.Warn("failed to fetch comments, will retry", "error", err)
+		if !first {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+		first = false
+
+		comments, err := t.FetchComments(ctx, issueID, since)
+		if err != nil {
+			logger.Warn("failed to fetch comments, will retry", "error", err)
+			continue
+		}
+
+		for _, c := range comments {
+			if c.IsSelf {
 				continue
 			}
-
-			for _, c := range comments {
-				if c.IsBot {
-					continue
-				}
-				action := ParseCommentAction(c.Body)
-				return &FeedbackResult{
-					Action:  action,
-					Message: c.Body,
-					Comment: c,
-				}, nil
-			}
+			action := ParseCommentAction(c.Body)
+			return &FeedbackResult{
+				Action:  action,
+				Message: c.Body,
+				Comment: c,
+			}, nil
 		}
 	}
 }

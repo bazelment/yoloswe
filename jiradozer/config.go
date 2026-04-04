@@ -66,7 +66,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	// Expand environment variables in sensitive fields.
-	cfg.Tracker.APIKey = resolveEnv(cfg.Tracker.APIKey)
+	apiKey, err := resolveEnv(cfg.Tracker.APIKey)
+	if err != nil {
+		return nil, fmt.Errorf("tracker.api_key: %w", err)
+	}
+	cfg.Tracker.APIKey = apiKey
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -147,12 +151,14 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 }
 
 // resolveEnv expands a value that starts with $ as an environment variable.
-func resolveEnv(value string) string {
+// Returns an error if the value references an env var that is not set.
+func resolveEnv(value string) (string, error) {
 	if strings.HasPrefix(value, "$") {
 		envName := strings.TrimPrefix(value, "$")
 		if v := os.Getenv(envName); v != "" {
-			return v
+			return v, nil
 		}
+		return "", fmt.Errorf("environment variable %s is not set", envName)
 	}
-	return value
+	return value, nil
 }

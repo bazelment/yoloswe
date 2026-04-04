@@ -106,7 +106,7 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	data.Plan = w.plan
 	data.BuildOutput = w.buildOutput
 
-	output, newSessionID, err := RunStepAgent(ctx, stepName, w.issue, data, cfg, w.config.WorkDir, w.feedback, sessionID, w.logger)
+	output, newSessionID, err := RunStepAgent(ctx, stepName, data, cfg, w.config.WorkDir, w.feedback, sessionID, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return

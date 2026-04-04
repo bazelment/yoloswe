@@ -101,7 +101,7 @@ func (c *Client) FetchComments(ctx context.Context, issueID string, since time.T
 			}
 			if n.User != nil {
 				comment.UserName = n.User.Name
-				comment.IsBot = n.User.IsMe
+				comment.IsSelf = n.User.IsMe
 			}
 			allComments = append(allComments, comment)
 		}
@@ -146,7 +146,10 @@ func (c *Client) PostComment(ctx context.Context, issueID string, body string) e
 	if err != nil {
 		return fmt.Errorf("post comment: %w", err)
 	}
-	if resp.Data != nil && !resp.Data.CommentCreate.Success {
+	if resp.Data == nil {
+		return fmt.Errorf("post comment: response data is nil")
+	}
+	if !resp.Data.CommentCreate.Success {
 		return fmt.Errorf("post comment: mutation returned success=false")
 	}
 	return nil
@@ -158,7 +161,10 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 	if err != nil {
 		return fmt.Errorf("update issue state: %w", err)
 	}
-	if resp.Data != nil && !resp.Data.IssueUpdate.Success {
+	if resp.Data == nil {
+		return fmt.Errorf("update issue state: response data is nil")
+	}
+	if !resp.Data.IssueUpdate.Success {
 		return fmt.Errorf("update issue state: mutation returned success=false")
 	}
 	return nil

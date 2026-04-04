@@ -69,8 +69,10 @@ Each step (`plan`, `build`, `validate`, `ship`) is a self-contained agent sessio
 | `system_prompt` | | | | | Optional system prompt |
 | `model` | inherit | inherit | inherit | inherit | Model override for this step |
 | `permission_mode` | `plan` | `bypass` | `bypass` | `bypass` | Agent permission mode |
-| `max_turns` | `10` | `30` | `10` | `10` | Max agent turns |
-| `max_budget_usd` | inherit | inherit | inherit | inherit | Budget override for this step |
+| `max_turns` | `10` | `30` | `10` | `10` | Max agent turns (Claude only) |
+| `max_budget_usd` | inherit | inherit | inherit | inherit | Budget override (Claude only) |
+
+> **Note**: `max_turns`, `max_budget_usd`, and session resume (redo/feedback) are currently only honored by the Claude provider. Other providers (Codex, Gemini, Cursor) accept these options without error but do not enforce them.
 
 ### Prompt templates
 

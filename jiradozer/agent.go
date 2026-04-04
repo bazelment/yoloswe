@@ -90,7 +90,7 @@ func DefaultPromptForStep(stepName string) string {
 // RunStepAgent runs an agent session for the given workflow step.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
-func RunStepAgent(ctx context.Context, stepName string, issue *tracker.Issue, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error) {
+func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error) {
 	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
 	if err != nil {
 		return "", "", fmt.Errorf("render %s prompt: %w", stepName, err)
