@@ -15,7 +15,7 @@ import (
 func TestFetchIssue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-		assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
+		assert.Equal(t, "test-key", r.Header.Get("Authorization"))
 
 		resp := graphqlResponse{
 			Data: &graphqlData{

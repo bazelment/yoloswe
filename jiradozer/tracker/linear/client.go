@@ -185,11 +185,7 @@ func (c *Client) execute(ctx context.Context, gqlReq graphqlRequest) (*graphqlRe
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	authValue := c.apiKey
-	if !strings.HasPrefix(authValue, "Bearer ") {
-		authValue = "Bearer " + authValue
-	}
-	httpReq.Header.Set("Authorization", authValue)
+	httpReq.Header.Set("Authorization", c.apiKey)
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
