@@ -90,6 +90,8 @@ func (w *Workflow) Run(ctx context.Context) error {
 		case StepFailed:
 			w.logger.Error("workflow failed", "error", w.lastError)
 			return w.lastError
+		default:
+			return fmt.Errorf("workflow reached unexpected state: %s", w.state.Current())
 		}
 	}
 }
@@ -190,7 +192,10 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 
 func (w *Workflow) fail(ctx context.Context, err error) {
 	w.lastError = err
-	_ = w.state.Transition(StepFailed, "error: "+err.Error())
+	if tErr := w.state.Transition(StepFailed, "error: "+err.Error()); tErr != nil {
+		w.logger.Error("failed to transition to StepFailed, forcing state", "from", w.state.Current(), "error", tErr)
+		w.state.ForceState(StepFailed)
+	}
 }
 
 func (w *Workflow) resolveStateIDs(ctx context.Context) error {

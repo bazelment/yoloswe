@@ -3,6 +3,7 @@ package jiradozer
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -72,6 +73,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	cfg.Tracker.APIKey = apiKey
 
+	// Expand ~ in work_dir.
+	cfg.WorkDir = ExpandHome(cfg.WorkDir)
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -107,6 +111,13 @@ func (c *Config) validate() error {
 	}
 	if c.Agent.Model == "" {
 		return fmt.Errorf("agent.model is required")
+	}
+	if c.WorkDir != "" && c.WorkDir != "." {
+		if info, err := os.Stat(c.WorkDir); err != nil {
+			return fmt.Errorf("work_dir %q: %w", c.WorkDir, err)
+		} else if !info.IsDir() {
+			return fmt.Errorf("work_dir %q is not a directory", c.WorkDir)
+		}
 	}
 	if c.PollInterval <= 0 {
 		c.PollInterval = 15 * time.Second
@@ -148,6 +159,16 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 		step.MaxBudgetUSD = c.MaxBudgetUSD
 	}
 	return step
+}
+
+// ExpandHome replaces a leading ~ with the user's home directory.
+func ExpandHome(path string) string {
+	if strings.HasPrefix(path, "~/") || path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
 }
 
 // resolveEnv expands a value that starts with $ as an environment variable.

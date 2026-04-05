@@ -95,7 +95,7 @@ func run(ctx context.Context, args runArgs) error {
 
 	// Apply CLI flag overrides.
 	if args.workDir != "" {
-		cfg.WorkDir = args.workDir
+		cfg.WorkDir = jiradozer.ExpandHome(args.workDir)
 	}
 	if args.modelID != "" {
 		cfg.Agent.Model = args.modelID
@@ -111,7 +111,12 @@ func run(ctx context.Context, args runArgs) error {
 	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
 		return fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
 	}
-	logger.Info("using agent", "model", cfg.Agent.Model)
+	logger.Info("using agent",
+		"model", cfg.Agent.Model,
+		"work_dir", cfg.WorkDir,
+		"base_branch", cfg.BaseBranch,
+		"poll_interval", cfg.PollInterval,
+	)
 
 	// Create tracker client.
 	tracker, err := createTracker(cfg)

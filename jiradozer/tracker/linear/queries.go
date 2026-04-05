@@ -1,15 +1,34 @@
 package linear
 
+import (
+	"strconv"
+	"strings"
+)
+
 // graphqlRequest is the JSON body sent to the Linear GraphQL endpoint.
 type graphqlRequest struct {
 	Variables map[string]any `json:"variables,omitempty"`
 	Query     string         `json:"query"`
 }
 
-// fetchIssueByIdentifierQuery returns a single issue by its human-readable identifier.
+// parseIdentifier splits a human-readable identifier like "INF-199" into
+// team key ("INF") and issue number (199).
+func parseIdentifier(identifier string) (teamKey string, number float64) {
+	parts := strings.SplitN(identifier, "-", 2)
+	if len(parts) == 2 {
+		teamKey = parts[0]
+		n, _ := strconv.Atoi(parts[1])
+		number = float64(n)
+	}
+	return teamKey, number
+}
+
+// fetchIssueByIdentifierQuery returns a single issue by its human-readable identifier
+// (e.g. "INF-199"). Linear's IssueFilter doesn't have an "identifier" field, so we
+// filter by team key + issue number instead.
 func fetchIssueByIdentifierQuery(identifier string) graphqlRequest {
-	query := `query FetchIssue($identifier: String!) {
-  issues(filter: { identifier: { eq: $identifier } }, first: 1) {
+	query := `query FetchIssue($teamKey: String!, $number: Float!) {
+  issues(filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }, first: 1) {
     nodes {
       id
       identifier
@@ -23,9 +42,10 @@ func fetchIssueByIdentifierQuery(identifier string) graphqlRequest {
     }
   }
 }`
+	teamKey, number := parseIdentifier(identifier)
 	return graphqlRequest{
 		Query:     query,
-		Variables: map[string]any{"identifier": identifier},
+		Variables: map[string]any{"teamKey": teamKey, "number": number},
 	}
 }
 

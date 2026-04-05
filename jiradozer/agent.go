@@ -138,6 +138,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"step", stepName,
 		"mode", cfg.PermissionMode,
 		"model", cfg.Model,
+		"work_dir", workDir,
 		"resume", resumeSessionID != "",
 	)
 

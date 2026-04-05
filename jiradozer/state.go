@@ -166,6 +166,21 @@ func (sm *StateMachine) Transition(to WorkflowStep, trigger string) error {
 	return nil
 }
 
+// ForceState unconditionally sets the current step, bypassing transition validation.
+// This is a safety escape hatch for when the normal transition path is unreachable
+// (e.g., transitioning to StepFailed from a state that doesn't allow it).
+func (sm *StateMachine) ForceState(to WorkflowStep) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.history = append(sm.history, StepTransition{
+		From:      sm.step,
+		To:        to,
+		Trigger:   "forced",
+		Timestamp: time.Now(),
+	})
+	sm.step = to
+}
+
 // History returns a copy of the transition history.
 func (sm *StateMachine) History() []StepTransition {
 	sm.mu.RLock()

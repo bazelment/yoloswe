@@ -46,10 +46,17 @@ type ProcessError struct {
 }
 
 func (e *ProcessError) Error() string {
+	msg := "process error: " + e.Message
 	if e.ExitCode != 0 {
-		return fmt.Sprintf("process error: %s (exit code %d)", e.Message, e.ExitCode)
+		msg += fmt.Sprintf(" (exit code %d)", e.ExitCode)
 	}
-	return fmt.Sprintf("process error: %s", e.Message)
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	if e.Stderr != "" {
+		msg += "\nstderr: " + e.Stderr
+	}
+	return msg
 }
 
 func (e *ProcessError) Unwrap() error {
