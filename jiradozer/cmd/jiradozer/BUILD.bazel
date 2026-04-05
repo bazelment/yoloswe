@@ -9,6 +9,7 @@ go_library(
         "//jiradozer",
         "//jiradozer/tracker",
         "//jiradozer/tracker/linear",
+        "//logging/klogfmt",
         "//multiagent/agent",
         "@com_github_spf13_cobra//:cobra",
     ],

@@ -16,6 +16,7 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
@@ -85,7 +86,8 @@ func run(ctx context.Context, args runArgs) error {
 	if args.verbose {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	klogfmt.Init(klogfmt.WithLevel(level))
+	logger := slog.Default()
 
 	// Load config.
 	cfg, err := jiradozer.LoadConfig(args.configPath)
