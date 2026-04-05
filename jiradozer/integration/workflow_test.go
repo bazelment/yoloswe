@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -130,7 +129,9 @@ func TestLinear_FetchWorkflowStates(t *testing.T) {
 	assert.True(t, typeSet["started"] || typeSet["unstarted"], "should have at least one started/unstarted state")
 }
 
-// TestLinear_CommentPolling verifies that PollForFeedback works with real Linear.
+// TestLinear_CommentPolling verifies comment posting and retrieval via real Linear.
+// Note: PollForFeedback filters out IsSelf=true comments, so we test FetchComments
+// directly since the authenticated API user's comments always have IsSelf=true.
 func TestLinear_CommentPolling(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -139,30 +140,38 @@ func TestLinear_CommentPolling(t *testing.T) {
 	client := getLinearClient(t)
 	issueID := getTestIssueID(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	issue, err := client.FetchIssue(ctx, issueID)
 	require.NoError(t, err)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	// Post a uniquely identifiable comment.
+	marker := time.Now().Format("20060102-150405.000")
+	commentBody := "polling-test-" + marker
+	since := time.Now().Add(-2 * time.Second)
 
-	// Post an "approve" comment, then poll for it.
-	approveBody := "lgtm"
-	err = client.PostComment(ctx, issue.ID, approveBody)
+	err = client.PostComment(ctx, issue.ID, commentBody)
 	require.NoError(t, err)
 
-	// Poll for the comment. Use a since time just before the post.
-	since := time.Now().Add(-5 * time.Second)
-	fb, err := jiradozer.PollForFeedback(ctx, client, issue.ID, since, 2*time.Second, logger)
+	// Fetch comments and verify ours is there, with correct IsSelf flag.
+	comments, err := client.FetchComments(ctx, issue.ID, since)
 	require.NoError(t, err)
-	require.NotNil(t, fb)
 
-	// The comment we posted is from "us" (IsSelf=true), so the poller should
-	// skip it. If no other human comments exist, this will time out.
-	// To properly test, we'd need a second user to post.
-	// For now, verify the poller returns SOME result.
-	t.Logf("Feedback: action=%d, message=%q, comment_id=%s", fb.Action, fb.Message, fb.Comment.ID)
+	var found bool
+	for _, c := range comments {
+		if c.Body == commentBody {
+			found = true
+			assert.True(t, c.IsSelf, "comment posted by our API key should have IsSelf=true")
+			t.Logf("Comment: ID=%s, IsSelf=%v, Body=%q", c.ID, c.IsSelf, c.Body)
+
+			// Verify ParseCommentAction works with the real comment body.
+			action := jiradozer.ParseCommentAction(c.Body)
+			assert.Equal(t, jiradozer.FeedbackComment, action, "non-keyword body should be FeedbackComment")
+			break
+		}
+	}
+	assert.True(t, found, "should find posted comment in FetchComments result")
 }
 
 // TestLinear_LGTM_Variants_RealComments verifies LGTM/approve handling with
