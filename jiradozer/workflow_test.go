@@ -3,6 +3,7 @@ package jiradozer
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"testing"
@@ -83,12 +84,8 @@ func (m *mockWorkflowTracker) getCalls(method string) []trackerCall {
 // --- Test Helpers ---
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(devNull{}, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 }
-
-type devNull struct{}
-
-func (devNull) Write(p []byte) (int, error) { return len(p), nil }
 
 func testIssue() *tracker.Issue {
 	desc := "Fix the widget rendering bug"
@@ -499,23 +496,10 @@ func TestWorkflow_FeedbackPreservedOnRedo(t *testing.T) {
 
 // TestWorkflow_BuildReviewBackToPlanning verifies backtracking from build review.
 func TestWorkflow_BuildReviewBackToPlanning(t *testing.T) {
-	mt := &mockWorkflowTracker{
-		commentSets: [][]tracker.Comment{
-			// Build review → redo goes to StepBuilding by default,
-			// but FeedbackComment goes to redoTarget which is StepBuilding.
-			// To go back to planning, we need BuildReview → Planning which is valid.
-			// In actual workflow, runReview(StepValidating, StepBuilding) means
-			// redo goes to StepBuilding. But the state machine allows
-			// BuildReview → Planning directly.
-		},
-	}
-
-	// Test the state machine transition directly.
 	sm := NewStateMachine()
 	walkTo(t, sm, StepBuildReview)
 	require.NoError(t, sm.Transition(StepPlanning, "back_to_plan"))
 	assert.Equal(t, StepPlanning, sm.Current())
-	_ = mt
 }
 
 // TestWorkflow_ValidateReviewToBuilding verifies that validate review can go to building.
@@ -574,16 +558,10 @@ func TestWorkflow_AllReviewStepsFilterBotComments(t *testing.T) {
 			}
 
 			wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
-			walkToWorkflow(t, wf, r.reviewStep)
+			walkTo(t, wf.state, r.reviewStep)
 
 			wf.runReview(context.Background(), r.approveTarget, r.redoTarget)
 			assert.Equal(t, r.approveTarget, wf.state.Current())
 		})
 	}
-}
-
-// walkToWorkflow transitions the workflow's state machine to the target step.
-func walkToWorkflow(t *testing.T, wf *Workflow, target WorkflowStep) {
-	t.Helper()
-	walkTo(t, wf.state, target)
 }
