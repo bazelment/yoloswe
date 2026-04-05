@@ -40,4 +40,5 @@ go_test(
         "thread_test.go",
     ],
     embed = [":codex"],
+    deps = ["@com_github_stretchr_testify//require"],
 )

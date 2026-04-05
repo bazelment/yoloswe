@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	"github.com/stretchr/testify/require"
 )
 
 // ============================================================================
@@ -428,4 +429,60 @@ func TestClient_Integration_Scenario5_MultipleThreads(t *testing.T) {
 	}
 
 	t.Log("Scenario 5 passed!")
+}
+
+// ============================================================================
+// Scenario 6: TurnCompletedEvent carries DurationMs and Error
+// ============================================================================
+
+// TestClient_Integration_Scenario6_TurnCompletedFields verifies that a successful
+// turn populates DurationMs > 0 and Error == nil on the TurnCompletedEvent emitted
+// through the client event channel. This exercises the fix where DurationMs was
+// always 0 and Error was always nil because handleTurnCompleted did not propagate
+// them to the emitted event.
+func TestClient_Integration_Scenario6_TurnCompletedFields(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	testDir, err := os.MkdirTemp("", "codex-go-test-scenario6-")
+	require.NoError(t, err)
+	defer os.RemoveAll(testDir)
+
+	client := codex.NewClient(
+		codex.WithClientName("codex-integration-test"),
+		codex.WithClientVersion("1.0.0"),
+	)
+
+	require.NoError(t, client.Start(ctx))
+	defer client.Stop()
+
+	thread, err := client.CreateThread(ctx,
+		codex.WithWorkDir(testDir),
+		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
+	)
+	require.NoError(t, err)
+
+	// Use thread.WaitReady() instead of event-channel-based
+	// WaitForThreadReady to avoid race with early event emission.
+	require.NoError(t, thread.WaitReady(ctx))
+
+	// Send a message (non-blocking) and collect events.
+	_, err = thread.SendMessage(ctx, "Reply with just: OK")
+	require.NoError(t, err)
+
+	events, err := CollectTurnEvents(ctx, client)
+	require.NoError(t, err)
+
+	require.NotNil(t, events.TurnCompleted, "expected TurnCompletedEvent")
+	tc := events.TurnCompleted
+
+	t.Logf("TurnCompleted: success=%v durationMs=%d error=%v", tc.Success, tc.DurationMs, tc.Error)
+
+	// A successful turn should have a positive duration and no error.
+	require.True(t, tc.Success, "expected successful turn")
+	require.Greater(t, tc.DurationMs, int64(0),
+		"DurationMs should be positive for a real turn (was always 0 before the fix)")
+	require.Nil(t, tc.Error, "expected nil error on success")
+
+	t.Log("Scenario 6 passed!")
 }
