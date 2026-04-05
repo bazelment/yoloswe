@@ -5,4 +5,5 @@ go_library(
     srcs = ["logging.go"],
     importpath = "github.com/bazelment/yoloswe/symphony/logging",
     visibility = ["//visibility:public"],
+    deps = ["//logging/klogfmt"],
 )

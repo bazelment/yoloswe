@@ -61,6 +61,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
+
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
@@ -193,6 +195,7 @@ func renderStatusBox(w tmuxWindow, lines []string, ps *session.PaneStatus, width
 }
 
 func main() {
+	klogfmt.Init()
 	duration := 10 * time.Minute
 	interval := 15 * time.Second
 

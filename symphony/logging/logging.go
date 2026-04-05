@@ -3,6 +3,8 @@ package logging
 import (
 	"log/slog"
 	"os"
+
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 )
 
 // WithIssue returns a logger with issue_id and issue_identifier attributes.
@@ -15,9 +17,7 @@ func WithSession(logger *slog.Logger, sessionID string) *slog.Logger {
 	return logger.With("session_id", sessionID)
 }
 
-// NewLogger creates a structured text logger writing to stderr.
+// NewLogger creates a klog-formatted logger writing to stderr.
 func NewLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
+	return slog.New(klogfmt.New(os.Stderr))
 }

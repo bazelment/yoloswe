@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -23,6 +24,7 @@ var (
 )
 
 func main() {
+	klogfmt.Init()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

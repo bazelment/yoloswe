@@ -12,6 +12,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/multiagent/cmd/swarm",
     visibility = ["//visibility:private"],
     deps = [
+        "//logging/klogfmt",
         "//multiagent/agent",
         "//multiagent/checkpoint",
         "//multiagent/orchestrator",

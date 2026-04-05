@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,6 +17,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/cmd/codereview"
@@ -82,6 +84,7 @@ func init() {
 }
 
 func main() {
+	klogfmt.Init()
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -183,7 +186,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Reconcile previously-running tmux sessions against live tmux windows.
 	if err := sessionManager.ReconcileTmuxSessions(); err != nil {
-		log.Printf("Warning: tmux session reconciliation failed: %v", err)
+		slog.Warn("tmux session reconciliation failed", "err", err)
 	}
 
 	// Discover repos (other than the initial one) that have live tmux sessions.
@@ -202,7 +205,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		})
 		router.SetOutput(io.Discard)
 		if err := router.Start(ctx); err != nil {
-			log.Printf("Warning: task router failed to start: %v (falling back to heuristic routing)", err)
+			slog.Warn("task router failed to start, falling back to heuristic routing", "err", err)
 		} else {
 			taskRouter = router
 			defer router.Stop()
@@ -412,7 +415,7 @@ func startIPCServer(registry *session.SessionRegistry, wtRoot, repoName string) 
 	})
 
 	if err := srv.Start(); err != nil {
-		log.Printf("Warning: IPC server failed to start: %v", err)
+		slog.Warn("IPC server failed to start", "err", err)
 		return nil, ""
 	}
 	socketPath := srv.SocketPath()

@@ -17,11 +17,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
 )
 
 func main() {
+	klogfmt.Init()
 	rootCmd := &cobra.Command{
 		Use:   "yoloswe",
 		Short: "AI-assisted software engineering tool",

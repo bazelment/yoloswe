@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/orchestrator"
 	"github.com/bazelment/yoloswe/multiagent/progress"
@@ -63,6 +64,7 @@ func init() {
 }
 
 func main() {
+	klogfmt.Init()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

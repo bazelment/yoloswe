@@ -16,12 +16,14 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/voice/stt"
 	"github.com/bazelment/yoloswe/voice/stt/deepgram"
 	"github.com/bazelment/yoloswe/voice/stt/logging"
 )
 
 func main() {
+	klogfmt.Init()
 	provider := flag.String("provider", "deepgram", "STT provider (deepgram)")
 	file := flag.String("file", "", "WAV file to transcribe (omit for live mic)")
 	logFile := flag.String("log", "", "JSONL log file path")

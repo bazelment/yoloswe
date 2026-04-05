@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/readline-voice-spike",
     visibility = ["//visibility:private"],
     deps = [
+        "//logging/klogfmt",
         "@com_github_ergochat_readline//:readline",
     ],
 )

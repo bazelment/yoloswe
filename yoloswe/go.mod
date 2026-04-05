@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
+	github.com/bazelment/yoloswe/logging v0.0.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.41.0
 )
@@ -21,3 +22,5 @@ require (
 )
 
 replace github.com/bazelment/yoloswe/agent-cli-wrapper => ../agent-cli-wrapper
+
+replace github.com/bazelment/yoloswe/logging => ../logging

@@ -15,10 +15,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
 
 func main() {
+	klogfmt.Init()
 	os.Exit(run())
 }
 

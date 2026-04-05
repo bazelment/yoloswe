@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/bramble/sessionanalysis"
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 )
 
 type config struct { //nolint:govet // fieldalignment: readability over packing
@@ -41,9 +42,7 @@ type config struct { //nolint:govet // fieldalignment: readability over packing
 func main() {
 	// Suppress noisy slog warnings from protocol parser (unknown message types
 	// like "last-prompt", "custom-title" that don't affect analysis).
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelError,
-	})))
+	klogfmt.Init(klogfmt.WithLevel(slog.LevelError))
 
 	cfg := parseFlags(os.Args[1:])
 

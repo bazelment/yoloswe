@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/medivac/engine"
 )
 
@@ -110,9 +111,9 @@ func verbosityLevel() slog.Level {
 	}
 }
 
-// newLogger creates a structured logger that writes to stderr.
+// newLogger creates a klog-formatted logger that writes to stderr.
 func newLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: verbosityLevel()}))
+	return slog.New(klogfmt.New(os.Stderr, klogfmt.WithLevel(verbosityLevel())))
 }
 
 // newFileLogger creates a logger that writes to both stderr and a persistent
@@ -134,5 +135,5 @@ func newFileLogger(root string) (*slog.Logger, string, func()) {
 	}
 
 	w := io.MultiWriter(os.Stderr, f)
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})), logFile, func() { f.Close() }
+	return slog.New(klogfmt.New(w, klogfmt.WithLevel(level))), logFile, func() { f.Close() }
 }

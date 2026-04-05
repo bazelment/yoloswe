@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/voice/cmd/voicetest",
     visibility = ["//visibility:private"],
     deps = [
+        "//logging/klogfmt",
         "//voice/stt",
         "//voice/stt/deepgram",
         "//voice/stt/logging",

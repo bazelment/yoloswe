@@ -13,6 +13,7 @@ go_library(
         "//bramble/app",
         "//bramble/replay",
         "//bramble/session",
+        "//logging/klogfmt",
     ],
 )
 
