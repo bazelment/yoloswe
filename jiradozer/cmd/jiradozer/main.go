@@ -29,6 +29,7 @@ func main() {
 		pollInterval time.Duration
 		maxBudget    float64
 		runStep      string
+		autoApprove  string
 		verbose      bool
 	)
 
@@ -45,6 +46,7 @@ func main() {
 				pollInterval: pollInterval,
 				maxBudget:    maxBudget,
 				runStep:      runStep,
+				autoApprove:  autoApprove,
 				verbose:      verbose,
 			})
 		},
@@ -57,6 +59,7 @@ func main() {
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, validate, ship")
+	rootCmd.Flags().StringVar(&autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
 
 	_ = rootCmd.MarkFlagRequired("issue")
@@ -75,6 +78,7 @@ type runArgs struct {
 	workDir      string
 	modelID      string
 	runStep      string
+	autoApprove  string
 	pollInterval time.Duration
 	maxBudget    float64
 	verbose      bool
@@ -107,6 +111,24 @@ func run(ctx context.Context, args runArgs) error {
 	}
 	if args.maxBudget > 0 {
 		cfg.MaxBudgetUSD = args.maxBudget
+	}
+
+	// Apply auto-approve overrides.
+	if args.autoApprove != "" {
+		for _, s := range parseAutoApprove(args.autoApprove) {
+			switch s {
+			case "plan":
+				cfg.Plan.AutoApprove = true
+			case "build":
+				cfg.Build.AutoApprove = true
+			case "validate":
+				cfg.Validate.AutoApprove = true
+			case "ship":
+				cfg.Ship.AutoApprove = true
+			default:
+				return fmt.Errorf("unknown step %q in --auto-approve (valid: plan, build, validate, ship, all)", s)
+			}
+		}
 	}
 
 	// Validate work_dir after CLI overrides.
@@ -166,6 +188,22 @@ func createTracker(cfg *jiradozer.Config) (tracker.IssueTracker, error) {
 	default:
 		return nil, fmt.Errorf("unsupported tracker kind: %q", cfg.Tracker.Kind)
 	}
+}
+
+var allSteps = []string{"plan", "build", "validate", "ship"}
+
+func parseAutoApprove(value string) []string {
+	if strings.TrimSpace(value) == "all" {
+		return allSteps
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 func availableModels() string {

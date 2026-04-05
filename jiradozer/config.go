@@ -45,6 +45,7 @@ type StepConfig struct {
 	PermissionMode string  `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
 	MaxTurns       int     `yaml:"max_turns"`
 	MaxBudgetUSD   float64 `yaml:"max_budget_usd"` // override top-level; 0 = inherit
+	AutoApprove    bool    `yaml:"auto_approve"`   // skip human review after this step
 }
 
 // StatesConfig maps logical workflow states to tracker-specific state names.
