@@ -1,0 +1,6 @@
+tracker:
+  kind: linear
+  api_key: ""
+
+agent:
+  model: sonnet
