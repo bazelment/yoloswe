@@ -152,6 +152,7 @@ You MUST respond with valid JSON in this exact format:
 // ReviewResult contains the result of a review turn.
 type ReviewResult struct {
 	ResponseText string // Full response text
+	ErrorMessage string // Error from the agent backend (empty on success)
 	Success      bool
 	DurationMs   int64
 	InputTokens  int64
@@ -321,6 +322,9 @@ func ResolveProtocolLogPath(flagValue string) (string, error) {
 func PrintResultSummary(result *ReviewResult) {
 	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
 	fmt.Fprintf(os.Stderr, "Success: %v\n", result.Success)
+	if result.ErrorMessage != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", result.ErrorMessage)
+	}
 	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
 	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
 

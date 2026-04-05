@@ -239,7 +239,8 @@ func (t *Thread) handleTextDelta(turnID, itemID, delta string) string {
 	return t.accumulator.handleDelta(turnID, itemID, delta)
 }
 
-func (t *Thread) handleTurnCompleted(turnID string, success bool, errMsg string) {
+// handleTurnCompleted processes a turn completion and returns the calculated duration.
+func (t *Thread) handleTurnCompleted(turnID string, success bool, errMsg string) int64 {
 	t.mu.Lock()
 
 	// Calculate duration
@@ -277,6 +278,7 @@ func (t *Thread) handleTurnCompleted(turnID string, success bool, errMsg string)
 	}
 
 	t.mu.Unlock()
+	return durationMs
 }
 
 func (t *Thread) setReady() {
