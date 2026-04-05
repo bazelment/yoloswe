@@ -51,6 +51,15 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	case "plan":
 		sessionOpts = append(sessionOpts, claude.WithPermissionMode(claude.PermissionModePlan))
 	}
+	if cfg.MaxTurns > 0 {
+		sessionOpts = append(sessionOpts, claude.WithMaxTurns(cfg.MaxTurns))
+	}
+	if cfg.MaxBudgetUSD > 0 {
+		sessionOpts = append(sessionOpts, claude.WithMaxBudgetUSD(cfg.MaxBudgetUSD))
+	}
+	if cfg.ResumeSessionID != "" {
+		sessionOpts = append(sessionOpts, claude.WithResume(cfg.ResumeSessionID))
+	}
 
 	// Create ephemeral session
 	session := claude.NewSession(sessionOpts...)
@@ -70,7 +79,11 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return nil, err
 	}
 
-	return ClaudeResultToAgentResult(result), nil
+	agentResult := ClaudeResultToAgentResult(result)
+	if info := session.Info(); info != nil {
+		agentResult.SessionID = info.SessionID
+	}
+	return agentResult, nil
 }
 
 func (p *ClaudeProvider) Events() <-chan AgentEvent { return p.events }

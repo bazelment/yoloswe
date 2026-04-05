@@ -3,6 +3,7 @@ go 1.25.0
 use (
 	./agent-cli-wrapper
 	./bramble
+	./jiradozer
 	./logging
 	./medivac
 	./multiagent

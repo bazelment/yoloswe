@@ -12,7 +12,6 @@ import (
 func GenerateSummary(info SessionInfo) string {
 	var parts []string
 
-	// Session type and title.
 	typeLabel := string(info.Type)
 	if info.Title != "" {
 		parts = append(parts, fmt.Sprintf("%s session %q", typeLabel, info.Title))
@@ -20,7 +19,6 @@ func GenerateSummary(info SessionInfo) string {
 		parts = append(parts, fmt.Sprintf("%s session", typeLabel))
 	}
 
-	// Status.
 	switch info.Status {
 	case StatusCompleted:
 		parts = append(parts, "completed successfully")
@@ -36,7 +34,6 @@ func GenerateSummary(info SessionInfo) string {
 		parts = append(parts, fmt.Sprintf("status: %s", string(info.Status)))
 	}
 
-	// Duration.
 	if info.StartedAt != nil {
 		end := time.Now()
 		if info.CompletedAt != nil {
@@ -46,7 +43,6 @@ func GenerateSummary(info SessionInfo) string {
 		parts = append(parts, fmt.Sprintf("in %s", formatDuration(duration)))
 	}
 
-	// Turn count and cost.
 	if info.Progress.TurnCount > 0 {
 		turnWord := "turns"
 		if info.Progress.TurnCount == 1 {

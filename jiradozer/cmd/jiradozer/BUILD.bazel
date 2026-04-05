@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "jiradozer_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bazelment/yoloswe/jiradozer/cmd/jiradozer",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//jiradozer",
+        "//jiradozer/tracker",
+        "//jiradozer/tracker/linear",
+        "//logging/klogfmt",
+        "//multiagent/agent",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_binary(
+    name = "jiradozer",
+    embed = [":jiradozer_lib"],
+    visibility = ["//visibility:public"],
+)

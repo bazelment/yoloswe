@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "jiradozer",
+    srcs = [
+        "agent.go",
+        "config.go",
+        "poller.go",
+        "state.go",
+        "workflow.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/jiradozer",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//jiradozer/tracker",
+        "//multiagent/agent",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "jiradozer_test",
+    srcs = [
+        "poller_test.go",
+        "state_test.go",
+    ],
+    embed = [":jiradozer"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -150,8 +150,8 @@ func (vr *VoiceReporter) Close() error {
 	if vr == nil {
 		return nil
 	}
-	if dp, ok := vr.handler.(*DirectPlayback); ok {
-		return dp.Close()
+	if closer, ok := vr.handler.(interface{ Close() error }); ok {
+		return closer.Close()
 	}
 	return nil
 }

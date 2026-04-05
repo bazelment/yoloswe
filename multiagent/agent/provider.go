@@ -12,6 +12,7 @@ type AgentResult struct {
 	Error         error
 	Text          string
 	Thinking      string
+	SessionID     string
 	ContentBlocks []AgentContentBlock
 	Usage         AgentUsage
 	DurationMs    int64
@@ -152,13 +153,14 @@ type ExecuteOption func(*ExecuteConfig)
 
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
-	EventHandler   EventHandler
-	Model          string
-	WorkDir        string
-	SystemPrompt   string
-	PermissionMode string
-	MaxTurns       int
-	MaxBudgetUSD   float64
+	EventHandler    EventHandler
+	Model           string
+	WorkDir         string
+	SystemPrompt    string
+	PermissionMode  string
+	ResumeSessionID string
+	MaxTurns        int
+	MaxBudgetUSD    float64
 }
 
 // WithProviderModel sets the model for a provider execution.
@@ -184,6 +186,21 @@ func WithProviderPermissionMode(mode string) ExecuteOption {
 // WithProviderEventHandler sets the event handler for a provider execution.
 func WithProviderEventHandler(h EventHandler) ExecuteOption {
 	return func(c *ExecuteConfig) { c.EventHandler = h }
+}
+
+// WithProviderMaxTurns sets the maximum number of agent turns for a provider execution.
+func WithProviderMaxTurns(n int) ExecuteOption {
+	return func(c *ExecuteConfig) { c.MaxTurns = n }
+}
+
+// WithProviderMaxBudgetUSD sets the maximum budget in USD for a provider execution.
+func WithProviderMaxBudgetUSD(budget float64) ExecuteOption {
+	return func(c *ExecuteConfig) { c.MaxBudgetUSD = budget }
+}
+
+// WithProviderResumeSessionID sets a session ID to resume instead of starting fresh.
+func WithProviderResumeSessionID(id string) ExecuteOption {
+	return func(c *ExecuteConfig) { c.ResumeSessionID = id }
 }
 
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.

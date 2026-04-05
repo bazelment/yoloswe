@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -150,6 +151,8 @@ func (pm *processManager) Start(ctx context.Context) error {
 	if cliPath == "" {
 		cliPath = "claude"
 	}
+
+	slog.Debug("starting CLI process", "cli_path", cliPath, "work_dir", pm.config.WorkDir, "args", args)
 
 	// Create command
 	pm.cmd = exec.CommandContext(ctx, cliPath, args...)
