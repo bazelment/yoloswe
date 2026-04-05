@@ -492,8 +492,8 @@ func TestClient_TokenUsageInTurnCompleted(t *testing.T) {
 func TestClient_TurnCompletedErrorAndDuration(t *testing.T) {
 	tests := []struct {
 		name    string
-		turn    Turn
 		wantErr string
+		turn    Turn
 		wantOK  bool
 	}{
 		{
