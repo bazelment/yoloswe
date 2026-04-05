@@ -108,12 +108,8 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Validate work_dir after CLI overrides.
-	if cfg.WorkDir != "" && cfg.WorkDir != "." {
-		if info, err := os.Stat(cfg.WorkDir); err != nil {
-			return fmt.Errorf("work_dir %q: %w", cfg.WorkDir, err)
-		} else if !info.IsDir() {
-			return fmt.Errorf("work_dir %q is not a directory", cfg.WorkDir)
-		}
+	if err := jiradozer.ValidateWorkDir(cfg.WorkDir); err != nil {
+		return err
 	}
 
 	// Validate agent model.

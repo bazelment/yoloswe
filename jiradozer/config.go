@@ -112,12 +112,8 @@ func (c *Config) validate() error {
 	if c.Agent.Model == "" {
 		return fmt.Errorf("agent.model is required")
 	}
-	if c.WorkDir != "" && c.WorkDir != "." {
-		if info, err := os.Stat(c.WorkDir); err != nil {
-			return fmt.Errorf("work_dir %q: %w", c.WorkDir, err)
-		} else if !info.IsDir() {
-			return fmt.Errorf("work_dir %q is not a directory", c.WorkDir)
-		}
+	if err := ValidateWorkDir(c.WorkDir); err != nil {
+		return err
 	}
 	if c.PollInterval <= 0 {
 		c.PollInterval = 15 * time.Second
@@ -159,6 +155,18 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 		step.MaxBudgetUSD = c.MaxBudgetUSD
 	}
 	return step
+}
+
+// ValidateWorkDir checks that a work_dir path exists and is a directory.
+func ValidateWorkDir(path string) error {
+	if path != "" && path != "." {
+		if info, err := os.Stat(path); err != nil {
+			return fmt.Errorf("work_dir %q: %w", path, err)
+		} else if !info.IsDir() {
+			return fmt.Errorf("work_dir %q is not a directory", path)
+		}
+	}
+	return nil
 }
 
 // ExpandHome replaces a leading ~ with the user's home directory.
