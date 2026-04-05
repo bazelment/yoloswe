@@ -107,6 +107,15 @@ func run(ctx context.Context, args runArgs) error {
 		cfg.MaxBudgetUSD = args.maxBudget
 	}
 
+	// Validate work_dir after CLI overrides.
+	if cfg.WorkDir != "" && cfg.WorkDir != "." {
+		if info, err := os.Stat(cfg.WorkDir); err != nil {
+			return fmt.Errorf("work_dir %q: %w", cfg.WorkDir, err)
+		} else if !info.IsDir() {
+			return fmt.Errorf("work_dir %q is not a directory", cfg.WorkDir)
+		}
+	}
+
 	// Validate agent model.
 	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
 		return fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())

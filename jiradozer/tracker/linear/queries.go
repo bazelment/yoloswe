@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -13,20 +14,22 @@ type graphqlRequest struct {
 
 // parseIdentifier splits a human-readable identifier like "INF-199" into
 // team key ("INF") and issue number (199).
-func parseIdentifier(identifier string) (teamKey string, number float64) {
+func parseIdentifier(identifier string) (teamKey string, number float64, err error) {
 	parts := strings.SplitN(identifier, "-", 2)
-	if len(parts) == 2 {
-		teamKey = parts[0]
-		n, _ := strconv.Atoi(parts[1])
-		number = float64(n)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", 0, fmt.Errorf("invalid issue identifier %q: expected format TEAM-NUMBER (e.g. INF-199)", identifier)
 	}
-	return teamKey, number
+	n, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid issue number in %q: %w", identifier, err)
+	}
+	return parts[0], float64(n), nil
 }
 
 // fetchIssueByIdentifierQuery returns a single issue by its human-readable identifier
 // (e.g. "INF-199"). Linear's IssueFilter doesn't have an "identifier" field, so we
 // filter by team key + issue number instead.
-func fetchIssueByIdentifierQuery(identifier string) graphqlRequest {
+func fetchIssueByIdentifierQuery(identifier string) (graphqlRequest, error) {
 	query := `query FetchIssue($teamKey: String!, $number: Float!) {
   issues(filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }, first: 1) {
     nodes {
@@ -42,11 +45,14 @@ func fetchIssueByIdentifierQuery(identifier string) graphqlRequest {
     }
   }
 }`
-	teamKey, number := parseIdentifier(identifier)
+	teamKey, number, err := parseIdentifier(identifier)
+	if err != nil {
+		return graphqlRequest{}, err
+	}
 	return graphqlRequest{
 		Query:     query,
 		Variables: map[string]any{"teamKey": teamKey, "number": number},
-	}
+	}, nil
 }
 
 // fetchCommentsQuery returns comments on an issue, ordered by creation time.

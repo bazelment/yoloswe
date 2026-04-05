@@ -45,7 +45,10 @@ func NewClientWithEndpoint(endpoint, apiKey string) *Client {
 }
 
 func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Issue, error) {
-	req := fetchIssueByIdentifierQuery(identifier)
+	req, err := fetchIssueByIdentifierQuery(identifier)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := c.execute(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch issue %s: %w", identifier, err)

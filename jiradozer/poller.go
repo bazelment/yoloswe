@@ -50,23 +50,35 @@ func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string
 			continue
 		}
 
-		for _, c := range comments {
-			if c.IsSelf {
-				continue
+		// Use the last (most recent) non-self comment, since Linear returns
+		// comments in ascending createdAt order.
+		var latest *tracker.Comment
+		for i := len(comments) - 1; i >= 0; i-- {
+			if !comments[i].IsSelf {
+				latest = &comments[i]
+				break
 			}
-			action := ParseCommentAction(c.Body)
+		}
+		if latest != nil {
+			action := ParseCommentAction(latest.Body)
 			return &FeedbackResult{
 				Action:  action,
-				Message: c.Body,
-				Comment: c,
+				Message: latest.Body,
+				Comment: *latest,
 			}, nil
 		}
 	}
 }
 
 // ParseCommentAction determines the feedback action from a comment body.
+// Only the first line is checked for action keywords, so "approve\n\nsome notes"
+// is correctly recognized as an approval.
 func ParseCommentAction(body string) FeedbackAction {
-	lower := strings.ToLower(strings.TrimSpace(body))
+	firstLine := strings.TrimSpace(body)
+	if idx := strings.IndexAny(firstLine, "\r\n"); idx >= 0 {
+		firstLine = strings.TrimSpace(firstLine[:idx])
+	}
+	lower := strings.ToLower(firstLine)
 	switch {
 	case lower == "approve" || lower == "lgtm" || lower == "ship it" || lower == "approved":
 		return FeedbackApprove
