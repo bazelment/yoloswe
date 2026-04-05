@@ -1,0 +1,6 @@
+tracker:
+  kind: linear
+  api_key: $JIRADOZER_TEST_API_KEY
+
+agent:
+  model: sonnet
