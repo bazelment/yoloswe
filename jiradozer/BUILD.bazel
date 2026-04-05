@@ -21,11 +21,16 @@ go_library(
 go_test(
     name = "jiradozer_test",
     srcs = [
+        "agent_test.go",
+        "config_test.go",
         "poller_test.go",
         "state_test.go",
+        "workflow_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":jiradozer"],
     deps = [
+        "//jiradozer/tracker",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
