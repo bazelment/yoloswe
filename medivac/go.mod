@@ -3,6 +3,7 @@ module github.com/bazelment/yoloswe/medivac
 go 1.25.0
 
 require (
+	github.com/bazelment/yoloswe/logging v0.0.0
 	github.com/bazelment/yoloswe/multiagent v0.0.0
 	github.com/bazelment/yoloswe/wt v0.0.0
 	github.com/spf13/cobra v1.10.2
@@ -22,6 +23,7 @@ require (
 
 replace (
 	github.com/bazelment/yoloswe/agent-cli-wrapper => ../agent-cli-wrapper
+	github.com/bazelment/yoloswe/logging => ../logging
 	github.com/bazelment/yoloswe/multiagent => ../multiagent
 	github.com/bazelment/yoloswe/wt => ../wt
 )

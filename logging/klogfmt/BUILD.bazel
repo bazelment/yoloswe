@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "klogfmt",
+    srcs = [
+        "handler.go",
+        "init.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/logging/klogfmt",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "klogfmt_test",
+    srcs = ["handler_test.go"],
+    embed = [":klogfmt"],
+)

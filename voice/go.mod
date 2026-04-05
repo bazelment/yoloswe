@@ -3,6 +3,7 @@ module github.com/bazelment/yoloswe/voice
 go 1.25.0
 
 require (
+	github.com/bazelment/yoloswe/logging v0.0.0
 	github.com/deepgram/deepgram-go-sdk/v3 v3.5.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/stretchr/testify v1.11.1
@@ -22,3 +23,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.110.1 // indirect
 )
+
+replace github.com/bazelment/yoloswe/logging => ../logging

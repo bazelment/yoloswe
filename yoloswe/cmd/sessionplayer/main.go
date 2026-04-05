@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/yoloswe/sessionplayer"
 )
 
 func main() {
+	klogfmt.Init()
 	verbose := flag.Bool("verbose", false, "Show all output (tool results, item events)")
 	noColor := flag.Bool("no-color", false, "Disable ANSI color codes")
 	flag.Usage = func() {

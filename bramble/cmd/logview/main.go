@@ -5,9 +5,12 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 )
 
 func main() {
+	klogfmt.Init()
 	cfg, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, usage(os.Args[0]))

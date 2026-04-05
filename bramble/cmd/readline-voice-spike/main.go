@@ -20,9 +20,12 @@ import (
 	"time"
 
 	"github.com/ergochat/readline"
+
+	"github.com/bazelment/yoloswe/logging/klogfmt"
 )
 
 func main() {
+	klogfmt.Init()
 	if !isTerminal(os.Stdin) {
 		fmt.Fprintln(os.Stderr, "readline-voice-spike: must be run on a real terminal (stdin is not a TTY)")
 		os.Exit(1)

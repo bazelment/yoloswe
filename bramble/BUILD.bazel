@@ -13,6 +13,7 @@ go_library(
         "//bramble/ipc",
         "//bramble/session",
         "//bramble/taskrouter",
+        "//logging/klogfmt",
         "//multiagent/agent",
         "//wt",
         "//yoloswe",

@@ -9,12 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bazelment/yoloswe/logging/klogfmt"
+
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/replay"
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
 func main() {
+	klogfmt.Init()
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <session-file.jsonl> [width] [height]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nRenders a session JSONL file using the TUI rendering widget.\n")

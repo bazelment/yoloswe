@@ -5,7 +5,10 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/sessanalyze",
     visibility = ["//visibility:private"],
-    deps = ["//bramble/sessionanalysis"],
+    deps = [
+        "//bramble/sessionanalysis",
+        "//logging/klogfmt",
+    ],
 )
 
 go_binary(

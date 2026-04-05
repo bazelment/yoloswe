@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/yoloswe/cmd/yoloswe",
     visibility = ["//visibility:private"],
     deps = [
+        "//logging/klogfmt",
         "//yoloswe",
         "//yoloswe/planner",
         "@com_github_spf13_cobra//:cobra",
