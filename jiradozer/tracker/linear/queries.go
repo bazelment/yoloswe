@@ -57,7 +57,7 @@ func fetchIssueByIdentifierQuery(identifier string) (graphqlRequest, error) {
 
 // fetchCommentsQuery returns comments on an issue, ordered by creation time.
 func fetchCommentsQuery(issueID string, afterCursor string) graphqlRequest {
-	query := `query FetchComments($issueId: String!, $first: Int!, $after: String) {
+	query := `query FetchComments($issueId: ID!, $first: Int!, $after: String) {
   comments(filter: { issue: { id: { eq: $issueId } } }, first: $first, after: $after, orderBy: createdAt) {
     pageInfo { hasNextPage endCursor }
     nodes {
@@ -80,7 +80,7 @@ func fetchCommentsQuery(issueID string, afterCursor string) graphqlRequest {
 
 // fetchWorkflowStatesQuery returns all workflow states for a team.
 func fetchWorkflowStatesQuery(teamID string) graphqlRequest {
-	query := `query FetchWorkflowStates($teamId: String!) {
+	query := `query FetchWorkflowStates($teamId: ID!) {
   workflowStates(filter: { team: { id: { eq: $teamId } } }, first: 50) {
     nodes { id name type }
   }
