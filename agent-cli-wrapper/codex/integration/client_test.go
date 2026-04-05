@@ -478,11 +478,22 @@ func TestClient_Integration_Scenario6_TurnCompletedFields(t *testing.T) {
 
 	t.Logf("TurnCompleted: success=%v durationMs=%d error=%v", tc.Success, tc.DurationMs, tc.Error)
 
-	// A successful turn should have a positive duration and no error.
-	require.True(t, tc.Success, "expected successful turn")
+	// Regardless of success or failure, DurationMs must be positive.
+	// Before the fix it was always 0 because the thread-calculated
+	// duration was not propagated to the emitted event.
 	require.Greater(t, tc.DurationMs, int64(0),
 		"DurationMs should be positive for a real turn (was always 0 before the fix)")
-	require.Nil(t, tc.Error, "expected nil error on success")
+
+	if tc.Success {
+		require.Nil(t, tc.Error, "expected nil error on success")
+	} else {
+		// A failed turn must carry the error message from codex
+		// (e.g., rate limit, auth failure). Before the fix this was
+		// always nil, making failures opaque.
+		require.NotNil(t, tc.Error,
+			"failed turn should have a non-nil Error (was always nil before the fix)")
+		t.Logf("Turn failed with error (expected when rate-limited): %v", tc.Error)
+	}
 
 	t.Log("Scenario 6 passed!")
 }
