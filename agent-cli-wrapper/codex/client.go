@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -538,16 +539,16 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 	c.mu.RUnlock()
 
 	success := notif.Turn.Status == "completed"
-	var errMsg string
-	if notif.Turn.Error != nil {
-		if s, ok := notif.Turn.Error.(string); ok {
-			errMsg = s
-		}
+	errMsg := extractErrorMessage(notif.Turn.Error)
+	var turnErr error
+	if errMsg != "" {
+		turnErr = fmt.Errorf("%s", errMsg)
 	}
 	fullText := ""
+	var durationMs int64
 	var usage TurnUsage
 	if ok {
-		thread.handleTurnCompleted(notif.Turn.ID, success, errMsg)
+		durationMs = thread.handleTurnCompleted(notif.Turn.ID, success, errMsg)
 		fullText = thread.GetFullText()
 		// Get token usage from the last token_count event
 		if lastUsage := thread.getAndClearLastUsage(); lastUsage != nil {
@@ -562,11 +563,13 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 	}
 
 	c.emit(TurnCompletedEvent{
-		ThreadID: notif.ThreadID,
-		TurnID:   notif.Turn.ID,
-		Success:  success,
-		FullText: fullText,
-		Usage:    usage,
+		ThreadID:   notif.ThreadID,
+		TurnID:     notif.Turn.ID,
+		Success:    success,
+		Error:      turnErr,
+		FullText:   fullText,
+		DurationMs: durationMs,
+		Usage:      usage,
 	})
 }
 
@@ -791,6 +794,26 @@ func (c *Client) emitError(threadID, turnID string, err error, context string) {
 		Context:   context,
 		Timestamp: time.Now(),
 	})
+}
+
+// extractErrorMessage converts a turn error (which may be a string,
+// map with a "message" key, or other JSON-decoded value) into a string.
+func extractErrorMessage(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch e := v.(type) {
+	case string:
+		return e
+	case map[string]interface{}:
+		if msg, ok := e["message"]; ok {
+			return fmt.Sprintf("%v", msg)
+		}
+		raw, _ := json.Marshal(e)
+		return string(raw)
+	default:
+		return fmt.Sprintf("%v", e)
+	}
 }
 
 func (c *Client) handleExecCommandBegin(params json.RawMessage) {

@@ -95,10 +95,13 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		DurationMs:   bridged.durationMs,
 	}
 
-	// Extract codex-specific token usage from the raw turn event.
+	// Extract codex-specific token usage and error from the raw turn event.
 	if tc, ok := bridged.turnEvent.(codex.TurnCompletedEvent); ok {
 		result.InputTokens = tc.Usage.InputTokens
 		result.OutputTokens = tc.Usage.OutputTokens
+		if tc.Error != nil {
+			result.ErrorMessage = tc.Error.Error()
+		}
 	}
 
 	return result, nil

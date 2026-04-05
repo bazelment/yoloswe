@@ -3,12 +3,18 @@ load("@rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "integration_test",
-    srcs = ["turn_test.go"],
+    srcs = [
+        "client_test.go",
+        "turn_test.go",
+    ],
     gotags = ["integration"],
     tags = [
         "integration",
         "local",
         "manual",
     ],
-    deps = ["//agent-cli-wrapper/codex"],
+    deps = [
+        "//agent-cli-wrapper/codex",
+        "@com_github_stretchr_testify//require",
+    ],
 )

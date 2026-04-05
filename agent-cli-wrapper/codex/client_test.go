@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewClient(t *testing.T) {
@@ -483,6 +485,99 @@ func TestClient_TokenUsageInTurnCompleted(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("TurnCompletedEvent not received")
+	}
+}
+
+// Test that handleTurnCompleted propagates error and duration to the emitted event.
+func TestClient_TurnCompletedErrorAndDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr string
+		turn    Turn
+		wantOK  bool
+	}{
+		{
+			name:    "string error",
+			turn:    Turn{ID: "t1", Status: "failed", Error: "model unavailable"},
+			wantErr: "model unavailable",
+			wantOK:  false,
+		},
+		{
+			name:    "map error with message key",
+			turn:    Turn{ID: "t2", Status: "failed", Error: map[string]interface{}{"message": "rate limited", "code": 429}},
+			wantErr: "rate limited",
+			wantOK:  false,
+		},
+		{
+			name:    "nil error on success",
+			turn:    Turn{ID: "t3", Status: "completed", Error: nil},
+			wantErr: "",
+			wantOK:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(WithEventBufferSize(10))
+			thread := newThread(client, "thread-1", ThreadConfig{})
+			client.threads["thread-1"] = thread
+
+			// Start a turn so duration is nonzero.
+			thread.handleTurnStarted(tt.turn.ID)
+
+			// Small sleep to ensure measurable duration.
+			time.Sleep(5 * time.Millisecond)
+
+			notif := TurnCompletedNotification{
+				ThreadID: "thread-1",
+				Turn:     tt.turn,
+			}
+			notifJSON, err := json.Marshal(notif)
+			require.NoError(t, err)
+
+			client.handleTurnCompleted(notifJSON)
+
+			select {
+			case event := <-client.events:
+				e, ok := event.(TurnCompletedEvent)
+				require.True(t, ok, "expected TurnCompletedEvent, got %T", event)
+
+				require.Equal(t, tt.wantOK, e.Success)
+
+				if tt.wantErr != "" {
+					require.NotNil(t, e.Error, "expected non-nil error")
+					require.Contains(t, e.Error.Error(), tt.wantErr)
+				} else {
+					require.Nil(t, e.Error)
+				}
+
+				require.GreaterOrEqual(t, e.DurationMs, int64(5),
+					"DurationMs should reflect time since turn start")
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("TurnCompletedEvent not received")
+			}
+		})
+	}
+}
+
+// Test extractErrorMessage handles various JSON-decoded error shapes.
+func TestExtractErrorMessage(t *testing.T) {
+	tests := []struct {
+		name  string
+		input interface{}
+		want  string
+	}{
+		{"nil", nil, ""},
+		{"string", "something broke", "something broke"},
+		{"map with message", map[string]interface{}{"message": "rate limited"}, "rate limited"},
+		{"map without message", map[string]interface{}{"code": 500}, `{"code":500}`},
+		{"number", 42, "42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractErrorMessage(tt.input)
+			require.Equal(t, tt.want, got)
+		})
 	}
 }
 
