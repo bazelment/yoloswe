@@ -147,6 +147,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		agent.WithProviderWorkDir(workDir),
 		agent.WithProviderPermissionMode(cfg.PermissionMode),
 		agent.WithProviderModel(cfg.Model),
+		agent.WithProviderKeepUserSettings(),
 	)
 	if cfg.SystemPrompt != "" {
 		opts = append(opts, agent.WithProviderSystemPrompt(cfg.SystemPrompt))

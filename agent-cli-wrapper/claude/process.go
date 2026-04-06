@@ -120,13 +120,16 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 	args = append(args, pm.config.ExtraArgs...)
 
 	// Always include partial messages for tool progress tracking.
-	// Disable external setting sources (matching Python SDK behavior).
 	// Input format must come last (matching Python SDK).
-	args = append(args,
-		"--include-partial-messages",
-		"--setting-sources", "",
-		"--input-format", "stream-json",
-	)
+	args = append(args, "--include-partial-messages")
+
+	// By default, disable external setting sources (matching Python SDK behavior).
+	// When KeepUserSettings is true, skip this so the CLI loads user/project settings.
+	if !pm.config.KeepUserSettings {
+		args = append(args, "--setting-sources", "")
+	}
+
+	args = append(args, "--input-format", "stream-json")
 
 	return args, nil
 }
