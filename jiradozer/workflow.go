@@ -140,6 +140,15 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 
 // runReview waits for human feedback and transitions accordingly.
 func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget WorkflowStep) {
+	if w.shouldAutoApprove(w.state.Current()) {
+		w.logger.Info("auto-approving", "step", w.state.Current())
+		w.feedback = ""
+		if err := w.state.Transition(approveTarget, "auto_approved"); err != nil {
+			w.fail(ctx, err)
+		}
+		return
+	}
+
 	fb, err := PollForFeedback(ctx, w.tracker, w.issue.ID, w.lastCommentAt, w.config.PollInterval, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("polling for feedback: %w", err))
@@ -185,9 +194,29 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 
 	w.lastCommentAt = time.Now()
 
+	if w.shouldAutoApprove(reviewStep) {
+		return
+	}
+
 	if err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current()); err != nil {
 		w.logger.Warn("failed to post waiting comment", "error", err)
 	}
+}
+
+// shouldAutoApprove returns true if the given review step should be
+// auto-approved (skipping human feedback polling).
+func (w *Workflow) shouldAutoApprove(reviewStep WorkflowStep) bool {
+	switch reviewStep {
+	case StepPlanReview:
+		return w.config.Plan.AutoApprove
+	case StepBuildReview:
+		return w.config.Build.AutoApprove
+	case StepValidateReview:
+		return w.config.Validate.AutoApprove
+	case StepShipReview:
+		return w.config.Ship.AutoApprove
+	}
+	return false
 }
 
 func (w *Workflow) fail(ctx context.Context, err error) {

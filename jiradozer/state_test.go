@@ -181,6 +181,35 @@ func TestStateMachineHistory(t *testing.T) {
 	assert.Equal(t, "start", sm.History()[0].Trigger)
 }
 
+func TestShouldAutoApprove(t *testing.T) {
+	cfg := &Config{}
+	w := &Workflow{config: cfg}
+
+	// No auto-approve by default.
+	for _, step := range []WorkflowStep{StepPlanReview, StepBuildReview, StepValidateReview, StepShipReview} {
+		assert.False(t, w.shouldAutoApprove(step), "step %s should not auto-approve by default", step)
+	}
+
+	// Non-review steps never auto-approve.
+	assert.False(t, w.shouldAutoApprove(StepPlanning))
+	assert.False(t, w.shouldAutoApprove(StepDone))
+
+	// Enable selectively.
+	cfg.Plan.AutoApprove = true
+	cfg.Validate.AutoApprove = true
+	assert.True(t, w.shouldAutoApprove(StepPlanReview))
+	assert.False(t, w.shouldAutoApprove(StepBuildReview))
+	assert.True(t, w.shouldAutoApprove(StepValidateReview))
+	assert.False(t, w.shouldAutoApprove(StepShipReview))
+
+	// Enable all.
+	cfg.Build.AutoApprove = true
+	cfg.Ship.AutoApprove = true
+	for _, step := range []WorkflowStep{StepPlanReview, StepBuildReview, StepValidateReview, StepShipReview} {
+		assert.True(t, w.shouldAutoApprove(step), "step %s should auto-approve", step)
+	}
+}
+
 // walkTo transitions the state machine to the target step via the happy path.
 func walkTo(t *testing.T, sm *StateMachine, target WorkflowStep) {
 	t.Helper()
