@@ -206,7 +206,7 @@ func (m *Model) refreshSnapshot() {
 	}
 	for i, existing := range m.statuses {
 		if updated, ok := snapMap[existing.Issue.ID]; ok {
-			if !existing.Done {
+			if !existing.IsDone() {
 				m.statuses[i] = updated
 			}
 		}

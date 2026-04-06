@@ -75,21 +75,7 @@ func (d *dashboard) view(width int) string {
 		style := stepStyle(s.Step)
 		icon := stepIcon(s.Step)
 
-		status := "running"
-		if s.Done {
-			status = "done"
-		}
-		switch s.Step {
-		case jiradozer.StepPlanReview, jiradozer.StepBuildReview,
-			jiradozer.StepValidateReview, jiradozer.StepShipReview:
-			status = "waiting"
-		case jiradozer.StepDone:
-			status = "done"
-		case jiradozer.StepFailed:
-			status = "failed"
-		case jiradozer.StepInit:
-			status = "queued"
-		}
+		status := stepStatus(s.Step)
 
 		duration := "--"
 		if !s.StartedAt.IsZero() {

@@ -87,7 +87,9 @@ func listIssuesQuery(teamKey string, states, labels []string, limit int) graphql
 	}
 	if len(labels) > 0 {
 		issueFilter["labels"] = map[string]any{
-			"name": map[string]any{"in": labels},
+			"some": map[string]any{
+				"name": map[string]any{"in": labels},
+			},
 		}
 	}
 

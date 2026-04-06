@@ -247,7 +247,7 @@ func TestOrchestrator_StatusUpdates(t *testing.T) {
 		select {
 		case s := <-orch.StatusUpdates():
 			statuses = append(statuses, s)
-			if s.Done {
+			if s.IsDone() {
 				goto done
 			}
 		case <-timeout:
@@ -258,7 +258,7 @@ done:
 	require.NotEmpty(t, statuses)
 	require.Equal(t, "ENG-1", statuses[0].Issue.Identifier)
 	require.Equal(t, jiradozer.StepInit, statuses[0].Step)
-	require.True(t, statuses[len(statuses)-1].Done)
+	require.True(t, statuses[len(statuses)-1].IsDone())
 }
 
 func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
@@ -292,7 +292,7 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 	for doneCount < 2 {
 		select {
 		case s := <-orch.StatusUpdates():
-			if s.Done {
+			if s.IsDone() {
 				doneCount++
 			}
 		case <-timeout:

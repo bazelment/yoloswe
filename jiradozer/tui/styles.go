@@ -47,6 +47,23 @@ func stepStyle(step jiradozer.WorkflowStep) lipgloss.Style {
 	}
 }
 
+// stepStatus returns a human-readable status string for a workflow step.
+func stepStatus(step jiradozer.WorkflowStep) string {
+	switch step {
+	case jiradozer.StepPlanReview, jiradozer.StepBuildReview,
+		jiradozer.StepValidateReview, jiradozer.StepShipReview:
+		return "waiting"
+	case jiradozer.StepDone:
+		return "done"
+	case jiradozer.StepFailed:
+		return "failed"
+	case jiradozer.StepInit:
+		return "queued"
+	default:
+		return "running"
+	}
+}
+
 // stepIcon returns a status icon for a workflow step.
 func stepIcon(step jiradozer.WorkflowStep) string {
 	switch step {

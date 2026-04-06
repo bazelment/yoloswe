@@ -252,17 +252,27 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	repoName := cfg.Source.Team // Use team key as repo name convention.
 	wtMgr := &wtAdapter{mgr: wt.NewManager(cfg.WorkDir, repoName)}
 
+	// Use a cancellable context so we can stop the orchestrator when the TUI exits.
+	orchCtx, orchCancel := context.WithCancel(ctx)
+	defer orchCancel()
+
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, logger)
 	disc := jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, logger)
 
 	go func() {
-		if err := orch.RunWithDiscovery(ctx, disc); err != nil && ctx.Err() == nil {
+		if err := orch.RunWithDiscovery(orchCtx, disc); err != nil && orchCtx.Err() == nil {
 			logger.Error("orchestrator error", "error", err)
 		}
 	}()
 
 	p := tea.NewProgram(tui.NewModel(orch))
 	_, err := p.Run()
+
+	// Cancel orchestrator context and wait for all workflows to drain
+	// so worktrees are cleaned up before the process exits.
+	orchCancel()
+	orch.Wait()
+
 	return err
 }
 

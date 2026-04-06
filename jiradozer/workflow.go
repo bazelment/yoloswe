@@ -10,6 +10,13 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
+// State keys for the stateIDs map, mapping logical workflow states to tracker state IDs.
+const (
+	stateKeyInProgress = "in_progress"
+	stateKeyInReview   = "in_review"
+	stateKeyDone       = "done"
+)
+
 // Workflow drives the issue through plan → build → validate → ship.
 type Workflow struct {
 	tracker    tracker.IssueTracker
@@ -54,8 +61,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Move issue to "In Progress".
-	if id, ok := w.stateIDs["in_progress"]; ok {
+	if id, ok := w.stateIDs[stateKeyInProgress]; ok {
 		if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 			w.logger.Warn("failed to update issue state to in_progress", "error", err)
 		}
@@ -85,7 +91,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 			w.runReview(ctx, StepDone, StepShipping)
 		case StepDone:
 			w.logger.Info("workflow completed successfully")
-			if id, ok := w.stateIDs["done"]; ok {
+			if id, ok := w.stateIDs[stateKeyDone]; ok {
 				if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 					w.logger.Warn("failed to update issue state to done", "error", err)
 				}
@@ -189,8 +195,7 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 		return
 	}
 
-	// Move issue to "In Review".
-	if id, ok := w.stateIDs["in_review"]; ok {
+	if id, ok := w.stateIDs[stateKeyInReview]; ok {
 		if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 			w.logger.Warn("failed to update issue state to in_review", "error", err)
 		}
@@ -254,9 +259,9 @@ func (w *Workflow) resolveStateIDs(ctx context.Context) error {
 	}
 
 	nameMap := map[string]string{
-		w.config.States.InProgress: "in_progress",
-		w.config.States.InReview:   "in_review",
-		w.config.States.Done:       "done",
+		w.config.States.InProgress: stateKeyInProgress,
+		w.config.States.InReview:   stateKeyInReview,
+		w.config.States.Done:       stateKeyDone,
 	}
 
 	for _, s := range states {

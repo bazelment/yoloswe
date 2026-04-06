@@ -137,7 +137,7 @@ func TestOrchestrator_StatusUpdates(t *testing.T) {
 	case status := <-orch.StatusUpdates():
 		require.Equal(t, "ENG-1", status.Issue.Identifier)
 		require.Equal(t, StepInit, status.Step)
-		require.False(t, status.Done)
+		require.False(t, status.IsDone())
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for status update")
 	}
