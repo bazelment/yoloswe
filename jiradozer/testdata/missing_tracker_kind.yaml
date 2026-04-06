@@ -1,0 +1,6 @@
+tracker:
+  kind: ""
+  api_key: test-key
+
+agent:
+  model: sonnet

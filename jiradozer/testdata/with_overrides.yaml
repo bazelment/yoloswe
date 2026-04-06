@@ -1,0 +1,17 @@
+tracker:
+  kind: linear
+  api_key: test-key
+
+agent:
+  model: sonnet
+
+max_budget_usd: 50.0
+
+plan:
+  model: opus
+  max_budget_usd: 10.0
+  max_turns: 5
+
+build:
+  model: ""
+  max_budget_usd: 0

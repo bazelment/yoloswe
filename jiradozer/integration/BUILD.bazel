@@ -1,0 +1,29 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = [
+        "session_resumption_test.go",
+        "workflow_test.go",
+    ],
+    env_inherit = [
+        "HOME",
+        "PATH",
+        "JIRADOZER_TEST_LINEAR_API_KEY",
+        "JIRADOZER_TEST_ISSUE_ID",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//jiradozer",
+        "//jiradozer/tracker",
+        "//jiradozer/tracker/linear",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

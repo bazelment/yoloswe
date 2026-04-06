@@ -1,0 +1,36 @@
+tracker:
+  kind: linear
+  api_key: test-api-key-123
+
+agent:
+  model: sonnet
+
+work_dir: .
+base_branch: main
+poll_interval: 30s
+max_budget_usd: 100.0
+
+states:
+  in_progress: "Started"
+  in_review: "Review"
+  done: "Completed"
+
+plan:
+  prompt: "Plan for {{.Identifier}}: {{.Title}}"
+  system_prompt: "You are a planner."
+  model: opus
+  permission_mode: plan
+  max_turns: 5
+  max_budget_usd: 20.0
+
+build:
+  permission_mode: bypass
+  max_turns: 30
+
+validate:
+  permission_mode: bypass
+  max_turns: 10
+
+ship:
+  permission_mode: bypass
+  max_turns: 10
