@@ -101,8 +101,8 @@ func (d *dashboard) view(width int) string {
 			if !s.CompletedAt.IsZero() {
 				end = s.CompletedAt
 			}
-			d := end.Sub(s.StartedAt)
-			duration = formatDuration(d)
+			dur := end.Sub(s.StartedAt)
+			duration = formatDuration(dur)
 		}
 
 		row := fmt.Sprintf("%s%-12s %-40s %s %-14s %-8s %s",

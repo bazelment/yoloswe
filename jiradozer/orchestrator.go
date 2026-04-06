@@ -39,6 +39,7 @@ type Orchestrator struct {
 	wtManager  WorktreeManager
 	active     map[string]*managedWorkflow // issueID -> workflow
 	statusChan chan IssueStatus
+	slotFreed  chan struct{} // non-blocking signal: a workflow slot was freed
 	done       chan struct{} // closed by Shutdown to unblock emitStatus
 	mu         sync.RWMutex
 	wg         sync.WaitGroup
@@ -62,6 +63,7 @@ func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager,
 		wtManager:  wtMgr,
 		active:     make(map[string]*managedWorkflow),
 		statusChan: make(chan IssueStatus, 64),
+		slotFreed:  make(chan struct{}, 1),
 		done:       make(chan struct{}),
 	}
 }
@@ -247,6 +249,8 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 		case <-ctx.Done():
 			o.Wait()
 			return ctx.Err()
+		case <-o.slotFreed:
+			// A workflow completed; loop back to drain the pending queue.
 		case issue, ok := <-issues:
 			if !ok {
 				o.Wait()
@@ -295,4 +299,10 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow) {
 	o.mu.Lock()
 	delete(o.active, mw.issue.ID)
 	o.mu.Unlock()
+	// Non-blocking signal to RunWithDiscovery so it can drain the pending queue
+	// without waiting for the next discovery poll.
+	select {
+	case o.slotFreed <- struct{}{}:
+	default:
+	}
 }
