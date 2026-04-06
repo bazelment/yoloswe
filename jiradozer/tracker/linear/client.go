@@ -58,23 +58,26 @@ func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Is
 		return nil, fmt.Errorf("issue not found: %s", identifier)
 	}
 
-	node := resp.Data.Issues.Nodes[0]
-	issue := &tracker.Issue{
-		ID:          node.ID,
-		Identifier:  node.Identifier,
-		Title:       node.Title,
-		Description: node.Description,
-		State:       node.State.Name,
-		BranchName:  node.BranchName,
-		URL:         node.URL,
+	return nodeToIssue(resp.Data.Issues.Nodes[0]), nil
+}
+
+func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
+	req := listIssuesQuery(filter.TeamKey, filter.States, filter.Labels, filter.Limit)
+	resp, err := c.execute(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("list issues: %w", err)
 	}
-	if node.Team != nil {
-		issue.TeamID = node.Team.ID
+
+	if resp.Data == nil {
+		return nil, nil
 	}
-	for _, l := range node.Labels.Nodes {
-		issue.Labels = append(issue.Labels, l.Name)
+
+	var issues []*tracker.Issue
+	for i := range resp.Data.Issues.Nodes {
+		issue := nodeToIssue(resp.Data.Issues.Nodes[i])
+		issues = append(issues, issue)
 	}
-	return issue, nil
+	return issues, nil
 }
 
 func (c *Client) FetchComments(ctx context.Context, issueID string, since time.Time) ([]tracker.Comment, error) {
@@ -219,6 +222,26 @@ func (c *Client) execute(ctx context.Context, gqlReq graphqlRequest) (*graphqlRe
 	}
 
 	return &gqlResp, nil
+}
+
+// nodeToIssue converts a GraphQL issue node to a tracker.Issue.
+func nodeToIssue(node graphqlIssue) *tracker.Issue {
+	issue := &tracker.Issue{
+		ID:          node.ID,
+		Identifier:  node.Identifier,
+		Title:       node.Title,
+		Description: node.Description,
+		State:       node.State.Name,
+		BranchName:  node.BranchName,
+		URL:         node.URL,
+	}
+	if node.Team != nil {
+		issue.TeamID = node.Team.ID
+	}
+	for _, l := range node.Labels.Nodes {
+		issue.Labels = append(issue.Labels, l.Name)
+	}
+	return issue
 }
 
 func truncate(s string, maxLen int) string {

@@ -11,26 +11,34 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
+	"github.com/bazelment/yoloswe/jiradozer/tui"
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/multiagent/agent"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 func main() {
 	var (
-		issueID      string
-		configPath   string
-		workDir      string
-		modelID      string
-		pollInterval time.Duration
-		maxBudget    float64
-		runStep      string
-		autoApprove  string
-		verbose      bool
+		issueID       string
+		configPath    string
+		workDir       string
+		modelID       string
+		pollInterval  time.Duration
+		maxBudget     float64
+		runStep       string
+		autoApprove   string
+		team          string
+		sourceStates  []string
+		sourceLabels  []string
+		maxConcurrent int
+		branchPrefix  string
+		verbose       bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -39,20 +47,25 @@ func main() {
 		Long:  "Drives a plan → build → validate → ship workflow from an issue tracker with human-in-the-loop approval at each step.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), runArgs{
-				issueID:      issueID,
-				configPath:   configPath,
-				workDir:      workDir,
-				modelID:      modelID,
-				pollInterval: pollInterval,
-				maxBudget:    maxBudget,
-				runStep:      runStep,
-				autoApprove:  autoApprove,
-				verbose:      verbose,
+				issueID:       issueID,
+				configPath:    configPath,
+				workDir:       workDir,
+				modelID:       modelID,
+				pollInterval:  pollInterval,
+				maxBudget:     maxBudget,
+				runStep:       runStep,
+				autoApprove:   autoApprove,
+				team:          team,
+				sourceStates:  sourceStates,
+				sourceLabels:  sourceLabels,
+				maxConcurrent: maxConcurrent,
+				branchPrefix:  branchPrefix,
+				verbose:       verbose,
 			})
 		},
 	}
 
-	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier (e.g. ENG-123) [required]")
+	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
@@ -60,9 +73,12 @@ func main() {
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, validate, ship")
 	rootCmd.Flags().StringVar(&autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
+	rootCmd.Flags().StringVar(&team, "team", "", "Team key for multi-issue mode (e.g. ENG)")
+	rootCmd.Flags().StringSliceVar(&sourceStates, "source-states", nil, "Issue states to track (default: Todo)")
+	rootCmd.Flags().StringSliceVar(&sourceLabels, "source-labels", nil, "Issue label filter")
+	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
+	rootCmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
-
-	_ = rootCmd.MarkFlagRequired("issue")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -73,15 +89,20 @@ func main() {
 }
 
 type runArgs struct {
-	issueID      string
-	configPath   string
-	workDir      string
-	modelID      string
-	runStep      string
-	autoApprove  string
-	pollInterval time.Duration
-	maxBudget    float64
-	verbose      bool
+	issueID       string
+	configPath    string
+	workDir       string
+	modelID       string
+	runStep       string
+	autoApprove   string
+	team          string
+	branchPrefix  string
+	sourceStates  []string
+	sourceLabels  []string
+	pollInterval  time.Duration
+	maxBudget     float64
+	maxConcurrent int
+	verbose       bool
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -111,6 +132,31 @@ func run(ctx context.Context, args runArgs) error {
 	}
 	if args.maxBudget > 0 {
 		cfg.MaxBudgetUSD = args.maxBudget
+	}
+
+	// Apply source overrides.
+	if args.team != "" {
+		cfg.Source.Team = args.team
+	}
+	if len(args.sourceStates) > 0 {
+		cfg.Source.States = args.sourceStates
+	}
+	if len(args.sourceLabels) > 0 {
+		cfg.Source.Labels = args.sourceLabels
+	}
+	if args.maxConcurrent > 0 {
+		cfg.Source.MaxConcurrent = args.maxConcurrent
+	}
+	if args.branchPrefix != "" {
+		cfg.Source.BranchPrefix = args.branchPrefix
+	}
+
+	// Validate mutual exclusivity.
+	if args.issueID != "" && cfg.Source.Team != "" {
+		return fmt.Errorf("--issue and --team (or source.team in config) are mutually exclusive")
+	}
+	if args.issueID == "" && cfg.Source.Team == "" {
+		return fmt.Errorf("either --issue or --team (or source.team in config) is required")
 	}
 
 	// Apply auto-approve overrides.
@@ -148,14 +194,19 @@ func run(ctx context.Context, args runArgs) error {
 	)
 
 	// Create tracker client.
-	tracker, err := createTracker(cfg)
+	issueTracker, err := createTracker(cfg)
 	if err != nil {
 		return err
 	}
 
-	// Fetch the issue.
+	// Multi-issue TUI mode.
+	if cfg.Source.Team != "" {
+		return runMultiIssue(ctx, issueTracker, cfg, logger)
+	}
+
+	// Single-issue headless mode.
 	logger.Info("fetching issue", "identifier", args.issueID)
-	issue, err := tracker.FetchIssue(ctx, args.issueID)
+	issue, err := issueTracker.FetchIssue(ctx, args.issueID)
 	if err != nil {
 		return fmt.Errorf("fetch issue: %w", err)
 	}
@@ -177,8 +228,53 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Run the full workflow.
-	wf := jiradozer.NewWorkflow(tracker, issue, cfg, logger)
+	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	return wf.Run(ctx)
+}
+
+// wtAdapter adapts wt.Manager to the jiradozer.WorktreeManager interface.
+type wtAdapter struct {
+	mgr *wt.Manager
+}
+
+func (a *wtAdapter) NewWorktree(ctx context.Context, branch, baseBranch, goal string) (string, error) {
+	return a.mgr.New(ctx, branch, baseBranch, goal)
+}
+
+func (a *wtAdapter) RemoveWorktree(ctx context.Context, nameOrBranch string, deleteBranch bool) error {
+	return a.mgr.Remove(ctx, nameOrBranch, deleteBranch)
+}
+
+func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
+	// Determine repo root for worktree manager.
+	// Use WorkDir as the root for wt.Manager — it should point to
+	// the bare repo's parent directory.
+	repoName := cfg.Source.Team // Use team key as repo name convention.
+	wtMgr := &wtAdapter{mgr: wt.NewManager(cfg.WorkDir, repoName)}
+
+	// Use a cancellable context so we can stop the orchestrator when the TUI exits.
+	orchCtx, orchCancel := context.WithCancel(ctx)
+	defer orchCancel()
+
+	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, logger)
+	disc := jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, logger)
+
+	go func() {
+		if err := orch.RunWithDiscovery(orchCtx, disc); err != nil && orchCtx.Err() == nil {
+			logger.Error("orchestrator error", "error", err)
+		}
+	}()
+
+	p := tea.NewProgram(tui.NewModel(orch))
+	_, err := p.Run()
+
+	// Signal shutdown (unblocks any pending terminal status sends),
+	// cancel the orchestrator context, and wait for all workflows to
+	// drain so worktrees are cleaned up before the process exits.
+	orchCancel()
+	orch.Shutdown()
+
+	return err
 }
 
 func createTracker(cfg *jiradozer.Config) (tracker.IssueTracker, error) {

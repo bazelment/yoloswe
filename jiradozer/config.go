@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
 // Config is the top-level configuration for jiradozer.
@@ -16,6 +18,7 @@ type Config struct {
 	Tracker      TrackerConfig `yaml:"tracker"`
 	States       StatesConfig  `yaml:"states"`
 	Agent        AgentConfig   `yaml:"agent"`
+	Source       SourceConfig  `yaml:"source"`
 	WorkDir      string        `yaml:"work_dir"`
 	BaseBranch   string        `yaml:"base_branch"`
 	Plan         StepConfig    `yaml:"plan"`
@@ -35,6 +38,24 @@ type TrackerConfig struct {
 // AgentConfig specifies the agent backend.
 type AgentConfig struct {
 	Model string `yaml:"model"` // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
+}
+
+// SourceConfig specifies how to discover issues for multi-issue mode.
+type SourceConfig struct {
+	Team          string   `yaml:"team"`           // Linear team key (e.g. "ENG")
+	BranchPrefix  string   `yaml:"branch_prefix"`  // Worktree branch prefix (default: "jiradozer")
+	States        []string `yaml:"states"`         // Issue states to pick up (default: ["Todo"])
+	Labels        []string `yaml:"labels"`         // Optional label filter
+	MaxConcurrent int      `yaml:"max_concurrent"` // Max parallel workflows (default: 3)
+}
+
+// ToFilter converts the source config to a tracker.IssueFilter.
+func (s SourceConfig) ToFilter() tracker.IssueFilter {
+	return tracker.IssueFilter{
+		TeamKey: s.Team,
+		States:  s.States,
+		Labels:  s.Labels,
+	}
 }
 
 // StepConfig configures a single workflow step (plan or build).
@@ -83,10 +104,22 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// DefaultConfigForTest returns the default config with sensible defaults.
+// Exported for use in integration tests.
+func DefaultConfigForTest() *Config {
+	cfg := defaultConfig()
+	return &cfg
+}
+
 func defaultConfig() Config {
 	return Config{
-		Tracker:  TrackerConfig{Kind: "linear"},
-		Agent:    AgentConfig{Model: "sonnet"},
+		Tracker: TrackerConfig{Kind: "linear"},
+		Agent:   AgentConfig{Model: "sonnet"},
+		Source: SourceConfig{
+			States:        []string{"Todo"},
+			MaxConcurrent: 3,
+			BranchPrefix:  "jiradozer",
+		},
 		Plan:     StepConfig{PermissionMode: "plan", MaxTurns: 10},
 		Build:    StepConfig{PermissionMode: "bypass", MaxTurns: 30},
 		Validate: StepConfig{PermissionMode: "bypass", MaxTurns: 10},

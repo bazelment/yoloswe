@@ -10,17 +10,28 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
+// State keys for the stateIDs map, mapping logical workflow states to tracker state IDs.
+const (
+	stateKeyInProgress = "in_progress"
+	stateKeyInReview   = "in_review"
+	stateKeyDone       = "done"
+)
+
 // Workflow drives the issue through plan → build → validate → ship.
 type Workflow struct {
+	tracker    tracker.IssueTracker
+	lastError  error
+	issue      *tracker.Issue
+	state      *StateMachine
+	config     *Config
+	logger     *slog.Logger
+	sessionIDs map[WorkflowStep]string // per-step session IDs for resume
+	stateIDs   map[string]string
+
+	// OnTransition is called after each successful state transition.
+	// The orchestrator uses this to track workflow progress without polling.
+	OnTransition  func(step WorkflowStep)
 	lastCommentAt time.Time
-	tracker       tracker.IssueTracker
-	lastError     error
-	issue         *tracker.Issue
-	state         *StateMachine
-	config        *Config
-	logger        *slog.Logger
-	sessionIDs    map[WorkflowStep]string // per-step session IDs for resume
-	stateIDs      map[string]string
 	plan          string
 	buildOutput   string
 	feedback      string
@@ -46,12 +57,11 @@ func (w *Workflow) Run(ctx context.Context) error {
 		return fmt.Errorf("resolve workflow states: %w", err)
 	}
 
-	if err := w.state.Transition(StepPlanning, "start"); err != nil {
+	if err := w.transition(StepPlanning, "start"); err != nil {
 		return err
 	}
 
-	// Move issue to "In Progress".
-	if id, ok := w.stateIDs["in_progress"]; ok {
+	if id, ok := w.stateIDs[stateKeyInProgress]; ok {
 		if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 			w.logger.Warn("failed to update issue state to in_progress", "error", err)
 		}
@@ -81,7 +91,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 			w.runReview(ctx, StepDone, StepShipping)
 		case StepDone:
 			w.logger.Info("workflow completed successfully")
-			if id, ok := w.stateIDs["done"]; ok {
+			if id, ok := w.stateIDs[stateKeyDone]; ok {
 				if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 					w.logger.Warn("failed to update issue state to done", "error", err)
 				}
@@ -143,7 +153,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 	if w.shouldAutoApprove(w.state.Current()) {
 		w.logger.Info("auto-approving", "step", w.state.Current())
 		w.feedback = ""
-		if err := w.state.Transition(approveTarget, "auto_approved"); err != nil {
+		if err := w.transition(approveTarget, "auto_approved"); err != nil {
 			w.fail(ctx, err)
 		}
 		return
@@ -161,32 +171,31 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 	case FeedbackApprove:
 		w.logger.Info("feedback: approved", "step", w.state.Current())
 		w.feedback = ""
-		if err := w.state.Transition(approveTarget, "approved"); err != nil {
+		if err := w.transition(approveTarget, "approved"); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackRedo:
 		w.logger.Info("feedback: redo", "step", w.state.Current())
 		w.feedback = fb.Message
-		if err := w.state.Transition(redoTarget, "redo"); err != nil {
+		if err := w.transition(redoTarget, "redo"); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackComment:
 		w.logger.Info("feedback: comment", "step", w.state.Current(), "message", fb.Message)
 		w.feedback = fb.Message
-		if err := w.state.Transition(redoTarget, "feedback"); err != nil {
+		if err := w.transition(redoTarget, "feedback"); err != nil {
 			w.fail(ctx, err)
 		}
 	}
 }
 
 func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowStep, trigger string) {
-	if err := w.state.Transition(reviewStep, trigger); err != nil {
+	if err := w.transition(reviewStep, trigger); err != nil {
 		w.fail(ctx, err)
 		return
 	}
 
-	// Move issue to "In Review".
-	if id, ok := w.stateIDs["in_review"]; ok {
+	if id, ok := w.stateIDs[stateKeyInReview]; ok {
 		if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 			w.logger.Warn("failed to update issue state to in_review", "error", err)
 		}
@@ -219,9 +228,20 @@ func (w *Workflow) shouldAutoApprove(reviewStep WorkflowStep) bool {
 	return false
 }
 
+// transition wraps state.Transition and fires the OnTransition callback on success.
+func (w *Workflow) transition(target WorkflowStep, trigger string) error {
+	if err := w.state.Transition(target, trigger); err != nil {
+		return err
+	}
+	if w.OnTransition != nil {
+		w.OnTransition(target)
+	}
+	return nil
+}
+
 func (w *Workflow) fail(ctx context.Context, err error) {
 	w.lastError = err
-	if tErr := w.state.Transition(StepFailed, "error: "+err.Error()); tErr != nil {
+	if tErr := w.transition(StepFailed, "error: "+err.Error()); tErr != nil {
 		w.logger.Error("failed to transition to StepFailed, forcing state", "from", w.state.Current(), "error", tErr)
 		w.state.ForceState(StepFailed)
 	}
@@ -239,9 +259,9 @@ func (w *Workflow) resolveStateIDs(ctx context.Context) error {
 	}
 
 	nameMap := map[string]string{
-		w.config.States.InProgress: "in_progress",
-		w.config.States.InReview:   "in_review",
-		w.config.States.Done:       "done",
+		w.config.States.InProgress: stateKeyInProgress,
+		w.config.States.InReview:   stateKeyInReview,
+		w.config.States.Done:       stateKeyDone,
 	}
 
 	for _, s := range states {
