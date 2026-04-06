@@ -10,6 +10,7 @@ import (
 
 // dashboard renders the scrollable issue table.
 type dashboard struct {
+	selectedID  string // issue ID to preserve selection across sorts
 	statuses    []jiradozer.IssueStatus
 	selectedIdx int
 	height      int // visible rows
@@ -21,6 +22,15 @@ func newDashboard() *dashboard {
 
 func (d *dashboard) setStatuses(statuses []jiradozer.IssueStatus) {
 	d.statuses = statuses
+	// Restore selection by issue ID after sort/reorder.
+	if d.selectedID != "" {
+		for i, s := range d.statuses {
+			if s.Issue.ID == d.selectedID {
+				d.selectedIdx = i
+				return
+			}
+		}
+	}
 	if d.selectedIdx >= len(d.statuses) {
 		d.selectedIdx = max(0, len(d.statuses)-1)
 	}
@@ -29,12 +39,20 @@ func (d *dashboard) setStatuses(statuses []jiradozer.IssueStatus) {
 func (d *dashboard) moveUp() {
 	if d.selectedIdx > 0 {
 		d.selectedIdx--
+		d.trackSelection()
 	}
 }
 
 func (d *dashboard) moveDown() {
 	if d.selectedIdx < len(d.statuses)-1 {
 		d.selectedIdx++
+		d.trackSelection()
+	}
+}
+
+func (d *dashboard) trackSelection() {
+	if d.selectedIdx < len(d.statuses) {
+		d.selectedID = d.statuses[d.selectedIdx].Issue.ID
 	}
 }
 

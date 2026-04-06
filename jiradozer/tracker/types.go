@@ -35,6 +35,6 @@ type WorkflowState struct {
 type IssueFilter struct {
 	TeamKey string   // e.g. "ENG"
 	States  []string // filter by state name, e.g. ["Todo"]
-	Labels  []string // optional AND filter by label name
+	Labels  []string // optional filter: issue must have at least one of these labels (OR)
 	Limit   int      // max results; 0 = default (50)
 }

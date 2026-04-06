@@ -258,10 +258,16 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 	if status.IsDone() {
 		status.CompletedAt = time.Now()
 	}
-	select {
-	case o.statusChan <- status:
-	default:
-		o.logger.Warn("status channel full, dropping update", "issue", mw.issue.Identifier)
+	if status.IsDone() {
+		// Terminal updates must not be dropped — block to ensure the TUI
+		// sees the final state before cleanup removes it from active.
+		o.statusChan <- status
+	} else {
+		select {
+		case o.statusChan <- status:
+		default:
+			o.logger.Warn("status channel full, dropping update", "issue", mw.issue.Identifier)
+		}
 	}
 }
 
