@@ -11,7 +11,6 @@ import (
 )
 
 // WorktreeManager is the interface for creating and removing git worktrees.
-// Use WTManagerAdapter to adapt wt.Manager to this interface.
 type WorktreeManager interface {
 	NewWorktree(ctx context.Context, branch, baseBranch, goal string) (worktreePath string, err error)
 	RemoveWorktree(ctx context.Context, nameOrBranch string, deleteBranch bool) error
@@ -208,17 +207,27 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 	issues := discovery.Run(ctx)
 	var pending []*tracker.Issue
 
+	startOrRetry := func(issue *tracker.Issue) {
+		if err := o.Start(ctx, issue); err != nil {
+			o.logger.Warn("failed to start workflow", "issue", issue.Identifier, "error", err)
+			// Clear from discovery's seen set so the issue is re-emitted on next poll.
+			discovery.ClearSeen(issue.ID)
+		}
+	}
+
 	for {
 		// Drain pending queue while under the concurrency limit.
 		active := o.ActiveCount()
-		for len(pending) > 0 && active < o.config.Source.MaxConcurrent {
-			issue := pending[0]
-			pending = pending[1:]
-			if err := o.Start(ctx, issue); err != nil {
-				o.logger.Warn("failed to start workflow", "issue", issue.Identifier, "error", err)
+		remaining := pending[:0]
+		for _, issue := range pending {
+			if active >= o.config.Source.MaxConcurrent {
+				remaining = append(remaining, issue)
+				continue
 			}
+			startOrRetry(issue)
 			active = o.ActiveCount()
 		}
+		pending = remaining
 
 		select {
 		case <-ctx.Done():
@@ -230,9 +239,7 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				return nil
 			}
 			if o.ActiveCount() < o.config.Source.MaxConcurrent {
-				if err := o.Start(ctx, issue); err != nil {
-					o.logger.Warn("failed to start workflow", "issue", issue.Identifier, "error", err)
-				}
+				startOrRetry(issue)
 			} else {
 				pending = append(pending, issue)
 			}

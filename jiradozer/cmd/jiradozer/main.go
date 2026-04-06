@@ -65,7 +65,7 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier (e.g. ENG-123) [required]")
+	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")

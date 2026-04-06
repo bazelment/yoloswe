@@ -153,7 +153,7 @@ func (m *Model) handleDashboardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.dashboard.moveUp()
 	case "enter":
 		if sel := m.dashboard.selected(); sel != nil {
-			m.detail.setStatus(sel)
+			m.detail.setStatus(*sel)
 			m.focus = focusDetail
 		}
 	case "c":
@@ -193,7 +193,7 @@ func (m *Model) updateStatus(s jiradozer.IssueStatus) {
 
 	// Update detail view if it's showing this issue.
 	if m.focus == focusDetail && m.detail.status != nil && m.detail.status.Issue.ID == s.Issue.ID {
-		m.detail.setStatus(&s)
+		m.detail.setStatus(s)
 	}
 }
 

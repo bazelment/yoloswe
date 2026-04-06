@@ -57,6 +57,12 @@ func (d *Discovery) MarkSeen(issueID string) {
 	d.seen[issueID] = true
 }
 
+// ClearSeen removes an issue ID from the seen set so it will be
+// re-emitted on the next poll. Use this when Start fails transiently.
+func (d *Discovery) ClearSeen(issueID string) {
+	delete(d.seen, issueID)
+}
+
 func (d *Discovery) poll(ctx context.Context, ch chan<- *tracker.Issue) {
 	issues, err := d.tracker.ListIssues(ctx, d.filter)
 	if err != nil {

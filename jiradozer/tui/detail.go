@@ -9,7 +9,7 @@ import (
 
 // detail renders the drill-down view for a single issue.
 type detail struct {
-	status  *jiradozer.IssueStatus
+	status  *jiradozer.IssueStatus // owned copy, not a pointer into the dashboard slice
 	scrollY int
 	height  int
 }
@@ -18,8 +18,8 @@ func newDetail() *detail {
 	return &detail{}
 }
 
-func (d *detail) setStatus(s *jiradozer.IssueStatus) {
-	d.status = s
+func (d *detail) setStatus(s jiradozer.IssueStatus) {
+	d.status = &s
 	d.scrollY = 0
 }
 
