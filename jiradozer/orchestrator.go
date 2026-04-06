@@ -39,6 +39,7 @@ type Orchestrator struct {
 	wtManager  WorktreeManager
 	active     map[string]*managedWorkflow // issueID -> workflow
 	statusChan chan IssueStatus
+	done       chan struct{} // closed by Shutdown to unblock emitStatus
 	mu         sync.RWMutex
 	wg         sync.WaitGroup
 }
@@ -61,6 +62,7 @@ func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager,
 		wtManager:  wtMgr,
 		active:     make(map[string]*managedWorkflow),
 		statusChan: make(chan IssueStatus, 64),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -140,7 +142,11 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	}
 
 	wf.OnTransition = func(step WorkflowStep) {
-		o.emitStatus(mw, step, nil)
+		// Skip terminal steps here — they are emitted by the goroutine
+		// below with the proper error attached.
+		if step != StepDone && step != StepFailed {
+			o.emitStatus(mw, step, nil)
+		}
 	}
 
 	o.mu.Lock()
@@ -194,6 +200,14 @@ func (o *Orchestrator) Cancel(issueID string) {
 	if ok && mw.cancel != nil {
 		mw.cancel()
 	}
+}
+
+// Shutdown signals that no consumer is reading StatusUpdates anymore,
+// then waits for all active workflows to complete. This prevents
+// blocking sends from hanging when the TUI has exited.
+func (o *Orchestrator) Shutdown() {
+	close(o.done)
+	o.wg.Wait()
 }
 
 // Wait blocks until all active workflows have completed.
@@ -259,9 +273,12 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 		status.CompletedAt = time.Now()
 	}
 	if status.IsDone() {
-		// Terminal updates must not be dropped — block to ensure the TUI
-		// sees the final state before cleanup removes it from active.
-		o.statusChan <- status
+		// Terminal updates should not be dropped. Block unless shutdown
+		// has been called (done closed), which means no consumer remains.
+		select {
+		case o.statusChan <- status:
+		case <-o.done:
+		}
 	} else {
 		select {
 		case o.statusChan <- status:

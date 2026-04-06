@@ -268,10 +268,11 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	p := tea.NewProgram(tui.NewModel(orch))
 	_, err := p.Run()
 
-	// Cancel orchestrator context and wait for all workflows to drain
-	// so worktrees are cleaned up before the process exits.
+	// Signal shutdown (unblocks any pending terminal status sends),
+	// cancel the orchestrator context, and wait for all workflows to
+	// drain so worktrees are cleaned up before the process exits.
 	orchCancel()
-	orch.Wait()
+	orch.Shutdown()
 
 	return err
 }
