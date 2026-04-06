@@ -204,11 +204,20 @@ func (m *Model) refreshSnapshot() {
 	for _, s := range snap {
 		snapMap[s.Issue.ID] = s
 	}
+	// Build a set of already-tracked issue IDs.
+	tracked := make(map[string]bool, len(m.statuses))
 	for i, existing := range m.statuses {
+		tracked[existing.Issue.ID] = true
 		if updated, ok := snapMap[existing.Issue.ID]; ok {
 			if !existing.IsDone() {
 				m.statuses[i] = updated
 			}
+		}
+	}
+	// Add any new issues from the snapshot that aren't yet tracked.
+	for _, s := range snap {
+		if !tracked[s.Issue.ID] {
+			m.statuses = append(m.statuses, s)
 		}
 	}
 	m.sortStatuses()
@@ -243,7 +252,7 @@ func (m *Model) listenForStatus() tea.Cmd {
 	return func() tea.Msg {
 		s, ok := <-ch
 		if !ok {
-			return tea.Quit
+			return tea.Quit()
 		}
 		return issueStatusMsg{Status: s}
 	}
