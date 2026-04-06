@@ -37,8 +37,10 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	sessionOpts := append([]claude.SessionOption{}, p.sessionOpts...)
 	sessionOpts = append(sessionOpts,
 		claude.WithModel(cfg.Model),
-		claude.WithDisablePlugins(),
 	)
+	if cfg.KeepUserSettings {
+		sessionOpts = append(sessionOpts, claude.WithKeepUserSettings())
+	}
 	if cfg.WorkDir != "" {
 		sessionOpts = append(sessionOpts, claude.WithWorkDir(cfg.WorkDir))
 	}

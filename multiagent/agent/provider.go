@@ -153,14 +153,15 @@ type ExecuteOption func(*ExecuteConfig)
 
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
-	EventHandler    EventHandler
-	Model           string
-	WorkDir         string
-	SystemPrompt    string
-	PermissionMode  string
-	ResumeSessionID string
-	MaxTurns        int
-	MaxBudgetUSD    float64
+	EventHandler     EventHandler
+	Model            string
+	WorkDir          string
+	SystemPrompt     string
+	PermissionMode   string
+	ResumeSessionID  string
+	MaxTurns         int
+	MaxBudgetUSD     float64
+	KeepUserSettings bool
 }
 
 // WithProviderModel sets the model for a provider execution.
@@ -196,6 +197,13 @@ func WithProviderMaxTurns(n int) ExecuteOption {
 // WithProviderMaxBudgetUSD sets the maximum budget in USD for a provider execution.
 func WithProviderMaxBudgetUSD(budget float64) ExecuteOption {
 	return func(c *ExecuteConfig) { c.MaxBudgetUSD = budget }
+}
+
+// WithProviderKeepUserSettings preserves the user's CLI settings and plugins.
+// When set, the session loads user/project settings and plugins instead of
+// running in isolated SDK mode.
+func WithProviderKeepUserSettings() ExecuteOption {
+	return func(c *ExecuteConfig) { c.KeepUserSettings = true }
 }
 
 // WithProviderResumeSessionID sets a session ID to resume instead of starting fresh.

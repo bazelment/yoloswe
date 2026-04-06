@@ -48,6 +48,7 @@ type SessionConfig struct {
 	MaxBudgetUSD               float64
 	EventBufferSize            int
 	DisablePlugins             bool
+	KeepUserSettings           bool
 	RecordMessages             bool
 	DangerouslySkipPermissions bool
 	PermissionPromptToolStdio  bool
@@ -84,10 +85,20 @@ func WithCLIPath(path string) SessionOption {
 	}
 }
 
-// WithDisablePlugins disables CLI plugins.
+// WithDisablePlugins disables CLI plugins by pointing --plugin-dir to /dev/null.
 func WithDisablePlugins() SessionOption {
 	return func(c *SessionConfig) {
 		c.DisablePlugins = true
+	}
+}
+
+// WithKeepUserSettings preserves the user's CLI settings and plugins.
+// By default, SDK sessions disable external setting sources (--setting-sources "")
+// and respect the DisablePlugins flag. When KeepUserSettings is true, the session
+// behaves like an interactive CLI session, loading user/project settings and plugins.
+func WithKeepUserSettings() SessionOption {
+	return func(c *SessionConfig) {
+		c.KeepUserSettings = true
 	}
 }
 
