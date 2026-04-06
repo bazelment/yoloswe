@@ -12,6 +12,10 @@ type IssueTracker interface {
 	// FetchIssue returns an issue by its human-readable identifier (e.g. "ENG-123").
 	FetchIssue(ctx context.Context, identifier string) (*Issue, error)
 
+	// ListIssues returns issues matching the given filter criteria.
+	// Results are ordered by creation time (newest first).
+	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
+
 	// FetchComments returns comments on an issue created after the given time.
 	// Comments are returned in chronological order.
 	FetchComments(ctx context.Context, issueID string, since time.Time) ([]Comment, error)

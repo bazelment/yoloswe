@@ -88,6 +88,10 @@ func (m *mockPollerTracker) FetchIssue(_ context.Context, _ string) (*tracker.Is
 	return nil, nil
 }
 
+func (m *mockPollerTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
+	return nil, nil
+}
+
 func (m *mockPollerTracker) FetchComments(_ context.Context, _ string, _ time.Time) ([]tracker.Comment, error) {
 	m.calls++
 	return m.comments, nil

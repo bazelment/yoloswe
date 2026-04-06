@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "agent.go",
         "config.go",
+        "discovery.go",
+        "orchestrator.go",
         "poller.go",
         "state.go",
         "workflow.go",
@@ -23,6 +25,8 @@ go_test(
     srcs = [
         "agent_test.go",
         "config_test.go",
+        "discovery_test.go",
+        "orchestrator_test.go",
         "poller_test.go",
         "state_test.go",
         "workflow_test.go",

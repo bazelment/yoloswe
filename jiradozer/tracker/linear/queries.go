@@ -55,6 +55,56 @@ func fetchIssueByIdentifierQuery(identifier string) (graphqlRequest, error) {
 	}, nil
 }
 
+// listIssuesQuery returns issues matching the given filter criteria.
+// teamKey filters by team, states filters by state name, labels filters by label name.
+func listIssuesQuery(teamKey string, states, labels []string, limit int) graphqlRequest {
+	query := `query ListIssues($filter: IssueFilter!, $first: Int!) {
+  issues(filter: $filter, first: $first, orderBy: createdAt) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      url
+      branchName
+      state { id name type }
+      labels { nodes { name } }
+      team { id }
+    }
+  }
+}`
+	issueFilter := map[string]any{}
+
+	if teamKey != "" {
+		issueFilter["team"] = map[string]any{
+			"key": map[string]any{"eq": teamKey},
+		}
+	}
+	if len(states) > 0 {
+		issueFilter["state"] = map[string]any{
+			"name": map[string]any{"in": states},
+		}
+	}
+	if len(labels) > 0 {
+		issueFilter["labels"] = map[string]any{
+			"name": map[string]any{"in": labels},
+		}
+	}
+
+	first := limit
+	if first <= 0 {
+		first = 50
+	}
+
+	return graphqlRequest{
+		Query: query,
+		Variables: map[string]any{
+			"filter": issueFilter,
+			"first":  first,
+		},
+	}
+}
+
 // fetchCommentsQuery returns comments on an issue, ordered by creation time.
 func fetchCommentsQuery(issueID string, afterCursor string) graphqlRequest {
 	query := `query FetchComments($issueId: ID!, $first: Int!, $after: String) {

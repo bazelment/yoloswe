@@ -36,6 +36,10 @@ func (m *mockWorkflowTracker) FetchIssue(_ context.Context, id string) (*tracker
 	return nil, nil
 }
 
+func (m *mockWorkflowTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
+	return nil, nil
+}
+
 func (m *mockWorkflowTracker) FetchComments(_ context.Context, issueID string, _ time.Time) ([]tracker.Comment, error) {
 	m.recordCall("FetchComments", issueID)
 	m.mu.Lock()

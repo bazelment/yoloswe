@@ -30,3 +30,11 @@ type WorkflowState struct {
 	Name string
 	Type string // e.g. "started", "unstarted", "completed", "canceled"
 }
+
+// IssueFilter specifies criteria for listing issues.
+type IssueFilter struct {
+	TeamKey string   // e.g. "ENG"
+	States  []string // filter by state name, e.g. ["Todo"]
+	Labels  []string // optional AND filter by label name
+	Limit   int      // max results; 0 = default (50)
+}
