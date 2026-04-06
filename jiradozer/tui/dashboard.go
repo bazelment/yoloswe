@@ -28,6 +28,7 @@ func (d *dashboard) setStatuses(statuses []jiradozer.IssueStatus) {
 		for i, s := range d.statuses {
 			if s.Issue.ID == d.selectedID {
 				d.selectedIdx = i
+				d.clampScroll()
 				return
 			}
 		}
@@ -35,6 +36,7 @@ func (d *dashboard) setStatuses(statuses []jiradozer.IssueStatus) {
 	if d.selectedIdx >= len(d.statuses) {
 		d.selectedIdx = max(0, len(d.statuses)-1)
 	}
+	d.clampScroll()
 }
 
 func (d *dashboard) moveUp() {

@@ -206,10 +206,13 @@ func (o *Orchestrator) Cancel(issueID string) {
 
 // Shutdown signals that no consumer is reading StatusUpdates anymore,
 // then waits for all active workflows to complete. This prevents
-// blocking sends from hanging when the TUI has exited.
+// blocking sends from hanging when the TUI has exited. Closing
+// statusChan after all workflows finish unblocks any goroutine still
+// listening on StatusUpdates (e.g. the TUI's listenForStatus goroutine).
 func (o *Orchestrator) Shutdown() {
 	close(o.done)
 	o.wg.Wait()
+	close(o.statusChan)
 }
 
 // Wait blocks until all active workflows have completed.
