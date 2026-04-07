@@ -1,7 +1,6 @@
 package jiradozer
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -411,20 +410,4 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	assert.Contains(t, buildPrompt, "# Plan")
 	assert.Contains(t, buildPrompt, "1. Fix widget")
 	assert.Contains(t, buildPrompt, "Approved Plan")
-}
-
-// TestReplay_LongPlanPostsTwoComments verifies that long plans produce a summary
-// comment followed by the full content, rather than being truncated.
-func TestReplay_LongPlanPostsTwoComments(t *testing.T) {
-	// Generate a plan longer than 3000 chars.
-	longPlan := ""
-	for i := range 200 {
-		longPlan += fmt.Sprintf("Step %d: Do something important with detailed description\n", i+1)
-	}
-	require.Greater(t, len(longPlan), 3000)
-
-	// Verify the two-comment pattern: summary (first 500 chars) + full plan.
-	summaryPrefix := longPlan[:500]
-	assert.Equal(t, longPlan[:500], summaryPrefix)
-	assert.Greater(t, len(longPlan), 500, "long plan should exceed summary prefix length")
 }

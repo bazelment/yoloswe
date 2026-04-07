@@ -138,7 +138,8 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	// then the full content in a separate comment so reviewers see everything.
 	heading := strings.ToUpper(stepName[:1]) + stepName[1:]
 	if len(output) > 3000 {
-		summary := fmt.Sprintf("## %s Complete\n\n%s\n\n_(Full output in next comment)_", heading, output[:500])
+		preview := string([]rune(output)[:500])
+		summary := fmt.Sprintf("## %s Complete\n\n%s\n\n_(Full output in next comment)_", heading, preview)
 		if _, err := w.tracker.PostComment(ctx, w.issue.ID, summary); err != nil {
 			w.logger.Warn("failed to post "+stepName+" summary comment", "error", err)
 		}
@@ -210,8 +211,10 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 	}
 
 	waitingComment, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current())
-	if err != nil {
-		w.logger.Warn("failed to post waiting comment", "error", err)
+	if err != nil || waitingComment.CreatedAt.IsZero() {
+		if err != nil {
+			w.logger.Warn("failed to post waiting comment", "error", err)
+		}
 		w.lastCommentAt = time.Now()
 	} else {
 		w.lastCommentAt = waitingComment.CreatedAt
