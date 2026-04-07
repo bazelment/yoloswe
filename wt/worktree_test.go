@@ -1505,3 +1505,240 @@ func TestGCRemoteOnlyDeletesLocallyDeletedBranches(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneMergedPRs_RemovesWorktrees(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	featurePath := filepath.Join(repoDir, "feature-voice")
+	os.MkdirAll(bareDir, 0755)
+	os.MkdirAll(featurePath, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + filepath.Join(repoDir, "main") + "\nHEAD abc123\nbranch refs/heads/main\n\n" +
+			"worktree " + featurePath + "\nHEAD def456\nbranch refs/heads/feature/voice\n\n",
+	}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	// Remove calls
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/voice\n"}
+	mockGit.Results["worktree remove "+featurePath] = &CmdResult{}
+	mockGit.Results["worktree prune"] = &CmdResult{}
+	mockGit.Results["branch -D feature/voice"] = &CmdResult{}
+	mockGit.Results["push origin --delete feature/voice"] = &CmdResult{}
+
+	mockGH := NewMockGHRunner()
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[{"number":42,"headRefName":"feature/voice","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/42"}]`,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.Prune(context.Background(), PruneOptions{MergedPRs: true})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if len(result.MergedWorktrees) != 1 || result.MergedWorktrees[0] != "feature/voice" {
+		t.Errorf("expected [feature/voice] in MergedWorktrees, got %v", result.MergedWorktrees)
+	}
+}
+
+func TestPruneMergedPRs_SkipsProtected(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + filepath.Join(repoDir, "main") + "\nHEAD abc123\nbranch refs/heads/main\n\n",
+	}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+
+	mockGH := NewMockGHRunner()
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[{"number":1,"headRefName":"main","state":"MERGED"}]`,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.Prune(context.Background(), PruneOptions{MergedPRs: true})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if len(result.MergedWorktrees) != 0 {
+		t.Errorf("expected no merged worktrees (main is protected), got %v", result.MergedWorktrees)
+	}
+}
+
+func TestPruneMergedPRs_SkipsNoPR(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+	os.MkdirAll(filepath.Join(repoDir, "feature-x"), 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + filepath.Join(repoDir, "main") + "\nHEAD abc123\nbranch refs/heads/main\n\n" +
+			"worktree " + filepath.Join(repoDir, "feature-x") + "\nHEAD def456\nbranch refs/heads/feature-x\n\n",
+	}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+
+	mockGH := NewMockGHRunner()
+	// No merged PRs matching feature-x
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[]`,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.Prune(context.Background(), PruneOptions{MergedPRs: true})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if len(result.MergedWorktrees) != 0 {
+		t.Errorf("expected no merged worktrees, got %v", result.MergedWorktrees)
+	}
+}
+
+func TestPruneMergedPRs_DryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+	os.MkdirAll(filepath.Join(repoDir, "feature-voice"), 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune --dry-run -v"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + filepath.Join(repoDir, "main") + "\nHEAD abc123\nbranch refs/heads/main\n\n" +
+			"worktree " + filepath.Join(repoDir, "feature-voice") + "\nHEAD def456\nbranch refs/heads/feature/voice\n\n",
+	}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+
+	mockGH := NewMockGHRunner()
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[{"number":42,"headRefName":"feature/voice","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/42"}]`,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.Prune(context.Background(), PruneOptions{DryRun: true, MergedPRs: true})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if len(result.MergedWorktrees) != 1 {
+		t.Fatalf("expected 1 merged worktree candidate, got %v", result.MergedWorktrees)
+	}
+	// Verify Remove was NOT called (no worktree remove in git calls)
+	for _, call := range mockGit.Calls {
+		if len(call) >= 2 && call[0] == "worktree" && call[1] == "remove" {
+			t.Error("Remove should not be called in dry-run mode")
+		}
+	}
+}
+
+func TestPruneMergedPRs_GHFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+
+	mockGH := NewMockGHRunner()
+	mockGH.Errors["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = errors.New("auth required")
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.Prune(context.Background(), PruneOptions{MergedPRs: true})
+	if err != nil {
+		t.Fatalf("Prune() should not fail on GH error, got %v", err)
+	}
+	// Stale worktree prune still ran
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// Merged worktrees should be nil since GH failed
+	if result.MergedWorktrees != nil {
+		t.Errorf("expected nil MergedWorktrees on GH failure, got %v", result.MergedWorktrees)
+	}
+}
+
+func TestPruneWithoutMergedFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	os.MkdirAll(bareDir, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(NewMockGHRunner()), WithOutput(output))
+
+	result, err := m.Prune(context.Background(), PruneOptions{})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	// Should only do git worktree prune, no GH calls
+	if result.MergedWorktrees != nil {
+		t.Errorf("expected nil MergedWorktrees without --merged, got %v", result.MergedWorktrees)
+	}
+}
+
+func TestGCMergedPRsPassthrough(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	featurePath := filepath.Join(repoDir, "feature-done")
+	os.MkdirAll(bareDir, 0755)
+	os.MkdirAll(featurePath, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + filepath.Join(repoDir, "main") + "\nHEAD abc123\nbranch refs/heads/main\n\n" +
+			"worktree " + featurePath + "\nHEAD def456\nbranch refs/heads/feature/done\n\n",
+	}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature/done\n"}
+	mockGit.Results["gc"] = &CmdResult{}
+	// Remove calls for feature/done
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/done\n"}
+	mockGit.Results["worktree remove "+featurePath] = &CmdResult{}
+	mockGit.Results["branch -D feature/done"] = &CmdResult{}
+	mockGit.Results["push origin --delete feature/done"] = &CmdResult{}
+
+	mockGH := NewMockGHRunner()
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[{"number":99,"headRefName":"feature/done","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/99"}]`,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{MergedPRs: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if len(result.MergedWorktrees) != 1 || result.MergedWorktrees[0] != "feature/done" {
+		t.Errorf("expected [feature/done] in MergedWorktrees, got %v", result.MergedWorktrees)
+	}
+}

@@ -1294,29 +1294,119 @@ func (m *Manager) handleChildBranches(ctx context.Context, children []BranchDepe
 	}
 }
 
-// Prune cleans stale worktree metadata.
-func (m *Manager) Prune(ctx context.Context, dryRun bool) ([]string, error) {
+// protectedBranches returns the set of branches that should never be deleted.
+func protectedBranches(ctx context.Context, git GitRunner, bareDir string) map[string]bool {
+	defaultBranch, _ := GetDefaultBranch(ctx, git, bareDir)
+	return map[string]bool{
+		defaultBranch: true,
+		"main":        true,
+		"master":      true,
+	}
+}
+
+// PruneOptions configures prune behavior.
+type PruneOptions struct {
+	DryRun    bool // Preview only, no changes
+	MergedPRs bool // Also remove worktrees whose GitHub PRs are merged
+}
+
+// PruneResult contains the results of pruning.
+type PruneResult struct {
+	StaleWorktrees  []string // Lines from git worktree prune
+	MergedWorktrees []string // Worktrees removed because their PR was merged
+}
+
+// Prune cleans stale worktree metadata and optionally removes worktrees
+// whose GitHub PRs have been merged.
+func (m *Manager) Prune(ctx context.Context, opts PruneOptions) (*PruneResult, error) {
 	bareDir := m.BareDir()
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		return nil, ErrRepoNotInitialized
 	}
 
+	result := &PruneResult{}
+
 	args := []string{"worktree", "prune"}
-	if dryRun {
+	if opts.DryRun {
 		args = append(args, "--dry-run", "-v")
 	}
 
-	result, err := m.git.Run(ctx, args, bareDir)
+	gitResult, err := m.git.Run(ctx, args, bareDir)
 	if err != nil {
 		return nil, err
 	}
 
-	if result.Stdout != "" {
-		return strings.Split(strings.TrimSpace(result.Stdout), "\n"), nil
+	if gitResult.Stdout != "" {
+		result.StaleWorktrees = strings.Split(strings.TrimSpace(gitResult.Stdout), "\n")
+	} else {
+		m.output.Success("No stale worktrees to prune")
 	}
 
-	m.output.Success("No stale worktrees to prune")
-	return nil, nil
+	if opts.MergedPRs {
+		merged, err := m.pruneMergedPRs(ctx, bareDir, opts.DryRun)
+		if err != nil {
+			m.output.Warn(fmt.Sprintf("Merged PR check failed: %v", err))
+		} else {
+			result.MergedWorktrees = merged
+		}
+	}
+
+	return result, nil
+}
+
+// pruneMergedPRs finds and removes worktrees whose PRs are merged.
+func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun bool) ([]string, error) {
+	protected := protectedBranches(ctx, m.git, bareDir)
+
+	worktrees, err := m.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+
+	mergedPRs, err := ListMergedPRs(ctx, m.gh, bareDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list merged PRs: %w", err)
+	}
+
+	if len(mergedPRs) >= 200 {
+		m.output.Warn("GitHub returned 200 merged PRs (limit reached); older merged-PR worktrees may not be detected")
+	}
+
+	mergedByBranch := make(map[string]*PRInfo, len(mergedPRs))
+	for i := range mergedPRs {
+		mergedByBranch[mergedPRs[i].HeadRefName] = &mergedPRs[i]
+	}
+
+	removed := []string{}
+	for _, wt := range worktrees {
+		if wt.IsDetached || protected[wt.Branch] {
+			continue
+		}
+
+		pr, ok := mergedByBranch[wt.Branch]
+		if !ok {
+			continue
+		}
+
+		if dryRun {
+			m.output.Info(fmt.Sprintf("[dry-run] Would remove %s (PR #%d merged)", wt.Branch, pr.Number))
+			removed = append(removed, wt.Branch)
+			continue
+		}
+
+		m.output.Info(fmt.Sprintf("Removing %s (PR #%d merged)...", wt.Branch, pr.Number))
+		if err := m.Remove(ctx, wt.Branch, true); err != nil {
+			m.output.Error(fmt.Sprintf("Failed to remove %s: %v", wt.Branch, err))
+			continue
+		}
+		removed = append(removed, wt.Branch)
+	}
+
+	if len(removed) == 0 {
+		m.output.Success("No worktrees with merged PRs to remove")
+	}
+
+	return removed, nil
 }
 
 // GCOptions configures garbage collection behavior.
@@ -1324,11 +1414,13 @@ type GCOptions struct {
 	DryRun         bool // Preview only, no changes
 	DeleteBranches bool // Delete orphaned local branches
 	DeleteRemote   bool // Also delete remote branches (requires DeleteBranches)
+	MergedPRs      bool // Also remove worktrees whose GitHub PRs are merged
 }
 
 // GCResult contains the results of garbage collection.
 type GCResult struct {
 	PrunedWorktrees  []string // Lines from git worktree prune
+	MergedWorktrees  []string // Worktrees removed because their PR was merged
 	OrphanedBranches []string // Local branches with no worktree
 	DeletedBranches  []string // Actually deleted local branches
 	DeletedRemote    []string // Actually deleted remote branches
@@ -1348,12 +1440,16 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 	result := &GCResult{}
 
 	// Step 1: git worktree prune — delegate to m.Prune to avoid duplicating logic.
-	pruned, err := m.Prune(ctx, opts.DryRun)
+	pruned, err := m.Prune(ctx, PruneOptions{
+		DryRun:    opts.DryRun,
+		MergedPRs: opts.MergedPRs,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("worktree prune failed: %w", err)
 	}
-	result.PrunedWorktrees = pruned
-	for _, line := range pruned {
+	result.PrunedWorktrees = pruned.StaleWorktrees
+	result.MergedWorktrees = pruned.MergedWorktrees
+	for _, line := range pruned.StaleWorktrees {
 		m.output.Info(fmt.Sprintf("Pruned: %s", line))
 	}
 
@@ -1371,12 +1467,7 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 	}
 
 	// Step 3: Detect orphaned branches
-	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
-	protectedBranches := map[string]bool{
-		defaultBranch: true,
-		"main":        true,
-		"master":      true,
-	}
+	protected := protectedBranches(ctx, m.git, bareDir)
 
 	branchResult, err := m.git.Run(ctx, []string{"branch", "--list", "--format=%(refname:short)"}, bareDir)
 	if err != nil {
@@ -1401,7 +1492,7 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 	}
 
 	for _, branch := range allBranches {
-		if !protectedBranches[branch] && !activeBranches[branch] {
+		if !protected[branch] && !activeBranches[branch] {
 			result.OrphanedBranches = append(result.OrphanedBranches, branch)
 		}
 	}
