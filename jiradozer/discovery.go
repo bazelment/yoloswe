@@ -12,12 +12,12 @@ import (
 // Discovery polls the issue tracker for new issues matching a filter
 // and emits them on a channel for the orchestrator to pick up.
 type Discovery struct {
-	tracker  tracker.IssueTracker // interface: 2 words (pointer-containing)
+	tracker  tracker.IssueTracker
 	logger   *slog.Logger
 	seen     map[string]bool
-	filter   tracker.IssueFilter // contains string + 2 slices (pointer-containing) + int
-	mu       sync.Mutex          // no pointers
-	interval time.Duration       // no pointers
+	filter   tracker.IssueFilter
+	mu       sync.Mutex
+	interval time.Duration
 }
 
 // NewDiscovery creates a new issue discovery poller.
