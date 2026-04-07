@@ -30,11 +30,14 @@ type Workflow struct {
 
 	// OnTransition is called after each successful state transition.
 	// The orchestrator uses this to track workflow progress without polling.
-	OnTransition  func(step WorkflowStep)
-	lastCommentAt time.Time
-	plan          string
-	buildOutput   string
-	feedback      string
+	OnTransition func(step WorkflowStep)
+	// OnRoundProgress is called during multi-round steps to report round progress.
+	// roundIndex is 0-based current round; roundTotal is len(rounds).
+	OnRoundProgress func(roundIndex, roundTotal int)
+	lastCommentAt   time.Time
+	plan            string
+	buildOutput     string
+	feedback        string
 }
 
 // NewWorkflow creates a new workflow for the given issue.
@@ -74,19 +77,19 @@ func (w *Workflow) Run(ctx context.Context) error {
 
 		switch w.state.Current() {
 		case StepPlanning:
-			w.runStep(ctx, "plan", w.config.Plan, StepPlanReview, "plan_complete")
+			w.runStepOrRounds(ctx, "plan", w.config.Plan, StepPlanReview, "plan_complete")
 		case StepPlanReview:
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
-			w.runStep(ctx, "build", w.config.Build, StepBuildReview, "build_complete")
+			w.runStepOrRounds(ctx, "build", w.config.Build, StepBuildReview, "build_complete")
 		case StepBuildReview:
 			w.runReview(ctx, StepValidating, StepBuilding)
 		case StepValidating:
-			w.runStep(ctx, "validate", w.config.Validate, StepValidateReview, "validation_complete")
+			w.runStepOrRounds(ctx, "validate", w.config.Validate, StepValidateReview, "validation_complete")
 		case StepValidateReview:
 			w.runReview(ctx, StepShipping, StepValidating)
 		case StepShipping:
-			w.runStep(ctx, "ship", w.config.Ship, StepShipReview, "ship_complete")
+			w.runStepOrRounds(ctx, "ship", w.config.Ship, StepShipReview, "ship_complete")
 		case StepShipReview:
 			w.runReview(ctx, StepDone, StepShipping)
 		case StepDone:
@@ -106,6 +109,62 @@ func (w *Workflow) Run(ctx context.Context) error {
 	}
 }
 
+// runStepOrRounds dispatches to multi-round execution when rounds are configured,
+// otherwise runs the single-session step.
+func (w *Workflow) runStepOrRounds(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
+	if len(stepCfg.Rounds) > 0 {
+		w.runStepRounds(ctx, stepName, stepCfg, reviewStep, trigger)
+		return
+	}
+	w.runStep(ctx, stepName, stepCfg, reviewStep, trigger)
+}
+
+// runStepRounds runs multiple agent sessions sequentially for a multi-round step.
+// Each round gets a fresh session (no resume). On redo, all rounds re-run from the
+// start with feedback injected into round 1 only.
+func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
+	resolved := w.config.ResolveStep(stepCfg)
+	totalRounds := len(stepCfg.Rounds)
+
+	w.logger.Info("step: "+stepName, "rounds", totalRounds, "feedback", w.feedback != "")
+
+	data := w.promptData()
+	var allOutputs []string
+	for i, round := range stepCfg.Rounds {
+		if ctx.Err() != nil {
+			w.fail(ctx, ctx.Err())
+			return
+		}
+
+		roundCfg := ResolveRound(round, resolved)
+		feedback := ""
+		if i == 0 {
+			feedback = w.feedback
+		}
+
+		w.logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
+		if w.OnRoundProgress != nil {
+			w.OnRoundProgress(i, totalRounds)
+		}
+
+		output, _, err := RunStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, feedback, "", w.logger)
+		if err != nil {
+			w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
+			return
+		}
+		allOutputs = append(allOutputs, output)
+
+		heading := capitalize(stepName)
+		comment := fmt.Sprintf("## %s Round %d/%d\n\n%s", heading, i+1, totalRounds, truncateOutput(output, 2000))
+		if _, err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
+			w.logger.Warn("failed to post round comment", "step", stepName, "round", i+1, "error", err)
+		}
+	}
+
+	w.captureOutput(stepName, strings.Join(allOutputs, "\n\n---\n\n"))
+	w.transitionToReview(ctx, reviewStep, trigger)
+}
+
 // runStep runs an agent session for the current workflow step.
 func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
 	currentStep := w.state.Current()
@@ -114,29 +173,18 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.logger.Info("step: "+stepName, "feedback", w.feedback != "", "resume", sessionID != "")
 
 	cfg := w.config.ResolveStep(stepCfg)
-	data := NewPromptData(w.issue, w.config.BaseBranch)
-	data.Plan = w.plan
-	data.BuildOutput = w.buildOutput
-
-	output, newSessionID, err := RunStepAgent(ctx, stepName, data, cfg, w.config.WorkDir, w.feedback, sessionID, w.logger)
+	output, newSessionID, err := RunStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, w.feedback, sessionID, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return
 	}
 
 	w.sessionIDs[currentStep] = newSessionID
+	w.captureOutput(stepName, output)
 
-	// Capture outputs for downstream steps.
-	switch stepName {
-	case "plan":
-		w.plan = output
-	case "build":
-		w.buildOutput = output
-	}
-
-	// Post result as comment(s). For long outputs, post a summary first
-	// then the full content in a separate comment so reviewers see everything.
-	heading := strings.ToUpper(stepName[:1]) + stepName[1:]
+	// For long outputs, post a summary first then the full content in a
+	// separate comment so reviewers see everything.
+	heading := capitalize(stepName)
 	if len(output) > 3000 {
 		preview := string([]rune(output)[:500])
 		summary := fmt.Sprintf("## %s Complete\n\n%s\n\n_(Full output in next comment)_", heading, preview)
@@ -150,6 +198,41 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	}
 
 	w.transitionToReview(ctx, reviewStep, trigger)
+}
+
+// promptData builds the template context for agent prompts.
+func (w *Workflow) promptData() PromptData {
+	data := NewPromptData(w.issue, w.config.BaseBranch)
+	data.Plan = w.plan
+	data.BuildOutput = w.buildOutput
+	return data
+}
+
+// captureOutput stores step output for use by downstream steps.
+func (w *Workflow) captureOutput(stepName, output string) {
+	switch stepName {
+	case "plan":
+		w.plan = output
+	case "build":
+		w.buildOutput = output
+	}
+}
+
+// truncateOutput shortens text that exceeds maxLen runes, appending a truncation notice.
+func truncateOutput(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen]) + "\n\n... (truncated)"
+	}
+	return s
+}
+
+// capitalize returns s with the first letter uppercased.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // runReview waits for human feedback and transitions accordingly.

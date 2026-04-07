@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+
 	"charm.land/lipgloss/v2"
 
 	"github.com/bazelment/yoloswe/jiradozer"
@@ -62,6 +64,15 @@ func stepStatus(step jiradozer.WorkflowStep) string {
 	default:
 		return "running"
 	}
+}
+
+// formatStep returns the step name with round progress appended for multi-round steps.
+func formatStep(s jiradozer.IssueStatus) string {
+	step := s.Step.String()
+	if s.RoundTotal > 0 {
+		step = fmt.Sprintf("%s (%d/%d)", step, s.RoundIndex+1, s.RoundTotal)
+	}
+	return step
 }
 
 // stepIcon returns a status icon for a workflow step.

@@ -1,0 +1,9 @@
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+validate:
+  rounds:
+    - prompt: "Round 1"
+    - prompt: ""

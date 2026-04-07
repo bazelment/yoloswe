@@ -16,17 +16,17 @@ import (
 // Config is the top-level configuration for jiradozer.
 type Config struct {
 	Tracker      TrackerConfig `yaml:"tracker"`
+	Source       SourceConfig  `yaml:"source"`
 	States       StatesConfig  `yaml:"states"`
 	Agent        AgentConfig   `yaml:"agent"`
-	Source       SourceConfig  `yaml:"source"`
 	WorkDir      string        `yaml:"work_dir"`
 	BaseBranch   string        `yaml:"base_branch"`
 	Plan         StepConfig    `yaml:"plan"`
 	Build        StepConfig    `yaml:"build"`
 	Validate     StepConfig    `yaml:"validate"`
 	Ship         StepConfig    `yaml:"ship"`
-	PollInterval time.Duration `yaml:"poll_interval"`
 	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
+	PollInterval time.Duration `yaml:"poll_interval"`
 }
 
 // TrackerConfig specifies the issue tracker backend.
@@ -60,13 +60,24 @@ func (s SourceConfig) ToFilter() tracker.IssueFilter {
 
 // StepConfig configures a single workflow step (plan or build).
 type StepConfig struct {
-	Prompt         string  `yaml:"prompt"`          // Go text/template; empty = built-in default
-	SystemPrompt   string  `yaml:"system_prompt"`   // optional system prompt passed to the agent
-	Model          string  `yaml:"model"`           // override agent.model; empty = inherit
-	PermissionMode string  `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
-	MaxTurns       int     `yaml:"max_turns"`
-	MaxBudgetUSD   float64 `yaml:"max_budget_usd"` // override top-level; 0 = inherit
-	AutoApprove    bool    `yaml:"auto_approve"`   // skip human review after this step
+	Prompt         string        `yaml:"prompt"`          // Go text/template; empty = built-in default
+	SystemPrompt   string        `yaml:"system_prompt"`   // optional system prompt passed to the agent
+	Model          string        `yaml:"model"`           // override agent.model; empty = inherit
+	PermissionMode string        `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
+	Rounds         []RoundConfig `yaml:"rounds"`          // multi-round execution; mutually exclusive with Prompt
+	MaxBudgetUSD   float64       `yaml:"max_budget_usd"`  // override top-level; 0 = inherit
+	MaxTurns       int           `yaml:"max_turns"`
+	AutoApprove    bool          `yaml:"auto_approve"` // skip human review after this step
+}
+
+// RoundConfig configures a single round within a multi-round step.
+// Zero-value fields inherit from the parent StepConfig.
+type RoundConfig struct {
+	Prompt       string  `yaml:"prompt"`         // Go text/template (required)
+	SystemPrompt string  `yaml:"system_prompt"`  // optional system prompt
+	Model        string  `yaml:"model"`          // override; empty = inherit from step
+	MaxTurns     int     `yaml:"max_turns"`      // override; 0 = inherit from step
+	MaxBudgetUSD float64 `yaml:"max_budget_usd"` // override; 0 = inherit from step
 }
 
 // StatesConfig maps logical workflow states to tracker-specific state names.
@@ -156,9 +167,20 @@ func (c *Config) validate() error {
 	for name, step := range map[string]StepConfig{
 		"plan": c.Plan, "build": c.Build, "validate": c.Validate, "ship": c.Ship,
 	} {
+		if step.Prompt != "" && len(step.Rounds) > 0 {
+			return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
+		}
 		if step.Prompt != "" {
 			if _, err := template.New(name).Parse(step.Prompt); err != nil {
 				return fmt.Errorf("%s.prompt template: %w", name, err)
+			}
+		}
+		for i, round := range step.Rounds {
+			if round.Prompt == "" {
+				return fmt.Errorf("%s.rounds[%d]: prompt is required", name, i)
+			}
+			if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
+				return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
 			}
 		}
 	}
@@ -190,6 +212,36 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 		step.MaxBudgetUSD = c.MaxBudgetUSD
 	}
 	return step
+}
+
+// ResolveRound converts a RoundConfig into a fully-resolved StepConfig,
+// inheriting zero-value fields from the parent step.
+func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
+	systemPrompt := round.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = parent.SystemPrompt
+	}
+	resolved := StepConfig{
+		Prompt:         round.Prompt,
+		SystemPrompt:   systemPrompt,
+		PermissionMode: parent.PermissionMode,
+	}
+	if round.Model != "" {
+		resolved.Model = round.Model
+	} else {
+		resolved.Model = parent.Model
+	}
+	if round.MaxTurns > 0 {
+		resolved.MaxTurns = round.MaxTurns
+	} else {
+		resolved.MaxTurns = parent.MaxTurns
+	}
+	if round.MaxBudgetUSD > 0 {
+		resolved.MaxBudgetUSD = round.MaxBudgetUSD
+	} else {
+		resolved.MaxBudgetUSD = parent.MaxBudgetUSD
+	}
+	return resolved
 }
 
 // ValidateWorkDir checks that a work_dir path exists and is a directory.

@@ -228,6 +228,87 @@ func TestValidateWorkDir(t *testing.T) {
 	assert.Contains(t, err.Error(), "not a directory")
 }
 
+func TestLoadConfig_WithRounds(t *testing.T) {
+	cfg, err := LoadConfig("testdata/with_rounds.yaml")
+	require.NoError(t, err)
+
+	// Validate step should have rounds, not a prompt.
+	assert.Empty(t, cfg.Validate.Prompt)
+	require.Len(t, cfg.Validate.Rounds, 2)
+	assert.Contains(t, cfg.Validate.Rounds[0].Prompt, "simplify")
+	assert.Equal(t, 15, cfg.Validate.Rounds[0].MaxTurns)
+	assert.Contains(t, cfg.Validate.Rounds[1].Prompt, "Run tests")
+	assert.Equal(t, "opus", cfg.Validate.Rounds[1].Model)
+	assert.Equal(t, 30.0, cfg.Validate.Rounds[1].MaxBudgetUSD)
+
+	// Other steps should have no rounds.
+	assert.Empty(t, cfg.Plan.Rounds)
+	assert.Empty(t, cfg.Build.Rounds)
+	assert.Empty(t, cfg.Ship.Rounds)
+}
+
+func TestLoadConfig_RoundsAndPromptConflict(t *testing.T) {
+	_, err := LoadConfig("testdata/rounds_and_prompt_conflict.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestLoadConfig_RoundsEmptyPrompt(t *testing.T) {
+	_, err := LoadConfig("testdata/rounds_empty_prompt.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prompt is required")
+}
+
+func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
+	_, err := LoadConfig("testdata/rounds_invalid_template.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "template")
+}
+
+func TestResolveRound_InheritsFromStep(t *testing.T) {
+	parent := StepConfig{
+		Model:          "sonnet",
+		SystemPrompt:   "parent system prompt",
+		PermissionMode: "bypass",
+		MaxTurns:       10,
+		MaxBudgetUSD:   25.0,
+	}
+
+	// Round with no overrides — inherits everything.
+	round := RoundConfig{Prompt: "do stuff"}
+	resolved := ResolveRound(round, parent)
+	assert.Equal(t, "do stuff", resolved.Prompt)
+	assert.Equal(t, "parent system prompt", resolved.SystemPrompt)
+	assert.Equal(t, "sonnet", resolved.Model)
+	assert.Equal(t, "bypass", resolved.PermissionMode)
+	assert.Equal(t, 10, resolved.MaxTurns)
+	assert.Equal(t, 25.0, resolved.MaxBudgetUSD)
+}
+
+func TestResolveRound_OverridesStep(t *testing.T) {
+	parent := StepConfig{
+		Model:          "sonnet",
+		PermissionMode: "bypass",
+		MaxTurns:       10,
+		MaxBudgetUSD:   25.0,
+	}
+
+	round := RoundConfig{
+		Prompt:       "do stuff",
+		SystemPrompt: "be careful",
+		Model:        "opus",
+		MaxTurns:     20,
+		MaxBudgetUSD: 50.0,
+	}
+	resolved := ResolveRound(round, parent)
+	assert.Equal(t, "do stuff", resolved.Prompt)
+	assert.Equal(t, "be careful", resolved.SystemPrompt)
+	assert.Equal(t, "opus", resolved.Model)
+	assert.Equal(t, 20, resolved.MaxTurns)
+	assert.Equal(t, 50.0, resolved.MaxBudgetUSD)
+	assert.Equal(t, "bypass", resolved.PermissionMode) // always from parent
+}
+
 func TestResolveEnv(t *testing.T) {
 	t.Setenv("TEST_RESOLVE_ENV_VAR", "secret-value")
 
