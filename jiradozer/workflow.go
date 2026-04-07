@@ -218,10 +218,11 @@ func (w *Workflow) captureOutput(stepName, output string) {
 	}
 }
 
-// truncateOutput shortens text that exceeds maxLen, appending a truncation notice.
+// truncateOutput shortens text that exceeds maxLen runes, appending a truncation notice.
 func truncateOutput(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen] + "\n\n... (truncated)"
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen]) + "\n\n... (truncated)"
 	}
 	return s
 }
