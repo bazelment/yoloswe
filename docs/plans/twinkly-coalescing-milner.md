@@ -36,7 +36,7 @@ Each issue file:
     "title": "Add retry logic to HTTP client",
     "description": "When HTTP requests fail with 5xx...",
     "state": "In Progress",
-    "team_id": "",
+    "team_id": "local",
     "labels": []
   },
   "comments": [

@@ -29,11 +29,13 @@ func TestCreateAndFetchIssue(t *testing.T) {
 	assert.Equal(t, "LOCAL-1", issue.Identifier)
 	assert.Equal(t, "Add retry logic", issue.Title)
 	assert.Equal(t, "Todo", issue.State)
+	assert.Equal(t, "local", issue.TeamID)
 
 	fetched, err := tr.FetchIssue(ctx, "LOCAL-1")
 	require.NoError(t, err)
 	assert.Equal(t, issue.ID, fetched.ID)
 	assert.Equal(t, issue.Title, fetched.Title)
+	assert.Equal(t, "local", fetched.TeamID)
 	require.NotNil(t, fetched.Description)
 	assert.Contains(t, *fetched.Description, "retry up to 3 times")
 }
