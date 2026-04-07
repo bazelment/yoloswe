@@ -419,6 +419,11 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	}
 	resolved := cfg.ResolveStep(stepCfg)
 	data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
+
+	if len(resolved.Rounds) > 0 {
+		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, logger)
+	}
+
 	output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, resolved, cfg.WorkDir, "", "", logger)
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
@@ -427,6 +432,43 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", sessionID)
 	} else {
 		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
+	}
+	return nil
+}
+
+func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.PromptData, resolved jiradozer.StepConfig, workDir string, logger *slog.Logger) error {
+	totalRounds := len(resolved.Rounds)
+	logger.Info("step: "+stepName, "rounds", totalRounds)
+
+	var allOutputs []string
+	var sessionIDs []string
+	for i, round := range resolved.Rounds {
+		if ctx.Err() != nil {
+			return fmt.Errorf("run-step %s: %w", stepName, ctx.Err())
+		}
+		roundCfg := jiradozer.ResolveRound(round, resolved)
+		logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
+
+		output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", logger)
+		if err != nil {
+			return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
+		}
+		allOutputs = append(allOutputs, output)
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+
+	hasOutput := false
+	for _, o := range allOutputs {
+		if o != "" {
+			hasOutput = true
+			break
+		}
+	}
+	if !hasOutput {
+		logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
+	} else {
+		combined := strings.Join(allOutputs, "\n\n---\n\n")
+		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
 	}
 	return nil
 }
