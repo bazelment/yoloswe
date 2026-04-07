@@ -451,16 +451,23 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 
 		output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", logger)
 		if err != nil {
-			return fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err)
+			return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
 		}
 		allOutputs = append(allOutputs, output)
 		sessionIDs = append(sessionIDs, sessionID)
 	}
 
-	combined := strings.Join(allOutputs, "\n\n---\n\n")
-	if combined == "" {
+	hasOutput := false
+	for _, o := range allOutputs {
+		if o != "" {
+			hasOutput = true
+			break
+		}
+	}
+	if !hasOutput {
 		logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
 	} else {
+		combined := strings.Join(allOutputs, "\n\n---\n\n")
 		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
 	}
 	return nil
