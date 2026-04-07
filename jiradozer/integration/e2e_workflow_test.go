@@ -195,3 +195,153 @@ func TestE2E_PlanStep_Smoke(t *testing.T) {
 	assert.NotEmpty(t, sessionID, "should return a session ID")
 	t.Logf("Plan output (first 300 chars): %.300s", output)
 }
+
+// TestE2E_HumanFeedback runs the full workflow with human feedback injected
+// at each review step. The plan step gets a "redo" with feedback first, then
+// "approve" on the second review. All other steps get "approve" directly.
+// This exercises the feedback polling, redo loop, and comment injection paths.
+func TestE2E_HumanFeedback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	workDir := t.TempDir()
+
+	issue := e2eIssue()
+	ft := NewFakeTracker(e2eWorkflowStates())
+	ft.AddIssue(*issue)
+
+	cfg := e2eConfig(t, workDir)
+	// Disable auto-approve for all steps — feedback will be injected.
+	cfg.Plan.AutoApprove = false
+	cfg.Build.AutoApprove = false
+	cfg.Validate.AutoApprove = false
+	cfg.Ship.AutoApprove = false
+
+	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
+
+	// Track transitions and how many times each review step is visited.
+	var transitions []jiradozer.WorkflowStep
+	var mu sync.Mutex
+	planReviewCount := 0
+
+	wf.OnTransition = func(step jiradozer.WorkflowStep) {
+		mu.Lock()
+		transitions = append(transitions, step)
+		mu.Unlock()
+		t.Logf("transition → %s", step)
+
+		// Inject human comments asynchronously after the workflow reaches
+		// review steps. The delay ensures lastCommentAt is set before
+		// the injected comment's CreatedAt (the workflow sets lastCommentAt
+		// synchronously after this callback returns).
+		switch step {
+		case jiradozer.StepPlanReview:
+			mu.Lock()
+			planReviewCount++
+			visit := planReviewCount
+			mu.Unlock()
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				if visit == 1 {
+					// First plan review: send feedback to trigger redo.
+					t.Log("injecting redo feedback for plan review")
+					ft.InjectHumanComment(issue.ID, "Please also consider edge cases and error handling in the plan")
+				} else {
+					// Second plan review (after redo): approve.
+					t.Log("injecting approve for plan review (after redo)")
+					ft.InjectHumanComment(issue.ID, "lgtm")
+				}
+			}()
+		case jiradozer.StepBuildReview:
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				t.Log("injecting approve for build review")
+				ft.InjectHumanComment(issue.ID, "approve")
+			}()
+		case jiradozer.StepValidateReview:
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				t.Log("injecting approve for validate review")
+				ft.InjectHumanComment(issue.ID, "ship it")
+			}()
+		case jiradozer.StepShipReview:
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				t.Log("injecting approve for ship review")
+				ft.InjectHumanComment(issue.ID, "approved")
+			}()
+		}
+	}
+
+	err := wf.Run(ctx)
+	require.NoError(t, err, "workflow should complete successfully")
+
+	// Final tracker state should be "done".
+	assert.Equal(t, "state-done", ft.IssueStateID(issue.ID), "final tracker state should be done")
+
+	// Transition sequence should include the plan redo loop.
+	mu.Lock()
+	got := transitions
+	mu.Unlock()
+
+	expected := []jiradozer.WorkflowStep{
+		jiradozer.StepPlanning,
+		jiradozer.StepPlanReview,
+		jiradozer.StepPlanning,     // redo: back to planning
+		jiradozer.StepPlanReview,   // second review
+		jiradozer.StepBuilding,     // approved
+		jiradozer.StepBuildReview,
+		jiradozer.StepValidating,
+		jiradozer.StepValidateReview,
+		jiradozer.StepShipping,
+		jiradozer.StepShipReview,
+		jiradozer.StepDone,
+	}
+	assert.Equal(t, expected, got, "transitions should include plan redo loop")
+
+	// FetchComments should have been called (no auto-approve).
+	fetchCalls := ft.CallsFor("FetchComments")
+	assert.GreaterOrEqual(t, len(fetchCalls), 5, "FetchComments called at least 5 times (2 plan reviews + 3 other reviews)")
+
+	// PostComment should include waiting comments for each review step.
+	postCalls := ft.CallsFor("PostComment")
+	var bodies []string
+	for _, c := range postCalls {
+		bodies = append(bodies, c.Args[1])
+	}
+
+	// Verify waiting comments were posted (not auto-approved).
+	waitingCount := 0
+	for _, b := range bodies {
+		if strings.Contains(b, "Waiting for review") {
+			waitingCount++
+		}
+	}
+	assert.GreaterOrEqual(t, waitingCount, 5, "should have waiting comments for each review (5 total: 2 plan + build + validate + ship)")
+
+	// Verify all step-complete comments are present.
+	for _, heading := range []string{"## Plan Complete", "## Build Complete", "## Validate Complete", "## Ship Complete"} {
+		found := false
+		for _, b := range bodies {
+			if strings.Contains(b, heading) {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "should have comment containing %q", heading)
+	}
+
+	// Plan Complete should appear twice (original + redo).
+	planCompleteCount := 0
+	for _, b := range bodies {
+		if strings.Contains(b, "## Plan Complete") {
+			planCompleteCount++
+		}
+	}
+	assert.Equal(t, 2, planCompleteCount, "Plan Complete should appear twice (original + redo)")
+}
