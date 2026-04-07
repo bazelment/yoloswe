@@ -1777,6 +1777,38 @@ func TestRemoveForce(t *testing.T) {
 	}
 }
 
+func TestRemoveNoForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	if err := m.Remove(context.Background(), "feature", false, false); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+
+	for _, call := range mockGit.Calls {
+		if call[0] == "worktree" && call[1] == "remove" {
+			for _, arg := range call[2:] {
+				if arg == "--force" {
+					t.Fatalf("Expected no '--force' flag, got calls: %v", mockGit.Calls)
+				}
+			}
+		}
+	}
+}
+
 func TestRemoveIncludesStderr(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "test-repo")
