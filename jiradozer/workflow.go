@@ -17,7 +17,7 @@ const (
 	stateKeyDone       = "done"
 )
 
-// Workflow drives the issue through plan → build → validate → ship.
+// Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
 	tracker    tracker.IssueTracker
 	lastError  error
@@ -81,6 +81,7 @@ func (w *Workflow) Run(ctx context.Context) error {
 		case StepPlanReview:
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
+			delete(w.sessionIDs, StepCreatingPR) // Fresh build cycle invalidates old create_pr session.
 			w.runStepOrRounds(ctx, "build", w.config.Build, StepCreatingPR, "build_complete")
 		case StepCreatingPR:
 			w.runStep(ctx, "create_pr", w.config.CreatePR, StepBuildReview, "pr_created")
