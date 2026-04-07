@@ -42,11 +42,23 @@ type comment struct {
 	IsSelf    bool      `json:"is_self"`
 }
 
+const (
+	stateIDInProgress = "local-in-progress"
+	stateIDInReview   = "local-in-review"
+	stateIDDone       = "local-done"
+
+	stateNameTodo       = "Todo"
+	stateNameInProgress = "In Progress"
+	stateNameInReview   = "In Review"
+	stateNameDone       = "Done"
+)
+
 // Tracker is a file-backed IssueTracker. Each issue is stored as a JSON
 // file under the configured directory, with a counter file for ID generation.
 type Tracker struct {
-	dir string
-	mu  sync.Mutex
+	dir         string
+	counterPath string
+	mu          sync.Mutex
 }
 
 // NewTracker creates a local file-backed tracker. The directory is created
@@ -55,7 +67,10 @@ func NewTracker(dir string) (*Tracker, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create tracker dir: %w", err)
 	}
-	return &Tracker{dir: dir}, nil
+	return &Tracker{
+		dir:         dir,
+		counterPath: filepath.Join(dir, "next_id"),
+	}, nil
 }
 
 // CreateIssue creates a new issue with an auto-incremented LOCAL-N identifier.
@@ -78,7 +93,7 @@ func (t *Tracker) CreateIssue(title, description string) (*tracker.Issue, error)
 			Identifier:  identifier,
 			Title:       title,
 			Description: description,
-			State:       "Todo",
+			State:       stateNameTodo,
 			Labels:      []string{},
 		},
 	}
@@ -104,16 +119,13 @@ func (t *Tracker) FetchIssue(_ context.Context, identifier string) (*tracker.Iss
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	files, err := t.listFiles()
+	// Identifiers are "LOCAL-N", file names are "local-N.json".
+	issueID := strings.ToLower(identifier)
+	f, err := t.readFile(issueID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("issue %q not found", identifier)
 	}
-	for i := range files {
-		if files[i].Issue.Identifier == identifier {
-			return toTrackerIssue(&files[i].Issue), nil
-		}
-	}
-	return nil, fmt.Errorf("issue %q not found", identifier)
+	return toTrackerIssue(&f.Issue), nil
 }
 
 func (t *Tracker) ListIssues(_ context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
@@ -166,9 +178,9 @@ func (t *Tracker) FetchComments(_ context.Context, issueID string, since time.Ti
 
 func (t *Tracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
 	return []tracker.WorkflowState{
-		{ID: "local-in-progress", Name: "In Progress", Type: "started"},
-		{ID: "local-in-review", Name: "In Review", Type: "started"},
-		{ID: "local-done", Name: "Done", Type: "completed"},
+		{ID: stateIDInProgress, Name: stateNameInProgress, Type: "started"},
+		{ID: stateIDInReview, Name: stateNameInReview, Type: "started"},
+		{ID: stateIDDone, Name: stateNameDone, Type: "completed"},
 	}, nil
 }
 
@@ -203,12 +215,12 @@ func (t *Tracker) UpdateIssueState(_ context.Context, issueID string, stateID st
 
 	// Map state IDs back to names for readability in the JSON file.
 	switch stateID {
-	case "local-in-progress":
-		f.Issue.State = "In Progress"
-	case "local-in-review":
-		f.Issue.State = "In Review"
-	case "local-done":
-		f.Issue.State = "Done"
+	case stateIDInProgress:
+		f.Issue.State = stateNameInProgress
+	case stateIDInReview:
+		f.Issue.State = stateNameInReview
+	case stateIDDone:
+		f.Issue.State = stateNameDone
 	default:
 		f.Issue.State = stateID
 	}
@@ -267,14 +279,13 @@ func (t *Tracker) listFiles() ([]issueFile, error) {
 
 // nextID reads and increments the counter file. Caller must hold t.mu.
 func (t *Tracker) nextID() (int, error) {
-	counterPath := filepath.Join(filepath.Dir(t.dir), "next_id")
 	id := 1
-	if data, err := os.ReadFile(counterPath); err == nil {
+	if data, err := os.ReadFile(t.counterPath); err == nil {
 		if n, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
 			id = n
 		}
 	}
-	if err := os.WriteFile(counterPath, []byte(strconv.Itoa(id+1)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(t.counterPath, []byte(strconv.Itoa(id+1)+"\n"), 0o644); err != nil {
 		return 0, fmt.Errorf("write counter: %w", err)
 	}
 	return id, nil

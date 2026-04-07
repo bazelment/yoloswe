@@ -152,12 +152,14 @@ func run(ctx context.Context, args runArgs) error {
 	// (config file is optional).
 	var cfg *jiradozer.Config
 	if args.description != "" {
-		cfg = jiradozer.DefaultConfigForTest()
-		cfg.Tracker.Kind = "local"
 		// Try loading config file for overrides but don't fail if missing.
-		if loaded, loadErr := jiradozer.LoadConfig(args.configPath); loadErr == nil {
+		loaded, loadErr := jiradozer.LoadConfig(args.configPath)
+		if loadErr == nil {
 			cfg = loaded
+		} else {
+			cfg = jiradozer.DefaultConfig()
 		}
+		// Force local tracker regardless of config file contents.
 		cfg.Tracker.Kind = "local"
 		// Default all steps to auto-approve in local mode unless overridden.
 		if args.autoApprove == "" {
@@ -371,11 +373,8 @@ func runFromDescription(ctx context.Context, description string, issueTracker tr
 	logger.Info("generating title from description")
 	title, err := jiradozer.GenerateTitle(ctx, description, logger)
 	if err != nil {
-		logger.Warn("title generation failed, using truncated description", "error", err)
+		logger.Warn("title generation failed, using description as title", "error", err)
 		title = description
-		if len(title) > 80 {
-			title = title[:77] + "..."
-		}
 	}
 	logger.Info("title generated", "title", title)
 

@@ -106,9 +106,8 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultConfigForTest returns the default config with sensible defaults.
-// Exported for use in integration tests.
-func DefaultConfigForTest() *Config {
+// DefaultConfig returns the default config with sensible defaults.
+func DefaultConfig() *Config {
 	cfg := defaultConfig()
 	return &cfg
 }
