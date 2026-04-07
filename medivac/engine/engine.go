@@ -505,7 +505,7 @@ func (e *Engine) MergeApproved(ctx context.Context) ([]MergeResult, error) {
 			e.tracker.UpdateStatus(iss.Signature, issue.StatusFixMerged)
 
 			// Cleanup worktree
-			if removeErr := e.config.WTManager.Remove(ctx, lastAttempt.Branch, true); removeErr != nil {
+			if removeErr := e.config.WTManager.Remove(ctx, lastAttempt.Branch, true, false); removeErr != nil {
 				e.logger.Warn("worktree cleanup failed",
 					"branch", lastAttempt.Branch,
 					"error", removeErr,

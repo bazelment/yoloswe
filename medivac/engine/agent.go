@@ -116,7 +116,7 @@ func runAgentCore(
 	// On success, the worktree will be cleaned up later after successful merge.
 	defer func() {
 		if !r.Success {
-			if removeErr := wtManager.Remove(ctx, r.Branch, true); removeErr != nil {
+			if removeErr := wtManager.Remove(ctx, r.Branch, true, false); removeErr != nil {
 				logger.Warn("failed to cleanup worktree on error path",
 					"branch", r.Branch,
 					"error", removeErr,
@@ -183,7 +183,7 @@ func runAgentCore(
 	if len(r.FilesChanged) == 0 {
 		if r.Analysis != nil && !r.Analysis.FixApplied {
 			// Analysis-only: no PR will be created, cleanup worktree immediately
-			if removeErr := wtManager.Remove(ctx, r.Branch, true); removeErr != nil {
+			if removeErr := wtManager.Remove(ctx, r.Branch, true, false); removeErr != nil {
 				logger.Warn("failed to cleanup worktree after analysis-only outcome",
 					"branch", r.Branch,
 					"error", removeErr,

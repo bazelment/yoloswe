@@ -214,7 +214,7 @@ func TestNewAtomicCleanupAfterPartialFailure(t *testing.T) {
 	require.DirExists(t, path)
 
 	// Remove it so we can test cleanup
-	err = repo.manager.Remove(repo.ctx, "feature-partial", true)
+	err = repo.manager.Remove(repo.ctx, "feature-partial", true, false)
 	require.NoError(t, err)
 
 	// Verify clean removal

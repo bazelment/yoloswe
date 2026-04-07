@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -615,7 +616,7 @@ on_worktree_delete:
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
-	err := m.Remove(context.Background(), "feature", false)
+	err := m.Remove(context.Background(), "feature", false, false)
 	if err != nil {
 		t.Fatalf("Remove() should continue when delete command fails, got error: %v", err)
 	}
@@ -657,7 +658,7 @@ on_worktree_delete:
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
-	if err := m.Remove(context.Background(), "feature", false); err != nil {
+	if err := m.Remove(context.Background(), "feature", false, false); err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
 
@@ -795,7 +796,7 @@ func TestRemoveIncludesWorktreePrune(t *testing.T) {
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
 
-	err := m.Remove(context.Background(), "feature", true)
+	err := m.Remove(context.Background(), "feature", true, false)
 	if err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
@@ -1524,7 +1525,7 @@ func TestPruneMergedPRs_RemovesWorktrees(t *testing.T) {
 	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
 	// Remove calls
 	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/voice\n"}
-	mockGit.Results["worktree remove "+featurePath] = &CmdResult{}
+	mockGit.Results["worktree remove --force "+featurePath] = &CmdResult{}
 	mockGit.Results["worktree prune"] = &CmdResult{}
 	mockGit.Results["branch -D feature/voice"] = &CmdResult{}
 	mockGit.Results["push origin --delete feature/voice"] = &CmdResult{}
@@ -1722,7 +1723,7 @@ func TestGCMergedPRsPassthrough(t *testing.T) {
 	mockGit.Results["gc"] = &CmdResult{}
 	// Remove calls for feature/done
 	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/done\n"}
-	mockGit.Results["worktree remove "+featurePath] = &CmdResult{}
+	mockGit.Results["worktree remove --force "+featurePath] = &CmdResult{}
 	mockGit.Results["branch -D feature/done"] = &CmdResult{}
 	mockGit.Results["push origin --delete feature/done"] = &CmdResult{}
 
@@ -1740,5 +1741,72 @@ func TestGCMergedPRsPassthrough(t *testing.T) {
 	}
 	if len(result.MergedWorktrees) != 1 || result.MergedWorktrees[0] != "feature/done" {
 		t.Errorf("expected [feature/done] in MergedWorktrees, got %v", result.MergedWorktrees)
+	}
+}
+
+func TestRemoveForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	if err := m.Remove(context.Background(), "feature", false, true); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+
+	forceFound := false
+	for _, call := range mockGit.Calls {
+		if len(call) >= 4 && call[0] == "worktree" && call[1] == "remove" && call[2] == "--force" && call[3] == wtPath {
+			forceFound = true
+			break
+		}
+	}
+	if !forceFound {
+		t.Fatalf("Expected 'worktree remove --force' call, got calls: %v", mockGit.Calls)
+	}
+}
+
+func TestRemoveIncludesStderr(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	wtPath := filepath.Join(repoDir, "feature")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGit := NewMockGitRunner()
+	removeKey := "worktree remove " + wtPath
+	mockGit.Errors[removeKey] = fmt.Errorf("exit status 128")
+	mockGit.Results[removeKey] = &CmdResult{
+		Stderr:   "fatal: 'feature' contains modified or untracked files, use --force to delete\n",
+		ExitCode: 128,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	err := m.Remove(context.Background(), "feature", false, false)
+	if err == nil {
+		t.Fatal("Expected error from Remove()")
+	}
+
+	if !strings.Contains(err.Error(), "contains modified or untracked files") {
+		t.Errorf("Expected stderr in error message, got: %v", err)
 	}
 }

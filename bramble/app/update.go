@@ -1422,7 +1422,7 @@ func (m Model) deleteWorktree(branch string, deleteBranch bool) (tea.Model, tea.
 			messages = append(messages, "Non-fatal: on-worktree-delete command failed")
 		}
 
-		err := manager.Remove(ctx, branch, deleteBranch)
+		err := manager.Remove(ctx, branch, deleteBranch, false)
 
 		messages = append(messages, parseHookOutput(buf.String())...)
 		if warning == "" {

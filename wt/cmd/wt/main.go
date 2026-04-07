@@ -357,7 +357,7 @@ Rough commands:
 		deleteBranch, _ := cmd.Flags().GetBool("delete-branch")
 		ctx := context.Background()
 
-		return m.Remove(ctx, branch, deleteBranch)
+		return m.Remove(ctx, branch, deleteBranch, false)
 	},
 }
 
