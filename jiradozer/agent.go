@@ -96,6 +96,13 @@ func DefaultPromptForStep(stepName string) string {
 	}
 }
 
+func truncate(s string, maxLen int) string {
+	if len(s) > maxLen {
+		return s[:maxLen] + "..."
+	}
+	return s
+}
+
 // RunStepAgent runs an agent session for the given workflow step.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
@@ -199,11 +206,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"resume", resumeSessionID != "",
 	)
 	logger.Debug("agent prompt", "step", stepName, "prompt", prompt)
-	promptSnippet := prompt
-	if len(promptSnippet) > 200 {
-		promptSnippet = promptSnippet[:200] + "..."
-	}
-	logger.Info("agent prompt", "step", stepName, "prompt", promptSnippet)
+	logger.Info("agent prompt", "step", stepName, "prompt", truncate(prompt, 200))
 
 	handler := &logEventHandler{logger: logger, step: stepName}
 	var opts []agent.ExecuteOption
@@ -245,12 +248,8 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"output_tokens", result.Usage.OutputTokens,
 		"cost_usd", result.Usage.CostUSD,
 	)
-	responseSnippet := result.Text
-	if len(responseSnippet) > 100 {
-		responseSnippet = responseSnippet[:100] + "..."
-	}
-	if responseSnippet != "" {
-		logger.Info("agent response", "step", stepName, "response", responseSnippet)
+	if result.Text != "" {
+		logger.Info("agent response", "step", stepName, "response", truncate(result.Text, 100))
 	}
 
 	output := resolveOutput(result.Text, handler, logger)
