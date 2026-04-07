@@ -1824,7 +1824,8 @@ func TestRemoveIncludesStderr(t *testing.T) {
 
 	mockGit := NewMockGitRunner()
 	removeKey := "worktree remove " + wtPath
-	mockGit.Errors[removeKey] = fmt.Errorf("exit status 128")
+	injectedErr := fmt.Errorf("exit status 128")
+	mockGit.Errors[removeKey] = injectedErr
 	mockGit.Results[removeKey] = &CmdResult{
 		Stderr:   "fatal: 'feature' contains modified or untracked files, use --force to delete\n",
 		ExitCode: 128,
@@ -1840,5 +1841,8 @@ func TestRemoveIncludesStderr(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "contains modified or untracked files") {
 		t.Errorf("Expected stderr in error message, got: %v", err)
+	}
+	if !errors.Is(err, injectedErr) {
+		t.Errorf("Expected original error to be wrapped, got: %v", err)
 	}
 }
