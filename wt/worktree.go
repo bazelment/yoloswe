@@ -740,7 +740,10 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 }
 
 // Remove removes a worktree by name (directory) or branch name.
-func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool) error {
+// If deleteBranch is true, the local and remote branch are deleted after the worktree is removed.
+// If force is true, passes --force to git worktree remove, allowing removal of worktrees with
+// modified or untracked files (equivalent to git worktree remove --force).
+func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool, force bool) error {
 	bareDir := m.BareDir()
 
 	// First try as directory name
@@ -788,7 +791,17 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	}
 
 	m.output.Info(fmt.Sprintf("Removing worktree %s...", branchName))
-	if _, err := m.git.Run(ctx, []string{"worktree", "remove", worktreePath}, bareDir); err != nil {
+	removeArgs := []string{"worktree", "remove"}
+	if force {
+		removeArgs = append(removeArgs, "--force")
+	}
+	removeArgs = append(removeArgs, worktreePath)
+	if result, err := m.git.Run(ctx, removeArgs, bareDir); err != nil {
+		if result != nil {
+			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+				return fmt.Errorf("failed to remove worktree: %s: %w", stderr, err)
+			}
+		}
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
 	m.output.Success(fmt.Sprintf("Removed worktree %s", branchName))
@@ -1137,7 +1150,7 @@ func (m *Manager) MergePR(ctx context.Context, opts MergeOptions) error {
 		m.output.Info("Navigating to default branch worktree...")
 		fmt.Printf("__WT_CD__:%s\n", filepath.Join(m.RepoDir(), defaultBranch))
 
-		if err := m.Remove(ctx, currentBranch, true); err != nil {
+		if err := m.Remove(ctx, currentBranch, true, false); err != nil {
 			m.output.Warn(fmt.Sprintf("Failed to cleanup worktree: %v", err))
 		}
 	}
@@ -1395,7 +1408,7 @@ func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun boo
 		}
 
 		m.output.Info(fmt.Sprintf("Removing %s (PR #%d merged)...", wt.Branch, pr.Number))
-		if err := m.Remove(ctx, wt.Branch, true); err != nil {
+		if err := m.Remove(ctx, wt.Branch, true, true); err != nil {
 			m.output.Error(fmt.Sprintf("Failed to remove %s: %v", wt.Branch, err))
 			continue
 		}

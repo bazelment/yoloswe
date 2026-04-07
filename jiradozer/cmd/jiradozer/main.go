@@ -313,7 +313,7 @@ func (a *wtAdapter) NewWorktree(ctx context.Context, branch, baseBranch, goal st
 }
 
 func (a *wtAdapter) RemoveWorktree(ctx context.Context, nameOrBranch string, deleteBranch bool) error {
-	return a.mgr.Remove(ctx, nameOrBranch, deleteBranch)
+	return a.mgr.Remove(ctx, nameOrBranch, deleteBranch, false)
 }
 
 func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {

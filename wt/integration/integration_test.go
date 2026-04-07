@@ -245,7 +245,7 @@ func TestWorktreeLifecycle(t *testing.T) {
 	require.True(t, status.IsDirty)
 
 	// Remove
-	err = repo.manager.Remove(repo.ctx, "feature-a", false)
+	err = repo.manager.Remove(repo.ctx, "feature-a", false, false)
 	require.NoError(t, err)
 	require.NoDirExists(t, featurePath)
 
@@ -547,7 +547,7 @@ func TestSyncParentBranchDeleted(t *testing.T) {
 	require.False(t, repo.remoteBranchExists("feature-a"), "feature-a should be deleted from remote")
 
 	t.Log("Removing local feature-a worktree")
-	err = repo.manager.Remove(repo.ctx, "feature-a", false)
+	err = repo.manager.Remove(repo.ctx, "feature-a", false, false)
 	require.NoError(t, err)
 
 	// Add a new commit to main
@@ -633,7 +633,7 @@ func TestSyncCascadingWithRemovedParentWorktree(t *testing.T) {
 
 	// Remove feature-a worktree (but keep the remote branch)
 	t.Log("Removing feature-a worktree")
-	err = repo.manager.Remove(repo.ctx, "feature-a", false)
+	err = repo.manager.Remove(repo.ctx, "feature-a", false, false)
 	require.NoError(t, err)
 
 	// Add a commit to origin/feature-a (simulating teammate push to parent)
