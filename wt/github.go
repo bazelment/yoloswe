@@ -162,6 +162,27 @@ func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, er
 	return prs, nil
 }
 
+// ListMergedPRs returns recently merged PRs in the repository.
+// Uses --limit 200 to cover typical worktree counts without excessive pagination.
+func ListMergedPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, error) {
+	result, err := runner.Run(ctx, []string{
+		"pr", "list",
+		"--json", "number,headRefName,baseRefName,state,url",
+		"--state", "merged",
+		"--limit", "200",
+	}, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var prs []PRInfo
+	if err := json.Unmarshal([]byte(result.Stdout), &prs); err != nil {
+		return nil, err
+	}
+
+	return prs, nil
+}
+
 // UpdatePRBase changes the base branch of a PR.
 func UpdatePRBase(ctx context.Context, runner GHRunner, prNumber int, newBase, dir string) error {
 	_, err := runner.Run(ctx, []string{

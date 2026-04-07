@@ -839,14 +839,17 @@ Examples:
 	},
 }
 
-// pruneCmd: wt prune [--dry-run]
+// pruneCmd: wt prune [--dry-run] [--merged]
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
-	Short: "Clean stale metadata",
+	Short: "Clean stale metadata and optionally remove merged-PR worktrees",
 	Long: `Prune removes stale worktree metadata for directories that no longer exist.
 
+With --merged, also removes worktrees whose GitHub PRs have been merged.
+
 Rough commands:
-  git worktree prune`,
+  git worktree prune
+  gh pr list --state merged  (with --merged)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -854,15 +857,26 @@ Rough commands:
 		}
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		merged, _ := cmd.Flags().GetBool("merged")
 		ctx := context.Background()
 
-		pruned, err := m.Prune(ctx, dryRun)
+		result, err := m.Prune(ctx, wt.PruneOptions{
+			DryRun:    dryRun,
+			MergedPRs: merged,
+		})
 		if err != nil {
 			return err
 		}
 
-		for _, line := range pruned {
+		for _, line := range result.StaleWorktrees {
 			fmt.Println(line)
+		}
+		for _, branch := range result.MergedWorktrees {
+			if dryRun {
+				fmt.Printf("[dry-run] Would remove %s (PR merged)\n", branch)
+			} else {
+				fmt.Printf("Removed %s (PR merged)\n", branch)
+			}
 		}
 
 		return nil
@@ -871,6 +885,7 @@ Rough commands:
 
 func init() {
 	pruneCmd.Flags().BoolP("dry-run", "n", false, "Show what would be removed")
+	pruneCmd.Flags().Bool("merged", false, "Also remove worktrees whose GitHub PRs are merged")
 }
 
 // gcCmd: wt gc [--dry-run] [-D] [-r]
@@ -900,10 +915,13 @@ Without -D, orphaned branches are listed but not deleted.`,
 		deleteRemote, _ := cmd.Flags().GetBool("remote")
 		ctx := context.Background()
 
+		merged, _ := cmd.Flags().GetBool("merged")
+
 		opts := wt.GCOptions{
 			DryRun:         dryRun,
 			DeleteBranches: deleteBranches,
 			DeleteRemote:   deleteRemote,
+			MergedPRs:      merged,
 		}
 
 		_, err = m.GC(ctx, opts)
@@ -915,6 +933,7 @@ func init() {
 	gcCmd.Flags().BoolP("dry-run", "n", false, "Preview what would be done")
 	gcCmd.Flags().BoolP("delete-branches", "D", false, "Delete orphaned local branches")
 	gcCmd.Flags().BoolP("remote", "r", false, "Also delete remote branches (requires -D)")
+	gcCmd.Flags().Bool("merged", false, "Also remove worktrees whose GitHub PRs are merged")
 }
 
 // shellenvCmd: wt shellenv

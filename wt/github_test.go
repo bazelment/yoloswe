@@ -274,3 +274,42 @@ func TestIsAuthError(t *testing.T) {
 		})
 	}
 }
+
+func TestListMergedPRs(t *testing.T) {
+	mock := NewMockGHRunner()
+	mock.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[
+			{"number":10,"headRefName":"feature-a","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/10"},
+			{"number":20,"headRefName":"feature-b","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/20"}
+		]`,
+	}
+
+	prs, err := ListMergedPRs(context.Background(), mock, "/tmp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(prs) != 2 {
+		t.Fatalf("expected 2 PRs, got %d", len(prs))
+	}
+	if prs[0].HeadRefName != "feature-a" || prs[0].Number != 10 {
+		t.Errorf("unexpected first PR: %+v", prs[0])
+	}
+	if prs[1].HeadRefName != "feature-b" || prs[1].Number != 20 {
+		t.Errorf("unexpected second PR: %+v", prs[1])
+	}
+}
+
+func TestListMergedPRs_Empty(t *testing.T) {
+	mock := NewMockGHRunner()
+	mock.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[]`,
+	}
+
+	prs, err := ListMergedPRs(context.Background(), mock, "/tmp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(prs) != 0 {
+		t.Errorf("expected 0 PRs, got %d", len(prs))
+	}
+}
