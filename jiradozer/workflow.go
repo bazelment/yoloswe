@@ -198,7 +198,7 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, output)
 	resultComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
 	if err != nil {
-		w.logger.Warn("failed to post "+stepName+" comment", "error", err)
+		w.logger.Warn("failed to post step comment", "step", stepName, "error", err)
 	} else if !resultComment.CreatedAt.IsZero() {
 		w.lastCommentAt = resultComment.CreatedAt
 	}
