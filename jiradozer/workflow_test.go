@@ -23,13 +23,15 @@ type trackerCall struct {
 }
 
 type mockWorkflowTracker struct {
-	commentSets      [][]tracker.Comment // sequence of comment responses for polling
-	workflowStates   []tracker.WorkflowState
-	comments         []tracker.Comment // returned by FetchComments
-	postCommentReply *tracker.Comment  // if set, PostComment returns this instead of default
-	calls            []trackerCall
-	mu               sync.Mutex
-	commentIdx       int // tracks which comment set to return (for polling)
+	commentSets        [][]tracker.Comment // sequence of comment responses for polling
+	workflowStates     []tracker.WorkflowState
+	comments           []tracker.Comment  // returned by FetchComments
+	postCommentReply   *tracker.Comment   // if set, PostComment always returns this
+	postCommentReplies []*tracker.Comment // if set, PostComment cycles through these in order
+	calls              []trackerCall
+	mu                 sync.Mutex
+	commentIdx         int // tracks which comment set to return (for polling)
+	postCommentIdx     int // tracks which postCommentReplies entry to use
 }
 
 func (m *mockWorkflowTracker) FetchIssue(_ context.Context, id string) (*tracker.Issue, error) {
@@ -59,9 +61,26 @@ func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID stri
 }
 
 func (m *mockWorkflowTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
-	m.recordCall("PostComment", issueID, body)
-	if m.postCommentReply != nil {
-		return *m.postCommentReply, nil
+	m.mu.Lock()
+	m.calls = append(m.calls, trackerCall{method: "PostComment", args: []string{issueID, body}})
+	reply := m.postCommentReply
+	var seqReply *tracker.Comment
+	if reply == nil && len(m.postCommentReplies) > 0 {
+		idx := m.postCommentIdx
+		if idx < len(m.postCommentReplies) {
+			m.postCommentIdx++
+		} else {
+			idx = len(m.postCommentReplies) - 1
+		}
+		seqReply = m.postCommentReplies[idx]
+	}
+	m.mu.Unlock()
+
+	if reply != nil {
+		return *reply, nil
+	}
+	if seqReply != nil {
+		return *seqReply, nil
 	}
 	return tracker.Comment{CreatedAt: time.Now()}, nil
 }
@@ -605,6 +624,28 @@ func TestWorkflow_TransitionToReview_ZeroTimestampFallback(t *testing.T) {
 
 	assert.False(t, wf.lastCommentAt.IsZero(), "lastCommentAt should not be zero")
 	assert.False(t, wf.lastCommentAt.Before(before), "lastCommentAt should be recent (time.Now fallback)")
+}
+
+// TestWorkflow_TransitionToReview_FallsBackToWaitingCommentTimestamp verifies that
+// when lastCommentAt is zero (step result comment failed or returned no timestamp),
+// transitionToReview uses the waiting comment's server timestamp instead of time.Now().
+func TestWorkflow_TransitionToReview_FallsBackToWaitingCommentTimestamp(t *testing.T) {
+	waitingTime := time.Date(2025, 6, 15, 12, 0, 5, 0, time.UTC)
+	mt := &mockWorkflowTracker{
+		workflowStates:   testWorkflowStates(),
+		postCommentReply: &tracker.Comment{CreatedAt: waitingTime},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	// lastCommentAt is zero — simulates a failed or zero-timestamp step result comment.
+	require.True(t, wf.lastCommentAt.IsZero())
+
+	wf.transitionToReview(context.Background(), StepPlanReview, "plan_complete")
+
+	assert.Equal(t, waitingTime, wf.lastCommentAt, "should use waiting comment's server timestamp when lastCommentAt is zero")
 }
 
 // TestWorkflow_AllReviewStepsFilterBotComments verifies each review step.

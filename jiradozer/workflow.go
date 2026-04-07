@@ -306,14 +306,21 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 		return
 	}
 
-	if _, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current()); err != nil {
+	waitingComment, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current())
+	if err != nil {
 		w.logger.Warn("failed to post waiting comment", "error", err)
 	}
 	// lastCommentAt was set by the step result comment in runStep/runStepRounds.
 	// Do not overwrite it here — doing so would skip user comments posted between
 	// the result comment and the waiting comment.
+	// If it is zero (step comment failed or returned no server timestamp), prefer
+	// the waiting comment's server timestamp before falling back to local time.
 	if w.lastCommentAt.IsZero() {
-		w.lastCommentAt = time.Now()
+		if err == nil && !waitingComment.CreatedAt.IsZero() {
+			w.lastCommentAt = waitingComment.CreatedAt
+		} else {
+			w.lastCommentAt = time.Now()
+		}
 	}
 }
 
