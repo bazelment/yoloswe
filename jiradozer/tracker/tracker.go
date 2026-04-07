@@ -23,8 +23,9 @@ type IssueTracker interface {
 	// FetchWorkflowStates returns available workflow states for the given team.
 	FetchWorkflowStates(ctx context.Context, teamID string) ([]WorkflowState, error)
 
-	// PostComment creates a new comment on an issue.
-	PostComment(ctx context.Context, issueID string, body string) error
+	// PostComment creates a new comment on an issue and returns the created comment
+	// with its server-assigned timestamp.
+	PostComment(ctx context.Context, issueID string, body string) (Comment, error)
 
 	// UpdateIssueState transitions an issue to the given workflow state.
 	UpdateIssueState(ctx context.Context, issueID string, stateID string) error

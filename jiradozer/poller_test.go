@@ -101,8 +101,8 @@ func (m *mockPollerTracker) FetchWorkflowStates(_ context.Context, _ string) ([]
 	return nil, nil
 }
 
-func (m *mockPollerTracker) PostComment(_ context.Context, _ string, _ string) error {
-	return nil
+func (m *mockPollerTracker) PostComment(_ context.Context, _ string, _ string) (tracker.Comment, error) {
+	return tracker.Comment{}, nil
 }
 
 func (m *mockPollerTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {

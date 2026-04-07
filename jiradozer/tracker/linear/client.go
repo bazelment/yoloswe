@@ -149,19 +149,27 @@ func (c *Client) FetchWorkflowStates(ctx context.Context, teamID string) ([]trac
 	return states, nil
 }
 
-func (c *Client) PostComment(ctx context.Context, issueID string, body string) error {
+func (c *Client) PostComment(ctx context.Context, issueID string, body string) (tracker.Comment, error) {
 	req := createCommentMutation(issueID, body)
 	resp, err := c.execute(ctx, req)
 	if err != nil {
-		return fmt.Errorf("post comment: %w", err)
+		return tracker.Comment{}, fmt.Errorf("post comment: %w", err)
 	}
 	if resp.Data == nil {
-		return fmt.Errorf("post comment: response data is nil")
+		return tracker.Comment{}, fmt.Errorf("post comment: response data is nil")
 	}
 	if !resp.Data.CommentCreate.Success {
-		return fmt.Errorf("post comment: mutation returned success=false")
+		return tracker.Comment{}, fmt.Errorf("post comment: mutation returned success=false")
 	}
-	return nil
+	comment := tracker.Comment{IsSelf: true}
+	if cr := resp.Data.CommentCreate.Comment; cr != nil {
+		comment.ID = cr.ID
+		comment.Body = cr.Body
+		if t, err := time.Parse(time.RFC3339, cr.CreatedAt); err == nil {
+			comment.CreatedAt = t
+		}
+	}
+	return comment, nil
 }
 
 func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID string) error {
@@ -262,11 +270,11 @@ type graphqlError struct {
 }
 
 type graphqlData struct {
+	CommentCreate  graphqlMutationResult           `json:"commentCreate"`
+	IssueUpdate    graphqlMutationResult           `json:"issueUpdate"`
 	Issues         graphqlIssuesConnection         `json:"issues"`
 	Comments       graphqlCommentsConnection       `json:"comments"`
 	WorkflowStates graphqlWorkflowStatesConnection `json:"workflowStates"`
-	CommentCreate  graphqlMutationResult           `json:"commentCreate"`
-	IssueUpdate    graphqlMutationResult           `json:"issueUpdate"`
 }
 
 type graphqlIssuesConnection struct {
@@ -337,5 +345,12 @@ type graphqlWorkflowState struct {
 }
 
 type graphqlMutationResult struct {
-	Success bool `json:"success"`
+	Comment *graphqlCommentResult `json:"comment,omitempty"`
+	Success bool                  `json:"success"`
+}
+
+type graphqlCommentResult struct {
+	ID        string `json:"id"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
 }

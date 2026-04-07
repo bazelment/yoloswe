@@ -53,8 +53,8 @@ func (m *mockOrchestratorTracker) FetchWorkflowStates(_ context.Context, _ strin
 	return m.workflowStates, nil
 }
 
-func (m *mockOrchestratorTracker) PostComment(_ context.Context, _ string, _ string) error {
-	return nil
+func (m *mockOrchestratorTracker) PostComment(_ context.Context, _ string, _ string) (tracker.Comment, error) {
+	return tracker.Comment{}, nil
 }
 
 func (m *mockOrchestratorTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {

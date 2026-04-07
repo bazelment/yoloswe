@@ -134,14 +134,17 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 		w.buildOutput = output
 	}
 
-	// Post result as comment.
-	summary := output
-	if len(summary) > 3000 {
-		summary = summary[:3000] + "\n\n... (truncated)"
-	}
+	// Post result as comment(s). For long outputs, post a summary first
+	// then the full content in a separate comment so reviewers see everything.
 	heading := strings.ToUpper(stepName[:1]) + stepName[1:]
-	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, summary)
-	if err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
+	if len(output) > 3000 {
+		summary := fmt.Sprintf("## %s Complete\n\n%s\n\n_(Full output in next comment)_", heading, output[:500])
+		if _, err := w.tracker.PostComment(ctx, w.issue.ID, summary); err != nil {
+			w.logger.Warn("failed to post "+stepName+" summary comment", "error", err)
+		}
+	}
+	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, output)
+	if _, err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
 		w.logger.Warn("failed to post "+stepName+" comment", "error", err)
 	}
 
@@ -201,14 +204,17 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 		}
 	}
 
-	w.lastCommentAt = time.Now()
-
 	if w.shouldAutoApprove(reviewStep) {
+		w.lastCommentAt = time.Now()
 		return
 	}
 
-	if err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current()); err != nil {
+	waitingComment, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current())
+	if err != nil {
 		w.logger.Warn("failed to post waiting comment", "error", err)
+		w.lastCommentAt = time.Now()
+	} else {
+		w.lastCommentAt = waitingComment.CreatedAt
 	}
 }
 

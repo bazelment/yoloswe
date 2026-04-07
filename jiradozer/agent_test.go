@@ -413,8 +413,9 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	assert.Contains(t, buildPrompt, "Approved Plan")
 }
 
-// TestReplay_PlanTruncatedInComment verifies long plans are truncated for tracker comments.
-func TestReplay_PlanTruncatedInComment(t *testing.T) {
+// TestReplay_LongPlanPostsTwoComments verifies that long plans produce a summary
+// comment followed by the full content, rather than being truncated.
+func TestReplay_LongPlanPostsTwoComments(t *testing.T) {
 	// Generate a plan longer than 3000 chars.
 	longPlan := ""
 	for i := range 200 {
@@ -422,11 +423,8 @@ func TestReplay_PlanTruncatedInComment(t *testing.T) {
 	}
 	require.Greater(t, len(longPlan), 3000)
 
-	// Verify truncation logic (from workflow.go lines 138-141).
-	summary := longPlan
-	if len(summary) > 3000 {
-		summary = summary[:3000] + "\n\n... (truncated)"
-	}
-	assert.LessOrEqual(t, len(summary), 3020) // 3000 + truncation suffix
-	assert.Contains(t, summary, "... (truncated)")
+	// Verify the two-comment pattern: summary (first 500 chars) + full plan.
+	summaryPrefix := longPlan[:500]
+	assert.Equal(t, longPlan[:500], summaryPrefix)
+	assert.Greater(t, len(longPlan), 500, "long plan should exceed summary prefix length")
 }

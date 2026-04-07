@@ -57,9 +57,9 @@ func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID stri
 	return m.workflowStates, nil
 }
 
-func (m *mockWorkflowTracker) PostComment(_ context.Context, issueID string, body string) error {
+func (m *mockWorkflowTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
 	m.recordCall("PostComment", issueID, body)
-	return nil
+	return tracker.Comment{CreatedAt: time.Now()}, nil
 }
 
 func (m *mockWorkflowTracker) UpdateIssueState(_ context.Context, issueID string, stateID string) error {
@@ -286,7 +286,7 @@ func TestWorkflow_FailFromInit_ForcesState(t *testing.T) {
 // TestPostWaitingComment verifies comment format.
 func TestPostWaitingComment(t *testing.T) {
 	mt := &mockWorkflowTracker{}
-	err := PostWaitingComment(context.Background(), mt, "issue-1", StepPlanReview)
+	_, err := PostWaitingComment(context.Background(), mt, "issue-1", StepPlanReview)
 	require.NoError(t, err)
 
 	calls := mt.getCalls("PostComment")

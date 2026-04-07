@@ -169,7 +169,14 @@ func TestPostComment(t *testing.T) {
 
 		resp := graphqlResponse{
 			Data: &graphqlData{
-				CommentCreate: graphqlMutationResult{Success: true},
+				CommentCreate: graphqlMutationResult{
+					Success: true,
+					Comment: &graphqlCommentResult{
+						ID:        "comment-1",
+						Body:      "test comment",
+						CreatedAt: "2025-01-15T10:00:00Z",
+					},
+				},
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -177,8 +184,10 @@ func TestPostComment(t *testing.T) {
 	defer server.Close()
 
 	client := NewClientWithEndpoint(server.URL, "test-key")
-	err := client.PostComment(context.Background(), "issue-1", "test comment")
+	comment, err := client.PostComment(context.Background(), "issue-1", "test comment")
 	require.NoError(t, err)
+	assert.Equal(t, "comment-1", comment.ID)
+	assert.True(t, comment.IsSelf)
 }
 
 func TestUpdateIssueState(t *testing.T) {
