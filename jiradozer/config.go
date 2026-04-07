@@ -217,9 +217,13 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 // ResolveRound converts a RoundConfig into a fully-resolved StepConfig,
 // inheriting zero-value fields from the parent step.
 func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
+	systemPrompt := round.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = parent.SystemPrompt
+	}
 	resolved := StepConfig{
 		Prompt:         round.Prompt,
-		SystemPrompt:   round.SystemPrompt,
+		SystemPrompt:   systemPrompt,
 		PermissionMode: parent.PermissionMode,
 	}
 	if round.Model != "" {

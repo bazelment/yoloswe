@@ -268,6 +268,7 @@ func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
 func TestResolveRound_InheritsFromStep(t *testing.T) {
 	parent := StepConfig{
 		Model:          "sonnet",
+		SystemPrompt:   "parent system prompt",
 		PermissionMode: "bypass",
 		MaxTurns:       10,
 		MaxBudgetUSD:   25.0,
@@ -277,6 +278,7 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	round := RoundConfig{Prompt: "do stuff"}
 	resolved := ResolveRound(round, parent)
 	assert.Equal(t, "do stuff", resolved.Prompt)
+	assert.Equal(t, "parent system prompt", resolved.SystemPrompt)
 	assert.Equal(t, "sonnet", resolved.Model)
 	assert.Equal(t, "bypass", resolved.PermissionMode)
 	assert.Equal(t, 10, resolved.MaxTurns)

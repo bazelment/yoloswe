@@ -92,6 +92,8 @@ func (o *Orchestrator) Snapshot() []IssueStatus {
 			Step:         step,
 			StartedAt:    mw.startedAt,
 			WorktreePath: mw.worktreePath,
+			RoundIndex:   mw.roundIndex,
+			RoundTotal:   mw.roundTotal,
 		})
 	}
 	return statuses
