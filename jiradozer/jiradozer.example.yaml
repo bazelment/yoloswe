@@ -1,0 +1,109 @@
+# jiradozer.yaml — example configuration with all options and their defaults.
+#
+# Required fields are marked [required]. Everything else has a default shown
+# in the inline comment and can be omitted.
+
+# --- Tracker ---
+# Issue tracker backend. Only "linear" is supported today.
+tracker:
+  kind: linear                          # [required] "linear" (future: "github", "jira")
+  api_key: $LINEAR_API_KEY              # [required] API key; supports $ENV_VAR expansion
+
+# --- Agent ---
+# Default agent model used for all steps unless overridden per-step.
+agent:
+  model: sonnet                         # default: "sonnet" — any model from agent.AllModels
+
+# --- Global Settings ---
+work_dir: .                             # default: "." — supports ~/path expansion
+base_branch: main                       # default: "main"
+poll_interval: 15s                      # default: 15s — how often to poll for human feedback
+max_budget_usd: 50.0                    # default: 50.0 — inherited by steps with no budget override
+
+# --- Tracker State Mapping ---
+# Maps jiradozer's logical workflow states to your tracker's state names.
+states:
+  in_progress: "In Progress"            # default: "In Progress"
+  in_review: "In Review"                # default: "In Review"
+  done: "Done"                          # default: "Done"
+
+# --- Multi-Issue Discovery (--team mode) ---
+source:
+  team: ENG                             # Linear team key; required for --team mode
+  branch_prefix: jiradozer              # default: "jiradozer" — worktree branch prefix
+  states:                               # default: ["Todo"] — issue states to pick up
+    - Todo
+  labels:                               # default: [] — optional OR label filter
+    - backend
+  max_concurrent: 3                     # default: 3 — max parallel workflows
+
+# --- Workflow Steps ---
+# Each step supports: prompt, system_prompt, model, permission_mode, max_turns,
+# max_budget_usd, auto_approve, and rounds. All fields are optional.
+#
+# Template variables available in prompts:
+#   {{.Identifier}}  — e.g. "ENG-123"
+#   {{.Title}}       — issue title
+#   {{.Description}} — issue description (empty if none)
+#   {{.URL}}         — issue URL (empty if none)
+#   {{.Labels}}      — comma-separated labels
+#   {{.BaseBranch}}  — e.g. "main"
+#   {{.Plan}}        — output from the plan step (build/validate/ship only)
+#   {{.BuildOutput}} — output from the build step (validate/ship only)
+
+# Plan step — creates an implementation plan. Runs in read-only "plan" mode.
+plan:
+  # prompt: ""                          # default: built-in plan prompt (see agent.go)
+  # system_prompt: ""                   # default: none
+  # model: ""                           # default: inherits from agent.model
+  permission_mode: plan                 # default: "plan" (read-only)
+  max_turns: 10                         # default: 10
+  # max_budget_usd: 0                   # default: inherits from top-level max_budget_usd
+  auto_approve: false                   # default: false — set true to skip human review
+
+# Build step — implements the plan. Runs in "bypass" mode (can edit files).
+build:
+  # prompt: ""                          # default: built-in build prompt
+  # system_prompt: ""                   # default: none
+  # model: ""                           # default: inherits from agent.model
+  permission_mode: bypass               # default: "bypass"
+  max_turns: 30                         # default: 30
+  # max_budget_usd: 0                   # default: inherits from top-level
+  auto_approve: false                   # default: false
+
+# Validate step — runs tests/linters, fixes failures.
+# This example uses multi-round execution: each round runs as a separate agent
+# session with a fresh context window. Rounds execute sequentially on the same
+# worktree, so round N's file changes are visible to round N+1.
+#
+# "rounds" and "prompt" are mutually exclusive. When rounds is set, the step's
+# prompt field is ignored and the built-in default prompt is not used.
+validate:
+  permission_mode: bypass               # default: "bypass" — inherited by all rounds
+  max_turns: 10                         # default: 10 — inherited by rounds unless overridden
+  # max_budget_usd: 0                   # default: inherits from top-level — per-round default
+  auto_approve: false                   # default: false — applies after ALL rounds complete
+  rounds:
+    - prompt: |
+        Issue: {{.Identifier}} — {{.Title}}
+        Review the code changes for quality and simplify where possible.
+      # system_prompt: ""               # default: none
+      # model: ""                       # default: inherits from step → agent.model
+      max_turns: 15                     # overrides step's max_turns for this round
+      # max_budget_usd: 0              # default: inherits from step → top-level
+    - prompt: |
+        Issue: {{.Identifier}} — {{.Title}}
+        Run the full test suite and linters. Fix any failures you find.
+      model: opus                       # override model for this round only
+      max_turns: 20
+      max_budget_usd: 30.0              # override budget for this round only
+
+# Ship step — creates a pull request.
+ship:
+  # prompt: ""                          # default: built-in ship prompt
+  # system_prompt: ""                   # default: none
+  # model: ""                           # default: inherits from agent.model
+  permission_mode: bypass               # default: "bypass"
+  max_turns: 10                         # default: 10
+  # max_budget_usd: 0                   # default: inherits from top-level
+  auto_approve: false                   # default: false
