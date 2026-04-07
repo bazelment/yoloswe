@@ -219,11 +219,15 @@ func run(ctx context.Context, args runArgs) error {
 		}
 		resolved := cfg.ResolveStep(stepCfg)
 		data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
-		output, _, err := jiradozer.RunStepAgent(ctx, args.runStep, data, resolved, cfg.WorkDir, "", "", logger)
+		output, sessionID, err := jiradozer.RunStepAgent(ctx, args.runStep, data, resolved, cfg.WorkDir, "", "", logger)
 		if err != nil {
 			return fmt.Errorf("run-step %s: %w", args.runStep, err)
 		}
-		fmt.Println(output)
+		if output == "" {
+			logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", args.runStep, "session_id", sessionID)
+		} else {
+			fmt.Printf("=== %s output ===\n%s\n", args.runStep, output)
+		}
 		return nil
 	}
 
