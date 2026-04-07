@@ -70,9 +70,20 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	}
 	defer session.Stop()
 
-	// Bridge Claude events to AgentEvent channel and EventHandler
+	// Bridge Claude events to AgentEvent channel and EventHandler.
+	// Use bridgeStop + bridgeDone to ensure all events are processed
+	// before Execute() returns (mirrors the Codex provider pattern).
 	if cfg.EventHandler != nil {
-		go bridgeEvents(session.Events(), cfg.EventHandler, p.events, nil, "", nil)
+		bridgeStop := make(chan struct{})
+		bridgeDone := make(chan struct{})
+		go func() {
+			bridgeEvents(session.Events(), cfg.EventHandler, p.events, bridgeStop, "", nil)
+			close(bridgeDone)
+		}()
+		defer func() {
+			close(bridgeStop)
+			<-bridgeDone
+		}()
 	}
 
 	// Execute single turn
