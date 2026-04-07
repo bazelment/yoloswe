@@ -279,8 +279,8 @@ func run(ctx context.Context, args runArgs) error {
 		return runFromDescription(ctx, args.description, issueTracker, cfg, logger)
 	}
 
-	// Multi-issue TUI mode.
-	if cfg.Source.Team != "" {
+	// Multi-issue TUI mode (only when no --issue flag was given).
+	if cfg.Source.Team != "" && args.issueID == "" {
 		return runMultiIssue(ctx, issueTracker, cfg, logger)
 	}
 

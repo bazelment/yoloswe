@@ -289,7 +289,7 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 func (c *Client) removeLabel(ctx context.Context, issueID, label string) error {
 	_, err := c.gh.Run(ctx, []string{
 		"api", "-X", "DELETE",
-		fmt.Sprintf("repos/%s/%s/issues/%s/labels/%s", c.owner, c.repo, issueID, label),
+		fmt.Sprintf("repos/%s/%s/issues/%s/labels/%s", c.owner, c.repo, issueID, url.PathEscape(label)),
 	}, "")
 	return err
 }
