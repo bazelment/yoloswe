@@ -69,12 +69,16 @@ func NewTracker(dir string) (*Tracker, error) {
 	}
 	return &Tracker{
 		dir:         dir,
-		counterPath: filepath.Join(dir, "next_id"),
+		counterPath: filepath.Join(filepath.Dir(dir), "next_id"),
 	}, nil
 }
 
 // CreateIssue creates a new issue with an auto-incremented LOCAL-N identifier.
 // This method is not part of the IssueTracker interface.
+//
+// NOTE: The mutex provides goroutine safety but not cross-process safety.
+// Running multiple jiradozer processes against the same work directory is
+// unsupported and may corrupt state.
 func (t *Tracker) CreateIssue(title, description string) (*tracker.Issue, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -94,6 +98,7 @@ func (t *Tracker) CreateIssue(title, description string) (*tracker.Issue, error)
 			Title:       title,
 			Description: description,
 			State:       stateNameTodo,
+			TeamID:      "local",
 			Labels:      []string{},
 		},
 	}
@@ -108,7 +113,8 @@ func (t *Tracker) CreateIssue(title, description string) (*tracker.Issue, error)
 		Identifier:  identifier,
 		Title:       title,
 		Description: &desc,
-		State:       "Todo",
+		State:       stateNameTodo,
+		TeamID:      "local",
 		Labels:      []string{},
 	}, nil
 }
@@ -119,13 +125,23 @@ func (t *Tracker) FetchIssue(_ context.Context, identifier string) (*tracker.Iss
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Identifiers are "LOCAL-N", file names are "local-N.json".
+	// Fast path: LOCAL-N identifiers map directly to local-N.json files.
 	issueID := strings.ToLower(identifier)
-	f, err := t.readFile(issueID)
-	if err != nil {
-		return nil, fmt.Errorf("issue %q not found", identifier)
+	if f, err := t.readFile(issueID); err == nil {
+		return toTrackerIssue(&f.Issue), nil
 	}
-	return toTrackerIssue(&f.Issue), nil
+
+	// Slow path: full scan for non-standard identifiers.
+	files, err := t.listFiles()
+	if err != nil {
+		return nil, err
+	}
+	for i := range files {
+		if files[i].Issue.Identifier == identifier {
+			return toTrackerIssue(&files[i].Issue), nil
+		}
+	}
+	return nil, fmt.Errorf("issue %q not found", identifier)
 }
 
 func (t *Tracker) ListIssues(_ context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
@@ -251,7 +267,7 @@ func (t *Tracker) writeFile(issueID string, f *issueFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal issue %q: %w", issueID, err)
 	}
-	if err := os.WriteFile(t.filePath(issueID), data, 0o644); err != nil {
+	if err := os.WriteFile(t.filePath(issueID), data, 0o600); err != nil {
 		return fmt.Errorf("write issue %q: %w", issueID, err)
 	}
 	return nil
@@ -285,7 +301,7 @@ func (t *Tracker) nextID() (int, error) {
 			id = n
 		}
 	}
-	if err := os.WriteFile(t.counterPath, []byte(strconv.Itoa(id+1)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(t.counterPath, []byte(strconv.Itoa(id+1)+"\n"), 0o600); err != nil {
 		return 0, fmt.Errorf("write counter: %w", err)
 	}
 	return id, nil

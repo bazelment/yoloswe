@@ -219,10 +219,10 @@ func run(ctx context.Context, args runArgs) error {
 		modeCount++
 	}
 	if modeCount > 1 {
-		return fmt.Errorf("--issue, --team, and --description are mutually exclusive")
+		return fmt.Errorf("--issue, --team, and --description/--description-file are mutually exclusive")
 	}
 	if modeCount == 0 {
-		return fmt.Errorf("either --issue, --team, or --description is required")
+		return fmt.Errorf("either --issue, --team, or --description/--description-file is required")
 	}
 
 	// Apply auto-approve overrides.
@@ -375,6 +375,9 @@ func runFromDescription(ctx context.Context, description string, issueTracker tr
 	if err != nil {
 		logger.Warn("title generation failed, using description as title", "error", err)
 		title = description
+		if len(title) > 80 {
+			title = title[:77] + "..."
+		}
 	}
 	logger.Info("title generated", "title", title)
 
