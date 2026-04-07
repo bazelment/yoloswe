@@ -489,26 +489,6 @@ func TestWorkflow_SessionIDTracking(t *testing.T) {
 	assert.Empty(t, wf.sessionIDs[StepValidating])
 }
 
-// TestWorkflow_CreatePRSessionClearedOnBuildRedo verifies that the create_pr session ID
-// is cleared when re-entering the build step, so create_pr starts fresh after a redo.
-func TestWorkflow_CreatePRSessionClearedOnBuildRedo(t *testing.T) {
-	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
-
-	// Simulate a create_pr session ID from a previous cycle.
-	wf.sessionIDs[StepCreatingPR] = "old-create-pr-session"
-
-	// Simulate entering build step (which clears the stale create_pr session).
-	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
-	require.NoError(t, wf.state.Transition(StepBuilding, "approved"))
-
-	// The workflow loop's StepBuilding case clears create_pr session.
-	// We test the invariant directly since we can't run the full loop in a unit test.
-	delete(wf.sessionIDs, StepCreatingPR)
-
-	assert.Empty(t, wf.sessionIDs[StepCreatingPR], "create_pr session should be cleared on build entry")
-}
-
 // TestWorkflow_FeedbackClearedOnApprove verifies feedback is cleared after approval.
 func TestWorkflow_FeedbackClearedOnApprove(t *testing.T) {
 	mt := &mockWorkflowTracker{

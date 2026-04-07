@@ -44,6 +44,7 @@ func TestWorkflowStepIsReview(t *testing.T) {
 	assert.True(t, StepValidateReview.IsReview())
 	assert.True(t, StepShipReview.IsReview())
 	assert.False(t, StepPlanning.IsReview())
+	assert.False(t, StepCreatingPR.IsReview())
 	assert.False(t, StepDone.IsReview())
 }
 
