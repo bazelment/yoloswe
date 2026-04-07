@@ -64,7 +64,11 @@ const defaultValidatePrompt = `Issue: {{.Identifier}} — {{.Title}}
 
 Run the project's tests and linters to validate the changes. Fix any failures you find. Report what passed and what you fixed.`
 
-const defaultCreatePRPrompt = `Check if a pull request already exists for the current branch against {{.BaseBranch}}.
+const defaultCreatePRPrompt = `First, check for any uncommitted changes (staged or unstaged, including untracked files).
+- If there are uncommitted changes: stage them, commit with a clear message referencing the work done, and push to the remote.
+- If there are no uncommitted changes but unpushed commits: push to the remote.
+
+Then, check if a pull request already exists for the current branch against {{.BaseBranch}}.
 - If a PR exists: update its description to reflect the current state of the code. Report the PR URL.
 - If no PR exists: create one against {{.BaseBranch}} with a clear title and description. Report the PR URL.`
 
