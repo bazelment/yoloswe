@@ -1700,3 +1700,45 @@ func TestPruneWithoutMergedFlag(t *testing.T) {
 		t.Errorf("expected nil MergedWorktrees without --merged, got %v", result.MergedWorktrees)
 	}
 }
+
+func TestGCMergedPRsPassthrough(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	featurePath := filepath.Join(repoDir, "feature-done")
+	os.MkdirAll(bareDir, 0755)
+	os.MkdirAll(featurePath, 0755)
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + filepath.Join(repoDir, "main") + "\nHEAD abc123\nbranch refs/heads/main\n\n" +
+			"worktree " + featurePath + "\nHEAD def456\nbranch refs/heads/feature/done\n\n",
+	}
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["fetch --prune"] = &CmdResult{}
+	mockGit.Results["branch --list --format=%(refname:short)"] = &CmdResult{Stdout: "main\nfeature/done\n"}
+	mockGit.Results["gc"] = &CmdResult{}
+	// Remove calls for feature/done
+	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/done\n"}
+	mockGit.Results["worktree remove "+featurePath] = &CmdResult{}
+	mockGit.Results["branch -D feature/done"] = &CmdResult{}
+	mockGit.Results["push origin --delete feature/done"] = &CmdResult{}
+
+	mockGH := NewMockGHRunner()
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+		Stdout: `[{"number":99,"headRefName":"feature/done","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/99"}]`,
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
+
+	result, err := m.GC(context.Background(), GCOptions{MergedPRs: true})
+	if err != nil {
+		t.Fatalf("GC() error = %v", err)
+	}
+	if len(result.MergedWorktrees) != 1 || result.MergedWorktrees[0] != "feature/done" {
+		t.Errorf("expected [feature/done] in MergedWorktrees, got %v", result.MergedWorktrees)
+	}
+}

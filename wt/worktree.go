@@ -1377,7 +1377,7 @@ func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun boo
 		mergedByBranch[mergedPRs[i].HeadRefName] = &mergedPRs[i]
 	}
 
-	var removed []string
+	removed := []string{}
 	for _, wt := range worktrees {
 		if wt.IsDetached || protected[wt.Branch] {
 			continue

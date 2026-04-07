@@ -888,11 +888,12 @@ var gcCmd = &cobra.Command{
 	Long: `GC performs comprehensive garbage collection:
 
 1. Prunes stale worktree metadata (git worktree prune)
-2. Fetches and prunes remote tracking refs (git fetch --prune)
-3. Detects orphaned local branches (no corresponding worktree)
-4. Optionally deletes orphaned local branches (-D)
-5. Optionally deletes corresponding remote branches (-D -r)
-6. Garbage collects loose objects (git gc)
+2. With --merged, removes worktrees whose GitHub PRs are merged
+3. Fetches and prunes remote tracking refs (git fetch --prune)
+4. Detects orphaned local branches (no corresponding worktree)
+5. Optionally deletes orphaned local branches (-D)
+6. Optionally deletes corresponding remote branches (-D -r)
+7. Garbage collects loose objects (git gc)
 
 Protected branches (main, master, default branch) are never deleted.
 
