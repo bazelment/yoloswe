@@ -48,7 +48,7 @@ func e2eStepConfig(autoApprove bool) jiradozer.StepConfig {
 
 func e2eConfig(t *testing.T, workDir string) *jiradozer.Config {
 	t.Helper()
-	cfg := jiradozer.DefaultConfigForTest()
+	cfg := jiradozer.DefaultConfig()
 	cfg.Agent.Model = "haiku"
 	cfg.WorkDir = workDir
 	cfg.BaseBranch = "main"

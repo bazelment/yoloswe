@@ -1,166 +1,200 @@
-# Jiradozer E2E Integration Tests with Fake Tracker
+# Jiradozer Local File Tracker
 
 ## Context
 
-Jiradozer has unit tests (mock tracker, no real agents) and integration tests (real Linear API, real Claude for individual steps), but nothing tests `Workflow.Run()` end-to-end with real Claude execution. The gap: we don't know if the full plan->build->validate->ship pipeline actually works when all steps run real agents and the tracker records the right call sequence. This plan adds an E2E test using a stateful fake tracker backend with auto-approve, running real Claude (haiku) for all 4 steps.
+Jiradozer currently requires a Linear issue tracker with API key to run. This limits adoption — users can't just point it at a task description and let it run. The goal is to add a `local` tracker backend so users can start a full plan→build→validate→ship workflow from just a `--description` flag on the CLI, with no external tracker needed. State persists to local JSON files so the workflow can be inspected/resumed.
 
 ## Files to Create/Modify
 
 | File | Action |
 |------|--------|
-| `jiradozer/integration/fake_tracker.go` | **Create** — stateful in-memory `IssueTracker` implementation |
-| `jiradozer/integration/e2e_workflow_test.go` | **Create** — end-to-end workflow test |
-| `jiradozer/integration/BUILD.bazel` | **Modify** — add new srcs |
+| `jiradozer/tracker/local/local.go` | **Create** — local file-backed IssueTracker implementation |
+| `jiradozer/tracker/local/local_test.go` | **Create** — unit tests |
+| `jiradozer/tracker/local/BUILD.bazel` | **Create** — Bazel build rule |
+| `jiradozer/config.go` | **Modify** — relax API key validation for local kind |
+| `jiradozer/cmd/jiradozer/main.go` | **Modify** — add `--description` flag, wire local tracker |
+| `jiradozer/cmd/jiradozer/BUILD.bazel` | **Modify** — add local tracker dep |
 
-## 1. FakeTracker (`fake_tracker.go`)
+## 1. Local Tracker (`jiradozer/tracker/local/local.go`)
 
-`//go:build integration` build tag. Package `integration`.
+### Storage Layout
+
+```
+<work-dir>/.jiradozer/
+  issues/
+    local-1.json    # one file per issue
+    local-2.json
+  next_id           # counter file: "3\n"
+```
+
+Each issue file:
+```json
+{
+  "issue": {
+    "id": "local-1",
+    "identifier": "LOCAL-1",
+    "title": "Add retry logic to HTTP client",
+    "description": "When HTTP requests fail with 5xx...",
+    "state": "In Progress",
+    "team_id": "local",
+    "labels": []
+  },
+  "comments": [
+    {
+      "id": "c-1",
+      "body": "## Plan Complete\n\n...",
+      "user_name": "jiradozer",
+      "is_self": true,
+      "created_at": "2026-04-07T10:00:00Z"
+    }
+  ]
+}
+```
 
 ### Struct
 
 ```go
-type FakeTracker struct {
-    mu       sync.Mutex
-    issues   map[string]*fakeIssue  // keyed by issue.ID
-    states   []tracker.WorkflowState
-    calls    []FakeTrackerCall
-    nextID   int
-}
-
-type fakeIssue struct {
-    issue    tracker.Issue
-    stateID  string
-    comments []tracker.Comment
-}
-
-type FakeTrackerCall struct {
-    Method string
-    Args   []string
+type Tracker struct {
+    dir string // path to .jiradozer/issues/
+    mu  sync.Mutex
 }
 ```
 
-### Constructor and helpers
+### Constructor
 
-- `NewFakeTracker(states []tracker.WorkflowState) *FakeTracker`
-- `AddIssue(issue tracker.Issue)` — stores issue by ID
-- `Calls() []FakeTrackerCall` — returns all recorded calls
-- `CallsFor(method string) []FakeTrackerCall` — filtered by method name
-- `IssueStateID(issueID string) string` — returns current state ID
-- `IssueComments(issueID string) []tracker.Comment` — returns stored comments
-- `InjectHumanComment(issueID, body string)` — adds comment with `IsSelf: false` (for future non-auto-approve tests)
+`NewTracker(dir string) (*Tracker, error)` — creates dir if needed, reads next_id counter.
 
-### IssueTracker interface (6 methods)
+### IssueTracker Interface Methods
 
 | Method | Behavior |
 |--------|----------|
-| `FetchIssue` | Lookup by `Identifier` (iterate values), return copy |
-| `ListIssues` | Return all issues (filter ignored for now) |
-| `FetchComments` | Filter stored comments by `CreatedAt.After(since)` |
-| `FetchWorkflowStates` | Return pre-configured states slice |
-| `PostComment` | Append comment with `IsSelf: true`, `CreatedAt: time.Now()`, auto-incrementing ID |
-| `UpdateIssueState` | Update `fakeIssue.stateID` |
+| `FetchIssue` | Glob `dir/*.json`, unmarshal, match by Identifier |
+| `ListIssues` | Glob all, filter by state names if filter.States is non-empty |
+| `FetchComments` | Read issue file, filter comments by `CreatedAt.After(since)` |
+| `FetchWorkflowStates` | Return fixed set: In Progress (started), In Review (started), Done (completed) |
+| `PostComment` | Append comment with `IsSelf: true`, persist to file |
+| `UpdateIssueState` | Update state field, persist to file |
 
-All methods record calls. All are mutex-protected.
+### Extra Method (not on interface)
 
-### Key design decisions
+`CreateIssue(title, description string) (*tracker.Issue, error)` — assigns next LOCAL-N identifier, writes initial JSON file with state "Todo", returns the Issue.
 
-- `PostComment` stores comments with `IsSelf: true` — matches real Linear behavior where bot-posted comments are self-attributed
-- `FetchComments` respects `since` parameter (existing `mockWorkflowTracker` ignores it — this is an improvement)
-- `InjectHumanComment` uses `IsSelf: false` for simulating human review feedback in future tests
+### Key Design Decisions
 
-## 2. E2E Workflow Test (`e2e_workflow_test.go`)
+- **Read-through, write-through**: Every method reads from disk and writes back. No in-memory cache. This keeps the code simple and lets external tools inspect/modify state.
+- **Fixed workflow states**: Always returns the same 3 states (In Progress, In Review, Done). No team concept.
+- **Thread-safe**: Mutex protects all file operations.
+- **Counter file**: `next_id` is a plain text file with an integer. Atomic via mutex.
 
-`//go:build integration` build tag. Package `integration`.
+## 2. Config Changes (`jiradozer/config.go`)
 
-### Test helpers
+### Relax API key validation
 
-**`e2eIssue()`** — trivial issue to minimize agent complexity:
-- Identifier: `"TEST-1"`, Title: `"Create hello.txt with hello world"`
-- Description: `"Create a file named hello.txt that contains the text 'hello world'"`
-- TeamID: `"team-fake"`
+Current `validate()` unconditionally requires `Tracker.APIKey`. Change to:
 
-**`e2eWorkflowStates()`** — three states matching config defaults:
-- `{ID: "state-ip", Name: "In Progress"}`, `{ID: "state-ir", Name: "In Review"}`, `{ID: "state-done", Name: "Done"}`
-
-**`e2eConfig(t, workDir)`** — builds config via `jiradozer.DefaultConfigForTest()` with overrides:
-- `Agent.Model = "haiku"` (cheapest/fastest)
-- `WorkDir = workDir` (t.TempDir)
-- `MaxBudgetUSD = 5.0`
-- All 4 steps: `AutoApprove = true`, `MaxTurns = 3`, `MaxBudgetUSD = 2.0`
-- Custom validate prompt: "Check if hello.txt exists and contains 'hello world'" (avoids running test frameworks)
-- Custom ship prompt: "Write SHIP_SUMMARY.md summarizing what was built" (avoids `gh pr create` which needs a real git remote)
-- `PollInterval = 50ms` (fast for tests, though auto-approve skips polling)
-
-### Test: `TestE2E_HappyPath_AllAutoApprove`
-
-The primary test — runs the full 4-step workflow with real Claude execution.
-
-**Setup:**
-1. Skip if `testing.Short()`
-2. `context.WithTimeout(ctx, 10*time.Minute)` — 4 haiku steps at ~1-2 min each
-3. Create FakeTracker with states, add issue
-4. Create Workflow with FakeTracker, set `OnTransition` callback to collect transitions
-5. Call `wf.Run(ctx)`
-
-**Assertions:**
-- `wf.Run` returns nil error
-- Final tracker state is `"state-done"`
-- Transition sequence matches: Planning → PlanReview → Building → BuildReview → Validating → ValidateReview → Shipping → ShipReview → Done
-- `FetchWorkflowStates` called exactly once
-- First `UpdateIssueState` is in-progress, last is done
-- `PostComment` called with bodies containing `"## Plan Complete"`, `"## Build Complete"`, `"## Validate Complete"`, `"## Ship Complete"`
-- `FetchComments` never called (auto-approve bypasses polling)
-
-### Test: `TestE2E_PlanStep_Smoke`
-
-Fast smoke test (~2 min) using `jiradozer.RunStepAgent` directly for plan step only. Verifies the model/agent setup works before committing to the full 10-minute E2E. Complements existing `session_resumption_test.go` but uses FakeTracker's issue data pattern.
-
-## 3. BUILD.bazel Update
-
-Add `fake_tracker.go` and `e2e_workflow_test.go` to `srcs`. No new external deps needed (all stdlib + existing testify + `//jiradozer` + `//jiradozer/tracker`).
-
-```python
-srcs = [
-    "e2e_workflow_test.go",    # NEW
-    "fake_tracker.go",         # NEW
-    "orchestrator_test.go",
-    "session_resumption_test.go",
-    "workflow_test.go",
-],
+```go
+if c.Tracker.Kind != "local" && c.Tracker.APIKey == "" {
+    return fmt.Errorf("tracker.api_key is required")
+}
 ```
 
-## 4. Implementation Order
+### Skip env resolution for local
 
-1. Create `fake_tracker.go` — independent, can verify compilation alone
-2. Create `e2e_workflow_test.go` — imports FakeTracker
-3. Update `BUILD.bazel` — add both files to srcs
-4. Run `TestE2E_PlanStep_Smoke` first (fast, ~2 min) to validate setup
-5. Run `TestE2E_HappyPath_AllAutoApprove` (full pipeline, ~10 min)
+In `LoadConfig()`, wrap the `resolveEnv(cfg.Tracker.APIKey)` call to skip when kind is local:
+
+```go
+if cfg.Tracker.Kind != "local" {
+    apiKey, err := resolveEnv(cfg.Tracker.APIKey)
+    // ...
+}
+```
+
+## 3. CLI Changes (`jiradozer/cmd/jiradozer/main.go`)
+
+### New flags
+
+```
+--description "task description text"
+--description-file path/to/file  (or - for stdin)
+```
+
+### Logic in `run()`
+
+1. Resolve description: if `--description-file` is set, read from file/stdin into `args.description`.
+2. Validate mutual exclusivity: `--description`, `--issue`, `--team` are mutually exclusive.
+3. When `--description` is set:
+   - Force `cfg.Tracker.Kind = "local"` (ignore config file tracker settings)
+   - Default all steps to auto-approve (user can override with `--auto-approve=none` or individual flags)
+   - Generate title from description using haiku (1-turn agent call, no tools, ~$0.001)
+   - Create local tracker, call `CreateIssue(title, description)`
+   - Run the workflow with the created issue
+
+### Title Generation
+
+Use the existing `runAgent()` infrastructure with a minimal config:
+
+```go
+func generateTitle(ctx context.Context, description string, logger *slog.Logger) (string, error) {
+    cfg := StepConfig{
+        Model:          "haiku",
+        PermissionMode: "plan",  // no tools
+        MaxTurns:       1,
+        MaxBudgetUSD:   0.01,
+    }
+    prompt := fmt.Sprintf("Generate a concise title (under 80 chars) for this task. Output ONLY the title, nothing else.\n\nTask: %s", description)
+    output, _, err := runAgent(ctx, "title", prompt, cfg, os.TempDir(), "", logger)
+    return strings.TrimSpace(output), err
+}
+```
+
+This lives in `jiradozer/agent.go` or as a helper in `main.go`. The agent call is cheap (~pennies) and uses existing infrastructure.
+
+### Factory update in `createTracker()`
+
+```go
+case "local":
+    dir := filepath.Join(cfg.WorkDir, ".jiradozer", "issues")
+    return local.NewTracker(dir)
+```
+
+## 4. Unit Tests (`jiradozer/tracker/local/local_test.go`)
+
+Standard Go tests (no build tag — these are fast, no external deps):
+
+1. **TestCreateAndFetchIssue** — create issue, fetch by identifier, verify fields
+2. **TestListIssues** — create 2 issues, list all, verify count
+3. **TestListIssuesFilterByState** — create issues in different states, filter
+4. **TestComments** — post comment, fetch with since filtering, verify IsSelf
+5. **TestUpdateState** — update state, fetch, verify new state
+6. **TestWorkflowStates** — verify fixed states returned
+7. **TestPersistence** — create tracker, write issue, create new Tracker pointing at same dir, verify data survives
+8. **TestAutoIncrementID** — create 3 issues, verify LOCAL-1, LOCAL-2, LOCAL-3
 
 ## 5. Verification
 
 ```bash
-# Quick smoke test
-bazel test //jiradozer/integration:integration_test \
-    --test_env=HOME="$HOME" --test_env=PATH="$PATH" \
-    --test_filter=TestE2E_PlanStep_Smoke \
-    --test_output=streamed --test_timeout=300
+# Unit tests
+bazel test //jiradozer/tracker/local:local_test --test_timeout=60
 
-# Full E2E
-bazel test //jiradozer/integration:integration_test \
-    --test_env=HOME="$HOME" --test_env=PATH="$PATH" \
-    --test_filter=TestE2E_HappyPath \
-    --test_output=streamed --test_timeout=900
+# Lint
+scripts/lint.sh
 
-# Or via test-manual.sh (runs all integration tests)
-scripts/test-manual.sh
+# Full build
+bazel build //...
+
+# Manual E2E (requires Claude API access):
+bazel run //jiradozer/cmd/jiradozer -- \
+  --description "Create a hello.txt file containing 'hello world'" \
+  --work-dir /tmp/jiradozer-test \
+  --auto-approve all \
+  --verbose
+
+# Verify local state was persisted:
+cat /tmp/jiradozer-test/.jiradozer/issues/local-1.json | jq .
 ```
 
-## Key Reuse
+## Scope Cuts (intentional)
 
-- `jiradozer.DefaultConfigForTest()` (`config.go:109`) — base config
-- `jiradozer.NewWorkflow()` (`workflow.go`) — workflow constructor
-- `jiradozer.RunStepAgent()` (`agent.go`) — for smoke test
-- `jiradozer.NewPromptData()` (`agent.go`) — for smoke test
-- `tracker.IssueTracker` interface (`tracker/tracker.go`) — FakeTracker implements this
-- Existing BUILD.bazel pattern from `jiradozer/integration/BUILD.bazel`
+- **No interactive feedback in local mode**: Auto-approve all by default. File-watching for human feedback is a future extension.
+- **No multi-issue mode for local**: `--description` is single-issue only.
+- **No config-file-driven local mode**: `--description` forces local mode. Users don't set `tracker.kind: local` in YAML (though it would work once the tracker exists).

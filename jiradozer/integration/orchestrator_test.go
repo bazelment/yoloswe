@@ -114,7 +114,7 @@ func (m *mockWTManager) getRemoved() []string {
 }
 
 func testOrchestratorConfig() *jiradozer.Config {
-	cfg := jiradozer.DefaultConfigForTest()
+	cfg := jiradozer.DefaultConfig()
 	cfg.Source.Team = "ENG"
 	cfg.Source.MaxConcurrent = 3
 	cfg.Source.BranchPrefix = "jiradozer"

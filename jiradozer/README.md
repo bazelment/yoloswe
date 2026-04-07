@@ -1,6 +1,6 @@
 # Jiradozer
 
-Issue-driven development workflow CLI. Takes an issue from a tracker (Linear, etc.), runs an AI agent through plan/build/validate/ship steps, and gates each step on human approval via issue comments.
+Issue-driven development workflow CLI. Takes an issue from a tracker (Linear, etc.) or a plain text description, runs an AI agent through plan/build/validate/ship steps, and gates each step on human approval via issue comments.
 
 ## Quick start
 
@@ -8,15 +8,20 @@ Issue-driven development workflow CLI. Takes an issue from a tracker (Linear, et
 # Build
 bazel build //jiradozer/cmd/jiradozer
 
-# Run
+# Run from a tracker issue
 bazel-bin/jiradozer/cmd/jiradozer/jiradozer --issue ENG-123
+
+# Run from a description (no tracker needed)
+bazel-bin/jiradozer/cmd/jiradozer/jiradozer \
+  --description "Add retry logic to the HTTP client for 5xx errors" \
+  --work-dir ~/myproject
 ```
 
 ## Prerequisites
 
 - A supported AI agent CLI installed (`claude`, `codex`, `gemini`, or `agent` for Cursor)
 - `gh` CLI authenticated (`gh auth login`)
-- A Linear API key (or another supported tracker)
+- A Linear API key — **or** use `--description` for local mode (no tracker needed)
 
 ## Configuration
 
@@ -107,16 +112,23 @@ If `prompt` is omitted, a built-in default is used. The prompt is only rendered 
 
 ```
 jiradozer --issue ENG-123 [flags]
+jiradozer --description "task description" [flags]
 ```
+
+One of `--issue`, `--team`, or `--description`/`--description-file` is required. They are mutually exclusive.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--issue` | (required) | Issue identifier (e.g. `ENG-123`) |
+| `--issue` | | Issue identifier (e.g. `ENG-123`) |
+| `--description` | | Task description for local mode (no external tracker needed) |
+| `--description-file` | | Read task description from file (use `-` for stdin) |
+| `--team` | | Team key for multi-issue mode (e.g. `ENG`) |
 | `--config` | `jiradozer.yaml` | Path to config file |
 | `--work-dir` | from config | Working directory for the agent |
 | `--model` | from config | Agent model ID (overrides config) |
 | `--poll-interval` | from config | How often to check for new comments |
 | `--max-budget` | from config | Max spend in USD |
+| `--auto-approve` | | Auto-approve review steps (`plan,build,validate,ship` or `all`) |
 | `--run-step` | | Run a single step and exit (for debugging): `plan`, `build`, `validate`, `ship` |
 | `--verbose` | `false` | Debug logging |
 
@@ -153,12 +165,43 @@ The provider is auto-detected from the model ID.
 The `tracker.IssueTracker` interface is pluggable. Currently implemented:
 
 - **Linear** (`tracker.kind: linear`) -- reads/writes issues and comments via GraphQL
+- **Local** (`--description` flag) -- file-backed tracker with no external dependencies
+
+### Local mode
+
+When you pass `--description` (or `--description-file`), jiradozer runs in local mode:
+
+- No config file or API key required (uses sensible defaults)
+- All steps auto-approve by default (override with `--auto-approve=none`)
+- A concise title is generated automatically from the description via a lightweight LLM call
+- State is persisted to `<work-dir>/.jiradozer/issues/` as JSON files, so you can inspect or resume workflows
+- The fixed workflow states are: Todo → In Progress → In Review → Done
+
+```bash
+# From a string
+jiradozer --description "Add rate limiting to the /api/v2 endpoints" --work-dir ~/myproject
+
+# From a file
+jiradozer --description-file spec.md --work-dir ~/myproject
+
+# From stdin
+cat spec.md | jiradozer --description-file - --work-dir ~/myproject
+
+# Inspect state after a run
+cat ~/myproject/.jiradozer/issues/local-1.json | jq .
+```
 
 To add a new tracker, implement the `IssueTracker` interface in a new subpackage under `tracker/` and add a case to `createTracker()` in `cmd/jiradozer/main.go`.
 
 ## Examples
 
 ```bash
+# Run from a description (no tracker, no config needed)
+jiradozer --description "Create a hello.txt file containing 'hello world'" --work-dir /tmp/demo
+
+# Run from a tracker issue
+jiradozer --issue ENG-123
+
 # Run a single step for debugging (no tracker interaction)
 jiradozer --issue ENG-123 --run-step plan
 jiradozer --issue ENG-123 --run-step build

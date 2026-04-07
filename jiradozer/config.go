@@ -88,12 +88,14 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// Expand environment variables in sensitive fields.
-	apiKey, err := resolveEnv(cfg.Tracker.APIKey)
-	if err != nil {
-		return nil, fmt.Errorf("tracker.api_key: %w", err)
+	// Expand environment variables in sensitive fields (local tracker has no API key).
+	if cfg.Tracker.Kind != "local" {
+		apiKey, err := resolveEnv(cfg.Tracker.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("tracker.api_key: %w", err)
+		}
+		cfg.Tracker.APIKey = apiKey
 	}
-	cfg.Tracker.APIKey = apiKey
 
 	// Expand ~ in work_dir.
 	cfg.WorkDir = ExpandHome(cfg.WorkDir)
@@ -104,9 +106,8 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultConfigForTest returns the default config with sensible defaults.
-// Exported for use in integration tests.
-func DefaultConfigForTest() *Config {
+// DefaultConfig returns the default config with sensible defaults.
+func DefaultConfig() *Config {
 	cfg := defaultConfig()
 	return &cfg
 }
@@ -140,7 +141,7 @@ func (c *Config) validate() error {
 	if c.Tracker.Kind == "" {
 		return fmt.Errorf("tracker.kind is required")
 	}
-	if c.Tracker.APIKey == "" {
+	if c.Tracker.Kind != "local" && c.Tracker.APIKey == "" {
 		return fmt.Errorf("tracker.api_key is required (set via config or $LINEAR_API_KEY)")
 	}
 	if c.Agent.Model == "" {

@@ -267,6 +267,30 @@ func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
 	return d
 }
 
+// GenerateTitle creates a short title from the first words of a description,
+// truncating at word boundaries to fit within 80 characters.
+func GenerateTitle(description string) string {
+	const maxLen = 80
+	words := strings.Fields(description)
+	var b strings.Builder
+	for _, w := range words {
+		if b.Len()+len(w)+1 > maxLen {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w)
+	}
+	if b.Len() == 0 && description != "" {
+		if len(description) > maxLen-3 {
+			return description[:maxLen-3] + "..."
+		}
+		return description
+	}
+	return b.String()
+}
+
 func renderPrompt(tmplStr string, data PromptData) (string, error) {
 	t, err := template.New("prompt").Parse(tmplStr)
 	if err != nil {
