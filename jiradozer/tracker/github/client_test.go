@@ -157,7 +157,7 @@ func TestListIssues(t *testing.T) {
 	body := "desc"
 	mock := &mockGHRunner{
 		responses: map[string]*wt.CmdResult{
-			"repos/acme/app/issues?state=open&labels=jiradozer&per_page=10": jsonResult([]ghIssue{
+			"repos/acme/app/issues?state=open&per_page=10&labels=jiradozer": jsonResult([]ghIssue{
 				{Number: 1, Title: "Issue 1", State: "open", Body: &body},
 				{Number: 2, Title: "PR 1", State: "open", PullRequest: &ghPullRequest{URL: "x"}},
 				{Number: 3, Title: "Issue 2", State: "open"},

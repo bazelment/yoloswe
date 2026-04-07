@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,16 +16,21 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
-const reviewLabel = "in-review"
+const (
+	reviewLabel = "in-review"
+
+	stateOpen   = "open"
+	stateClosed = "closed"
+	stateReview = "label:" + reviewLabel
+)
 
 // Client implements tracker.IssueTracker for GitHub Issues via the gh CLI.
 type Client struct {
 	gh        wt.GHRunner
-	selfErr   error
 	owner     string
 	repo      string
 	selfLogin string
-	selfOnce  sync.Once
+	selfMu    sync.Mutex
 }
 
 // NewClient creates a new GitHub Issues tracker client.
@@ -60,31 +66,31 @@ func parseIdentifier(identifier string) (owner, repo string, number int, err err
 	}
 
 	n, err := strconv.Atoi(numStr)
-	if err != nil || n <= 0 {
+	if err != nil {
 		return "", "", 0, fmt.Errorf("invalid issue number in %q: %w", identifier, err)
+	}
+	if n <= 0 {
+		return "", "", 0, fmt.Errorf("invalid issue number in %q: must be positive", identifier)
 	}
 	return owner, repo, n, nil
 }
 
 func (c *Client) ensureSelfLogin(ctx context.Context) error {
-	c.selfOnce.Do(func() {
-		result, err := c.gh.Run(ctx, []string{"api", "/user"}, "")
-		if err != nil {
-			c.selfErr = fmt.Errorf("get authenticated user: %w", err)
-			return
-		}
-		var user ghUser
-		if err := json.Unmarshal([]byte(result.Stdout), &user); err != nil {
-			c.selfErr = fmt.Errorf("parse /user response: %w", err)
-			return
-		}
-		c.selfLogin = user.Login
-	})
-	return c.selfErr
-}
-
-func (c *Client) apiPath(format string, args ...any) string {
-	return fmt.Sprintf(format, args...)
+	c.selfMu.Lock()
+	defer c.selfMu.Unlock()
+	if c.selfLogin != "" {
+		return nil
+	}
+	result, err := c.gh.Run(ctx, []string{"api", "/user"}, "")
+	if err != nil {
+		return fmt.Errorf("get authenticated user: %w", err)
+	}
+	var user ghUser
+	if err := json.Unmarshal([]byte(result.Stdout), &user); err != nil {
+		return fmt.Errorf("parse /user response: %w", err)
+	}
+	c.selfLogin = user.Login
+	return nil
 }
 
 func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Issue, error) {
@@ -94,7 +100,7 @@ func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Is
 	}
 
 	result, err := c.gh.Run(ctx, []string{
-		"api", c.apiPath("repos/%s/%s/issues/%d", owner, repo, number),
+		"api", fmt.Sprintf("repos/%s/%s/issues/%d", owner, repo, number),
 	}, "")
 	if err != nil {
 		return nil, fmt.Errorf("fetch issue %s: %w", identifier, err)
@@ -129,33 +135,46 @@ func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]
 		}
 	}
 
-	path := fmt.Sprintf("repos/%s/%s/issues?state=%s", owner, repo, ghState)
-	if len(filter.Labels) > 0 {
-		path += "&labels=" + strings.Join(filter.Labels, ",")
-	}
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	path += fmt.Sprintf("&per_page=%d", limit)
 
-	result, err := c.gh.Run(ctx, []string{"api", path}, "")
-	if err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
+	// GitHub's labels query parameter uses AND semantics, but the tracker
+	// interface specifies OR. Issue one request per label and merge results.
+	labelSets := filter.Labels
+	if len(labelSets) == 0 {
+		labelSets = []string{""} // single request with no label filter
 	}
 
-	var ghIssues []ghIssue
-	if err := json.Unmarshal([]byte(result.Stdout), &ghIssues); err != nil {
-		return nil, fmt.Errorf("parse issues response: %w", err)
-	}
-
+	seen := make(map[int]bool)
 	var issues []*tracker.Issue
-	for _, gi := range ghIssues {
-		// GitHub returns pull requests in the issues endpoint; skip them.
-		if gi.PullRequest != nil {
-			continue
+	for _, label := range labelSets {
+		path := fmt.Sprintf("repos/%s/%s/issues?state=%s&per_page=%d", owner, repo, ghState, limit)
+		if label != "" {
+			path += "&labels=" + url.QueryEscape(label)
 		}
-		issues = append(issues, c.ghIssueToTracker(gi, owner, repo))
+
+		result, err := c.gh.Run(ctx, []string{"api", path}, "")
+		if err != nil {
+			return nil, fmt.Errorf("list issues: %w", err)
+		}
+
+		var ghIssues []ghIssue
+		if err := json.Unmarshal([]byte(result.Stdout), &ghIssues); err != nil {
+			return nil, fmt.Errorf("parse issues response: %w", err)
+		}
+
+		for _, gi := range ghIssues {
+			if gi.PullRequest != nil {
+				continue
+			}
+			if seen[gi.Number] {
+				continue
+			}
+			seen[gi.Number] = true
+			issues = append(issues, c.ghIssueToTracker(gi, owner, repo))
+		}
 	}
 	return issues, nil
 }
@@ -199,9 +218,9 @@ func (c *Client) FetchComments(ctx context.Context, issueID string, since time.T
 
 func (c *Client) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
 	return []tracker.WorkflowState{
-		{ID: "open", Name: "In Progress", Type: "started"},
-		{ID: "label:" + reviewLabel, Name: "In Review", Type: "started"},
-		{ID: "closed", Name: "Done", Type: "completed"},
+		{ID: stateOpen, Name: "In Progress", Type: "started"},
+		{ID: stateReview, Name: "In Review", Type: "started"},
+		{ID: stateClosed, Name: "Done", Type: "completed"},
 	}, nil
 }
 
@@ -220,33 +239,36 @@ func (c *Client) PostComment(ctx context.Context, issueID string, body string) (
 		return tracker.Comment{}, fmt.Errorf("parse comment response: %w", err)
 	}
 
-	comment := tracker.Comment{
-		ID:     strconv.FormatInt(gc.ID, 10),
-		Body:   gc.Body,
-		IsSelf: true,
+	createdAt, err := time.Parse(time.RFC3339, gc.CreatedAt)
+	if err != nil {
+		return tracker.Comment{}, fmt.Errorf("parse comment timestamp %q: %w", gc.CreatedAt, err)
 	}
-	if t, err := time.Parse(time.RFC3339, gc.CreatedAt); err == nil {
-		comment.CreatedAt = t
-	}
-	return comment, nil
+	return tracker.Comment{
+		ID:        strconv.FormatInt(gc.ID, 10),
+		Body:      gc.Body,
+		IsSelf:    true,
+		CreatedAt: createdAt,
+	}, nil
 }
 
 func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID string) error {
-	switch {
-	case stateID == "open":
-		// Reopen and remove review label.
+	switch stateID {
+	case stateOpen, stateClosed:
+		ghState := "open"
+		if stateID == stateClosed {
+			ghState = "closed"
+		}
 		if _, err := c.gh.Run(ctx, []string{
 			"api", "-X", "PATCH",
 			fmt.Sprintf("repos/%s/%s/issues/%s", c.owner, c.repo, issueID),
-			"-f", "state=open",
+			"-f", "state=" + ghState,
 		}, ""); err != nil {
-			return fmt.Errorf("update issue state to open: %w", err)
+			return fmt.Errorf("update issue state to %s: %w", ghState, err)
 		}
 		c.removeLabel(ctx, issueID, reviewLabel) //nolint:errcheck // best-effort
 		return nil
 
-	case stateID == "label:"+reviewLabel:
-		// Add review label via JSON body.
+	case stateReview:
 		if _, err := c.gh.Run(ctx, []string{
 			"api", "-X", "POST",
 			fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
@@ -254,18 +276,6 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 		}, ""); err != nil {
 			return fmt.Errorf("add review label: %w", err)
 		}
-		return nil
-
-	case stateID == "closed":
-		// Close and remove review label.
-		if _, err := c.gh.Run(ctx, []string{
-			"api", "-X", "PATCH",
-			fmt.Sprintf("repos/%s/%s/issues/%s", c.owner, c.repo, issueID),
-			"-f", "state=closed",
-		}, ""); err != nil {
-			return fmt.Errorf("update issue state to closed: %w", err)
-		}
-		c.removeLabel(ctx, issueID, reviewLabel) //nolint:errcheck // best-effort
 		return nil
 
 	default:

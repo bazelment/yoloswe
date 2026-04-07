@@ -88,15 +88,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// Expand environment variables in sensitive fields.
-	// Local tracker has no API key; GitHub tracker can use gh CLI auth.
-	if cfg.Tracker.Kind != "local" && cfg.Tracker.Kind != "github" {
-		apiKey, err := resolveEnv(cfg.Tracker.APIKey)
-		if err != nil {
-			return nil, fmt.Errorf("tracker.api_key: %w", err)
-		}
-		cfg.Tracker.APIKey = apiKey
-	} else if cfg.Tracker.Kind == "github" && cfg.Tracker.APIKey != "" {
+	// Expand environment variables in API key when present.
+	// Local tracker has no API key; GitHub tracker uses gh CLI auth (API key optional).
+	if cfg.Tracker.APIKey != "" {
 		apiKey, err := resolveEnv(cfg.Tracker.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("tracker.api_key: %w", err)
