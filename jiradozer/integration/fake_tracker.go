@@ -172,6 +172,7 @@ func (f *FakeTracker) FetchWorkflowStates(_ context.Context, teamID string) ([]t
 func (f *FakeTracker) PostComment(_ context.Context, issueID string, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.record("PostComment", issueID, body)
 	fi, ok := f.issues[issueID]
 	if !ok {
 		return fmt.Errorf("issue %q not found", issueID)
@@ -184,18 +185,17 @@ func (f *FakeTracker) PostComment(_ context.Context, issueID string, body string
 		IsSelf:    true,
 		CreatedAt: time.Now(),
 	})
-	f.record("PostComment", issueID, body)
 	return nil
 }
 
 func (f *FakeTracker) UpdateIssueState(_ context.Context, issueID string, stateID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.record("UpdateIssueState", issueID, stateID)
 	fi, ok := f.issues[issueID]
 	if !ok {
 		return fmt.Errorf("issue %q not found", issueID)
 	}
 	fi.stateID = stateID
-	f.record("UpdateIssueState", issueID, stateID)
 	return nil
 }
