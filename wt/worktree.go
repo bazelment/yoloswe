@@ -794,12 +794,10 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	}
 	removeArgs = append(removeArgs, worktreePath)
 	if result, err := m.git.Run(ctx, removeArgs, bareDir); err != nil {
-		stderr := ""
 		if result != nil {
-			stderr = strings.TrimSpace(result.Stderr)
-		}
-		if stderr != "" {
-			return fmt.Errorf("failed to remove worktree: %s", stderr)
+			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+				return fmt.Errorf("failed to remove worktree: %s: %w", stderr, err)
+			}
 		}
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
