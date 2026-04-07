@@ -68,23 +68,26 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if err := session.Start(ctx); err != nil {
 		return nil, err
 	}
-	defer session.Stop()
 
 	// Bridge Claude events to AgentEvent channel and EventHandler.
-	// Use bridgeStop + bridgeDone to ensure all events are processed
-	// before Execute() returns (mirrors the Codex provider pattern).
+	// session.Stop() closes the events channel, which causes bridgeEvents
+	// to exit naturally after draining all buffered events. We wait on
+	// bridgeDone to ensure all OnToolComplete callbacks (including
+	// ExitPlanMode) have fired before Execute() returns.
+	var bridgeDone chan struct{}
 	if cfg.EventHandler != nil {
-		bridgeStop := make(chan struct{})
-		bridgeDone := make(chan struct{})
+		bridgeDone = make(chan struct{})
 		go func() {
-			bridgeEvents(session.Events(), cfg.EventHandler, p.events, bridgeStop, "", nil)
+			bridgeEvents(session.Events(), cfg.EventHandler, p.events, nil, "", nil)
 			close(bridgeDone)
 		}()
-		defer func() {
-			close(bridgeStop)
-			<-bridgeDone
-		}()
 	}
+	defer func() {
+		session.Stop()
+		if bridgeDone != nil {
+			<-bridgeDone
+		}
+	}()
 
 	// Execute single turn
 	result, err := session.Ask(ctx, fullPrompt)
