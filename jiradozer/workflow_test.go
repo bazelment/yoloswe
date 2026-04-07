@@ -334,6 +334,29 @@ func TestWorkflow_TransitionToReview(t *testing.T) {
 	assert.NotEmpty(t, commentCalls)
 }
 
+// TestWorkflow_TransitionToReview_SkipsReviewMachineryForNonReviewStep verifies that
+// transitioning to a non-review step (e.g. StepCreatingPR) does not update issue state
+// or post a waiting comment.
+func TestWorkflow_TransitionToReview_SkipsReviewMachineryForNonReviewStep(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		workflowStates: testWorkflowStates(),
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+	require.NoError(t, wf.state.Transition(StepBuilding, "approved"))
+
+	wf.transitionToReview(context.Background(), StepCreatingPR, "build_complete")
+
+	assert.Equal(t, StepCreatingPR, wf.state.Current())
+
+	// Should NOT have updated issue state or posted a waiting comment.
+	assert.Empty(t, mt.getCalls("UpdateIssueState"), "should not update issue state for non-review step")
+	assert.Empty(t, mt.getCalls("PostComment"), "should not post waiting comment for non-review step")
+}
+
 // TestWorkflow_RunReview_Approve tests that an approve comment advances to the next step.
 func TestWorkflow_RunReview_Approve(t *testing.T) {
 	mt := &mockWorkflowTracker{

@@ -18,8 +18,8 @@ const (
 	StepBuildReview                 // Build done, waiting for human feedback
 	StepValidating                  // Running validation commands
 	StepValidateReview              // Validation results posted, waiting for feedback
-	StepShipping                    // Creating PR
-	StepShipReview                  // PR created, waiting for CI + human feedback
+	StepShipping                    // Final shipping (push, merge, etc.)
+	StepShipReview                  // Ship complete, waiting for CI + human feedback
 	StepDone                        // Terminal: issue marked done
 	StepFailed                      // Terminal: workflow failed
 )
