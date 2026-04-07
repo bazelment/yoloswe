@@ -64,13 +64,19 @@ const defaultValidatePrompt = `Issue: {{.Identifier}} — {{.Title}}
 
 Run the project's tests and linters to validate the changes. Fix any failures you find. Report what passed and what you fixed.`
 
+const defaultCreatePRPrompt = `Check if a pull request already exists for the current branch against {{.BaseBranch}}.
+- If a PR exists: update its description to reflect the current state of the code. Report the PR URL.
+- If no PR exists: create one against {{.BaseBranch}} with a clear title and description. Report the PR URL.`
+
 const defaultShipPrompt = `Issue: {{.Identifier}} — {{.Title}}
 {{- if .URL}}
 
 Linear: {{.URL}}
 {{- end}}
 
-Create a pull request for the changes on the current branch against {{.BaseBranch}}. Use the issue title for the PR title (prefixed with the issue identifier) and write a clear PR description.`
+Check if a pull request already exists for the current branch against {{.BaseBranch}}.
+- If a PR exists: update its description if needed and ensure it is ready for review. Report the PR URL.
+- If no PR exists: create one using gh pr create with "{{.Identifier}}: {{.Title}}" as the title.`
 
 // DefaultPromptForStep returns the built-in default prompt template for a step name.
 func DefaultPromptForStep(stepName string) string {
@@ -81,11 +87,21 @@ func DefaultPromptForStep(stepName string) string {
 		return defaultBuildPrompt
 	case "validate":
 		return defaultValidatePrompt
+	case "create_pr":
+		return defaultCreatePRPrompt
 	case "ship":
 		return defaultShipPrompt
 	default:
 		return ""
 	}
+}
+
+func truncate(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen]) + "..."
+	}
+	return s
 }
 
 // RunStepAgent runs an agent session for the given workflow step.
@@ -191,6 +207,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"resume", resumeSessionID != "",
 	)
 	logger.Debug("agent prompt", "step", stepName, "prompt", prompt)
+	logger.Info("agent prompt", "step", stepName, "prompt", truncate(prompt, 200))
 
 	handler := &logEventHandler{logger: logger, step: stepName}
 	var opts []agent.ExecuteOption
@@ -232,6 +249,9 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"output_tokens", result.Usage.OutputTokens,
 		"cost_usd", result.Usage.CostUSD,
 	)
+	if result.Text != "" {
+		logger.Info("agent response", "step", stepName, "response", truncate(result.Text, 100))
+	}
 
 	output := resolveOutput(result.Text, handler, logger)
 	return output, result.SessionID, nil

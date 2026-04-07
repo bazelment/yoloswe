@@ -36,7 +36,7 @@ var (
 // stepStyle returns the lipgloss style for a workflow step.
 func stepStyle(step jiradozer.WorkflowStep) lipgloss.Style {
 	switch step {
-	case jiradozer.StepPlanning, jiradozer.StepBuilding, jiradozer.StepValidating, jiradozer.StepShipping:
+	case jiradozer.StepPlanning, jiradozer.StepBuilding, jiradozer.StepCreatingPR, jiradozer.StepValidating, jiradozer.StepShipping:
 		return styleActive
 	case jiradozer.StepPlanReview, jiradozer.StepBuildReview, jiradozer.StepValidateReview, jiradozer.StepShipReview:
 		return styleWaiting
@@ -78,7 +78,7 @@ func formatStep(s jiradozer.IssueStatus) string {
 // stepIcon returns a status icon for a workflow step.
 func stepIcon(step jiradozer.WorkflowStep) string {
 	switch step {
-	case jiradozer.StepPlanning, jiradozer.StepBuilding, jiradozer.StepValidating, jiradozer.StepShipping:
+	case jiradozer.StepPlanning, jiradozer.StepBuilding, jiradozer.StepCreatingPR, jiradozer.StepValidating, jiradozer.StepShipping:
 		return "●"
 	case jiradozer.StepPlanReview, jiradozer.StepBuildReview, jiradozer.StepValidateReview, jiradozer.StepShipReview:
 		return "◎"

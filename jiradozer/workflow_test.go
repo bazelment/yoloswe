@@ -119,6 +119,7 @@ func testConfig() *Config {
 		MaxBudgetUSD: 50.0,
 		Plan:         StepConfig{PermissionMode: "plan", MaxTurns: 10},
 		Build:        StepConfig{PermissionMode: "bypass", MaxTurns: 30},
+		CreatePR:     StepConfig{PermissionMode: "bypass", MaxTurns: 5},
 		Validate:     StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		Ship:         StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		States: StatesConfig{
@@ -331,6 +332,29 @@ func TestWorkflow_TransitionToReview(t *testing.T) {
 	// Should have posted a waiting comment.
 	commentCalls := mt.getCalls("PostComment")
 	assert.NotEmpty(t, commentCalls)
+}
+
+// TestWorkflow_TransitionToReview_SkipsReviewMachineryForNonReviewStep verifies that
+// transitioning to a non-review step (e.g. StepCreatingPR) does not update issue state
+// or post a waiting comment.
+func TestWorkflow_TransitionToReview_SkipsReviewMachineryForNonReviewStep(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		workflowStates: testWorkflowStates(),
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+	require.NoError(t, wf.state.Transition(StepBuilding, "approved"))
+
+	wf.transitionToReview(context.Background(), StepCreatingPR, "build_complete")
+
+	assert.Equal(t, StepCreatingPR, wf.state.Current())
+
+	// Should NOT have updated issue state or posted a waiting comment.
+	assert.Empty(t, mt.getCalls("UpdateIssueState"), "should not update issue state for non-review step")
+	assert.Empty(t, mt.getCalls("PostComment"), "should not post waiting comment for non-review step")
 }
 
 // TestWorkflow_RunReview_Approve tests that an approve comment advances to the next step.

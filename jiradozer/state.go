@@ -14,11 +14,12 @@ const (
 	StepPlanning                    // Agent running in plan mode
 	StepPlanReview                  // Plan posted, waiting for human feedback
 	StepBuilding                    // Agent running in bypass/execution mode
+	StepCreatingPR                  // Create PR after build
 	StepBuildReview                 // Build done, waiting for human feedback
 	StepValidating                  // Running validation commands
 	StepValidateReview              // Validation results posted, waiting for feedback
-	StepShipping                    // Creating PR
-	StepShipReview                  // PR created, waiting for CI + human feedback
+	StepShipping                    // Final shipping (push, merge, etc.)
+	StepShipReview                  // Ship complete, waiting for CI + human feedback
 	StepDone                        // Terminal: issue marked done
 	StepFailed                      // Terminal: workflow failed
 )
@@ -34,6 +35,8 @@ func (s WorkflowStep) String() string {
 		return "plan_review"
 	case StepBuilding:
 		return "building"
+	case StepCreatingPR:
+		return "creating_pr"
 	case StepBuildReview:
 		return "build_review"
 	case StepValidating:
@@ -91,8 +94,12 @@ var validTransitions = map[int]bool{
 	key(StepPlanReview, StepFailed):   true,
 
 	// Building
-	key(StepBuilding, StepBuildReview): true,
-	key(StepBuilding, StepFailed):      true,
+	key(StepBuilding, StepCreatingPR): true,
+	key(StepBuilding, StepFailed):     true,
+
+	// CreatingPR
+	key(StepCreatingPR, StepBuildReview): true,
+	key(StepCreatingPR, StepFailed):      true,
 
 	// BuildReview
 	key(StepBuildReview, StepBuilding):   true, // redo with feedback

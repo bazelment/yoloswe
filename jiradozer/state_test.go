@@ -16,6 +16,7 @@ func TestWorkflowStepString(t *testing.T) {
 		{want: "planning", step: StepPlanning},
 		{want: "plan_review", step: StepPlanReview},
 		{want: "building", step: StepBuilding},
+		{want: "creating_pr", step: StepCreatingPR},
 		{want: "build_review", step: StepBuildReview},
 		{want: "validating", step: StepValidating},
 		{want: "validate_review", step: StepValidateReview},
@@ -43,6 +44,7 @@ func TestWorkflowStepIsReview(t *testing.T) {
 	assert.True(t, StepValidateReview.IsReview())
 	assert.True(t, StepShipReview.IsReview())
 	assert.False(t, StepPlanning.IsReview())
+	assert.False(t, StepCreatingPR.IsReview())
 	assert.False(t, StepDone.IsReview())
 }
 
@@ -57,7 +59,8 @@ func TestStateMachineHappyPath(t *testing.T) {
 		{trigger: "start", to: StepPlanning},
 		{trigger: "plan_complete", to: StepPlanReview},
 		{trigger: "approved", to: StepBuilding},
-		{trigger: "build_complete", to: StepBuildReview},
+		{trigger: "build_complete", to: StepCreatingPR},
+		{trigger: "pr_created", to: StepBuildReview},
 		{trigger: "approved", to: StepValidating},
 		{trigger: "validation_complete", to: StepValidateReview},
 		{trigger: "approved", to: StepShipping},
@@ -90,7 +93,8 @@ func TestStateMachineFeedbackLoops(t *testing.T) {
 		require.NoError(t, sm.Transition(StepPlanning, "start"))
 		require.NoError(t, sm.Transition(StepPlanReview, "plan_done"))
 		require.NoError(t, sm.Transition(StepBuilding, "approved"))
-		require.NoError(t, sm.Transition(StepBuildReview, "build_done"))
+		require.NoError(t, sm.Transition(StepCreatingPR, "build_done"))
+		require.NoError(t, sm.Transition(StepBuildReview, "pr_created"))
 		require.NoError(t, sm.Transition(StepBuilding, "redo_with_feedback"))
 		assert.Equal(t, StepBuilding, sm.Current())
 	})
@@ -100,7 +104,8 @@ func TestStateMachineFeedbackLoops(t *testing.T) {
 		require.NoError(t, sm.Transition(StepPlanning, "start"))
 		require.NoError(t, sm.Transition(StepPlanReview, "plan_done"))
 		require.NoError(t, sm.Transition(StepBuilding, "approved"))
-		require.NoError(t, sm.Transition(StepBuildReview, "build_done"))
+		require.NoError(t, sm.Transition(StepCreatingPR, "build_done"))
+		require.NoError(t, sm.Transition(StepBuildReview, "pr_created"))
 		require.NoError(t, sm.Transition(StepPlanning, "back_to_plan"))
 		assert.Equal(t, StepPlanning, sm.Current())
 	})
@@ -110,6 +115,7 @@ func TestStateMachineFeedbackLoops(t *testing.T) {
 		require.NoError(t, sm.Transition(StepPlanning, "start"))
 		require.NoError(t, sm.Transition(StepPlanReview, "done"))
 		require.NoError(t, sm.Transition(StepBuilding, "approved"))
+		require.NoError(t, sm.Transition(StepCreatingPR, "done"))
 		require.NoError(t, sm.Transition(StepBuildReview, "done"))
 		require.NoError(t, sm.Transition(StepValidating, "approved"))
 		require.NoError(t, sm.Transition(StepValidateReview, "done"))
@@ -122,6 +128,7 @@ func TestStateMachineFeedbackLoops(t *testing.T) {
 		require.NoError(t, sm.Transition(StepPlanning, "start"))
 		require.NoError(t, sm.Transition(StepPlanReview, "done"))
 		require.NoError(t, sm.Transition(StepBuilding, "approved"))
+		require.NoError(t, sm.Transition(StepCreatingPR, "done"))
 		require.NoError(t, sm.Transition(StepBuildReview, "done"))
 		require.NoError(t, sm.Transition(StepValidating, "approved"))
 		require.NoError(t, sm.Transition(StepValidateReview, "done"))
@@ -142,7 +149,7 @@ func TestStateMachineInvalidTransition(t *testing.T) {
 
 func TestStateMachineFailFromAnyStep(t *testing.T) {
 	stepsBeforeFail := []WorkflowStep{
-		StepInit, StepPlanning, StepPlanReview, StepBuilding, StepBuildReview,
+		StepInit, StepPlanning, StepPlanReview, StepBuilding, StepCreatingPR, StepBuildReview,
 		StepValidating, StepValidateReview, StepShipping, StepShipReview,
 	}
 
@@ -220,7 +227,8 @@ func walkTo(t *testing.T, sm *StateMachine, target WorkflowStep) {
 		{trigger: "start", step: StepPlanning},
 		{trigger: "done", step: StepPlanReview},
 		{trigger: "approved", step: StepBuilding},
-		{trigger: "done", step: StepBuildReview},
+		{trigger: "done", step: StepCreatingPR},
+		{trigger: "pr_created", step: StepBuildReview},
 		{trigger: "approved", step: StepValidating},
 		{trigger: "done", step: StepValidateReview},
 		{trigger: "approved", step: StepShipping},

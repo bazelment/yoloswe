@@ -67,6 +67,10 @@ func e2eConfig(t *testing.T, workDir string) *jiradozer.Config {
 Check if hello.txt exists in the current directory and contains "hello world".
 Report what you find. Do not run any test frameworks or linters.`
 
+	cfg.CreatePR = e2eStepConfig(true)
+	cfg.CreatePR.PermissionMode = "bypass"
+	cfg.CreatePR.Prompt = `Report that the PR creation step ran successfully. Do not create a pull request or run any git commands.`
+
 	cfg.Ship = e2eStepConfig(true)
 	cfg.Ship.PermissionMode = "bypass"
 	cfg.Ship.Prompt = `Issue: {{.Identifier}} — {{.Title}}
@@ -77,7 +81,7 @@ Do not attempt to create a pull request or run any git commands.`
 	return cfg
 }
 
-var stepCompleteHeadings = []string{"## Plan Complete", "## Build Complete", "## Validate Complete", "## Ship Complete"}
+var stepCompleteHeadings = []string{"## Plan Complete", "## Build Complete", "## Create_pr Complete", "## Validate Complete", "## Ship Complete"}
 
 func postCommentBodies(ft *FakeTracker) []string {
 	var bodies []string
@@ -151,6 +155,7 @@ func TestE2E_HappyPath_AllAutoApprove(t *testing.T) {
 		jiradozer.StepPlanning,
 		jiradozer.StepPlanReview,
 		jiradozer.StepBuilding,
+		jiradozer.StepCreatingPR,
 		jiradozer.StepBuildReview,
 		jiradozer.StepValidating,
 		jiradozer.StepValidateReview,
@@ -295,6 +300,7 @@ func TestE2E_HumanFeedback(t *testing.T) {
 		jiradozer.StepPlanning,   // redo: back to planning
 		jiradozer.StepPlanReview, // second review
 		jiradozer.StepBuilding,
+		jiradozer.StepCreatingPR,
 		jiradozer.StepBuildReview,
 		jiradozer.StepValidating,
 		jiradozer.StepValidateReview,

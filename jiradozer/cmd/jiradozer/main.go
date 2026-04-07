@@ -80,7 +80,7 @@ func main() {
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
-	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, validate, ship")
+	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
 	rootCmd.Flags().StringVar(&autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
 	rootCmd.Flags().StringVar(&team, "team", "", "Team key for multi-issue mode (e.g. ENG)")
 	rootCmd.Flags().StringSliceVar(&sourceStates, "source-states", nil, "Issue states to track (default: Todo)")
@@ -246,6 +246,8 @@ func run(ctx context.Context, args runArgs) error {
 				cfg.Validate.AutoApprove = true
 			case "ship":
 				cfg.Ship.AutoApprove = true
+			case "create_pr":
+				// create_pr has no review step; auto-approve is a no-op.
 			default:
 				return fmt.Errorf("unknown step %q in --auto-approve (valid: %s, all)", s, strings.Join(allSteps, ", "))
 			}
@@ -429,7 +431,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	return nil
 }
 
-var allSteps = []string{"plan", "build", "validate", "ship"}
+var allSteps = []string{"plan", "build", "create_pr", "validate", "ship"}
 
 func parseAutoApprove(value string) []string {
 	if strings.TrimSpace(value) == "all" {
