@@ -564,22 +564,28 @@ func TestWorkflow_MultipleRedoLoops(t *testing.T) {
 	assert.Len(t, sm.History(), 7)
 }
 
-// TestWorkflow_TransitionToReview_UsesServerTimestamp verifies lastCommentAt uses the
-// server-assigned timestamp from PostComment, not time.Now().
-func TestWorkflow_TransitionToReview_UsesServerTimestamp(t *testing.T) {
-	serverTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+// TestWorkflow_TransitionToReview_PreservesLastCommentAt verifies that
+// transitionToReview does not overwrite a lastCommentAt that was already set
+// by the step result comment, preventing a race where user approval posted
+// between the result comment and the waiting comment would be missed.
+func TestWorkflow_TransitionToReview_PreservesLastCommentAt(t *testing.T) {
+	resultTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	waitingTime := time.Date(2025, 6, 15, 12, 0, 5, 0, time.UTC)
 	mt := &mockWorkflowTracker{
 		workflowStates:   testWorkflowStates(),
-		postCommentReply: &tracker.Comment{CreatedAt: serverTime},
+		postCommentReply: &tracker.Comment{CreatedAt: waitingTime},
 	}
 
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 	require.NoError(t, wf.resolveStateIDs(context.Background()))
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
+	// Simulate runStep having set lastCommentAt from the result comment.
+	wf.lastCommentAt = resultTime
+
 	wf.transitionToReview(context.Background(), StepPlanReview, "plan_complete")
 
-	assert.Equal(t, serverTime, wf.lastCommentAt)
+	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be preserved from step result, not overwritten by waiting comment")
 }
 
 // TestWorkflow_TransitionToReview_ZeroTimestampFallback verifies that a zero

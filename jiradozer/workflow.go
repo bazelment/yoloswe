@@ -162,8 +162,11 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 
 		heading := capitalize(stepName)
 		comment := fmt.Sprintf("## %s Round %d/%d\n\n%s", heading, i+1, totalRounds, truncateOutput(output, 2000))
-		if _, err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
+		roundComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
+		if err != nil {
 			w.logger.Warn("failed to post round comment", "step", stepName, "round", i+1, "error", err)
+		} else if i == totalRounds-1 && !roundComment.CreatedAt.IsZero() {
+			w.lastCommentAt = roundComment.CreatedAt
 		}
 	}
 
@@ -191,19 +194,13 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.sessionIDs[currentStep] = newSessionID
 	w.captureOutput(stepName, output)
 
-	// For long outputs, post a summary first then the full content in a
-	// separate comment so reviewers see everything.
 	heading := capitalize(stepName)
-	if len(output) > 3000 {
-		preview := string([]rune(output)[:500])
-		summary := fmt.Sprintf("## %s Complete\n\n%s\n\n_(Full output in next comment)_", heading, preview)
-		if _, err := w.tracker.PostComment(ctx, w.issue.ID, summary); err != nil {
-			w.logger.Warn("failed to post "+stepName+" summary comment", "error", err)
-		}
-	}
 	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, output)
-	if _, err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
+	resultComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
+	if err != nil {
 		w.logger.Warn("failed to post "+stepName+" comment", "error", err)
+	} else if !resultComment.CreatedAt.IsZero() {
+		w.lastCommentAt = resultComment.CreatedAt
 	}
 
 	w.transitionToReview(ctx, reviewStep, trigger)
@@ -254,6 +251,8 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		}
 		return
 	}
+
+	w.logger.Info("waiting for approval", "step", w.state.Current(), "issue", w.issue.Identifier)
 
 	fb, err := PollForFeedback(ctx, w.tracker, w.issue.ID, w.lastCommentAt, w.config.PollInterval, w.logger)
 	if err != nil {
@@ -307,16 +306,14 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 		return
 	}
 
-	waitingComment, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current())
-	if err != nil || waitingComment.CreatedAt.IsZero() {
-		if err != nil {
-			w.logger.Warn("failed to post waiting comment", "error", err)
-		} else {
-			w.logger.Warn("waiting comment has no server timestamp, falling back to local clock")
-		}
+	if _, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current()); err != nil {
+		w.logger.Warn("failed to post waiting comment", "error", err)
+	}
+	// lastCommentAt was set by the step result comment in runStep/runStepRounds.
+	// Do not overwrite it here — doing so would skip user comments posted between
+	// the result comment and the waiting comment.
+	if w.lastCommentAt.IsZero() {
 		w.lastCommentAt = time.Now()
-	} else {
-		w.lastCommentAt = waitingComment.CreatedAt
 	}
 }
 
