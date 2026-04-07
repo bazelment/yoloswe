@@ -6,6 +6,7 @@ go_test(
     srcs = [
         "e2e_workflow_test.go",
         "fake_tracker.go",
+        "github_test.go",
         "orchestrator_test.go",
         "session_resumption_test.go",
         "workflow_test.go",
@@ -15,6 +16,8 @@ go_test(
         "PATH",
         "JIRADOZER_TEST_LINEAR_API_KEY",
         "JIRADOZER_TEST_ISSUE_ID",
+        "JIRADOZER_TEST_GITHUB_REPO",
+        "JIRADOZER_TEST_GITHUB_ISSUE",
     ],
     gotags = ["integration"],
     tags = [
@@ -25,7 +28,9 @@ go_test(
     deps = [
         "//jiradozer",
         "//jiradozer/tracker",
+        "//jiradozer/tracker/github",
         "//jiradozer/tracker/linear",
+        "//wt",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

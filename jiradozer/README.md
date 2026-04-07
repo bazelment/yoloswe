@@ -1,6 +1,6 @@
 # Jiradozer
 
-Issue-driven development workflow CLI. Takes an issue from a tracker (Linear, etc.) or a plain text description, runs an AI agent through plan/build/validate/ship steps, and gates each step on human approval via issue comments.
+Issue-driven development workflow CLI. Takes an issue from a tracker (Linear, GitHub Issues, etc.) or a plain text description, runs an AI agent through plan/build/validate/ship steps, and gates each step on human approval via issue comments.
 
 ## Quick start
 
@@ -21,7 +21,7 @@ bazel-bin/jiradozer/cmd/jiradozer/jiradozer \
 
 - A supported AI agent CLI installed (`claude`, `codex`, `gemini`, or `agent` for Cursor)
 - `gh` CLI authenticated (`gh auth login`)
-- A Linear API key — **or** use `--description` for local mode (no tracker needed)
+- A Linear API key, or `gh` CLI authenticated for GitHub Issues — **or** use `--description` for local mode (no tracker needed)
 
 ## Configuration
 
@@ -119,10 +119,10 @@ One of `--issue`, `--team`, or `--description`/`--description-file` is required.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--issue` | | Issue identifier (e.g. `ENG-123`) |
+| `--issue` | | Issue identifier (e.g. `ENG-123` or `owner/repo#42`) |
 | `--description` | | Task description for local mode (no external tracker needed) |
 | `--description-file` | | Read task description from file (use `-` for stdin) |
-| `--team` | | Team key for multi-issue mode (e.g. `ENG`) |
+| `--team` | | Team key for multi-issue mode (e.g. `ENG` or `owner/repo`) |
 | `--config` | `jiradozer.yaml` | Path to config file |
 | `--work-dir` | from config | Working directory for the agent |
 | `--model` | from config | Agent model ID (overrides config) |
@@ -165,6 +165,7 @@ The provider is auto-detected from the model ID.
 The `tracker.IssueTracker` interface is pluggable. Currently implemented:
 
 - **Linear** (`tracker.kind: linear`) -- reads/writes issues and comments via GraphQL
+- **GitHub Issues** (`tracker.kind: github`) -- reads/writes issues and comments via `gh` CLI
 - **Local** (`--description` flag) -- file-backed tracker with no external dependencies
 
 ### Local mode
@@ -190,6 +191,39 @@ cat spec.md | jiradozer --description-file - --work-dir ~/myproject
 # Inspect state after a run
 cat ~/myproject/.jiradozer/issues/local-1.json | jq .
 ```
+
+### GitHub Issues mode
+
+When `tracker.kind` is `github`, jiradozer uses the `gh` CLI for authentication and API access. No API key is needed — just `gh auth login`.
+
+```yaml
+tracker:
+  kind: github
+
+source:
+  team: "owner/repo"          # GitHub owner/repo
+  states: ["Todo"]
+  labels: ["jiradozer"]        # optional: only pick up issues with this label
+  max_concurrent: 3
+```
+
+```bash
+# Single issue
+jiradozer --issue owner/repo#42
+
+# Multi-issue mode (discovers open issues)
+jiradozer --team owner/repo
+```
+
+GitHub Issues only has open/closed states, so jiradozer maps workflow states using labels:
+
+| Logical state | GitHub action |
+|---------------|---------------|
+| In Progress | Issue is open |
+| In Review | `in-review` label added |
+| Done | Issue is closed |
+
+The default `states` config ("In Progress", "In Review", "Done") works without changes.
 
 To add a new tracker, implement the `IssueTracker` interface in a new subpackage under `tracker/` and add a case to `createTracker()` in `cmd/jiradozer/main.go`.
 

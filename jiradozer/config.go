@@ -31,7 +31,7 @@ type Config struct {
 
 // TrackerConfig specifies the issue tracker backend.
 type TrackerConfig struct {
-	Kind   string `yaml:"kind"`    // "linear", future: "github", "jira"
+	Kind   string `yaml:"kind"`    // "linear", "github", "local"
 	APIKey string `yaml:"api_key"` // supports $ENV_VAR expansion
 }
 
@@ -42,7 +42,7 @@ type AgentConfig struct {
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
 type SourceConfig struct {
-	Team          string   `yaml:"team"`           // Linear team key (e.g. "ENG")
+	Team          string   `yaml:"team"`           // Team or repo identifier (e.g. "ENG" for Linear, "owner/repo" for GitHub)
 	BranchPrefix  string   `yaml:"branch_prefix"`  // Worktree branch prefix (default: "jiradozer")
 	States        []string `yaml:"states"`         // Issue states to pick up (default: ["Todo"])
 	Labels        []string `yaml:"labels"`         // Optional label filter
@@ -88,8 +88,15 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// Expand environment variables in sensitive fields (local tracker has no API key).
-	if cfg.Tracker.Kind != "local" {
+	// Expand environment variables in sensitive fields.
+	// Local tracker has no API key; GitHub tracker can use gh CLI auth.
+	if cfg.Tracker.Kind != "local" && cfg.Tracker.Kind != "github" {
+		apiKey, err := resolveEnv(cfg.Tracker.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("tracker.api_key: %w", err)
+		}
+		cfg.Tracker.APIKey = apiKey
+	} else if cfg.Tracker.Kind == "github" && cfg.Tracker.APIKey != "" {
 		apiKey, err := resolveEnv(cfg.Tracker.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("tracker.api_key: %w", err)
@@ -141,8 +148,8 @@ func (c *Config) validate() error {
 	if c.Tracker.Kind == "" {
 		return fmt.Errorf("tracker.kind is required")
 	}
-	if c.Tracker.Kind != "local" && c.Tracker.APIKey == "" {
-		return fmt.Errorf("tracker.api_key is required (set via config or $LINEAR_API_KEY)")
+	if c.Tracker.Kind != "local" && c.Tracker.Kind != "github" && c.Tracker.APIKey == "" {
+		return fmt.Errorf("tracker.api_key is required (set via config or environment variable)")
 	}
 	if c.Agent.Model == "" {
 		return fmt.Errorf("agent.model is required")

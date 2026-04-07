@@ -18,6 +18,7 @@ import (
 
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	ghtracker "github.com/bazelment/yoloswe/jiradozer/tracker/github"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
 	"github.com/bazelment/yoloswe/jiradozer/tui"
@@ -361,6 +362,12 @@ func createTracker(cfg *jiradozer.Config) (tracker.IssueTracker, error) {
 	switch cfg.Tracker.Kind {
 	case "linear":
 		return linear.NewClient(cfg.Tracker.APIKey), nil
+	case "github":
+		owner, repo, err := ghtracker.ParseOwnerRepo(cfg.Source.Team)
+		if err != nil {
+			return nil, fmt.Errorf("github tracker requires source.team as 'owner/repo': %w", err)
+		}
+		return ghtracker.NewClient(&wt.DefaultGHRunner{}, owner, repo), nil
 	case "local":
 		dir := filepath.Join(cfg.WorkDir, ".jiradozer", "issues")
 		return local.NewTracker(dir)

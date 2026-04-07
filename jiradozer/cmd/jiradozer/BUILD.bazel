@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//jiradozer",
         "//jiradozer/tracker",
+        "//jiradozer/tracker/github",
         "//jiradozer/tracker/linear",
         "//jiradozer/tracker/local",
         "//jiradozer/tui",
