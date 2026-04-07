@@ -74,7 +74,7 @@ func main() {
 	}
 	rootCmd.SilenceUsage = true
 
-	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123)")
+	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123 or owner/repo#42)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
@@ -373,13 +373,18 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	case "linear":
 		return linear.NewClient(cfg.Tracker.APIKey), nil
 	case "github":
+		// When --issue is provided, always derive owner/repo from the identifier
+		// to ensure the client is bound to the same repo as the issue. This
+		// prevents mutations (comment, close) targeting a different repo than
+		// the one the issue was fetched from.
 		team := cfg.Source.Team
-		if team == "" {
-			// In single-issue mode, source.team may be unset. Extract owner/repo
-			// from the issue identifier (e.g. "owner/repo#42").
+		if issueID != "" {
 			if idx := strings.LastIndex(issueID, "#"); idx > 0 {
 				team = issueID[:idx]
 			}
+		}
+		if team == "" {
+			return nil, fmt.Errorf("github tracker requires source.team or --issue as 'owner/repo#N'")
 		}
 		owner, repo, err := ghtracker.ParseOwnerRepo(team)
 		if err != nil {
