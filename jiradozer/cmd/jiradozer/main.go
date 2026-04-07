@@ -370,15 +370,7 @@ func runFromDescription(ctx context.Context, description string, issueTracker tr
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
 	}
 
-	logger.Info("generating title from description")
-	title, err := jiradozer.GenerateTitle(ctx, description, logger)
-	if err != nil {
-		logger.Warn("title generation failed, using description as title", "error", err)
-		title = description
-		if len(title) > 80 {
-			title = title[:77] + "..."
-		}
-	}
+	title := jiradozer.GenerateTitle(description)
 	logger.Info("title generated", "title", title)
 
 	issue, err := lt.CreateIssue(title, description)

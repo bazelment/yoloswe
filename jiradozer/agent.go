@@ -267,32 +267,28 @@ func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
 	return d
 }
 
-// GenerateTitle uses a lightweight agent call to produce a concise issue title
-// from a task description.
-func GenerateTitle(ctx context.Context, description string, logger *slog.Logger) (string, error) {
-	cfg := StepConfig{
-		Model:          "haiku",
-		PermissionMode: "plan",
-		MaxTurns:       1,
-		MaxBudgetUSD:   0.01,
-	}
-	prompt := fmt.Sprintf(
-		"Generate a concise title (under 80 chars) for this task. Output ONLY the title, nothing else.\n\nTask: %s",
-		description,
-	)
-	output, _, err := runAgent(ctx, "title", prompt, cfg, os.TempDir(), "", logger)
-	if err != nil {
-		return "", err
-	}
-	title := strings.TrimSpace(output)
-	if title == "" {
-		// Fallback: truncate description.
-		title = description
-		if len(title) > 80 {
-			title = title[:77] + "..."
+// GenerateTitle creates a short title from the first words of a description,
+// truncating at word boundaries to fit within 80 characters.
+func GenerateTitle(description string) string {
+	const maxLen = 80
+	words := strings.Fields(description)
+	var b strings.Builder
+	for _, w := range words {
+		if b.Len()+len(w)+1 > maxLen {
+			break
 		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w)
 	}
-	return title, nil
+	if b.Len() == 0 && description != "" {
+		if len(description) > maxLen-3 {
+			return description[:maxLen-3] + "..."
+		}
+		return description
+	}
+	return b.String()
 }
 
 func renderPrompt(tmplStr string, data PromptData) (string, error) {
