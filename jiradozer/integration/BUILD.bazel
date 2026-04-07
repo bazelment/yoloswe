@@ -4,6 +4,8 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "integration_test",
     srcs = [
+        "e2e_workflow_test.go",
+        "fake_tracker.go",
         "orchestrator_test.go",
         "session_resumption_test.go",
         "workflow_test.go",
