@@ -188,6 +188,7 @@ func TestPostComment(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "comment-1", comment.ID)
 	assert.True(t, comment.IsSelf)
+	assert.Equal(t, time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC), comment.CreatedAt)
 }
 
 func TestUpdateIssueState(t *testing.T) {

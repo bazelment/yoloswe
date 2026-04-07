@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -167,6 +168,8 @@ func (c *Client) PostComment(ctx context.Context, issueID string, body string) (
 		comment.Body = cr.Body
 		if t, err := time.Parse(time.RFC3339, cr.CreatedAt); err == nil {
 			comment.CreatedAt = t
+		} else {
+			slog.Warn("failed to parse comment CreatedAt from Linear API", "raw", cr.CreatedAt, "error", err)
 		}
 	}
 	return comment, nil

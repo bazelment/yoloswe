@@ -214,6 +214,8 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 	if err != nil || waitingComment.CreatedAt.IsZero() {
 		if err != nil {
 			w.logger.Warn("failed to post waiting comment", "error", err)
+		} else {
+			w.logger.Warn("waiting comment has no server timestamp, falling back to local clock")
 		}
 		w.lastCommentAt = time.Now()
 	} else {

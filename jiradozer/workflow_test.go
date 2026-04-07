@@ -23,12 +23,13 @@ type trackerCall struct {
 }
 
 type mockWorkflowTracker struct {
-	commentSets    [][]tracker.Comment // sequence of comment responses for polling
-	workflowStates []tracker.WorkflowState
-	comments       []tracker.Comment // returned by FetchComments
-	calls          []trackerCall
-	mu             sync.Mutex
-	commentIdx     int // tracks which comment set to return (for polling)
+	commentSets      [][]tracker.Comment // sequence of comment responses for polling
+	workflowStates   []tracker.WorkflowState
+	comments         []tracker.Comment // returned by FetchComments
+	postCommentReply *tracker.Comment  // if set, PostComment returns this instead of default
+	calls            []trackerCall
+	mu               sync.Mutex
+	commentIdx       int // tracks which comment set to return (for polling)
 }
 
 func (m *mockWorkflowTracker) FetchIssue(_ context.Context, id string) (*tracker.Issue, error) {
@@ -59,6 +60,9 @@ func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID stri
 
 func (m *mockWorkflowTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
 	m.recordCall("PostComment", issueID, body)
+	if m.postCommentReply != nil {
+		return *m.postCommentReply, nil
+	}
 	return tracker.Comment{CreatedAt: time.Now()}, nil
 }
 
@@ -534,6 +538,43 @@ func TestWorkflow_MultipleRedoLoops(t *testing.T) {
 
 	// Verify history length: 7 transitions.
 	assert.Len(t, sm.History(), 7)
+}
+
+// TestWorkflow_TransitionToReview_UsesServerTimestamp verifies lastCommentAt uses the
+// server-assigned timestamp from PostComment, not time.Now().
+func TestWorkflow_TransitionToReview_UsesServerTimestamp(t *testing.T) {
+	serverTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	mt := &mockWorkflowTracker{
+		workflowStates:   testWorkflowStates(),
+		postCommentReply: &tracker.Comment{CreatedAt: serverTime},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.transitionToReview(context.Background(), StepPlanReview, "plan_complete")
+
+	assert.Equal(t, serverTime, wf.lastCommentAt)
+}
+
+// TestWorkflow_TransitionToReview_ZeroTimestampFallback verifies that a zero
+// CreatedAt falls back to a recent time (time.Now) instead of staying zero.
+func TestWorkflow_TransitionToReview_ZeroTimestampFallback(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		workflowStates:   testWorkflowStates(),
+		postCommentReply: &tracker.Comment{CreatedAt: time.Time{}},
+	}
+
+	before := time.Now()
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.transitionToReview(context.Background(), StepPlanReview, "plan_complete")
+
+	assert.False(t, wf.lastCommentAt.IsZero(), "lastCommentAt should not be zero")
+	assert.False(t, wf.lastCommentAt.Before(before), "lastCommentAt should be recent (time.Now fallback)")
 }
 
 // TestWorkflow_AllReviewStepsFilterBotComments verifies each review step.

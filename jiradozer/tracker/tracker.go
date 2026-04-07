@@ -16,7 +16,7 @@ type IssueTracker interface {
 	// Results are ordered by creation time (newest first).
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
 
-	// FetchComments returns comments on an issue created after the given time.
+	// FetchComments returns comments on an issue created on or after the given time.
 	// Comments are returned in chronological order.
 	FetchComments(ctx context.Context, issueID string, since time.Time) ([]Comment, error)
 

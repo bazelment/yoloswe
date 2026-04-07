@@ -182,7 +182,7 @@ func (t *Tracker) FetchComments(_ context.Context, issueID string, since time.Ti
 
 	var out []tracker.Comment
 	for _, c := range f.Comments {
-		if c.CreatedAt.After(since) {
+		if !c.CreatedAt.Before(since) {
 			out = append(out, tracker.Comment{
 				ID:        c.ID,
 				Body:      c.Body,
