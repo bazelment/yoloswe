@@ -871,13 +871,6 @@ Rough commands:
 		for _, line := range result.StaleWorktrees {
 			fmt.Println(line)
 		}
-		for _, branch := range result.MergedWorktrees {
-			if dryRun {
-				fmt.Printf("[dry-run] Would remove %s (PR merged)\n", branch)
-			} else {
-				fmt.Printf("Removed %s (PR merged)\n", branch)
-			}
-		}
 
 		return nil
 	},

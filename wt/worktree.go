@@ -1294,6 +1294,16 @@ func (m *Manager) handleChildBranches(ctx context.Context, children []BranchDepe
 	}
 }
 
+// protectedBranches returns the set of branches that should never be deleted.
+func protectedBranches(ctx context.Context, git GitRunner, bareDir string) map[string]bool {
+	defaultBranch, _ := GetDefaultBranch(ctx, git, bareDir)
+	return map[string]bool{
+		defaultBranch: true,
+		"main":        true,
+		"master":      true,
+	}
+}
+
 // PruneOptions configures prune behavior.
 type PruneOptions struct {
 	DryRun    bool // Preview only, no changes
@@ -1316,7 +1326,6 @@ func (m *Manager) Prune(ctx context.Context, opts PruneOptions) (*PruneResult, e
 
 	result := &PruneResult{}
 
-	// Step 1: git worktree prune (existing behavior)
 	args := []string{"worktree", "prune"}
 	if opts.DryRun {
 		args = append(args, "--dry-run", "-v")
@@ -1333,7 +1342,6 @@ func (m *Manager) Prune(ctx context.Context, opts PruneOptions) (*PruneResult, e
 		m.output.Success("No stale worktrees to prune")
 	}
 
-	// Step 2: Remove worktrees with merged PRs
 	if opts.MergedPRs {
 		merged, err := m.pruneMergedPRs(ctx, bareDir, opts.DryRun)
 		if err != nil {
@@ -1348,27 +1356,22 @@ func (m *Manager) Prune(ctx context.Context, opts PruneOptions) (*PruneResult, e
 
 // pruneMergedPRs finds and removes worktrees whose PRs are merged.
 func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun bool) ([]string, error) {
-	// Build protected branches set
-	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
-	protected := map[string]bool{
-		defaultBranch: true,
-		"main":        true,
-		"master":      true,
-	}
+	protected := protectedBranches(ctx, m.git, bareDir)
 
-	// List all worktrees
 	worktrees, err := m.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list worktrees: %w", err)
 	}
 
-	// Fetch merged PRs in one batch call
 	mergedPRs, err := ListMergedPRs(ctx, m.gh, bareDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list merged PRs: %w", err)
 	}
 
-	// Build lookup by head branch name
+	if len(mergedPRs) >= 200 {
+		m.output.Warn("GitHub returned 200 merged PRs (limit reached); older merged-PR worktrees may not be detected")
+	}
+
 	mergedByBranch := make(map[string]*PRInfo, len(mergedPRs))
 	for i := range mergedPRs {
 		mergedByBranch[mergedPRs[i].HeadRefName] = &mergedPRs[i]
@@ -1464,12 +1467,7 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 	}
 
 	// Step 3: Detect orphaned branches
-	defaultBranch, _ := GetDefaultBranch(ctx, m.git, bareDir)
-	protectedBranches := map[string]bool{
-		defaultBranch: true,
-		"main":        true,
-		"master":      true,
-	}
+	protected := protectedBranches(ctx, m.git, bareDir)
 
 	branchResult, err := m.git.Run(ctx, []string{"branch", "--list", "--format=%(refname:short)"}, bareDir)
 	if err != nil {
@@ -1494,7 +1492,7 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 	}
 
 	for _, branch := range allBranches {
-		if !protectedBranches[branch] && !activeBranches[branch] {
+		if !protected[branch] && !activeBranches[branch] {
 			result.OrphanedBranches = append(result.OrphanedBranches, branch)
 		}
 	}
