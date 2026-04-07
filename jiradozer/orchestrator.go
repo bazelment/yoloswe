@@ -153,14 +153,18 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		// Skip terminal steps here — they are emitted by the goroutine
 		// below with the proper error attached.
 		if step != StepDone && step != StepFailed {
+			o.mu.Lock()
 			mw.roundIndex = 0
 			mw.roundTotal = 0
+			o.mu.Unlock()
 			o.emitStatus(mw, step, nil)
 		}
 	}
 	wf.OnRoundProgress = func(roundIndex, roundTotal int) {
+		o.mu.Lock()
 		mw.roundIndex = roundIndex
 		mw.roundTotal = roundTotal
+		o.mu.Unlock()
 		o.emitStatus(mw, wf.state.Current(), nil)
 	}
 
