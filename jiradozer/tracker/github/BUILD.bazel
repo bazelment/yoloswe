@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "github",
+    srcs = [
+        "client.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/jiradozer/tracker/github",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//jiradozer/tracker",
+        "//wt",
+    ],
+)
+
+go_test(
+    name = "github_test",
+    srcs = ["client_test.go"],
+    embed = [":github"],
+    deps = [
+        "//jiradozer/tracker",
+        "//wt",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

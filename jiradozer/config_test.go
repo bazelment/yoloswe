@@ -160,6 +160,13 @@ poll_interval: 0s
 	assert.Equal(t, 15*time.Second, cfg.PollInterval)
 }
 
+func TestLoadConfig_GitHubTrackerNoAPIKey(t *testing.T) {
+	cfg, err := LoadConfig("testdata/valid_github.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, "github", cfg.Tracker.Kind)
+	assert.Empty(t, cfg.Tracker.APIKey)
+}
+
 func TestResolveStep_InheritsFromTopLevel(t *testing.T) {
 	cfg, err := LoadConfig("testdata/with_overrides.yaml")
 	require.NoError(t, err)

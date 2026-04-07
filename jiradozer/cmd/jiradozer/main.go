@@ -18,6 +18,7 @@ import (
 
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	ghtracker "github.com/bazelment/yoloswe/jiradozer/tracker/github"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
 	"github.com/bazelment/yoloswe/jiradozer/tui"
@@ -73,7 +74,7 @@ func main() {
 	}
 	rootCmd.SilenceUsage = true
 
-	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123)")
+	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123 or owner/repo#42)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
@@ -212,19 +213,22 @@ func run(ctx context.Context, args runArgs) error {
 		cfg.Source.BranchPrefix = args.branchPrefix
 	}
 
-	// Validate mutual exclusivity.
+	// Validate mutual exclusivity. CLI flags (--issue, --description) take
+	// precedence over config-file values (source.team). Only count source.team
+	// as a mode when no CLI flag is given, so users can have source.team in
+	// their config for multi-issue mode and still use --issue for single-issue.
 	modeCount := 0
 	if args.issueID != "" {
-		modeCount++
-	}
-	if cfg.Source.Team != "" {
 		modeCount++
 	}
 	if args.description != "" {
 		modeCount++
 	}
+	if modeCount == 0 && cfg.Source.Team != "" {
+		modeCount++
+	}
 	if modeCount > 1 {
-		return fmt.Errorf("--issue, --team, and --description/--description-file are mutually exclusive")
+		return fmt.Errorf("--issue and --description/--description-file are mutually exclusive")
 	}
 	if modeCount == 0 {
 		return fmt.Errorf("either --issue, --team, or --description/--description-file is required")
@@ -265,7 +269,7 @@ func run(ctx context.Context, args runArgs) error {
 	)
 
 	// Create tracker client.
-	issueTracker, err := createTracker(cfg)
+	issueTracker, err := createTracker(cfg, args.issueID)
 	if err != nil {
 		return err
 	}
@@ -275,8 +279,8 @@ func run(ctx context.Context, args runArgs) error {
 		return runFromDescription(ctx, args.description, issueTracker, cfg, logger)
 	}
 
-	// Multi-issue TUI mode.
-	if cfg.Source.Team != "" {
+	// Multi-issue TUI mode (only when no --issue flag was given).
+	if cfg.Source.Team != "" && args.issueID == "" {
 		return runMultiIssue(ctx, issueTracker, cfg, logger)
 	}
 
@@ -329,7 +333,14 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	// Determine repo root for worktree manager.
 	// Use WorkDir as the root for wt.Manager — it should point to
 	// the bare repo's parent directory.
-	repoName := cfg.Source.Team // Use team key as repo name convention.
+	// For GitHub, source.team is "owner/repo" which would create a nested
+	// directory. Use just the repo portion as the worktree repo name.
+	repoName := cfg.Source.Team
+	if cfg.Tracker.Kind == "github" {
+		if _, repo, err := ghtracker.ParseOwnerRepo(repoName); err == nil {
+			repoName = repo
+		}
+	}
 	wtMgr := &wtAdapter{mgr: wt.NewManager(cfg.WorkDir, repoName)}
 
 	// Use a cancellable context so we can stop the orchestrator when the TUI exits.
@@ -357,10 +368,29 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	return err
 }
 
-func createTracker(cfg *jiradozer.Config) (tracker.IssueTracker, error) {
+func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker, error) {
 	switch cfg.Tracker.Kind {
 	case "linear":
 		return linear.NewClient(cfg.Tracker.APIKey), nil
+	case "github":
+		// When --issue is provided, always derive owner/repo from the identifier
+		// to ensure the client is bound to the same repo as the issue. This
+		// prevents mutations (comment, close) targeting a different repo than
+		// the one the issue was fetched from.
+		team := cfg.Source.Team
+		if issueID != "" {
+			if idx := strings.LastIndex(issueID, "#"); idx > 0 {
+				team = issueID[:idx]
+			}
+		}
+		if team == "" {
+			return nil, fmt.Errorf("github tracker requires source.team or --issue as 'owner/repo#N'")
+		}
+		owner, repo, err := ghtracker.ParseOwnerRepo(team)
+		if err != nil {
+			return nil, fmt.Errorf("github tracker requires source.team or --issue as 'owner/repo#N': %w", err)
+		}
+		return ghtracker.NewClient(&wt.DefaultGHRunner{}, owner, repo), nil
 	case "local":
 		dir := filepath.Join(cfg.WorkDir, ".jiradozer", "issues")
 		return local.NewTracker(dir)
