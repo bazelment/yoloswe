@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
+	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
 	"github.com/bazelment/yoloswe/jiradozer/tui"
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/multiagent/agent"
@@ -25,20 +28,22 @@ import (
 
 func main() {
 	var (
-		issueID       string
-		configPath    string
-		workDir       string
-		modelID       string
-		pollInterval  time.Duration
-		maxBudget     float64
-		runStep       string
-		autoApprove   string
-		team          string
-		sourceStates  []string
-		sourceLabels  []string
-		maxConcurrent int
-		branchPrefix  string
-		verbose       bool
+		issueID         string
+		configPath      string
+		workDir         string
+		modelID         string
+		pollInterval    time.Duration
+		maxBudget       float64
+		runStep         string
+		autoApprove     string
+		team            string
+		sourceStates    []string
+		sourceLabels    []string
+		maxConcurrent   int
+		branchPrefix    string
+		verbose         bool
+		description     string
+		descriptionFile string
 	)
 
 	rootCmd := &cobra.Command{
@@ -47,20 +52,22 @@ func main() {
 		Long:  "Drives a plan → build → validate → ship workflow from an issue tracker with human-in-the-loop approval at each step.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return run(cmd.Context(), runArgs{
-				issueID:       issueID,
-				configPath:    configPath,
-				workDir:       workDir,
-				modelID:       modelID,
-				pollInterval:  pollInterval,
-				maxBudget:     maxBudget,
-				runStep:       runStep,
-				autoApprove:   autoApprove,
-				team:          team,
-				sourceStates:  sourceStates,
-				sourceLabels:  sourceLabels,
-				maxConcurrent: maxConcurrent,
-				branchPrefix:  branchPrefix,
-				verbose:       verbose,
+				issueID:         issueID,
+				configPath:      configPath,
+				workDir:         workDir,
+				modelID:         modelID,
+				pollInterval:    pollInterval,
+				maxBudget:       maxBudget,
+				runStep:         runStep,
+				autoApprove:     autoApprove,
+				team:            team,
+				sourceStates:    sourceStates,
+				sourceLabels:    sourceLabels,
+				maxConcurrent:   maxConcurrent,
+				branchPrefix:    branchPrefix,
+				verbose:         verbose,
+				description:     description,
+				descriptionFile: descriptionFile,
 			})
 		},
 	}
@@ -79,6 +86,8 @@ func main() {
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	rootCmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
+	rootCmd.Flags().StringVar(&description, "description", "", "Task description for local mode (no external tracker needed)")
+	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -89,20 +98,22 @@ func main() {
 }
 
 type runArgs struct {
-	issueID       string
-	configPath    string
-	workDir       string
-	modelID       string
-	runStep       string
-	autoApprove   string
-	team          string
-	branchPrefix  string
-	sourceStates  []string
-	sourceLabels  []string
-	pollInterval  time.Duration
-	maxBudget     float64
-	maxConcurrent int
-	verbose       bool
+	issueID         string
+	configPath      string
+	workDir         string
+	modelID         string
+	runStep         string
+	autoApprove     string
+	team            string
+	branchPrefix    string
+	description     string
+	descriptionFile string
+	sourceStates    []string
+	sourceLabels    []string
+	pollInterval    time.Duration
+	maxBudget       float64
+	maxConcurrent   int
+	verbose         bool
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -114,10 +125,53 @@ func run(ctx context.Context, args runArgs) error {
 	klogfmt.Init(klogfmt.WithLevel(level))
 	logger := slog.Default()
 
-	// Load config.
-	cfg, err := jiradozer.LoadConfig(args.configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+	// Resolve --description-file into --description.
+	if args.descriptionFile != "" {
+		if args.description != "" {
+			return fmt.Errorf("--description and --description-file are mutually exclusive")
+		}
+		var (
+			data []byte
+			err  error
+		)
+		if args.descriptionFile == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			data, err = os.ReadFile(args.descriptionFile)
+		}
+		if err != nil {
+			return fmt.Errorf("read description file: %w", err)
+		}
+		args.description = strings.TrimSpace(string(data))
+		if args.description == "" {
+			return fmt.Errorf("description file is empty")
+		}
+	}
+
+	// Load config — use defaults when running in local description mode
+	// (config file is optional).
+	var cfg *jiradozer.Config
+	if args.description != "" {
+		cfg = jiradozer.DefaultConfigForTest()
+		cfg.Tracker.Kind = "local"
+		// Try loading config file for overrides but don't fail if missing.
+		if loaded, loadErr := jiradozer.LoadConfig(args.configPath); loadErr == nil {
+			cfg = loaded
+		}
+		cfg.Tracker.Kind = "local"
+		// Default all steps to auto-approve in local mode unless overridden.
+		if args.autoApprove == "" {
+			cfg.Plan.AutoApprove = true
+			cfg.Build.AutoApprove = true
+			cfg.Validate.AutoApprove = true
+			cfg.Ship.AutoApprove = true
+		}
+	} else {
+		var err error
+		cfg, err = jiradozer.LoadConfig(args.configPath)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
 	}
 
 	// Apply CLI flag overrides.
@@ -152,11 +206,21 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Validate mutual exclusivity.
-	if args.issueID != "" && cfg.Source.Team != "" {
-		return fmt.Errorf("--issue and --team (or source.team in config) are mutually exclusive")
+	modeCount := 0
+	if args.issueID != "" {
+		modeCount++
 	}
-	if args.issueID == "" && cfg.Source.Team == "" {
-		return fmt.Errorf("either --issue or --team (or source.team in config) is required")
+	if cfg.Source.Team != "" {
+		modeCount++
+	}
+	if args.description != "" {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return fmt.Errorf("--issue, --team, and --description are mutually exclusive")
+	}
+	if modeCount == 0 {
+		return fmt.Errorf("either --issue, --team, or --description is required")
 	}
 
 	// Apply auto-approve overrides.
@@ -197,6 +261,11 @@ func run(ctx context.Context, args runArgs) error {
 	issueTracker, err := createTracker(cfg)
 	if err != nil {
 		return err
+	}
+
+	// Local description mode.
+	if args.description != "" {
+		return runFromDescription(ctx, args.description, issueTracker, cfg, logger)
 	}
 
 	// Multi-issue TUI mode.
@@ -285,9 +354,39 @@ func createTracker(cfg *jiradozer.Config) (tracker.IssueTracker, error) {
 	switch cfg.Tracker.Kind {
 	case "linear":
 		return linear.NewClient(cfg.Tracker.APIKey), nil
+	case "local":
+		dir := filepath.Join(cfg.WorkDir, ".jiradozer", "issues")
+		return local.NewTracker(dir)
 	default:
 		return nil, fmt.Errorf("unsupported tracker kind: %q", cfg.Tracker.Kind)
 	}
+}
+
+func runFromDescription(ctx context.Context, description string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
+	lt, ok := issueTracker.(*local.Tracker)
+	if !ok {
+		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
+	}
+
+	logger.Info("generating title from description")
+	title, err := jiradozer.GenerateTitle(ctx, description, logger)
+	if err != nil {
+		logger.Warn("title generation failed, using truncated description", "error", err)
+		title = description
+		if len(title) > 80 {
+			title = title[:77] + "..."
+		}
+	}
+	logger.Info("title generated", "title", title)
+
+	issue, err := lt.CreateIssue(title, description)
+	if err != nil {
+		return fmt.Errorf("create local issue: %w", err)
+	}
+	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
+
+	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
+	return wf.Run(ctx)
 }
 
 var allSteps = []string{"plan", "build", "validate", "ship"}

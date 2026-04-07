@@ -9,6 +9,7 @@ go_library(
         "//jiradozer",
         "//jiradozer/tracker",
         "//jiradozer/tracker/linear",
+        "//jiradozer/tracker/local",
         "//jiradozer/tui",
         "//logging/klogfmt",
         "//multiagent/agent",
