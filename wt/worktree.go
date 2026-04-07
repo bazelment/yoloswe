@@ -740,6 +740,9 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 }
 
 // Remove removes a worktree by name (directory) or branch name.
+// If deleteBranch is true, the local and remote branch are deleted after the worktree is removed.
+// If force is true, passes --force to git worktree remove, allowing removal of worktrees with
+// modified or untracked files (equivalent to git worktree remove --force).
 func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool, force bool) error {
 	bareDir := m.BareDir()
 
