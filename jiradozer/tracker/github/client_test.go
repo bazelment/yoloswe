@@ -180,6 +180,37 @@ func TestListIssues(t *testing.T) {
 	assert.Equal(t, "3", issues[1].ID)
 }
 
+func TestListIssues_MultiLabel_ORSemantics(t *testing.T) {
+	mock := &mockGHRunner{
+		responses: map[string]*wt.CmdResult{
+			"repos/acme/app/issues?state=open&per_page=3&labels=bug": jsonResult([]ghIssue{
+				{Number: 1, Title: "Bug 1", State: "open"},
+				{Number: 2, Title: "Bug 2", State: "open"},
+			}),
+			"repos/acme/app/issues?state=open&per_page=3&labels=feature": jsonResult([]ghIssue{
+				{Number: 2, Title: "Bug 2", State: "open"}, // duplicate
+				{Number: 3, Title: "Feature 1", State: "open"},
+				{Number: 4, Title: "Feature 2", State: "open"},
+			}),
+		},
+	}
+
+	client := NewClient(mock, "acme", "app")
+	issues, err := client.ListIssues(context.Background(), tracker.IssueFilter{
+		TeamKey: "acme/app",
+		States:  []string{"Todo"},
+		Labels:  []string{"bug", "feature"},
+		Limit:   3,
+	})
+	require.NoError(t, err)
+
+	// Should dedup issue #2, and respect Limit=3.
+	require.Len(t, issues, 3)
+	assert.Equal(t, "1", issues[0].ID)
+	assert.Equal(t, "2", issues[1].ID)
+	assert.Equal(t, "3", issues[2].ID)
+}
+
 func TestFetchComments(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	mock := &mockGHRunner{

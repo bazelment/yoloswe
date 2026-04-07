@@ -174,6 +174,9 @@ func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]
 			}
 			seen[gi.Number] = true
 			issues = append(issues, c.ghIssueToTracker(gi, owner, repo))
+			if len(issues) >= limit {
+				return issues, nil
+			}
 		}
 	}
 	return issues, nil

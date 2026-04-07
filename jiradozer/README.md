@@ -115,7 +115,7 @@ jiradozer --issue ENG-123 [flags]
 jiradozer --description "task description" [flags]
 ```
 
-One of `--issue`, `--team`, or `--description`/`--description-file` is required. They are mutually exclusive.
+One of `--issue`, `--team`, or `--description`/`--description-file` is required. `--issue` and `--description` are mutually exclusive; `--issue` takes precedence over `source.team` in the config file (so you can keep `source.team` for multi-issue mode and still use `--issue` for single issues).
 
 | Flag | Default | Description |
 |------|---------|-------------|
