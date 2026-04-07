@@ -23,15 +23,13 @@ type trackerCall struct {
 }
 
 type mockWorkflowTracker struct {
-	commentSets        [][]tracker.Comment // sequence of comment responses for polling
-	workflowStates     []tracker.WorkflowState
-	comments           []tracker.Comment  // returned by FetchComments
-	postCommentReply   *tracker.Comment   // if set, PostComment always returns this
-	postCommentReplies []*tracker.Comment // if set, PostComment cycles through these in order
-	calls              []trackerCall
-	mu                 sync.Mutex
-	commentIdx         int // tracks which comment set to return (for polling)
-	postCommentIdx     int // tracks which postCommentReplies entry to use
+	commentSets      [][]tracker.Comment // sequence of comment responses for polling
+	workflowStates   []tracker.WorkflowState
+	comments         []tracker.Comment // returned by FetchComments
+	postCommentReply *tracker.Comment  // if set, PostComment always returns this
+	calls            []trackerCall
+	mu               sync.Mutex
+	commentIdx       int // tracks which comment set to return (for polling)
 }
 
 func (m *mockWorkflowTracker) FetchIssue(_ context.Context, id string) (*tracker.Issue, error) {
@@ -61,26 +59,9 @@ func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID stri
 }
 
 func (m *mockWorkflowTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
-	m.mu.Lock()
-	m.calls = append(m.calls, trackerCall{method: "PostComment", args: []string{issueID, body}})
-	reply := m.postCommentReply
-	var seqReply *tracker.Comment
-	if reply == nil && len(m.postCommentReplies) > 0 {
-		idx := m.postCommentIdx
-		if idx < len(m.postCommentReplies) {
-			m.postCommentIdx++
-		} else {
-			idx = len(m.postCommentReplies) - 1
-		}
-		seqReply = m.postCommentReplies[idx]
-	}
-	m.mu.Unlock()
-
-	if reply != nil {
-		return *reply, nil
-	}
-	if seqReply != nil {
-		return *seqReply, nil
+	m.recordCall("PostComment", issueID, body)
+	if m.postCommentReply != nil {
+		return *m.postCommentReply, nil
 	}
 	return tracker.Comment{CreatedAt: time.Now()}, nil
 }

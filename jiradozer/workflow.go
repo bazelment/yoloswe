@@ -129,6 +129,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)
 
+	// Reset lastCommentAt so transitionToReview uses the server timestamp from
+	// this step's result comment rather than a stale value from a prior review cycle.
+	w.lastCommentAt = time.Time{}
+
 	feedback := w.feedback
 	w.feedback = ""
 
@@ -178,6 +182,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
 	currentStep := w.state.Current()
 	sessionID := w.sessionIDs[currentStep]
+
+	// Reset lastCommentAt so transitionToReview uses the server timestamp from
+	// this step's result comment rather than a stale value from a prior review cycle.
+	w.lastCommentAt = time.Time{}
 
 	feedback := w.feedback
 	w.feedback = ""
