@@ -1,7 +1,6 @@
 package jiradozer
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -411,22 +410,4 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	assert.Contains(t, buildPrompt, "# Plan")
 	assert.Contains(t, buildPrompt, "1. Fix widget")
 	assert.Contains(t, buildPrompt, "Approved Plan")
-}
-
-// TestReplay_PlanTruncatedInComment verifies long plans are truncated for tracker comments.
-func TestReplay_PlanTruncatedInComment(t *testing.T) {
-	// Generate a plan longer than 3000 chars.
-	longPlan := ""
-	for i := range 200 {
-		longPlan += fmt.Sprintf("Step %d: Do something important with detailed description\n", i+1)
-	}
-	require.Greater(t, len(longPlan), 3000)
-
-	// Verify truncation logic (from workflow.go lines 138-141).
-	summary := longPlan
-	if len(summary) > 3000 {
-		summary = summary[:3000] + "\n\n... (truncated)"
-	}
-	assert.LessOrEqual(t, len(summary), 3020) // 3000 + truncation suffix
-	assert.Contains(t, summary, "... (truncated)")
 }

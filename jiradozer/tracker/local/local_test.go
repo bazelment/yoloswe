@@ -98,7 +98,7 @@ func TestComments(t *testing.T) {
 
 	before := time.Now().Add(-time.Millisecond)
 
-	err = tr.PostComment(ctx, issue.ID, "## Plan Complete\n\nHere is the plan.")
+	_, err = tr.PostComment(ctx, issue.ID, "## Plan Complete\n\nHere is the plan.")
 	require.NoError(t, err)
 
 	// Fetch comments since before the post.
@@ -189,7 +189,7 @@ func TestPostCommentNotFound(t *testing.T) {
 	tr := newTestTracker(t)
 	ctx := context.Background()
 
-	err := tr.PostComment(ctx, "nonexistent", "hello")
+	_, err := tr.PostComment(ctx, "nonexistent", "hello")
 	assert.Error(t, err)
 }
 

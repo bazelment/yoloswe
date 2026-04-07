@@ -182,7 +182,7 @@ func (t *Tracker) FetchComments(_ context.Context, issueID string, since time.Ti
 
 	var out []tracker.Comment
 	for _, c := range f.Comments {
-		if c.CreatedAt.After(since) {
+		if !c.CreatedAt.Before(since) {
 			out = append(out, tracker.Comment{
 				ID:        c.ID,
 				Body:      c.Body,
@@ -203,24 +203,35 @@ func (t *Tracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.Wo
 	}, nil
 }
 
-func (t *Tracker) PostComment(_ context.Context, issueID string, body string) error {
+func (t *Tracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	f, err := t.readFile(issueID)
 	if err != nil {
-		return err
+		return tracker.Comment{}, err
 	}
 
-	f.Comments = append(f.Comments, comment{
+	now := time.Now()
+	c := comment{
 		ID:        fmt.Sprintf("c-%d", len(f.Comments)+1),
 		Body:      body,
 		UserName:  "jiradozer",
 		IsSelf:    true,
-		CreatedAt: time.Now(),
-	})
+		CreatedAt: now,
+	}
+	f.Comments = append(f.Comments, c)
 
-	return t.writeFile(issueID, f)
+	if err := t.writeFile(issueID, f); err != nil {
+		return tracker.Comment{}, err
+	}
+	return tracker.Comment{
+		ID:        c.ID,
+		Body:      c.Body,
+		UserName:  c.UserName,
+		IsSelf:    true,
+		CreatedAt: now,
+	}, nil
 }
 
 func (t *Tracker) UpdateIssueState(_ context.Context, issueID string, stateID string) error {

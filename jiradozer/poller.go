@@ -89,8 +89,9 @@ func ParseCommentAction(body string) FeedbackAction {
 	}
 }
 
-// PostWaitingComment posts a standardized "waiting for review" comment.
-func PostWaitingComment(ctx context.Context, t tracker.IssueTracker, issueID string, step WorkflowStep) error {
+// PostWaitingComment posts a standardized "waiting for review" comment and
+// returns the created comment with its server-assigned timestamp.
+func PostWaitingComment(ctx context.Context, t tracker.IssueTracker, issueID string, step WorkflowStep) (tracker.Comment, error) {
 	body := fmt.Sprintf("**%s** — Waiting for review.\n\nReply with:\n- `approve` to proceed to the next step\n- `redo` to re-run this step\n- Any other comment to provide feedback for revision", step)
 	return t.PostComment(ctx, issueID, body)
 }

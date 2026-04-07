@@ -153,7 +153,7 @@ func (f *FakeTracker) FetchComments(_ context.Context, issueID string, since tim
 	}
 	var out []tracker.Comment
 	for _, c := range fi.comments {
-		if c.CreatedAt.After(since) {
+		if !c.CreatedAt.Before(since) {
 			out = append(out, c)
 		}
 	}
@@ -169,23 +169,24 @@ func (f *FakeTracker) FetchWorkflowStates(_ context.Context, teamID string) ([]t
 	return out, nil
 }
 
-func (f *FakeTracker) PostComment(_ context.Context, issueID string, body string) error {
+func (f *FakeTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("PostComment", issueID, body)
 	fi, ok := f.issues[issueID]
 	if !ok {
-		return fmt.Errorf("issue %q not found", issueID)
+		return tracker.Comment{}, fmt.Errorf("issue %q not found", issueID)
 	}
 	f.nextID++
-	fi.comments = append(fi.comments, tracker.Comment{
+	comment := tracker.Comment{
 		ID:        fmt.Sprintf("comment-%d", f.nextID),
 		Body:      body,
 		UserName:  "jiradozer-bot",
 		IsSelf:    true,
 		CreatedAt: time.Now(),
-	})
-	return nil
+	}
+	fi.comments = append(fi.comments, comment)
+	return comment, nil
 }
 
 func (f *FakeTracker) UpdateIssueState(_ context.Context, issueID string, stateID string) error {

@@ -45,8 +45,8 @@ func (m *mockDiscoveryTracker) FetchComments(_ context.Context, _ string, _ time
 func (m *mockDiscoveryTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
 	return nil, nil
 }
-func (m *mockDiscoveryTracker) PostComment(_ context.Context, _ string, _ string) error {
-	return nil
+func (m *mockDiscoveryTracker) PostComment(_ context.Context, _ string, _ string) (tracker.Comment, error) {
+	return tracker.Comment{}, nil
 }
 func (m *mockDiscoveryTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
 	return nil

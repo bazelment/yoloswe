@@ -77,11 +77,11 @@ func TestLinear_PostAndFetchComment(t *testing.T) {
 
 	// Post a test comment.
 	commentBody := "**Integration Test** — " + time.Now().Format(time.RFC3339)
-	err = client.PostComment(ctx, issue.ID, commentBody)
+	posted, err := client.PostComment(ctx, issue.ID, commentBody)
 	require.NoError(t, err)
 
 	// Fetch comments and verify ours is there.
-	since := time.Now().Add(-10 * time.Second)
+	since := posted.CreatedAt.Add(-10 * time.Second)
 	comments, err := client.FetchComments(ctx, issue.ID, since)
 	require.NoError(t, err)
 
@@ -151,7 +151,7 @@ func TestLinear_CommentPolling(t *testing.T) {
 	commentBody := "polling-test-" + marker
 	since := time.Now().Add(-2 * time.Second)
 
-	err = client.PostComment(ctx, issue.ID, commentBody)
+	_, err = client.PostComment(ctx, issue.ID, commentBody)
 	require.NoError(t, err)
 
 	// Fetch comments and verify ours is there, with correct IsSelf flag.
@@ -204,7 +204,7 @@ func TestLinear_LGTM_Variants_RealComments(t *testing.T) {
 	for _, v := range variants {
 		t.Run(v.body, func(t *testing.T) {
 			// Post the comment.
-			err := client.PostComment(ctx, issue.ID, v.body)
+			_, err := client.PostComment(ctx, issue.ID, v.body)
 			require.NoError(t, err)
 
 			// Fetch and parse.
