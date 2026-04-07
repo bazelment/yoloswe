@@ -247,7 +247,7 @@ func run(ctx context.Context, args runArgs) error {
 			case "ship":
 				cfg.Ship.AutoApprove = true
 			default:
-				return fmt.Errorf("unknown step %q in --auto-approve (valid: plan, build, validate, ship, all)", s)
+				return fmt.Errorf("unknown step %q in --auto-approve (valid: %s, all)", s, strings.Join(allSteps, ", "))
 			}
 		}
 	}
@@ -276,7 +276,7 @@ func run(ctx context.Context, args runArgs) error {
 
 	// Local description mode.
 	if args.description != "" {
-		return runFromDescription(ctx, args.description, issueTracker, cfg, logger)
+		return runFromDescription(ctx, args.description, args.runStep, issueTracker, cfg, logger)
 	}
 
 	// Multi-issue TUI mode (only when no --issue flag was given).
@@ -293,22 +293,7 @@ func run(ctx context.Context, args runArgs) error {
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
 
 	if args.runStep != "" {
-		stepCfg, ok := cfg.StepByName(args.runStep)
-		if !ok {
-			return fmt.Errorf("unknown step %q (valid: plan, build, validate, ship)", args.runStep)
-		}
-		resolved := cfg.ResolveStep(stepCfg)
-		data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
-		output, sessionID, err := jiradozer.RunStepAgent(ctx, args.runStep, data, resolved, cfg.WorkDir, "", "", logger)
-		if err != nil {
-			return fmt.Errorf("run-step %s: %w", args.runStep, err)
-		}
-		if output == "" {
-			logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", args.runStep, "session_id", sessionID)
-		} else {
-			fmt.Printf("=== %s output ===\n%s\n", args.runStep, output)
-		}
-		return nil
+		return runSingleStep(ctx, args.runStep, issue, cfg, logger)
 	}
 
 	// Run the full workflow.
@@ -399,7 +384,7 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	}
 }
 
-func runFromDescription(ctx context.Context, description string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
+func runFromDescription(ctx context.Context, description, runStep string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
 	lt, ok := issueTracker.(*local.Tracker)
 	if !ok {
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
@@ -414,8 +399,31 @@ func runFromDescription(ctx context.Context, description string, issueTracker tr
 	}
 	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
 
+	if runStep != "" {
+		return runSingleStep(ctx, runStep, issue, cfg, logger)
+	}
+
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	return wf.Run(ctx)
+}
+
+func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, logger *slog.Logger) error {
+	stepCfg, ok := cfg.StepByName(stepName)
+	if !ok {
+		return fmt.Errorf("unknown step %q (valid: %s)", stepName, strings.Join(allSteps, ", "))
+	}
+	resolved := cfg.ResolveStep(stepCfg)
+	data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
+	output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, resolved, cfg.WorkDir, "", "", logger)
+	if err != nil {
+		return fmt.Errorf("run-step %s: %w", stepName, err)
+	}
+	if output == "" {
+		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", sessionID)
+	} else {
+		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
+	}
+	return nil
 }
 
 var allSteps = []string{"plan", "build", "validate", "ship"}
