@@ -193,6 +193,15 @@ func TestPostCommentNotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestPathTraversal(t *testing.T) {
+	tr := newTestTracker(t)
+	ctx := context.Background()
+
+	_, err := tr.FetchIssue(ctx, "../../../etc/passwd")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "path escapes tracker directory")
+}
+
 func TestUpdateStateNotFound(t *testing.T) {
 	tr := newTestTracker(t)
 	ctx := context.Background()

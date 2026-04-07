@@ -127,6 +127,9 @@ func (t *Tracker) FetchIssue(_ context.Context, identifier string) (*tracker.Iss
 
 	// Fast path: LOCAL-N identifiers map directly to local-N.json files.
 	issueID := strings.ToLower(identifier)
+	if _, err := t.filePath(issueID); err != nil {
+		return nil, err // path traversal attempt
+	}
 	if f, err := t.readFile(issueID); err == nil {
 		return toTrackerIssue(&f.Issue), nil
 	}
@@ -246,12 +249,23 @@ func (t *Tracker) UpdateIssueState(_ context.Context, issueID string, stateID st
 
 // --- internal helpers ---
 
-func (t *Tracker) filePath(issueID string) string {
-	return filepath.Join(t.dir, issueID+".json")
+func (t *Tracker) filePath(issueID string) (string, error) {
+	p := filepath.Join(t.dir, issueID+".json")
+	// Ensure the resolved path stays within the issues directory to prevent
+	// path traversal via crafted identifiers (e.g. "../../../etc/passwd").
+	clean := filepath.Clean(p)
+	if !strings.HasPrefix(clean, filepath.Clean(t.dir)+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid issue ID %q: path escapes tracker directory", issueID)
+	}
+	return clean, nil
 }
 
 func (t *Tracker) readFile(issueID string) (*issueFile, error) {
-	data, err := os.ReadFile(t.filePath(issueID))
+	p, err := t.filePath(issueID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
 	if err != nil {
 		return nil, fmt.Errorf("read issue %q: %w", issueID, err)
 	}
@@ -267,7 +281,11 @@ func (t *Tracker) writeFile(issueID string, f *issueFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal issue %q: %w", issueID, err)
 	}
-	if err := os.WriteFile(t.filePath(issueID), data, 0o600); err != nil {
+	p, err := t.filePath(issueID)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(p, data, 0o600); err != nil {
 		return fmt.Errorf("write issue %q: %w", issueID, err)
 	}
 	return nil
