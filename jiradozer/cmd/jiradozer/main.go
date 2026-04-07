@@ -74,7 +74,7 @@ func main() {
 	}
 	rootCmd.SilenceUsage = true
 
-	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123 or owner/repo#42)")
+	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123, owner/repo#42, or https://github.com/owner/repo/issues/42)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
@@ -362,18 +362,21 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 		// to ensure the client is bound to the same repo as the issue. This
 		// prevents mutations (comment, close) targeting a different repo than
 		// the one the issue was fetched from.
-		team := cfg.Source.Team
+		var owner, repo string
 		if issueID != "" {
-			if idx := strings.LastIndex(issueID, "#"); idx > 0 {
-				team = issueID[:idx]
+			var err error
+			owner, repo, _, err = ghtracker.ParseIdentifier(issueID)
+			if err != nil {
+				return nil, fmt.Errorf("github tracker: %w", err)
 			}
-		}
-		if team == "" {
+		} else if cfg.Source.Team != "" {
+			var err error
+			owner, repo, err = ghtracker.ParseOwnerRepo(cfg.Source.Team)
+			if err != nil {
+				return nil, fmt.Errorf("github tracker requires source.team as 'owner/repo': %w", err)
+			}
+		} else {
 			return nil, fmt.Errorf("github tracker requires source.team or --issue as 'owner/repo#N'")
-		}
-		owner, repo, err := ghtracker.ParseOwnerRepo(team)
-		if err != nil {
-			return nil, fmt.Errorf("github tracker requires source.team or --issue as 'owner/repo#N': %w", err)
 		}
 		return ghtracker.NewClient(&wt.DefaultGHRunner{}, owner, repo), nil
 	case "local":

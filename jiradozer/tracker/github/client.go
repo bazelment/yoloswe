@@ -51,8 +51,30 @@ func ParseOwnerRepo(s string) (owner, repo string, err error) {
 	return parts[0], parts[1], nil
 }
 
-// parseIdentifier splits "owner/repo#123" into (owner, repo, number).
-func parseIdentifier(identifier string) (owner, repo string, number int, err error) {
+// parseIssueURL parses a GitHub issue URL into (owner, repo, number).
+// Accepts URLs like https://github.com/owner/repo/issues/123 (any host).
+func parseIssueURL(rawURL string) (owner, repo string, number int, err error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("invalid issue URL %q: %w", rawURL, err)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 4 || parts[2] != "issues" {
+		return "", "", 0, fmt.Errorf("invalid issue URL %q: expected https://github.com/owner/repo/issues/number", rawURL)
+	}
+	n, err := strconv.Atoi(parts[3])
+	if err != nil || n <= 0 {
+		return "", "", 0, fmt.Errorf("invalid issue number in URL %q", rawURL)
+	}
+	return parts[0], parts[1], n, nil
+}
+
+// ParseIdentifier splits "owner/repo#123" or a GitHub issue URL into (owner, repo, number).
+func ParseIdentifier(identifier string) (owner, repo string, number int, err error) {
+	if strings.HasPrefix(identifier, "https://") || strings.HasPrefix(identifier, "http://") {
+		return parseIssueURL(identifier)
+	}
+
 	hashIdx := strings.LastIndex(identifier, "#")
 	if hashIdx < 0 {
 		return "", "", 0, fmt.Errorf("invalid identifier %q: expected format owner/repo#number", identifier)
@@ -94,7 +116,7 @@ func (c *Client) ensureSelfLogin(ctx context.Context) error {
 }
 
 func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Issue, error) {
-	owner, repo, number, err := parseIdentifier(identifier)
+	owner, repo, number, err := ParseIdentifier(identifier)
 	if err != nil {
 		return nil, err
 	}
