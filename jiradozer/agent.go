@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"text/template"
 
@@ -122,6 +123,54 @@ func resolvePromptForExecution(configPrompt, defaultPrompt string, data PromptDa
 	return prompt, nil
 }
 
+// logEventHandler logs agent events at debug level for verbose output.
+// It also tracks plan file writes for the plan step.
+type logEventHandler struct {
+	logger       *slog.Logger
+	step         string
+	planFilePath string // set when Claude writes a plan .md file before ExitPlanMode
+	lastWriteMD  string // tracks the most recent .md Write for ExitPlanMode correlation
+}
+
+func (h *logEventHandler) OnText(text string) {
+	h.logger.Debug("agent text", "step", h.step, "text", text)
+}
+
+func (h *logEventHandler) OnThinking(thinking string) {
+	h.logger.Debug("agent thinking", "step", h.step, "thinking", thinking)
+}
+
+func (h *logEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
+	h.logger.Debug("agent tool start", "step", h.step, "tool", name, "id", id)
+}
+
+func (h *logEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
+	h.logger.Debug("agent tool complete", "step", h.step, "tool", name, "id", id, "is_error", isError)
+	// Track .md file writes — the last one before ExitPlanMode is the plan file.
+	// The plan file location varies: .claude/plans/, docs/plans/, etc. depending on
+	// user settings, so we track any .md Write and confirm when ExitPlanMode fires.
+	if name == "Write" && !isError {
+		if filePath, ok := input["file_path"].(string); ok {
+			if strings.HasSuffix(filePath, ".md") {
+				h.lastWriteMD = filePath
+				h.logger.Debug("tracked md write", "step", h.step, "path", filePath)
+			}
+		}
+	}
+	if name == "ExitPlanMode" && h.lastWriteMD != "" {
+		h.planFilePath = h.lastWriteMD
+		h.logger.Debug("plan file confirmed", "step", h.step, "path", h.planFilePath)
+	}
+}
+
+func (h *logEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
+	h.logger.Debug("agent turn complete", "step", h.step, "turn", turnNumber, "success", success, "duration_ms", durationMs, "cost_usd", costUSD)
+}
+
+func (h *logEventHandler) OnError(err error, context string) {
+	h.logger.Debug("agent error", "step", h.step, "error", err, "context", context)
+}
+
 // runAgent runs an agent with the given prompt and step configuration.
 func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, logger *slog.Logger) (string, string, error) {
 	model, ok := agent.ModelByID(cfg.Model)
@@ -141,13 +190,16 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"work_dir", workDir,
 		"resume", resumeSessionID != "",
 	)
+	logger.Debug("agent prompt", "step", stepName, "prompt", prompt)
 
+	handler := &logEventHandler{logger: logger, step: stepName}
 	var opts []agent.ExecuteOption
 	opts = append(opts,
 		agent.WithProviderWorkDir(workDir),
 		agent.WithProviderPermissionMode(cfg.PermissionMode),
 		agent.WithProviderModel(cfg.Model),
 		agent.WithProviderKeepUserSettings(),
+		agent.WithProviderEventHandler(handler),
 	)
 	if cfg.SystemPrompt != "" {
 		opts = append(opts, agent.WithProviderSystemPrompt(cfg.SystemPrompt))
@@ -180,7 +232,23 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		"output_tokens", result.Usage.OutputTokens,
 		"cost_usd", result.Usage.CostUSD,
 	)
-	return result.Text, result.SessionID, nil
+
+	output := resolveOutput(result.Text, handler, logger)
+	return output, result.SessionID, nil
+}
+
+// resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.
+func resolveOutput(agentText string, handler *logEventHandler, logger *slog.Logger) string {
+	if handler.planFilePath == "" {
+		return agentText
+	}
+	planContent, err := os.ReadFile(handler.planFilePath)
+	if err != nil {
+		logger.Warn("could not read plan file, using agent text output", "path", handler.planFilePath, "error", err)
+		return agentText
+	}
+	logger.Info("using plan file content", "path", handler.planFilePath)
+	return string(planContent)
 }
 
 func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {

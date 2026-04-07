@@ -278,8 +278,6 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 	}
 	if status.IsDone() {
 		status.CompletedAt = time.Now()
-	}
-	if status.IsDone() {
 		// Terminal updates should not be dropped. Block unless shutdown
 		// has been called (done closed), which means no consumer remains.
 		select {
