@@ -71,6 +71,7 @@ func main() {
 			})
 		},
 	}
+	rootCmd.SilenceUsage = true
 
 	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
