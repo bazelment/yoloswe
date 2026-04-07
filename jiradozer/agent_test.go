@@ -108,6 +108,18 @@ func TestRenderPrompt_DefaultValidate(t *testing.T) {
 	assert.Contains(t, output, "tests and linters")
 }
 
+func TestRenderPrompt_DefaultCreatePR(t *testing.T) {
+	data := PromptData{
+		BaseBranch: "main",
+	}
+
+	output, err := renderPrompt(defaultCreatePRPrompt, data)
+	require.NoError(t, err)
+	assert.Contains(t, output, "pull request")
+	assert.Contains(t, output, "main")
+	assert.Contains(t, output, "already exists")
+}
+
 func TestRenderPrompt_DefaultShip(t *testing.T) {
 	data := PromptData{
 		Identifier: "ENG-123",
@@ -119,6 +131,7 @@ func TestRenderPrompt_DefaultShip(t *testing.T) {
 	output, err := renderPrompt(defaultShipPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "pull request")
+	assert.Contains(t, output, "already exists")
 	assert.Contains(t, output, "main")
 	assert.Contains(t, output, "https://linear.app/team/ENG-123")
 }
@@ -146,6 +159,7 @@ func TestDefaultPromptForStep(t *testing.T) {
 	assert.NotEmpty(t, DefaultPromptForStep("plan"))
 	assert.NotEmpty(t, DefaultPromptForStep("build"))
 	assert.NotEmpty(t, DefaultPromptForStep("validate"))
+	assert.NotEmpty(t, DefaultPromptForStep("create_pr"))
 	assert.NotEmpty(t, DefaultPromptForStep("ship"))
 	assert.Empty(t, DefaultPromptForStep("unknown"))
 }

@@ -23,6 +23,7 @@ type Config struct {
 	BaseBranch   string        `yaml:"base_branch"`
 	Plan         StepConfig    `yaml:"plan"`
 	Build        StepConfig    `yaml:"build"`
+	CreatePR     StepConfig    `yaml:"create_pr"`
 	Validate     StepConfig    `yaml:"validate"`
 	Ship         StepConfig    `yaml:"ship"`
 	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
@@ -135,6 +136,7 @@ func defaultConfig() Config {
 		},
 		Plan:     StepConfig{PermissionMode: "plan", MaxTurns: 10},
 		Build:    StepConfig{PermissionMode: "bypass", MaxTurns: 30},
+		CreatePR: StepConfig{PermissionMode: "bypass", MaxTurns: 5},
 		Validate: StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		Ship:     StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		States: StatesConfig{
@@ -166,7 +168,7 @@ func (c *Config) validate() error {
 		c.PollInterval = 15 * time.Second
 	}
 	for name, step := range map[string]StepConfig{
-		"plan": c.Plan, "build": c.Build, "validate": c.Validate, "ship": c.Ship,
+		"plan": c.Plan, "build": c.Build, "create_pr": c.CreatePR, "validate": c.Validate, "ship": c.Ship,
 	} {
 		if step.Prompt != "" && len(step.Rounds) > 0 {
 			return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
@@ -195,6 +197,8 @@ func (c *Config) StepByName(name string) (StepConfig, bool) {
 		return c.Plan, true
 	case "build":
 		return c.Build, true
+	case "create_pr":
+		return c.CreatePR, true
 	case "validate":
 		return c.Validate, true
 	case "ship":

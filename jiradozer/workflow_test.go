@@ -119,6 +119,7 @@ func testConfig() *Config {
 		MaxBudgetUSD: 50.0,
 		Plan:         StepConfig{PermissionMode: "plan", MaxTurns: 10},
 		Build:        StepConfig{PermissionMode: "bypass", MaxTurns: 30},
+		CreatePR:     StepConfig{PermissionMode: "bypass", MaxTurns: 5},
 		Validate:     StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		Ship:         StepConfig{PermissionMode: "bypass", MaxTurns: 10},
 		States: StatesConfig{

@@ -187,7 +187,7 @@ func TestStepByName(t *testing.T) {
 	cfg, err := LoadConfig("testdata/valid_complete.yaml")
 	require.NoError(t, err)
 
-	for _, name := range []string{"plan", "build", "validate", "ship"} {
+	for _, name := range []string{"plan", "build", "create_pr", "validate", "ship"} {
 		step, ok := cfg.StepByName(name)
 		assert.True(t, ok, "step %s should exist", name)
 		assert.NotZero(t, step)

@@ -81,7 +81,9 @@ func (w *Workflow) Run(ctx context.Context) error {
 		case StepPlanReview:
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
-			w.runStepOrRounds(ctx, "build", w.config.Build, StepBuildReview, "build_complete")
+			w.runStepOrRounds(ctx, "build", w.config.Build, StepCreatingPR, "build_complete")
+		case StepCreatingPR:
+			w.runStep(ctx, "create_pr", w.config.CreatePR, StepBuildReview, "pr_created")
 		case StepBuildReview:
 			w.runReview(ctx, StepValidating, StepBuilding)
 		case StepValidating:
