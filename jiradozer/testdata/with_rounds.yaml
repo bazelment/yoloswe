@@ -1,0 +1,15 @@
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+validate:
+  permission_mode: bypass
+  max_turns: 10
+  max_budget_usd: 25.0
+  rounds:
+    - prompt: "Review code for {{.Identifier}}: simplify where possible."
+      max_turns: 15
+    - prompt: "Run tests for {{.Identifier}}: fix any failures."
+      model: opus
+      max_budget_usd: 30.0

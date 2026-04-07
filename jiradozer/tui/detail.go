@@ -72,7 +72,7 @@ func (d *detail) view(width int) string {
 	b.WriteString("\n")
 
 	// Workflow status
-	step := s.Step.String()
+	step := formatStep(*s)
 	style := stepStyle(s.Step)
 	icon := stepIcon(s.Step)
 	b.WriteString(styleSubtitle.Render("  Current Step: "))

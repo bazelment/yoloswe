@@ -24,6 +24,8 @@ type IssueStatus struct {
 	CompletedAt  time.Time
 	WorktreePath string
 	Step         WorkflowStep
+	RoundIndex   int // 0-based current round during multi-round steps (0 when not in rounds)
+	RoundTotal   int // total rounds in current step (0 = single-round step)
 }
 
 // IsDone returns true if the workflow has completed (successfully or with failure).
@@ -52,6 +54,8 @@ type managedWorkflow struct {
 	startedAt    time.Time
 	worktreePath string
 	branch       string
+	roundIndex   int // current round in multi-round step
+	roundTotal   int // total rounds (0 = single-round)
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -147,8 +151,15 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		// Skip terminal steps here — they are emitted by the goroutine
 		// below with the proper error attached.
 		if step != StepDone && step != StepFailed {
+			mw.roundIndex = 0
+			mw.roundTotal = 0
 			o.emitStatus(mw, step, nil)
 		}
+	}
+	wf.OnRoundProgress = func(roundIndex, roundTotal int) {
+		mw.roundIndex = roundIndex
+		mw.roundTotal = roundTotal
+		o.emitStatus(mw, wf.state.Current(), nil)
 	}
 
 	o.mu.Lock()
@@ -275,6 +286,8 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 		StartedAt:    mw.startedAt,
 		WorktreePath: mw.worktreePath,
 		Error:        err,
+		RoundIndex:   mw.roundIndex,
+		RoundTotal:   mw.roundTotal,
 	}
 	if status.IsDone() {
 		status.CompletedAt = time.Now()

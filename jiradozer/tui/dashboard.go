@@ -129,7 +129,7 @@ func (d *dashboard) view(width int) string {
 			title = title[:35] + "..."
 		}
 
-		step := s.Step.String()
+		step := formatStep(s)
 		style := stepStyle(s.Step)
 		icon := stepIcon(s.Step)
 
