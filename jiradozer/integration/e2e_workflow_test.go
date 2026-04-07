@@ -235,10 +235,23 @@ func TestE2E_HumanFeedback(t *testing.T) {
 
 	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
 
-	// Track transitions and how many times each review step is visited.
 	var transitions []jiradozer.WorkflowStep
 	var mu sync.Mutex
+	var wg sync.WaitGroup
 	planReviewCount := 0
+
+	// injectAfterDelay spawns a goroutine that waits briefly then injects a
+	// human comment. The delay ensures lastCommentAt is set before the
+	// injected comment's CreatedAt (the workflow sets lastCommentAt
+	// synchronously after the OnTransition callback returns).
+	injectAfterDelay := func(body string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(200 * time.Millisecond)
+			ft.InjectHumanComment(issue.ID, body)
+		}()
+	}
 
 	wf.OnTransition = func(step jiradozer.WorkflowStep) {
 		mu.Lock()
@@ -246,50 +259,28 @@ func TestE2E_HumanFeedback(t *testing.T) {
 		mu.Unlock()
 		t.Logf("transition → %s", step)
 
-		// Inject human comments asynchronously after the workflow reaches
-		// review steps. The delay ensures lastCommentAt is set before
-		// the injected comment's CreatedAt (the workflow sets lastCommentAt
-		// synchronously after this callback returns).
 		switch step {
 		case jiradozer.StepPlanReview:
 			mu.Lock()
 			planReviewCount++
 			visit := planReviewCount
 			mu.Unlock()
-			go func() {
-				time.Sleep(200 * time.Millisecond)
-				if visit == 1 {
-					// First plan review: send feedback to trigger redo.
-					t.Log("injecting redo feedback for plan review")
-					ft.InjectHumanComment(issue.ID, "Please also consider edge cases and error handling in the plan")
-				} else {
-					// Second plan review (after redo): approve.
-					t.Log("injecting approve for plan review (after redo)")
-					ft.InjectHumanComment(issue.ID, "lgtm")
-				}
-			}()
+			if visit == 1 {
+				injectAfterDelay("Please also consider edge cases and error handling in the plan")
+			} else {
+				injectAfterDelay("lgtm")
+			}
 		case jiradozer.StepBuildReview:
-			go func() {
-				time.Sleep(200 * time.Millisecond)
-				t.Log("injecting approve for build review")
-				ft.InjectHumanComment(issue.ID, "approve")
-			}()
+			injectAfterDelay("approve")
 		case jiradozer.StepValidateReview:
-			go func() {
-				time.Sleep(200 * time.Millisecond)
-				t.Log("injecting approve for validate review")
-				ft.InjectHumanComment(issue.ID, "ship it")
-			}()
+			injectAfterDelay("ship it")
 		case jiradozer.StepShipReview:
-			go func() {
-				time.Sleep(200 * time.Millisecond)
-				t.Log("injecting approve for ship review")
-				ft.InjectHumanComment(issue.ID, "approved")
-			}()
+			injectAfterDelay("approved")
 		}
 	}
 
 	err := wf.Run(ctx)
+	wg.Wait() // Ensure all inject goroutines finish before test returns.
 	require.NoError(t, err, "workflow should complete successfully")
 
 	assert.Equal(t, "state-done", ft.IssueStateID(issue.ID), "final tracker state should be done")
