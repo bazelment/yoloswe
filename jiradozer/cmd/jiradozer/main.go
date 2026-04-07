@@ -159,9 +159,12 @@ func run(ctx context.Context, args runArgs) error {
 		} else {
 			cfg = jiradozer.DefaultConfig()
 		}
-		// Force local tracker and clear team (description mode is single-issue).
+		// Force local tracker, clear team, and reset state names to match the
+		// local tracker's fixed states ("In Progress", "In Review", "Done").
 		cfg.Tracker.Kind = "local"
 		cfg.Source.Team = ""
+		defaults := jiradozer.DefaultConfig()
+		cfg.States = defaults.States
 		// Default all steps to auto-approve in local mode unless overridden.
 		if args.autoApprove == "" {
 			cfg.Plan.AutoApprove = true
