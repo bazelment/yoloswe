@@ -34,22 +34,25 @@ type Workflow struct {
 	// OnRoundProgress is called during multi-round steps to report round progress.
 	// roundIndex is 0-based current round; roundTotal is len(rounds).
 	OnRoundProgress func(roundIndex, roundTotal int)
-	lastCommentAt   time.Time
-	plan            string
-	buildOutput     string
-	feedback        string
+	// runStepAgent is the agent runner, overridable in tests.
+	runStepAgent  func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error)
+	lastCommentAt time.Time
+	plan          string
+	buildOutput   string
+	feedback      string
 }
 
 // NewWorkflow creates a new workflow for the given issue.
 func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
 	return &Workflow{
-		tracker:    t,
-		issue:      issue,
-		state:      NewStateMachine(),
-		config:     cfg,
-		logger:     logger,
-		stateIDs:   make(map[string]string),
-		sessionIDs: make(map[WorkflowStep]string),
+		tracker:      t,
+		issue:        issue,
+		state:        NewStateMachine(),
+		config:       cfg,
+		logger:       logger,
+		stateIDs:     make(map[string]string),
+		sessionIDs:   make(map[WorkflowStep]string),
+		runStepAgent: RunStepAgent,
 	}
 }
 
@@ -157,7 +160,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			w.OnRoundProgress(i, totalRounds)
 		}
 
-		output, _, err := RunStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+		output, _, err := w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
 		if err != nil {
 			w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
 			return
@@ -193,7 +196,7 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.logger.Info("step: "+stepName, "feedback", feedback != "", "resume", sessionID != "")
 
 	cfg := w.config.ResolveStep(stepCfg)
-	output, newSessionID, err := RunStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
+	output, newSessionID, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return

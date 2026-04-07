@@ -564,6 +564,36 @@ func TestWorkflow_MultipleRedoLoops(t *testing.T) {
 	assert.Len(t, sm.History(), 7)
 }
 
+// TestWorkflow_RunStep_SetsLastCommentAt verifies that runStep captures the server
+// timestamp from PostComment as the polling anchor, and that a stale lastCommentAt
+// from a prior review cycle is reset at step start rather than carried forward.
+func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
+	resultTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	mt := &mockWorkflowTracker{
+		workflowStates:   testWorkflowStates(),
+		postCommentReply: &tracker.Comment{CreatedAt: resultTime},
+	}
+
+	cfg := testConfig()
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	// Inject a stale lastCommentAt simulating a leftover from a prior review cycle.
+	staleTime := time.Date(2025, 6, 14, 10, 0, 0, 0, time.UTC)
+	wf.lastCommentAt = staleTime
+
+	// Stub runStepAgent so runStep executes without invoking a real agent.
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *slog.Logger) (string, string, error) {
+		return "step output", "session-1", nil
+	}
+
+	wf.runStep(context.Background(), "plan", cfg.Plan, StepPlanReview, "plan_complete")
+
+	// lastCommentAt should be resultTime (from the result comment), not staleTime.
+	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be set from result comment, stale value discarded")
+}
+
 // TestWorkflow_TransitionToReview_PreservesLastCommentAt verifies that
 // transitionToReview does not overwrite a lastCommentAt that was already set
 // by the step result comment, preventing a race where user approval posted
