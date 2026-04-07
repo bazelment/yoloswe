@@ -128,7 +128,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)
 
-	w.logger.Info("step: "+stepName, "rounds", totalRounds, "feedback", w.feedback != "")
+	feedback := w.feedback
+	w.feedback = ""
+
+	w.logger.Info("step: "+stepName, "rounds", totalRounds, "feedback", feedback != "")
 
 	data := w.promptData()
 	var allOutputs []string
@@ -139,9 +142,9 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		}
 
 		roundCfg := ResolveRound(round, resolved)
-		feedback := ""
+		roundFeedback := ""
 		if i == 0 {
-			feedback = w.feedback
+			roundFeedback = feedback
 		}
 
 		w.logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
@@ -149,7 +152,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			w.OnRoundProgress(i, totalRounds)
 		}
 
-		output, _, err := RunStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, feedback, "", w.logger)
+		output, _, err := RunStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
 		if err != nil {
 			w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
 			return
@@ -172,10 +175,13 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	currentStep := w.state.Current()
 	sessionID := w.sessionIDs[currentStep]
 
-	w.logger.Info("step: "+stepName, "feedback", w.feedback != "", "resume", sessionID != "")
+	feedback := w.feedback
+	w.feedback = ""
+
+	w.logger.Info("step: "+stepName, "feedback", feedback != "", "resume", sessionID != "")
 
 	cfg := w.config.ResolveStep(stepCfg)
-	output, newSessionID, err := RunStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, w.feedback, sessionID, w.logger)
+	output, newSessionID, err := RunStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return
@@ -281,6 +287,11 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowStep, trigger string) {
 	if err := w.transition(reviewStep, trigger); err != nil {
 		w.fail(ctx, err)
+		return
+	}
+
+	// Skip review machinery (issue state update, waiting comment) for non-review steps.
+	if !reviewStep.IsReview() {
 		return
 	}
 
