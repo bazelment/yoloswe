@@ -37,6 +37,15 @@ func e2eWorkflowStates() []tracker.WorkflowState {
 	}
 }
 
+func e2eStepConfig(autoApprove bool) jiradozer.StepConfig {
+	return jiradozer.StepConfig{
+		Model:        "haiku",
+		MaxTurns:     3,
+		MaxBudgetUSD: 2.0,
+		AutoApprove:  autoApprove,
+	}
+}
+
 func e2eConfig(t *testing.T, workDir string) *jiradozer.Config {
 	t.Helper()
 	cfg := jiradozer.DefaultConfigForTest()
@@ -46,38 +55,58 @@ func e2eConfig(t *testing.T, workDir string) *jiradozer.Config {
 	cfg.MaxBudgetUSD = 5.0
 	cfg.PollInterval = 50 * time.Millisecond
 
-	// All steps use haiku, low turns, auto-approve.
-	cfg.Plan.Model = "haiku"
-	cfg.Plan.MaxTurns = 3
-	cfg.Plan.MaxBudgetUSD = 2.0
-	cfg.Plan.AutoApprove = true
+	cfg.Plan = e2eStepConfig(true)
+	cfg.Plan.PermissionMode = "plan"
+	cfg.Build = e2eStepConfig(true)
+	cfg.Build.PermissionMode = "bypass"
 
-	cfg.Build.Model = "haiku"
-	cfg.Build.MaxTurns = 3
-	cfg.Build.MaxBudgetUSD = 2.0
-	cfg.Build.AutoApprove = true
-
-	// Custom validate prompt: avoids running test frameworks.
-	cfg.Validate.Model = "haiku"
-	cfg.Validate.MaxTurns = 3
-	cfg.Validate.MaxBudgetUSD = 2.0
-	cfg.Validate.AutoApprove = true
+	cfg.Validate = e2eStepConfig(true)
+	cfg.Validate.PermissionMode = "bypass"
 	cfg.Validate.Prompt = `Issue: {{.Identifier}} — {{.Title}}
 
 Check if hello.txt exists in the current directory and contains "hello world".
 Report what you find. Do not run any test frameworks or linters.`
 
-	// Custom ship prompt: avoids gh pr create which needs a real git remote.
-	cfg.Ship.Model = "haiku"
-	cfg.Ship.MaxTurns = 3
-	cfg.Ship.MaxBudgetUSD = 2.0
-	cfg.Ship.AutoApprove = true
+	cfg.Ship = e2eStepConfig(true)
+	cfg.Ship.PermissionMode = "bypass"
 	cfg.Ship.Prompt = `Issue: {{.Identifier}} — {{.Title}}
 
 Write a file named SHIP_SUMMARY.md summarizing what was built and how it would be shipped.
 Do not attempt to create a pull request or run any git commands.`
 
 	return cfg
+}
+
+var stepCompleteHeadings = []string{"## Plan Complete", "## Build Complete", "## Validate Complete", "## Ship Complete"}
+
+func postCommentBodies(ft *FakeTracker) []string {
+	var bodies []string
+	for _, c := range ft.CallsFor("PostComment") {
+		bodies = append(bodies, c.Args[1])
+	}
+	return bodies
+}
+
+// assertBodyContains checks that at least one body string contains the given substring.
+func assertBodyContains(t *testing.T, bodies []string, sub string) {
+	t.Helper()
+	for _, b := range bodies {
+		if strings.Contains(b, sub) {
+			return
+		}
+	}
+	t.Errorf("no comment body contains %q", sub)
+}
+
+// countBodies returns how many body strings contain the given substring.
+func countBodies(bodies []string, sub string) int {
+	n := 0
+	for _, b := range bodies {
+		if strings.Contains(b, sub) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestE2E_HappyPath_AllAutoApprove runs the full plan→build→validate→ship
@@ -112,10 +141,8 @@ func TestE2E_HappyPath_AllAutoApprove(t *testing.T) {
 	err := wf.Run(ctx)
 	require.NoError(t, err, "workflow should complete successfully")
 
-	// Final tracker state should be "done".
 	assert.Equal(t, "state-done", ft.IssueStateID(issue.ID), "final tracker state should be done")
 
-	// Transition sequence should follow the happy path.
 	mu.Lock()
 	got := transitions
 	mu.Unlock()
@@ -133,35 +160,19 @@ func TestE2E_HappyPath_AllAutoApprove(t *testing.T) {
 	}
 	assert.Equal(t, expected, got, "transitions should follow happy path order")
 
-	// FetchWorkflowStates called once at start.
 	assert.Len(t, ft.CallsFor("FetchWorkflowStates"), 1)
 
-	// UpdateIssueState: first is in_progress, last is done.
 	updateCalls := ft.CallsFor("UpdateIssueState")
 	require.GreaterOrEqual(t, len(updateCalls), 2, "at least in_progress + done")
-	assert.Equal(t, "state-ip", updateCalls[0].Args[1], "first state update should be in_progress")
-	assert.Equal(t, "state-done", updateCalls[len(updateCalls)-1].Args[1], "last state update should be done")
+	assert.Equal(t, "state-ip", updateCalls[0].Args[1])
+	assert.Equal(t, "state-done", updateCalls[len(updateCalls)-1].Args[1])
 
-	// PostComment should include step-complete headings.
-	postCalls := ft.CallsFor("PostComment")
-	assert.GreaterOrEqual(t, len(postCalls), 4, "at least 4 PostComment calls (one per step)")
-
-	var bodies []string
-	for _, c := range postCalls {
-		bodies = append(bodies, c.Args[1])
-	}
-	for _, heading := range []string{"## Plan Complete", "## Build Complete", "## Validate Complete", "## Ship Complete"} {
-		found := false
-		for _, b := range bodies {
-			if strings.Contains(b, heading) {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "should have comment containing %q", heading)
+	postBodies := postCommentBodies(ft)
+	assert.GreaterOrEqual(t, len(postBodies), 4, "at least 4 PostComment calls (one per step)")
+	for _, heading := range stepCompleteHeadings {
+		assertBodyContains(t, postBodies, heading)
 	}
 
-	// FetchComments should NOT be called since all steps are auto-approved.
 	assert.Empty(t, ft.CallsFor("FetchComments"), "FetchComments should not be called with auto-approve")
 }
 
@@ -281,10 +292,8 @@ func TestE2E_HumanFeedback(t *testing.T) {
 	err := wf.Run(ctx)
 	require.NoError(t, err, "workflow should complete successfully")
 
-	// Final tracker state should be "done".
 	assert.Equal(t, "state-done", ft.IssueStateID(issue.ID), "final tracker state should be done")
 
-	// Transition sequence should include the plan redo loop.
 	mu.Lock()
 	got := transitions
 	mu.Unlock()
@@ -292,9 +301,9 @@ func TestE2E_HumanFeedback(t *testing.T) {
 	expected := []jiradozer.WorkflowStep{
 		jiradozer.StepPlanning,
 		jiradozer.StepPlanReview,
-		jiradozer.StepPlanning,     // redo: back to planning
-		jiradozer.StepPlanReview,   // second review
-		jiradozer.StepBuilding,     // approved
+		jiradozer.StepPlanning,   // redo: back to planning
+		jiradozer.StepPlanReview, // second review
+		jiradozer.StepBuilding,
 		jiradozer.StepBuildReview,
 		jiradozer.StepValidating,
 		jiradozer.StepValidateReview,
@@ -304,44 +313,20 @@ func TestE2E_HumanFeedback(t *testing.T) {
 	}
 	assert.Equal(t, expected, got, "transitions should include plan redo loop")
 
-	// FetchComments should have been called (no auto-approve).
 	fetchCalls := ft.CallsFor("FetchComments")
 	assert.GreaterOrEqual(t, len(fetchCalls), 5, "FetchComments called at least 5 times (2 plan reviews + 3 other reviews)")
 
-	// PostComment should include waiting comments for each review step.
-	postCalls := ft.CallsFor("PostComment")
-	var bodies []string
-	for _, c := range postCalls {
-		bodies = append(bodies, c.Args[1])
+	postBodies := postCommentBodies(ft)
+
+	// Waiting comments posted for each review (not auto-approved).
+	assert.GreaterOrEqual(t, countBodies(postBodies, "Waiting for review"), 5,
+		"should have 5 waiting comments (2 plan + build + validate + ship)")
+
+	for _, heading := range stepCompleteHeadings {
+		assertBodyContains(t, postBodies, heading)
 	}
 
-	// Verify waiting comments were posted (not auto-approved).
-	waitingCount := 0
-	for _, b := range bodies {
-		if strings.Contains(b, "Waiting for review") {
-			waitingCount++
-		}
-	}
-	assert.GreaterOrEqual(t, waitingCount, 5, "should have waiting comments for each review (5 total: 2 plan + build + validate + ship)")
-
-	// Verify all step-complete comments are present.
-	for _, heading := range []string{"## Plan Complete", "## Build Complete", "## Validate Complete", "## Ship Complete"} {
-		found := false
-		for _, b := range bodies {
-			if strings.Contains(b, heading) {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "should have comment containing %q", heading)
-	}
-
-	// Plan Complete should appear twice (original + redo).
-	planCompleteCount := 0
-	for _, b := range bodies {
-		if strings.Contains(b, "## Plan Complete") {
-			planCompleteCount++
-		}
-	}
-	assert.Equal(t, 2, planCompleteCount, "Plan Complete should appear twice (original + redo)")
+	// Plan Complete appears twice (original + redo).
+	assert.Equal(t, 2, countBodies(postBodies, "## Plan Complete"),
+		"Plan Complete should appear twice (original + redo)")
 }
