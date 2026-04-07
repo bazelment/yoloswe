@@ -61,11 +61,21 @@ func TestParseIdentifier(t *testing.T) {
 		{"#123", "", "", 0, true},
 		{"/repo#123", "", "", 0, true},
 		{"owner/#123", "", "", 0, true},
+
+		// GitHub issue URLs.
+		{"https://github.com/owner/repo/issues/123", "owner", "repo", 123, false},
+		{"http://github.com/owner/repo/issues/456", "owner", "repo", 456, false},
+		{"https://github.com/owner/repo/issues/123#issuecomment-789", "owner", "repo", 123, false},
+		{"https://github.enterprise.com/org/my-repo/issues/7", "org", "my-repo", 7, false},
+		{"https://github.com/owner/repo/pulls/123", "", "", 0, true},
+		{"https://github.com/owner/repo/issues/abc", "", "", 0, true},
+		{"https://github.com/owner/repo/issues/0", "", "", 0, true},
+		{"https://github.com/owner/repo", "", "", 0, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			owner, repo, number, err := parseIdentifier(tt.input)
+			owner, repo, number, err := ParseIdentifier(tt.input)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
