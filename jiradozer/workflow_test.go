@@ -23,13 +23,15 @@ type trackerCall struct {
 }
 
 type mockWorkflowTracker struct {
-	commentSets      [][]tracker.Comment // sequence of comment responses for polling
-	workflowStates   []tracker.WorkflowState
-	comments         []tracker.Comment // returned by FetchComments
-	postCommentReply *tracker.Comment  // if set, PostComment always returns this
-	calls            []trackerCall
-	mu               sync.Mutex
-	commentIdx       int // tracks which comment set to return (for polling)
+	commentSets        [][]tracker.Comment // sequence of comment responses for polling
+	workflowStates     []tracker.WorkflowState
+	comments           []tracker.Comment  // returned by FetchComments
+	postCommentReply   *tracker.Comment   // if set, PostComment always returns this
+	postCommentReplies []*tracker.Comment // if set, PostComment returns these in order (last repeated)
+	calls              []trackerCall
+	mu                 sync.Mutex
+	commentIdx         int // tracks which comment set to return (for polling)
+	postCommentIdx     int // tracks index into postCommentReplies
 }
 
 func (m *mockWorkflowTracker) FetchIssue(_ context.Context, id string) (*tracker.Issue, error) {
@@ -59,9 +61,24 @@ func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID stri
 }
 
 func (m *mockWorkflowTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
-	m.recordCall("PostComment", issueID, body)
+	m.mu.Lock()
+	m.calls = append(m.calls, trackerCall{method: "PostComment", args: []string{issueID, body}})
+	var reply *tracker.Comment
 	if m.postCommentReply != nil {
-		return *m.postCommentReply, nil
+		reply = m.postCommentReply
+	} else if len(m.postCommentReplies) > 0 {
+		idx := m.postCommentIdx
+		if idx >= len(m.postCommentReplies) {
+			idx = len(m.postCommentReplies) - 1
+		} else {
+			m.postCommentIdx++
+		}
+		reply = m.postCommentReplies[idx]
+	}
+	m.mu.Unlock()
+
+	if reply != nil {
+		return *reply, nil
 	}
 	return tracker.Comment{CreatedAt: time.Now()}, nil
 }
@@ -565,13 +582,22 @@ func TestWorkflow_MultipleRedoLoops(t *testing.T) {
 }
 
 // TestWorkflow_RunStep_SetsLastCommentAt verifies that runStep captures the server
-// timestamp from PostComment as the polling anchor, and that a stale lastCommentAt
-// from a prior review cycle is reset at step start rather than carried forward.
+// timestamp from the result PostComment as the polling anchor, and that a stale
+// lastCommentAt from a prior review cycle is reset at step start. Uses distinct
+// timestamps for the result comment vs the subsequent waiting comment so that the
+// test fails if runStep stops capturing from the result comment (instead of silently
+// passing via the transitionToReview fallback).
 func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 	resultTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	waitingTime := time.Date(2025, 6, 15, 12, 0, 5, 0, time.UTC)
+
+	// First PostComment = result comment, second = waiting comment.
 	mt := &mockWorkflowTracker{
-		workflowStates:   testWorkflowStates(),
-		postCommentReply: &tracker.Comment{CreatedAt: resultTime},
+		workflowStates: testWorkflowStates(),
+		postCommentReplies: []*tracker.Comment{
+			{CreatedAt: resultTime},
+			{CreatedAt: waitingTime},
+		},
 	}
 
 	cfg := testConfig()
@@ -590,8 +616,56 @@ func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 
 	wf.runStep(context.Background(), "plan", cfg.Plan, StepPlanReview, "plan_complete")
 
-	// lastCommentAt should be resultTime (from the result comment), not staleTime.
-	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be set from result comment, stale value discarded")
+	// Must be resultTime (result comment), not waitingTime (waiting comment) or staleTime.
+	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be set from result comment, not waiting comment or stale value")
+}
+
+// TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound verifies that
+// runStepRounds captures the server timestamp from the final round's PostComment
+// as the polling anchor, discarding any stale value from a prior review cycle.
+// Uses distinct timestamps per round so that only the final round's timestamp
+// wins — confirming it is the final-round comment, not an earlier one.
+func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
+	round1Time := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	round2Time := time.Date(2025, 6, 15, 12, 1, 0, 0, time.UTC)
+	waitingTime := time.Date(2025, 6, 15, 12, 2, 0, 0, time.UTC)
+
+	// Sequence: round1 result comment → round2 result comment → waiting comment.
+	mt := &mockWorkflowTracker{
+		workflowStates: testWorkflowStates(),
+		postCommentReplies: []*tracker.Comment{
+			{CreatedAt: round1Time},
+			{CreatedAt: round2Time},
+			{CreatedAt: waitingTime},
+		},
+	}
+
+	cfg := testConfig()
+	// Build a two-round step config.
+	roundsCfg := StepConfig{
+		Rounds: []RoundConfig{
+			{Prompt: "round one"},
+			{Prompt: "round two"},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	// Inject a stale lastCommentAt simulating a prior review cycle.
+	staleTime := time.Date(2025, 6, 14, 10, 0, 0, 0, time.UTC)
+	wf.lastCommentAt = staleTime
+
+	// Stub runStepAgent so rounds execute without a real agent.
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *slog.Logger) (string, string, error) {
+		return "round output", "", nil
+	}
+
+	wf.runStepRounds(context.Background(), "plan", roundsCfg, StepPlanReview, "plan_complete")
+
+	// Must be round2Time (final round's result comment), not round1Time, waitingTime, or staleTime.
+	assert.Equal(t, round2Time, wf.lastCommentAt, "lastCommentAt should be set from final round's result comment")
 }
 
 // TestWorkflow_TransitionToReview_PreservesLastCommentAt verifies that
