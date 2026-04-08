@@ -1,6 +1,7 @@
 package jiradozer
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -394,6 +395,44 @@ func TestReplay_PlanFileReadFailure(t *testing.T) {
 	// resolveOutput falls back to agent text when file is unreadable.
 	output := resolveOutput("conversational summary", h, slog.Default())
 	assert.Equal(t, "conversational summary", output)
+}
+
+func TestRunCommand_Success(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	data := PromptData{Identifier: "ENG-1"}
+	output, err := RunCommand(ctx, "build", data, "echo hello", t.TempDir(), slog.Default())
+	require.NoError(t, err)
+	assert.Contains(t, output, "hello")
+}
+
+func TestRunCommand_Failure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	data := PromptData{}
+	output, err := RunCommand(ctx, "build", data, "exit 1", t.TempDir(), slog.Default())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "command failed")
+	_ = output
+}
+
+func TestRunCommand_TemplateRendering(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	data := PromptData{Identifier: "ENG-42"}
+	output, err := RunCommand(ctx, "build", data, "echo {{.Identifier}}", t.TempDir(), slog.Default())
+	require.NoError(t, err)
+	assert.Contains(t, output, "ENG-42")
+}
+
+func TestRunCommand_WorkDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	data := PromptData{}
+	output, err := RunCommand(ctx, "build", data, "pwd", dir, slog.Default())
+	require.NoError(t, err)
+	assert.Contains(t, output, dir)
 }
 
 // TestReplay_PlanContentPostedToTracker verifies the full chain: plan file content

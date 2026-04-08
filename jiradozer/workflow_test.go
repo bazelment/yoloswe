@@ -670,6 +670,46 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 	assert.Equal(t, round2Time, wf.lastCommentAt, "lastCommentAt should be set from final round's result comment")
 }
 
+// TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection verifies that when
+// the first round is a command, redo feedback is injected into the first agent
+// round (not the command round, which cannot accept feedback).
+func TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{
+		workflowStates: testWorkflowStates(),
+		postCommentReply: &tracker.Comment{
+			CreatedAt: time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC),
+		},
+	}
+
+	cfg := testConfig()
+	// Two-round step: command first, then agent.
+	roundsCfg := StepConfig{
+		Rounds: []RoundConfig{
+			{Command: "echo command-round"},
+			{Prompt: "agent round prompt"},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	// Inject redo feedback — should go to the agent round (index 1), not the command round.
+	wf.feedback = "please fix the tests"
+
+	var capturedFeedback string
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, feedback string, _ string, _ *slog.Logger) (string, string, error) {
+		capturedFeedback = feedback
+		return "agent output", "", nil
+	}
+
+	wf.runStepRounds(context.Background(), "build", roundsCfg, StepBuildReview, "build_complete")
+
+	assert.Equal(t, "please fix the tests", capturedFeedback, "feedback should be injected into the first agent round")
+}
+
 // TestWorkflow_TransitionToReview_PreservesLastCommentAt verifies that
 // transitionToReview does not overwrite a lastCommentAt that was already set
 // by the step result comment, preventing a race where user approval posted

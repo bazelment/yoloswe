@@ -123,9 +123,9 @@ func (w *Workflow) runStepOrRounds(ctx context.Context, stepName string, stepCfg
 	w.runStep(ctx, stepName, stepCfg, reviewStep, trigger)
 }
 
-// runStepRounds runs multiple agent sessions sequentially for a multi-round step.
-// Each round gets a fresh session (no resume). On redo, all rounds re-run from the
-// start with feedback injected into round 1 only.
+// runStepRounds runs rounds sequentially for a multi-round step. Each round is
+// either a shell command or an agent session (no resume). On redo, all rounds
+// re-run from the start; feedback is injected into the first agent round only.
 func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)
@@ -142,16 +142,11 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 
 	data := w.promptData()
 	var allOutputs []string
+	feedbackInjected := false
 	for i, round := range stepCfg.Rounds {
 		if ctx.Err() != nil {
 			w.fail(ctx, ctx.Err())
 			return
-		}
-
-		roundCfg := ResolveRound(round, resolved)
-		roundFeedback := ""
-		if i == 0 {
-			roundFeedback = feedback
 		}
 
 		w.logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
@@ -159,10 +154,26 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			w.OnRoundProgress(i, totalRounds)
 		}
 
-		output, _, err := w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
-		if err != nil {
-			w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
-			return
+		var output string
+		var err error
+		if round.IsCommand() {
+			output, err = RunCommand(ctx, stepName, data, round.Command, w.config.WorkDir, w.logger)
+			if err != nil {
+				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
+				return
+			}
+		} else {
+			roundCfg := ResolveRound(round, resolved)
+			roundFeedback := ""
+			if !feedbackInjected {
+				roundFeedback = feedback
+				feedbackInjected = true
+			}
+			output, _, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+			if err != nil {
+				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
+				return
+			}
 		}
 		allOutputs = append(allOutputs, output)
 
@@ -179,6 +190,14 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 				w.lastCommentAt = roundComment.CreatedAt
 			}
 		}
+	}
+
+	// Warn if feedback was provided but could not be injected (all rounds are
+	// command rounds). Feedback cannot be passed to shell commands; the redo
+	// cycle will re-run commands identically.
+	if feedback != "" && !feedbackInjected {
+		w.logger.Warn("feedback not injected: all rounds are command rounds; redo will re-run commands unchanged",
+			"step", stepName, "feedback", truncate(feedback, 200))
 	}
 
 	// Filter empty round outputs before joining so separator-only text

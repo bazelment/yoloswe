@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -118,6 +119,37 @@ func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg Ste
 		return "", "", fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
 	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, logger)
+}
+
+// RunCommand runs a shell command template for the given workflow step.
+// The commandTmpl is rendered with data, then executed via sh -c in workDir.
+// Returns the combined stdout+stderr output and any error.
+//
+// Security note: command templates are rendered with PromptData fields (Title,
+// Description, etc.) which originate from the issue tracker and are
+// user-controlled. Interpolating these fields directly into shell commands can
+// allow shell injection. Only include tracker fields in command templates when
+// the issue source is fully trusted (e.g. an internal tracker with restricted
+// write access). Avoid interpolating free-text fields such as Title or
+// Description unless you control all issue authors.
+func RunCommand(ctx context.Context, stepName string, data PromptData, commandTmpl string, workDir string, logger *slog.Logger) (string, error) {
+	rendered, err := renderPrompt(commandTmpl, data)
+	if err != nil {
+		return "", fmt.Errorf("render %s command: %w", stepName, err)
+	}
+
+	logger.Info("running command", "step", stepName, "command", truncate(rendered, 200), "work_dir", workDir)
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", rendered)
+	cmd.Dir = workDir
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+	if err != nil {
+		return output, fmt.Errorf("command failed: %w", err)
+	}
+
+	logger.Info("command completed", "step", stepName, "output", truncate(output, 200))
+	return output, nil
 }
 
 // resolvePromptForExecution determines the prompt to send to the agent.

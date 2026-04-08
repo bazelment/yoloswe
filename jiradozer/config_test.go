@@ -263,7 +263,26 @@ func TestLoadConfig_RoundsAndPromptConflict(t *testing.T) {
 func TestLoadConfig_RoundsEmptyPrompt(t *testing.T) {
 	_, err := LoadConfig("testdata/rounds_empty_prompt.yaml")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prompt is required")
+	assert.Contains(t, err.Error(), "prompt or command is required")
+}
+
+func TestLoadConfig_CreatePRRoundsRejected(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+create_pr:
+  rounds:
+    - command: "echo hello"
+`
+	path := dir + "/cfg.yaml"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create_pr does not support rounds")
 }
 
 func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
@@ -314,6 +333,51 @@ func TestResolveRound_OverridesStep(t *testing.T) {
 	assert.Equal(t, 20, resolved.MaxTurns)
 	assert.Equal(t, 50.0, resolved.MaxBudgetUSD)
 	assert.Equal(t, "bypass", resolved.PermissionMode) // always from parent
+}
+
+func TestLoadConfig_WithCommandRounds(t *testing.T) {
+	cfg, err := LoadConfig("testdata/with_command_rounds.yaml")
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Build.Rounds, 2)
+	assert.Equal(t, "git pull origin {{.BaseBranch}}", cfg.Build.Rounds[0].Command)
+	assert.Empty(t, cfg.Build.Rounds[0].Prompt)
+	assert.True(t, cfg.Build.Rounds[0].IsCommand())
+
+	assert.Empty(t, cfg.Build.Rounds[1].Command)
+	assert.NotEmpty(t, cfg.Build.Rounds[1].Prompt)
+	assert.False(t, cfg.Build.Rounds[1].IsCommand())
+}
+
+func TestLoadConfig_RoundCommandAndPromptConflict(t *testing.T) {
+	_, err := LoadConfig("testdata/round_command_and_prompt.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+func TestLoadConfig_RoundNoPromptNoCommand(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+build:
+  rounds:
+    - max_turns: 5
+`
+	path := dir + "/cfg.yaml"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prompt or command is required")
+}
+
+func TestRoundConfig_IsCommand(t *testing.T) {
+	assert.True(t, RoundConfig{Command: "echo hello"}.IsCommand())
+	assert.False(t, RoundConfig{Prompt: "do stuff"}.IsCommand())
+	assert.False(t, RoundConfig{}.IsCommand())
 }
 
 func TestResolveEnv(t *testing.T) {
