@@ -123,9 +123,9 @@ func (w *Workflow) runStepOrRounds(ctx context.Context, stepName string, stepCfg
 	w.runStep(ctx, stepName, stepCfg, reviewStep, trigger)
 }
 
-// runStepRounds runs multiple agent sessions sequentially for a multi-round step.
-// Each round gets a fresh session (no resume). On redo, all rounds re-run from the
-// start with feedback injected into round 1 only.
+// runStepRounds runs rounds sequentially for a multi-round step. Each round is
+// either a shell command or an agent session (no resume). On redo, all rounds
+// re-run from the start; feedback is injected into the first agent round only.
 func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)

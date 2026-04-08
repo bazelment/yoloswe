@@ -137,7 +137,7 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 	if err != nil {
-		return output, fmt.Errorf("command failed: %w\noutput: %s", err, output)
+		return output, fmt.Errorf("command failed: %w", err)
 	}
 
 	logger.Info("command completed", "step", stepName, "output", truncate(output, 200))

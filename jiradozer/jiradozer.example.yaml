@@ -62,6 +62,21 @@ plan:
   auto_approve: false                   # default: false — set true to skip human review
 
 # Build step — implements the plan. Runs in "bypass" mode (can edit files).
+# To use mixed command + agent rounds (e.g. sync base branch before implementing):
+#
+#   build:
+#     permission_mode: bypass
+#     max_turns: 30
+#     rounds:
+#       - command: "git fetch origin && git rebase origin/{{.BaseBranch}}"
+#       - prompt: |
+#           Issue: {{.Identifier}} — {{.Title}}
+#           Implement the changes described in the plan.
+#         max_turns: 30
+#
+# Command rounds support the same template variables as prompts.
+# Agent-only fields (model, max_turns, max_budget_usd, system_prompt) are
+# silently ignored on command rounds.
 build:
   # prompt: ""                          # default: built-in build prompt
   # system_prompt: ""                   # default: none
@@ -99,22 +114,13 @@ validate:
       max_budget_usd: 30.0              # override budget for this round only
 
 # Create PR step — creates a pull request.
-# This example uses mixed command + agent rounds: a shell command runs first
-# (e.g. to sync the base branch), followed by an agent session.
-#
-# Command rounds support the same template variables as prompts.
-# Agent-only fields (model, max_turns, max_budget_usd, system_prompt) are
-# silently ignored on command rounds.
+# Note: create_pr does not support rounds; use prompt (or omit to use the built-in default).
 create_pr:
   permission_mode: bypass
   max_turns: 5
-  rounds:
-    - command: "git fetch origin && git rebase origin/{{.BaseBranch}}"
-    - prompt: |
-        Create a pull request for {{.Identifier}}: {{.Title}} against {{.BaseBranch}}.
-      max_turns: 5
+  # prompt: ""                            # default: built-in create_pr prompt
 
-# Ship step — creates a pull request.
+# Ship step — ships the completed work.
 ship:
   # prompt: ""                          # default: built-in ship prompt
   # system_prompt: ""                   # default: none

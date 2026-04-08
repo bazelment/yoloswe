@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -414,7 +413,7 @@ func TestRunCommand_Failure(t *testing.T) {
 	output, err := RunCommand(ctx, "build", data, "exit 1", t.TempDir(), slog.Default())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "command failed")
-	_ = output // output may be empty for exit 1
+	_ = output
 }
 
 func TestRunCommand_TemplateRendering(t *testing.T) {
@@ -423,7 +422,7 @@ func TestRunCommand_TemplateRendering(t *testing.T) {
 	data := PromptData{Identifier: "ENG-42"}
 	output, err := RunCommand(ctx, "build", data, "echo {{.Identifier}}", t.TempDir(), slog.Default())
 	require.NoError(t, err)
-	assert.True(t, strings.Contains(output, "ENG-42"), "expected ENG-42 in output, got: %q", output)
+	assert.Contains(t, output, "ENG-42")
 }
 
 func TestRunCommand_WorkDir(t *testing.T) {
