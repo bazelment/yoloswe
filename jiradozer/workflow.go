@@ -34,22 +34,25 @@ type Workflow struct {
 	// OnRoundProgress is called during multi-round steps to report round progress.
 	// roundIndex is 0-based current round; roundTotal is len(rounds).
 	OnRoundProgress func(roundIndex, roundTotal int)
-	lastCommentAt   time.Time
-	plan            string
-	buildOutput     string
-	feedback        string
+	// runStepAgent is the agent runner, overridable in tests.
+	runStepAgent  func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error)
+	lastCommentAt time.Time
+	plan          string
+	buildOutput   string
+	feedback      string
 }
 
 // NewWorkflow creates a new workflow for the given issue.
 func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
 	return &Workflow{
-		tracker:    t,
-		issue:      issue,
-		state:      NewStateMachine(),
-		config:     cfg,
-		logger:     logger,
-		stateIDs:   make(map[string]string),
-		sessionIDs: make(map[WorkflowStep]string),
+		tracker:      t,
+		issue:        issue,
+		state:        NewStateMachine(),
+		config:       cfg,
+		logger:       logger,
+		stateIDs:     make(map[string]string),
+		sessionIDs:   make(map[WorkflowStep]string),
+		runStepAgent: RunStepAgent,
 	}
 }
 
@@ -129,6 +132,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)
 
+	// Reset lastCommentAt so transitionToReview uses the server timestamp from
+	// this step's result comment rather than a stale value from a prior review cycle.
+	w.lastCommentAt = time.Time{}
+
 	feedback := w.feedback
 	w.feedback = ""
 
@@ -153,7 +160,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			w.OnRoundProgress(i, totalRounds)
 		}
 
-		output, _, err := RunStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+		output, _, err := w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
 		if err != nil {
 			w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
 			return
@@ -162,8 +169,11 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 
 		heading := capitalize(stepName)
 		comment := fmt.Sprintf("## %s Round %d/%d\n\n%s", heading, i+1, totalRounds, truncateOutput(output, 2000))
-		if _, err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
+		roundComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
+		if err != nil {
 			w.logger.Warn("failed to post round comment", "step", stepName, "round", i+1, "error", err)
+		} else if i == totalRounds-1 && !roundComment.CreatedAt.IsZero() {
+			w.lastCommentAt = roundComment.CreatedAt
 		}
 	}
 
@@ -176,13 +186,17 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	currentStep := w.state.Current()
 	sessionID := w.sessionIDs[currentStep]
 
+	// Reset lastCommentAt so transitionToReview uses the server timestamp from
+	// this step's result comment rather than a stale value from a prior review cycle.
+	w.lastCommentAt = time.Time{}
+
 	feedback := w.feedback
 	w.feedback = ""
 
 	w.logger.Info("step: "+stepName, "feedback", feedback != "", "resume", sessionID != "")
 
 	cfg := w.config.ResolveStep(stepCfg)
-	output, newSessionID, err := RunStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
+	output, newSessionID, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return
@@ -191,19 +205,13 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.sessionIDs[currentStep] = newSessionID
 	w.captureOutput(stepName, output)
 
-	// For long outputs, post a summary first then the full content in a
-	// separate comment so reviewers see everything.
 	heading := capitalize(stepName)
-	if len(output) > 3000 {
-		preview := string([]rune(output)[:500])
-		summary := fmt.Sprintf("## %s Complete\n\n%s\n\n_(Full output in next comment)_", heading, preview)
-		if _, err := w.tracker.PostComment(ctx, w.issue.ID, summary); err != nil {
-			w.logger.Warn("failed to post "+stepName+" summary comment", "error", err)
-		}
-	}
 	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, output)
-	if _, err := w.tracker.PostComment(ctx, w.issue.ID, comment); err != nil {
-		w.logger.Warn("failed to post "+stepName+" comment", "error", err)
+	resultComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
+	if err != nil {
+		w.logger.Warn("failed to post step comment", "step", stepName, "error", err)
+	} else if !resultComment.CreatedAt.IsZero() {
+		w.lastCommentAt = resultComment.CreatedAt
 	}
 
 	w.transitionToReview(ctx, reviewStep, trigger)
@@ -254,6 +262,8 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		}
 		return
 	}
+
+	w.logger.Info("waiting for approval", "step", w.state.Current(), "issue", w.issue.Identifier)
 
 	fb, err := PollForFeedback(ctx, w.tracker, w.issue.ID, w.lastCommentAt, w.config.PollInterval, w.logger)
 	if err != nil {
@@ -308,15 +318,20 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 	}
 
 	waitingComment, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current())
-	if err != nil || waitingComment.CreatedAt.IsZero() {
-		if err != nil {
-			w.logger.Warn("failed to post waiting comment", "error", err)
+	if err != nil {
+		w.logger.Warn("failed to post waiting comment", "error", err)
+	}
+	// lastCommentAt was set by the step result comment in runStep/runStepRounds.
+	// Do not overwrite it here — doing so would skip user comments posted between
+	// the result comment and the waiting comment.
+	// If it is zero (step comment failed or returned no server timestamp), prefer
+	// the waiting comment's server timestamp before falling back to local time.
+	if w.lastCommentAt.IsZero() {
+		if err == nil && !waitingComment.CreatedAt.IsZero() {
+			w.lastCommentAt = waitingComment.CreatedAt
 		} else {
-			w.logger.Warn("waiting comment has no server timestamp, falling back to local clock")
+			w.lastCommentAt = time.Now()
 		}
-		w.lastCommentAt = time.Now()
-	} else {
-		w.lastCommentAt = waitingComment.CreatedAt
 	}
 }
 
