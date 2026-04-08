@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -118,6 +119,29 @@ func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg Ste
 		return "", "", fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
 	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, logger)
+}
+
+// RunCommand runs a shell command template for the given workflow step.
+// The commandTmpl is rendered with data, then executed via sh -c in workDir.
+// Returns the combined stdout+stderr output and any error.
+func RunCommand(ctx context.Context, stepName string, data PromptData, commandTmpl string, workDir string, logger *slog.Logger) (string, error) {
+	rendered, err := renderPrompt(commandTmpl, data)
+	if err != nil {
+		return "", fmt.Errorf("render %s command: %w", stepName, err)
+	}
+
+	logger.Info("running command", "step", stepName, "command", rendered, "work_dir", workDir)
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", rendered)
+	cmd.Dir = workDir
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+	if err != nil {
+		return output, fmt.Errorf("command failed: %w\noutput: %s", err, output)
+	}
+
+	logger.Info("command completed", "step", stepName, "output", truncate(output, 200))
+	return output, nil
 }
 
 // resolvePromptForExecution determines the prompt to send to the agent.

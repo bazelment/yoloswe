@@ -486,15 +486,26 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 		if ctx.Err() != nil {
 			return fmt.Errorf("run-step %s: %w", stepName, ctx.Err())
 		}
-		roundCfg := jiradozer.ResolveRound(round, resolved)
 		logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
 
-		output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", logger)
-		if err != nil {
-			return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
+		var output string
+		if round.IsCommand() {
+			var err error
+			output, err = jiradozer.RunCommand(ctx, stepName, data, round.Command, workDir, logger)
+			if err != nil {
+				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
+			}
+		} else {
+			roundCfg := jiradozer.ResolveRound(round, resolved)
+			var sessionID string
+			var err error
+			output, sessionID, err = jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", logger)
+			if err != nil {
+				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
+			}
+			sessionIDs = append(sessionIDs, sessionID)
 		}
 		allOutputs = append(allOutputs, output)
-		sessionIDs = append(sessionIDs, sessionID)
 	}
 
 	// Filter empty round outputs before joining so separator-only text

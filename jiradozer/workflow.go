@@ -142,16 +142,11 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 
 	data := w.promptData()
 	var allOutputs []string
+	feedbackInjected := false
 	for i, round := range stepCfg.Rounds {
 		if ctx.Err() != nil {
 			w.fail(ctx, ctx.Err())
 			return
-		}
-
-		roundCfg := ResolveRound(round, resolved)
-		roundFeedback := ""
-		if i == 0 {
-			roundFeedback = feedback
 		}
 
 		w.logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
@@ -159,10 +154,26 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			w.OnRoundProgress(i, totalRounds)
 		}
 
-		output, _, err := w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
-		if err != nil {
-			w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
-			return
+		var output string
+		var err error
+		if round.IsCommand() {
+			output, err = RunCommand(ctx, stepName, data, round.Command, w.config.WorkDir, w.logger)
+			if err != nil {
+				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
+				return
+			}
+		} else {
+			roundCfg := ResolveRound(round, resolved)
+			roundFeedback := ""
+			if !feedbackInjected {
+				roundFeedback = feedback
+				feedbackInjected = true
+			}
+			output, _, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+			if err != nil {
+				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
+				return
+			}
 		}
 		allOutputs = append(allOutputs, output)
 

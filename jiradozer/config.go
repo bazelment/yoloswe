@@ -73,12 +73,19 @@ type StepConfig struct {
 
 // RoundConfig configures a single round within a multi-round step.
 // Zero-value fields inherit from the parent StepConfig.
+// Exactly one of Prompt or Command must be set.
 type RoundConfig struct {
-	Prompt       string  `yaml:"prompt"`         // Go text/template (required)
-	SystemPrompt string  `yaml:"system_prompt"`  // optional system prompt
-	Model        string  `yaml:"model"`          // override; empty = inherit from step
-	MaxTurns     int     `yaml:"max_turns"`      // override; 0 = inherit from step
-	MaxBudgetUSD float64 `yaml:"max_budget_usd"` // override; 0 = inherit from step
+	Prompt       string  `yaml:"prompt"`         // Go text/template; mutually exclusive with Command
+	Command      string  `yaml:"command"`        // Shell command template (sh -c); mutually exclusive with Prompt
+	SystemPrompt string  `yaml:"system_prompt"`  // optional system prompt (agent rounds only)
+	Model        string  `yaml:"model"`          // override; empty = inherit from step (agent rounds only)
+	MaxTurns     int     `yaml:"max_turns"`      // override; 0 = inherit from step (agent rounds only)
+	MaxBudgetUSD float64 `yaml:"max_budget_usd"` // override; 0 = inherit from step (agent rounds only)
+}
+
+// IsCommand reports whether this round runs a shell command instead of an agent session.
+func (r RoundConfig) IsCommand() bool {
+	return r.Command != ""
 }
 
 // StatesConfig maps logical workflow states to tracker-specific state names.
@@ -179,11 +186,21 @@ func (c *Config) validate() error {
 			}
 		}
 		for i, round := range step.Rounds {
-			if round.Prompt == "" {
-				return fmt.Errorf("%s.rounds[%d]: prompt is required", name, i)
+			if round.Prompt == "" && round.Command == "" {
+				return fmt.Errorf("%s.rounds[%d]: prompt or command is required", name, i)
 			}
-			if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
-				return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
+			if round.Prompt != "" && round.Command != "" {
+				return fmt.Errorf("%s.rounds[%d]: prompt and command are mutually exclusive", name, i)
+			}
+			if round.Prompt != "" {
+				if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
+					return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
+				}
+			}
+			if round.Command != "" {
+				if _, err := template.New(fmt.Sprintf("%s_round_%d_cmd", name, i)).Parse(round.Command); err != nil {
+					return fmt.Errorf("%s.rounds[%d].command template: %w", name, i, err)
+				}
 			}
 		}
 	}
