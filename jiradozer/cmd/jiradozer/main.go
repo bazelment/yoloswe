@@ -151,9 +151,12 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Resolve --plan-file into planContent.
-	// Only meaningful for --run-step=build; warn if used otherwise.
+	// Only meaningful for --run-step=build.
 	if args.planFile != "" {
-		if args.runStep != "" && args.runStep != "build" {
+		if args.runStep != "build" {
+			if args.runStep == "" {
+				return fmt.Errorf("--plan-file requires --run-step=build")
+			}
 			return fmt.Errorf("--plan-file is only used with --run-step=build (got --run-step=%s)", args.runStep)
 		}
 		data, err := readFileOrStdin(args.planFile)
@@ -499,14 +502,14 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			break
 		}
 	}
-	if !hasOutput {
-		logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
-	} else {
-		combined := strings.Join(allOutputs, "\n\n---\n\n")
+	var combined string
+	if hasOutput {
+		combined = strings.Join(allOutputs, "\n\n---\n\n")
 		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
+	} else {
+		logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
 	}
 	if stepName == "plan" {
-		combined := strings.Join(allOutputs, "\n\n---\n\n")
 		jiradozer.PersistPlan(workDir, combined, logger)
 	}
 	return nil
