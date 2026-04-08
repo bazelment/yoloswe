@@ -45,6 +45,7 @@ func main() {
 		verbose         bool
 		description     string
 		descriptionFile string
+		planFile        string
 	)
 
 	rootCmd := &cobra.Command{
@@ -69,6 +70,7 @@ func main() {
 				verbose:         verbose,
 				description:     description,
 				descriptionFile: descriptionFile,
+				planFile:        planFile,
 			})
 		},
 	}
@@ -90,6 +92,7 @@ func main() {
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
 	rootCmd.Flags().StringVar(&description, "description", "", "Task description for local mode (no external tracker needed)")
 	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
+	rootCmd.Flags().StringVar(&planFile, "plan-file", "", "Plan file for build step (use - for stdin)")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -110,6 +113,8 @@ type runArgs struct {
 	branchPrefix    string
 	description     string
 	descriptionFile string
+	planFile        string
+	planContent     string
 	sourceStates    []string
 	sourceLabels    []string
 	pollInterval    time.Duration
@@ -147,6 +152,26 @@ func run(ctx context.Context, args runArgs) error {
 		args.description = strings.TrimSpace(string(data))
 		if args.description == "" {
 			return fmt.Errorf("description file is empty")
+		}
+	}
+
+	// Resolve --plan-file into planContent.
+	if args.planFile != "" {
+		var (
+			data []byte
+			err  error
+		)
+		if args.planFile == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			data, err = os.ReadFile(args.planFile)
+		}
+		if err != nil {
+			return fmt.Errorf("read plan file: %w", err)
+		}
+		args.planContent = strings.TrimSpace(string(data))
+		if args.planContent == "" {
+			return fmt.Errorf("plan file is empty")
 		}
 	}
 
@@ -278,7 +303,7 @@ func run(ctx context.Context, args runArgs) error {
 
 	// Local description mode.
 	if args.description != "" {
-		return runFromDescription(ctx, args.description, args.runStep, issueTracker, cfg, logger)
+		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, cfg, logger)
 	}
 
 	// Multi-issue TUI mode (only when no --issue flag was given).
@@ -295,7 +320,7 @@ func run(ctx context.Context, args runArgs) error {
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
 
 	if args.runStep != "" {
-		return runSingleStep(ctx, args.runStep, issue, cfg, logger)
+		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, logger)
 	}
 
 	// Run the full workflow.
@@ -389,7 +414,7 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	}
 }
 
-func runFromDescription(ctx context.Context, description, runStep string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
+func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
 	lt, ok := issueTracker.(*local.Tracker)
 	if !ok {
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
@@ -405,20 +430,35 @@ func runFromDescription(ctx context.Context, description, runStep string, issueT
 	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
 
 	if runStep != "" {
-		return runSingleStep(ctx, runStep, issue, cfg, logger)
+		return runSingleStep(ctx, runStep, issue, cfg, planContent, logger)
 	}
 
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	return wf.Run(ctx)
 }
 
-func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, logger *slog.Logger) error {
+func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, logger *slog.Logger) error {
 	stepCfg, ok := cfg.StepByName(stepName)
 	if !ok {
 		return fmt.Errorf("unknown step %q (valid: %s)", stepName, strings.Join(allSteps, ", "))
 	}
 	resolved := cfg.ResolveStep(stepCfg)
 	data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
+
+	// Inject plan into prompt data for the build step.
+	// Priority: --plan-file flag > persisted plan.md > no plan.
+	if stepName == "build" {
+		if planContent != "" {
+			data.Plan = planContent
+			logger.Info("using plan from --plan-file")
+		} else if content, err := os.ReadFile(jiradozer.PlanFilePath(cfg.WorkDir)); err == nil {
+			data.Plan = strings.TrimSpace(string(content))
+			logger.Info("loaded persisted plan", "path", jiradozer.PlanFilePath(cfg.WorkDir))
+		}
+		if data.Plan == "" {
+			logger.Warn("NO PLAN AVAILABLE — build step is running without a plan; use --plan-file to provide one, or run the plan step first")
+		}
+	}
 
 	if len(resolved.Rounds) > 0 {
 		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, logger)

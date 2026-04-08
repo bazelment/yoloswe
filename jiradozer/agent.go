@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -289,6 +290,11 @@ func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
 		d.URL = *issue.URL
 	}
 	return d
+}
+
+// PlanFilePath returns the path to the persisted plan file within a work directory.
+func PlanFilePath(workDir string) string {
+	return filepath.Join(workDir, ".jiradozer", "plan.md")
 }
 
 // GenerateTitle creates a short title from the first words of a description,

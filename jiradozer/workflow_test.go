@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -765,4 +767,46 @@ func TestWorkflow_AllReviewStepsFilterBotComments(t *testing.T) {
 			assert.Equal(t, r.approveTarget, wf.state.Current())
 		})
 	}
+}
+
+func TestCaptureOutput_PersistsPlanToDisk(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), cfg, discardLogger())
+	planText := "## Plan\n\n1. Do thing A\n2. Do thing B"
+	wf.captureOutput("plan", planText)
+
+	// Verify in-memory state.
+	assert.Equal(t, planText, wf.plan)
+
+	// Verify persisted file.
+	planPath := PlanFilePath(workDir)
+	content, err := os.ReadFile(planPath)
+	require.NoError(t, err)
+	assert.Equal(t, planText, string(content))
+}
+
+func TestCaptureOutput_BuildDoesNotPersist(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), cfg, discardLogger())
+	wf.captureOutput("build", "build output")
+
+	assert.Equal(t, "build output", wf.buildOutput)
+
+	// No plan file should be created for build output.
+	_, err := os.Stat(PlanFilePath(workDir))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestPlanFilePath(t *testing.T) {
+	t.Parallel()
+	got := PlanFilePath("/tmp/myproject")
+	assert.Equal(t, filepath.Join("/tmp/myproject", ".jiradozer", "plan.md"), got)
 }

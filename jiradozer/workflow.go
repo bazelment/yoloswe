@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -85,6 +87,9 @@ func (w *Workflow) Run(ctx context.Context) error {
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
 			delete(w.sessionIDs, StepCreatingPR) // Fresh build cycle invalidates old create_pr session.
+			if w.plan == "" {
+				w.logger.Warn("NO PLAN AVAILABLE — build step is running without a plan")
+			}
 			w.runStepOrRounds(ctx, "build", w.config.Build, StepCreatingPR, "build_complete")
 		case StepCreatingPR:
 			w.runStep(ctx, "create_pr", w.config.CreatePR, StepBuildReview, "pr_created")
@@ -226,10 +231,19 @@ func (w *Workflow) promptData() PromptData {
 }
 
 // captureOutput stores step output for use by downstream steps.
+// For the plan step, it also persists to disk so it survives process restarts.
 func (w *Workflow) captureOutput(stepName, output string) {
 	switch stepName {
 	case "plan":
 		w.plan = output
+		planPath := PlanFilePath(w.config.WorkDir)
+		if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+			w.logger.Warn("failed to create plan directory", "error", err)
+		} else if err := os.WriteFile(planPath, []byte(output), 0o644); err != nil {
+			w.logger.Warn("failed to persist plan", "error", err)
+		} else {
+			w.logger.Info("persisted plan to disk", "path", planPath)
+		}
 	case "build":
 		w.buildOutput = output
 	}
