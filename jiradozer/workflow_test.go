@@ -805,6 +805,28 @@ func TestCaptureOutput_BuildDoesNotPersist(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+func TestCaptureOutput_EmptyPlanDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), cfg, discardLogger())
+
+	// Persist a valid plan first.
+	wf.captureOutput("plan", "valid plan content")
+	planPath := PlanFilePath(workDir)
+	content, err := os.ReadFile(planPath)
+	require.NoError(t, err)
+	assert.Equal(t, "valid plan content", string(content))
+
+	// Now capture empty plan output — should NOT overwrite.
+	wf.captureOutput("plan", "")
+	content, err = os.ReadFile(planPath)
+	require.NoError(t, err)
+	assert.Equal(t, "valid plan content", string(content), "empty output should not overwrite valid plan")
+}
+
 func TestPlanFilePath(t *testing.T) {
 	t.Parallel()
 	got := PlanFilePath("/tmp/myproject")

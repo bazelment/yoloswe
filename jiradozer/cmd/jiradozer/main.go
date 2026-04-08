@@ -449,6 +449,8 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 		} else if content, err := os.ReadFile(planPath); err == nil {
 			data.Plan = strings.TrimSpace(string(content))
 			logger.Info("loaded persisted plan", "path", planPath)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("read persisted plan %s: %w", planPath, err)
 		}
 		if data.Plan == "" {
 			logger.Warn("NO PLAN AVAILABLE — build step is running without a plan; use --plan-file to provide one, or run the plan step first")

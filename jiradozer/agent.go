@@ -299,7 +299,12 @@ func PlanFilePath(workDir string) string {
 }
 
 // PersistPlan writes plan output to PlanFilePath so --run-step=build can load it.
+// Empty output is silently skipped to avoid overwriting a previously valid plan.
 func PersistPlan(workDir, output string, logger *slog.Logger) {
+	if strings.TrimSpace(output) == "" {
+		logger.Warn("skipping plan persistence — output is empty")
+		return
+	}
 	planPath := PlanFilePath(workDir)
 	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
 		logger.Warn("failed to create plan directory", "error", err)
