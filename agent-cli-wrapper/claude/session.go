@@ -834,14 +834,17 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		} else {
 			// Accumulate cost and token usage from this intermediate result so
 			// the final TurnResult reports the true total for the logical turn.
+			// Also re-add accUsage (usage from earlier suppressed results that was
+			// snapshotted at the top of this call) so multi-background-task turns
+			// accumulate correctly across all suppressed intermediate results.
 			s.mu.Lock()
 			s.cumulativeCostUSD += msg.TotalCostUSD
 			totalCostSoFar := s.cumulativeCostUSD
-			s.bgTaskAccumulatedUsage.InputTokens += msg.Usage.InputTokens
-			s.bgTaskAccumulatedUsage.OutputTokens += msg.Usage.OutputTokens
-			s.bgTaskAccumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
-			s.bgTaskAccumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens
-			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD
+			s.bgTaskAccumulatedUsage.InputTokens += msg.Usage.InputTokens + accUsage.InputTokens
+			s.bgTaskAccumulatedUsage.OutputTokens += msg.Usage.OutputTokens + accUsage.OutputTokens
+			s.bgTaskAccumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens
+			s.bgTaskAccumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens
+			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD + accUsage.CostUSD
 			s.mu.Unlock()
 			costAccounted = true
 
