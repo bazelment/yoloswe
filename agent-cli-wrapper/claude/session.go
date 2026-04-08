@@ -819,6 +819,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	s.bgTaskLaunchedSinceLastResult = false
 	s.mu.Unlock()
 
+	// costAccounted tracks whether cumulativeCostUSD has already been updated
+	// for this result (the background-task branch does it early to enable budget
+	// checks mid-turn; the normal path must not double-count).
+	costAccounted := false
+
 	if bgLaunched {
 		// If the intermediate result carries an error, propagate it now rather
 		// than silently dropping it — the background task continuation will not
@@ -838,12 +843,17 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			s.bgTaskAccumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens
 			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD
 			s.mu.Unlock()
+			costAccounted = true
 
 			// Enforce budget limit: if the intermediate result already pushed us
 			// over budget, surface ErrBudgetExceeded now rather than letting the
-			// continuation turn run up additional cost.
+			// continuation turn run up additional cost. Clear the accumulated
+			// usage so it does not leak into the next turn's TurnResult.
 			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 				result.Error = ErrBudgetExceeded
+				s.mu.Lock()
+				s.bgTaskAccumulatedUsage = TurnUsage{}
+				s.mu.Unlock()
 				// Fall through to normal completion path to emit TurnCompleteEvent.
 			} else {
 				// Reset accumulator so the continuation turn's streaming events
@@ -857,8 +867,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Update cumulative cost and check SDK-level limits.
 	// SDK limit errors are only set if there is no existing error from the CLI,
 	// to avoid silently overwriting the real error.
+	// Skip if the background-task branch already accounted for this result's cost.
 	s.mu.Lock()
-	s.cumulativeCostUSD += msg.TotalCostUSD
+	if !costAccounted {
+		s.cumulativeCostUSD += msg.TotalCostUSD
+	}
 	totalCost := s.cumulativeCostUSD
 	s.mu.Unlock()
 
@@ -868,6 +881,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		} else if s.config.MaxBudgetUSD > 0 && totalCost >= s.config.MaxBudgetUSD {
 			result.Error = ErrBudgetExceeded
 		}
+	}
+	// Keep Success consistent with Error: SDK-set errors (budget, max-turns)
+	// do not set msg.IsError, so Success must be updated here.
+	if result.Error != nil {
+		result.Success = false
 	}
 
 	// Record turn completion
