@@ -847,8 +847,15 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 			// Enforce budget limit: if the intermediate result already pushed us
 			// over budget, surface ErrBudgetExceeded now rather than letting the
-			// continuation turn run up additional cost. Clear the accumulated
-			// usage so it does not leak into the next turn's TurnResult.
+			// continuation turn run up additional cost. Clear accumulated usage so
+			// it does not leak into the next turn's TurnResult.
+			//
+			// Note: the background task is still running in the CLI process and will
+			// send a task-notification when it finishes, producing an unattended
+			// assistant continuation turn. This is an acceptable edge case (budget
+			// exceeded mid-background-turn) and matches existing budget enforcement,
+			// which also does not cancel the CLI process. Callers should call Stop()
+			// after receiving ErrBudgetExceeded if they want to halt fully.
 			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 				result.Error = ErrBudgetExceeded
 				s.mu.Lock()
