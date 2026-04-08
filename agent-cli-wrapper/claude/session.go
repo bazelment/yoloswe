@@ -24,26 +24,36 @@ type SessionInfo struct {
 
 // Session manages interaction with the Claude CLI.
 type Session struct {
-	ctx                           context.Context
-	events                        chan Event
-	recorder                      *sessionRecorder
-	accumulator                   *streamAccumulator
-	turnManager                   *turnManager
-	permissionManager             *permissionManager
-	state                         *sessionState
-	process                       *processManager
-	info                          *SessionInfo
-	done                          chan struct{}
-	pendingControlResponses       map[string]chan protocol.ControlResponsePayload
-	cancel                        context.CancelFunc
-	config                        SessionConfig
-	cumulativeCostUSD             float64
-	mu                            sync.RWMutex
-	pendingMu                     sync.Mutex
-	bgTasksMu                     sync.Mutex
-	started                       bool
-	stopping                      bool
+	ctx                     context.Context
+	events                  chan Event
+	recorder                *sessionRecorder
+	accumulator             *streamAccumulator
+	turnManager             *turnManager
+	permissionManager       *permissionManager
+	state                   *sessionState
+	process                 *processManager
+	info                    *SessionInfo
+	done                    chan struct{}
+	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	cancel                  context.CancelFunc
+	config                  SessionConfig
+	cumulativeCostUSD       float64
+	mu                      sync.RWMutex
+	pendingMu               sync.Mutex
+	started                 bool
+	stopping                bool
+
+	// bgTaskLaunchedSinceLastResult is set when a tool with run_in_background
+	// is observed in a tool result, causing the next result message to suppress
+	// turn completion so callers block until the background task finishes.
+	// Protected by mu.
 	bgTaskLaunchedSinceLastResult bool
+
+	// bgTaskAccumulatedUsage holds token/cost totals from intermediate
+	// ResultMessages that were suppressed due to background task continuation.
+	// These are added to the final ResultMessage's usage so callers see the
+	// full cost of the logical turn. Protected by mu.
+	bgTaskAccumulatedUsage TurnUsage
 }
 
 // NewSession creates a new Claude session with options.
@@ -720,12 +730,15 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 				IsError:    isError,
 			})
 
-			// Track background task launches from tool_result content.
-			if contentStr, ok := resultBlock.Content.(string); ok {
-				if extractBackgroundTaskID(contentStr) != "" {
-					s.bgTasksMu.Lock()
+			// Track background task launches from tool input parameters.
+			// Checking tool.Input["run_in_background"] is robust against false
+			// positives from output content (e.g., git diffs containing the
+			// background task regex pattern string).
+			if tool != nil {
+				if rib, ok := tool.Input["run_in_background"].(bool); ok && rib {
+					s.mu.Lock()
 					s.bgTaskLaunchedSinceLastResult = true
-					s.bgTasksMu.Unlock()
+					s.mu.Unlock()
 				}
 			}
 		}
@@ -757,16 +770,23 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		durationMs = time.Since(turn.StartTime).Milliseconds()
 	}
 
+	// Collect any accumulated usage from suppressed intermediate results
+	// (background task continuation turns) to report the full logical-turn cost.
+	s.mu.Lock()
+	accUsage := s.bgTaskAccumulatedUsage
+	s.bgTaskAccumulatedUsage = TurnUsage{}
+	s.mu.Unlock()
+
 	result := TurnResult{
 		TurnNumber: turnNumber,
 		Success:    !msg.IsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
-			InputTokens:         msg.Usage.InputTokens,
-			OutputTokens:        msg.Usage.OutputTokens,
-			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
-			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
-			CostUSD:             msg.TotalCostUSD,
+			InputTokens:         msg.Usage.InputTokens + accUsage.InputTokens,
+			OutputTokens:        msg.Usage.OutputTokens + accUsage.OutputTokens,
+			CacheCreationTokens: msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens,
+			CacheReadTokens:     msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens,
+			CostUSD:             msg.TotalCostUSD + accUsage.CostUSD,
 		},
 	}
 
@@ -794,21 +814,35 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// task-notification messages and starting a new assistant turn). Suppress
 	// turn completion so callers of Ask()/WaitForTurn()/CollectResponse()
 	// block until the truly-final turn.
-	s.bgTasksMu.Lock()
+	s.mu.Lock()
 	bgLaunched := s.bgTaskLaunchedSinceLastResult
 	s.bgTaskLaunchedSinceLastResult = false
-	s.bgTasksMu.Unlock()
+	s.mu.Unlock()
 
 	if bgLaunched {
-		// Accumulate cost from this intermediate result.
-		s.mu.Lock()
-		s.cumulativeCostUSD += msg.TotalCostUSD
-		s.mu.Unlock()
+		// If the intermediate result carries an error, propagate it now rather
+		// than silently dropping it — the background task continuation will not
+		// arrive, so the session would otherwise stay stuck in StateProcessing.
+		if msg.IsError {
+			result.Error = fmt.Errorf("%s", msg.Result)
+			// Fall through to the normal completion path below.
+		} else {
+			// Accumulate cost and token usage from this intermediate result so
+			// the final TurnResult reports the true total for the logical turn.
+			s.mu.Lock()
+			s.cumulativeCostUSD += msg.TotalCostUSD
+			s.bgTaskAccumulatedUsage.InputTokens += msg.Usage.InputTokens
+			s.bgTaskAccumulatedUsage.OutputTokens += msg.Usage.OutputTokens
+			s.bgTaskAccumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
+			s.bgTaskAccumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens
+			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD
+			s.mu.Unlock()
 
-		// Reset accumulator so the continuation turn's streaming events
-		// are processed cleanly.
-		s.accumulator.Reset()
-		return
+			// Reset accumulator so the continuation turn's streaming events
+			// are processed cleanly.
+			s.accumulator.Reset()
+			return
+		}
 	}
 
 	// Update cumulative cost and check SDK-level limits.
