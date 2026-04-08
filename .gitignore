@@ -2,6 +2,9 @@
 bazel-*
 .bazel-cache/
 
+# jiradozer runtime artifacts
+.jiradozer/
+
 # Go
 *.exe
 *.exe~

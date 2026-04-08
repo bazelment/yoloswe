@@ -151,7 +151,11 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Resolve --plan-file into planContent.
+	// Only meaningful for --run-step=build; warn if used otherwise.
 	if args.planFile != "" {
+		if args.runStep != "" && args.runStep != "build" {
+			return fmt.Errorf("--plan-file is only used with --run-step=build (got --run-step=%s)", args.runStep)
+		}
 		data, err := readFileOrStdin(args.planFile)
 		if err != nil {
 			return fmt.Errorf("read plan file: %w", err)
@@ -461,7 +465,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	} else {
 		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
 	}
-	if stepName == "plan" && output != "" {
+	if stepName == "plan" {
 		jiradozer.PersistPlan(cfg.WorkDir, output, logger)
 	}
 	return nil
@@ -500,9 +504,10 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 	} else {
 		combined := strings.Join(allOutputs, "\n\n---\n\n")
 		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
-		if stepName == "plan" {
-			jiradozer.PersistPlan(workDir, combined, logger)
-		}
+	}
+	if stepName == "plan" {
+		combined := strings.Join(allOutputs, "\n\n---\n\n")
+		jiradozer.PersistPlan(workDir, combined, logger)
 	}
 	return nil
 }
