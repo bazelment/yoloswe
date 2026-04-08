@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -519,6 +520,119 @@ turnDone:
 	}
 
 	t.Log("All assertions passed for Scenario 4")
+}
+
+// ============================================================================
+// Scenario 5: Background Task Continuation
+// ============================================================================
+
+// TestSession_Integration_BackgroundTask verifies that the session correctly
+// waits for background tasks to complete before signaling turn completion.
+//
+// The Claude CLI supports run_in_background for Bash commands. When used:
+//  1. CLI returns tool_result with backgroundTaskId immediately
+//  2. Agent ends its turn (stop_reason: end_turn)
+//  3. Background task completes → CLI injects <task-notification>
+//  4. CLI auto-starts a new assistant turn to process the notification
+//  5. New ResultMessage sent for the continuation turn
+//
+// Without the background task fix, CollectTurnEvents would return after step 2,
+// and the caller would see "Running in background..." instead of the final result.
+func TestSession_Integration_BackgroundTask(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	testDir, err := os.MkdirTemp("", "claude-go-test-bgtask-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(testDir)
+	t.Logf("Test artifacts directory: %s", testDir)
+
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModeBypass),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
+	)
+
+	if err := session.Start(ctx); err != nil {
+		t.Fatalf("Failed to start session: %v", err)
+	}
+	defer session.Stop()
+
+	// Ask the agent to run a short command in the background and report its result.
+	// The agent should use run_in_background: true, wait for completion, then report.
+	t.Log("Sending background task prompt...")
+	_, err = session.SendMessage(ctx,
+		"Run this exact bash command in the background: `sleep 2 && echo 'BG_TASK_DONE_MARKER'`. "+
+			"After it completes, tell me the exact output. "+
+			"You MUST use run_in_background: true for the bash command.")
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	events, err := CollectTurnEvents(ctx, session)
+	if err != nil {
+		t.Fatalf("CollectTurnEvents failed: %v", err)
+	}
+
+	if events.TurnComplete == nil {
+		t.Fatal("Expected TurnCompleteEvent")
+	}
+	if !events.TurnComplete.Success {
+		t.Errorf("Expected successful turn, got error")
+	}
+
+	// Verify the agent used a background task. Check tool completions for
+	// a Bash tool with run_in_background in its input.
+	foundBgTask := false
+	for _, tc := range events.ToolComplete {
+		if tc.Name == "Bash" {
+			if rib, ok := tc.Input["run_in_background"]; ok {
+				if b, ok := rib.(bool); ok && b {
+					foundBgTask = true
+				}
+			}
+		}
+	}
+	if !foundBgTask {
+		t.Log("WARNING: Agent did not use run_in_background — test may not exercise the background task path")
+	}
+
+	// Check that the final text includes the background task output marker.
+	// This confirms the session waited for the background task to complete
+	// rather than returning the intermediate "running in background" text.
+	fullText := ""
+	for _, te := range events.TextEvents {
+		fullText += te.Text
+	}
+	t.Logf("Final response text (truncated): %.300s", fullText)
+
+	if foundBgTask {
+		// If the agent did use a background task, the final output should
+		// contain our marker string, proving the session waited for completion.
+		if !containsAny(fullText, "BG_TASK_DONE_MARKER", "bg_task_done_marker", "bg-done") {
+			t.Error("Expected final text to contain background task output marker, " +
+				"but got intermediate 'running in background' response instead. " +
+				"This suggests the session did not wait for the background task to complete.")
+		}
+	}
+
+	t.Logf("Turn completed: success=%v, cost=$%.6f", events.TurnComplete.Success, events.TurnComplete.Usage.CostUSD)
+	t.Log("All assertions passed for Background Task scenario")
+}
+
+// containsAny reports whether s contains any of the given substrings (case-insensitive).
+func containsAny(s string, subs ...string) bool {
+	lower := strings.ToLower(s)
+	for _, sub := range subs {
+		if strings.Contains(lower, strings.ToLower(sub)) {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================

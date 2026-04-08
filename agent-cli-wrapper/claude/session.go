@@ -42,6 +42,18 @@ type Session struct {
 	pendingMu               sync.Mutex
 	started                 bool
 	stopping                bool
+
+	// bgTaskLaunchedSinceLastResult is set when a tool with run_in_background
+	// is observed in a tool result, causing the next result message to suppress
+	// turn completion so callers block until the background task finishes.
+	// Protected by mu.
+	bgTaskLaunchedSinceLastResult bool
+
+	// bgTaskAccumulatedUsage holds token/cost totals from intermediate
+	// ResultMessages that were suppressed due to background task continuation.
+	// These are added to the final ResultMessage's usage so callers see the
+	// full cost of the logical turn. Protected by mu.
+	bgTaskAccumulatedUsage TurnUsage
 }
 
 // NewSession creates a new Claude session with options.
@@ -683,6 +695,12 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 }
 
 func (s *Session) handleUser(msg protocol.UserMessage) {
+	// Check for task notifications (background task completed).
+	// These arrive as string content, not blocks.
+	if _, ok := msg.Message.Content.AsString(); ok {
+		return // String content has no blocks to process
+	}
+
 	// Get content blocks (if available)
 	blocks, ok := msg.Message.Content.AsBlocks()
 	if !ok {
@@ -711,6 +729,18 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 				Content:    resultBlock.Content,
 				IsError:    isError,
 			})
+
+			// Track background task launches from tool input parameters.
+			// Checking tool.Input["run_in_background"] is robust against false
+			// positives from output content (e.g., git diffs containing the
+			// background task regex pattern string).
+			if tool != nil {
+				if rib, ok := tool.Input["run_in_background"].(bool); ok && rib {
+					s.mu.Lock()
+					s.bgTaskLaunchedSinceLastResult = true
+					s.mu.Unlock()
+				}
+			}
 		}
 	}
 
@@ -740,16 +770,23 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		durationMs = time.Since(turn.StartTime).Milliseconds()
 	}
 
+	// Collect any accumulated usage from suppressed intermediate results
+	// (background task continuation turns) to report the full logical-turn cost.
+	s.mu.Lock()
+	accUsage := s.bgTaskAccumulatedUsage
+	s.bgTaskAccumulatedUsage = TurnUsage{}
+	s.mu.Unlock()
+
 	result := TurnResult{
 		TurnNumber: turnNumber,
 		Success:    !msg.IsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
-			InputTokens:         msg.Usage.InputTokens,
-			OutputTokens:        msg.Usage.OutputTokens,
-			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
-			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
-			CostUSD:             msg.TotalCostUSD,
+			InputTokens:         msg.Usage.InputTokens + accUsage.InputTokens,
+			OutputTokens:        msg.Usage.OutputTokens + accUsage.OutputTokens,
+			CacheCreationTokens: msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens,
+			CacheReadTokens:     msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens,
+			CostUSD:             msg.TotalCostUSD + accUsage.CostUSD,
 		},
 	}
 
@@ -772,11 +809,79 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Error = fmt.Errorf("%s", msg.Result)
 	}
 
+	// Check if background tasks were launched since the last ResultMessage.
+	// If so, the CLI will auto-continue after the tasks complete (delivering
+	// task-notification messages and starting a new assistant turn). Suppress
+	// turn completion so callers of Ask()/WaitForTurn()/CollectResponse()
+	// block until the truly-final turn.
+	s.mu.Lock()
+	bgLaunched := s.bgTaskLaunchedSinceLastResult
+	s.bgTaskLaunchedSinceLastResult = false
+	s.mu.Unlock()
+
+	// costAccounted tracks whether cumulativeCostUSD has already been updated
+	// for this result (the background-task branch does it early to enable budget
+	// checks mid-turn; the normal path must not double-count).
+	costAccounted := false
+
+	if bgLaunched {
+		// If the intermediate result carries an error, propagate it now rather
+		// than silently dropping it — the background task continuation will not
+		// arrive, so the session would otherwise stay stuck in StateProcessing.
+		// result.Error was already set above from msg.IsError; just fall through.
+		if msg.IsError {
+			// Fall through to the normal completion path below.
+		} else {
+			// Accumulate cost and token usage from this intermediate result so
+			// the final TurnResult reports the true total for the logical turn.
+			// Also re-add accUsage (usage from earlier suppressed results that was
+			// snapshotted at the top of this call) so multi-background-task turns
+			// accumulate correctly across all suppressed intermediate results.
+			s.mu.Lock()
+			s.cumulativeCostUSD += msg.TotalCostUSD
+			totalCostSoFar := s.cumulativeCostUSD
+			s.bgTaskAccumulatedUsage.InputTokens += msg.Usage.InputTokens + accUsage.InputTokens
+			s.bgTaskAccumulatedUsage.OutputTokens += msg.Usage.OutputTokens + accUsage.OutputTokens
+			s.bgTaskAccumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens
+			s.bgTaskAccumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens
+			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD + accUsage.CostUSD
+			s.mu.Unlock()
+			costAccounted = true
+
+			// Enforce budget limit: if the intermediate result already pushed us
+			// over budget, surface ErrBudgetExceeded now rather than letting the
+			// continuation turn run up additional cost. Clear accumulated usage so
+			// it does not leak into the next turn's TurnResult.
+			//
+			// Note: the background task is still running in the CLI process and will
+			// send a task-notification when it finishes, producing an unattended
+			// assistant continuation turn. This is an acceptable edge case (budget
+			// exceeded mid-background-turn) and matches existing budget enforcement,
+			// which also does not cancel the CLI process. Callers should call Stop()
+			// after receiving ErrBudgetExceeded if they want to halt fully.
+			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
+				result.Error = ErrBudgetExceeded
+				s.mu.Lock()
+				s.bgTaskAccumulatedUsage = TurnUsage{}
+				s.mu.Unlock()
+				// Fall through to normal completion path to emit TurnCompleteEvent.
+			} else {
+				// Reset accumulator so the continuation turn's streaming events
+				// are processed cleanly.
+				s.accumulator.Reset()
+				return
+			}
+		}
+	}
+
 	// Update cumulative cost and check SDK-level limits.
 	// SDK limit errors are only set if there is no existing error from the CLI,
 	// to avoid silently overwriting the real error.
+	// Skip if the background-task branch already accounted for this result's cost.
 	s.mu.Lock()
-	s.cumulativeCostUSD += msg.TotalCostUSD
+	if !costAccounted {
+		s.cumulativeCostUSD += msg.TotalCostUSD
+	}
 	totalCost := s.cumulativeCostUSD
 	s.mu.Unlock()
 
@@ -786,6 +891,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		} else if s.config.MaxBudgetUSD > 0 && totalCost >= s.config.MaxBudgetUSD {
 			result.Error = ErrBudgetExceeded
 		}
+	}
+	// Keep Success consistent with Error: SDK-set errors (budget, max-turns)
+	// do not set msg.IsError, so Success must be updated here.
+	if result.Error != nil {
+		result.Success = false
 	}
 
 	// Record turn completion
