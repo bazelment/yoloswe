@@ -137,15 +137,10 @@ func run(ctx context.Context, args runArgs) error {
 		if args.description != "" {
 			return fmt.Errorf("--description and --description-file are mutually exclusive")
 		}
-		var (
-			data []byte
-			err  error
-		)
-		if args.descriptionFile == "-" {
-			data, err = io.ReadAll(os.Stdin)
-		} else {
-			data, err = os.ReadFile(args.descriptionFile)
+		if args.descriptionFile == "-" && args.planFile == "-" {
+			return fmt.Errorf("cannot use stdin (-) for both --description-file and --plan-file")
 		}
+		data, err := readFileOrStdin(args.descriptionFile)
 		if err != nil {
 			return fmt.Errorf("read description file: %w", err)
 		}
@@ -157,15 +152,7 @@ func run(ctx context.Context, args runArgs) error {
 
 	// Resolve --plan-file into planContent.
 	if args.planFile != "" {
-		var (
-			data []byte
-			err  error
-		)
-		if args.planFile == "-" {
-			data, err = io.ReadAll(os.Stdin)
-		} else {
-			data, err = os.ReadFile(args.planFile)
-		}
+		data, err := readFileOrStdin(args.planFile)
 		if err != nil {
 			return fmt.Errorf("read plan file: %w", err)
 		}
@@ -448,12 +435,13 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	// Inject plan into prompt data for the build step.
 	// Priority: --plan-file flag > persisted plan.md > no plan.
 	if stepName == "build" {
+		planPath := jiradozer.PlanFilePath(cfg.WorkDir)
 		if planContent != "" {
 			data.Plan = planContent
 			logger.Info("using plan from --plan-file")
-		} else if content, err := os.ReadFile(jiradozer.PlanFilePath(cfg.WorkDir)); err == nil {
+		} else if content, err := os.ReadFile(planPath); err == nil {
 			data.Plan = strings.TrimSpace(string(content))
-			logger.Info("loaded persisted plan", "path", jiradozer.PlanFilePath(cfg.WorkDir))
+			logger.Info("loaded persisted plan", "path", planPath)
 		}
 		if data.Plan == "" {
 			logger.Warn("NO PLAN AVAILABLE — build step is running without a plan; use --plan-file to provide one, or run the plan step first")
@@ -472,6 +460,9 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", sessionID)
 	} else {
 		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
+	}
+	if stepName == "plan" && output != "" {
+		jiradozer.PersistPlan(cfg.WorkDir, output, logger)
 	}
 	return nil
 }
@@ -509,8 +500,19 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 	} else {
 		combined := strings.Join(allOutputs, "\n\n---\n\n")
 		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
+		if stepName == "plan" {
+			jiradozer.PersistPlan(workDir, combined, logger)
+		}
 	}
 	return nil
+}
+
+// readFileOrStdin reads from the given path, or from stdin if path is "-".
+func readFileOrStdin(path string) ([]byte, error) {
+	if path == "-" {
+		return io.ReadAll(os.Stdin)
+	}
+	return os.ReadFile(path)
 }
 
 var allSteps = []string{"plan", "build", "create_pr", "validate", "ship"}
