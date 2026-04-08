@@ -823,14 +823,15 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		// If the intermediate result carries an error, propagate it now rather
 		// than silently dropping it — the background task continuation will not
 		// arrive, so the session would otherwise stay stuck in StateProcessing.
+		// result.Error was already set above from msg.IsError; just fall through.
 		if msg.IsError {
-			result.Error = fmt.Errorf("%s", msg.Result)
 			// Fall through to the normal completion path below.
 		} else {
 			// Accumulate cost and token usage from this intermediate result so
 			// the final TurnResult reports the true total for the logical turn.
 			s.mu.Lock()
 			s.cumulativeCostUSD += msg.TotalCostUSD
+			totalCostSoFar := s.cumulativeCostUSD
 			s.bgTaskAccumulatedUsage.InputTokens += msg.Usage.InputTokens
 			s.bgTaskAccumulatedUsage.OutputTokens += msg.Usage.OutputTokens
 			s.bgTaskAccumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
@@ -838,10 +839,18 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD
 			s.mu.Unlock()
 
-			// Reset accumulator so the continuation turn's streaming events
-			// are processed cleanly.
-			s.accumulator.Reset()
-			return
+			// Enforce budget limit: if the intermediate result already pushed us
+			// over budget, surface ErrBudgetExceeded now rather than letting the
+			// continuation turn run up additional cost.
+			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
+				result.Error = ErrBudgetExceeded
+				// Fall through to normal completion path to emit TurnCompleteEvent.
+			} else {
+				// Reset accumulator so the continuation turn's streaming events
+				// are processed cleanly.
+				s.accumulator.Reset()
+				return
+			}
 		}
 	}
 
