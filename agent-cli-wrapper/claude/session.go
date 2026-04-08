@@ -24,24 +24,26 @@ type SessionInfo struct {
 
 // Session manages interaction with the Claude CLI.
 type Session struct {
-	ctx                     context.Context
-	events                  chan Event
-	recorder                *sessionRecorder
-	accumulator             *streamAccumulator
-	turnManager             *turnManager
-	permissionManager       *permissionManager
-	state                   *sessionState
-	process                 *processManager
-	info                    *SessionInfo
-	done                    chan struct{}
-	pendingControlResponses map[string]chan protocol.ControlResponsePayload
-	cancel                  context.CancelFunc
-	config                  SessionConfig
-	cumulativeCostUSD       float64
-	mu                      sync.RWMutex
-	pendingMu               sync.Mutex
-	started                 bool
-	stopping                bool
+	ctx                           context.Context
+	events                        chan Event
+	recorder                      *sessionRecorder
+	accumulator                   *streamAccumulator
+	turnManager                   *turnManager
+	permissionManager             *permissionManager
+	state                         *sessionState
+	process                       *processManager
+	info                          *SessionInfo
+	done                          chan struct{}
+	pendingControlResponses       map[string]chan protocol.ControlResponsePayload
+	cancel                        context.CancelFunc
+	config                        SessionConfig
+	cumulativeCostUSD             float64
+	mu                            sync.RWMutex
+	pendingMu                     sync.Mutex
+	bgTasksMu                     sync.Mutex
+	started                       bool
+	stopping                      bool
+	bgTaskLaunchedSinceLastResult bool
 }
 
 // NewSession creates a new Claude session with options.
@@ -683,6 +685,12 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 }
 
 func (s *Session) handleUser(msg protocol.UserMessage) {
+	// Check for task notifications (background task completed).
+	// These arrive as string content, not blocks.
+	if _, ok := msg.Message.Content.AsString(); ok {
+		return // String content has no blocks to process
+	}
+
 	// Get content blocks (if available)
 	blocks, ok := msg.Message.Content.AsBlocks()
 	if !ok {
@@ -711,6 +719,15 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 				Content:    resultBlock.Content,
 				IsError:    isError,
 			})
+
+			// Track background task launches from tool_result content.
+			if contentStr, ok := resultBlock.Content.(string); ok {
+				if extractBackgroundTaskID(contentStr) != "" {
+					s.bgTasksMu.Lock()
+					s.bgTaskLaunchedSinceLastResult = true
+					s.bgTasksMu.Unlock()
+				}
+			}
 		}
 	}
 
@@ -770,6 +787,28 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 	if msg.IsError {
 		result.Error = fmt.Errorf("%s", msg.Result)
+	}
+
+	// Check if background tasks were launched since the last ResultMessage.
+	// If so, the CLI will auto-continue after the tasks complete (delivering
+	// task-notification messages and starting a new assistant turn). Suppress
+	// turn completion so callers of Ask()/WaitForTurn()/CollectResponse()
+	// block until the truly-final turn.
+	s.bgTasksMu.Lock()
+	bgLaunched := s.bgTaskLaunchedSinceLastResult
+	s.bgTaskLaunchedSinceLastResult = false
+	s.bgTasksMu.Unlock()
+
+	if bgLaunched {
+		// Accumulate cost from this intermediate result.
+		s.mu.Lock()
+		s.cumulativeCostUSD += msg.TotalCostUSD
+		s.mu.Unlock()
+
+		// Reset accumulator so the continuation turn's streaming events
+		// are processed cleanly.
+		s.accumulator.Reset()
+		return
 	}
 
 	// Update cumulative cost and check SDK-level limits.

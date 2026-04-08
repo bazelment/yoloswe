@@ -2,9 +2,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "github",
-    srcs = [
-        "client.go",
-    ],
+    srcs = ["client.go"],
     importpath = "github.com/bazelment/yoloswe/jiradozer/tracker/github",
     visibility = ["//visibility:public"],
     deps = [
