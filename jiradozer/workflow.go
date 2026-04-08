@@ -180,7 +180,15 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		}
 	}
 
-	w.captureOutput(stepName, strings.Join(allOutputs, "\n\n---\n\n"))
+	// Filter empty round outputs before joining so separator-only text
+	// (e.g. "\n\n---\n\n") is not mistaken for real plan content.
+	var nonEmpty []string
+	for _, o := range allOutputs {
+		if strings.TrimSpace(o) != "" {
+			nonEmpty = append(nonEmpty, o)
+		}
+	}
+	w.captureOutput(stepName, strings.Join(nonEmpty, "\n\n---\n\n"))
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
