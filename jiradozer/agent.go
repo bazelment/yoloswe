@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -289,6 +290,29 @@ func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
 		d.URL = *issue.URL
 	}
 	return d
+}
+
+// PlanFilePath returns .jiradozer/plan.md within workDir, enabling plan
+// reuse across separate process invocations (e.g. plan step then build step).
+func PlanFilePath(workDir string) string {
+	return filepath.Join(workDir, ".jiradozer", "plan.md")
+}
+
+// PersistPlan writes plan output to PlanFilePath so --run-step=build can load it.
+// Empty output is skipped (with a warning log) to avoid overwriting a previously valid plan.
+func PersistPlan(workDir, output string, logger *slog.Logger) {
+	if strings.TrimSpace(output) == "" {
+		logger.Warn("skipping plan persistence — output is empty")
+		return
+	}
+	planPath := PlanFilePath(workDir)
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		logger.Warn("failed to create plan directory", "error", err)
+	} else if err := os.WriteFile(planPath, []byte(output), 0o644); err != nil {
+		logger.Warn("failed to persist plan", "error", err)
+	} else {
+		logger.Info("persisted plan to disk", "path", planPath)
+	}
 }
 
 // GenerateTitle creates a short title from the first words of a description,

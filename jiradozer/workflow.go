@@ -85,6 +85,9 @@ func (w *Workflow) Run(ctx context.Context) error {
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
 			delete(w.sessionIDs, StepCreatingPR) // Fresh build cycle invalidates old create_pr session.
+			if w.plan == "" {
+				w.logger.Warn("NO PLAN AVAILABLE — build step is running without a plan")
+			}
 			w.runStepOrRounds(ctx, "build", w.config.Build, StepCreatingPR, "build_complete")
 		case StepCreatingPR:
 			w.runStep(ctx, "create_pr", w.config.CreatePR, StepBuildReview, "pr_created")
@@ -177,7 +180,15 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		}
 	}
 
-	w.captureOutput(stepName, strings.Join(allOutputs, "\n\n---\n\n"))
+	// Filter empty round outputs before joining so separator-only text
+	// (e.g. "\n\n---\n\n") is not mistaken for real plan content.
+	var nonEmpty []string
+	for _, o := range allOutputs {
+		if strings.TrimSpace(o) != "" {
+			nonEmpty = append(nonEmpty, o)
+		}
+	}
+	w.captureOutput(stepName, strings.Join(nonEmpty, "\n\n---\n\n"))
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
@@ -226,10 +237,13 @@ func (w *Workflow) promptData() PromptData {
 }
 
 // captureOutput stores step output for use by downstream steps.
+// Plan output is also persisted to disk so the build step can load it
+// when run as a separate process invocation (--run-step=build).
 func (w *Workflow) captureOutput(stepName, output string) {
 	switch stepName {
 	case "plan":
 		w.plan = output
+		PersistPlan(w.config.WorkDir, output, w.logger)
 	case "build":
 		w.buildOutput = output
 	}
