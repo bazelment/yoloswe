@@ -27,8 +27,16 @@ type FeedbackResult struct {
 }
 
 // PollForFeedback polls the tracker for new human comments on the issue.
-// It blocks until a non-bot comment is found, then parses the action.
-func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string, since time.Time, interval time.Duration, logger *slog.Logger) (*FeedbackResult, error) {
+// It blocks until a comment not in excludeIDs is found, then parses the action.
+// excludeIDs contains IDs of comments posted by the bot (e.g., step result and
+// waiting comments) so they are skipped even when the bot and human share the
+// same API key (where IsSelf would be true for both).
+func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string, since time.Time, interval time.Duration, logger *slog.Logger, excludeIDs []string) (*FeedbackResult, error) {
+	exclude := make(map[string]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		exclude[id] = true
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -50,11 +58,11 @@ func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string
 			continue
 		}
 
-		// Use the last (most recent) non-self comment, since Linear returns
-		// comments in ascending createdAt order.
+		// Use the last (most recent) comment not posted by the bot, since
+		// Linear returns comments in ascending createdAt order.
 		var latest *tracker.Comment
 		for i := len(comments) - 1; i >= 0; i-- {
-			if !comments[i].IsSelf {
+			if !exclude[comments[i].ID] {
 				latest = &comments[i]
 				break
 			}

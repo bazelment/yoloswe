@@ -19,27 +19,22 @@ const (
 
 // Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
-	tracker    tracker.IssueTracker
-	lastError  error
-	issue      *tracker.Issue
-	state      *StateMachine
-	config     *Config
-	logger     *slog.Logger
-	sessionIDs map[WorkflowStep]string // per-step session IDs for resume
-	stateIDs   map[string]string
-
-	// OnTransition is called after each successful state transition.
-	// The orchestrator uses this to track workflow progress without polling.
-	OnTransition func(step WorkflowStep)
-	// OnRoundProgress is called during multi-round steps to report round progress.
-	// roundIndex is 0-based current round; roundTotal is len(rounds).
+	lastCommentAt   time.Time
+	tracker         tracker.IssueTracker
+	lastError       error
+	config          *Config
+	state           *StateMachine
+	logger          *slog.Logger
+	sessionIDs      map[WorkflowStep]string
+	stateIDs        map[string]string
+	OnTransition    func(step WorkflowStep)
 	OnRoundProgress func(roundIndex, roundTotal int)
-	// runStepAgent is the agent runner, overridable in tests.
-	runStepAgent  func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error)
-	lastCommentAt time.Time
-	plan          string
-	buildOutput   string
-	feedback      string
+	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error)
+	issue           *tracker.Issue
+	plan            string
+	buildOutput     string
+	feedback        string
+	botCommentIDs   []string
 }
 
 // NewWorkflow creates a new workflow for the given issue.
@@ -135,9 +130,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)
 
-	// Reset lastCommentAt so transitionToReview uses the server timestamp from
-	// this step's result comment rather than a stale value from a prior review cycle.
+	// Reset lastCommentAt and botCommentIDs so transitionToReview uses
+	// fresh values from this step cycle rather than stale ones from a prior cycle.
 	w.lastCommentAt = time.Time{}
+	w.botCommentIDs = nil
 
 	feedback := w.feedback
 	w.feedback = ""
@@ -175,8 +171,13 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		roundComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
 		if err != nil {
 			w.logger.Warn("failed to post round comment", "step", stepName, "round", i+1, "error", err)
-		} else if i == totalRounds-1 && !roundComment.CreatedAt.IsZero() {
-			w.lastCommentAt = roundComment.CreatedAt
+		} else {
+			if roundComment.ID != "" {
+				w.botCommentIDs = append(w.botCommentIDs, roundComment.ID)
+			}
+			if i == totalRounds-1 && !roundComment.CreatedAt.IsZero() {
+				w.lastCommentAt = roundComment.CreatedAt
+			}
 		}
 	}
 
@@ -197,9 +198,10 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	currentStep := w.state.Current()
 	sessionID := w.sessionIDs[currentStep]
 
-	// Reset lastCommentAt so transitionToReview uses the server timestamp from
-	// this step's result comment rather than a stale value from a prior review cycle.
+	// Reset lastCommentAt and botCommentIDs so transitionToReview uses
+	// fresh values from this step cycle rather than stale ones from a prior cycle.
 	w.lastCommentAt = time.Time{}
+	w.botCommentIDs = nil
 
 	feedback := w.feedback
 	w.feedback = ""
@@ -221,8 +223,13 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	resultComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
 	if err != nil {
 		w.logger.Warn("failed to post step comment", "step", stepName, "error", err)
-	} else if !resultComment.CreatedAt.IsZero() {
-		w.lastCommentAt = resultComment.CreatedAt
+	} else {
+		if resultComment.ID != "" {
+			w.botCommentIDs = append(w.botCommentIDs, resultComment.ID)
+		}
+		if !resultComment.CreatedAt.IsZero() {
+			w.lastCommentAt = resultComment.CreatedAt
+		}
 	}
 
 	w.transitionToReview(ctx, reviewStep, trigger)
@@ -279,7 +286,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 
 	w.logger.Info("waiting for approval", "step", w.state.Current(), "issue", w.issue.Identifier)
 
-	fb, err := PollForFeedback(ctx, w.tracker, w.issue.ID, w.lastCommentAt, w.config.PollInterval, w.logger)
+	fb, err := PollForFeedback(ctx, w.tracker, w.issue.ID, w.lastCommentAt, w.config.PollInterval, w.logger, w.botCommentIDs)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("polling for feedback: %w", err))
 		return
@@ -334,6 +341,8 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 	waitingComment, err := PostWaitingComment(ctx, w.tracker, w.issue.ID, w.state.Current())
 	if err != nil {
 		w.logger.Warn("failed to post waiting comment", "error", err)
+	} else if waitingComment.ID != "" {
+		w.botCommentIDs = append(w.botCommentIDs, waitingComment.ID)
 	}
 	// lastCommentAt was set by the step result comment in runStep/runStepRounds.
 	// Do not overwrite it here — doing so would skip user comments posted between

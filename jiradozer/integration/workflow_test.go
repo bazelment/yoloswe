@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -275,5 +276,67 @@ func TestLinear_StateResolution(t *testing.T) {
 		t.Logf("in_progress → %s", id)
 	} else {
 		t.Log("WARNING: 'In Progress' state not found — team may use custom names")
+	}
+}
+
+// TestLinear_PollForFeedback_SameUser verifies the approval flow when the
+// bot and human share the same API key (IsSelf=true for all comments).
+// This is a regression test: previously PollForFeedback filtered by IsSelf,
+// which meant human comments were silently ignored when using a personal API key.
+func TestLinear_PollForFeedback_SameUser(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	client := getLinearClient(t)
+	issueID := getTestIssueID(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	issue, err := client.FetchIssue(ctx, issueID)
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	variants := []struct {
+		body string
+		want jiradozer.FeedbackAction
+	}{
+		{"approve", jiradozer.FeedbackApprove},
+		{"lgtm", jiradozer.FeedbackApprove},
+		{"LGTM", jiradozer.FeedbackApprove},
+		{"ship it", jiradozer.FeedbackApprove},
+		{"redo", jiradozer.FeedbackRedo},
+		{"Please fix tests", jiradozer.FeedbackComment},
+	}
+
+	for _, v := range variants {
+		t.Run(v.body, func(t *testing.T) {
+			marker := time.Now().Format("20060102-150405.000")
+
+			// Post bot comments (simulating result + waiting).
+			resultComment, err := client.PostComment(ctx, issue.ID, "## Plan Complete ("+marker+")\n\nOutput.")
+			require.NoError(t, err)
+
+			waitingComment, err := client.PostComment(ctx, issue.ID, "**plan_review** — Waiting ("+marker+").")
+			require.NoError(t, err)
+
+			// Post the "human" comment (same API key, so IsSelf=true).
+			humanComment, err := client.PostComment(ctx, issue.ID, v.body)
+			require.NoError(t, err)
+			assert.True(t, humanComment.IsSelf, "same API key → IsSelf should be true")
+
+			// PollForFeedback should find the human comment by excluding bot IDs.
+			excludeIDs := []string{resultComment.ID, waitingComment.ID}
+
+			pollCtx, pollCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer pollCancel()
+
+			fb, err := jiradozer.PollForFeedback(pollCtx, client, issue.ID, resultComment.CreatedAt, 500*time.Millisecond, logger, excludeIDs)
+			require.NoError(t, err, "PollForFeedback should find the human comment")
+			assert.Equal(t, v.want, fb.Action, "body=%q", v.body)
+			assert.Equal(t, v.body, fb.Message)
+		})
 	}
 }

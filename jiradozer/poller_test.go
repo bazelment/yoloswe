@@ -123,7 +123,7 @@ func TestPollForFeedback_FiltersBotComments(t *testing.T) {
 	defer cancel()
 
 	logger := discardLogger()
-	fb, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 100*time.Millisecond, logger)
+	fb, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 100*time.Millisecond, logger, []string{"bot1", "bot2"})
 	require.NoError(t, err)
 	assert.Equal(t, FeedbackApprove, fb.Action)
 	assert.Equal(t, "lgtm", fb.Message)
@@ -143,9 +143,9 @@ func TestPollForFeedback_UsesLastHumanComment(t *testing.T) {
 	defer cancel()
 
 	logger := discardLogger()
-	fb, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 100*time.Millisecond, logger)
+	fb, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 100*time.Millisecond, logger, nil)
 	require.NoError(t, err)
-	// Should pick the last (most recent) non-self comment.
+	// Should pick the last (most recent) non-excluded comment.
 	assert.Equal(t, FeedbackApprove, fb.Action)
 	assert.Equal(t, "h2", fb.Comment.ID)
 }
@@ -163,7 +163,7 @@ func TestPollForFeedback_ContextCanceled(t *testing.T) {
 	}()
 
 	logger := discardLogger()
-	_, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 50*time.Millisecond, logger)
+	_, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 50*time.Millisecond, logger, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 }
@@ -179,10 +179,34 @@ func TestPollForFeedback_OnlyBotComments_KeepsPolling(t *testing.T) {
 	defer cancel()
 
 	logger := discardLogger()
-	_, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 50*time.Millisecond, logger)
-	// Should time out because only bot comments are present.
+	_, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 50*time.Millisecond, logger, []string{"bot1"})
+	// Should time out because only excluded bot comments are present.
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	// Should have polled multiple times.
 	assert.Greater(t, mt.calls, 1)
+}
+
+// TestPollForFeedback_SameUserExcludeByID verifies that when all comments
+// have IsSelf=true (same API key for bot and human), excluding by bot comment
+// IDs still allows human comments through.
+func TestPollForFeedback_SameUserExcludeByID(t *testing.T) {
+	now := time.Now()
+	mt := &mockPollerTracker{
+		comments: []tracker.Comment{
+			{ID: "bot-result", Body: "## Plan Complete\n\nPlan output...", IsSelf: true, CreatedAt: now},
+			{ID: "bot-waiting", Body: "**plan_review** — Waiting for review.", IsSelf: true, CreatedAt: now.Add(time.Second)},
+			{ID: "human-approve", Body: "approve", IsSelf: true, CreatedAt: now.Add(2 * time.Second)},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	logger := discardLogger()
+	fb, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 100*time.Millisecond, logger, []string{"bot-result", "bot-waiting"})
+	require.NoError(t, err)
+	assert.Equal(t, FeedbackApprove, fb.Action)
+	assert.Equal(t, "approve", fb.Message)
+	assert.Equal(t, "human-approve", fb.Comment.ID)
 }
