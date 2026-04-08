@@ -177,6 +177,9 @@ func (c *Config) validate() error {
 	for name, step := range map[string]StepConfig{
 		"plan": c.Plan, "build": c.Build, "create_pr": c.CreatePR, "validate": c.Validate, "ship": c.Ship,
 	} {
+		if name == "create_pr" && len(step.Rounds) > 0 {
+			return fmt.Errorf("create_pr does not support rounds")
+		}
 		if step.Prompt != "" && len(step.Rounds) > 0 {
 			return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
 		}

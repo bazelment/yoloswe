@@ -266,6 +266,25 @@ func TestLoadConfig_RoundsEmptyPrompt(t *testing.T) {
 	assert.Contains(t, err.Error(), "prompt or command is required")
 }
 
+func TestLoadConfig_CreatePRRoundsRejected(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+create_pr:
+  rounds:
+    - command: "echo hello"
+`
+	path := dir + "/cfg.yaml"
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create_pr does not support rounds")
+}
+
 func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
 	_, err := LoadConfig("testdata/rounds_invalid_template.yaml")
 	require.Error(t, err)

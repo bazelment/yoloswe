@@ -130,7 +130,7 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 		return "", fmt.Errorf("render %s command: %w", stepName, err)
 	}
 
-	logger.Info("running command", "step", stepName, "command", rendered, "work_dir", workDir)
+	logger.Info("running command", "step", stepName, "command", truncate(rendered, 200), "work_dir", workDir)
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", rendered)
 	cmd.Dir = workDir
