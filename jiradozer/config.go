@@ -76,7 +76,7 @@ type StepConfig struct {
 // Exactly one of Prompt or Command must be set.
 type RoundConfig struct {
 	Prompt       string  `yaml:"prompt"`         // Go text/template; mutually exclusive with Command
-	Command      string  `yaml:"command"`        // Shell command template (sh -c); mutually exclusive with Prompt
+	Command      string  `yaml:"command"`        // Shell command template (sh -c); mutually exclusive with Prompt. WARNING: tracker fields like Title/Description are user-controlled — only interpolate them when the issue source is fully trusted.
 	SystemPrompt string  `yaml:"system_prompt"`  // optional system prompt (agent rounds only)
 	Model        string  `yaml:"model"`          // override; empty = inherit from step (agent rounds only)
 	MaxTurns     int     `yaml:"max_turns"`      // override; 0 = inherit from step (agent rounds only)

@@ -192,6 +192,14 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		}
 	}
 
+	// Warn if feedback was provided but could not be injected (all rounds are
+	// command rounds). Feedback cannot be passed to shell commands; the redo
+	// cycle will re-run commands identically.
+	if feedback != "" && !feedbackInjected {
+		w.logger.Warn("feedback not injected: all rounds are command rounds; redo will re-run commands unchanged",
+			"step", stepName, "feedback", truncate(feedback, 200))
+	}
+
 	// Filter empty round outputs before joining so separator-only text
 	// (e.g. "\n\n---\n\n") is not mistaken for real plan content.
 	var nonEmpty []string

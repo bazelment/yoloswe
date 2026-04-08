@@ -124,6 +124,14 @@ func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg Ste
 // RunCommand runs a shell command template for the given workflow step.
 // The commandTmpl is rendered with data, then executed via sh -c in workDir.
 // Returns the combined stdout+stderr output and any error.
+//
+// Security note: command templates are rendered with PromptData fields (Title,
+// Description, etc.) which originate from the issue tracker and are
+// user-controlled. Interpolating these fields directly into shell commands can
+// allow shell injection. Only include tracker fields in command templates when
+// the issue source is fully trusted (e.g. an internal tracker with restricted
+// write access). Avoid interpolating free-text fields such as Title or
+// Description unless you control all issue authors.
 func RunCommand(ctx context.Context, stepName string, data PromptData, commandTmpl string, workDir string, logger *slog.Logger) (string, error) {
 	rendered, err := renderPrompt(commandTmpl, data)
 	if err != nil {
