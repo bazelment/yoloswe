@@ -497,16 +497,17 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 		sessionIDs = append(sessionIDs, sessionID)
 	}
 
-	hasOutput := false
+	// Filter empty round outputs before joining so separator-only text
+	// is not mistaken for real content (mirrors workflow.go logic).
+	var nonEmpty []string
 	for _, o := range allOutputs {
-		if o != "" {
-			hasOutput = true
-			break
+		if strings.TrimSpace(o) != "" {
+			nonEmpty = append(nonEmpty, o)
 		}
 	}
 	var combined string
-	if hasOutput {
-		combined = strings.Join(allOutputs, "\n\n---\n\n")
+	if len(nonEmpty) > 0 {
+		combined = strings.Join(nonEmpty, "\n\n---\n\n")
 		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
 	} else {
 		logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
