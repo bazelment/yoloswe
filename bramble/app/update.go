@@ -696,7 +696,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "p", "b", "c":
-		st := map[string]session.SessionType{"p": session.SessionTypePlanner, "b": session.SessionTypeBuilder, "c": session.SessionTypeCodeTalk}[msg.String()]
+		st := sessionTypeFromKey(msg.String())
 		if m.selectedWorktree() != nil {
 			defaultModel, promptLabel, placeholder := m.sessionPromptConfig(st)
 			m.pendingModel = defaultModel
@@ -1296,6 +1296,20 @@ func (m *Model) saveDefaultModel(sessionType session.SessionType, model string) 
 	}
 }
 
+// sessionTypeFromKey maps a key press ("p", "b", "c") to a SessionType.
+func sessionTypeFromKey(key string) session.SessionType {
+	switch key {
+	case "p":
+		return session.SessionTypePlanner
+	case "b":
+		return session.SessionTypeBuilder
+	case "c":
+		return session.SessionTypeCodeTalk
+	default:
+		return session.SessionTypePlanner
+	}
+}
+
 // sessionPromptConfig returns the default model, prompt label, and placeholder
 // for a given session type. Used by all p/b/c key handlers.
 func (m *Model) sessionPromptConfig(st session.SessionType) (defaultModel, promptLabel, placeholder string) {
@@ -1350,8 +1364,9 @@ func (m Model) startSessionOnPath(sessionType session.SessionType, prompt, model
 }
 
 // startNewSessionFromOverlay prompts the user for input to start a session on
-// the given session's worktree. Caller must hide the overlay before calling.
-func (m Model) startNewSessionFromOverlay(sess *session.SessionInfo, sessionType session.SessionType) (tea.Model, tea.Cmd) {
+// the given session's worktree. hideOverlay is called only after validation
+// succeeds, so the overlay stays visible on error (preventing focus-state bugs).
+func (m Model) startNewSessionFromOverlay(sess *session.SessionInfo, sessionType session.SessionType, hideOverlay func()) (tea.Model, tea.Cmd) {
 	if sess == nil {
 		toastCmd := m.addToast("No session selected", ToastInfo)
 		return m, toastCmd
@@ -1361,12 +1376,21 @@ func (m Model) startNewSessionFromOverlay(sess *session.SessionInfo, sessionType
 		return m, toastCmd
 	}
 
+	hideOverlay()
+	m.focus = FocusOutput
+
 	// Switch repo if needed
 	if sess.RepoName != "" && sess.RepoName != m.repoName {
 		if _, ok := m.repos[sess.RepoName]; ok {
 			m.saveActiveContext()
 			m.loadContext(sess.RepoName)
 		}
+	}
+
+	// Sync worktree dropdown so the UI reflects where the new session will run
+	if sess.WorktreeName != "" {
+		m.worktreeDropdown.SelectByID(sess.WorktreeName)
+		m.updateSessionDropdown()
 	}
 
 	defaultModel, promptLabel, placeholder := m.sessionPromptConfig(sessionType)
@@ -2003,9 +2027,8 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m.switchToOverlaySession()
 
 	case "p", "b", "c":
-		m.allSessionsOverlay.Hide()
-		st := map[string]session.SessionType{"p": session.SessionTypePlanner, "b": session.SessionTypeBuilder, "c": session.SessionTypeCodeTalk}[msg.String()]
-		return m.startNewSessionFromOverlay(m.allSessionsOverlay.SelectedSession(), st)
+		st := sessionTypeFromKey(msg.String())
+		return m.startNewSessionFromOverlay(m.allSessionsOverlay.SelectedSession(), st, func() { m.allSessionsOverlay.Hide() })
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -2211,9 +2234,8 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "p", "b", "c":
-		m.commandCenter.Hide()
-		st := map[string]session.SessionType{"p": session.SessionTypePlanner, "b": session.SessionTypeBuilder, "c": session.SessionTypeCodeTalk}[msg.String()]
-		return m.startNewSessionFromOverlay(m.commandCenter.SelectedSession(), st)
+		st := sessionTypeFromKey(msg.String())
+		return m.startNewSessionFromOverlay(m.commandCenter.SelectedSession(), st, func() { m.commandCenter.Hide() })
 
 	case "v":
 		sess := m.commandCenter.TogglePreview()

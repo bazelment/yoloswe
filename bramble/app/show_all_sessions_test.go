@@ -292,3 +292,80 @@ func TestAllSessionsOverlay_VisibleSessionRange_FollowsSelection(t *testing.T) {
 	assert.Equal(t, 8, start)
 	assert.Equal(t, 14, end)
 }
+
+func TestAllSessionsOverlay_NewSession_PBC(t *testing.T) {
+	for _, tc := range []struct {
+		promptSub   string
+		sessionType session.SessionType
+		key         rune
+	}{
+		{"Plan prompt", session.SessionTypePlanner, 'p'},
+		{"Build prompt", session.SessionTypeBuilder, 'b'},
+		{"CodeTalk prompt", session.SessionTypeCodeTalk, 'c'},
+	} {
+		t.Run(string(tc.key), func(t *testing.T) {
+			m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+				{Branch: "main", Path: "/tmp/wt/main"},
+			}, "test-repo")
+			m.worktreeDropdown.SelectIndex(0)
+
+			sessions := []session.SessionInfo{
+				{ID: "s1", Status: session.StatusRunning, WorktreePath: "/tmp/wt/main", WorktreeName: "main"},
+			}
+			m.allSessionsOverlay.Show(sessions, m.width, m.height)
+			m.focus = FocusAllSessions
+
+			newModel, _ := m.handleAllSessionsOverlay(keyPress(tc.key))
+			m2 := newModel.(Model)
+
+			// Overlay should be hidden and focus should move to input
+			assert.False(t, m2.allSessionsOverlay.IsVisible())
+			assert.Equal(t, FocusInput, m2.focus)
+			assert.True(t, m2.inputMode)
+			assert.Contains(t, m2.inputPrompt, tc.promptSub)
+			assert.Equal(t, tc.sessionType, m2.pendingSessionType)
+		})
+	}
+}
+
+func TestAllSessionsOverlay_NewSession_NoSession(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	// Show overlay with no sessions
+	m.allSessionsOverlay.Show(nil, m.width, m.height)
+	m.focus = FocusAllSessions
+
+	newModel, _ := m.handleAllSessionsOverlay(keyPress('p'))
+	m2 := newModel.(Model)
+
+	// Should show toast error and overlay stays visible (focus-state bug fix)
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "No session selected")
+	// Overlay should NOT have been hidden
+	assert.True(t, m2.allSessionsOverlay.IsVisible())
+}
+
+func TestAllSessionsOverlay_NewSession_NoWorktree(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	// Session with no worktree path
+	sessions := []session.SessionInfo{
+		{ID: "s1", Status: session.StatusRunning, WorktreePath: ""},
+	}
+	m.allSessionsOverlay.Show(sessions, m.width, m.height)
+	m.focus = FocusAllSessions
+
+	newModel, _ := m.handleAllSessionsOverlay(keyPress('b'))
+	m2 := newModel.(Model)
+
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "no worktree")
+	// Overlay should NOT have been hidden
+	assert.True(t, m2.allSessionsOverlay.IsVisible())
+}
