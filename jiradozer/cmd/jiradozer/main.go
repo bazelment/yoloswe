@@ -37,9 +37,7 @@ func main() {
 		maxBudget       float64
 		runStep         string
 		autoApprove     string
-		team            string
-		sourceStates    []string
-		sourceLabels    []string
+		sourceFilters   []string
 		maxConcurrent   int
 		branchPrefix    string
 		verbose         bool
@@ -62,9 +60,7 @@ func main() {
 				maxBudget:       maxBudget,
 				runStep:         runStep,
 				autoApprove:     autoApprove,
-				team:            team,
-				sourceStates:    sourceStates,
-				sourceLabels:    sourceLabels,
+				sourceFilters:   sourceFilters,
 				maxConcurrent:   maxConcurrent,
 				branchPrefix:    branchPrefix,
 				verbose:         verbose,
@@ -84,9 +80,7 @@ func main() {
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
 	rootCmd.Flags().StringVar(&autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
-	rootCmd.Flags().StringVar(&team, "team", "", "Team key for multi-issue mode (e.g. ENG)")
-	rootCmd.Flags().StringSliceVar(&sourceStates, "source-states", nil, "Issue states to track (default: Todo)")
-	rootCmd.Flags().StringSliceVar(&sourceLabels, "source-labels", nil, "Issue label filter")
+	rootCmd.Flags().StringSliceVar(&sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo)")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	rootCmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
@@ -109,14 +103,12 @@ type runArgs struct {
 	modelID         string
 	runStep         string
 	autoApprove     string
-	team            string
 	branchPrefix    string
 	description     string
 	descriptionFile string
 	planFile        string
 	planContent     string
-	sourceStates    []string
-	sourceLabels    []string
+	sourceFilters   []string
 	pollInterval    time.Duration
 	maxBudget       float64
 	maxConcurrent   int
@@ -202,7 +194,7 @@ func run(ctx context.Context, args runArgs) error {
 		// Force local tracker, clear team, and reset state names to match the
 		// local tracker's fixed states ("In Progress", "In Review", "Done").
 		cfg.Tracker.Kind = "local"
-		cfg.Source.Team = ""
+		cfg.Source.Filters = nil
 		defaults := jiradozer.DefaultConfig()
 		cfg.States = defaults.States
 		// Default all steps to auto-approve in local mode unless overridden.
@@ -235,14 +227,17 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Apply source overrides.
-	if args.team != "" {
-		cfg.Source.Team = args.team
-	}
-	if len(args.sourceStates) > 0 {
-		cfg.Source.States = args.sourceStates
-	}
-	if len(args.sourceLabels) > 0 {
-		cfg.Source.Labels = args.sourceLabels
+	if len(args.sourceFilters) > 0 {
+		if cfg.Source.Filters == nil {
+			cfg.Source.Filters = make(map[string]string)
+		}
+		for _, kv := range args.sourceFilters {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				return fmt.Errorf("invalid --filter %q: expected key=value", kv)
+			}
+			cfg.Source.Filters[k] = v
+		}
 	}
 	if args.maxConcurrent > 0 {
 		cfg.Source.MaxConcurrent = args.maxConcurrent
@@ -262,14 +257,14 @@ func run(ctx context.Context, args runArgs) error {
 	if args.description != "" {
 		modeCount++
 	}
-	if modeCount == 0 && cfg.Source.Team != "" {
+	if modeCount == 0 && cfg.Source.HasSource() {
 		modeCount++
 	}
 	if modeCount > 1 {
 		return fmt.Errorf("--issue and --description/--description-file are mutually exclusive")
 	}
 	if modeCount == 0 {
-		return fmt.Errorf("either --issue, --team, or --description/--description-file is required")
+		return fmt.Errorf("either --issue, --filter, or --description/--description-file is required")
 	}
 
 	// Apply auto-approve overrides.
@@ -320,7 +315,7 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Multi-issue TUI mode (only when no --issue flag was given).
-	if cfg.Source.Team != "" && args.issueID == "" {
+	if cfg.Source.HasSource() && args.issueID == "" {
 		return runMultiIssue(ctx, issueTracker, cfg, logger)
 	}
 
@@ -360,7 +355,10 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	// the bare repo's parent directory.
 	// For GitHub, source.team is "owner/repo" which would create a nested
 	// directory. Use just the repo portion as the worktree repo name.
-	repoName := cfg.Source.Team
+	repoName := cfg.Source.Filters["team"]
+	if repoName == "" {
+		repoName = "jiradozer"
+	}
 	if cfg.Tracker.Kind == "github" {
 		if _, repo, err := ghtracker.ParseOwnerRepo(repoName); err == nil {
 			repoName = repo
@@ -409,14 +407,14 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 			if err != nil {
 				return nil, fmt.Errorf("github tracker: %w", err)
 			}
-		} else if cfg.Source.Team != "" {
+		} else if teamKey := cfg.Source.Filters["team"]; teamKey != "" {
 			var err error
-			owner, repo, err = ghtracker.ParseOwnerRepo(cfg.Source.Team)
+			owner, repo, err = ghtracker.ParseOwnerRepo(teamKey)
 			if err != nil {
-				return nil, fmt.Errorf("github tracker requires source.team as 'owner/repo': %w", err)
+				return nil, fmt.Errorf("github tracker requires filter team as 'owner/repo': %w", err)
 			}
 		} else {
-			return nil, fmt.Errorf("github tracker requires source.team or --issue as 'owner/repo#N'")
+			return nil, fmt.Errorf("github tracker requires --filter team=owner/repo or --issue owner/repo#N")
 		}
 		return ghtracker.NewClient(&wt.DefaultGHRunner{}, owner, repo), nil
 	case "local":

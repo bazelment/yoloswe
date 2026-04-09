@@ -139,21 +139,23 @@ func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Is
 func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
 	owner := c.owner
 	repo := c.repo
-	if filter.TeamKey != "" {
+	if teamKey := filter.Filters["team"]; teamKey != "" {
 		var err error
-		owner, repo, err = ParseOwnerRepo(filter.TeamKey)
+		owner, repo, err = ParseOwnerRepo(teamKey)
 		if err != nil {
 			return nil, fmt.Errorf("invalid team key: %w", err)
 		}
 	}
 
-	// Map jiradozer state names to GitHub issue states.
+	// Map state filter to GitHub issue state.
 	ghState := "open"
-	for _, s := range filter.States {
-		lower := strings.ToLower(s)
-		if lower == "done" || lower == "closed" {
-			ghState = "closed"
-			break
+	if stateCSV := filter.Filters["state"]; stateCSV != "" {
+		for _, s := range strings.Split(stateCSV, ",") {
+			lower := strings.ToLower(strings.TrimSpace(s))
+			if lower == "done" || lower == "closed" {
+				ghState = "closed"
+				break
+			}
 		}
 	}
 
@@ -164,7 +166,10 @@ func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]
 
 	// GitHub's labels query parameter uses AND semantics, but the tracker
 	// interface specifies OR. Issue one request per label and merge results.
-	labelSets := filter.Labels
+	var labelSets []string
+	if labelCSV := filter.Filters["label"]; labelCSV != "" {
+		labelSets = strings.Split(labelCSV, ",")
+	}
 	if len(labelSets) == 0 {
 		labelSets = []string{""} // single request with no label filter
 	}
@@ -174,7 +179,13 @@ func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]
 	for _, label := range labelSets {
 		path := fmt.Sprintf("repos/%s/%s/issues?state=%s&per_page=%d", owner, repo, ghState, limit)
 		if label != "" {
-			path += "&labels=" + url.QueryEscape(label)
+			path += "&labels=" + url.QueryEscape(strings.TrimSpace(label))
+		}
+		if milestone := filter.Filters["milestone"]; milestone != "" {
+			path += "&milestone=" + url.QueryEscape(milestone)
+		}
+		if assignee := filter.Filters["assignee"]; assignee != "" {
+			path += "&assignee=" + url.QueryEscape(assignee)
 		}
 
 		result, err := c.gh.Run(ctx, []string{"api", path}, "")

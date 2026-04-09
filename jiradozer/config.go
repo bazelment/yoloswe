@@ -43,20 +43,20 @@ type AgentConfig struct {
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
 type SourceConfig struct {
-	Team          string   `yaml:"team"`           // Team or repo identifier (e.g. "ENG" for Linear, "owner/repo" for GitHub)
-	BranchPrefix  string   `yaml:"branch_prefix"`  // Worktree branch prefix (default: "jiradozer")
-	States        []string `yaml:"states"`         // Issue states to pick up (default: ["Todo"])
-	Labels        []string `yaml:"labels"`         // Optional label filter
-	MaxConcurrent int      `yaml:"max_concurrent"` // Max parallel workflows (default: 3)
+	Filters       map[string]string `yaml:"filters"`        // Generic key-value filters (see tracker.IssueFilter)
+	BranchPrefix  string            `yaml:"branch_prefix"`  // Worktree branch prefix (default: "jiradozer")
+	MaxConcurrent int               `yaml:"max_concurrent"` // Max parallel workflows (default: 3)
 }
 
 // ToFilter converts the source config to a tracker.IssueFilter.
 func (s SourceConfig) ToFilter() tracker.IssueFilter {
-	return tracker.IssueFilter{
-		TeamKey: s.Team,
-		States:  s.States,
-		Labels:  s.Labels,
-	}
+	return tracker.IssueFilter{Filters: s.Filters}
+}
+
+// HasSource reports whether the source config specifies enough to enter
+// multi-issue mode (at least one filter key must be set).
+func (s SourceConfig) HasSource() bool {
+	return len(s.Filters) > 0
 }
 
 // StepConfig configures a single workflow step (plan or build).
@@ -137,7 +137,6 @@ func defaultConfig() Config {
 		Tracker: TrackerConfig{Kind: "linear"},
 		Agent:   AgentConfig{Model: "sonnet"},
 		Source: SourceConfig{
-			States:        []string{"Todo"},
 			MaxConcurrent: 3,
 			BranchPrefix:  "jiradozer",
 		},

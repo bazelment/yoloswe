@@ -63,7 +63,7 @@ func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Is
 }
 
 func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
-	req := listIssuesQuery(filter.TeamKey, filter.States, filter.Labels, filter.Limit)
+	req := listIssuesQuery(filter)
 	resp, err := c.execute(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)

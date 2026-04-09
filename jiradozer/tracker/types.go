@@ -32,9 +32,17 @@ type WorkflowState struct {
 }
 
 // IssueFilter specifies criteria for listing issues.
+//
+// Filters is a generic key-value map; each tracker interprets the keys it
+// understands and silently ignores unknown ones. Multi-value fields use
+// comma-separated strings (e.g. "Todo,InProgress").
+//
+// Common keys:
+//
+//	Universal:  team, state, label
+//	GitHub:     milestone, assignee, search (raw GitHub search query)
+//	Linear:     project, cycle ("current" for active cycle), assignee
 type IssueFilter struct {
-	TeamKey string   // e.g. "ENG"
-	States  []string // filter by state name, e.g. ["Todo"]
-	Labels  []string // optional filter: issue must have at least one of these labels (OR)
-	Limit   int      // max results; 0 = default (50)
+	Filters map[string]string // tracker-specific key-value pairs
+	Limit   int               // max results; 0 = default (50)
 }
