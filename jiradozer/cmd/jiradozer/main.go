@@ -355,7 +355,7 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	// the bare repo's parent directory.
 	// For GitHub, source.team is "owner/repo" which would create a nested
 	// directory. Use just the repo portion as the worktree repo name.
-	repoName := cfg.Source.Filters["team"]
+	repoName := cfg.Source.Filters[tracker.FilterTeam]
 	if repoName == "" {
 		repoName = "jiradozer"
 	}
@@ -407,7 +407,7 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 			if err != nil {
 				return nil, fmt.Errorf("github tracker: %w", err)
 			}
-		} else if teamKey := cfg.Source.Filters["team"]; teamKey != "" {
+		} else if teamKey := cfg.Source.Filters[tracker.FilterTeam]; teamKey != "" {
 			var err error
 			owner, repo, err = ghtracker.ParseOwnerRepo(teamKey)
 			if err != nil {

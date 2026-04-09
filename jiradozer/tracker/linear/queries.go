@@ -78,31 +78,29 @@ func listIssuesQuery(filter tracker.IssueFilter) graphqlRequest {
 }`
 	issueFilter := map[string]any{}
 
-	if team := filter.Filters["team"]; team != "" {
+	if team := filter.Filters[tracker.FilterTeam]; team != "" {
 		issueFilter["team"] = map[string]any{
 			"key": map[string]any{"eq": team},
 		}
 	}
-	if stateCSV := filter.Filters["state"]; stateCSV != "" {
-		states := strings.Split(stateCSV, ",")
+	if states := tracker.SplitCSV(filter.Filters[tracker.FilterState]); len(states) > 0 {
 		issueFilter["state"] = map[string]any{
 			"name": map[string]any{"in": states},
 		}
 	}
-	if labelCSV := filter.Filters["label"]; labelCSV != "" {
-		labels := strings.Split(labelCSV, ",")
+	if labels := tracker.SplitCSV(filter.Filters[tracker.FilterLabel]); len(labels) > 0 {
 		issueFilter["labels"] = map[string]any{
 			"some": map[string]any{
 				"name": map[string]any{"in": labels},
 			},
 		}
 	}
-	if project := filter.Filters["project"]; project != "" {
+	if project := filter.Filters[tracker.FilterProject]; project != "" {
 		issueFilter["project"] = map[string]any{
 			"name": map[string]any{"containsIgnoreCase": project},
 		}
 	}
-	if cycle := filter.Filters["cycle"]; cycle != "" {
+	if cycle := filter.Filters[tracker.FilterCycle]; cycle != "" {
 		if cycle == "current" {
 			issueFilter["cycle"] = map[string]any{
 				"isActive": map[string]any{"eq": true},
@@ -113,7 +111,7 @@ func listIssuesQuery(filter tracker.IssueFilter) graphqlRequest {
 			}
 		}
 	}
-	if assignee := filter.Filters["assignee"]; assignee != "" {
+	if assignee := filter.Filters[tracker.FilterAssignee]; assignee != "" {
 		issueFilter["assignee"] = map[string]any{
 			"displayName": map[string]any{"containsIgnoreCase": assignee},
 		}

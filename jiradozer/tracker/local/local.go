@@ -157,11 +157,10 @@ func (t *Tracker) ListIssues(_ context.Context, filter tracker.IssueFilter) ([]*
 	}
 
 	var stateSet map[string]bool
-	if stateCSV := filter.Filters["state"]; stateCSV != "" {
-		states := strings.Split(stateCSV, ",")
+	if states := tracker.SplitCSV(filter.Filters[tracker.FilterState]); len(states) > 0 {
 		stateSet = make(map[string]bool, len(states))
 		for _, s := range states {
-			stateSet[strings.TrimSpace(s)] = true
+			stateSet[s] = true
 		}
 	}
 

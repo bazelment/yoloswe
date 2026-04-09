@@ -139,7 +139,7 @@ func (c *Client) FetchIssue(ctx context.Context, identifier string) (*tracker.Is
 func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
 	owner := c.owner
 	repo := c.repo
-	if teamKey := filter.Filters["team"]; teamKey != "" {
+	if teamKey := filter.Filters[tracker.FilterTeam]; teamKey != "" {
 		var err error
 		owner, repo, err = ParseOwnerRepo(teamKey)
 		if err != nil {
@@ -147,15 +147,13 @@ func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]
 		}
 	}
 
-	// Map state filter to GitHub issue state.
+	// GitHub only supports a single state parameter; default to "open" unless
+	// a "done"/"closed" state is explicitly requested.
 	ghState := "open"
-	if stateCSV := filter.Filters["state"]; stateCSV != "" {
-		for _, s := range strings.Split(stateCSV, ",") {
-			lower := strings.ToLower(strings.TrimSpace(s))
-			if lower == "done" || lower == "closed" {
-				ghState = "closed"
-				break
-			}
+	for _, s := range tracker.SplitCSV(filter.Filters[tracker.FilterState]) {
+		if lower := strings.ToLower(s); lower == "done" || lower == "closed" {
+			ghState = "closed"
+			break
 		}
 	}
 
@@ -166,25 +164,25 @@ func (c *Client) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]
 
 	// GitHub's labels query parameter uses AND semantics, but the tracker
 	// interface specifies OR. Issue one request per label and merge results.
-	var labelSets []string
-	if labelCSV := filter.Filters["label"]; labelCSV != "" {
-		labelSets = strings.Split(labelCSV, ",")
-	}
+	labelSets := tracker.SplitCSV(filter.Filters[tracker.FilterLabel])
 	if len(labelSets) == 0 {
 		labelSets = []string{""} // single request with no label filter
 	}
+
+	milestone := filter.Filters[tracker.FilterMilestone]
+	assignee := filter.Filters[tracker.FilterAssignee]
 
 	seen := make(map[int]bool)
 	var issues []*tracker.Issue
 	for _, label := range labelSets {
 		path := fmt.Sprintf("repos/%s/%s/issues?state=%s&per_page=%d", owner, repo, ghState, limit)
 		if label != "" {
-			path += "&labels=" + url.QueryEscape(strings.TrimSpace(label))
+			path += "&labels=" + url.QueryEscape(label)
 		}
-		if milestone := filter.Filters["milestone"]; milestone != "" {
+		if milestone != "" {
 			path += "&milestone=" + url.QueryEscape(milestone)
 		}
-		if assignee := filter.Filters["assignee"]; assignee != "" {
+		if assignee != "" {
 			path += "&assignee=" + url.QueryEscape(assignee)
 		}
 
