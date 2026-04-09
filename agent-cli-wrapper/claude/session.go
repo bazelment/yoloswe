@@ -13,6 +13,12 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
+// defaultBgTaskSafetyTimeout is the maximum time to wait for a continuation
+// ResultMessage after suppressing a turn due to background tasks. If no
+// continuation arrives within this duration, the turn completes with
+// accumulated data to prevent indefinite blocking.
+const defaultBgTaskSafetyTimeout = 90 * time.Second
+
 // SessionInfo contains session metadata.
 type SessionInfo struct {
 	SessionID      string
@@ -23,10 +29,14 @@ type SessionInfo struct {
 }
 
 // Session manages interaction with the Claude CLI.
+//
+// Field ordering follows the fieldalignment rule: pointer/interface fields
+// first (minimises GC pointer bitmap), then value types, then small scalars.
 type Session struct {
+	// Pointer / interface / channel fields (all 8-16 bytes, contain pointers).
 	ctx                     context.Context
-	events                  chan Event
-	recorder                *sessionRecorder
+	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	bgSafetyTimer           *time.Timer // fires if no bg-task continuation arrives; see completeSuppressedTurn
 	accumulator             *streamAccumulator
 	turnManager             *turnManager
 	permissionManager       *permissionManager
@@ -34,26 +44,23 @@ type Session struct {
 	process                 *processManager
 	info                    *SessionInfo
 	done                    chan struct{}
-	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	events                  chan Event
+	recorder                *sessionRecorder
 	cancel                  context.CancelFunc
-	config                  SessionConfig
-	cumulativeCostUSD       float64
-	mu                      sync.RWMutex
-	pendingMu               sync.Mutex
-	started                 bool
-	stopping                bool
 
-	// bgTaskLaunchedSinceLastResult is set when a tool with run_in_background
-	// is observed in a tool result, causing the next result message to suppress
-	// turn completion so callers block until the background task finishes.
-	// Protected by mu.
-	bgTaskLaunchedSinceLastResult bool
+	// Value / struct fields.
+	config                 SessionConfig
+	bgTaskAccumulatedUsage TurnUsage // token/cost totals from suppressed intermediate results; protected by mu
+	cumulativeCostUSD      float64
 
-	// bgTaskAccumulatedUsage holds token/cost totals from intermediate
-	// ResultMessages that were suppressed due to background task continuation.
-	// These are added to the final ResultMessage's usage so callers see the
-	// full cost of the logical turn. Protected by mu.
-	bgTaskAccumulatedUsage TurnUsage
+	// Scalar and sync fields.
+	bgTasksPendingSinceLastResult int // successful bg launches since last result; protected by mu
+	mu                            sync.RWMutex
+	pendingMu                     sync.Mutex
+	bgTurnSuppressionActive       bool // true while waiting for continuation; cleared by timer or normal path
+	bgTimerFired                  bool // set by completeSuppressedTurn; cleared at start of next turn
+	started                       bool
+	stopping                      bool
 }
 
 // NewSession creates a new Claude session with options.
@@ -226,6 +233,15 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
+	// Clear any stale background-task suppression state from the previous turn.
+	// A safety timer for Turn N must not fire after Turn N+1 has started.
+	s.bgTimerFired = false
+	s.bgTurnSuppressionActive = false
+	s.bgTasksPendingSinceLastResult = 0
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
 
 	// Record turn start
 	if s.recorder != nil {
@@ -265,6 +281,14 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
+	// Clear any stale background-task suppression state from the previous turn.
+	s.bgTimerFired = false
+	s.bgTurnSuppressionActive = false
+	s.bgTasksPendingSinceLastResult = 0
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
 
 	// Record turn start
 	if s.recorder != nil {
@@ -427,6 +451,11 @@ func (s *Session) Stop() error {
 		return nil
 	}
 	s.stopping = true
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
+	s.bgTurnSuppressionActive = false
 	s.mu.Unlock()
 
 	// Cancel context for tool handler goroutines
@@ -734,10 +763,16 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 			// Checking tool.Input["run_in_background"] is robust against false
 			// positives from output content (e.g., git diffs containing the
 			// background task regex pattern string).
-			if tool != nil {
+			//
+			// Only count non-error results: when a parallel tool call fails, the
+			// CLI cancels sibling tools (including background ones) and returns
+			// is_error=true. Those cancelled tools never actually launched a
+			// background task, so counting them would cause the session to wait
+			// for a task-notification that will never arrive.
+			if tool != nil && !isError {
 				if rib, ok := tool.Input["run_in_background"].(bool); ok && rib {
 					s.mu.Lock()
-					s.bgTaskLaunchedSinceLastResult = true
+					s.bgTasksPendingSinceLastResult++
 					s.mu.Unlock()
 				}
 			}
@@ -762,6 +797,27 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
+	// Cancel any pending background-task safety timer — a normal continuation
+	// ResultMessage has arrived, so the safety path is no longer needed.
+	// If bgTimerFired is set, the safety timer already completed this turn;
+	// return early to prevent a duplicate TurnCompleteEvent.
+	s.mu.Lock()
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
+	timerAlreadyFired := s.bgTimerFired
+	s.bgTimerFired = false // clear; also reset by SendMessage at next turn start
+	s.bgTurnSuppressionActive = false
+	if timerAlreadyFired {
+		// The safety timer already finalized this turn. Clear any pending counter
+		// so it does not incorrectly suppress the next turn's result.
+		s.bgTasksPendingSinceLastResult = 0
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
 	turnNumber := s.turnManager.CurrentTurnNumber()
 	turn := s.turnManager.CurrentTurn()
 
@@ -815,8 +871,8 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// turn completion so callers of Ask()/WaitForTurn()/CollectResponse()
 	// block until the truly-final turn.
 	s.mu.Lock()
-	bgLaunched := s.bgTaskLaunchedSinceLastResult
-	s.bgTaskLaunchedSinceLastResult = false
+	bgPending := s.bgTasksPendingSinceLastResult
+	s.bgTasksPendingSinceLastResult = 0
 	s.mu.Unlock()
 
 	// costAccounted tracks whether cumulativeCostUSD has already been updated
@@ -824,7 +880,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// checks mid-turn; the normal path must not double-count).
 	costAccounted := false
 
-	if bgLaunched {
+	if bgPending > 0 {
 		// If the intermediate result carries an error, propagate it now rather
 		// than silently dropping it — the background task continuation will not
 		// arrive, so the session would otherwise stay stuck in StateProcessing.
@@ -869,6 +925,25 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 				// Reset accumulator so the continuation turn's streaming events
 				// are processed cleanly.
 				s.accumulator.Reset()
+
+				// Start a safety timer: if no continuation ResultMessage arrives
+				// within the timeout, complete the turn with accumulated data
+				// to prevent indefinite blocking.
+				timeout := defaultBgTaskSafetyTimeout
+				if s.config.BgTaskSafetyTimeout > 0 {
+					timeout = s.config.BgTaskSafetyTimeout
+				}
+				safetyResult := result
+				s.mu.Lock()
+				s.bgTurnSuppressionActive = true
+				s.bgTimerFired = false // reset for this turn's timer
+				if s.bgSafetyTimer != nil {
+					s.bgSafetyTimer.Stop()
+				}
+				s.bgSafetyTimer = time.AfterFunc(timeout, func() {
+					s.completeSuppressedTurn(safetyResult)
+				})
+				s.mu.Unlock()
 				return
 			}
 		}
@@ -898,15 +973,16 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
-	// Record turn completion
+	s.finalizeTurn(result)
+}
+
+// finalizeTurn records, emits, and completes the turn. Called from both the
+// normal handleResult path and the safety-timer path (completeSuppressedTurn).
+func (s *Session) finalizeTurn(result TurnResult) {
 	if s.recorder != nil {
-		s.recorder.CompleteTurn(turnNumber, result)
+		s.recorder.CompleteTurn(result.TurnNumber, result)
 	}
-
-	// Transition back to ready state
 	_ = s.state.Transition(TransitionResultReceived)
-
-	// Emit turn complete event
 	s.emit(TurnCompleteEvent{
 		TurnNumber: result.TurnNumber,
 		Success:    result.Success,
@@ -914,9 +990,36 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		Usage:      result.Usage,
 		Error:      result.Error,
 	})
-
-	// Complete turn (notifies waiters)
 	s.turnManager.CompleteTurn(result)
+}
+
+// completeSuppressedTurn is called by the background-task safety timer when
+// no continuation ResultMessage arrives within the timeout. It completes the
+// turn with whatever data was accumulated, preventing indefinite blocking.
+func (s *Session) completeSuppressedTurn(result TurnResult) {
+	s.mu.Lock()
+	if !s.bgTurnSuppressionActive {
+		s.mu.Unlock()
+		return // Already completed by normal path
+	}
+	s.bgTurnSuppressionActive = false
+	s.bgTimerFired = true
+	s.bgSafetyTimer = nil
+	s.bgTaskAccumulatedUsage = TurnUsage{}
+	s.bgTasksPendingSinceLastResult = 0 // clear stale counter; no continuation will arrive
+	s.mu.Unlock()
+
+	// Incorporate streaming updates from the correct turn only. Guard with
+	// TurnNumber to avoid cross-contaminating with a new turn that may have
+	// started between the lock release above and this read.
+	turn := s.turnManager.CurrentTurn()
+	if turn != nil && turn.Number == result.TurnNumber {
+		result.Text = turn.FullText
+		result.Thinking = turn.FullThinking
+		result.ContentBlocks = turn.ContentBlocks
+	}
+
+	s.finalizeTurn(result)
 }
 
 // handleControlResponse routes incoming control_response messages to the goroutine

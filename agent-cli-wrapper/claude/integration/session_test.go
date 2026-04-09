@@ -624,6 +624,86 @@ func TestSession_Integration_BackgroundTask(t *testing.T) {
 	t.Log("All assertions passed for Background Task scenario")
 }
 
+// ============================================================================
+// Scenario 6: Background Task Cancellation (parallel tool failure)
+// ============================================================================
+
+// TestSession_Integration_BackgroundTaskCancelled verifies that the session
+// does NOT hang when background tasks are cancelled due to a sibling parallel
+// tool call failing.
+//
+// This reproduces the exact bug from jiradozer's validate step:
+//  1. Agent calls 3 Bash tools in parallel
+//  2. First tool fails (exit 1)
+//  3. CLI cancels the other two (which had run_in_background: true)
+//  4. Session must complete the turn normally, not hang waiting for
+//     task-notifications that will never arrive.
+func TestSession_Integration_BackgroundTaskCancelled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	testDir, err := os.MkdirTemp("", "claude-go-test-bgcancel-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(testDir)
+	t.Logf("Test artifacts directory: %s", testDir)
+
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModeBypass),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
+	)
+
+	if err := session.Start(ctx); err != nil {
+		t.Fatalf("Failed to start session: %v", err)
+	}
+	defer session.Stop()
+
+	// Ask the agent to run 3 parallel Bash commands. The first one must fail,
+	// which should cause the CLI to cancel the other two background tasks.
+	t.Log("Sending parallel-failure prompt...")
+	_, err = session.SendMessage(ctx,
+		"Run these THREE bash commands in PARALLEL (all in one response, using multiple tool calls):\n"+
+			"1. `exit 1` (this will fail)\n"+
+			"2. `sleep 5 && echo SECOND_DONE` with run_in_background: true\n"+
+			"3. `sleep 5 && echo THIRD_DONE` with run_in_background: true\n\n"+
+			"You MUST call all three Bash tools in the same response so they run in parallel. "+
+			"Commands 2 and 3 MUST use run_in_background: true.")
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	events, err := CollectTurnEvents(ctx, session)
+	if err != nil {
+		t.Fatalf("CollectTurnEvents failed (session may have hung): %v", err)
+	}
+
+	if events.TurnComplete == nil {
+		t.Fatal("Expected TurnCompleteEvent — session hung or no events received")
+	}
+
+	t.Logf("Turn completed: success=%v, cost=$%.6f",
+		events.TurnComplete.Success, events.TurnComplete.Usage.CostUSD)
+
+	// Check that we had tool results with errors (cancelled bg tasks).
+	cancelledCount := 0
+	for _, tr := range events.ToolResults {
+		if tr.IsError {
+			cancelledCount++
+		}
+	}
+	t.Logf("Tool results with errors: %d", cancelledCount)
+	if cancelledCount == 0 {
+		t.Log("WARNING: No cancelled tool results — agent may not have used parallel tools. " +
+			"Test may not exercise the cancelled-bg-task path.")
+	}
+
+	t.Log("All assertions passed for Background Task Cancellation scenario")
+}
+
 // containsAny reports whether s contains any of the given substrings (case-insensitive).
 func containsAny(s string, subs ...string) bool {
 	lower := strings.ToLower(s)

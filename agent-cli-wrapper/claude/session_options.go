@@ -1,5 +1,7 @@
 package claude
 
+import "time"
+
 // PermissionMode controls tool execution approval.
 type PermissionMode string
 
@@ -52,6 +54,7 @@ type SessionConfig struct {
 	RecordMessages             bool
 	DangerouslySkipPermissions bool
 	PermissionPromptToolStdio  bool
+	BgTaskSafetyTimeout        time.Duration // 0 means use default (90s)
 }
 
 // SessionOption is a functional option for configuring a Session.
@@ -256,6 +259,14 @@ func WithTools(tools string) SessionOption {
 func WithExtraArgs(args ...string) SessionOption {
 	return func(c *SessionConfig) {
 		c.ExtraArgs = args
+	}
+}
+
+// WithBgTaskSafetyTimeout overrides the default safety timeout for background
+// task turn suppression. Useful for testing. 0 means use the default (90s).
+func WithBgTaskSafetyTimeout(d time.Duration) SessionOption {
+	return func(c *SessionConfig) {
+		c.BgTaskSafetyTimeout = d
 	}
 }
 
