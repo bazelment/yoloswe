@@ -140,8 +140,8 @@ func TestGitHub_ListIssues(t *testing.T) {
 
 	issues, err := client.ListIssues(ctx, tracker.IssueFilter{
 		Filters: map[string]string{
-			"team":  repo,
-			"state": "Todo",
+			tracker.FilterTeam:  repo,
+			tracker.FilterState: "Todo",
 		},
 		Limit: 5,
 	})

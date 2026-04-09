@@ -43,7 +43,7 @@ source:
     # project: "Backend Rewrite"        # Linear project name
     # cycle: current                    # Linear cycle ("current" or name)
     # milestone: "1"                     # GitHub milestone number (not title)
-    # assignee: "@me"                   # GitHub/Linear assignee
+    # assignee: "octocat"               # GitHub username or Linear display name
   branch_prefix: jiradozer              # default: "jiradozer" — worktree branch prefix
   max_concurrent: 3                     # default: 3 — max parallel workflows
 

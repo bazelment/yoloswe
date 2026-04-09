@@ -247,9 +247,10 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Validate mutual exclusivity. CLI flags (--issue, --description) take
-	// precedence over config-file values (source.team). Only count source.team
-	// as a mode when no CLI flag is given, so users can have source.team in
-	// their config for multi-issue mode and still use --issue for single-issue.
+	// precedence over config-file values (source.filters). Only count
+	// source.filters as a mode when no CLI flag is given, so users can have
+	// source.filters in their config for multi-issue mode and still use
+	// --issue for single-issue.
 	modeCount := 0
 	if args.issueID != "" {
 		modeCount++
@@ -264,7 +265,7 @@ func run(ctx context.Context, args runArgs) error {
 		return fmt.Errorf("--issue and --description/--description-file are mutually exclusive")
 	}
 	if modeCount == 0 {
-		return fmt.Errorf("either --issue, --filter, or --description/--description-file is required")
+		return fmt.Errorf("either --issue, --filter, --description/--description-file, or source.filters in config is required")
 	}
 
 	// Apply auto-approve overrides.
