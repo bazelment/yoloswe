@@ -46,6 +46,42 @@ type turnState struct {
 	Number        int
 }
 
+// shouldSuppressForBgTasks returns true when ALL non-cancelled tool_use blocks
+// in the turn had run_in_background: true, meaning the ResultMessage arrived
+// because bg tools returned immediately and the real work is still in progress.
+// When non-bg tools are present, the ResultMessage represents completion of
+// synchronous work and must not be suppressed.
+func (turn *turnState) shouldSuppressForBgTasks() bool {
+	if turn == nil {
+		return false
+	}
+
+	cancelled := make(map[string]bool)
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolResult && block.IsError {
+			cancelled[block.ToolUseID] = true
+		}
+	}
+
+	// Non-bg tools always prevent suppression (even if they errored), because
+	// their presence means the ResultMessage represents completion of synchronous
+	// work. Cancelled bg tools are skipped — they never launched a background task.
+	hasBgTool := false
+	for _, block := range turn.ContentBlocks {
+		if block.Type != ContentBlockTypeToolUse {
+			continue
+		}
+		isBg, _ := block.ToolInput["run_in_background"].(bool)
+		if !isBg {
+			return false // non-bg tool → ResultMessage is real completion, never suppress
+		}
+		if !cancelled[block.ToolUseID] {
+			hasBgTool = true
+		}
+	}
+	return hasBgTool
+}
+
 // toolState tracks the state of a tool within a turn.
 type toolState struct {
 	StartTime    time.Time

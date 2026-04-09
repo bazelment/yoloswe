@@ -65,14 +65,20 @@ func newTestSession(t *testing.T, opts ...SessionOption) *Session {
 	return s
 }
 
-// simulateAssistantToolUse registers tool_use blocks with the session so
-// that handleUser can look them up via FindToolByID.
+// simulateAssistantToolUse registers tool_use blocks with the session,
+// mirroring what handleAssistant does: tracks tools and appends ContentBlocks.
 func simulateAssistantToolUse(s *Session, tools []protocol.ToolUseBlock) {
 	// Start a turn and register each tool.
 	s.turnManager.StartTurn("test")
 	for _, tb := range tools {
 		tool := s.turnManager.GetOrCreateTool(tb.ID, tb.Name)
 		tool.Input = tb.Input
+		s.turnManager.AppendContentBlock(ContentBlock{
+			Type:      ContentBlockTypeToolUse,
+			ToolUseID: tb.ID,
+			ToolName:  tb.Name,
+			ToolInput: tb.Input,
+		})
 	}
 }
 
@@ -119,17 +125,13 @@ func TestBgTask_CancelledToolsDoNotSuppressTurn(t *testing.T) {
 	}
 	simulateUserToolResults(t, s, results)
 
-	// The counter should be 0: cancelled bg tools should not be counted.
-	s.mu.RLock()
-	pending := s.bgTasksPendingSinceLastResult
-	s.mu.RUnlock()
-
-	if pending != 0 {
-		t.Errorf("expected bgTasksPendingSinceLastResult=0, got %d", pending)
+	// shouldSuppressForBgTasks must return false: all tools are cancelled.
+	turn := s.turnManager.CurrentTurn()
+	if turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return false when all tools are cancelled")
 	}
 
 	// Now simulate handleResult — should complete the turn normally, not suppress.
-	// Transition to processing first.
 	_ = s.state.Transition(TransitionUserMessageSent)
 
 	resultMsg := protocol.ResultMessage{
@@ -157,12 +159,10 @@ func TestBgTask_SuccessfulBgToolSuppressesTurn(t *testing.T) {
 	}
 	simulateUserToolResults(t, s, results)
 
-	s.mu.RLock()
-	pending := s.bgTasksPendingSinceLastResult
-	s.mu.RUnlock()
-
-	if pending != 1 {
-		t.Errorf("expected bgTasksPendingSinceLastResult=1, got %d", pending)
+	// shouldSuppressForBgTasks must return true: only bg tools, none cancelled.
+	turn := s.turnManager.CurrentTurn()
+	if !turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return true for a single successful bg tool")
 	}
 
 	// handleResult should suppress the turn (no TurnCompleteEvent).
@@ -185,21 +185,21 @@ func TestBgTask_SuccessfulBgToolSuppressesTurn(t *testing.T) {
 
 	// Verify safety timer is active.
 	s.mu.RLock()
-	timerActive := s.bgSafetyTimer != nil
-	suppActive := s.bgTurnSuppressionActive
+	timerActive := s.bgState.timer != nil
+	suppActive := s.bgState.active
 	s.mu.RUnlock()
 
 	if !timerActive {
-		t.Error("expected bgSafetyTimer to be active")
+		t.Error("expected bgState.timer to be active")
 	}
 	if !suppActive {
-		t.Error("expected bgTurnSuppressionActive to be true")
+		t.Error("expected bgState.active to be true")
 	}
 
 	// Clean up: stop the safety timer to avoid leaks.
 	s.mu.Lock()
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
 	}
 	s.mu.Unlock()
 }
@@ -256,7 +256,7 @@ func TestBgTask_SafetyTimerPreventsLateResultDoubleCompletion(t *testing.T) {
 	waitForTurnComplete(t, s.events, 2*time.Second)
 
 	// Simulate a late continuation result arriving after the timer completed the turn.
-	// handleResult must detect bgTimerFired and return early — no second TurnCompleteEvent.
+	// handleResult must detect bgState.timerFired and return early — no second TurnCompleteEvent.
 	s.handleResult(resultMsg)
 
 	// Drain events for a short window; must see at most one TurnCompleteEvent total.
@@ -305,14 +305,11 @@ func TestBgTask_SafetyTimerDoesNotPoisonNextTurn(t *testing.T) {
 	// Simulate Turn N+1 starting (replicates what SendMessage does):
 	// clear all stale suppression state so the old timer cannot fire again.
 	s.mu.Lock()
-	s.bgTimerFired = false
-	s.bgTurnSuppressionActive = false
-	s.bgTasksPendingSinceLastResult = 0
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop()
-		s.bgSafetyTimer = nil
-	}
+	s.bgState.reset()
 	s.mu.Unlock()
+
+	// Start a new turn with no bg tools.
+	s.turnManager.StartTurn("turn N+1")
 
 	// Turn N+1: transition to processing and deliver a result.
 	// This must produce a TurnCompleteEvent — not be silently dropped.
@@ -324,13 +321,13 @@ func TestBgTask_SafetyTimerDoesNotPoisonNextTurn(t *testing.T) {
 
 func TestBgTask_OldTimerCannotPoisonNextTurnAfterSendMessage(t *testing.T) {
 	// Validate that SendMessage correctly stops the old timer and clears
-	// bgTurnSuppressionActive, so even if the timer fires after SendMessage
-	// completes, it cannot set bgTimerFired and drop the new turn's result.
+	// bgState.active, so even if the timer fires after SendMessage
+	// completes, it cannot set bgState.timerFired and drop the new turn's result.
 	//
 	// Sequence:
 	//   1. Turn N suppressed, timer armed.
-	//   2. SendMessage starts Turn N+1 (clears bgTurnSuppressionActive, stops timer).
-	//   3. Old timer closure fires — completeSuppressedTurn sees bgTurnSuppressionActive=false, returns.
+	//   2. SendMessage starts Turn N+1 (clears bgState.active, stops timer).
+	//   3. Old timer closure fires — completeSuppressedTurn sees bgState.active=false, returns.
 	//   4. Turn N+1 handleResult must complete normally.
 	s := newTestSession(t, WithBgTaskSafetyTimeout(200*time.Millisecond))
 
@@ -352,22 +349,19 @@ func TestBgTask_OldTimerCannotPoisonNextTurnAfterSendMessage(t *testing.T) {
 
 	// Verify suppression is active.
 	s.mu.RLock()
-	suppActive := s.bgTurnSuppressionActive
+	suppActive := s.bgState.active
 	s.mu.RUnlock()
 	if !suppActive {
-		t.Fatal("expected bgTurnSuppressionActive to be true after suppression started")
+		t.Fatal("expected bgState.active to be true after suppression started")
 	}
 
 	// Simulate SendMessage for Turn N+1: clear all stale state and stop the old timer.
 	s.mu.Lock()
-	s.bgTimerFired = false
-	s.bgTurnSuppressionActive = false
-	s.bgTasksPendingSinceLastResult = 0
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop() // stops the real timer
-		s.bgSafetyTimer = nil
-	}
+	s.bgState.reset()
 	s.mu.Unlock()
+
+	// Start a new turn with no bg tools.
+	s.turnManager.StartTurn("turn N+1")
 
 	// Wait longer than the timer would have fired (200ms), ensuring no late fire.
 	time.Sleep(300 * time.Millisecond)
@@ -378,12 +372,12 @@ func TestBgTask_OldTimerCannotPoisonNextTurnAfterSendMessage(t *testing.T) {
 
 	waitForTurnComplete(t, s.events, time.Second)
 
-	// Ensure bgTimerFired was not set by the old timer closure.
+	// Ensure bgState.timerFired was not set by the old timer closure.
 	s.mu.RLock()
-	timerFired := s.bgTimerFired
+	timerFired := s.bgState.timerFired
 	s.mu.RUnlock()
 	if timerFired {
-		t.Error("bgTimerFired should be false — old timer should have been stopped by SendMessage")
+		t.Error("bgState.timerFired should be false — old timer should have been stopped by bgState.reset()")
 	}
 }
 
@@ -407,17 +401,161 @@ func TestBgTask_MixedSuccessAndCancelled(t *testing.T) {
 	}
 	simulateUserToolResults(t, s, results)
 
-	// Only tool-1 should be counted.
-	s.mu.RLock()
-	pending := s.bgTasksPendingSinceLastResult
-	s.mu.RUnlock()
+	// shouldSuppressForBgTasks must return true: only tool-1 is non-cancelled, and it's bg.
+	turn := s.turnManager.CurrentTurn()
+	if !turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return true — only non-cancelled tool is bg")
+	}
+}
 
-	if pending != 1 {
-		t.Errorf("expected bgTasksPendingSinceLastResult=1 (only non-error bg tool), got %d", pending)
+func TestBgTask_MixedBgAndNonBgDoesNotSuppressTurn(t *testing.T) {
+	// This is the core bug fix test: when a turn has both bg and non-bg tools,
+	// the ResultMessage represents completion of synchronous work and must NOT
+	// be suppressed. This was the jiradozer stuck-session scenario.
+	s := newTestSession(t)
+
+	// Simulate 3 tools: 2 bg + 1 non-bg (the exact jiradozer pattern).
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "sleep 1 && echo BG1", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 1 && echo BG2", "run_in_background": true}},
+		{ID: "tool-3", Name: "Bash", Input: map[string]interface{}{"command": "echo blocking", "timeout": 600000}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Running in background...", IsError: &isErrFalse},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &isErrFalse},
+		{ToolUseID: "tool-3", Content: "blocking output", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	// shouldSuppressForBgTasks must return false: non-bg tool exists.
+	turn := s.turnManager.CurrentTurn()
+	if turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return false when non-bg tools are present")
+	}
+
+	// handleResult should complete the turn normally.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{
+		Type:    "result",
+		IsError: false,
+	}
+	s.handleResult(resultMsg)
+
+	// TurnCompleteEvent must be emitted — not suppressed.
+	waitForTurnComplete(t, s.events, time.Second)
+
+	// Safety timer must NOT be started.
+	s.mu.RLock()
+	timerActive := s.bgState.timer != nil
+	s.mu.RUnlock()
+	if timerActive {
+		t.Error("safety timer should NOT be started for mixed bg/non-bg turns")
+	}
+}
+
+func TestBgTask_MultipleBgToolsStillSuppressTurn(t *testing.T) {
+	// When ALL tools are bg, the turn should still be suppressed.
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "sleep 5 && echo BG1", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 5 && echo BG2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Running in background...", IsError: &isErrFalse},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	// shouldSuppressForBgTasks must return true.
+	turn := s.turnManager.CurrentTurn()
+	if !turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return true when all tools are bg")
+	}
+
+	// handleResult should suppress the turn.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{Type: "result", IsError: false}
+	s.handleResult(resultMsg)
+
+	// Should NOT get a TurnCompleteEvent.
+	select {
+	case event := <-s.events:
+		if _, ok := event.(TurnCompleteEvent); ok {
+			t.Error("TurnCompleteEvent should NOT have been emitted — all tools are bg")
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Good — suppressed.
+	}
+
+	// Safety timer must be started.
+	s.mu.RLock()
+	timerActive := s.bgState.timer != nil
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !timerActive {
+		t.Error("expected safety timer to be active")
+	}
+	if !suppActive {
+		t.Error("expected bgState.active to be true")
 	}
 
 	// Clean up.
 	s.mu.Lock()
-	s.bgTasksPendingSinceLastResult = 0
+	s.bgState.reset()
 	s.mu.Unlock()
+}
+
+func TestBgTask_MixedBgAndNonBgWithNonBgError(t *testing.T) {
+	// When a non-bg tool errors alongside a successful bg tool, the turn
+	// should NOT be suppressed — the non-bg tool's existence means the
+	// ResultMessage is the real completion.
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "echo bg", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "exit 1"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	isErrTrue := true
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Running in background...", IsError: &isErrFalse},
+		{ToolUseID: "tool-2", Content: "exit code 1", IsError: &isErrTrue},
+	}
+	simulateUserToolResults(t, s, results)
+
+	// Non-bg tool exists (even though it errored) → don't suppress.
+	turn := s.turnManager.CurrentTurn()
+	if turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return false when a non-bg tool exists (even if errored)")
+	}
+}
+
+func TestBgTask_NoBgToolsNormalCompletion(t *testing.T) {
+	// Baseline: no bg tools at all → normal completion.
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "echo hello"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "hello", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return false when no bg tools exist")
+	}
 }
