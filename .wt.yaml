@@ -1,0 +1,2 @@
+on_worktree_create:
+  - scripts/setup.sh
