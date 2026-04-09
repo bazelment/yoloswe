@@ -4,9 +4,9 @@
 # in the inline comment and can be omitted.
 
 # --- Tracker ---
-# Issue tracker backend. Only "linear" is supported today.
+# Issue tracker backend: "linear" or "github".
 tracker:
-  kind: linear                          # [required] "linear" (future: "github", "jira")
+  kind: linear                          # [required] "linear" or "github"
   api_key: $LINEAR_API_KEY              # [required] API key; supports $ENV_VAR expansion
 
 # --- Agent ---
@@ -27,14 +27,24 @@ states:
   in_review: "In Review"                # default: "In Review"
   done: "Done"                          # default: "Done"
 
-# --- Multi-Issue Discovery (--team mode) ---
+# --- Multi-Issue Discovery (--filter mode) ---
+# Use --filter key=value (repeatable) on the CLI, or configure here.
+# Each tracker interprets the keys it understands; unknown keys are ignored.
+#
+# Common keys:
+#   Universal:  team, state, label  (multi-value: comma-separated, e.g. state: "Todo,Backlog")
+#   GitHub:     milestone, assignee
+#   Linear:     project, cycle ("current" for active cycle), assignee
 source:
-  team: ENG                             # Linear team key; required for --team mode
+  filters:
+    team: ENG                           # Linear team key or GitHub "owner/repo"
+    state: Todo                         # issue states to pick up (comma-separated)
+    # label: backend                    # optional label filter (comma-separated, OR semantics)
+    # project: "Backend Rewrite"        # Linear project name
+    # cycle: current                    # Linear cycle ("current" or name)
+    # milestone: "1"                     # GitHub milestone number (not title)
+    # assignee: "octocat"               # GitHub username or Linear display name
   branch_prefix: jiradozer              # default: "jiradozer" — worktree branch prefix
-  states:                               # default: ["Todo"] — issue states to pick up
-    - Todo
-  labels:                               # default: [] — optional OR label filter
-    - backend
   max_concurrent: 3                     # default: 3 — max parallel workflows
 
 # --- Workflow Steps ---

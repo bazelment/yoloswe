@@ -139,9 +139,11 @@ func TestGitHub_ListIssues(t *testing.T) {
 	defer cancel()
 
 	issues, err := client.ListIssues(ctx, tracker.IssueFilter{
-		TeamKey: repo,
-		States:  []string{"Todo"},
-		Limit:   5,
+		Filters: map[string]string{
+			tracker.FilterTeam:  repo,
+			tracker.FilterState: "Todo",
+		},
+		Limit: 5,
 	})
 	require.NoError(t, err)
 	t.Logf("Found %d open issues", len(issues))

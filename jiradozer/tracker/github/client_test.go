@@ -177,10 +177,12 @@ func TestListIssues(t *testing.T) {
 
 	client := NewClient(mock, "acme", "app")
 	issues, err := client.ListIssues(context.Background(), tracker.IssueFilter{
-		TeamKey: "acme/app",
-		States:  []string{"Todo"},
-		Labels:  []string{"jiradozer"},
-		Limit:   10,
+		Filters: map[string]string{
+			tracker.FilterTeam:  "acme/app",
+			tracker.FilterState: "Todo",
+			tracker.FilterLabel: "jiradozer",
+		},
+		Limit: 10,
 	})
 	require.NoError(t, err)
 
@@ -207,10 +209,12 @@ func TestListIssues_MultiLabel_ORSemantics(t *testing.T) {
 
 	client := NewClient(mock, "acme", "app")
 	issues, err := client.ListIssues(context.Background(), tracker.IssueFilter{
-		TeamKey: "acme/app",
-		States:  []string{"Todo"},
-		Labels:  []string{"bug", "feature"},
-		Limit:   3,
+		Filters: map[string]string{
+			tracker.FilterTeam:  "acme/app",
+			tracker.FilterState: "Todo",
+			tracker.FilterLabel: "bug,feature",
+		},
+		Limit: 3,
 	})
 	require.NoError(t, err)
 

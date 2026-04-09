@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
 // graphqlRequest is the JSON body sent to the Linear GraphQL endpoint.
@@ -56,8 +58,9 @@ func fetchIssueByIdentifierQuery(identifier string) (graphqlRequest, error) {
 }
 
 // listIssuesQuery returns issues matching the given filter criteria.
-// teamKey filters by team, states filters by state name, labels filters by label name.
-func listIssuesQuery(teamKey string, states, labels []string, limit int) graphqlRequest {
+// Filter keys are read from filter.Filters; see tracker.IssueFilter for
+// documented keys.
+func listIssuesQuery(filter tracker.IssueFilter) graphqlRequest {
 	query := `query ListIssues($filter: IssueFilter!, $first: Int!) {
   issues(filter: $filter, first: $first, orderBy: createdAt) {
     nodes {
@@ -75,25 +78,46 @@ func listIssuesQuery(teamKey string, states, labels []string, limit int) graphql
 }`
 	issueFilter := map[string]any{}
 
-	if teamKey != "" {
+	if team := filter.Filters[tracker.FilterTeam]; team != "" {
 		issueFilter["team"] = map[string]any{
-			"key": map[string]any{"eq": teamKey},
+			"key": map[string]any{"eq": team},
 		}
 	}
-	if len(states) > 0 {
+	if states := tracker.SplitCSV(filter.Filters[tracker.FilterState]); len(states) > 0 {
 		issueFilter["state"] = map[string]any{
 			"name": map[string]any{"in": states},
 		}
 	}
-	if len(labels) > 0 {
+	if labels := tracker.SplitCSV(filter.Filters[tracker.FilterLabel]); len(labels) > 0 {
 		issueFilter["labels"] = map[string]any{
 			"some": map[string]any{
 				"name": map[string]any{"in": labels},
 			},
 		}
 	}
+	if project := filter.Filters[tracker.FilterProject]; project != "" {
+		issueFilter["project"] = map[string]any{
+			"name": map[string]any{"containsIgnoreCase": project},
+		}
+	}
+	if cycle := filter.Filters[tracker.FilterCycle]; cycle != "" {
+		if cycle == "current" {
+			issueFilter["cycle"] = map[string]any{
+				"isActive": map[string]any{"eq": true},
+			}
+		} else {
+			issueFilter["cycle"] = map[string]any{
+				"name": map[string]any{"containsIgnoreCase": cycle},
+			}
+		}
+	}
+	if assignee := filter.Filters[tracker.FilterAssignee]; assignee != "" {
+		issueFilter["assignee"] = map[string]any{
+			"displayName": map[string]any{"containsIgnoreCase": assignee},
+		}
+	}
 
-	first := limit
+	first := filter.Limit
 	if first <= 0 {
 		first = 50
 	}

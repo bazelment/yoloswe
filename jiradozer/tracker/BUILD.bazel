@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "tracker",
@@ -8,4 +8,11 @@ go_library(
     ],
     importpath = "github.com/bazelment/yoloswe/jiradozer/tracker",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "tracker_test",
+    srcs = ["types_test.go"],
+    embed = [":tracker"],
+    deps = ["@com_github_stretchr_testify//assert"],
 )

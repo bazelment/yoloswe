@@ -115,19 +115,21 @@ jiradozer --issue ENG-123 [flags]
 jiradozer --description "task description" [flags]
 ```
 
-One of `--issue`, `--team`, or `--description`/`--description-file` is required. `--issue` and `--description` are mutually exclusive; `--issue` takes precedence over `source.team` in the config file (so you can keep `source.team` for multi-issue mode and still use `--issue` for single issues).
+One of `--issue`, `--filter`, or `--description`/`--description-file` is required. `--issue` and `--description` are mutually exclusive; `--issue` takes precedence over `source.filters` in the config file (so you can keep `source.filters` for multi-issue mode and still use `--issue` for single issues).
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--issue` | | Issue identifier (e.g. `ENG-123` or `owner/repo#42`) |
 | `--description` | | Task description for local mode (no external tracker needed) |
 | `--description-file` | | Read task description from file (use `-` for stdin) |
-| `--team` | | Team key for multi-issue mode (e.g. `ENG` or `owner/repo`) |
+| `--filter` | | Issue filter as `key=value` (repeatable, e.g. `--filter team=ENG --filter state=Todo,Backlog`) |
 | `--config` | `jiradozer.yaml` | Path to config file |
 | `--work-dir` | from config | Working directory for the agent |
 | `--model` | from config | Agent model ID (overrides config) |
 | `--poll-interval` | from config | How often to check for new comments |
 | `--max-budget` | from config | Max spend in USD |
+| `--max-concurrent` | from config | Max concurrent workflows |
+| `--branch-prefix` | from config | Worktree branch prefix |
 | `--auto-approve` | | Auto-approve review steps (`plan,build,validate,ship` or `all`) |
 | `--run-step` | | Run a single step and exit (for debugging): `plan`, `build`, `validate`, `ship` |
 | `--verbose` | `false` | Debug logging |
@@ -201,9 +203,10 @@ tracker:
   kind: github
 
 source:
-  team: "owner/repo"          # GitHub owner/repo
-  states: ["Todo"]
-  labels: ["jiradozer"]        # optional: only pick up issues with this label
+  filters:
+    team: "owner/repo"
+    state: "Todo"
+    label: "jiradozer"         # optional: only pick up issues with this label
   max_concurrent: 3
 ```
 
@@ -212,7 +215,7 @@ source:
 jiradozer --issue owner/repo#42
 
 # Multi-issue mode (discovers open issues)
-jiradozer --team owner/repo
+jiradozer --filter team=owner/repo --filter state=Todo
 ```
 
 GitHub Issues only has open/closed states, so jiradozer maps workflow states using labels:

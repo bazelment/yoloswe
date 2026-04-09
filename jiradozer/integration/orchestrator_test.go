@@ -115,7 +115,7 @@ func (m *mockWTManager) getRemoved() []string {
 
 func testOrchestratorConfig() *jiradozer.Config {
 	cfg := jiradozer.DefaultConfig()
-	cfg.Source.Team = "ENG"
+	cfg.Source.Filters = map[string]string{tracker.FilterTeam: "ENG"}
 	cfg.Source.MaxConcurrent = 3
 	cfg.Source.BranchPrefix = "jiradozer"
 	cfg.Tracker.APIKey = "test-key"
