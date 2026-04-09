@@ -124,13 +124,30 @@ type runArgs struct {
 }
 
 func run(ctx context.Context, args runArgs) error {
-	// Set up logger.
+	// Set up logger with dual-write to stderr + log file.
 	level := slog.LevelInfo
 	if args.verbose {
 		level = slog.LevelDebug
 	}
-	klogfmt.Init(klogfmt.WithLevel(level))
+	if home, err := os.UserHomeDir(); err == nil {
+		logDir := filepath.Join(home, ".jiradozer", "logs")
+		logFile := filepath.Join(logDir, fmt.Sprintf("jiradozer-%s-%d.log",
+			time.Now().Format("20060102-150405"), os.Getpid()))
+		closer, err := klogfmt.InitWithLogFile(logFile, klogfmt.WithLevel(level))
+		if err != nil {
+			klogfmt.Init(klogfmt.WithLevel(level))
+			slog.Warn("failed to open log file, logging to stderr only", "path", logFile, "error", err)
+		} else {
+			defer closer()
+		}
+	} else {
+		klogfmt.Init(klogfmt.WithLevel(level))
+	}
 	logger := slog.Default()
+
+	// Log invocation banner with CLI args and working directory.
+	cwd, _ := os.Getwd()
+	logger.Info("jiradozer starting", "args", os.Args[1:], "cwd", cwd, "pid", os.Getpid())
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {

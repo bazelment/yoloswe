@@ -53,6 +53,35 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 
 // Run executes the workflow loop until completion or failure.
 func (w *Workflow) Run(ctx context.Context) error {
+	w.logger.Info("workflow starting",
+		"issue", w.issue.Identifier,
+		"title", w.issue.Title,
+		"model", w.config.Agent.Model,
+		"work_dir", w.config.WorkDir,
+		"base_branch", w.config.BaseBranch,
+	)
+	workflowStart := time.Now()
+	defer func() {
+		finalStep := w.state.Current().String()
+		duration := time.Since(workflowStart)
+		if w.lastError != nil {
+			w.logger.Error("workflow finished",
+				"issue", w.issue.Identifier,
+				"final_step", finalStep,
+				"error", w.lastError,
+				"duration", duration,
+				"transitions", len(w.state.History()),
+			)
+		} else {
+			w.logger.Info("workflow finished",
+				"issue", w.issue.Identifier,
+				"final_step", finalStep,
+				"duration", duration,
+				"transitions", len(w.state.History()),
+			)
+		}
+	}()
+
 	// Resolve workflow state names to IDs.
 	if err := w.resolveStateIDs(ctx); err != nil {
 		return fmt.Errorf("resolve workflow states: %w", err)
@@ -138,7 +167,8 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	feedback := w.feedback
 	w.feedback = ""
 
-	w.logger.Info("step: "+stepName, "rounds", totalRounds, "feedback", feedback != "")
+	w.logger.Info("step: "+stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "feedback", feedback != "")
+	stepStart := time.Now()
 
 	data := w.promptData()
 	var allOutputs []string
@@ -208,6 +238,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			nonEmpty = append(nonEmpty, o)
 		}
 	}
+	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "duration", time.Since(stepStart))
 	w.captureOutput(stepName, strings.Join(nonEmpty, "\n\n---\n\n"))
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
@@ -225,8 +256,9 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	feedback := w.feedback
 	w.feedback = ""
 
-	w.logger.Info("step: "+stepName, "feedback", feedback != "", "resume", sessionID != "")
+	w.logger.Info("step: "+stepName, "issue", w.issue.Identifier, "feedback", feedback != "", "resume", sessionID != "")
 
+	stepStart := time.Now()
 	cfg := w.config.ResolveStep(stepCfg)
 	output, newSessionID, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
 	if err != nil {
@@ -234,6 +266,7 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 		return
 	}
 
+	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "session_id", newSessionID, "duration", time.Since(stepStart))
 	w.sessionIDs[currentStep] = newSessionID
 	w.captureOutput(stepName, output)
 

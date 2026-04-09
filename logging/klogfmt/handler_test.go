@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -185,4 +187,49 @@ func TestInit(t *testing.T) {
 	Init(WithLevel(slog.LevelWarn))
 	// Restore default after test.
 	defer slog.SetDefault(slog.Default())
+}
+
+func TestInitWithWriter(t *testing.T) {
+	defer slog.SetDefault(slog.Default())
+
+	var extra bytes.Buffer
+	Init(WithLevel(slog.LevelInfo), WithWriter(&extra))
+
+	slog.Info("dual-write test", "key", "val")
+
+	got := extra.String()
+	if !strings.Contains(got, "dual-write test") {
+		t.Errorf("expected log in extra writer, got: %s", got)
+	}
+	if !strings.Contains(got, "key=val") {
+		t.Errorf("expected attrs in extra writer, got: %s", got)
+	}
+}
+
+func TestInitWithLogFile(t *testing.T) {
+	defer slog.SetDefault(slog.Default())
+
+	logPath := filepath.Join(t.TempDir(), "sub", "test.log")
+	closer, err := InitWithLogFile(logPath, WithLevel(slog.LevelInfo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closer()
+
+	slog.Info("file test", "foo", "bar")
+
+	// Flush by closing.
+	closer()
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "file test") {
+		t.Errorf("expected log in file, got: %s", got)
+	}
+	if !strings.Contains(got, "foo=bar") {
+		t.Errorf("expected attrs in file, got: %s", got)
+	}
 }
