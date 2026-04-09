@@ -77,7 +77,7 @@ Tmux mode launches each AI session in its own tmux window. Bramble manages the w
 Key tmux features:
 - Automatic tmux window creation per session
 - Window monitoring and idle detection
-- Pane capture for inspecting session output from the TUI (`[p]` in command center)
+- Pane capture for inspecting session output from the TUI (`[v]` in command center)
 - Notifications via visual bell when sessions need attention
 - Windows remain open on error for debugging
 
@@ -92,7 +92,7 @@ The main view shows the selected worktree's session output with a status bar and
 
 ### Command Center (`Alt-C`)
 
-A full-screen dashboard showing all sessions across all worktrees. Press `[p]` to toggle inline preview of tmux pane content.
+A full-screen dashboard showing all sessions across all worktrees. Press `[v]` to toggle inline preview of tmux pane content, or `[p/b/c]` to start a new planner/builder/codetalk session on the selected worktree.
 
 ![Command center](docs/screenshots/command-center.png)
 <!-- TODO: Add screenshot of command center with session list and preview panel -->
