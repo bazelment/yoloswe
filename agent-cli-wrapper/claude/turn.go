@@ -63,6 +63,9 @@ func (turn *turnState) shouldSuppressForBgTasks() bool {
 		}
 	}
 
+	// Non-bg tools always prevent suppression (even if they errored), because
+	// their presence means the ResultMessage represents completion of synchronous
+	// work. Cancelled bg tools are skipped — they never launched a background task.
 	hasBgTool := false
 	for _, block := range turn.ContentBlocks {
 		if block.Type != ContentBlockTypeToolUse {
@@ -70,7 +73,7 @@ func (turn *turnState) shouldSuppressForBgTasks() bool {
 		}
 		isBg, _ := block.ToolInput["run_in_background"].(bool)
 		if !isBg {
-			return false
+			return false // non-bg tool → ResultMessage is real completion, never suppress
 		}
 		if !cancelled[block.ToolUseID] {
 			hasBgTool = true
