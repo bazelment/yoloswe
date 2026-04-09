@@ -233,6 +233,7 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
+	s.bgTimerFired = false // clear stale timer state from previous turn
 
 	// Record turn start
 	if s.recorder != nil {
@@ -272,6 +273,7 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
+	s.bgTimerFired = false // clear stale timer state from previous turn
 
 	// Record turn start
 	if s.recorder != nil {
@@ -780,22 +782,17 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
-	// Cancel any pending background-task safety timer — a continuation
-	// ResultMessage has arrived, so the normal completion path will run.
-	// If the timer already fired and completed the turn, return early to
-	// prevent a duplicate TurnCompleteEvent.
+	// Cancel any pending background-task safety timer — a normal continuation
+	// ResultMessage has arrived, so the safety path is no longer needed.
+	// If bgTimerFired is set, the safety timer already completed this turn;
+	// return early to prevent a duplicate TurnCompleteEvent.
 	s.mu.Lock()
 	if s.bgSafetyTimer != nil {
 		s.bgSafetyTimer.Stop()
 		s.bgSafetyTimer = nil
 	}
-	// If the state is already StateReady when we enter handleResult, the
-	// safety timer already completed the turn — skip to avoid duplicating
-	// TurnCompleteEvent and recorder entries.
-	// If the safety timer already fired and completed this turn, ignore the
-	// late continuation result to prevent a duplicate TurnCompleteEvent.
 	timerAlreadyFired := s.bgTimerFired
-	s.bgTimerFired = false // reset for next turn
+	s.bgTimerFired = false // clear; also reset by SendMessage at next turn start
 	s.bgTurnSuppressionActive = false
 	s.mu.Unlock()
 	if timerAlreadyFired {
@@ -920,6 +917,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 				safetyResult := result
 				s.mu.Lock()
 				s.bgTurnSuppressionActive = true
+				s.bgTimerFired = false // reset for this turn's timer
 				if s.bgSafetyTimer != nil {
 					s.bgSafetyTimer.Stop()
 				}

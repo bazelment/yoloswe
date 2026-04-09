@@ -256,8 +256,7 @@ func TestBgTask_SafetyTimerPreventsLateResultDoubleCompletion(t *testing.T) {
 	waitForTurnComplete(t, s.events, 2*time.Second)
 
 	// Simulate a late continuation result arriving after the timer completed the turn.
-	// This should be a no-op; no second TurnCompleteEvent should be emitted.
-	// The session state is now StateReady, so handleResult should return early.
+	// handleResult must detect bgTimerFired and return early — no second TurnCompleteEvent.
 	s.handleResult(resultMsg)
 
 	// Drain events for a short window; must see at most one TurnCompleteEvent total.
@@ -277,6 +276,44 @@ drain:
 	if count > 0 {
 		t.Errorf("expected no additional TurnCompleteEvent after safety timer already completed the turn, got %d", count)
 	}
+}
+
+func TestBgTask_SafetyTimerDoesNotPoisonNextTurn(t *testing.T) {
+	// When the safety timer fires and no late continuation arrives,
+	// the NEXT turn's handleResult must still work correctly.
+	s := newTestSession(t, WithBgTaskSafetyTimeout(100*time.Millisecond))
+
+	// Turn N: set up a suppressed bg turn.
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "sleep 60", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Running in background...", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{Type: "result", IsError: false}
+	s.handleResult(resultMsg)
+
+	// Wait for safety timer to fire.
+	waitForTurnComplete(t, s.events, 2*time.Second)
+
+	// No late continuation arrives (timer already handled it).
+	// Simulate start of Turn N+1: reset bgTimerFired as SendMessage would.
+	s.mu.Lock()
+	s.bgTimerFired = false
+	s.mu.Unlock()
+
+	// Turn N+1: transition to processing and deliver a result.
+	// This must produce a TurnCompleteEvent — not be silently dropped.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(resultMsg)
+
+	waitForTurnComplete(t, s.events, time.Second)
 }
 
 func TestBgTask_MixedSuccessAndCancelled(t *testing.T) {
