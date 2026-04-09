@@ -425,9 +425,9 @@ func (cc *CommandCenter) renderHeader(s *Styles) string {
 
 // renderFooter renders the footer keybinding hints.
 func (cc *CommandCenter) renderFooter(s *Styles) string {
-	previewKey := "[p] Preview pane"
+	previewKey := "[v] Preview pane"
 	if cc.previewIdx >= 0 {
-		previewKey = "[p] Close preview"
+		previewKey = "[v] Close preview"
 	}
 	keys := []string{
 		"[←/→/↑/↓] Navigate",
@@ -436,6 +436,7 @@ func (cc *CommandCenter) renderFooter(s *Styles) string {
 		previewKey,
 		"[f] Follow-up",
 		"[a] Approve plan",
+		"[p/b/c] New session",
 		"[Esc] Close",
 	}
 	return "\n" + s.Dim.Render(strings.Join(keys, "  "))

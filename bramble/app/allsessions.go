@@ -283,7 +283,7 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 	lines = append(lines, "")
 
 	// Footer
-	footer := s.Dim.Render("[↑/↓] Navigate  [Enter] Switch  [1-9] Quick select  [Esc] Close")
+	footer := s.Dim.Render("[↑/↓] Navigate  [Enter] Switch  [p/b/c] New session  [1-9] Quick select  [Esc] Close")
 	if len(o.sessions) > 0 {
 		maxSessionRows := contentHeight - 6
 		if maxSessionRows < 1 {
@@ -292,7 +292,7 @@ func (o *AllSessionsOverlay) View(s *Styles) string {
 		start, end := o.visibleSessionRange(maxSessionRows)
 		if start > 0 || end < len(o.sessions) {
 			footer = s.Dim.Render(fmt.Sprintf(
-				"[↑/↓] Navigate  [Enter] Switch  [1-9] Quick select  [Esc] Close   (%d-%d/%d)",
+				"[↑/↓] Navigate  [Enter] Switch  [p/b/c] New session  [1-9] Quick select  [Esc] Close   (%d-%d/%d)",
 				start+1, end, len(o.sessions),
 			))
 		}

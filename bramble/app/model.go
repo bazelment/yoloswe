@@ -757,6 +757,12 @@ type (
 		prompt      string
 		model       string
 	}
+	startSessionOnPathMsg struct {
+		sessionType  session.SessionType
+		prompt       string
+		model        string
+		worktreePath string
+	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }
 	taskRouteMsg      struct{ prompt string }
