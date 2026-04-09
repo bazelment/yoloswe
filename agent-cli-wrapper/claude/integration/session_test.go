@@ -782,8 +782,9 @@ func TestSession_Integration_BackgroundTaskMixed(t *testing.T) {
 	}
 	t.Logf("Tool mix: %d bg, %d non-bg", bgCount, nonBgCount)
 	if bgCount == 0 || nonBgCount == 0 {
-		t.Log("WARNING: Agent did not produce the expected mix of bg + non-bg tools. " +
-			"Test may not exercise the mixed-tool path.")
+		t.Skipf("Agent did not produce the expected mix of bg + non-bg tools "+
+			"(bg=%d, non-bg=%d); cannot exercise the mixed-tool suppression path",
+			bgCount, nonBgCount)
 	}
 
 	t.Logf("Turn completed: success=%v, cost=$%.6f",
