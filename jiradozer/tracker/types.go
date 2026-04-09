@@ -55,15 +55,21 @@ type IssueFilter struct {
 	Limit   int               // max results; 0 = default (50)
 }
 
-// SplitCSV splits a comma-separated filter value into trimmed parts.
-// Returns nil if the value is empty.
+// SplitCSV splits a comma-separated filter value into trimmed, non-empty parts.
+// Returns nil if the value is empty or contains only commas/whitespace.
 func SplitCSV(csv string) []string {
 	if csv == "" {
 		return nil
 	}
-	parts := strings.Split(csv, ",")
-	for i, p := range parts {
-		parts[i] = strings.TrimSpace(p)
+	raw := strings.Split(csv, ",")
+	parts := raw[:0] // reuse backing array
+	for _, p := range raw {
+		if s := strings.TrimSpace(p); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
 	}
 	return parts
 }

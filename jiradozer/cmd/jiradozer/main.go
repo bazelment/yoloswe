@@ -236,7 +236,7 @@ func run(ctx context.Context, args runArgs) error {
 			if !ok {
 				return fmt.Errorf("invalid --filter %q: expected key=value", kv)
 			}
-			cfg.Source.Filters[k] = v
+			cfg.Source.Filters[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
 	if args.maxConcurrent > 0 {

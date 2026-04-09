@@ -18,6 +18,9 @@ func TestSplitCSV(t *testing.T) {
 		{name: "multiple values", input: "Todo,Backlog", want: []string{"Todo", "Backlog"}},
 		{name: "trims spaces", input: " Todo , Backlog ", want: []string{"Todo", "Backlog"}},
 		{name: "preserves internal spaces", input: "In Progress,Todo", want: []string{"In Progress", "Todo"}},
+		{name: "skips empty segments", input: "bug,,feature", want: []string{"bug", "feature"}},
+		{name: "comma only returns nil", input: ",", want: nil},
+		{name: "trailing comma", input: "bug,", want: []string{"bug"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

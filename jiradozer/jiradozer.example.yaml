@@ -4,9 +4,9 @@
 # in the inline comment and can be omitted.
 
 # --- Tracker ---
-# Issue tracker backend. Only "linear" is supported today.
+# Issue tracker backend: "linear" or "github".
 tracker:
-  kind: linear                          # [required] "linear" (future: "github", "jira")
+  kind: linear                          # [required] "linear" or "github"
   api_key: $LINEAR_API_KEY              # [required] API key; supports $ENV_VAR expansion
 
 # --- Agent ---
