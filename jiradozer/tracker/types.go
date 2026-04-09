@@ -41,7 +41,7 @@ const (
 	FilterLabel     = "label"     // comma-separated labels (OR semantics)
 	FilterProject   = "project"   // Linear project name
 	FilterCycle     = "cycle"     // Linear cycle ("current" for active cycle, or name)
-	FilterMilestone = "milestone" // GitHub milestone
+	FilterMilestone = "milestone" // GitHub milestone number (integer string, e.g. "1")
 	FilterAssignee  = "assignee"  // GitHub/Linear assignee
 )
 
