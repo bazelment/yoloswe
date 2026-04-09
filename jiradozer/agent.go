@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/multiagent/agent"
@@ -140,15 +141,17 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 
 	logger.Info("running command", "step", stepName, "command", truncate(rendered, 200), "work_dir", workDir)
 
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", "-c", rendered)
 	cmd.Dir = workDir
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 	if err != nil {
+		logger.Info("command failed", "step", stepName, "duration", time.Since(start), "error", err)
 		return output, fmt.Errorf("command failed: %w", err)
 	}
 
-	logger.Info("command completed", "step", stepName, "output", truncate(output, 200))
+	logger.Info("command completed", "step", stepName, "duration", time.Since(start), "output", truncate(output, 200))
 	return output, nil
 }
 
@@ -236,15 +239,17 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	}
 	defer provider.Close()
 
-	logger.Info("running agent",
+	logAttrs := []any{
 		"step", stepName,
 		"mode", cfg.PermissionMode,
 		"model", cfg.Model,
 		"work_dir", workDir,
-		"resume", resumeSessionID != "",
-	)
-	logger.Debug("agent prompt", "step", stepName, "prompt", prompt)
-	logger.Info("agent prompt", "step", stepName, "prompt", truncate(prompt, 200))
+	}
+	if resumeSessionID != "" {
+		logAttrs = append(logAttrs, "resume_session_id", resumeSessionID)
+	}
+	logger.Info("running agent", logAttrs...)
+	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
 
 	handler := &logEventHandler{logger: logger, step: stepName}
 	var opts []agent.ExecuteOption
@@ -281,13 +286,14 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 
 	logger.Info("agent completed",
 		"step", stepName,
-		"mode", cfg.PermissionMode,
+		"session_id", result.SessionID,
 		"input_tokens", result.Usage.InputTokens,
 		"output_tokens", result.Usage.OutputTokens,
 		"cost_usd", result.Usage.CostUSD,
+		"duration_ms", result.DurationMs,
 	)
 	if result.Text != "" {
-		logger.Info("agent response", "step", stepName, "response", truncate(result.Text, 100))
+		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
 	}
 
 	output := resolveOutput(result.Text, handler, logger)
@@ -304,7 +310,7 @@ func resolveOutput(agentText string, handler *logEventHandler, logger *slog.Logg
 		logger.Warn("could not read plan file, using agent text output", "path", handler.planFilePath, "error", err)
 		return agentText
 	}
-	logger.Info("using plan file content", "path", handler.planFilePath)
+	logger.Debug("using plan file content", "path", handler.planFilePath)
 	return string(planContent)
 }
 
@@ -343,7 +349,7 @@ func PersistPlan(workDir, output string, logger *slog.Logger) {
 	} else if err := os.WriteFile(planPath, []byte(output), 0o644); err != nil {
 		logger.Warn("failed to persist plan", "error", err)
 	} else {
-		logger.Info("persisted plan to disk", "path", planPath)
+		logger.Debug("persisted plan to disk", "path", planPath)
 	}
 }
 

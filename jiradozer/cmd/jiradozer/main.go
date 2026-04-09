@@ -124,13 +124,32 @@ type runArgs struct {
 }
 
 func run(ctx context.Context, args runArgs) error {
-	// Set up logger.
+	// Set up logger with dual-write to stderr + log file.
 	level := slog.LevelInfo
 	if args.verbose {
 		level = slog.LevelDebug
 	}
-	klogfmt.Init(klogfmt.WithLevel(level))
+	if home, err := os.UserHomeDir(); err == nil {
+		logDir := filepath.Join(home, ".jiradozer", "logs")
+		logFile := filepath.Join(logDir, fmt.Sprintf("jiradozer-%s-%d.log",
+			time.Now().Format("20060102-150405"), os.Getpid()))
+		closer, err := klogfmt.InitWithLogFile(logFile, klogfmt.WithLevel(level))
+		if err != nil {
+			klogfmt.Init(klogfmt.WithLevel(level))
+			slog.Warn("failed to open log file, logging to stderr only", "path", logFile, "error", err)
+		} else {
+			defer closer()
+		}
+	} else {
+		klogfmt.Init(klogfmt.WithLevel(level))
+		slog.Warn("could not determine home directory, logging to stderr only", "error", err)
+	}
 	logger := slog.Default()
+
+	// Log invocation banner with CLI args and working directory.
+	// Redact values of flags that may contain secrets.
+	cwd, _ := os.Getwd()
+	logger.Info("jiradozer starting", "args", redactArgs(os.Args[1:]), "cwd", cwd, "pid", os.Getpid())
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {
@@ -559,4 +578,28 @@ func availableModels() string {
 		names = append(names, m.ID)
 	}
 	return fmt.Sprintf("[%s]", strings.Join(names, ", "))
+}
+
+// sensitiveFlags lists flag prefixes whose values should be redacted from logs.
+var sensitiveFlags = []string{"--api-key", "--token", "--secret", "--password", "--description"}
+
+// redactArgs returns a copy of args with values of sensitive flags replaced by "***".
+func redactArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, arg := range out {
+		for _, prefix := range sensitiveFlags {
+			// --flag=value form
+			if strings.HasPrefix(arg, prefix+"=") {
+				out[i] = prefix + "=***"
+				break
+			}
+			// --flag value form: redact the next arg
+			if arg == prefix && i+1 < len(out) {
+				out[i+1] = "***"
+				break
+			}
+		}
+	}
+	return out
 }
