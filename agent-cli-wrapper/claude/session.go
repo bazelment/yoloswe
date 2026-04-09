@@ -233,7 +233,15 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	s.bgTimerFired = false // clear stale timer state from previous turn
+	// Clear any stale background-task suppression state from the previous turn.
+	// A safety timer for Turn N must not fire after Turn N+1 has started.
+	s.bgTimerFired = false
+	s.bgTurnSuppressionActive = false
+	s.bgTasksPendingSinceLastResult = 0
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
 
 	// Record turn start
 	if s.recorder != nil {
@@ -273,7 +281,14 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	s.bgTimerFired = false // clear stale timer state from previous turn
+	// Clear any stale background-task suppression state from the previous turn.
+	s.bgTimerFired = false
+	s.bgTurnSuppressionActive = false
+	s.bgTasksPendingSinceLastResult = 0
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
 
 	// Record turn start
 	if s.recorder != nil {

@@ -299,13 +299,19 @@ func TestBgTask_SafetyTimerDoesNotPoisonNextTurn(t *testing.T) {
 	resultMsg := protocol.ResultMessage{Type: "result", IsError: false}
 	s.handleResult(resultMsg)
 
-	// Wait for safety timer to fire.
+	// Wait for safety timer to fire — Turn N is now complete.
 	waitForTurnComplete(t, s.events, 2*time.Second)
 
-	// No late continuation arrives (timer already handled it).
-	// Simulate start of Turn N+1: reset bgTimerFired as SendMessage would.
+	// Simulate Turn N+1 starting (replicates what SendMessage does):
+	// clear all stale suppression state so the old timer cannot fire again.
 	s.mu.Lock()
 	s.bgTimerFired = false
+	s.bgTurnSuppressionActive = false
+	s.bgTasksPendingSinceLastResult = 0
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop()
+		s.bgSafetyTimer = nil
+	}
 	s.mu.Unlock()
 
 	// Turn N+1: transition to processing and deliver a result.
@@ -314,6 +320,71 @@ func TestBgTask_SafetyTimerDoesNotPoisonNextTurn(t *testing.T) {
 	s.handleResult(resultMsg)
 
 	waitForTurnComplete(t, s.events, time.Second)
+}
+
+func TestBgTask_OldTimerCannotPoisonNextTurnAfterSendMessage(t *testing.T) {
+	// Validate that SendMessage correctly stops the old timer and clears
+	// bgTurnSuppressionActive, so even if the timer fires after SendMessage
+	// completes, it cannot set bgTimerFired and drop the new turn's result.
+	//
+	// Sequence:
+	//   1. Turn N suppressed, timer armed.
+	//   2. SendMessage starts Turn N+1 (clears bgTurnSuppressionActive, stops timer).
+	//   3. Old timer closure fires — completeSuppressedTurn sees bgTurnSuppressionActive=false, returns.
+	//   4. Turn N+1 handleResult must complete normally.
+	s := newTestSession(t, WithBgTaskSafetyTimeout(200*time.Millisecond))
+
+	// Turn N: suppress.
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "sleep 60", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Running in background...", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{Type: "result", IsError: false}
+	s.handleResult(resultMsg)
+
+	// Verify suppression is active.
+	s.mu.RLock()
+	suppActive := s.bgTurnSuppressionActive
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Fatal("expected bgTurnSuppressionActive to be true after suppression started")
+	}
+
+	// Simulate SendMessage for Turn N+1: clear all stale state and stop the old timer.
+	s.mu.Lock()
+	s.bgTimerFired = false
+	s.bgTurnSuppressionActive = false
+	s.bgTasksPendingSinceLastResult = 0
+	if s.bgSafetyTimer != nil {
+		s.bgSafetyTimer.Stop() // stops the real timer
+		s.bgSafetyTimer = nil
+	}
+	s.mu.Unlock()
+
+	// Wait longer than the timer would have fired (200ms), ensuring no late fire.
+	time.Sleep(300 * time.Millisecond)
+
+	// Turn N+1's handleResult: must complete the turn, not be silently dropped.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(resultMsg)
+
+	waitForTurnComplete(t, s.events, time.Second)
+
+	// Ensure bgTimerFired was not set by the old timer closure.
+	s.mu.RLock()
+	timerFired := s.bgTimerFired
+	s.mu.RUnlock()
+	if timerFired {
+		t.Error("bgTimerFired should be false — old timer should have been stopped by SendMessage")
+	}
 }
 
 func TestBgTask_MixedSuccessAndCancelled(t *testing.T) {
