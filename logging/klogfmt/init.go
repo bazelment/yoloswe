@@ -25,7 +25,8 @@ func WithWriter(w io.Writer) Option {
 	return func(o *options) { o.writer = w }
 }
 
-// Init sets slog.SetDefault with a klogfmt handler writing to stderr.
+// Init sets slog.SetDefault with a klogfmt handler writing to stderr
+// (and any extra writer added via WithWriter).
 func Init(opts ...Option) {
 	o := options{}
 	for _, opt := range opts {
@@ -48,7 +49,7 @@ func InitWithLogFile(logPath string, opts ...Option) (func() error, error) {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}

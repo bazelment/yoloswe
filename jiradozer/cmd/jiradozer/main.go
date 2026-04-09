@@ -142,12 +142,14 @@ func run(ctx context.Context, args runArgs) error {
 		}
 	} else {
 		klogfmt.Init(klogfmt.WithLevel(level))
+		slog.Warn("could not determine home directory, logging to stderr only", "error", err)
 	}
 	logger := slog.Default()
 
 	// Log invocation banner with CLI args and working directory.
+	// Redact values of flags that may contain secrets.
 	cwd, _ := os.Getwd()
-	logger.Info("jiradozer starting", "args", os.Args[1:], "cwd", cwd, "pid", os.Getpid())
+	logger.Info("jiradozer starting", "args", redactArgs(os.Args[1:]), "cwd", cwd, "pid", os.Getpid())
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {
@@ -576,4 +578,28 @@ func availableModels() string {
 		names = append(names, m.ID)
 	}
 	return fmt.Sprintf("[%s]", strings.Join(names, ", "))
+}
+
+// sensitiveFlags lists flag prefixes whose values should be redacted from logs.
+var sensitiveFlags = []string{"--api-key", "--token", "--secret", "--password"}
+
+// redactArgs returns a copy of args with values of sensitive flags replaced by "***".
+func redactArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, arg := range out {
+		for _, prefix := range sensitiveFlags {
+			// --flag=value form
+			if strings.HasPrefix(arg, prefix+"=") {
+				out[i] = prefix + "=***"
+				break
+			}
+			// --flag value form: redact the next arg
+			if arg == prefix && i+1 < len(out) {
+				out[i+1] = "***"
+				break
+			}
+		}
+	}
+	return out
 }

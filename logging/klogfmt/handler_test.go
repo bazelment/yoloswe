@@ -214,12 +214,13 @@ func TestInitWithLogFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closer()
 
 	slog.Info("file test", "foo", "bar")
 
-	// Flush by closing.
-	closer()
+	// Close to flush before reading.
+	if err := closer(); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {

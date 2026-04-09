@@ -52,7 +52,7 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 }
 
 // Run executes the workflow loop until completion or failure.
-func (w *Workflow) Run(ctx context.Context) error {
+func (w *Workflow) Run(ctx context.Context) (runErr error) {
 	w.logger.Info("workflow starting",
 		"issue", w.issue.Identifier,
 		"title", w.issue.Title,
@@ -64,11 +64,11 @@ func (w *Workflow) Run(ctx context.Context) error {
 	defer func() {
 		finalStep := w.state.Current().String()
 		duration := time.Since(workflowStart)
-		if w.lastError != nil {
+		if runErr != nil {
 			w.logger.Error("workflow finished",
 				"issue", w.issue.Identifier,
 				"final_step", finalStep,
-				"error", w.lastError,
+				"error", runErr,
 				"duration", duration,
 				"transitions", len(w.state.History()),
 			)
@@ -134,7 +134,6 @@ func (w *Workflow) Run(ctx context.Context) error {
 			}
 			return nil
 		case StepFailed:
-			w.logger.Error("workflow failed", "error", w.lastError)
 			return w.lastError
 		default:
 			return fmt.Errorf("workflow reached unexpected state: %s", w.state.Current())
@@ -172,6 +171,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 
 	data := w.promptData()
 	var allOutputs []string
+	var roundSessionIDs []string
 	feedbackInjected := false
 	for i, round := range stepCfg.Rounds {
 		if ctx.Err() != nil {
@@ -199,7 +199,11 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 				roundFeedback = feedback
 				feedbackInjected = true
 			}
-			output, _, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+			var roundSessionID string
+			output, roundSessionID, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+			if roundSessionID != "" {
+				roundSessionIDs = append(roundSessionIDs, roundSessionID)
+			}
 			if err != nil {
 				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
 				return
@@ -238,7 +242,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			nonEmpty = append(nonEmpty, o)
 		}
 	}
-	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "duration", time.Since(stepStart))
+	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "session_ids", roundSessionIDs, "duration", time.Since(stepStart))
 	w.captureOutput(stepName, strings.Join(nonEmpty, "\n\n---\n\n"))
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
