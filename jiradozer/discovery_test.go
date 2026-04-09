@@ -64,7 +64,7 @@ func TestDiscovery_DeduplicatesIssues(t *testing.T) {
 		},
 	}
 
-	filter := tracker.IssueFilter{Filters: map[string]string{"team": "ENG", "state": "Todo"}}
+	filter := tracker.IssueFilter{Filters: map[string]string{tracker.FilterTeam: "ENG", tracker.FilterState: "Todo"}}
 	d := NewDiscovery(mt, filter, 10*time.Millisecond, testLogger(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -116,9 +116,9 @@ func TestDiscovery_PassesFilter(t *testing.T) {
 
 	filter := tracker.IssueFilter{
 		Filters: map[string]string{
-			"team":  "INF",
-			"state": "Todo,Backlog",
-			"label": "automated",
+			tracker.FilterTeam:  "INF",
+			tracker.FilterState: "Todo,Backlog",
+			tracker.FilterLabel: "automated",
 		},
 	}
 	d := NewDiscovery(mt, filter, 50*time.Millisecond, testLogger(t))
@@ -133,9 +133,9 @@ func TestDiscovery_PassesFilter(t *testing.T) {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 	require.NotEmpty(t, mt.callArgs)
-	require.Equal(t, "INF", mt.callArgs[0].Filters["team"])
-	require.Equal(t, "Todo,Backlog", mt.callArgs[0].Filters["state"])
-	require.Equal(t, "automated", mt.callArgs[0].Filters["label"])
+	require.Equal(t, "INF", mt.callArgs[0].Filters[tracker.FilterTeam])
+	require.Equal(t, "Todo,Backlog", mt.callArgs[0].Filters[tracker.FilterState])
+	require.Equal(t, "automated", mt.callArgs[0].Filters[tracker.FilterLabel])
 }
 
 func TestDiscovery_ContextCancellation(t *testing.T) {

@@ -53,7 +53,7 @@ func (m *mockWTManager) getCreated() map[string]string {
 
 func testOrchestratorConfig() *Config {
 	cfg := defaultConfig()
-	cfg.Source.Filters = map[string]string{"team": "ENG"}
+	cfg.Source.Filters = map[string]string{tracker.FilterTeam: "ENG"}
 	cfg.Source.MaxConcurrent = 3
 	cfg.Source.BranchPrefix = "jiradozer"
 	cfg.Tracker.APIKey = "test-key"

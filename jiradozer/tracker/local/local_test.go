@@ -77,13 +77,13 @@ func TestListIssuesFilterByState(t *testing.T) {
 	require.NoError(t, err)
 
 	// Filter for Todo only.
-	issues, err := tr.ListIssues(ctx, tracker.IssueFilter{Filters: map[string]string{"state": "Todo"}})
+	issues, err := tr.ListIssues(ctx, tracker.IssueFilter{Filters: map[string]string{tracker.FilterState: "Todo"}})
 	require.NoError(t, err)
 	assert.Len(t, issues, 1)
 	assert.Equal(t, "LOCAL-2", issues[0].Identifier)
 
 	// Filter for In Progress only.
-	issues, err = tr.ListIssues(ctx, tracker.IssueFilter{Filters: map[string]string{"state": "In Progress"}})
+	issues, err = tr.ListIssues(ctx, tracker.IssueFilter{Filters: map[string]string{tracker.FilterState: "In Progress"}})
 	require.NoError(t, err)
 	assert.Len(t, issues, 1)
 	assert.Equal(t, "LOCAL-1", issues[0].Identifier)

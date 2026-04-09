@@ -80,7 +80,7 @@ func main() {
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
 	rootCmd.Flags().StringVar(&autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
-	rootCmd.Flags().StringSliceVar(&sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo)")
+	rootCmd.Flags().StringArrayVar(&sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	rootCmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
@@ -353,8 +353,8 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	// Determine repo root for worktree manager.
 	// Use WorkDir as the root for wt.Manager — it should point to
 	// the bare repo's parent directory.
-	// For GitHub, source.team is "owner/repo" which would create a nested
-	// directory. Use just the repo portion as the worktree repo name.
+	// For GitHub, source.filters.team is "owner/repo" which would create a
+	// nested directory. Use just the repo portion as the worktree repo name.
 	repoName := cfg.Source.Filters[tracker.FilterTeam]
 	if repoName == "" {
 		repoName = "jiradozer"
