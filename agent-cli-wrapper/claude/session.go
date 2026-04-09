@@ -29,10 +29,14 @@ type SessionInfo struct {
 }
 
 // Session manages interaction with the Claude CLI.
+//
+// Field ordering follows the fieldalignment rule: pointer/interface fields
+// first (minimises GC pointer bitmap), then value types, then small scalars.
 type Session struct {
+	// Pointer / interface / channel fields (all 8-16 bytes, contain pointers).
 	ctx                     context.Context
-	events                  chan Event
-	recorder                *sessionRecorder
+	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	bgSafetyTimer           *time.Timer // fires if no bg-task continuation arrives; see completeSuppressedTurn
 	accumulator             *streamAccumulator
 	turnManager             *turnManager
 	permissionManager       *permissionManager
@@ -40,23 +44,23 @@ type Session struct {
 	process                 *processManager
 	info                    *SessionInfo
 	done                    chan struct{}
-	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	events                  chan Event
+	recorder                *sessionRecorder
 	cancel                  context.CancelFunc
 
-	config            SessionConfig
-	cumulativeCostUSD float64
-	mu                sync.RWMutex
-	pendingMu         sync.Mutex
-	started           bool
-	stopping          bool
+	// Value / struct fields.
+	config                 SessionConfig
+	bgTaskAccumulatedUsage TurnUsage // token/cost totals from suppressed intermediate results; protected by mu
+	cumulativeCostUSD      float64
 
-	// Background-task turn suppression state (all protected by mu).
-	// When a tool with run_in_background succeeds, we suppress the
-	// intermediate ResultMessage and wait for a continuation turn.
-	bgTasksPendingSinceLastResult int       // successful bg launches since last result; only suppress when > 0
-	bgTaskAccumulatedUsage        TurnUsage // token/cost totals from suppressed intermediate results
-	bgTurnSuppressionActive       bool      // guards against double-completion (timer vs normal path race)
-	bgSafetyTimer                 *time.Timer
+	// Scalar and sync fields.
+	bgTasksPendingSinceLastResult int // successful bg launches since last result; protected by mu
+	mu                            sync.RWMutex
+	pendingMu                     sync.Mutex
+	bgTurnSuppressionActive       bool // true while waiting for continuation; cleared by timer or normal path
+	bgTimerFired                  bool // set by completeSuppressedTurn; cleared at start of next turn
+	started                       bool
+	stopping                      bool
 }
 
 // NewSession creates a new Claude session with options.
@@ -778,13 +782,25 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Cancel any pending background-task safety timer — a continuation
 	// ResultMessage has arrived, so the normal completion path will run.
+	// If the timer already fired and completed the turn, return early to
+	// prevent a duplicate TurnCompleteEvent.
 	s.mu.Lock()
 	if s.bgSafetyTimer != nil {
 		s.bgSafetyTimer.Stop()
 		s.bgSafetyTimer = nil
 	}
+	// If the state is already StateReady when we enter handleResult, the
+	// safety timer already completed the turn — skip to avoid duplicating
+	// TurnCompleteEvent and recorder entries.
+	// If the safety timer already fired and completed this turn, ignore the
+	// late continuation result to prevent a duplicate TurnCompleteEvent.
+	timerAlreadyFired := s.bgTimerFired
+	s.bgTimerFired = false // reset for next turn
 	s.bgTurnSuppressionActive = false
 	s.mu.Unlock()
+	if timerAlreadyFired {
+		return
+	}
 
 	turnNumber := s.turnManager.CurrentTurnNumber()
 	turn := s.turnManager.CurrentTurn()
@@ -970,6 +986,7 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 		return // Already completed by normal path
 	}
 	s.bgTurnSuppressionActive = false
+	s.bgTimerFired = true
 	s.bgSafetyTimer = nil
 	s.bgTaskAccumulatedUsage = TurnUsage{}
 	s.mu.Unlock()

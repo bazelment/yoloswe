@@ -59,7 +59,8 @@ func newTestSession(t *testing.T, opts ...SessionOption) *Session {
 		done:        make(chan struct{}),
 	}
 	s.accumulator = newStreamAccumulator(s)
-	// Transition to ready so handleResult can transition back.
+	// Transition to StateReady so handleResult can transition back via TransitionResultReceived.
+	_ = s.state.Transition(TransitionStarted)
 	_ = s.state.Transition(TransitionInitReceived)
 	return s
 }
@@ -229,6 +230,53 @@ func TestBgTask_SafetyTimeoutCompletesTurn(t *testing.T) {
 
 	// Wait for the safety timer to fire and complete the turn.
 	waitForTurnComplete(t, s.events, 2*time.Second)
+}
+
+func TestBgTask_SafetyTimerPreventsLateResultDoubleCompletion(t *testing.T) {
+	// When the safety timer fires and completes the turn, a late continuation
+	// ResultMessage must be ignored — not emit a second TurnCompleteEvent.
+	s := newTestSession(t, WithBgTaskSafetyTimeout(100*time.Millisecond))
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "sleep 60", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Running in background...", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{Type: "result", IsError: false}
+	s.handleResult(resultMsg)
+
+	// Wait for the safety timer to fire.
+	waitForTurnComplete(t, s.events, 2*time.Second)
+
+	// Simulate a late continuation result arriving after the timer completed the turn.
+	// This should be a no-op; no second TurnCompleteEvent should be emitted.
+	// The session state is now StateReady, so handleResult should return early.
+	s.handleResult(resultMsg)
+
+	// Drain events for a short window; must see at most one TurnCompleteEvent total.
+	count := 0
+	deadline := time.After(200 * time.Millisecond)
+drain:
+	for {
+		select {
+		case event := <-s.events:
+			if _, ok := event.(TurnCompleteEvent); ok {
+				count++
+			}
+		case <-deadline:
+			break drain
+		}
+	}
+	if count > 0 {
+		t.Errorf("expected no additional TurnCompleteEvent after safety timer already completed the turn, got %d", count)
+	}
 }
 
 func TestBgTask_MixedSuccessAndCancelled(t *testing.T) {
