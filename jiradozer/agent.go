@@ -147,6 +147,7 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 	out, err := cmd.CombinedOutput()
 	output := string(out)
 	if err != nil {
+		logger.Info("command failed", "step", stepName, "duration", time.Since(start), "error", err)
 		return output, fmt.Errorf("command failed: %w", err)
 	}
 
@@ -248,7 +249,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		logAttrs = append(logAttrs, "resume_session_id", resumeSessionID)
 	}
 	logger.Info("running agent", logAttrs...)
-	logger.Debug("agent prompt", "step", stepName, "prompt", prompt)
+	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
 
 	handler := &logEventHandler{logger: logger, step: stepName}
 	var opts []agent.ExecuteOption

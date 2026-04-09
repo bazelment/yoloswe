@@ -126,7 +126,6 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		case StepShipReview:
 			w.runReview(ctx, StepDone, StepShipping)
 		case StepDone:
-			w.logger.Info("workflow completed successfully")
 			if id, ok := w.stateIDs[stateKeyDone]; ok {
 				if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 					w.logger.Warn("failed to update issue state to done", "error", err)

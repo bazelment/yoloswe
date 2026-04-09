@@ -581,7 +581,7 @@ func availableModels() string {
 }
 
 // sensitiveFlags lists flag prefixes whose values should be redacted from logs.
-var sensitiveFlags = []string{"--api-key", "--token", "--secret", "--password"}
+var sensitiveFlags = []string{"--api-key", "--token", "--secret", "--password", "--description"}
 
 // redactArgs returns a copy of args with values of sensitive flags replaced by "***".
 func redactArgs(args []string) []string {
