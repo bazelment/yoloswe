@@ -704,6 +704,93 @@ func TestSession_Integration_BackgroundTaskCancelled(t *testing.T) {
 	t.Log("All assertions passed for Background Task Cancellation scenario")
 }
 
+// ============================================================================
+// Scenario 7: Mixed Background + Non-Background Tools
+// ============================================================================
+
+// TestSession_Integration_BackgroundTaskMixed verifies that the session
+// completes normally when a turn contains BOTH background and non-background
+// tools. This reproduces the jiradozer stuck-session bug where the SDK
+// incorrectly suppressed the turn when 2× bg + 1× non-bg tools were present.
+//
+// The ResultMessage for a mixed turn represents completion of the synchronous
+// (non-bg) work, so it must NOT be suppressed.
+func TestSession_Integration_BackgroundTaskMixed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	testDir, err := os.MkdirTemp("", "claude-go-test-bgmixed-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(testDir)
+	t.Logf("Test artifacts directory: %s", testDir)
+
+	session := claude.NewSession(
+		claude.WithModel("haiku"),
+		claude.WithWorkDir(testDir),
+		claude.WithPermissionMode(claude.PermissionModeBypass),
+		claude.WithDisablePlugins(),
+		claude.WithRecording(testDir),
+	)
+
+	if err := session.Start(ctx); err != nil {
+		t.Fatalf("Failed to start session: %v", err)
+	}
+	defer session.Stop()
+
+	// Ask the agent to run 3 tools in one response: 2 background + 1 blocking.
+	// This is the exact pattern that caused the jiradozer stuck session.
+	t.Log("Sending mixed bg/non-bg prompt...")
+	_, err = session.SendMessage(ctx,
+		"Run these THREE bash commands in PARALLEL (all in one response, using multiple tool calls):\n"+
+			"1. `sleep 1 && echo BG1_DONE` with run_in_background: true\n"+
+			"2. `sleep 1 && echo BG2_DONE` with run_in_background: true\n"+
+			"3. `echo BLOCKING_DONE` (NO run_in_background, this is a normal blocking command)\n\n"+
+			"You MUST call all three Bash tools in the same response so they run in parallel. "+
+			"Commands 1 and 2 MUST use run_in_background: true. "+
+			"Command 3 MUST NOT use run_in_background.")
+	if err != nil {
+		t.Fatalf("SendMessage failed: %v", err)
+	}
+
+	events, err := CollectTurnEvents(ctx, session)
+	if err != nil {
+		t.Fatalf("CollectTurnEvents failed (session may have hung — this is the mixed bg/non-bg bug): %v", err)
+	}
+
+	if events.TurnComplete == nil {
+		t.Fatal("Expected TurnCompleteEvent — session hung or no events received")
+	}
+	if !events.TurnComplete.Success {
+		t.Errorf("Expected successful turn, got error")
+	}
+
+	// Verify the tool mix: at least one bg and one non-bg tool.
+	bgCount := 0
+	nonBgCount := 0
+	for _, tc := range events.ToolComplete {
+		if tc.Name == "Bash" {
+			if rib, ok := tc.Input["run_in_background"]; ok {
+				if b, ok := rib.(bool); ok && b {
+					bgCount++
+					continue
+				}
+			}
+			nonBgCount++
+		}
+	}
+	t.Logf("Tool mix: %d bg, %d non-bg", bgCount, nonBgCount)
+	if bgCount == 0 || nonBgCount == 0 {
+		t.Log("WARNING: Agent did not produce the expected mix of bg + non-bg tools. " +
+			"Test may not exercise the mixed-tool path.")
+	}
+
+	t.Logf("Turn completed: success=%v, cost=$%.6f",
+		events.TurnComplete.Success, events.TurnComplete.Usage.CostUSD)
+	t.Log("All assertions passed for Mixed Background Task scenario")
+}
+
 // containsAny reports whether s contains any of the given substrings (case-insensitive).
 func containsAny(s string, subs ...string) bool {
 	lower := strings.ToLower(s)

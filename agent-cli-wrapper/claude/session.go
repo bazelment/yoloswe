@@ -19,6 +19,29 @@ import (
 // accumulated data to prevent indefinite blocking.
 const defaultBgTaskSafetyTimeout = 90 * time.Second
 
+// bgSuppressionState groups all background-task turn-suppression state.
+// When the CLI runs background tasks (run_in_background: true), the SDK
+// suppresses the intermediate ResultMessage and waits for continuation
+// task-notifications. This struct holds the state for that mechanism.
+// Use reset() to clear all fields at turn boundaries.
+type bgSuppressionState struct {
+	timer            *time.Timer // fires if no continuation arrives; see completeSuppressedTurn
+	accumulatedUsage TurnUsage   // token/cost totals from suppressed intermediate results
+	active           bool        // true while waiting for continuation; cleared by timer or normal path
+	timerFired       bool        // set by completeSuppressedTurn; cleared at start of next turn
+}
+
+// reset clears all suppression state and stops any pending timer.
+func (b *bgSuppressionState) reset() {
+	b.active = false
+	b.timerFired = false
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	b.accumulatedUsage = TurnUsage{}
+}
+
 // SessionInfo contains session metadata.
 type SessionInfo struct {
 	SessionID      string
@@ -36,7 +59,6 @@ type Session struct {
 	// Pointer / interface / channel fields (all 8-16 bytes, contain pointers).
 	ctx                     context.Context
 	pendingControlResponses map[string]chan protocol.ControlResponsePayload
-	bgSafetyTimer           *time.Timer // fires if no bg-task continuation arrives; see completeSuppressedTurn
 	accumulator             *streamAccumulator
 	turnManager             *turnManager
 	permissionManager       *permissionManager
@@ -49,18 +71,15 @@ type Session struct {
 	cancel                  context.CancelFunc
 
 	// Value / struct fields.
-	config                 SessionConfig
-	bgTaskAccumulatedUsage TurnUsage // token/cost totals from suppressed intermediate results; protected by mu
-	cumulativeCostUSD      float64
+	config            SessionConfig
+	bgState           bgSuppressionState // background-task turn-suppression state; protected by mu
+	cumulativeCostUSD float64
 
 	// Scalar and sync fields.
-	bgTasksPendingSinceLastResult int // successful bg launches since last result; protected by mu
-	mu                            sync.RWMutex
-	pendingMu                     sync.Mutex
-	bgTurnSuppressionActive       bool // true while waiting for continuation; cleared by timer or normal path
-	bgTimerFired                  bool // set by completeSuppressedTurn; cleared at start of next turn
-	started                       bool
-	stopping                      bool
+	mu        sync.RWMutex
+	pendingMu sync.Mutex
+	started   bool
+	stopping  bool
 }
 
 // NewSession creates a new Claude session with options.
@@ -235,13 +254,7 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	turn := s.turnManager.StartTurn(content)
 	// Clear any stale background-task suppression state from the previous turn.
 	// A safety timer for Turn N must not fire after Turn N+1 has started.
-	s.bgTimerFired = false
-	s.bgTurnSuppressionActive = false
-	s.bgTasksPendingSinceLastResult = 0
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop()
-		s.bgSafetyTimer = nil
-	}
+	s.bgState.reset()
 
 	// Record turn start
 	if s.recorder != nil {
@@ -282,13 +295,7 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 
 	turn := s.turnManager.StartTurn(content)
 	// Clear any stale background-task suppression state from the previous turn.
-	s.bgTimerFired = false
-	s.bgTurnSuppressionActive = false
-	s.bgTasksPendingSinceLastResult = 0
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop()
-		s.bgSafetyTimer = nil
-	}
+	s.bgState.reset()
 
 	// Record turn start
 	if s.recorder != nil {
@@ -451,11 +458,7 @@ func (s *Session) Stop() error {
 		return nil
 	}
 	s.stopping = true
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop()
-		s.bgSafetyTimer = nil
-	}
-	s.bgTurnSuppressionActive = false
+	s.bgState.reset()
 	s.mu.Unlock()
 
 	// Cancel context for tool handler goroutines
@@ -759,23 +762,6 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 				IsError:    isError,
 			})
 
-			// Track background task launches from tool input parameters.
-			// Checking tool.Input["run_in_background"] is robust against false
-			// positives from output content (e.g., git diffs containing the
-			// background task regex pattern string).
-			//
-			// Only count non-error results: when a parallel tool call fails, the
-			// CLI cancels sibling tools (including background ones) and returns
-			// is_error=true. Those cancelled tools never actually launched a
-			// background task, so counting them would cause the session to wait
-			// for a task-notification that will never arrive.
-			if tool != nil && !isError {
-				if rib, ok := tool.Input["run_in_background"].(bool); ok && rib {
-					s.mu.Lock()
-					s.bgTasksPendingSinceLastResult++
-					s.mu.Unlock()
-				}
-			}
 		}
 	}
 
@@ -796,23 +782,64 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 }
 
+// shouldSuppressForBgTasks inspects the current turn's ContentBlocks to decide
+// whether the ResultMessage should be suppressed (waiting for background task
+// continuations). Returns true only when ALL non-cancelled tool_use blocks in
+// the turn had run_in_background: true — meaning the ResultMessage arrived
+// because bg tools returned immediately, and the real work is still in progress.
+//
+// When non-bg tools are present, the ResultMessage represents the completion of
+// synchronous work and must not be suppressed.
+func (s *Session) shouldSuppressForBgTasks(turn *turnState) bool {
+	if turn == nil {
+		return false
+	}
+
+	// Build set of cancelled (errored) tool IDs from tool_result blocks.
+	// Cancelled tools never launched a background task, so they should not
+	// influence the suppression decision.
+	cancelled := make(map[string]bool)
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolResult && block.IsError {
+			cancelled[block.ToolUseID] = true
+		}
+	}
+
+	// Check tool_use blocks. Non-bg tools always prevent suppression (even if
+	// they errored), because their presence means the ResultMessage represents
+	// completion of synchronous work. Cancelled bg tools are skipped — they
+	// never actually launched a background task.
+	hasBgTool := false
+	for _, block := range turn.ContentBlocks {
+		if block.Type != ContentBlockTypeToolUse {
+			continue
+		}
+		isBg, _ := block.ToolInput["run_in_background"].(bool)
+		if !isBg {
+			return false // non-bg tool exists → don't suppress
+		}
+		// It's a bg tool — only count it if not cancelled.
+		if !cancelled[block.ToolUseID] {
+			hasBgTool = true
+		}
+	}
+	return hasBgTool
+}
+
 func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Cancel any pending background-task safety timer — a normal continuation
 	// ResultMessage has arrived, so the safety path is no longer needed.
 	// If bgTimerFired is set, the safety timer already completed this turn;
 	// return early to prevent a duplicate TurnCompleteEvent.
 	s.mu.Lock()
-	if s.bgSafetyTimer != nil {
-		s.bgSafetyTimer.Stop()
-		s.bgSafetyTimer = nil
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+		s.bgState.timer = nil
 	}
-	timerAlreadyFired := s.bgTimerFired
-	s.bgTimerFired = false // clear; also reset by SendMessage at next turn start
-	s.bgTurnSuppressionActive = false
+	timerAlreadyFired := s.bgState.timerFired
+	s.bgState.timerFired = false // clear; also reset by SendMessage at next turn start
+	s.bgState.active = false
 	if timerAlreadyFired {
-		// The safety timer already finalized this turn. Clear any pending counter
-		// so it does not incorrectly suppress the next turn's result.
-		s.bgTasksPendingSinceLastResult = 0
 		s.mu.Unlock()
 		return
 	}
@@ -829,8 +856,8 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Collect any accumulated usage from suppressed intermediate results
 	// (background task continuation turns) to report the full logical-turn cost.
 	s.mu.Lock()
-	accUsage := s.bgTaskAccumulatedUsage
-	s.bgTaskAccumulatedUsage = TurnUsage{}
+	accUsage := s.bgState.accumulatedUsage
+	s.bgState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
 	result := TurnResult{
@@ -865,22 +892,22 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Error = fmt.Errorf("%s", msg.Result)
 	}
 
-	// Check if background tasks were launched since the last ResultMessage.
+	// Check if ALL non-cancelled tools in this turn were background tasks.
 	// If so, the CLI will auto-continue after the tasks complete (delivering
 	// task-notification messages and starting a new assistant turn). Suppress
 	// turn completion so callers of Ask()/WaitForTurn()/CollectResponse()
 	// block until the truly-final turn.
-	s.mu.Lock()
-	bgPending := s.bgTasksPendingSinceLastResult
-	s.bgTasksPendingSinceLastResult = 0
-	s.mu.Unlock()
+	//
+	// When non-bg tools are present (mixed turn), the ResultMessage represents
+	// completion of synchronous work and must not be suppressed.
+	shouldSuppress := s.shouldSuppressForBgTasks(turn)
 
 	// costAccounted tracks whether cumulativeCostUSD has already been updated
 	// for this result (the background-task branch does it early to enable budget
 	// checks mid-turn; the normal path must not double-count).
 	costAccounted := false
 
-	if bgPending > 0 {
+	if shouldSuppress {
 		// If the intermediate result carries an error, propagate it now rather
 		// than silently dropping it — the background task continuation will not
 		// arrive, so the session would otherwise stay stuck in StateProcessing.
@@ -896,11 +923,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			s.mu.Lock()
 			s.cumulativeCostUSD += msg.TotalCostUSD
 			totalCostSoFar := s.cumulativeCostUSD
-			s.bgTaskAccumulatedUsage.InputTokens += msg.Usage.InputTokens + accUsage.InputTokens
-			s.bgTaskAccumulatedUsage.OutputTokens += msg.Usage.OutputTokens + accUsage.OutputTokens
-			s.bgTaskAccumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens
-			s.bgTaskAccumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens
-			s.bgTaskAccumulatedUsage.CostUSD += msg.TotalCostUSD + accUsage.CostUSD
+			s.bgState.accumulatedUsage.InputTokens += msg.Usage.InputTokens + accUsage.InputTokens
+			s.bgState.accumulatedUsage.OutputTokens += msg.Usage.OutputTokens + accUsage.OutputTokens
+			s.bgState.accumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens
+			s.bgState.accumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens
+			s.bgState.accumulatedUsage.CostUSD += msg.TotalCostUSD + accUsage.CostUSD
 			s.mu.Unlock()
 			costAccounted = true
 
@@ -918,7 +945,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 				result.Error = ErrBudgetExceeded
 				s.mu.Lock()
-				s.bgTaskAccumulatedUsage = TurnUsage{}
+				s.bgState.accumulatedUsage = TurnUsage{}
 				s.mu.Unlock()
 				// Fall through to normal completion path to emit TurnCompleteEvent.
 			} else {
@@ -935,12 +962,12 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 				}
 				safetyResult := result
 				s.mu.Lock()
-				s.bgTurnSuppressionActive = true
-				s.bgTimerFired = false // reset for this turn's timer
-				if s.bgSafetyTimer != nil {
-					s.bgSafetyTimer.Stop()
+				s.bgState.active = true
+				s.bgState.timerFired = false // reset for this turn's timer
+				if s.bgState.timer != nil {
+					s.bgState.timer.Stop()
 				}
-				s.bgSafetyTimer = time.AfterFunc(timeout, func() {
+				s.bgState.timer = time.AfterFunc(timeout, func() {
 					s.completeSuppressedTurn(safetyResult)
 				})
 				s.mu.Unlock()
@@ -998,15 +1025,14 @@ func (s *Session) finalizeTurn(result TurnResult) {
 // turn with whatever data was accumulated, preventing indefinite blocking.
 func (s *Session) completeSuppressedTurn(result TurnResult) {
 	s.mu.Lock()
-	if !s.bgTurnSuppressionActive {
+	if !s.bgState.active {
 		s.mu.Unlock()
 		return // Already completed by normal path
 	}
-	s.bgTurnSuppressionActive = false
-	s.bgTimerFired = true
-	s.bgSafetyTimer = nil
-	s.bgTaskAccumulatedUsage = TurnUsage{}
-	s.bgTasksPendingSinceLastResult = 0 // clear stale counter; no continuation will arrive
+	s.bgState.active = false
+	s.bgState.timerFired = true
+	s.bgState.timer = nil
+	s.bgState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
 	// Incorporate streaming updates from the correct turn only. Guard with
