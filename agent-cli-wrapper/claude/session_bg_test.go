@@ -65,9 +65,8 @@ func newTestSession(t *testing.T, opts ...SessionOption) *Session {
 	return s
 }
 
-// simulateAssistantToolUse registers tool_use blocks with the session so
-// that handleUser can look them up via FindToolByID. Also appends
-// ContentBlocks so shouldSuppressForBgTasks can inspect them.
+// simulateAssistantToolUse registers tool_use blocks with the session,
+// mirroring what handleAssistant does: tracks tools and appends ContentBlocks.
 func simulateAssistantToolUse(s *Session, tools []protocol.ToolUseBlock) {
 	// Start a turn and register each tool.
 	s.turnManager.StartTurn("test")
@@ -128,7 +127,7 @@ func TestBgTask_CancelledToolsDoNotSuppressTurn(t *testing.T) {
 
 	// shouldSuppressForBgTasks must return false: all tools are cancelled.
 	turn := s.turnManager.CurrentTurn()
-	if s.shouldSuppressForBgTasks(turn) {
+	if turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return false when all tools are cancelled")
 	}
 
@@ -162,7 +161,7 @@ func TestBgTask_SuccessfulBgToolSuppressesTurn(t *testing.T) {
 
 	// shouldSuppressForBgTasks must return true: only bg tools, none cancelled.
 	turn := s.turnManager.CurrentTurn()
-	if !s.shouldSuppressForBgTasks(turn) {
+	if !turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return true for a single successful bg tool")
 	}
 
@@ -404,7 +403,7 @@ func TestBgTask_MixedSuccessAndCancelled(t *testing.T) {
 
 	// shouldSuppressForBgTasks must return true: only tool-1 is non-cancelled, and it's bg.
 	turn := s.turnManager.CurrentTurn()
-	if !s.shouldSuppressForBgTasks(turn) {
+	if !turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return true — only non-cancelled tool is bg")
 	}
 }
@@ -433,7 +432,7 @@ func TestBgTask_MixedBgAndNonBgDoesNotSuppressTurn(t *testing.T) {
 
 	// shouldSuppressForBgTasks must return false: non-bg tool exists.
 	turn := s.turnManager.CurrentTurn()
-	if s.shouldSuppressForBgTasks(turn) {
+	if turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return false when non-bg tools are present")
 	}
 
@@ -476,7 +475,7 @@ func TestBgTask_MultipleBgToolsStillSuppressTurn(t *testing.T) {
 
 	// shouldSuppressForBgTasks must return true.
 	turn := s.turnManager.CurrentTurn()
-	if !s.shouldSuppressForBgTasks(turn) {
+	if !turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return true when all tools are bg")
 	}
 
@@ -535,7 +534,7 @@ func TestBgTask_MixedBgAndNonBgWithNonBgError(t *testing.T) {
 
 	// Non-bg tool exists (even though it errored) → don't suppress.
 	turn := s.turnManager.CurrentTurn()
-	if s.shouldSuppressForBgTasks(turn) {
+	if turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return false when a non-bg tool exists (even if errored)")
 	}
 }
@@ -556,7 +555,7 @@ func TestBgTask_NoBgToolsNormalCompletion(t *testing.T) {
 	simulateUserToolResults(t, s, results)
 
 	turn := s.turnManager.CurrentTurn()
-	if s.shouldSuppressForBgTasks(turn) {
+	if turn.shouldSuppressForBgTasks() {
 		t.Error("shouldSuppressForBgTasks should return false when no bg tools exist")
 	}
 }

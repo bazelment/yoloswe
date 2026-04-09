@@ -782,22 +782,16 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 }
 
-// shouldSuppressForBgTasks inspects the current turn's ContentBlocks to decide
-// whether the ResultMessage should be suppressed (waiting for background task
-// continuations). Returns true only when ALL non-cancelled tool_use blocks in
-// the turn had run_in_background: true — meaning the ResultMessage arrived
-// because bg tools returned immediately, and the real work is still in progress.
-//
-// When non-bg tools are present, the ResultMessage represents the completion of
+// shouldSuppressForBgTasks returns true when ALL non-cancelled tool_use blocks
+// in the turn had run_in_background: true, meaning the ResultMessage arrived
+// because bg tools returned immediately and the real work is still in progress.
+// When non-bg tools are present, the ResultMessage represents completion of
 // synchronous work and must not be suppressed.
-func (s *Session) shouldSuppressForBgTasks(turn *turnState) bool {
+func (turn *turnState) shouldSuppressForBgTasks() bool {
 	if turn == nil {
 		return false
 	}
 
-	// Build set of cancelled (errored) tool IDs from tool_result blocks.
-	// Cancelled tools never launched a background task, so they should not
-	// influence the suppression decision.
 	cancelled := make(map[string]bool)
 	for _, block := range turn.ContentBlocks {
 		if block.Type == ContentBlockTypeToolResult && block.IsError {
@@ -805,10 +799,6 @@ func (s *Session) shouldSuppressForBgTasks(turn *turnState) bool {
 		}
 	}
 
-	// Check tool_use blocks. Non-bg tools always prevent suppression (even if
-	// they errored), because their presence means the ResultMessage represents
-	// completion of synchronous work. Cancelled bg tools are skipped — they
-	// never actually launched a background task.
 	hasBgTool := false
 	for _, block := range turn.ContentBlocks {
 		if block.Type != ContentBlockTypeToolUse {
@@ -816,9 +806,8 @@ func (s *Session) shouldSuppressForBgTasks(turn *turnState) bool {
 		}
 		isBg, _ := block.ToolInput["run_in_background"].(bool)
 		if !isBg {
-			return false // non-bg tool exists → don't suppress
+			return false
 		}
-		// It's a bg tool — only count it if not cancelled.
 		if !cancelled[block.ToolUseID] {
 			hasBgTool = true
 		}
@@ -900,7 +889,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	//
 	// When non-bg tools are present (mixed turn), the ResultMessage represents
 	// completion of synchronous work and must not be suppressed.
-	shouldSuppress := s.shouldSuppressForBgTasks(turn)
+	shouldSuppress := turn.shouldSuppressForBgTasks()
 
 	// costAccounted tracks whether cumulativeCostUSD has already been updated
 	// for this result (the background-task branch does it early to enable budget
