@@ -794,10 +794,14 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	timerAlreadyFired := s.bgTimerFired
 	s.bgTimerFired = false // clear; also reset by SendMessage at next turn start
 	s.bgTurnSuppressionActive = false
-	s.mu.Unlock()
 	if timerAlreadyFired {
+		// The safety timer already finalized this turn. Clear any pending counter
+		// so it does not incorrectly suppress the next turn's result.
+		s.bgTasksPendingSinceLastResult = 0
+		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
 
 	turnNumber := s.turnManager.CurrentTurnNumber()
 	turn := s.turnManager.CurrentTurn()
@@ -987,11 +991,14 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 	s.bgTimerFired = true
 	s.bgSafetyTimer = nil
 	s.bgTaskAccumulatedUsage = TurnUsage{}
+	s.bgTasksPendingSinceLastResult = 0 // clear stale counter; no continuation will arrive
 	s.mu.Unlock()
 
-	// Incorporate streaming updates that may have arrived before the timeout.
+	// Incorporate streaming updates from the correct turn only. Guard with
+	// TurnNumber to avoid cross-contaminating with a new turn that may have
+	// started between the lock release above and this read.
 	turn := s.turnManager.CurrentTurn()
-	if turn != nil {
+	if turn != nil && turn.Number == result.TurnNumber {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
