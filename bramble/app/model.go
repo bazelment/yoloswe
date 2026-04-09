@@ -753,15 +753,10 @@ type (
 	sessionsUpdated struct{}
 	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
-		sessionType session.SessionType
-		prompt      string
-		model       string
-	}
-	startSessionOnPathMsg struct {
 		sessionType  session.SessionType
 		prompt       string
 		model        string
-		worktreePath string
+		worktreePath string // if set, starts on this path instead of selected worktree
 	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }

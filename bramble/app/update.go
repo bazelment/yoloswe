@@ -371,32 +371,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case startSessionMsg:
-		// Save the chosen model as the new default for this session type
-		if msg.model != "" {
-			switch msg.sessionType {
-			case session.SessionTypePlanner:
-				m.defaultPlanModel = msg.model
-			case session.SessionTypeBuilder:
-				m.defaultBuildModel = msg.model
-			case session.SessionTypeCodeTalk:
-				m.defaultCodeTalkModel = msg.model
-			}
+		m.saveDefaultModel(msg.sessionType, msg.model)
+		if msg.worktreePath != "" {
+			return m.startSessionOnPath(msg.sessionType, msg.prompt, msg.model, msg.worktreePath)
 		}
 		return m.startSession(msg.sessionType, msg.prompt, msg.model)
-
-	case startSessionOnPathMsg:
-		// Save the chosen model as the new default for this session type
-		if msg.model != "" {
-			switch msg.sessionType {
-			case session.SessionTypePlanner:
-				m.defaultPlanModel = msg.model
-			case session.SessionTypeBuilder:
-				m.defaultBuildModel = msg.model
-			case session.SessionTypeCodeTalk:
-				m.defaultCodeTalkModel = msg.model
-			}
-		}
-		return m.startSessionOnPath(msg.sessionType, msg.prompt, msg.model, msg.worktreePath)
 
 	case createWorktreeMsg:
 		return m.createWorktree(msg.branch)
@@ -716,44 +695,17 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.focus = FocusTaskModal
 		return m, nil
 
-	case "p":
-		// Start planner
+	case "p", "b", "c":
+		st := map[string]session.SessionType{"p": session.SessionTypePlanner, "b": session.SessionTypeBuilder, "c": session.SessionTypeCodeTalk}[msg.String()]
 		if m.selectedWorktree() != nil {
-			m.pendingModel = m.defaultPlanModel
-			m.pendingSessionType = session.SessionTypePlanner
-			return m.promptInput(fmt.Sprintf("Plan prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
+			defaultModel, promptLabel, placeholder := m.sessionPromptConfig(st)
+			m.pendingModel = defaultModel
+			m.pendingSessionType = st
+			return m.promptInput(promptLabel, func(prompt, model string, _ session.SessionType) tea.Cmd {
 				return func() tea.Msg {
-					return startSessionMsg{session.SessionTypePlanner, prompt, model}
+					return startSessionMsg{sessionType: st, prompt: prompt, model: model}
 				}
-			}, "Describe what you want to plan...")
-		}
-		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
-		return m, toastCmd
-
-	case "b":
-		// Start builder
-		if m.selectedWorktree() != nil {
-			m.pendingModel = m.defaultBuildModel
-			m.pendingSessionType = session.SessionTypeBuilder
-			return m.promptInput(fmt.Sprintf("Build prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
-				return func() tea.Msg {
-					return startSessionMsg{session.SessionTypeBuilder, prompt, model}
-				}
-			}, "Describe what to build...")
-		}
-		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
-		return m, toastCmd
-
-	case "c":
-		// Start codetalk (code understanding)
-		if m.selectedWorktree() != nil {
-			m.pendingModel = m.defaultCodeTalkModel
-			m.pendingSessionType = session.SessionTypeCodeTalk
-			return m.promptInput(fmt.Sprintf("CodeTalk prompt [%s]:", m.pendingModel), func(prompt, model string, _ session.SessionType) tea.Cmd {
-				return func() tea.Msg {
-					return startSessionMsg{session.SessionTypeCodeTalk, prompt, model}
-				}
-			}, "What code area do you want to understand?")
+			}, placeholder)
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd
@@ -1329,6 +1281,41 @@ func (m Model) promptInput(prompt string, handler func(value, model string, sess
 	return m, nil
 }
 
+// saveDefaultModel persists the user's model choice for future sessions of the same type.
+func (m *Model) saveDefaultModel(sessionType session.SessionType, model string) {
+	if model == "" {
+		return
+	}
+	switch sessionType {
+	case session.SessionTypePlanner:
+		m.defaultPlanModel = model
+	case session.SessionTypeBuilder:
+		m.defaultBuildModel = model
+	case session.SessionTypeCodeTalk:
+		m.defaultCodeTalkModel = model
+	}
+}
+
+// sessionPromptConfig returns the default model, prompt label, and placeholder
+// for a given session type. Used by all p/b/c key handlers.
+func (m *Model) sessionPromptConfig(st session.SessionType) (defaultModel, promptLabel, placeholder string) {
+	switch st {
+	case session.SessionTypePlanner:
+		defaultModel = m.defaultPlanModel
+		promptLabel = fmt.Sprintf("Plan prompt [%s]:", defaultModel)
+		placeholder = "Describe what you want to plan..."
+	case session.SessionTypeBuilder:
+		defaultModel = m.defaultBuildModel
+		promptLabel = fmt.Sprintf("Build prompt [%s]:", defaultModel)
+		placeholder = "Describe what to build..."
+	case session.SessionTypeCodeTalk:
+		defaultModel = m.defaultCodeTalkModel
+		promptLabel = fmt.Sprintf("CodeTalk prompt [%s]:", defaultModel)
+		placeholder = "What code area do you want to understand?"
+	}
+	return
+}
+
 // startSession starts a session of the given type with the specified model,
 // using the currently selected worktree.
 func (m Model) startSession(sessionType session.SessionType, prompt, model string) (tea.Model, tea.Cmd) {
@@ -1362,44 +1349,33 @@ func (m Model) startSessionOnPath(sessionType session.SessionType, prompt, model
 	return m, toastCmd
 }
 
-// startNewSessionFromOverlay handles session creation from command center or
-// all-sessions overlay. It hides the overlay, switches repo if needed, and
-// prompts the user for input to start a session on the highlighted session's worktree.
-func (m Model) startNewSessionFromOverlay(
-	sess *session.SessionInfo,
-	sessionType session.SessionType,
-	defaultModel string,
-	promptLabel string,
-	placeholder string,
-	hideOverlay func(),
-) (tea.Model, tea.Cmd) {
+// startNewSessionFromOverlay prompts the user for input to start a session on
+// the given session's worktree. Caller must hide the overlay before calling.
+func (m Model) startNewSessionFromOverlay(sess *session.SessionInfo, sessionType session.SessionType) (tea.Model, tea.Cmd) {
 	if sess == nil {
 		toastCmd := m.addToast("No session selected", ToastInfo)
 		return m, toastCmd
 	}
-	worktreePath := sess.WorktreePath
-	if worktreePath == "" {
+	if sess.WorktreePath == "" {
 		toastCmd := m.addToast("Selected session has no worktree", ToastInfo)
 		return m, toastCmd
 	}
-	sessRepoName := sess.RepoName
-
-	hideOverlay()
-	m.focus = FocusOutput
 
 	// Switch repo if needed
-	if sessRepoName != "" && sessRepoName != m.repoName {
-		if _, ok := m.repos[sessRepoName]; ok {
+	if sess.RepoName != "" && sess.RepoName != m.repoName {
+		if _, ok := m.repos[sess.RepoName]; ok {
 			m.saveActiveContext()
-			m.loadContext(sessRepoName)
+			m.loadContext(sess.RepoName)
 		}
 	}
 
+	defaultModel, promptLabel, placeholder := m.sessionPromptConfig(sessionType)
+	worktreePath := sess.WorktreePath
 	m.pendingModel = defaultModel
 	m.pendingSessionType = sessionType
 	return m.promptInput(promptLabel, func(prompt, model string, _ session.SessionType) tea.Cmd {
 		return func() tea.Msg {
-			return startSessionOnPathMsg{sessionType, prompt, model, worktreePath}
+			return startSessionMsg{sessionType, prompt, model, worktreePath}
 		}
 	}, placeholder)
 }
@@ -2026,32 +2002,10 @@ func (m Model) handleAllSessionsOverlay(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	case "enter":
 		return m.switchToOverlaySession()
 
-	case "p":
-		sess := m.allSessionsOverlay.SelectedSession()
-		return m.startNewSessionFromOverlay(
-			sess, session.SessionTypePlanner, m.defaultPlanModel,
-			fmt.Sprintf("Plan prompt [%s]:", m.defaultPlanModel),
-			"Describe what you want to plan...",
-			func() { m.allSessionsOverlay.Hide() },
-		)
-
-	case "b":
-		sess := m.allSessionsOverlay.SelectedSession()
-		return m.startNewSessionFromOverlay(
-			sess, session.SessionTypeBuilder, m.defaultBuildModel,
-			fmt.Sprintf("Build prompt [%s]:", m.defaultBuildModel),
-			"Describe what to build...",
-			func() { m.allSessionsOverlay.Hide() },
-		)
-
-	case "c":
-		sess := m.allSessionsOverlay.SelectedSession()
-		return m.startNewSessionFromOverlay(
-			sess, session.SessionTypeCodeTalk, m.defaultCodeTalkModel,
-			fmt.Sprintf("CodeTalk prompt [%s]:", m.defaultCodeTalkModel),
-			"What code area do you want to understand?",
-			func() { m.allSessionsOverlay.Hide() },
-		)
+	case "p", "b", "c":
+		m.allSessionsOverlay.Hide()
+		st := map[string]session.SessionType{"p": session.SessionTypePlanner, "b": session.SessionTypeBuilder, "c": session.SessionTypeCodeTalk}[msg.String()]
+		return m.startNewSessionFromOverlay(m.allSessionsOverlay.SelectedSession(), st)
 
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -2256,35 +2210,10 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.updateSessionDropdown()
 		return m, nil
 
-	case "p":
-		// Start planner on highlighted session's worktree
-		sess := m.commandCenter.SelectedSession()
-		return m.startNewSessionFromOverlay(
-			sess, session.SessionTypePlanner, m.defaultPlanModel,
-			fmt.Sprintf("Plan prompt [%s]:", m.defaultPlanModel),
-			"Describe what you want to plan...",
-			func() { m.commandCenter.Hide() },
-		)
-
-	case "b":
-		// Start builder on highlighted session's worktree
-		sess := m.commandCenter.SelectedSession()
-		return m.startNewSessionFromOverlay(
-			sess, session.SessionTypeBuilder, m.defaultBuildModel,
-			fmt.Sprintf("Build prompt [%s]:", m.defaultBuildModel),
-			"Describe what to build...",
-			func() { m.commandCenter.Hide() },
-		)
-
-	case "c":
-		// Start codetalk on highlighted session's worktree
-		sess := m.commandCenter.SelectedSession()
-		return m.startNewSessionFromOverlay(
-			sess, session.SessionTypeCodeTalk, m.defaultCodeTalkModel,
-			fmt.Sprintf("CodeTalk prompt [%s]:", m.defaultCodeTalkModel),
-			"What code area do you want to understand?",
-			func() { m.commandCenter.Hide() },
-		)
+	case "p", "b", "c":
+		m.commandCenter.Hide()
+		st := map[string]session.SessionType{"p": session.SessionTypePlanner, "b": session.SessionTypeBuilder, "c": session.SessionTypeCodeTalk}[msg.String()]
+		return m.startNewSessionFromOverlay(m.commandCenter.SelectedSession(), st)
 
 	case "v":
 		sess := m.commandCenter.TogglePreview()
