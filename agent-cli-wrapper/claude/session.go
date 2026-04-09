@@ -43,37 +43,20 @@ type Session struct {
 	pendingControlResponses map[string]chan protocol.ControlResponsePayload
 	cancel                  context.CancelFunc
 
-	// bgSafetyTimer fires if a suppressed background-task turn never receives
-	// a continuation ResultMessage. Prevents indefinite blocking.
-	// Protected by mu.
-	bgSafetyTimer *time.Timer
-
 	config            SessionConfig
 	cumulativeCostUSD float64
 	mu                sync.RWMutex
+	pendingMu         sync.Mutex
+	started           bool
+	stopping          bool
 
-	// bgTaskAccumulatedUsage holds token/cost totals from intermediate
-	// ResultMessages that were suppressed due to background task continuation.
-	// These are added to the final ResultMessage's usage so callers see the
-	// full cost of the logical turn. Protected by mu.
-	bgTaskAccumulatedUsage TurnUsage
-
-	pendingMu sync.Mutex
-
-	// bgTasksPendingSinceLastResult counts successful (non-error) background
-	// task launches since the last ResultMessage. Only suppress turn completion
-	// when > 0. Cancelled/errored tool results with run_in_background are not
-	// counted because the CLI never actually launched the background task.
-	// Protected by mu.
-	bgTasksPendingSinceLastResult int
-
-	started  bool
-	stopping bool
-
-	// bgTurnSuppressionActive guards against double-completion when the
-	// safety timer and a continuation ResultMessage race.
-	// Protected by mu.
-	bgTurnSuppressionActive bool
+	// Background-task turn suppression state (all protected by mu).
+	// When a tool with run_in_background succeeds, we suppress the
+	// intermediate ResultMessage and wait for a continuation turn.
+	bgTasksPendingSinceLastResult int       // successful bg launches since last result; only suppress when > 0
+	bgTaskAccumulatedUsage        TurnUsage // token/cost totals from suppressed intermediate results
+	bgTurnSuppressionActive       bool      // guards against double-completion (timer vs normal path race)
+	bgSafetyTimer                 *time.Timer
 }
 
 // NewSession creates a new Claude session with options.
@@ -957,15 +940,16 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
-	// Record turn completion
+	s.finalizeTurn(result)
+}
+
+// finalizeTurn records, emits, and completes the turn. Called from both the
+// normal handleResult path and the safety-timer path (completeSuppressedTurn).
+func (s *Session) finalizeTurn(result TurnResult) {
 	if s.recorder != nil {
-		s.recorder.CompleteTurn(turnNumber, result)
+		s.recorder.CompleteTurn(result.TurnNumber, result)
 	}
-
-	// Transition back to ready state
 	_ = s.state.Transition(TransitionResultReceived)
-
-	// Emit turn complete event
 	s.emit(TurnCompleteEvent{
 		TurnNumber: result.TurnNumber,
 		Success:    result.Success,
@@ -973,8 +957,6 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		Usage:      result.Usage,
 		Error:      result.Error,
 	})
-
-	// Complete turn (notifies waiters)
 	s.turnManager.CompleteTurn(result)
 }
 
@@ -992,8 +974,7 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 	s.bgTaskAccumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
-	// Refresh text/content from current turn state (may have been updated
-	// by streaming events from a partial continuation).
+	// Incorporate streaming updates that may have arrived before the timeout.
 	turn := s.turnManager.CurrentTurn()
 	if turn != nil {
 		result.Text = turn.FullText
@@ -1001,25 +982,7 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 		result.ContentBlocks = turn.ContentBlocks
 	}
 
-	// Record turn completion
-	if s.recorder != nil {
-		s.recorder.CompleteTurn(result.TurnNumber, result)
-	}
-
-	// Transition back to ready state
-	_ = s.state.Transition(TransitionResultReceived)
-
-	// Emit turn complete event
-	s.emit(TurnCompleteEvent{
-		TurnNumber: result.TurnNumber,
-		Success:    result.Success,
-		DurationMs: result.DurationMs,
-		Usage:      result.Usage,
-		Error:      result.Error,
-	})
-
-	// Complete turn (notifies waiters)
-	s.turnManager.CompleteTurn(result)
+	s.finalizeTurn(result)
 }
 
 // handleControlResponse routes incoming control_response messages to the goroutine
