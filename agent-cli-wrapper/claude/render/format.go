@@ -90,12 +90,22 @@ func Truncate(s string, max int) string {
 }
 
 // TruncatePath truncates a file path, keeping the end visible.
-// For paths longer than max, shows ".../" plus the last path components.
+// For paths longer than max, shows ".../" plus the last two path components.
 func TruncatePath(path string, max int) string {
 	runes := []rune(path)
 	if len(runes) <= max {
 		return path
 	}
+	// Try to keep the last two components (e.g. "foo/bar.go").
+	parts := strings.Split(path, "/")
+	if len(parts) >= 2 {
+		suffix := strings.Join(parts[len(parts)-2:], "/")
+		prefixed := ".../" + suffix
+		if len([]rune(prefixed)) <= max {
+			return prefixed
+		}
+	}
+	// Fall back to keeping just the filename.
 	if lastSlash := strings.LastIndexByte(path, '/'); lastSlash > 0 {
 		suffix := path[lastSlash:]
 		if len([]rune(suffix)) <= max-3 {

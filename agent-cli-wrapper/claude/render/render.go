@@ -239,9 +239,12 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Don't print for interactive tools
+	// Don't print for interactive tools, but still notify the event handler.
 	if name == "AskUserQuestion" || name == "ExitPlanMode" {
 		r.inToolOutput = false
+		if r.eventHandler != nil {
+			r.eventHandler.OnToolComplete(name, r.lastToolID, input, nil, false)
+		}
 		r.lastToolID = ""
 		return
 	}
@@ -268,10 +271,7 @@ func (r *Renderer) ToolResult(content interface{}, isError bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Errors shown at Normal+; success results at Verbose+
-	if isError && r.verbosity < VerbosityNormal {
-		return
-	}
+	// Errors always shown (even in Quiet); success results at Verbose+
 	if !isError && r.verbosity < VerbosityVerbose {
 		return
 	}
@@ -452,13 +452,15 @@ func (r *Renderer) QuestionAutoAnswer(question, header string, options []Questio
 // Turn lifecycle and status
 // ---------------------------------------------------------------------------
 
-// Status prints a status message.
+// Status prints a status message. Shown at Normal+ verbosity.
 func (r *Renderer) Status(msg string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.flushText()
-	fmt.Fprintf(r.out, "%s[Status]%s %s\n", r.color(ColorGray), r.color(ColorReset), msg)
+	if r.verbosity >= VerbosityNormal {
+		fmt.Fprintf(r.out, "%s[Status]%s %s\n", r.color(ColorGray), r.color(ColorReset), msg)
+	}
 
 	if r.eventHandler != nil {
 		r.eventHandler.OnStatus(msg)
