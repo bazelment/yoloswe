@@ -169,7 +169,7 @@ func (r *Renderer) Thinking(thinking string) {
 	// never receives OnThinking while stale text remains in the buffer.
 	r.flushText()
 
-	if r.verbosity >= VerbosityVerbose {
+	if r.verbosity >= VerbosityNormal {
 		r.closeToolOutput()
 		fmt.Fprintf(r.out, "%s%s%s%s", r.color(ColorDim), r.color(ColorItalic), thinking, r.color(ColorReset))
 		r.inReasoning = true
@@ -534,6 +534,10 @@ func (r *Renderer) TurnCompleteWithTokens(success bool, durationMs, inputTokens,
 	icon, colorCode := successIcon(success)
 	fmt.Fprintf(r.out, "%s%s Turn complete (%.1fs, %d input / %d output tokens)%s\n",
 		r.color(colorCode), icon, float64(durationMs)/1000, inputTokens, outputTokens, r.color(ColorReset))
+
+	if r.eventHandler != nil {
+		r.eventHandler.OnTurnComplete(0, success, durationMs, 0)
+	}
 }
 
 // PlanComplete prints the plan completion summary.

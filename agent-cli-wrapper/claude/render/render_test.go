@@ -61,11 +61,21 @@ func TestThinking_Verbose(t *testing.T) {
 	}
 }
 
-func TestThinking_Normal_Suppressed(t *testing.T) {
+func TestThinking_Normal_Shown(t *testing.T) {
+	// Thinking was always shown in the original renderer; normal verbosity
+	// should preserve that behaviour.
 	r, buf := newTestRenderer(VerbosityNormal)
 	r.Thinking("pondering...")
+	if !strings.Contains(buf.String(), "pondering...") {
+		t.Errorf("Normal mode should show thinking, got %q", buf.String())
+	}
+}
+
+func TestThinking_Quiet_Suppressed(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityQuiet)
+	r.Thinking("pondering...")
 	if buf.Len() != 0 {
-		t.Errorf("Normal mode should suppress thinking, got %q", buf.String())
+		t.Errorf("Quiet mode should suppress thinking, got %q", buf.String())
 	}
 }
 
