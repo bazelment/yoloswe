@@ -210,3 +210,18 @@ func TestResultMessage_Outcome_Errors(t *testing.T) {
 		})
 	}
 }
+
+// TestResultMessage_Outcome_IsErrorWithSuccessSubtype guards the case where
+// is_error is true but the subtype string still says "success" — Outcome must
+// classify the turn as failed and preserve the diagnostic text from Result.
+func TestResultMessage_Outcome_IsErrorWithSuccessSubtype(t *testing.T) {
+	m := ResultMessage{Subtype: "success", IsError: true, Result: "boom"}
+	out := m.Outcome()
+	e, ok := out.(ResultError)
+	if !ok {
+		t.Fatalf("expected ResultError, got %T", out)
+	}
+	if e.Text != "boom" {
+		t.Errorf("text: %q", e.Text)
+	}
+}

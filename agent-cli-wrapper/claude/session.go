@@ -745,7 +745,7 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 				Description:    p.Description,
 				RecentAction:   p.RecentAction,
 				IsNoteworthy:   p.IsNoteworthy,
-				NeedsAction:    p.NeedsAction != "" && p.NeedsAction != "false",
+				NeedsAction:    p.NeedsAction,
 				TurnNumber:     turnNum,
 			})
 		} else {
@@ -1282,22 +1282,34 @@ func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 
 	// First check if this is an MCP message (SDK MCP server traffic)
 	reqData, parseErr := protocol.ParseControlRequest(msg.Request)
-	if parseErr == nil {
-		switch r := reqData.(type) {
-		case protocol.MCPMessageRequest:
-			s.handleMCPMessage(msg.RequestID, r)
-			return
-		case protocol.HookCallbackRequest:
-			s.handleHookCallbackControl(ctx, msg.RequestID, r)
-			return
-		case protocol.ElicitationRequest:
-			s.handleElicitationControl(ctx, msg.RequestID, r)
-			return
-		case protocol.UnknownControlRequest:
-			slog.Warn("unknown control_request subtype", "subtype", r.SubtypeField)
-			s.sendControlSuccess(msg.RequestID, nil)
-			return
+	if parseErr != nil {
+		// A malformed control_request frame must still receive a response —
+		// otherwise the CLI's pending future never resolves and the session
+		// stalls. Send a deny so the peer can surface the error.
+		slog.Warn("failed to parse control_request", "error", parseErr, "request_id", msg.RequestID)
+		resp := buildDenyResponse(msg.RequestID, fmt.Sprintf("malformed control_request: %v", parseErr), false)
+		if err := s.process.WriteMessage(resp); err != nil {
+			s.emitError(err, "send_control_response")
 		}
+		if s.recorder != nil {
+			s.recorder.RecordSent(resp)
+		}
+		return
+	}
+	switch r := reqData.(type) {
+	case protocol.MCPMessageRequest:
+		s.handleMCPMessage(msg.RequestID, r)
+		return
+	case protocol.HookCallbackRequest:
+		s.handleHookCallbackControl(ctx, msg.RequestID, r)
+		return
+	case protocol.ElicitationRequest:
+		s.handleElicitationControl(ctx, msg.RequestID, r)
+		return
+	case protocol.UnknownControlRequest:
+		slog.Warn("unknown control_request subtype", "subtype", r.SubtypeField)
+		s.sendControlSuccess(msg.RequestID, nil)
+		return
 	}
 
 	// Parse tool use request from control message

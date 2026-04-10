@@ -503,3 +503,82 @@ func TestSessionDispatchControlRequestUnknownSubtype(t *testing.T) {
 	require.Equal(t, "req-unk-1", reqID)
 	require.Empty(t, body)
 }
+
+// TestSessionControlCancelRequest_UnblocksWaiter exercises the cancel race
+// fix from round 1: a control_cancel_request must unblock a goroutine waiting
+// in sendControlRequestLocked and surface ErrControlRequestCancelled — not a
+// false zero-value success, and without panicking on a closed channel.
+func TestSessionControlCancelRequest_UnblocksWaiter(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	s.pendingControlResponses = make(map[string]chan protocol.ControlResponsePayload)
+	attachCapturingProcess(t, s)
+
+	type result struct {
+		err  error
+		resp protocol.ControlResponsePayload
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		resp, err := s.sendControlRequestLocked(context.Background(), map[string]interface{}{
+			"subtype": "initialize",
+		}, 5*time.Second)
+		resCh <- result{err: err, resp: resp}
+	}()
+
+	// Wait for the request to register itself, then look up its request_id
+	// from the pending map and feed a control_cancel_request through handleLine.
+	var requestID string
+	require.Eventually(t, func() bool {
+		s.pendingMu.Lock()
+		defer s.pendingMu.Unlock()
+		for id := range s.pendingControlResponses {
+			requestID = id
+			return true
+		}
+		return false
+	}, time.Second, time.Millisecond)
+
+	cancelLine, err := json.Marshal(map[string]interface{}{
+		"type":       "control_cancel_request",
+		"request_id": requestID,
+	})
+	require.NoError(t, err)
+	s.handleLine(cancelLine)
+
+	select {
+	case r := <-resCh:
+		require.ErrorIs(t, r.err, ErrControlRequestCancelled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter did not unblock after control_cancel_request")
+	}
+}
+
+// TestSessionControlRequestMalformed_RepliesWithDeny verifies that a malformed
+// inner control_request body still receives a control_response so the CLI's
+// pending future resolves instead of stalling the session.
+func TestSessionControlRequestMalformed_RepliesWithDeny(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	buf := attachCapturingProcess(t, s)
+
+	// Build a control_request whose `request` is not a valid JSON object —
+	// ParseControlRequest will fail.
+	line, err := json.Marshal(map[string]interface{}{
+		"type":       "control_request",
+		"request_id": "req-bad-1",
+		"request":    "not-an-object",
+	})
+	require.NoError(t, err)
+	s.handleLine(line)
+
+	require.Eventually(t, func() bool { return buf.Len() > 0 }, time.Second, 5*time.Millisecond)
+	// The deny path uses subtype "success" with a behavior=deny body — assert
+	// only that *something* came back referencing our request_id, since the
+	// concrete shape is asserted by interactive_test.go.
+	var msg map[string]interface{}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &msg))
+	resp, ok := msg["response"].(map[string]interface{})
+	require.True(t, ok, "expected response object, got %v", msg)
+	require.Equal(t, "req-bad-1", resp["request_id"])
+}

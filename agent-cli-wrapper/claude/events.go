@@ -339,10 +339,13 @@ type PostTurnSummaryEvent struct {
 	Title          string
 	Description    string
 	RecentAction   string
-	ArtifactURLs   []string
-	TurnNumber     int
-	IsNoteworthy   bool
-	NeedsAction    bool
+	// NeedsAction is the raw upstream string (e.g. "true", "false", or a
+	// future sentinel) — the CLI defines it as a string, so we surface it
+	// verbatim rather than collapsing future states into a bool.
+	NeedsAction  string
+	ArtifactURLs []string
+	TurnNumber   int
+	IsNoteworthy bool
 }
 
 // Type returns the event type.

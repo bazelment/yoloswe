@@ -300,9 +300,12 @@ func (ResultSuccess) isResultOutcome() {}
 
 // ResultError is returned by ResultMessage.Outcome when the turn failed.
 // Subtype identifies the specific failure mode; Errors lists any human
-// readable diagnostics the CLI attached.
+// readable diagnostics the CLI attached. Text holds the raw `result` field
+// when present — some upstream error frames put the diagnostic there
+// instead of in Errors, so callers should consider both.
 type ResultError struct {
 	Subtype ResultSubtype
+	Text    string
 	Errors  []string
 }
 
@@ -315,7 +318,11 @@ func (m ResultMessage) Outcome() ResultOutcome {
 	if !m.IsError && ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
 		return ResultSuccess{Text: m.Result}
 	}
-	return ResultError{Subtype: ResultSubtype(m.Subtype), Errors: m.Errors}
+	return ResultError{
+		Subtype: ResultSubtype(m.Subtype),
+		Errors:  m.Errors,
+		Text:    m.Result,
+	}
 }
 
 // MsgType returns the message type.
