@@ -1,6 +1,11 @@
 package claude
 
-import "time"
+import (
+	"context"
+	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
+)
 
 // PermissionMode controls tool execution approval.
 type PermissionMode string
@@ -28,33 +33,35 @@ type AgentDefinition struct {
 
 // SessionConfig holds session configuration.
 type SessionConfig struct {
-	PermissionHandler          PermissionHandler
 	InteractiveToolHandler     InteractiveToolHandler
+	PermissionHandler          PermissionHandler
+	ElicitationHandler         func(ctx context.Context, req protocol.ElicitationRequest) (protocol.ElicitationResponse, error)
 	MCPConfig                  *MCPConfig
 	StderrHandler              func([]byte)
 	Env                        map[string]string
-	PermissionMode             PermissionMode
+	Tools                      *string
+	HookCallbackHandler        func(ctx context.Context, req protocol.HookCallbackRequest) (map[string]any, error)
 	Model                      string
-	WorkDir                    string
-	CLIPath                    string
 	SystemPrompt               string
 	Resume                     string
 	RecordingDir               string
-	AllowedTools               []string
-	DisallowedTools            []string
+	CLIPath                    string
+	WorkDir                    string
+	PermissionMode             PermissionMode
 	Betas                      []string
-	Agents                     []AgentDefinition
-	Tools                      *string // Base set of built-in tools. nil=default, ""=none, "Bash,Read"=specific
 	ExtraArgs                  []string
+	AllowedTools               []string
+	Agents                     []AgentDefinition
+	DisallowedTools            []string
+	BgTaskSafetyTimeout        time.Duration
 	MaxTurns                   int
 	MaxBudgetUSD               float64
 	EventBufferSize            int
-	DisablePlugins             bool
 	KeepUserSettings           bool
-	RecordMessages             bool
-	DangerouslySkipPermissions bool
 	PermissionPromptToolStdio  bool
-	BgTaskSafetyTimeout        time.Duration // 0 means use default (90s)
+	DangerouslySkipPermissions bool
+	RecordMessages             bool
+	DisablePlugins             bool
 }
 
 // SessionOption is a functional option for configuring a Session.
@@ -267,6 +274,20 @@ func WithExtraArgs(args ...string) SessionOption {
 func WithBgTaskSafetyTimeout(d time.Duration) SessionOption {
 	return func(c *SessionConfig) {
 		c.BgTaskSafetyTimeout = d
+	}
+}
+
+// WithHookCallbackHandler registers a handler for hook_callback control requests.
+func WithHookCallbackHandler(h func(ctx context.Context, req protocol.HookCallbackRequest) (map[string]any, error)) SessionOption {
+	return func(c *SessionConfig) {
+		c.HookCallbackHandler = h
+	}
+}
+
+// WithElicitationHandler registers a handler for elicitation control requests.
+func WithElicitationHandler(h func(ctx context.Context, req protocol.ElicitationRequest) (protocol.ElicitationResponse, error)) SessionOption {
+	return func(c *SessionConfig) {
+		c.ElicitationHandler = h
 	}
 }
 

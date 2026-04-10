@@ -7,7 +7,7 @@ Read this during Step 5 (Analyze). Check every item against both rendered stdout
 | # | Check | Pass condition |
 |---|-------|----------------|
 | 1 | Text coherence | No word-boundary fragments like `"TheI"`, `"GreatHere"` — streaming chunks must be buffered at word boundaries |
-| 2 | Tool display | Delegator tools shown: `start_session`, `stop_session`, `get_session_progress`, `send_followup`, plus `Read` built-in |
+| 2 | Tool display | Delegator tools shown: `start_session`, `stop_session`, `get_session_progress`, `send_followup`, plus `Read` and `RemoteTrigger` built-ins |
 | 3 | Child lifecycle | Sessions start, run, complete with status lines |
 | 4 | Turn structure | Each turn: thinking (dim) → text → tool calls → `✓ Turn N (Xs, $X.XXXX)` |
 | 5 | No noise | No stderr leakage, no "Starting claude with flags", no "WARN skipping unknown" |
@@ -30,8 +30,8 @@ Read this during Step 5 (Analyze). Check every item against both rendered stdout
 
 JSONL session logs are **ground truth**. Check these even if rendered output looks clean:
 
-- **Tool count per session:** Delegator sessions must have exactly 5 tools (4 SDK: start_session, stop_session, get_session_progress, send_followup + 1 built-in: Read). Children should have ~26. Count from `"type":"system","subtype":"init"` messages.
-- **No ToolSearch in delegator:** Any `ToolSearch` call in a 5-tool session is a regression.
+- **Tool count per session:** Delegator sessions must have exactly 6 tools (4 SDK: start_session, stop_session, get_session_progress, send_followup + 2 built-in: Read, RemoteTrigger). Children should have ~26. Count from `"type":"system","subtype":"init"` messages.
+- **No ToolSearch in delegator:** Any `ToolSearch` call in a 6-tool session is a regression.
 - **Child completion:** `"stop_reason":"end_turn"` must appear — absence means timeout or crash.
 - **Model propagation:** Child `init` messages should show the expected model, not a default.
 - **Cost values:** `OutputTypeTurnEnd` lines carry the authoritative cost data.

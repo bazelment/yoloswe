@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
 // EventType discriminates between event kinds.
@@ -30,6 +31,44 @@ const (
 	EventTypeError
 	// EventTypeStateChange fires on session state transitions.
 	EventTypeStateChange
+	// EventTypeCompactBoundary fires when the CLI compacts conversation history.
+	EventTypeCompactBoundary
+	// EventTypeAPIRetry fires when a retryable API error is being retried.
+	EventTypeAPIRetry
+	// EventTypeTaskStarted fires when a background task starts.
+	EventTypeTaskStarted
+	// EventTypeTaskProgress fires on background task progress updates.
+	EventTypeTaskProgress
+	// EventTypeTaskNotification fires when a background task completes/fails/stops.
+	EventTypeTaskNotification
+	// EventTypeHookLifecycle fires for hook_started/progress/response.
+	EventTypeHookLifecycle
+	// EventTypeRateLimit fires when the server's rate-limit state changes.
+	EventTypeRateLimit
+	// EventTypeCLISessionStateChanged fires when CLI's internal session state transitions.
+	EventTypeCLISessionStateChanged
+	// EventTypePostTurnSummary fires with a background post-turn summary.
+	EventTypePostTurnSummary
+	// EventTypeFilesPersisted fires when a file-save batch completes.
+	EventTypeFilesPersisted
+	// EventTypeAuthStatus fires with OAuth flow status updates.
+	EventTypeAuthStatus
+	// EventTypeToolExecutionProgress fires with elapsed time for a running tool.
+	EventTypeToolExecutionProgress
+	// EventTypeLocalCommandOutput fires with text from a local slash command.
+	EventTypeLocalCommandOutput
+)
+
+// HookPhase identifies which hook lifecycle stage a HookLifecycleEvent represents.
+type HookPhase string
+
+const (
+	// HookPhaseStarted marks the start of a hook execution.
+	HookPhaseStarted HookPhase = "started"
+	// HookPhaseProgress streams incremental stdout/stderr from a running hook.
+	HookPhaseProgress HookPhase = "progress"
+	// HookPhaseResponse marks hook completion with final output and outcome.
+	HookPhaseResponse HookPhase = "response"
 )
 
 // Event is the interface for all events.
@@ -172,3 +211,189 @@ type StateChangeEvent struct {
 
 // Type returns the event type.
 func (e StateChangeEvent) Type() EventType { return EventTypeStateChange }
+
+// CompactBoundaryEvent fires when the CLI compacts conversation history
+// (either on demand via /compact or automatically when approaching the
+// context limit). Trigger is "manual" or "auto".
+type CompactBoundaryEvent struct {
+	PreservedSegment *protocol.CompactPreservedSegment
+	Trigger          string
+	PreTokens        int
+	TurnNumber       int
+}
+
+// Type returns the event type.
+func (e CompactBoundaryEvent) Type() EventType { return EventTypeCompactBoundary }
+
+// APIRetryEvent fires when the CLI hits a retryable API error and is about
+// to retry after RetryDelayMs. ErrorStatus is nil for connection errors
+// that had no HTTP response.
+type APIRetryEvent struct {
+	ErrorStatus  *int
+	ErrorType    string
+	Attempt      int
+	MaxRetries   int
+	RetryDelayMs int
+	TurnNumber   int
+}
+
+// Type returns the event type.
+func (e APIRetryEvent) Type() EventType { return EventTypeAPIRetry }
+
+// TaskStartedEvent fires when a background task (sub-agent or workflow) starts.
+type TaskStartedEvent struct {
+	ToolUseID    *string
+	WorkflowName *string
+	TaskID       string
+	Description  string
+	TaskType     string
+	Prompt       string
+	TurnNumber   int
+}
+
+// Type returns the event type.
+func (e TaskStartedEvent) Type() EventType { return EventTypeTaskStarted }
+
+// TaskProgressEvent fires with incremental progress from a running background task.
+type TaskProgressEvent struct {
+	ToolUseID    *string
+	TaskID       string
+	Description  string
+	LastToolName string
+	Summary      string
+	Usage        protocol.TaskUsage
+	TurnNumber   int
+}
+
+// Type returns the event type.
+func (e TaskProgressEvent) Type() EventType { return EventTypeTaskProgress }
+
+// TaskNotificationEvent fires when a background task completes. Status is
+// "completed", "failed", or "stopped".
+type TaskNotificationEvent struct {
+	ToolUseID  *string
+	TaskID     string
+	Status     string
+	OutputFile string
+	Summary    string
+	Usage      protocol.TaskUsage
+	TurnNumber int
+}
+
+// Type returns the event type.
+func (e TaskNotificationEvent) Type() EventType { return EventTypeTaskNotification }
+
+// HookLifecycleEvent is a unified event for hook_started/hook_progress/
+// hook_response system subtypes. Phase selects which stage this event
+// represents; fields are populated where available per stage.
+type HookLifecycleEvent struct {
+	ExitCode      *int
+	Phase         HookPhase
+	HookID        string
+	HookName      string
+	HookEventName string
+	Stdout        string
+	Stderr        string
+	Output        string
+	Outcome       string
+	TurnNumber    int
+}
+
+// Type returns the event type.
+func (e HookLifecycleEvent) Type() EventType { return EventTypeHookLifecycle }
+
+// RateLimitEvent fires whenever the server's rate-limit state changes for
+// the current subscription (e.g. crossing into allowed_warning or rejected).
+type RateLimitEvent struct {
+	ResetsAt              *float64
+	Utilization           *float64
+	OverageResetsAt       *float64
+	OverageDisabledReason *string
+	SurpassedThreshold    *float64
+	Status                string
+	RateLimitType         string
+	IsUsingOverage        bool
+	IsOverageActive       bool
+	TurnNumber            int
+}
+
+// Type returns the event type.
+func (e RateLimitEvent) Type() EventType { return EventTypeRateLimit }
+
+// CLISessionStateChangedEvent is the CLI's own session state transition
+// (distinct from the SDK-internal StateChangeEvent). State is "idle",
+// "running", or "requires_action".
+type CLISessionStateChangedEvent struct {
+	State      string
+	TurnNumber int
+}
+
+// Type returns the event type.
+func (e CLISessionStateChangedEvent) Type() EventType { return EventTypeCLISessionStateChanged }
+
+// PostTurnSummaryEvent exposes the CLI's post-turn background summary.
+type PostTurnSummaryEvent struct {
+	SummarizesUUID string
+	StatusCategory string
+	StatusDetail   string
+	Title          string
+	Description    string
+	RecentAction   string
+	// NeedsAction is the raw upstream string (e.g. "true", "false", or a
+	// future sentinel) — the CLI defines it as a string, so we surface it
+	// verbatim rather than collapsing future states into a bool.
+	NeedsAction  string
+	ArtifactURLs []string
+	TurnNumber   int
+	IsNoteworthy bool
+}
+
+// Type returns the event type.
+func (e PostTurnSummaryEvent) Type() EventType { return EventTypePostTurnSummary }
+
+// FilesPersistedEvent reports a batch file-save outcome.
+type FilesPersistedEvent struct {
+	ProcessedAt string
+	Files       []protocol.PersistedFile
+	Failed      []protocol.PersistedFileFailure
+	TurnNumber  int
+}
+
+// Type returns the event type.
+func (e FilesPersistedEvent) Type() EventType { return EventTypeFilesPersisted }
+
+// AuthStatusEvent reports progress of an interactive OAuth login flow.
+type AuthStatusEvent struct {
+	Error            *string
+	Output           []string
+	IsAuthenticating bool
+	TurnNumber       int
+}
+
+// Type returns the event type.
+func (e AuthStatusEvent) Type() EventType { return EventTypeAuthStatus }
+
+// ToolExecutionProgressEvent fires periodically while a tool is executing,
+// so consumers can display a live "running for Ns" indicator. Distinct from
+// ToolProgressEvent which carries streaming tool-input deltas.
+type ToolExecutionProgressEvent struct {
+	ParentToolUseID    *string
+	TaskID             *string
+	ToolUseID          string
+	ToolName           string
+	ElapsedTimeSeconds float64
+	TurnNumber         int
+}
+
+// Type returns the event type.
+func (e ToolExecutionProgressEvent) Type() EventType { return EventTypeToolExecutionProgress }
+
+// LocalCommandOutputEvent carries text output from a local slash command
+// (e.g. /voice, /cost). Displayed as assistant-style text in the transcript.
+type LocalCommandOutputEvent struct {
+	Content    string
+	TurnNumber int
+}
+
+// Type returns the event type.
+func (e LocalCommandOutputEvent) Type() EventType { return EventTypeLocalCommandOutput }

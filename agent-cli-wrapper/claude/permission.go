@@ -103,6 +103,29 @@ func (pm *permissionManager) HandleRequest(ctx context.Context, msg protocol.Con
 	return pm.buildResponse(msg.RequestID, resp, req.Input), nil
 }
 
+// HandleToolRequest handles a permission request from an already-parsed ToolUseRequest,
+// avoiding a redundant JSON decode compared to HandleRequest.
+func (pm *permissionManager) HandleToolRequest(ctx context.Context, toolReq *protocol.ToolUseRequest) (*protocol.ControlResponse, error) {
+	req := &PermissionRequest{
+		RequestID:   toolReq.RequestID,
+		ToolName:    toolReq.ToolName,
+		Input:       toolReq.Input,
+		BlockedPath: toolReq.BlockedPath,
+	}
+
+	if pm.handler == nil {
+		// No handler configured, auto-deny
+		return pm.buildDenyResponse(toolReq.RequestID, "No permission handler configured", false), nil
+	}
+
+	resp, err := pm.handler.HandlePermission(ctx, req)
+	if err != nil {
+		return pm.buildDenyResponse(toolReq.RequestID, "Permission handler error", false), err
+	}
+
+	return pm.buildResponse(toolReq.RequestID, resp, req.Input), nil
+}
+
 // buildResponse builds a control response from a permission response.
 // originalInput is used as fallback when resp.UpdatedInput is nil (per Python SDK behavior).
 func (pm *permissionManager) buildResponse(requestID string, resp *PermissionResponse, originalInput map[string]interface{}) *protocol.ControlResponse {
