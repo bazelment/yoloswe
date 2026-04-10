@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
 )
 
 // BackendType identifies which agent backend to use.
@@ -206,7 +206,7 @@ func New(config Config) *Reviewer {
 	return &Reviewer{
 		config:   config,
 		output:   os.Stderr,
-		renderer: render.NewRenderer(os.Stderr, config.Verbose, config.NoColor),
+		renderer: render.NewRendererWithOptions(os.Stderr, config.Verbose, config.NoColor),
 		backend:  backend,
 	}
 }
@@ -215,7 +215,7 @@ func New(config Config) *Reviewer {
 // This also recreates the renderer to use the new writer.
 func (r *Reviewer) SetOutput(w io.Writer) {
 	r.output = w
-	r.renderer = render.NewRenderer(w, r.config.Verbose, r.config.NoColor)
+	r.renderer = render.NewRendererWithOptions(w, r.config.Verbose, r.config.NoColor)
 }
 
 // Start initializes the backend.
@@ -251,7 +251,7 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	if err != nil {
 		return nil, err
 	}
-	r.renderer.TurnComplete(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
+	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
 }
 
@@ -262,7 +262,7 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	if err != nil {
 		return nil, err
 	}
-	r.renderer.TurnComplete(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
+	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
 }
 

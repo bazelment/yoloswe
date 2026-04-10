@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
-	codexrender "github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
 )
 
 // SessionFormat identifies the session log format.
@@ -61,7 +61,7 @@ func DetectFormat(path string) (SessionFormat, error) {
 
 // CodexPlayer plays back Codex session logs.
 type CodexPlayer struct {
-	renderer      *codexrender.Renderer
+	renderer      *render.Renderer
 	turnStartTime string
 	lastTimestamp string
 	inputTokens   int64
@@ -70,7 +70,7 @@ type CodexPlayer struct {
 }
 
 // NewCodexPlayer creates a new Codex session player.
-func NewCodexPlayer(renderer *codexrender.Renderer, verbose bool) *CodexPlayer {
+func NewCodexPlayer(renderer *render.Renderer, verbose bool) *CodexPlayer {
 	return &CodexPlayer{
 		renderer: renderer,
 		verbose:  verbose,
@@ -284,7 +284,7 @@ func (p *CodexPlayer) handleTurnCompleted(params json.RawMessage) {
 		}
 	}
 
-	p.renderer.TurnComplete(success, durationMs, p.inputTokens, p.outputTokens)
+	p.renderer.TurnCompleteWithTokens(success, durationMs, p.inputTokens, p.outputTokens)
 }
 
 func (p *CodexPlayer) handleTokenCount(params json.RawMessage) {

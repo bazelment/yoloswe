@@ -12,8 +12,8 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/claude/render",
         "//agent-cli-wrapper/codex",
-        "//agent-cli-wrapper/codex/render",
         "//agent-cli-wrapper/cursor",
         "@org_golang_x_term//:term",
     ],

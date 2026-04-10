@@ -5,60 +5,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
-	codexrender "github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
 )
 
 // Player plays back recorded session messages (Claude or Codex format).
 type Player struct {
-	claudeRenderer *render.Renderer
-	codexRenderer  *codexrender.Renderer
-	codexPlayer    *CodexPlayer
-	out            io.Writer
-	verbose        bool
-	noColor        bool
+	renderer *render.Renderer
+	out      io.Writer
+	verbose  bool
+	noColor  bool
 }
 
 // NewPlayer creates a new session player.
 func NewPlayer(out io.Writer, verbose bool) *Player {
-	noColor := !isTerminal(out)
-	codexR := codexrender.NewRenderer(out, verbose, noColor)
+	r := render.NewRenderer(out, verbose)
 	return &Player{
-		claudeRenderer: render.NewRenderer(out, verbose),
-		codexRenderer:  codexR,
-		codexPlayer:    NewCodexPlayer(codexR, verbose),
-		out:            out,
-		verbose:        verbose,
-		noColor:        noColor,
+		renderer: r,
+		out:      out,
+		verbose:  verbose,
+		noColor:  !render.IsTerminal(out),
 	}
 }
 
 // NewPlayerWithOptions creates a new session player with explicit options.
 func NewPlayerWithOptions(out io.Writer, verbose, noColor bool) *Player {
-	codexR := codexrender.NewRenderer(out, verbose, noColor)
+	r := render.NewRendererWithOptions(out, verbose, noColor)
 	return &Player{
-		claudeRenderer: render.NewRendererWithOptions(out, verbose, noColor),
-		codexRenderer:  codexR,
-		codexPlayer:    NewCodexPlayer(codexR, verbose),
-		out:            out,
-		verbose:        verbose,
-		noColor:        noColor,
+		renderer: r,
+		out:      out,
+		verbose:  verbose,
+		noColor:  noColor,
 	}
-}
-
-// isTerminal checks if the writer is a terminal.
-func isTerminal(w io.Writer) bool {
-	if f, ok := w.(*os.File); ok {
-		stat, err := f.Stat()
-		if err != nil {
-			return false
-		}
-		return (stat.Mode() & os.ModeCharDevice) != 0
-	}
-	return false
 }
 
 // color returns the color code if colors are enabled, empty string otherwise.
@@ -115,7 +94,8 @@ func (p *Player) playClaude(dirPath string) error {
 
 // playCodex plays back a Codex session log file.
 func (p *Player) playCodex(filePath string) error {
-	return p.codexPlayer.PlayFile(filePath)
+	codexP := NewCodexPlayer(p.renderer, p.verbose)
+	return codexP.PlayFile(filePath)
 }
 
 // printHeader prints session metadata header.
@@ -152,14 +132,11 @@ func (p *Player) printFooter(rec *claude.SessionRecording) {
 
 // renderMessage renders a single recorded message.
 func (p *Player) renderMessage(msg claude.RecordedMessage) {
-	// Parse the raw message to determine its type
 	rawMsg, ok := msg.Message.(json.RawMessage)
 	if !ok {
-		// Already parsed (shouldn't happen with current implementation)
 		return
 	}
 
-	// First, determine the message type
 	var typeOnly struct {
 		Type string `json:"type"`
 	}
@@ -173,8 +150,7 @@ func (p *Player) renderMessage(msg claude.RecordedMessage) {
 	case "stream_event":
 		p.renderStreamEvent(rawMsg)
 	case "assistant":
-		// Complete assistant message - we already rendered via stream events
-		// Could optionally show a summary here
+		// Complete assistant message - already rendered via stream events
 	case "user":
 		p.renderUserMessage(rawMsg)
 	case "result":
@@ -196,7 +172,7 @@ func (p *Player) renderSystemMessage(raw json.RawMessage) {
 
 	switch msg.Subtype {
 	case "init":
-		p.claudeRenderer.Status(fmt.Sprintf("Session initialized: %s (model: %s)", msg.SessionID, msg.Model))
+		p.renderer.Status(fmt.Sprintf("Session initialized: %s (model: %s)", msg.SessionID, msg.Model))
 	case "hook_started", "hook_response":
 		// Skip hook messages in playback
 	}
@@ -233,17 +209,16 @@ func (p *Player) renderStreamEvent(raw json.RawMessage) {
 	switch event.Type {
 	case "content_block_start":
 		if event.ContentBlock.Type == "tool_use" {
-			p.claudeRenderer.ToolStart(event.ContentBlock.Name, event.ContentBlock.ID)
+			p.renderer.ToolStart(event.ContentBlock.Name, event.ContentBlock.ID)
 		}
 	case "content_block_delta":
 		switch event.Delta.Type {
 		case "text_delta":
-			p.claudeRenderer.Text(event.Delta.Text)
+			p.renderer.Text(event.Delta.Text)
 		case "thinking_delta":
-			p.claudeRenderer.Thinking(event.Delta.Thinking)
+			p.renderer.Thinking(event.Delta.Thinking)
 		case "input_json_delta":
 			// Tool input streaming - skip for cleaner output
-			// p.claudeRenderer.ToolProgress(event.Delta.PartialJSON)
 		}
 	case "content_block_stop":
 		// Block completed
@@ -262,13 +237,12 @@ func (p *Player) renderUserMessage(raw json.RawMessage) {
 		return
 	}
 
-	// Check if this is a tool result
 	if content, ok := msg.Message.Content.([]interface{}); ok {
 		for _, block := range content {
 			if bMap, ok := block.(map[string]interface{}); ok {
 				if bMap["type"] == "tool_result" {
 					isError, _ := bMap["is_error"].(bool)
-					p.claudeRenderer.ToolResult(bMap["content"], isError)
+					p.renderer.ToolResult(bMap["content"], isError)
 				}
 			}
 		}
@@ -289,6 +263,6 @@ func (p *Player) renderResultMessage(raw json.RawMessage) {
 	}
 
 	if msg.Subtype == "success" || msg.Subtype == "error_max_turns" {
-		p.claudeRenderer.TurnSummary(msg.NumTurns, !msg.IsError, msg.DurationMs, msg.TotalCostUSD)
+		p.renderer.TurnSummary(msg.NumTurns, !msg.IsError, msg.DurationMs, msg.TotalCostUSD)
 	}
 }
