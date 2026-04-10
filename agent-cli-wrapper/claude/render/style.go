@@ -22,13 +22,13 @@ type Palette struct {
 	enabled bool
 }
 
-// DefaultPalette returns a palette with colors enabled.
-func DefaultPalette() Palette {
+// defaultPalette returns a palette with colors enabled.
+func defaultPalette() Palette {
 	return Palette{enabled: true}
 }
 
-// NoPalette returns a palette with colors disabled.
-func NoPalette() Palette {
+// noPalette returns a palette with colors disabled.
+func noPalette() Palette {
 	return Palette{}
 }
 
@@ -36,14 +36,14 @@ func NoPalette() Palette {
 func resolvePalette(mode ColorMode, out io.Writer) Palette {
 	switch mode {
 	case ColorAlways:
-		return DefaultPalette()
+		return defaultPalette()
 	case ColorNever:
-		return NoPalette()
+		return noPalette()
 	default: // ColorAuto
 		if isTerminalWriter(out) {
-			return DefaultPalette()
+			return defaultPalette()
 		}
-		return NoPalette()
+		return noPalette()
 	}
 }
 
