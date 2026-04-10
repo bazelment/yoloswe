@@ -1296,6 +1296,9 @@ func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 		}
 		return
 	}
+	// toolReq is populated from the already-parsed reqData when the subtype is
+	// can_use_tool, avoiding a redundant ParseControlRequest call.
+	var toolReq *protocol.ToolUseRequest
 	switch r := reqData.(type) {
 	case protocol.MCPMessageRequest:
 		s.handleMCPMessage(msg.RequestID, r)
@@ -1314,10 +1317,15 @@ func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 		_ = r // bound for the type switch; the body itself is not needed.
 		s.sendControlSuccess(msg.RequestID, map[string]any{})
 		return
+	case protocol.CanUseToolRequest:
+		// Use the already-parsed result directly to avoid a second JSON decode.
+		toolReq = &protocol.ToolUseRequest{
+			RequestID:   msg.RequestID,
+			ToolName:    r.ToolName,
+			Input:       r.Input,
+			BlockedPath: r.BlockedPath,
+		}
 	}
-
-	// Parse tool use request from control message
-	toolReq := protocol.ParseToolUseRequest(msg)
 
 	// Check if this is an interactive tool with a dedicated handler
 	if toolReq != nil && s.config.InteractiveToolHandler != nil {
@@ -1346,8 +1354,16 @@ func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 		}
 	}
 
-	// Delegate to permission manager for non-interactive tools
-	resp, err := s.permissionManager.HandleRequest(ctx, msg)
+	// Delegate to permission manager for non-interactive tools.
+	// Use HandleToolRequest when we already have the parsed ToolUseRequest to
+	// avoid a redundant JSON decode inside HandleRequest/ExtractPermissionRequest.
+	var resp *protocol.ControlResponse
+	var err error
+	if toolReq != nil {
+		resp, err = s.permissionManager.HandleToolRequest(ctx, toolReq)
+	} else {
+		resp, err = s.permissionManager.HandleRequest(ctx, msg)
+	}
 	if err != nil {
 		s.emitError(err, "permission_handling")
 	}
