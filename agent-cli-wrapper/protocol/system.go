@@ -7,7 +7,7 @@
 //
 // This file defines the SystemSubtype enum, one typed payload struct per
 // subtype (fields mirror the upstream TypeScript schemas in
-// open-claude-code/src/entrypoints/sdk/coreSchemas.ts), and a DecodePayload
+// the upstream Claude Code CLI's SDK entrypoint schemas), and a DecodePayload
 // helper that dispatches on Subtype to return the right typed value.
 package protocol
 
