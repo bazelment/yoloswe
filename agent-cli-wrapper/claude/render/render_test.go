@@ -125,8 +125,11 @@ func TestToolComplete_Normal(t *testing.T) {
 
 func TestToolComplete_InteractiveTool_EventHandler(t *testing.T) {
 	r, _ := newTestRenderer(VerbosityNormal)
-	var completedName string
+	var startedName, completedName string
 	handler := &testEventHandler{
+		onToolStart: func(name, id string, input map[string]interface{}) {
+			startedName = name
+		},
 		onToolComplete: func(name, id string, input map[string]interface{}, result interface{}, isError bool) {
 			completedName = name
 		},
@@ -134,6 +137,9 @@ func TestToolComplete_InteractiveTool_EventHandler(t *testing.T) {
 	r.SetEventHandler(handler)
 	r.ToolStart("AskUserQuestion", "q-1")
 	r.ToolComplete("AskUserQuestion", nil)
+	if startedName != "AskUserQuestion" {
+		t.Errorf("EventHandler should receive OnToolStart for interactive tools, got %q", startedName)
+	}
 	if completedName != "AskUserQuestion" {
 		t.Errorf("EventHandler should receive OnToolComplete for interactive tools, got %q", completedName)
 	}
@@ -415,6 +421,7 @@ func TestEventHandler_StatusAlwaysEmitted(t *testing.T) {
 type testEventHandler struct {
 	NoOpEventHandler
 	onText         func(string)
+	onToolStart    func(name, id string, input map[string]interface{})
 	onToolComplete func(name, id string, input map[string]interface{}, result interface{}, isError bool)
 	onStatus       func(string)
 }
@@ -422,6 +429,12 @@ type testEventHandler struct {
 func (h *testEventHandler) OnText(text string) {
 	if h.onText != nil {
 		h.onText(text)
+	}
+}
+
+func (h *testEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
+	if h.onToolStart != nil {
+		h.onToolStart(name, id, input)
 	}
 }
 

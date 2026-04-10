@@ -216,8 +216,9 @@ func (r *Renderer) ToolStart(name, id string) {
 		}
 	}
 
-	// Event handler always receives events regardless of verbosity.
-	if r.eventHandler != nil && name != "AskUserQuestion" && name != "ExitPlanMode" {
+	// Event handler always receives events regardless of verbosity,
+	// including interactive tools, for paired start/complete tracking.
+	if r.eventHandler != nil {
 		r.eventHandler.OnToolStart(name, id, nil)
 	}
 }
