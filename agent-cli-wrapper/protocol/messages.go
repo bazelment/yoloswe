@@ -312,7 +312,7 @@ func (ResultError) isResultOutcome() {}
 // failed, so callers can switch on the concrete type instead of inspecting
 // Subtype strings directly.
 func (m ResultMessage) Outcome() ResultOutcome {
-	if ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
+	if !m.IsError && ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
 		return ResultSuccess{Text: m.Result}
 	}
 	return ResultError{Subtype: ResultSubtype(m.Subtype), Errors: m.Errors}

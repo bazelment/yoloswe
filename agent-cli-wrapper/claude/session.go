@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,11 +27,10 @@ const defaultBgTaskSafetyTimeout = 90 * time.Second
 // task-notifications. This struct holds the state for that mechanism.
 // Use reset() to clear all fields at turn boundaries.
 type bgSuppressionState struct {
-	timer            *time.Timer     // fires if no continuation arrives; see completeSuppressedTurn
-	activeTaskIDs    map[string]bool // IDs from task_started awaiting task_notification
-	accumulatedUsage TurnUsage       // token/cost totals from suppressed intermediate results
-	active           bool            // true while waiting for continuation; cleared by timer or normal path
-	timerFired       bool            // set by completeSuppressedTurn; cleared at start of next turn
+	timer            *time.Timer // fires if no continuation arrives; see completeSuppressedTurn
+	accumulatedUsage TurnUsage   // token/cost totals from suppressed intermediate results
+	active           bool        // true while waiting for continuation; cleared by timer or normal path
+	timerFired       bool        // set by completeSuppressedTurn; cleared at start of next turn
 }
 
 // reset clears all suppression state and stops any pending timer.
@@ -42,7 +42,6 @@ func (b *bgSuppressionState) reset() {
 		b.timer = nil
 	}
 	b.accumulatedUsage = TurnUsage{}
-	b.activeTaskIDs = nil
 }
 
 // SessionInfo contains session metadata.
@@ -224,8 +223,11 @@ func (s *Session) sendControlRequestLocked(ctx context.Context, request interfac
 
 	select {
 	case resp := <-ch:
-		if resp.Subtype == "error" {
+		switch resp.Subtype {
+		case "error":
 			return resp, fmt.Errorf("control request error: %s", resp.Error)
+		case controlResponseCancelledSubtype:
+			return resp, ErrControlRequestCancelled
 		}
 		return resp, nil
 	case <-timeoutCtx.Done():
@@ -234,6 +236,16 @@ func (s *Session) sendControlRequestLocked(ctx context.Context, request interfac
 		return protocol.ControlResponsePayload{}, fmt.Errorf("session stopped")
 	}
 }
+
+// controlResponseCancelledSubtype is an internal sentinel used to mark a
+// pending control response that was cancelled by a control_cancel_request
+// from the CLI. It is not part of the wire protocol.
+const controlResponseCancelledSubtype = "__cancelled__"
+
+// ErrControlRequestCancelled is returned by sendControlRequestLocked when the
+// CLI cancels an in-flight control request via control_cancel_request before a
+// real response arrives.
+var ErrControlRequestCancelled = fmt.Errorf("control request cancelled by CLI")
 
 // Events returns a read-only channel for receiving events.
 func (s *Session) Events() <-chan Event {
@@ -596,10 +608,6 @@ func (s *Session) handleLine(line []byte) {
 		return
 	}
 
-	if msg == nil {
-		return // unknown type — already recorded above
-	}
-
 	switch m := msg.(type) {
 	case protocol.SystemMessage:
 		s.handleSystem(m)
@@ -652,11 +660,20 @@ func (s *Session) handleLine(line []byte) {
 	case protocol.PromptSuggestionMessage, protocol.StreamlinedTextMessage, protocol.StreamlinedToolUseSummaryMessage:
 		// Internal CLI messages — consumed silently.
 	case protocol.ControlCancelRequest:
-		// Best-effort: close any pending response channel for this request ID
-		// so the waiting goroutine unblocks.
+		// Unblock the waiting goroutine by sending a sentinel cancelled
+		// payload on the buffered channel. We must NOT close the channel —
+		// a racing handleControlResponse send would panic, and a receive
+		// from a closed channel would yield (zero, nil) which the waiter
+		// would mistake for success.
 		s.pendingMu.Lock()
 		if ch, ok := s.pendingControlResponses[m.RequestID]; ok {
-			close(ch)
+			select {
+			case ch <- protocol.ControlResponsePayload{
+				RequestID: m.RequestID,
+				Subtype:   controlResponseCancelledSubtype,
+			}:
+			default:
+			}
 			delete(s.pendingControlResponses, m.RequestID)
 		}
 		s.pendingMu.Unlock()
@@ -799,12 +816,6 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 		}
 	case protocol.SystemSubtypeTaskStarted:
 		if p, ok := msg.AsTaskStarted(); ok {
-			s.mu.Lock()
-			if s.bgState.activeTaskIDs == nil {
-				s.bgState.activeTaskIDs = make(map[string]bool)
-			}
-			s.bgState.activeTaskIDs[p.TaskID] = true
-			s.mu.Unlock()
 			s.emit(TaskStartedEvent{
 				ToolUseID:    p.ToolUseID,
 				WorkflowName: p.WorkflowName,
@@ -833,9 +844,6 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 		}
 	case protocol.SystemSubtypeTaskNotification:
 		if p, ok := msg.AsTaskNotification(); ok {
-			s.mu.Lock()
-			delete(s.bgState.activeTaskIDs, p.TaskID)
-			s.mu.Unlock()
 			s.emit(TaskNotificationEvent{
 				ToolUseID:  p.ToolUseID,
 				TaskID:     p.TaskID,
@@ -1072,7 +1080,17 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	}
 
 	if msg.IsError {
-		result.Error = fmt.Errorf("%s", msg.Result)
+		// Per the protocol, error subtypes populate Errors, not Result.
+		// Fall back to Result/subtype if Errors is empty so we never surface
+		// a blank error string.
+		switch {
+		case len(msg.Errors) > 0:
+			result.Error = fmt.Errorf("%s", strings.Join(msg.Errors, "; "))
+		case msg.Result != "":
+			result.Error = fmt.Errorf("%s", msg.Result)
+		default:
+			result.Error = fmt.Errorf("turn failed: %s", msg.Subtype)
+		}
 	}
 
 	// Check if ALL non-cancelled tools in this turn were background tasks.
@@ -1237,21 +1255,30 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 // control_response after completing MCP server setup.
 func (s *Session) handleControlResponse(msg protocol.ControlResponse) {
 	requestID := msg.Response.RequestID
+	// Hold pendingMu across the send to serialize with the cancel path,
+	// which deletes the entry while sending its own sentinel. This prevents
+	// a panic from sending on a channel that the cancel path might have
+	// otherwise closed, and ensures at most one writer per request_id.
 	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
 	ch, ok := s.pendingControlResponses[requestID]
-	s.pendingMu.Unlock()
-
-	if ok {
-		// Send response to waiting goroutine (non-blocking since channel is buffered)
-		select {
-		case ch <- msg.Response:
-		default:
-		}
+	if !ok {
+		return
+	}
+	select {
+	case ch <- msg.Response:
+	default:
 	}
 }
 
 func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
-	ctx := context.Background()
+	// Use the session context so handlers (hook callbacks, elicitation,
+	// interactive tools, permission requests) are cancelled when Stop() runs
+	// and cannot outlive the session.
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// First check if this is an MCP message (SDK MCP server traffic)
 	reqData, parseErr := protocol.ParseControlRequest(msg.Request)
