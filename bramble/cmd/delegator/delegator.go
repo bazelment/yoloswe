@@ -189,6 +189,26 @@ func runMockConversation(ctx context.Context, s *claude.Session, mock *session.M
 				r.ToolComplete(e.Name, e.Input)
 			case claude.CLIToolResultEvent:
 				r.ToolResult(e.Content, e.IsError)
+			case claude.ToolExecutionProgressEvent:
+				r.ToolExecutionProgress(e.ToolName, e.ToolUseID, e.ElapsedTimeSeconds)
+			case claude.TaskStartedEvent:
+				r.TaskStarted(e.TaskID, e.Description)
+			case claude.TaskProgressEvent:
+				r.TaskProgress(e.TaskID, e.Description)
+			case claude.TaskNotificationEvent:
+				r.TaskNotification(e.TaskID, e.Status, e.Summary)
+			case claude.HookLifecycleEvent:
+				r.HookLifecycle(string(e.Phase), e.HookName)
+			case claude.RateLimitEvent:
+				r.RateLimit(e.Status, e.Utilization)
+			case claude.APIRetryEvent:
+				r.APIRetry(e.Attempt, e.MaxRetries, e.ErrorType)
+			case claude.CompactBoundaryEvent:
+				r.CompactBoundary(e.Trigger)
+			case claude.PostTurnSummaryEvent:
+				r.PostTurnSummary(e.Title, e.Description)
+			case claude.AuthStatusEvent:
+				r.AuthStatus(e.IsAuthenticating, e.Output)
 			}
 		}
 

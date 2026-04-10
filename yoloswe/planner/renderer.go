@@ -16,7 +16,7 @@ type Renderer struct {
 }
 
 // NewRenderer creates a new renderer writing to the given output.
-// If verbose is false, only error tool results are displayed.
+// If verbose is false, uses VerbosityNormal; if true, VerbosityVerbose.
 func NewRenderer(out io.Writer, verbose bool) *Renderer {
 	return &Renderer{
 		Renderer: render.NewRenderer(out, verbose),

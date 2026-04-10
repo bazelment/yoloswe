@@ -14,8 +14,8 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
 )
 
 //go:embed prompt.go.tmpl
@@ -94,14 +94,14 @@ func New(config Config) *Router {
 	return &Router{
 		config:   config,
 		output:   os.Stdout,
-		renderer: render.NewRenderer(os.Stdout, config.Verbose, config.NoColor),
+		renderer: render.NewRendererWithOptions(os.Stdout, config.Verbose, config.NoColor),
 	}
 }
 
 // SetOutput sets the output writer.
 func (r *Router) SetOutput(w io.Writer) {
 	r.output = w
-	r.renderer = render.NewRenderer(w, r.config.Verbose, r.config.NoColor)
+	r.renderer = render.NewRendererWithOptions(w, r.config.Verbose, r.config.NoColor)
 }
 
 // Start initializes the Codex client.

@@ -173,6 +173,39 @@ func (b *baseSession) RunTurn(ctx context.Context, message string) (*claude.Turn
 			case claude.ErrorEvent:
 				b.renderer.Error(e.Error, e.Context)
 				return nil, fmt.Errorf("%s error: %v (context: %s)", b.errorPrefix, e.Error, e.Context)
+
+			case claude.ToolProgressEvent:
+				b.renderer.ToolProgress(e.InputChunk)
+
+			case claude.ToolExecutionProgressEvent:
+				b.renderer.ToolExecutionProgress(e.ToolName, e.ToolUseID, e.ElapsedTimeSeconds)
+
+			case claude.TaskStartedEvent:
+				b.renderer.TaskStarted(e.TaskID, e.Description)
+
+			case claude.TaskProgressEvent:
+				b.renderer.TaskProgress(e.TaskID, e.Description)
+
+			case claude.TaskNotificationEvent:
+				b.renderer.TaskNotification(e.TaskID, e.Status, e.Summary)
+
+			case claude.HookLifecycleEvent:
+				b.renderer.HookLifecycle(string(e.Phase), e.HookName)
+
+			case claude.RateLimitEvent:
+				b.renderer.RateLimit(e.Status, e.Utilization)
+
+			case claude.APIRetryEvent:
+				b.renderer.APIRetry(e.Attempt, e.MaxRetries, e.ErrorType)
+
+			case claude.CompactBoundaryEvent:
+				b.renderer.CompactBoundary(e.Trigger)
+
+			case claude.PostTurnSummaryEvent:
+				b.renderer.PostTurnSummary(e.Title, e.Description)
+
+			case claude.AuthStatusEvent:
+				b.renderer.AuthStatus(e.IsAuthenticating, e.Output)
 			}
 		}
 	}

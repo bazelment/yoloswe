@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex/render"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 )
 
 // Backend abstracts the agent lifecycle for different providers.

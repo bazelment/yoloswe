@@ -1,4 +1,4 @@
-// Package render provides ANSI-colored terminal rendering for Claude sessions.
+// Package render provides ANSI-colored terminal rendering for Claude and agent sessions.
 package render
 
 // EventHandler receives semantic events for structured output capture.

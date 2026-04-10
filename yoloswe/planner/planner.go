@@ -510,6 +510,36 @@ func (p *PlannerWrapper) handleEvent(ctx context.Context, event claude.Event) (b
 	case claude.ErrorEvent:
 		p.renderer.Error(e.Error, e.Context)
 		return false, e.Error
+
+	case claude.ToolExecutionProgressEvent:
+		p.renderer.ToolExecutionProgress(e.ToolName, e.ToolUseID, e.ElapsedTimeSeconds)
+
+	case claude.TaskStartedEvent:
+		p.renderer.TaskStarted(e.TaskID, e.Description)
+
+	case claude.TaskProgressEvent:
+		p.renderer.TaskProgress(e.TaskID, e.Description)
+
+	case claude.TaskNotificationEvent:
+		p.renderer.TaskNotification(e.TaskID, e.Status, e.Summary)
+
+	case claude.HookLifecycleEvent:
+		p.renderer.HookLifecycle(string(e.Phase), e.HookName)
+
+	case claude.RateLimitEvent:
+		p.renderer.RateLimit(e.Status, e.Utilization)
+
+	case claude.APIRetryEvent:
+		p.renderer.APIRetry(e.Attempt, e.MaxRetries, e.ErrorType)
+
+	case claude.CompactBoundaryEvent:
+		p.renderer.CompactBoundary(e.Trigger)
+
+	case claude.PostTurnSummaryEvent:
+		p.renderer.PostTurnSummary(e.Title, e.Description)
+
+	case claude.AuthStatusEvent:
+		p.renderer.AuthStatus(e.IsAuthenticating, e.Output)
 	}
 
 	return false, nil
