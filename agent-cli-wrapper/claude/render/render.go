@@ -165,8 +165,11 @@ func (r *Renderer) Thinking(thinking string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Always flush buffered text before a thinking event so the event handler
+	// never receives OnThinking while stale text remains in the buffer.
+	r.flushText()
+
 	if r.verbosity >= VerbosityVerbose {
-		r.flushText()
 		r.closeToolOutput()
 		fmt.Fprintf(r.out, "%s%s%s%s", r.color(ColorDim), r.color(ColorItalic), thinking, r.color(ColorReset))
 		r.inReasoning = true
@@ -204,8 +207,11 @@ func (r *Renderer) ToolStart(name, id string) {
 	r.lastToolName = name
 	r.lastToolID = id
 
+	// Always flush buffered text before a tool event so the event handler
+	// never receives OnToolStart while stale text remains in the buffer.
+	r.flushText()
+
 	if r.verbosity >= VerbosityNormal {
-		r.flushText()
 		r.closeToolOutput()
 		r.endReasoning()
 
@@ -398,18 +404,23 @@ func (r *Renderer) Question(question string, options []string) {
 	r.QuestionWithOptions(question, "", opts)
 }
 
+// printQuestionHeader prints the bracketed header line for question prompts.
+// Must be called with mutex held.
+func (r *Renderer) printQuestionHeader(question, header string) {
+	if header != "" {
+		fmt.Fprintf(r.out, "\n%s[%s]%s %s\n", r.color(ColorMagenta), header, r.color(ColorReset), question)
+	} else {
+		fmt.Fprintf(r.out, "\n%s[Question]%s %s\n", r.color(ColorMagenta), r.color(ColorReset), question)
+	}
+}
+
 // QuestionWithOptions prints a question prompt with labeled options.
 func (r *Renderer) QuestionWithOptions(question, header string, options []QuestionOption) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.closeToolOutput()
-
-	if header != "" {
-		fmt.Fprintf(r.out, "\n%s[%s]%s %s\n", r.color(ColorMagenta), header, r.color(ColorReset), question)
-	} else {
-		fmt.Fprintf(r.out, "\n%s[Question]%s %s\n", r.color(ColorMagenta), r.color(ColorReset), question)
-	}
+	r.printQuestionHeader(question, header)
 
 	for i, opt := range options {
 		if opt.Description != "" {
@@ -429,12 +440,7 @@ func (r *Renderer) QuestionAutoAnswer(question, header string, options []Questio
 	defer r.mu.Unlock()
 
 	r.closeToolOutput()
-
-	if header != "" {
-		fmt.Fprintf(r.out, "\n%s[%s]%s %s\n", r.color(ColorMagenta), header, r.color(ColorReset), question)
-	} else {
-		fmt.Fprintf(r.out, "\n%s[Question]%s %s\n", r.color(ColorMagenta), r.color(ColorReset), question)
-	}
+	r.printQuestionHeader(question, header)
 
 	for i, opt := range options {
 		if i == selectedIdx {
@@ -490,6 +496,14 @@ func (r *Renderer) SessionInfo(sessionID, model string) {
 	}
 }
 
+// successIcon returns a status icon and color code for success/failure.
+func successIcon(success bool) (icon, colorCode string) {
+	if success {
+		return "✓", ColorGreen
+	}
+	return "✗", ColorRed
+}
+
 // TurnSummary prints a summary of the completed turn.
 func (r *Renderer) TurnSummary(turnNumber int, success bool, durationMs int64, costUSD float64) {
 	r.mu.Lock()
@@ -498,15 +512,9 @@ func (r *Renderer) TurnSummary(turnNumber int, success bool, durationMs int64, c
 	r.flushText()
 	r.closeToolOutput()
 
-	status := "✓"
-	colorCode := ColorGreen
-	if !success {
-		status = "✗"
-		colorCode = ColorRed
-	}
-
+	icon, colorCode := successIcon(success)
 	fmt.Fprintf(r.out, "\n%s%s Turn %d complete (%.1fs, $%.4f)%s\n",
-		r.color(colorCode), status, turnNumber, float64(durationMs)/1000, costUSD, r.color(ColorReset))
+		r.color(colorCode), icon, turnNumber, float64(durationMs)/1000, costUSD, r.color(ColorReset))
 
 	if r.eventHandler != nil {
 		r.eventHandler.OnTurnComplete(turnNumber, success, durationMs, costUSD)
@@ -523,15 +531,9 @@ func (r *Renderer) TurnCompleteWithTokens(success bool, durationMs, inputTokens,
 
 	fmt.Fprintf(r.out, "\n%s───────────────────────────────────────────────────────%s\n", r.color(ColorDim), r.color(ColorReset))
 
-	status := "✓"
-	colorCode := ColorGreen
-	if !success {
-		status = "✗"
-		colorCode = ColorRed
-	}
-
+	icon, colorCode := successIcon(success)
 	fmt.Fprintf(r.out, "%s%s Turn complete (%.1fs, %d input / %d output tokens)%s\n",
-		r.color(colorCode), status, float64(durationMs)/1000, inputTokens, outputTokens, r.color(ColorReset))
+		r.color(colorCode), icon, float64(durationMs)/1000, inputTokens, outputTokens, r.color(ColorReset))
 }
 
 // PlanComplete prints the plan completion summary.
@@ -577,32 +579,28 @@ func (r *Renderer) Error(err error, context string) {
 // New event types — tasks, hooks, rate limits, etc.
 // ---------------------------------------------------------------------------
 
-// TaskStarted prints a task/sub-agent start notification.
-func (r *Renderer) TaskStarted(taskID, description string) {
+// tagged prints a bracketed, colored one-liner if verbosity is at or above minV.
+// Must NOT be called with mu held — it acquires the lock itself.
+func (r *Renderer) tagged(minV Verbosity, colorCode, label, msg string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.verbosity < VerbosityVerbose {
+	if r.verbosity < minV {
 		return
 	}
 
 	r.closeToolOutput()
-	fmt.Fprintf(r.out, "%s[Task %s]%s %s\n",
-		r.color(ColorBlue), taskID, r.color(ColorReset), TruncateForDisplay(description, 80))
+	fmt.Fprintf(r.out, "%s[%s]%s %s\n", r.color(colorCode), label, r.color(ColorReset), msg)
+}
+
+// TaskStarted prints a task/sub-agent start notification.
+func (r *Renderer) TaskStarted(taskID, description string) {
+	r.tagged(VerbosityVerbose, ColorBlue, "Task "+taskID, TruncateForDisplay(description, 80))
 }
 
 // TaskProgress prints a task progress update.
 func (r *Renderer) TaskProgress(taskID, description string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.verbosity < VerbosityVerbose {
-		return
-	}
-
-	r.closeToolOutput()
-	fmt.Fprintf(r.out, "%s[Task %s]%s %s\n",
-		r.color(ColorGray), taskID, r.color(ColorReset), TruncateForDisplay(description, 80))
+	r.tagged(VerbosityVerbose, ColorGray, "Task "+taskID, TruncateForDisplay(description, 80))
 }
 
 // TaskNotification prints a task completion notification.
@@ -632,63 +630,26 @@ func (r *Renderer) TaskNotification(taskID, status, summary string) {
 
 // HookLifecycle prints a hook execution event.
 func (r *Renderer) HookLifecycle(phase, hookName string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.verbosity < VerbosityVerbose {
-		return
-	}
-
-	r.closeToolOutput()
-	fmt.Fprintf(r.out, "%s[Hook: %s]%s %s\n",
-		r.color(ColorGray), hookName, r.color(ColorReset), phase)
+	r.tagged(VerbosityVerbose, ColorGray, "Hook: "+hookName, phase)
 }
 
 // RateLimit prints a rate limit notification.
 func (r *Renderer) RateLimit(status string, utilization *float64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Show warnings at Normal+, full details at Verbose+
-	if r.verbosity < VerbosityNormal {
-		return
-	}
-
-	r.closeToolOutput()
 	msg := status
 	if utilization != nil {
 		msg = fmt.Sprintf("%s (%.0f%% utilized)", status, *utilization*100)
 	}
-	fmt.Fprintf(r.out, "%s[Rate Limit]%s %s\n",
-		r.color(ColorYellow), r.color(ColorReset), msg)
+	r.tagged(VerbosityNormal, ColorYellow, "Rate Limit", msg)
 }
 
 // APIRetry prints an API retry notification.
 func (r *Renderer) APIRetry(attempt, maxRetries int, errorMsg string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.verbosity < VerbosityVerbose {
-		return
-	}
-
-	r.closeToolOutput()
-	fmt.Fprintf(r.out, "%s[API Retry %d/%d]%s %s\n",
-		r.color(ColorYellow), attempt, maxRetries, r.color(ColorReset), errorMsg)
+	r.tagged(VerbosityVerbose, ColorYellow, fmt.Sprintf("API Retry %d/%d", attempt, maxRetries), errorMsg)
 }
 
 // CompactBoundary prints a conversation compaction event.
 func (r *Renderer) CompactBoundary(trigger string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.verbosity < VerbosityVerbose {
-		return
-	}
-
-	r.closeToolOutput()
-	fmt.Fprintf(r.out, "%s[Compact]%s %s\n",
-		r.color(ColorGray), r.color(ColorReset), trigger)
+	r.tagged(VerbosityVerbose, ColorGray, "Compact", trigger)
 }
 
 // PostTurnSummary prints a background post-turn summary.

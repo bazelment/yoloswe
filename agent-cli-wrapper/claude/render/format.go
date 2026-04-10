@@ -70,6 +70,10 @@ func formatContent(content interface{}) string {
 // appending "..." if truncation occurred (the suffix counts toward max).
 // Rune-based indexing avoids splitting multi-byte UTF-8 sequences.
 func TruncateForDisplay(s string, max int) string {
+	// Fast path: byte length ≤ max implies rune length ≤ max.
+	if len(s) <= max {
+		return s
+	}
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
@@ -80,18 +84,13 @@ func TruncateForDisplay(s string, max int) string {
 	return string(runes[:max-3]) + "..."
 }
 
-// Truncate truncates a string to the given max byte length.
-// Kept for backward compatibility; prefer TruncateForDisplay for new code.
-func Truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
-}
-
 // TruncatePath truncates a file path, keeping the end visible.
 // For paths longer than max, shows ".../" plus the last two path components.
 func TruncatePath(path string, max int) string {
+	// Fast path: byte length ≤ max implies rune length ≤ max.
+	if len(path) <= max {
+		return path
+	}
 	runes := []rune(path)
 	if len(runes) <= max {
 		return path
@@ -101,14 +100,14 @@ func TruncatePath(path string, max int) string {
 	if len(parts) >= 2 {
 		suffix := strings.Join(parts[len(parts)-2:], "/")
 		prefixed := ".../" + suffix
-		if len([]rune(prefixed)) <= max {
+		if len(prefixed) <= max { // ASCII-safe: ".../" + path segments
 			return prefixed
 		}
 	}
 	// Fall back to keeping just the filename.
 	if lastSlash := strings.LastIndexByte(path, '/'); lastSlash > 0 {
 		suffix := path[lastSlash:]
-		if len([]rune(suffix)) <= max-3 {
+		if len(suffix) <= max-3 { // ASCII-safe: path components
 			return "..." + suffix
 		}
 	}
