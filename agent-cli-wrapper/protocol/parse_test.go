@@ -523,11 +523,30 @@ func TestParseMessage_InvalidJSON(t *testing.T) {
 }
 
 func TestParseMessage_UnknownType(t *testing.T) {
-	msg, err := ParseMessage([]byte(`{"type":"rate_limit_event","retry_after_ms":5000}`))
+	raw := `{"type":"this_is_not_a_real_type","foo":"bar"}`
+	msg, err := ParseMessage([]byte(raw))
 	if err != nil {
 		t.Fatalf("expected no error for unknown type, got: %v", err)
 	}
-	if msg != nil {
-		t.Fatalf("expected nil message for unknown type, got: %v", msg)
+	unknown, ok := msg.(UnknownMessage)
+	if !ok {
+		t.Fatalf("expected UnknownMessage, got %T", msg)
+	}
+	if string(unknown.Type) != "this_is_not_a_real_type" {
+		t.Errorf("unexpected Type: %q", unknown.Type)
+	}
+	if unknown.MsgType() != unknown.Type {
+		t.Errorf("MsgType() mismatch: %q vs %q", unknown.MsgType(), unknown.Type)
+	}
+	if len(unknown.Raw) == 0 {
+		t.Fatal("expected Raw to be populated")
+	}
+	// Raw should parse back to the original JSON shape.
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(unknown.Raw, &parsed); err != nil {
+		t.Fatalf("Raw not valid JSON: %v", err)
+	}
+	if parsed["foo"] != "bar" {
+		t.Errorf("Raw missing original fields: %v", parsed)
 	}
 }

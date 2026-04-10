@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -25,10 +26,11 @@ const defaultBgTaskSafetyTimeout = 90 * time.Second
 // task-notifications. This struct holds the state for that mechanism.
 // Use reset() to clear all fields at turn boundaries.
 type bgSuppressionState struct {
-	timer            *time.Timer // fires if no continuation arrives; see completeSuppressedTurn
-	accumulatedUsage TurnUsage   // token/cost totals from suppressed intermediate results
-	active           bool        // true while waiting for continuation; cleared by timer or normal path
-	timerFired       bool        // set by completeSuppressedTurn; cleared at start of next turn
+	timer            *time.Timer     // fires if no continuation arrives; see completeSuppressedTurn
+	activeTaskIDs    map[string]bool // IDs from task_started awaiting task_notification
+	accumulatedUsage TurnUsage       // token/cost totals from suppressed intermediate results
+	active           bool            // true while waiting for continuation; cleared by timer or normal path
+	timerFired       bool            // set by completeSuppressedTurn; cleared at start of next turn
 }
 
 // reset clears all suppression state and stops any pending timer.
@@ -40,6 +42,7 @@ func (b *bgSuppressionState) reset() {
 		b.timer = nil
 	}
 	b.accumulatedUsage = TurnUsage{}
+	b.activeTaskIDs = nil
 }
 
 // SessionInfo contains session metadata.
@@ -612,6 +615,60 @@ func (s *Session) handleLine(line []byte) {
 		s.handleControlRequest(m)
 	case protocol.ControlResponse:
 		s.handleControlResponse(m)
+	case protocol.KeepAliveMessage:
+		// Heartbeat; no-op but consumed so it isn't logged as unknown.
+	case protocol.ToolProgressMessage:
+		s.emit(ToolExecutionProgressEvent{
+			ParentToolUseID:    m.ParentToolUseID,
+			TaskID:             m.TaskID,
+			ToolUseID:          m.ToolUseID,
+			ToolName:           m.ToolName,
+			ElapsedTimeSeconds: m.ElapsedTimeSeconds,
+			TurnNumber:         s.turnManager.CurrentTurnNumber(),
+		})
+	case protocol.ToolUseSummaryMessage:
+		slog.Debug("tool_use_summary", "summary", m.Summary, "preceding", m.PrecedingToolUseIDs)
+	case protocol.AuthStatusMessage:
+		s.emit(AuthStatusEvent{
+			Error:            m.Error,
+			Output:           m.Output,
+			IsAuthenticating: m.IsAuthenticating,
+			TurnNumber:       s.turnManager.CurrentTurnNumber(),
+		})
+	case protocol.RateLimitEventMessage:
+		info := m.RateLimitInfo
+		s.emit(RateLimitEvent{
+			ResetsAt:              info.ResetsAt,
+			Utilization:           info.Utilization,
+			OverageResetsAt:       info.OverageResetsAt,
+			OverageDisabledReason: info.OverageDisabledReason,
+			SurpassedThreshold:    info.SurpassedThreshold,
+			Status:                info.Status,
+			RateLimitType:         info.RateLimitType,
+			IsUsingOverage:        info.IsUsingOverage,
+			IsOverageActive:       info.OverageStatus == "active",
+			TurnNumber:            s.turnManager.CurrentTurnNumber(),
+		})
+	case protocol.PromptSuggestionMessage, protocol.StreamlinedTextMessage, protocol.StreamlinedToolUseSummaryMessage:
+		// Internal CLI messages — consumed silently.
+	case protocol.ControlCancelRequest:
+		// Best-effort: close any pending response channel for this request ID
+		// so the waiting goroutine unblocks.
+		s.pendingMu.Lock()
+		if ch, ok := s.pendingControlResponses[m.RequestID]; ok {
+			close(ch)
+			delete(s.pendingControlResponses, m.RequestID)
+		}
+		s.pendingMu.Unlock()
+		slog.Debug("control_cancel_request received", "request_id", m.RequestID)
+	case protocol.UpdateEnvironmentVariablesMessage:
+		slog.Warn("unexpected update_environment_variables from CLI (SDK->CLI only)")
+	case protocol.UnknownMessage:
+		rawStr := string(m.Raw)
+		if len(rawStr) > 200 {
+			rawStr = rawStr[:200]
+		}
+		slog.Warn("unknown top-level message type", "type", m.Type, "raw", rawStr)
 	}
 }
 
@@ -644,6 +701,176 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 
 		// Emit ready event
 		s.emit(ReadyEvent{Info: *s.info})
+		return
+	}
+
+	turnNum := s.turnManager.CurrentTurnNumber()
+	switch protocol.SystemSubtype(msg.Subtype) {
+	case protocol.SystemSubtypeCompactBoundary:
+		if p, ok := msg.AsCompactBoundary(); ok {
+			s.emit(CompactBoundaryEvent{
+				PreservedSegment: p.CompactMetadata.PreservedSegment,
+				Trigger:          p.CompactMetadata.Trigger,
+				PreTokens:        p.CompactMetadata.PreTokens,
+				TurnNumber:       turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode compact_boundary payload")
+		}
+	case protocol.SystemSubtypePostTurnSummary:
+		if p, ok := msg.AsPostTurnSummary(); ok {
+			s.emit(PostTurnSummaryEvent{
+				ArtifactURLs:   p.ArtifactURLs,
+				SummarizesUUID: p.SummarizesUUID,
+				StatusCategory: p.StatusCategory,
+				StatusDetail:   p.StatusDetail,
+				Title:          p.Title,
+				Description:    p.Description,
+				RecentAction:   p.RecentAction,
+				IsNoteworthy:   p.IsNoteworthy,
+				NeedsAction:    p.NeedsAction != "" && p.NeedsAction != "false",
+				TurnNumber:     turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode post_turn_summary payload")
+		}
+	case protocol.SystemSubtypeAPIRetry:
+		if p, ok := msg.AsAPIRetry(); ok {
+			s.emit(APIRetryEvent{
+				ErrorStatus:  p.ErrorStatus,
+				ErrorType:    p.Error,
+				Attempt:      p.Attempt,
+				MaxRetries:   p.MaxRetries,
+				RetryDelayMs: p.RetryDelayMs,
+				TurnNumber:   turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode api_retry payload")
+		}
+	case protocol.SystemSubtypeLocalCommandOutput:
+		if p, ok := msg.AsLocalCommandOutput(); ok {
+			s.emit(LocalCommandOutputEvent{Content: p.Content, TurnNumber: turnNum})
+		} else {
+			slog.Warn("failed to decode local_command_output payload")
+		}
+	case protocol.SystemSubtypeHookStarted:
+		if p, ok := msg.AsHookStarted(); ok {
+			s.emit(HookLifecycleEvent{
+				Phase:         HookPhaseStarted,
+				HookID:        p.HookID,
+				HookName:      p.HookName,
+				HookEventName: p.HookEvent,
+				TurnNumber:    turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode hook_started payload")
+		}
+	case protocol.SystemSubtypeHookProgress:
+		if p, ok := msg.AsHookProgress(); ok {
+			s.emit(HookLifecycleEvent{
+				Phase:         HookPhaseProgress,
+				HookID:        p.HookID,
+				HookName:      p.HookName,
+				HookEventName: p.HookEvent,
+				Stdout:        p.Stdout,
+				Stderr:        p.Stderr,
+				Output:        p.Output,
+				TurnNumber:    turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode hook_progress payload")
+		}
+	case protocol.SystemSubtypeHookResponse:
+		if p, ok := msg.AsHookResponse(); ok {
+			s.emit(HookLifecycleEvent{
+				ExitCode:      p.ExitCode,
+				Phase:         HookPhaseResponse,
+				HookID:        p.HookID,
+				HookName:      p.HookName,
+				HookEventName: p.HookEvent,
+				Stdout:        p.Stdout,
+				Stderr:        p.Stderr,
+				Output:        p.Output,
+				Outcome:       p.Outcome,
+				TurnNumber:    turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode hook_response payload")
+		}
+	case protocol.SystemSubtypeTaskStarted:
+		if p, ok := msg.AsTaskStarted(); ok {
+			s.mu.Lock()
+			if s.bgState.activeTaskIDs == nil {
+				s.bgState.activeTaskIDs = make(map[string]bool)
+			}
+			s.bgState.activeTaskIDs[p.TaskID] = true
+			s.mu.Unlock()
+			s.emit(TaskStartedEvent{
+				ToolUseID:    p.ToolUseID,
+				WorkflowName: p.WorkflowName,
+				TaskID:       p.TaskID,
+				Description:  p.Description,
+				TaskType:     p.TaskType,
+				Prompt:       p.Prompt,
+				TurnNumber:   turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode task_started payload")
+		}
+	case protocol.SystemSubtypeTaskProgress:
+		if p, ok := msg.AsTaskProgress(); ok {
+			s.emit(TaskProgressEvent{
+				ToolUseID:    p.ToolUseID,
+				TaskID:       p.TaskID,
+				Description:  p.Description,
+				LastToolName: p.LastToolName,
+				Summary:      p.Summary,
+				Usage:        p.Usage,
+				TurnNumber:   turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode task_progress payload")
+		}
+	case protocol.SystemSubtypeTaskNotification:
+		if p, ok := msg.AsTaskNotification(); ok {
+			s.mu.Lock()
+			delete(s.bgState.activeTaskIDs, p.TaskID)
+			s.mu.Unlock()
+			s.emit(TaskNotificationEvent{
+				ToolUseID:  p.ToolUseID,
+				TaskID:     p.TaskID,
+				Status:     p.Status,
+				OutputFile: p.OutputFile,
+				Summary:    p.Summary,
+				Usage:      p.Usage,
+				TurnNumber: turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode task_notification payload")
+		}
+	case protocol.SystemSubtypeSessionStateChanged:
+		if p, ok := msg.AsSessionStateChanged(); ok {
+			s.emit(CLISessionStateChangedEvent{State: p.State, TurnNumber: turnNum})
+		} else {
+			slog.Warn("failed to decode session_state_changed payload")
+		}
+	case protocol.SystemSubtypeFilesPersisted:
+		if p, ok := msg.AsFilesPersisted(); ok {
+			s.emit(FilesPersistedEvent{
+				Files:       p.Files,
+				Failed:      p.Failed,
+				ProcessedAt: p.ProcessedAt,
+				TurnNumber:  turnNum,
+			})
+		} else {
+			slog.Warn("failed to decode files_persisted payload")
+		}
+	case protocol.SystemSubtypeElicitationComplete:
+		slog.Debug("system.elicitation_complete", "subtype", msg.Subtype)
+	case protocol.SystemSubtypeStatus:
+		slog.Debug("system.status", "subtype", msg.Subtype)
+	default:
+		slog.Debug("unhandled system subtype", "subtype", msg.Subtype)
 	}
 }
 
@@ -1029,8 +1256,19 @@ func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 	// First check if this is an MCP message (SDK MCP server traffic)
 	reqData, parseErr := protocol.ParseControlRequest(msg.Request)
 	if parseErr == nil {
-		if mcpReq, ok := reqData.(protocol.MCPMessageRequest); ok {
-			s.handleMCPMessage(msg.RequestID, mcpReq)
+		switch r := reqData.(type) {
+		case protocol.MCPMessageRequest:
+			s.handleMCPMessage(msg.RequestID, r)
+			return
+		case protocol.HookCallbackRequest:
+			s.handleHookCallbackControl(ctx, msg.RequestID, r)
+			return
+		case protocol.ElicitationRequest:
+			s.handleElicitationControl(ctx, msg.RequestID, r)
+			return
+		case protocol.UnknownControlRequest:
+			slog.Warn("unknown control_request subtype", "subtype", r.SubtypeField)
+			s.sendControlSuccess(msg.RequestID, nil)
 			return
 		}
 	}
@@ -1276,6 +1514,64 @@ func (s *Session) sendMCPErrorResponse(requestID string, rpcID interface{}, code
 	if s.recorder != nil {
 		s.recorder.RecordSent(&resp)
 	}
+}
+
+// sendControlSuccess sends a success control response with an optional
+// response body. Used for hook_callback, elicitation, and unknown-subtype
+// fallbacks to keep the CLI unblocked.
+func (s *Session) sendControlSuccess(requestID string, body interface{}) {
+	resp := protocol.ControlResponse{
+		Type: protocol.MessageTypeControlResponse,
+		Response: protocol.ControlResponsePayload{
+			Subtype:   protocol.ControlResponseSubtypeSuccess,
+			RequestID: requestID,
+			Response:  body,
+		},
+	}
+	if err := s.process.WriteMessage(&resp); err != nil {
+		s.emitError(err, "send_control_response")
+		return
+	}
+	if s.recorder != nil {
+		s.recorder.RecordSent(&resp)
+	}
+}
+
+// handleHookCallbackControl dispatches a hook_callback control request to
+// the configured handler, or responds with an empty success body if none.
+func (s *Session) handleHookCallbackControl(ctx context.Context, requestID string, req protocol.HookCallbackRequest) {
+	var body map[string]any
+	if s.config.HookCallbackHandler != nil {
+		out, err := s.config.HookCallbackHandler(ctx, req)
+		if err != nil {
+			s.emitError(err, "hook_callback_handler")
+			// Fall through to empty-body success so CLI is not blocked.
+		} else {
+			body = out
+		}
+	}
+	if body == nil {
+		body = map[string]any{}
+	}
+	s.sendControlSuccess(requestID, body)
+}
+
+// handleElicitationControl dispatches an elicitation control request to
+// the configured handler, or responds with Action="cancel" if none.
+func (s *Session) handleElicitationControl(ctx context.Context, requestID string, req protocol.ElicitationRequest) {
+	var resp protocol.ElicitationResponse
+	if s.config.ElicitationHandler != nil {
+		out, err := s.config.ElicitationHandler(ctx, req)
+		if err != nil {
+			s.emitError(err, "elicitation_handler")
+			resp = protocol.ElicitationResponse{Action: "cancel"}
+		} else {
+			resp = out
+		}
+	} else {
+		resp = protocol.ElicitationResponse{Action: "cancel"}
+	}
+	s.sendControlSuccess(requestID, resp)
 }
 
 // generateRequestID generates a unique request ID.

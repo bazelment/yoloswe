@@ -45,10 +45,12 @@ go_test(
         "sdk_mcp_test.go",
         "sdk_mcp_typed_test.go",
         "session_bg_test.go",
+        "session_dispatch_test.go",
         "turn_test.go",
     ],
     embed = [":claude"],
     deps = [
+        "//agent-cli-wrapper/internal/ndjson",
         "//agent-cli-wrapper/protocol",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

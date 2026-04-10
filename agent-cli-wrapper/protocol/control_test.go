@@ -307,6 +307,247 @@ func TestParseToolUseRequest_BlockedPath(t *testing.T) {
 	}
 }
 
+func TestParseControlRequest_NewSubtypes(t *testing.T) {
+	tests := []struct {
+		verify func(t *testing.T, r ControlRequestData)
+		name   string
+		raw    string
+	}{
+		{
+			name: "initialize",
+			raw:  `{"subtype":"initialize","promptSuggestions":true}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(InitializeRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.PromptSuggestions == nil || !*v.PromptSuggestions {
+					t.Errorf("promptSuggestions: %v", v.PromptSuggestions)
+				}
+			},
+		},
+		{
+			name: "set_max_thinking_tokens",
+			raw:  `{"subtype":"set_max_thinking_tokens","max_thinking_tokens":8000}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(SetMaxThinkingTokensRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.MaxThinkingTokens == nil || *v.MaxThinkingTokens != 8000 {
+					t.Errorf("max_thinking_tokens: %v", v.MaxThinkingTokens)
+				}
+			},
+		},
+		{
+			name: "mcp_status",
+			raw:  `{"subtype":"mcp_status"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				if _, ok := r.(MCPStatusRequest); !ok {
+					t.Fatalf("type: %T", r)
+				}
+			},
+		},
+		{
+			name: "mcp_set_servers",
+			raw:  `{"subtype":"mcp_set_servers","servers":{"foo":{"type":"stdio","command":"x"}}}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(MCPSetServersRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if _, exists := v.Servers["foo"]; !exists {
+					t.Errorf("missing server foo: %v", v.Servers)
+				}
+			},
+		},
+		{
+			name: "mcp_reconnect",
+			raw:  `{"subtype":"mcp_reconnect","serverName":"foo"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(MCPReconnectRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.ServerName != "foo" {
+					t.Errorf("serverName: %q", v.ServerName)
+				}
+			},
+		},
+		{
+			name: "mcp_toggle",
+			raw:  `{"subtype":"mcp_toggle","serverName":"foo","enabled":true}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(MCPToggleRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.ServerName != "foo" || !v.Enabled {
+					t.Errorf("fields: %+v", v)
+				}
+			},
+		},
+		{
+			name: "get_context_usage",
+			raw:  `{"subtype":"get_context_usage"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				if _, ok := r.(GetContextUsageRequest); !ok {
+					t.Fatalf("type: %T", r)
+				}
+			},
+		},
+		{
+			name: "reload_plugins",
+			raw:  `{"subtype":"reload_plugins"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				if _, ok := r.(ReloadPluginsRequest); !ok {
+					t.Fatalf("type: %T", r)
+				}
+			},
+		},
+		{
+			name: "rewind_files",
+			raw:  `{"subtype":"rewind_files","user_message_id":"um_1","dry_run":true}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(RewindFilesRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.UserMessageID != "um_1" {
+					t.Errorf("user_message_id: %q", v.UserMessageID)
+				}
+				if v.DryRun == nil || !*v.DryRun {
+					t.Errorf("dry_run: %v", v.DryRun)
+				}
+			},
+		},
+		{
+			name: "cancel_async_message",
+			raw:  `{"subtype":"cancel_async_message","message_uuid":"mu_1"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(CancelAsyncMessageRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.MessageUUID != "mu_1" {
+					t.Errorf("message_uuid: %q", v.MessageUUID)
+				}
+			},
+		},
+		{
+			name: "seed_read_state",
+			raw:  `{"subtype":"seed_read_state","path":"/tmp/a","mtime":1234.5}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(SeedReadStateRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.Path != "/tmp/a" || v.Mtime != 1234.5 {
+					t.Errorf("fields: %+v", v)
+				}
+			},
+		},
+		{
+			name: "hook_callback",
+			raw:  `{"subtype":"hook_callback","callback_id":"cb_1","input":{"k":"v"}}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(HookCallbackRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.CallbackID != "cb_1" {
+					t.Errorf("callback_id: %q", v.CallbackID)
+				}
+				if v.Input["k"] != "v" {
+					t.Errorf("input: %v", v.Input)
+				}
+			},
+		},
+		{
+			name: "get_settings",
+			raw:  `{"subtype":"get_settings"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				if _, ok := r.(GetSettingsRequest); !ok {
+					t.Fatalf("type: %T", r)
+				}
+			},
+		},
+		{
+			name: "apply_flag_settings",
+			raw:  `{"subtype":"apply_flag_settings","settings":{"foo":1}}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(ApplyFlagSettingsRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.Settings["foo"] == nil {
+					t.Errorf("settings: %v", v.Settings)
+				}
+			},
+		},
+		{
+			name: "stop_task",
+			raw:  `{"subtype":"stop_task","task_id":"t1"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(StopTaskRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.TaskID != "t1" {
+					t.Errorf("task_id: %q", v.TaskID)
+				}
+			},
+		},
+		{
+			name: "elicitation",
+			raw:  `{"subtype":"elicitation","mcp_server_name":"m","message":"hi","elicitation_id":"el_1"}`,
+			verify: func(t *testing.T, r ControlRequestData) {
+				v, ok := r.(ElicitationRequest)
+				if !ok {
+					t.Fatalf("type: %T", r)
+				}
+				if v.MCPServerName != "m" || v.Message != "hi" || v.ElicitationID != "el_1" {
+					t.Errorf("fields: %+v", v)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := ParseControlRequest(json.RawMessage(tt.raw))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			tt.verify(t, r)
+		})
+	}
+}
+
+func TestParseControlRequest_UnknownSubtype(t *testing.T) {
+	raw := `{"subtype":"brand_new_subtype","foo":"bar"}`
+	r, err := ParseControlRequest(json.RawMessage(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	u, ok := r.(UnknownControlRequest)
+	if !ok {
+		t.Fatalf("expected UnknownControlRequest, got %T", r)
+	}
+	if u.Subtype() != ControlRequestSubtype("brand_new_subtype") {
+		t.Errorf("subtype: %q", u.Subtype())
+	}
+	if len(u.Raw) == 0 {
+		t.Fatal("expected Raw populated")
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(u.Raw, &parsed); err != nil {
+		t.Fatalf("Raw not valid JSON: %v", err)
+	}
+	if parsed["foo"] != "bar" {
+		t.Errorf("Raw missing fields: %v", parsed)
+	}
+}
+
 func TestControlResponse_FullStructure(t *testing.T) {
 	// Test the complete control response structure with proper input
 	response := ControlResponse{
