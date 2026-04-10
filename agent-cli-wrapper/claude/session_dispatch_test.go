@@ -498,6 +498,11 @@ func TestSessionDispatchControlRequestUnknownSubtype(t *testing.T) {
 	s.handleLine(line)
 
 	require.Eventually(t, func() bool { return buf.Len() > 0 }, time.Second, 5*time.Millisecond)
+	// Lock in the wire shape: the inner `response` field must be present as
+	// an explicit empty object, not omitted entirely. This guards against a
+	// regression to sendControlSuccess(..., nil), which would serialize the
+	// `interface{}` field with omitempty and drop `response` from the wire.
+	require.Contains(t, buf.String(), `"response":{}`)
 	subtype, reqID, body := parseControlResponse(t, buf)
 	require.Equal(t, "success", subtype)
 	require.Equal(t, "req-unk-1", reqID)

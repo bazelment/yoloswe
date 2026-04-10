@@ -3,8 +3,9 @@
 This document describes the wire protocol between our Go SDK wrapper
 (`agent-cli-wrapper/claude/`) and the upstream Claude Code CLI. It is the
 canonical reference — the Go types in `agent-cli-wrapper/protocol/` must
-match this document, and this document must match the upstream CLI at
-`/home/ubuntu/g/open-claude-code/src/entrypoints/sdk/`.
+match this document, and this document must match the Claude Code SDK
+entrypoints in upstream `open-claude-code` (the `src/entrypoints/sdk/`
+directory of that repository).
 
 ## Overview
 
