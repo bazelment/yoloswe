@@ -459,6 +459,7 @@ func (r *Renderer) Status(msg string) {
 	defer r.mu.Unlock()
 
 	r.flushText()
+	r.closeToolOutput()
 	if r.verbosity >= VerbosityNormal {
 		fmt.Fprintf(r.out, "%s[Status]%s %s\n", r.color(ColorGray), r.color(ColorReset), msg)
 	}
@@ -585,6 +586,7 @@ func (r *Renderer) TaskStarted(taskID, description string) {
 		return
 	}
 
+	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s[Task %s]%s %s\n",
 		r.color(ColorBlue), taskID, r.color(ColorReset), TruncateForDisplay(description, 80))
 }
@@ -598,6 +600,7 @@ func (r *Renderer) TaskProgress(taskID, description string) {
 		return
 	}
 
+	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s[Task %s]%s %s\n",
 		r.color(ColorGray), taskID, r.color(ColorReset), TruncateForDisplay(description, 80))
 }
@@ -611,6 +614,7 @@ func (r *Renderer) TaskNotification(taskID, status, summary string) {
 		return
 	}
 
+	r.closeToolOutput()
 	colorCode := ColorGreen
 	icon := "✓"
 	if status == "failed" {
@@ -635,6 +639,7 @@ func (r *Renderer) HookLifecycle(phase, hookName string) {
 		return
 	}
 
+	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s[Hook: %s]%s %s\n",
 		r.color(ColorGray), hookName, r.color(ColorReset), phase)
 }
@@ -649,6 +654,7 @@ func (r *Renderer) RateLimit(status string, utilization *float64) {
 		return
 	}
 
+	r.closeToolOutput()
 	msg := status
 	if utilization != nil {
 		msg = fmt.Sprintf("%s (%.0f%% utilized)", status, *utilization*100)
@@ -666,6 +672,7 @@ func (r *Renderer) APIRetry(attempt, maxRetries int, errorMsg string) {
 		return
 	}
 
+	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s[API Retry %d/%d]%s %s\n",
 		r.color(ColorYellow), attempt, maxRetries, r.color(ColorReset), errorMsg)
 }
@@ -679,6 +686,7 @@ func (r *Renderer) CompactBoundary(trigger string) {
 		return
 	}
 
+	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s[Compact]%s %s\n",
 		r.color(ColorGray), r.color(ColorReset), trigger)
 }
@@ -692,6 +700,7 @@ func (r *Renderer) PostTurnSummary(title, description string) {
 		return
 	}
 
+	r.closeToolOutput()
 	fmt.Fprintf(r.out, "%s[Summary]%s %s\n",
 		r.color(ColorGray), r.color(ColorReset), title)
 	if description != "" {
@@ -708,6 +717,7 @@ func (r *Renderer) AuthStatus(isAuthenticating bool, output []string) {
 		return
 	}
 
+	r.closeToolOutput()
 	if isAuthenticating {
 		fmt.Fprintf(r.out, "%s[Auth]%s Authenticating...\n", r.color(ColorGray), r.color(ColorReset))
 	}

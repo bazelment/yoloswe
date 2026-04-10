@@ -6,11 +6,12 @@ type Verbosity int
 const (
 	// VerbosityQuiet shows only errors and final results.
 	VerbosityQuiet Verbosity = iota
-	// VerbosityNormal shows text, tool names, errors, and turn summaries.
-	// Tool results are hidden unless they are errors.
+	// VerbosityNormal shows text, tool names, errors, turn summaries,
+	// rate limit warnings, and auth status. Tool results are hidden
+	// unless they are errors.
 	VerbosityNormal
 	// VerbosityVerbose shows all tool results (truncated), thinking,
-	// task/hook lifecycle, and rate limit warnings.
+	// task/hook lifecycle, API retries, and compact boundaries.
 	VerbosityVerbose
 	// VerbosityDebug shows everything: full tool results, streaming tool
 	// input, state changes, API retries, compact boundaries.
