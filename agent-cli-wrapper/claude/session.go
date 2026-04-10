@@ -1307,8 +1307,12 @@ func (s *Session) handleControlRequest(msg protocol.ControlRequest) {
 		s.handleElicitationControl(ctx, msg.RequestID, r)
 		return
 	case protocol.UnknownControlRequest:
-		slog.Warn("unknown control_request subtype", "subtype", r.SubtypeField)
-		s.sendControlSuccess(msg.RequestID, nil)
+		// ParseControlRequest already logged the unknown subtype at warn.
+		// Reply with an explicit empty-object body so the wire shape always
+		// includes the inner `response` field, matching the hook_callback /
+		// elicitation paths and avoiding any ambiguity for the CLI.
+		_ = r // bound for the type switch; the body itself is not needed.
+		s.sendControlSuccess(msg.RequestID, map[string]any{})
 		return
 	}
 
