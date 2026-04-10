@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
@@ -114,12 +115,13 @@ func truncate(s string, maxLen int) string {
 // RunStepAgent runs an agent session for the given workflow step.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
-func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error) {
+// If renderer is non-nil, agent events are streamed to the terminal.
+func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
 	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
 	if err != nil {
 		return "", "", fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
-	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, logger)
+	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
 }
 
 // RunCommand runs a shell command template for the given workflow step.
@@ -179,37 +181,72 @@ func resolvePromptForExecution(configPrompt, defaultPrompt string, data PromptDa
 	return prompt, nil
 }
 
-// logEventHandler logs agent events at debug level for verbose output.
-// It also tracks plan file writes for the plan step.
+// logEventHandler logs agent events to the log file with high signal-to-noise ratio.
+// Text is accumulated and flushed at semantic boundaries. Tool start/complete are
+// merged into a single log line with input summary and duration. Tool IDs are omitted.
 type logEventHandler struct {
 	logger       *slog.Logger
+	toolStarts   map[string]time.Time
 	step         string
-	planFilePath string // set when Claude writes a plan .md file before ExitPlanMode
-	lastWriteMD  string // tracks the most recent .md Write for ExitPlanMode correlation
+	planFilePath string
+	lastWriteMD  string
+	textBuf      strings.Builder
+}
+
+func newLogEventHandler(logger *slog.Logger, step string) *logEventHandler {
+	return &logEventHandler{
+		logger:     logger,
+		step:       step,
+		toolStarts: make(map[string]time.Time),
+	}
+}
+
+// flushText logs accumulated text and resets the buffer.
+func (h *logEventHandler) flushText() {
+	if h.textBuf.Len() > 0 {
+		h.logger.Debug("agent text", "step", h.step, "text", truncate(h.textBuf.String(), 200))
+		h.textBuf.Reset()
+	}
 }
 
 func (h *logEventHandler) OnText(text string) {
-	h.logger.Debug("agent text", "step", h.step, "text", text)
+	h.textBuf.WriteString(text)
+	// Flush at semantic boundaries: newline or buffer > 200 chars.
+	if strings.Contains(text, "\n") || h.textBuf.Len() > 200 {
+		h.flushText()
+	}
 }
 
 func (h *logEventHandler) OnThinking(thinking string) {
-	h.logger.Debug("agent thinking", "step", h.step, "thinking", thinking)
+	h.flushText()
+	h.logger.Debug("agent thinking", "step", h.step, "thinking", truncate(thinking, 200))
 }
 
 func (h *logEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
-	h.logger.Debug("agent tool start", "step", h.step, "tool", name, "id", id)
+	h.flushText()
+	h.toolStarts[id] = time.Now()
 }
 
 func (h *logEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
-	h.logger.Debug("agent tool complete", "step", h.step, "tool", name, "id", id, "is_error", isError)
+	// Single log line per tool with input summary and duration.
+	attrs := []any{"step", h.step, "tool", name}
+	if inputSummary := render.FormatToolInput(name, input); inputSummary != "" {
+		attrs = append(attrs, "input", inputSummary)
+	}
+	if start, ok := h.toolStarts[id]; ok {
+		attrs = append(attrs, "duration", time.Since(start).Round(100*time.Millisecond))
+		delete(h.toolStarts, id)
+	}
+	if isError {
+		attrs = append(attrs, "error", true)
+	}
+	h.logger.Debug("tool", attrs...)
+
 	// Track .md file writes — the last one before ExitPlanMode is the plan file.
-	// The plan file location varies: .claude/plans/, docs/plans/, etc. depending on
-	// user settings, so we track any .md Write and confirm when ExitPlanMode fires.
 	if name == "Write" && !isError {
 		if filePath, ok := input["file_path"].(string); ok {
 			if strings.HasSuffix(filePath, ".md") {
 				h.lastWriteMD = filePath
-				h.logger.Debug("tracked md write", "step", h.step, "path", filePath)
 			}
 		}
 	}
@@ -220,15 +257,113 @@ func (h *logEventHandler) OnToolComplete(name, id string, input map[string]inter
 }
 
 func (h *logEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
-	h.logger.Debug("agent turn complete", "step", h.step, "turn", turnNumber, "success", success, "duration_ms", durationMs, "cost_usd", costUSD)
+	h.flushText()
+	h.logger.Debug("turn complete",
+		"step", h.step,
+		"turn", turnNumber,
+		"success", success,
+		"duration", fmt.Sprintf("%.1fs", float64(durationMs)/1000),
+		"cost", fmt.Sprintf("$%.4f", costUSD),
+	)
 }
 
 func (h *logEventHandler) OnError(err error, context string) {
+	h.flushText()
 	h.logger.Debug("agent error", "step", h.step, "error", err, "context", context)
 }
 
+// rendererEventHandler adapts agent.EventHandler to a render.Renderer for
+// terminal display. It also tracks plan file writes for the plan step.
+type rendererEventHandler struct {
+	r            *render.Renderer
+	planFilePath string
+	lastWriteMD  string
+}
+
+func (h *rendererEventHandler) OnText(text string) {
+	h.r.Text(text)
+}
+
+func (h *rendererEventHandler) OnThinking(thinking string) {
+	h.r.Thinking(thinking)
+}
+
+func (h *rendererEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
+	h.r.ToolStart(name, id)
+}
+
+func (h *rendererEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
+	h.r.ToolComplete(name, input)
+	if result != nil || isError {
+		h.r.ToolResult(result, isError)
+	}
+
+	// Track plan file writes (same logic as logEventHandler).
+	if name == "Write" && !isError {
+		if filePath, ok := input["file_path"].(string); ok {
+			if strings.HasSuffix(filePath, ".md") {
+				h.lastWriteMD = filePath
+			}
+		}
+	}
+	if name == "ExitPlanMode" && h.lastWriteMD != "" {
+		h.planFilePath = h.lastWriteMD
+	}
+}
+
+func (h *rendererEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
+	h.r.TurnSummary(turnNumber, success, durationMs, costUSD)
+}
+
+func (h *rendererEventHandler) OnError(err error, ctx string) {
+	h.r.Error(err, ctx)
+}
+
+// compositeEventHandler fans out events to multiple handlers.
+type compositeEventHandler struct {
+	handlers []agent.EventHandler
+}
+
+func (c *compositeEventHandler) OnText(text string) {
+	for _, h := range c.handlers {
+		h.OnText(text)
+	}
+}
+
+func (c *compositeEventHandler) OnThinking(thinking string) {
+	for _, h := range c.handlers {
+		h.OnThinking(thinking)
+	}
+}
+
+func (c *compositeEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
+	for _, h := range c.handlers {
+		h.OnToolStart(name, id, input)
+	}
+}
+
+func (c *compositeEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
+	for _, h := range c.handlers {
+		h.OnToolComplete(name, id, input, result, isError)
+	}
+}
+
+func (c *compositeEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
+	for _, h := range c.handlers {
+		h.OnTurnComplete(turnNumber, success, durationMs, costUSD)
+	}
+}
+
+func (c *compositeEventHandler) OnError(err error, ctx string) {
+	for _, h := range c.handlers {
+		h.OnError(err, ctx)
+	}
+}
+
 // runAgent runs an agent with the given prompt and step configuration.
-func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, logger *slog.Logger) (string, string, error) {
+// If renderer is non-nil, agent events are rendered to the terminal in addition
+// to being logged to the log file.
+func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
 	model, ok := agent.ModelByID(cfg.Model)
 	if !ok {
 		return "", "", fmt.Errorf("unknown model: %q", cfg.Model)
@@ -251,7 +386,16 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	logger.Info("running agent", logAttrs...)
 	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
 
-	handler := &logEventHandler{logger: logger, step: stepName}
+	logHandler := newLogEventHandler(logger, stepName)
+	var renderHandler *rendererEventHandler
+
+	// Build the event handler: log-only or composite (log + renderer).
+	var handler agent.EventHandler = logHandler
+	if renderer != nil {
+		renderHandler = &rendererEventHandler{r: renderer}
+		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, renderHandler}}
+	}
+
 	var opts []agent.ExecuteOption
 	opts = append(opts,
 		agent.WithProviderWorkDir(workDir),
@@ -296,21 +440,33 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
 	}
 
-	output := resolveOutput(result.Text, handler, logger)
-	return output, result.SessionID, nil
+	// Prefer renderHandler for plan file detection (it tracks the same signals).
+	planHandler := logHandler
+	if renderHandler != nil && renderHandler.planFilePath != "" {
+		planHandler = nil
+	}
+	if planHandler != nil {
+		return resolveOutput(result.Text, logHandler, logger), result.SessionID, nil
+	}
+	return resolveOutputFromPath(result.Text, renderHandler.planFilePath, logger), result.SessionID, nil
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.
 func resolveOutput(agentText string, handler *logEventHandler, logger *slog.Logger) string {
-	if handler.planFilePath == "" {
+	return resolveOutputFromPath(agentText, handler.planFilePath, logger)
+}
+
+// resolveOutputFromPath reads a plan file if the path is non-empty, falling back to agentText.
+func resolveOutputFromPath(agentText, planFilePath string, logger *slog.Logger) string {
+	if planFilePath == "" {
 		return agentText
 	}
-	planContent, err := os.ReadFile(handler.planFilePath)
+	planContent, err := os.ReadFile(planFilePath)
 	if err != nil {
-		logger.Warn("could not read plan file, using agent text output", "path", handler.planFilePath, "error", err)
+		logger.Warn("could not read plan file, using agent text output", "path", planFilePath, "error", err)
 		return agentText
 	}
-	logger.Debug("using plan file content", "path", handler.planFilePath)
+	logger.Debug("using plan file content", "path", planFilePath)
 	return string(planContent)
 }
 

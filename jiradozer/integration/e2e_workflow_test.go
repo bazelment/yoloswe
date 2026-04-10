@@ -205,7 +205,7 @@ func TestE2E_PlanStep_Smoke(t *testing.T) {
 		MaxBudgetUSD:   1.0,
 	}
 
-	output, sessionID, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", logger)
+	output, sessionID, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err, "plan step should succeed")
 	assert.NotEmpty(t, output, "plan output should not be empty")
 	assert.NotEmpty(t, sessionID, "should return a session ID")

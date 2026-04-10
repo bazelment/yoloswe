@@ -17,6 +17,19 @@ const (
 	ColorNever
 )
 
+// ParseColorMode converts a string to a ColorMode.
+// Returns ColorAuto for unrecognized values.
+func ParseColorMode(s string) ColorMode {
+	switch s {
+	case "always":
+		return ColorAlways
+	case "never":
+		return ColorNever
+	default:
+		return ColorAuto
+	}
+}
+
 // Palette controls whether ANSI color codes are emitted.
 type Palette struct {
 	enabled bool

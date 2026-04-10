@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	ghtracker "github.com/bazelment/yoloswe/jiradozer/tracker/github"
@@ -41,6 +42,8 @@ func main() {
 		maxConcurrent   int
 		branchPrefix    string
 		verbose         bool
+		verbosity       string
+		color           string
 		description     string
 		descriptionFile string
 		planFile        string
@@ -64,6 +67,8 @@ func main() {
 				maxConcurrent:   maxConcurrent,
 				branchPrefix:    branchPrefix,
 				verbose:         verbose,
+				verbosity:       verbosity,
+				color:           color,
 				description:     description,
 				descriptionFile: descriptionFile,
 				planFile:        planFile,
@@ -83,7 +88,9 @@ func main() {
 	rootCmd.Flags().StringArrayVar(&sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	rootCmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
-	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
+	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose output (shorthand for --verbosity=verbose)")
+	rootCmd.Flags().StringVar(&verbosity, "verbosity", "normal", "Output verbosity: quiet, normal, verbose, debug")
+	rootCmd.Flags().StringVar(&color, "color", "auto", "Color output: auto, always, never")
 	rootCmd.Flags().StringVar(&description, "description", "", "Task description for local mode (no external tracker needed)")
 	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
 	rootCmd.Flags().StringVar(&planFile, "plan-file", "", "Plan file for build step (use - for stdin)")
@@ -97,17 +104,19 @@ func main() {
 }
 
 type runArgs struct {
-	issueID         string
+	description     string
+	planFile        string
 	configPath      string
 	workDir         string
 	modelID         string
 	runStep         string
 	autoApprove     string
 	branchPrefix    string
-	description     string
+	issueID         string
+	color           string
 	descriptionFile string
-	planFile        string
 	planContent     string
+	verbosity       string
 	sourceFilters   []string
 	pollInterval    time.Duration
 	maxBudget       float64
@@ -116,27 +125,42 @@ type runArgs struct {
 }
 
 func run(ctx context.Context, args runArgs) error {
-	// Set up logger with dual-write to stderr + log file.
-	level := slog.LevelInfo
-	if args.verbose {
-		level = slog.LevelDebug
+	// Resolve verbosity: --verbose is shorthand for --verbosity=verbose.
+	v := render.ParseVerbosity(args.verbosity)
+	if args.verbose && v < render.VerbosityVerbose {
+		v = render.VerbosityVerbose
 	}
+	colorMode := render.ParseColorMode(args.color)
+
+	// Set up logger: log file gets DEBUG-level detail, terminal output goes through renderer.
 	if home, err := os.UserHomeDir(); err == nil {
 		logDir := filepath.Join(home, ".jiradozer", "logs")
-		logFile := filepath.Join(logDir, fmt.Sprintf("jiradozer-%s-%d.log",
+		logPath := filepath.Join(logDir, fmt.Sprintf("jiradozer-%s-%d.log",
 			time.Now().Format("20060102-150405"), os.Getpid()))
-		closer, err := klogfmt.InitWithLogFile(logFile, klogfmt.WithLevel(level))
-		if err != nil {
-			klogfmt.Init(klogfmt.WithLevel(level))
-			slog.Warn("failed to open log file, logging to stderr only", "path", logFile, "error", err)
+		if err := os.MkdirAll(logDir, 0o755); err == nil {
+			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if err == nil {
+				defer f.Close()
+				// Log file only — all terminal output goes through the renderer.
+				slog.SetDefault(slog.New(klogfmt.New(f, klogfmt.WithLevel(slog.LevelDebug))))
+			} else {
+				klogfmt.Init(klogfmt.WithLevel(slog.LevelDebug))
+				slog.Warn("failed to open log file, logging to stderr only", "path", logPath, "error", err)
+			}
 		} else {
-			defer closer()
+			klogfmt.Init(klogfmt.WithLevel(slog.LevelDebug))
 		}
 	} else {
-		klogfmt.Init(klogfmt.WithLevel(level))
+		klogfmt.Init(klogfmt.WithLevel(slog.LevelDebug))
 		slog.Warn("could not determine home directory, logging to stderr only", "error", err)
 	}
 	logger := slog.Default()
+
+	// Create the terminal renderer for headless modes (not TUI).
+	renderer := render.New(os.Stderr,
+		render.WithVerbosity(v),
+		render.WithColorMode(colorMode),
+	)
 
 	// Log invocation banner with CLI args and working directory.
 	// Redact values of flags that may contain secrets.
@@ -316,10 +340,11 @@ func run(ctx context.Context, args runArgs) error {
 
 	// Local description mode.
 	if args.description != "" {
-		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, cfg, logger)
+		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, cfg, renderer, logger)
 	}
 
 	// Multi-issue TUI mode (only when no --issue flag was given).
+	// TUI owns the terminal — don't use the renderer.
 	if cfg.Source.HasSource() && args.issueID == "" {
 		return runMultiIssue(ctx, issueTracker, cfg, logger)
 	}
@@ -333,11 +358,12 @@ func run(ctx context.Context, args runArgs) error {
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
 
 	if args.runStep != "" {
-		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, logger)
+		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, renderer, logger)
 	}
 
 	// Run the full workflow.
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
+	wf.SetRenderer(renderer)
 	return wf.Run(ctx)
 }
 
@@ -430,7 +456,7 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	}
 }
 
-func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
+func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger) error {
 	lt, ok := issueTracker.(*local.Tracker)
 	if !ok {
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
@@ -446,14 +472,15 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
 
 	if runStep != "" {
-		return runSingleStep(ctx, runStep, issue, cfg, planContent, logger)
+		return runSingleStep(ctx, runStep, issue, cfg, planContent, renderer, logger)
 	}
 
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
+	wf.SetRenderer(renderer)
 	return wf.Run(ctx)
 }
 
-func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, logger *slog.Logger) error {
+func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, renderer *render.Renderer, logger *slog.Logger) error {
 	stepCfg, ok := cfg.StepByName(stepName)
 	if !ok {
 		return fmt.Errorf("unknown step %q (valid: %s)", stepName, strings.Join(allSteps, ", "))
@@ -480,10 +507,10 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	}
 
 	if len(resolved.Rounds) > 0 {
-		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, logger)
+		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, renderer, logger)
 	}
 
-	output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, resolved, cfg.WorkDir, "", "", logger)
+	output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
 	}
@@ -498,7 +525,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	return nil
 }
 
-func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.PromptData, resolved jiradozer.StepConfig, workDir string, logger *slog.Logger) error {
+func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.PromptData, resolved jiradozer.StepConfig, workDir string, renderer *render.Renderer, logger *slog.Logger) error {
 	totalRounds := len(resolved.Rounds)
 	logger.Info("step: "+stepName, "rounds", totalRounds)
 
@@ -521,7 +548,7 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			roundCfg := jiradozer.ResolveRound(round, resolved)
 			var sessionID string
 			var err error
-			output, sessionID, err = jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", logger)
+			output, sessionID, err = jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
 			}

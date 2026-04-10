@@ -257,7 +257,7 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 	}
 
 	if r.verbosity >= VerbosityNormal {
-		summary := formatToolInput(name, input)
+		summary := FormatToolInput(name, input)
 		if summary != "" {
 			fmt.Fprintf(r.out, "%s%s%s\n", r.color(ColorYellow), summary, r.color(ColorReset))
 		} else {

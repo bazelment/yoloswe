@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// formatToolInput formats tool input for inline display after the tool name bracket.
+// FormatToolInput formats tool input for inline display after the tool name bracket.
 // Returns an empty string for tools that should be handled specially.
-func formatToolInput(name string, input map[string]interface{}) string {
+func FormatToolInput(name string, input map[string]interface{}) string {
 	switch name {
 	case "Read":
 		if path, ok := input["file_path"].(string); ok {

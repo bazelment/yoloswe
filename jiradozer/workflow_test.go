@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
@@ -612,7 +613,7 @@ func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 	wf.lastCommentAt = staleTime
 
 	// Stub runStepAgent so runStep executes without invoking a real agent.
-	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *slog.Logger) (string, string, error) {
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (string, string, error) {
 		return "step output", "session-1", nil
 	}
 
@@ -660,7 +661,7 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 	wf.lastCommentAt = staleTime
 
 	// Stub runStepAgent so rounds execute without a real agent.
-	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *slog.Logger) (string, string, error) {
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (string, string, error) {
 		return "round output", "", nil
 	}
 
@@ -700,7 +701,7 @@ func TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection(t *testing.T) {
 	wf.feedback = "please fix the tests"
 
 	var capturedFeedback string
-	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, feedback string, _ string, _ *slog.Logger) (string, string, error) {
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, feedback string, _ string, _ *render.Renderer, _ *slog.Logger) (string, string, error) {
 		capturedFeedback = feedback
 		return "agent output", "", nil
 	}
