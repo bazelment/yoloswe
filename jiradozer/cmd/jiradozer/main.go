@@ -323,12 +323,8 @@ func run(ctx context.Context, args runArgs) error {
 		return fmt.Errorf("either --issue, --filter, --description/--description-file, or source.filters in config is required")
 	}
 
-	// --dry-run is a team-mode-only flag: single-issue and local description
-	// modes already give the caller an obvious command to run.
-	if cfg.Source.DryRun {
-		if args.issueID != "" || args.description != "" {
-			return fmt.Errorf("--dry-run only applies to team mode (--filter); --issue and --description do not support it")
-		}
+	if err := validateDryRunMode(cfg, args); err != nil {
+		return err
 	}
 
 	// Apply auto-approve overrides.
@@ -413,6 +409,19 @@ func (a *wtAdapter) NewWorktree(ctx context.Context, branch, baseBranch, goal st
 
 func (a *wtAdapter) RemoveWorktree(ctx context.Context, nameOrBranch string, deleteBranch bool) error {
 	return a.mgr.Remove(ctx, nameOrBranch, deleteBranch, false)
+}
+
+// validateDryRunMode enforces that --dry-run is only used with team mode.
+// Single-issue and local description modes already give the caller an
+// obvious command to run, so dry-run is rejected in those paths.
+func validateDryRunMode(cfg *jiradozer.Config, args runArgs) error {
+	if !cfg.Source.DryRun {
+		return nil
+	}
+	if args.issueID != "" || args.description != "" {
+		return fmt.Errorf("--dry-run only applies to team mode (--filter); --issue and --description do not support it")
+	}
+	return nil
 }
 
 // resolveRepoName picks the repo name used by wt.Manager (for worktree

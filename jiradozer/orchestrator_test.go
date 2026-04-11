@@ -198,6 +198,28 @@ func TestOrchestrator_DryRun(t *testing.T) {
 	require.Contains(t, buf.String(), "bramble new-session")
 }
 
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty string", "", "''"},
+		{"simple word", "hello", "'hello'"},
+		{"with spaces", "hello world", "'hello world'"},
+		{"shell metachars are inert inside quotes", "$(whoami) && rm -rf / `id` !echo", "'$(whoami) && rm -rf / `id` !echo'"},
+		{"newline preserved literally", "line1\nline2", "'line1\nline2'"},
+		{"single quote escaped via close-escape-reopen", "it's", `'it'\''s'`},
+		{"multiple single quotes", "a'b'c", `'a'\''b'\''c'`},
+		{"only single quote", "'", `''\'''`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shellQuote(tt.in))
+		})
+	}
+}
+
 func TestOrchestrator_Snapshot(t *testing.T) {
 	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
