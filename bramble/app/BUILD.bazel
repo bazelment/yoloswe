@@ -64,6 +64,7 @@ go_test(
         "filetree_open_test.go",
         "helpoverlay_test.go",
         "merge_test.go",
+        "new_session_cross_repo_test.go",
         "output_test.go",
         "playback_test.go",
         "quick_switch_test.go",
