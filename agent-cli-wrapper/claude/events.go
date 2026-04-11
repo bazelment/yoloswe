@@ -84,6 +84,9 @@ type ReadyEvent struct {
 // Type returns the event type.
 func (e ReadyEvent) Type() EventType { return EventTypeReady }
 
+func (e ReadyEvent) StreamEventKind() agentstream.EventKind { return agentstream.KindReady }
+func (e ReadyEvent) StreamSessionID() string                { return e.Info.SessionID }
+
 // TextEvent contains streaming text chunks.
 type TextEvent struct {
 	Text       string

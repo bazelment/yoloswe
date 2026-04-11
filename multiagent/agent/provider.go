@@ -117,6 +117,13 @@ type EventHandler interface {
 	OnError(err error, context string)
 }
 
+// SessionInitHandler is an optional interface that EventHandler implementations
+// can implement to receive session initialization metadata (e.g. session ID).
+// The bridge calls OnSessionInit when the provider emits a ready/init event.
+type SessionInitHandler interface {
+	OnSessionInit(sessionID string)
+}
+
 // Provider is the pluggable interface for agent backends.
 // Adding a new backend (Gemini, Codex, etc.) means implementing this interface.
 type Provider interface {
