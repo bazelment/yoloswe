@@ -1215,6 +1215,21 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 				}
 				safetyResult := result
 				s.mu.Lock()
+				// Fast path: all bg tasks already completed before this
+				// ResultMessage arrived (task_updated/task_notification arrived
+				// first). In that case liveTasks is already empty and no future
+				// task event will call maybeReleaseSuppression, so we must
+				// finalize now rather than hanging until the safety timer fires.
+				//
+				// Only applies when tasks were actually registered (Monitor
+				// path); bg-Bash turns never register tasks and use the
+				// continuation-ResultMessage release path instead.
+				if s.turnManager.AllTasksCompleted() {
+					s.bgState.accumulatedUsage = TurnUsage{}
+					s.mu.Unlock()
+					s.finalizeTurn(safetyResult)
+					return
+				}
 				s.bgState.active = true
 				s.bgState.timerFired = false // reset for this turn's timer
 				s.bgState.heldResult = &safetyResult

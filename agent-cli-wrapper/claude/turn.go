@@ -48,14 +48,15 @@ var backgroundTools = map[string]bool{
 
 // turnState tracks the state of a single turn.
 type turnState struct {
-	StartTime     time.Time
-	UserMessage   interface{}
-	Tools         map[string]*toolState
-	liveTasks     map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
-	FullText      string
-	FullThinking  string
-	ContentBlocks []ContentBlock
-	Number        int
+	StartTime        time.Time
+	UserMessage      interface{}
+	Tools            map[string]*toolState
+	liveTasks        map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
+	FullText         string
+	FullThinking     string
+	ContentBlocks    []ContentBlock
+	tasksEverTracked int // counts task IDs ever added via TrackTask; never decremented
+	Number           int
 }
 
 // isBackgroundToolUse reports whether a tool_use block represents background
@@ -72,17 +73,6 @@ func isBackgroundToolUse(block ContentBlock) bool {
 	return backgroundTools[block.ToolName]
 }
 
-// shouldSuppressForBgTasks returns true when the turn has live background
-// work and must not be finalized on the intermediate ResultMessage.
-//
-// The turn is "live" if:
-//   - every non-cancelled tool_use is a background tool (run_in_background or
-//     in backgroundTools), AND
-//   - at least one such non-cancelled bg tool exists, OR the turn has
-//     registered task IDs via task_started that are still running.
-//
-// When any non-bg tool is present, the ResultMessage represents completion
-// of synchronous work and must not be suppressed.
 // cancelledToolIDs returns the set of tool_use IDs whose tool_result was an
 // error, meaning the tool invocation was cancelled before it ran.
 func (turn *turnState) cancelledToolIDs() map[string]bool {
@@ -95,6 +85,17 @@ func (turn *turnState) cancelledToolIDs() map[string]bool {
 	return cancelled
 }
 
+// shouldSuppressForBgTasks returns true when the turn has live background
+// work and must not be finalized on the intermediate ResultMessage.
+//
+// The turn is "live" if:
+//   - every non-cancelled tool_use is a background tool (run_in_background or
+//     in backgroundTools), AND
+//   - at least one such non-cancelled bg tool exists, OR the turn has
+//     registered task IDs via task_started that are still running.
+//
+// When any non-bg tool is present, the ResultMessage represents completion
+// of synchronous work and must not be suppressed.
 func (turn *turnState) shouldSuppressForBgTasks() bool {
 	if turn == nil {
 		return false
@@ -367,23 +368,18 @@ func (tm *turnManager) TrackTask(taskID string) {
 		tm.currentTurn.liveTasks = make(map[string]struct{})
 	}
 	tm.currentTurn.liveTasks[taskID] = struct{}{}
+	tm.currentTurn.tasksEverTracked++
 }
 
-// UntrackTask removes a task ID from the current turn's live set. Returns
-// hadTask (task was previously tracked) and wasLast (live set is now empty
-// after removal). Callers can combine these to decide whether suppression
-// should release.
-func (tm *turnManager) UntrackTask(taskID string) (hadTask bool, wasLast bool) {
+// UntrackTask removes a task ID from the current turn's live set.
+// No-op if the task is not tracked or there is no current turn.
+func (tm *turnManager) UntrackTask(taskID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil || taskID == "" {
-		return false, false
-	}
-	if _, ok := tm.currentTurn.liveTasks[taskID]; !ok {
-		return false, false
+		return
 	}
 	delete(tm.currentTurn.liveTasks, taskID)
-	return true, len(tm.currentTurn.liveTasks) == 0
 }
 
 // HasLiveTasks reports whether the current turn has any registered live
@@ -395,6 +391,19 @@ func (tm *turnManager) HasLiveTasks() bool {
 		return false
 	}
 	return len(tm.currentTurn.liveTasks) > 0
+}
+
+// AllTasksCompleted reports whether the current turn had tasks registered via
+// task_started and all of them have since reached a terminal state. Returns
+// false if no tasks were ever registered (e.g. bg-Bash turns that use the
+// continuation-ResultMessage release path instead of task events).
+func (tm *turnManager) AllTasksCompleted() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if tm.currentTurn == nil {
+		return false
+	}
+	return tm.currentTurn.tasksEverTracked > 0 && len(tm.currentTurn.liveTasks) == 0
 }
 
 // GetTurnByNumber returns a turn by its number.

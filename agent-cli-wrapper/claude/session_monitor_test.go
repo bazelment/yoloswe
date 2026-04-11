@@ -356,3 +356,39 @@ func TestMonitor_TaskNotificationAlsoReleases(t *testing.T) {
 
 	waitForTurnComplete(t, s.events, time.Second)
 }
+
+// TestMonitor_TaskCompletesBeforeResultMessage verifies the race where
+// task_updated:completed arrives before ResultMessage. Without the fix,
+// handleResult would activate suppression with an empty liveTasks set and
+// no future task event would call maybeReleaseSuppression, leaving the turn
+// stuck until the safety timer fires.
+func TestMonitor_TaskCompletesBeforeResultMessage(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "true"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-fast", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// task_updated:completed arrives BEFORE the ResultMessage — the fast-exit race.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-fast", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// Now the ResultMessage arrives. All live tasks are already gone; suppression
+	// must finalize immediately without waiting for the safety timer.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
