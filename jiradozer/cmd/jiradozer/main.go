@@ -538,6 +538,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.PromptData, resolved jiradozer.StepConfig, workDir string, renderer *render.Renderer, logger *slog.Logger) error {
 	totalRounds := len(resolved.Rounds)
 	logger.Info("step: "+stepName, "rounds", totalRounds)
+	renderer.Status(fmt.Sprintf("Step: %s (%d rounds)", stepName, totalRounds))
 
 	var allOutputs []string
 	var sessionIDs []string
@@ -546,6 +547,7 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			return fmt.Errorf("run-step %s: %w", stepName, ctx.Err())
 		}
 		logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
+		renderer.Status(fmt.Sprintf("Round %d/%d", i+1, totalRounds))
 
 		var output string
 		if round.IsCommand() {
