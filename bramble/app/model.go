@@ -757,6 +757,7 @@ type (
 		prompt       string
 		model        string
 		worktreePath string // if set, starts on this path instead of selected worktree
+		repoName     string // if set and != m.repoName, starts on that repo's manager
 	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }
