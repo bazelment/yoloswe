@@ -33,6 +33,7 @@ const (
 	SystemSubtypeTaskNotification    SystemSubtype = "task_notification"
 	SystemSubtypeTaskStarted         SystemSubtype = "task_started"
 	SystemSubtypeTaskProgress        SystemSubtype = "task_progress"
+	SystemSubtypeTaskUpdated         SystemSubtype = "task_updated"
 	SystemSubtypeSessionStateChanged SystemSubtype = "session_state_changed"
 	SystemSubtypeFilesPersisted      SystemSubtype = "files_persisted"
 	SystemSubtypeElicitationComplete SystemSubtype = "elicitation_complete"
@@ -212,6 +213,32 @@ type TaskProgressPayload struct {
 	Usage        TaskUsage `json:"usage"`
 }
 
+// TaskUpdatedPatch is the wire-safe subset of TaskState fields that changed
+// since the last update. All fields are optional — only the ones that
+// actually changed are present on the wire. Mirrors the upstream Zod schema
+// in the Claude Code CLI (excludes abortController, unregisterCleanup, and
+// internal message-buffer fields that are not JSON-safe).
+type TaskUpdatedPatch struct {
+	Status         *string `json:"status,omitempty"`
+	Description    *string `json:"description,omitempty"`
+	EndTime        *int64  `json:"end_time,omitempty"`
+	TotalPausedMs  *int64  `json:"total_paused_ms,omitempty"`
+	Error          *string `json:"error,omitempty"`
+	IsBackgrounded *bool   `json:"is_backgrounded,omitempty"`
+}
+
+// TaskUpdatedPayload is emitted whenever the CLI mutates a registered
+// background task — e.g. Monitor or Bash run_in_background state machine
+// transitions (pending→running→completed/failed/killed), description
+// updates, backgrounding toggles. Unlike most system payloads this frame
+// carries no uuid/session_id: it is a state patch, not a logged event.
+//
+// Status enum on the wire: pending | running | completed | failed | killed.
+type TaskUpdatedPayload struct {
+	Patch  TaskUpdatedPatch `json:"patch"`
+	TaskID string           `json:"task_id"`
+}
+
 // SessionStateChangedPayload mirrors the CLI's own session state machine.
 // "idle" is the authoritative turn-over signal (fires after heldBackResult
 // flushes and the background-agent loop exits).
@@ -304,6 +331,8 @@ func (m SystemMessage) DecodePayload() (any, error) {
 		return decode(&TaskStartedPayload{})
 	case SystemSubtypeTaskProgress:
 		return decode(&TaskProgressPayload{})
+	case SystemSubtypeTaskUpdated:
+		return decode(&TaskUpdatedPayload{})
 	case SystemSubtypeSessionStateChanged:
 		return decode(&SessionStateChangedPayload{})
 	case SystemSubtypeFilesPersisted:
@@ -397,6 +426,13 @@ func (m SystemMessage) AsTaskStarted() (*TaskStartedPayload, bool) {
 func (m SystemMessage) AsTaskProgress() (*TaskProgressPayload, bool) {
 	p, _ := m.DecodePayload()
 	v, ok := p.(*TaskProgressPayload)
+	return v, ok
+}
+
+// AsTaskUpdated returns the task_updated payload.
+func (m SystemMessage) AsTaskUpdated() (*TaskUpdatedPayload, bool) {
+	p, _ := m.DecodePayload()
+	v, ok := p.(*TaskUpdatedPayload)
 	return v, ok
 }
 

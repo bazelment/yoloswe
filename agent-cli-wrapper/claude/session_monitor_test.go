@@ -1,0 +1,663 @@
+package claude
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
+)
+
+var notErr = false // reusable *bool for ToolResultBlock.IsError across tests
+
+// makeSystemMessage builds a protocol.SystemMessage from a JSON map by
+// round-tripping through UnmarshalJSON so the raw payload is captured for
+// DecodePayload to re-decode typed sub-payloads.
+func makeSystemMessage(t *testing.T, v map[string]interface{}) protocol.SystemMessage {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg protocol.SystemMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+// expectNoTurnComplete asserts no TurnCompleteEvent arrives within the window.
+func expectNoTurnComplete(t *testing.T, events <-chan Event, window time.Duration) {
+	t.Helper()
+	deadline := time.After(window)
+	for {
+		select {
+		case event := <-events:
+			if _, ok := event.(TurnCompleteEvent); ok {
+				t.Fatal("unexpected TurnCompleteEvent — turn should still be suppressed")
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// TestMonitor_HappyPath verifies the end-to-end Monitor lifecycle:
+// a Monitor tool_use → task_started → ResultMessage is suppressed → terminal
+// task_updated releases the suppression and fires TurnCompleteEvent.
+func TestMonitor_HappyPath(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{
+			"command":     "sleep 60",
+			"description": "wait for reviews",
+			"timeout_ms":  float64(300000),
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started (task task-abc, timeout 300000ms).", IsError: &notErr},
+	})
+
+	// task_started arrives.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type":        "system",
+		"subtype":     "task_started",
+		"session_id":  "sess-1",
+		"uuid":        "evt-1",
+		"task_id":     "task-abc",
+		"tool_use_id": "tool-1",
+		"description": "wait for reviews",
+		"task_type":   "monitor",
+	}))
+
+	// shouldSuppressForBgTasks must be true — Monitor is in backgroundTools.
+	turn := s.turnManager.CurrentTurn()
+	if !turn.shouldSuppressForBgTasks() {
+		t.Error("shouldSuppressForBgTasks should return true for a Monitor tool")
+	}
+	if !s.turnManager.HasLiveTasks() {
+		t.Error("expected HasLiveTasks=true after task_started")
+	}
+
+	// ResultMessage arrives — should suppress, not emit TurnCompleteEvent.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	expectNoTurnComplete(t, s.events, 100*time.Millisecond)
+
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	heldTurn := 0
+	if s.bgState.heldResult != nil {
+		heldTurn = s.bgState.heldResult.TurnNumber
+	}
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Error("expected suppression to be active after Monitor ResultMessage")
+	}
+	if heldTurn != turn.Number {
+		t.Errorf("heldResult.TurnNumber=%d, want %d", heldTurn, turn.Number)
+	}
+
+	// Terminal task_updated releases the suppression.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type":       "system",
+		"subtype":    "task_updated",
+		"session_id": "sess-1",
+		"uuid":       "evt-2",
+		"task_id":    "task-abc",
+		"patch": map[string]interface{}{
+			"status":   "completed",
+			"end_time": float64(1234567890),
+		},
+	}))
+
+	// TurnCompleteEvent should now fire.
+	waitForTurnComplete(t, s.events, time.Second)
+
+	s.mu.RLock()
+	stillActive := s.bgState.active
+	s.mu.RUnlock()
+	if stillActive {
+		t.Error("bgState.active should be cleared after release")
+	}
+	if s.turnManager.HasLiveTasks() {
+		t.Error("live tasks should be empty after terminal task_updated")
+	}
+}
+
+// TestMonitor_FailedTaskReleases verifies that task_updated:failed also
+// releases suppression — a failed bg task still signals the turn is done.
+func TestMonitor_FailedTaskReleases(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "false"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-abc", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	errStr := "subprocess exited nonzero"
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-abc",
+		"patch": map[string]interface{}{
+			"status": "failed",
+			"error":  errStr,
+		},
+	}))
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_TwoTasksReleaseRequiresBoth verifies that when two Monitor tasks
+// are live, only the second terminal task_updated releases the suppression.
+func TestMonitor_TwoTasksReleaseRequiresBoth(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "sleep 10"}},
+		{ID: "tool-2", Name: "Monitor", Input: map[string]interface{}{"command": "sleep 10"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-A", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u2",
+		"task_id": "task-B", "tool_use_id": "tool-2", "task_type": "monitor",
+	}))
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// First task completes — still suppressed.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u3",
+		"task_id": "task-A",
+		"patch":   map[string]interface{}{"status": "completed"},
+	}))
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+	if !s.turnManager.HasLiveTasks() {
+		t.Error("expected one live task remaining after first terminal")
+	}
+
+	// Second task completes — now release.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u4",
+		"task_id": "task-B",
+		"patch":   map[string]interface{}{"status": "completed"},
+	}))
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_MixedWithNonBgDoesNotSuppress verifies that when a turn has
+// both a Monitor tool and a regular non-bg tool, the ResultMessage represents
+// real completion and must not be suppressed. task_started for the Monitor
+// still registers a live task, but shouldSuppressForBgTasks short-circuits
+// on the non-bg tool.
+func TestMonitor_MixedWithNonBgDoesNotSuppress(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "sleep 60"}},
+		{ID: "tool-2", Name: "Read", Input: map[string]interface{}{"file_path": "/tmp/x"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "file contents", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-A", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.shouldSuppressForBgTasks() {
+		t.Error("non-bg Read tool present → shouldSuppressForBgTasks must be false")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_HonorsTimeoutMs verifies that Monitor's tool_use.timeout_ms
+// extends the safety timer past the configured default.
+func TestMonitor_HonorsTimeoutMs(t *testing.T) {
+	// Configure a tiny default. Monitor carries a much larger explicit timeout.
+	s := newTestSession(t, WithBgTaskSafetyTimeout(10*time.Millisecond))
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{
+			"command":    "sleep 60",
+			"timeout_ms": float64(600000), // 10 minutes
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	// longestBackgroundToolTimeoutMs should pick up 600000.
+	turn := s.turnManager.CurrentTurn()
+	if got := turn.longestBackgroundToolTimeoutMs(); got != 600000 {
+		t.Errorf("longestBackgroundToolTimeoutMs=%d, want 600000", got)
+	}
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-A", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	// If the Monitor timeout_ms were ignored, the 10ms default would fire almost
+	// instantly and emit TurnCompleteEvent. Observe a window much larger than
+	// that to confirm suppression survives.
+	expectNoTurnComplete(t, s.events, 150*time.Millisecond)
+
+	// Clean up the armed timer.
+	s.mu.Lock()
+	s.bgState.reset()
+	s.mu.Unlock()
+}
+
+// TestMonitor_NonTerminalStatusDoesNotRelease verifies task_updated with
+// non-terminal status (pending/running) does not release suppression.
+func TestMonitor_NonTerminalStatusDoesNotRelease(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "sleep 60"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-A", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	// Running status patch — must not release.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-A",
+		"patch":   map[string]interface{}{"status": "running"},
+	}))
+
+	expectNoTurnComplete(t, s.events, 100*time.Millisecond)
+
+	if !s.turnManager.HasLiveTasks() {
+		t.Error("expected task-A still live after non-terminal patch")
+	}
+
+	s.mu.Lock()
+	s.bgState.reset()
+	s.mu.Unlock()
+}
+
+// TestMonitor_TaskNotificationAlsoReleases verifies task_notification provides
+// a belt-and-suspenders release path: if task_updated:completed never arrives
+// but task_notification does, suppression still releases.
+func TestMonitor_TaskNotificationAlsoReleases(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-A", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-A", "tool_use_id": "tool-1",
+		"status": "completed",
+	}))
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_TaskCompletesBeforeResultMessage verifies the race where
+// task_updated:completed arrives before ResultMessage. Without the fix,
+// handleResult would activate suppression with an empty liveTasks set and
+// no future task event would call maybeReleaseSuppression, leaving the turn
+// stuck until the safety timer fires.
+func TestMonitor_TaskCompletesBeforeResultMessage(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "true"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-fast", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// task_updated:completed arrives BEFORE the ResultMessage — the fast-exit race.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-fast", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// Now the ResultMessage arrives. All live tasks are already gone; suppression
+	// must finalize immediately without waiting for the safety timer.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_TaskNotificationBeforeResultMessage is the symmetric race to
+// TestMonitor_TaskCompletesBeforeResultMessage: task_notification arrives
+// before ResultMessage. Both release paths (task_updated and task_notification)
+// must correctly trigger the AllTasksCompleted fast path.
+func TestMonitor_TaskNotificationBeforeResultMessage(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-fast2", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// task_notification arrives BEFORE the ResultMessage.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-fast2", "tool_use_id": "tool-1",
+		"status": "completed",
+	}))
+
+	// ResultMessage arrives after notification; must finalize immediately.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_MixedWithCancelledBgBashFastPaths verifies that a turn with a
+// Monitor task and a CANCELLED bg-Bash tool still uses the AllTasksCompleted
+// fast path when the Monitor task completes. A cancelled bg-Bash tool never
+// produces a continuation ResultMessage, so the fast path should apply.
+func TestMonitor_MixedWithCancelledBgBashFastPaths(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	// tool-2 (bg-Bash) is cancelled (IsError=true).
+	isErrTrue := true
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Cancelled: parallel tool call errored", IsError: &isErrTrue},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// Monitor completes BEFORE the ResultMessage.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// ResultMessage arrives — cancelled bg-Bash has no continuation, so fast
+	// path must apply and the turn must complete immediately.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg tests the reverse
+// ordering: ResultMessage arrives first (suppressing the turn), then Monitor
+// task_updated:completed arrives. maybeReleaseSuppression must NOT release
+// while the uncancelled bg-Bash continuation is still pending.
+func TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed3", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// ResultMessage arrives first (normal ordering for this scenario).
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	// Turn is now suppressed (safety timer active, bgState.active=true).
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Monitor task completes AFTER the ResultMessage. maybeReleaseSuppression
+	// must NOT fire because bg-Bash continuation is still pending.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed3", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// Turn must still be suppressed after Monitor completes.
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Verify suppression is still active.
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Error("expected suppression to remain active while bg-Bash continuation is still pending")
+	}
+
+	// Clean up.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+		s.bgState.timer = nil
+	}
+	s.bgState.active = false
+	s.mu.Unlock()
+}
+
+// TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg_ThenBashContinuation
+// is the end-to-end version of the reverse ordering test. It exercises the
+// full release path: ResultMessage arrives (suppresses), Monitor completes
+// (still suppressed), then bg-Bash continuation ResultMessage arrives and
+// releases the held turn, producing a TurnCompleteEvent.
+func TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg_ThenBashContinuation(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed4", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// ResultMessage arrives first — suppresses the turn.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Monitor task completes — still suppressed, bg-Bash continuation pending.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed4", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// bg-Bash continuation ResultMessage arrives (CLI auto-continues on the same
+	// turn; no new StartTurn is called). handleResult clears bgState.active and
+	// the turn finalizes normally.
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
+// TestMonitor_MixedWithBgBashDoesNotFastPath verifies that a turn containing
+// both a Monitor tool and a bg-Bash (run_in_background) tool does NOT use the
+// AllTasksCompleted fast path when the Monitor task completes first. The turn
+// must remain suppressed (via the safety timer) waiting for the bg-Bash
+// continuation ResultMessage that the CLI will send automatically.
+func TestMonitor_MixedWithBgBashDoesNotFastPath(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// Monitor completes BEFORE the ResultMessage — but bg-Bash is still running.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// ResultMessage arrives — should suppress (not fast-path) because bg-Bash is pending.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	// Turn must still be suppressed — bg-Bash continuation hasn't arrived.
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Verify suppression is active (safety timer armed, not fast-pathed).
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Error("expected suppression to be active while bg-Bash continuation is pending")
+	}
+
+	// Clean up the safety timer to avoid test leaks.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+		s.bgState.timer = nil
+	}
+	s.bgState.active = false
+	s.mu.Unlock()
+}
+
+// TestMonitor_MixedWithBgBashDoesNotFastPath_ThenBashContinuation is the
+// end-to-end version: Monitor completes before ResultMessage (no fast-path),
+// then ResultMessage suppresses, then bg-Bash continuation ResultMessage
+// arrives and releases the held turn.
+func TestMonitor_MixedWithBgBashDoesNotFastPath_ThenBashContinuation(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// Monitor completes BEFORE the ResultMessage — bg-Bash is still running.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// ResultMessage suppresses (AllTasksCompleted returns false due to bg-Bash).
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// bg-Bash continuation ResultMessage arrives (same turn, no new StartTurn).
+	// handleResult clears bgState.active and the turn finalizes normally.
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	waitForTurnComplete(t, s.events, time.Second)
+}

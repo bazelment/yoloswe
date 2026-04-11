@@ -10,6 +10,7 @@ go_test(
     srcs = [
         "config_test.go",
         "content_blocks_test.go",
+        "monitor_test.go",
         "query_test.go",
         "sdk_mcp_test.go",
         "sdk_mcp_typed_test.go",
