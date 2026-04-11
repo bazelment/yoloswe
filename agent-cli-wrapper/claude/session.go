@@ -1191,11 +1191,16 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 				// indefinite blocking.
 				//
 				// Two release paths exist:
-				//   1. A continuation ResultMessage (auto-continued bg-Bash
-				//      path — handleResult detects bgState.active and completes).
+				//   1. A continuation ResultMessage (auto-continued bg-Bash path).
+				//      The CLI auto-starts a new assistant turn when bg work
+				//      finishes. handleResult clears bgState.active at the top,
+				//      then the new turn has no bg tools so shouldSuppressForBgTasks
+				//      returns false and the turn completes normally.
 				//   2. All registered tasks reach a terminal state via
 				//      task_updated/task_notification (Monitor path —
-				//      maybeReleaseSuppression fires from handleSystem).
+				//      maybeReleaseSuppression fires from handleSystem; or the
+				//      AllTasksCompleted fast path fires if tasks completed before
+				//      this ResultMessage arrived).
 				//
 				// The timeout is max(configured, longest bg tool timeout_ms,
 				// 1h upper clamp) so it never releases before the agent's own

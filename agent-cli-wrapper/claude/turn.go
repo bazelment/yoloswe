@@ -403,13 +403,16 @@ func (tm *turnManager) HasLiveTasks() bool {
 
 // AllTasksCompleted reports whether the current turn had tasks registered via
 // task_started, all of them have since reached a terminal state, and the turn
-// contains no bg-Bash (continuation) tools.
+// contains no uncancelled bg-Bash (continuation) tools.
 //
 // Background: Monitor tasks release suppression via terminal task events;
 // bg-Bash (run_in_background) releases via a continuation ResultMessage. A
 // turn that mixes both must NOT short-circuit on task completion alone —
 // the Bash continuation must still arrive. This method returns false for
 // mixed turns, deferring release to the continuation-ResultMessage path.
+//
+// Cancelled bg-Bash tools (IsError on their tool_result) never produce a
+// continuation, so they are excluded from the check.
 func (tm *turnManager) AllTasksCompleted() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -419,7 +422,22 @@ func (tm *turnManager) AllTasksCompleted() bool {
 	if tm.currentTurn.tasksEverTracked == 0 || len(tm.currentTurn.liveTasks) != 0 {
 		return false
 	}
-	return !tm.currentTurn.hasContinuationBgTools
+	if !tm.currentTurn.hasContinuationBgTools {
+		return true
+	}
+	// hasContinuationBgTools is set conservatively on tool_use append. Check
+	// whether any such tool is actually uncancelled (i.e. has a non-error
+	// tool_result) — cancelled bg-Bash tools never produce a continuation.
+	cancelled := tm.currentTurn.cancelledToolIDs()
+	for _, block := range tm.currentTurn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolUse &&
+			isBackgroundToolUse(block) &&
+			!backgroundTools[block.ToolName] &&
+			!cancelled[block.ToolUseID] {
+			return false // uncancelled bg-Bash present, wait for continuation
+		}
+	}
+	return true
 }
 
 // GetTurnByNumber returns a turn by its number.

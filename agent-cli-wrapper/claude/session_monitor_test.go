@@ -427,6 +427,45 @@ func TestMonitor_TaskNotificationBeforeResultMessage(t *testing.T) {
 	waitForTurnComplete(t, s.events, time.Second)
 }
 
+// TestMonitor_MixedWithCancelledBgBashFastPaths verifies that a turn with a
+// Monitor task and a CANCELLED bg-Bash tool still uses the AllTasksCompleted
+// fast path when the Monitor task completes. A cancelled bg-Bash tool never
+// produces a continuation ResultMessage, so the fast path should apply.
+func TestMonitor_MixedWithCancelledBgBashFastPaths(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	// tool-2 (bg-Bash) is cancelled (IsError=true).
+	isErrTrue := true
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Cancelled: parallel tool call errored", IsError: &isErrTrue},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// Monitor completes BEFORE the ResultMessage.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// ResultMessage arrives — cancelled bg-Bash has no continuation, so fast
+	// path must apply and the turn must complete immediately.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
 // TestMonitor_MixedWithBgBashDoesNotFastPath verifies that a turn containing
 // both a Monitor tool and a bg-Bash (run_in_background) tool does NOT use the
 // AllTasksCompleted fast path when the Monitor task completes first. The turn
