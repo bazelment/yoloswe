@@ -46,6 +46,7 @@ go_test(
         "sdk_mcp_typed_test.go",
         "session_bg_test.go",
         "session_dispatch_test.go",
+        "session_monitor_test.go",
         "turn_test.go",
     ],
     embed = [":claude"],

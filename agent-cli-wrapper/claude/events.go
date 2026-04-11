@@ -41,6 +41,8 @@ const (
 	EventTypeTaskProgress
 	// EventTypeTaskNotification fires when a background task completes/fails/stops.
 	EventTypeTaskNotification
+	// EventTypeTaskUpdated fires when a background task's state patch is emitted.
+	EventTypeTaskUpdated
 	// EventTypeHookLifecycle fires for hook_started/progress/response.
 	EventTypeHookLifecycle
 	// EventTypeRateLimit fires when the server's rate-limit state changes.
@@ -285,6 +287,25 @@ type TaskNotificationEvent struct {
 
 // Type returns the event type.
 func (e TaskNotificationEvent) Type() EventType { return EventTypeTaskNotification }
+
+// TaskUpdatedEvent fires on a background-task state patch. Status and
+// description are pointers because the upstream patch only carries fields
+// that actually changed — an unchanged description is nil, not "". Terminal
+// Status values are "completed", "failed", or "killed"; non-terminal values
+// are "pending" and "running".
+type TaskUpdatedEvent struct {
+	Status         *string
+	Description    *string
+	EndTime        *int64
+	TotalPausedMs  *int64
+	Error          *string
+	IsBackgrounded *bool
+	TaskID         string
+	TurnNumber     int
+}
+
+// Type returns the event type.
+func (e TaskUpdatedEvent) Type() EventType { return EventTypeTaskUpdated }
 
 // HookLifecycleEvent is a unified event for hook_started/hook_progress/
 // hook_response system subtypes. Phase selects which stage this event

@@ -197,6 +197,48 @@ func TestSystemSubtype_TaskProgress(t *testing.T) {
 	}
 }
 
+func TestSystemSubtype_TaskUpdated(t *testing.T) {
+	raw := `{"type":"system","subtype":"task_updated","task_id":"t1","patch":{"status":"running","description":"searching","is_backgrounded":true}}`
+	m := parseSystem(t, raw)
+	p, ok := m.AsTaskUpdated()
+	if !ok {
+		t.Fatalf("AsTaskUpdated failed")
+	}
+	if p.TaskID != "t1" {
+		t.Errorf("task_id: %q", p.TaskID)
+	}
+	if p.Patch.Status == nil || *p.Patch.Status != "running" {
+		t.Errorf("patch.status: %+v", p.Patch.Status)
+	}
+	if p.Patch.Description == nil || *p.Patch.Description != "searching" {
+		t.Errorf("patch.description: %+v", p.Patch.Description)
+	}
+	if p.Patch.IsBackgrounded == nil || !*p.Patch.IsBackgrounded {
+		t.Errorf("patch.is_backgrounded: %+v", p.Patch.IsBackgrounded)
+	}
+	if p.Patch.EndTime != nil || p.Patch.TotalPausedMs != nil || p.Patch.Error != nil {
+		t.Errorf("unset fields should be nil: %+v", p.Patch)
+	}
+}
+
+func TestSystemSubtype_TaskUpdated_TerminalStatus(t *testing.T) {
+	raw := `{"type":"system","subtype":"task_updated","task_id":"t1","patch":{"status":"completed","end_time":1712800000000,"total_paused_ms":1500}}`
+	m := parseSystem(t, raw)
+	p, ok := m.AsTaskUpdated()
+	if !ok {
+		t.Fatalf("AsTaskUpdated failed")
+	}
+	if p.Patch.Status == nil || *p.Patch.Status != "completed" {
+		t.Errorf("patch.status: %+v", p.Patch.Status)
+	}
+	if p.Patch.EndTime == nil || *p.Patch.EndTime != 1712800000000 {
+		t.Errorf("patch.end_time: %+v", p.Patch.EndTime)
+	}
+	if p.Patch.TotalPausedMs == nil || *p.Patch.TotalPausedMs != 1500 {
+		t.Errorf("patch.total_paused_ms: %+v", p.Patch.TotalPausedMs)
+	}
+}
+
 func TestSystemSubtype_SessionStateChanged(t *testing.T) {
 	raw := `{"type":"system","subtype":"session_state_changed","session_id":"s1","uuid":"u1","state":"running"}`
 	m := parseSystem(t, raw)
@@ -303,6 +345,16 @@ func TestSystemDecodePayload_DispatchesAllSubtypes(t *testing.T) {
 		{subtype: "task_progress", raw: `{"type":"system","subtype":"task_progress","session_id":"s","uuid":"u","task_id":"t","description":"d","usage":{"total_tokens":0,"tool_uses":0,"duration_ms":0}}`, check: func(t *testing.T, v any) {
 			if _, ok := v.(*TaskProgressPayload); !ok {
 				t.Errorf("wrong type: %T", v)
+			}
+		}},
+		{subtype: "task_updated", raw: `{"type":"system","subtype":"task_updated","task_id":"t","patch":{"status":"failed","error":"boom"}}`, check: func(t *testing.T, v any) {
+			p, ok := v.(*TaskUpdatedPayload)
+			if !ok {
+				t.Errorf("wrong type: %T", v)
+				return
+			}
+			if p.Patch.Error == nil || *p.Patch.Error != "boom" {
+				t.Errorf("patch.error: %+v", p.Patch.Error)
 			}
 		}},
 		{subtype: "session_state_changed", raw: `{"type":"system","subtype":"session_state_changed","session_id":"s","uuid":"u","state":"idle"}`, check: func(t *testing.T, v any) {

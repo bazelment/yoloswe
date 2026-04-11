@@ -35,22 +35,54 @@ type TurnResult struct {
 	Success       bool
 }
 
+// backgroundTools lists tools that the CLI treats as background work even
+// though their tool_use.input does not carry `run_in_background: true`.
+// They register with the CLI's task registry and emit
+// task_started/task_updated/task_notification frames just like
+// Bash(run_in_background:true), but the CLI does NOT auto-start a
+// continuation assistant turn when they complete — wrappers must observe
+// task_updated terminal status (or task_notification) to release suppression.
+var backgroundTools = map[string]bool{
+	"Monitor": true,
+}
+
 // turnState tracks the state of a single turn.
 type turnState struct {
 	StartTime     time.Time
 	UserMessage   interface{}
 	Tools         map[string]*toolState
+	liveTasks     map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
 	FullText      string
 	FullThinking  string
 	ContentBlocks []ContentBlock
 	Number        int
 }
 
-// shouldSuppressForBgTasks returns true when ALL non-cancelled tool_use blocks
-// in the turn had run_in_background: true, meaning the ResultMessage arrived
-// because bg tools returned immediately and the real work is still in progress.
-// When non-bg tools are present, the ResultMessage represents completion of
-// synchronous work and must not be suppressed.
+// isBackgroundToolUse reports whether a tool_use block represents background
+// work. A block is "background" if its input carries run_in_background:true
+// (e.g. Bash(run_in_background)) OR its tool name is in backgroundTools
+// (e.g. Monitor, which registers a task without the explicit flag).
+func isBackgroundToolUse(block ContentBlock) bool {
+	if block.Type != ContentBlockTypeToolUse {
+		return false
+	}
+	if isBg, _ := block.ToolInput["run_in_background"].(bool); isBg {
+		return true
+	}
+	return backgroundTools[block.ToolName]
+}
+
+// shouldSuppressForBgTasks returns true when the turn has live background
+// work and must not be finalized on the intermediate ResultMessage.
+//
+// The turn is "live" if:
+//   - every non-cancelled tool_use is a background tool (run_in_background or
+//     in backgroundTools), AND
+//   - at least one such non-cancelled bg tool exists, OR the turn has
+//     registered task IDs via task_started that are still running.
+//
+// When any non-bg tool is present, the ResultMessage represents completion
+// of synchronous work and must not be suppressed.
 func (turn *turnState) shouldSuppressForBgTasks() bool {
 	if turn == nil {
 		return false
@@ -71,15 +103,58 @@ func (turn *turnState) shouldSuppressForBgTasks() bool {
 		if block.Type != ContentBlockTypeToolUse {
 			continue
 		}
-		isBg, _ := block.ToolInput["run_in_background"].(bool)
-		if !isBg {
+		if !isBackgroundToolUse(block) {
 			return false // non-bg tool → ResultMessage is real completion, never suppress
 		}
 		if !cancelled[block.ToolUseID] {
 			hasBgTool = true
 		}
 	}
-	return hasBgTool
+	// Either an uncancelled bg tool is present, or task_started has already
+	// registered a live task for this turn (e.g. task_started arrived before
+	// the bg tool's tool_use_id reached ContentBlocks). Both signal live work.
+	return hasBgTool || len(turn.liveTasks) > 0
+}
+
+// longestBackgroundToolTimeoutMs returns the largest timeout_ms value across
+// all non-cancelled background tool_use blocks in the turn. Returns 0 when
+// no bg tool carries an explicit timeout. Used to size the suppression
+// safety timer so it never releases before the agent's own deadline.
+func (turn *turnState) longestBackgroundToolTimeoutMs() int64 {
+	if turn == nil {
+		return 0
+	}
+	cancelled := make(map[string]bool)
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolResult && block.IsError {
+			cancelled[block.ToolUseID] = true
+		}
+	}
+	var maxMs int64
+	for _, block := range turn.ContentBlocks {
+		if !isBackgroundToolUse(block) || cancelled[block.ToolUseID] {
+			continue
+		}
+		raw, ok := block.ToolInput["timeout_ms"]
+		if !ok {
+			continue
+		}
+		var ms int64
+		switch v := raw.(type) {
+		case float64:
+			ms = int64(v)
+		case int:
+			ms = int64(v)
+		case int64:
+			ms = v
+		default:
+			continue
+		}
+		if ms > maxMs {
+			maxMs = ms
+		}
+	}
+	return maxMs
 }
 
 // toolState tracks the state of a tool within a turn.
@@ -276,6 +351,48 @@ func (tm *turnManager) AppendContentBlock(block ContentBlock) {
 	if tm.currentTurn != nil {
 		tm.currentTurn.ContentBlocks = append(tm.currentTurn.ContentBlocks, block)
 	}
+}
+
+// TrackTask records a task ID as live on the current turn. Called from
+// task_started handling. No-op if there is no current turn.
+func (tm *turnManager) TrackTask(taskID string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.currentTurn == nil || taskID == "" {
+		return
+	}
+	if tm.currentTurn.liveTasks == nil {
+		tm.currentTurn.liveTasks = make(map[string]struct{})
+	}
+	tm.currentTurn.liveTasks[taskID] = struct{}{}
+}
+
+// UntrackTask removes a task ID from the current turn's live set. Returns
+// hadTask (task was previously tracked) and wasLast (live set is now empty
+// after removal). Callers can combine these to decide whether suppression
+// should release.
+func (tm *turnManager) UntrackTask(taskID string) (hadTask bool, wasLast bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.currentTurn == nil || taskID == "" {
+		return false, false
+	}
+	if _, ok := tm.currentTurn.liveTasks[taskID]; !ok {
+		return false, false
+	}
+	delete(tm.currentTurn.liveTasks, taskID)
+	return true, len(tm.currentTurn.liveTasks) == 0
+}
+
+// HasLiveTasks reports whether the current turn has any registered live
+// tasks that have not yet reached a terminal state.
+func (tm *turnManager) HasLiveTasks() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if tm.currentTurn == nil {
+		return false
+	}
+	return len(tm.currentTurn.liveTasks) > 0
 }
 
 // GetTurnByNumber returns a turn by its number.
