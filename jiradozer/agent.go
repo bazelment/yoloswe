@@ -410,9 +410,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 
 	result, err := provider.Execute(ctx, prompt, nil, opts...)
 	if err != nil {
+		logHandler.flushText()
 		return "", "", fmt.Errorf("agent execution: %w", err)
 	}
 	if !result.Success {
+		logHandler.flushText()
 		if result.Error != nil {
 			return "", "", result.Error
 		}

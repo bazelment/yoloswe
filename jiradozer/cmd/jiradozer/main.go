@@ -142,6 +142,7 @@ func run(ctx context.Context, args runArgs) error {
 	}
 
 	// Set up logger: log file gets DEBUG-level detail, terminal output goes through renderer.
+	var activeLogPath string
 	if home, err := os.UserHomeDir(); err == nil {
 		logDir := filepath.Join(home, ".jiradozer", "logs")
 		logPath := filepath.Join(logDir, fmt.Sprintf("jiradozer-%s-%d.log",
@@ -152,6 +153,7 @@ func run(ctx context.Context, args runArgs) error {
 				defer f.Close()
 				// Log file only — all terminal output goes through the renderer.
 				slog.SetDefault(slog.New(klogfmt.New(f, klogfmt.WithLevel(slog.LevelDebug))))
+				activeLogPath = logPath
 			} else {
 				klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 				slog.Warn("failed to open log file, logging to stderr only", "path", logPath, "error", err)
@@ -171,6 +173,9 @@ func run(ctx context.Context, args runArgs) error {
 		render.WithVerbosity(v),
 		render.WithColorMode(colorMode),
 	)
+	if activeLogPath != "" {
+		renderer.Status("Logging to " + activeLogPath)
+	}
 
 	// Log invocation banner with CLI args and working directory.
 	// Redact values of flags that may contain secrets.
@@ -538,7 +543,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.PromptData, resolved jiradozer.StepConfig, workDir string, renderer *render.Renderer, logger *slog.Logger) error {
 	totalRounds := len(resolved.Rounds)
 	logger.Info("step: "+stepName, "rounds", totalRounds)
-	renderer.Status(fmt.Sprintf("Step: %s (%d rounds)", stepName, totalRounds))
+	rendererStatus(renderer, fmt.Sprintf("Step: %s (%d rounds)", stepName, totalRounds))
 
 	var allOutputs []string
 	var sessionIDs []string
@@ -547,7 +552,7 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			return fmt.Errorf("run-step %s: %w", stepName, ctx.Err())
 		}
 		logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
-		renderer.Status(fmt.Sprintf("Round %d/%d", i+1, totalRounds))
+		rendererStatus(renderer, fmt.Sprintf("Round %d/%d", i+1, totalRounds))
 
 		var output string
 		if round.IsCommand() {
@@ -617,6 +622,13 @@ func availableModels() string {
 var sensitiveFlags = []string{"--api-key", "--token", "--secret", "--password", "--description"}
 
 // redactArgs returns a copy of args with values of sensitive flags replaced by "***".
+// rendererStatus is a nil-safe wrapper around renderer.Status.
+func rendererStatus(r *render.Renderer, msg string) {
+	if r != nil {
+		r.Status(msg)
+	}
+}
+
 func redactArgs(args []string) []string {
 	out := make([]string, len(args))
 	copy(out, args)
