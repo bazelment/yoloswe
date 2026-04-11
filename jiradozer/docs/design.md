@@ -354,7 +354,7 @@ jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
 
 1. **Unit tests**: `bazel test //jiradozer/...` — state machine transitions, config parsing, comment action parsing
 2. **Integration test with httptest**: Linear client against mock GraphQL server
-3. **Manual test**: `jiradozer --issue ENG-123 --dry-run` against real Linear
+3. **Manual test**: `jiradozer --filter team=ENG --dry-run` against real Linear (team-mode only — `--dry-run` is not accepted with `--issue` or `--description`)
 4. **Full run**: `jiradozer --issue ENG-123 --model sonnet`
 5. **Build**: `bazel build //jiradozer/...`
 6. **Lint**: `scripts/lint.sh`

@@ -1,6 +1,7 @@
 package jiradozer
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
@@ -71,7 +72,7 @@ func TestOrchestrator_BranchPrefix(t *testing.T) {
 	cfg.Source.BranchPrefix = "auto"
 	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, testLogger(t))
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
 
 	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
 	// Start will fail because the mock tracker doesn't implement workflow states,
@@ -88,7 +89,7 @@ func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
 	cfg.Source.MaxConcurrent = 2
 	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, testLogger(t))
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
 
 	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
 	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}
@@ -110,7 +111,7 @@ func TestOrchestrator_DuplicateIssue(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, testLogger(t))
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
 
 	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
 	err1 := orch.Start(context.Background(), issue)
@@ -126,7 +127,7 @@ func TestOrchestrator_StatusUpdates(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, testLogger(t))
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
 
 	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
 	err := orch.Start(context.Background(), issue)
@@ -143,12 +144,88 @@ func TestOrchestrator_StatusUpdates(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_DryRun(t *testing.T) {
+	wtm := newMockWTManager()
+	cfg := testOrchestratorConfig()
+	cfg.Source.DryRun = true
+	cfg.BaseBranch = "main"
+	cfg.Agent.Model = "sonnet"
+	mt := &mockDiscoveryTracker{}
+
+	orch := NewOrchestrator(mt, cfg, wtm, "yoloswe", testLogger(t))
+	var buf bytes.Buffer
+	orch.SetDryRunOutput(&buf)
+
+	url := "https://linear.app/ENG-1"
+	issue := &tracker.Issue{
+		ID:         "1",
+		Identifier: "ENG-1",
+		Title:      "Fix widget rendering",
+		URL:        &url,
+	}
+
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	// Worktree manager must not have been touched.
+	require.Empty(t, wtm.getCreated())
+	// No status updates should have been emitted.
+	select {
+	case s := <-orch.StatusUpdates():
+		t.Fatalf("unexpected status update in dry-run mode: %+v", s)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// Nothing was added to the active map.
+	require.Equal(t, 0, orch.ActiveCount())
+
+	out := buf.String()
+	require.Contains(t, out, "bramble new-session")
+	require.Contains(t, out, "--create-worktree")
+	require.Contains(t, out, `--branch 'jiradozer/ENG-1'`)
+	require.Contains(t, out, `--from 'main'`)
+	require.Contains(t, out, `--model 'sonnet'`)
+	require.Contains(t, out, `--repo 'yoloswe'`)
+	require.Contains(t, out, `--goal 'Fix widget rendering'`)
+	require.Contains(t, out, "Work on ENG-1: Fix widget rendering")
+	require.Contains(t, out, url)
+
+	// A second Start with the same issue should also print — dry-run does
+	// not track duplicates, but discovery's seen set keeps real repeats
+	// from reaching this code path in practice.
+	buf.Reset()
+	err = orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+	require.Contains(t, buf.String(), "bramble new-session")
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty string", "", "''"},
+		{"simple word", "hello", "'hello'"},
+		{"with spaces", "hello world", "'hello world'"},
+		{"shell metachars are inert inside quotes", "$(whoami) && rm -rf / `id` !echo", "'$(whoami) && rm -rf / `id` !echo'"},
+		{"newline preserved literally", "line1\nline2", "'line1\nline2'"},
+		{"single quote escaped via close-escape-reopen", "it's", `'it'\''s'`},
+		{"multiple single quotes", "a'b'c", `'a'\''b'\''c'`},
+		{"only single quote", "'", `''\'''`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shellQuote(tt.in))
+		})
+	}
+}
+
 func TestOrchestrator_Snapshot(t *testing.T) {
 	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
 	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, testLogger(t))
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
 
 	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
 	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}

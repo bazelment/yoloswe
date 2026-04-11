@@ -46,6 +46,7 @@ type SourceConfig struct {
 	Filters       map[string]string `yaml:"filters"`        // Generic key-value filters (see tracker.IssueFilter)
 	BranchPrefix  string            `yaml:"branch_prefix"`  // Worktree branch prefix (default: "jiradozer")
 	MaxConcurrent int               `yaml:"max_concurrent"` // Max parallel workflows (default: 3)
+	DryRun        bool              `yaml:"dry_run"`        // Print equivalent bramble new-session command instead of launching a workflow
 }
 
 // ToFilter converts the source config to a tracker.IssueFilter.
