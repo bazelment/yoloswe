@@ -295,7 +295,9 @@ func (h *rendererEventHandler) OnToolStart(name, id string, input map[string]int
 
 func (h *rendererEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
 	h.r.ToolComplete(name, input)
-	h.r.ToolResult(result, isError)
+	if result != nil || isError {
+		h.r.ToolResult(result, isError)
+	}
 }
 
 func (h *rendererEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
