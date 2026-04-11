@@ -39,7 +39,7 @@ const (
 	EventTypeTaskStarted
 	// EventTypeTaskProgress fires on background task progress updates.
 	EventTypeTaskProgress
-	// EventTypeTaskNotification fires when a background task completes/fails/stops.
+	// EventTypeTaskNotification fires when a background task completes/fails/is killed.
 	EventTypeTaskNotification
 	// EventTypeTaskUpdated fires when a background task's state patch is emitted.
 	EventTypeTaskUpdated
