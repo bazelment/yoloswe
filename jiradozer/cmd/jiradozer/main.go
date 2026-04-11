@@ -74,6 +74,7 @@ func main() {
 				descriptionFile: descriptionFile,
 				planFile:        planFile,
 				dryRun:          dryRun,
+				dryRunSet:       cmd.Flags().Changed("dry-run"),
 			})
 		},
 	}
@@ -126,6 +127,7 @@ type runArgs struct {
 	maxConcurrent   int
 	verbose         bool
 	dryRun          bool
+	dryRunSet       bool
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -292,8 +294,11 @@ func run(ctx context.Context, args runArgs) error {
 	if args.branchPrefix != "" {
 		cfg.Source.BranchPrefix = args.branchPrefix
 	}
-	if args.dryRun {
-		cfg.Source.DryRun = true
+	// --dry-run overrides the config in both directions: explicitly passing
+	// --dry-run=true/false lets a user flip the setting without editing YAML.
+	// When the flag is not set at all, the config value stands.
+	if args.dryRunSet {
+		cfg.Source.DryRun = args.dryRun
 	}
 
 	// Validate mutual exclusivity. CLI flags (--issue, --description) take

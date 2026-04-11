@@ -336,9 +336,12 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 	}
 }
 
-// printDryRunCommand prints an equivalent `bramble new-session` invocation
-// for the given issue to o.out. The printed command matches what the live
-// path would use for branch, base branch, model, repo, and goal.
+// printDryRunCommand prints a `bramble new-session` invocation that would
+// start an equivalent planner session for the given issue. The live path
+// does not actually shell out to `bramble new-session` — it drives
+// `wt.Manager` and the workflow/agent code directly — so the printed
+// `--prompt` is a hand-authored starter, not a rendered plan/build prompt.
+// Branch, base branch, model, repo, and goal do match the live path.
 func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
 	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
 	prompt := fmt.Sprintf("Work on %s: %s", issue.Identifier, issue.Title)
