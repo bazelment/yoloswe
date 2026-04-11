@@ -7,6 +7,7 @@ const (
 	// KindUnknown is the zero value. Events returning KindUnknown are skipped
 	// by the generic bridge (e.g., ACP ToolCallUpdateEvent with non-terminal status).
 	KindUnknown EventKind = iota
+	KindReady
 	KindText
 	KindThinking
 	KindToolStart
@@ -20,6 +21,12 @@ const (
 // interface are silently skipped.
 type Event interface {
 	StreamEventKind() EventKind
+}
+
+// Ready provides session initialization metadata.
+type Ready interface {
+	Event
+	StreamSessionID() string
 }
 
 // Text provides streaming text deltas.

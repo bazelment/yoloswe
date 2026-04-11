@@ -55,7 +55,7 @@ func TestSessionResumption_PlanFeedbackLoop(t *testing.T) {
 
 	// --- Step 1: First execution (no session ID, no feedback) ---
 	t.Log("Step 1: First planning execution")
-	output1, sessionID1, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", logger)
+	output1, sessionID1, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err, "first plan execution should succeed")
 	require.NotEmpty(t, output1, "first plan output should not be empty")
 	require.NotEmpty(t, sessionID1, "first execution should return a session ID")
@@ -65,7 +65,7 @@ func TestSessionResumption_PlanFeedbackLoop(t *testing.T) {
 	// --- Step 2: Resume with feedback (same session ID) ---
 	t.Log("Step 2: Resume with feedback (redo)")
 	feedback := "Please also add validation for required fields and return typed errors instead of generic errors"
-	output2, sessionID2, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, feedback, sessionID1, logger)
+	output2, sessionID2, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, feedback, sessionID1, nil, logger)
 	require.NoError(t, err, "resumed plan execution should succeed")
 	require.NotEmpty(t, output2, "resumed plan output should not be empty")
 	require.NotEmpty(t, sessionID2, "resumed execution should return a session ID")
@@ -112,7 +112,7 @@ func TestSessionResumption_BuildAfterPlan(t *testing.T) {
 	// Plan step.
 	t.Log("Running plan step")
 	data := jiradozer.NewPromptData(issue, "main")
-	planOutput, planSessionID, err := jiradozer.RunStepAgent(ctx, "plan", data, planCfg, workDir, "", "", logger)
+	planOutput, planSessionID, err := jiradozer.RunStepAgent(ctx, "plan", data, planCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err)
 	require.NotEmpty(t, planOutput)
 	require.NotEmpty(t, planSessionID)
@@ -128,7 +128,7 @@ func TestSessionResumption_BuildAfterPlan(t *testing.T) {
 	data.Plan = planOutput
 
 	t.Log("Running build step with plan output")
-	buildOutput, buildSessionID, err := jiradozer.RunStepAgent(ctx, "build", data, buildCfg, workDir, "", "", logger)
+	buildOutput, buildSessionID, err := jiradozer.RunStepAgent(ctx, "build", data, buildCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err)
 	require.NotEmpty(t, buildOutput)
 	require.NotEmpty(t, buildSessionID)

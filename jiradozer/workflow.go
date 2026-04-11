@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
@@ -29,7 +30,8 @@ type Workflow struct {
 	stateIDs        map[string]string
 	OnTransition    func(step WorkflowStep)
 	OnRoundProgress func(roundIndex, roundTotal int)
-	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, logger *slog.Logger) (string, string, error)
+	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error)
+	renderer        *render.Renderer
 	issue           *tracker.Issue
 	plan            string
 	buildOutput     string
@@ -48,6 +50,18 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		stateIDs:     make(map[string]string),
 		sessionIDs:   make(map[WorkflowStep]string),
 		runStepAgent: RunStepAgent,
+	}
+}
+
+// SetRenderer sets the terminal renderer for streaming output.
+func (w *Workflow) SetRenderer(r *render.Renderer) {
+	w.renderer = r
+}
+
+// status emits a renderer status line when a renderer is configured.
+func (w *Workflow) status(msg string) {
+	if w.renderer != nil {
+		w.renderer.Status(msg)
 	}
 }
 
@@ -166,6 +180,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	w.feedback = ""
 
 	w.logger.Info("step: "+stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "feedback", feedback != "")
+	w.status(fmt.Sprintf("Step: %s (%s) %d rounds", stepName, w.issue.Identifier, totalRounds))
 	stepStart := time.Now()
 
 	data := w.promptData()
@@ -179,6 +194,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		}
 
 		w.logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
+		w.status(fmt.Sprintf("Round %d/%d", i+1, totalRounds))
 		if w.OnRoundProgress != nil {
 			w.OnRoundProgress(i, totalRounds)
 		}
@@ -199,7 +215,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 				feedbackInjected = true
 			}
 			var roundSessionID string
-			output, roundSessionID, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.logger)
+			output, roundSessionID, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.renderer, w.logger)
 			if roundSessionID != "" {
 				roundSessionIDs = append(roundSessionIDs, roundSessionID)
 			}
@@ -233,16 +249,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			"step", stepName, "feedback", truncate(feedback, 200))
 	}
 
-	// Filter empty round outputs before joining so separator-only text
-	// (e.g. "\n\n---\n\n") is not mistaken for real plan content.
-	var nonEmpty []string
-	for _, o := range allOutputs {
-		if strings.TrimSpace(o) != "" {
-			nonEmpty = append(nonEmpty, o)
-		}
-	}
-	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "session_ids", roundSessionIDs, "duration", time.Since(stepStart))
-	w.captureOutput(stepName, strings.Join(nonEmpty, "\n\n---\n\n"))
+	stepDuration := time.Since(stepStart)
+	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "session_ids", roundSessionIDs, "duration", stepDuration)
+	w.status(fmt.Sprintf("Step %s complete (%s)", stepName, stepDuration.Truncate(time.Second)))
+	w.captureOutput(stepName, JoinRoundOutputs(allOutputs))
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
@@ -260,16 +270,19 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.feedback = ""
 
 	w.logger.Info("step: "+stepName, "issue", w.issue.Identifier, "feedback", feedback != "", "resume", sessionID != "")
+	w.status(fmt.Sprintf("Step: %s (%s)", stepName, w.issue.Identifier))
 
 	stepStart := time.Now()
 	cfg := w.config.ResolveStep(stepCfg)
-	output, newSessionID, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.logger)
+	output, newSessionID, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.renderer, w.logger)
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return
 	}
 
-	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "session_id", newSessionID, "duration", time.Since(stepStart))
+	stepDuration := time.Since(stepStart)
+	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "session_id", newSessionID, "duration", stepDuration)
+	w.status(fmt.Sprintf("Step %s complete (%s)", stepName, stepDuration.Truncate(time.Second)))
 	w.sessionIDs[currentStep] = newSessionID
 	w.captureOutput(stepName, output)
 
@@ -332,6 +345,7 @@ func capitalize(s string) string {
 func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget WorkflowStep) {
 	if w.shouldAutoApprove(w.state.Current()) {
 		w.logger.Info("auto-approving", "step", w.state.Current())
+		w.status(fmt.Sprintf("Auto-approved %s", w.state.Current()))
 		w.feedback = ""
 		if err := w.transition(approveTarget, "auto_approved"); err != nil {
 			w.fail(ctx, err)
@@ -340,6 +354,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 	}
 
 	w.logger.Info("waiting for approval", "step", w.state.Current(), "issue", w.issue.Identifier)
+	w.status(fmt.Sprintf("Waiting for approval on %s...", w.issue.Identifier))
 
 	fb, err := PollForFeedback(ctx, w.tracker, w.issue.ID, w.lastCommentAt, w.config.PollInterval, w.logger, w.botCommentIDs)
 	if err != nil {
@@ -352,18 +367,21 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 	switch fb.Action {
 	case FeedbackApprove:
 		w.logger.Info("feedback: approved", "step", w.state.Current())
+		w.status("Approved")
 		w.feedback = ""
 		if err := w.transition(approveTarget, "approved"); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackRedo:
 		w.logger.Info("feedback: redo", "step", w.state.Current())
+		w.status("Redo requested")
 		w.feedback = fb.Message
 		if err := w.transition(redoTarget, "redo"); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackComment:
 		w.logger.Info("feedback: comment", "step", w.state.Current(), "message", fb.Message)
+		w.status("Feedback received")
 		w.feedback = fb.Message
 		if err := w.transition(redoTarget, "feedback"); err != nil {
 			w.fail(ctx, err)

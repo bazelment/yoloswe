@@ -65,6 +65,15 @@ func bridgeEvents[E any](
 			}
 
 			switch kind {
+			case agentstream.KindReady:
+				if handler != nil {
+					if sh, ok := handler.(SessionInitHandler); ok {
+						if re, ok := sev.(agentstream.Ready); ok {
+							sh.OnSessionInit(re.StreamSessionID())
+						}
+					}
+				}
+
 			case agentstream.KindText:
 				te := sev.(agentstream.Text)
 				delta := te.StreamDelta()
