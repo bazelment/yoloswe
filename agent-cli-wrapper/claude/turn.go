@@ -48,15 +48,16 @@ var backgroundTools = map[string]bool{
 
 // turnState tracks the state of a single turn.
 type turnState struct {
-	StartTime        time.Time
-	UserMessage      interface{}
-	Tools            map[string]*toolState
-	liveTasks        map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
-	FullText         string
-	FullThinking     string
-	ContentBlocks    []ContentBlock
-	tasksEverTracked int // counts task IDs ever added via TrackTask; never decremented
-	Number           int
+	StartTime              time.Time
+	UserMessage            interface{}
+	Tools                  map[string]*toolState
+	liveTasks              map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
+	FullText               string
+	FullThinking           string
+	ContentBlocks          []ContentBlock
+	tasksEverTracked       int  // counts task IDs ever added via TrackTask; never decremented
+	hasContinuationBgTools bool // true if turn has any bg-Bash (run_in_background) tools that use continuation-ResultMessage release path
+	Number                 int
 }
 
 // isBackgroundToolUse reports whether a tool_use block represents background
@@ -348,11 +349,18 @@ func (tm *turnManager) GetTurnHistory() []*turnState {
 }
 
 // AppendContentBlock appends a content block to the current turn.
+// When a bg tool_use that is not in backgroundTools (e.g. Bash with
+// run_in_background) is appended, hasContinuationBgTools is set to true so
+// AllTasksCompleted skips the fast path for mixed Monitor+bg-Bash turns.
 func (tm *turnManager) AppendContentBlock(block ContentBlock) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	if tm.currentTurn != nil {
-		tm.currentTurn.ContentBlocks = append(tm.currentTurn.ContentBlocks, block)
+	if tm.currentTurn == nil {
+		return
+	}
+	tm.currentTurn.ContentBlocks = append(tm.currentTurn.ContentBlocks, block)
+	if isBackgroundToolUse(block) && !backgroundTools[block.ToolName] {
+		tm.currentTurn.hasContinuationBgTools = true
 	}
 }
 
@@ -394,16 +402,24 @@ func (tm *turnManager) HasLiveTasks() bool {
 }
 
 // AllTasksCompleted reports whether the current turn had tasks registered via
-// task_started and all of them have since reached a terminal state. Returns
-// false if no tasks were ever registered (e.g. bg-Bash turns that use the
-// continuation-ResultMessage release path instead of task events).
+// task_started, all of them have since reached a terminal state, and the turn
+// contains no bg-Bash (continuation) tools.
+//
+// Background: Monitor tasks release suppression via terminal task events;
+// bg-Bash (run_in_background) releases via a continuation ResultMessage. A
+// turn that mixes both must NOT short-circuit on task completion alone —
+// the Bash continuation must still arrive. This method returns false for
+// mixed turns, deferring release to the continuation-ResultMessage path.
 func (tm *turnManager) AllTasksCompleted() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	if tm.currentTurn == nil {
 		return false
 	}
-	return tm.currentTurn.tasksEverTracked > 0 && len(tm.currentTurn.liveTasks) == 0
+	if tm.currentTurn.tasksEverTracked == 0 || len(tm.currentTurn.liveTasks) != 0 {
+		return false
+	}
+	return !tm.currentTurn.hasContinuationBgTools
 }
 
 // GetTurnByNumber returns a turn by its number.

@@ -426,3 +426,58 @@ func TestMonitor_TaskNotificationBeforeResultMessage(t *testing.T) {
 
 	waitForTurnComplete(t, s.events, time.Second)
 }
+
+// TestMonitor_MixedWithBgBashDoesNotFastPath verifies that a turn containing
+// both a Monitor tool and a bg-Bash (run_in_background) tool does NOT use the
+// AllTasksCompleted fast path when the Monitor task completes first. The turn
+// must remain suppressed (via the safety timer) waiting for the bg-Bash
+// continuation ResultMessage that the CLI will send automatically.
+func TestMonitor_MixedWithBgBashDoesNotFastPath(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// Monitor completes BEFORE the ResultMessage — but bg-Bash is still running.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// ResultMessage arrives — should suppress (not fast-path) because bg-Bash is pending.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	// Turn must still be suppressed — bg-Bash continuation hasn't arrived.
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Verify suppression is active (safety timer armed, not fast-pathed).
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Error("expected suppression to be active while bg-Bash continuation is pending")
+	}
+
+	// Clean up the safety timer to avoid test leaks.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+		s.bgState.timer = nil
+	}
+	s.bgState.active = false
+	s.mu.Unlock()
+}
