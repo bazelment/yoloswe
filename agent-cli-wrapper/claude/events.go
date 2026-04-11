@@ -274,7 +274,7 @@ type TaskProgressEvent struct {
 func (e TaskProgressEvent) Type() EventType { return EventTypeTaskProgress }
 
 // TaskNotificationEvent fires when a background task completes. Status is
-// "completed", "failed", or "stopped".
+// "completed", "failed", or "killed".
 type TaskNotificationEvent struct {
 	ToolUseID  *string
 	TaskID     string

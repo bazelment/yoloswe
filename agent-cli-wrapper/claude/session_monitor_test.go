@@ -392,3 +392,37 @@ func TestMonitor_TaskCompletesBeforeResultMessage(t *testing.T) {
 
 	waitForTurnComplete(t, s.events, time.Second)
 }
+
+// TestMonitor_TaskNotificationBeforeResultMessage is the symmetric race to
+// TestMonitor_TaskCompletesBeforeResultMessage: task_notification arrives
+// before ResultMessage. Both release paths (task_updated and task_notification)
+// must correctly trigger the AllTasksCompleted fast path.
+func TestMonitor_TaskNotificationBeforeResultMessage(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-fast2", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// task_notification arrives BEFORE the ResultMessage.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-fast2", "tool_use_id": "tool-1",
+		"status": "completed",
+	}))
+
+	// ResultMessage arrives after notification; must finalize immediately.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	waitForTurnComplete(t, s.events, time.Second)
+}
