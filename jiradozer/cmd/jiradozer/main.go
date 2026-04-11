@@ -47,6 +47,7 @@ func main() {
 		description     string
 		descriptionFile string
 		planFile        string
+		dryRun          bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -72,6 +73,7 @@ func main() {
 				description:     description,
 				descriptionFile: descriptionFile,
 				planFile:        planFile,
+				dryRun:          dryRun,
 			})
 		},
 	}
@@ -94,6 +96,7 @@ func main() {
 	rootCmd.Flags().StringVar(&description, "description", "", "Task description for local mode (no external tracker needed)")
 	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
 	rootCmd.Flags().StringVar(&planFile, "plan-file", "", "Plan file for build step (use - for stdin)")
+	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Team mode only: for each newly-discovered issue, print the equivalent `bramble new-session` command instead of launching a workflow. TUI remains empty — look at stdout for the printed commands.")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -122,6 +125,7 @@ type runArgs struct {
 	maxBudget       float64
 	maxConcurrent   int
 	verbose         bool
+	dryRun          bool
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -288,6 +292,9 @@ func run(ctx context.Context, args runArgs) error {
 	if args.branchPrefix != "" {
 		cfg.Source.BranchPrefix = args.branchPrefix
 	}
+	if args.dryRun {
+		cfg.Source.DryRun = true
+	}
 
 	// Validate mutual exclusivity. CLI flags (--issue, --description) take
 	// precedence over config-file values (source.filters). Only count
@@ -309,6 +316,14 @@ func run(ctx context.Context, args runArgs) error {
 	}
 	if modeCount == 0 {
 		return fmt.Errorf("either --issue, --filter, --description/--description-file, or source.filters in config is required")
+	}
+
+	// --dry-run is a team-mode-only flag: single-issue and local description
+	// modes already give the caller an obvious command to run.
+	if cfg.Source.DryRun {
+		if args.issueID != "" || args.description != "" {
+			return fmt.Errorf("--dry-run only applies to team mode (--filter); --issue and --description do not support it")
+		}
 	}
 
 	// Apply auto-approve overrides.
@@ -395,12 +410,11 @@ func (a *wtAdapter) RemoveWorktree(ctx context.Context, nameOrBranch string, del
 	return a.mgr.Remove(ctx, nameOrBranch, deleteBranch, false)
 }
 
-func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
-	// Determine repo root for worktree manager.
-	// Use WorkDir as the root for wt.Manager — it should point to
-	// the bare repo's parent directory.
-	// For GitHub, source.filters.team is "owner/repo" which would create a
-	// nested directory. Use just the repo portion as the worktree repo name.
+// resolveRepoName picks the repo name used by wt.Manager (for worktree
+// placement) and by dry-run printed commands (for --repo). For GitHub, the
+// team filter is "owner/repo"; only the repo portion is used to avoid a
+// nested worktree directory layout.
+func resolveRepoName(cfg *jiradozer.Config) string {
 	repoName := cfg.Source.Filters[tracker.FilterTeam]
 	if repoName == "" {
 		repoName = "jiradozer"
@@ -410,13 +424,18 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 			repoName = repo
 		}
 	}
+	return repoName
+}
+
+func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
+	repoName := resolveRepoName(cfg)
 	wtMgr := &wtAdapter{mgr: wt.NewManager(cfg.WorkDir, repoName)}
 
 	// Use a cancellable context so we can stop the orchestrator when the TUI exits.
 	orchCtx, orchCancel := context.WithCancel(ctx)
 	defer orchCancel()
 
-	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, logger)
+	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, repoName, logger)
 	disc := jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, logger)
 
 	go func() {

@@ -3,7 +3,11 @@ package jiradozer
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,10 +43,12 @@ type Orchestrator struct {
 	config     *Config
 	logger     *slog.Logger
 	wtManager  WorktreeManager
+	out        io.Writer                   // dry-run output sink (defaults to os.Stdout)
 	active     map[string]*managedWorkflow // issueID -> workflow
 	statusChan chan IssueStatus
 	slotFreed  chan struct{} // non-blocking signal: a workflow slot was freed
 	done       chan struct{} // closed by Shutdown to unblock emitStatus
+	repoName   string        // repo name used when printing dry-run bramble commands
 	mu         sync.RWMutex
 	wg         sync.WaitGroup
 }
@@ -59,7 +65,9 @@ type managedWorkflow struct {
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
-func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager, logger *slog.Logger) *Orchestrator {
+// repoName is used when formatting dry-run bramble new-session commands;
+// pass an empty string in non-dry-run paths and it will be ignored.
+func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager, repoName string, logger *slog.Logger) *Orchestrator {
 	return &Orchestrator{
 		tracker:    t,
 		config:     cfg,
@@ -69,7 +77,15 @@ func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager,
 		statusChan: make(chan IssueStatus, 64),
 		slotFreed:  make(chan struct{}, 1),
 		done:       make(chan struct{}),
+		repoName:   repoName,
+		out:        os.Stdout,
 	}
+}
+
+// SetDryRunOutput overrides the writer that dry-run commands are printed to.
+// Primarily useful for tests.
+func (o *Orchestrator) SetDryRunOutput(w io.Writer) {
+	o.out = w
 }
 
 // StatusUpdates returns the channel that receives status updates for all workflows.
@@ -109,6 +125,15 @@ func (o *Orchestrator) ActiveCount() int {
 // Start launches a workflow for the given issue in a new worktree.
 // Returns an error if the concurrency limit is reached or worktree creation fails.
 func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
+	// Dry-run: print the equivalent bramble new-session command and return
+	// success without reserving a slot or touching the worktree manager.
+	// RunWithDiscovery only clears the seen set on error, so returning nil
+	// keeps the issue out of subsequent polls.
+	if o.config.Source.DryRun {
+		o.printDryRunCommand(issue)
+		return nil
+	}
+
 	// Hold the lock for the entire check-and-reserve sequence to prevent
 	// TOCTOU races on both the concurrency limit and the duplicate check.
 	o.mu.Lock()
@@ -310,6 +335,42 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 			o.logger.Warn("status channel full, dropping update", "issue", mw.issue.Identifier)
 		}
 	}
+}
+
+// printDryRunCommand prints an equivalent `bramble new-session` invocation
+// for the given issue to o.out. The printed command matches what the live
+// path would use for branch, base branch, model, repo, and goal.
+func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
+	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
+	prompt := fmt.Sprintf("Work on %s: %s", issue.Identifier, issue.Title)
+	if issue.URL != nil && *issue.URL != "" {
+		prompt = fmt.Sprintf("%s\n\n%s", prompt, *issue.URL)
+	}
+
+	args := []string{
+		"bramble new-session",
+		"  --type planner",
+		"  --create-worktree",
+		"  --branch " + strconv.Quote(branch),
+		"  --from " + strconv.Quote(o.config.BaseBranch),
+		"  --model " + strconv.Quote(o.config.Agent.Model),
+	}
+	if o.repoName != "" {
+		args = append(args, "  --repo "+strconv.Quote(o.repoName))
+	}
+	args = append(args,
+		"  --goal "+strconv.Quote(issue.Title),
+		"  --prompt "+strconv.Quote(prompt),
+	)
+
+	fmt.Fprintf(o.out, "\n# [dry-run] %s — %s\n", issue.Identifier, issue.Title)
+	fmt.Fprintln(o.out, strings.Join(args, " \\\n"))
+	fmt.Fprintln(o.out)
+
+	o.logger.Info("dry-run: printed bramble new-session command",
+		"identifier", issue.Identifier,
+		"branch", branch,
+	)
 }
 
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow) {

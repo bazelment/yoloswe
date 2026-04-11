@@ -145,7 +145,7 @@ func TestOrchestrator_WorktreeCreation(t *testing.T) {
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 
 	// Short timeout — workflows will fail when agent times out, which is expected.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -188,7 +188,7 @@ func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	cfg.Source.MaxConcurrent = 2
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 	ctx := context.Background()
 
 	err1 := orch.Start(ctx, mt.issues[0])
@@ -210,7 +210,7 @@ func TestOrchestrator_BranchPrefix(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	cfg.Source.BranchPrefix = "auto"
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -232,7 +232,7 @@ func TestOrchestrator_StatusUpdates(t *testing.T) {
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -273,7 +273,7 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 	cfg.Source.MaxConcurrent = 5
 	cfg.PollInterval = 50 * time.Millisecond
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 	disc := jiradozer.NewDiscovery(mt, cfg.Source.ToFilter(), cfg.PollInterval, testOrchestratorLogger(t))
 
 	// Short timeout — workflows fail when agent times out, which is expected.
@@ -316,7 +316,7 @@ func TestOrchestrator_WorktreeCleanupOnCompletion(t *testing.T) {
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -344,7 +344,7 @@ func TestOrchestrator_WorktreePathIsValid(t *testing.T) {
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, testOrchestratorLogger(t))
+	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
