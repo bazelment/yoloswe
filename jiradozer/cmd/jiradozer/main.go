@@ -419,7 +419,7 @@ func validateDryRunMode(cfg *jiradozer.Config, args runArgs) error {
 		return nil
 	}
 	if args.issueID != "" || args.description != "" {
-		return fmt.Errorf("--dry-run only applies to team mode (--filter); --issue and --description do not support it")
+		return fmt.Errorf("--dry-run only applies to team mode (--filter or source.filters in config); --issue and --description do not support it")
 	}
 	return nil
 }
