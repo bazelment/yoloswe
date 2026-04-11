@@ -273,11 +273,9 @@ func (h *logEventHandler) OnError(err error, context string) {
 }
 
 // rendererEventHandler adapts agent.EventHandler to a render.Renderer for
-// terminal display. It also tracks plan file writes for the plan step.
+// terminal display.
 type rendererEventHandler struct {
-	r            *render.Renderer
-	planFilePath string
-	lastWriteMD  string
+	r *render.Renderer
 }
 
 func (h *rendererEventHandler) OnText(text string) {
@@ -296,18 +294,6 @@ func (h *rendererEventHandler) OnToolComplete(name, id string, input map[string]
 	h.r.ToolComplete(name, input)
 	if result != nil || isError {
 		h.r.ToolResult(result, isError)
-	}
-
-	// Track plan file writes (same logic as logEventHandler).
-	if name == "Write" && !isError {
-		if filePath, ok := input["file_path"].(string); ok {
-			if strings.HasSuffix(filePath, ".md") {
-				h.lastWriteMD = filePath
-			}
-		}
-	}
-	if name == "ExitPlanMode" && h.lastWriteMD != "" {
-		h.planFilePath = h.lastWriteMD
 	}
 }
 
@@ -387,13 +373,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
 
 	logHandler := newLogEventHandler(logger, stepName)
-	var renderHandler *rendererEventHandler
 
 	// Build the event handler: log-only or composite (log + renderer).
 	var handler agent.EventHandler = logHandler
 	if renderer != nil {
-		renderHandler = &rendererEventHandler{r: renderer}
-		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, renderHandler}}
+		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, &rendererEventHandler{r: renderer}}}
 	}
 
 	var opts []agent.ExecuteOption
@@ -440,15 +424,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
 	}
 
-	// Prefer renderHandler for plan file detection (it tracks the same signals).
-	planHandler := logHandler
-	if renderHandler != nil && renderHandler.planFilePath != "" {
-		planHandler = nil
-	}
-	if planHandler != nil {
-		return resolveOutput(result.Text, logHandler, logger), result.SessionID, nil
-	}
-	return resolveOutputFromPath(result.Text, renderHandler.planFilePath, logger), result.SessionID, nil
+	return resolveOutput(result.Text, logHandler, logger), result.SessionID, nil
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.
