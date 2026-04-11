@@ -68,8 +68,9 @@ func bridgeEvents[E any](
 			case agentstream.KindReady:
 				if handler != nil {
 					if sh, ok := handler.(SessionInitHandler); ok {
-						re := sev.(agentstream.Ready)
-						sh.OnSessionInit(re.StreamSessionID())
+						if re, ok := sev.(agentstream.Ready); ok {
+							sh.OnSessionInit(re.StreamSessionID())
+						}
 					}
 				}
 
