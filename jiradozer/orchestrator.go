@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -347,20 +346,21 @@ func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
 		prompt = fmt.Sprintf("%s\n\n%s", prompt, *issue.URL)
 	}
 
+	sq := shellQuote
 	args := []string{
 		"bramble new-session",
 		"  --type planner",
 		"  --create-worktree",
-		"  --branch " + strconv.Quote(branch),
-		"  --from " + strconv.Quote(o.config.BaseBranch),
-		"  --model " + strconv.Quote(o.config.Agent.Model),
+		"  --branch " + sq(branch),
+		"  --from " + sq(o.config.BaseBranch),
+		"  --model " + sq(o.config.Agent.Model),
 	}
 	if o.repoName != "" {
-		args = append(args, "  --repo "+strconv.Quote(o.repoName))
+		args = append(args, "  --repo "+sq(o.repoName))
 	}
 	args = append(args,
-		"  --goal "+strconv.Quote(issue.Title),
-		"  --prompt "+strconv.Quote(prompt),
+		"  --goal "+sq(issue.Title),
+		"  --prompt "+sq(prompt),
 	)
 
 	fmt.Fprintf(o.out, "\n# [dry-run] %s — %s\n", issue.Identifier, issue.Title)
@@ -371,6 +371,10 @@ func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
 		"identifier", issue.Identifier,
 		"branch", branch,
 	)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow) {

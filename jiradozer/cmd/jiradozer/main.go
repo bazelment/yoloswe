@@ -438,6 +438,16 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, repoName, logger)
 	disc := jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, logger)
 
+	// Dry-run mode: run the orchestrator headlessly (no TUI) so that the
+	// printed bramble commands are visible on stdout. The alternate screen
+	// used by Bubbletea would hide and then destroy any stdout output.
+	if cfg.Source.DryRun {
+		err := orch.RunWithDiscovery(orchCtx, disc)
+		orchCancel()
+		orch.Shutdown()
+		return err
+	}
+
 	go func() {
 		if err := orch.RunWithDiscovery(orchCtx, disc); err != nil && orchCtx.Err() == nil {
 			logger.Error("orchestrator error", "error", err)
