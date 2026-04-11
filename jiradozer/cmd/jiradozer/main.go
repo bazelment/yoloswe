@@ -132,6 +132,15 @@ func run(ctx context.Context, args runArgs) error {
 	}
 	colorMode := render.ParseColorMode(args.color)
 
+	// Map verbosity to a slog level for stderr fallback paths.
+	// The log file always uses LevelDebug (full detail); stderr respects --verbosity.
+	stderrLevel := slog.LevelInfo
+	if v >= render.VerbosityDebug {
+		stderrLevel = slog.LevelDebug
+	} else if v <= render.VerbosityQuiet {
+		stderrLevel = slog.LevelWarn
+	}
+
 	// Set up logger: log file gets DEBUG-level detail, terminal output goes through renderer.
 	if home, err := os.UserHomeDir(); err == nil {
 		logDir := filepath.Join(home, ".jiradozer", "logs")
@@ -144,14 +153,14 @@ func run(ctx context.Context, args runArgs) error {
 				// Log file only — all terminal output goes through the renderer.
 				slog.SetDefault(slog.New(klogfmt.New(f, klogfmt.WithLevel(slog.LevelDebug))))
 			} else {
-				klogfmt.Init(klogfmt.WithLevel(slog.LevelDebug))
+				klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 				slog.Warn("failed to open log file, logging to stderr only", "path", logPath, "error", err)
 			}
 		} else {
-			klogfmt.Init(klogfmt.WithLevel(slog.LevelDebug))
+			klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 		}
 	} else {
-		klogfmt.Init(klogfmt.WithLevel(slog.LevelDebug))
+		klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 		slog.Warn("could not determine home directory, logging to stderr only", "error", err)
 	}
 	logger := slog.Default()

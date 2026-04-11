@@ -188,6 +188,7 @@ type logEventHandler struct {
 	logger       *slog.Logger
 	toolStarts   map[string]time.Time
 	step         string
+	sessionID    string
 	planFilePath string
 	lastWriteMD  string
 	textBuf      strings.Builder
@@ -201,17 +202,25 @@ func newLogEventHandler(logger *slog.Logger, step string) *logEventHandler {
 	}
 }
 
+// logAttrs returns the common log attributes, including session_id when available.
+func (h *logEventHandler) logAttrs(extra ...any) []any {
+	attrs := []any{"step", h.step}
+	if h.sessionID != "" {
+		attrs = append(attrs, "session_id", h.sessionID)
+	}
+	return append(attrs, extra...)
+}
+
 // flushText logs accumulated text and resets the buffer.
 func (h *logEventHandler) flushText() {
 	if h.textBuf.Len() > 0 {
-		h.logger.Debug("agent text", "step", h.step, "text", truncate(h.textBuf.String(), 200))
+		h.logger.Debug("agent text", h.logAttrs("text", truncate(h.textBuf.String(), 200))...)
 		h.textBuf.Reset()
 	}
 }
 
 func (h *logEventHandler) OnText(text string) {
 	h.textBuf.WriteString(text)
-	// Flush at semantic boundaries: newline or buffer > 200 chars.
 	if strings.Contains(text, "\n") || h.textBuf.Len() > 200 {
 		h.flushText()
 	}
@@ -219,7 +228,7 @@ func (h *logEventHandler) OnText(text string) {
 
 func (h *logEventHandler) OnThinking(thinking string) {
 	h.flushText()
-	h.logger.Debug("agent thinking", "step", h.step, "thinking", truncate(thinking, 200))
+	h.logger.Debug("agent thinking", h.logAttrs("thinking", truncate(thinking, 200))...)
 }
 
 func (h *logEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
@@ -228,8 +237,7 @@ func (h *logEventHandler) OnToolStart(name, id string, input map[string]interfac
 }
 
 func (h *logEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
-	// Single log line per tool with input summary and duration.
-	attrs := []any{"step", h.step, "tool", name}
+	attrs := h.logAttrs("tool", name)
 	if inputSummary := render.FormatToolInput(name, input); inputSummary != "" {
 		attrs = append(attrs, "input", inputSummary)
 	}
@@ -252,24 +260,24 @@ func (h *logEventHandler) OnToolComplete(name, id string, input map[string]inter
 	}
 	if name == "ExitPlanMode" && h.lastWriteMD != "" {
 		h.planFilePath = h.lastWriteMD
-		h.logger.Debug("plan file confirmed", "step", h.step, "path", h.planFilePath)
+		h.logger.Debug("plan file confirmed", h.logAttrs("path", h.planFilePath)...)
 	}
 }
 
 func (h *logEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
 	h.flushText()
-	h.logger.Debug("turn complete",
-		"step", h.step,
+	h.logger.Debug("turn complete", h.logAttrs(
 		"turn", turnNumber,
 		"success", success,
 		"duration", fmt.Sprintf("%.1fs", float64(durationMs)/1000),
 		"cost", fmt.Sprintf("$%.4f", costUSD),
-	)
+	)...)
 }
 
 func (h *logEventHandler) OnError(err error, context string) {
 	h.flushText()
-	h.logger.Debug("agent error", "step", h.step, "error", err, "context", context)
+	clear(h.toolStarts)
+	h.logger.Debug("agent error", h.logAttrs("error", err, "context", context)...)
 }
 
 // rendererEventHandler adapts agent.EventHandler to a render.Renderer for
@@ -373,8 +381,9 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
 
 	logHandler := newLogEventHandler(logger, stepName)
-
-	// Build the event handler: log-only or composite (log + renderer).
+	if resumeSessionID != "" {
+		logHandler.sessionID = resumeSessionID
+	}
 	var handler agent.EventHandler = logHandler
 	if renderer != nil {
 		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, &rendererEventHandler{r: renderer}}}
