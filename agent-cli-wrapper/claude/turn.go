@@ -83,17 +83,24 @@ func isBackgroundToolUse(block ContentBlock) bool {
 //
 // When any non-bg tool is present, the ResultMessage represents completion
 // of synchronous work and must not be suppressed.
-func (turn *turnState) shouldSuppressForBgTasks() bool {
-	if turn == nil {
-		return false
-	}
-
+// cancelledToolIDs returns the set of tool_use IDs whose tool_result was an
+// error, meaning the tool invocation was cancelled before it ran.
+func (turn *turnState) cancelledToolIDs() map[string]bool {
 	cancelled := make(map[string]bool)
 	for _, block := range turn.ContentBlocks {
 		if block.Type == ContentBlockTypeToolResult && block.IsError {
 			cancelled[block.ToolUseID] = true
 		}
 	}
+	return cancelled
+}
+
+func (turn *turnState) shouldSuppressForBgTasks() bool {
+	if turn == nil {
+		return false
+	}
+
+	cancelled := turn.cancelledToolIDs()
 
 	// Non-bg tools always prevent suppression (even if they errored), because
 	// their presence means the ResultMessage represents completion of synchronous
@@ -124,12 +131,7 @@ func (turn *turnState) longestBackgroundToolTimeoutMs() int64 {
 	if turn == nil {
 		return 0
 	}
-	cancelled := make(map[string]bool)
-	for _, block := range turn.ContentBlocks {
-		if block.Type == ContentBlockTypeToolResult && block.IsError {
-			cancelled[block.ToolUseID] = true
-		}
-	}
+	cancelled := turn.cancelledToolIDs()
 	var maxMs int64
 	for _, block := range turn.ContentBlocks {
 		if !isBackgroundToolUse(block) || cancelled[block.ToolUseID] {

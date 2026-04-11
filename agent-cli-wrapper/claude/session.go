@@ -32,7 +32,6 @@ type bgSuppressionState struct {
 	timer            *time.Timer // fires if no release signal arrives; see completeSuppressedTurn
 	heldResult       *TurnResult // captured intermediate result, finalized by the release path
 	accumulatedUsage TurnUsage   // token/cost totals from suppressed intermediate results
-	turnNumber       int         // turn that owns the held result (guards against stale releases)
 	active           bool        // true while waiting for release; cleared by timer, task terminal, or continuation result
 	timerFired       bool        // set by completeSuppressedTurn; cleared at start of next turn
 }
@@ -47,7 +46,6 @@ func (b *bgSuppressionState) reset() {
 	}
 	b.accumulatedUsage = TurnUsage{}
 	b.heldResult = nil
-	b.turnNumber = 0
 }
 
 // SessionInfo contains session metadata.
@@ -1220,7 +1218,6 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 				s.bgState.active = true
 				s.bgState.timerFired = false // reset for this turn's timer
 				s.bgState.heldResult = &safetyResult
-				s.bgState.turnNumber = turnNumber
 				if s.bgState.timer != nil {
 					s.bgState.timer.Stop()
 				}
@@ -1327,13 +1324,13 @@ func (s *Session) maybeReleaseSuppression(reason string) {
 		return
 	}
 	result := *s.bgState.heldResult
-	if result.TurnNumber != s.bgState.turnNumber {
+	currentTurnNum := s.turnManager.CurrentTurnNumber()
+	if result.TurnNumber != currentTurnNum {
 		s.mu.Unlock()
 		return
 	}
 	s.bgState.active = false
 	s.bgState.heldResult = nil
-	s.bgState.turnNumber = 0
 	if s.bgState.timer != nil {
 		s.bgState.timer.Stop()
 		s.bgState.timer = nil

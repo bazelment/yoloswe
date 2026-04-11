@@ -8,6 +8,8 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
+var notErr = false // reusable *bool for ToolResultBlock.IsError across tests
+
 // makeSystemMessage builds a protocol.SystemMessage from a JSON map by
 // round-tripping through UnmarshalJSON so the raw payload is captured for
 // DecodePayload to re-decode typed sub-payloads.
@@ -55,9 +57,8 @@ func TestMonitor_HappyPath(t *testing.T) {
 	}
 	simulateAssistantToolUse(s, tools)
 
-	isErrFalse := false
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started (task task-abc, timeout 300000ms).", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started (task task-abc, timeout 300000ms).", IsError: &notErr},
 	})
 
 	// task_started arrives.
@@ -89,13 +90,16 @@ func TestMonitor_HappyPath(t *testing.T) {
 
 	s.mu.RLock()
 	suppActive := s.bgState.active
-	heldTurn := s.bgState.turnNumber
+	heldTurn := 0
+	if s.bgState.heldResult != nil {
+		heldTurn = s.bgState.heldResult.TurnNumber
+	}
 	s.mu.RUnlock()
 	if !suppActive {
 		t.Error("expected suppression to be active after Monitor ResultMessage")
 	}
 	if heldTurn != turn.Number {
-		t.Errorf("bgState.turnNumber=%d, want %d", heldTurn, turn.Number)
+		t.Errorf("heldResult.TurnNumber=%d, want %d", heldTurn, turn.Number)
 	}
 
 	// Terminal task_updated releases the suppression.
@@ -134,9 +138,9 @@ func TestMonitor_FailedTaskReleases(t *testing.T) {
 		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "false"}},
 	}
 	simulateAssistantToolUse(s, tools)
-	isErrFalse := false
+
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
 	})
 	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
 		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
@@ -170,10 +174,10 @@ func TestMonitor_TwoTasksReleaseRequiresBoth(t *testing.T) {
 		{ID: "tool-2", Name: "Monitor", Input: map[string]interface{}{"command": "sleep 10"}},
 	}
 	simulateAssistantToolUse(s, tools)
-	isErrFalse := false
+
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &isErrFalse},
-		{ToolUseID: "tool-2", Content: "Monitor started.", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Monitor started.", IsError: &notErr},
 	})
 	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
 		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
@@ -221,10 +225,10 @@ func TestMonitor_MixedWithNonBgDoesNotSuppress(t *testing.T) {
 		{ID: "tool-2", Name: "Read", Input: map[string]interface{}{"file_path": "/tmp/x"}},
 	}
 	simulateAssistantToolUse(s, tools)
-	isErrFalse := false
+
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &isErrFalse},
-		{ToolUseID: "tool-2", Content: "file contents", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "file contents", IsError: &notErr},
 	})
 	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
 		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
@@ -262,9 +266,8 @@ func TestMonitor_HonorsTimeoutMs(t *testing.T) {
 		t.Errorf("longestBackgroundToolTimeoutMs=%d, want 600000", got)
 	}
 
-	isErrFalse := false
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
 	})
 	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
 		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
@@ -294,9 +297,9 @@ func TestMonitor_NonTerminalStatusDoesNotRelease(t *testing.T) {
 		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "sleep 60"}},
 	}
 	simulateAssistantToolUse(s, tools)
-	isErrFalse := false
+
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
 	})
 	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
 		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
@@ -333,9 +336,9 @@ func TestMonitor_TaskNotificationAlsoReleases(t *testing.T) {
 		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
 	}
 	simulateAssistantToolUse(s, tools)
-	isErrFalse := false
+
 	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &isErrFalse},
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
 	})
 	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
 		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
