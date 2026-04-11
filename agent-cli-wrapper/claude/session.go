@@ -1061,7 +1061,15 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	}
 	timerAlreadyFired := s.bgState.timerFired
 	s.bgState.timerFired = false // clear; also reset by SendMessage at next turn start
+	// wasSuppressed is true when a prior ResultMessage triggered suppression and
+	// this ResultMessage is the bg-Bash continuation that releases it. In that
+	// case shouldSuppressForBgTasks would still return true (the bg-Bash tool_use
+	// remains in ContentBlocks), but we must NOT re-suppress — this IS the final
+	// result. We detect it by checking whether suppression was active when we
+	// arrive: if active was true, we just cleared it, so this is the continuation.
+	wasSuppressed := s.bgState.active
 	s.bgState.active = false
+	s.bgState.heldResult = nil
 	if timerAlreadyFired {
 		s.mu.Unlock()
 		return
@@ -1133,7 +1141,12 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	//
 	// When non-bg tools are present (mixed turn), the ResultMessage represents
 	// completion of synchronous work and must not be suppressed.
-	shouldSuppress := turn.shouldSuppressForBgTasks()
+	//
+	// When wasSuppressed is true, this ResultMessage is the bg-Bash continuation
+	// that releases prior suppression. The turn's ContentBlocks still contain the
+	// bg-Bash tool_use (so shouldSuppressForBgTasks would return true), but
+	// suppression must not be re-armed — this IS the final result for the turn.
+	shouldSuppress := !wasSuppressed && turn.shouldSuppressForBgTasks()
 
 	// costAccounted tracks whether cumulativeCostUSD has already been updated
 	// for this result (the background-task branch does it early to enable budget
@@ -1339,17 +1352,12 @@ func (s *Session) maybeReleaseSuppression(reason string) {
 		s.mu.Unlock()
 		return
 	}
-	if s.turnManager.HasLiveTasks() {
-		s.mu.Unlock()
-		return
-	}
-	// For mixed Monitor + bg-Bash turns: if the turn has uncancelled bg-Bash
-	// tools, do not release here — the continuation ResultMessage will arrive
-	// later and finalize via the normal (non-suppressed) handleResult path.
+	// AllTasksCompleted returns false when liveTasks is non-empty (Monitor task
+	// still running), when no tasks were ever registered (bg-Bash only turns
+	// that use the continuation-ResultMessage release path), or when uncancelled
+	// bg-Bash tools are present (mixed Monitor+bg-Bash must defer to the
+	// continuation-ResultMessage path).
 	if !s.turnManager.AllTasksCompleted() {
-		// AllTasksCompleted returns false when uncancelled continuation bg-Bash
-		// tools are present. Suppression remains active; the continuation
-		// ResultMessage (on a new assistant turn) will clear bgState.active.
 		s.mu.Unlock()
 		return
 	}

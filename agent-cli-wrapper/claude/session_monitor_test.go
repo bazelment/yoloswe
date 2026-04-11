@@ -524,6 +524,49 @@ func TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg(t *testing.T) {
 	s.mu.Unlock()
 }
 
+// TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg_ThenBashContinuation
+// is the end-to-end version of the reverse ordering test. It exercises the
+// full release path: ResultMessage arrives (suppresses), Monitor completes
+// (still suppressed), then bg-Bash continuation ResultMessage arrives and
+// releases the held turn, producing a TurnCompleteEvent.
+func TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg_ThenBashContinuation(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed4", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// ResultMessage arrives first — suppresses the turn.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Monitor task completes — still suppressed, bg-Bash continuation pending.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed4", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// bg-Bash continuation ResultMessage arrives (CLI auto-continues on the same
+	// turn; no new StartTurn is called). handleResult clears bgState.active and
+	// the turn finalizes normally.
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	waitForTurnComplete(t, s.events, time.Second)
+}
+
 // TestMonitor_MixedWithBgBashDoesNotFastPath verifies that a turn containing
 // both a Monitor tool and a bg-Bash (run_in_background) tool does NOT use the
 // AllTasksCompleted fast path when the Monitor task completes first. The turn
@@ -577,4 +620,44 @@ func TestMonitor_MixedWithBgBashDoesNotFastPath(t *testing.T) {
 	}
 	s.bgState.active = false
 	s.mu.Unlock()
+}
+
+// TestMonitor_MixedWithBgBashDoesNotFastPath_ThenBashContinuation is the
+// end-to-end version: Monitor completes before ResultMessage (no fast-path),
+// then ResultMessage suppresses, then bg-Bash continuation ResultMessage
+// arrives and releases the held turn.
+func TestMonitor_MixedWithBgBashDoesNotFastPath_ThenBashContinuation(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// Monitor completes BEFORE the ResultMessage — bg-Bash is still running.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed2", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// ResultMessage suppresses (AllTasksCompleted returns false due to bg-Bash).
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// bg-Bash continuation ResultMessage arrives (same turn, no new StartTurn).
+	// handleResult clears bgState.active and the turn finalizes normally.
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+	waitForTurnComplete(t, s.events, time.Second)
 }
