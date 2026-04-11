@@ -295,7 +295,7 @@ func (h *rendererEventHandler) OnToolStart(name, id string, input map[string]int
 
 func (h *rendererEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
 	h.r.ToolComplete(name, input)
-	if result != nil || isError {
+	if isError {
 		h.r.ToolResult(result, isError)
 	}
 }
@@ -433,6 +433,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
 	}
 
+	logHandler.flushText()
 	return resolveOutput(result.Text, logHandler, logger), result.SessionID, nil
 }
 
@@ -453,6 +454,17 @@ func resolveOutputFromPath(agentText, planFilePath string, logger *slog.Logger) 
 	}
 	logger.Debug("using plan file content", "path", planFilePath)
 	return string(planContent)
+}
+
+// JoinRoundOutputs filters empty outputs and joins non-empty ones with a separator.
+func JoinRoundOutputs(outputs []string) string {
+	var nonEmpty []string
+	for _, o := range outputs {
+		if strings.TrimSpace(o) != "" {
+			nonEmpty = append(nonEmpty, o)
+		}
+	}
+	return strings.Join(nonEmpty, "\n\n---\n\n")
 }
 
 func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {

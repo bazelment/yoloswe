@@ -213,7 +213,7 @@ func TestResolvePromptForExecution_ResumeWithoutFeedback(t *testing.T) {
 }
 
 func TestLogEventHandler_TracksPlanFile_ExitPlanMode(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Write .md file, then ExitPlanMode confirms it as the plan file.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -227,7 +227,7 @@ func TestLogEventHandler_TracksPlanFile_ExitPlanMode(t *testing.T) {
 }
 
 func TestLogEventHandler_TracksPlanFile_ClaudePlansDir(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Also works with .claude/plans/ paths.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -238,7 +238,7 @@ func TestLogEventHandler_TracksPlanFile_ClaudePlansDir(t *testing.T) {
 }
 
 func TestLogEventHandler_NoExitPlanMode_NoPlanFile(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Write .md without ExitPlanMode — planFilePath stays empty.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -248,7 +248,7 @@ func TestLogEventHandler_NoExitPlanMode_NoPlanFile(t *testing.T) {
 }
 
 func TestLogEventHandler_IgnoresNonMDWrites(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Write to a non-.md path should not be tracked.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -259,7 +259,7 @@ func TestLogEventHandler_IgnoresNonMDWrites(t *testing.T) {
 }
 
 func TestLogEventHandler_IgnoresNonWriteTools(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Non-Write tool should not track .md path.
 	h.OnToolComplete("Read", "tool-1", map[string]interface{}{
@@ -270,7 +270,7 @@ func TestLogEventHandler_IgnoresNonWriteTools(t *testing.T) {
 }
 
 func TestLogEventHandler_IgnoresFailedWrites(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Failed write should not be tracked.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -281,7 +281,7 @@ func TestLogEventHandler_IgnoresFailedWrites(t *testing.T) {
 }
 
 func TestLogEventHandler_LastMDWriteWins(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 
 	// Multiple .md writes — the last one before ExitPlanMode wins.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -334,7 +334,7 @@ func TestReplay_PlanStepEventSequence(t *testing.T) {
 		{name: "ExitPlanMode", id: "t-10"},
 	}
 
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 	for _, ev := range events {
 		input := ev.input
 		if input == nil {
@@ -364,7 +364,7 @@ func TestReplay_PlanStepNoExitPlanMode(t *testing.T) {
 		// No ExitPlanMode — agent ran out of turns.
 	}
 
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 	for _, ev := range events {
 		input := ev.input
 		if input == nil {
@@ -384,7 +384,7 @@ func TestReplay_PlanStepNoExitPlanMode(t *testing.T) {
 // TestReplay_PlanFileReadFailure verifies graceful fallback when the plan file
 // cannot be read (e.g., deleted between write and read).
 func TestReplay_PlanFileReadFailure(t *testing.T) {
-	h := &logEventHandler{logger: slog.Default(), step: "plan"}
+	h := newLogEventHandler(slog.Default(), "plan")
 	h.OnToolComplete("Write", "t-1", map[string]interface{}{
 		"file_path": "/nonexistent/path/plan.md",
 	}, nil, false)

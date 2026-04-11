@@ -249,18 +249,10 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			"step", stepName, "feedback", truncate(feedback, 200))
 	}
 
-	// Filter empty round outputs before joining so separator-only text
-	// (e.g. "\n\n---\n\n") is not mistaken for real plan content.
-	var nonEmpty []string
-	for _, o := range allOutputs {
-		if strings.TrimSpace(o) != "" {
-			nonEmpty = append(nonEmpty, o)
-		}
-	}
 	stepDuration := time.Since(stepStart)
 	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "session_ids", roundSessionIDs, "duration", stepDuration)
 	w.status(fmt.Sprintf("Step %s complete (%s)", stepName, stepDuration.Truncate(time.Second)))
-	w.captureOutput(stepName, strings.Join(nonEmpty, "\n\n---\n\n"))
+	w.captureOutput(stepName, JoinRoundOutputs(allOutputs))
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
