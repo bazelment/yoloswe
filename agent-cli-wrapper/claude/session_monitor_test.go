@@ -466,6 +466,64 @@ func TestMonitor_MixedWithCancelledBgBashFastPaths(t *testing.T) {
 	waitForTurnComplete(t, s.events, time.Second)
 }
 
+// TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg tests the reverse
+// ordering: ResultMessage arrives first (suppressing the turn), then Monitor
+// task_updated:completed arrives. maybeReleaseSuppression must NOT release
+// while the uncancelled bg-Bash continuation is still pending.
+func TestMonitor_MixedWithBgBashMonitorCompletesAfterResultMsg(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "echo done"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "sleep 2", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor started.", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "Running in background...", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-mixed3", "tool_use_id": "tool-1", "task_type": "monitor",
+	}))
+
+	// ResultMessage arrives first (normal ordering for this scenario).
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	// Turn is now suppressed (safety timer active, bgState.active=true).
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Monitor task completes AFTER the ResultMessage. maybeReleaseSuppression
+	// must NOT fire because bg-Bash continuation is still pending.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-mixed3", "tool_use_id": "tool-1",
+		"patch": map[string]interface{}{"status": "completed"},
+	}))
+
+	// Turn must still be suppressed after Monitor completes.
+	expectNoTurnComplete(t, s.events, 50*time.Millisecond)
+
+	// Verify suppression is still active.
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Error("expected suppression to remain active while bg-Bash continuation is still pending")
+	}
+
+	// Clean up.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+		s.bgState.timer = nil
+	}
+	s.bgState.active = false
+	s.mu.Unlock()
+}
+
 // TestMonitor_MixedWithBgBashDoesNotFastPath verifies that a turn containing
 // both a Monitor tool and a bg-Bash (run_in_background) tool does NOT use the
 // AllTasksCompleted fast path when the Monitor task completes first. The turn

@@ -1343,6 +1343,16 @@ func (s *Session) maybeReleaseSuppression(reason string) {
 		s.mu.Unlock()
 		return
 	}
+	// For mixed Monitor + bg-Bash turns: if the turn has uncancelled bg-Bash
+	// tools, do not release here — the continuation ResultMessage will arrive
+	// later and finalize via the normal (non-suppressed) handleResult path.
+	if !s.turnManager.AllTasksCompleted() {
+		// AllTasksCompleted returns false when uncancelled continuation bg-Bash
+		// tools are present. Suppression remains active; the continuation
+		// ResultMessage (on a new assistant turn) will clear bgState.active.
+		s.mu.Unlock()
+		return
+	}
 	result := *s.bgState.heldResult
 	currentTurnNum := s.turnManager.CurrentTurnNumber()
 	if result.TurnNumber != currentTurnNum {
