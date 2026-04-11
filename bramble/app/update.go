@@ -1343,6 +1343,14 @@ func (m Model) startSession(sessionType session.SessionType, prompt, model strin
 	return m.startSessionOnPath(sessionType, prompt, model, wt.Path)
 }
 
+func truncateSessionID(id session.SessionID) string {
+	s := string(id)
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
 // startSessionOnPath starts a session of the given type on an explicit worktree path.
 func (m Model) startSessionOnPath(sessionType session.SessionType, prompt, model, worktreePath string) (tea.Model, tea.Cmd) {
 	if worktreePath == "" || prompt == "" {
@@ -1362,13 +1370,12 @@ func (m Model) startSessionOnPath(sessionType session.SessionType, prompt, model
 	m.scrollOffset = 0 // New session starts at bottom
 	m.sessions = m.sessionManager.GetAllSessions()
 	m.updateSessionDropdown()
-	toastCmd := m.addToast("Session started: "+string(sessionID)[:12], ToastSuccess)
+	toastCmd := m.addToast("Session started: "+truncateSessionID(sessionID), ToastSuccess)
 	return m, toastCmd
 }
 
-// startSessionOnRepo starts a session on a specific repo's manager without
-// mutating the active repo context. Used by overlays that let users spawn a
-// session on a different repo's worktree while keeping the main view stable.
+// startSessionOnRepo starts a session on a different repo's manager without
+// switching the active repo context.
 func (m Model) startSessionOnRepo(repoName string, sessionType session.SessionType, prompt, model, worktreePath string) (tea.Model, tea.Cmd) {
 	if worktreePath == "" || prompt == "" {
 		return m, nil
@@ -1378,13 +1385,12 @@ func (m Model) startSessionOnRepo(repoName string, sessionType session.SessionTy
 		toastCmd := m.addToast("Target repo no longer available", ToastError)
 		return m, toastCmd
 	}
-	sessionID, err := rc.sessionManager.StartSession(sessionType, worktreePath, prompt, model)
+	_, err := rc.sessionManager.StartSession(sessionType, worktreePath, prompt, model)
 	if err != nil {
 		toastCmd := m.addToast(err.Error(), ToastError)
 		return m, toastCmd
 	}
-	rc.sessions = rc.sessionManager.GetAllSessions()
-	toastCmd := m.addToast("Session started on "+repoName+": "+string(sessionID)[:12], ToastSuccess)
+	toastCmd := m.addToast("Session started on "+repoName, ToastSuccess)
 	return m, toastCmd
 }
 
@@ -1404,19 +1410,14 @@ func (m Model) startNewSessionFromOverlay(sess *session.SessionInfo, sessionType
 	hideOverlay()
 	m.focus = FocusOutput
 
-	// Capture the target repo and worktree up front. We intentionally do NOT
-	// call saveActiveContext / loadContext here — the main view stays on its
-	// current repo. The target manager is resolved at startSessionMsg dispatch
-	// time via m.repos[repoName], avoiding a race where a background message
-	// could reset the active context between prompt-open and prompt-submit.
+	// Capture target repo/worktree up front so the main view stays on its
+	// current repo (avoids race if background messages reset active context).
 	targetRepo := sess.RepoName
 	if targetRepo == "" {
 		targetRepo = m.repoName
 	}
 	worktreePath := sess.WorktreePath
 
-	// Only sync the worktree dropdown when the target is the currently-viewed
-	// repo — the dropdown belongs to the active repo's context.
 	if targetRepo == m.repoName && sess.WorktreeName != "" {
 		m.worktreeDropdown.SelectByID(sess.WorktreeName)
 		m.updateSessionDropdown()

@@ -10,9 +10,6 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
-// injectSecondRepo adds a second repo to the Model's repos map with its own
-// session.Manager, so tests can exercise cross-repo overlay flows without
-// going through openRepo's filesystem checks.
 func injectSecondRepo(t *testing.T, m *Model, repoName string) *session.Manager {
 	t.Helper()
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{
@@ -48,8 +45,6 @@ func TestNewSessionFromOverlay_CrossRepo_UsesTargetManager(t *testing.T) {
 	m.allSessionsOverlay.Show([]session.SessionInfo{repoBSess}, m.width, m.height)
 	m.focus = FocusAllSessions
 
-	// Capture the active worktree dropdown selection before the keypress so we
-	// can assert it was not mutated by the overlay handler.
 	dropdownBefore := m.worktreeDropdown.SelectedItem()
 
 	newModel, _ := m.handleAllSessionsOverlay(keyPress('b'))
@@ -63,9 +58,6 @@ func TestNewSessionFromOverlay_CrossRepo_UsesTargetManager(t *testing.T) {
 		assert.Equal(t, dropdownBefore.ID, after.ID, "worktree dropdown must not change for cross-repo")
 	}
 
-	// Drive the prompt submission. The handler returns a tea.Cmd that yields a
-	// startSessionMsg — inspect it before dispatching to verify the target repo
-	// and worktree were captured correctly.
 	newModel2, cmd := m2.Update(promptInputMsg{value: "do the thing"})
 	m3 := newModel2.(Model)
 	require.NotNil(t, cmd, "promptInputMsg must return a cmd")
@@ -75,8 +67,6 @@ func TestNewSessionFromOverlay_CrossRepo_UsesTargetManager(t *testing.T) {
 	assert.Equal(t, "repoB", startMsg.repoName)
 	assert.Equal(t, "/tmp/wt/repoB-feature", startMsg.worktreePath)
 
-	// Dispatch the startSessionMsg and assert the new session landed on repoB's
-	// manager with the correct metadata, while repoA stays untouched.
 	newModel3, _ := m3.Update(startMsg)
 	m4 := newModel3.(Model)
 
@@ -139,7 +129,6 @@ func TestNewSessionFromOverlay_SameRepo_SyncsWorktreeDropdown(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0) // start on "main"
 
-	// Highlight a session on the "feature" worktree in the same repo.
 	sess := session.SessionInfo{
 		ID:           "s1",
 		Status:       session.StatusRunning,
