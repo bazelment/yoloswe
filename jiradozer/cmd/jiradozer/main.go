@@ -505,12 +505,16 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 
 	// Report preserved worktrees so the user knows what's left.
 	if preserved := orch.PreservedWorktrees(); len(preserved) > 0 {
-		fmt.Fprintf(os.Stderr, "\nPreserved %d worktree(s) with in-progress work:\n", len(preserved))
+		fmt.Fprintf(os.Stderr, "\nPreserved %d worktree(s):\n", len(preserved))
 		for _, pw := range preserved {
-			fmt.Fprintf(os.Stderr, "  %s  %s  (%s)\n", pw.Issue, pw.Branch, pw.WorktreePath)
+			reason := "cancelled"
+			if pw.Step == jiradozer.StepDone {
+				reason = "shipped (PR open, not yet merged)"
+			}
+			fmt.Fprintf(os.Stderr, "  %s  %s  (%s)  [%s]\n", pw.Issue, pw.Branch, pw.WorktreePath, reason)
 		}
-		fmt.Fprintf(os.Stderr, "\nTo clean up manually: wt remove <branch>\n")
-		fmt.Fprintf(os.Stderr, "To clean up all on cancel: re-run with --force-cleanup\n")
+		fmt.Fprintf(os.Stderr, "\nTo remove after merging: wt remove <branch>\n")
+		fmt.Fprintf(os.Stderr, "To remove cancelled worktrees on next run: re-run with --force-cleanup\n")
 	}
 
 	return err

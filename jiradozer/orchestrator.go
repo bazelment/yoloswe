@@ -36,12 +36,13 @@ func (s IssueStatus) IsDone() bool {
 	return s.Step.IsTerminal()
 }
 
-// PreservedWorktree records a worktree that was not cleaned up because its
-// workflow was cancelled by the user.
+// PreservedWorktree records a worktree that was not cleaned up after its
+// workflow ended.
 type PreservedWorktree struct {
 	Branch       string
 	WorktreePath string
-	Issue        string // issue identifier
+	Issue        string       // issue identifier
+	Step         WorkflowStep // step at which the workflow ended
 }
 
 // Orchestrator manages concurrent issue workflows, each in its own worktree.
@@ -111,10 +112,14 @@ func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, lo
 	o.logDir = logDir
 }
 
-// SetForceCleanup controls whether worktrees are deleted even when workflows
-// are cancelled by the user (Ctrl+C). By default, cancelled worktrees are
-// preserved so work is not lost. When force is true, all worktrees are
-// cleaned up unconditionally.
+// SetForceCleanup controls whether worktrees are deleted when workflows are
+// cancelled by the user (Ctrl+C). By default, cancelled worktrees are
+// preserved so in-progress work is not lost. When force is true, cancelled
+// worktrees are removed on cancellation.
+//
+// Note: worktrees for successfully completed workflows (StepDone) are always
+// preserved regardless of this flag — the ship step opens a PR but does not
+// merge it, so the branch must remain until the PR is merged.
 func (o *Orchestrator) SetForceCleanup(force bool) {
 	o.forceCleanup = force
 }
@@ -504,6 +509,7 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 			Branch:       mw.branch,
 			WorktreePath: mw.worktreePath,
 			Issue:        mw.issue.Identifier,
+			Step:         step,
 		})
 		o.mu.Unlock()
 	} else {
