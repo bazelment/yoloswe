@@ -331,6 +331,121 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+func TestOrchestrator_CancelPreservesWorktree(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	// Script that waits for SIGINT (simulates a long-running subprocess).
+	script := writeTestScript(t, "trap 'exit 130' INT; sleep 60")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(ctx, issue)
+	require.NoError(t, err)
+
+	// Drain StepInit.
+	select {
+	case <-orch.StatusUpdates():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepInit")
+	}
+
+	// Cancel the context (simulates Ctrl+C).
+	cancel()
+
+	// Should receive StepCancelled.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepCancelled, status.Step)
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for StepCancelled")
+	}
+
+	orch.Wait()
+
+	// Worktree should NOT have been removed.
+	wtm.mu.Lock()
+	removed := wtm.removed
+	wtm.mu.Unlock()
+	require.Empty(t, removed, "cancelled worktree should not be removed")
+
+	// Preserved worktrees should be recorded.
+	preserved := orch.PreservedWorktrees()
+	require.Len(t, preserved, 1)
+	require.Equal(t, "ENG-1", preserved[0].Issue)
+	require.Contains(t, preserved[0].Branch, "ENG-1")
+}
+
+func TestOrchestrator_CancelWithForceCleanup(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	script := writeTestScript(t, "trap 'exit 130' INT; sleep 60")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+	orch.SetForceCleanup(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(ctx, issue)
+	require.NoError(t, err)
+
+	// Drain StepInit.
+	select {
+	case <-orch.StatusUpdates():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepInit")
+	}
+
+	cancel()
+
+	// Should receive StepCancelled.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepCancelled, status.Step)
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for StepCancelled")
+	}
+
+	orch.Wait()
+
+	// With forceCleanup, worktree SHOULD be removed.
+	wtm.mu.Lock()
+	removed := wtm.removed
+	wtm.mu.Unlock()
+	require.Len(t, removed, 1, "cancelled worktree should be removed with --force-cleanup")
+
+	// No preserved worktrees.
+	require.Empty(t, orch.PreservedWorktrees())
+}
+
+func TestOrchestrator_FailedStillCleansUp(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	script := writeTestScript(t, "exit 1")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	// Drain StepInit + StepFailed.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-orch.StatusUpdates():
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for status")
+		}
+	}
+
+	orch.Wait()
+
+	// Failed worktrees should still be cleaned up.
+	wtm.mu.Lock()
+	removed := wtm.removed
+	wtm.mu.Unlock()
+	require.Len(t, removed, 1, "failed worktree should be removed")
+	require.Empty(t, orch.PreservedWorktrees())
+}
+
 func TestOrchestrator_Snapshot(t *testing.T) {
 	cfg := testOrchestratorConfig()
 
