@@ -149,6 +149,24 @@ At each review gate, comment on the issue:
 - `redo` -- re-run the current step
 - Any other text -- treated as feedback, incorporated into the next agent run
 
+### Worktree lifecycle (team mode)
+
+In team mode (`--filter`), each issue gets its own git worktree under a dedicated branch (`<branch-prefix>/<identifier>`). The worktree lifecycle is:
+
+- **Created** when the issue is picked up and `Start()` is called.
+- **Left intact** when the workflow completes successfully (`StepDone`). The ship step typically opens a PR but does not merge it — the branch must remain until the PR is reviewed and merged.
+- **Removed** only on workflow failure (`StepFailed`). Failed runs clean up the worktree and branch so a future retry starts from a clean state.
+
+After merging the PR, remove the worktree manually:
+
+```bash
+# Remove worktree and branch after merge
+git worktree remove ~/worktrees/<repo>/<branch-prefix>/<identifier>
+git branch -d <branch-prefix>/<identifier>
+```
+
+Or use `wt remove` if you have the wt tool configured.
+
 ## Supported agents
 
 Jiradozer uses the `multiagent/agent.Provider` interface, so any agent backend that bramble supports works out of the box:

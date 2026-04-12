@@ -326,18 +326,53 @@ func (o *Orchestrator) PreservedWorktrees() []PreservedWorktree {
 	return cp
 }
 
+// maxStartFailures is the number of consecutive non-transient Start failures
+// allowed for a single issue before RunWithDiscovery gives up and stops
+// clearing it from the seen set (preventing an infinite retry storm).
+const maxStartFailures = 3
+
 // RunWithDiscovery consumes issues from the discovery channel and starts
 // workflows for them, respecting the concurrency limit.
 func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discovery) error {
 	issues := discovery.Run(ctx)
 	var pending []*tracker.Issue
+	// failCounts tracks consecutive permanent Start failures per issue ID.
+	// Transient failures (concurrency limit) are not counted here; they are
+	// handled by re-queuing into pending instead of clearing the seen set.
+	failCounts := make(map[string]int)
 
-	startOrRetry := func(issue *tracker.Issue) {
-		if err := o.Start(ctx, issue); err != nil {
-			o.logger.Warn("failed to start workflow", "issue", issue.Identifier, "error", err)
-			// Clear from discovery's seen set so the issue is re-emitted on next poll.
-			discovery.ClearSeen(issue.ID)
+	// tryStart attempts to start the issue workflow. Returns true if the issue
+	// should be removed from the pending queue (either started successfully or
+	// permanently failed). Returns false if it should stay pending (transient).
+	tryStart := func(issue *tracker.Issue) bool {
+		err := o.Start(ctx, issue)
+		if err == nil {
+			delete(failCounts, issue.ID)
+			return true
 		}
+		if strings.Contains(err.Error(), "concurrency limit") {
+			// Transient: slots are full. Keep in pending; do not clear seen.
+			return false
+		}
+		// Permanent error (worktree already exists, subprocess start failed, etc.).
+		failCounts[issue.ID]++
+		if failCounts[issue.ID] < maxStartFailures {
+			o.logger.Warn("failed to start workflow, will retry",
+				"issue", issue.Identifier,
+				"error", err,
+				"attempt", failCounts[issue.ID],
+				"max", maxStartFailures,
+			)
+			discovery.ClearSeen(issue.ID)
+		} else {
+			o.logger.Error("failed to start workflow, giving up after repeated failures",
+				"issue", issue.Identifier,
+				"error", err,
+				"failures", failCounts[issue.ID],
+			)
+			// Do NOT clear seen — leave the issue suppressed to stop the storm.
+		}
+		return true
 	}
 
 	for {
@@ -349,7 +384,10 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				remaining = append(remaining, issue)
 				continue
 			}
-			startOrRetry(issue)
+			if !tryStart(issue) {
+				remaining = append(remaining, issue)
+				continue
+			}
 			active = o.ActiveCount()
 		}
 		pending = remaining
@@ -366,7 +404,7 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				return nil
 			}
 			if o.ActiveCount() < o.config.Source.MaxConcurrent {
-				startOrRetry(issue)
+				tryStart(issue)
 			} else {
 				pending = append(pending, issue)
 			}
@@ -443,9 +481,18 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// cleanup removes the issue from the active map and signals a free slot.
+// Worktree removal depends on how the workflow ended:
+//   - StepDone: worktree is preserved — the ship step opens a PR but does not
+//     merge it, so the branch must remain until the PR is merged.
+//   - StepCancelled: worktree is preserved by default so in-progress work is
+//     not lost; set forceCleanup to remove it unconditionally.
+//   - StepFailed: worktree is removed so a future retry starts clean.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
-	if step == StepCancelled && !o.forceCleanup {
-		o.logger.Info("preserving worktree for cancelled workflow",
+	preserve := step == StepDone || (step == StepCancelled && !o.forceCleanup)
+	if preserve {
+		o.logger.Info("preserving worktree",
+			"step", step,
 			"branch", mw.branch,
 			"worktree", mw.worktreePath,
 			"issue", mw.issue.Identifier,
