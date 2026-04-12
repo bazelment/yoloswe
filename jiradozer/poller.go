@@ -80,15 +80,18 @@ func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string
 
 // ParseCommentAction determines the feedback action from a comment body.
 // Only the first line is checked for action keywords, so "approve\n\nsome notes"
-// is correctly recognized as an approval.
+// is correctly recognized as an approval. Trailing punctuation (., !, ?) is
+// stripped before matching, so "lgtm!", "approved.", "ship it!" all work.
 func ParseCommentAction(body string) FeedbackAction {
 	firstLine := strings.TrimSpace(body)
 	if idx := strings.IndexAny(firstLine, "\r\n"); idx >= 0 {
 		firstLine = strings.TrimSpace(firstLine[:idx])
 	}
 	lower := strings.ToLower(firstLine)
+	// Strip trailing punctuation for keyword matching.
+	normalized := strings.TrimRight(lower, ".!?")
 	switch {
-	case lower == "approve" || lower == "lgtm" || lower == "ship it" || lower == "approved":
+	case normalized == "approve" || normalized == "lgtm" || normalized == "ship it" || normalized == "approved":
 		return FeedbackApprove
 	case strings.HasPrefix(lower, "redo") || strings.HasPrefix(lower, "retry"):
 		return FeedbackRedo

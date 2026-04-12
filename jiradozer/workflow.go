@@ -18,6 +18,11 @@ const (
 	stateKeyDone       = "done"
 )
 
+// DefaultMaxRedos is the maximum number of times a step can be re-run via
+// feedback before the workflow fails. This prevents infinite loops when
+// comments are repeatedly parsed as redo requests.
+const DefaultMaxRedos = 3
+
 // Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
 	lastCommentAt   time.Time
@@ -28,6 +33,7 @@ type Workflow struct {
 	logger          *slog.Logger
 	sessionIDs      map[WorkflowStep]string
 	stateIDs        map[string]string
+	redoCounts      map[WorkflowStep]int
 	OnTransition    func(step WorkflowStep)
 	OnRoundProgress func(roundIndex, roundTotal int)
 	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error)
@@ -37,6 +43,7 @@ type Workflow struct {
 	buildOutput     string
 	feedback        string
 	botCommentIDs   []string
+	maxRedos        int
 }
 
 // NewWorkflow creates a new workflow for the given issue.
@@ -49,6 +56,8 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		logger:       logger,
 		stateIDs:     make(map[string]string),
 		sessionIDs:   make(map[WorkflowStep]string),
+		redoCounts:   make(map[WorkflowStep]int),
+		maxRedos:     DefaultMaxRedos,
 		runStepAgent: RunStepAgent,
 	}
 }
@@ -376,17 +385,39 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		w.logger.Info("feedback: redo", "step", w.state.Current())
 		w.status("Redo requested")
 		w.feedback = fb.Message
-		if err := w.transition(redoTarget, "redo"); err != nil {
+		if err := w.tryRedo(ctx, redoTarget); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackComment:
 		w.logger.Info("feedback: comment", "step", w.state.Current(), "message", fb.Message)
 		w.status("Feedback received")
 		w.feedback = fb.Message
-		if err := w.transition(redoTarget, "feedback"); err != nil {
-			w.fail(ctx, err)
+		// During plan review, general comments advance to build with feedback
+		// incorporated — they don't restart the planning step. For other review
+		// steps, redo is the right behavior (the user wants changes applied).
+		if w.state.Current() == StepPlanReview {
+			if err := w.transition(approveTarget, "approved_with_feedback"); err != nil {
+				w.fail(ctx, err)
+			}
+		} else {
+			if err := w.tryRedo(ctx, redoTarget); err != nil {
+				w.fail(ctx, err)
+			}
 		}
 	}
+}
+
+// tryRedo transitions to the redo target if the circuit breaker hasn't tripped.
+// Returns an error (and transitions to StepFailed) if the step has been re-run
+// maxRedos times.
+func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
+	w.redoCounts[redoTarget]++
+	count := w.redoCounts[redoTarget]
+	if count > w.maxRedos {
+		return fmt.Errorf("step %s has been re-run %d times (max %d), giving up", redoTarget, count-1, w.maxRedos)
+	}
+	w.logger.Info("redo attempt", "target", redoTarget, "attempt", count, "max", w.maxRedos)
+	return w.transition(redoTarget, "redo")
 }
 
 func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowStep, trigger string) {

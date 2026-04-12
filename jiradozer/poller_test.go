@@ -29,10 +29,21 @@ func TestParseCommentAction(t *testing.T) {
 		{"Ship It", FeedbackApprove},
 		{"SHIP IT", FeedbackApprove},
 
-		// Approve with trailing text on first line (exact match required).
-		{"lgtm!", FeedbackComment},        // "lgtm!" is not an exact match
+		// Approve with trailing punctuation (stripped before matching).
+		{"lgtm!", FeedbackApprove},
+		{"lgtm.", FeedbackApprove},
+		{"lgtm?", FeedbackApprove},
+		{"LGTM!", FeedbackApprove},
+		{"approved!", FeedbackApprove},
+		{"approved.", FeedbackApprove},
+		{"approve!", FeedbackApprove},
+		{"ship it!", FeedbackApprove},
+		{"ship it!!", FeedbackApprove},
+
+		// Approve with trailing text on first line (not just punctuation — still rejected).
 		{"approve this", FeedbackComment}, // "approve this" is not "approve"
 		{"ship it now", FeedbackComment},  // "ship it now" is not "ship it"
+		{"lgtm yeah", FeedbackComment},    // "lgtm yeah" is not "lgtm"
 
 		// Redo variants.
 		{"redo", FeedbackRedo},
