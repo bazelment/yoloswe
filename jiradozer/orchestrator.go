@@ -2,6 +2,7 @@ package jiradozer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,11 @@ import (
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
+
+// errConcurrencyLimit is returned by Start when all concurrency slots are full.
+// RunWithDiscovery uses errors.Is to distinguish transient (keep pending) from
+// permanent failures (retry with ClearSeen or give up).
+var errConcurrencyLimit = errors.New("concurrency limit reached")
 
 // WorktreeManager is the interface for creating and removing git worktrees.
 type WorktreeManager interface {
@@ -169,7 +175,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.mu.Lock()
 	if o.activeCountLocked() >= o.config.Source.MaxConcurrent {
 		o.mu.Unlock()
-		return fmt.Errorf("concurrency limit reached (%d)", o.config.Source.MaxConcurrent)
+		return fmt.Errorf("%w (%d)", errConcurrencyLimit, o.config.Source.MaxConcurrent)
 	}
 	if _, exists := o.active[issue.ID]; exists {
 		o.mu.Unlock()
@@ -358,7 +364,7 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 			delete(failCounts, issue.ID)
 			return true
 		}
-		if strings.Contains(err.Error(), "concurrency limit") {
+		if errors.Is(err, errConcurrencyLimit) {
 			// Transient: slots are full. Keep in pending; do not clear seen.
 			return false
 		}
