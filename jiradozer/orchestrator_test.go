@@ -418,6 +418,48 @@ func TestOrchestrator_CancelWithForceCleanup(t *testing.T) {
 	require.Empty(t, orch.PreservedWorktrees())
 }
 
+func TestOrchestrator_CancelWithCleanExit(t *testing.T) {
+	// Verify that a subprocess that traps SIGINT and exits 0 is still
+	// classified as StepCancelled, not StepDone.
+	t.Parallel()
+	cfg := testOrchestratorConfig()
+
+	// Script traps SIGINT and exits cleanly (exit 0).
+	script := writeTestScript(t, "trap 'exit 0' INT; sleep 60")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(ctx, issue)
+	require.NoError(t, err)
+
+	// Drain StepInit.
+	select {
+	case <-orch.StatusUpdates():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepInit")
+	}
+
+	// Cancel the context (simulates Ctrl+C).
+	cancel()
+
+	// Should receive StepCancelled, not StepDone, even though exit code is 0.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepCancelled, status.Step, "clean exit after SIGINT must be StepCancelled")
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for StepCancelled")
+	}
+
+	orch.Wait()
+
+	// Worktree should NOT have been removed (default: preserve on cancel).
+	wtm.mu.Lock()
+	removed := wtm.removed
+	wtm.mu.Unlock()
+	require.Empty(t, removed, "cancelled worktree should not be removed")
+}
+
 func TestOrchestrator_FailedStillCleansUp(t *testing.T) {
 	cfg := testOrchestratorConfig()
 

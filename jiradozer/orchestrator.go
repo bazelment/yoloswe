@@ -257,15 +257,17 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		defer logFile.Close()
 		err := cmd.Wait()
 		switch {
+		case wfCtx.Err() != nil:
+			// Context was cancelled (user pressed Ctrl+C). Check this first:
+			// a child that traps SIGINT and exits 0 would otherwise be
+			// misclassified as StepDone.
+			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
+			o.emitStatus(mw, StepCancelled, wfCtx.Err())
+			o.cleanup(context.Background(), mw, StepCancelled)
 		case err == nil:
 			o.logger.Info("subprocess completed", "issue", issue.Identifier)
 			o.emitStatus(mw, StepDone, nil)
 			o.cleanup(context.Background(), mw, StepDone)
-		case wfCtx.Err() != nil:
-			// The workflow context was cancelled (user pressed Ctrl+C).
-			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
-			o.emitStatus(mw, StepCancelled, err)
-			o.cleanup(context.Background(), mw, StepCancelled)
 		default:
 			o.logger.Error("subprocess failed", "issue", issue.Identifier, "error", err)
 			o.emitStatus(mw, StepFailed, err)
@@ -320,9 +322,10 @@ func (o *Orchestrator) Wait() {
 	o.wg.Wait()
 }
 
-// PreservedWorktrees returns the list of worktrees that were preserved
-// because their workflows were cancelled. Only meaningful after Wait or
-// Shutdown has returned.
+// PreservedWorktrees returns the list of worktrees that were preserved after
+// their workflows ended. This includes both successful completions (StepDone —
+// waiting for the PR to be merged) and cancellations (StepCancelled — preserving
+// in-progress work). Only meaningful after Wait or Shutdown has returned.
 func (o *Orchestrator) PreservedWorktrees() []PreservedWorktree {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
