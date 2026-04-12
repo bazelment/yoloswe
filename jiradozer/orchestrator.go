@@ -245,11 +245,6 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.active[issue.ID] = placeholder
 	o.mu.Unlock()
 
-	// Transition to "In Progress" before creating the worktree. This acts as a
-	// distributed lock: other jiradozer processes polling with --filter state=Todo
-	// will stop discovering this issue after the state changes. Do this before
-	// NewWorktree so that even if worktree creation fails, the issue is claimed
-	// (preventing races where another process starts work in the same window).
 	o.claimIssueInProgress(ctx, issue)
 
 	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)

@@ -598,7 +598,7 @@ type mockClaimTracker struct {
 	stateIDs     []string // stateIDs passed to UpdateIssueState
 	labelIssues  []string // issueIDs passed to AddLabel
 	labelNames   []string // labels passed to AddLabel
-	mu2          sync.Mutex
+	claimMu      sync.Mutex
 }
 
 func (m *mockClaimTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
@@ -609,30 +609,30 @@ func (m *mockClaimTracker) FetchWorkflowStates(_ context.Context, _ string) ([]t
 }
 
 func (m *mockClaimTracker) UpdateIssueState(_ context.Context, issueID string, stateID string) error {
-	m.mu2.Lock()
-	defer m.mu2.Unlock()
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
 	m.stateUpdates = append(m.stateUpdates, issueID)
 	m.stateIDs = append(m.stateIDs, stateID)
 	return nil
 }
 
 func (m *mockClaimTracker) AddLabel(_ context.Context, issueID string, label string) error {
-	m.mu2.Lock()
-	defer m.mu2.Unlock()
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
 	m.labelIssues = append(m.labelIssues, issueID)
 	m.labelNames = append(m.labelNames, label)
 	return nil
 }
 
 func (m *mockClaimTracker) getStateUpdates() ([]string, []string) {
-	m.mu2.Lock()
-	defer m.mu2.Unlock()
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
 	return append([]string(nil), m.stateUpdates...), append([]string(nil), m.stateIDs...)
 }
 
 func (m *mockClaimTracker) getLabelCalls() ([]string, []string) {
-	m.mu2.Lock()
-	defer m.mu2.Unlock()
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
 	return append([]string(nil), m.labelIssues...), append([]string(nil), m.labelNames...)
 }
 
