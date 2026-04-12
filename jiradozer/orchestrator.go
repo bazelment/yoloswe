@@ -184,6 +184,9 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		cancel()
+		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
+			o.logger.Warn("failed to remove worktree after log open failure", "branch", branch, "error", removeErr)
+		}
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("open log file for %s: %w", issue.Identifier, err)
 	}
@@ -193,6 +196,10 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		cancel()
+		// Clean up the worktree that was already created before we failed.
+		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
+			o.logger.Warn("failed to remove worktree after start failure", "branch", branch, "error", removeErr)
+		}
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("start subprocess for %s: %w", issue.Identifier, err)
 	}
