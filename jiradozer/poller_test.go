@@ -119,6 +119,9 @@ func (m *mockPollerTracker) PostComment(_ context.Context, _ string, _ string) (
 func (m *mockPollerTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
 	return nil
 }
+func (m *mockPollerTracker) AddLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
 
 func TestPollForFeedback_FiltersBotComments(t *testing.T) {
 	now := time.Now()

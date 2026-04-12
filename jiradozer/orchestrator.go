@@ -21,6 +21,12 @@ import (
 // permanent failures (retry with ClearSeen or give up).
 var errConcurrencyLimit = errors.New("concurrency limit reached")
 
+// LockLabel is the label attached to an issue when jiradozer claims it.
+// This provides defense-in-depth alongside the state transition: even if
+// another process polls a different state set, the label signals that the
+// issue is already being handled.
+const LockLabel = "jiradozer-active"
+
 // WorktreeManager is the interface for creating and removing git worktrees.
 type WorktreeManager interface {
 	NewWorktree(ctx context.Context, branch, baseBranch, goal string) (worktreePath string, err error)
@@ -158,6 +164,59 @@ func (o *Orchestrator) ActiveCount() int {
 	return o.activeCountLocked()
 }
 
+// claimIssueInProgress transitions the issue to "In Progress" and attaches the
+// LockLabel before launching the subprocess. Together these provide a distributed
+// lock against concurrent jiradozer processes:
+//
+//  1. State transition: processes polling --filter state=Todo stop discovering
+//     the issue once it leaves the Todo state.
+//  2. Label: defense-in-depth for processes that poll a different state set or
+//     that discover the issue in the narrow window before the state changes.
+//
+// Both operations are best-effort — errors are logged as warnings and do not
+// abort the workflow start, since missing team ID or transient API failures
+// should not prevent local work from proceeding.
+func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.Issue) {
+	// Attach the lock label first — it signals intent even if the state
+	// transition below fails.
+	if err := o.tracker.AddLabel(ctx, issue.ID, LockLabel); err != nil {
+		o.logger.Warn("failed to add lock label to issue",
+			"issue", issue.Identifier, "label", LockLabel, "error", err)
+	} else {
+		o.logger.Info("claimed issue: added lock label",
+			"issue", issue.Identifier, "label", LockLabel)
+	}
+
+	if issue.TeamID == "" {
+		o.logger.Warn("issue has no team ID, skipping in_progress state transition",
+			"issue", issue.Identifier)
+		return
+	}
+
+	states, err := o.tracker.FetchWorkflowStates(ctx, issue.TeamID)
+	if err != nil {
+		o.logger.Warn("failed to fetch workflow states for in_progress claim",
+			"issue", issue.Identifier, "error", err)
+		return
+	}
+
+	for _, s := range states {
+		if s.Name == o.config.States.InProgress {
+			if err := o.tracker.UpdateIssueState(ctx, issue.ID, s.ID); err != nil {
+				o.logger.Warn("failed to transition issue to in_progress",
+					"issue", issue.Identifier, "state", s.Name, "error", err)
+			} else {
+				o.logger.Info("claimed issue: transitioned to in_progress",
+					"issue", issue.Identifier, "state", s.Name)
+			}
+			return
+		}
+	}
+
+	o.logger.Warn("in_progress state not found in workflow states",
+		"issue", issue.Identifier, "expected_name", o.config.States.InProgress)
+}
+
 // Start launches a workflow for the given issue in a new worktree.
 // Returns an error if the concurrency limit is reached or worktree creation fails.
 func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
@@ -185,6 +244,13 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	placeholder := &managedWorkflow{issue: issue}
 	o.active[issue.ID] = placeholder
 	o.mu.Unlock()
+
+	// Transition to "In Progress" before creating the worktree. This acts as a
+	// distributed lock: other jiradozer processes polling with --filter state=Todo
+	// will stop discovering this issue after the state changes. Do this before
+	// NewWorktree so that even if worktree creation fails, the issue is claimed
+	// (preventing races where another process starts work in the same window).
+	o.claimIssueInProgress(ctx, issue)
 
 	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
 	worktreePath, err := o.wtManager.NewWorktree(ctx, branch, o.config.BaseBranch, issue.Title)
@@ -368,7 +434,17 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 			// Transient: slots are full. Keep in pending; do not clear seen.
 			return false
 		}
-		// Permanent error (worktree already exists, subprocess start failed, etc.).
+		// "worktree already exists" means a prior run already claimed this issue.
+		// Clearing the seen set would cause an infinite rediscovery storm —
+		// treat it as a terminal signal that the issue is already handled.
+		if strings.Contains(err.Error(), "worktree already exists") {
+			o.logger.Warn("worktree already exists, issue is already being handled — suppressing",
+				"issue", issue.Identifier,
+				"error", err,
+			)
+			return true
+		}
+		// Other permanent errors: retry up to maxStartFailures, then give up.
 		failCounts[issue.ID]++
 		if failCounts[issue.ID] < maxStartFailures {
 			o.logger.Warn("failed to start workflow, will retry",

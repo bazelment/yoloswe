@@ -60,6 +60,9 @@ func (m *mockOrchestratorTracker) PostComment(_ context.Context, _ string, _ str
 func (m *mockOrchestratorTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
 	return nil
 }
+func (m *mockOrchestratorTracker) AddLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
 
 // mockWTManager tracks worktree operations without real git.
 type mockWTManager struct {
