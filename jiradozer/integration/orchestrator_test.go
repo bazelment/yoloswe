@@ -189,10 +189,35 @@ func TestOrchestrator_WorktreeCreation(t *testing.T) {
 	// Wait for subprocesses to complete.
 	orch.Wait()
 
-	// Verify cleanup happened.
+	// On successful completion the worktree is intentionally left intact so
+	// the PR (which may not be merged yet) retains its base branch.
+	removed := wtm.getRemoved()
+	require.NotContains(t, removed, "jiradozer/ENG-1")
+	require.NotContains(t, removed, "jiradozer/ENG-2")
+}
+
+func TestOrchestrator_WorktreeRemovedOnFailure(t *testing.T) {
+	t.Parallel()
+	issues := []*tracker.Issue{
+		testIssue("1", "ENG-1", "Feature A"),
+	}
+	wtm := newMockWTManager(t)
+	cfg := testOrchestratorConfig()
+	script := writeIntegrationTestScript(t, "exit 1")
+	orch := newOrchWithScript(t, cfg, wtm, script)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := orch.Start(ctx, issues[0])
+	require.NoError(t, err)
+
+	// Wait for subprocess to complete.
+	orch.Wait()
+
+	// On failure the worktree must be cleaned up.
 	removed := wtm.getRemoved()
 	require.Contains(t, removed, "jiradozer/ENG-1")
-	require.Contains(t, removed, "jiradozer/ENG-2")
 }
 
 func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
@@ -323,7 +348,9 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 	require.Contains(t, created, "jiradozer/ENG-2")
 }
 
-func TestOrchestrator_WorktreeCleanupOnCompletion(t *testing.T) {
+func TestOrchestrator_WorktreePreservedOnCompletion(t *testing.T) {
+	// On successful completion the worktree is intentionally left intact so
+	// the PR (which may not be merged yet) retains its base branch.
 	issue := testIssue("1", "ENG-1", "Feature A")
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
@@ -339,7 +366,11 @@ func TestOrchestrator_WorktreeCleanupOnCompletion(t *testing.T) {
 	orch.Wait()
 
 	removed := wtm.getRemoved()
-	require.Contains(t, removed, "jiradozer/ENG-1", "worktree should be cleaned up after subprocess completion")
+	require.NotContains(t, removed, "jiradozer/ENG-1", "worktree must not be removed after successful completion")
+
+	preserved := orch.PreservedWorktrees()
+	require.Len(t, preserved, 1)
+	require.Equal(t, "ENG-1", preserved[0].Issue)
 }
 
 // testOrchestratorLogger returns a logger suitable for integration tests.

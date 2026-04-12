@@ -3,6 +3,7 @@ package jiradozer
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -417,6 +418,48 @@ func TestOrchestrator_CancelWithForceCleanup(t *testing.T) {
 	require.Empty(t, orch.PreservedWorktrees())
 }
 
+func TestOrchestrator_CancelWithCleanExit(t *testing.T) {
+	// Verify that a subprocess that traps SIGINT and exits 0 is still
+	// classified as StepCancelled, not StepDone.
+	t.Parallel()
+	cfg := testOrchestratorConfig()
+
+	// Script traps SIGINT and exits cleanly (exit 0).
+	script := writeTestScript(t, "trap 'exit 0' INT; sleep 60")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(ctx, issue)
+	require.NoError(t, err)
+
+	// Drain StepInit.
+	select {
+	case <-orch.StatusUpdates():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepInit")
+	}
+
+	// Cancel the context (simulates Ctrl+C).
+	cancel()
+
+	// Should receive StepCancelled, not StepDone, even though exit code is 0.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepCancelled, status.Step, "clean exit after SIGINT must be StepCancelled")
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for StepCancelled")
+	}
+
+	orch.Wait()
+
+	// Worktree should NOT have been removed (default: preserve on cancel).
+	wtm.mu.Lock()
+	removed := wtm.removed
+	wtm.mu.Unlock()
+	require.Empty(t, removed, "cancelled worktree should not be removed")
+}
+
 func TestOrchestrator_FailedStillCleansUp(t *testing.T) {
 	cfg := testOrchestratorConfig()
 
@@ -444,6 +487,109 @@ func TestOrchestrator_FailedStillCleansUp(t *testing.T) {
 	wtm.mu.Unlock()
 	require.Len(t, removed, 1, "failed worktree should be removed")
 	require.Empty(t, orch.PreservedWorktrees())
+}
+
+// countingWTManager wraps mockWTManager and counts NewWorktree calls.
+type countingWTManager struct {
+	*mockWTManager
+	newCalls int
+	mu2      sync.Mutex
+}
+
+func (c *countingWTManager) NewWorktree(ctx context.Context, branch, base, goal string) (string, error) {
+	c.mu2.Lock()
+	c.newCalls++
+	c.mu2.Unlock()
+	return c.mockWTManager.NewWorktree(ctx, branch, base, goal)
+}
+
+func (c *countingWTManager) callCount() int {
+	c.mu2.Lock()
+	defer c.mu2.Unlock()
+	return c.newCalls
+}
+
+// TestRunWithDiscovery_PermanentErrorStopsRetrying verifies that RunWithDiscovery
+// stops clearing the seen set after maxStartFailures permanent errors for the
+// same issue, preventing an infinite retry storm.
+func TestRunWithDiscovery_PermanentErrorStopsRetrying(t *testing.T) {
+	t.Parallel()
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	// mockDiscoveryTracker returns the same issue on every ListIssues call.
+	mt := &mockDiscoveryTracker{
+		results: [][]*tracker.Issue{
+			{issue}, {issue}, {issue}, {issue}, {issue},
+			{issue}, {issue}, {issue}, {issue}, {issue},
+		},
+	}
+
+	cfg := testOrchestratorConfig()
+	cfg.Source.MaxConcurrent = 3
+
+	inner := newMockWTManager()
+	inner.newErr = fmt.Errorf("worktree already exists")
+	wtm := &countingWTManager{mockWTManager: inner}
+
+	logDir := t.TempDir()
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode("/bin/false", nil, logDir)
+
+	d := NewDiscovery(mt, tracker.IssueFilter{}, 5*time.Millisecond, testLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	_ = orch.RunWithDiscovery(ctx, d)
+
+	// After maxStartFailures attempts the retry storm must stop.
+	// Allow one extra call in case of a race at the boundary.
+	calls := wtm.callCount()
+	require.LessOrEqual(t, calls, maxStartFailures+1,
+		"NewWorktree called %d times; expected at most %d (maxStartFailures=%d)",
+		calls, maxStartFailures+1, maxStartFailures)
+}
+
+// TestRunWithDiscovery_ConcurrencyLimitKeepsPending verifies that a
+// concurrency-limit error keeps the issue in the pending queue rather than
+// triggering a ClearSeen (which would cause an infinite retry storm when slots
+// free up).
+func TestRunWithDiscovery_ConcurrencyLimitKeepsPending(t *testing.T) {
+	t.Parallel()
+
+	// Use a script that exits quickly so slots free up.
+	fastScript := writeTestScript(t, "exit 0")
+
+	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
+	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}
+	issue3 := &tracker.Issue{ID: "3", Identifier: "ENG-3", Title: "Test 3"}
+
+	cfg := testOrchestratorConfig()
+	cfg.Source.MaxConcurrent = 2 // Only 2 slots.
+
+	wtm := newMockWTManagerWithDir(t)
+	logDir := t.TempDir()
+
+	mt := &mockDiscoveryTracker{
+		results: [][]*tracker.Issue{
+			{issue1, issue2, issue3},
+		},
+	}
+
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode(fastScript, nil, logDir)
+
+	d := NewDiscovery(mt, tracker.IssueFilter{}, time.Hour, testLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = orch.RunWithDiscovery(ctx, d)
+
+	// All three issues must have been started exactly once (third issue was
+	// pending until a slot freed, then started — not duplicated via ClearSeen).
+	created := wtm.getCreated()
+	require.Len(t, created, 3, "expected all 3 issues to be started exactly once")
 }
 
 func TestOrchestrator_Snapshot(t *testing.T) {

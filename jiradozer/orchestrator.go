@@ -2,6 +2,7 @@ package jiradozer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,11 @@ import (
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
+
+// errConcurrencyLimit is returned by Start when all concurrency slots are full.
+// RunWithDiscovery uses errors.Is to distinguish transient (keep pending) from
+// permanent failures (retry with ClearSeen or give up).
+var errConcurrencyLimit = errors.New("concurrency limit reached")
 
 // WorktreeManager is the interface for creating and removing git worktrees.
 type WorktreeManager interface {
@@ -36,12 +42,13 @@ func (s IssueStatus) IsDone() bool {
 	return s.Step.IsTerminal()
 }
 
-// PreservedWorktree records a worktree that was not cleaned up because its
-// workflow was cancelled by the user.
+// PreservedWorktree records a worktree that was not cleaned up after its
+// workflow ended.
 type PreservedWorktree struct {
 	Branch       string
 	WorktreePath string
-	Issue        string // issue identifier
+	Issue        string       // issue identifier
+	Step         WorkflowStep // step at which the workflow ended
 }
 
 // Orchestrator manages concurrent issue workflows, each in its own worktree.
@@ -111,10 +118,14 @@ func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, lo
 	o.logDir = logDir
 }
 
-// SetForceCleanup controls whether worktrees are deleted even when workflows
-// are cancelled by the user (Ctrl+C). By default, cancelled worktrees are
-// preserved so work is not lost. When force is true, all worktrees are
-// cleaned up unconditionally.
+// SetForceCleanup controls whether worktrees are deleted when workflows are
+// cancelled by the user (Ctrl+C). By default, cancelled worktrees are
+// preserved so in-progress work is not lost. When force is true, cancelled
+// worktrees are removed on cancellation.
+//
+// Note: worktrees for successfully completed workflows (StepDone) are always
+// preserved regardless of this flag — the ship step opens a PR but does not
+// merge it, so the branch must remain until the PR is merged.
 func (o *Orchestrator) SetForceCleanup(force bool) {
 	o.forceCleanup = force
 }
@@ -164,7 +175,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.mu.Lock()
 	if o.activeCountLocked() >= o.config.Source.MaxConcurrent {
 		o.mu.Unlock()
-		return fmt.Errorf("concurrency limit reached (%d)", o.config.Source.MaxConcurrent)
+		return fmt.Errorf("%w (%d)", errConcurrencyLimit, o.config.Source.MaxConcurrent)
 	}
 	if _, exists := o.active[issue.ID]; exists {
 		o.mu.Unlock()
@@ -252,15 +263,17 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		defer logFile.Close()
 		err := cmd.Wait()
 		switch {
+		case wfCtx.Err() != nil:
+			// Context was cancelled (user pressed Ctrl+C). Check this first:
+			// a child that traps SIGINT and exits 0 would otherwise be
+			// misclassified as StepDone.
+			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
+			o.emitStatus(mw, StepCancelled, wfCtx.Err())
+			o.cleanup(context.Background(), mw, StepCancelled)
 		case err == nil:
 			o.logger.Info("subprocess completed", "issue", issue.Identifier)
 			o.emitStatus(mw, StepDone, nil)
 			o.cleanup(context.Background(), mw, StepDone)
-		case wfCtx.Err() != nil:
-			// The workflow context was cancelled (user pressed Ctrl+C).
-			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
-			o.emitStatus(mw, StepCancelled, err)
-			o.cleanup(context.Background(), mw, StepCancelled)
 		default:
 			o.logger.Error("subprocess failed", "issue", issue.Identifier, "error", err)
 			o.emitStatus(mw, StepFailed, err)
@@ -315,9 +328,10 @@ func (o *Orchestrator) Wait() {
 	o.wg.Wait()
 }
 
-// PreservedWorktrees returns the list of worktrees that were preserved
-// because their workflows were cancelled. Only meaningful after Wait or
-// Shutdown has returned.
+// PreservedWorktrees returns the list of worktrees that were preserved after
+// their workflows ended. This includes both successful completions (StepDone —
+// waiting for the PR to be merged) and cancellations (StepCancelled — preserving
+// in-progress work). Only meaningful after Wait or Shutdown has returned.
 func (o *Orchestrator) PreservedWorktrees() []PreservedWorktree {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -326,18 +340,53 @@ func (o *Orchestrator) PreservedWorktrees() []PreservedWorktree {
 	return cp
 }
 
+// maxStartFailures is the number of consecutive non-transient Start failures
+// allowed for a single issue before RunWithDiscovery gives up and stops
+// clearing it from the seen set (preventing an infinite retry storm).
+const maxStartFailures = 3
+
 // RunWithDiscovery consumes issues from the discovery channel and starts
 // workflows for them, respecting the concurrency limit.
 func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discovery) error {
 	issues := discovery.Run(ctx)
 	var pending []*tracker.Issue
+	// failCounts tracks consecutive permanent Start failures per issue ID.
+	// Transient failures (concurrency limit) are not counted here; they are
+	// handled by re-queuing into pending instead of clearing the seen set.
+	failCounts := make(map[string]int)
 
-	startOrRetry := func(issue *tracker.Issue) {
-		if err := o.Start(ctx, issue); err != nil {
-			o.logger.Warn("failed to start workflow", "issue", issue.Identifier, "error", err)
-			// Clear from discovery's seen set so the issue is re-emitted on next poll.
-			discovery.ClearSeen(issue.ID)
+	// tryStart attempts to start the issue workflow. Returns true if the issue
+	// should be removed from the pending queue (either started successfully or
+	// permanently failed). Returns false if it should stay pending (transient).
+	tryStart := func(issue *tracker.Issue) bool {
+		err := o.Start(ctx, issue)
+		if err == nil {
+			delete(failCounts, issue.ID)
+			return true
 		}
+		if errors.Is(err, errConcurrencyLimit) {
+			// Transient: slots are full. Keep in pending; do not clear seen.
+			return false
+		}
+		// Permanent error (worktree already exists, subprocess start failed, etc.).
+		failCounts[issue.ID]++
+		if failCounts[issue.ID] < maxStartFailures {
+			o.logger.Warn("failed to start workflow, will retry",
+				"issue", issue.Identifier,
+				"error", err,
+				"attempt", failCounts[issue.ID],
+				"max", maxStartFailures,
+			)
+			discovery.ClearSeen(issue.ID)
+		} else {
+			o.logger.Error("failed to start workflow, giving up after repeated failures",
+				"issue", issue.Identifier,
+				"error", err,
+				"failures", failCounts[issue.ID],
+			)
+			// Do NOT clear seen — leave the issue suppressed to stop the storm.
+		}
+		return true
 	}
 
 	for {
@@ -349,7 +398,10 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				remaining = append(remaining, issue)
 				continue
 			}
-			startOrRetry(issue)
+			if !tryStart(issue) {
+				remaining = append(remaining, issue)
+				continue
+			}
 			active = o.ActiveCount()
 		}
 		pending = remaining
@@ -366,7 +418,9 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				return nil
 			}
 			if o.ActiveCount() < o.config.Source.MaxConcurrent {
-				startOrRetry(issue)
+				if !tryStart(issue) {
+					pending = append(pending, issue)
+				}
 			} else {
 				pending = append(pending, issue)
 			}
@@ -443,9 +497,18 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// cleanup removes the issue from the active map and signals a free slot.
+// Worktree removal depends on how the workflow ended:
+//   - StepDone: worktree is preserved — the ship step opens a PR but does not
+//     merge it, so the branch must remain until the PR is merged.
+//   - StepCancelled: worktree is preserved by default so in-progress work is
+//     not lost; set forceCleanup to remove it unconditionally.
+//   - StepFailed: worktree is removed so a future retry starts clean.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
-	if step == StepCancelled && !o.forceCleanup {
-		o.logger.Info("preserving worktree for cancelled workflow",
+	preserve := step == StepDone || (step == StepCancelled && !o.forceCleanup)
+	if preserve {
+		o.logger.Info("preserving worktree",
+			"step", step,
 			"branch", mw.branch,
 			"worktree", mw.worktreePath,
 			"issue", mw.issue.Identifier,
@@ -455,6 +518,7 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 			Branch:       mw.branch,
 			WorktreePath: mw.worktreePath,
 			Issue:        mw.issue.Identifier,
+			Step:         step,
 		})
 		o.mu.Unlock()
 	} else {
