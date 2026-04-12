@@ -29,4 +29,8 @@ type IssueTracker interface {
 
 	// UpdateIssueState transitions an issue to the given workflow state.
 	UpdateIssueState(ctx context.Context, issueID string, stateID string) error
+
+	// AddLabel attaches a label to an issue. It is idempotent: adding a label
+	// that already exists must not return an error.
+	AddLabel(ctx context.Context, issueID string, label string) error
 }

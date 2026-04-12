@@ -91,6 +91,11 @@ func (m *mockWorkflowTracker) UpdateIssueState(_ context.Context, issueID string
 	return nil
 }
 
+func (m *mockWorkflowTracker) AddLabel(_ context.Context, issueID string, label string) error {
+	m.recordCall("AddLabel", issueID, label)
+	return nil
+}
+
 func (m *mockWorkflowTracker) recordCall(method string, args ...string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

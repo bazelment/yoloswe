@@ -261,6 +261,25 @@ func (t *Tracker) UpdateIssueState(_ context.Context, issueID string, stateID st
 	return t.writeFile(issueID, f)
 }
 
+// AddLabel adds a label to a local issue. It is idempotent.
+func (t *Tracker) AddLabel(_ context.Context, issueID string, label string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	f, err := t.readFile(issueID)
+	if err != nil {
+		return err
+	}
+
+	for _, l := range f.Issue.Labels {
+		if l == label {
+			return nil // already present — idempotent
+		}
+	}
+	f.Issue.Labels = append(f.Issue.Labels, label)
+	return t.writeFile(issueID, f)
+}
+
 // --- internal helpers ---
 
 func (t *Tracker) filePath(issueID string) (string, error) {

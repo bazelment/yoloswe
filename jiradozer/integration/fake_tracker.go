@@ -200,3 +200,20 @@ func (f *FakeTracker) UpdateIssueState(_ context.Context, issueID string, stateI
 	fi.stateID = stateID
 	return nil
 }
+
+func (f *FakeTracker) AddLabel(_ context.Context, issueID string, label string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("AddLabel", issueID, label)
+	fi, ok := f.issues[issueID]
+	if !ok {
+		return fmt.Errorf("issue %q not found", issueID)
+	}
+	for _, l := range fi.issue.Labels {
+		if l == label {
+			return nil // idempotent
+		}
+	}
+	fi.issue.Labels = append(fi.issue.Labels, label)
+	return nil
+}

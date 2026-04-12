@@ -511,7 +511,8 @@ func (c *countingWTManager) callCount() int {
 
 // TestRunWithDiscovery_PermanentErrorStopsRetrying verifies that RunWithDiscovery
 // stops clearing the seen set after maxStartFailures permanent errors for the
-// same issue, preventing an infinite retry storm.
+// same issue, preventing an infinite retry storm. Uses a non-worktree error to
+// exercise the generic retry path (worktree-exists errors are handled separately).
 func TestRunWithDiscovery_PermanentErrorStopsRetrying(t *testing.T) {
 	t.Parallel()
 
@@ -528,7 +529,7 @@ func TestRunWithDiscovery_PermanentErrorStopsRetrying(t *testing.T) {
 	cfg.Source.MaxConcurrent = 3
 
 	inner := newMockWTManager()
-	inner.newErr = fmt.Errorf("worktree already exists")
+	inner.newErr = fmt.Errorf("disk quota exceeded") // generic permanent error
 	wtm := &countingWTManager{mockWTManager: inner}
 
 	logDir := t.TempDir()
@@ -548,6 +549,132 @@ func TestRunWithDiscovery_PermanentErrorStopsRetrying(t *testing.T) {
 	require.LessOrEqual(t, calls, maxStartFailures+1,
 		"NewWorktree called %d times; expected at most %d (maxStartFailures=%d)",
 		calls, maxStartFailures+1, maxStartFailures)
+}
+
+// TestRunWithDiscovery_WorktreeExistsNoClearSeen verifies that a "worktree
+// already exists" error does NOT trigger ClearSeen. The issue is already being
+// handled by another process; calling ClearSeen would cause a retry storm.
+func TestRunWithDiscovery_WorktreeExistsNoClearSeen(t *testing.T) {
+	t.Parallel()
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	mt := &mockDiscoveryTracker{
+		results: [][]*tracker.Issue{
+			{issue}, {issue}, {issue}, {issue}, {issue},
+		},
+	}
+
+	cfg := testOrchestratorConfig()
+	cfg.Source.MaxConcurrent = 3
+
+	inner := newMockWTManager()
+	inner.newErr = fmt.Errorf("create worktree for ENG-1: worktree already exists")
+	wtm := &countingWTManager{mockWTManager: inner}
+
+	logDir := t.TempDir()
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode("/bin/false", nil, logDir)
+
+	d := NewDiscovery(mt, tracker.IssueFilter{}, 5*time.Millisecond, testLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	_ = orch.RunWithDiscovery(ctx, d)
+
+	// Must be tried exactly once: no ClearSeen means the issue stays in the seen
+	// set and is never rediscovered, so NewWorktree is only called once.
+	calls := wtm.callCount()
+	require.Equal(t, 1, calls,
+		"NewWorktree called %d times; expected exactly 1 (worktree-exists must not trigger ClearSeen)", calls)
+}
+
+// mockClaimTracker wraps mockDiscoveryTracker and records UpdateIssueState and AddLabel calls.
+//
+//nolint:govet // fieldalignment: embedded struct ordering is intentional for readability
+type mockClaimTracker struct {
+	mockDiscoveryTracker
+	stateUpdates []string // issueIDs passed to UpdateIssueState
+	stateIDs     []string // stateIDs passed to UpdateIssueState
+	labelIssues  []string // issueIDs passed to AddLabel
+	labelNames   []string // labels passed to AddLabel
+	claimMu      sync.Mutex
+}
+
+func (m *mockClaimTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
+	return []tracker.WorkflowState{
+		{ID: "state-inprogress", Name: "In Progress"},
+		{ID: "state-done", Name: "Done"},
+	}, nil
+}
+
+func (m *mockClaimTracker) UpdateIssueState(_ context.Context, issueID string, stateID string) error {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	m.stateUpdates = append(m.stateUpdates, issueID)
+	m.stateIDs = append(m.stateIDs, stateID)
+	return nil
+}
+
+func (m *mockClaimTracker) AddLabel(_ context.Context, issueID string, label string) error {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	m.labelIssues = append(m.labelIssues, issueID)
+	m.labelNames = append(m.labelNames, label)
+	return nil
+}
+
+func (m *mockClaimTracker) getStateUpdates() ([]string, []string) {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	return append([]string(nil), m.stateUpdates...), append([]string(nil), m.stateIDs...)
+}
+
+func (m *mockClaimTracker) getLabelCalls() ([]string, []string) {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	return append([]string(nil), m.labelIssues...), append([]string(nil), m.labelNames...)
+}
+
+// TestOrchestrator_StartClaimsInProgress verifies that Start() transitions the
+// issue to "In Progress" and adds the LockLabel before launching the subprocess,
+// providing a distributed lock so other jiradozer processes won't rediscover
+// the same issue.
+func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	cfg.States.InProgress = "In Progress"
+
+	script := writeTestScript(t, "exit 0")
+	logDir := t.TempDir()
+	wtm := newMockWTManagerWithDir(t)
+
+	issue := &tracker.Issue{
+		ID:         "issue-1",
+		Identifier: "ENG-1",
+		Title:      "Test issue",
+		TeamID:     "team-eng",
+	}
+
+	mt := &mockClaimTracker{}
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode(script, nil, logDir)
+
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	orch.Wait()
+
+	// Verify state transition.
+	issueIDs, stateIDs := mt.getStateUpdates()
+	require.Len(t, issueIDs, 1, "expected exactly one UpdateIssueState call")
+	require.Equal(t, "issue-1", issueIDs[0])
+	require.Equal(t, "state-inprogress", stateIDs[0])
+
+	// Verify lock label was added.
+	labelIssues, labelNames := mt.getLabelCalls()
+	require.Len(t, labelIssues, 1, "expected exactly one AddLabel call")
+	require.Equal(t, "issue-1", labelIssues[0])
+	require.Equal(t, LockLabel, labelNames[0])
 }
 
 // TestRunWithDiscovery_ConcurrencyLimitKeepsPending verifies that a

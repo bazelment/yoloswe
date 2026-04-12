@@ -42,7 +42,7 @@ func fetchIssueByIdentifierQuery(identifier string) (graphqlRequest, error) {
       url
       branchName
       state { id name type }
-      labels { nodes { name } }
+      labels { nodes { id name } }
       team { id }
     }
   }
@@ -55,6 +55,28 @@ func fetchIssueByIdentifierQuery(identifier string) (graphqlRequest, error) {
 		Query:     query,
 		Variables: map[string]any{"teamKey": teamKey, "number": number},
 	}, nil
+}
+
+// fetchIssueByIDQuery fetches a single issue by its Linear UUID (not the
+// human-readable identifier). Used internally when we have the UUID but not
+// the human identifier.
+func fetchIssueByIDQuery(issueID string) graphqlRequest {
+	query := `query FetchIssueByID($id: ID!) {
+  issues(filter: { id: { eq: $id } }, first: 1) {
+    nodes {
+      id
+      identifier
+      title
+      state { id name type }
+      labels { nodes { id name } }
+      team { id }
+    }
+  }
+}`
+	return graphqlRequest{
+		Query:     query,
+		Variables: map[string]any{"id": issueID},
+	}
 }
 
 // listIssuesQuery returns issues matching the given filter criteria.
@@ -71,7 +93,7 @@ func listIssuesQuery(filter tracker.IssueFilter) graphqlRequest {
       url
       branchName
       state { id name type }
-      labels { nodes { name } }
+      labels { nodes { id name } }
       team { id }
     }
   }
@@ -198,5 +220,51 @@ func updateIssueStateMutation(issueID, stateID string) graphqlRequest {
 			"issueId": issueID,
 			"stateId": stateID,
 		},
+	}
+}
+
+// searchLabelQuery looks up a label ID by name within the given team's
+// organization. Linear labels are team-scoped.
+func searchLabelQuery(teamID, name string) graphqlRequest {
+	query := `query FindLabel($teamId: ID!, $name: String!) {
+  issueLabels(filter: { team: { id: { eq: $teamId } }, name: { eq: $name } }, first: 1) {
+    nodes { id name }
+  }
+}`
+	return graphqlRequest{
+		Query:     query,
+		Variables: map[string]any{"teamId": teamID, "name": name},
+	}
+}
+
+// createLabelMutation creates a new label with the given name in the team's workspace.
+func createLabelMutation(teamID, name string) graphqlRequest {
+	query := `mutation CreateLabel($teamId: String!, $name: String!) {
+  issueLabelCreate(input: { teamId: $teamId, name: $name }) {
+    success
+    issueLabel { id name }
+  }
+}`
+	return graphqlRequest{
+		Query:     query,
+		Variables: map[string]any{"teamId": teamID, "name": name},
+	}
+}
+
+// addLabelToIssueMutation appends a label (by ID) to an issue without
+// replacing existing labels. Linear's issueRelationCreate / issueLabelCreate
+// don't support per-issue attachment; instead we read the current label IDs
+// and pass the full merged set to issueUpdate. The caller is responsible for
+// building the full list.
+func addLabelToIssueMutation(issueID string, allLabelIDs []string) graphqlRequest {
+	query := `mutation AddLabel($issueId: String!, $labelIds: [String!]!) {
+  issueUpdate(id: $issueId, input: { labelIds: $labelIds }) {
+    success
+    issue { id labels { nodes { id name } } }
+  }
+}`
+	return graphqlRequest{
+		Query:     query,
+		Variables: map[string]any{"issueId": issueID, "labelIds": allLabelIDs},
 	}
 }

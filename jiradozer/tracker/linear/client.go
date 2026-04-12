@@ -175,6 +175,88 @@ func (c *Client) PostComment(ctx context.Context, issueID string, body string) (
 	return comment, nil
 }
 
+// AddLabel attaches a label (by name) to an issue. If the label does not exist
+// in the team's workspace it is created first. The operation is idempotent.
+// teamID is the Linear team ID used to scope the label lookup and creation.
+// If the issue object's LabelIDs are known they must be passed via the
+// tracker.Issue.LabelIDs field; otherwise we fetch the issue first.
+func (c *Client) AddLabel(ctx context.Context, issueID string, label string) error {
+	// Step 1: fetch the issue to get its team ID and current label IDs.
+	// We need the team ID to scope the label search/creation.
+	issueResp, err := c.fetchIssueByID(ctx, issueID)
+	if err != nil {
+		return fmt.Errorf("add label: fetch issue: %w", err)
+	}
+
+	// Step 2: find or create the label within the team.
+	labelID, err := c.ensureLabel(ctx, issueResp.TeamID, label)
+	if err != nil {
+		return fmt.Errorf("add label: ensure label %q: %w", label, err)
+	}
+
+	// Step 3: merge the new label with the issue's existing label IDs (dedup).
+	existingIDs := issueResp.LabelIDs
+	merged := make([]string, 0, len(existingIDs)+1)
+	found := false
+	for _, id := range existingIDs {
+		merged = append(merged, id)
+		if id == labelID {
+			found = true
+		}
+	}
+	if found {
+		return nil // already has the label — idempotent
+	}
+	merged = append(merged, labelID)
+
+	// Step 4: update the issue with the full merged label set.
+	req := addLabelToIssueMutation(issueID, merged)
+	resp, err := c.execute(ctx, req)
+	if err != nil {
+		return fmt.Errorf("add label to issue: %w", err)
+	}
+	if resp.Data == nil || !resp.Data.IssueUpdate.Success {
+		return fmt.Errorf("add label to issue: mutation returned success=false")
+	}
+	return nil
+}
+
+// fetchIssueByID returns a minimal issue record (team ID + label IDs) needed
+// for AddLabel. Uses the issueID (Linear UUID), not the human identifier.
+func (c *Client) fetchIssueByID(ctx context.Context, issueID string) (*tracker.Issue, error) {
+	req := fetchIssueByIDQuery(issueID)
+	resp, err := c.execute(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Data == nil || len(resp.Data.Issues.Nodes) == 0 {
+		return nil, fmt.Errorf("issue not found: %s", issueID)
+	}
+	return nodeToIssue(resp.Data.Issues.Nodes[0]), nil
+}
+
+// ensureLabel finds a label by name within the given team, creating it if it
+// does not exist. Returns the label's Linear UUID.
+func (c *Client) ensureLabel(ctx context.Context, teamID, name string) (string, error) {
+	searchResp, err := c.execute(ctx, searchLabelQuery(teamID, name))
+	if err != nil {
+		return "", fmt.Errorf("search label: %w", err)
+	}
+	if searchResp.Data != nil && len(searchResp.Data.IssueLabels.Nodes) > 0 {
+		return searchResp.Data.IssueLabels.Nodes[0].ID, nil
+	}
+
+	// Label not found — create it.
+	createResp, err := c.execute(ctx, createLabelMutation(teamID, name))
+	if err != nil {
+		return "", fmt.Errorf("create label: %w", err)
+	}
+	if createResp.Data == nil || !createResp.Data.IssueLabelCreate.Success || createResp.Data.IssueLabelCreate.IssueLabel == nil {
+		return "", fmt.Errorf("create label: mutation returned success=false or missing label")
+	}
+	return createResp.Data.IssueLabelCreate.IssueLabel.ID, nil
+}
+
 func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID string) error {
 	req := updateIssueStateMutation(issueID, stateID)
 	resp, err := c.execute(ctx, req)
@@ -251,6 +333,7 @@ func nodeToIssue(node graphqlIssue) *tracker.Issue {
 	}
 	for _, l := range node.Labels.Nodes {
 		issue.Labels = append(issue.Labels, l.Name)
+		issue.LabelIDs = append(issue.LabelIDs, l.ID)
 	}
 	return issue
 }
@@ -273,11 +356,22 @@ type graphqlError struct {
 }
 
 type graphqlData struct {
-	CommentCreate  graphqlMutationResult           `json:"commentCreate"`
-	IssueUpdate    graphqlMutationResult           `json:"issueUpdate"`
-	Issues         graphqlIssuesConnection         `json:"issues"`
-	Comments       graphqlCommentsConnection       `json:"comments"`
-	WorkflowStates graphqlWorkflowStatesConnection `json:"workflowStates"`
+	CommentCreate    graphqlMutationResult           `json:"commentCreate"`
+	IssueUpdate      graphqlMutationResult           `json:"issueUpdate"`
+	IssueLabelCreate graphqlLabelMutationResult      `json:"issueLabelCreate"`
+	Issues           graphqlIssuesConnection         `json:"issues"`
+	IssueLabels      graphqlLabelsConnection         `json:"issueLabels"`
+	Comments         graphqlCommentsConnection       `json:"comments"`
+	WorkflowStates   graphqlWorkflowStatesConnection `json:"workflowStates"`
+}
+
+type graphqlLabelsConnection struct {
+	Nodes []graphqlLabel `json:"nodes"`
+}
+
+type graphqlLabelMutationResult struct {
+	IssueLabel *graphqlLabel `json:"issueLabel,omitempty"`
+	Success    bool          `json:"success"`
 }
 
 type graphqlIssuesConnection struct {
@@ -307,6 +401,7 @@ type graphqlLabels struct {
 }
 
 type graphqlLabel struct {
+	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
