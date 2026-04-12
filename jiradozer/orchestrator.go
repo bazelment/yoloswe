@@ -165,13 +165,17 @@ func (o *Orchestrator) ActiveCount() int {
 }
 
 // claimIssueInProgress transitions the issue to "In Progress" and attaches the
-// LockLabel before launching the subprocess. Together these provide a distributed
+// LockLabel after the worktree is created. Together these provide a distributed
 // lock against concurrent jiradozer processes:
 //
 //  1. State transition: processes polling --filter state=Todo stop discovering
 //     the issue once it leaves the Todo state.
 //  2. Label: defense-in-depth for processes that poll a different state set or
 //     that discover the issue in the narrow window before the state changes.
+//
+// Called after NewWorktree so that a worktree creation failure leaves the issue
+// in its original state — discovery can retry without hitting a permanently
+// "In Progress" issue with no active process.
 //
 // Both operations are best-effort — errors are logged as warnings and do not
 // abort the workflow start, since missing team ID or transient API failures
@@ -245,14 +249,19 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.active[issue.ID] = placeholder
 	o.mu.Unlock()
 
-	o.claimIssueInProgress(ctx, issue)
-
 	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
 	worktreePath, err := o.wtManager.NewWorktree(ctx, branch, o.config.BaseBranch, issue.Title)
 	if err != nil {
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
 	}
+
+	// Claim the issue in-progress after the worktree is created. This provides
+	// a distributed lock so other jiradozer processes stop discovering the issue.
+	// Done after NewWorktree so a worktree creation failure leaves the issue in
+	// its original state — discovery can retry cleanly without ClearSeen calling
+	// into a permanently "In Progress" issue with no active process.
+	o.claimIssueInProgress(ctx, issue)
 
 	wfCtx, cancel := context.WithCancel(ctx)
 

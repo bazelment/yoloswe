@@ -333,9 +333,7 @@ func nodeToIssue(node graphqlIssue) *tracker.Issue {
 	}
 	for _, l := range node.Labels.Nodes {
 		issue.Labels = append(issue.Labels, l.Name)
-		if l.ID != "" {
-			issue.LabelIDs = append(issue.LabelIDs, l.ID)
-		}
+		issue.LabelIDs = append(issue.LabelIDs, l.ID)
 	}
 	return issue
 }
