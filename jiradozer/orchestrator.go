@@ -404,7 +404,9 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				return nil
 			}
 			if o.ActiveCount() < o.config.Source.MaxConcurrent {
-				tryStart(issue)
+				if !tryStart(issue) {
+					pending = append(pending, issue)
+				}
 			} else {
 				pending = append(pending, issue)
 			}
