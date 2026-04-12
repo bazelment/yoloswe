@@ -475,7 +475,7 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	if err != nil {
 		return fmt.Errorf("resolve config path: %w", err)
 	}
-	childArgs := buildChildArgs(args, absConfig, cfg)
+	childArgs := buildChildArgs(args, absConfig)
 	logDir := jiradozerLogDir()
 
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, &wtAdapter{mgr: wtMgr}, repoName, logger)
@@ -537,7 +537,7 @@ func resolveWTManager() (*wt.Manager, error) {
 
 // buildChildArgs constructs CLI flags to propagate from the parent
 // team-mode process to each child single-issue subprocess.
-func buildChildArgs(args runArgs, absConfigPath string, cfg *jiradozer.Config) []string {
+func buildChildArgs(args runArgs, absConfigPath string) []string {
 	var out []string
 	out = append(out, "--config", absConfigPath)
 	if args.modelID != "" {
@@ -546,13 +546,8 @@ func buildChildArgs(args runArgs, absConfigPath string, cfg *jiradozer.Config) [
 	if args.maxBudget > 0 {
 		out = append(out, "--max-budget", fmt.Sprintf("%.2f", args.maxBudget))
 	}
-	// Propagate auto-approve: prefer the explicit CLI flag, otherwise
-	// synthesize from the resolved config so that YAML-only auto_approve
-	// settings are forwarded as a CLI override to child processes.
 	if args.autoApprove != "" {
 		out = append(out, "--auto-approve", args.autoApprove)
-	} else if aa := autoApproveFromConfig(cfg); aa != "" {
-		out = append(out, "--auto-approve", aa)
 	}
 	if args.verbose {
 		out = append(out, "--verbose")
@@ -563,26 +558,6 @@ func buildChildArgs(args runArgs, absConfigPath string, cfg *jiradozer.Config) [
 		out = append(out, "--color", args.color)
 	}
 	return out
-}
-
-// autoApproveFromConfig returns a comma-separated list of steps that have
-// auto_approve enabled in the config, suitable for --auto-approve. Returns
-// empty string if no steps are auto-approved.
-func autoApproveFromConfig(cfg *jiradozer.Config) string {
-	var steps []string
-	if cfg.Plan.AutoApprove {
-		steps = append(steps, "plan")
-	}
-	if cfg.Build.AutoApprove {
-		steps = append(steps, "build")
-	}
-	if cfg.Validate.AutoApprove {
-		steps = append(steps, "validate")
-	}
-	if cfg.Ship.AutoApprove {
-		steps = append(steps, "ship")
-	}
-	return strings.Join(steps, ",")
 }
 
 // jiradozerLogDir returns the directory for jiradozer log files, creating
