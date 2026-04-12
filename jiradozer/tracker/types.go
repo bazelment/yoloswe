@@ -15,7 +15,8 @@ type Issue struct {
 	Title       string
 	State       string
 	TeamID      string
-	Labels      []string
+	Labels      []string // label names
+	LabelIDs    []string // tracker-internal label IDs (populated when available)
 }
 
 // Comment is a single comment on an issue.
