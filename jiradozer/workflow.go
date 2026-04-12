@@ -236,7 +236,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		allOutputs = append(allOutputs, output)
 
 		heading := capitalize(stepName)
-		comment := fmt.Sprintf("## %s Round %d/%d\n\n%s", heading, i+1, totalRounds, truncateOutput(output, 2000))
+		comment := fmt.Sprintf("## %s Round %d/%d\n\n%s", heading, i+1, totalRounds, output)
 		roundComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
 		if err != nil {
 			w.logger.Warn("failed to post round comment", "step", stepName, "round", i+1, "error", err)
@@ -331,15 +331,6 @@ func (w *Workflow) captureOutput(stepName, output string) {
 	case "build":
 		w.buildOutput = output
 	}
-}
-
-// truncateOutput shortens text that exceeds maxLen runes, appending a truncation notice.
-func truncateOutput(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) > maxLen {
-		return string(runes[:maxLen]) + "\n\n... (truncated)"
-	}
-	return s
 }
 
 // capitalize returns s with the first letter uppercased.
