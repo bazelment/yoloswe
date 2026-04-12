@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
@@ -22,7 +21,6 @@ import (
 	ghtracker "github.com/bazelment/yoloswe/jiradozer/tracker/github"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
-	"github.com/bazelment/yoloswe/jiradozer/tui"
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
@@ -374,10 +372,9 @@ func run(ctx context.Context, args runArgs) error {
 		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, cfg, renderer, logger)
 	}
 
-	// Multi-issue TUI mode (only when no --issue flag was given).
-	// TUI owns the terminal — don't use the renderer.
+	// Multi-issue team mode (only when no --issue flag was given).
 	if cfg.Source.HasSource() && args.issueID == "" {
-		return runMultiIssue(ctx, issueTracker, cfg, logger)
+		return runMultiIssue(ctx, issueTracker, cfg, args, renderer, logger)
 	}
 
 	// Single-issue headless mode.
@@ -441,43 +438,122 @@ func resolveRepoName(cfg *jiradozer.Config) string {
 	return repoName
 }
 
-func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, logger *slog.Logger) error {
-	repoName := resolveRepoName(cfg)
-	wtMgr := &wtAdapter{mgr: wt.NewManager(cfg.WorkDir, repoName)}
-
-	// Use a cancellable context so we can stop the orchestrator when the TUI exits.
+func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, args runArgs, renderer *render.Renderer, logger *slog.Logger) error {
 	orchCtx, orchCancel := context.WithCancel(ctx)
 	defer orchCancel()
 
-	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, repoName, logger)
+	repoName := resolveRepoName(cfg)
 	disc := jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, logger)
 
-	// Dry-run mode: run the orchestrator headlessly (no TUI) so that the
-	// printed bramble commands are visible on stdout. The alternate screen
-	// used by Bubbletea would hide and then destroy any stdout output.
+	// Dry-run mode: print bramble new-session commands to stdout. No real
+	// worktrees are needed; the wtManager won't be called.
 	if cfg.Source.DryRun {
+		dummyWtMgr := &wtAdapter{mgr: wt.NewManager(".", repoName)}
+		orch := jiradozer.NewOrchestrator(issueTracker, cfg, dummyWtMgr, repoName, logger)
 		err := orch.RunWithDiscovery(orchCtx, disc)
 		orchCancel()
 		orch.Shutdown()
 		return err
 	}
 
+	// Non-dry-run: detect the real wt-managed repository.
+	wtMgr, err := resolveWTManager()
+	if err != nil {
+		return fmt.Errorf("team mode requires a wt-managed repository: %w", err)
+	}
+	logger.Info("resolved wt-managed repository", "repo_dir", wtMgr.RepoDir())
+
+	selfPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve jiradozer binary path: %w", err)
+	}
+	absConfig, err := filepath.Abs(args.configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	childArgs := buildChildArgs(args, absConfig)
+	logDir := jiradozerLogDir()
+
+	orch := jiradozer.NewOrchestrator(issueTracker, cfg, &wtAdapter{mgr: wtMgr}, repoName, logger)
+	orch.SetSubprocessMode(selfPath, childArgs, logDir)
+
+	// Print status updates to stderr.
 	go func() {
-		if err := orch.RunWithDiscovery(orchCtx, disc); err != nil && orchCtx.Err() == nil {
-			logger.Error("orchestrator error", "error", err)
+		for status := range orch.StatusUpdates() {
+			switch {
+			case status.Step == jiradozer.StepInit:
+				renderer.Status(fmt.Sprintf("[%s] started — %s", status.Issue.Identifier, status.Issue.Title))
+			case status.Step == jiradozer.StepDone:
+				elapsed := time.Since(status.StartedAt).Truncate(time.Second)
+				renderer.Status(fmt.Sprintf("[%s] completed (%s)", status.Issue.Identifier, elapsed))
+			case status.Step == jiradozer.StepFailed:
+				renderer.Error(status.Error, fmt.Sprintf("[%s] failed", status.Issue.Identifier))
+			}
 		}
 	}()
 
-	p := tea.NewProgram(tui.NewModel(orch))
-	_, err := p.Run()
-
-	// Signal shutdown (unblocks any pending terminal status sends),
-	// cancel the orchestrator context, and wait for all workflows to
-	// drain so worktrees are cleaned up before the process exits.
+	err = orch.RunWithDiscovery(orchCtx, disc)
 	orchCancel()
 	orch.Shutdown()
-
 	return err
+}
+
+// resolveWTManager detects the wt-managed repository from the current
+// working directory, using the same logic as `wt` CLI.
+func resolveWTManager() (*wt.Manager, error) {
+	wtRoot := os.Getenv("WT_ROOT")
+	if wtRoot == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		wtRoot = filepath.Join(home, "worktrees")
+	}
+	ctx := context.Background()
+	repoName, err := wt.GetCurrentRepoName(ctx, &wt.DefaultGitRunner{}, wtRoot)
+	if err != nil {
+		return nil, fmt.Errorf("not in a wt-managed repository (WT_ROOT=%s): %w", wtRoot, err)
+	}
+	return wt.NewManager(wtRoot, repoName), nil
+}
+
+// buildChildArgs constructs CLI flags to propagate from the parent
+// team-mode process to each child single-issue subprocess.
+func buildChildArgs(args runArgs, absConfigPath string) []string {
+	var out []string
+	out = append(out, "--config", absConfigPath)
+	if args.modelID != "" {
+		out = append(out, "--model", args.modelID)
+	}
+	if args.maxBudget > 0 {
+		out = append(out, "--max-budget", fmt.Sprintf("%.2f", args.maxBudget))
+	}
+	if args.autoApprove != "" {
+		out = append(out, "--auto-approve", args.autoApprove)
+	}
+	if args.verbose {
+		out = append(out, "--verbose")
+	} else if args.verbosity != "normal" {
+		out = append(out, "--verbosity", args.verbosity)
+	}
+	if args.color != "auto" {
+		out = append(out, "--color", args.color)
+	}
+	return out
+}
+
+// jiradozerLogDir returns the directory for jiradozer log files, creating
+// it if necessary.
+func jiradozerLogDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.TempDir()
+	}
+	dir := filepath.Join(home, ".jiradozer", "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return os.TempDir()
+	}
+	return dir
 }
 
 func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker, error) {

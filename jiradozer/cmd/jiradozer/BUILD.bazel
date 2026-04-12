@@ -12,12 +12,10 @@ go_library(
         "//jiradozer/tracker/github",
         "//jiradozer/tracker/linear",
         "//jiradozer/tracker/local",
-        "//jiradozer/tui",
         "//logging/klogfmt",
         "//multiagent/agent",
         "//wt",
         "@com_github_spf13_cobra//:cobra",
-        "@land_charm_bubbletea_v2//:bubbletea",
     ],
 )
 
