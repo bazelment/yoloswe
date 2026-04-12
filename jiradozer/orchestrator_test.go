@@ -109,6 +109,46 @@ func TestOrchestrator_BranchPrefix(t *testing.T) {
 	require.Contains(t, created, "auto/ENG-1")
 }
 
+func TestOrchestrator_SpecialCharsInIdentifier(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	cfg.Source.BranchPrefix = "auto"
+
+	script := writeTestScript(t, "exit 0")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	// GitHub identifiers like "acme/app#42" contain "/" and "#" which are
+	// problematic in file paths. Both must be sanitized.
+	issue := &tracker.Issue{ID: "1", Identifier: "acme/app#42", Title: "Test"}
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	orch.Wait()
+
+	// Verify log file was created with sanitized name.
+	logDir := orch.logDir
+	entries, err := os.ReadDir(logDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].Name(), "acme_app_42-")
+}
+
+func TestSanitizeForFilename(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"ENG-123", "ENG-123"},
+		{"acme/app#42", "acme_app_42"},
+		{`a\b:c*d?e"f<g>h|i j`, "a_b_c_d_e_f_g_h_i_j"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitizeForFilename(tt.input)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // writeTestScript creates a shell script in a temp dir that ignores all
 // arguments and runs the given body. Returns the script path.
 func writeTestScript(t *testing.T, body string) string {

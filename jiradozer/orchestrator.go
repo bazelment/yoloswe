@@ -179,8 +179,11 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	cmd.WaitDelay = 10 * time.Second
 
 	// Per-issue log file for subprocess stdout/stderr.
+	// Sanitize identifier for use as a filename: GitHub identifiers like
+	// "acme/app#42" contain "/" and "#" which are problematic in file paths.
+	safeID := sanitizeForFilename(issue.Identifier)
 	logPath := filepath.Join(o.logDir, fmt.Sprintf("%s-%s.log",
-		issue.Identifier, time.Now().Format("20060102-150405")))
+		safeID, time.Now().Format("20060102-150405")))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		cancel()
@@ -417,4 +420,17 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow) {
 	case o.slotFreed <- struct{}{}:
 	default:
 	}
+}
+
+// sanitizeForFilename replaces characters that are problematic in file paths
+// (path separators, shell metacharacters) with underscores.
+func sanitizeForFilename(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', '#', ' ', ':', '*', '?', '"', '<', '>', '|':
+			return '_'
+		default:
+			return r
+		}
+	}, s)
 }
