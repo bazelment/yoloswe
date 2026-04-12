@@ -126,6 +126,28 @@ func testOrchestratorConfig() *jiradozer.Config {
 	return cfg
 }
 
+// writeIntegrationTestScript creates a shell script in a temp dir. The script
+// exits immediately with the given exit code, simulating a subprocess run.
+func writeIntegrationTestScript(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "test.sh")
+	err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755)
+	require.NoError(t, err)
+	return p
+}
+
+// newOrchWithScript creates an orchestrator configured to spawn a test shell
+// script instead of the real jiradozer binary. Tests use this to verify
+// orchestrator mechanics without a real agent.
+func newOrchWithScript(t *testing.T, cfg *jiradozer.Config, wtm *mockWTManager, script string) *jiradozer.Orchestrator {
+	t.Helper()
+	logDir := t.TempDir()
+	orch := jiradozer.NewOrchestrator(&mockOrchestratorTracker{}, cfg, wtm, "", testOrchestratorLogger(t))
+	orch.SetSubprocessMode(script, nil, logDir)
+	return orch
+}
+
 func testIssue(id, identifier, title string) *tracker.Issue {
 	return &tracker.Issue{
 		ID:         id,
@@ -136,24 +158,21 @@ func testIssue(id, identifier, title string) *tracker.Issue {
 }
 
 func TestOrchestrator_WorktreeCreation(t *testing.T) {
-	mt := &mockOrchestratorTracker{
-		issues: []*tracker.Issue{
-			testIssue("1", "ENG-1", "Feature A"),
-			testIssue("2", "ENG-2", "Feature B"),
-		},
+	issues := []*tracker.Issue{
+		testIssue("1", "ENG-1", "Feature A"),
+		testIssue("2", "ENG-2", "Feature B"),
 	}
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
+	script := writeIntegrationTestScript(t, "exit 0")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
-
-	// Short timeout — workflows will fail when agent times out, which is expected.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := orch.Start(ctx, mt.issues[0])
+	err := orch.Start(ctx, issues[0])
 	require.NoError(t, err)
-	err = orch.Start(ctx, mt.issues[1])
+	err = orch.Start(ctx, issues[1])
 	require.NoError(t, err)
 
 	created := wtm.getCreated()
@@ -167,55 +186,52 @@ func TestOrchestrator_WorktreeCreation(t *testing.T) {
 		require.True(t, info.IsDir())
 	}
 
-	// Wait for workflows to complete (they'll fail due to agent timeout).
+	// Wait for subprocesses to complete.
 	orch.Wait()
 
-	// Verify cleanup happened (on failure too).
+	// Verify cleanup happened.
 	removed := wtm.getRemoved()
 	require.Contains(t, removed, "jiradozer/ENG-1")
 	require.Contains(t, removed, "jiradozer/ENG-2")
 }
 
 func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
-	mt := &mockOrchestratorTracker{
-		issues: []*tracker.Issue{
-			testIssue("1", "ENG-1", "Feature A"),
-			testIssue("2", "ENG-2", "Feature B"),
-			testIssue("3", "ENG-3", "Feature C"),
-		},
+	issues := []*tracker.Issue{
+		testIssue("1", "ENG-1", "Feature A"),
+		testIssue("2", "ENG-2", "Feature B"),
+		testIssue("3", "ENG-3", "Feature C"),
 	}
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
 	cfg.Source.MaxConcurrent = 2
+	script := writeIntegrationTestScript(t, "sleep 60")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
 	ctx := context.Background()
 
-	err1 := orch.Start(ctx, mt.issues[0])
+	err1 := orch.Start(ctx, issues[0])
 	require.NoError(t, err1)
-	err2 := orch.Start(ctx, mt.issues[1])
+	err2 := orch.Start(ctx, issues[1])
 	require.NoError(t, err2)
 
 	// Third should be rejected.
-	err3 := orch.Start(ctx, mt.issues[2])
+	err3 := orch.Start(ctx, issues[2])
 	require.Error(t, err3)
 	require.Contains(t, err3.Error(), "concurrency limit")
 }
 
 func TestOrchestrator_BranchPrefix(t *testing.T) {
-	mt := &mockOrchestratorTracker{
-		issues: []*tracker.Issue{testIssue("1", "ENG-1", "Feature A")},
-	}
+	issue := testIssue("1", "ENG-1", "Feature A")
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
 	cfg.Source.BranchPrefix = "auto"
+	script := writeIntegrationTestScript(t, "exit 0")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := orch.Start(ctx, mt.issues[0])
+	err := orch.Start(ctx, issue)
 	require.NoError(t, err)
 
 	created := wtm.getCreated()
@@ -226,23 +242,22 @@ func TestOrchestrator_BranchPrefix(t *testing.T) {
 }
 
 func TestOrchestrator_StatusUpdates(t *testing.T) {
-	mt := &mockOrchestratorTracker{
-		issues: []*tracker.Issue{testIssue("1", "ENG-1", "Feature A")},
-	}
+	issue := testIssue("1", "ENG-1", "Feature A")
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
+	// Script exits cleanly so we get StepDone.
+	script := writeIntegrationTestScript(t, "exit 0")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := orch.Start(ctx, mt.issues[0])
+	err := orch.Start(ctx, issue)
 	require.NoError(t, err)
 
-	// Drain status updates — should get at least init + a final state (failed due to agent timeout).
+	// Drain status updates — init + done.
 	var statuses []jiradozer.IssueStatus
-	timeout := time.After(10 * time.Second)
+	timeout := time.After(5 * time.Second)
 	for {
 		select {
 		case s := <-orch.StatusUpdates():
@@ -272,12 +287,11 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	cfg.Source.MaxConcurrent = 5
 	cfg.PollInterval = 50 * time.Millisecond
-
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
+	script := writeIntegrationTestScript(t, "exit 0")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 	disc := jiradozer.NewDiscovery(mt, cfg.Source.ToFilter(), cfg.PollInterval, testOrchestratorLogger(t))
 
-	// Short timeout — workflows fail when agent times out, which is expected.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Run in background.
@@ -286,7 +300,7 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 		done <- orch.RunWithDiscovery(ctx, disc)
 	}()
 
-	// Wait for both workflows to complete (they'll fail due to agent timeout).
+	// Wait for both subprocesses to complete.
 	doneCount := 0
 	timeout := time.After(10 * time.Second)
 	for doneCount < 2 {
@@ -296,7 +310,7 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 				doneCount++
 			}
 		case <-timeout:
-			t.Fatalf("timed out waiting for workflows to complete (got %d/2)", doneCount)
+			t.Fatalf("timed out waiting for subprocesses to complete (got %d/2)", doneCount)
 		}
 	}
 
@@ -310,24 +324,22 @@ func TestOrchestrator_DiscoveryIntegration(t *testing.T) {
 }
 
 func TestOrchestrator_WorktreeCleanupOnCompletion(t *testing.T) {
-	mt := &mockOrchestratorTracker{
-		issues: []*tracker.Issue{testIssue("1", "ENG-1", "Feature A")},
-	}
+	issue := testIssue("1", "ENG-1", "Feature A")
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
+	script := writeIntegrationTestScript(t, "exit 0")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := orch.Start(ctx, mt.issues[0])
+	err := orch.Start(ctx, issue)
 	require.NoError(t, err)
 
 	orch.Wait()
 
 	removed := wtm.getRemoved()
-	require.Contains(t, removed, "jiradozer/ENG-1", "worktree should be cleaned up after failure/completion")
+	require.Contains(t, removed, "jiradozer/ENG-1", "worktree should be cleaned up after subprocess completion")
 }
 
 // testOrchestratorLogger returns a logger suitable for integration tests.
@@ -338,18 +350,16 @@ func testOrchestratorLogger(t *testing.T) *slog.Logger {
 
 // Verify the worktree path is absolute and within a temp directory.
 func TestOrchestrator_WorktreePathIsValid(t *testing.T) {
-	mt := &mockOrchestratorTracker{
-		issues: []*tracker.Issue{testIssue("1", "ENG-1", "Feature A")},
-	}
+	issue := testIssue("1", "ENG-1", "Feature A")
 	wtm := newMockWTManager(t)
 	cfg := testOrchestratorConfig()
+	script := writeIntegrationTestScript(t, "sleep 60")
+	orch := newOrchWithScript(t, cfg, wtm, script)
 
-	orch := jiradozer.NewOrchestrator(mt, cfg, wtm, "", testOrchestratorLogger(t))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := orch.Start(ctx, mt.issues[0])
+	err := orch.Start(ctx, issue)
 	require.NoError(t, err)
 
 	snap := orch.Snapshot()

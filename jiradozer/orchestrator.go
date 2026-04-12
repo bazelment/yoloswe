@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +21,7 @@ type WorktreeManager interface {
 	RemoveWorktree(ctx context.Context, nameOrBranch string, deleteBranch bool) error
 }
 
-// IssueStatus represents the current state of a tracked issue's workflow.
+// IssueStatus represents the current state of a tracked issue's subprocess.
 type IssueStatus struct {
 	Issue        *tracker.Issue
 	Error        error
@@ -27,8 +29,6 @@ type IssueStatus struct {
 	CompletedAt  time.Time
 	WorktreePath string
 	Step         WorkflowStep
-	RoundIndex   int // 0-based current round during multi-round steps (0 when not in rounds)
-	RoundTotal   int // total rounds in current step (0 = single-round step)
 }
 
 // IsDone returns true if the workflow has completed (successfully or with failure).
@@ -37,30 +37,34 @@ func (s IssueStatus) IsDone() bool {
 }
 
 // Orchestrator manages concurrent issue workflows, each in its own worktree.
+//
+//nolint:govet // fieldalignment: sync types at the end require padding
 type Orchestrator struct {
 	tracker    tracker.IssueTracker
+	wtManager  WorktreeManager
+	out        io.Writer
 	config     *Config
 	logger     *slog.Logger
-	wtManager  WorktreeManager
-	out        io.Writer                   // dry-run output sink (defaults to os.Stdout)
-	active     map[string]*managedWorkflow // issueID -> workflow
+	active     map[string]*managedWorkflow
 	statusChan chan IssueStatus
-	slotFreed  chan struct{} // non-blocking signal: a workflow slot was freed
-	done       chan struct{} // closed by Shutdown to unblock emitStatus
-	repoName   string        // repo name used when printing dry-run bramble commands
+	slotFreed  chan struct{}
+	done       chan struct{}
+	childArgs  []string
+	repoName   string
+	selfPath   string
+	logDir     string
 	mu         sync.RWMutex
 	wg         sync.WaitGroup
 }
 
 type managedWorkflow struct {
-	workflow     *Workflow
 	issue        *tracker.Issue
+	cmd          *exec.Cmd
+	logFile      *os.File
 	cancel       context.CancelFunc
 	startedAt    time.Time
 	worktreePath string
 	branch       string
-	roundIndex   int // current round in multi-round step
-	roundTotal   int // total rounds (0 = single-round)
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -87,6 +91,16 @@ func (o *Orchestrator) SetDryRunOutput(w io.Writer) {
 	o.out = w
 }
 
+// SetSubprocessMode configures the orchestrator to spawn child jiradozer
+// processes instead of running workflows in-process. selfPath is the path
+// to the jiradozer binary, childArgs are flags propagated to each child
+// (e.g. --config, --model), and logDir is the directory for per-issue logs.
+func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, logDir string) {
+	o.selfPath = selfPath
+	o.childArgs = childArgs
+	o.logDir = logDir
+}
+
 // StatusUpdates returns the channel that receives status updates for all workflows.
 func (o *Orchestrator) StatusUpdates() <-chan IssueStatus {
 	return o.statusChan
@@ -98,17 +112,11 @@ func (o *Orchestrator) Snapshot() []IssueStatus {
 	defer o.mu.RUnlock()
 	statuses := make([]IssueStatus, 0, len(o.active))
 	for _, mw := range o.active {
-		step := StepInit
-		if mw.workflow != nil {
-			step = mw.workflow.state.Current()
-		}
 		statuses = append(statuses, IssueStatus{
 			Issue:        mw.issue,
-			Step:         step,
+			Step:         StepInit,
 			StartedAt:    mw.startedAt,
 			WorktreePath: mw.worktreePath,
-			RoundIndex:   mw.roundIndex,
-			RoundTotal:   mw.roundTotal,
 		})
 	}
 	return statuses
@@ -152,44 +160,61 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
 	worktreePath, err := o.wtManager.NewWorktree(ctx, branch, o.config.BaseBranch, issue.Title)
 	if err != nil {
-		o.mu.Lock()
-		delete(o.active, issue.ID)
-		o.mu.Unlock()
+		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
 	}
 
-	issueCfg := *o.config
-	issueCfg.WorkDir = worktreePath
-
 	wfCtx, cancel := context.WithCancel(ctx)
-	wf := NewWorkflow(o.tracker, issue, &issueCfg, o.logger.With("issue", issue.Identifier))
+
+	// Build child process arguments: --issue <ID> --work-dir <path> + propagated flags.
+	args := make([]string, 0, len(o.childArgs)+4)
+	args = append(args, "--issue", issue.Identifier, "--work-dir", worktreePath)
+	args = append(args, o.childArgs...)
+
+	cmd := exec.CommandContext(wfCtx, o.selfPath, args...)
+	cmd.Dir = worktreePath
+	// Graceful shutdown: send SIGINT so the child can clean up, then
+	// force-kill after WaitDelay if it hasn't exited.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 10 * time.Second
+
+	// Per-issue log file for subprocess stdout/stderr.
+	// Sanitize identifier for use as a filename: GitHub identifiers like
+	// "acme/app#42" contain "/" and "#" which are problematic in file paths.
+	safeID := sanitizeForFilename(issue.Identifier)
+	logPath := filepath.Join(o.logDir, fmt.Sprintf("%s-%s.log",
+		safeID, time.Now().Format("20060102-150405")))
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		cancel()
+		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
+			o.logger.Warn("failed to remove worktree after log open failure", "branch", branch, "error", removeErr)
+		}
+		o.unreserveSlot(issue.ID)
+		return fmt.Errorf("open log file for %s: %w", issue.Identifier, err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		cancel()
+		// Clean up the worktree that was already created before we failed.
+		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
+			o.logger.Warn("failed to remove worktree after start failure", "branch", branch, "error", removeErr)
+		}
+		o.unreserveSlot(issue.ID)
+		return fmt.Errorf("start subprocess for %s: %w", issue.Identifier, err)
+	}
 
 	mw := &managedWorkflow{
-		workflow:     wf,
 		issue:        issue,
 		cancel:       cancel,
 		worktreePath: worktreePath,
 		branch:       branch,
 		startedAt:    time.Now(),
-	}
-
-	wf.OnTransition = func(step WorkflowStep) {
-		// Skip terminal steps here — they are emitted by the goroutine
-		// below with the proper error attached.
-		if step != StepDone && step != StepFailed {
-			o.mu.Lock()
-			mw.roundIndex = 0
-			mw.roundTotal = 0
-			o.mu.Unlock()
-			o.emitStatus(mw, step, nil)
-		}
-	}
-	wf.OnRoundProgress = func(roundIndex, roundTotal int) {
-		o.mu.Lock()
-		mw.roundIndex = roundIndex
-		mw.roundTotal = roundTotal
-		o.mu.Unlock()
-		o.emitStatus(mw, wf.state.Current(), nil)
+		cmd:          cmd,
+		logFile:      logFile,
 	}
 
 	o.mu.Lock()
@@ -197,45 +222,49 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.mu.Unlock()
 
 	o.emitStatus(mw, StepInit, nil)
+	o.logger.Info("subprocess started",
+		"issue", issue.Identifier,
+		"pid", cmd.Process.Pid,
+		"log", logPath,
+	)
 
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		err := wf.Run(wfCtx)
+		defer logFile.Close()
+		err := cmd.Wait()
 		if err != nil {
-			o.logger.Error("workflow failed", "issue", issue.Identifier, "error", err)
+			o.logger.Error("subprocess failed", "issue", issue.Identifier, "error", err)
 			o.emitStatus(mw, StepFailed, err)
 		} else {
-			o.logger.Info("workflow completed", "issue", issue.Identifier)
+			o.logger.Info("subprocess completed", "issue", issue.Identifier)
 			o.emitStatus(mw, StepDone, nil)
 		}
-		// Use background context for cleanup so worktree removal
-		// succeeds even when the parent context is cancelled (e.g. TUI exit).
 		o.cleanup(context.Background(), mw)
 	}()
 
 	return nil
 }
 
-// activeCountLocked returns the number of active (non-terminal) workflows.
+// activeCountLocked returns the number of active subprocesses.
 // Caller must hold o.mu.
 func (o *Orchestrator) activeCountLocked() int {
-	count := 0
-	for _, mw := range o.active {
-		if mw.workflow == nil {
-			// Placeholder reservation, counts as active.
-			count++
-			continue
-		}
-		step := mw.workflow.state.Current()
-		if step != StepDone && step != StepFailed {
-			count++
-		}
-	}
-	return count
+	return len(o.active)
 }
 
-// Cancel stops the workflow for the given issue ID.
+// unreserveSlot removes a placeholder reservation and signals that
+// a slot is free so RunWithDiscovery can drain pending issues.
+func (o *Orchestrator) unreserveSlot(issueID string) {
+	o.mu.Lock()
+	delete(o.active, issueID)
+	o.mu.Unlock()
+	select {
+	case o.slotFreed <- struct{}{}:
+	default:
+	}
+}
+
+// Cancel stops the subprocess for the given issue ID.
 func (o *Orchestrator) Cancel(issueID string) {
 	o.mu.RLock()
 	mw, ok := o.active[issueID]
@@ -316,8 +345,6 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 		StartedAt:    mw.startedAt,
 		WorktreePath: mw.worktreePath,
 		Error:        err,
-		RoundIndex:   mw.roundIndex,
-		RoundTotal:   mw.roundTotal,
 	}
 	if status.IsDone() {
 		status.CompletedAt = time.Now()
@@ -393,4 +420,17 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow) {
 	case o.slotFreed <- struct{}{}:
 	default:
 	}
+}
+
+// sanitizeForFilename replaces characters that are problematic in file paths
+// (path separators, shell metacharacters) with underscores.
+func sanitizeForFilename(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', '#', ' ', ':', '*', '?', '"', '<', '>', '|':
+			return '_'
+		default:
+			return r
+		}
+	}, s)
 }

@@ -3,6 +3,8 @@ package jiradozer
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 // mockWTManager implements WorktreeManager for testing.
 type mockWTManager struct {
 	newErr  error
+	baseDir string            // temp dir for creating real directories
 	created map[string]string // branch -> worktreePath
 	removed []string          // branches removed
 	mu      sync.Mutex
@@ -24,13 +27,27 @@ func newMockWTManager() *mockWTManager {
 	return &mockWTManager{created: make(map[string]string)}
 }
 
+func newMockWTManagerWithDir(t *testing.T) *mockWTManager {
+	t.Helper()
+	return &mockWTManager{
+		baseDir: t.TempDir(),
+		created: make(map[string]string),
+	}
+}
+
 func (m *mockWTManager) NewWorktree(_ context.Context, branch, _, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.newErr != nil {
 		return "", m.newErr
 	}
-	path := "/tmp/worktrees/" + branch
+	var path string
+	if m.baseDir != "" {
+		path = filepath.Join(m.baseDir, branch)
+		os.MkdirAll(path, 0o755)
+	} else {
+		path = "/tmp/worktrees/" + branch
+	}
 	m.created[branch] = path
 	return path, nil
 }
@@ -66,30 +83,89 @@ func testOrchestratorConfig() *Config {
 	return &cfg
 }
 
+// setupSubprocessOrch creates an orchestrator with subprocess mode configured
+// using the given binary (e.g. a test script).
+func setupSubprocessOrch(t *testing.T, cfg *Config, binary string) (*Orchestrator, *mockWTManager) {
+	t.Helper()
+	wtm := newMockWTManagerWithDir(t)
+	logDir := t.TempDir()
+	orch := NewOrchestrator(&mockDiscoveryTracker{}, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode(binary, nil, logDir)
+	return orch, wtm
+}
+
 func TestOrchestrator_BranchPrefix(t *testing.T) {
-	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
 	cfg.Source.BranchPrefix = "auto"
-	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	script := writeTestScript(t, "exit 0")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
 
 	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
-	// Start will fail because the mock tracker doesn't implement workflow states,
-	// but we can check the worktree was created with the right branch.
-	_ = orch.Start(context.Background(), issue)
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
 
 	created := wtm.getCreated()
 	require.Contains(t, created, "auto/ENG-1")
 }
 
+func TestOrchestrator_SpecialCharsInIdentifier(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	cfg.Source.BranchPrefix = "auto"
+
+	script := writeTestScript(t, "exit 0")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	// GitHub identifiers like "acme/app#42" contain "/" and "#" which are
+	// problematic in file paths. Both must be sanitized.
+	issue := &tracker.Issue{ID: "1", Identifier: "acme/app#42", Title: "Test"}
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	orch.Wait()
+
+	// Verify log file was created with sanitized name.
+	logDir := orch.logDir
+	entries, err := os.ReadDir(logDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].Name(), "acme_app_42-")
+}
+
+func TestSanitizeForFilename(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"ENG-123", "ENG-123"},
+		{"acme/app#42", "acme_app_42"},
+		{`a\b:c*d?e"f<g>h|i j`, "a_b_c_d_e_f_g_h_i_j"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitizeForFilename(tt.input)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// writeTestScript creates a shell script in a temp dir that ignores all
+// arguments and runs the given body. Returns the script path.
+func writeTestScript(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "test.sh")
+	err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755)
+	require.NoError(t, err)
+	return p
+}
+
 func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
-	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
 	cfg.Source.MaxConcurrent = 2
-	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	script := writeTestScript(t, "sleep 60")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
 
 	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
 	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}
@@ -107,11 +183,10 @@ func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
 }
 
 func TestOrchestrator_DuplicateIssue(t *testing.T) {
-	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
-	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	script := writeTestScript(t, "sleep 60")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
 
 	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
 	err1 := orch.Start(context.Background(), issue)
@@ -123,24 +198,60 @@ func TestOrchestrator_DuplicateIssue(t *testing.T) {
 }
 
 func TestOrchestrator_StatusUpdates(t *testing.T) {
-	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
-	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	script := writeTestScript(t, "exit 0")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
 
 	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
 	err := orch.Start(context.Background(), issue)
 	require.NoError(t, err)
 
-	// Should receive at least the initial status update.
+	// Should receive the initial status update.
 	select {
 	case status := <-orch.StatusUpdates():
 		require.Equal(t, "ENG-1", status.Issue.Identifier)
 		require.Equal(t, StepInit, status.Step)
 		require.False(t, status.IsDone())
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for status update")
+		t.Fatal("timed out waiting for StepInit status")
+	}
+
+	// Should receive StepDone when the subprocess exits.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, "ENG-1", status.Issue.Identifier)
+		require.Equal(t, StepDone, status.Step)
+		require.True(t, status.IsDone())
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepDone status")
+	}
+}
+
+func TestOrchestrator_SubprocessFailed(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	script := writeTestScript(t, "exit 1")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	// Drain StepInit.
+	select {
+	case <-orch.StatusUpdates():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepInit")
+	}
+
+	// Should receive StepFailed.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepFailed, status.Step)
+		require.Error(t, status.Error)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepFailed")
 	}
 }
 
@@ -221,17 +332,16 @@ func TestShellQuote(t *testing.T) {
 }
 
 func TestOrchestrator_Snapshot(t *testing.T) {
-	wtm := newMockWTManager()
 	cfg := testOrchestratorConfig()
-	mt := &mockDiscoveryTracker{}
 
-	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	script := writeTestScript(t, "sleep 60")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
 
 	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
 	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}
 
-	_ = orch.Start(context.Background(), issue1)
-	_ = orch.Start(context.Background(), issue2)
+	require.NoError(t, orch.Start(context.Background(), issue1))
+	require.NoError(t, orch.Start(context.Background(), issue2))
 
 	snap := orch.Snapshot()
 	require.Len(t, snap, 2)
@@ -239,6 +349,7 @@ func TestOrchestrator_Snapshot(t *testing.T) {
 	ids := map[string]bool{}
 	for _, s := range snap {
 		ids[s.Issue.Identifier] = true
+		require.Equal(t, StepInit, s.Step)
 	}
 	require.True(t, ids["ENG-1"])
 	require.True(t, ids["ENG-2"])
