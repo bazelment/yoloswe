@@ -24,6 +24,7 @@ func TestWorkflowStepString(t *testing.T) {
 		{want: "ship_review", step: StepShipReview},
 		{want: "done", step: StepDone},
 		{want: "failed", step: StepFailed},
+		{want: "cancelled", step: StepCancelled},
 		{want: "unknown(99)", step: WorkflowStep(99)},
 	}
 	for _, tt := range tests {
@@ -34,6 +35,7 @@ func TestWorkflowStepString(t *testing.T) {
 func TestWorkflowStepIsTerminal(t *testing.T) {
 	assert.True(t, StepDone.IsTerminal())
 	assert.True(t, StepFailed.IsTerminal())
+	assert.True(t, StepCancelled.IsTerminal())
 	assert.False(t, StepPlanning.IsTerminal())
 	assert.False(t, StepInit.IsTerminal())
 }

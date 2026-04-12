@@ -33,28 +33,38 @@ type IssueStatus struct {
 
 // IsDone returns true if the workflow has completed (successfully or with failure).
 func (s IssueStatus) IsDone() bool {
-	return s.Step == StepDone || s.Step == StepFailed
+	return s.Step.IsTerminal()
+}
+
+// PreservedWorktree records a worktree that was not cleaned up because its
+// workflow was cancelled by the user.
+type PreservedWorktree struct {
+	Branch       string
+	WorktreePath string
+	Issue        string // issue identifier
 }
 
 // Orchestrator manages concurrent issue workflows, each in its own worktree.
 //
 //nolint:govet // fieldalignment: sync types at the end require padding
 type Orchestrator struct {
-	tracker    tracker.IssueTracker
-	wtManager  WorktreeManager
-	out        io.Writer
-	config     *Config
-	logger     *slog.Logger
-	active     map[string]*managedWorkflow
-	statusChan chan IssueStatus
-	slotFreed  chan struct{}
-	done       chan struct{}
-	childArgs  []string
-	repoName   string
-	selfPath   string
-	logDir     string
-	mu         sync.RWMutex
-	wg         sync.WaitGroup
+	tracker      tracker.IssueTracker
+	wtManager    WorktreeManager
+	out          io.Writer
+	config       *Config
+	logger       *slog.Logger
+	active       map[string]*managedWorkflow
+	statusChan   chan IssueStatus
+	slotFreed    chan struct{}
+	done         chan struct{}
+	childArgs    []string
+	repoName     string
+	selfPath     string
+	logDir       string
+	mu           sync.RWMutex
+	wg           sync.WaitGroup
+	forceCleanup bool
+	preserved    []PreservedWorktree
 }
 
 type managedWorkflow struct {
@@ -99,6 +109,14 @@ func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, lo
 	o.selfPath = selfPath
 	o.childArgs = childArgs
 	o.logDir = logDir
+}
+
+// SetForceCleanup controls whether worktrees are deleted even when workflows
+// are cancelled by the user (Ctrl+C). By default, cancelled worktrees are
+// preserved so work is not lost. When force is true, all worktrees are
+// cleaned up unconditionally.
+func (o *Orchestrator) SetForceCleanup(force bool) {
+	o.forceCleanup = force
 }
 
 // StatusUpdates returns the channel that receives status updates for all workflows.
@@ -233,14 +251,21 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		defer o.wg.Done()
 		defer logFile.Close()
 		err := cmd.Wait()
-		if err != nil {
-			o.logger.Error("subprocess failed", "issue", issue.Identifier, "error", err)
-			o.emitStatus(mw, StepFailed, err)
-		} else {
+		switch {
+		case err == nil:
 			o.logger.Info("subprocess completed", "issue", issue.Identifier)
 			o.emitStatus(mw, StepDone, nil)
+			o.cleanup(context.Background(), mw, StepDone)
+		case wfCtx.Err() != nil:
+			// The workflow context was cancelled (user pressed Ctrl+C).
+			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
+			o.emitStatus(mw, StepCancelled, err)
+			o.cleanup(context.Background(), mw, StepCancelled)
+		default:
+			o.logger.Error("subprocess failed", "issue", issue.Identifier, "error", err)
+			o.emitStatus(mw, StepFailed, err)
+			o.cleanup(context.Background(), mw, StepFailed)
 		}
-		o.cleanup(context.Background(), mw)
 	}()
 
 	return nil
@@ -288,6 +313,17 @@ func (o *Orchestrator) Shutdown() {
 // Wait blocks until all active workflows have completed.
 func (o *Orchestrator) Wait() {
 	o.wg.Wait()
+}
+
+// PreservedWorktrees returns the list of worktrees that were preserved
+// because their workflows were cancelled. Only meaningful after Wait or
+// Shutdown has returned.
+func (o *Orchestrator) PreservedWorktrees() []PreservedWorktree {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	cp := make([]PreservedWorktree, len(o.preserved))
+	copy(cp, o.preserved)
+	return cp
 }
 
 // RunWithDiscovery consumes issues from the discovery channel and starts
@@ -407,9 +443,24 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow) {
-	if err := o.wtManager.RemoveWorktree(ctx, mw.branch, true); err != nil {
-		o.logger.Warn("failed to remove worktree", "branch", mw.branch, "error", err)
+func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
+	if step == StepCancelled && !o.forceCleanup {
+		o.logger.Info("preserving worktree for cancelled workflow",
+			"branch", mw.branch,
+			"worktree", mw.worktreePath,
+			"issue", mw.issue.Identifier,
+		)
+		o.mu.Lock()
+		o.preserved = append(o.preserved, PreservedWorktree{
+			Branch:       mw.branch,
+			WorktreePath: mw.worktreePath,
+			Issue:        mw.issue.Identifier,
+		})
+		o.mu.Unlock()
+	} else {
+		if err := o.wtManager.RemoveWorktree(ctx, mw.branch, true); err != nil {
+			o.logger.Warn("failed to remove worktree", "branch", mw.branch, "error", err)
+		}
 	}
 	o.mu.Lock()
 	delete(o.active, mw.issue.ID)

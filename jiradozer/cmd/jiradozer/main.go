@@ -46,6 +46,7 @@ func main() {
 		descriptionFile string
 		planFile        string
 		dryRun          bool
+		forceCleanup    bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -73,6 +74,7 @@ func main() {
 				planFile:        planFile,
 				dryRun:          dryRun,
 				dryRunSet:       cmd.Flags().Changed("dry-run"),
+				forceCleanup:    forceCleanup,
 			})
 		},
 	}
@@ -96,6 +98,7 @@ func main() {
 	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
 	rootCmd.Flags().StringVar(&planFile, "plan-file", "", "Plan file for build step (use - for stdin)")
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Team mode only: for each newly-discovered issue, print the equivalent `bramble new-session` command instead of launching a workflow. TUI remains empty — look at stdout for the printed commands.")
+	rootCmd.Flags().BoolVar(&forceCleanup, "force-cleanup", false, "Team mode only: delete all worktrees on cancellation (Ctrl+C). By default, worktrees with in-progress work are preserved.")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -126,6 +129,7 @@ type runArgs struct {
 	verbose         bool
 	dryRun          bool
 	dryRunSet       bool
+	forceCleanup    bool
 }
 
 func run(ctx context.Context, args runArgs) error {
@@ -476,6 +480,7 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, &wtAdapter{mgr: wtMgr}, repoName, logger)
 	orch.SetSubprocessMode(selfPath, childArgs, logDir)
+	orch.SetForceCleanup(args.forceCleanup)
 
 	// Print status updates to stderr.
 	go func() {
@@ -486,6 +491,8 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 			case status.Step == jiradozer.StepDone:
 				elapsed := time.Since(status.StartedAt).Truncate(time.Second)
 				renderer.Status(fmt.Sprintf("[%s] completed (%s)", status.Issue.Identifier, elapsed))
+			case status.Step == jiradozer.StepCancelled:
+				renderer.Status(fmt.Sprintf("[%s] cancelled", status.Issue.Identifier))
 			case status.Step == jiradozer.StepFailed:
 				renderer.Error(status.Error, fmt.Sprintf("[%s] failed", status.Issue.Identifier))
 			}
@@ -495,6 +502,17 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	err = orch.RunWithDiscovery(orchCtx, disc)
 	orchCancel()
 	orch.Shutdown()
+
+	// Report preserved worktrees so the user knows what's left.
+	if preserved := orch.PreservedWorktrees(); len(preserved) > 0 {
+		fmt.Fprintf(os.Stderr, "\nPreserved %d worktree(s) with in-progress work:\n", len(preserved))
+		for _, pw := range preserved {
+			fmt.Fprintf(os.Stderr, "  %s  %s  (%s)\n", pw.Issue, pw.Branch, pw.WorktreePath)
+		}
+		fmt.Fprintf(os.Stderr, "\nTo clean up manually: wt remove <branch>\n")
+		fmt.Fprintf(os.Stderr, "To clean up all on cancel: re-run with --force-cleanup\n")
+	}
+
 	return err
 }
 

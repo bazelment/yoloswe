@@ -22,6 +22,7 @@ const (
 	StepShipReview                  // Ship complete, waiting for CI + human feedback
 	StepDone                        // Terminal: issue marked done
 	StepFailed                      // Terminal: workflow failed
+	StepCancelled                   // Terminal: workflow interrupted by user cancellation
 )
 
 // String returns the string representation of the step.
@@ -51,6 +52,8 @@ func (s WorkflowStep) String() string {
 		return "done"
 	case StepFailed:
 		return "failed"
+	case StepCancelled:
+		return "cancelled"
 	default:
 		return fmt.Sprintf("unknown(%d)", s)
 	}
@@ -58,7 +61,7 @@ func (s WorkflowStep) String() string {
 
 // IsTerminal returns true if this is a terminal step.
 func (s WorkflowStep) IsTerminal() bool {
-	return s == StepDone || s == StepFailed
+	return s == StepDone || s == StepFailed || s == StepCancelled
 }
 
 // IsReview returns true if this step is waiting for human feedback.
