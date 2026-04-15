@@ -2,10 +2,86 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/wt"
 )
+
+const retryPrompt = "retry"
+
+// UnresolvedToolErrorMarkerPrefix is a stable prefix that identifies the
+// unresolved-tool-error marker in agent text output. Callers can use it to
+// detect whether the marker is already present before re-appending.
+const UnresolvedToolErrorMarkerPrefix = "[unresolved tool error ("
+
+const unresolvedToolErrorMarkerTemplate = UnresolvedToolErrorMarkerPrefix + "%s) after %d/%d retries — tool: %s\n excerpt: %s]"
+
+// Abort-reason constants for UnresolvedToolError.Reason.
+const (
+	RetryStopExhausted      = "exhausted"
+	RetryStopNoProgress     = "no_progress"
+	RetryStopBudgetExceeded = "budget_exceeded"
+	RetryStopCtxCancelled   = "ctx_cancelled"
+)
+
+// FormatUnresolvedToolErrorMarker returns the marker string used to surface
+// an unresolved tool error in agent text output. Callers that replace
+// AgentResult.Text downstream (e.g. plan-file readers) should re-append this
+// marker so the failure is not silently dropped.
+func FormatUnresolvedToolErrorMarker(e UnresolvedToolError) string {
+	reason := e.Reason
+	if reason == "" {
+		reason = RetryStopExhausted
+	}
+	return fmt.Sprintf(unresolvedToolErrorMarkerTemplate, reason, e.Attempts, e.Max, e.Tool, e.Excerpt)
+}
+
+// AppendUnresolvedToolErrorMarker appends the marker to text, using a blank
+// separator when text is non-empty. Exported for callers that re-append the
+// marker after downstream text substitution.
+func AppendUnresolvedToolErrorMarker(text string, e UnresolvedToolError) string {
+	marker := FormatUnresolvedToolErrorMarker(e)
+	if text == "" {
+		return marker
+	}
+	return text + "\n\n" + marker
+}
+
+const minRetryWallClockBudget = 10 * time.Minute
+
+func computeRetryTimeBudget(cfg ExecuteConfig) time.Duration {
+	turnBudget := time.Duration(cfg.MaxTurns) * time.Minute
+	if turnBudget > minRetryWallClockBudget {
+		return turnBudget
+	}
+	return minRetryWallClockBudget
+}
+
+func buildRetryPrompt() string {
+	return retryPrompt
+}
+
+// emitRetry fires the hook before each follow-up Ask so logs see the
+// decision even if the retry subsequently hangs.
+func emitRetry(h EventHandler, attempt, max int, toolName, excerpt string) {
+	if h == nil {
+		return
+	}
+	if rh, ok := h.(RetryHandler); ok {
+		rh.OnRetry(attempt, max, toolName, excerpt)
+	}
+}
+
+func emitRetryAbort(h EventHandler, reason, toolName, excerpt string) {
+	if h == nil {
+		return
+	}
+	if rh, ok := h.(RetryHandler); ok {
+		rh.OnRetryAbort(reason, toolName, excerpt)
+	}
+}
 
 // ClaudeProvider wraps the Claude SDK behind the Provider interface.
 type ClaudeProvider struct {
@@ -89,15 +165,70 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		}
 	}()
 
-	// Execute single turn
+	start := time.Now()
+	budget := computeRetryTimeBudget(cfg)
+
 	result, err := session.Ask(ctx, fullPrompt)
 	if err != nil {
 		return nil, err
 	}
 
+	var (
+		prevExcerpt string
+		havePrev    bool
+		attempts    int
+		stopReason  = RetryStopExhausted
+	)
+	for attempts < cfg.MaxToolErrorRetries {
+		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
+		if !ok {
+			break
+		}
+		if ctx.Err() != nil {
+			stopReason = RetryStopCtxCancelled
+			break
+		}
+		if time.Since(start) >= budget {
+			stopReason = RetryStopBudgetExceeded
+			break
+		}
+		if havePrev && excerpt == prevExcerpt {
+			stopReason = RetryStopNoProgress
+			break
+		}
+		prevExcerpt = excerpt
+		havePrev = true
+		attempts++
+
+		emitRetry(cfg.EventHandler, attempts, cfg.MaxToolErrorRetries, toolName, excerpt)
+
+		next, askErr := session.Ask(ctx, buildRetryPrompt())
+		if askErr != nil {
+			return nil, askErr
+		}
+		result = next
+	}
+
 	agentResult := ClaudeResultToAgentResult(result)
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
+	}
+	if cfg.MaxToolErrorRetries > 0 {
+		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
+			unresolved := &UnresolvedToolError{
+				Tool:     toolName,
+				Excerpt:  excerpt,
+				Reason:   stopReason,
+				Attempts: attempts,
+				Max:      cfg.MaxToolErrorRetries,
+			}
+			agentResult.UnresolvedToolError = unresolved
+			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
+			// Fire the abort callback once per loop execution that stopped
+			// with a tool error still present. Unifies the four stop reasons
+			// (exhausted, no_progress, budget_exceeded, ctx_cancelled).
+			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
+		}
 	}
 	return agentResult, nil
 }

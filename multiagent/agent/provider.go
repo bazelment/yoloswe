@@ -9,14 +9,29 @@ import (
 // AgentResult is the provider-agnostic result of an agent execution.
 // It replaces direct dependency on claude.TurnResult in the agent interfaces.
 type AgentResult struct {
-	Error         error
-	Text          string
-	Thinking      string
-	SessionID     string
-	ContentBlocks []AgentContentBlock
-	Usage         AgentUsage
-	DurationMs    int64
-	Success       bool
+	Error               error
+	UnresolvedToolError *UnresolvedToolError
+	Text                string
+	Thinking            string
+	SessionID           string
+	ContentBlocks       []AgentContentBlock
+	Usage               AgentUsage
+	DurationMs          int64
+	Success             bool
+}
+
+// UnresolvedToolError records an unresolved tool error that persisted after
+// the retry loop stopped. Consumers can surface it independently of
+// AgentResult.Text, which may be replaced downstream (e.g. when a plan file
+// is read instead of the agent's text). Reason distinguishes why the loop
+// stopped — "exhausted" (count budget reached), "budget_exceeded",
+// "no_progress", or "ctx_cancelled".
+type UnresolvedToolError struct {
+	Tool     string
+	Excerpt  string
+	Reason   string
+	Attempts int
+	Max      int
 }
 
 // AgentContentBlock is a provider-agnostic content block.
@@ -124,6 +139,20 @@ type SessionInitHandler interface {
 	OnSessionInit(sessionID string)
 }
 
+// RetryHandler is an optional EventHandler extension fired before each
+// tool-error retry turn and when the retry loop stops with an
+// unresolved tool error still present.
+type RetryHandler interface {
+	OnRetry(attempt, max int, tool, excerpt string)
+	// OnRetryAbort fires once per retry-loop execution when the loop
+	// stops while a tool error is still present. reason is one of
+	// "exhausted" (count budget reached), "no_progress",
+	// "budget_exceeded", or "ctx_cancelled". The same reason is
+	// carried on UnresolvedToolError.Reason and in the appended
+	// marker, so handlers can correlate logs with downstream output.
+	OnRetryAbort(reason, tool, excerpt string)
+}
+
 // Provider is the pluggable interface for agent backends.
 // Adding a new backend (Gemini, Codex, etc.) means implementing this interface.
 type Provider interface {
@@ -160,15 +189,16 @@ type ExecuteOption func(*ExecuteConfig)
 
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
-	EventHandler     EventHandler
-	Model            string
-	WorkDir          string
-	SystemPrompt     string
-	PermissionMode   string
-	ResumeSessionID  string
-	MaxTurns         int
-	MaxBudgetUSD     float64
-	KeepUserSettings bool
+	EventHandler        EventHandler
+	Model               string
+	WorkDir             string
+	SystemPrompt        string
+	PermissionMode      string
+	ResumeSessionID     string
+	MaxTurns            int
+	MaxToolErrorRetries int
+	MaxBudgetUSD        float64
+	KeepUserSettings    bool
 }
 
 // WithProviderModel sets the model for a provider execution.
@@ -216,6 +246,13 @@ func WithProviderKeepUserSettings() ExecuteOption {
 // WithProviderResumeSessionID sets a session ID to resume instead of starting fresh.
 func WithProviderResumeSessionID(id string) ExecuteOption {
 	return func(c *ExecuteConfig) { c.ResumeSessionID = id }
+}
+
+// WithProviderMaxToolErrorRetries sets the maximum number of auto-retries
+// performed when a turn ends with an unresolved tool error. Zero disables
+// the feature (the provider returns the errored result without retrying).
+func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
+	return func(c *ExecuteConfig) { c.MaxToolErrorRetries = n }
 }
 
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.

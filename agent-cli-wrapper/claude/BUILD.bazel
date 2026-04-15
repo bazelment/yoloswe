@@ -47,6 +47,7 @@ go_test(
         "session_bg_test.go",
         "session_dispatch_test.go",
         "session_monitor_test.go",
+        "turn_retry_test.go",
         "turn_test.go",
     ],
     embed = [":claude"],

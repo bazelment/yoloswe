@@ -107,6 +107,10 @@ validate:
   permission_mode: bypass               # default: "bypass" — inherited by all rounds
   max_turns: 10                         # default: 10 — inherited by rounds unless overridden
   # max_budget_usd: 0                   # default: inherits from top-level — per-round default
+  # Retry up to 3x when a turn ends with an unresolved tool error
+  # (e.g. parallel-cancelled Bash siblings). 0 disables the feature.
+  # Each retry is a full agent turn — budget wall-clock accordingly.
+  max_tool_error_retries: 3             # default: 0 (disabled)
   auto_approve: false                   # default: false — applies after ALL rounds complete
   rounds:
     - prompt: |

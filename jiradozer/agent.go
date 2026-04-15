@@ -275,6 +275,39 @@ func (h *logEventHandler) OnError(err error, context string) {
 	h.logger.Debug("agent error", "step", h.step, "error", err, "context", context)
 }
 
+func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
+	h.flushText()
+	h.logger.Info("retry on tool error",
+		"step", h.step,
+		"attempt", attempt,
+		"max", max,
+		"tool", tool,
+	)
+	// Excerpt is derived from raw tool output and may contain paths,
+	// command lines, or other sensitive material, so keep it at Debug.
+	h.logger.Debug("retry on tool error excerpt",
+		"step", h.step,
+		"attempt", attempt,
+		"tool", tool,
+		"excerpt", excerpt,
+	)
+}
+
+func (h *logEventHandler) OnRetryAbort(reason, tool, excerpt string) {
+	h.flushText()
+	h.logger.Info("retry loop aborted",
+		"step", h.step,
+		"reason", reason,
+		"tool", tool,
+	)
+	h.logger.Debug("retry loop aborted excerpt",
+		"step", h.step,
+		"reason", reason,
+		"tool", tool,
+		"excerpt", excerpt,
+	)
+}
+
 // rendererEventHandler adapts agent.EventHandler to a render.Renderer for
 // terminal display.
 type rendererEventHandler struct {
@@ -306,6 +339,14 @@ func (h *rendererEventHandler) OnTurnComplete(turnNumber int, success bool, dura
 
 func (h *rendererEventHandler) OnError(err error, ctx string) {
 	h.r.Error(err, ctx)
+}
+
+func (h *rendererEventHandler) OnRetry(attempt, max int, tool, _ string) {
+	h.r.Status(fmt.Sprintf("Retry %d/%d: tool error in %s", attempt, max, tool))
+}
+
+func (h *rendererEventHandler) OnRetryAbort(reason, tool, _ string) {
+	h.r.Status(fmt.Sprintf("Retry loop aborted (%s) on tool %s", reason, tool))
 }
 
 // compositeEventHandler fans out events to multiple handlers.
@@ -357,6 +398,22 @@ func (c *compositeEventHandler) OnSessionInit(sessionID string) {
 	}
 }
 
+func (c *compositeEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
+	for _, h := range c.handlers {
+		if rh, ok := h.(agent.RetryHandler); ok {
+			rh.OnRetry(attempt, max, tool, excerpt)
+		}
+	}
+}
+
+func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
+	for _, h := range c.handlers {
+		if rh, ok := h.(agent.RetryHandler); ok {
+			rh.OnRetryAbort(reason, tool, excerpt)
+		}
+	}
+}
+
 // runAgent runs an agent with the given prompt and step configuration.
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
@@ -403,6 +460,9 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	if cfg.MaxTurns > 0 {
 		opts = append(opts, agent.WithProviderMaxTurns(cfg.MaxTurns))
 	}
+	if cfg.MaxToolErrorRetries > 0 {
+		opts = append(opts, agent.WithProviderMaxToolErrorRetries(cfg.MaxToolErrorRetries))
+	}
 	if cfg.MaxBudgetUSD > 0 {
 		opts = append(opts, agent.WithProviderMaxBudgetUSD(cfg.MaxBudgetUSD))
 	}
@@ -436,7 +496,15 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	}
 
 	logHandler.flushText()
-	return resolveOutput(result.Text, logHandler, logger), result.SessionID, nil
+	output := resolveOutput(result.Text, logHandler, logger)
+	// The provider already appended the marker to result.Text. If
+	// resolveOutput returned the same string, the marker is still
+	// present; otherwise plan-file substitution replaced it and we
+	// need to re-append so the unresolved-error signal is not lost.
+	if e := result.UnresolvedToolError; e != nil && output != result.Text {
+		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
+	}
+	return output, result.SessionID, nil
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.

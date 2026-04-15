@@ -2,9 +2,106 @@ package claude
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
+
+// toolUseErrorMarker guards against upstream format drift where IsError
+// is unset but content still carries this sentinel (seen on parallel-
+// cancelled tool siblings).
+const toolUseErrorMarker = "<tool_use_error>"
+
+const toolErrorExcerptMaxRunes = 200
+
+func stringifyToolResult(result interface{}) string {
+	if result == nil {
+		return ""
+	}
+	switch v := result.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var b strings.Builder
+		for _, entry := range v {
+			m, ok := entry.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text, ok := m["text"].(string); ok {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(text)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+		return fmt.Sprint(v)
+	case []map[string]interface{}:
+		var b strings.Builder
+		for _, m := range v {
+			if text, ok := m["text"].(string); ok {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(text)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+		return fmt.Sprint(v)
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// excerptRunes returns the first max runes of s. Iterates by rune via
+// `range string` to avoid allocating a full []rune for large tool outputs.
+func excerptRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	count := 0
+	for i := range s {
+		if count == max {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
+// FinalTurnToolError reports the first errored tool_result in blocks,
+// returning the failing tool's name and a bounded excerpt. On parallel
+// tool batches the first-in-order errored result wins — in the cancelled-
+// sibling case this surfaces the real cause, not the cancellation.
+func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
+	toolNames := make(map[string]string)
+	for _, block := range blocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolUseID != "" {
+			toolNames[block.ToolUseID] = block.ToolName
+		}
+	}
+	for _, block := range blocks {
+		if block.Type != ContentBlockTypeToolResult {
+			continue
+		}
+		content := stringifyToolResult(block.ToolResult)
+		if !block.IsError && !strings.Contains(content, toolUseErrorMarker) {
+			continue
+		}
+		name := toolNames[block.ToolUseID]
+		if name == "" {
+			name = "unknown"
+		}
+		return name, excerptRunes(content, toolErrorExcerptMaxRunes), true
+	}
+	return "", "", false
+}
 
 // TurnUsage contains token usage for a turn.
 type TurnUsage struct {
