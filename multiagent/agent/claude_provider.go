@@ -249,7 +249,12 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
 	}
-	if cfg.MaxToolErrorRetries > 0 {
+	// When bg work is live the retry loop deliberately skips retrying — the
+	// session parked normally and the bg tasks are still running. The result
+	// may still contain a tool_use_error block (e.g. a Skill error that
+	// triggered the park), but surfacing it as an unresolved-tool-error
+	// marker would be misleading: no retry was ever attempted or warranted.
+	if cfg.MaxToolErrorRetries > 0 && stopReason != RetryStopBgWorkLive {
 		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
 			unresolved := &UnresolvedToolError{
 				Tool:     toolName,
@@ -261,8 +266,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			agentResult.UnresolvedToolError = unresolved
 			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
 			// Fire the abort callback once per loop execution that stopped
-			// with a tool error still present. Covers all five stop reasons:
-			// exhausted, no_progress, budget_exceeded, ctx_cancelled, bg_work_live.
+			// with a tool error still present. Covers all four stop reasons:
+			// exhausted, no_progress, budget_exceeded, ctx_cancelled.
+			// bg_work_live is excluded above — no retry was attempted.
 			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 		}
 	}

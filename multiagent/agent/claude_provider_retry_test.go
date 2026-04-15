@@ -303,6 +303,42 @@ func TestRunRetryLoop_SkipsWhenBgWorkLiveAndParallelCancel(t *testing.T) {
 	}
 }
 
+// TestRunRetryLoop_BgWorkLiveNoUnresolvedError verifies the contract that
+// Execute relies on: when HasLiveBackgroundWork=true and a tool_use_error
+// is present, runRetryLoop returns stopReason=RetryStopBgWorkLive with
+// attempts=0, which causes Execute to SKIP the post-loop UnresolvedToolError
+// block (guarded by stopReason != RetryStopBgWorkLive). This ensures the
+// parked-session case never pollutes agentResult.Text with a spurious
+// "[unresolved tool error (bg_work_live) after 0/N retries]" marker.
+func TestRunRetryLoop_BgWorkLiveNoUnresolvedError(t *testing.T) {
+	t.Parallel()
+	initial := turnResult(
+		"parked",
+		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"),
+		true, // HasLiveBackgroundWork — G2 gate fires
+	)
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	result, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no retries when bg work is live, got %d", attempts)
+	}
+	if reason != RetryStopBgWorkLive {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopBgWorkLive, reason)
+	}
+	// Confirm: FinalTurnToolError WOULD return ok=true on this result,
+	// so the Execute guard (stopReason != RetryStopBgWorkLive) is what
+	// prevents the UnresolvedToolError marker from being appended.
+	_, _, ok := claude.FinalTurnToolError(result.ContentBlocks)
+	if !ok {
+		t.Error("FinalTurnToolError must return ok=true on this result — the Execute guard is what suppresses the marker, not the absence of an error block")
+	}
+}
+
 // TestRunRetryLoop_PropagatesAskError ensures an Ask transport error
 // aborts the loop cleanly without masking.
 func TestRunRetryLoop_PropagatesAskError(t *testing.T) {

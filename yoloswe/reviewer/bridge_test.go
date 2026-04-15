@@ -48,10 +48,10 @@ type testTurnCompleteEvent struct {
 func (e testTurnCompleteEvent) StreamEventKind() agentstream.EventKind {
 	return agentstream.KindTurnComplete
 }
-func (e testTurnCompleteEvent) StreamTurnNum() int    { return 1 }
-func (e testTurnCompleteEvent) StreamIsSuccess() bool { return e.success }
-func (e testTurnCompleteEvent) StreamDuration() int64 { return e.durationMs }
-func (e testTurnCompleteEvent) StreamCost() float64 { return 0 }
+func (e testTurnCompleteEvent) StreamTurnNum() int                { return 1 }
+func (e testTurnCompleteEvent) StreamIsSuccess() bool             { return e.success }
+func (e testTurnCompleteEvent) StreamDuration() int64             { return e.durationMs }
+func (e testTurnCompleteEvent) StreamCost() float64               { return 0 }
 func (e testTurnCompleteEvent) StreamHasLiveBackgroundWork() bool { return false }
 
 type testErrorEvent struct {
