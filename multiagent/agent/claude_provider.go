@@ -16,7 +16,12 @@ const retryPromptTemplate = `Your previous turn ended with a tool error that was
 
 This is the source of the failure — if a sibling tool in a parallel batch was cancelled, the real error is in the *other* sibling. Fix the underlying problem and continue the task. Do not stop until the task is complete or you have a concrete blocker to report.`
 
-const unresolvedToolErrorMarkerTemplate = "[unresolved tool error after %d/%d retries — tool: %s\n excerpt: %s]"
+// UnresolvedToolErrorMarkerPrefix is a stable prefix that identifies the
+// unresolved-tool-error marker in agent text output. Callers can use it to
+// detect whether the marker is already present before re-appending.
+const UnresolvedToolErrorMarkerPrefix = "[unresolved tool error after "
+
+const unresolvedToolErrorMarkerTemplate = UnresolvedToolErrorMarkerPrefix + "%d/%d retries — tool: %s\n excerpt: %s]"
 
 // FormatUnresolvedToolErrorMarker returns the marker string used to surface
 // an unresolved tool error in agent text output. Callers that replace
@@ -24,6 +29,17 @@ const unresolvedToolErrorMarkerTemplate = "[unresolved tool error after %d/%d re
 // marker so the failure is not silently dropped.
 func FormatUnresolvedToolErrorMarker(e UnresolvedToolError) string {
 	return fmt.Sprintf(unresolvedToolErrorMarkerTemplate, e.Attempts, e.Max, e.Tool, e.Excerpt)
+}
+
+// AppendUnresolvedToolErrorMarker appends the marker to text, using a blank
+// separator when text is non-empty. Exported for callers that re-append the
+// marker after downstream text substitution.
+func AppendUnresolvedToolErrorMarker(text string, e UnresolvedToolError) string {
+	marker := FormatUnresolvedToolErrorMarker(e)
+	if text == "" {
+		return marker
+	}
+	return text + "\n\n" + marker
 }
 
 const minRetryWallClockBudget = 10 * time.Minute
@@ -40,14 +56,6 @@ func buildRetryPrompt(toolName, excerpt string) string {
 	return fmt.Sprintf(retryPromptTemplate, toolName, excerpt)
 }
 
-func appendUnresolvedToolErrorMarker(text string, e UnresolvedToolError) string {
-	marker := FormatUnresolvedToolErrorMarker(e)
-	if text == "" {
-		return marker
-	}
-	return text + "\n\n" + marker
-}
-
 // emitRetry fires the hook before each follow-up Ask so logs see the
 // decision even if the retry subsequently hangs.
 func emitRetry(h EventHandler, attempt, max int, toolName, excerpt string) {
@@ -56,6 +64,15 @@ func emitRetry(h EventHandler, attempt, max int, toolName, excerpt string) {
 	}
 	if rh, ok := h.(RetryHandler); ok {
 		rh.OnRetry(attempt, max, toolName, excerpt)
+	}
+}
+
+func emitRetryAbort(h EventHandler, reason, toolName, excerpt string) {
+	if h == nil {
+		return
+	}
+	if rh, ok := h.(RetryHandler); ok {
+		rh.OnRetryAbort(reason, toolName, excerpt)
 	}
 }
 
@@ -155,10 +172,15 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	)
 	for attempts < cfg.MaxToolErrorRetries {
 		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
-		if !ok || ctx.Err() != nil || time.Since(start) >= budget {
+		if !ok || ctx.Err() != nil {
+			break
+		}
+		if time.Since(start) >= budget {
+			emitRetryAbort(cfg.EventHandler, "budget_exceeded", toolName, excerpt)
 			break
 		}
 		if attempts > 0 && excerpt == prevExcerpt {
+			emitRetryAbort(cfg.EventHandler, "no_progress", toolName, excerpt)
 			break
 		}
 		prevExcerpt = excerpt
@@ -186,7 +208,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 				Max:      cfg.MaxToolErrorRetries,
 			}
 			agentResult.UnresolvedToolError = unresolved
-			agentResult.Text = appendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
+			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
 		}
 	}
 	return agentResult, nil

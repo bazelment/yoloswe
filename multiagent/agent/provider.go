@@ -137,9 +137,14 @@ type SessionInitHandler interface {
 }
 
 // RetryHandler is an optional EventHandler extension fired before each
-// tool-error retry turn.
+// tool-error retry turn and when the retry loop aborts early.
 type RetryHandler interface {
 	OnRetry(attempt, max int, tool, excerpt string)
+	// OnRetryAbort fires when the retry loop exits before reaching the
+	// count budget — e.g. because the no-progress guard tripped or the
+	// wall-clock budget elapsed. reason is a short, log-safe token
+	// ("no_progress", "budget_exceeded").
+	OnRetryAbort(reason, tool, excerpt string)
 }
 
 // Provider is the pluggable interface for agent backends.

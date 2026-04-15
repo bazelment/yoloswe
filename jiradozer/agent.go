@@ -282,6 +282,28 @@ func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
 		"attempt", attempt,
 		"max", max,
 		"tool", tool,
+	)
+	// Excerpt is derived from raw tool output and may contain paths,
+	// command lines, or other sensitive material, so keep it at Debug.
+	h.logger.Debug("retry on tool error excerpt",
+		"step", h.step,
+		"attempt", attempt,
+		"tool", tool,
+		"excerpt", excerpt,
+	)
+}
+
+func (h *logEventHandler) OnRetryAbort(reason, tool, excerpt string) {
+	h.flushText()
+	h.logger.Info("retry loop aborted",
+		"step", h.step,
+		"reason", reason,
+		"tool", tool,
+	)
+	h.logger.Debug("retry loop aborted excerpt",
+		"step", h.step,
+		"reason", reason,
+		"tool", tool,
 		"excerpt", excerpt,
 	)
 }
@@ -321,6 +343,10 @@ func (h *rendererEventHandler) OnError(err error, ctx string) {
 
 func (h *rendererEventHandler) OnRetry(attempt, max int, tool, _ string) {
 	h.r.Status(fmt.Sprintf("Retry %d/%d: tool error in %s", attempt, max, tool))
+}
+
+func (h *rendererEventHandler) OnRetryAbort(reason, tool, _ string) {
+	h.r.Status(fmt.Sprintf("Retry loop aborted (%s) on tool %s", reason, tool))
 }
 
 // compositeEventHandler fans out events to multiple handlers.
@@ -376,6 +402,14 @@ func (c *compositeEventHandler) OnRetry(attempt, max int, tool, excerpt string) 
 	for _, h := range c.handlers {
 		if rh, ok := h.(agent.RetryHandler); ok {
 			rh.OnRetry(attempt, max, tool, excerpt)
+		}
+	}
+}
+
+func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
+	for _, h := range c.handlers {
+		if rh, ok := h.(agent.RetryHandler); ok {
+			rh.OnRetryAbort(reason, tool, excerpt)
 		}
 	}
 }
@@ -465,13 +499,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	output := resolveOutput(result.Text, logHandler, logger)
 	// If the provider recorded an unresolved tool error, make sure the
 	// marker survives any plan-file substitution performed by resolveOutput.
-	if e := result.UnresolvedToolError; e != nil && !strings.Contains(output, "unresolved tool error") {
-		marker := agent.FormatUnresolvedToolErrorMarker(*e)
-		if output == "" {
-			output = marker
-		} else {
-			output = output + "\n\n" + marker
-		}
+	// Match on the stable marker prefix rather than a loose substring so
+	// plan files that happen to mention "unresolved tool error" don't
+	// suppress re-append.
+	if e := result.UnresolvedToolError; e != nil && !strings.Contains(output, agent.UnresolvedToolErrorMarkerPrefix) {
+		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
 	}
 	return output, result.SessionID, nil
 }
