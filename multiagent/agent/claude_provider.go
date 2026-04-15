@@ -9,12 +9,7 @@ import (
 	"github.com/bazelment/yoloswe/wt"
 )
 
-const retryPromptTemplate = `Your previous turn ended with a tool error that was not addressed:
-
-  tool: %s
-  result: %s
-
-This is the source of the failure — if a sibling tool in a parallel batch was cancelled, the real error is in the *other* sibling. Fix the underlying problem and continue the task. Do not stop until the task is complete or you have a concrete blocker to report.`
+const retryPrompt = "retry"
 
 // UnresolvedToolErrorMarkerPrefix is a stable prefix that identifies the
 // unresolved-tool-error marker in agent text output. Callers can use it to
@@ -64,8 +59,8 @@ func computeRetryTimeBudget(cfg ExecuteConfig) time.Duration {
 	return minRetryWallClockBudget
 }
 
-func buildRetryPrompt(toolName, excerpt string) string {
-	return fmt.Sprintf(retryPromptTemplate, toolName, excerpt)
+func buildRetryPrompt() string {
+	return retryPrompt
 }
 
 // emitRetry fires the hook before each follow-up Ask so logs see the
@@ -207,7 +202,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 
 		emitRetry(cfg.EventHandler, attempts, cfg.MaxToolErrorRetries, toolName, excerpt)
 
-		next, askErr := session.Ask(ctx, buildRetryPrompt(toolName, excerpt))
+		next, askErr := session.Ask(ctx, buildRetryPrompt())
 		if askErr != nil {
 			return nil, askErr
 		}
