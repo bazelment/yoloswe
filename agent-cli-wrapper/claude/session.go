@@ -383,11 +383,12 @@ func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, er
 			events = append(events, evt)
 			if tc, ok := evt.(TurnCompleteEvent); ok {
 				result := &TurnResult{
-					TurnNumber: tc.TurnNumber,
-					Success:    tc.Success,
-					DurationMs: tc.DurationMs,
-					Usage:      tc.Usage,
-					Error:      tc.Error,
+					TurnNumber:            tc.TurnNumber,
+					Success:               tc.Success,
+					DurationMs:            tc.DurationMs,
+					Usage:                 tc.Usage,
+					Error:                 tc.Error,
+					HasLiveBackgroundWork: tc.HasLiveBackgroundWork,
 				}
 				// Populate text/blocks from turn state
 				turn := s.turnManager.GetTurnByNumber(tc.TurnNumber)
@@ -1159,7 +1160,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		// arrive, so the session would otherwise stay stuck in StateProcessing.
 		// result.Error was already set above from msg.IsError; just fall through.
 		if msg.IsError {
-			// Fall through to the normal completion path below.
+			// Fall through to the normal completion path below. Mark the
+			// result as having live bg work so downstream retry loops do
+			// not interrupt the parked tasks — defer session.Stop() on a
+			// retry would orphan them.
+			result.HasLiveBackgroundWork = true
 		} else {
 			// Accumulate cost and token usage from this intermediate result so
 			// the final TurnResult reports the true total for the logical turn.
@@ -1190,6 +1195,10 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			// after receiving ErrBudgetExceeded if they want to halt fully.
 			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 				result.Error = ErrBudgetExceeded
+				// The background task is still running in the CLI process. Mark
+				// so retry loops do not interrupt it (same guard as the error
+				// and safety-timer paths).
+				result.HasLiveBackgroundWork = true
 				s.mu.Lock()
 				s.bgState.accumulatedUsage = TurnUsage{}
 				s.mu.Unlock()
@@ -1298,11 +1307,12 @@ func (s *Session) finalizeTurn(result TurnResult) {
 	}
 	_ = s.state.Transition(TransitionResultReceived)
 	s.emit(TurnCompleteEvent{
-		TurnNumber: result.TurnNumber,
-		Success:    result.Success,
-		DurationMs: result.DurationMs,
-		Usage:      result.Usage,
-		Error:      result.Error,
+		TurnNumber:            result.TurnNumber,
+		Success:               result.Success,
+		DurationMs:            result.DurationMs,
+		Usage:                 result.Usage,
+		Error:                 result.Error,
+		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
 	})
 	s.turnManager.CompleteTurn(result)
 }
@@ -1332,6 +1342,10 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
 	}
+	// The safety timer fired without any release signal. The bg work is
+	// still live from the session's perspective — mark so retry loops do
+	// not interrupt it.
+	result.HasLiveBackgroundWork = true
 
 	s.finalizeTurn(result)
 }

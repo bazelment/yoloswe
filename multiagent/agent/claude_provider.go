@@ -24,6 +24,11 @@ const (
 	RetryStopNoProgress     = "no_progress"
 	RetryStopBudgetExceeded = "budget_exceeded"
 	RetryStopCtxCancelled   = "ctx_cancelled"
+	// RetryStopBgWorkLive fires when the turn ended with uncancelled
+	// background work the agent deliberately parked on. Re-Asking the
+	// session would interrupt the park and, on ephemeral sessions, the
+	// defer Stop() would orphan the bg work. No retry is attempted.
+	RetryStopBgWorkLive = "bg_work_live"
 )
 
 // FormatUnresolvedToolErrorMarker returns the marker string used to surface
@@ -83,6 +88,13 @@ func emitRetryAbort(h EventHandler, reason, toolName, excerpt string) {
 	}
 }
 
+// retrySession is the minimal slice of *claude.Session that the retry
+// loop depends on. Exists so tests can drive runRetryLoop with a fake
+// that scripts a sequence of TurnResults without spawning a real CLI.
+type retrySession interface {
+	Ask(ctx context.Context, content string) (*claude.TurnResult, error)
+}
+
 // ClaudeProvider wraps the Claude SDK behind the Provider interface.
 type ClaudeProvider struct {
 	events      chan AgentEvent
@@ -99,6 +111,64 @@ func NewClaudeProvider(sessionOpts ...claude.SessionOption) *ClaudeProvider {
 }
 
 func (p *ClaudeProvider) Name() string { return "claude" }
+
+// runRetryLoop drives the provider-layer retry-on-tool-error loop. Takes
+// the result of the initial Ask and may issue follow-up Asks up to
+// cfg.MaxToolErrorRetries times. Exits early when the turn is parked on
+// bg work (G2), no tool_use_error is present (G1), the retry budget is
+// exhausted, or the ctx is cancelled. Returns the final TurnResult, the
+// number of retry Asks issued, and the stop reason recorded on the last
+// decision. The caller appends the unresolved marker and fires
+// OnRetryAbort on the returned stop reason when applicable.
+func runRetryLoop(ctx context.Context, session retrySession, initial *claude.TurnResult, cfg ExecuteConfig) (*claude.TurnResult, int, string, error) {
+	result := initial
+	start := time.Now()
+	budget := computeRetryTimeBudget(cfg)
+	stopReason := RetryStopExhausted
+	var (
+		prevExcerpt string
+		havePrev    bool
+		attempts    int
+	)
+	for attempts < cfg.MaxToolErrorRetries {
+		// G2: never retry when the turn ended with live background work.
+		// Re-Ask would interrupt the park and defer session.Stop() would
+		// orphan the bg tasks. Check before the content walk so the signal
+		// dominates even on turns that also carry a tool_use_error.
+		if result.HasLiveBackgroundWork {
+			stopReason = RetryStopBgWorkLive
+			break
+		}
+		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
+		if !ok {
+			break
+		}
+		if ctx.Err() != nil {
+			stopReason = RetryStopCtxCancelled
+			break
+		}
+		if time.Since(start) >= budget {
+			stopReason = RetryStopBudgetExceeded
+			break
+		}
+		if havePrev && excerpt == prevExcerpt {
+			stopReason = RetryStopNoProgress
+			break
+		}
+		prevExcerpt = excerpt
+		havePrev = true
+		attempts++
+
+		emitRetry(cfg.EventHandler, attempts, cfg.MaxToolErrorRetries, toolName, excerpt)
+
+		next, askErr := session.Ask(ctx, buildRetryPrompt())
+		if askErr != nil {
+			return nil, attempts, stopReason, askErr
+		}
+		result = next
+	}
+	return result, attempts, stopReason, nil
+}
 
 func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
@@ -165,55 +235,26 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		}
 	}()
 
-	start := time.Now()
-	budget := computeRetryTimeBudget(cfg)
-
 	result, err := session.Ask(ctx, fullPrompt)
 	if err != nil {
 		return nil, err
 	}
 
-	var (
-		prevExcerpt string
-		havePrev    bool
-		attempts    int
-		stopReason  = RetryStopExhausted
-	)
-	for attempts < cfg.MaxToolErrorRetries {
-		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
-		if !ok {
-			break
-		}
-		if ctx.Err() != nil {
-			stopReason = RetryStopCtxCancelled
-			break
-		}
-		if time.Since(start) >= budget {
-			stopReason = RetryStopBudgetExceeded
-			break
-		}
-		if havePrev && excerpt == prevExcerpt {
-			stopReason = RetryStopNoProgress
-			break
-		}
-		prevExcerpt = excerpt
-		havePrev = true
-		attempts++
-
-		emitRetry(cfg.EventHandler, attempts, cfg.MaxToolErrorRetries, toolName, excerpt)
-
-		next, askErr := session.Ask(ctx, buildRetryPrompt())
-		if askErr != nil {
-			return nil, askErr
-		}
-		result = next
+	result, attempts, stopReason, err := runRetryLoop(ctx, session, result, cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	agentResult := ClaudeResultToAgentResult(result)
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
 	}
-	if cfg.MaxToolErrorRetries > 0 {
+	// When bg work is live the retry loop deliberately skips retrying — the
+	// session parked normally and the bg tasks are still running. The result
+	// may still contain a tool_use_error block (e.g. a Skill error that
+	// triggered the park), but surfacing it as an unresolved-tool-error
+	// marker would be misleading: no retry was ever attempted or warranted.
+	if cfg.MaxToolErrorRetries > 0 && stopReason != RetryStopBgWorkLive {
 		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
 			unresolved := &UnresolvedToolError{
 				Tool:     toolName,
@@ -225,8 +266,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			agentResult.UnresolvedToolError = unresolved
 			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
 			// Fire the abort callback once per loop execution that stopped
-			// with a tool error still present. Unifies the four stop reasons
-			// (exhausted, no_progress, budget_exceeded, ctx_cancelled).
+			// with a tool error still present. Covers all four stop reasons:
+			// exhausted, no_progress, budget_exceeded, ctx_cancelled.
+			// bg_work_live is excluded above — no retry was attempted.
 			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 		}
 	}
@@ -267,6 +309,8 @@ func (p *ClaudeLongRunningProvider) Start(ctx context.Context) error {
 	return nil
 }
 
+// SendMessage issues one Ask on the persistent session. Unlike Execute, it
+// does not run the retry loop — tool-error retries are not applied here.
 func (p *ClaudeLongRunningProvider) SendMessage(ctx context.Context, message string) (*AgentResult, error) {
 	result, err := p.session.Ask(ctx, message)
 	if err != nil {

@@ -8,9 +8,12 @@ import (
 	"time"
 )
 
-// toolUseErrorMarker guards against upstream format drift where IsError
-// is unset but content still carries this sentinel (seen on parallel-
-// cancelled tool siblings).
+// toolUseErrorMarker is the sentinel the Claude CLI wraps around tool
+// invocations it refused, blocked, or cancelled (disable-model-invocation,
+// sleep block, parallel-cancelled siblings). It is NOT emitted for
+// nonzero-exit Bash the agent ran to inspect output — those carry a raw
+// "Exit code N\n<output>" string with is_error=true but no wrapper. The
+// retry detector requires both IsError and this marker.
 const toolUseErrorMarker = "<tool_use_error>"
 
 const toolErrorExcerptMaxRunes = 200
@@ -75,10 +78,16 @@ func excerptRunes(s string, max int) string {
 	return s
 }
 
-// FinalTurnToolError reports the first errored tool_result in blocks,
-// returning the failing tool's name and a bounded excerpt. On parallel
-// tool batches the first-in-order errored result wins — in the cancelled-
-// sibling case this surfaces the real cause, not the cancellation.
+// FinalTurnToolError reports the first CLI-reported tool_use_error in
+// blocks, returning the failing tool's name and a bounded excerpt. A
+// block qualifies iff IsError is set AND the content carries the
+// toolUseErrorMarker wrapper — the marker is the stable signal the CLI
+// uses for tool invocations it refused, blocked, or cancelled. Nonzero-
+// exit Bash (e.g. `gh pr checks` exit 8) sets IsError but lacks the
+// wrapper and must not trigger retry.
+//
+// On parallel batches, first qualifying block wins (first with both
+// IsError and the marker).
 func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
 	toolNames := make(map[string]string)
 	for _, block := range blocks {
@@ -87,11 +96,11 @@ func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok boo
 		}
 	}
 	for _, block := range blocks {
-		if block.Type != ContentBlockTypeToolResult {
+		if block.Type != ContentBlockTypeToolResult || !block.IsError {
 			continue
 		}
 		content := stringifyToolResult(block.ToolResult)
-		if !block.IsError && !strings.Contains(content, toolUseErrorMarker) {
+		if !strings.Contains(content, toolUseErrorMarker) {
 			continue
 		}
 		name := toolNames[block.ToolUseID]
@@ -130,6 +139,13 @@ type TurnResult struct {
 	TurnNumber    int
 	DurationMs    int64
 	Success       bool
+	// HasLiveBackgroundWork is a snapshot at finalize time: true when the
+	// turn ended with registered live Monitor tasks or uncancelled bg-Bash
+	// tools the agent parked on. Callers that would otherwise restart the
+	// session (e.g. the jiradozer retry-on-tool-error loop) must skip that
+	// action when this is true — re-Ask would interrupt the park and the
+	// ephemeral session's defer Stop() would orphan the bg work.
+	HasLiveBackgroundWork bool
 }
 
 // backgroundTools lists tools that the CLI treats as background work even

@@ -31,6 +31,7 @@ go_library(
 go_test(
     name = "agent_test",
     srcs = [
+        "claude_provider_retry_test.go",
         "codex_provider_test.go",
         "config_test.go",
         "cursor_provider_test.go",

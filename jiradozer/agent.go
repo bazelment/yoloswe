@@ -295,7 +295,13 @@ func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
 
 func (h *logEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 	h.flushText()
-	h.logger.Info("retry loop aborted",
+	msg := "retry loop aborted"
+	if reason == agent.RetryStopBgWorkLive {
+		// Expected-case gate: the turn ended with live bg work, so retry
+		// was intentionally skipped. Not a failure.
+		msg = "retry skipped: background work still live"
+	}
+	h.logger.Info(msg,
 		"step", h.step,
 		"reason", reason,
 		"tool", tool,
@@ -346,6 +352,10 @@ func (h *rendererEventHandler) OnRetry(attempt, max int, tool, _ string) {
 }
 
 func (h *rendererEventHandler) OnRetryAbort(reason, tool, _ string) {
+	if reason == agent.RetryStopBgWorkLive {
+		h.r.Status(fmt.Sprintf("Retry skipped: background work still live (tool %s)", tool))
+		return
+	}
 	h.r.Status(fmt.Sprintf("Retry loop aborted (%s) on tool %s", reason, tool))
 }
 

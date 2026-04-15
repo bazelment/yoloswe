@@ -25,7 +25,8 @@ type AgentResult struct {
 // AgentResult.Text, which may be replaced downstream (e.g. when a plan file
 // is read instead of the agent's text). Reason distinguishes why the loop
 // stopped — "exhausted" (count budget reached), "budget_exceeded",
-// "no_progress", or "ctx_cancelled".
+// "no_progress", "ctx_cancelled", or "bg_work_live" (live background work
+// present; retry was intentionally skipped to avoid orphaning bg tasks).
 type UnresolvedToolError struct {
 	Tool     string
 	Excerpt  string
@@ -105,10 +106,11 @@ func (e ToolCompleteAgentEvent) AgentEventType() AgentEventType { return AgentEv
 
 // TurnCompleteAgentEvent is emitted when a turn finishes.
 type TurnCompleteAgentEvent struct {
-	TurnNumber int
-	Success    bool
-	DurationMs int64
-	CostUSD    float64
+	DurationMs            int64
+	CostUSD               float64
+	TurnNumber            int
+	HasLiveBackgroundWork bool
+	Success               bool
 }
 
 func (e TurnCompleteAgentEvent) AgentEventType() AgentEventType { return AgentEventTurnComplete }
@@ -147,9 +149,11 @@ type RetryHandler interface {
 	// OnRetryAbort fires once per retry-loop execution when the loop
 	// stops while a tool error is still present. reason is one of
 	// "exhausted" (count budget reached), "no_progress",
-	// "budget_exceeded", or "ctx_cancelled". The same reason is
-	// carried on UnresolvedToolError.Reason and in the appended
-	// marker, so handlers can correlate logs with downstream output.
+	// "budget_exceeded", "ctx_cancelled", or "bg_work_live" (live
+	// background work present; retry intentionally skipped). The same
+	// reason is carried on UnresolvedToolError.Reason and in the
+	// appended marker, so handlers can correlate logs with downstream
+	// output.
 	OnRetryAbort(reason, tool, excerpt string)
 }
 
