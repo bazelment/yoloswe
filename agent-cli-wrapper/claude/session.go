@@ -1195,6 +1195,10 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			// after receiving ErrBudgetExceeded if they want to halt fully.
 			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 				result.Error = ErrBudgetExceeded
+				// The background task is still running in the CLI process. Mark
+				// so retry loops do not interrupt it (same guard as the error
+				// and safety-timer paths).
+				result.HasLiveBackgroundWork = true
 				s.mu.Lock()
 				s.bgState.accumulatedUsage = TurnUsage{}
 				s.mu.Unlock()

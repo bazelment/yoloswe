@@ -303,6 +303,8 @@ func (p *ClaudeLongRunningProvider) Start(ctx context.Context) error {
 	return nil
 }
 
+// SendMessage issues one Ask on the persistent session. Unlike Execute, it
+// does not run the retry loop — tool-error retries are not applied here.
 func (p *ClaudeLongRunningProvider) SendMessage(ctx context.Context, message string) (*AgentResult, error) {
 	result, err := p.session.Ask(ctx, message)
 	if err != nil {
