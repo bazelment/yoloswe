@@ -497,12 +497,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 
 	logHandler.flushText()
 	output := resolveOutput(result.Text, logHandler, logger)
-	// If the provider recorded an unresolved tool error, make sure the
-	// marker survives any plan-file substitution performed by resolveOutput.
-	// Match on the stable marker prefix rather than a loose substring so
-	// plan files that happen to mention "unresolved tool error" don't
-	// suppress re-append.
-	if e := result.UnresolvedToolError; e != nil && !strings.Contains(output, agent.UnresolvedToolErrorMarkerPrefix) {
+	// The provider already appended the marker to result.Text. If
+	// resolveOutput replaced it with plan-file content, the marker is
+	// gone — detect that by comparing pointers-of-content and re-append
+	// rather than keying off a fuzzy substring match.
+	if e := result.UnresolvedToolError; e != nil && output != result.Text {
 		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
 	}
 	return output, result.SessionID, nil

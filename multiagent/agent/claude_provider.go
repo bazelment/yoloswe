@@ -168,22 +168,28 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 
 	var (
 		prevExcerpt string
+		havePrev    bool
 		attempts    int
 	)
 	for attempts < cfg.MaxToolErrorRetries {
 		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
-		if !ok || ctx.Err() != nil {
+		if !ok {
+			break
+		}
+		if ctx.Err() != nil {
+			emitRetryAbort(cfg.EventHandler, "ctx_cancelled", toolName, excerpt)
 			break
 		}
 		if time.Since(start) >= budget {
 			emitRetryAbort(cfg.EventHandler, "budget_exceeded", toolName, excerpt)
 			break
 		}
-		if attempts > 0 && excerpt == prevExcerpt {
+		if havePrev && excerpt == prevExcerpt {
 			emitRetryAbort(cfg.EventHandler, "no_progress", toolName, excerpt)
 			break
 		}
 		prevExcerpt = excerpt
+		havePrev = true
 		attempts++
 
 		emitRetry(cfg.EventHandler, attempts, cfg.MaxToolErrorRetries, toolName, excerpt)
