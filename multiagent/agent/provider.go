@@ -124,6 +124,14 @@ type SessionInitHandler interface {
 	OnSessionInit(sessionID string)
 }
 
+// RetryHandler is an optional interface that EventHandler implementations can
+// implement to observe tool-error retries. Emitted by ClaudeProvider.Execute
+// before each follow-up turn when MaxToolErrorRetries > 0 and the previous
+// turn ended with an unresolved tool error.
+type RetryHandler interface {
+	OnRetry(attempt, max int, tool, excerpt string)
+}
+
 // Provider is the pluggable interface for agent backends.
 // Adding a new backend (Gemini, Codex, etc.) means implementing this interface.
 type Provider interface {
@@ -160,15 +168,16 @@ type ExecuteOption func(*ExecuteConfig)
 
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
-	EventHandler     EventHandler
-	Model            string
-	WorkDir          string
-	SystemPrompt     string
-	PermissionMode   string
-	ResumeSessionID  string
-	MaxTurns         int
-	MaxBudgetUSD     float64
-	KeepUserSettings bool
+	EventHandler        EventHandler
+	Model               string
+	WorkDir             string
+	SystemPrompt        string
+	PermissionMode      string
+	ResumeSessionID     string
+	MaxTurns            int
+	MaxToolErrorRetries int
+	MaxBudgetUSD        float64
+	KeepUserSettings    bool
 }
 
 // WithProviderModel sets the model for a provider execution.
@@ -216,6 +225,13 @@ func WithProviderKeepUserSettings() ExecuteOption {
 // WithProviderResumeSessionID sets a session ID to resume instead of starting fresh.
 func WithProviderResumeSessionID(id string) ExecuteOption {
 	return func(c *ExecuteConfig) { c.ResumeSessionID = id }
+}
+
+// WithProviderMaxToolErrorRetries sets the maximum number of auto-retries
+// performed when a turn ends with an unresolved tool error. Zero disables
+// the feature (the provider returns the errored result without retrying).
+func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
+	return func(c *ExecuteConfig) { c.MaxToolErrorRetries = n }
 }
 
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.

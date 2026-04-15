@@ -2,9 +2,124 @@ package claude
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
+
+// toolUseErrorMarker is the sentinel substring Claude emits inside a
+// tool_result.content when a parallel tool batch sibling errored and the
+// CLI cancelled this tool before it ran. Detected by FinalTurnToolError
+// even when IsError is not set, to protect against upstream format drift.
+const toolUseErrorMarker = "<tool_use_error>"
+
+// toolErrorExcerptMaxRunes caps the FinalTurnToolError excerpt so log lines
+// and retry prompts stay bounded regardless of the failing tool's output.
+const toolErrorExcerptMaxRunes = 200
+
+// stringifyToolResult renders a ContentBlock.ToolResult payload as a plain
+// string for substring matching and excerpt extraction. The underlying
+// protocol.ToolResultBlock.Content may arrive as a plain string (legacy
+// shape) or as a []interface{} of {type: "text", text: "..."} blocks (the
+// normal shape that handleUser stores into ContentBlock.ToolResult).
+// Unrecognised shapes fall through to fmt.Sprint so callers still get
+// *something* to match against.
+func stringifyToolResult(result interface{}) string {
+	if result == nil {
+		return ""
+	}
+	switch v := result.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var b strings.Builder
+		for _, entry := range v {
+			m, ok := entry.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text, ok := m["text"].(string); ok {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(text)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+		return fmt.Sprint(v)
+	case []map[string]interface{}:
+		var b strings.Builder
+		for _, m := range v {
+			if text, ok := m["text"].(string); ok {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(text)
+			}
+		}
+		if b.Len() > 0 {
+			return b.String()
+		}
+		return fmt.Sprint(v)
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// excerptRunes returns the first max runes of s, with no truncation marker.
+// Used to bound error excerpts in logs and retry prompts.
+func excerptRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
+}
+
+// FinalTurnToolError reports whether the given content blocks contain any
+// errored tool_result (IsError or a <tool_use_error> substring), and
+// returns the failing tool's name and a short excerpt from the first such
+// result. Callers use this to decide whether to auto-retry a turn that
+// ended with unresolved tool errors.
+//
+// When multiple tool_results are errored (parallel tool batches), the first
+// one encountered in block order wins; in the parallel-cancelled case this
+// is the real cause, not the cancelled sibling (Claude's dispatcher emits
+// the errored sibling first).
+//
+// The substring check on <tool_use_error> is belt-and-braces: today IsError
+// is always set when the marker is present, but the double check costs
+// nothing and guards against upstream format drift.
+func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
+	for i, block := range blocks {
+		if block.Type != ContentBlockTypeToolResult {
+			continue
+		}
+		content := stringifyToolResult(block.ToolResult)
+		isErr := block.IsError || strings.Contains(content, toolUseErrorMarker)
+		if !isErr {
+			continue
+		}
+		name := "unknown"
+		// Look backward for the matching tool_use block in the same turn.
+		for j := i - 1; j >= 0; j-- {
+			if blocks[j].Type == ContentBlockTypeToolUse && blocks[j].ToolUseID == block.ToolUseID {
+				if blocks[j].ToolName != "" {
+					name = blocks[j].ToolName
+				}
+				break
+			}
+		}
+		return name, excerptRunes(content, toolErrorExcerptMaxRunes), true
+	}
+	return "", "", false
+}
 
 // TurnUsage contains token usage for a turn.
 type TurnUsage struct {

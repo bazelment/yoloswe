@@ -62,26 +62,28 @@ func (s SourceConfig) HasSource() bool {
 
 // StepConfig configures a single workflow step (plan or build).
 type StepConfig struct {
-	Prompt         string        `yaml:"prompt"`          // Go text/template; empty = built-in default
-	SystemPrompt   string        `yaml:"system_prompt"`   // optional system prompt passed to the agent
-	Model          string        `yaml:"model"`           // override agent.model; empty = inherit
-	PermissionMode string        `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
-	Rounds         []RoundConfig `yaml:"rounds"`          // multi-round execution; mutually exclusive with Prompt
-	MaxBudgetUSD   float64       `yaml:"max_budget_usd"`  // override top-level; 0 = inherit
-	MaxTurns       int           `yaml:"max_turns"`
-	AutoApprove    bool          `yaml:"auto_approve"` // skip human review after this step
+	Prompt              string        `yaml:"prompt"`          // Go text/template; empty = built-in default
+	SystemPrompt        string        `yaml:"system_prompt"`   // optional system prompt passed to the agent
+	Model               string        `yaml:"model"`           // override agent.model; empty = inherit
+	PermissionMode      string        `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
+	Rounds              []RoundConfig `yaml:"rounds"`          // multi-round execution; mutually exclusive with Prompt
+	MaxBudgetUSD        float64       `yaml:"max_budget_usd"`  // override top-level; 0 = inherit
+	MaxTurns            int           `yaml:"max_turns"`
+	MaxToolErrorRetries int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
+	AutoApprove         bool          `yaml:"auto_approve"`           // skip human review after this step
 }
 
 // RoundConfig configures a single round within a multi-round step.
 // Zero-value fields inherit from the parent StepConfig.
 // Exactly one of Prompt or Command must be set.
 type RoundConfig struct {
-	Prompt       string  `yaml:"prompt"`         // Go text/template; mutually exclusive with Command
-	Command      string  `yaml:"command"`        // Shell command template (sh -c); mutually exclusive with Prompt. WARNING: tracker fields like Title/Description are user-controlled — only interpolate them when the issue source is fully trusted.
-	SystemPrompt string  `yaml:"system_prompt"`  // optional system prompt (agent rounds only)
-	Model        string  `yaml:"model"`          // override; empty = inherit from step (agent rounds only)
-	MaxTurns     int     `yaml:"max_turns"`      // override; 0 = inherit from step (agent rounds only)
-	MaxBudgetUSD float64 `yaml:"max_budget_usd"` // override; 0 = inherit from step (agent rounds only)
+	Prompt              string  `yaml:"prompt"`                 // Go text/template; mutually exclusive with Command
+	Command             string  `yaml:"command"`                // Shell command template (sh -c); mutually exclusive with Prompt. WARNING: tracker fields like Title/Description are user-controlled — only interpolate them when the issue source is fully trusted.
+	SystemPrompt        string  `yaml:"system_prompt"`          // optional system prompt (agent rounds only)
+	Model               string  `yaml:"model"`                  // override; empty = inherit from step (agent rounds only)
+	MaxTurns            int     `yaml:"max_turns"`              // override; 0 = inherit from step (agent rounds only)
+	MaxToolErrorRetries int     `yaml:"max_tool_error_retries"` // override; 0 = inherit from step (agent rounds only)
+	MaxBudgetUSD        float64 `yaml:"max_budget_usd"`         // override; 0 = inherit from step (agent rounds only)
 }
 
 // IsCommand reports whether this round runs a shell command instead of an agent session.
@@ -265,6 +267,11 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		resolved.MaxBudgetUSD = round.MaxBudgetUSD
 	} else {
 		resolved.MaxBudgetUSD = parent.MaxBudgetUSD
+	}
+	if round.MaxToolErrorRetries > 0 {
+		resolved.MaxToolErrorRetries = round.MaxToolErrorRetries
+	} else {
+		resolved.MaxToolErrorRetries = parent.MaxToolErrorRetries
 	}
 	return resolved
 }

@@ -275,6 +275,19 @@ func (h *logEventHandler) OnError(err error, context string) {
 	h.logger.Debug("agent error", "step", h.step, "error", err, "context", context)
 }
 
+// OnRetry implements agent.RetryHandler: surfaces tool-error retries at INFO
+// so they're visible in jiradozer logs without enabling DEBUG.
+func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
+	h.flushText()
+	h.logger.Info("retry on tool error",
+		"step", h.step,
+		"attempt", attempt,
+		"max", max,
+		"tool", tool,
+		"excerpt", truncate(excerpt, 200),
+	)
+}
+
 // rendererEventHandler adapts agent.EventHandler to a render.Renderer for
 // terminal display.
 type rendererEventHandler struct {
@@ -306,6 +319,12 @@ func (h *rendererEventHandler) OnTurnComplete(turnNumber int, success bool, dura
 
 func (h *rendererEventHandler) OnError(err error, ctx string) {
 	h.r.Error(err, ctx)
+}
+
+// OnRetry implements agent.RetryHandler: shows a status line above the
+// streaming output so the terminal user sees the retry decision.
+func (h *rendererEventHandler) OnRetry(attempt, max int, tool, _ string) {
+	h.r.Status(fmt.Sprintf("Retry %d/%d: tool error in %s", attempt, max, tool))
 }
 
 // compositeEventHandler fans out events to multiple handlers.
@@ -357,6 +376,15 @@ func (c *compositeEventHandler) OnSessionInit(sessionID string) {
 	}
 }
 
+// OnRetry fans RetryHandler events out to any handler that implements it.
+func (c *compositeEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
+	for _, h := range c.handlers {
+		if rh, ok := h.(agent.RetryHandler); ok {
+			rh.OnRetry(attempt, max, tool, excerpt)
+		}
+	}
+}
+
 // runAgent runs an agent with the given prompt and step configuration.
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
@@ -402,6 +430,9 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	}
 	if cfg.MaxTurns > 0 {
 		opts = append(opts, agent.WithProviderMaxTurns(cfg.MaxTurns))
+	}
+	if cfg.MaxToolErrorRetries > 0 {
+		opts = append(opts, agent.WithProviderMaxToolErrorRetries(cfg.MaxToolErrorRetries))
 	}
 	if cfg.MaxBudgetUSD > 0 {
 		opts = append(opts, agent.WithProviderMaxBudgetUSD(cfg.MaxBudgetUSD))
