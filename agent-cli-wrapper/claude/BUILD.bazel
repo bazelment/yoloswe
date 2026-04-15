@@ -50,6 +50,7 @@ go_test(
         "turn_retry_test.go",
         "turn_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":claude"],
     deps = [
         "//agent-cli-wrapper/internal/ndjson",

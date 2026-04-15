@@ -1,0 +1,46 @@
+[
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_bash_bg_1",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sleep 120",
+      "run_in_background": true
+    }
+  },
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_bash_bg_2",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "until gh api repos/sycamore-labs/kernel/pulls/2285/reviews | jq -e '.[0]'; do sleep 10; done",
+      "run_in_background": true
+    }
+  },
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_skill_1",
+    "tool_name": "Skill",
+    "tool_input": {
+      "skill": "sy:pr-polish"
+    }
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_bash_bg_1",
+    "tool_result": "command started in background",
+    "is_error": false
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_bash_bg_2",
+    "tool_result": "command started in background",
+    "is_error": false
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_skill_1",
+    "tool_result": "<tool_use_error>Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation</tool_use_error>",
+    "is_error": true
+  }
+]

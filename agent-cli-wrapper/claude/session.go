@@ -1159,7 +1159,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		// arrive, so the session would otherwise stay stuck in StateProcessing.
 		// result.Error was already set above from msg.IsError; just fall through.
 		if msg.IsError {
-			// Fall through to the normal completion path below.
+			// Fall through to the normal completion path below. Mark the
+			// result as having live bg work so downstream retry loops do
+			// not interrupt the parked tasks — defer session.Stop() on a
+			// retry would orphan them.
+			result.HasLiveBackgroundWork = true
 		} else {
 			// Accumulate cost and token usage from this intermediate result so
 			// the final TurnResult reports the true total for the logical turn.
@@ -1332,6 +1336,10 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
 	}
+	// The safety timer fired without any release signal. The bg work is
+	// still live from the session's perspective — mark so retry loops do
+	// not interrupt it.
+	result.HasLiveBackgroundWork = true
 
 	s.finalizeTurn(result)
 }

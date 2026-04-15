@@ -1,0 +1,16 @@
+[
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_017E3NKRaj3dZEWn8jStZhjR",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "gh pr checks 2286"
+    }
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_017E3NKRaj3dZEWn8jStZhjR",
+    "tool_result": "Exit code 8\nForge Visual Tests\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532667425\t\nPython Tests\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532667428\t\nSecurity Scan\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532667430\t\nDocker Compose Smoke\tskipping\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532668275\t\nDetect Changes\tpass\t6s\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532641962\t\nLint & Type Check\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532642026\t",
+    "is_error": true
+  }
+]
