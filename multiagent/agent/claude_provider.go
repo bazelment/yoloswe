@@ -16,7 +16,15 @@ const retryPromptTemplate = `Your previous turn ended with a tool error that was
 
 This is the source of the failure — if a sibling tool in a parallel batch was cancelled, the real error is in the *other* sibling. Fix the underlying problem and continue the task. Do not stop until the task is complete or you have a concrete blocker to report.`
 
-const unresolvedToolErrorMarkerTemplate = "\n\n[unresolved tool error after %d/%d retries — tool: %s\n excerpt: %s]"
+const unresolvedToolErrorMarkerTemplate = "[unresolved tool error after %d/%d retries — tool: %s\n excerpt: %s]"
+
+// FormatUnresolvedToolErrorMarker returns the marker string used to surface
+// an unresolved tool error in agent text output. Callers that replace
+// AgentResult.Text downstream (e.g. plan-file readers) should re-append this
+// marker so the failure is not silently dropped.
+func FormatUnresolvedToolErrorMarker(e UnresolvedToolError) string {
+	return fmt.Sprintf(unresolvedToolErrorMarkerTemplate, e.Attempts, e.Max, e.Tool, e.Excerpt)
+}
 
 const minRetryWallClockBudget = 10 * time.Minute
 
@@ -32,8 +40,12 @@ func buildRetryPrompt(toolName, excerpt string) string {
 	return fmt.Sprintf(retryPromptTemplate, toolName, excerpt)
 }
 
-func appendUnresolvedToolErrorMarker(text string, attempts, max int, toolName, excerpt string) string {
-	return text + fmt.Sprintf(unresolvedToolErrorMarkerTemplate, attempts, max, toolName, excerpt)
+func appendUnresolvedToolErrorMarker(text string, e UnresolvedToolError) string {
+	marker := FormatUnresolvedToolErrorMarker(e)
+	if text == "" {
+		return marker
+	}
+	return text + "\n\n" + marker
 }
 
 // emitRetry fires the hook before each follow-up Ask so logs see the
@@ -167,8 +179,14 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	}
 	if cfg.MaxToolErrorRetries > 0 {
 		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
-			agentResult.Text = appendUnresolvedToolErrorMarker(
-				agentResult.Text, attempts, cfg.MaxToolErrorRetries, toolName, excerpt)
+			unresolved := &UnresolvedToolError{
+				Tool:     toolName,
+				Excerpt:  excerpt,
+				Attempts: attempts,
+				Max:      cfg.MaxToolErrorRetries,
+			}
+			agentResult.UnresolvedToolError = unresolved
+			agentResult.Text = appendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
 		}
 	}
 	return agentResult, nil

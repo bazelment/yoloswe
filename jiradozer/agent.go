@@ -462,7 +462,18 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	}
 
 	logHandler.flushText()
-	return resolveOutput(result.Text, logHandler, logger), result.SessionID, nil
+	output := resolveOutput(result.Text, logHandler, logger)
+	// If the provider recorded an unresolved tool error, make sure the
+	// marker survives any plan-file substitution performed by resolveOutput.
+	if e := result.UnresolvedToolError; e != nil && !strings.Contains(output, "unresolved tool error") {
+		marker := agent.FormatUnresolvedToolErrorMarker(*e)
+		if output == "" {
+			output = marker
+		} else {
+			output = output + "\n\n" + marker
+		}
+	}
+	return output, result.SessionID, nil
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.

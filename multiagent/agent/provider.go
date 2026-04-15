@@ -9,14 +9,26 @@ import (
 // AgentResult is the provider-agnostic result of an agent execution.
 // It replaces direct dependency on claude.TurnResult in the agent interfaces.
 type AgentResult struct {
-	Error         error
-	Text          string
-	Thinking      string
-	SessionID     string
-	ContentBlocks []AgentContentBlock
-	Usage         AgentUsage
-	DurationMs    int64
-	Success       bool
+	Error               error
+	UnresolvedToolError *UnresolvedToolError
+	Text                string
+	Thinking            string
+	SessionID           string
+	ContentBlocks       []AgentContentBlock
+	Usage               AgentUsage
+	DurationMs          int64
+	Success             bool
+}
+
+// UnresolvedToolError records an unresolved tool error that persisted after
+// the retry budget was exhausted. Consumers can surface it independently of
+// AgentResult.Text, which may be replaced downstream (e.g. when a plan file
+// is read instead of the agent's text).
+type UnresolvedToolError struct {
+	Tool     string
+	Excerpt  string
+	Attempts int
+	Max      int
 }
 
 // AgentContentBlock is a provider-agnostic content block.
