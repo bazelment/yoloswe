@@ -261,8 +261,8 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			agentResult.UnresolvedToolError = unresolved
 			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
 			// Fire the abort callback once per loop execution that stopped
-			// with a tool error still present. Unifies the four stop reasons
-			// (exhausted, no_progress, budget_exceeded, ctx_cancelled).
+			// with a tool error still present. Covers all five stop reasons:
+			// exhausted, no_progress, budget_exceeded, ctx_cancelled, bg_work_live.
 			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 		}
 	}
