@@ -140,12 +140,16 @@ type SessionInitHandler interface {
 }
 
 // RetryHandler is an optional EventHandler extension fired before each
-// tool-error retry turn and when the retry loop aborts early.
+// tool-error retry turn and when the retry loop stops with an
+// unresolved tool error still present.
 type RetryHandler interface {
 	OnRetry(attempt, max int, tool, excerpt string)
-	// OnRetryAbort fires when the retry loop exits before reaching the
-	// count budget. reason is one of "no_progress", "budget_exceeded",
-	// or "ctx_cancelled".
+	// OnRetryAbort fires once per retry-loop execution when the loop
+	// stops while a tool error is still present. reason is one of
+	// "exhausted" (count budget reached), "no_progress",
+	// "budget_exceeded", or "ctx_cancelled". The same reason is
+	// carried on UnresolvedToolError.Reason and in the appended
+	// marker, so handlers can correlate logs with downstream output.
 	OnRetryAbort(reason, tool, excerpt string)
 }
 

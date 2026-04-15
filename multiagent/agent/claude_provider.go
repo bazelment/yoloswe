@@ -191,17 +191,14 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		}
 		if ctx.Err() != nil {
 			stopReason = RetryStopCtxCancelled
-			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 			break
 		}
 		if time.Since(start) >= budget {
 			stopReason = RetryStopBudgetExceeded
-			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 			break
 		}
 		if havePrev && excerpt == prevExcerpt {
 			stopReason = RetryStopNoProgress
-			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 			break
 		}
 		prevExcerpt = excerpt
@@ -232,6 +229,10 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			}
 			agentResult.UnresolvedToolError = unresolved
 			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
+			// Fire the abort callback once per loop execution that stopped
+			// with a tool error still present. Unifies the four stop reasons
+			// (exhausted, no_progress, budget_exceeded, ctx_cancelled).
+			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 		}
 	}
 	return agentResult, nil
