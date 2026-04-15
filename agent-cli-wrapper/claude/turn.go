@@ -8,23 +8,13 @@ import (
 	"time"
 )
 
-// toolUseErrorMarker is the sentinel substring Claude emits inside a
-// tool_result.content when a parallel tool batch sibling errored and the
-// CLI cancelled this tool before it ran. Detected by FinalTurnToolError
-// even when IsError is not set, to protect against upstream format drift.
+// toolUseErrorMarker guards against upstream format drift where IsError
+// is unset but content still carries this sentinel (seen on parallel-
+// cancelled tool siblings).
 const toolUseErrorMarker = "<tool_use_error>"
 
-// toolErrorExcerptMaxRunes caps the FinalTurnToolError excerpt so log lines
-// and retry prompts stay bounded regardless of the failing tool's output.
 const toolErrorExcerptMaxRunes = 200
 
-// stringifyToolResult renders a ContentBlock.ToolResult payload as a plain
-// string for substring matching and excerpt extraction. The underlying
-// protocol.ToolResultBlock.Content may arrive as a plain string (legacy
-// shape) or as a []interface{} of {type: "text", text: "..."} blocks (the
-// normal shape that handleUser stores into ContentBlock.ToolResult).
-// Unrecognised shapes fall through to fmt.Sprint so callers still get
-// *something* to match against.
 func stringifyToolResult(result interface{}) string {
 	if result == nil {
 		return ""
@@ -69,52 +59,44 @@ func stringifyToolResult(result interface{}) string {
 	}
 }
 
-// excerptRunes returns the first max runes of s, with no truncation marker.
-// Used to bound error excerpts in logs and retry prompts.
+// excerptRunes returns the first max runes of s. Iterates by rune via
+// `range string` to avoid allocating a full []rune for large tool outputs.
 func excerptRunes(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
+	count := 0
+	for i := range s {
+		if count == max {
+			return s[:i]
+		}
+		count++
 	}
-	return string(runes[:max])
+	return s
 }
 
-// FinalTurnToolError reports whether the given content blocks contain any
-// errored tool_result (IsError or a <tool_use_error> substring), and
-// returns the failing tool's name and a short excerpt from the first such
-// result. Callers use this to decide whether to auto-retry a turn that
-// ended with unresolved tool errors.
-//
-// When multiple tool_results are errored (parallel tool batches), the first
-// one encountered in block order wins; in the parallel-cancelled case this
-// is the real cause, not the cancelled sibling (Claude's dispatcher emits
-// the errored sibling first).
-//
-// The substring check on <tool_use_error> is belt-and-braces: today IsError
-// is always set when the marker is present, but the double check costs
-// nothing and guards against upstream format drift.
+// FinalTurnToolError reports the first errored tool_result in blocks,
+// returning the failing tool's name and a bounded excerpt. On parallel
+// tool batches the first-in-order errored result wins — in the cancelled-
+// sibling case this surfaces the real cause, not the cancellation.
 func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
-	for i, block := range blocks {
+	toolNames := make(map[string]string)
+	for _, block := range blocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolUseID != "" {
+			toolNames[block.ToolUseID] = block.ToolName
+		}
+	}
+	for _, block := range blocks {
 		if block.Type != ContentBlockTypeToolResult {
 			continue
 		}
 		content := stringifyToolResult(block.ToolResult)
-		isErr := block.IsError || strings.Contains(content, toolUseErrorMarker)
-		if !isErr {
+		if !block.IsError && !strings.Contains(content, toolUseErrorMarker) {
 			continue
 		}
-		name := "unknown"
-		// Look backward for the matching tool_use block in the same turn.
-		for j := i - 1; j >= 0; j-- {
-			if blocks[j].Type == ContentBlockTypeToolUse && blocks[j].ToolUseID == block.ToolUseID {
-				if blocks[j].ToolName != "" {
-					name = blocks[j].ToolName
-				}
-				break
-			}
+		name := toolNames[block.ToolUseID]
+		if name == "" {
+			name = "unknown"
 		}
 		return name, excerptRunes(content, toolErrorExcerptMaxRunes), true
 	}

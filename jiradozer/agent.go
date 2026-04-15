@@ -275,8 +275,6 @@ func (h *logEventHandler) OnError(err error, context string) {
 	h.logger.Debug("agent error", "step", h.step, "error", err, "context", context)
 }
 
-// OnRetry implements agent.RetryHandler: surfaces tool-error retries at INFO
-// so they're visible in jiradozer logs without enabling DEBUG.
 func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
 	h.flushText()
 	h.logger.Info("retry on tool error",
@@ -284,7 +282,7 @@ func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
 		"attempt", attempt,
 		"max", max,
 		"tool", tool,
-		"excerpt", truncate(excerpt, 200),
+		"excerpt", excerpt,
 	)
 }
 
@@ -321,8 +319,6 @@ func (h *rendererEventHandler) OnError(err error, ctx string) {
 	h.r.Error(err, ctx)
 }
 
-// OnRetry implements agent.RetryHandler: shows a status line above the
-// streaming output so the terminal user sees the retry decision.
 func (h *rendererEventHandler) OnRetry(attempt, max int, tool, _ string) {
 	h.r.Status(fmt.Sprintf("Retry %d/%d: tool error in %s", attempt, max, tool))
 }
@@ -376,7 +372,6 @@ func (c *compositeEventHandler) OnSessionInit(sessionID string) {
 	}
 }
 
-// OnRetry fans RetryHandler events out to any handler that implements it.
 func (c *compositeEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
 	for _, h := range c.handlers {
 		if rh, ok := h.(agent.RetryHandler); ok {

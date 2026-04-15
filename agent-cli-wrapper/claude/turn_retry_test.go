@@ -6,6 +6,7 @@ import (
 )
 
 func TestFinalTurnToolError_IsError(t *testing.T) {
+	t.Parallel()
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
 		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: "failed", IsError: true},
@@ -23,7 +24,7 @@ func TestFinalTurnToolError_IsError(t *testing.T) {
 }
 
 func TestFinalTurnToolError_SubstringOnly(t *testing.T) {
-	// IsError is false but content carries the marker — format-drift guard.
+	t.Parallel()
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
 		{
@@ -46,9 +47,7 @@ func TestFinalTurnToolError_SubstringOnly(t *testing.T) {
 }
 
 func TestFinalTurnToolError_ParallelCancelled(t *testing.T) {
-	// Exact PLA-212 shape: two parallel Bash tool_uses; the errored sibling
-	// comes first, the cancelled sibling second. Detector returns the first
-	// errored result — the real cause, not the cancelled one.
+	t.Parallel()
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeToolUse, ToolUseID: "ruff", ToolName: "Bash", ToolInput: map[string]interface{}{"command": "ruff check"}},
 		{Type: ContentBlockTypeToolUse, ToolUseID: "pytest", ToolName: "Bash", ToolInput: map[string]interface{}{"command": "pytest"}},
@@ -81,6 +80,7 @@ func TestFinalTurnToolError_ParallelCancelled(t *testing.T) {
 }
 
 func TestFinalTurnToolError_Clean(t *testing.T) {
+	t.Parallel()
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Read"},
 		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: "file contents", IsError: false},
@@ -91,6 +91,7 @@ func TestFinalTurnToolError_Clean(t *testing.T) {
 }
 
 func TestFinalTurnToolError_NoToolUse(t *testing.T) {
+	t.Parallel()
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeText, Text: "hello"},
 	}
@@ -103,8 +104,7 @@ func TestFinalTurnToolError_NoToolUse(t *testing.T) {
 }
 
 func TestFinalTurnToolError_BlockShape(t *testing.T) {
-	// Wire shape from handleUser at session.go:1045 — Content is often a
-	// []interface{} of {type: "text", text: "..."} maps rather than a plain string.
+	t.Parallel()
 	wireShape := []interface{}{
 		map[string]interface{}{
 			"type": "text",
@@ -125,6 +125,7 @@ func TestFinalTurnToolError_BlockShape(t *testing.T) {
 }
 
 func TestFinalTurnToolError_ExcerptLength(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("x", 500)
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
@@ -140,9 +141,7 @@ func TestFinalTurnToolError_ExcerptLength(t *testing.T) {
 }
 
 func TestFinalTurnToolError_UnknownTool(t *testing.T) {
-	// Tool_result with no matching tool_use in the same block slice — name
-	// falls back to "unknown". Shouldn't happen in practice but the detector
-	// must not panic.
+	t.Parallel()
 	blocks := []ContentBlock{
 		{Type: ContentBlockTypeToolResult, ToolUseID: "orphan", ToolResult: "err", IsError: true},
 	}

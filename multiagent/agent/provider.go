@@ -124,10 +124,8 @@ type SessionInitHandler interface {
 	OnSessionInit(sessionID string)
 }
 
-// RetryHandler is an optional interface that EventHandler implementations can
-// implement to observe tool-error retries. Emitted by ClaudeProvider.Execute
-// before each follow-up turn when MaxToolErrorRetries > 0 and the previous
-// turn ended with an unresolved tool error.
+// RetryHandler is an optional EventHandler extension fired before each
+// tool-error retry turn.
 type RetryHandler interface {
 	OnRetry(attempt, max int, tool, excerpt string)
 }
