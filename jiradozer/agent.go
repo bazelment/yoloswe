@@ -498,9 +498,9 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	logHandler.flushText()
 	output := resolveOutput(result.Text, logHandler, logger)
 	// The provider already appended the marker to result.Text. If
-	// resolveOutput replaced it with plan-file content, the marker is
-	// gone — detect that by comparing pointers-of-content and re-append
-	// rather than keying off a fuzzy substring match.
+	// resolveOutput returned the same string, the marker is still
+	// present; otherwise plan-file substitution replaced it and we
+	// need to re-append so the unresolved-error signal is not lost.
 	if e := result.UnresolvedToolError; e != nil && output != result.Text {
 		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
 	}

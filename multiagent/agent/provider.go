@@ -21,12 +21,15 @@ type AgentResult struct {
 }
 
 // UnresolvedToolError records an unresolved tool error that persisted after
-// the retry budget was exhausted. Consumers can surface it independently of
+// the retry loop stopped. Consumers can surface it independently of
 // AgentResult.Text, which may be replaced downstream (e.g. when a plan file
-// is read instead of the agent's text).
+// is read instead of the agent's text). Reason distinguishes why the loop
+// stopped — "exhausted" (count budget reached), "budget_exceeded",
+// "no_progress", or "ctx_cancelled".
 type UnresolvedToolError struct {
 	Tool     string
 	Excerpt  string
+	Reason   string
 	Attempts int
 	Max      int
 }
@@ -141,9 +144,8 @@ type SessionInitHandler interface {
 type RetryHandler interface {
 	OnRetry(attempt, max int, tool, excerpt string)
 	// OnRetryAbort fires when the retry loop exits before reaching the
-	// count budget — e.g. because the no-progress guard tripped or the
-	// wall-clock budget elapsed. reason is a short, log-safe token
-	// ("no_progress", "budget_exceeded").
+	// count budget. reason is one of "no_progress", "budget_exceeded",
+	// or "ctx_cancelled".
 	OnRetryAbort(reason, tool, excerpt string)
 }
 

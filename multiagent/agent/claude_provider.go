@@ -19,16 +19,28 @@ This is the source of the failure — if a sibling tool in a parallel batch was 
 // UnresolvedToolErrorMarkerPrefix is a stable prefix that identifies the
 // unresolved-tool-error marker in agent text output. Callers can use it to
 // detect whether the marker is already present before re-appending.
-const UnresolvedToolErrorMarkerPrefix = "[unresolved tool error after "
+const UnresolvedToolErrorMarkerPrefix = "[unresolved tool error ("
 
-const unresolvedToolErrorMarkerTemplate = UnresolvedToolErrorMarkerPrefix + "%d/%d retries — tool: %s\n excerpt: %s]"
+const unresolvedToolErrorMarkerTemplate = UnresolvedToolErrorMarkerPrefix + "%s) after %d/%d retries — tool: %s\n excerpt: %s]"
+
+// Abort-reason constants for UnresolvedToolError.Reason.
+const (
+	RetryStopExhausted      = "exhausted"
+	RetryStopNoProgress     = "no_progress"
+	RetryStopBudgetExceeded = "budget_exceeded"
+	RetryStopCtxCancelled   = "ctx_cancelled"
+)
 
 // FormatUnresolvedToolErrorMarker returns the marker string used to surface
 // an unresolved tool error in agent text output. Callers that replace
 // AgentResult.Text downstream (e.g. plan-file readers) should re-append this
 // marker so the failure is not silently dropped.
 func FormatUnresolvedToolErrorMarker(e UnresolvedToolError) string {
-	return fmt.Sprintf(unresolvedToolErrorMarkerTemplate, e.Attempts, e.Max, e.Tool, e.Excerpt)
+	reason := e.Reason
+	if reason == "" {
+		reason = RetryStopExhausted
+	}
+	return fmt.Sprintf(unresolvedToolErrorMarkerTemplate, reason, e.Attempts, e.Max, e.Tool, e.Excerpt)
 }
 
 // AppendUnresolvedToolErrorMarker appends the marker to text, using a blank
@@ -170,6 +182,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		prevExcerpt string
 		havePrev    bool
 		attempts    int
+		stopReason  = RetryStopExhausted
 	)
 	for attempts < cfg.MaxToolErrorRetries {
 		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
@@ -177,15 +190,18 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			break
 		}
 		if ctx.Err() != nil {
-			emitRetryAbort(cfg.EventHandler, "ctx_cancelled", toolName, excerpt)
+			stopReason = RetryStopCtxCancelled
+			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 			break
 		}
 		if time.Since(start) >= budget {
-			emitRetryAbort(cfg.EventHandler, "budget_exceeded", toolName, excerpt)
+			stopReason = RetryStopBudgetExceeded
+			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 			break
 		}
 		if havePrev && excerpt == prevExcerpt {
-			emitRetryAbort(cfg.EventHandler, "no_progress", toolName, excerpt)
+			stopReason = RetryStopNoProgress
+			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 			break
 		}
 		prevExcerpt = excerpt
@@ -210,6 +226,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			unresolved := &UnresolvedToolError{
 				Tool:     toolName,
 				Excerpt:  excerpt,
+				Reason:   stopReason,
 				Attempts: attempts,
 				Max:      cfg.MaxToolErrorRetries,
 			}
