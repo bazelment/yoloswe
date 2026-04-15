@@ -190,10 +190,11 @@ func (e TurnCompleteEvent) Type() EventType { return EventTypeTurnComplete }
 func (e TurnCompleteEvent) StreamEventKind() agentstream.EventKind {
 	return agentstream.KindTurnComplete
 }
-func (e TurnCompleteEvent) StreamTurnNum() int    { return e.TurnNumber }
-func (e TurnCompleteEvent) StreamIsSuccess() bool { return e.Success }
-func (e TurnCompleteEvent) StreamDuration() int64 { return e.DurationMs }
-func (e TurnCompleteEvent) StreamCost() float64   { return e.Usage.CostUSD }
+func (e TurnCompleteEvent) StreamTurnNum() int                { return e.TurnNumber }
+func (e TurnCompleteEvent) StreamIsSuccess() bool             { return e.Success }
+func (e TurnCompleteEvent) StreamDuration() int64             { return e.DurationMs }
+func (e TurnCompleteEvent) StreamCost() float64               { return e.Usage.CostUSD }
+func (e TurnCompleteEvent) StreamHasLiveBackgroundWork() bool { return e.HasLiveBackgroundWork }
 
 // ErrorEvent contains session errors.
 type ErrorEvent struct {

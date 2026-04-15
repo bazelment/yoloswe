@@ -106,10 +106,11 @@ func (e ToolCompleteAgentEvent) AgentEventType() AgentEventType { return AgentEv
 
 // TurnCompleteAgentEvent is emitted when a turn finishes.
 type TurnCompleteAgentEvent struct {
-	TurnNumber int
-	Success    bool
-	DurationMs int64
-	CostUSD    float64
+	DurationMs            int64
+	CostUSD               float64
+	TurnNumber            int
+	HasLiveBackgroundWork bool
+	Success               bool
 }
 
 func (e TurnCompleteAgentEvent) AgentEventType() AgentEventType { return AgentEventTurnComplete }

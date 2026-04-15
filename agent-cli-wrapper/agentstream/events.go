@@ -63,6 +63,12 @@ type TurnComplete interface {
 	StreamIsSuccess() bool
 	StreamDuration() int64
 	StreamCost() float64
+	// StreamHasLiveBackgroundWork returns true when the turn ended with live
+	// background tasks still registered (parked session, safety-timer expiry,
+	// or budget-exceeded mid-bg-turn). Callers that would otherwise restart or
+	// retry the session should skip that action when this returns true.
+	// Returns false for providers that do not support background tasks.
+	StreamHasLiveBackgroundWork() bool
 }
 
 // Error provides error information.
