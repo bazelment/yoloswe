@@ -17,7 +17,7 @@ func TestFinalTurnToolError_IsErrorPlusMarker(t *testing.T) {
 		{
 			Type:       ContentBlockTypeToolResult,
 			ToolUseID:  "t1",
-			ToolResult: "<tool_use_error>Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation</tool_use_error>",
+			ToolResult: "<tool_use_error>Skill example:pr-polish cannot be used with Skill tool due to disable-model-invocation</tool_use_error>",
 			IsError:    true,
 		},
 	}
@@ -248,7 +248,7 @@ func TestFinalTurnToolError_Fixture_RealToolUseError(t *testing.T) {
 	if !ok {
 		t.Fatal("parallel-cancelled fixture must be detected")
 	}
-	if !strings.Contains(excerpt, "Cancelled") && !strings.Contains(excerpt, "tool_use_error") {
+	if !strings.Contains(excerpt, "Cancelled") {
 		t.Errorf("expected the wrapped sibling to be surfaced, got %q", excerpt)
 	}
 }

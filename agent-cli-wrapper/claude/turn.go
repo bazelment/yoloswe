@@ -86,8 +86,8 @@ func excerptRunes(s string, max int) string {
 // exit Bash (e.g. `gh pr checks` exit 8) sets IsError but lacks the
 // wrapper and must not trigger retry.
 //
-// On parallel batches, first-in-order wins, so a real error listed
-// before a parallel-cancelled sibling surfaces the real cause.
+// On parallel batches, first qualifying block wins (first with both
+// IsError and the marker).
 func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
 	toolNames := make(map[string]string)
 	for _, block := range blocks {

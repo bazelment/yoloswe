@@ -10,7 +10,7 @@
   {
     "type": "tool_result",
     "tool_use_id": "toolu_017E3NKRaj3dZEWn8jStZhjR",
-    "tool_result": "Exit code 8\nForge Visual Tests\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532667425\t\nPython Tests\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532667428\t\nSecurity Scan\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532667430\t\nDocker Compose Smoke\tskipping\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532668275\t\nDetect Changes\tpass\t6s\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532641962\t\nLint & Type Check\tpending\t0\thttps://github.com/sycamore-labs/kernel/actions/runs/24477273494/job/71532642026\t",
+    "tool_result": "Exit code 8\nForge Visual Tests\tpending\t0\thttps://github.com/example-org/example-repo/actions/runs/1/job/1\t\nPython Tests\tpending\t0\thttps://github.com/example-org/example-repo/actions/runs/1/job/2\t\nSecurity Scan\tpending\t0\thttps://github.com/example-org/example-repo/actions/runs/1/job/3\t\nDocker Compose Smoke\tskipping\t0\thttps://github.com/example-org/example-repo/actions/runs/1/job/4\t\nDetect Changes\tpass\t6s\thttps://github.com/example-org/example-repo/actions/runs/1/job/5\t\nLint & Type Check\tpending\t0\thttps://github.com/example-org/example-repo/actions/runs/1/job/6\t",
     "is_error": true
   }
 ]
