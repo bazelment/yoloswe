@@ -176,11 +176,12 @@ func (e CLIToolResultEvent) Type() EventType { return EventTypeCLIToolResult }
 
 // TurnCompleteEvent fires when a turn finishes.
 type TurnCompleteEvent struct {
-	Error      error
-	Usage      TurnUsage
-	TurnNumber int
-	DurationMs int64
-	Success    bool
+	Error                 error
+	Usage                 TurnUsage
+	TurnNumber            int
+	DurationMs            int64
+	Success               bool
+	HasLiveBackgroundWork bool
 }
 
 // Type returns the event type.

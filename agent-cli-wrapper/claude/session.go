@@ -383,11 +383,12 @@ func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, er
 			events = append(events, evt)
 			if tc, ok := evt.(TurnCompleteEvent); ok {
 				result := &TurnResult{
-					TurnNumber: tc.TurnNumber,
-					Success:    tc.Success,
-					DurationMs: tc.DurationMs,
-					Usage:      tc.Usage,
-					Error:      tc.Error,
+					TurnNumber:            tc.TurnNumber,
+					Success:               tc.Success,
+					DurationMs:            tc.DurationMs,
+					Usage:                 tc.Usage,
+					Error:                 tc.Error,
+					HasLiveBackgroundWork: tc.HasLiveBackgroundWork,
 				}
 				// Populate text/blocks from turn state
 				turn := s.turnManager.GetTurnByNumber(tc.TurnNumber)
@@ -1302,11 +1303,12 @@ func (s *Session) finalizeTurn(result TurnResult) {
 	}
 	_ = s.state.Transition(TransitionResultReceived)
 	s.emit(TurnCompleteEvent{
-		TurnNumber: result.TurnNumber,
-		Success:    result.Success,
-		DurationMs: result.DurationMs,
-		Usage:      result.Usage,
-		Error:      result.Error,
+		TurnNumber:            result.TurnNumber,
+		Success:               result.Success,
+		DurationMs:            result.DurationMs,
+		Usage:                 result.Usage,
+		Error:                 result.Error,
+		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
 	})
 	s.turnManager.CompleteTurn(result)
 }
