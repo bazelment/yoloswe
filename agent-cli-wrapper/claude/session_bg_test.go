@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -1099,6 +1100,53 @@ func TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount(t *testing.T) {
 	}
 	if tc.TurnNumber != 1 {
 		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
+	}
+}
+
+// TestScheduleWakeup_CollectResponseReturnsContinuationContent verifies
+// that CollectResponse, when a wakeup chain completes, returns the
+// continuation turn's text and content blocks rather than the
+// pre-wakeup snapshot at the suppressed turn number.
+func TestScheduleWakeup_CollectResponseReturnsContinuationContent(t *testing.T) {
+	s := newTestSession(t)
+	isErrFalse := false
+
+	// Turn 1: ScheduleWakeup.
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	// Turn 2: continuation with a distinctive final assistant response.
+	s.turnManager.StartTurn("cont")
+	const finalText = "final assistant response after wakeup"
+	s.turnManager.AppendText(finalText)
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 20, OutputTokens: 10},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, _, err := s.CollectResponse(ctx)
+	if err != nil {
+		t.Fatalf("CollectResponse failed: %v", err)
+	}
+	if result.TurnNumber != 1 {
+		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", result.TurnNumber)
+	}
+	if result.Text != finalText {
+		t.Errorf("expected continuation Text %q, got %q", finalText, result.Text)
 	}
 }
 

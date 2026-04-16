@@ -423,17 +423,19 @@ func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, er
 					Error:                 tc.Error,
 					HasLiveBackgroundWork: tc.HasLiveBackgroundWork,
 				}
-				// Populate text/blocks from turn state. For ScheduleWakeup
-				// suppression the event's TurnNumber is the original
-				// suppressed turn, but the final assistant response lives on
-				// the latest continuation turn. Prefer CurrentTurn() when it
-				// has advanced past tc.TurnNumber so callers get the real
-				// final response rather than the pre-wakeup snapshot.
-				turn := s.turnManager.CurrentTurn()
-				if turn == nil || turn.Number < tc.TurnNumber {
-					turn = s.turnManager.GetTurnByNumber(tc.TurnNumber)
-				}
-				if turn != nil {
+				// Populate text/blocks from the recorded TurnResult when
+				// available. finalizeTurn stores the final turn's content
+				// into completedResults keyed by result.TurnNumber — for
+				// ScheduleWakeup chains this is the continuation's
+				// assistant response (populated in handleResult from the
+				// latest CurrentTurn), not the pre-wakeup snapshot. Fall
+				// back to the raw turn-state scan only if no recorded
+				// result is available (legacy paths, races).
+				if completed := s.turnManager.GetCompletedResult(tc.TurnNumber); completed != nil {
+					result.Text = completed.Text
+					result.Thinking = completed.Thinking
+					result.ContentBlocks = completed.ContentBlocks
+				} else if turn := s.turnManager.GetTurnByNumber(tc.TurnNumber); turn != nil {
 					result.Text = turn.FullText
 					result.Thinking = turn.FullThinking
 					result.ContentBlocks = turn.ContentBlocks

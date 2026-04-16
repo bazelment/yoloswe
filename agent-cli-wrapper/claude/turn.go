@@ -619,3 +619,15 @@ func (tm *turnManager) GetTurnByNumber(n int) *turnState {
 	}
 	return nil
 }
+
+// GetCompletedResult returns the recorded TurnResult for a completed turn,
+// or nil if the turn has not completed (or never existed). The result is
+// what CompleteTurn stored, so Text/Thinking/ContentBlocks reflect the
+// final turn state — including wakeup-suppression chains where the
+// completion was emitted under the original suppressed turn number but
+// populated from the last continuation's assistant response.
+func (tm *turnManager) GetCompletedResult(n int) *TurnResult {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.completedResults[n]
+}
