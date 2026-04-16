@@ -159,6 +159,44 @@ var backgroundTools = map[string]bool{
 	"Monitor": true,
 }
 
+// scheduleWakeupToolName is the tool the Claude CLI uses for /loop dynamic
+// pacing. When the agent calls this tool, the CLI schedules a future
+// continuation turn after a delay. The wrapper must suppress turn completion
+// and wait for the continuation, otherwise the session appears "done" and
+// callers exit prematurely.
+const scheduleWakeupToolName = "ScheduleWakeup"
+
+// hasScheduleWakeup reports whether the turn's ContentBlocks contain a
+// ScheduleWakeup tool_use. When present, the CLI will auto-inject a user
+// message after the specified delay to start a continuation turn.
+func (turn *turnState) hasScheduleWakeup() bool {
+	if turn == nil {
+		return false
+	}
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
+			return true
+		}
+	}
+	return false
+}
+
+// scheduleWakeupDelaySeconds extracts the delaySeconds value from the first
+// ScheduleWakeup tool_use in the turn. Returns 0 if not found.
+func (turn *turnState) scheduleWakeupDelaySeconds() float64 {
+	if turn == nil {
+		return 0
+	}
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
+			if delay, ok := block.ToolInput["delaySeconds"].(float64); ok {
+				return delay
+			}
+		}
+	}
+	return 0
+}
+
 // turnState tracks the state of a single turn.
 type turnState struct {
 	StartTime              time.Time

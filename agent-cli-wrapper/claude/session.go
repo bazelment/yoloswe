@@ -48,6 +48,35 @@ func (b *bgSuppressionState) reset() {
 	b.heldResult = nil
 }
 
+// wakeupSuppressionState tracks cross-turn suppression for ScheduleWakeup.
+// When the agent calls ScheduleWakeup, the CLI will inject a continuation
+// user message after the specified delay, starting a new assistant turn.
+// The wrapper suppresses the current turn's completion and waits for the
+// continuation turn. If the continuation also calls ScheduleWakeup, it is
+// suppressed again, chaining until a turn completes without ScheduleWakeup.
+type wakeupSuppressionState struct {
+	timer            *time.Timer // safety timer; fires if no continuation arrives
+	accumulatedUsage TurnUsage   // token/cost totals from suppressed turns
+	active           bool        // true while waiting for the continuation turn
+	timerFired       bool        // set by the safety timer
+	// suppressedTurnNumber is the original turn number that waiters are
+	// blocked on. The continuation turn has a higher number, but we
+	// complete it under the original number so WaitForTurn callers unblock.
+	suppressedTurnNumber int
+}
+
+// reset clears wakeup suppression state and stops any pending timer.
+func (w *wakeupSuppressionState) reset() {
+	w.active = false
+	w.timerFired = false
+	w.suppressedTurnNumber = 0
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.accumulatedUsage = TurnUsage{}
+}
+
 // SessionInfo contains session metadata.
 type SessionInfo struct {
 	SessionID      string
@@ -78,7 +107,8 @@ type Session struct {
 
 	// Value / struct fields.
 	config            SessionConfig
-	bgState           bgSuppressionState // background-task turn-suppression state; protected by mu
+	bgState           bgSuppressionState     // background-task turn-suppression state; protected by mu
+	wakeupState       wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
 	cumulativeCostUSD float64
 
 	// Scalar and sync fields.
@@ -479,6 +509,7 @@ func (s *Session) Stop() error {
 	}
 	s.stopping = true
 	s.bgState.reset()
+	s.wakeupState.reset()
 	s.mu.Unlock()
 
 	// Cancel context for tool handler goroutines
@@ -1071,7 +1102,21 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	wasSuppressed := s.bgState.active
 	s.bgState.active = false
 	s.bgState.heldResult = nil
-	if timerAlreadyFired {
+
+	// Cancel any pending wakeup-suppression safety timer.
+	// If the wakeup timer already fired, a duplicate TurnCompleteEvent must
+	// not be emitted — return early.
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+		s.wakeupState.timer = nil
+	}
+	wakeupTimerFired := s.wakeupState.timerFired
+	s.wakeupState.timerFired = false
+	wakeupSuppressed := s.wakeupState.active
+	// Don't clear wakeupState.active yet — we may need to re-suppress below
+	// if this continuation turn also contains ScheduleWakeup.
+
+	if timerAlreadyFired || wakeupTimerFired {
 		s.mu.Unlock()
 		return
 	}
@@ -1086,14 +1131,32 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	}
 
 	// Collect any accumulated usage from suppressed intermediate results
-	// (background task continuation turns) to report the full logical-turn cost.
+	// (background task continuation turns and wakeup-suppressed turns)
+	// to report the full logical-turn cost.
 	s.mu.Lock()
 	accUsage := s.bgState.accumulatedUsage
 	s.bgState.accumulatedUsage = TurnUsage{}
+	// Add accumulated wakeup-suppressed usage.
+	accUsage.InputTokens += s.wakeupState.accumulatedUsage.InputTokens
+	accUsage.OutputTokens += s.wakeupState.accumulatedUsage.OutputTokens
+	accUsage.CacheCreationTokens += s.wakeupState.accumulatedUsage.CacheCreationTokens
+	accUsage.CacheReadTokens += s.wakeupState.accumulatedUsage.CacheReadTokens
+	accUsage.CostUSD += s.wakeupState.accumulatedUsage.CostUSD
+	s.wakeupState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
+	// When wakeup suppression is active, waiters are blocked on the original
+	// suppressed turn number. Use that number so CompleteTurn unblocks them.
+	resultTurnNumber := turnNumber
+	if wakeupSuppressed {
+		s.mu.Lock()
+		resultTurnNumber = s.wakeupState.suppressedTurnNumber
+		s.wakeupState.active = false
+		s.mu.Unlock()
+	}
+
 	result := TurnResult{
-		TurnNumber: turnNumber,
+		TurnNumber: resultTurnNumber,
 		Success:    !msg.IsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
@@ -1272,19 +1335,86 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		}
 	}
 
+	// Check if the turn ends with a ScheduleWakeup tool call. When present,
+	// the CLI will auto-inject a continuation user message after the specified
+	// delay, starting a new assistant turn. Suppress turn completion so callers
+	// of Ask()/WaitForTurn() block until the continuation turn completes.
+	//
+	// Skip suppression when:
+	//   - the result carries an error (propagate immediately)
+	//   - this is already a wakeup continuation (wakeupSuppressed=true) and
+	//     the continuation turn does NOT have another ScheduleWakeup
+	shouldSuppressWakeup := !msg.IsError && turn.hasScheduleWakeup()
+	if shouldSuppressWakeup {
+		s.mu.Lock()
+		s.cumulativeCostUSD += msg.TotalCostUSD
+		// Accumulate usage from this suppressed turn.
+		s.wakeupState.accumulatedUsage.InputTokens += msg.Usage.InputTokens
+		s.wakeupState.accumulatedUsage.OutputTokens += msg.Usage.OutputTokens
+		s.wakeupState.accumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
+		s.wakeupState.accumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens
+		s.wakeupState.accumulatedUsage.CostUSD += msg.TotalCostUSD
+
+		// Preserve the original turn number for waiters. On the first
+		// suppression wakeupSuppressed is false; on chained wakeups
+		// the number is already set from the prior suppression.
+		if !wakeupSuppressed {
+			s.wakeupState.suppressedTurnNumber = turnNumber
+		}
+
+		// Budget check: if we're already over budget, don't suppress — let
+		// the normal path surface ErrBudgetExceeded.
+		totalCostSoFar := s.cumulativeCostUSD
+		if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
+			s.wakeupState.accumulatedUsage = TurnUsage{}
+			s.wakeupState.active = false
+			s.mu.Unlock()
+			// Fall through to normal completion with budget error.
+		} else {
+			s.wakeupState.active = true
+
+			// Safety timer: delay + 60s buffer. ScheduleWakeup delays are
+			// clamped to [60, 3600] by the runtime, so worst case is ~61 min.
+			delaySec := turn.scheduleWakeupDelaySeconds()
+			if delaySec < 60 {
+				delaySec = 60
+			}
+			timeout := time.Duration(delaySec+60) * time.Second
+
+			safetyResult := result
+			if !wakeupSuppressed {
+				safetyResult.TurnNumber = turnNumber
+			} else {
+				safetyResult.TurnNumber = s.wakeupState.suppressedTurnNumber
+			}
+			if s.wakeupState.timer != nil {
+				s.wakeupState.timer.Stop()
+			}
+			s.wakeupState.timer = time.AfterFunc(timeout, func() {
+				s.completeWakeupSuppressedTurn(safetyResult)
+			})
+			s.mu.Unlock()
+
+			// Reset accumulator so the continuation turn's streaming events
+			// are processed cleanly.
+			s.accumulator.Reset()
+			return
+		}
+	}
+
 	// Update cumulative cost and check SDK-level limits.
 	// SDK limit errors are only set if there is no existing error from the CLI,
 	// to avoid silently overwriting the real error.
 	// Skip if the background-task branch already accounted for this result's cost.
 	s.mu.Lock()
-	if !costAccounted {
+	if !costAccounted && !shouldSuppressWakeup {
 		s.cumulativeCostUSD += msg.TotalCostUSD
 	}
 	totalCost := s.cumulativeCostUSD
 	s.mu.Unlock()
 
 	if result.Error == nil {
-		if s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns {
+		if s.config.MaxTurns > 0 && resultTurnNumber >= s.config.MaxTurns {
 			result.Error = ErrMaxTurnsExceeded
 		} else if s.config.MaxBudgetUSD > 0 && totalCost >= s.config.MaxBudgetUSD {
 			result.Error = ErrBudgetExceeded
@@ -1346,6 +1476,33 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 	// still live from the session's perspective — mark so retry loops do
 	// not interrupt it.
 	result.HasLiveBackgroundWork = true
+
+	s.finalizeTurn(result)
+}
+
+// completeWakeupSuppressedTurn is the safety-timer equivalent for
+// ScheduleWakeup suppression. If no continuation turn arrives within
+// the expected delay + buffer, complete the turn to prevent hanging.
+func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
+	s.mu.Lock()
+	if !s.wakeupState.active {
+		s.mu.Unlock()
+		return // Already completed by the normal continuation path
+	}
+	s.wakeupState.active = false
+	s.wakeupState.timerFired = true
+	s.wakeupState.timer = nil
+	s.wakeupState.accumulatedUsage = TurnUsage{}
+	s.mu.Unlock()
+
+	// Use the latest turn's content if it matches the original suppressed
+	// turn number (unlikely for cross-turn wakeups, but safe to check).
+	turn := s.turnManager.CurrentTurn()
+	if turn != nil && turn.Number == result.TurnNumber {
+		result.Text = turn.FullText
+		result.Thinking = turn.FullThinking
+		result.ContentBlocks = turn.ContentBlocks
+	}
 
 	s.finalizeTurn(result)
 }

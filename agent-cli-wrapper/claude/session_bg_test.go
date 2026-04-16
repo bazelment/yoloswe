@@ -559,3 +559,317 @@ func TestBgTask_NoBgToolsNormalCompletion(t *testing.T) {
 		t.Error("shouldSuppressForBgTasks should return false when no bg tools exist")
 	}
 }
+
+// TestScheduleWakeup_SuppressesTurn verifies that a turn ending with a
+// ScheduleWakeup tool_use is suppressed (no TurnCompleteEvent emitted)
+// and a safety timer is started.
+func TestScheduleWakeup_SuppressesTurn(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "echo work"}},
+		{ID: "tool-2", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(120),
+			"prompt":       "check status",
+			"reason":       "waiting for reviews",
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "work", IsError: &isErrFalse},
+		{ToolUseID: "tool-2", Content: "scheduled", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	// hasScheduleWakeup must return true.
+	turn := s.turnManager.CurrentTurn()
+	if !turn.hasScheduleWakeup() {
+		t.Fatal("hasScheduleWakeup should return true")
+	}
+
+	// handleResult should suppress the turn.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{
+		Type:    "result",
+		IsError: false,
+		Usage: protocol.UsageDetails{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+		TotalCostUSD: 0.01,
+	}
+	s.handleResult(resultMsg)
+
+	// Should NOT get a TurnCompleteEvent.
+	select {
+	case event := <-s.events:
+		if _, ok := event.(TurnCompleteEvent); ok {
+			t.Error("TurnCompleteEvent should NOT be emitted — turn should be suppressed for ScheduleWakeup")
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Good — suppressed.
+	}
+
+	// Verify wakeup state is active.
+	s.mu.RLock()
+	timerActive := s.wakeupState.timer != nil
+	suppActive := s.wakeupState.active
+	origTurn := s.wakeupState.suppressedTurnNumber
+	s.mu.RUnlock()
+
+	if !timerActive {
+		t.Error("expected wakeupState.timer to be active")
+	}
+	if !suppActive {
+		t.Error("expected wakeupState.active to be true")
+	}
+	if origTurn != 1 {
+		t.Errorf("expected suppressedTurnNumber=1, got %d", origTurn)
+	}
+
+	// Clean up: stop safety timer.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+	}
+	s.mu.Unlock()
+}
+
+// TestScheduleWakeup_ContinuationCompletesTurn verifies that when a
+// continuation turn arrives (without ScheduleWakeup), the suppressed turn
+// is completed under the original turn number.
+func TestScheduleWakeup_ContinuationCompletesTurn(t *testing.T) {
+	s := newTestSession(t)
+
+	// Turn 1: agent calls ScheduleWakeup.
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60),
+			"prompt":       "check again",
+			"reason":       "waiting",
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "scheduled", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg1 := protocol.ResultMessage{
+		Type:    "result",
+		IsError: false,
+		Usage: protocol.UsageDetails{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+		TotalCostUSD: 0.01,
+	}
+	s.handleResult(resultMsg1)
+
+	// Verify suppression is active.
+	s.mu.RLock()
+	suppActive := s.wakeupState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Fatal("wakeup suppression should be active after ScheduleWakeup turn")
+	}
+
+	// Simulate the continuation turn (no ScheduleWakeup this time).
+	// The CLI injects a new assistant turn after the wakeup fires.
+	// Start a new turn so the ScheduleWakeup block from the prior turn is gone.
+	s.turnManager.StartTurn("continuation-turn")
+	s.turnManager.AppendContentBlock(ContentBlock{
+		Type:      ContentBlockTypeToolUse,
+		ToolUseID: "tool-2",
+		ToolName:  "Bash",
+		ToolInput: map[string]interface{}{"command": "echo done"},
+	})
+	s.turnManager.AppendText("All checks passed.")
+
+	// Transition state machine back to processing for the continuation result.
+	_ = s.state.Transition(TransitionUserMessageSent)
+
+	resultMsg2 := protocol.ResultMessage{
+		Type:    "result",
+		IsError: false,
+		Usage: protocol.UsageDetails{
+			InputTokens:  200,
+			OutputTokens: 100,
+		},
+		TotalCostUSD: 0.02,
+	}
+	s.handleResult(resultMsg2)
+
+	// Now we SHOULD get a TurnCompleteEvent with the original turn number.
+	// Drain non-TurnCompleteEvents (e.g. CLIToolResultEvent) before checking.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+			// else keep draining
+		case <-deadline:
+			t.Fatal("expected TurnCompleteEvent for continuation turn")
+		}
+		if found {
+			break
+		}
+	}
+	// Turn number should be the original suppressed turn (1), not the
+	// continuation turn's number.
+	if tc.TurnNumber != 1 {
+		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
+	}
+	if !tc.Success {
+		t.Error("expected success=true")
+	}
+	// Usage should include both the suppressed turn and the continuation.
+	expectedInput := int(100 + 200)
+	if tc.Usage.InputTokens != expectedInput {
+		t.Errorf("expected accumulated InputTokens=%d, got %d", expectedInput, tc.Usage.InputTokens)
+	}
+
+	// Wakeup state should be cleared.
+	s.mu.RLock()
+	suppActiveAfter := s.wakeupState.active
+	s.mu.RUnlock()
+	if suppActiveAfter {
+		t.Error("wakeup suppression should be cleared after continuation")
+	}
+}
+
+// TestScheduleWakeup_SafetyTimerCompletesTurn verifies that the safety
+// timer fires and completes the turn if no continuation arrives.
+func TestScheduleWakeup_SafetyTimerCompletesTurn(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60),
+			"prompt":       "check",
+			"reason":       "waiting",
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "scheduled", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	// Override the safety timer to a very short duration for testing.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{
+		Type:    "result",
+		IsError: false,
+		Usage: protocol.UsageDetails{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+		TotalCostUSD: 0.01,
+	}
+	s.handleResult(resultMsg)
+
+	// Replace the safety timer with a short one.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+	}
+	safetyResult := TurnResult{TurnNumber: 1, Success: true}
+	s.wakeupState.timer = time.AfterFunc(50*time.Millisecond, func() {
+		s.completeWakeupSuppressedTurn(safetyResult)
+	})
+	s.mu.Unlock()
+
+	// Wait for the safety timer to fire, draining non-TurnCompleteEvents.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("safety timer should have fired and completed the turn")
+		}
+		if found {
+			break
+		}
+	}
+	if tc.TurnNumber != 1 {
+		t.Errorf("expected TurnNumber=1, got %d", tc.TurnNumber)
+	}
+}
+
+// TestScheduleWakeup_ErrorTurnNotSuppressed verifies that an error result
+// with ScheduleWakeup is NOT suppressed.
+func TestScheduleWakeup_ErrorTurnNotSuppressed(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(120),
+			"prompt":       "check",
+			"reason":       "waiting",
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "scheduled", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	resultMsg := protocol.ResultMessage{
+		Type:    "result",
+		IsError: true,
+		Result:  "something went wrong",
+	}
+	s.handleResult(resultMsg)
+
+	// Error results should NOT be suppressed. Drain non-TurnCompleteEvents.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("error result with ScheduleWakeup should complete immediately, not suppress")
+		}
+		if found {
+			break
+		}
+	}
+	if tc.Success {
+		t.Error("expected success=false for error result")
+	}
+
+	// Wakeup state should NOT be active.
+	s.mu.RLock()
+	suppActive := s.wakeupState.active
+	s.mu.RUnlock()
+	if suppActive {
+		t.Error("wakeup suppression should not be active for error results")
+	}
+}
