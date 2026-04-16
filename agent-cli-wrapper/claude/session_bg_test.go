@@ -687,10 +687,11 @@ func TestScheduleWakeup_ContinuationCompletesTurn(t *testing.T) {
 		t.Fatal("wakeup suppression should be active after ScheduleWakeup turn")
 	}
 
-	// Simulate the continuation turn (no ScheduleWakeup this time).
-	// The CLI injects a new assistant turn after the wakeup fires.
-	// Start a new turn so the ScheduleWakeup block from the prior turn is gone.
-	s.turnManager.StartTurn("continuation-turn")
+	// Simulate the CLI-injected continuation. In production, the CLI does
+	// NOT call turnManager.StartTurn — the continuation's assistant content
+	// is appended to the same turn. The original ScheduleWakeup tool_use
+	// block therefore persists in ContentBlocks; the !wakeupSuppressed
+	// guard in handleResult prevents spurious re-suppression.
 	s.turnManager.AppendContentBlock(ContentBlock{
 		Type:      ContentBlockTypeToolUse,
 		ToolUseID: "tool-2",
@@ -882,17 +883,22 @@ func TestScheduleWakeup_ErrorTurnNotSuppressed(t *testing.T) {
 	}
 }
 
-// TestScheduleWakeup_ChainedSuppressionAccumulatesUsage verifies that when
-// two ScheduleWakeup turns chain (turn N has ScheduleWakeup, its
-// continuation turn N+1 also has ScheduleWakeup, and the final
-// continuation turn N+2 does not), the final TurnCompleteEvent:
-//   - uses the original (earliest) suppressed turn number
-//   - accumulates token usage from all three turns
-func TestScheduleWakeup_ChainedSuppressionAccumulatesUsage(t *testing.T) {
+// TestScheduleWakeup_ContinuationDoesNotReSuppress verifies production
+// behavior: when the CLI auto-injects a continuation user message after a
+// wakeup, it does NOT call turnManager.StartTurn — the continuation's
+// assistant content is appended to the same turn. The original
+// ScheduleWakeup tool_use block therefore persists in ContentBlocks, so
+// hasScheduleWakeup() still returns true on the continuation's
+// ResultMessage. Without the !wakeupSuppressed guard, suppression would
+// spuriously re-arm for another delay+60s safety window. With the guard,
+// the continuation releases suppression and accumulates usage correctly.
+func TestScheduleWakeup_ContinuationDoesNotReSuppress(t *testing.T) {
 	s := newTestSession(t)
 	isErrFalse := false
 
-	// Turn 1: ScheduleWakeup.
+	// Turn 1: ScheduleWakeup. The tool_use block is recorded in
+	// ContentBlocks and persists across the continuation because the
+	// turn is not replaced in production.
 	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
 		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
 			"delaySeconds": float64(60), "prompt": "p1", "reason": "r1",
@@ -908,16 +914,19 @@ func TestScheduleWakeup_ChainedSuppressionAccumulatesUsage(t *testing.T) {
 		TotalCostUSD: 0.01,
 	})
 
-	// Turn 2: continuation that ALSO ends with ScheduleWakeup (chained).
-	s.turnManager.StartTurn("cont-1")
-	s.turnManager.AppendContentBlock(ContentBlock{
-		Type:      ContentBlockTypeToolUse,
-		ToolUseID: "t2",
-		ToolName:  "ScheduleWakeup",
-		ToolInput: map[string]interface{}{
-			"delaySeconds": float64(60), "prompt": "p2", "reason": "r2",
-		},
-	})
+	// Verify suppression is armed after the wakeup turn.
+	s.mu.RLock()
+	suppActive := s.wakeupState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Fatal("wakeup suppression should be armed after ScheduleWakeup turn")
+	}
+
+	// Simulate the CLI-injected continuation: a new assistant response
+	// appended to the SAME turn (no StartTurn call), followed by a new
+	// ResultMessage. hasScheduleWakeup() still returns true because the
+	// original tool_use block is still in ContentBlocks.
+	s.turnManager.AppendText("continuation response")
 	_ = s.state.Transition(TransitionUserMessageSent)
 	s.handleResult(protocol.ResultMessage{
 		Type: "result", IsError: false,
@@ -925,30 +934,7 @@ func TestScheduleWakeup_ChainedSuppressionAccumulatesUsage(t *testing.T) {
 		TotalCostUSD: 0.02,
 	})
 
-	// Verify suppression is still active after chain.
-	s.mu.RLock()
-	suppActive := s.wakeupState.active
-	origTurn := s.wakeupState.suppressedTurnNumber
-	s.mu.RUnlock()
-	if !suppActive {
-		t.Fatal("wakeup suppression should still be active after chained ScheduleWakeup")
-	}
-	if origTurn != 1 {
-		t.Errorf("expected suppressedTurnNumber to remain 1, got %d", origTurn)
-	}
-
-	// Turn 3: final continuation, no ScheduleWakeup.
-	s.turnManager.StartTurn("cont-2")
-	s.turnManager.AppendText("all done")
-	_ = s.state.Transition(TransitionUserMessageSent)
-	s.handleResult(protocol.ResultMessage{
-		Type: "result", IsError: false,
-		Usage:        protocol.UsageDetails{InputTokens: 300, OutputTokens: 100},
-		TotalCostUSD: 0.03,
-	})
-
-	// Drain events until TurnCompleteEvent appears; must carry accumulated
-	// usage from all three turns and the original turn number.
+	// The continuation must RELEASE suppression, not re-arm it.
 	var tc TurnCompleteEvent
 	deadline := time.After(time.Second)
 	for {
@@ -960,26 +946,39 @@ func TestScheduleWakeup_ChainedSuppressionAccumulatesUsage(t *testing.T) {
 				found = true
 			}
 		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent after chain terminates")
+			t.Fatal("expected TurnCompleteEvent after continuation; suppression was spuriously re-armed")
 		}
 		if found {
 			break
 		}
 	}
 
+	// Usage must include both the wakeup turn and the continuation.
 	if tc.TurnNumber != 1 {
 		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
 	}
-	if got, want := tc.Usage.InputTokens, 100+200+300; got != want {
+	if got, want := tc.Usage.InputTokens, 100+200; got != want {
 		t.Errorf("expected accumulated InputTokens=%d, got %d", want, got)
 	}
-	if got, want := tc.Usage.OutputTokens, 50+75+100; got != want {
+	if got, want := tc.Usage.OutputTokens, 50+75; got != want {
 		t.Errorf("expected accumulated OutputTokens=%d, got %d", want, got)
 	}
-	// Cost accumulates across all three turns.
-	const wantCost = 0.01 + 0.02 + 0.03
+	// Cost accumulates across both turns.
+	const wantCost = 0.01 + 0.02
 	if tc.Usage.CostUSD < wantCost-1e-9 || tc.Usage.CostUSD > wantCost+1e-9 {
 		t.Errorf("expected accumulated CostUSD=%v, got %v", wantCost, tc.Usage.CostUSD)
+	}
+
+	// Suppression must be cleared and safety timer stopped.
+	s.mu.RLock()
+	stillActive := s.wakeupState.active
+	timer := s.wakeupState.timer
+	s.mu.RUnlock()
+	if stillActive {
+		t.Error("wakeup suppression must be cleared after continuation")
+	}
+	if timer != nil {
+		t.Error("safety timer must be cleared after continuation")
 	}
 }
 
@@ -1037,69 +1036,6 @@ func TestScheduleWakeup_WakeupStateClearedOnNewTurn(t *testing.T) {
 	}
 	if !timerCleared {
 		t.Error("wakeupState.timer should be stopped and cleared by new user turn")
-	}
-}
-
-// TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount verifies that
-// MaxTurns is evaluated against the actual advancing turn number, not
-// the (earlier) resultTurnNumber used to unblock waiters. Without this,
-// chained wakeups could run past the configured limit.
-func TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount(t *testing.T) {
-	s := newTestSession(t, WithMaxTurns(2))
-	isErrFalse := false
-
-	// Turn 1: ScheduleWakeup.
-	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
-		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
-			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
-		}},
-	})
-	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
-	})
-	_ = s.state.Transition(TransitionUserMessageSent)
-	s.handleResult(protocol.ResultMessage{
-		Type: "result", IsError: false,
-		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
-	})
-
-	// Turn 2: continuation without ScheduleWakeup. With MaxTurns=2, the
-	// real turn count has now reached the limit, so the final completion
-	// must surface ErrMaxTurnsExceeded. If the check were using the
-	// suppressed turn number (1), it would incorrectly pass.
-	s.turnManager.StartTurn("cont")
-	s.turnManager.AppendText("done")
-	_ = s.state.Transition(TransitionUserMessageSent)
-	s.handleResult(protocol.ResultMessage{
-		Type: "result", IsError: false,
-		Usage: protocol.UsageDetails{InputTokens: 20, OutputTokens: 10},
-	})
-
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent after continuation")
-		}
-		if found {
-			break
-		}
-	}
-	if !errors.Is(tc.Error, ErrMaxTurnsExceeded) {
-		t.Errorf("expected ErrMaxTurnsExceeded after 2 turns with MaxTurns=2, got %v", tc.Error)
-	}
-	if tc.Success {
-		t.Error("expected Success=false when MaxTurns exceeded")
-	}
-	if tc.TurnNumber != 1 {
-		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
 	}
 }
 
@@ -1196,9 +1132,10 @@ func TestScheduleWakeup_FinalizeRecordsBeforeEmit(t *testing.T) {
 		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
 	})
 
-	// Turn 2: continuation with a distinctive final text.
+	// Continuation: CLI-injected, appended to the same turn (no StartTurn
+	// in production). Distinctive text so the recorded result can be
+	// distinguished from turn-state leftovers.
 	const finalText = "final assistant response after wakeup"
-	s.turnManager.StartTurn("cont")
 	s.turnManager.AppendText(finalText)
 	_ = s.state.Transition(TransitionUserMessageSent)
 	s.handleResult(protocol.ResultMessage{
@@ -1266,8 +1203,7 @@ func TestScheduleWakeup_CollectResponseReturnsContinuationContent(t *testing.T) 
 		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
 	})
 
-	// Turn 2: continuation with a distinctive final assistant response.
-	s.turnManager.StartTurn("cont")
+	// Continuation: appended to same turn (no StartTurn in production).
 	const finalText = "final assistant response after wakeup"
 	s.turnManager.AppendText(finalText)
 	_ = s.state.Transition(TransitionUserMessageSent)
@@ -1287,83 +1223,6 @@ func TestScheduleWakeup_CollectResponseReturnsContinuationContent(t *testing.T) 
 	}
 	if result.Text != finalText {
 		t.Errorf("expected continuation Text %q, got %q", finalText, result.Text)
-	}
-}
-
-// TestScheduleWakeup_MaxTurnsStopsChain verifies that once MaxTurns is
-// reached, further ScheduleWakeup suppression is skipped and the session
-// surfaces ErrMaxTurnsExceeded instead of chaining past the limit.
-func TestScheduleWakeup_MaxTurnsStopsChain(t *testing.T) {
-	s := newTestSession(t, WithMaxTurns(2))
-	isErrFalse := false
-
-	// Turn 1: ScheduleWakeup — suppression armed.
-	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
-		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
-			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
-		}},
-	})
-	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
-		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
-	})
-	_ = s.state.Transition(TransitionUserMessageSent)
-	s.handleResult(protocol.ResultMessage{
-		Type: "result", IsError: false,
-		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
-	})
-
-	s.mu.RLock()
-	active := s.wakeupState.active
-	s.mu.RUnlock()
-	if !active {
-		t.Fatal("precondition: suppression should be armed after first wakeup")
-	}
-
-	// Turn 2: continuation that ALSO ends with ScheduleWakeup. turnNumber
-	// is now 2, which equals MaxTurns=2. Suppression must be skipped so
-	// the MaxTurns guard can fire; otherwise the chain runs unbounded.
-	s.turnManager.StartTurn("cont")
-	s.turnManager.AppendContentBlock(ContentBlock{
-		Type:      ContentBlockTypeToolUse,
-		ToolUseID: "t2",
-		ToolName:  "ScheduleWakeup",
-		ToolInput: map[string]interface{}{
-			"delaySeconds": float64(60), "prompt": "p2", "reason": "r2",
-		},
-	})
-	_ = s.state.Transition(TransitionUserMessageSent)
-	s.handleResult(protocol.ResultMessage{
-		Type: "result", IsError: false,
-		Usage: protocol.UsageDetails{InputTokens: 20, OutputTokens: 10},
-	})
-
-	// Suppression must have been released; a TurnCompleteEvent with
-	// ErrMaxTurnsExceeded should be emitted.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent (ErrMaxTurnsExceeded) when chain hits limit")
-		}
-		if found {
-			break
-		}
-	}
-	if !errors.Is(tc.Error, ErrMaxTurnsExceeded) {
-		t.Errorf("expected ErrMaxTurnsExceeded, got %v", tc.Error)
-	}
-	s.mu.RLock()
-	stillActive := s.wakeupState.active
-	s.mu.RUnlock()
-	if stillActive {
-		t.Error("wakeup suppression should be released when MaxTurns blocks re-arming")
 	}
 }
 

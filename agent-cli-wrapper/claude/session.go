@@ -1353,20 +1353,23 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 	// Check if the turn ends with a ScheduleWakeup tool call. When present,
 	// the CLI will auto-inject a continuation user message after the specified
-	// delay, starting a new assistant turn. Suppress turn completion so callers
-	// of Ask()/WaitForTurn() block until a continuation turn completes without
-	// another ScheduleWakeup (chained wakeups re-arm suppression).
+	// delay, and the continuation's assistant response is appended to the
+	// same turn (the CLI does NOT start a new turn in turnManager — that only
+	// happens via SendMessage/SendToolResult). Suppress turn completion so
+	// callers of Ask()/WaitForTurn() block until that continuation arrives.
 	//
 	// Skip suppression when:
 	//   - the result carries an error (propagate immediately)
 	//   - MaxTurns has been reached (let the normal path surface it)
 	//   - the turn does not contain a ScheduleWakeup tool_use
-	// Don't suppress if we've already hit MaxTurns. Suppression would
-	// re-arm the session for another continuation turn, letting chained
-	// wakeups run past the configured limit. Fall through so the MaxTurns
-	// guard below can convert this result into ErrMaxTurnsExceeded.
+	//   - wakeupSuppressed is true: this ResultMessage is the continuation
+	//     that releases the prior suppression. The original ScheduleWakeup
+	//     tool_use block persists in ContentBlocks (no StartTurn was called),
+	//     so hasScheduleWakeup() still returns true; without this guard we
+	//     would spuriously re-arm the safety timer for up to ~61 minutes.
+	//     This mirrors the bgState !wasSuppressed guard above.
 	maxTurnsReached := s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns
-	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && turn.hasScheduleWakeup()
+	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && !wakeupSuppressed && turn.hasScheduleWakeup()
 	if shouldSuppressWakeup {
 		s.mu.Lock()
 		s.cumulativeCostUSD += msg.TotalCostUSD
