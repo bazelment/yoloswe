@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -1035,5 +1036,68 @@ func TestScheduleWakeup_WakeupStateClearedOnNewTurn(t *testing.T) {
 	}
 	if !timerCleared {
 		t.Error("wakeupState.timer should be stopped and cleared by new user turn")
+	}
+}
+
+// TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount verifies that
+// MaxTurns is evaluated against the actual advancing turn number, not
+// the (earlier) resultTurnNumber used to unblock waiters. Without this,
+// chained wakeups could run past the configured limit.
+func TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount(t *testing.T) {
+	s := newTestSession(t, WithMaxTurns(2))
+	isErrFalse := false
+
+	// Turn 1: ScheduleWakeup.
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	// Turn 2: continuation without ScheduleWakeup. With MaxTurns=2, the
+	// real turn count has now reached the limit, so the final completion
+	// must surface ErrMaxTurnsExceeded. If the check were using the
+	// suppressed turn number (1), it would incorrectly pass.
+	s.turnManager.StartTurn("cont")
+	s.turnManager.AppendText("done")
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 20, OutputTokens: 10},
+	})
+
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("expected TurnCompleteEvent after continuation")
+		}
+		if found {
+			break
+		}
+	}
+	if !errors.Is(tc.Error, ErrMaxTurnsExceeded) {
+		t.Errorf("expected ErrMaxTurnsExceeded after 2 turns with MaxTurns=2, got %v", tc.Error)
+	}
+	if tc.Success {
+		t.Error("expected Success=false when MaxTurns exceeded")
+	}
+	if tc.TurnNumber != 1 {
+		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
 	}
 }

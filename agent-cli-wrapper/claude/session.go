@@ -1496,10 +1496,12 @@ func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
 	s.wakeupState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
-	// Use the latest turn's content if it matches the original suppressed
-	// turn number (unlikely for cross-turn wakeups, but safe to check).
-	turn := s.turnManager.CurrentTurn()
-	if turn != nil && turn.Number == result.TurnNumber {
+	// Refresh content from the latest turn snapshot. For chained wakeups
+	// the current turn number has advanced beyond result.TurnNumber (which
+	// is the original suppressed turn used to unblock waiters), so we take
+	// whatever the most recent streamed assistant state is rather than
+	// finalizing with the stale snapshot captured when the timer was armed.
+	if turn := s.turnManager.CurrentTurn(); turn != nil {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
