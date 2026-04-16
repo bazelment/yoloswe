@@ -48,6 +48,35 @@ func (b *bgSuppressionState) reset() {
 	b.heldResult = nil
 }
 
+// wakeupSuppressionState tracks cross-turn suppression for ScheduleWakeup.
+// When the agent calls ScheduleWakeup, the CLI will inject a continuation
+// user message after the specified delay, starting a new assistant turn.
+// The wrapper suppresses the current turn's completion and waits for the
+// continuation turn. If the continuation also calls ScheduleWakeup, it is
+// suppressed again, chaining until a turn completes without ScheduleWakeup.
+type wakeupSuppressionState struct {
+	timer            *time.Timer // safety timer; fires if no continuation arrives
+	accumulatedUsage TurnUsage   // token/cost totals from suppressed turns
+	active           bool        // true while waiting for the continuation turn
+	timerFired       bool        // set by the safety timer
+	// suppressedTurnNumber is the original turn number that waiters are
+	// blocked on. The continuation turn has a higher number, but we
+	// complete it under the original number so WaitForTurn callers unblock.
+	suppressedTurnNumber int
+}
+
+// reset clears wakeup suppression state and stops any pending timer.
+func (w *wakeupSuppressionState) reset() {
+	w.active = false
+	w.timerFired = false
+	w.suppressedTurnNumber = 0
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+	w.accumulatedUsage = TurnUsage{}
+}
+
 // SessionInfo contains session metadata.
 type SessionInfo struct {
 	SessionID      string
@@ -78,7 +107,8 @@ type Session struct {
 
 	// Value / struct fields.
 	config            SessionConfig
-	bgState           bgSuppressionState // background-task turn-suppression state; protected by mu
+	bgState           bgSuppressionState     // background-task turn-suppression state; protected by mu
+	wakeupState       wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
 	cumulativeCostUSD float64
 
 	// Scalar and sync fields.
@@ -271,9 +301,11 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	// Clear any stale background-task suppression state from the previous turn.
-	// A safety timer for Turn N must not fire after Turn N+1 has started.
+	// Clear any stale suppression state from the previous turn. A safety
+	// timer for Turn N must not fire after Turn N+1 has started, and the
+	// suppressed turn number must not bleed across user-initiated turns.
 	s.bgState.reset()
+	s.wakeupState.reset()
 
 	// Record turn start
 	if s.recorder != nil {
@@ -313,8 +345,9 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	// Clear any stale background-task suppression state from the previous turn.
+	// Clear any stale suppression state from the previous turn.
 	s.bgState.reset()
+	s.wakeupState.reset()
 
 	// Record turn start
 	if s.recorder != nil {
@@ -390,9 +423,19 @@ func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, er
 					Error:                 tc.Error,
 					HasLiveBackgroundWork: tc.HasLiveBackgroundWork,
 				}
-				// Populate text/blocks from turn state
-				turn := s.turnManager.GetTurnByNumber(tc.TurnNumber)
-				if turn != nil {
+				// Populate text/blocks from the recorded TurnResult when
+				// available. finalizeTurn stores the final turn's content
+				// into completedResults keyed by result.TurnNumber — for
+				// ScheduleWakeup chains this is the continuation's
+				// assistant response (populated in handleResult from the
+				// latest CurrentTurn), not the pre-wakeup snapshot. Fall
+				// back to the raw turn-state scan only if no recorded
+				// result is available (legacy paths, races).
+				if completed := s.turnManager.GetCompletedResult(tc.TurnNumber); completed != nil {
+					result.Text = completed.Text
+					result.Thinking = completed.Thinking
+					result.ContentBlocks = completed.ContentBlocks
+				} else if turn := s.turnManager.GetTurnByNumber(tc.TurnNumber); turn != nil {
 					result.Text = turn.FullText
 					result.Thinking = turn.FullThinking
 					result.ContentBlocks = turn.ContentBlocks
@@ -479,6 +522,7 @@ func (s *Session) Stop() error {
 	}
 	s.stopping = true
 	s.bgState.reset()
+	s.wakeupState.reset()
 	s.mu.Unlock()
 
 	// Cancel context for tool handler goroutines
@@ -1071,7 +1115,32 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	wasSuppressed := s.bgState.active
 	s.bgState.active = false
 	s.bgState.heldResult = nil
-	if timerAlreadyFired {
+
+	// Cancel any pending wakeup-suppression safety timer.
+	// If the wakeup timer already fired, a duplicate TurnCompleteEvent must
+	// not be emitted — return early.
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+		s.wakeupState.timer = nil
+	}
+	wakeupTimerFired := s.wakeupState.timerFired
+	s.wakeupState.timerFired = false
+	wakeupSuppressed := s.wakeupState.active
+	// Snapshot suppressedTurnNumber under the initial lock. A later read
+	// after mu.Unlock would race with SendMessage/SendToolResult, which
+	// resets wakeupState to zero — that would emit the completion under
+	// turn 0 and strand WaitForTurn/CollectResponse callers waiting on
+	// the real original turn number.
+	wakeupSuppressedTurnNumber := s.wakeupState.suppressedTurnNumber
+	// Clear wakeupState.active under the same lock where timerFired is read.
+	// Leaving it true while mu is released would race with the safety-timer
+	// callback (completeWakeupSuppressedTurn), which would see active=true
+	// and emit a duplicate TurnCompleteEvent. If this turn needs to be
+	// re-suppressed (chained ScheduleWakeup), the shouldSuppressWakeup
+	// branch below re-arms it.
+	s.wakeupState.active = false
+
+	if timerAlreadyFired || wakeupTimerFired {
 		s.mu.Unlock()
 		return
 	}
@@ -1086,14 +1155,24 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	}
 
 	// Collect any accumulated usage from suppressed intermediate results
-	// (background task continuation turns) to report the full logical-turn cost.
+	// (background task continuation turns and wakeup-suppressed turns)
+	// to report the full logical-turn cost.
 	s.mu.Lock()
 	accUsage := s.bgState.accumulatedUsage
 	s.bgState.accumulatedUsage = TurnUsage{}
+	accUsage.Add(s.wakeupState.accumulatedUsage)
+	s.wakeupState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
+	// When wakeup suppression was active, waiters are blocked on the original
+	// suppressed turn number. Use the snapshot taken under the initial lock.
+	resultTurnNumber := turnNumber
+	if wakeupSuppressed {
+		resultTurnNumber = wakeupSuppressedTurnNumber
+	}
+
 	result := TurnResult{
-		TurnNumber: turnNumber,
+		TurnNumber: resultTurnNumber,
 		Success:    !msg.IsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
@@ -1272,18 +1351,92 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		}
 	}
 
+	// Check if the turn ends with a ScheduleWakeup tool call. When present,
+	// the CLI will auto-inject a continuation user message after the specified
+	// delay, and the continuation's assistant response is appended to the
+	// same turn (the CLI does NOT start a new turn in turnManager — that only
+	// happens via SendMessage/SendToolResult). Suppress turn completion so
+	// callers of Ask()/WaitForTurn() block until that continuation arrives.
+	//
+	// Skip suppression when:
+	//   - the result carries an error (propagate immediately)
+	//   - MaxTurns has been reached (let the normal path surface it)
+	//   - the turn does not contain a ScheduleWakeup tool_use
+	//   - wakeupSuppressed is true: this ResultMessage is the continuation
+	//     that releases the prior suppression. The original ScheduleWakeup
+	//     tool_use block persists in ContentBlocks (no StartTurn was called),
+	//     so hasScheduleWakeup() still returns true; without this guard we
+	//     would spuriously re-arm the safety timer for up to ~61 minutes.
+	//     This mirrors the bgState !wasSuppressed guard above.
+	maxTurnsReached := s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns
+	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && !wakeupSuppressed && turn.hasScheduleWakeup()
+	if shouldSuppressWakeup {
+		s.mu.Lock()
+		s.cumulativeCostUSD += msg.TotalCostUSD
+		s.wakeupState.accumulatedUsage.Add(TurnUsage{
+			InputTokens:         msg.Usage.InputTokens,
+			OutputTokens:        msg.Usage.OutputTokens,
+			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
+			CostUSD:             msg.TotalCostUSD,
+		})
+		// Re-add usage drained from prior suppressed turns (snapshotted into
+		// accUsage at the top of this call). Without this, chained wakeups
+		// would silently drop earlier turns' token/cost totals.
+		s.wakeupState.accumulatedUsage.Add(accUsage)
+
+		// On first suppression, capture the original turn number so chained
+		// continuation turns can be completed under the same number.
+		if !wakeupSuppressed {
+			s.wakeupState.suppressedTurnNumber = turnNumber
+		}
+
+		totalCostSoFar := s.cumulativeCostUSD
+		if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
+			s.wakeupState.accumulatedUsage = TurnUsage{}
+			s.wakeupState.active = false
+			s.mu.Unlock()
+			// Fall through to normal completion with budget error.
+		} else {
+			s.wakeupState.active = true
+
+			// Safety timer: delay + 60s buffer. ScheduleWakeup delays are
+			// clamped to [60, 3600] by the runtime, so worst case is ~61 min.
+			delaySec := turn.scheduleWakeupDelaySeconds()
+			if delaySec < 60 {
+				delaySec = 60
+			}
+			timeout := time.Duration(delaySec+60) * time.Second
+
+			safetyResult := result
+			safetyResult.TurnNumber = resultTurnNumber
+			s.wakeupState.timer = time.AfterFunc(timeout, func() {
+				s.completeWakeupSuppressedTurn(safetyResult)
+			})
+			s.mu.Unlock()
+
+			s.accumulator.Reset()
+			return
+		}
+	}
+
 	// Update cumulative cost and check SDK-level limits.
 	// SDK limit errors are only set if there is no existing error from the CLI,
 	// to avoid silently overwriting the real error.
 	// Skip if the background-task branch already accounted for this result's cost.
 	s.mu.Lock()
-	if !costAccounted {
+	if !costAccounted && !shouldSuppressWakeup {
 		s.cumulativeCostUSD += msg.TotalCostUSD
 	}
 	totalCost := s.cumulativeCostUSD
 	s.mu.Unlock()
 
 	if result.Error == nil {
+		// MaxTurns is enforced against the actual turn count, not
+		// resultTurnNumber. Under wakeup suppression resultTurnNumber is
+		// the original (lower) turn number used to unblock waiters, but
+		// the real assistant turn count has advanced — enforcing against
+		// the stale number would let chained wakeups exceed the limit.
 		if s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns {
 			result.Error = ErrMaxTurnsExceeded
 		} else if s.config.MaxBudgetUSD > 0 && totalCost >= s.config.MaxBudgetUSD {
@@ -1301,11 +1454,21 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 // finalizeTurn records, emits, and completes the turn. Called from both the
 // normal handleResult path and the safety-timer path (completeSuppressedTurn).
+//
+// Ordering: turnManager.CompleteTurn runs before s.emit so that any
+// CollectResponse/WaitForTurn caller observing TurnCompleteEvent can look
+// up the recorded TurnResult via GetCompletedResult and find it already
+// populated. Reversing the order would open a race for ScheduleWakeup
+// chains, where the event reports the suppressed turn number but the
+// final assistant content lives on a later continuation turn: a consumer
+// could see the event, query completedResults, miss, and fall back to
+// the suppressed turn's stale turnState snapshot.
 func (s *Session) finalizeTurn(result TurnResult) {
 	if s.recorder != nil {
 		s.recorder.CompleteTurn(result.TurnNumber, result)
 	}
 	_ = s.state.Transition(TransitionResultReceived)
+	s.turnManager.CompleteTurn(result)
 	s.emit(TurnCompleteEvent{
 		TurnNumber:            result.TurnNumber,
 		Success:               result.Success,
@@ -1314,7 +1477,6 @@ func (s *Session) finalizeTurn(result TurnResult) {
 		Error:                 result.Error,
 		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
 	})
-	s.turnManager.CompleteTurn(result)
 }
 
 // completeSuppressedTurn is called by the background-task safety timer when
@@ -1346,6 +1508,37 @@ func (s *Session) completeSuppressedTurn(result TurnResult) {
 	// still live from the session's perspective — mark so retry loops do
 	// not interrupt it.
 	result.HasLiveBackgroundWork = true
+
+	s.finalizeTurn(result)
+}
+
+// completeWakeupSuppressedTurn is the safety-timer equivalent for
+// ScheduleWakeup suppression. If no continuation turn arrives within
+// the expected delay + buffer, complete the turn to prevent hanging.
+func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
+	s.mu.Lock()
+	if !s.wakeupState.active {
+		s.mu.Unlock()
+		return // Already completed by the normal continuation path
+	}
+	s.wakeupState.active = false
+	s.wakeupState.timerFired = true
+	s.wakeupState.timer = nil
+	s.wakeupState.accumulatedUsage = TurnUsage{}
+
+	// Snapshot the current turn under the lock so a concurrent
+	// SendMessage/SendToolResult (which advances the turn manager and
+	// resets wakeupState) cannot splice unrelated user-initiated turn
+	// content onto the wakeup completion. Only accept the snapshot if
+	// the turn's number is >= the suppressed turn; otherwise the
+	// turn manager is in an unexpected state and we keep result as-is.
+	turn := s.turnManager.CurrentTurn()
+	if turn != nil && turn.Number >= result.TurnNumber {
+		result.Text = turn.FullText
+		result.Thinking = turn.FullThinking
+		result.ContentBlocks = turn.ContentBlocks
+	}
+	s.mu.Unlock()
 
 	s.finalizeTurn(result)
 }

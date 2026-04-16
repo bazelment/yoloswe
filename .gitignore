@@ -5,6 +5,9 @@ bazel-*
 # jiradozer runtime artifacts
 .jiradozer/
 
+# Claude Code per-project state
+.claude/scheduled_tasks.lock
+
 # Go
 *.exe
 *.exe~

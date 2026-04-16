@@ -122,6 +122,16 @@ type TurnUsage struct {
 	ContextWindow       int // total context window size for the model
 }
 
+// Add accumulates other's counts into u. ContextWindow is not summed —
+// callers set it explicitly from per-model usage metadata.
+func (u *TurnUsage) Add(other TurnUsage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheCreationTokens += other.CacheCreationTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CostUSD += other.CostUSD
+}
+
 // TotalInputTokens returns the total input context size: fresh input tokens +
 // cache creation tokens + cache read tokens. This represents the full context
 // window utilization for the turn.
@@ -157,6 +167,51 @@ type TurnResult struct {
 // task_updated terminal status (or task_notification) to release suppression.
 var backgroundTools = map[string]bool{
 	"Monitor": true,
+}
+
+// scheduleWakeupToolName is the tool the Claude CLI uses for /loop dynamic
+// pacing. When the agent calls this tool, the CLI schedules a future
+// continuation turn after a delay. The wrapper must suppress turn completion
+// and wait for the continuation, otherwise the session appears "done" and
+// callers exit prematurely.
+const scheduleWakeupToolName = "ScheduleWakeup"
+
+// hasScheduleWakeup reports whether the turn's ContentBlocks contain a
+// ScheduleWakeup tool_use. When present, the CLI will auto-inject a user
+// message after the specified delay to start a continuation turn.
+func (turn *turnState) hasScheduleWakeup() bool {
+	if turn == nil {
+		return false
+	}
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
+			return true
+		}
+	}
+	return false
+}
+
+// scheduleWakeupDelaySeconds extracts the delaySeconds value from the first
+// ScheduleWakeup tool_use in the turn. Returns 0 if not found or malformed.
+// Accepts float64 (JSON default), int, and int64 to match the decoder
+// tolerance used for other tool-input numerics in this package.
+func (turn *turnState) scheduleWakeupDelaySeconds() float64 {
+	if turn == nil {
+		return 0
+	}
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
+			switch v := block.ToolInput["delaySeconds"].(type) {
+			case float64:
+				return v
+			case int:
+				return float64(v)
+			case int64:
+				return float64(v)
+			}
+		}
+	}
+	return 0
 }
 
 // turnState tracks the state of a single turn.
@@ -563,4 +618,16 @@ func (tm *turnManager) GetTurnByNumber(n int) *turnState {
 		}
 	}
 	return nil
+}
+
+// GetCompletedResult returns the recorded TurnResult for a completed turn,
+// or nil if the turn has not completed (or never existed). The result is
+// what CompleteTurn stored, so Text/Thinking/ContentBlocks reflect the
+// final turn state — including wakeup-suppression chains where the
+// completion was emitted under the original suppressed turn number but
+// populated from the last continuation's assistant response.
+func (tm *turnManager) GetCompletedResult(n int) *TurnResult {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.completedResults[n]
 }
