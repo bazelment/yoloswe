@@ -122,6 +122,16 @@ type TurnUsage struct {
 	ContextWindow       int // total context window size for the model
 }
 
+// Add accumulates other's counts into u. ContextWindow is not summed —
+// callers set it explicitly from per-model usage metadata.
+func (u *TurnUsage) Add(other TurnUsage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheCreationTokens += other.CacheCreationTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CostUSD += other.CostUSD
+}
+
 // TotalInputTokens returns the total input context size: fresh input tokens +
 // cache creation tokens + cache read tokens. This represents the full context
 // window utilization for the turn.

@@ -1136,12 +1136,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	s.mu.Lock()
 	accUsage := s.bgState.accumulatedUsage
 	s.bgState.accumulatedUsage = TurnUsage{}
-	// Add accumulated wakeup-suppressed usage.
-	accUsage.InputTokens += s.wakeupState.accumulatedUsage.InputTokens
-	accUsage.OutputTokens += s.wakeupState.accumulatedUsage.OutputTokens
-	accUsage.CacheCreationTokens += s.wakeupState.accumulatedUsage.CacheCreationTokens
-	accUsage.CacheReadTokens += s.wakeupState.accumulatedUsage.CacheReadTokens
-	accUsage.CostUSD += s.wakeupState.accumulatedUsage.CostUSD
+	accUsage.Add(s.wakeupState.accumulatedUsage)
 	s.wakeupState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
@@ -1348,22 +1343,20 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	if shouldSuppressWakeup {
 		s.mu.Lock()
 		s.cumulativeCostUSD += msg.TotalCostUSD
-		// Accumulate usage from this suppressed turn.
-		s.wakeupState.accumulatedUsage.InputTokens += msg.Usage.InputTokens
-		s.wakeupState.accumulatedUsage.OutputTokens += msg.Usage.OutputTokens
-		s.wakeupState.accumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
-		s.wakeupState.accumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens
-		s.wakeupState.accumulatedUsage.CostUSD += msg.TotalCostUSD
+		s.wakeupState.accumulatedUsage.Add(TurnUsage{
+			InputTokens:         msg.Usage.InputTokens,
+			OutputTokens:        msg.Usage.OutputTokens,
+			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
+			CostUSD:             msg.TotalCostUSD,
+		})
 
-		// Preserve the original turn number for waiters. On the first
-		// suppression wakeupSuppressed is false; on chained wakeups
-		// the number is already set from the prior suppression.
+		// On first suppression, capture the original turn number so chained
+		// continuation turns can be completed under the same number.
 		if !wakeupSuppressed {
 			s.wakeupState.suppressedTurnNumber = turnNumber
 		}
 
-		// Budget check: if we're already over budget, don't suppress — let
-		// the normal path surface ErrBudgetExceeded.
 		totalCostSoFar := s.cumulativeCostUSD
 		if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 			s.wakeupState.accumulatedUsage = TurnUsage{}
@@ -1382,21 +1375,12 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			timeout := time.Duration(delaySec+60) * time.Second
 
 			safetyResult := result
-			if !wakeupSuppressed {
-				safetyResult.TurnNumber = turnNumber
-			} else {
-				safetyResult.TurnNumber = s.wakeupState.suppressedTurnNumber
-			}
-			if s.wakeupState.timer != nil {
-				s.wakeupState.timer.Stop()
-			}
+			safetyResult.TurnNumber = resultTurnNumber
 			s.wakeupState.timer = time.AfterFunc(timeout, func() {
 				s.completeWakeupSuppressedTurn(safetyResult)
 			})
 			s.mu.Unlock()
 
-			// Reset accumulator so the continuation turn's streaming events
-			// are processed cleanly.
 			s.accumulator.Reset()
 			return
 		}
