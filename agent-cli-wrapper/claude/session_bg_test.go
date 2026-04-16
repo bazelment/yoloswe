@@ -1101,3 +1101,150 @@ func TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount(t *testing.T) {
 		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
 	}
 }
+
+// TestScheduleWakeup_MaxTurnsStopsChain verifies that once MaxTurns is
+// reached, further ScheduleWakeup suppression is skipped and the session
+// surfaces ErrMaxTurnsExceeded instead of chaining past the limit.
+func TestScheduleWakeup_MaxTurnsStopsChain(t *testing.T) {
+	s := newTestSession(t, WithMaxTurns(2))
+	isErrFalse := false
+
+	// Turn 1: ScheduleWakeup — suppression armed.
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	s.mu.RLock()
+	active := s.wakeupState.active
+	s.mu.RUnlock()
+	if !active {
+		t.Fatal("precondition: suppression should be armed after first wakeup")
+	}
+
+	// Turn 2: continuation that ALSO ends with ScheduleWakeup. turnNumber
+	// is now 2, which equals MaxTurns=2. Suppression must be skipped so
+	// the MaxTurns guard can fire; otherwise the chain runs unbounded.
+	s.turnManager.StartTurn("cont")
+	s.turnManager.AppendContentBlock(ContentBlock{
+		Type:      ContentBlockTypeToolUse,
+		ToolUseID: "t2",
+		ToolName:  "ScheduleWakeup",
+		ToolInput: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p2", "reason": "r2",
+		},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 20, OutputTokens: 10},
+	})
+
+	// Suppression must have been released; a TurnCompleteEvent with
+	// ErrMaxTurnsExceeded should be emitted.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("expected TurnCompleteEvent (ErrMaxTurnsExceeded) when chain hits limit")
+		}
+		if found {
+			break
+		}
+	}
+	if !errors.Is(tc.Error, ErrMaxTurnsExceeded) {
+		t.Errorf("expected ErrMaxTurnsExceeded, got %v", tc.Error)
+	}
+	s.mu.RLock()
+	stillActive := s.wakeupState.active
+	s.mu.RUnlock()
+	if stillActive {
+		t.Error("wakeup suppression should be released when MaxTurns blocks re-arming")
+	}
+}
+
+// TestScheduleWakeup_SafetyTimerPreventsLateResultDoubleCompletion verifies
+// that if the wakeup safety timer fires first and then a late continuation
+// ResultMessage arrives, the second handleResult call does not emit a
+// duplicate TurnCompleteEvent. Mirrors TestBgTask_SafetyTimerPreventsLateResultDoubleCompletion.
+func TestScheduleWakeup_SafetyTimerPreventsLateResultDoubleCompletion(t *testing.T) {
+	s := newTestSession(t)
+	isErrFalse := false
+
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	// Force the safety timer to fire by replacing it with a short one.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+	}
+	safetyResult := TurnResult{TurnNumber: 1, Success: true}
+	s.wakeupState.timer = time.AfterFunc(20*time.Millisecond, func() {
+		s.completeWakeupSuppressedTurn(safetyResult)
+	})
+	s.mu.Unlock()
+
+	// First TurnCompleteEvent (from safety timer).
+	gotFirst := false
+	deadline := time.After(time.Second)
+	for !gotFirst {
+		select {
+		case event := <-s.events:
+			if _, ok := event.(TurnCompleteEvent); ok {
+				gotFirst = true
+			}
+		case <-deadline:
+			t.Fatal("safety timer should have fired and emitted TurnCompleteEvent")
+		}
+	}
+
+	// A late continuation ResultMessage arrives. It must NOT emit a
+	// second TurnCompleteEvent.
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 999, OutputTokens: 999},
+	})
+
+	// Drain the event channel for a short window; any TurnCompleteEvent
+	// here is a double-completion bug.
+	windowEnd := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case event := <-s.events:
+			if _, ok := event.(TurnCompleteEvent); ok {
+				t.Error("second TurnCompleteEvent emitted for late continuation — duplicate completion")
+			}
+		case <-windowEnd:
+			return
+		}
+	}
+}

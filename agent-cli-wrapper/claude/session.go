@@ -423,8 +423,16 @@ func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, er
 					Error:                 tc.Error,
 					HasLiveBackgroundWork: tc.HasLiveBackgroundWork,
 				}
-				// Populate text/blocks from turn state
-				turn := s.turnManager.GetTurnByNumber(tc.TurnNumber)
+				// Populate text/blocks from turn state. For ScheduleWakeup
+				// suppression the event's TurnNumber is the original
+				// suppressed turn, but the final assistant response lives on
+				// the latest continuation turn. Prefer CurrentTurn() when it
+				// has advanced past tc.TurnNumber so callers get the real
+				// final response rather than the pre-wakeup snapshot.
+				turn := s.turnManager.CurrentTurn()
+				if turn == nil || turn.Number < tc.TurnNumber {
+					turn = s.turnManager.GetTurnByNumber(tc.TurnNumber)
+				}
 				if turn != nil {
 					result.Text = turn.FullText
 					result.Thinking = turn.FullThinking
@@ -1341,13 +1349,19 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Check if the turn ends with a ScheduleWakeup tool call. When present,
 	// the CLI will auto-inject a continuation user message after the specified
 	// delay, starting a new assistant turn. Suppress turn completion so callers
-	// of Ask()/WaitForTurn() block until the continuation turn completes.
+	// of Ask()/WaitForTurn() block until a continuation turn completes without
+	// another ScheduleWakeup (chained wakeups re-arm suppression).
 	//
 	// Skip suppression when:
 	//   - the result carries an error (propagate immediately)
-	//   - this is already a wakeup continuation (wakeupSuppressed=true) and
-	//     the continuation turn does NOT have another ScheduleWakeup
-	shouldSuppressWakeup := !msg.IsError && turn.hasScheduleWakeup()
+	//   - MaxTurns has been reached (let the normal path surface it)
+	//   - the turn does not contain a ScheduleWakeup tool_use
+	// Don't suppress if we've already hit MaxTurns. Suppression would
+	// re-arm the session for another continuation turn, letting chained
+	// wakeups run past the configured limit. Fall through so the MaxTurns
+	// guard below can convert this result into ErrMaxTurnsExceeded.
+	maxTurnsReached := s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns
+	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && turn.hasScheduleWakeup()
 	if shouldSuppressWakeup {
 		s.mu.Lock()
 		s.cumulativeCostUSD += msg.TotalCostUSD
