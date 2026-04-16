@@ -602,14 +602,20 @@ func TestScheduleWakeup_SuppressesTurn(t *testing.T) {
 	}
 	s.handleResult(resultMsg)
 
-	// Should NOT get a TurnCompleteEvent.
-	select {
-	case event := <-s.events:
-		if _, ok := event.(TurnCompleteEvent); ok {
-			t.Error("TurnCompleteEvent should NOT be emitted — turn should be suppressed for ScheduleWakeup")
+	// Drain all events for a fixed window, failing if any TurnCompleteEvent
+	// appears. A single select would stop after the first non-completion
+	// event (e.g. CLIToolResultEvent), which could mask a later completion.
+	deadline := time.After(100 * time.Millisecond)
+	draining := true
+	for draining {
+		select {
+		case event := <-s.events:
+			if _, ok := event.(TurnCompleteEvent); ok {
+				t.Error("TurnCompleteEvent should NOT be emitted — turn should be suppressed for ScheduleWakeup")
+			}
+		case <-deadline:
+			draining = false
 		}
-	case <-time.After(100 * time.Millisecond):
-		// Good — suppressed.
 	}
 
 	// Verify wakeup state is active.
@@ -871,5 +877,163 @@ func TestScheduleWakeup_ErrorTurnNotSuppressed(t *testing.T) {
 	s.mu.RUnlock()
 	if suppActive {
 		t.Error("wakeup suppression should not be active for error results")
+	}
+}
+
+// TestScheduleWakeup_ChainedSuppressionAccumulatesUsage verifies that when
+// two ScheduleWakeup turns chain (turn N has ScheduleWakeup, its
+// continuation turn N+1 also has ScheduleWakeup, and the final
+// continuation turn N+2 does not), the final TurnCompleteEvent:
+//   - uses the original (earliest) suppressed turn number
+//   - accumulates token usage from all three turns
+func TestScheduleWakeup_ChainedSuppressionAccumulatesUsage(t *testing.T) {
+	s := newTestSession(t)
+	isErrFalse := false
+
+	// Turn 1: ScheduleWakeup.
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p1", "reason": "r1",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 100, OutputTokens: 50},
+		TotalCostUSD: 0.01,
+	})
+
+	// Turn 2: continuation that ALSO ends with ScheduleWakeup (chained).
+	s.turnManager.StartTurn("cont-1")
+	s.turnManager.AppendContentBlock(ContentBlock{
+		Type:      ContentBlockTypeToolUse,
+		ToolUseID: "t2",
+		ToolName:  "ScheduleWakeup",
+		ToolInput: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p2", "reason": "r2",
+		},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 200, OutputTokens: 75},
+		TotalCostUSD: 0.02,
+	})
+
+	// Verify suppression is still active after chain.
+	s.mu.RLock()
+	suppActive := s.wakeupState.active
+	origTurn := s.wakeupState.suppressedTurnNumber
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Fatal("wakeup suppression should still be active after chained ScheduleWakeup")
+	}
+	if origTurn != 1 {
+		t.Errorf("expected suppressedTurnNumber to remain 1, got %d", origTurn)
+	}
+
+	// Turn 3: final continuation, no ScheduleWakeup.
+	s.turnManager.StartTurn("cont-2")
+	s.turnManager.AppendText("all done")
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 300, OutputTokens: 100},
+		TotalCostUSD: 0.03,
+	})
+
+	// Drain events until TurnCompleteEvent appears; must carry accumulated
+	// usage from all three turns and the original turn number.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("expected TurnCompleteEvent after chain terminates")
+		}
+		if found {
+			break
+		}
+	}
+
+	if tc.TurnNumber != 1 {
+		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
+	}
+	if got, want := tc.Usage.InputTokens, 100+200+300; got != want {
+		t.Errorf("expected accumulated InputTokens=%d, got %d", want, got)
+	}
+	if got, want := tc.Usage.OutputTokens, 50+75+100; got != want {
+		t.Errorf("expected accumulated OutputTokens=%d, got %d", want, got)
+	}
+	// Cost accumulates across all three turns.
+	const wantCost = 0.01 + 0.02 + 0.03
+	if tc.Usage.CostUSD < wantCost-1e-9 || tc.Usage.CostUSD > wantCost+1e-9 {
+		t.Errorf("expected accumulated CostUSD=%v, got %v", wantCost, tc.Usage.CostUSD)
+	}
+}
+
+// TestScheduleWakeup_WakeupStateClearedOnNewTurn verifies that a pending
+// wakeup suppression does not leak into a subsequent user-initiated turn.
+// SendMessage/SendToolResult must reset wakeupState so handleResult for
+// the new turn does not complete under a stale suppressedTurnNumber.
+func TestScheduleWakeup_WakeupStateClearedOnNewTurn(t *testing.T) {
+	s := newTestSession(t)
+	isErrFalse := false
+
+	// Turn 1: ScheduleWakeup (leaves wakeupState.active=true, suppressed=1).
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+		TotalCostUSD: 0.01,
+	})
+
+	s.mu.RLock()
+	active := s.wakeupState.active
+	s.mu.RUnlock()
+	if !active {
+		t.Fatal("precondition: wakeup suppression should be active")
+	}
+
+	// User sends a new prompt while wakeup is pending. Touch turnManager
+	// directly (avoiding the process writer) by invoking the same reset
+	// path used by SendMessage.
+	s.mu.Lock()
+	s.turnManager.StartTurn("fresh user prompt")
+	s.bgState.reset()
+	s.wakeupState.reset()
+	s.mu.Unlock()
+
+	s.mu.RLock()
+	activeAfter := s.wakeupState.active
+	suppTurn := s.wakeupState.suppressedTurnNumber
+	timerCleared := s.wakeupState.timer == nil
+	s.mu.RUnlock()
+
+	if activeAfter {
+		t.Error("wakeupState.active should be cleared by new user turn")
+	}
+	if suppTurn != 0 {
+		t.Errorf("wakeupState.suppressedTurnNumber should be 0, got %d", suppTurn)
+	}
+	if !timerCleared {
+		t.Error("wakeupState.timer should be stopped and cleared by new user turn")
 	}
 }

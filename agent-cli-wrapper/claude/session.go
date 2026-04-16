@@ -301,9 +301,11 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	// Clear any stale background-task suppression state from the previous turn.
-	// A safety timer for Turn N must not fire after Turn N+1 has started.
+	// Clear any stale suppression state from the previous turn. A safety
+	// timer for Turn N must not fire after Turn N+1 has started, and the
+	// suppressed turn number must not bleed across user-initiated turns.
 	s.bgState.reset()
+	s.wakeupState.reset()
 
 	// Record turn start
 	if s.recorder != nil {
@@ -343,8 +345,9 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	// Clear any stale background-task suppression state from the previous turn.
+	// Clear any stale suppression state from the previous turn.
 	s.bgState.reset()
+	s.wakeupState.reset()
 
 	// Record turn start
 	if s.recorder != nil {
@@ -1113,8 +1116,13 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	wakeupTimerFired := s.wakeupState.timerFired
 	s.wakeupState.timerFired = false
 	wakeupSuppressed := s.wakeupState.active
-	// Don't clear wakeupState.active yet — we may need to re-suppress below
-	// if this continuation turn also contains ScheduleWakeup.
+	// Clear wakeupState.active under the same lock where timerFired is read.
+	// Leaving it true while mu is released would race with the safety-timer
+	// callback (completeWakeupSuppressedTurn), which would see active=true
+	// and emit a duplicate TurnCompleteEvent. If this turn needs to be
+	// re-suppressed (chained ScheduleWakeup), the shouldSuppressWakeup
+	// branch below re-arms it.
+	s.wakeupState.active = false
 
 	if timerAlreadyFired || wakeupTimerFired {
 		s.mu.Unlock()
@@ -1140,13 +1148,13 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	s.wakeupState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
-	// When wakeup suppression is active, waiters are blocked on the original
+	// When wakeup suppression was active, waiters are blocked on the original
 	// suppressed turn number. Use that number so CompleteTurn unblocks them.
+	// (wakeupState.active was already cleared above under the initial lock.)
 	resultTurnNumber := turnNumber
 	if wakeupSuppressed {
 		s.mu.Lock()
 		resultTurnNumber = s.wakeupState.suppressedTurnNumber
-		s.wakeupState.active = false
 		s.mu.Unlock()
 	}
 
@@ -1350,6 +1358,10 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
 			CostUSD:             msg.TotalCostUSD,
 		})
+		// Re-add usage drained from prior suppressed turns (snapshotted into
+		// accUsage at the top of this call). Without this, chained wakeups
+		// would silently drop earlier turns' token/cost totals.
+		s.wakeupState.accumulatedUsage.Add(accUsage)
 
 		// On first suppression, capture the original turn number so chained
 		// continuation turns can be completed under the same number.
@@ -1398,7 +1410,12 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	s.mu.Unlock()
 
 	if result.Error == nil {
-		if s.config.MaxTurns > 0 && resultTurnNumber >= s.config.MaxTurns {
+		// MaxTurns is enforced against the actual turn count, not
+		// resultTurnNumber. Under wakeup suppression resultTurnNumber is
+		// the original (lower) turn number used to unblock waiters, but
+		// the real assistant turn count has advanced — enforcing against
+		// the stale number would let chained wakeups exceed the limit.
+		if s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns {
 			result.Error = ErrMaxTurnsExceeded
 		} else if s.config.MaxBudgetUSD > 0 && totalCost >= s.config.MaxBudgetUSD {
 			result.Error = ErrBudgetExceeded

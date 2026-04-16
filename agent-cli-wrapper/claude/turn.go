@@ -192,15 +192,22 @@ func (turn *turnState) hasScheduleWakeup() bool {
 }
 
 // scheduleWakeupDelaySeconds extracts the delaySeconds value from the first
-// ScheduleWakeup tool_use in the turn. Returns 0 if not found.
+// ScheduleWakeup tool_use in the turn. Returns 0 if not found or malformed.
+// Accepts float64 (JSON default), int, and int64 to match the decoder
+// tolerance used for other tool-input numerics in this package.
 func (turn *turnState) scheduleWakeupDelaySeconds() float64 {
 	if turn == nil {
 		return 0
 	}
 	for _, block := range turn.ContentBlocks {
 		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
-			if delay, ok := block.ToolInput["delaySeconds"].(float64); ok {
-				return delay
+			switch v := block.ToolInput["delaySeconds"].(type) {
+			case float64:
+				return v
+			case int:
+				return float64(v)
+			case int64:
+				return float64(v)
 			}
 		}
 	}
