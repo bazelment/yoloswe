@@ -1126,6 +1126,12 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	wakeupTimerFired := s.wakeupState.timerFired
 	s.wakeupState.timerFired = false
 	wakeupSuppressed := s.wakeupState.active
+	// Snapshot suppressedTurnNumber under the initial lock. A later read
+	// after mu.Unlock would race with SendMessage/SendToolResult, which
+	// resets wakeupState to zero — that would emit the completion under
+	// turn 0 and strand WaitForTurn/CollectResponse callers waiting on
+	// the real original turn number.
+	wakeupSuppressedTurnNumber := s.wakeupState.suppressedTurnNumber
 	// Clear wakeupState.active under the same lock where timerFired is read.
 	// Leaving it true while mu is released would race with the safety-timer
 	// callback (completeWakeupSuppressedTurn), which would see active=true
@@ -1159,13 +1165,10 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	s.mu.Unlock()
 
 	// When wakeup suppression was active, waiters are blocked on the original
-	// suppressed turn number. Use that number so CompleteTurn unblocks them.
-	// (wakeupState.active was already cleared above under the initial lock.)
+	// suppressed turn number. Use the snapshot taken under the initial lock.
 	resultTurnNumber := turnNumber
 	if wakeupSuppressed {
-		s.mu.Lock()
-		resultTurnNumber = s.wakeupState.suppressedTurnNumber
-		s.mu.Unlock()
+		resultTurnNumber = wakeupSuppressedTurnNumber
 	}
 
 	result := TurnResult{

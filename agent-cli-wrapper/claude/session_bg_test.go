@@ -1103,6 +1103,67 @@ func TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount(t *testing.T) {
 	}
 }
 
+// TestScheduleWakeup_MaxBudgetExceededReleasesSuppression verifies that
+// when a ScheduleWakeup turn pushes cumulative cost at or past
+// MaxBudgetUSD, suppression is NOT armed and ErrBudgetExceeded is
+// surfaced on the current turn — the chain must not continue running
+// up cost after the budget is breached.
+func TestScheduleWakeup_MaxBudgetExceededReleasesSuppression(t *testing.T) {
+	s := newTestSession(t, WithMaxBudgetUSD(0.05))
+	isErrFalse := false
+
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	// Cost 0.10 > budget 0.05 — suppression must be skipped.
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+		TotalCostUSD: 0.10,
+	})
+
+	// Expect ErrBudgetExceeded on a TurnCompleteEvent, not silent
+	// suppression.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("expected TurnCompleteEvent with ErrBudgetExceeded, got nothing")
+		}
+		if found {
+			break
+		}
+	}
+	if !errors.Is(tc.Error, ErrBudgetExceeded) {
+		t.Errorf("expected ErrBudgetExceeded, got %v", tc.Error)
+	}
+
+	// Wakeup state must have been released (not left armed).
+	s.mu.RLock()
+	active := s.wakeupState.active
+	timer := s.wakeupState.timer
+	s.mu.RUnlock()
+	if active {
+		t.Error("wakeup suppression should be released when budget exceeded")
+	}
+	if timer != nil {
+		t.Error("wakeup safety timer should not be armed when budget exceeded")
+	}
+}
+
 // TestScheduleWakeup_CollectResponseRaceAgainstFinalize verifies that a
 // concurrent CollectResponse blocked on Events() still observes the
 // recorded TurnResult's content when TurnCompleteEvent arrives — i.e.
