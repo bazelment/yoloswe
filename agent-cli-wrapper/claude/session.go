@@ -1448,11 +1448,21 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 // finalizeTurn records, emits, and completes the turn. Called from both the
 // normal handleResult path and the safety-timer path (completeSuppressedTurn).
+//
+// Ordering: turnManager.CompleteTurn runs before s.emit so that any
+// CollectResponse/WaitForTurn caller observing TurnCompleteEvent can look
+// up the recorded TurnResult via GetCompletedResult and find it already
+// populated. Reversing the order would open a race for ScheduleWakeup
+// chains, where the event reports the suppressed turn number but the
+// final assistant content lives on a later continuation turn: a consumer
+// could see the event, query completedResults, miss, and fall back to
+// the suppressed turn's stale turnState snapshot.
 func (s *Session) finalizeTurn(result TurnResult) {
 	if s.recorder != nil {
 		s.recorder.CompleteTurn(result.TurnNumber, result)
 	}
 	_ = s.state.Transition(TransitionResultReceived)
+	s.turnManager.CompleteTurn(result)
 	s.emit(TurnCompleteEvent{
 		TurnNumber:            result.TurnNumber,
 		Success:               result.Success,
@@ -1461,7 +1471,6 @@ func (s *Session) finalizeTurn(result TurnResult) {
 		Error:                 result.Error,
 		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
 	})
-	s.turnManager.CompleteTurn(result)
 }
 
 // completeSuppressedTurn is called by the background-task safety timer when
@@ -1510,18 +1519,20 @@ func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
 	s.wakeupState.timerFired = true
 	s.wakeupState.timer = nil
 	s.wakeupState.accumulatedUsage = TurnUsage{}
-	s.mu.Unlock()
 
-	// Refresh content from the latest turn snapshot. For chained wakeups
-	// the current turn number has advanced beyond result.TurnNumber (which
-	// is the original suppressed turn used to unblock waiters), so we take
-	// whatever the most recent streamed assistant state is rather than
-	// finalizing with the stale snapshot captured when the timer was armed.
-	if turn := s.turnManager.CurrentTurn(); turn != nil {
+	// Snapshot the current turn under the lock so a concurrent
+	// SendMessage/SendToolResult (which advances the turn manager and
+	// resets wakeupState) cannot splice unrelated user-initiated turn
+	// content onto the wakeup completion. Only accept the snapshot if
+	// the turn's number is >= the suppressed turn; otherwise the
+	// turn manager is in an unexpected state and we keep result as-is.
+	turn := s.turnManager.CurrentTurn()
+	if turn != nil && turn.Number >= result.TurnNumber {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
 	}
+	s.mu.Unlock()
 
 	s.finalizeTurn(result)
 }

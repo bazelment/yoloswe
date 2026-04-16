@@ -1103,6 +1103,75 @@ func TestScheduleWakeup_MaxTurnsEnforcedAgainstActualTurnCount(t *testing.T) {
 	}
 }
 
+// TestScheduleWakeup_CollectResponseRaceAgainstFinalize verifies that a
+// concurrent CollectResponse blocked on Events() still observes the
+// recorded TurnResult's content when TurnCompleteEvent arrives — i.e.
+// finalizeTurn must record the result before emitting the event so a
+// racing consumer cannot fall back to the stale turnState snapshot.
+func TestScheduleWakeup_CollectResponseRaceAgainstFinalize(t *testing.T) {
+	s := newTestSession(t)
+	isErrFalse := false
+
+	// Turn 1: ScheduleWakeup — armed but not yet completed.
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "t1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "p", "reason": "r",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "t1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	// Start CollectResponse BEFORE the continuation arrives so it blocks
+	// on s.events. When handleResult finalizes, the consumer is already
+	// waiting — any race between event emission and result recording
+	// would show up here.
+	type cresp struct {
+		result *TurnResult
+		err    error
+	}
+	done := make(chan cresp, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		r, _, err := s.CollectResponse(ctx)
+		done <- cresp{r, err}
+	}()
+
+	// Give the collector a moment to block on the channel, then drive
+	// the continuation to final completion.
+	time.Sleep(20 * time.Millisecond)
+
+	const finalText = "final assistant response after wakeup (race test)"
+	s.turnManager.StartTurn("cont")
+	s.turnManager.AppendText(finalText)
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 20, OutputTokens: 10},
+	})
+
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("CollectResponse failed: %v", res.err)
+		}
+		if res.result.TurnNumber != 1 {
+			t.Errorf("expected TurnNumber=1, got %d", res.result.TurnNumber)
+		}
+		if res.result.Text != finalText {
+			t.Errorf("expected continuation Text %q, got %q", finalText, res.result.Text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("CollectResponse did not return")
+	}
+}
+
 // TestScheduleWakeup_CollectResponseReturnsContinuationContent verifies
 // that CollectResponse, when a wakeup chain completes, returns the
 // continuation turn's text and content blocks rather than the
