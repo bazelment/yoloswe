@@ -78,16 +78,21 @@ func excerptRunes(s string, max int) string {
 	return s
 }
 
-// FinalTurnToolError reports the first CLI-reported tool_use_error in
-// blocks, returning the failing tool's name and a bounded excerpt. A
-// block qualifies iff IsError is set AND the content carries the
-// toolUseErrorMarker wrapper — the marker is the stable signal the CLI
-// uses for tool invocations it refused, blocked, or cancelled. Nonzero-
-// exit Bash (e.g. `gh pr checks` exit 8) sets IsError but lacks the
-// wrapper and must not trigger retry.
+// FinalTurnToolError reports a CLI-reported tool_use_error only when it
+// is the LAST tool_result in the turn. A block qualifies iff IsError is
+// set AND the content carries the toolUseErrorMarker wrapper — the marker
+// is the stable signal the CLI uses for tool invocations it refused,
+// blocked, or cancelled. Nonzero-exit Bash (e.g. `gh pr checks` exit 8)
+// sets IsError but lacks the wrapper and must not trigger retry.
 //
-// On parallel batches, first qualifying block wins (first with both
-// IsError and the marker).
+// Walking in reverse catches the last tool_result first. If the agent
+// recovered from a transient error (e.g. "File has not been read yet"
+// followed by a successful Read + Edit), the last tool_result is a
+// success, so ok=false — the turn is not retried.
+//
+// On parallel batches where the errored group is the final group, the
+// cancelled sibling (carrying the marker) is still the last tool_result
+// in forward order, so it remains detectable.
 func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
 	toolNames := make(map[string]string)
 	for _, block := range blocks {
@@ -95,13 +100,19 @@ func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok boo
 			toolNames[block.ToolUseID] = block.ToolName
 		}
 	}
-	for _, block := range blocks {
-		if block.Type != ContentBlockTypeToolResult || !block.IsError {
+	// Walk in reverse to find the last tool_result block.
+	for i := len(blocks) - 1; i >= 0; i-- {
+		block := blocks[i]
+		if block.Type != ContentBlockTypeToolResult {
 			continue
+		}
+		// Found the last tool_result. It must have IsError AND the marker.
+		if !block.IsError {
+			return "", "", false
 		}
 		content := stringifyToolResult(block.ToolResult)
 		if !strings.Contains(content, toolUseErrorMarker) {
-			continue
+			return "", "", false
 		}
 		name := toolNames[block.ToolUseID]
 		if name == "" {

@@ -253,6 +253,46 @@ func TestFinalTurnToolError_Fixture_RealToolUseError(t *testing.T) {
 	}
 }
 
+// TestFinalTurnToolError_Fixture_EditErrorThenRecovered is the G4
+// regression for the 2026-04-18 production failure: a single turn with
+// one early Edit tool_use_error followed by a successful Read + Edit.
+// The agent self-recovered; FinalTurnToolError must return ok=false.
+func TestFinalTurnToolError_Fixture_EditErrorThenRecovered(t *testing.T) {
+	t.Parallel()
+	blocks := loadRetryFixture(t, "edit_error_then_recovered.json")
+	if _, _, ok := FinalTurnToolError(blocks); ok {
+		t.Error("recovered-error fixture must not trigger retry (G4: error is not the last tool_result)")
+	}
+}
+
+// TestFinalTurnToolError_ErrorIsLastToolResult verifies the positive G4
+// case: when the last tool_result in the turn IS the errored one, retry
+// must still fire.
+func TestFinalTurnToolError_ErrorIsLastToolResult(t *testing.T) {
+	t.Parallel()
+	blocks := []ContentBlock{
+		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Read"},
+		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: "file contents", IsError: false},
+		{Type: ContentBlockTypeToolUse, ToolUseID: "t2", ToolName: "Edit"},
+		{
+			Type:       ContentBlockTypeToolResult,
+			ToolUseID:  "t2",
+			ToolResult: "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+			IsError:    true,
+		},
+	}
+	name, excerpt, ok := FinalTurnToolError(blocks)
+	if !ok {
+		t.Fatal("expected ok=true when error is the last tool_result")
+	}
+	if name != "Edit" {
+		t.Errorf("expected tool=Edit, got %q", name)
+	}
+	if !strings.Contains(excerpt, "File has not been read yet") {
+		t.Errorf("expected excerpt to contain error text, got %q", excerpt)
+	}
+}
+
 // loadRetryFixture reads a JSON snapshot of []ContentBlock from
 // testdata/retry/. Fixtures are hand-extracted from real Claude CLI
 // session JSONL files to guard the detector against regressions.

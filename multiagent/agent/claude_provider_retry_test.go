@@ -339,6 +339,53 @@ func TestRunRetryLoop_BgWorkLiveNoUnresolvedError(t *testing.T) {
 	}
 }
 
+// recoveredErrorBlocks returns a block sequence where an early Edit
+// tool_use_error is followed by a successful Read + Edit, mirroring the
+// 2026-04-18 production failure (fc29ffb6 session, line 132 → 156).
+func recoveredErrorBlocks() []claude.ContentBlock {
+	return []claude.ContentBlock{
+		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "edit1", ToolName: "Edit"},
+		{
+			Type:       claude.ContentBlockTypeToolResult,
+			ToolUseID:  "edit1",
+			ToolResult: "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+			IsError:    true,
+		},
+		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "read1", ToolName: "Read"},
+		{Type: claude.ContentBlockTypeToolResult, ToolUseID: "read1", ToolResult: "file contents", IsError: false},
+		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "edit2", ToolName: "Edit"},
+		{Type: claude.ContentBlockTypeToolResult, ToolUseID: "edit2", ToolResult: "edit applied", IsError: false},
+	}
+}
+
+// TestRunRetryLoop_SkipsWhenAgentRecovered is the G4 regression for the
+// 2026-04-18 production failure: a turn that had an early Edit error
+// followed by a successful recovery must not trigger retry.
+func TestRunRetryLoop_SkipsWhenAgentRecovered(t *testing.T) {
+	t.Parallel()
+	initial := &claude.TurnResult{
+		Text:          "Validated successfully.",
+		ContentBlocks: recoveredErrorBlocks(),
+		Success:       true,
+	}
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	result, attempts, _, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no retries when agent self-recovered, got %d", attempts)
+	}
+	if len(fake.asks) != 0 {
+		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
+	}
+	if result != initial {
+		t.Error("expected the original result returned unchanged")
+	}
+}
+
 // TestRunRetryLoop_PropagatesAskError ensures an Ask transport error
 // aborts the loop cleanly without masking.
 func TestRunRetryLoop_PropagatesAskError(t *testing.T) {
