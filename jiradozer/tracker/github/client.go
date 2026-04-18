@@ -313,14 +313,49 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 // AddLabel adds a label to a GitHub issue. The operation is idempotent —
 // GitHub returns 200 OK even if the label is already present.
 func (c *Client) AddLabel(ctx context.Context, issueID string, label string) error {
+	result, err := c.gh.Run(ctx, []string{
+		"api", "-X", "POST",
+		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
+		"-f", fmt.Sprintf("labels[]=%s", label),
+	}, "")
+	if err == nil {
+		return nil
+	}
+	// GitHub returns 422 "Validation Failed" when the label does not yet
+	// exist on the repo. Create it on demand (matching Linear's ensureLabel
+	// behaviour) and retry once.
+	if result == nil || !strings.Contains(result.Stderr, "422") {
+		return fmt.Errorf("add label %q to issue %s: %w", label, issueID, err)
+	}
+	if cErr := c.ensureRepoLabel(ctx, label); cErr != nil {
+		return fmt.Errorf("add label %q to issue %s: ensure repo label: %w", label, issueID, cErr)
+	}
 	if _, err := c.gh.Run(ctx, []string{
 		"api", "-X", "POST",
 		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
 		"-f", fmt.Sprintf("labels[]=%s", label),
 	}, ""); err != nil {
-		return fmt.Errorf("add label %q to issue %s: %w", label, issueID, err)
+		return fmt.Errorf("add label %q to issue %s (after creating repo label): %w", label, issueID, err)
 	}
 	return nil
+}
+
+// ensureRepoLabel creates a label on the repository if it does not already
+// exist. A 422 (label already exists) is treated as success so the operation
+// is idempotent under concurrent creators.
+func (c *Client) ensureRepoLabel(ctx context.Context, label string) error {
+	result, err := c.gh.Run(ctx, []string{
+		"api", "-X", "POST",
+		fmt.Sprintf("repos/%s/%s/labels", c.owner, c.repo),
+		"-f", "name=" + label,
+	}, "")
+	if err == nil {
+		return nil
+	}
+	if result != nil && strings.Contains(result.Stderr, "422") {
+		return nil
+	}
+	return err
 }
 
 // RemoveLabel removes a label from a GitHub issue. The operation is

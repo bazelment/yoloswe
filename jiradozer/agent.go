@@ -550,10 +550,19 @@ func JoinRoundOutputs(outputs []string) string {
 }
 
 func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
+	// Strip jiradozer-* bookkeeping labels so agent prompts see only
+	// user-facing labels. Callers that need the full set (e.g. phase skip
+	// logic in Workflow) work off a separately-tracked copy.
+	userLabels := make([]string, 0, len(issue.Labels))
+	for _, l := range issue.Labels {
+		if !isJiradozerLabel(l) {
+			userLabels = append(userLabels, l)
+		}
+	}
 	d := PromptData{
 		Identifier: issue.Identifier,
 		Title:      issue.Title,
-		Labels:     strings.Join(issue.Labels, ", "),
+		Labels:     strings.Join(userLabels, ", "),
 		BaseBranch: baseBranch,
 	}
 	if issue.Description != nil {
