@@ -459,12 +459,18 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 	}
 }
 
+// completePriorPhases walks phaseTable up to currentPhase and attempts to
+// mark each earlier phase as done. Phases already phaseDone are skipped by
+// completePhase itself. Phases still phaseNotStarted can happen when the
+// initial enterPhase AddLabel failed transiently; since the state machine
+// has since advanced past them, retry the -done write here so the issue
+// reflects the workflow's actual progress.
 func (w *Workflow) completePriorPhases(ctx context.Context, currentPhase string) {
 	for _, p := range phaseTable {
 		if p.name == currentPhase {
 			return
 		}
-		if w.phases[p.name] == phaseInProgress {
+		if w.phases[p.name] != phaseDone {
 			w.completePhase(ctx, p.name)
 		}
 	}

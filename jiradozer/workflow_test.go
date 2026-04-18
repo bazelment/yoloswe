@@ -1206,6 +1206,34 @@ func TestWorkflow_CompletePhase_DoneLabelFailureDoesNotAdvanceState(t *testing.T
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
 }
 
+// TestWorkflow_CompletePriorPhases_RecoversFromFailedEnter verifies that
+// approving a phase boundary still writes -done for a prior phase whose
+// initial enterPhase AddLabel failed. Without this, a transient tracker
+// failure at workflow start would leave the issue missing plan-done even
+// though the workflow ran planning and has moved on.
+func TestWorkflow_CompletePriorPhases_RecoversFromFailedEnter(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		addLabelErr: map[string]error{"jiradozer-plan-inprogress": errors.New("transient")},
+	}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+
+	// Simulate initial enterPhase call that failed at workflow start.
+	wf.enterPhase(context.Background(), PhasePlan)
+	assert.Equal(t, phaseNotStarted, wf.phases[PhasePlan])
+
+	// Workflow has advanced through planning and is now crossing the
+	// plan → build boundary. Clear the AddLabel error so completion can
+	// write -done successfully.
+	mt.addLabelErr = nil
+	wf.completePriorPhases(context.Background(), PhaseBuild)
+
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+	seq := labelSequence(mt)
+	// Expect the -done write, even though the initial -inprogress never
+	// made it onto the issue.
+	assert.Contains(t, seq, "AddLabel:jiradozer-plan-done")
+}
+
 // TestWorkflow_ApproveTransition_CrossesPhaseBoundary verifies that a
 // plan_review → building transition completes the plan phase and enters the
 // build phase in the correct order.
@@ -1243,7 +1271,9 @@ func TestWorkflow_ApproveTransition_BuildToValidate(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepBuildReview)
-	wf.phases[PhaseBuild] = phaseInProgress // simulate build phase already in-flight
+	// Simulate plan already completed (normal mid-run state) and build in-flight.
+	wf.phases[PhasePlan] = phaseDone
+	wf.phases[PhaseBuild] = phaseInProgress
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepValidating, "approved"))
 
@@ -1357,6 +1387,8 @@ func TestWorkflow_HandlePhaseBoundary_MidRunSkip(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepBuildReview)
+	// Normal mid-run state: plan done, build in-flight.
+	wf.phases[PhasePlan] = phaseDone
 	wf.phases[PhaseBuild] = phaseInProgress
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepValidating, "approved"))
