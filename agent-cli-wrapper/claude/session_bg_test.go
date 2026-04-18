@@ -14,18 +14,25 @@ import (
 // is found or the timeout expires.
 func waitForTurnComplete(t *testing.T, events <-chan Event, timeout time.Duration) {
 	t.Helper()
+	drainUntilTurnComplete(t, events, timeout)
+}
+
+// drainUntilTurnComplete drains events until a TurnCompleteEvent arrives and
+// returns it. Fatals if the timeout expires first.
+func drainUntilTurnComplete(t *testing.T, events <-chan Event, timeout time.Duration) TurnCompleteEvent {
+	t.Helper()
 	deadline := time.After(timeout)
 	for {
 		select {
 		case event := <-events:
-			if _, ok := event.(TurnCompleteEvent); ok {
-				return
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				return tce
 			}
-			// Keep draining other events (CLIToolResultEvent, etc.).
 		case <-deadline:
-			t.Fatal("turn did not complete — TurnCompleteEvent not emitted within timeout")
+			t.Fatal("TurnCompleteEvent not emitted within timeout")
 		}
 	}
+	panic("unreachable")
 }
 
 // makeFlexibleContent marshals v into a FlexibleContent.
@@ -714,26 +721,7 @@ func TestScheduleWakeup_ContinuationCompletesTurn(t *testing.T) {
 	}
 	s.handleResult(resultMsg2)
 
-	// Now we SHOULD get a TurnCompleteEvent with the original turn number.
-	// Drain non-TurnCompleteEvents (e.g. CLIToolResultEvent) before checking.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-			// else keep draining
-		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent for continuation turn")
-		}
-		if found {
-			break
-		}
-	}
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
 	// Turn number should be the original suppressed turn (1), not the
 	// continuation turn's number.
 	if tc.TurnNumber != 1 {
@@ -801,24 +789,7 @@ func TestScheduleWakeup_SafetyTimerCompletesTurn(t *testing.T) {
 	})
 	s.mu.Unlock()
 
-	// Wait for the safety timer to fire, draining non-TurnCompleteEvents.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("safety timer should have fired and completed the turn")
-		}
-		if found {
-			break
-		}
-	}
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
 	if tc.TurnNumber != 1 {
 		t.Errorf("expected TurnNumber=1, got %d", tc.TurnNumber)
 	}
@@ -852,24 +823,8 @@ func TestScheduleWakeup_ErrorTurnNotSuppressed(t *testing.T) {
 	}
 	s.handleResult(resultMsg)
 
-	// Error results should NOT be suppressed. Drain non-TurnCompleteEvents.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("error result with ScheduleWakeup should complete immediately, not suppress")
-		}
-		if found {
-			break
-		}
-	}
+	// Error results should NOT be suppressed.
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
 	if tc.Success {
 		t.Error("expected success=false for error result")
 	}
@@ -935,23 +890,7 @@ func TestScheduleWakeup_ContinuationDoesNotReSuppress(t *testing.T) {
 	})
 
 	// The continuation must RELEASE suppression, not re-arm it.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent after continuation; suppression was spuriously re-armed")
-		}
-		if found {
-			break
-		}
-	}
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
 
 	// Usage must include both the wakeup turn and the continuation.
 	if tc.TurnNumber != 1 {
@@ -1108,23 +1047,7 @@ func TestScheduleWakeup_ChainedWakeupReSuppress(t *testing.T) {
 	})
 
 	// Now we MUST get a TurnCompleteEvent with the original turn number.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent after final continuation (no ScheduleWakeup)")
-		}
-		if found {
-			break
-		}
-	}
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
 
 	// Turn number must be the original (1), not the continuation's number.
 	if tc.TurnNumber != 1 {
@@ -1237,25 +1160,8 @@ func TestScheduleWakeup_MaxBudgetExceededReleasesSuppression(t *testing.T) {
 		TotalCostUSD: 0.10,
 	})
 
-	// Expect ErrBudgetExceeded on a TurnCompleteEvent, not silent
-	// suppression.
-	var tc TurnCompleteEvent
-	deadline := time.After(time.Second)
-	for {
-		var found bool
-		select {
-		case event := <-s.events:
-			if tce, ok := event.(TurnCompleteEvent); ok {
-				tc = tce
-				found = true
-			}
-		case <-deadline:
-			t.Fatal("expected TurnCompleteEvent with ErrBudgetExceeded, got nothing")
-		}
-		if found {
-			break
-		}
-	}
+	// Expect ErrBudgetExceeded on a TurnCompleteEvent, not silent suppression.
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
 	if !errors.Is(tc.Error, ErrBudgetExceeded) {
 		t.Errorf("expected ErrBudgetExceeded, got %v", tc.Error)
 	}

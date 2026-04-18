@@ -225,24 +225,17 @@ func (turn *turnState) latestScheduleWakeupDelaySeconds() float64 {
 		return 0
 	}
 	delay := float64(0)
-	found := false
 	for _, block := range turn.ContentBlocks {
 		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
 			switch v := block.ToolInput["delaySeconds"].(type) {
 			case float64:
 				delay = v
-				found = true
 			case int:
 				delay = float64(v)
-				found = true
 			case int64:
 				delay = float64(v)
-				found = true
 			}
 		}
-	}
-	if !found {
-		return 0
 	}
 	return delay
 }

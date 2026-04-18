@@ -55,19 +55,12 @@ func (b *bgSuppressionState) reset() {
 // continuation turn. If the continuation also calls ScheduleWakeup, it is
 // suppressed again, chaining until a turn completes without ScheduleWakeup.
 type wakeupSuppressionState struct {
-	timer *time.Timer // safety timer; fires if no continuation arrives
-	// suppressedWakeupToolID is the tool_use_id of the ScheduleWakeup block
-	// that triggered the current suppression. Used to detect when a
-	// continuation appends a NEW ScheduleWakeup (different ID) vs the stale
-	// original block that persists in ContentBlocks across continuations.
-	suppressedWakeupToolID string
-	accumulatedUsage       TurnUsage // token/cost totals from suppressed turns
-	// suppressedTurnNumber is the original turn number that waiters are
-	// blocked on. The continuation turn has a higher number, but we
-	// complete it under the original number so WaitForTurn callers unblock.
-	suppressedTurnNumber int
-	active               bool // true while waiting for the continuation turn
-	timerFired           bool // set by the safety timer
+	timer                  *time.Timer // safety timer; fires if no continuation arrives
+	suppressedWakeupToolID string      // tool_use_id that triggered suppression; detects stale vs new blocks
+	accumulatedUsage       TurnUsage   // token/cost totals from suppressed turns
+	suppressedTurnNumber   int         // original turn number; continuations complete under this number
+	active                 bool        // true while waiting for the continuation turn
+	timerFired             bool        // set by the safety timer
 }
 
 // reset clears wakeup suppression state and stops any pending timer.
@@ -1376,11 +1369,11 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	//     re-suppress, chaining the wakeup sequence.
 	maxTurnsReached := s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns
 	latestWakeupID := turn.latestScheduleWakeupToolID()
-	// alreadySuppressedThisWakeup: we previously suppressed on this exact
-	// tool_use_id, meaning no new ScheduleWakeup was appended by the
-	// continuation. priorSuppressedWakeupToolID was snapshotted under mu above.
-	alreadySuppressedThisWakeup := wakeupSuppressed && latestWakeupID == priorSuppressedWakeupToolID
-	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && latestWakeupID != "" && !alreadySuppressedThisWakeup
+	// priorSuppressedWakeupToolID was snapshotted under mu above. If it matches
+	// latestWakeupID, the continuation appended no new ScheduleWakeup — the stale
+	// original block is the only one present, so we release rather than re-suppress.
+	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && latestWakeupID != "" &&
+		!(wakeupSuppressed && latestWakeupID == priorSuppressedWakeupToolID)
 	if shouldSuppressWakeup {
 		s.mu.Lock()
 		s.cumulativeCostUSD += msg.TotalCostUSD
