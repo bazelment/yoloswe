@@ -201,27 +201,50 @@ func (turn *turnState) hasScheduleWakeup() bool {
 	return false
 }
 
-// scheduleWakeupDelaySeconds extracts the delaySeconds value from the first
-// ScheduleWakeup tool_use in the turn. Returns 0 if not found or malformed.
-// Accepts float64 (JSON default), int, and int64 to match the decoder
-// tolerance used for other tool-input numerics in this package.
-func (turn *turnState) scheduleWakeupDelaySeconds() float64 {
+// latestScheduleWakeupToolID returns the tool_use_id of the LAST ScheduleWakeup
+// block in the turn, or "" if none. Used to detect when a continuation appends
+// a new ScheduleWakeup (different ID) vs the stale original block.
+func (turn *turnState) latestScheduleWakeupToolID() string {
+	if turn == nil {
+		return ""
+	}
+	id := ""
+	for _, block := range turn.ContentBlocks {
+		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
+			id = block.ToolUseID
+		}
+	}
+	return id
+}
+
+// latestScheduleWakeupDelaySeconds extracts the delaySeconds from the LAST
+// ScheduleWakeup block. For chained wakeups the continuation appends a new
+// block; the safety timer should be set from the newest delay, not the first.
+func (turn *turnState) latestScheduleWakeupDelaySeconds() float64 {
 	if turn == nil {
 		return 0
 	}
+	delay := float64(0)
+	found := false
 	for _, block := range turn.ContentBlocks {
 		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
 			switch v := block.ToolInput["delaySeconds"].(type) {
 			case float64:
-				return v
+				delay = v
+				found = true
 			case int:
-				return float64(v)
+				delay = float64(v)
+				found = true
 			case int64:
-				return float64(v)
+				delay = float64(v)
+				found = true
 			}
 		}
 	}
-	return 0
+	if !found {
+		return 0
+	}
+	return delay
 }
 
 // turnState tracks the state of a single turn.

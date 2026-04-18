@@ -982,6 +982,179 @@ func TestScheduleWakeup_ContinuationDoesNotReSuppress(t *testing.T) {
 	}
 }
 
+// TestScheduleWakeup_ChainedWakeupReSuppress verifies the documented chaining
+// behavior: when a continuation turn itself calls ScheduleWakeup (with a NEW
+// tool_use_id), suppression is re-armed rather than released. The session only
+// completes when a continuation arrives without a new ScheduleWakeup.
+// This is the production scenario where jiradozer exited prematurely because
+// the second ScheduleWakeup was not re-suppressed.
+func TestScheduleWakeup_ChainedWakeupReSuppress(t *testing.T) {
+	s := newTestSession(t)
+	isErrFalse := false
+
+	// --- Turn 1: agent calls ScheduleWakeup (tool-1) ---
+	simulateAssistantToolUse(s, []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60), "prompt": "check again", "reason": "polling",
+		}},
+	})
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "scheduled", IsError: &isErrFalse},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 100, OutputTokens: 50},
+		TotalCostUSD: 0.01,
+	})
+
+	// Assert first suppression is armed.
+	s.mu.RLock()
+	active1 := s.wakeupState.active
+	origTurn := s.wakeupState.suppressedTurnNumber
+	suppID1 := s.wakeupState.suppressedWakeupToolID
+	timer1 := s.wakeupState.timer
+	s.mu.RUnlock()
+	if !active1 {
+		t.Fatal("wakeup suppression should be active after first ScheduleWakeup")
+	}
+	if origTurn != 1 {
+		t.Errorf("expected suppressedTurnNumber=1, got %d", origTurn)
+	}
+	if suppID1 != "tool-1" {
+		t.Errorf("expected suppressedWakeupToolID=tool-1, got %q", suppID1)
+	}
+	if timer1 == nil {
+		t.Error("safety timer should be active after first ScheduleWakeup")
+	}
+	// Stop the first safety timer; we'll assert re-arming after the second.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+		s.wakeupState.timer = nil
+	}
+	s.mu.Unlock()
+
+	// --- Continuation 1: agent calls a second ScheduleWakeup (tool-2) ---
+	// The CLI appends the new content to the same turn (no StartTurn call),
+	// so tool-1 still persists in ContentBlocks alongside the new tool-2.
+	s.turnManager.AppendContentBlock(ContentBlock{
+		Type:      ContentBlockTypeToolUse,
+		ToolUseID: "tool-2",
+		ToolName:  "ScheduleWakeup",
+		ToolInput: map[string]interface{}{
+			"delaySeconds": float64(120), "prompt": "still polling", "reason": "waiting on codex",
+		},
+	})
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 200, OutputTokens: 75},
+		TotalCostUSD: 0.02,
+	})
+
+	// The second ScheduleWakeup must re-suppress — no TurnCompleteEvent yet.
+	select {
+	case event := <-s.events:
+		if _, ok := event.(TurnCompleteEvent); ok {
+			t.Fatal("got unexpected TurnCompleteEvent after chained ScheduleWakeup — suppression was not re-armed")
+		}
+	default:
+		// Good — no TurnCompleteEvent.
+	}
+
+	// Verify suppression is still active and re-armed with the new tool ID.
+	s.mu.RLock()
+	active2 := s.wakeupState.active
+	suppID2 := s.wakeupState.suppressedWakeupToolID
+	origTurn2 := s.wakeupState.suppressedTurnNumber
+	timer2 := s.wakeupState.timer
+	s.mu.RUnlock()
+	if !active2 {
+		t.Error("wakeup suppression should still be active after chained ScheduleWakeup")
+	}
+	if suppID2 != "tool-2" {
+		t.Errorf("expected suppressedWakeupToolID=tool-2 after re-arm, got %q", suppID2)
+	}
+	if origTurn2 != 1 {
+		t.Errorf("expected suppressedTurnNumber still=1, got %d", origTurn2)
+	}
+	if timer2 == nil {
+		t.Error("safety timer should be re-armed after chained ScheduleWakeup")
+	}
+	// Stop the second safety timer to avoid interference.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+		s.wakeupState.timer = nil
+	}
+	s.mu.Unlock()
+
+	// --- Continuation 2: no new ScheduleWakeup (Bash + text) ---
+	// Now the continuation resolves without calling ScheduleWakeup, so
+	// suppression should release and TurnCompleteEvent should fire.
+	s.turnManager.AppendContentBlock(ContentBlock{
+		Type:      ContentBlockTypeToolUse,
+		ToolUseID: "tool-3",
+		ToolName:  "Bash",
+		ToolInput: map[string]interface{}{"command": "echo done"},
+	})
+	s.turnManager.AppendText("All checks passed. Codex review complete.")
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage:        protocol.UsageDetails{InputTokens: 300, OutputTokens: 100},
+		TotalCostUSD: 0.03,
+	})
+
+	// Now we MUST get a TurnCompleteEvent with the original turn number.
+	var tc TurnCompleteEvent
+	deadline := time.After(time.Second)
+	for {
+		var found bool
+		select {
+		case event := <-s.events:
+			if tce, ok := event.(TurnCompleteEvent); ok {
+				tc = tce
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("expected TurnCompleteEvent after final continuation (no ScheduleWakeup)")
+		}
+		if found {
+			break
+		}
+	}
+
+	// Turn number must be the original (1), not the continuation's number.
+	if tc.TurnNumber != 1 {
+		t.Errorf("expected TurnNumber=1 (original suppressed), got %d", tc.TurnNumber)
+	}
+	if !tc.Success {
+		t.Error("expected success=true")
+	}
+
+	// Usage must accumulate across all three handleResult calls.
+	if got, want := tc.Usage.InputTokens, 100+200+300; got != want {
+		t.Errorf("expected accumulated InputTokens=%d, got %d", want, got)
+	}
+	if got, want := tc.Usage.OutputTokens, 50+75+100; got != want {
+		t.Errorf("expected accumulated OutputTokens=%d, got %d", want, got)
+	}
+	const wantCost = 0.01 + 0.02 + 0.03
+	if tc.Usage.CostUSD < wantCost-1e-9 || tc.Usage.CostUSD > wantCost+1e-9 {
+		t.Errorf("expected accumulated CostUSD=%v, got %v", wantCost, tc.Usage.CostUSD)
+	}
+
+	// Suppression must be cleared.
+	s.mu.RLock()
+	stillActive := s.wakeupState.active
+	s.mu.RUnlock()
+	if stillActive {
+		t.Error("wakeup suppression must be cleared after final continuation")
+	}
+}
+
 // TestScheduleWakeup_WakeupStateClearedOnNewTurn verifies that a pending
 // wakeup suppression does not leak into a subsequent user-initiated turn.
 // SendMessage/SendToolResult must reset wakeupState so handleResult for

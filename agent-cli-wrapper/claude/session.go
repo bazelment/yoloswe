@@ -55,14 +55,19 @@ func (b *bgSuppressionState) reset() {
 // continuation turn. If the continuation also calls ScheduleWakeup, it is
 // suppressed again, chaining until a turn completes without ScheduleWakeup.
 type wakeupSuppressionState struct {
-	timer            *time.Timer // safety timer; fires if no continuation arrives
-	accumulatedUsage TurnUsage   // token/cost totals from suppressed turns
-	active           bool        // true while waiting for the continuation turn
-	timerFired       bool        // set by the safety timer
+	timer *time.Timer // safety timer; fires if no continuation arrives
+	// suppressedWakeupToolID is the tool_use_id of the ScheduleWakeup block
+	// that triggered the current suppression. Used to detect when a
+	// continuation appends a NEW ScheduleWakeup (different ID) vs the stale
+	// original block that persists in ContentBlocks across continuations.
+	suppressedWakeupToolID string
+	accumulatedUsage       TurnUsage // token/cost totals from suppressed turns
 	// suppressedTurnNumber is the original turn number that waiters are
 	// blocked on. The continuation turn has a higher number, but we
 	// complete it under the original number so WaitForTurn callers unblock.
 	suppressedTurnNumber int
+	active               bool // true while waiting for the continuation turn
+	timerFired           bool // set by the safety timer
 }
 
 // reset clears wakeup suppression state and stops any pending timer.
@@ -70,6 +75,7 @@ func (w *wakeupSuppressionState) reset() {
 	w.active = false
 	w.timerFired = false
 	w.suppressedTurnNumber = 0
+	w.suppressedWakeupToolID = ""
 	if w.timer != nil {
 		w.timer.Stop()
 		w.timer = nil
@@ -1126,12 +1132,13 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	wakeupTimerFired := s.wakeupState.timerFired
 	s.wakeupState.timerFired = false
 	wakeupSuppressed := s.wakeupState.active
-	// Snapshot suppressedTurnNumber under the initial lock. A later read
-	// after mu.Unlock would race with SendMessage/SendToolResult, which
-	// resets wakeupState to zero — that would emit the completion under
-	// turn 0 and strand WaitForTurn/CollectResponse callers waiting on
-	// the real original turn number.
+	// Snapshot suppressedTurnNumber and suppressedWakeupToolID under the
+	// initial lock. A later read after mu.Unlock would race with
+	// SendMessage/SendToolResult, which resets wakeupState to zero — that
+	// would emit the completion under turn 0 and strand WaitForTurn/
+	// CollectResponse callers waiting on the real original turn number.
 	wakeupSuppressedTurnNumber := s.wakeupState.suppressedTurnNumber
+	priorSuppressedWakeupToolID := s.wakeupState.suppressedWakeupToolID
 	// Clear wakeupState.active under the same lock where timerFired is read.
 	// Leaving it true while mu is released would race with the safety-timer
 	// callback (completeWakeupSuppressedTurn), which would see active=true
@@ -1351,7 +1358,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		}
 	}
 
-	// Check if the turn ends with a ScheduleWakeup tool call. When present,
+	// Check if the turn ends with a NEW ScheduleWakeup tool call. When present,
 	// the CLI will auto-inject a continuation user message after the specified
 	// delay, and the continuation's assistant response is appended to the
 	// same turn (the CLI does NOT start a new turn in turnManager — that only
@@ -1361,15 +1368,19 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Skip suppression when:
 	//   - the result carries an error (propagate immediately)
 	//   - MaxTurns has been reached (let the normal path surface it)
-	//   - the turn does not contain a ScheduleWakeup tool_use
-	//   - wakeupSuppressed is true: this ResultMessage is the continuation
-	//     that releases the prior suppression. The original ScheduleWakeup
-	//     tool_use block persists in ContentBlocks (no StartTurn was called),
-	//     so hasScheduleWakeup() still returns true; without this guard we
-	//     would spuriously re-arm the safety timer for up to ~61 minutes.
-	//     This mirrors the bgState !wasSuppressed guard above.
+	//   - the latest ScheduleWakeup tool_use_id matches the one we already
+	//     suppressed on: this means no new ScheduleWakeup was appended by the
+	//     continuation, so the stale original block is the only one present
+	//     and we should NOT re-suppress. If the continuation DID call
+	//     ScheduleWakeup, its block has a different tool_use_id and we
+	//     re-suppress, chaining the wakeup sequence.
 	maxTurnsReached := s.config.MaxTurns > 0 && turnNumber >= s.config.MaxTurns
-	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && !wakeupSuppressed && turn.hasScheduleWakeup()
+	latestWakeupID := turn.latestScheduleWakeupToolID()
+	// alreadySuppressedThisWakeup: we previously suppressed on this exact
+	// tool_use_id, meaning no new ScheduleWakeup was appended by the
+	// continuation. priorSuppressedWakeupToolID was snapshotted under mu above.
+	alreadySuppressedThisWakeup := wakeupSuppressed && latestWakeupID == priorSuppressedWakeupToolID
+	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && latestWakeupID != "" && !alreadySuppressedThisWakeup
 	if shouldSuppressWakeup {
 		s.mu.Lock()
 		s.cumulativeCostUSD += msg.TotalCostUSD
@@ -1387,14 +1398,19 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 		// On first suppression, capture the original turn number so chained
 		// continuation turns can be completed under the same number.
-		if !wakeupSuppressed {
+		if s.wakeupState.suppressedTurnNumber == 0 {
 			s.wakeupState.suppressedTurnNumber = turnNumber
 		}
+		// Record which ScheduleWakeup triggered this suppression. The next
+		// handleResult will compare latestScheduleWakeupToolID() against this
+		// to distinguish a new chained call from the stale original block.
+		s.wakeupState.suppressedWakeupToolID = latestWakeupID
 
 		totalCostSoFar := s.cumulativeCostUSD
 		if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
 			s.wakeupState.accumulatedUsage = TurnUsage{}
 			s.wakeupState.active = false
+			s.wakeupState.suppressedWakeupToolID = ""
 			s.mu.Unlock()
 			// Fall through to normal completion with budget error.
 		} else {
@@ -1402,7 +1418,9 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 			// Safety timer: delay + 60s buffer. ScheduleWakeup delays are
 			// clamped to [60, 3600] by the runtime, so worst case is ~61 min.
-			delaySec := turn.scheduleWakeupDelaySeconds()
+			// Use the latest block's delay — for chained wakeups the
+			// continuation appends a new ScheduleWakeup with its own delay.
+			delaySec := turn.latestScheduleWakeupDelaySeconds()
 			if delaySec < 60 {
 				delaySec = 60
 			}
