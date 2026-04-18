@@ -453,6 +453,12 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 		if w.phases[PhaseShip] != phaseDone {
 			w.completePhase(ctx, PhaseShip)
 		}
+		// Final sweep: completePhase's -inprogress removal is best-effort, so
+		// a transient RemoveLabel failure can leave the issue with both
+		// -inprogress and -done for a completed phase. At StepDone there's no
+		// subsequent handlePhaseBoundary to reconcile via skipDonePhases, so
+		// do the cleanup here.
+		w.cleanupStalePhaseLabels(ctx)
 		return
 	}
 
@@ -464,6 +470,26 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 
 	if phase := phaseForStep(w.state.Current()); phase != "" {
 		w.enterPhase(ctx, phase)
+	}
+}
+
+// cleanupStalePhaseLabels removes any -inprogress label still present on
+// the issue for a phase that bookkeeping considers phaseDone. This is the
+// terminal counterpart to skipDonePhases' stale-label reconciliation —
+// without it, a transient RemoveLabel failure during completePhase would
+// leave the issue permanently tagged with both -inprogress and -done.
+func (w *Workflow) cleanupStalePhaseLabels(ctx context.Context) {
+	labels := w.refreshLabels(ctx)
+	for _, p := range phaseTable {
+		if w.phases[p.name] != phaseDone {
+			continue
+		}
+		if !slices.Contains(labels, inProgressLabel(p.name)) {
+			continue
+		}
+		if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(p.name)); err != nil {
+			w.logger.Warn("failed to clear stale in-progress label at terminal sweep", "phase", p.name, "error", err)
+		}
 	}
 }
 
@@ -534,8 +560,11 @@ func (w *Workflow) skipDonePhases(ctx context.Context) {
 // refreshLabels fetches the latest label set from the tracker and returns it
 // for phase decisions (including jiradozer-* bookkeeping labels). The
 // user-facing subset is mirrored onto w.issue.Labels so agent prompts don't
-// see bookkeeping noise via promptData. On fetch failure, returns the last
-// known full set from w.lastLabels.
+// see bookkeeping noise via promptData. Labels and LabelIDs are filtered in
+// lockstep so they continue to describe the same attachment set — Linear's
+// nodeToIssue populates them in parallel, and any future caller using them
+// together would otherwise get a mismatch. On fetch failure, returns the
+// last known full set from w.lastLabels.
 func (w *Workflow) refreshLabels(ctx context.Context) []string {
 	fresh, err := w.tracker.FetchIssue(ctx, w.issue.Identifier)
 	if err != nil || fresh == nil {
@@ -547,8 +576,19 @@ func (w *Workflow) refreshLabels(ctx context.Context) []string {
 		return w.lastLabels
 	}
 	w.lastLabels = fresh.Labels
-	w.issue.Labels = slices.DeleteFunc(slices.Clone(fresh.Labels), isJiradozerLabel)
-	w.issue.LabelIDs = fresh.LabelIDs
+	filteredLabels := make([]string, 0, len(fresh.Labels))
+	filteredIDs := make([]string, 0, len(fresh.LabelIDs))
+	for i, name := range fresh.Labels {
+		if isJiradozerLabel(name) {
+			continue
+		}
+		filteredLabels = append(filteredLabels, name)
+		if i < len(fresh.LabelIDs) {
+			filteredIDs = append(filteredIDs, fresh.LabelIDs[i])
+		}
+	}
+	w.issue.Labels = filteredLabels
+	w.issue.LabelIDs = filteredIDs
 	return fresh.Labels
 }
 
@@ -605,7 +645,76 @@ func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
 		return fmt.Errorf("step %s has been re-run %d times (max %d), giving up", redoTarget, count-1, w.maxRedos)
 	}
 	w.logger.Info("redo attempt", "target", redoTarget, "attempt", count, "max", w.maxRedos)
-	return w.transition(redoTarget, "redo")
+	if err := w.transition(redoTarget, "redo"); err != nil {
+		return err
+	}
+	w.reopenPhaseOnRedo(ctx, redoTarget)
+	return nil
+}
+
+// reopenPhaseOnRedo keeps phase labels honest across backward (redo)
+// transitions. The state machine allows transitions like
+// ValidateReview → Building, which rewinds the agent into an already-
+// completed phase. Without this reconciliation, the issue would keep
+// jiradozer-build-done while the build agent is actively re-running, and
+// observers would see stale labels until the next forward phase boundary.
+//
+// Semantics: when redoing into a phase earlier than (or the same as) the
+// current in-progress phase, mark the target phase and every later phase
+// as not-started again, replace any -done labels with -inprogress, and
+// clear stray -inprogress labels on phases we're rewinding past.
+func (w *Workflow) reopenPhaseOnRedo(ctx context.Context, redoTarget WorkflowStep) {
+	targetPhase := phaseForStep(redoTarget)
+	if targetPhase == "" {
+		// Redoing into a review gate or terminal step has no phase of its
+		// own; nothing to reconcile here.
+		return
+	}
+	// Find targetPhase's index in phaseTable; every phase at or after that
+	// index needs to be rewound.
+	targetIdx := -1
+	for i, p := range phaseTable {
+		if p.name == targetPhase {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		return
+	}
+	for i := targetIdx; i < len(phaseTable); i++ {
+		phase := phaseTable[i].name
+		prior := w.phases[phase]
+		// Target phase: re-enter as in-progress. Later phases: reset to
+		// not-started (they haven't happened in this rewound run).
+		if i == targetIdx {
+			if prior == phaseDone {
+				if err := w.tracker.RemoveLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+					w.logger.Warn("failed to remove -done label on redo", "phase", phase, "error", err)
+				}
+			}
+			// Force a fresh -inprogress write even if prior was phaseInProgress,
+			// in case the previous -inprogress was removed by skipDonePhases or
+			// a prior boundary.
+			w.phases[phase] = phaseNotStarted
+			w.enterPhase(ctx, phase)
+		} else {
+			// Phases "ahead" of the redo target shouldn't carry state from
+			// the forward run we're rewinding. Clear any labels and reset
+			// bookkeeping so the next forward pass starts clean.
+			if prior == phaseInProgress {
+				if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+					w.logger.Warn("failed to remove -inprogress on redo", "phase", phase, "error", err)
+				}
+			}
+			if prior == phaseDone {
+				if err := w.tracker.RemoveLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+					w.logger.Warn("failed to remove -done on redo", "phase", phase, "error", err)
+				}
+			}
+			w.phases[phase] = phaseNotStarted
+		}
+	}
 }
 
 func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowStep, trigger string) {
