@@ -30,9 +30,9 @@ func drainUntilTurnComplete(t *testing.T, events <-chan Event, timeout time.Dura
 			}
 		case <-deadline:
 			t.Fatal("TurnCompleteEvent not emitted within timeout")
+			return TurnCompleteEvent{}
 		}
 	}
-	panic("unreachable")
 }
 
 // makeFlexibleContent marshals v into a FlexibleContent.
