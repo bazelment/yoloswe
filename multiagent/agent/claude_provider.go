@@ -115,7 +115,7 @@ func (p *ClaudeProvider) Name() string { return "claude" }
 // runRetryLoop drives the provider-layer retry-on-tool-error loop. Takes
 // the result of the initial Ask and may issue follow-up Asks up to
 // cfg.MaxToolErrorRetries times. Exits early when the turn is parked on
-// bg work (G2), no tool_use_error is present (G1), the retry budget is
+// bg work (G2), no tool_use_error is present or agent self-recovered (G1/G4), the retry budget is
 // exhausted, or the ctx is cancelled. Returns the final TurnResult, the
 // number of retry Asks issued, and the stop reason recorded on the last
 // decision. The caller appends the unresolved marker and fires

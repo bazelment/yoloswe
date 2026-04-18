@@ -109,7 +109,7 @@ func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok boo
 		// Build tool name map only on the error path (uncommon case).
 		toolNames := make(map[string]string)
 		for _, b := range blocks {
-			if b.Type == ContentBlockTypeToolUse {
+			if b.Type == ContentBlockTypeToolUse && b.ToolUseID != "" {
 				toolNames[b.ToolUseID] = b.ToolName
 			}
 		}
