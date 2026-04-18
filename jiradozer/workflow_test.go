@@ -2,8 +2,10 @@ package jiradozer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -890,7 +892,7 @@ func TestCaptureOutput_BuildDoesNotPersist(t *testing.T) {
 
 	// No plan file should be created for build output.
 	_, err := os.Stat(PlanFilePath(workDir))
-	assert.True(t, os.IsNotExist(err))
+	assert.True(t, errors.Is(err, fs.ErrNotExist))
 }
 
 func TestCaptureOutput_EmptyPlanDoesNotOverwrite(t *testing.T) {
@@ -1121,7 +1123,7 @@ func TestWorkflow_EnterPhase_Idempotent(t *testing.T) {
 	wf.enterPhase(context.Background(), PhasePlan) // repeat
 
 	assert.Equal(t, []string{"AddLabel:jiradozer-plan-inprogress"}, labelSequence(mt))
-	assert.True(t, wf.phaseEntered[PhasePlan])
+	assert.Equal(t, phaseInProgress, wf.phases[PhasePlan])
 }
 
 // TestWorkflow_CompletePhase_Idempotent verifies completePhase removes the
@@ -1136,7 +1138,7 @@ func TestWorkflow_CompletePhase_Idempotent(t *testing.T) {
 	assert.Equal(t,
 		[]string{"RemoveLabel:jiradozer-plan-inprogress", "AddLabel:jiradozer-plan-done"},
 		labelSequence(mt))
-	assert.True(t, wf.phaseCompleted[PhasePlan])
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
 }
 
 // TestWorkflow_ApproveTransition_CrossesPhaseBoundary verifies that a
@@ -1150,7 +1152,7 @@ func TestWorkflow_ApproveTransition_CrossesPhaseBoundary(t *testing.T) {
 
 	// Simulate plan phase already entered (as if by workflow start).
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	wf.phaseEntered[PhasePlan] = true
+	wf.phases[PhasePlan] = phaseInProgress
 	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepBuilding, "approved"))
@@ -1176,7 +1178,7 @@ func TestWorkflow_ApproveTransition_BuildToValidate(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepBuildReview)
-	wf.phaseEntered[PhaseBuild] = true // simulate build phase already in-flight
+	wf.phases[PhaseBuild] = phaseInProgress // simulate build phase already in-flight
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepValidating, "approved"))
 
@@ -1195,8 +1197,7 @@ func TestWorkflow_ApproveTransition_BuildToValidate(t *testing.T) {
 func TestWorkflow_SkipDonePhases_FromInit(t *testing.T) {
 	workDir := t.TempDir()
 	// Seed a persisted plan so the build step has something to work with.
-	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".jiradozer"), 0o755))
-	require.NoError(t, os.WriteFile(PlanFilePath(workDir), []byte("persisted plan"), 0o644))
+	PersistPlan(workDir, "persisted plan", discardLogger())
 
 	issue := testIssue()
 	issue.Labels = []string{"bug", "jiradozer-plan-done", "jiradozer-build-done"}
@@ -1211,15 +1212,15 @@ func TestWorkflow_SkipDonePhases_FromInit(t *testing.T) {
 
 	// Workflow starts at StepPlanning (the first step after init transition).
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	wf.skipDonePhases(context.Background(), "test")
+	wf.skipDonePhases(context.Background())
 
 	// Should have jumped forward past plan and build to validating.
 	assert.Equal(t, StepValidating, wf.state.Current())
 	// Plan should have been loaded from disk since plan phase was skipped.
 	assert.Equal(t, "persisted plan", wf.plan)
 	// Phases skipped should be marked entered + completed (internal bookkeeping).
-	assert.True(t, wf.phaseCompleted[PhasePlan])
-	assert.True(t, wf.phaseCompleted[PhaseBuild])
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+	assert.Equal(t, phaseDone, wf.phases[PhaseBuild])
 	// No label writes should happen for skipped phases (label already present).
 	assert.Empty(t, labelSequence(mt))
 }
@@ -1241,7 +1242,7 @@ func TestWorkflow_SkipDonePhases_AllDone(t *testing.T) {
 	wf := NewWorkflow(mt, issue, testConfig(), discardLogger())
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
-	wf.skipDonePhases(context.Background(), "test")
+	wf.skipDonePhases(context.Background())
 
 	assert.Equal(t, StepDone, wf.state.Current())
 }
@@ -1261,13 +1262,13 @@ func TestWorkflow_HandlePhaseBoundary_MidRunSkip(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepBuildReview)
-	wf.phaseEntered[PhaseBuild] = true
+	wf.phases[PhaseBuild] = phaseInProgress
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepValidating, "approved"))
 
 	// Should have skipped validate and landed on shipping.
 	assert.Equal(t, StepShipping, wf.state.Current())
-	assert.True(t, wf.phaseCompleted[PhaseValidate])
+	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
 	// Build is completed (label writes) and ship is entered (label write).
 	// Validate phase labels are NOT written — the -done label was user-added.
 	assert.Equal(t,
@@ -1288,7 +1289,7 @@ func TestWorkflow_HandlePhaseBoundary_StepDone(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepShipReview)
-	wf.phaseEntered[PhaseShip] = true
+	wf.phases[PhaseShip] = phaseInProgress
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepDone, "approved"))
 

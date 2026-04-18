@@ -59,12 +59,3 @@ func TestLabelFormat(t *testing.T) {
 	assert.Equal(t, "jiradozer-validate-done", doneLabel(PhaseValidate))
 	assert.Equal(t, "jiradozer-ship-inprogress", inProgressLabel(PhaseShip))
 }
-
-func TestHasLabel(t *testing.T) {
-	t.Parallel()
-	labels := []string{"bug", "jiradozer-plan-done"}
-	assert.True(t, hasLabel(labels, "bug"))
-	assert.True(t, hasLabel(labels, "jiradozer-plan-done"))
-	assert.False(t, hasLabel(labels, "other"))
-	assert.False(t, hasLabel(nil, "anything"))
-}

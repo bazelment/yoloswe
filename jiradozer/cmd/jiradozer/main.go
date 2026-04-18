@@ -647,15 +647,18 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	// Inject plan into prompt data for the build step.
 	// Priority: --plan-file flag > persisted plan.md > no plan.
 	if stepName == "build" {
-		planPath := jiradozer.PlanFilePath(cfg.WorkDir)
 		if planContent != "" {
 			data.Plan = planContent
 			logger.Info("using plan from --plan-file")
-		} else if content, err := os.ReadFile(planPath); err == nil {
-			data.Plan = strings.TrimSpace(string(content))
-			logger.Info("loaded persisted plan", "path", planPath)
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("read persisted plan %s: %w", planPath, err)
+		} else {
+			content, err := jiradozer.LoadPersistedPlan(cfg.WorkDir)
+			if err != nil {
+				return err
+			}
+			if content != "" {
+				data.Plan = content
+				logger.Info("loaded persisted plan", "path", jiradozer.PlanFilePath(cfg.WorkDir))
+			}
 		}
 		if data.Plan == "" {
 			logger.Warn("NO PLAN AVAILABLE — build step is running without a plan; use --plan-file to provide one, or run the plan step first")

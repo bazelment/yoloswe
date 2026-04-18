@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -244,12 +245,7 @@ func (c *Client) RemoveLabel(ctx context.Context, issueID string, label string) 
 		return nil
 	}
 
-	remaining := make([]string, 0, len(issueResp.LabelIDs))
-	for _, id := range issueResp.LabelIDs {
-		if id != targetID {
-			remaining = append(remaining, id)
-		}
-	}
+	remaining := slices.DeleteFunc(slices.Clone(issueResp.LabelIDs), func(id string) bool { return id == targetID })
 
 	req := addLabelToIssueMutation(issueID, remaining)
 	resp, err := c.execute(ctx, req)

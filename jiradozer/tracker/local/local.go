@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -290,19 +291,11 @@ func (t *Tracker) RemoveLabel(_ context.Context, issueID string, label string) e
 		return err
 	}
 
-	filtered := f.Issue.Labels[:0]
-	removed := false
-	for _, l := range f.Issue.Labels {
-		if l == label {
-			removed = true
-			continue
-		}
-		filtered = append(filtered, l)
+	original := len(f.Issue.Labels)
+	f.Issue.Labels = slices.DeleteFunc(f.Issue.Labels, func(l string) bool { return l == label })
+	if len(f.Issue.Labels) == original {
+		return nil
 	}
-	if !removed {
-		return nil // not present — idempotent
-	}
-	f.Issue.Labels = filtered
 	return t.writeFile(issueID, f)
 }
 

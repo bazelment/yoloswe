@@ -10,8 +10,19 @@ const (
 	PhaseShip     = "ship"
 )
 
-// allPhases lists phases in workflow order. Used for skip-done detection.
-var allPhases = []string{PhasePlan, PhaseBuild, PhaseValidate, PhaseShip}
+// phaseTable is the single source of truth for phase ordering and the
+// starting WorkflowStep of each phase. Review gates and StepCreatingPR are
+// not primary starts; they are folded into the preceding phase by
+// phaseForStep.
+var phaseTable = []struct {
+	name      string
+	startStep WorkflowStep
+}{
+	{PhasePlan, StepPlanning},
+	{PhaseBuild, StepBuilding},
+	{PhaseValidate, StepValidating},
+	{PhaseShip, StepShipping},
+}
 
 // phaseForStep maps a WorkflowStep to its phase name, or "" if the step
 // does not belong to a labelled phase (review gates, terminal states).
@@ -30,32 +41,23 @@ func phaseForStep(s WorkflowStep) string {
 	return ""
 }
 
-// startStepForPhase returns the first WorkflowStep of the given phase.
-// Used when forcing the workflow to start at a mid-phase step after
-// skipping completed phases.
 func startStepForPhase(phase string) WorkflowStep {
-	switch phase {
-	case PhasePlan:
-		return StepPlanning
-	case PhaseBuild:
-		return StepBuilding
-	case PhaseValidate:
-		return StepValidating
-	case PhaseShip:
-		return StepShipping
+	for _, p := range phaseTable {
+		if p.name == phase {
+			return p.startStep
+		}
 	}
 	return StepInit
 }
 
-func inProgressLabel(phase string) string { return "jiradozer-" + phase + "-inprogress" }
-func doneLabel(phase string) string       { return "jiradozer-" + phase + "-done" }
-
-// hasLabel reports whether the label set contains name.
-func hasLabel(labels []string, name string) bool {
-	for _, l := range labels {
-		if l == name {
-			return true
+func phaseAfter(phase string) string {
+	for i, p := range phaseTable {
+		if p.name == phase && i+1 < len(phaseTable) {
+			return phaseTable[i+1].name
 		}
 	}
-	return false
+	return ""
 }
+
+func inProgressLabel(phase string) string { return "jiradozer-" + phase + "-inprogress" }
+func doneLabel(phase string) string       { return "jiradozer-" + phase + "-done" }
