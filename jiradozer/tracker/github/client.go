@@ -299,7 +299,7 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 		}, ""); err != nil {
 			return fmt.Errorf("update issue state to %s: %w", ghState, err)
 		}
-		c.removeLabel(ctx, issueID, reviewLabel) //nolint:errcheck // best-effort
+		c.RemoveLabel(ctx, issueID, reviewLabel) //nolint:errcheck // best-effort
 		return nil
 
 	case stateReview:
@@ -330,12 +330,21 @@ func (c *Client) AddLabel(ctx context.Context, issueID string, label string) err
 	return nil
 }
 
-func (c *Client) removeLabel(ctx context.Context, issueID, label string) error {
-	_, err := c.gh.Run(ctx, []string{
+// RemoveLabel removes a label from a GitHub issue. The operation is
+// idempotent: a 404 response (label not present on issue) is treated as
+// success.
+func (c *Client) RemoveLabel(ctx context.Context, issueID, label string) error {
+	result, err := c.gh.Run(ctx, []string{
 		"api", "-X", "DELETE",
 		fmt.Sprintf("repos/%s/%s/issues/%s/labels/%s", c.owner, c.repo, issueID, url.PathEscape(label)),
 	}, "")
-	return err
+	if err != nil {
+		if result != nil && strings.Contains(result.Stderr, "HTTP 404") {
+			return nil
+		}
+		return fmt.Errorf("remove label %q from issue %s: %w", label, issueID, err)
+	}
+	return nil
 }
 
 func (c *Client) ghIssueToTracker(gi ghIssue, owner, repo string) *tracker.Issue {

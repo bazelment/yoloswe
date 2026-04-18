@@ -33,4 +33,8 @@ type IssueTracker interface {
 	// AddLabel attaches a label to an issue. It is idempotent: adding a label
 	// that already exists must not return an error.
 	AddLabel(ctx context.Context, issueID string, label string) error
+
+	// RemoveLabel detaches a label from an issue. It is idempotent: removing
+	// a label that is not present must not return an error.
+	RemoveLabel(ctx context.Context, issueID string, label string) error
 }

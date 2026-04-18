@@ -217,3 +217,21 @@ func (f *FakeTracker) AddLabel(_ context.Context, issueID string, label string) 
 	fi.issue.Labels = append(fi.issue.Labels, label)
 	return nil
 }
+
+func (f *FakeTracker) RemoveLabel(_ context.Context, issueID string, label string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("RemoveLabel", issueID, label)
+	fi, ok := f.issues[issueID]
+	if !ok {
+		return fmt.Errorf("issue %q not found", issueID)
+	}
+	filtered := fi.issue.Labels[:0]
+	for _, l := range fi.issue.Labels {
+		if l != label {
+			filtered = append(filtered, l)
+		}
+	}
+	fi.issue.Labels = filtered
+	return nil
+}

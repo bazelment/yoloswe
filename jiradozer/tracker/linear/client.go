@@ -221,6 +221,47 @@ func (c *Client) AddLabel(ctx context.Context, issueID string, label string) err
 	return nil
 }
 
+// RemoveLabel detaches a label (by name) from an issue. If the label is not
+// present on the issue (or does not exist in the workspace), returns nil.
+// The operation is idempotent.
+func (c *Client) RemoveLabel(ctx context.Context, issueID string, label string) error {
+	issueResp, err := c.fetchIssueByID(ctx, issueID)
+	if err != nil {
+		return fmt.Errorf("remove label: fetch issue: %w", err)
+	}
+
+	// Find the label ID on the issue by name. If not present, idempotent no-op.
+	var targetID string
+	for i, name := range issueResp.Labels {
+		if name == label {
+			if i < len(issueResp.LabelIDs) {
+				targetID = issueResp.LabelIDs[i]
+			}
+			break
+		}
+	}
+	if targetID == "" {
+		return nil
+	}
+
+	remaining := make([]string, 0, len(issueResp.LabelIDs))
+	for _, id := range issueResp.LabelIDs {
+		if id != targetID {
+			remaining = append(remaining, id)
+		}
+	}
+
+	req := addLabelToIssueMutation(issueID, remaining)
+	resp, err := c.execute(ctx, req)
+	if err != nil {
+		return fmt.Errorf("remove label from issue: %w", err)
+	}
+	if resp.Data == nil || !resp.Data.IssueUpdate.Success {
+		return fmt.Errorf("remove label from issue: mutation returned success=false")
+	}
+	return nil
+}
+
 // fetchIssueByID returns a minimal issue record (team ID + label IDs) needed
 // for AddLabel. Uses the issueID (Linear UUID), not the human identifier.
 func (c *Client) fetchIssueByID(ctx context.Context, issueID string) (*tracker.Issue, error) {

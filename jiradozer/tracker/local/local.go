@@ -280,6 +280,32 @@ func (t *Tracker) AddLabel(_ context.Context, issueID string, label string) erro
 	return t.writeFile(issueID, f)
 }
 
+// RemoveLabel removes a label from a local issue. It is idempotent.
+func (t *Tracker) RemoveLabel(_ context.Context, issueID string, label string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	f, err := t.readFile(issueID)
+	if err != nil {
+		return err
+	}
+
+	filtered := f.Issue.Labels[:0]
+	removed := false
+	for _, l := range f.Issue.Labels {
+		if l == label {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, l)
+	}
+	if !removed {
+		return nil // not present — idempotent
+	}
+	f.Issue.Labels = filtered
+	return t.writeFile(issueID, f)
+}
+
 // --- internal helpers ---
 
 func (t *Tracker) filePath(issueID string) (string, error) {

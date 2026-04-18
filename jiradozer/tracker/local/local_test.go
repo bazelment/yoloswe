@@ -209,3 +209,45 @@ func TestUpdateStateNotFound(t *testing.T) {
 	err := tr.UpdateIssueState(ctx, "nonexistent", "local-done")
 	assert.Error(t, err)
 }
+
+func TestAddAndRemoveLabel(t *testing.T) {
+	tr := newTestTracker(t)
+	ctx := context.Background()
+
+	issue, err := tr.CreateIssue("Task", "desc")
+	require.NoError(t, err)
+
+	require.NoError(t, tr.AddLabel(ctx, issue.ID, "bug"))
+	require.NoError(t, tr.AddLabel(ctx, issue.ID, "priority"))
+
+	fetched, err := tr.FetchIssue(ctx, issue.Identifier)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"bug", "priority"}, fetched.Labels)
+
+	// AddLabel is idempotent.
+	require.NoError(t, tr.AddLabel(ctx, issue.ID, "bug"))
+	fetched, err = tr.FetchIssue(ctx, issue.Identifier)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"bug", "priority"}, fetched.Labels)
+
+	// RemoveLabel drops the label.
+	require.NoError(t, tr.RemoveLabel(ctx, issue.ID, "bug"))
+	fetched, err = tr.FetchIssue(ctx, issue.Identifier)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"priority"}, fetched.Labels)
+
+	// RemoveLabel is idempotent: removing an absent label is a no-op.
+	require.NoError(t, tr.RemoveLabel(ctx, issue.ID, "bug"))
+	require.NoError(t, tr.RemoveLabel(ctx, issue.ID, "never-existed"))
+	fetched, err = tr.FetchIssue(ctx, issue.Identifier)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"priority"}, fetched.Labels)
+}
+
+func TestRemoveLabelNotFound(t *testing.T) {
+	tr := newTestTracker(t)
+	ctx := context.Background()
+
+	err := tr.RemoveLabel(ctx, "nonexistent", "bug")
+	assert.Error(t, err)
+}

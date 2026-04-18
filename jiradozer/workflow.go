@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ type Workflow struct {
 	sessionIDs      map[WorkflowStep]string
 	stateIDs        map[string]string
 	redoCounts      map[WorkflowStep]int
+	phaseEntered    map[string]bool
+	phaseCompleted  map[string]bool
 	OnTransition    func(step WorkflowStep)
 	OnRoundProgress func(roundIndex, roundTotal int)
 	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error)
@@ -49,16 +52,18 @@ type Workflow struct {
 // NewWorkflow creates a new workflow for the given issue.
 func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
 	return &Workflow{
-		tracker:      t,
-		issue:        issue,
-		state:        NewStateMachine(),
-		config:       cfg,
-		logger:       logger,
-		stateIDs:     make(map[string]string),
-		sessionIDs:   make(map[WorkflowStep]string),
-		redoCounts:   make(map[WorkflowStep]int),
-		maxRedos:     DefaultMaxRedos,
-		runStepAgent: RunStepAgent,
+		tracker:        t,
+		issue:          issue,
+		state:          NewStateMachine(),
+		config:         cfg,
+		logger:         logger,
+		stateIDs:       make(map[string]string),
+		sessionIDs:     make(map[WorkflowStep]string),
+		redoCounts:     make(map[WorkflowStep]int),
+		phaseEntered:   make(map[string]bool),
+		phaseCompleted: make(map[string]bool),
+		maxRedos:       DefaultMaxRedos,
+		runStepAgent:   RunStepAgent,
 	}
 }
 
@@ -118,6 +123,15 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 			w.logger.Warn("failed to update issue state to in_progress", "error", err)
 		}
+	}
+
+	// Honor pre-existing -done labels by skipping completed phases. A fresh
+	// workflow run never re-does plan/build/validate/ship that the user has
+	// already marked done. Users clear the label manually to re-run a phase.
+	w.skipDonePhases(ctx, "workflow_start")
+	// Enter the phase we actually start in (after skip).
+	if phase := phaseForStep(w.state.Current()); phase != "" {
+		w.enterPhase(ctx, phase)
 	}
 
 	for {
@@ -347,7 +361,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		w.logger.Info("auto-approving", "step", w.state.Current())
 		w.status(fmt.Sprintf("Auto-approved %s", w.state.Current()))
 		w.feedback = ""
-		if err := w.transition(approveTarget, "auto_approved"); err != nil {
+		if err := w.approveTransition(ctx, approveTarget, "auto_approved"); err != nil {
 			w.fail(ctx, err)
 		}
 		return
@@ -369,7 +383,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		w.logger.Info("feedback: approved", "step", w.state.Current())
 		w.status("Approved")
 		w.feedback = ""
-		if err := w.transition(approveTarget, "approved"); err != nil {
+		if err := w.approveTransition(ctx, approveTarget, "approved"); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackRedo:
@@ -387,7 +401,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		// incorporated — they don't restart the planning step. For other review
 		// steps, redo is the right behavior (the user wants changes applied).
 		if w.state.Current() == StepPlanReview {
-			if err := w.transition(approveTarget, "approved_with_feedback"); err != nil {
+			if err := w.approveTransition(ctx, approveTarget, "approved_with_feedback"); err != nil {
 				w.fail(ctx, err)
 			}
 		} else {
@@ -396,6 +410,179 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 			}
 		}
 	}
+}
+
+// approveTransition advances to approveTarget via the normal state machine,
+// then checks for mid-run label edits that skip the upcoming phase. If the
+// upcoming phase is already -done, completes the prior phase label and jumps
+// forward to the next not-done phase using ForceState. Also marks entry into
+// whichever phase the workflow actually lands on.
+func (w *Workflow) approveTransition(ctx context.Context, approveTarget WorkflowStep, trigger string) error {
+	if err := w.transition(approveTarget, trigger); err != nil {
+		return err
+	}
+	// Phase-boundary crossings: complete the prior phase and possibly skip ahead.
+	w.handlePhaseBoundary(ctx)
+	return nil
+}
+
+// handlePhaseBoundary is called after a transition lands on a phase-start
+// step (StepBuilding/StepValidating/StepShipping/StepDone) or the build-phase
+// create_pr step. It completes the prior phase, then refreshes labels and may
+// skip forward over additional phases whose -done label is already present.
+func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
+	cur := w.state.Current()
+	curPhase := phaseForStep(cur)
+
+	// Terminal StepDone closes out the ship phase.
+	if cur == StepDone {
+		if !w.phaseCompleted[PhaseShip] && w.phaseEntered[PhaseShip] {
+			w.completePhase(ctx, PhaseShip)
+		}
+		return
+	}
+
+	// If we just entered a new phase, complete any prior phases that were in
+	// flight but not yet completed.
+	if curPhase != "" {
+		w.completePriorPhases(ctx, curPhase)
+	}
+
+	// Check whether the current phase is already marked -done by a user edit.
+	// If so, skip forward.
+	w.skipDonePhases(ctx, "phase_boundary")
+
+	// Mark entry into whichever phase we actually landed on.
+	if phase := phaseForStep(w.state.Current()); phase != "" {
+		w.enterPhase(ctx, phase)
+	}
+}
+
+// completePriorPhases marks any earlier phases as completed (remove -inprogress,
+// add -done) up to — but not including — the current phase.
+func (w *Workflow) completePriorPhases(ctx context.Context, currentPhase string) {
+	for _, p := range allPhases {
+		if p == currentPhase {
+			return
+		}
+		if w.phaseEntered[p] && !w.phaseCompleted[p] {
+			w.completePhase(ctx, p)
+		}
+	}
+}
+
+// skipDonePhases refreshes labels from the tracker, then walks phases forward
+// from the current step. For each phase already marked -done it uses
+// ForceState to jump to the next phase's starting step. If all remaining
+// phases are -done, jumps to StepDone.
+func (w *Workflow) skipDonePhases(ctx context.Context, trigger string) {
+	labels := w.refreshLabels(ctx)
+
+	for {
+		cur := w.state.Current()
+		phase := phaseForStep(cur)
+		if phase == "" {
+			return
+		}
+		if !hasLabel(labels, doneLabel(phase)) {
+			return
+		}
+		// Phase is already done — record completion (no label writes; label is
+		// already there), and skip to the next phase's start step.
+		w.phaseEntered[phase] = true
+		w.phaseCompleted[phase] = true
+		nextPhase := phaseAfter(phase)
+		if nextPhase == "" {
+			w.logger.Info("all phases already marked done; skipping to StepDone", "trigger", trigger)
+			w.state.ForceState(StepDone)
+			if w.OnTransition != nil {
+				w.OnTransition(StepDone)
+			}
+			return
+		}
+		next := startStepForPhase(nextPhase)
+		w.logger.Info("skipping phase (label present)", "phase", phase, "next", next, "trigger", trigger)
+		w.state.ForceState(next)
+		if w.OnTransition != nil {
+			w.OnTransition(next)
+		}
+		// If we skipped past plan, load the persisted plan from disk so the
+		// build step isn't run blind.
+		if phase == PhasePlan && w.plan == "" {
+			w.loadPersistedPlan()
+		}
+	}
+}
+
+// phaseAfter returns the phase immediately following p in allPhases, or ""
+// if p is the last phase or unknown.
+func phaseAfter(p string) string {
+	for i, name := range allPhases {
+		if name == p && i+1 < len(allPhases) {
+			return allPhases[i+1]
+		}
+	}
+	return ""
+}
+
+// refreshLabels fetches the latest label set from the tracker. On failure,
+// falls back to the cached labels from the initial issue snapshot and logs
+// a warning. Also updates w.issue.Labels with the fresh set on success.
+func (w *Workflow) refreshLabels(ctx context.Context) []string {
+	fresh, err := w.tracker.FetchIssue(ctx, w.issue.Identifier)
+	if err != nil || fresh == nil {
+		if err != nil {
+			w.logger.Warn("failed to refresh issue labels", "error", err)
+		}
+		return w.issue.Labels
+	}
+	w.issue.Labels = fresh.Labels
+	w.issue.LabelIDs = fresh.LabelIDs
+	return fresh.Labels
+}
+
+// enterPhase adds the -inprogress label for phase. No-op if already entered
+// in this workflow run.
+func (w *Workflow) enterPhase(ctx context.Context, phase string) {
+	if w.phaseEntered[phase] {
+		return
+	}
+	w.phaseEntered[phase] = true
+	if err := w.tracker.AddLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+		w.logger.Warn("failed to add phase in-progress label", "phase", phase, "error", err)
+	}
+}
+
+// completePhase removes the -inprogress label and adds the -done label for
+// phase. Both operations are best-effort. No-op if already completed.
+func (w *Workflow) completePhase(ctx context.Context, phase string) {
+	if w.phaseCompleted[phase] {
+		return
+	}
+	w.phaseCompleted[phase] = true
+	if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+		w.logger.Warn("failed to remove phase in-progress label", "phase", phase, "error", err)
+	}
+	if err := w.tracker.AddLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+		w.logger.Warn("failed to add phase done label", "phase", phase, "error", err)
+	}
+}
+
+// loadPersistedPlan reads the persisted plan.md from disk into w.plan so the
+// build step can run without re-planning. Logs a warning if no plan is found.
+func (w *Workflow) loadPersistedPlan() {
+	planPath := PlanFilePath(w.config.WorkDir)
+	content, err := os.ReadFile(planPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.logger.Warn("skipping plan but no persisted plan found; build will run blind", "path", planPath)
+		} else {
+			w.logger.Warn("failed to load persisted plan", "path", planPath, "error", err)
+		}
+		return
+	}
+	w.plan = strings.TrimSpace(string(content))
+	w.logger.Info("loaded persisted plan from disk after skipping plan phase", "path", planPath)
 }
 
 // tryRedo transitions to the redo target if the circuit breaker hasn't tripped.
