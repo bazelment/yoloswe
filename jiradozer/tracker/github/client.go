@@ -313,11 +313,7 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 // AddLabel adds a label to a GitHub issue. The operation is idempotent —
 // GitHub returns 200 OK even if the label is already present.
 func (c *Client) AddLabel(ctx context.Context, issueID string, label string) error {
-	result, err := c.gh.Run(ctx, []string{
-		"api", "-X", "POST",
-		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
-		"-f", fmt.Sprintf("labels[]=%s", label),
-	}, "")
+	result, err := c.attachLabelToIssue(ctx, issueID, label)
 	if err == nil {
 		return nil
 	}
@@ -330,14 +326,18 @@ func (c *Client) AddLabel(ctx context.Context, issueID string, label string) err
 	if cErr := c.ensureRepoLabel(ctx, label); cErr != nil {
 		return fmt.Errorf("add label %q to issue %s: ensure repo label: %w", label, issueID, cErr)
 	}
-	if _, err := c.gh.Run(ctx, []string{
-		"api", "-X", "POST",
-		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
-		"-f", fmt.Sprintf("labels[]=%s", label),
-	}, ""); err != nil {
+	if _, err := c.attachLabelToIssue(ctx, issueID, label); err != nil {
 		return fmt.Errorf("add label %q to issue %s (after creating repo label): %w", label, issueID, err)
 	}
 	return nil
+}
+
+func (c *Client) attachLabelToIssue(ctx context.Context, issueID, label string) (*wt.CmdResult, error) {
+	return c.gh.Run(ctx, []string{
+		"api", "-X", "POST",
+		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
+		"-f", fmt.Sprintf("labels[]=%s", label),
+	}, "")
 }
 
 // ensureRepoLabel creates a label on the repository if it does not already

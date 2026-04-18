@@ -35,6 +35,8 @@ type mockWorkflowTracker struct {
 	postCommentReplies []*tracker.Comment // if set, PostComment returns these in order (last repeated)
 	fetchIssueReply    *tracker.Issue     // if set, FetchIssue returns this (used to feed labels into refreshLabels)
 	fetchIssueReplies  []*tracker.Issue   // if set, FetchIssue returns these in order (last repeated)
+	addLabelErr        map[string]error   // if label name is in map, AddLabel returns the mapped error
+	removeLabelErr     map[string]error   // if label name is in map, RemoveLabel returns the mapped error
 	calls              []trackerCall
 	mu                 sync.Mutex
 	commentIdx         int // tracks which comment set to return (for polling)
@@ -112,11 +114,17 @@ func (m *mockWorkflowTracker) UpdateIssueState(_ context.Context, issueID string
 
 func (m *mockWorkflowTracker) AddLabel(_ context.Context, issueID string, label string) error {
 	m.recordCall("AddLabel", issueID, label)
+	if err, ok := m.addLabelErr[label]; ok {
+		return err
+	}
 	return nil
 }
 
 func (m *mockWorkflowTracker) RemoveLabel(_ context.Context, issueID string, label string) error {
 	m.recordCall("RemoveLabel", issueID, label)
+	if err, ok := m.removeLabelErr[label]; ok {
+		return err
+	}
 	return nil
 }
 
@@ -1157,6 +1165,44 @@ func TestWorkflow_CompletePhase_Idempotent(t *testing.T) {
 	assert.Equal(t,
 		[]string{"RemoveLabel:jiradozer-plan-inprogress", "AddLabel:jiradozer-plan-done"},
 		labelSequence(mt))
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+}
+
+// TestWorkflow_EnterPhase_TrackerFailureDoesNotAdvanceState verifies that
+// enterPhase leaves phaseState at phaseNotStarted when AddLabel fails, so
+// subsequent events can retry the write rather than silently believing the
+// phase is in progress.
+func TestWorkflow_EnterPhase_TrackerFailureDoesNotAdvanceState(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		addLabelErr: map[string]error{"jiradozer-plan-inprogress": errors.New("boom")},
+	}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+
+	wf.enterPhase(context.Background(), PhasePlan)
+
+	assert.Equal(t, phaseNotStarted, wf.phases[PhasePlan])
+	// On retry (tracker now healthy), the state should advance.
+	mt.addLabelErr = nil
+	wf.enterPhase(context.Background(), PhasePlan)
+	assert.Equal(t, phaseInProgress, wf.phases[PhasePlan])
+}
+
+// TestWorkflow_CompletePhase_DoneLabelFailureDoesNotAdvanceState verifies
+// completePhase leaves phaseState intact when the -done AddLabel fails, so
+// the workflow doesn't record a phase as done that the tracker never saw.
+func TestWorkflow_CompletePhase_DoneLabelFailureDoesNotAdvanceState(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		addLabelErr: map[string]error{"jiradozer-plan-done": errors.New("boom")},
+	}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.phases[PhasePlan] = phaseInProgress
+
+	wf.completePhase(context.Background(), PhasePlan)
+
+	assert.NotEqual(t, phaseDone, wf.phases[PhasePlan])
+	// Retry succeeds.
+	mt.addLabelErr = nil
+	wf.completePhase(context.Background(), PhasePlan)
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
 }
 

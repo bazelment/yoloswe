@@ -527,6 +527,8 @@ func (w *Workflow) refreshLabels(ctx context.Context) []string {
 	if err != nil || fresh == nil {
 		if err != nil {
 			w.logger.Warn("failed to refresh issue labels", "error", err)
+		} else {
+			w.logger.Warn("refresh issue returned nil without error; falling back to cached labels")
 		}
 		return w.lastLabels
 	}
@@ -540,27 +542,40 @@ func isJiradozerLabel(label string) bool {
 	return strings.HasPrefix(label, "jiradozer-")
 }
 
+// enterPhase flips internal bookkeeping to inProgress only after the
+// tracker confirms the -inprogress label write. On tracker failure the
+// phase stays in phaseNotStarted so a retry (or the next event) will
+// attempt the write again — keeping the in-memory state and the tracker
+// from silently diverging.
 func (w *Workflow) enterPhase(ctx context.Context, phase string) {
 	if w.phases[phase] != phaseNotStarted {
 		return
 	}
-	w.phases[phase] = phaseInProgress
 	if err := w.tracker.AddLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
 		w.logger.Warn("failed to add phase in-progress label", "phase", phase, "error", err)
+		return
 	}
+	w.phases[phase] = phaseInProgress
 }
 
+// completePhase flips internal bookkeeping to phaseDone only after the
+// tracker confirms the -done label write. The -inprogress removal is
+// best-effort (a stale -inprogress will be reconciled on the next
+// skipDonePhases), but the -done write is authoritative: without it the
+// phase stays "in progress" in memory and the workflow will retry the
+// transition rather than advance past a phase the tracker didn't record.
 func (w *Workflow) completePhase(ctx context.Context, phase string) {
 	if w.phases[phase] == phaseDone {
 		return
 	}
-	w.phases[phase] = phaseDone
 	if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
 		w.logger.Warn("failed to remove phase in-progress label", "phase", phase, "error", err)
 	}
 	if err := w.tracker.AddLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
 		w.logger.Warn("failed to add phase done label", "phase", phase, "error", err)
+		return
 	}
+	w.phases[phase] = phaseDone
 }
 
 // tryRedo transitions to the redo target if the circuit breaker hasn't tripped.
