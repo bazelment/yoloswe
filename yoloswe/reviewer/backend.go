@@ -3,6 +3,7 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
@@ -141,17 +142,26 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 	}
 }
 
-// rendererEventHandler adapts EventHandler to a render.Renderer.
+// rendererEventHandler adapts EventHandler to a render.Renderer and also
+// emits a structured slog record for each boundary event (session info, tool
+// start/end, turn complete, error). The slog side is cheap and writes to the
+// handler installed by SetupRunLog; when no file handler is installed it
+// still flows through the default slog writer, which tests may override.
 type rendererEventHandler struct {
-	r *render.Renderer
+	r        *render.Renderer
+	reviewer *Reviewer // optional; captures lastSessionID when set
 }
 
-func newRendererEventHandler(r *render.Renderer) *rendererEventHandler {
-	return &rendererEventHandler{r: r}
+func (r *Reviewer) newEventHandler() *rendererEventHandler {
+	return &rendererEventHandler{r: r.renderer, reviewer: r}
 }
 
 func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
 	h.r.SessionInfo(sessionID, model)
+	if h.reviewer != nil {
+		h.reviewer.lastSessionID = sessionID
+	}
+	slog.Info("reviewer session started", "session_id", sessionID, "model", model)
 }
 
 func (h *rendererEventHandler) OnText(delta string) {
@@ -162,22 +172,68 @@ func (h *rendererEventHandler) OnReasoning(delta string) {
 	h.r.Reasoning(delta)
 }
 
-func (h *rendererEventHandler) OnToolStart(name, callID string, _ map[string]interface{}) {
+func (h *rendererEventHandler) OnToolStart(name, callID string, input map[string]interface{}) {
 	h.r.CommandStart(callID, name)
+	slog.Debug("tool call start",
+		"tool", name,
+		"call_id", callID,
+		"input_summary", summarizeToolInput(input))
 }
 
-func (h *rendererEventHandler) OnToolComplete(_ string, callID string, _ map[string]interface{}, _ interface{}, isError bool) {
+func (h *rendererEventHandler) OnToolComplete(name string, callID string, _ map[string]interface{}, result interface{}, isError bool) {
 	exitCode := 0
 	if isError {
 		exitCode = 1
 	}
 	h.r.CommandEnd(callID, exitCode, 0)
+	resultLen := 0
+	if s, ok := result.(string); ok {
+		resultLen = len(s)
+	}
+	slog.Debug("tool call end",
+		"tool", name,
+		"call_id", callID,
+		"is_error", isError,
+		"result_len", resultLen)
 }
 
-func (h *rendererEventHandler) OnTurnComplete(_ bool, _ int64) {
-	// No-op: reviewer.go calls r.renderer.TurnComplete() after RunPrompt returns.
+func (h *rendererEventHandler) OnTurnComplete(success bool, durationMs int64) {
+	// Renderer update is handled by reviewer.go after RunPrompt returns.
+	slog.Info("reviewer turn complete",
+		"success", success,
+		"duration_ms", durationMs)
 }
 
 func (h *rendererEventHandler) OnError(err error, context string) {
 	h.r.Error(err, context)
+	slog.Error("reviewer error",
+		"context", context,
+		"error", err.Error())
+}
+
+// summarizeToolInput collapses a tool input map to a short key=value preview
+// for logging. It avoids dumping large file contents into the log.
+func summarizeToolInput(input map[string]interface{}) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	const maxLen = 200
+	for k, v := range input {
+		if b.Len() >= maxLen {
+			b.WriteString("...")
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		s := fmt.Sprintf("%v", v)
+		if len(s) > 80 {
+			s = s[:77] + "..."
+		}
+		b.WriteString(s)
+	}
+	return b.String()
 }

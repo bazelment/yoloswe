@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/term"
-
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
@@ -81,6 +79,10 @@ type Config struct {
 	Verbose        bool
 	NoColor        bool
 	JSONOutput     bool
+	// SkipTestExecution instructs the reviewer not to run test/build commands
+	// (bazel, go test, etc.). Callers that already run tests in a separate step
+	// (e.g. /pr-polish quality gates) should enable this to avoid duplicate work.
+	SkipTestExecution bool
 }
 
 // buildGoalText formats the goal text for review prompts.
@@ -91,9 +93,16 @@ func buildGoalText(goal string) string {
 	return "Review all changes on this branch. The main goal of the change on this branch is: " + goal
 }
 
+// skipTestExecutionSuffix is appended to the base prompt when the caller has
+// opted into SkipTestExecution. The reviewer is still free to read test files;
+// only process-spawning test/build commands are discouraged.
+const skipTestExecutionSuffix = `
+
+Do NOT run tests or build commands. The caller runs tests separately. Read test files to assess coverage, but do not invoke bazel, go test, go build, npm test, pytest, etc.`
+
 // buildBasePrompt creates the common review prompt content.
-func buildBasePrompt(goal string) string {
-	return fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
+func buildBasePrompt(goal string, skipTestExecution bool) string {
+	base := fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
 %s
 
 Focus on these areas:
@@ -107,18 +116,32 @@ Focus on these areas:
 When you flag an issue, provide a short, direct explanation and cite the affected file and line range.
 Prioritize severe issues and avoid nit-level comments unless they block understanding of the diff.
 Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected.`, buildGoalText(goal))
+	if skipTestExecution {
+		base += skipTestExecutionSuffix
+	}
+	return base
 }
 
 // BuildPrompt creates the review prompt with free-form text output.
 func BuildPrompt(goal string) string {
-	return buildBasePrompt(goal) + `
+	return BuildPromptWithOptions(goal, false)
+}
+
+// BuildPromptWithOptions is BuildPrompt with the skip-test-execution toggle.
+func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
+	return buildBasePrompt(goal, skipTestExecution) + `
 
 After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.`
 }
 
 // BuildJSONPrompt creates a review prompt that requests JSON output format.
 func BuildJSONPrompt(goal string) string {
-	return buildBasePrompt(goal) + `
+	return BuildJSONPromptWithOptions(goal, false)
+}
+
+// BuildJSONPromptWithOptions is BuildJSONPrompt with the skip-test-execution toggle.
+func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
+	return buildBasePrompt(goal, skipTestExecution) + `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:
@@ -161,10 +184,11 @@ type ReviewResult struct {
 
 // Reviewer wraps an agent backend for code review operations.
 type Reviewer struct {
-	output   io.Writer
-	backend  Backend
-	renderer *render.Renderer
-	config   Config
+	output        io.Writer
+	backend       Backend
+	renderer      *render.Renderer
+	lastSessionID string
+	config        Config
 }
 
 // New creates a new Reviewer with the given config.
@@ -246,7 +270,7 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	}
 	status += ")..."
 	r.renderer.Status(status)
-	handler := newRendererEventHandler(r.renderer)
+	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {
 		return nil, err
@@ -257,7 +281,7 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 
 // FollowUp sends a follow-up message to the existing backend session.
 func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, error) {
-	handler := newRendererEventHandler(r.renderer)
+	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {
 		return nil, err
@@ -265,6 +289,10 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
 }
+
+// LastSessionID returns the session/thread ID from the most recent backend
+// session, or the empty string if no OnSessionInfo event has been observed.
+func (r *Reviewer) LastSessionID() string { return r.lastSessionID }
 
 // ValidateBackend returns an error if the given backend string is not supported.
 func ValidateBackend(backend string) error {
@@ -311,14 +339,14 @@ func ResolveProtocolLogPath(flagValue string) (string, error) {
 	return filepath.Join(dir, filename), nil
 }
 
-// PrintResultSummary writes the review metadata to stderr and conditionally
-// prints the full response text to stdout.
+// PrintResultSummary writes the review metadata to stderr and prints the full
+// response text to stdout.
 //
-// The verdict is printed to stdout only when the user won't see it via the
-// streaming path on stderr — specifically, when stdout and stderr are NOT both
-// real terminals. This avoids duplicate output in interactive use while still
-// emitting the verdict for pipes/redirections. It uses term.IsTerminal (not
-// ModeCharDevice) to correctly handle character devices like /dev/null.
+// Output contract: the streaming render path already prints the response on
+// stderr during the turn. Stdout always receives the final response text
+// exactly once so pipeline consumers have a stable sink; interactive users
+// will see the text twice (streaming on stderr, final on stdout), which is
+// a reasonable cost for a predictable machine-readable contract.
 func PrintResultSummary(result *ReviewResult) {
 	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
 	fmt.Fprintf(os.Stderr, "Success: %v\n", result.Success)
@@ -327,10 +355,5 @@ func PrintResultSummary(result *ReviewResult) {
 	}
 	fmt.Fprintf(os.Stderr, "Duration: %dms\n", result.DurationMs)
 	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
-
-	stdoutIsTerminal := term.IsTerminal(int(os.Stdout.Fd()))
-	stderrIsTerminal := term.IsTerminal(int(os.Stderr.Fd()))
-	if !(stdoutIsTerminal && stderrIsTerminal) {
-		fmt.Println(result.ResponseText)
-	}
+	fmt.Println(result.ResponseText)
 }
