@@ -58,11 +58,13 @@ type Workflow struct {
 	maxRedos        int
 }
 
-// NewWorkflow creates a new workflow for the given issue.
+// NewWorkflow creates a new workflow for the given issue. The caller's
+// Issue is not mutated: the workflow takes a shallow copy and filters its
+// own copy's Labels so the first agent prompt (before any successful
+// refreshLabels) doesn't leak bookkeeping labels.
 func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
 	w := &Workflow{
 		tracker:      t,
-		issue:        issue,
 		state:        NewStateMachine(),
 		config:       cfg,
 		logger:       logger,
@@ -74,12 +76,13 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		runStepAgent: RunStepAgent,
 	}
 	if issue != nil {
-		// Seed the label cache from the initial issue so refreshLabels has a
-		// sensible fallback before the first successful fetch. Also filter
-		// jiradozer-* out of issue.Labels so the first agent prompt (before
-		// any successful refresh) doesn't leak bookkeeping labels.
+		// Shallow-copy so Labels mutations on w.issue don't bleed back into
+		// the caller's struct. lastLabels keeps the full (unfiltered) set for
+		// phase-skip decisions before the first tracker fetch.
+		issueCopy := *issue
 		w.lastLabels = slices.Clone(issue.Labels)
-		issue.Labels = slices.DeleteFunc(slices.Clone(issue.Labels), isJiradozerLabel)
+		issueCopy.Labels = slices.DeleteFunc(slices.Clone(issue.Labels), isJiradozerLabel)
+		w.issue = &issueCopy
 	}
 	return w
 }
@@ -442,9 +445,11 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 	cur := w.state.Current()
 
 	if cur == StepDone {
-		// Reconcile the ship phase even when enterPhase(ship) failed: the
-		// state machine reaching StepDone is authoritative evidence that
-		// shipping ran, so retry the -done write unless it's already there.
+		// Reaching StepDone is authoritative evidence that every prior phase
+		// ran to completion. Retry any -done writes that were left unfinished
+		// by transient tracker failures at earlier boundaries (including ship
+		// itself), so the final issue reflects the real workflow state.
+		w.completePriorPhases(ctx, PhaseShip)
 		if w.phases[PhaseShip] != phaseDone {
 			w.completePhase(ctx, PhaseShip)
 		}
@@ -564,21 +569,28 @@ func (w *Workflow) enterPhase(ctx context.Context, phase string) {
 }
 
 // completePhase flips internal bookkeeping to phaseDone only after the
-// tracker confirms the -done label write. The -inprogress removal is
-// best-effort (a stale -inprogress will be reconciled on the next
-// skipDonePhases), but the -done write is authoritative: without it the
-// phase stays "in progress" in memory and the workflow will retry the
-// transition rather than advance past a phase the tracker didn't record.
+// tracker confirms the -done label write. Order matters: add -done first,
+// then remove -inprogress. A crash between these two calls leaves the
+// issue with both labels, which skipDonePhases reconciles on the next run.
+// The reverse order would leave the issue with NEITHER label on crash,
+// losing durable evidence that the phase completed and causing a resumed
+// run to redo an already-finished phase.
+//
+// The -inprogress removal is best-effort (a stale -inprogress will be
+// cleared on the next skipDonePhases), but the -done write is
+// authoritative: without it the phase stays "in progress" in memory and
+// the workflow will retry the transition rather than advance past a phase
+// the tracker didn't record.
 func (w *Workflow) completePhase(ctx context.Context, phase string) {
 	if w.phases[phase] == phaseDone {
 		return
 	}
-	if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
-		w.logger.Warn("failed to remove phase in-progress label", "phase", phase, "error", err)
-	}
 	if err := w.tracker.AddLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
 		w.logger.Warn("failed to add phase done label", "phase", phase, "error", err)
 		return
+	}
+	if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+		w.logger.Warn("failed to remove phase in-progress label", "phase", phase, "error", err)
 	}
 	w.phases[phase] = phaseDone
 }

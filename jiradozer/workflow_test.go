@@ -1122,22 +1122,45 @@ func labelSequence(mt *mockWorkflowTracker) []string {
 }
 
 // TestNewWorkflow_FiltersJiradozerLabelsFromIssue verifies that NewWorkflow
-// strips jiradozer-* labels from issue.Labels at construction time so agent
-// prompts (which read issue.Labels directly) don't see bookkeeping labels
-// before the first successful refreshLabels call.
+// strips jiradozer-* labels from the workflow's internal issue copy at
+// construction time so agent prompts (which read issue.Labels directly)
+// don't see bookkeeping labels before the first successful refreshLabels
+// call, while leaving the caller's struct untouched.
 func TestNewWorkflow_FiltersJiradozerLabelsFromIssue(t *testing.T) {
 	t.Parallel()
-	issue := testIssue()
-	issue.Labels = []string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"}
+	callerIssue := testIssue()
+	callerLabels := []string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"}
+	callerIssue.Labels = callerLabels
 
-	wf := NewWorkflow(&mockWorkflowTracker{}, issue, testConfig(), discardLogger())
+	wf := NewWorkflow(&mockWorkflowTracker{}, callerIssue, testConfig(), discardLogger())
 
-	// issue.Labels should have jiradozer-* filtered out.
+	// The workflow's internal issue view has jiradozer-* filtered out.
 	assert.Equal(t, []string{"bug", "feature"}, wf.issue.Labels)
 	// lastLabels should retain the full set for skip decisions.
 	assert.Equal(t,
 		[]string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"},
 		wf.lastLabels)
+	// The caller's Issue struct must not be mutated — NewWorkflow takes a
+	// shallow copy so external references remain stable.
+	assert.Equal(t, callerLabels, callerIssue.Labels,
+		"NewWorkflow must not mutate the caller's issue.Labels")
+	assert.NotSame(t, callerIssue, wf.issue,
+		"NewWorkflow must hold its own Issue copy, not the caller's pointer")
+}
+
+// TestNewWorkflow_PreservesUnrelatedJiradozerLabels verifies the narrowed
+// allowlist: labels that happen to share the jiradozer- prefix but aren't
+// one of the eight phase × state labels (e.g. a team's jiradozer-backlog)
+// stay visible to agents.
+func TestNewWorkflow_PreservesUnrelatedJiradozerLabels(t *testing.T) {
+	t.Parallel()
+	issue := testIssue()
+	issue.Labels = []string{"jiradozer-backlog", "jiradozer-plan-done", "bug"}
+
+	wf := NewWorkflow(&mockWorkflowTracker{}, issue, testConfig(), discardLogger())
+
+	// Only the recognized phase label is stripped.
+	assert.Equal(t, []string{"jiradozer-backlog", "bug"}, wf.issue.Labels)
 }
 
 // TestWorkflow_EnterPhase_Idempotent verifies enterPhase adds the inprogress
@@ -1162,9 +1185,47 @@ func TestWorkflow_CompletePhase_Idempotent(t *testing.T) {
 	wf.completePhase(context.Background(), PhasePlan)
 	wf.completePhase(context.Background(), PhasePlan) // repeat
 
+	// -done is written first so a crash between the two calls leaves durable
+	// evidence of completion. -inprogress removal is best-effort cleanup.
 	assert.Equal(t,
-		[]string{"RemoveLabel:jiradozer-plan-inprogress", "AddLabel:jiradozer-plan-done"},
+		[]string{"AddLabel:jiradozer-plan-done", "RemoveLabel:jiradozer-plan-inprogress"},
 		labelSequence(mt))
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+}
+
+// TestWorkflow_CompletePhase_WritesDoneBeforeRemovingInProgress verifies the
+// crash-safe ordering inside completePhase: a crash (or RemoveLabel failure)
+// after the -done write must still leave durable evidence of completion on
+// the tracker, so a resumed run reads -done and skips the finished phase.
+// Reversing the order would leave the issue with NEITHER label on crash.
+func TestWorkflow_CompletePhase_WritesDoneBeforeRemovingInProgress(t *testing.T) {
+	mt := &mockWorkflowTracker{}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+
+	wf.completePhase(context.Background(), PhasePlan)
+
+	seq := labelSequence(mt)
+	require.GreaterOrEqual(t, len(seq), 2, "expected at least AddLabel + RemoveLabel")
+	assert.Equal(t, "AddLabel:jiradozer-plan-done", seq[0],
+		"done label must be written first so it is durable if the process crashes next")
+	assert.Equal(t, "RemoveLabel:jiradozer-plan-inprogress", seq[1],
+		"in-progress removal is best-effort cleanup that runs after -done is safe")
+}
+
+// TestWorkflow_CompletePhase_RemoveInProgressFailureStillAdvances verifies
+// that when -done succeeds but the subsequent -inprogress removal fails,
+// completePhase still advances the in-memory phase to phaseDone. The
+// tracker has the authoritative -done label; the stale -inprogress is a
+// cosmetic issue that skipDonePhases will reconcile on the next run.
+func TestWorkflow_CompletePhase_RemoveInProgressFailureStillAdvances(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		removeLabelErr: map[string]error{"jiradozer-plan-inprogress": errors.New("transient")},
+	}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.phases[PhasePlan] = phaseInProgress
+
+	wf.completePhase(context.Background(), PhasePlan)
+
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
 }
 
@@ -1253,8 +1314,8 @@ func TestWorkflow_ApproveTransition_CrossesPhaseBoundary(t *testing.T) {
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Equal(t,
 		[]string{
-			"RemoveLabel:jiradozer-plan-inprogress",
 			"AddLabel:jiradozer-plan-done",
+			"RemoveLabel:jiradozer-plan-inprogress",
 			"AddLabel:jiradozer-build-inprogress",
 		},
 		labelSequence(mt))
@@ -1280,8 +1341,8 @@ func TestWorkflow_ApproveTransition_BuildToValidate(t *testing.T) {
 	assert.Equal(t, StepValidating, wf.state.Current())
 	assert.Equal(t,
 		[]string{
-			"RemoveLabel:jiradozer-build-inprogress",
 			"AddLabel:jiradozer-build-done",
+			"RemoveLabel:jiradozer-build-inprogress",
 			"AddLabel:jiradozer-validate-inprogress",
 		},
 		labelSequence(mt))
@@ -1400,15 +1461,16 @@ func TestWorkflow_HandlePhaseBoundary_MidRunSkip(t *testing.T) {
 	// Validate phase labels are NOT written — the -done label was user-added.
 	assert.Equal(t,
 		[]string{
-			"RemoveLabel:jiradozer-build-inprogress",
 			"AddLabel:jiradozer-build-done",
+			"RemoveLabel:jiradozer-build-inprogress",
 			"AddLabel:jiradozer-ship-inprogress",
 		},
 		labelSequence(mt))
 }
 
 // TestWorkflow_HandlePhaseBoundary_StepDone verifies that reaching StepDone
-// completes the ship phase when ship was entered.
+// completes the ship phase when ship was entered and all prior phases were
+// already done (the normal clean-run path).
 func TestWorkflow_HandlePhaseBoundary_StepDone(t *testing.T) {
 	mt := &mockWorkflowTracker{
 		fetchIssueReply: &tracker.Issue{Labels: []string{}},
@@ -1416,6 +1478,10 @@ func TestWorkflow_HandlePhaseBoundary_StepDone(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepShipReview)
+	// Normal clean-run state: every prior phase is already phaseDone.
+	wf.phases[PhasePlan] = phaseDone
+	wf.phases[PhaseBuild] = phaseDone
+	wf.phases[PhaseValidate] = phaseDone
 	wf.phases[PhaseShip] = phaseInProgress
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepDone, "approved"))
@@ -1423,8 +1489,8 @@ func TestWorkflow_HandlePhaseBoundary_StepDone(t *testing.T) {
 	assert.Equal(t, StepDone, wf.state.Current())
 	assert.Equal(t,
 		[]string{
-			"RemoveLabel:jiradozer-ship-inprogress",
 			"AddLabel:jiradozer-ship-done",
+			"RemoveLabel:jiradozer-ship-inprogress",
 		},
 		labelSequence(mt))
 }
@@ -1441,8 +1507,12 @@ func TestWorkflow_HandlePhaseBoundary_StepDone_RecoversFromFailedShipEnter(t *te
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
 
 	walkTo(t, wf.state, StepShipReview)
-	// Simulate a failed ship enter: phases[PhaseShip] never advanced past
-	// phaseNotStarted because the -inprogress write failed at entry.
+	// Prior phases completed cleanly; ship entry failed transiently so
+	// phases[PhaseShip] is still phaseNotStarted even though the state
+	// machine reached StepShipReview.
+	wf.phases[PhasePlan] = phaseDone
+	wf.phases[PhaseBuild] = phaseDone
+	wf.phases[PhaseValidate] = phaseDone
 	assert.Equal(t, phaseNotStarted, wf.phases[PhaseShip])
 
 	require.NoError(t, wf.approveTransition(context.Background(), StepDone, "approved"))
@@ -1450,6 +1520,37 @@ func TestWorkflow_HandlePhaseBoundary_StepDone_RecoversFromFailedShipEnter(t *te
 	assert.Equal(t, StepDone, wf.state.Current())
 	assert.Equal(t, phaseDone, wf.phases[PhaseShip])
 	seq := labelSequence(mt)
+	assert.Contains(t, seq, "AddLabel:jiradozer-ship-done")
+}
+
+// TestWorkflow_HandlePhaseBoundary_StepDone_ReconcilesPriorPhases verifies
+// that reaching StepDone retries -done writes for any prior phase whose
+// earlier completePhase call failed transiently. Reaching StepDone is
+// authoritative evidence the workflow ran every phase, so a missing
+// validate-done must not be left on the issue.
+func TestWorkflow_HandlePhaseBoundary_StepDone_ReconcilesPriorPhases(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{}},
+	}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+
+	walkTo(t, wf.state, StepShipReview)
+	// Simulate a workflow where plan and build completed cleanly, but
+	// completePhase(PhaseValidate) failed transiently at the validate→ship
+	// boundary so PhaseValidate is still phaseInProgress. Ship entered
+	// successfully.
+	wf.phases[PhasePlan] = phaseDone
+	wf.phases[PhaseBuild] = phaseDone
+	wf.phases[PhaseValidate] = phaseInProgress
+	wf.phases[PhaseShip] = phaseInProgress
+
+	require.NoError(t, wf.approveTransition(context.Background(), StepDone, "approved"))
+
+	assert.Equal(t, StepDone, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
+	assert.Equal(t, phaseDone, wf.phases[PhaseShip])
+	seq := labelSequence(mt)
+	assert.Contains(t, seq, "AddLabel:jiradozer-validate-done")
 	assert.Contains(t, seq, "AddLabel:jiradozer-ship-done")
 }
 

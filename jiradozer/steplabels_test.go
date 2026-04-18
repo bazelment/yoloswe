@@ -59,3 +59,19 @@ func TestLabelFormat(t *testing.T) {
 	assert.Equal(t, "jiradozer-validate-done", doneLabel(PhaseValidate))
 	assert.Equal(t, "jiradozer-ship-inprogress", inProgressLabel(PhaseShip))
 }
+
+func TestIsJiradozerLabel_AllowlistOnly(t *testing.T) {
+	t.Parallel()
+	// All eight phase × state labels should be recognized.
+	for _, p := range phaseTable {
+		assert.True(t, isJiradozerLabel(inProgressLabel(p.name)), "%s in-progress", p.name)
+		assert.True(t, isJiradozerLabel(doneLabel(p.name)), "%s done", p.name)
+	}
+	// Unrelated jiradozer-prefixed labels must NOT be filtered, so teams
+	// can use the namespace without their labels being hidden from agents.
+	assert.False(t, isJiradozerLabel("jiradozer-backlog"))
+	assert.False(t, isJiradozerLabel("jiradozer-plan-unknown"))
+	assert.False(t, isJiradozerLabel("jiradozer-"))
+	assert.False(t, isJiradozerLabel(""))
+	assert.False(t, isJiradozerLabel("bug"))
+}
