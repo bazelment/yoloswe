@@ -442,7 +442,10 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 	cur := w.state.Current()
 
 	if cur == StepDone {
-		if w.phases[PhaseShip] == phaseInProgress {
+		// Reconcile the ship phase even when enterPhase(ship) failed: the
+		// state machine reaching StepDone is authoritative evidence that
+		// shipping ran, so retry the -done write unless it's already there.
+		if w.phases[PhaseShip] != phaseDone {
 			w.completePhase(ctx, PhaseShip)
 		}
 		return
@@ -542,10 +545,6 @@ func (w *Workflow) refreshLabels(ctx context.Context) []string {
 	w.issue.Labels = slices.DeleteFunc(slices.Clone(fresh.Labels), isJiradozerLabel)
 	w.issue.LabelIDs = fresh.LabelIDs
 	return fresh.Labels
-}
-
-func isJiradozerLabel(label string) bool {
-	return strings.HasPrefix(label, "jiradozer-")
 }
 
 // enterPhase flips internal bookkeeping to inProgress only after the

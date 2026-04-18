@@ -1,5 +1,7 @@
 package jiradozer
 
+import "strings"
+
 // Phase names used as label segments for step tracking. Four high-level
 // phases are surfaced to users as labels; review gates and create_pr fold
 // into the adjacent agent phase.
@@ -61,3 +63,10 @@ func phaseAfter(phase string) string {
 
 func inProgressLabel(phase string) string { return "jiradozer-" + phase + "-inprogress" }
 func doneLabel(phase string) string       { return "jiradozer-" + phase + "-done" }
+
+// isJiradozerLabel reports whether label is one of jiradozer's bookkeeping
+// phase labels. Callers strip these from user-facing prompts so agents see
+// only substantive labels.
+func isJiradozerLabel(label string) bool {
+	return strings.HasPrefix(label, "jiradozer-")
+}

@@ -1429,6 +1429,30 @@ func TestWorkflow_HandlePhaseBoundary_StepDone(t *testing.T) {
 		labelSequence(mt))
 }
 
+// TestWorkflow_HandlePhaseBoundary_StepDone_RecoversFromFailedShipEnter
+// verifies that reaching StepDone writes ship-done even when the initial
+// enterPhase(PhaseShip) AddLabel failed. Without this recovery, a transient
+// tracker failure at ship phase start would silently leave the terminal
+// ship-done label missing from the issue.
+func TestWorkflow_HandlePhaseBoundary_StepDone_RecoversFromFailedShipEnter(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{}},
+	}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+
+	walkTo(t, wf.state, StepShipReview)
+	// Simulate a failed ship enter: phases[PhaseShip] never advanced past
+	// phaseNotStarted because the -inprogress write failed at entry.
+	assert.Equal(t, phaseNotStarted, wf.phases[PhaseShip])
+
+	require.NoError(t, wf.approveTransition(context.Background(), StepDone, "approved"))
+
+	assert.Equal(t, StepDone, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhaseShip])
+	seq := labelSequence(mt)
+	assert.Contains(t, seq, "AddLabel:jiradozer-ship-done")
+}
+
 // TestWorkflow_RefreshLabels_FallbackOnError verifies that when FetchIssue
 // returns nil (or error), refreshLabels falls back to the cached labels.
 func TestWorkflow_RefreshLabels_FallbackOnError(t *testing.T) {

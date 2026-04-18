@@ -343,11 +343,16 @@ func (c *Client) attachLabelToIssue(ctx context.Context, issueID, label string) 
 // ensureRepoLabel creates a label on the repository if it does not already
 // exist. A 422 (label already exists) is treated as success so the operation
 // is idempotent under concurrent creators.
+//
+// GitHub's Create-a-label endpoint requires both "name" and "color" (6-char
+// hex, no leading #). We pass a neutral grey ("ededed") so the label renders
+// but doesn't carry semantic colour. Users can recolour afterwards.
 func (c *Client) ensureRepoLabel(ctx context.Context, label string) error {
 	result, err := c.gh.Run(ctx, []string{
 		"api", "-X", "POST",
 		fmt.Sprintf("repos/%s/%s/labels", c.owner, c.repo),
 		"-f", "name=" + label,
+		"-f", "color=ededed",
 	}, "")
 	if err == nil {
 		return nil
