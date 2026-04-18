@@ -454,6 +454,49 @@ is the load-bearing regression coverage.
   INFO, not WARN, when `reason == bg_work_live` since it's the
   expected case.
 
+## G4 — Error must be the final tool_result in the turn
+
+Added after a production failure on 2026-04-18 (commit on
+`fix/retry-detector-recovered-errors`).
+
+**Symptom.** Jiradozer validate ran a 16-Edit turn. One early Edit returned
+`<tool_use_error>File has not been read yet</tool_use_error>`. The agent
+recovered: Read the file, re-issued the Edit, completed 20+ more tool calls,
+and ended with `stop_reason=end_turn` and a 1426-char summary text.
+Jiradozer's retry loop still fired ("Retry 1/3: tool error in Edit") and
+re-ran "simplify review from scratch," wasting ~5 min and clobbering the
+successful output.
+
+**Evidence.**
+- Session JSONL:
+  `~/.claude/projects/-home-ubuntu-worktrees-yoloswe-faeture-step-tracking/fc29ffb6-7b4d-40f6-80bc-4be1b0a2df33.jsonl`
+  line 132 (errored tool_result), line 156 (clean `end_turn` with text summary).
+- Jiradozer log:
+  `~/.jiradozer/logs/jiradozer-20260418-042630-3768733.log`
+  lines 203–208: `turn complete step=validate success=true` immediately
+  followed by `retry on tool error ... tool=Edit`.
+
+**Root cause.** The pre-G4 `FinalTurnToolError` walked `ContentBlocks` in
+forward order and returned the *first* qualifying error block. It never
+checked whether the error was the *last* tool_result. A turn with a transient
+early error and later recovery looked identical to a terminal error.
+
+**Fix.** Walk `ContentBlocks` in reverse. Take the first `tool_result`
+encountered (i.e. the last one in forward order). Return `ok=true` only if
+that last tool_result has both `IsError==true` and the `toolUseErrorMarker`.
+If the agent recovered (last tool_result is a success), `ok=false`.
+
+**Compatibility.** Existing G1/G2/G3 gates in `claude_provider.go` are
+unchanged. The PLA-212 fixture (`real_tool_use_error.json`) still passes
+because in that fixture the cancelled parallel sibling IS the last
+tool_result. The `parked_with_skill_error.json` fixture still returns
+`ok=true` at the detector level (Skill error is the last tool_result);
+G2 (`HasLiveBackgroundWork`) continues to suppress the retry.
+
+**Test regression.** `TestFinalTurnToolError_Fixture_EditErrorThenRecovered`
+in `turn_retry_test.go` + `TestRunRetryLoop_SkipsWhenAgentRecovered` in
+`claude_provider_retry_test.go`.
+
 ## Open questions for human review
 
 1. **Do we need G3 at all?** If G1+G2 land and no log shows a

@@ -1,0 +1,48 @@
+[
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_edit_1",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/repo/foo.go",
+      "old_string": "old",
+      "new_string": "new"
+    }
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_edit_1",
+    "tool_result": "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+    "is_error": true
+  },
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_read_1",
+    "tool_name": "Read",
+    "tool_input": {
+      "file_path": "/repo/foo.go"
+    }
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_read_1",
+    "tool_result": "package foo\n\nfunc Old() {}\n",
+    "is_error": false
+  },
+  {
+    "type": "tool_use",
+    "tool_use_id": "toolu_edit_2",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "/repo/foo.go",
+      "old_string": "old",
+      "new_string": "new"
+    }
+  },
+  {
+    "type": "tool_result",
+    "tool_use_id": "toolu_edit_2",
+    "tool_result": "Successfully edited /repo/foo.go",
+    "is_error": false
+  }
+]
