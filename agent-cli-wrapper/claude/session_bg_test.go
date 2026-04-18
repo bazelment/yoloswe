@@ -992,14 +992,19 @@ func TestScheduleWakeup_ChainedWakeupReSuppress(t *testing.T) {
 		TotalCostUSD: 0.02,
 	})
 
-	// The second ScheduleWakeup must re-suppress — no TurnCompleteEvent yet.
-	select {
-	case event := <-s.events:
-		if _, ok := event.(TurnCompleteEvent); ok {
-			t.Fatal("got unexpected TurnCompleteEvent after chained ScheduleWakeup — suppression was not re-armed")
+	// The second ScheduleWakeup must re-suppress — drain all queued events
+	// with a short deadline and assert none are TurnCompleteEvent.
+	drainDeadline := time.After(50 * time.Millisecond)
+drainLoop:
+	for {
+		select {
+		case event := <-s.events:
+			if _, ok := event.(TurnCompleteEvent); ok {
+				t.Fatal("got unexpected TurnCompleteEvent after chained ScheduleWakeup — suppression was not re-armed")
+			}
+		case <-drainDeadline:
+			break drainLoop
 		}
-	default:
-		// Good — no TurnCompleteEvent.
 	}
 
 	// Verify suppression is still active and re-armed with the new tool ID.
