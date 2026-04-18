@@ -232,6 +232,8 @@ func (c *Client) RemoveLabel(ctx context.Context, issueID string, label string) 
 	}
 
 	// Find the label ID on the issue by name. If not present, idempotent no-op.
+	// Labels and LabelIDs are populated in parallel by nodeToIssue from a
+	// single Labels.Nodes iteration, so index i is safe across both slices.
 	var targetID string
 	for i, name := range issueResp.Labels {
 		if name == label {

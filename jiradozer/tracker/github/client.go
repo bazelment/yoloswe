@@ -303,14 +303,7 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 		return nil
 
 	case stateReview:
-		if _, err := c.gh.Run(ctx, []string{
-			"api", "-X", "POST",
-			fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
-			"-f", fmt.Sprintf("labels[]=%s", reviewLabel),
-		}, ""); err != nil {
-			return fmt.Errorf("add review label: %w", err)
-		}
-		return nil
+		return c.AddLabel(ctx, issueID, reviewLabel)
 
 	default:
 		return fmt.Errorf("unknown state ID: %q", stateID)
