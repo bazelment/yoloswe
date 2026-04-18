@@ -94,25 +94,24 @@ func excerptRunes(s string, max int) string {
 // cancelled sibling (carrying the marker) is still the last tool_result
 // in forward order, so it remains detectable.
 func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
-	toolNames := make(map[string]string)
-	for _, block := range blocks {
-		if block.Type == ContentBlockTypeToolUse && block.ToolUseID != "" {
-			toolNames[block.ToolUseID] = block.ToolName
-		}
-	}
-	// Walk in reverse to find the last tool_result block.
 	for i := len(blocks) - 1; i >= 0; i-- {
 		block := blocks[i]
 		if block.Type != ContentBlockTypeToolResult {
 			continue
 		}
-		// Found the last tool_result. It must have IsError AND the marker.
 		if !block.IsError {
 			return "", "", false
 		}
 		content := stringifyToolResult(block.ToolResult)
 		if !strings.Contains(content, toolUseErrorMarker) {
 			return "", "", false
+		}
+		// Build tool name map only on the error path (uncommon case).
+		toolNames := make(map[string]string)
+		for _, b := range blocks {
+			if b.Type == ContentBlockTypeToolUse {
+				toolNames[b.ToolUseID] = b.ToolName
+			}
 		}
 		name := toolNames[block.ToolUseID]
 		if name == "" {
