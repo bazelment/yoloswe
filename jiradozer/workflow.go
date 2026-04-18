@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,6 +24,15 @@ const (
 // comments are repeatedly parsed as redo requests.
 const DefaultMaxRedos = 3
 
+// phaseState tracks per-phase bookkeeping: notStarted → inProgress → done.
+type phaseState int
+
+const (
+	phaseNotStarted phaseState = iota
+	phaseInProgress
+	phaseDone
+)
+
 // Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
 	lastCommentAt   time.Time
@@ -34,6 +44,7 @@ type Workflow struct {
 	sessionIDs      map[WorkflowStep]string
 	stateIDs        map[string]string
 	redoCounts      map[WorkflowStep]int
+	phases          map[string]phaseState
 	OnTransition    func(step WorkflowStep)
 	OnRoundProgress func(roundIndex, roundTotal int)
 	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error)
@@ -43,23 +54,37 @@ type Workflow struct {
 	buildOutput     string
 	feedback        string
 	botCommentIDs   []string
+	lastLabels      []string
 	maxRedos        int
 }
 
-// NewWorkflow creates a new workflow for the given issue.
+// NewWorkflow creates a new workflow for the given issue. The caller's
+// Issue is not mutated: the workflow takes a shallow copy and filters its
+// own copy's Labels so the first agent prompt (before any successful
+// refreshLabels) doesn't leak bookkeeping labels.
 func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
-	return &Workflow{
+	w := &Workflow{
 		tracker:      t,
-		issue:        issue,
 		state:        NewStateMachine(),
 		config:       cfg,
 		logger:       logger,
 		stateIDs:     make(map[string]string),
 		sessionIDs:   make(map[WorkflowStep]string),
 		redoCounts:   make(map[WorkflowStep]int),
+		phases:       make(map[string]phaseState),
 		maxRedos:     DefaultMaxRedos,
 		runStepAgent: RunStepAgent,
 	}
+	if issue != nil {
+		// Shallow-copy so Labels mutations on w.issue don't bleed back into
+		// the caller's struct. lastLabels keeps the full (unfiltered) set for
+		// phase-skip decisions before the first tracker fetch.
+		issueCopy := *issue
+		w.lastLabels = slices.Clone(issue.Labels)
+		issueCopy.Labels = slices.DeleteFunc(slices.Clone(issue.Labels), isJiradozerLabel)
+		w.issue = &issueCopy
+	}
+	return w
 }
 
 // SetRenderer sets the terminal renderer for streaming output.
@@ -118,6 +143,14 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		if err := w.tracker.UpdateIssueState(ctx, w.issue.ID, id); err != nil {
 			w.logger.Warn("failed to update issue state to in_progress", "error", err)
 		}
+	}
+
+	// Honor pre-existing -done labels by skipping completed phases. A fresh
+	// workflow run never re-does plan/build/validate/ship that the user has
+	// already marked done. Users clear the label manually to re-run a phase.
+	w.skipDonePhases(ctx)
+	if phase := phaseForStep(w.state.Current()); phase != "" {
+		w.enterPhase(ctx, phase)
 	}
 
 	for {
@@ -347,7 +380,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		w.logger.Info("auto-approving", "step", w.state.Current())
 		w.status(fmt.Sprintf("Auto-approved %s", w.state.Current()))
 		w.feedback = ""
-		if err := w.transition(approveTarget, "auto_approved"); err != nil {
+		if err := w.approveTransition(ctx, approveTarget, "auto_approved"); err != nil {
 			w.fail(ctx, err)
 		}
 		return
@@ -369,7 +402,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		w.logger.Info("feedback: approved", "step", w.state.Current())
 		w.status("Approved")
 		w.feedback = ""
-		if err := w.transition(approveTarget, "approved"); err != nil {
+		if err := w.approveTransition(ctx, approveTarget, "approved"); err != nil {
 			w.fail(ctx, err)
 		}
 	case FeedbackRedo:
@@ -387,7 +420,7 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		// incorporated — they don't restart the planning step. For other review
 		// steps, redo is the right behavior (the user wants changes applied).
 		if w.state.Current() == StepPlanReview {
-			if err := w.transition(approveTarget, "approved_with_feedback"); err != nil {
+			if err := w.approveTransition(ctx, approveTarget, "approved_with_feedback"); err != nil {
 				w.fail(ctx, err)
 			}
 		} else {
@@ -396,6 +429,210 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 			}
 		}
 	}
+}
+
+// approveTransition advances to approveTarget, then closes out the prior
+// phase and skips ahead over any phases whose -done label was added mid-run.
+func (w *Workflow) approveTransition(ctx context.Context, approveTarget WorkflowStep, trigger string) error {
+	if err := w.transition(approveTarget, trigger); err != nil {
+		return err
+	}
+	w.handlePhaseBoundary(ctx)
+	return nil
+}
+
+func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
+	cur := w.state.Current()
+
+	if cur == StepDone {
+		// Reaching StepDone is authoritative evidence that every prior phase
+		// ran to completion. Retry any -done writes that were left unfinished
+		// by transient tracker failures at earlier boundaries (including ship
+		// itself), so the final issue reflects the real workflow state.
+		w.completePriorPhases(ctx, PhaseShip)
+		if w.phases[PhaseShip] != phaseDone {
+			w.completePhase(ctx, PhaseShip)
+		}
+		// Final sweep: completePhase's -inprogress removal is best-effort, so
+		// a transient RemoveLabel failure can leave the issue with both
+		// -inprogress and -done for a completed phase. At StepDone there's no
+		// subsequent handlePhaseBoundary to reconcile via skipDonePhases, so
+		// do the cleanup here.
+		w.cleanupStalePhaseLabels(ctx)
+		return
+	}
+
+	if curPhase := phaseForStep(cur); curPhase != "" {
+		w.completePriorPhases(ctx, curPhase)
+	}
+
+	w.skipDonePhases(ctx)
+
+	if phase := phaseForStep(w.state.Current()); phase != "" {
+		w.enterPhase(ctx, phase)
+	}
+}
+
+// cleanupStalePhaseLabels removes any -inprogress label still present on
+// the issue for a phase that bookkeeping considers phaseDone. This is the
+// terminal counterpart to skipDonePhases' stale-label reconciliation —
+// without it, a transient RemoveLabel failure during completePhase would
+// leave the issue permanently tagged with both -inprogress and -done.
+func (w *Workflow) cleanupStalePhaseLabels(ctx context.Context) {
+	labels := w.refreshLabels(ctx)
+	for _, p := range phaseTable {
+		if w.phases[p.name] != phaseDone {
+			continue
+		}
+		if !slices.Contains(labels, inProgressLabel(p.name)) {
+			continue
+		}
+		if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(p.name)); err != nil {
+			w.logger.Warn("failed to clear stale in-progress label at terminal sweep", "phase", p.name, "error", err)
+		}
+	}
+}
+
+// completePriorPhases walks phaseTable up to currentPhase and attempts to
+// mark each earlier phase as done. Phases already phaseDone are skipped by
+// completePhase itself. Phases still phaseNotStarted can happen when the
+// initial enterPhase AddLabel failed transiently; since the state machine
+// has since advanced past them, retry the -done write here so the issue
+// reflects the workflow's actual progress.
+func (w *Workflow) completePriorPhases(ctx context.Context, currentPhase string) {
+	for _, p := range phaseTable {
+		if p.name == currentPhase {
+			return
+		}
+		if w.phases[p.name] != phaseDone {
+			w.completePhase(ctx, p.name)
+		}
+	}
+}
+
+// skipDonePhases refreshes labels from the tracker, then walks phases forward
+// from the current step, jumping past any phase already marked -done via
+// forceTransition. If all remaining phases are -done, jumps to StepDone.
+func (w *Workflow) skipDonePhases(ctx context.Context) {
+	labels := w.refreshLabels(ctx)
+
+	for {
+		cur := w.state.Current()
+		phase := phaseForStep(cur)
+		if phase == "" {
+			return
+		}
+		if !slices.Contains(labels, doneLabel(phase)) {
+			return
+		}
+		// The -done label is authoritative, so clear any stale -inprogress
+		// label left over from a prior interrupted run or a user toggling
+		// phase state manually. Without this, the issue can end up tagged
+		// both -inprogress and -done for the same phase.
+		if slices.Contains(labels, inProgressLabel(phase)) {
+			if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+				w.logger.Warn("failed to clear stale in-progress label while skipping phase", "phase", phase, "error", err)
+			}
+		}
+		w.phases[phase] = phaseDone
+		nextPhase := phaseAfter(phase)
+		if nextPhase == "" {
+			w.logger.Info("all phases already marked done; skipping to StepDone")
+			w.forceTransition(StepDone)
+			return
+		}
+		next := startStepForPhase(nextPhase)
+		w.logger.Info("skipping phase (label present)", "phase", phase, "next", next)
+		w.forceTransition(next)
+		if phase == PhasePlan && w.plan == "" {
+			if content, err := LoadPersistedPlan(w.config.WorkDir); err != nil {
+				w.logger.Warn("failed to load persisted plan after skipping plan phase", "error", err)
+			} else if content == "" {
+				w.logger.Warn("skipping plan but no persisted plan found; build will run blind", "path", PlanFilePath(w.config.WorkDir))
+			} else {
+				w.plan = content
+				w.logger.Info("loaded persisted plan from disk after skipping plan phase", "path", PlanFilePath(w.config.WorkDir))
+			}
+		}
+	}
+}
+
+// refreshLabels fetches the latest label set from the tracker and returns it
+// for phase decisions (including jiradozer-* bookkeeping labels). The
+// user-facing subset is mirrored onto w.issue.Labels so agent prompts don't
+// see bookkeeping noise via promptData. Labels and LabelIDs are filtered in
+// lockstep so they continue to describe the same attachment set — Linear's
+// nodeToIssue populates them in parallel, and any future caller using them
+// together would otherwise get a mismatch. On fetch failure, returns the
+// last known full set from w.lastLabels.
+func (w *Workflow) refreshLabels(ctx context.Context) []string {
+	fresh, err := w.tracker.FetchIssue(ctx, w.issue.Identifier)
+	if err != nil || fresh == nil {
+		if err != nil {
+			w.logger.Warn("failed to refresh issue labels", "error", err)
+		} else {
+			w.logger.Warn("refresh issue returned nil without error; falling back to cached labels")
+		}
+		return w.lastLabels
+	}
+	w.lastLabels = fresh.Labels
+	filteredLabels := make([]string, 0, len(fresh.Labels))
+	filteredIDs := make([]string, 0, len(fresh.LabelIDs))
+	for i, name := range fresh.Labels {
+		if isJiradozerLabel(name) {
+			continue
+		}
+		filteredLabels = append(filteredLabels, name)
+		if i < len(fresh.LabelIDs) {
+			filteredIDs = append(filteredIDs, fresh.LabelIDs[i])
+		}
+	}
+	w.issue.Labels = filteredLabels
+	w.issue.LabelIDs = filteredIDs
+	return fresh.Labels
+}
+
+// enterPhase flips internal bookkeeping to inProgress only after the
+// tracker confirms the -inprogress label write. On tracker failure the
+// phase stays in phaseNotStarted so a retry (or the next event) will
+// attempt the write again — keeping the in-memory state and the tracker
+// from silently diverging.
+func (w *Workflow) enterPhase(ctx context.Context, phase string) {
+	if w.phases[phase] != phaseNotStarted {
+		return
+	}
+	if err := w.tracker.AddLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+		w.logger.Warn("failed to add phase in-progress label", "phase", phase, "error", err)
+		return
+	}
+	w.phases[phase] = phaseInProgress
+}
+
+// completePhase flips internal bookkeeping to phaseDone only after the
+// tracker confirms the -done label write. Order matters: add -done first,
+// then remove -inprogress. A crash between these two calls leaves the
+// issue with both labels, which skipDonePhases reconciles on the next run.
+// The reverse order would leave the issue with NEITHER label on crash,
+// losing durable evidence that the phase completed and causing a resumed
+// run to redo an already-finished phase.
+//
+// The -inprogress removal is best-effort (a stale -inprogress will be
+// cleared on the next skipDonePhases), but the -done write is
+// authoritative: without it the phase stays "in progress" in memory and
+// the workflow will retry the transition rather than advance past a phase
+// the tracker didn't record.
+func (w *Workflow) completePhase(ctx context.Context, phase string) {
+	if w.phases[phase] == phaseDone {
+		return
+	}
+	if err := w.tracker.AddLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+		w.logger.Warn("failed to add phase done label", "phase", phase, "error", err)
+		return
+	}
+	if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+		w.logger.Warn("failed to remove phase in-progress label", "phase", phase, "error", err)
+	}
+	w.phases[phase] = phaseDone
 }
 
 // tryRedo transitions to the redo target if the circuit breaker hasn't tripped.
@@ -408,7 +645,76 @@ func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
 		return fmt.Errorf("step %s has been re-run %d times (max %d), giving up", redoTarget, count-1, w.maxRedos)
 	}
 	w.logger.Info("redo attempt", "target", redoTarget, "attempt", count, "max", w.maxRedos)
-	return w.transition(redoTarget, "redo")
+	if err := w.transition(redoTarget, "redo"); err != nil {
+		return err
+	}
+	w.reopenPhaseOnRedo(ctx, redoTarget)
+	return nil
+}
+
+// reopenPhaseOnRedo keeps phase labels honest across backward (redo)
+// transitions. The state machine allows transitions like
+// ValidateReview → Building, which rewinds the agent into an already-
+// completed phase. Without this reconciliation, the issue would keep
+// jiradozer-build-done while the build agent is actively re-running, and
+// observers would see stale labels until the next forward phase boundary.
+//
+// Semantics: when redoing into a phase earlier than (or the same as) the
+// current in-progress phase, mark the target phase and every later phase
+// as not-started again, replace any -done labels with -inprogress, and
+// clear stray -inprogress labels on phases we're rewinding past.
+func (w *Workflow) reopenPhaseOnRedo(ctx context.Context, redoTarget WorkflowStep) {
+	targetPhase := phaseForStep(redoTarget)
+	if targetPhase == "" {
+		// Redoing into a review gate or terminal step has no phase of its
+		// own; nothing to reconcile here.
+		return
+	}
+	// Find targetPhase's index in phaseTable; every phase at or after that
+	// index needs to be rewound.
+	targetIdx := -1
+	for i, p := range phaseTable {
+		if p.name == targetPhase {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx < 0 {
+		return
+	}
+	for i := targetIdx; i < len(phaseTable); i++ {
+		phase := phaseTable[i].name
+		prior := w.phases[phase]
+		// Target phase: re-enter as in-progress. Later phases: reset to
+		// not-started (they haven't happened in this rewound run).
+		if i == targetIdx {
+			if prior == phaseDone {
+				if err := w.tracker.RemoveLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+					w.logger.Warn("failed to remove -done label on redo", "phase", phase, "error", err)
+				}
+			}
+			// Force a fresh -inprogress write even if prior was phaseInProgress,
+			// in case the previous -inprogress was removed by skipDonePhases or
+			// a prior boundary.
+			w.phases[phase] = phaseNotStarted
+			w.enterPhase(ctx, phase)
+		} else {
+			// Phases "ahead" of the redo target shouldn't carry state from
+			// the forward run we're rewinding. Clear any labels and reset
+			// bookkeeping so the next forward pass starts clean.
+			if prior == phaseInProgress {
+				if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+					w.logger.Warn("failed to remove -inprogress on redo", "phase", phase, "error", err)
+				}
+			}
+			if prior == phaseDone {
+				if err := w.tracker.RemoveLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+					w.logger.Warn("failed to remove -done on redo", "phase", phase, "error", err)
+				}
+			}
+			w.phases[phase] = phaseNotStarted
+		}
+	}
 }
 
 func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowStep, trigger string) {
@@ -478,6 +784,16 @@ func (w *Workflow) transition(target WorkflowStep, trigger string) error {
 		w.OnTransition(target)
 	}
 	return nil
+}
+
+// forceTransition bypasses state machine validation (used when jumping over
+// already-done phases) but still fires OnTransition so subscribers see the
+// jump.
+func (w *Workflow) forceTransition(target WorkflowStep) {
+	w.state.ForceState(target)
+	if w.OnTransition != nil {
+		w.OnTransition(target)
+	}
 }
 
 func (w *Workflow) fail(ctx context.Context, err error) {

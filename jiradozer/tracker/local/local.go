@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -277,6 +278,24 @@ func (t *Tracker) AddLabel(_ context.Context, issueID string, label string) erro
 		}
 	}
 	f.Issue.Labels = append(f.Issue.Labels, label)
+	return t.writeFile(issueID, f)
+}
+
+// RemoveLabel removes a label from a local issue. It is idempotent.
+func (t *Tracker) RemoveLabel(_ context.Context, issueID string, label string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	f, err := t.readFile(issueID)
+	if err != nil {
+		return err
+	}
+
+	original := len(f.Issue.Labels)
+	f.Issue.Labels = slices.DeleteFunc(f.Issue.Labels, func(l string) bool { return l == label })
+	if len(f.Issue.Labels) == original {
+		return nil
+	}
 	return t.writeFile(issueID, f)
 }
 

@@ -3,7 +3,9 @@ package jiradozer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -548,10 +550,20 @@ func JoinRoundOutputs(outputs []string) string {
 }
 
 func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
+	// Strip jiradozer's phase bookkeeping labels (exact-match allowlist, see
+	// isJiradozerLabel) so agent prompts see only user-facing labels.
+	// Callers that need the full set (e.g. phase skip logic in Workflow)
+	// work off a separately-tracked copy.
+	userLabels := make([]string, 0, len(issue.Labels))
+	for _, l := range issue.Labels {
+		if !isJiradozerLabel(l) {
+			userLabels = append(userLabels, l)
+		}
+	}
 	d := PromptData{
 		Identifier: issue.Identifier,
 		Title:      issue.Title,
-		Labels:     strings.Join(issue.Labels, ", "),
+		Labels:     strings.Join(userLabels, ", "),
 		BaseBranch: baseBranch,
 	}
 	if issue.Description != nil {
@@ -567,6 +579,21 @@ func NewPromptData(issue *tracker.Issue, baseBranch string) PromptData {
 // reuse across separate process invocations (e.g. plan step then build step).
 func PlanFilePath(workDir string) string {
 	return filepath.Join(workDir, ".jiradozer", "plan.md")
+}
+
+// LoadPersistedPlan reads plan.md from workDir. Returns "" and no error when
+// the file does not exist (a missing plan is normal, not a failure). The
+// returned content is trimmed.
+func LoadPersistedPlan(workDir string) (string, error) {
+	planPath := PlanFilePath(workDir)
+	content, err := os.ReadFile(planPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read persisted plan %s: %w", planPath, err)
+	}
+	return strings.TrimSpace(string(content)), nil
 }
 
 // PersistPlan writes plan output to PlanFilePath so --run-step=build can load it.

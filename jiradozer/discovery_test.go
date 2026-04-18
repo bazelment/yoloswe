@@ -54,6 +54,9 @@ func (m *mockDiscoveryTracker) UpdateIssueState(_ context.Context, _ string, _ s
 func (m *mockDiscoveryTracker) AddLabel(_ context.Context, _ string, _ string) error {
 	return nil
 }
+func (m *mockDiscoveryTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
 
 func TestDiscovery_DeduplicatesIssues(t *testing.T) {
 	issueA := &tracker.Issue{ID: "a", Identifier: "ENG-1", Title: "Issue A"}

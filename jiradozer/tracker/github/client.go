@@ -299,18 +299,11 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 		}, ""); err != nil {
 			return fmt.Errorf("update issue state to %s: %w", ghState, err)
 		}
-		c.removeLabel(ctx, issueID, reviewLabel) //nolint:errcheck // best-effort
+		c.RemoveLabel(ctx, issueID, reviewLabel) //nolint:errcheck // best-effort
 		return nil
 
 	case stateReview:
-		if _, err := c.gh.Run(ctx, []string{
-			"api", "-X", "POST",
-			fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
-			"-f", fmt.Sprintf("labels[]=%s", reviewLabel),
-		}, ""); err != nil {
-			return fmt.Errorf("add review label: %w", err)
-		}
-		return nil
+		return c.AddLabel(ctx, issueID, reviewLabel)
 
 	default:
 		return fmt.Errorf("unknown state ID: %q", stateID)
@@ -320,22 +313,71 @@ func (c *Client) UpdateIssueState(ctx context.Context, issueID string, stateID s
 // AddLabel adds a label to a GitHub issue. The operation is idempotent —
 // GitHub returns 200 OK even if the label is already present.
 func (c *Client) AddLabel(ctx context.Context, issueID string, label string) error {
-	if _, err := c.gh.Run(ctx, []string{
-		"api", "-X", "POST",
-		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
-		"-f", fmt.Sprintf("labels[]=%s", label),
-	}, ""); err != nil {
+	result, err := c.attachLabelToIssue(ctx, issueID, label)
+	if err == nil {
+		return nil
+	}
+	// GitHub returns 422 "Validation Failed" when the label does not yet
+	// exist on the repo. Create it on demand (matching Linear's ensureLabel
+	// behaviour) and retry once.
+	if result == nil || !strings.Contains(result.Stderr, "422") {
 		return fmt.Errorf("add label %q to issue %s: %w", label, issueID, err)
+	}
+	if cErr := c.ensureRepoLabel(ctx, label); cErr != nil {
+		return fmt.Errorf("add label %q to issue %s: ensure repo label: %w", label, issueID, cErr)
+	}
+	if _, err := c.attachLabelToIssue(ctx, issueID, label); err != nil {
+		return fmt.Errorf("add label %q to issue %s (after creating repo label): %w", label, issueID, err)
 	}
 	return nil
 }
 
-func (c *Client) removeLabel(ctx context.Context, issueID, label string) error {
-	_, err := c.gh.Run(ctx, []string{
+func (c *Client) attachLabelToIssue(ctx context.Context, issueID, label string) (*wt.CmdResult, error) {
+	return c.gh.Run(ctx, []string{
+		"api", "-X", "POST",
+		fmt.Sprintf("repos/%s/%s/issues/%s/labels", c.owner, c.repo, issueID),
+		"-f", fmt.Sprintf("labels[]=%s", label),
+	}, "")
+}
+
+// ensureRepoLabel creates a label on the repository if it does not already
+// exist. A 422 (label already exists) is treated as success so the operation
+// is idempotent under concurrent creators.
+//
+// GitHub's Create-a-label endpoint requires both "name" and "color" (6-char
+// hex, no leading #). We pass a neutral grey ("ededed") so the label renders
+// but doesn't carry semantic colour. Users can recolour afterwards.
+func (c *Client) ensureRepoLabel(ctx context.Context, label string) error {
+	result, err := c.gh.Run(ctx, []string{
+		"api", "-X", "POST",
+		fmt.Sprintf("repos/%s/%s/labels", c.owner, c.repo),
+		"-f", "name=" + label,
+		"-f", "color=ededed",
+	}, "")
+	if err == nil {
+		return nil
+	}
+	if result != nil && strings.Contains(result.Stderr, "422") {
+		return nil
+	}
+	return err
+}
+
+// RemoveLabel removes a label from a GitHub issue. The operation is
+// idempotent: a 404 response (label not present on issue) is treated as
+// success.
+func (c *Client) RemoveLabel(ctx context.Context, issueID, label string) error {
+	result, err := c.gh.Run(ctx, []string{
 		"api", "-X", "DELETE",
 		fmt.Sprintf("repos/%s/%s/issues/%s/labels/%s", c.owner, c.repo, issueID, url.PathEscape(label)),
 	}, "")
-	return err
+	if err != nil {
+		if result != nil && strings.Contains(result.Stderr, "HTTP 404") {
+			return nil
+		}
+		return fmt.Errorf("remove label %q from issue %s: %w", label, issueID, err)
+	}
+	return nil
 }
 
 func (c *Client) ghIssueToTracker(gi ghIssue, owner, repo string) *tracker.Issue {

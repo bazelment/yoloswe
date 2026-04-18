@@ -122,6 +122,9 @@ func (m *mockPollerTracker) UpdateIssueState(_ context.Context, _ string, _ stri
 func (m *mockPollerTracker) AddLabel(_ context.Context, _ string, _ string) error {
 	return nil
 }
+func (m *mockPollerTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
 
 func TestPollForFeedback_FiltersBotComments(t *testing.T) {
 	now := time.Now()

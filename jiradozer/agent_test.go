@@ -36,6 +36,19 @@ func TestNewPromptData(t *testing.T) {
 	assert.Empty(t, data.BuildOutput)
 }
 
+func TestNewPromptData_StripsJiradozerLabels(t *testing.T) {
+	issue := &tracker.Issue{
+		ID:         "id",
+		Identifier: "ENG-1",
+		Title:      "Test",
+		Labels:     []string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"},
+	}
+
+	data := NewPromptData(issue, "main")
+
+	assert.Equal(t, "bug, feature", data.Labels)
+}
+
 func TestNewPromptData_NilOptionalFields(t *testing.T) {
 	issue := &tracker.Issue{
 		ID:         "id",

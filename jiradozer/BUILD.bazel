@@ -9,6 +9,7 @@ go_library(
         "orchestrator.go",
         "poller.go",
         "state.go",
+        "steplabels.go",
         "workflow.go",
     ],
     importpath = "github.com/bazelment/yoloswe/jiradozer",
