@@ -75,8 +75,11 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 	}
 	if issue != nil {
 		// Seed the label cache from the initial issue so refreshLabels has a
-		// sensible fallback before the first successful fetch.
+		// sensible fallback before the first successful fetch. Also filter
+		// jiradozer-* out of issue.Labels so the first agent prompt (before
+		// any successful refresh) doesn't leak bookkeeping labels.
 		w.lastLabels = slices.Clone(issue.Labels)
+		issue.Labels = slices.DeleteFunc(slices.Clone(issue.Labels), isJiradozerLabel)
 	}
 	return w
 }
@@ -482,8 +485,15 @@ func (w *Workflow) skipDonePhases(ctx context.Context) {
 		if !slices.Contains(labels, doneLabel(phase)) {
 			return
 		}
-		// Mark bookkeeping only — labels are already on the tracker (that's why
-		// we're skipping), so no AddLabel/RemoveLabel writes are needed.
+		// The -done label is authoritative, so clear any stale -inprogress
+		// label left over from a prior interrupted run or a user toggling
+		// phase state manually. Without this, the issue can end up tagged
+		// both -inprogress and -done for the same phase.
+		if slices.Contains(labels, inProgressLabel(phase)) {
+			if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+				w.logger.Warn("failed to clear stale in-progress label while skipping phase", "phase", phase, "error", err)
+			}
+		}
 		w.phases[phase] = phaseDone
 		nextPhase := phaseAfter(phase)
 		if nextPhase == "" {

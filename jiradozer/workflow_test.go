@@ -1113,6 +1113,25 @@ func labelSequence(mt *mockWorkflowTracker) []string {
 	return out
 }
 
+// TestNewWorkflow_FiltersJiradozerLabelsFromIssue verifies that NewWorkflow
+// strips jiradozer-* labels from issue.Labels at construction time so agent
+// prompts (which read issue.Labels directly) don't see bookkeeping labels
+// before the first successful refreshLabels call.
+func TestNewWorkflow_FiltersJiradozerLabelsFromIssue(t *testing.T) {
+	t.Parallel()
+	issue := testIssue()
+	issue.Labels = []string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"}
+
+	wf := NewWorkflow(&mockWorkflowTracker{}, issue, testConfig(), discardLogger())
+
+	// issue.Labels should have jiradozer-* filtered out.
+	assert.Equal(t, []string{"bug", "feature"}, wf.issue.Labels)
+	// lastLabels should retain the full set for skip decisions.
+	assert.Equal(t,
+		[]string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"},
+		wf.lastLabels)
+}
+
 // TestWorkflow_EnterPhase_Idempotent verifies enterPhase adds the inprogress
 // label on first call and is a no-op on repeat.
 func TestWorkflow_EnterPhase_Idempotent(t *testing.T) {
@@ -1223,6 +1242,36 @@ func TestWorkflow_SkipDonePhases_FromInit(t *testing.T) {
 	assert.Equal(t, phaseDone, wf.phases[PhaseBuild])
 	// No label writes should happen for skipped phases (label already present).
 	assert.Empty(t, labelSequence(mt))
+}
+
+// TestWorkflow_SkipDonePhases_ClearsStaleInProgress verifies that when a phase
+// has both -inprogress and -done labels (e.g. from a prior interrupted run),
+// skipDonePhases removes the stale -inprogress label so the issue doesn't end
+// up with contradictory phase labels.
+func TestWorkflow_SkipDonePhases_ClearsStaleInProgress(t *testing.T) {
+	workDir := t.TempDir()
+	PersistPlan(workDir, "persisted plan", discardLogger())
+
+	issue := testIssue()
+	issue.Labels = []string{"jiradozer-plan-inprogress", "jiradozer-plan-done"}
+
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: issue.Labels},
+	}
+
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+	wf := NewWorkflow(mt, issue, cfg, discardLogger())
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.skipDonePhases(context.Background())
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+	// The stale -inprogress should have been cleared.
+	assert.Equal(t,
+		[]string{"RemoveLabel:jiradozer-plan-inprogress"},
+		labelSequence(mt))
 }
 
 // TestWorkflow_SkipDonePhases_AllDone verifies that if every phase is already
