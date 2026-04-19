@@ -35,6 +35,25 @@ var validVerdicts = map[string]struct{}{
 	"rejected": {},
 }
 
+// validSeverities enumerates the severity labels the reviewer prompt requires.
+// Anything else is treated as a schema violation; keeping this aligned with the
+// rank table in cmd/codereview/codereview.go's maxSeverity prevents drift
+// between the envelope contract and downstream consumers.
+var validSeverities = map[string]struct{}{
+	"low":      {},
+	"medium":   {},
+	"high":     {},
+	"critical": {},
+}
+
+// blockingSeverities are the severities that contradict an "accepted" verdict.
+// Anything at high or critical means the reviewer surfaced something that
+// blocks merge, so the verdict must be "rejected" for the envelope to be ok.
+var blockingSeverities = map[string]struct{}{
+	"high":     {},
+	"critical": {},
+}
+
 // EnvelopeStatus values distinguish bramble-level outcomes from reviewer
 // verdicts. A successful review with verdict="rejected" is still Status="ok".
 type EnvelopeStatus string
@@ -115,20 +134,41 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 }
 
 // validateReviewBody checks the parsed body against the required reviewer
-// schema: verdict must be "accepted" or "rejected", and any listed issue must
-// carry a severity and message. Callers treat a non-nil error as a protocol
-// violation regardless of how cleanly the JSON itself parsed.
+// schema. A non-nil error means the envelope must report status="error" so
+// downstream automation never acts on malformed reviewer output.
+//
+// Required:
+//   - verdict ∈ {accepted, rejected}
+//   - each issue has severity ∈ {low, medium, high, critical}, message, file
+//   - "rejected" carries at least one issue (otherwise nothing was rejected)
+//   - "accepted" carries no high/critical issues (those block merge by definition)
 func validateReviewBody(body ReviewBody) error {
 	if _, ok := validVerdicts[body.Verdict]; !ok {
 		return fmt.Errorf("verdict %q not in {accepted,rejected}", body.Verdict)
 	}
+	hasBlocking := false
 	for i, issue := range body.Issues {
 		if issue.Severity == "" {
 			return fmt.Errorf("issue[%d] missing severity", i)
 		}
+		if _, ok := validSeverities[issue.Severity]; !ok {
+			return fmt.Errorf("issue[%d] severity %q not in {low,medium,high,critical}", i, issue.Severity)
+		}
 		if issue.Message == "" {
 			return fmt.Errorf("issue[%d] missing message", i)
 		}
+		if issue.File == "" {
+			return fmt.Errorf("issue[%d] missing file", i)
+		}
+		if _, blocks := blockingSeverities[issue.Severity]; blocks {
+			hasBlocking = true
+		}
+	}
+	if body.Verdict == "rejected" && len(body.Issues) == 0 {
+		return fmt.Errorf("verdict %q requires at least one issue", body.Verdict)
+	}
+	if body.Verdict == "accepted" && hasBlocking {
+		return fmt.Errorf("verdict %q inconsistent with high/critical issues", body.Verdict)
 	}
 	return nil
 }

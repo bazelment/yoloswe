@@ -221,6 +221,7 @@ func (h *rendererEventHandler) OnError(err error, context string) {
 var sensitiveToolInputKeys = map[string]bool{
 	"command":          true,
 	"content":          true,
+	"cwd":              true,
 	"file_text":        true,
 	"new_string":       true,
 	"old_string":       true,

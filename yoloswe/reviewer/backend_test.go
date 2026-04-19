@@ -49,6 +49,20 @@ func TestSummarizeToolInput_RedactsSensitiveValues(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolInput_RedactsCWD(t *testing.T) {
+	// Codex shell tool start payloads include a `cwd` key with the absolute
+	// workspace path. Without redaction, every shell-tool log line persists
+	// the developer's full path. See agent-cli-wrapper/codex/events.go.
+	input := map[string]interface{}{"cwd": "/home/alice/secret-project"}
+	got := summarizeToolInput(input)
+	if strings.Contains(got, "/home/alice") {
+		t.Errorf("summarizeToolInput leaked cwd path: %s", got)
+	}
+	if !strings.Contains(got, "cwd=<redacted:") {
+		t.Errorf("summarizeToolInput should mark cwd as redacted: %s", got)
+	}
+}
+
 func TestSummarizeToolInput_Empty(t *testing.T) {
 	if got := summarizeToolInput(nil); got != "" {
 		t.Errorf("summarizeToolInput(nil) = %q, want empty", got)
