@@ -169,6 +169,7 @@ You MUST respond with valid JSON in this exact format:
 - verdict MUST be exactly "accepted" or "rejected"
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
+- Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
 - Output ONLY the JSON object, no other text`
 }
 

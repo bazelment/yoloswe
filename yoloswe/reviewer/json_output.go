@@ -139,9 +139,13 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 //
 // Required:
 //   - verdict ∈ {accepted, rejected}
-//   - each issue has severity ∈ {low, medium, high, critical}, message, file
+//   - each issue has severity ∈ {low, medium, high, critical}, message, file, line ≥ 1
 //   - "rejected" carries at least one issue (otherwise nothing was rejected)
 //   - "accepted" carries no high/critical issues (those block merge by definition)
+//
+// The line requirement matches the prompt contract in buildBasePrompt, which
+// instructs the reviewer to "cite the affected file and line range" — without
+// a line, downstream automation cannot place the comment at the right spot.
 func validateReviewBody(body ReviewBody) error {
 	if _, ok := validVerdicts[body.Verdict]; !ok {
 		return fmt.Errorf("verdict %q not in {accepted,rejected}", body.Verdict)
@@ -159,6 +163,9 @@ func validateReviewBody(body ReviewBody) error {
 		}
 		if issue.File == "" {
 			return fmt.Errorf("issue[%d] missing file", i)
+		}
+		if issue.Line < 1 {
+			return fmt.Errorf("issue[%d] missing line", i)
 		}
 		if _, blocks := blockingSeverities[issue.Severity]; blocks {
 			hasBlocking = true

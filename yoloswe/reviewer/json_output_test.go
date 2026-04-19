@@ -163,7 +163,7 @@ func TestBuildEnvelope_IssueMissingFile(t *testing.T) {
 	// Downstream automation places PR comments using file/line. An issue
 	// without a file pin can't be acted on, so the envelope must reject it.
 	result := &ReviewResult{
-		ResponseText: `{"verdict":"rejected","issues":[{"severity":"high","message":"bug"}]}`,
+		ResponseText: `{"verdict":"rejected","issues":[{"severity":"high","message":"bug","line":1}]}`,
 		Success:      true,
 	}
 	env := BuildEnvelope(result, BackendCodex, "m", "")
@@ -172,9 +172,22 @@ func TestBuildEnvelope_IssueMissingFile(t *testing.T) {
 	}
 }
 
+func TestBuildEnvelope_IssueMissingLine(t *testing.T) {
+	// The prompt instructs reviewers to cite file and line range; downstream
+	// automation needs both to anchor PR comments precisely.
+	result := &ReviewResult{
+		ResponseText: `{"verdict":"rejected","issues":[{"severity":"high","file":"a.go","message":"bug"}]}`,
+		Success:      true,
+	}
+	env := BuildEnvelope(result, BackendCodex, "m", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for issue missing line", env.Status)
+	}
+}
+
 func TestBuildEnvelope_UnknownSeverity(t *testing.T) {
 	result := &ReviewResult{
-		ResponseText: `{"verdict":"rejected","issues":[{"severity":"blocker","file":"a.go","message":"bug"}]}`,
+		ResponseText: `{"verdict":"rejected","issues":[{"severity":"blocker","file":"a.go","line":1,"message":"bug"}]}`,
 		Success:      true,
 	}
 	env := BuildEnvelope(result, BackendCodex, "m", "")
@@ -200,7 +213,7 @@ func TestBuildEnvelope_AcceptedWithBlockingIssue(t *testing.T) {
 	// "accepted" with a high/critical issue is a contradiction: those
 	// severities block merge by definition.
 	result := &ReviewResult{
-		ResponseText: `{"verdict":"accepted","issues":[{"severity":"high","file":"a.go","message":"bug"}]}`,
+		ResponseText: `{"verdict":"accepted","issues":[{"severity":"high","file":"a.go","line":1,"message":"bug"}]}`,
 		Success:      true,
 	}
 	env := BuildEnvelope(result, BackendCodex, "m", "")
@@ -213,7 +226,7 @@ func TestBuildEnvelope_AcceptedWithLowIssue(t *testing.T) {
 	// Low/medium issues are fine alongside accepted — they're suggestions,
 	// not blockers. Regression guard against over-tightening.
 	result := &ReviewResult{
-		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","message":"nit"}]}`,
+		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":3,"message":"nit"}]}`,
 		Success:      true,
 	}
 	env := BuildEnvelope(result, BackendCodex, "m", "")

@@ -232,7 +232,13 @@ func emitEarlyFailure(err error, effectiveModel string) error {
 		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 			ErrorMessage: err.Error(),
 		}, reviewer.BackendType(backend), effectiveModel, "")
-		_ = reviewer.PrintJSONResult(os.Stdout, env)
+		if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
+			// Stdout serialization failed (broken pipe, full disk, marshal
+			// error). Automation that assumed "--json ⇒ exactly one JSON
+			// object on stdout" would otherwise see silence; surface the
+			// envelope failure on stderr so callers can distinguish it.
+			slog.Error("print json early-failure envelope", "error", printErr.Error())
+		}
 	}
 	return err
 }

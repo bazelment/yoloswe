@@ -49,6 +49,28 @@ func TestSummarizeToolInput_RedactsSensitiveValues(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolInput_RedactsCursorSearchKeys(t *testing.T) {
+	// Cursor's grepToolCall and globToolCall pass `pattern` and `globPattern`
+	// as inputs (yoloswe/reviewer/backend_cursor.go grep/glob input keys).
+	// Patterns can carry secrets (e.g. searching for an API key prefix) or
+	// reveal what the reviewer was looking for; redact them.
+	input := map[string]interface{}{
+		"pattern":     "AKIA[0-9A-Z]{16}",
+		"globPattern": "**/credentials.*",
+	}
+	got := summarizeToolInput(input)
+	for _, leaked := range []string{"AKIA", "credentials"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("summarizeToolInput leaked %q: %s", leaked, got)
+		}
+	}
+	for _, want := range []string{"pattern=<redacted:", "globPattern=<redacted:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summarizeToolInput should mark %s: %s", want, got)
+		}
+	}
+}
+
 func TestSummarizeToolInput_RedactsCWD(t *testing.T) {
 	// Codex shell tool start payloads include a `cwd` key with the absolute
 	// workspace path. Without redaction, every shell-tool log line persists
