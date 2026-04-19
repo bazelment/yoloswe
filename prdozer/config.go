@@ -12,14 +12,14 @@ import (
 
 // Config is the top-level prdozer configuration.
 type Config struct {
-	Agent        AgentConfig   `yaml:"agent"`
 	WorkDir      string        `yaml:"work_dir"`
 	BaseBranch   string        `yaml:"base_branch"`
+	Agent        AgentConfig   `yaml:"agent"`
 	Source       SourceConfig  `yaml:"source"`
 	Polish       PolishConfig  `yaml:"polish"`
 	Backoff      BackoffConfig `yaml:"backoff"`
-	PollInterval time.Duration `yaml:"poll_interval"`
 	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
+	PollInterval time.Duration `yaml:"poll_interval"`
 }
 
 // AgentConfig selects the agent backend.
@@ -53,10 +53,16 @@ type SourceFilter struct {
 
 // PolishConfig controls the agent invocation per tick.
 type PolishConfig struct {
-	Local        bool    `yaml:"local"`          // pass --local to /pr-polish
-	AutoMerge    bool    `yaml:"auto_merge"`     // run gh pr merge when PR is mergeable
-	MaxTurns     int     `yaml:"max_turns"`      // cap turns for /pr-polish session
-	MaxBudgetUSD float64 `yaml:"max_budget_usd"` // override top-level budget
+	// PermissionMode is passed to the agent provider. Prdozer is designed for
+	// unattended background operation, so the default is "bypass" (no
+	// interactive prompts). This is a trust-boundary setting — the agent can
+	// invoke any tool available on the host. Set to "default" to force
+	// per-tool approval, or to any other value accepted by the provider.
+	PermissionMode string  `yaml:"permission_mode"`
+	MaxBudgetUSD   float64 `yaml:"max_budget_usd"` // overrides top-level budget; 0 inherits
+	MaxTurns       int     `yaml:"max_turns"`      // cap turns for /pr-polish session
+	Local          bool    `yaml:"local"`          // pass --local to /pr-polish
+	AutoMerge      bool    `yaml:"auto_merge"`     // run gh pr merge when PR is mergeable
 }
 
 // BackoffConfig caps how aggressively prdozer keeps retrying after failures.
@@ -84,10 +90,11 @@ func defaultConfig() Config {
 			MaxConcurrent: 3,
 		},
 		Polish: PolishConfig{
-			Local:        false,
-			AutoMerge:    false,
-			MaxTurns:     100,
-			MaxBudgetUSD: 20.0,
+			Local:          false,
+			AutoMerge:      false,
+			MaxTurns:       100,
+			PermissionMode: "bypass",
+			// MaxBudgetUSD left at zero so validate() inherits the top-level value.
 		},
 		Backoff: BackoffConfig{
 			MaxConsecutiveFailures: 3,
@@ -130,6 +137,16 @@ func (c *Config) validate() error {
 	}
 	if c.Source.Mode == SourceModeAll && c.Source.Filter.Author == "" {
 		c.Source.Filter.Author = "@me"
+	}
+	// Nested polish budget inherits the top-level value when unset.
+	if c.Polish.MaxBudgetUSD <= 0 && c.MaxBudgetUSD > 0 {
+		c.Polish.MaxBudgetUSD = c.MaxBudgetUSD
+	}
+	if c.Polish.PermissionMode == "" {
+		c.Polish.PermissionMode = "bypass"
+	}
+	if envMode := strings.TrimSpace(os.Getenv("PRDOZER_PERMISSION_MODE")); envMode != "" {
+		c.Polish.PermissionMode = envMode
 	}
 	if err := ValidateWorkDir(c.WorkDir); err != nil {
 		return err

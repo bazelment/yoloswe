@@ -15,6 +15,7 @@ func snapWithRollup(rollup string) *Snapshot {
 			BaseRefName:    "main",
 			State:          "OPEN",
 			ReviewDecision: "REVIEW_REQUIRED",
+			Mergeable:      "MERGEABLE",
 		},
 		BaseSHA:      "base1",
 		StatusRollup: rollup,
@@ -110,6 +111,35 @@ func TestComputeChangeset_Mergeable(t *testing.T) {
 	cs := ComputeChangeset(prev, snap)
 	assert.True(t, cs.Mergeable)
 	assert.False(t, cs.NeedsPolish(), "mergeable should not trigger polish")
+}
+
+func TestComputeChangeset_EmptyRollupNotMergeable(t *testing.T) {
+	t.Parallel()
+	prev := &State{
+		LastCheckAt:     time.Now(),
+		LastSeenHeadSHA: "head1",
+		LastSeenBaseSHA: "base1",
+	}
+	snap := snapWithRollup("")
+	snap.PR.ReviewDecision = "APPROVED"
+	cs := ComputeChangeset(prev, snap)
+	assert.False(t, cs.Mergeable,
+		"empty status rollup (no checks yet / pending / unknown) must NOT be treated as mergeable")
+}
+
+func TestComputeChangeset_GhMergeableConflicting(t *testing.T) {
+	t.Parallel()
+	prev := &State{
+		LastCheckAt:     time.Now(),
+		LastSeenHeadSHA: "head1",
+		LastSeenBaseSHA: "base1",
+	}
+	snap := snapWithRollup("SUCCESS")
+	snap.PR.ReviewDecision = "APPROVED"
+	snap.PR.Mergeable = "CONFLICTING"
+	cs := ComputeChangeset(prev, snap)
+	assert.False(t, cs.Mergeable,
+		"CONFLICTING PRs must not be flagged mergeable even with APPROVED + SUCCESS")
 }
 
 func TestComputeChangeset_BaseMovedSuppressesMergeable(t *testing.T) {

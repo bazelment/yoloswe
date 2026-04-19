@@ -207,6 +207,38 @@ func TestWatcher_Tick_MergeableNoAutoMerge_Idles(t *testing.T) {
 	assert.Empty(t, polish.calls)
 }
 
+func TestWatcher_Tick_StateSaveFailure_Surfaces(t *testing.T) {
+	// Create a read-only state-file path so Save's WriteFile fails. LoadState
+	// tolerates ENOENT but not "exists and unwritable", so we pre-create the
+	// state dir and a 0o400 state file seeded with a valid previous State.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	statePath := StatePath("r", 42)
+	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o755))
+	// Pre-seed with a non-first-run state so the tick will decide to record a
+	// snapshot and write. Write as 0o400 so the subsequent WriteFile fails.
+	pre := &State{
+		LastCheckAt:     time.Now(),
+		LastSeenHeadSHA: "head0",
+		LastSeenBaseSHA: "base0",
+	}
+	require.NoError(t, pre.Save(statePath))
+	require.NoError(t, os.Chmod(statePath, 0o400))
+	// Also make the parent dir unwritable so atomic-write approaches also fail.
+	require.NoError(t, os.Chmod(filepath.Dir(statePath), 0o500))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(statePath), 0o755) })
+
+	gh := setupGH(buildPRJSON(okPRJSON, "SUCCESS"), "[]", "base1")
+	polish := &stubPolish{}
+	cfg := DefaultConfig()
+	cfg.PollInterval = 10 * time.Millisecond
+	w := NewWatcher(cfg, gh, polish, 42, ".", "r", nil)
+
+	_, err := w.Tick(context.Background())
+	require.Error(t, err, "state save failure must propagate")
+	assert.Contains(t, err.Error(), "save state")
+}
+
 func TestBuildPolishPrompt(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "/pr-polish 42", buildPolishPrompt(42, false))

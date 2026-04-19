@@ -75,9 +75,13 @@ func (p *AgentPolisher) Run(ctx context.Context, req PolishRequest) (PolishResul
 		handler = &compositeHandler{handlers: []agent.EventHandler{logHandler, &rendererHandler{r: p.renderer}}}
 	}
 
+	permMode := req.Cfg.PermissionMode
+	if permMode == "" {
+		permMode = "bypass"
+	}
 	opts := []agent.ExecuteOption{
 		agent.WithProviderWorkDir(req.WorkDir),
-		agent.WithProviderPermissionMode("bypass"),
+		agent.WithProviderPermissionMode(permMode),
 		agent.WithProviderModel(req.Model),
 		agent.WithProviderKeepUserSettings(),
 		agent.WithProviderEventHandler(handler),

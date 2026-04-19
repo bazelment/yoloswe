@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -282,14 +283,57 @@ func currentGitHubLogin(ctx context.Context, gh wt.GHRunner) (string, error) {
 	return strings.TrimSpace(res.Stdout), nil
 }
 
-// repoNameFromCwd derives a short repo identifier from the cwd's parent dir;
-// callers can override with --repo. This matches the convention used by other
-// tools in the monorepo (worktree layout: <repos-root>/<repo>/<branch>).
+// repoNameFromCwd derives a short repo identifier to namespace state files.
+// Preference order:
+//  1. `git remote get-url origin` → basename of the repo URL (strip .git).
+//  2. Walk up from cwd until a `.git` entry is found; use that directory's name.
+//  3. Fall back to the final path segment of cwd.
+//
+// Callers can override with --repo. The earlier heuristic of
+// filepath.Base(filepath.Dir(cwd)) picked up the worktree parent directory
+// (often "feature" or "worktrees") and produced colliding state-file paths.
 func repoNameFromCwd(cwd string) string {
-	// cwd looks like .../worktrees/<repo>/<branch>; pick the directory two levels up.
-	parent := filepath.Base(filepath.Dir(cwd))
-	if parent == "" || parent == "." || parent == "/" {
-		return filepath.Base(cwd)
+	if name := repoNameFromGitRemote(cwd); name != "" {
+		return name
 	}
-	return parent
+	if name := repoNameFromGitDir(cwd); name != "" {
+		return name
+	}
+	return filepath.Base(cwd)
+}
+
+func repoNameFromGitRemote(cwd string) string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSpace(string(out))
+	if url == "" {
+		return ""
+	}
+	// Strip any trailing .git and take the final path segment. Handles both
+	// https://github.com/owner/repo(.git) and git@github.com:owner/repo(.git).
+	url = strings.TrimSuffix(url, ".git")
+	for _, sep := range []string{"/", ":"} {
+		if i := strings.LastIndex(url, sep); i >= 0 && i+1 < len(url) {
+			url = url[i+1:]
+		}
+	}
+	return url
+}
+
+func repoNameFromGitDir(cwd string) string {
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return filepath.Base(dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }

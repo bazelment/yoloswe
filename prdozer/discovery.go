@@ -51,7 +51,7 @@ func fetchByNumbers(ctx context.Context, gh wt.GHRunner, dir string, numbers []i
 	var wg sync.WaitGroup
 	for i, n := range numbers {
 		wg.Add(1)
-		go func() {
+		go func(i, n int) {
 			defer wg.Done()
 			args := []string{
 				"pr", "view", fmt.Sprintf("%d", n),
@@ -68,7 +68,7 @@ func fetchByNumbers(ctx context.Context, gh wt.GHRunner, dir string, numbers []i
 				return
 			}
 			out[i] = toDiscovered(raw)
-		}()
+		}(i, n)
 	}
 	wg.Wait()
 	for _, err := range errs {

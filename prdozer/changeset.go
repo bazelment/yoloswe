@@ -85,7 +85,13 @@ func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 		cs.CIFailed = true
 	}
 
-	if snap.PR.ReviewDecision == "APPROVED" && (snap.StatusRollup == StatusSuccess || snap.StatusRollup == "") && !cs.BaseMoved && !cs.CIFailed {
+	// Require an explicit SUCCESS rollup AND an explicit MERGEABLE verdict from
+	// gh. An empty rollup (no checks yet, pending, or unknown) must NOT count as
+	// mergeable — otherwise auto-merge can fire before CI has even started.
+	if snap.PR.ReviewDecision == "APPROVED" &&
+		snap.StatusRollup == StatusSuccess &&
+		snap.PR.Mergeable == "MERGEABLE" &&
+		!cs.BaseMoved && !cs.CIFailed {
 		cs.Mergeable = true
 	}
 

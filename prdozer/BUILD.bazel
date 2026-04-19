@@ -27,6 +27,7 @@ go_test(
     srcs = [
         "changeset_test.go",
         "config_test.go",
+        "discovery_test.go",
         "orchestrator_test.go",
         "state_test.go",
         "watcher_test.go",

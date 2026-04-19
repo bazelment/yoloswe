@@ -31,6 +31,11 @@ polish:
   auto_merge: false                     # if true, merge PRs that become mergeable
   max_turns: 100                        # turn cap for each /pr-polish session
   max_budget_usd: 20.0                  # per-session budget; overrides top-level max_budget_usd
+  # Permission mode passed to the agent provider. Default is "bypass" because
+  # prdozer is designed for unattended operation; an interactive approval flow
+  # defeats the purpose. Set to "default" to force per-tool approval prompts.
+  # Override at runtime with the PRDOZER_PERMISSION_MODE env var.
+  permission_mode: bypass
 
 # --- Backoff after consecutive polish failures ---
 backoff:

@@ -134,12 +134,17 @@ func (w *Watcher) Tick(ctx context.Context) (TickResult, error) {
 	)
 
 	action := w.decideAndAct(ctx, snap, cs)
+	res := TickResult{Snapshot: snap, Changeset: cs, Action: action}
 	if w.recordSnapshot(state, snap, action) {
 		if err := state.Save(statePath); err != nil {
-			w.logger.Warn("failed to save state", "path", statePath, "error", err)
+			// State save failure is serious: the action already ran (maybe merged
+			// or polished) and the next tick will reload stale state and could
+			// re-trigger it. Surface the error so the outer loop can at least
+			// log+alert, and the caller can decide whether to back off.
+			return res, fmt.Errorf("save state %q: %w", statePath, err)
 		}
 	}
-	return TickResult{Snapshot: snap, Changeset: cs, Action: action}, nil
+	return res, nil
 }
 
 func (w *Watcher) decideAndAct(ctx context.Context, snap *Snapshot, cs Changeset) LastAction {
