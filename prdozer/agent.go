@@ -40,7 +40,6 @@ type AgentPolisher struct {
 	logger   *slog.Logger
 }
 
-// NewAgentPolisher constructs the production polish runner.
 func NewAgentPolisher(renderer *render.Renderer, logger *slog.Logger) *AgentPolisher {
 	if logger == nil {
 		logger = slog.Default()
@@ -48,7 +47,6 @@ func NewAgentPolisher(renderer *render.Renderer, logger *slog.Logger) *AgentPoli
 	return &AgentPolisher{renderer: renderer, logger: logger}
 }
 
-// Run invokes /pr-polish via Claude.
 func (p *AgentPolisher) Run(ctx context.Context, req PolishRequest) (PolishResult, error) {
 	model, ok := agent.ModelByID(req.Model)
 	if !ok {
@@ -129,8 +127,7 @@ func buildPolishPrompt(prNumber int, local bool) string {
 	return sb.String()
 }
 
-// polishLogHandler logs agent events to slog at sensible levels — high signal,
-// low noise. Mirrors jiradozer's logEventHandler shape.
+// polishLogHandler mirrors jiradozer's logEventHandler shape.
 type polishLogHandler struct {
 	logger     *slog.Logger
 	toolStarts map[string]time.Time
@@ -216,7 +213,6 @@ func (h *polishLogHandler) OnRetryAbort(reason, tool, _ string) {
 	h.logger.Info("retry loop aborted", "pr", h.pr, "reason", reason, "tool", tool)
 }
 
-// rendererHandler streams agent events into the terminal renderer.
 type rendererHandler struct {
 	r *render.Renderer
 }

@@ -6,9 +6,17 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/wt"
+)
+
+// Coarse status-rollup classification used across snapshot and changeset.
+const (
+	StatusSuccess = "SUCCESS"
+	StatusPending = "PENDING"
+	StatusFailure = "FAILURE"
 )
 
 // Snapshot is a point-in-time view of a PR's state.
@@ -23,15 +31,24 @@ type Snapshot struct {
 
 // PRDetails is the fields prdozer cares about from `gh pr view`.
 type PRDetails struct {
-	URL            string `json:"url"`
-	HeadRefName    string `json:"headRefName"`
-	BaseRefName    string `json:"baseRefName"`
-	HeadRefOid     string `json:"headRefOid"`
-	State          string `json:"state"`
-	ReviewDecision string `json:"reviewDecision"`
-	Mergeable      string `json:"mergeable"`
-	Number         int    `json:"number"`
-	IsDraft        bool   `json:"isDraft"`
+	URL               string           `json:"url"`
+	HeadRefName       string           `json:"headRefName"`
+	BaseRefName       string           `json:"baseRefName"`
+	HeadRefOid        string           `json:"headRefOid"`
+	State             string           `json:"state"`
+	ReviewDecision    string           `json:"reviewDecision"`
+	Mergeable         string           `json:"mergeable"`
+	StatusCheckRollup []statusCheckRow `json:"statusCheckRollup"`
+	Number            int              `json:"number"`
+	IsDraft           bool             `json:"isDraft"`
+}
+
+// statusCheckRow is a single entry in gh's statusCheckRollup. Some checks set
+// `conclusion`, others use `state` — we collapse both downstream.
+type statusCheckRow struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	State      string `json:"state"`
 }
 
 // CommentRef is a single comment we've observed; we keep enough to dedupe and
@@ -51,33 +68,47 @@ type SnapshotOptions struct {
 	Self          string
 }
 
-// TakeSnapshot fetches the current state of a PR via gh.
+// TakeSnapshot fetches the current state of a PR via gh. The initial pr view
+// call runs synchronously (we need its URL/HeadRefName to parameterize the
+// follow-up calls); independent follow-ups run concurrently.
 func TakeSnapshot(ctx context.Context, gh wt.GHRunner, dir string, prNumber int, opts SnapshotOptions) (*Snapshot, error) {
 	pr, err := fetchPRDetails(ctx, gh, dir, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("pr view #%d: %w", prNumber, err)
 	}
-	rollup, err := fetchStatusRollup(ctx, gh, dir, prNumber)
-	if err != nil {
-		return nil, fmt.Errorf("status rollup #%d: %w", prNumber, err)
-	}
-	failed, err := fetchFailedRunIDs(ctx, gh, dir, pr.HeadRefName)
-	if err != nil {
-		return nil, fmt.Errorf("failed runs for %s: %w", pr.HeadRefName, err)
-	}
 	owner, repo, err := repoSlugFromURL(pr.URL)
 	if err != nil {
 		return nil, fmt.Errorf("derive owner/repo from %s: %w", pr.URL, err)
 	}
-	comments, err := fetchAllComments(ctx, gh, dir, owner, repo, prNumber, opts)
-	if err != nil {
-		return nil, fmt.Errorf("comments for #%d: %w", prNumber, err)
+
+	var (
+		wg                     sync.WaitGroup
+		failed                 []int64
+		comments               []CommentRef
+		baseSHA                string
+		failedErr, commentsErr error
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		failed, failedErr = fetchFailedRunIDs(ctx, gh, dir, pr.HeadRefName)
+	}()
+	go func() {
+		defer wg.Done()
+		comments, commentsErr = fetchAllComments(ctx, gh, dir, owner, repo, prNumber, opts)
+	}()
+	go func() {
+		defer wg.Done()
+		// Base detection is best-effort — the changeset will skip the
+		// BaseMoved signal if we can't read the SHA, so we swallow errors here.
+		baseSHA, _ = fetchBaseSHA(ctx, gh, dir, pr.BaseRefName)
+	}()
+	wg.Wait()
+	if failedErr != nil {
+		return nil, fmt.Errorf("failed runs for %s: %w", pr.HeadRefName, failedErr)
 	}
-	baseSHA, err := fetchBaseSHA(ctx, gh, dir, pr.BaseRefName)
-	if err != nil {
-		// Non-fatal — base detection is best-effort, the changeset will skip
-		// the BaseMoved signal if we can't read the SHA.
-		baseSHA = ""
+	if commentsErr != nil {
+		return nil, fmt.Errorf("comments for #%d: %w", prNumber, commentsErr)
 	}
 	return &Snapshot{
 		TakenAt:      time.Now().UTC(),
@@ -85,14 +116,14 @@ func TakeSnapshot(ctx context.Context, gh wt.GHRunner, dir string, prNumber int,
 		Comments:     comments,
 		FailedRunIDs: failed,
 		BaseSHA:      baseSHA,
-		StatusRollup: rollup,
+		StatusRollup: summarizeRollup(pr.StatusCheckRollup),
 	}, nil
 }
 
 func fetchPRDetails(ctx context.Context, gh wt.GHRunner, dir string, n int) (*PRDetails, error) {
 	args := []string{
 		"pr", "view", strconv.Itoa(n),
-		"--json", "number,url,headRefName,baseRefName,headRefOid,state,isDraft,reviewDecision,mergeable",
+		"--json", "number,url,headRefName,baseRefName,headRefOid,state,isDraft,reviewDecision,mergeable,statusCheckRollup",
 	}
 	res, err := gh.Run(ctx, args, dir)
 	if err != nil {
@@ -105,40 +136,13 @@ func fetchPRDetails(ctx context.Context, gh wt.GHRunner, dir string, n int) (*PR
 	return &pr, nil
 }
 
-// statusCheckRollup is parsed separately because the JSON shape varies and we
-// only want a coarse PASS/FAIL/PENDING signal here. CI failure detail is fetched
-// via medivac/github when we actually need to act.
-type statusCheckRollupResp struct {
-	StatusCheckRollup []struct {
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		State      string `json:"state"` // some checks use state instead of conclusion
-	} `json:"statusCheckRollup"`
-}
-
-func fetchStatusRollup(ctx context.Context, gh wt.GHRunner, dir string, n int) (string, error) {
-	args := []string{
-		"pr", "view", strconv.Itoa(n),
-		"--json", "statusCheckRollup",
-	}
-	res, err := gh.Run(ctx, args, dir)
-	if err != nil {
-		return "", ghError(err, res)
-	}
-	var resp statusCheckRollupResp
-	if err := json.Unmarshal([]byte(res.Stdout), &resp); err != nil {
-		return "", fmt.Errorf("parse rollup: %w", err)
-	}
-	return summarizeRollup(resp), nil
-}
-
-func summarizeRollup(r statusCheckRollupResp) string {
-	if len(r.StatusCheckRollup) == 0 {
+func summarizeRollup(rows []statusCheckRow) string {
+	if len(rows) == 0 {
 		return ""
 	}
 	anyPending := false
 	anyFailure := false
-	for _, c := range r.StatusCheckRollup {
+	for _, c := range rows {
 		concl := strings.ToUpper(c.Conclusion)
 		if concl == "" {
 			concl = strings.ToUpper(c.State)
@@ -152,11 +156,11 @@ func summarizeRollup(r statusCheckRollupResp) string {
 	}
 	switch {
 	case anyFailure:
-		return "FAILURE"
+		return StatusFailure
 	case anyPending:
-		return "PENDING"
+		return StatusPending
 	default:
-		return "SUCCESS"
+		return StatusSuccess
 	}
 }
 

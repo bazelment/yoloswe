@@ -5,13 +5,18 @@
 package prdozer
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"time"
 )
+
+// maxSeenIDs caps the LastSeen* slices so high-traffic PRs don't grow state
+// files without bound. Oldest (lowest by sort order) entries drop first.
+const maxSeenIDs = 500
 
 // LastAction is the prdozer-side action recorded after a tick.
 type LastAction string
@@ -73,40 +78,47 @@ func (s *State) Save(path string) error {
 	return nil
 }
 
-// MergeSeenComments adds new IDs to LastSeenCommentIDs, deduplicating and
-// sorting for stable output.
-func (s *State) MergeSeenComments(ids []string) {
-	seen := make(map[string]bool, len(s.LastSeenCommentIDs)+len(ids))
-	for _, id := range s.LastSeenCommentIDs {
-		seen[id] = true
-	}
-	for _, id := range ids {
-		seen[id] = true
-	}
-	out := make([]string, 0, len(seen))
-	for id := range seen {
-		out = append(out, id)
-	}
-	sort.Strings(out)
-	s.LastSeenCommentIDs = out
+// MergeSeenComments returns true iff the merge added at least one ID.
+func (s *State) MergeSeenComments(ids []string) bool {
+	merged, changed := mergeSortedCapped(s.LastSeenCommentIDs, ids)
+	s.LastSeenCommentIDs = merged
+	return changed
 }
 
-// MergeSeenRuns adds new run IDs to LastSeenCIRunIDs, deduplicating and
-// sorting for stable output.
-func (s *State) MergeSeenRuns(ids []int64) {
-	seen := make(map[int64]bool, len(s.LastSeenCIRunIDs)+len(ids))
-	for _, id := range s.LastSeenCIRunIDs {
-		seen[id] = true
+// MergeSeenRuns returns true iff the merge added at least one ID.
+func (s *State) MergeSeenRuns(ids []int64) bool {
+	merged, changed := mergeSortedCapped(s.LastSeenCIRunIDs, ids)
+	s.LastSeenCIRunIDs = merged
+	return changed
+}
+
+func mergeSortedCapped[T cmp.Ordered](existing, incoming []T) ([]T, bool) {
+	if len(incoming) == 0 {
+		return existing, false
 	}
-	for _, id := range ids {
-		seen[id] = true
+	seen := make(map[T]struct{}, len(existing)+len(incoming))
+	for _, v := range existing {
+		seen[v] = struct{}{}
 	}
-	out := make([]int64, 0, len(seen))
-	for id := range seen {
-		out = append(out, id)
+	changed := false
+	for _, v := range incoming {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			changed = true
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	s.LastSeenCIRunIDs = out
+	if !changed {
+		return existing, false
+	}
+	out := make([]T, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	slices.Sort(out)
+	if len(out) > maxSeenIDs {
+		out = out[len(out)-maxSeenIDs:]
+	}
+	return out, true
 }
 
 // StatePath returns the canonical state-file path for a given repo and PR.

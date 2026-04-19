@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -45,21 +46,35 @@ func DiscoverPRs(ctx context.Context, gh wt.GHRunner, dir string, src SourceConf
 }
 
 func fetchByNumbers(ctx context.Context, gh wt.GHRunner, dir string, numbers []int) ([]DiscoveredPR, error) {
-	out := make([]DiscoveredPR, 0, len(numbers))
-	for _, n := range numbers {
-		args := []string{
-			"pr", "view", fmt.Sprintf("%d", n),
-			"--json", "number,headRefName,baseRefName,url,isDraft,labels",
-		}
-		res, err := gh.Run(ctx, args, dir)
+	out := make([]DiscoveredPR, len(numbers))
+	errs := make([]error, len(numbers))
+	var wg sync.WaitGroup
+	for i, n := range numbers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			args := []string{
+				"pr", "view", fmt.Sprintf("%d", n),
+				"--json", "number,headRefName,baseRefName,url,isDraft,labels",
+			}
+			res, err := gh.Run(ctx, args, dir)
+			if err != nil {
+				errs[i] = ghError(err, res)
+				return
+			}
+			var raw discoverPRRaw
+			if err := json.Unmarshal([]byte(res.Stdout), &raw); err != nil {
+				errs[i] = fmt.Errorf("parse pr view #%d: %w", n, err)
+				return
+			}
+			out[i] = toDiscovered(raw)
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
-			return nil, ghError(err, res)
+			return nil, err
 		}
-		var raw discoverPRRaw
-		if err := json.Unmarshal([]byte(res.Stdout), &raw); err != nil {
-			return nil, fmt.Errorf("parse pr view #%d: %w", n, err)
-		}
-		out = append(out, toDiscovered(raw))
 	}
 	return out, nil
 }

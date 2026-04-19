@@ -32,14 +32,12 @@ func (c Changeset) NeedsPolish() bool {
 }
 
 // ComputeChangeset diffs the snapshot against the previously persisted State.
-// State may be a zero-value (first run): in that case all observed comments
-// and failed runs are recorded into State on save, but only BaseMoved /
-// CIFailed via rollup signal a real action — we don't want to polish the PR
-// just because we've never seen it before.
+// On first run (prev is zero), observed comments/runs are recorded but don't
+// trigger polish — we only react to a current FAILURE rollup, so prdozer
+// doesn't silently swallow a known-broken PR.
 func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 	cs := Changeset{}
 
-	// PR closed/merged: short-circuit.
 	if snap.PR.State == "CLOSED" || snap.PR.State == "MERGED" {
 		cs.PRClosed = true
 		return cs
@@ -47,7 +45,6 @@ func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 
 	firstRun := prev == nil || prev.LastCheckAt.IsZero()
 
-	// Head/base SHA tracking.
 	if !firstRun && prev.LastSeenHeadSHA != "" && prev.LastSeenHeadSHA != snap.PR.HeadRefOid {
 		cs.HeadMoved = true
 	}
@@ -55,7 +52,6 @@ func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 		cs.BaseMoved = true
 	}
 
-	// Comments: anything not in the previously-seen set, ignoring self-authored.
 	seenComments := make(map[string]bool)
 	if prev != nil {
 		for _, id := range prev.LastSeenCommentIDs {
@@ -74,7 +70,6 @@ func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 		cs.NewComments = true
 	}
 
-	// CI: new failed runs since last tick.
 	seenRuns := make(map[int64]bool)
 	if prev != nil {
 		for _, id := range prev.LastSeenCIRunIDs {
@@ -86,18 +81,11 @@ func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 			cs.NewFailedRuns = append(cs.NewFailedRuns, id)
 		}
 	}
-	if !firstRun && (len(cs.NewFailedRuns) > 0 || snap.StatusRollup == "FAILURE") {
-		cs.CIFailed = true
-	}
-	// On the very first run, treat a current FAILURE rollup as actionable so
-	// prdozer doesn't silently swallow a known-broken PR.
-	if firstRun && snap.StatusRollup == "FAILURE" {
+	if snap.StatusRollup == StatusFailure || (!firstRun && len(cs.NewFailedRuns) > 0) {
 		cs.CIFailed = true
 	}
 
-	// Mergeable: APPROVED + green checks. Base unchanged is implied since
-	// BaseMoved is its own flag.
-	if snap.PR.ReviewDecision == "APPROVED" && (snap.StatusRollup == "SUCCESS" || snap.StatusRollup == "") && !cs.BaseMoved && !cs.CIFailed {
+	if snap.PR.ReviewDecision == "APPROVED" && (snap.StatusRollup == StatusSuccess || snap.StatusRollup == "") && !cs.BaseMoved && !cs.CIFailed {
 		cs.Mergeable = true
 	}
 

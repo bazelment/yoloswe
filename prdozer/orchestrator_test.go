@@ -49,13 +49,13 @@ func setupGHForOrch(t *testing.T) *fakeGH {
 	// Per-PR snapshot. Use a FAILURE rollup so polish would be invoked.
 	for _, n := range []int{10, 20, 30} {
 		nStr := numToStr(n)
-		gh.addPrefix("pr view "+nStr+" --json number,url,headRefName,baseRefName,headRefOid,state,isDraft,reviewDecision,mergeable", `{
+		gh.addPrefix("pr view "+nStr+" --json number,url,headRefName,baseRefName,headRefOid,state,isDraft,reviewDecision,mergeable,statusCheckRollup", `{
             "number":`+nStr+`,
             "url":"https://github.com/o/r/pull/`+nStr+`",
             "headRefName":"feat","baseRefName":"main","headRefOid":"head1",
-            "state":"OPEN","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE"
+            "state":"OPEN","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE",
+            "statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED"}]
         }`)
-		gh.addPrefix("pr view "+nStr+" --json statusCheckRollup", failureRollupJSON)
 		gh.addPrefix("pr view "+nStr+" --json number,headRefName,baseRefName,url,isDraft,labels", `{
             "number":`+nStr+`,"headRefName":"feat","baseRefName":"main","url":"https://github.com/o/r/pull/`+nStr+`","isDraft":false,"labels":[]
         }`)

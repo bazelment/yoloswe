@@ -73,7 +73,6 @@ func (w *Watcher) Run(ctx context.Context, once bool) error {
 		_, err := w.Tick(ctx)
 		return err
 	}
-	// Tick immediately, then on the configured interval.
 	if _, err := w.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		w.logger.Warn("tick failed", "error", err)
 	}
@@ -98,7 +97,6 @@ type TickResult struct {
 	Changeset Changeset
 }
 
-// Tick performs a single polling cycle: snapshot → changeset → maybe-polish → save state.
 func (w *Watcher) Tick(ctx context.Context) (TickResult, error) {
 	statePath := StatePath(w.repo, w.pr)
 	state, err := LoadState(statePath)
@@ -136,9 +134,10 @@ func (w *Watcher) Tick(ctx context.Context) (TickResult, error) {
 	)
 
 	action := w.decideAndAct(ctx, snap, cs)
-	w.recordSnapshot(state, snap, action)
-	if err := state.Save(statePath); err != nil {
-		w.logger.Warn("failed to save state", "path", statePath, "error", err)
+	if w.recordSnapshot(state, snap, action) {
+		if err := state.Save(statePath); err != nil {
+			w.logger.Warn("failed to save state", "path", statePath, "error", err)
+		}
 	}
 	return TickResult{Snapshot: snap, Changeset: cs, Action: action}, nil
 }
@@ -202,23 +201,40 @@ func (w *Watcher) merge(ctx context.Context) error {
 	return nil
 }
 
-// recordSnapshot updates the state to reflect the post-tick world.
-func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) {
-	s.LastCheckAt = snap.TakenAt
-	s.LastSeenHeadSHA = snap.PR.HeadRefOid
-	if snap.BaseSHA != "" {
-		s.LastSeenBaseSHA = snap.BaseSHA
+// recordSnapshot mutates s to reflect snap and action, returning true iff any
+// persistable field changed (so the caller can skip disk writes on no-op ticks).
+func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) bool {
+	firstRun := s.LastCheckAt.IsZero()
+	dirty := firstRun
+
+	if s.LastSeenHeadSHA != snap.PR.HeadRefOid {
+		s.LastSeenHeadSHA = snap.PR.HeadRefOid
+		dirty = true
 	}
+	if snap.BaseSHA != "" && s.LastSeenBaseSHA != snap.BaseSHA {
+		s.LastSeenBaseSHA = snap.BaseSHA
+		dirty = true
+	}
+
 	commentIDs := make([]string, 0, len(snap.Comments))
 	for _, c := range snap.Comments {
 		commentIDs = append(commentIDs, c.ID)
 	}
-	s.MergeSeenComments(commentIDs)
-	s.MergeSeenRuns(snap.FailedRunIDs)
-	s.LastAction = action
+	if s.MergeSeenComments(commentIDs) {
+		dirty = true
+	}
+	if s.MergeSeenRuns(snap.FailedRunIDs) {
+		dirty = true
+	}
+
+	if s.LastAction != action {
+		s.LastAction = action
+		dirty = true
+	}
 	switch action {
 	case LastActionFailed:
 		s.ConsecutiveFailures++
+		dirty = true
 		if w.cfg.Backoff.MaxConsecutiveFailures > 0 && s.ConsecutiveFailures >= w.cfg.Backoff.MaxConsecutiveFailures && w.cfg.Backoff.Cooldown > 0 {
 			s.CooldownUntil = time.Now().Add(w.cfg.Backoff.Cooldown)
 			w.logger.Warn("entering cooldown after repeated failures",
@@ -227,9 +243,16 @@ func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) {
 			)
 		}
 	case LastActionPolished, LastActionMerged, LastActionIdle, LastActionDryRun:
+		if s.ConsecutiveFailures != 0 || !s.CooldownUntil.IsZero() {
+			dirty = true
+		}
 		s.ConsecutiveFailures = 0
 		s.CooldownUntil = time.Time{}
 	}
+	if dirty {
+		s.LastCheckAt = snap.TakenAt
+	}
+	return dirty
 }
 
 func (w *Watcher) status(format string, args ...interface{}) {

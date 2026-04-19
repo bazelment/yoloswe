@@ -63,15 +63,26 @@ func (s *stubPolish) Run(_ context.Context, req PolishRequest) (PolishResult, er
 	return PolishResult{SessionID: "stub", Output: "ok"}, nil
 }
 
-func setupGH(prJSON, rollupJSON, runListJSON, baseSHA string) *fakeGH {
+func setupGH(prJSON, runListJSON, baseSHA string) *fakeGH {
 	gh := newFakeGH()
-	gh.addPrefix("pr view 42 --json number,url,headRefName,baseRefName,headRefOid,state,isDraft,reviewDecision,mergeable", prJSON)
-	gh.addPrefix("pr view 42 --json statusCheckRollup", rollupJSON)
+	gh.addPrefix("pr view 42 --json number,url,headRefName,baseRefName,headRefOid,state,isDraft,reviewDecision,mergeable,statusCheckRollup", prJSON)
 	gh.addPrefix("run list --branch feature --status failure", runListJSON)
 	gh.addPrefix("api repos/{owner}/{repo}/git/refs/heads/main", baseSHA)
 	gh.addPrefix("api --paginate repos/o/r/pulls/42/comments", "[]")
 	gh.addPrefix("api --paginate repos/o/r/issues/42/comments", "[]")
 	return gh
+}
+
+// buildPRJSON stitches the core PR fields with a statusCheckRollup outcome so
+// a single gh pr view call returns everything TakeSnapshot needs.
+func buildPRJSON(core, rollupOutcome string) string {
+	rollup := ""
+	switch rollupOutcome {
+	case "SUCCESS", "FAILURE":
+		rollup = fmt.Sprintf(`,"statusCheckRollup":[{"conclusion":%q,"status":"COMPLETED"}]`, rollupOutcome)
+	}
+	trimmed := strings.TrimSpace(core)
+	return trimmed[:len(trimmed)-1] + rollup + "}"
 }
 
 const okPRJSON = `{
@@ -86,9 +97,6 @@ const okPRJSON = `{
   "mergeable": "MERGEABLE"
 }`
 
-const successRollupJSON = `{"statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}`
-const failureRollupJSON = `{"statusCheckRollup":[{"conclusion":"FAILURE","status":"COMPLETED"}]}`
-
 func newWatcherForTest(t *testing.T, gh wt.GHRunner, polish PolishRunner, opts ...WatcherOption) *Watcher {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
@@ -100,7 +108,7 @@ func newWatcherForTest(t *testing.T, gh wt.GHRunner, polish PolishRunner, opts .
 }
 
 func TestWatcher_Tick_FirstRunIdle_NoPolish(t *testing.T) {
-	gh := setupGH(okPRJSON, successRollupJSON, "[]", "base1")
+	gh := setupGH(buildPRJSON(okPRJSON, "SUCCESS"), "[]", "base1")
 	polish := &stubPolish{}
 	w := newWatcherForTest(t, gh, polish)
 	res, err := w.Tick(context.Background())
@@ -114,7 +122,7 @@ func TestWatcher_Tick_FirstRunIdle_NoPolish(t *testing.T) {
 }
 
 func TestWatcher_Tick_BaseMoved_TriggersPolish(t *testing.T) {
-	gh := setupGH(okPRJSON, successRollupJSON, "[]", "new-base")
+	gh := setupGH(buildPRJSON(okPRJSON, "SUCCESS"), "[]", "new-base")
 	polish := &stubPolish{}
 	w := newWatcherForTest(t, gh, polish)
 	// Pre-seed state so this is NOT the first run.
@@ -135,7 +143,7 @@ func TestWatcher_Tick_BaseMoved_TriggersPolish(t *testing.T) {
 }
 
 func TestWatcher_Tick_DryRun_DoesNotPolish(t *testing.T) {
-	gh := setupGH(okPRJSON, failureRollupJSON, "[]", "base1")
+	gh := setupGH(buildPRJSON(okPRJSON, "FAILURE"), "[]", "base1")
 	polish := &stubPolish{}
 	w := newWatcherForTest(t, gh, polish, WithDryRun(true))
 
@@ -146,7 +154,7 @@ func TestWatcher_Tick_DryRun_DoesNotPolish(t *testing.T) {
 }
 
 func TestWatcher_Tick_PolishFailure_TripsCooldown(t *testing.T) {
-	gh := setupGH(okPRJSON, failureRollupJSON, "[]", "base1")
+	gh := setupGH(buildPRJSON(okPRJSON, "FAILURE"), "[]", "base1")
 	polish := &stubPolish{err: fmt.Errorf("boom")}
 	w := newWatcherForTest(t, gh, polish)
 	statePath := StatePath("r", 42)
@@ -188,7 +196,7 @@ func TestWatcher_StateFileLocation(t *testing.T) {
 
 func TestWatcher_Tick_MergeableNoAutoMerge_Idles(t *testing.T) {
 	approved := strings.Replace(okPRJSON, `"reviewDecision": "REVIEW_REQUIRED"`, `"reviewDecision": "APPROVED"`, 1)
-	gh := setupGH(approved, successRollupJSON, "[]", "base1")
+	gh := setupGH(buildPRJSON(approved, "SUCCESS"), "[]", "base1")
 	polish := &stubPolish{}
 	w := newWatcherForTest(t, gh, polish)
 
