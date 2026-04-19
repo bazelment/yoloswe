@@ -47,7 +47,7 @@ type Workflow struct {
 	phases          map[string]phaseState
 	OnTransition    func(step WorkflowStep)
 	OnRoundProgress func(roundIndex, roundTotal int)
-	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error)
+	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
 	renderer        *render.Renderer
 	issue           *tracker.Issue
 	plan            string
@@ -73,7 +73,7 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		redoCounts:   make(map[WorkflowStep]int),
 		phases:       make(map[string]phaseState),
 		maxRedos:     DefaultMaxRedos,
-		runStepAgent: RunStepAgent,
+		runStepAgent: RunStepAgentDetailed,
 	}
 	if issue != nil {
 		// Shallow-copy so Labels mutations on w.issue don't bleed back into
@@ -256,15 +256,20 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 				roundFeedback = feedback
 				feedbackInjected = true
 			}
-			var roundSessionID string
-			output, roundSessionID, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.renderer, w.logger)
-			if roundSessionID != "" {
-				roundSessionIDs = append(roundSessionIDs, roundSessionID)
+			var res StepAgentResult
+			res, err = w.runStepAgent(ctx, stepName, data, roundCfg, w.config.WorkDir, roundFeedback, "", w.renderer, w.logger)
+			if res.SessionID != "" {
+				roundSessionIDs = append(roundSessionIDs, res.SessionID)
+			}
+			if res.HasLiveBackgroundWork {
+				w.fail(ctx, fmt.Errorf("%s round %d/%d: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — have the agent use ScheduleWakeup/Monitor to wait", stepName, i+1, totalRounds, res.SessionID))
+				return
 			}
 			if err != nil {
 				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
 				return
 			}
+			output = res.Output
 		}
 		allOutputs = append(allOutputs, output)
 
@@ -316,11 +321,17 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 
 	stepStart := time.Now()
 	cfg := w.config.ResolveStep(stepCfg)
-	output, newSessionID, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.renderer, w.logger)
+	res, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.renderer, w.logger)
+	if res.HasLiveBackgroundWork {
+		w.fail(ctx, fmt.Errorf("%s step: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — have the agent use ScheduleWakeup/Monitor to wait", stepName, res.SessionID))
+		return
+	}
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return
 	}
+	output := res.Output
+	newSessionID := res.SessionID
 
 	stepDuration := time.Since(stepStart)
 	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "session_id", newSessionID, "duration", stepDuration)

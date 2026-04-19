@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -222,6 +223,56 @@ func TestRunSingleStep_RejectsLiveBackgroundWork(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "live background work")
 	assert.Contains(t, err.Error(), "sess-oneshot")
+}
+
+// TestRunSingleStep_PrefersLiveBgWorkOverAgentError asserts that when the
+// agent returns BOTH an error AND HasLiveBackgroundWork, the bg-work refusal
+// path fires — the bg-work message is the actionable one, and swallowing it
+// because the turn also errored would re-open the premature-exit gap.
+func TestRunSingleStep_PrefersLiveBgWorkOverAgentError(t *testing.T) {
+	prev := runStepAgentDetailed
+	t.Cleanup(func() { runStepAgentDetailed = prev })
+
+	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _, _, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+		return jiradozer.StepAgentResult{
+			SessionID:             "sess-err-live",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: boom")
+	}
+
+	cfg := &jiradozer.Config{Plan: jiradozer.StepConfig{Prompt: "inline"}}
+	issue := &tracker.Issue{Identifier: "ENG-1", Title: "t"}
+
+	err := runSingleStep(context.Background(), "plan", issue, cfg, "", nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "live background work")
+	assert.Contains(t, err.Error(), "sess-err-live")
+	assert.NotContains(t, err.Error(), "boom", "bg-work message wins over the raw agent error")
+}
+
+// TestRunSingleStepRounds_PrefersLiveBgWorkOverAgentError is the round-based
+// analogue: the bg-work refusal must fire on the first round that reports
+// HasLiveBackgroundWork, regardless of whether the round also returned an
+// error.
+func TestRunSingleStepRounds_PrefersLiveBgWorkOverAgentError(t *testing.T) {
+	prev := runStepAgentDetailed
+	t.Cleanup(func() { runStepAgentDetailed = prev })
+
+	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _, _, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+		return jiradozer.StepAgentResult{
+			SessionID:             "sess-err-live-rounds",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: boom")
+	}
+
+	resolved := jiradozer.StepConfig{
+		Rounds: []jiradozer.RoundConfig{{Prompt: "r1"}, {Prompt: "r2"}},
+	}
+
+	err := runSingleStepRounds(context.Background(), "plan", jiradozer.PromptData{}, resolved, t.TempDir(), nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "live background work")
+	assert.Contains(t, err.Error(), "sess-err-live-rounds")
 }
 
 type discardWriter struct{}
