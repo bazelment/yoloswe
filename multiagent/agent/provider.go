@@ -18,11 +18,9 @@ type AgentResult struct {
 	Usage               AgentUsage
 	DurationMs          int64
 	Success             bool
-	// HasLiveBackgroundWork is true when the final turn ended with live
-	// background work (run_in_background:true Bash, Monitor tasks, or parked
-	// tools). Orchestrators (jiradozer rounds, retry loops) must check this
-	// before advancing or stopping the session — advancing past the turn can
-	// silently lose the bg work's output, and Stop() would orphan the tasks.
+	// HasLiveBackgroundWork mirrors claude.TurnResult.HasLiveBackgroundWork:
+	// orchestrators must not advance past or Stop() a session when this is set,
+	// or live bg tasks are orphaned.
 	HasLiveBackgroundWork bool
 }
 

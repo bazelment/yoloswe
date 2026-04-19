@@ -114,11 +114,6 @@ func truncate(s string, maxLen int) string {
 	return s
 }
 
-// StepAgentResult carries the extended outcome of an agent step. Callers who
-// only care about text + session id should use RunStepAgent; callers that
-// need to detect live background work after the turn (e.g. to refuse to
-// advance rounds while bg tasks are still running) should use
-// RunStepAgentDetailed.
 type StepAgentResult struct {
 	Output                string
 	SessionID             string
@@ -134,10 +129,8 @@ func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg Ste
 	return res.Output, res.SessionID, err
 }
 
-// RunStepAgentDetailed runs an agent step and returns the full StepAgentResult.
-// Prefer this over RunStepAgent when the caller needs to check
-// HasLiveBackgroundWork to avoid advancing past a round that parked
-// background tasks.
+// RunStepAgentDetailed is RunStepAgent but returns the full StepAgentResult
+// (including HasLiveBackgroundWork).
 func RunStepAgentDetailed(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
 	if err != nil {
