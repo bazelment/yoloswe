@@ -225,12 +225,17 @@ func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) bo
 				"until", s.CooldownUntil,
 			)
 		}
-	case LastActionPolished, LastActionMerged, LastActionClosed, LastActionIdle, LastActionDryRun:
+	case LastActionPolished, LastActionMerged, LastActionClosed, LastActionIdle:
+		// A real successful/terminal tick clears any prior backoff.
 		if s.ConsecutiveFailures != 0 || !s.CooldownUntil.IsZero() {
 			dirty = true
 		}
 		s.ConsecutiveFailures = 0
 		s.CooldownUntil = time.Time{}
+	case LastActionDryRun:
+		// Dry-run is observe-only: it must NOT clear an existing cooldown,
+		// otherwise running `prdozer --once --dry-run` during a real backoff
+		// silently lifts the protection before the next live tick.
 	}
 	if dirty {
 		s.LastCheckAt = snap.TakenAt

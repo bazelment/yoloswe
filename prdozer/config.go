@@ -142,6 +142,12 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("source.mode %q is invalid (want single, list, or all)", c.Source.Mode)
 	}
+	switch c.Source.Mode {
+	case SourceModeSingle, SourceModeList:
+		if len(c.Source.PRs) == 0 {
+			return fmt.Errorf("source.mode %q requires source.prs to be non-empty", c.Source.Mode)
+		}
+	}
 	if c.Source.Mode == SourceModeAll && c.Source.Filter.Author == "" {
 		c.Source.Filter.Author = "@me"
 	}

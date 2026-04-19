@@ -4,11 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
 	"github.com/bazelment/yoloswe/wt"
 )
+
+// discoverAllLimit caps how many PRs a single `gh pr list` call returns. gh
+// itself does not paginate past --limit, so reaching this value means the
+// result set was truncated — callers should treat the ceiling as a hard
+// operational limit until pagination is implemented.
+const discoverAllLimit = 200
 
 // DiscoveredPR is the minimal info needed to route a PR to a watcher.
 type DiscoveredPR struct {
@@ -84,7 +91,7 @@ func discoverAll(ctx context.Context, gh wt.GHRunner, dir string, f SourceFilter
 		"pr", "list",
 		"--state", "open",
 		"--json", "number,headRefName,baseRefName,url,isDraft,labels",
-		"--limit", "200",
+		"--limit", fmt.Sprintf("%d", discoverAllLimit),
 	}
 	if author := strings.TrimSpace(f.Author); author != "" {
 		args = append(args, "--author", author)
@@ -99,6 +106,12 @@ func discoverAll(ctx context.Context, gh wt.GHRunner, dir string, f SourceFilter
 	var raws []discoverPRRaw
 	if err := json.Unmarshal([]byte(res.Stdout), &raws); err != nil {
 		return nil, fmt.Errorf("parse pr list: %w", err)
+	}
+	if len(raws) >= discoverAllLimit {
+		slog.Warn("prdozer: gh pr list hit the discovery limit; some open PRs may not be watched",
+			"limit", discoverAllLimit,
+			"returned", len(raws),
+		)
 	}
 	include := make(map[string]bool, len(f.Labels))
 	for _, l := range f.Labels {

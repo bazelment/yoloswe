@@ -72,6 +72,26 @@ backoff:
 	assert.Equal(t, time.Hour, c.Backoff.Cooldown)
 }
 
+func TestLoadConfig_SingleModeRequiresPRs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prdozer.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("source:\n  mode: single\n"), 0o600))
+	_, err := LoadConfig(path)
+	require.Error(t, err, "mode=single with empty prs must not silently yield zero watched PRs")
+	assert.Contains(t, err.Error(), "source.prs")
+}
+
+func TestLoadConfig_ListModeRequiresPRs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prdozer.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("source:\n  mode: list\n"), 0o600))
+	_, err := LoadConfig(path)
+	require.Error(t, err, "mode=list with empty prs must not silently yield zero watched PRs")
+	assert.Contains(t, err.Error(), "source.prs")
+}
+
 func TestLoadConfig_InvalidMode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
