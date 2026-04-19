@@ -53,6 +53,29 @@ func TestSetupRunLog_CreatesFileAndLogs(t *testing.T) {
 	}
 }
 
+func TestSetupRunLog_CleanupRestoresDefault(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv(RunLogEnvTag, "")
+
+	sentinel := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(sentinel) })
+
+	_, cleanup, err := SetupRunLog()
+	if err != nil {
+		t.Fatalf("SetupRunLog: %v", err)
+	}
+	if slog.Default() == sentinel {
+		t.Fatal("SetupRunLog did not replace slog default")
+	}
+
+	cleanup()
+
+	if slog.Default() != sentinel {
+		t.Error("cleanup did not restore previous slog default")
+	}
+}
+
 func TestSetupRunLog_NoEnvTag(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)

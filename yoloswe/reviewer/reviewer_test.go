@@ -119,6 +119,21 @@ func TestNew_DefaultValues(t *testing.T) {
 	}
 }
 
+func TestEffectiveModel_ReportsDefaultAfterNew(t *testing.T) {
+	// Regression: the command-layer JSON envelope used to report the raw
+	// --model flag, which is empty when a default applies. EffectiveModel
+	// must surface the post-default value so consumers can correlate runs.
+	r := New(Config{BackendType: BackendCodex})
+	if got := r.EffectiveModel(); got != "gpt-5.2-codex" {
+		t.Errorf("EffectiveModel() = %q, want gpt-5.2-codex", got)
+	}
+
+	r2 := New(Config{BackendType: BackendCodex, Model: "gpt-5.4"})
+	if got := r2.EffectiveModel(); got != "gpt-5.4" {
+		t.Errorf("EffectiveModel() = %q, want gpt-5.4", got)
+	}
+}
+
 func TestNew_WithVerbose(t *testing.T) {
 	r := New(Config{Verbose: true})
 

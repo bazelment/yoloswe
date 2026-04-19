@@ -28,6 +28,13 @@ type ReviewBody struct {
 	Issues  []ReviewIssue `json:"issues,omitempty"`
 }
 
+// validVerdicts enumerates the verdict strings the reviewer prompt requires.
+// Anything else is treated as a schema violation in BuildEnvelope.
+var validVerdicts = map[string]struct{}{
+	"accepted": {},
+	"rejected": {},
+}
+
 // EnvelopeStatus values distinguish bramble-level outcomes from reviewer
 // verdicts. A successful review with verdict="rejected" is still Status="ok".
 type EnvelopeStatus string
@@ -81,6 +88,8 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 	body, parseErr := extractReviewBody(result.ResponseText)
 	env.Review = body
 
+	schemaErr := validateReviewBody(body)
+
 	switch {
 	case result.ErrorMessage != "":
 		env.Status = StatusError
@@ -94,10 +103,34 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 		if env.Error == "" {
 			env.Error = fmt.Sprintf("parse reviewer JSON: %v", parseErr)
 		}
+	case schemaErr != nil:
+		env.Status = StatusError
+		if env.Error == "" {
+			env.Error = fmt.Sprintf("invalid reviewer JSON: %v", schemaErr)
+		}
 	default:
 		env.Status = StatusOK
 	}
 	return env
+}
+
+// validateReviewBody checks the parsed body against the required reviewer
+// schema: verdict must be "accepted" or "rejected", and any listed issue must
+// carry a severity and message. Callers treat a non-nil error as a protocol
+// violation regardless of how cleanly the JSON itself parsed.
+func validateReviewBody(body ReviewBody) error {
+	if _, ok := validVerdicts[body.Verdict]; !ok {
+		return fmt.Errorf("verdict %q not in {accepted,rejected}", body.Verdict)
+	}
+	for i, issue := range body.Issues {
+		if issue.Severity == "" {
+			return fmt.Errorf("issue[%d] missing severity", i)
+		}
+		if issue.Message == "" {
+			return fmt.Errorf("issue[%d] missing message", i)
+		}
+	}
+	return nil
 }
 
 // PrintJSONResult serializes the envelope to w as a single-line JSON object

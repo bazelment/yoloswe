@@ -120,6 +120,45 @@ func TestBuildEnvelope_BackendError(t *testing.T) {
 	}
 }
 
+func TestBuildEnvelope_MissingVerdict(t *testing.T) {
+	// Syntactically valid JSON without a required verdict must not be reported
+	// as ok. Regression guard for an earlier contract gap where any parseable
+	// object was treated as a success.
+	result := &ReviewResult{
+		ResponseText: `{"summary":"looks fine","issues":[]}`,
+		Success:      true,
+	}
+	env := BuildEnvelope(result, BackendCodex, "m", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for missing verdict", env.Status)
+	}
+	if !strings.Contains(env.Error, "verdict") {
+		t.Errorf("error = %q, want mention of verdict", env.Error)
+	}
+}
+
+func TestBuildEnvelope_UnknownVerdict(t *testing.T) {
+	result := &ReviewResult{
+		ResponseText: `{"verdict":"maybe","summary":"unclear"}`,
+		Success:      true,
+	}
+	env := BuildEnvelope(result, BackendCodex, "m", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for unknown verdict", env.Status)
+	}
+}
+
+func TestBuildEnvelope_IssueMissingFields(t *testing.T) {
+	result := &ReviewResult{
+		ResponseText: `{"verdict":"rejected","issues":[{"file":"a.go"}]}`,
+		Success:      true,
+	}
+	env := BuildEnvelope(result, BackendCodex, "m", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for issue missing severity/message", env.Status)
+	}
+}
+
 func TestBuildEnvelope_UnparseableText(t *testing.T) {
 	result := &ReviewResult{
 		ResponseText: "the reviewer refused to produce JSON",

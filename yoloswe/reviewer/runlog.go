@@ -44,7 +44,12 @@ func SetupRunLog() (string, func(), error) {
 	if tag := os.Getenv(RunLogEnvTag); tag != "" {
 		base = base.With("run_tag", tag)
 	}
+	prev := slog.Default()
 	slog.SetDefault(base)
 
-	return logPath, func() { _ = f.Close() }, nil
+	cleanup := func() {
+		slog.SetDefault(prev)
+		_ = f.Close()
+	}
+	return logPath, cleanup, nil
 }

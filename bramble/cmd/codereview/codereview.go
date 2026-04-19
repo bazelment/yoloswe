@@ -68,15 +68,6 @@ func init() {
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) error {
-	if err := reviewer.ValidateBackend(backend); err != nil {
-		return err
-	}
-
-	workDir, err := reviewer.ResolveWorkDir()
-	if err != nil {
-		return err
-	}
-
 	runStart := time.Now()
 	logPath, logClose, logErr := reviewer.SetupRunLog()
 	defer logClose()
@@ -84,6 +75,15 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[code-review] run log setup failed: %v\n", logErr)
 	} else if logPath != "" {
 		fmt.Fprintf(os.Stderr, "[code-review] logging run to %s\n", logPath)
+	}
+
+	if err := reviewer.ValidateBackend(backend); err != nil {
+		return emitEarlyFailure(err, "")
+	}
+
+	workDir, err := reviewer.ResolveWorkDir()
+	if err != nil {
+		return emitEarlyFailure(err, "")
 	}
 
 	slog.Info("code-review run start",
@@ -113,11 +113,12 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
 	if err != nil {
-		return err
+		return emitEarlyFailure(err, "")
 	}
 	config.SessionLogPath = logPath2
 
 	r := reviewer.New(config)
+	effectiveModel := r.EffectiveModel()
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
@@ -127,7 +128,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 
 	if err := r.Start(ctx); err != nil {
 		slog.Error("reviewer start failed", "error", err.Error())
-		return fmt.Errorf("failed to start reviewer: %w", err)
+		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), effectiveModel)
 	}
 	defer r.Stop()
 
@@ -145,14 +146,14 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 			// a bramble-level failure from a reviewer-level "rejected".
 			env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 				ErrorMessage: err.Error(),
-			}, reviewer.BackendType(backend), model, r.LastSessionID())
+			}, reviewer.BackendType(backend), effectiveModel, r.LastSessionID())
 			_ = reviewer.PrintJSONResult(os.Stdout, env)
 		}
 		return fmt.Errorf("review failed: %w", err)
 	}
 
 	if jsonOutput {
-		env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), model, r.LastSessionID())
+		env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), effectiveModel, r.LastSessionID())
 		fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
 		fmt.Fprintf(os.Stderr, "Status: %s\n", env.Status)
 		fmt.Fprintf(os.Stderr, "Duration: %dms\n", env.DurationMs)
@@ -178,16 +179,41 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 }
 
 // maxSeverity returns the highest severity label in issues, using the order
-// critical > high > medium > low. Empty when issues is empty.
+// critical > high > medium > low. Unknown (non-empty, unrecognized) labels
+// rank above "low" so they remain visible in logs instead of being silently
+// downgraded to "". Empty when issues is empty.
 func maxSeverity(issues []reviewer.ReviewIssue) string {
 	rank := map[string]int{"critical": 4, "high": 3, "medium": 2, "low": 1}
+	const unknownRank = 1 // tied with "low": flagged but no worse than low
 	best := ""
 	bestRank := 0
 	for _, issue := range issues {
-		if r := rank[issue.Severity]; r > bestRank {
+		if issue.Severity == "" {
+			continue
+		}
+		r, known := rank[issue.Severity]
+		if !known {
+			r = unknownRank
+		}
+		if r > bestRank {
 			best = issue.Severity
 			bestRank = r
 		}
 	}
 	return best
+}
+
+// emitEarlyFailure reports a pre-review failure to the caller. When --json is
+// set it also writes a minimal error envelope to stdout so automation sees a
+// single stable output shape regardless of where the failure occurred.
+// effectiveModel is the model after reviewer.New defaults were applied; pass
+// "" when the reviewer hasn't been constructed yet.
+func emitEarlyFailure(err error, effectiveModel string) error {
+	if jsonOutput {
+		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
+			ErrorMessage: err.Error(),
+		}, reviewer.BackendType(backend), effectiveModel, "")
+		_ = reviewer.PrintJSONResult(os.Stdout, env)
+	}
+	return err
 }

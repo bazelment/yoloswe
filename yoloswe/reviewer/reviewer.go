@@ -290,6 +290,12 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	return result, nil
 }
 
+// EffectiveModel returns the model actually used by the backend, after any
+// backend-specific defaults in New were applied. Callers that want to report
+// the model they ran against (e.g. JSON envelope, run-log correlation) should
+// use this instead of the raw --model flag, which may be empty.
+func (r *Reviewer) EffectiveModel() string { return r.config.Model }
+
 // LastSessionID returns the session/thread ID from the most recent backend
 // session, or the empty string if no OnSessionInfo event has been observed.
 func (r *Reviewer) LastSessionID() string { return r.lastSessionID }

@@ -114,3 +114,27 @@ Notes:
 - codex-5.4: strictest — never said "correct". Finds architectural gaps (swe.go, benchmark isolation). Best for safety-critical reviews.
 - cursor-composer2: most thorough — reads Go source deeply, broadest findings. 4 consecutive "correct" verdicts. Best for comprehensive review.
 - codex-5.4-mini: sharpest on subtle details (prose vs template, --read-only scope, build ordering). Fewest findings but highest signal-to-noise.
+
+## 2026-04-18 — feature/better-review
+
+Diff: 8 files, +771/-55 lines (code-review JSON envelope + per-run log)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 8 | 0 | correct | 0.84 | 77s |
+| codex-5.4 | 2 | 0 | incorrect | 0.88 | 209s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.90 | 146s |
+
+Consensus (both codex):
+- Effective model not reported in envelope (raw `--model` flag used; empty when defaults apply) — `bramble/cmd/codereview/codereview.go:155`, `yoloswe/reviewer/reviewer.go:201`
+
+Unique to codex-5.4: `BuildEnvelope` treats any syntactically valid JSON object as a success (no schema validation of `verdict`/issues) — `yoloswe/reviewer/json_output.go:81-99,134-138`
+Unique to codex-5.4-mini: `--json` not guaranteed on pre-run failure paths (setup/validation/start errors bypass envelope) — `bramble/cmd/codereview/codereview.go:71,128`
+Unique to cursor-composer2: global `slog.SetDefault` never restored on cleanup; unused `Config.JSONOutput`/`SkipTestExecution` fields; dual `code-review` CLI drift (`yoloswe/cmd/code-review/main.go`); duplicated "Review Result" stderr block; JSON error-path ignores `PrintJSONResult` return; `maxSeverity` only handles 4 labels; tool-input summaries logged at debug (potential log leakage); `PrintResultSummary` now prints to both stderr and stdout
+
+Notes:
+- Cursor-composer2 broadest surface again; useful maintainability/security observations (slog restore, log leakage) no codex model raised
+- Both codex models converged on effective-model-reporting gap that cursor did not flag
+- codex-5.4 caught a protocol-level correctness bug (empty JSON body → status ok); codex-5.4-mini caught the early-failure envelope gap
+- cursor's "correct" verdict vs codex's "incorrect" mirrors the strictness pattern from earlier rounds
+- Tokens: all reported 0/0 for codex (known issue); cursor doesn't report
