@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "codereview",
@@ -9,4 +9,11 @@ go_library(
         "//yoloswe/reviewer",
         "@com_github_spf13_cobra//:cobra",
     ],
+)
+
+go_test(
+    name = "codereview_test",
+    srcs = ["codereview_test.go"],
+    embed = [":codereview"],
+    deps = ["//yoloswe/reviewer"],
 )

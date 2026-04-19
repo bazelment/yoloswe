@@ -114,3 +114,202 @@ Notes:
 - codex-5.4: strictest — never said "correct". Finds architectural gaps (swe.go, benchmark isolation). Best for safety-critical reviews.
 - cursor-composer2: most thorough — reads Go source deeply, broadest findings. 4 consecutive "correct" verdicts. Best for comprehensive review.
 - codex-5.4-mini: sharpest on subtle details (prose vs template, --read-only scope, build ordering). Fewest findings but highest signal-to-noise.
+
+## 2026-04-18 — feature/better-review
+
+Diff: 8 files, +771/-55 lines (code-review JSON envelope + per-run log)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 8 | 0 | correct | 0.84 | 77s |
+| codex-5.4 | 2 | 0 | incorrect | 0.88 | 209s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.90 | 146s |
+
+Consensus (both codex):
+- Effective model not reported in envelope (raw `--model` flag used; empty when defaults apply) — `bramble/cmd/codereview/codereview.go:155`, `yoloswe/reviewer/reviewer.go:201`
+
+Unique to codex-5.4: `BuildEnvelope` treats any syntactically valid JSON object as a success (no schema validation of `verdict`/issues) — `yoloswe/reviewer/json_output.go:81-99,134-138`
+Unique to codex-5.4-mini: `--json` not guaranteed on pre-run failure paths (setup/validation/start errors bypass envelope) — `bramble/cmd/codereview/codereview.go:71,128`
+Unique to cursor-composer2: global `slog.SetDefault` never restored on cleanup; unused `Config.JSONOutput`/`SkipTestExecution` fields; dual `code-review` CLI drift (`yoloswe/cmd/code-review/main.go`); duplicated "Review Result" stderr block; JSON error-path ignores `PrintJSONResult` return; `maxSeverity` only handles 4 labels; tool-input summaries logged at debug (potential log leakage); `PrintResultSummary` now prints to both stderr and stdout
+
+Notes:
+- Cursor-composer2 broadest surface again; useful maintainability/security observations (slog restore, log leakage) no codex model raised
+- Both codex models converged on effective-model-reporting gap that cursor did not flag
+- codex-5.4 caught a protocol-level correctness bug (empty JSON body → status ok); codex-5.4-mini caught the early-failure envelope gap
+- cursor's "correct" verdict vs codex's "incorrect" mirrors the strictness pattern from earlier rounds
+- Tokens: all reported 0/0 for codex (known issue); cursor doesn't report
+
+## 2026-04-19 — feature/better-review (post-fix round)
+
+Diff: 10 files, +946/-59 lines (after commit 46171c6 closed JSON envelope contract gaps)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 3 | 0 | incorrect | 0.85 | 273s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.89 | 158s |
+| cursor-composer2 | 6 | 0 | correct | 0.84 | 67s |
+
+Consensus:
+- `maxSeverity` unknown-label handling doesn't match its comment — `unknownRank=1` ties `low` with strict `>`, so unknown labels can be suppressed by a prior `low`. `bramble/cmd/codereview/codereview.go:185-201`. (codex-5.4-mini + cursor)
+
+Unique to codex-5.4: Cursor `ReadyEvent.Model` never feeds `Reviewer.EffectiveModel()`, so `--backend cursor --json` reports empty/stale model (confirmed against `backend_cursor.go:108-112` and `reviewer.go:297`); `summarizeToolInput` writes truncated tool args to per-run log every run (potential leak of shell commands, paths — confirmed in cursor's own run log); dual entrypoint `yoloswe/cmd/code-review/main.go` lacks `--json`/`--skip-test-execution`/run log.
+
+Unique to codex-5.4-mini: `validateReviewBody` only checks verdict + issue severity/message — doesn't reject `accepted` with non-empty issues, `rejected` with empty issues, missing `file`/`line`, or arbitrary severity labels. `json_output.go:121-133`.
+
+Unique to cursor-composer2: `PrintJSONResult` error discarded on error-envelope path (`codereview.go:150,215`); `Config.JSONOutput` field is set but never read inside reviewer; explicitly re-raises the dual-entrypoint divergence; recapped prior-round findings.
+
+Notes:
+- Commit 46171c6 closed the previous round's envelope-contract and effective-model gaps for Codex, but the Cursor path still doesn't update EffectiveModel from ReadyEvent (verified).
+- `maxSeverity` bug is real and actionable — two different reviewers, same finding, verified by reading the code.
+- codex-5.4 caught the debug-log leakage and confirmed it (cursor's own run produced log lines containing shell command fragments and absolute paths).
+- `validateReviewBody` findings are legit design concerns but arguably a "stricter validation" follow-up rather than a correctness bug.
+- cursor-composer2 saw the implementation correctness was sound, issued "correct" — consistent with its pattern of accepting inherent-design limitations as acceptable.
+- codex-5.4 was 4x slower than cursor for 3 findings vs cursor's 6, but those 3 were higher-signal (model-report bug, log leakage both verified).
+
+## 2026-04-19 (round 2) — feature/better-review (post commit 278b516)
+
+Diff: 13 files, +1185/-64 lines (after fix-eval commit closed prior round's findings)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 2 | 0 | incorrect | 0.86 | 271s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.88 | 137s |
+| cursor-composer2 | 8 | 0 | correct | 0.82 | 42s |
+
+Consensus (all three):
+- `validateReviewBody` is too lax: only checks verdict membership + issue severity/message presence. Doesn't enforce file/line citation, doesn't reject inconsistent verdict/issues combos, doesn't constrain severity labels. `yoloswe/reviewer/json_output.go:121-133`. (all three reviewers, cursor framed as "intentionally minimal" rather than a bug)
+
+Consensus (codex-5.4 + cursor):
+- Dual entrypoint `yoloswe/cmd/code-review/main.go` still lacks `--json`/`--skip-test-execution`/run log/envelope path. Maintainability/DX trap. (raised in 4 of last 4 rounds — never fixed)
+
+Unique to codex-5.4-mini: `cwd` key missing from `sensitiveToolInputKeys` despite Codex shell tool start emitting `cwd` (verified at `agent-cli-wrapper/codex/events.go:233`). Per-run logs persist full workspace paths. `yoloswe/reviewer/backend.go:221-233`. **High signal — verified, not raised by other configs.**
+
+Unique to cursor-composer2: `emitEarlyFailure` discards `PrintJSONResult` return value (`codereview.go:217-224`); `Config.JSONOutput` field unused inside reviewer; `--json` review-failure path: print error only logged, original review error returned (caller can't tell stdout was incomplete); `PrintResultSummary` always-on stdout duplicate when interactive; run log captures user-supplied `goal` verbatim; tool-input redaction uses allowlist of sensitive keys but non-listed keys still pass through `%v`.
+
+Notes:
+- Commit 278b516 closed last round's `maxSeverity` and effective-model bugs (verified — cursor reports model in stderr now).
+- All three converged on `validateReviewBody` strictness — same finding, three rounds running. This is now a stable "agreed gap" rather than a fresh discovery.
+- codex-5.4-mini's `cwd` redaction finding is the round's standout: concrete, verifiable, novel, security-relevant. Other configs missed it.
+- cursor-composer2 was fastest by 3-6x and broadest (8 findings); no false positives but most are minor/style.
+- cursor was the only one to grade "correct" again — same pattern as prior rounds (cursor accepts intentional-design choices, codex flags them).
+- Token counts still 0/0 for codex (known reporting bug), n/a for cursor.
+
+## 2026-04-19 (round 3) — feature/better-review (post commit 830ebbf)
+
+Diff: 14 files, +1306/-67 lines (after fix-eval round 2 closed cwd redaction + tightened validateReviewBody)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 2 | 0 | incorrect | 0.89 | 251s |
+| codex-5.4-mini | 3 | 1 | incorrect | 0.93 | 197s |
+| cursor-composer2 | 6 | 0 | correct | 0.87 | 52s |
+
+Consensus (all three):
+- **`cwd` redaction is incomplete** — fix only added `cwd` to `sensitiveToolInputKeys` (per-tool-call summaries), but the run-start log line at `bramble/cmd/codereview/codereview.go:89-100` still emits `"cwd", workDir` directly via slog, so per-run logs continue to persist the absolute workspace path. Real bug — verified by reading the code.
+
+Consensus (codex-5.4 + cursor):
+- Dual entrypoint `yoloswe/cmd/code-review/main.go` still bypasses --json/run log/envelope. **5th round in a row** — never fixed.
+
+Unique to codex-5.4-mini: protocol-log filename only has second-level precision (`reviewer.go:336-348` + `codex/process.go:86-88` opens with os.Create, two runs in same second collide).
+
+Unique to cursor-composer2: `env.Error` loses parse/schema detail when both ErrorMessage and parseErr/schemaErr trigger (cosmetic — only first set wins); severity vocabulary duplicated between `validSeverities` and `maxSeverity` rank table; no test for `BuildPromptWithOptions(skipTestExecution=true)` suffix; eval-runs.log churn risk.
+
+False positive — codex-5.4-mini:
+- "High: `agent-cli-wrapper/claude/turn.go:81` retry detector regression". **FP — those files are NOT in this branch's diff** (`git diff origin/main...HEAD --stat` confirms only code-review files touched). The model hallucinated a regression in unrelated code, weighted it "high", and counted it in the verdict. This is the first verified FP across all rounds. Lowers signal of codex-5.4-mini's verdict for this round.
+
+Notes:
+- The cwd fix in commit 830ebbf was incomplete: per-tool-call args are redacted now, but the per-run startup log line still leaks the path. Same finding raised by all three reviewers — high consensus → real.
+- codex-5.4-mini broadened scope (3 findings vs 2 in last 3 rounds) but regressed on signal: 1 of 3 findings is hallucinated. Time also nearly doubled (137s → 197s).
+- cursor-composer2 stayed broad and useful (6 findings, no FPs); held "correct" verdict (its 7th out of last 8 rounds).
+- codex-5.4 was the steadiest: 2 findings, both real, both verifiable.
+- The validateReviewBody fix landed cleanly — no reviewer raised contract-strictness as an issue this round, vs being the consensus finding for 3 prior rounds.
+- Recurring blind-spot pattern: standalone `yoloswe/cmd/code-review/main.go` flagged 5 rounds running, never fixed. Worth deciding: delete the binary, or sync it with the new contract.
+
+## 2026-04-19 (round 4) — feature/better-review (post commit 322b991)
+
+Diff: 14 files, +1370/-69 lines (after run-start log redaction landed)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 2 | 0 | incorrect | 0.85 | 288s |
+| codex-5.4-mini | 1 | 0 | incorrect | 0.93 | 213s |
+| cursor-composer2 | 6 | 0 | correct | 0.84 | 52s |
+
+Verified fixes from commit 322b991:
+- All three reviewers stopped flagging the cwd-in-run-start leak. Cursor explicitly noted: "Run-start logging no longer dumps raw `cwd` or goal text". Fix landed cleanly.
+
+New consensus (codex-5.4 + cursor): Dual entrypoint `yoloswe/cmd/code-review/main.go` still bypasses --json/runlog/envelope. **6th round in a row** — never fixed.
+
+Unique to codex-5.4-mini: **`pattern` and `globPattern` keys missing from `sensitiveToolInputKeys`** despite Cursor's `grepToolCall` and `globToolCall` emitting them as inputs (verified at `backend_cursor.go:137-149`). Per-run logs persist regex patterns and glob expressions verbatim. **High signal — verified, novel, not raised by other configs.** This is codex-5.4-mini's second consecutive round catching a real, novel redaction-allowlist gap (round 3: cwd; round 4: pattern/globPattern).
+
+Unique to codex-5.4: missing `line` not enforced in `validateReviewBody` despite the prompt schema example showing `"line": 42`. Borderline — file pin alone is still actionable, but pin precision degraded. Severity arguable (codex-5.4 says high; file-level findings can legitimately omit line). Treat as a "tighter contract" follow-up, not a blocker.
+
+Unique to cursor-composer2: `emitEarlyFailure` still discards `PrintJSONResult` error (3rd round flagging this — minor but never fixed); severity vocabulary duplicated between `validSeverities` and `maxSeverity` rank table; no test for `BuildPromptWithOptions(skipTestExecution=true)`; commit message references missing `pr-polish/SKILL.md`; eval-runs.log churn risk.
+
+Notes:
+- Round-3's hallucinated codex-5.4-mini finding (turn.go retry) did NOT recur. Codex-5.4-mini stayed in scope and found exactly 1 high-signal real bug. Confidence held at 0.93.
+- All redaction-allowlist additions in this branch (cwd, plus the existing list) were caught one round late by codex-5.4-mini. This is now an established pattern: codex-5.4-mini specializes in finding allowlist boundary gaps. Worth treating as a "redaction completeness" reviewer.
+- cursor-composer2 reissued its 4th "correct" verdict in 4 rounds; the codex models continue flagging "incorrect" on inherent design concerns.
+- The `--json early failure error discarded` is now a 3-round pattern raised by cursor; deserves a follow-up commit even though it's minor.
+
+## 2026-04-19 (round 5) — feature/better-review (post commit 6f15371)
+
+Diff: 14 files, +1416/-72 lines (after redaction expansion + line requirement + early-failure error surfacing)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 3 | 0 | incorrect | 0.76 | 310s |
+| codex-5.4-mini | 0 | 0 | **correct** | 0.91 | 202s |
+| cursor-composer2 | 6 | 0 | correct | 0.86 | 83s |
+
+Verified fixes from commit 6f15371:
+- All three reviewers stopped flagging the cwd, validateReviewBody, and pattern/globPattern findings. cursor explicitly noted: "Tool input summarization redacts paths, commands, edit payloads, and Cursor search-related keys (`pattern`, `globPattern`)".
+- `validateReviewBody` line requirement is no longer raised by anyone — even codex-5.4 dropped it from this round's findings.
+
+**Codex-5.4-mini issued first "patch is correct" verdict in 5 rounds** with 0 findings, 0.91 confidence. Notably ran `bazel build //...` AND `bazel test //... --test_timeout=60` (full repo) to validate before signing off — broader than usual.
+
+**New finding from codex-5.4 (real, introduced by my fix):**
+- `slog.Error` calls in `emitEarlyFailure` and the review-failure path don't actually surface to stderr after `SetupRunLog` runs. `SetupRunLog` does `slog.SetDefault(base)` where base writes ONLY to the log file (`runlog.go:41-48`). Verified: my "fix" for the print-error-discarded issue was incomplete — the error gets logged to disk but not stderr where the operator would see it. **Self-inflicted regression caught by codex-5.4.** Severity: medium (functional gap, not a security/correctness break).
+
+Other findings from codex-5.4: validateReviewBody doesn't require `summary` field (borderline — schema marks it as advisory); dual entrypoint (7th round running).
+
+Unique to cursor-composer2: `Config.JSONOutput` and `Config.SkipTestExecution` fields are populated but never read inside reviewer (3rd round flagging this — minor); severity vocabulary duplicated; eval-runs.log churn risk.
+
+Notes:
+- **First time codex-5.4-mini agreed with cursor on "correct"**. Both verdicts are now "correct" except codex-5.4 (which holds out on the slog-stderr regression).
+- The slog-redirect-to-file finding is a textbook case where adding code to address a reviewer concern introduces a new bug because the surrounding state (SetupRunLog) wasn't traced. Worth a follow-up commit: in `emitEarlyFailure` and `runCodeReview` failure path, write the error directly to `os.Stderr` (or a separate stderr handler) instead of trusting the redirected slog.
+- codex-5.4 was the slowest run yet (310s); confidence dropped to 0.76 — its lowest in this branch.
+- cursor stayed steady at ~80s, broad findings, "correct" verdict (5th in last 5 rounds).
+- Pattern across rounds: codex-5.4 catches the most subtle/architectural issues; codex-5.4-mini catches surface-level redaction gaps quickly then declares done; cursor finds the most variety but accepts intentional design as correct.
+
+## 2026-04-19 (round 6) — feature/better-review (post commit db67e16)
+
+Diff: 14 files, +1463/-72 lines (after stderr fix for envelope-print errors)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 3 | 0 | incorrect | 0.79 | 306s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.81 | 198s |
+| cursor-composer2 | 4 | 0 | **correct** | 0.90 | 112s |
+
+Verified fixes from commit db67e16:
+- All three reviewers stopped flagging the slog-to-disk-only regression. cursor explicitly noted: "`reportEnvelopePrintError` writing to stderr when slog is file-bound" as a strength. Fix landed cleanly.
+- Cursor confidence rose from 0.86 → 0.90 (highest of any round on this branch).
+
+New finding from codex-5.4 (real, novel — 1st time raised):
+- **`redactPath` preserves basename which IS the branch/worktree name.** Verified: `basename $(pwd)` = `better-review` (the feature branch). In standard worktree layout (`/home/user/worktrees/<repo>/<branch>`), the branch name (often a ticket ID or customer identifier) ends up in every per-run log. The fix from round 4 (commit 322b991) is partial — it dropped home-directory layout but kept branch identifiers. **Real but minor; severity arguable.** Could redact further to `<redacted:N>` only, or document that basename is intentionally kept for run disambiguation.
+
+Other findings from codex-5.4: dual entrypoint (8th round running); CLI test coverage gap (only helpers tested, runCodeReview unverified end-to-end).
+
+codex-5.4-mini findings:
+- JSON contract shape concerns (single `line` int vs prompt's "line range"; `summary` not required by validateReviewBody). Both borderline — `Line int` matches the prompt schema example exactly, and `summary` is advisory in the prompt. **Treat as nice-to-haves, not bugs.**
+- runCodeReview not directly tested (consensus with codex-5.4 above).
+
+Unique to cursor-composer2: severity vocabulary duplicated (5th round flagging — accepted as design); SetupRunLog modifies global slog (acknowledged as CLI-acceptable side effect); eval-runs.log churn risk.
+
+Notes:
+- Round 5's regression (slog-to-disk-only) caught and fixed in one cycle. Both call sites (emitEarlyFailure + review-failure path) now go through reportEnvelopePrintError which writes to stderr first then slog.
+- codex-5.4-mini reverted from "correct" to "incorrect" — it noticed the runCodeReview test gap which it had missed in round 5. This is actually an improvement in attention.
+- Both codex models converged on **CLI integration test gap** as the remaining real concern. Worth fixing — would be the cleanest way to catch future regressions like the slog-routing one before they ship.
+- cursor's 0.90 confidence is the highest signal of branch readiness yet. With its broad coverage and "correct" verdict, the branch is in solid shape for merge.
+- The dual-entrypoint finding has been raised in 8 of 8 rounds on this branch by codex-5.4 (and most rounds by cursor). Until someone decides to delete or sync `yoloswe/cmd/code-review/main.go`, every reviewer will keep raising it. Consider closing the loop with an explicit decision commit.

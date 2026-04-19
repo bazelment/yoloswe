@@ -119,6 +119,41 @@ func TestNew_DefaultValues(t *testing.T) {
 	}
 }
 
+func TestEffectiveModel_ReportsDefaultAfterNew(t *testing.T) {
+	// Regression: the command-layer JSON envelope used to report the raw
+	// --model flag, which is empty when a default applies. EffectiveModel
+	// must surface the post-default value so consumers can correlate runs.
+	r := New(Config{BackendType: BackendCodex})
+	if got := r.EffectiveModel(); got != "gpt-5.2-codex" {
+		t.Errorf("EffectiveModel() = %q, want gpt-5.2-codex", got)
+	}
+
+	r2 := New(Config{BackendType: BackendCodex, Model: "gpt-5.4"})
+	if got := r2.EffectiveModel(); got != "gpt-5.4" {
+		t.Errorf("EffectiveModel() = %q, want gpt-5.4", got)
+	}
+}
+
+func TestEffectiveModel_UpdatesFromSessionInfo(t *testing.T) {
+	// Cursor's CLI picks a default model when --model is empty and reports
+	// the choice via ReadyEvent → OnSessionInfo. The envelope must surface
+	// that real model instead of a stale empty/config value.
+	r := New(Config{BackendType: BackendCursor})
+	if got := r.EffectiveModel(); got != "" {
+		t.Errorf("pre-session EffectiveModel() = %q, want empty", got)
+	}
+	h := r.newEventHandler()
+	h.OnSessionInfo("session-abc", "Composer 2")
+	if got := r.EffectiveModel(); got != "Composer 2" {
+		t.Errorf("post-session EffectiveModel() = %q, want Composer 2", got)
+	}
+	// Session info with empty model must not erase a known value.
+	h.OnSessionInfo("session-def", "")
+	if got := r.EffectiveModel(); got != "Composer 2" {
+		t.Errorf("after empty session model EffectiveModel() = %q, want Composer 2", got)
+	}
+}
+
 func TestNew_WithVerbose(t *testing.T) {
 	r := New(Config{Verbose: true})
 
