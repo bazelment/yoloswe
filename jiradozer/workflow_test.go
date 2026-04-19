@@ -858,6 +858,43 @@ func TestWorkflow_RunStep_PrefersLiveBgWorkOverAgentError(t *testing.T) {
 	assert.NotContains(t, wf.lastError.Error(), "boom", "bg-work message wins over the raw agent error")
 }
 
+// TestWorkflow_RunStepRounds_PrefersLiveBgWorkOverAgentError is the
+// round-based analogue: the bg-work refusal must fire on the first round
+// that reports HasLiveBackgroundWork, regardless of whether the round also
+// returned an error. Mirrors the single-step test above.
+func TestWorkflow_RunStepRounds_PrefersLiveBgWorkOverAgentError(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	roundsCfg := StepConfig{
+		Rounds: []RoundConfig{
+			{Prompt: "r1"},
+			{Prompt: "r2"}, // must NOT run
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	var calls int
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		calls++
+		return StepAgentResult{
+			SessionID:             "sess-err-live-wf-rounds",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: boom")
+	}
+
+	wf.runStepRounds(context.Background(), "plan", roundsCfg, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	assert.Contains(t, wf.lastError.Error(), "live background work")
+	assert.Contains(t, wf.lastError.Error(), "sess-err-live-wf-rounds")
+	assert.NotContains(t, wf.lastError.Error(), "boom", "bg-work message wins over the raw agent error")
+	assert.Equal(t, 1, calls, "guard must short-circuit before round 2")
+}
+
 // TestWorkflow_TransitionToReview_PreservesLastCommentAt verifies that
 // transitionToReview does not overwrite a lastCommentAt that was already set
 // by the step result comment, preventing a race where user approval posted

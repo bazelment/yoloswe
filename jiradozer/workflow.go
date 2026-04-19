@@ -262,7 +262,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 				roundSessionIDs = append(roundSessionIDs, res.SessionID)
 			}
 			if res.HasLiveBackgroundWork {
-				w.fail(ctx, fmt.Errorf("%s round %d/%d: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — have the agent use ScheduleWakeup/Monitor to wait", stepName, i+1, totalRounds, res.SessionID))
+				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, LiveBackgroundWorkError(res.SessionID)))
 				return
 			}
 			if err != nil {
@@ -323,7 +323,7 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	cfg := w.config.ResolveStep(stepCfg)
 	res, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.renderer, w.logger)
 	if res.HasLiveBackgroundWork {
-		w.fail(ctx, fmt.Errorf("%s step: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — have the agent use ScheduleWakeup/Monitor to wait", stepName, res.SessionID))
+		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, LiveBackgroundWorkError(res.SessionID)))
 		return
 	}
 	if err != nil {

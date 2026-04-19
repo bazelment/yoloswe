@@ -679,7 +679,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 			"session_id", res.SessionID,
 			"agent_error", err,
 		)
-		return fmt.Errorf("run-step %s: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun the step after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", stepName, res.SessionID)
+		return fmt.Errorf("run-step %s: %w", stepName, jiradozer.LiveBackgroundWorkError(res.SessionID))
 	}
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
@@ -731,7 +731,7 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 					"session_id", res.SessionID,
 					"agent_error", err,
 				)
-				return fmt.Errorf("run-step %s round %d/%d: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun the round after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", stepName, i+1, totalRounds, res.SessionID)
+				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, jiradozer.LiveBackgroundWorkError(res.SessionID))
 			}
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)

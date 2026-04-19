@@ -120,6 +120,13 @@ type StepAgentResult struct {
 	HasLiveBackgroundWork bool
 }
 
+// LiveBackgroundWorkError formats the shared refusal message for a session
+// that ended with live background work. Callers wrap it with their own
+// step/round context prefix.
+func LiveBackgroundWorkError(sessionID string) error {
+	return fmt.Errorf("session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", sessionID)
+}
+
 // RunStepAgent runs an agent session for the given workflow step.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
