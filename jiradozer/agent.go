@@ -114,14 +114,34 @@ func truncate(s string, maxLen int) string {
 	return s
 }
 
+// StepAgentResult carries the extended outcome of an agent step. Callers who
+// only care about text + session id should use RunStepAgent; callers that
+// need to detect live background work after the turn (e.g. to refuse to
+// advance rounds while bg tasks are still running) should use
+// RunStepAgentDetailed.
+type StepAgentResult struct {
+	Output                string
+	SessionID             string
+	HasLiveBackgroundWork bool
+}
+
 // RunStepAgent runs an agent session for the given workflow step.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
 // If renderer is non-nil, agent events are streamed to the terminal.
 func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
+	res, err := RunStepAgentDetailed(ctx, stepName, data, cfg, workDir, feedback, resumeSessionID, renderer, logger)
+	return res.Output, res.SessionID, err
+}
+
+// RunStepAgentDetailed runs an agent step and returns the full StepAgentResult.
+// Prefer this over RunStepAgent when the caller needs to check
+// HasLiveBackgroundWork to avoid advancing past a round that parked
+// background tasks.
+func RunStepAgentDetailed(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
 	if err != nil {
-		return "", "", fmt.Errorf("render %s prompt: %w", stepName, err)
+		return StepAgentResult{}, fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
 	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
 }
@@ -429,14 +449,14 @@ func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 // runAgent runs an agent with the given prompt and step configuration.
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
-func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
+func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	model, ok := agent.ModelByID(cfg.Model)
 	if !ok {
-		return "", "", fmt.Errorf("unknown model: %q", cfg.Model)
+		return StepAgentResult{}, fmt.Errorf("unknown model: %q", cfg.Model)
 	}
 	provider, err := agent.NewProviderForModel(model)
 	if err != nil {
-		return "", "", fmt.Errorf("create provider: %w", err)
+		return StepAgentResult{}, fmt.Errorf("create provider: %w", err)
 	}
 	defer provider.Close()
 
@@ -485,14 +505,14 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	result, err := provider.Execute(ctx, prompt, nil, opts...)
 	if err != nil {
 		logHandler.flushText()
-		return "", "", fmt.Errorf("agent execution: %w", err)
+		return StepAgentResult{}, fmt.Errorf("agent execution: %w", err)
 	}
 	if !result.Success {
 		logHandler.flushText()
 		if result.Error != nil {
-			return "", "", result.Error
+			return StepAgentResult{}, result.Error
 		}
-		return "", "", fmt.Errorf("agent failed")
+		return StepAgentResult{}, fmt.Errorf("agent failed")
 	}
 
 	logger.Info("agent completed",
@@ -516,7 +536,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	if e := result.UnresolvedToolError; e != nil && output != result.Text {
 		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
 	}
-	return output, result.SessionID, nil
+	return StepAgentResult{
+		Output:                output,
+		SessionID:             result.SessionID,
+		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
+	}, nil
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.

@@ -319,6 +319,38 @@ func (turn *turnState) shouldSuppressForBgTasks() bool {
 	return hasBgTool || len(turn.liveTasks) > 0
 }
 
+// hasLiveBackgroundWork returns true when the turn has any uncancelled bg
+// tool_use (run_in_background:true Bash, Monitor, etc.) or live registered
+// tasks — regardless of whether sync tools are also present.
+//
+// Unlike shouldSuppressForBgTasks (which gates ResultMessage suppression and
+// thus short-circuits on any non-bg tool), this is used to annotate the final
+// TurnResult so callers can detect "turn ended with sync completion, but bg
+// work is still running in the background". The orchestrator or retry loop
+// can then avoid advancing past the turn or stopping the session and
+// orphaning those bg tasks.
+func (turn *turnState) hasLiveBackgroundWork() bool {
+	if turn == nil {
+		return false
+	}
+	if len(turn.liveTasks) > 0 {
+		return true
+	}
+	cancelled := turn.cancelledToolIDs()
+	for _, block := range turn.ContentBlocks {
+		if block.Type != ContentBlockTypeToolUse {
+			continue
+		}
+		if !isBackgroundToolUse(block) {
+			continue
+		}
+		if !cancelled[block.ToolUseID] {
+			return true
+		}
+	}
+	return false
+}
+
 // longestBackgroundToolTimeoutMs returns the largest timeout_ms value across
 // all non-cancelled background tool_use blocks in the turn. Returns 0 when
 // no bg tool carries an explicit timeout. Used to size the suppression

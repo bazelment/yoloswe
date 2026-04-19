@@ -1460,6 +1460,17 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
+	// Mixed-turn guard: the turn has live bg work (run_in_background:true Bash,
+	// Monitor, etc.) but also sync tools, so shouldSuppress was false and the
+	// ResultMessage is real sync completion. We still must flag the live bg
+	// work so orchestrators (jiradozer rounds, retry loops, session cleanup)
+	// do not advance past the turn or Stop() the session and orphan the bg
+	// tasks. wasSuppressed indicates a prior suppressed ResultMessage already
+	// set the flag; do not overwrite.
+	if !wasSuppressed && !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
+		result.HasLiveBackgroundWork = true
+	}
+
 	s.finalizeTurn(result)
 }
 

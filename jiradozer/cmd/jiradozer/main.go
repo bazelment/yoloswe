@@ -707,13 +707,21 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			}
 		} else {
 			roundCfg := jiradozer.ResolveRound(round, resolved)
-			var sessionID string
-			var err error
-			output, sessionID, err = jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
+			res, err := jiradozer.RunStepAgentDetailed(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
 			}
-			sessionIDs = append(sessionIDs, sessionID)
+			output = res.Output
+			sessionIDs = append(sessionIDs, res.SessionID)
+			if res.HasLiveBackgroundWork {
+				logger.Error("round ended with live background work — refusing to advance",
+					"step", stepName,
+					"round", i+1,
+					"total", totalRounds,
+					"session_id", res.SessionID,
+				)
+				return fmt.Errorf("run-step %s round %d/%d: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun the round after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", stepName, i+1, totalRounds, res.SessionID)
+			}
 		}
 		allOutputs = append(allOutputs, output)
 	}

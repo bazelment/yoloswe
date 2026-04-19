@@ -332,11 +332,12 @@ func ClaudeResultToAgentResult(r *claude.TurnResult) *AgentResult {
 		return nil
 	}
 	return &AgentResult{
-		Text:       r.Text,
-		Thinking:   r.Thinking,
-		Success:    r.Success,
-		Error:      r.Error,
-		DurationMs: r.DurationMs,
+		Text:                  r.Text,
+		Thinking:              r.Thinking,
+		Success:               r.Success,
+		Error:                 r.Error,
+		DurationMs:            r.DurationMs,
+		HasLiveBackgroundWork: r.HasLiveBackgroundWork,
 		Usage: AgentUsage{
 			InputTokens:     r.Usage.InputTokens,
 			OutputTokens:    r.Usage.OutputTokens,
