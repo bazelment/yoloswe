@@ -1,6 +1,7 @@
 package codereview
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -84,6 +85,91 @@ func TestRedactPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// captureStdStreams redirects os.Stdout and os.Stderr to pipes for the
+// duration of fn, returning whatever was written to each. Many of the
+// --json paths in runCodeReview write the envelope to stdout and
+// diagnostics to stderr; isolating both lets a test assert on the
+// machine-readable contract and the operator-visible message independently.
+func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	origOut, origErr := os.Stdout, os.Stderr
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stdout, os.Stderr = outW, errW
+	t.Cleanup(func() { os.Stdout, os.Stderr = origOut, origErr })
+
+	outCh := make(chan string, 1)
+	errCh := make(chan string, 1)
+	go func() { b, _ := io.ReadAll(outR); outCh <- string(b) }()
+	go func() { b, _ := io.ReadAll(errR); errCh <- string(b) }()
+
+	fn()
+	_ = outW.Close()
+	_ = errW.Close()
+	return <-outCh, <-errCh
+}
+
+func TestEmitEarlyFailure_JSONMode_WritesEnvelopeToStdout(t *testing.T) {
+	// Guards the --json contract: a pre-review failure (validation, cwd
+	// resolution, backend start) must still emit one parseable envelope on
+	// stdout so /pr-polish and similar automation never have to distinguish
+	// "bramble failed early" from "bramble failed late". This is the exact
+	// invariant the round-4 slog regression broke.
+	origJSON, origBackend := jsonOutput, backend
+	jsonOutput = true
+	backend = "codex"
+	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
+
+	boom := errors.New("backend unreachable")
+	var returned error
+	stdout, _ := captureStdStreams(t, func() {
+		returned = emitEarlyFailure(boom, "gpt-x")
+	})
+
+	if returned == nil || !strings.Contains(returned.Error(), "backend unreachable") {
+		t.Errorf("returned error = %v, want wrap of original", returned)
+	}
+	var env reviewer.ResultEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+		t.Fatalf("stdout must be a single JSON envelope, got %q: %v", stdout, err)
+	}
+	if env.Status != reviewer.StatusError {
+		t.Errorf("status = %s, want error", env.Status)
+	}
+	if !strings.Contains(env.Error, "backend unreachable") {
+		t.Errorf("envelope.error = %q, want wrapped original", env.Error)
+	}
+	if env.Backend != "codex" || env.Model != "gpt-x" {
+		t.Errorf("envelope backend/model = %s/%s, want codex/gpt-x", env.Backend, env.Model)
+	}
+	if env.SchemaVersion != reviewer.JSONSchemaVersion {
+		t.Errorf("schema_version = %d, want %d", env.SchemaVersion, reviewer.JSONSchemaVersion)
+	}
+}
+
+func TestEmitEarlyFailure_NonJSONMode_NoStdout(t *testing.T) {
+	// The text output contract: prose mode must leave stdout untouched on
+	// early failure so humans see the error via stderr and shells that pipe
+	// stdout (| tee, | grep) don't pick up stray JSON they can't render.
+	origJSON, origBackend := jsonOutput, backend
+	jsonOutput = false
+	backend = "codex"
+	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
+
+	stdout, _ := captureStdStreams(t, func() {
+		_ = emitEarlyFailure(errors.New("boom"), "")
+	})
+	if stdout != "" {
+		t.Errorf("stdout should be empty in prose mode, got %q", stdout)
 	}
 }
 
