@@ -134,6 +134,26 @@ func TestEffectiveModel_ReportsDefaultAfterNew(t *testing.T) {
 	}
 }
 
+func TestEffectiveModel_UpdatesFromSessionInfo(t *testing.T) {
+	// Cursor's CLI picks a default model when --model is empty and reports
+	// the choice via ReadyEvent → OnSessionInfo. The envelope must surface
+	// that real model instead of a stale empty/config value.
+	r := New(Config{BackendType: BackendCursor})
+	if got := r.EffectiveModel(); got != "" {
+		t.Errorf("pre-session EffectiveModel() = %q, want empty", got)
+	}
+	h := r.newEventHandler()
+	h.OnSessionInfo("session-abc", "Composer 2")
+	if got := r.EffectiveModel(); got != "Composer 2" {
+		t.Errorf("post-session EffectiveModel() = %q, want Composer 2", got)
+	}
+	// Session info with empty model must not erase a known value.
+	h.OnSessionInfo("session-def", "")
+	if got := r.EffectiveModel(); got != "Composer 2" {
+		t.Errorf("after empty session model EffectiveModel() = %q, want Composer 2", got)
+	}
+}
+
 func TestNew_WithVerbose(t *testing.T) {
 	r := New(Config{Verbose: true})
 

@@ -184,11 +184,12 @@ type ReviewResult struct {
 
 // Reviewer wraps an agent backend for code review operations.
 type Reviewer struct {
-	output        io.Writer
-	backend       Backend
-	renderer      *render.Renderer
-	lastSessionID string
-	config        Config
+	output         io.Writer
+	backend        Backend
+	renderer       *render.Renderer
+	lastSessionID  string
+	effectiveModel string // updated from backend session info when available
+	config         Config
 }
 
 // New creates a new Reviewer with the given config.
@@ -228,10 +229,11 @@ func New(config Config) *Reviewer {
 	}
 
 	return &Reviewer{
-		config:   config,
-		output:   os.Stderr,
-		renderer: render.NewRendererWithOptions(os.Stderr, config.Verbose, config.NoColor),
-		backend:  backend,
+		config:         config,
+		output:         os.Stderr,
+		renderer:       render.NewRendererWithOptions(os.Stderr, config.Verbose, config.NoColor),
+		backend:        backend,
+		effectiveModel: config.Model,
 	}
 }
 
@@ -290,11 +292,12 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	return result, nil
 }
 
-// EffectiveModel returns the model actually used by the backend, after any
-// backend-specific defaults in New were applied. Callers that want to report
-// the model they ran against (e.g. JSON envelope, run-log correlation) should
-// use this instead of the raw --model flag, which may be empty.
-func (r *Reviewer) EffectiveModel() string { return r.config.Model }
+// EffectiveModel returns the model actually used by the backend. For Codex
+// this is the post-default config value; for Cursor this is updated from the
+// backend's ReadyEvent once the session starts (the CLI picks its own default
+// when --model is empty). Callers should prefer this over the raw --model
+// flag, which may be empty or differ from what the backend actually ran.
+func (r *Reviewer) EffectiveModel() string { return r.effectiveModel }
 
 // LastSessionID returns the session/thread ID from the most recent backend
 // session, or the empty string if no OnSessionInfo event has been observed.

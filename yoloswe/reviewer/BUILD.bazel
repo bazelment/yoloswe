@@ -25,6 +25,7 @@ go_test(
     name = "reviewer_test",
     srcs = [
         "backend_cursor_test.go",
+        "backend_test.go",
         "bridge_test.go",
         "json_output_test.go",
         "reviewer_test.go",

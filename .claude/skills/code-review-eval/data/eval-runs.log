@@ -138,3 +138,30 @@ Notes:
 - codex-5.4 caught a protocol-level correctness bug (empty JSON body → status ok); codex-5.4-mini caught the early-failure envelope gap
 - cursor's "correct" verdict vs codex's "incorrect" mirrors the strictness pattern from earlier rounds
 - Tokens: all reported 0/0 for codex (known issue); cursor doesn't report
+
+## 2026-04-19 — feature/better-review (post-fix round)
+
+Diff: 10 files, +946/-59 lines (after commit 46171c6 closed JSON envelope contract gaps)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| codex-5.4 | 3 | 0 | incorrect | 0.85 | 273s |
+| codex-5.4-mini | 2 | 0 | incorrect | 0.89 | 158s |
+| cursor-composer2 | 6 | 0 | correct | 0.84 | 67s |
+
+Consensus:
+- `maxSeverity` unknown-label handling doesn't match its comment — `unknownRank=1` ties `low` with strict `>`, so unknown labels can be suppressed by a prior `low`. `bramble/cmd/codereview/codereview.go:185-201`. (codex-5.4-mini + cursor)
+
+Unique to codex-5.4: Cursor `ReadyEvent.Model` never feeds `Reviewer.EffectiveModel()`, so `--backend cursor --json` reports empty/stale model (confirmed against `backend_cursor.go:108-112` and `reviewer.go:297`); `summarizeToolInput` writes truncated tool args to per-run log every run (potential leak of shell commands, paths — confirmed in cursor's own run log); dual entrypoint `yoloswe/cmd/code-review/main.go` lacks `--json`/`--skip-test-execution`/run log.
+
+Unique to codex-5.4-mini: `validateReviewBody` only checks verdict + issue severity/message — doesn't reject `accepted` with non-empty issues, `rejected` with empty issues, missing `file`/`line`, or arbitrary severity labels. `json_output.go:121-133`.
+
+Unique to cursor-composer2: `PrintJSONResult` error discarded on error-envelope path (`codereview.go:150,215`); `Config.JSONOutput` field is set but never read inside reviewer; explicitly re-raises the dual-entrypoint divergence; recapped prior-round findings.
+
+Notes:
+- Commit 46171c6 closed the previous round's envelope-contract and effective-model gaps for Codex, but the Cursor path still doesn't update EffectiveModel from ReadyEvent (verified).
+- `maxSeverity` bug is real and actionable — two different reviewers, same finding, verified by reading the code.
+- codex-5.4 caught the debug-log leakage and confirmed it (cursor's own run produced log lines containing shell command fragments and absolute paths).
+- `validateReviewBody` findings are legit design concerns but arguably a "stricter validation" follow-up rather than a correctness bug.
+- cursor-composer2 saw the implementation correctness was sound, issued "correct" — consistent with its pattern of accepting inherent-design limitations as acceptable.
+- codex-5.4 was 4x slower than cursor for 3 findings vs cursor's 6, but those 3 were higher-signal (model-report bug, log leakage both verified).

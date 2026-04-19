@@ -160,6 +160,9 @@ func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
 	h.r.SessionInfo(sessionID, model)
 	if h.reviewer != nil {
 		h.reviewer.lastSessionID = sessionID
+		if model != "" {
+			h.reviewer.effectiveModel = model
+		}
 	}
 	slog.Info("reviewer session started", "session_id", sessionID, "model", model)
 }
@@ -211,8 +214,29 @@ func (h *rendererEventHandler) OnError(err error, context string) {
 		"error", err.Error())
 }
 
-// summarizeToolInput collapses a tool input map to a short key=value preview
-// for logging. It avoids dumping large file contents into the log.
+// sensitiveToolInputKeys names keys whose values may contain shell commands,
+// file paths, edit payloads, or other content that should not be written to
+// the per-run log verbatim. For these keys summarizeToolInput records only the
+// value length, not the value itself.
+var sensitiveToolInputKeys = map[string]bool{
+	"command":          true,
+	"content":          true,
+	"file_text":        true,
+	"new_string":       true,
+	"old_string":       true,
+	"path":             true,
+	"file_path":        true,
+	"simpleCommands":   true,
+	"parsingResult":    true,
+	"args":             true,
+	"workingDirectory": true,
+}
+
+// summarizeToolInput collapses a tool input map to a short preview for
+// logging. Non-sensitive primitive values are truncated and included; values
+// under sensitive keys (commands, paths, edit payloads — see
+// sensitiveToolInputKeys) are replaced with a length marker so the per-run
+// log never stores shell commands or file contents verbatim.
 func summarizeToolInput(input map[string]interface{}) string {
 	if len(input) == 0 {
 		return ""
@@ -229,6 +253,10 @@ func summarizeToolInput(input map[string]interface{}) string {
 		}
 		b.WriteString(k)
 		b.WriteString("=")
+		if sensitiveToolInputKeys[k] {
+			b.WriteString(fmt.Sprintf("<redacted:%d>", redactedLen(v)))
+			continue
+		}
 		s := fmt.Sprintf("%v", v)
 		if len(s) > 80 {
 			s = s[:77] + "..."
@@ -236,4 +264,17 @@ func summarizeToolInput(input map[string]interface{}) string {
 		b.WriteString(s)
 	}
 	return b.String()
+}
+
+// redactedLen reports a byte length for a redacted tool-input value so the
+// log retains "how big was it" without the content itself.
+func redactedLen(v interface{}) int {
+	switch x := v.(type) {
+	case string:
+		return len(x)
+	case nil:
+		return 0
+	default:
+		return len(fmt.Sprintf("%v", x))
+	}
 }

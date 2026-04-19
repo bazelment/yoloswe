@@ -118,7 +118,11 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 	config.SessionLogPath = logPath2
 
 	r := reviewer.New(config)
-	effectiveModel := r.EffectiveModel()
+	// Snapshot before Start for early-failure paths. After the backend
+	// session begins (OnSessionInfo), call r.EffectiveModel() fresh so the
+	// envelope reports the model the backend actually ran (Cursor picks its
+	// own default when --model is empty).
+	earlyModel := r.EffectiveModel()
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
@@ -128,7 +132,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 
 	if err := r.Start(ctx); err != nil {
 		slog.Error("reviewer start failed", "error", err.Error())
-		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), effectiveModel)
+		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), earlyModel)
 	}
 	defer r.Stop()
 
@@ -146,14 +150,16 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 			// a bramble-level failure from a reviewer-level "rejected".
 			env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 				ErrorMessage: err.Error(),
-			}, reviewer.BackendType(backend), effectiveModel, r.LastSessionID())
-			_ = reviewer.PrintJSONResult(os.Stdout, env)
+			}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
+				slog.Error("print json failure envelope", "error", printErr.Error())
+			}
 		}
 		return fmt.Errorf("review failed: %w", err)
 	}
 
 	if jsonOutput {
-		env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), effectiveModel, r.LastSessionID())
+		env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
 		fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
 		fmt.Fprintf(os.Stderr, "Status: %s\n", env.Status)
 		fmt.Fprintf(os.Stderr, "Duration: %dms\n", env.DurationMs)
@@ -183,8 +189,8 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 // rank above "low" so they remain visible in logs instead of being silently
 // downgraded to "". Empty when issues is empty.
 func maxSeverity(issues []reviewer.ReviewIssue) string {
-	rank := map[string]int{"critical": 4, "high": 3, "medium": 2, "low": 1}
-	const unknownRank = 1 // tied with "low": flagged but no worse than low
+	rank := map[string]int{"critical": 5, "high": 4, "medium": 3, "low": 1}
+	const unknownRank = 2 // above "low" so non-standard labels stay visible
 	best := ""
 	bestRank := 0
 	for _, issue := range issues {
