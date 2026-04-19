@@ -636,6 +636,9 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 	return wf.Run(ctx)
 }
 
+// runStepAgentDetailed is overridable so unit tests can stub the agent call.
+var runStepAgentDetailed = jiradozer.RunStepAgentDetailed
+
 func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, renderer *render.Renderer, logger *slog.Logger) error {
 	stepCfg, ok := cfg.StepByName(stepName)
 	if !ok {
@@ -669,12 +672,20 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, renderer, logger)
 	}
 
-	output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
+	res, err := runStepAgentDetailed(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
 	}
+	if res.HasLiveBackgroundWork {
+		logger.Error("step ended with live background work — refusing to advance",
+			"step", stepName,
+			"session_id", res.SessionID,
+		)
+		return fmt.Errorf("run-step %s: session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun the step after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", stepName, res.SessionID)
+	}
+	output := res.Output
 	if output == "" {
-		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", sessionID)
+		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", res.SessionID)
 	} else {
 		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
 	}
@@ -707,7 +718,7 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			}
 		} else {
 			roundCfg := jiradozer.ResolveRound(round, resolved)
-			res, err := jiradozer.RunStepAgentDetailed(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
+			res, err := runStepAgentDetailed(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
 			}

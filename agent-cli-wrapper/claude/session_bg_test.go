@@ -1456,7 +1456,8 @@ func TestHasLiveBackgroundWork_PureSyncTurnDoesNotFlag(t *testing.T) {
 
 // TestHasLiveBackgroundWork_CancelledBgToolDoesNotFlag asserts that a
 // cancelled bg tool_use (its tool_result is an error) does not count as live
-// bg work — the CLI never launched it.
+// bg work — the CLI never launched it. Covers both the turn predicate and
+// the end-to-end handleResult → TurnCompleteEvent path.
 func TestHasLiveBackgroundWork_CancelledBgToolDoesNotFlag(t *testing.T) {
 	s := newTestSession(t)
 
@@ -1475,6 +1476,14 @@ func TestHasLiveBackgroundWork_CancelledBgToolDoesNotFlag(t *testing.T) {
 	turn := s.turnManager.CurrentTurn()
 	if turn.hasLiveBackgroundWork() {
 		t.Fatal("cancelled bg tool must not register as live background work")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, time.Second)
+	if tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be false when the only bg tool was cancelled")
 	}
 }
 

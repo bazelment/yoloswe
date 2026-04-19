@@ -502,10 +502,14 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	}
 	if !result.Success {
 		logHandler.flushText()
-		if result.Error != nil {
-			return StepAgentResult{}, result.Error
+		failed := StepAgentResult{
+			SessionID:             result.SessionID,
+			HasLiveBackgroundWork: result.HasLiveBackgroundWork,
 		}
-		return StepAgentResult{}, fmt.Errorf("agent failed")
+		if result.Error != nil {
+			return failed, result.Error
+		}
+		return failed, fmt.Errorf("agent failed")
 	}
 
 	logger.Info("agent completed",

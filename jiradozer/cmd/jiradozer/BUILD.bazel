@@ -30,8 +30,10 @@ go_test(
     srcs = ["main_test.go"],
     embed = [":jiradozer_lib"],
     deps = [
+        "//agent-cli-wrapper/claude/render",
         "//jiradozer",
         "//jiradozer/tracker",
         "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )

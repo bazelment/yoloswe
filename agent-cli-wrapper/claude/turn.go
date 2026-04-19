@@ -295,28 +295,18 @@ func (turn *turnState) shouldSuppressForBgTasks() bool {
 	if turn == nil {
 		return false
 	}
-
-	cancelled := turn.cancelledToolIDs()
-
 	// Non-bg tools always prevent suppression (even if they errored), because
 	// their presence means the ResultMessage represents completion of synchronous
-	// work. Cancelled bg tools are skipped — they never launched a background task.
-	hasBgTool := false
+	// work.
 	for _, block := range turn.ContentBlocks {
 		if block.Type != ContentBlockTypeToolUse {
 			continue
 		}
 		if !isBackgroundToolUse(block) {
-			return false // non-bg tool → ResultMessage is real completion, never suppress
-		}
-		if !cancelled[block.ToolUseID] {
-			hasBgTool = true
+			return false
 		}
 	}
-	// Either an uncancelled bg tool is present, or task_started has already
-	// registered a live task for this turn (e.g. task_started arrived before
-	// the bg tool's tool_use_id reached ContentBlocks). Both signal live work.
-	return hasBgTool || len(turn.liveTasks) > 0
+	return turn.hasLiveBackgroundWork()
 }
 
 // hasLiveBackgroundWork returns true when the turn has any uncancelled bg
