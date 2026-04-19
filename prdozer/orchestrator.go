@@ -110,6 +110,7 @@ func (o *Orchestrator) tickAll(ctx context.Context, prs []DiscoveredPR, returnRe
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	results := make(map[int]TickResult)
+	var tickErrs []error
 
 	for _, pr := range prs {
 		pr := pr
@@ -127,6 +128,9 @@ func (o *Orchestrator) tickAll(ctx context.Context, prs []DiscoveredPR, returnRe
 			res, err := w.Tick(ctx)
 			if err != nil {
 				o.logger.Warn("tick failed", "pr", pr.Number, "error", err)
+				mu.Lock()
+				tickErrs = append(tickErrs, fmt.Errorf("pr #%d: %w", pr.Number, err))
+				mu.Unlock()
 				return
 			}
 			if returnResults {
@@ -137,7 +141,7 @@ func (o *Orchestrator) tickAll(ctx context.Context, prs []DiscoveredPR, returnRe
 		}()
 	}
 	wg.Wait()
-	return results, nil
+	return results, errors.Join(tickErrs...)
 }
 
 func (o *Orchestrator) newWatcher(prNumber int) *Watcher {

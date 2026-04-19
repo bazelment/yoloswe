@@ -226,18 +226,30 @@ func fetchComments(ctx context.Context, gh wt.GHRunner, dir, endpoint, source st
 	if err != nil {
 		return nil, ghError(err, res)
 	}
-	var raw []ghComment
 	body := strings.TrimSpace(res.Stdout)
 	if body == "" {
 		return nil, nil
 	}
-	if err := json.Unmarshal([]byte(body), &raw); err != nil {
-		return nil, fmt.Errorf("parse comments (%s): %w", source, err)
+	// `gh api --paginate` emits one JSON array per page concatenated back-to-
+	// back (e.g. `[a,b][c,d]`), which is NOT valid as a single JSON value.
+	// Decode page arrays in a loop and flatten.
+	dec := json.NewDecoder(strings.NewReader(body))
+	var raw []ghComment
+	for dec.More() {
+		var page []ghComment
+		if err := dec.Decode(&page); err != nil {
+			return nil, fmt.Errorf("parse comments (%s): %w", source, err)
+		}
+		raw = append(raw, page...)
 	}
 	out := make([]CommentRef, 0, len(raw))
 	for _, c := range raw {
+		// Inline (/pulls/{n}/comments) and issue (/issues/{n}/comments) comment
+		// IDs come from separate GitHub ID sequences and can collide. Namespace
+		// the dedup key by source so two distinct comments with the same
+		// numeric ID aren't silently dropped as duplicates.
 		out = append(out, CommentRef{
-			ID:      string(c.ID),
+			ID:      source + ":" + string(c.ID),
 			Source:  source,
 			Author:  c.User.Login,
 			IsBot:   c.User.Type == "Bot" || strings.HasSuffix(c.User.Login, "[bot]"),

@@ -210,11 +210,19 @@ func run(ctx context.Context, args runArgs) error {
 }
 
 func loadConfig(args runArgs) (*prdozer.Config, error) {
-	if _, err := os.Stat(args.configPath); err == nil {
+	_, err := os.Stat(args.configPath)
+	switch {
+	case err == nil:
 		return prdozer.LoadConfig(args.configPath)
+	case os.IsNotExist(err):
+		// No config file is fine — we synthesize one from CLI flags.
+		return prdozer.DefaultConfig(), nil
+	default:
+		// Permission denied, broken symlink, unreadable filesystem, etc.
+		// Surfacing these stops prdozer from silently running with defaults
+		// when the user intended to supply a config.
+		return nil, fmt.Errorf("stat config %s: %w", args.configPath, err)
 	}
-	// No config file is fine — we synthesize one from CLI flags.
-	return prdozer.DefaultConfig(), nil
 }
 
 func applyOverrides(cfg *prdozer.Config, args runArgs) error {

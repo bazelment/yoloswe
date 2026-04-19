@@ -26,6 +26,7 @@ const (
 	LastActionIdle     LastAction = "idle"
 	LastActionPolished LastAction = "polished"
 	LastActionMerged   LastAction = "merged"
+	LastActionClosed   LastAction = "closed"
 	LastActionFailed   LastAction = "failed"
 	LastActionDryRun   LastAction = "dry_run"
 )
@@ -38,7 +39,6 @@ type State struct {
 	LastSeenHeadSHA     string     `json:"last_seen_head_sha,omitempty"`
 	LastSeenBaseSHA     string     `json:"last_seen_base_sha,omitempty"`
 	LastAction          LastAction `json:"last_action,omitempty"`
-	LastError           string     `json:"last_error,omitempty"`
 	Repo                string     `json:"repo,omitempty"`
 	LastSeenCommentIDs  []string   `json:"last_seen_comment_ids,omitempty"`
 	LastSeenCIRunIDs    []int64    `json:"last_seen_ci_run_ids,omitempty"`

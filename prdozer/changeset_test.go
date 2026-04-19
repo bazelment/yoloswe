@@ -88,6 +88,27 @@ func TestComputeChangeset_NewComments_IgnoresSelf(t *testing.T) {
 	assert.Equal(t, []string{"c2"}, cs.NewCommentIDs)
 }
 
+func TestComputeChangeset_CommentIDsFromDifferentSourcesDoNotCollide(t *testing.T) {
+	t.Parallel()
+	// Simulate the real fetchComments output: inline + issue endpoints each
+	// namespace their IDs. Two distinct comments must both count as new.
+	prev := &State{
+		LastCheckAt:        time.Now(),
+		LastSeenHeadSHA:    "head1",
+		LastSeenBaseSHA:    "base1",
+		LastSeenCommentIDs: []string{"inline:42"},
+	}
+	snap := snapWithRollup("SUCCESS")
+	snap.Comments = []CommentRef{
+		{ID: "inline:42", Source: "inline", Author: "alice"}, // already seen
+		{ID: "issue:42", Source: "issue", Author: "bob"},     // same numeric id, different endpoint
+	}
+	cs := ComputeChangeset(prev, snap)
+	assert.True(t, cs.NewComments)
+	assert.Equal(t, []string{"issue:42"}, cs.NewCommentIDs,
+		"the issue-sourced #42 must NOT be silently dropped as a duplicate of inline #42")
+}
+
 func TestComputeChangeset_PRClosed_ShortCircuits(t *testing.T) {
 	t.Parallel()
 	snap := snapWithRollup("SUCCESS")

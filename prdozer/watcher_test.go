@@ -239,6 +239,29 @@ func TestWatcher_Tick_StateSaveFailure_Surfaces(t *testing.T) {
 	assert.Contains(t, err.Error(), "save state")
 }
 
+func TestWatcher_Tick_ClosedVsMerged_DistinctActions(t *testing.T) {
+	cases := []struct {
+		state      string
+		wantAction LastAction
+	}{
+		{state: "MERGED", wantAction: LastActionMerged},
+		{state: "CLOSED", wantAction: LastActionClosed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			modified := strings.Replace(okPRJSON, `"state": "OPEN"`, fmt.Sprintf(`"state": %q`, tc.state), 1)
+			gh := setupGH(buildPRJSON(modified, "SUCCESS"), "[]", "base1")
+			polish := &stubPolish{}
+			w := newWatcherForTest(t, gh, polish)
+
+			res, err := w.Tick(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantAction, res.Action)
+			assert.Empty(t, polish.calls, "closed/merged PRs should not invoke polish")
+		})
+	}
+}
+
 func TestBuildPolishPrompt(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "/pr-polish 42", buildPolishPrompt(42, false))

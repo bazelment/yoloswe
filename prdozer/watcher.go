@@ -2,7 +2,6 @@ package prdozer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -66,30 +65,6 @@ func NewWatcher(cfg *Config, gh wt.GHRunner, polish PolishRunner, prNumber int, 
 	return w
 }
 
-// Run loops until ctx is cancelled, ticking at cfg.PollInterval.
-// If once is true, runs a single tick and exits.
-func (w *Watcher) Run(ctx context.Context, once bool) error {
-	if once {
-		_, err := w.Tick(ctx)
-		return err
-	}
-	if _, err := w.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		w.logger.Warn("tick failed", "error", err)
-	}
-	ticker := time.NewTicker(w.cfg.PollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if _, err := w.Tick(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				w.logger.Warn("tick failed", "error", err)
-			}
-		}
-	}
-}
-
 // TickResult summarizes what happened in one polling cycle.
 type TickResult struct {
 	Snapshot  *Snapshot
@@ -151,7 +126,10 @@ func (w *Watcher) decideAndAct(ctx context.Context, snap *Snapshot, cs Changeset
 	switch {
 	case cs.PRClosed:
 		w.status("PR #%d is %s — nothing to do", w.pr, snap.PR.State)
-		return LastActionMerged
+		if snap.PR.State == "MERGED" {
+			return LastActionMerged
+		}
+		return LastActionClosed
 	case cs.Mergeable && w.cfg.Polish.AutoMerge && !w.dryRun:
 		if err := w.merge(ctx); err != nil {
 			w.logger.Error("auto-merge failed", "error", err)
@@ -247,7 +225,7 @@ func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) bo
 				"until", s.CooldownUntil,
 			)
 		}
-	case LastActionPolished, LastActionMerged, LastActionIdle, LastActionDryRun:
+	case LastActionPolished, LastActionMerged, LastActionClosed, LastActionIdle, LastActionDryRun:
 		if s.ConsecutiveFailures != 0 || !s.CooldownUntil.IsZero() {
 			dirty = true
 		}
