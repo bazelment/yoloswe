@@ -153,7 +153,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 				ErrorMessage: err.Error(),
 			}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
 			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
-				slog.Error("print json failure envelope", "error", printErr.Error())
+				reportEnvelopePrintError(printErr)
 			}
 		}
 		return fmt.Errorf("review failed: %w", err)
@@ -233,12 +233,19 @@ func emitEarlyFailure(err error, effectiveModel string) error {
 			ErrorMessage: err.Error(),
 		}, reviewer.BackendType(backend), effectiveModel, "")
 		if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
-			// Stdout serialization failed (broken pipe, full disk, marshal
-			// error). Automation that assumed "--json ⇒ exactly one JSON
-			// object on stdout" would otherwise see silence; surface the
-			// envelope failure on stderr so callers can distinguish it.
-			slog.Error("print json early-failure envelope", "error", printErr.Error())
+			reportEnvelopePrintError(printErr)
 		}
 	}
 	return err
+}
+
+// reportEnvelopePrintError surfaces a stdout-serialization failure to the
+// operator. Once SetupRunLog runs, slog.Default() is rebound to a file-only
+// handler; using slog here would write the message to disk where the operator
+// won't see it. Writing directly to os.Stderr guarantees the message reaches
+// the terminal regardless of slog redirection, while a parallel slog.Error
+// keeps the same record in the per-run log for forensics.
+func reportEnvelopePrintError(printErr error) {
+	fmt.Fprintf(os.Stderr, "[code-review] failed to write JSON envelope to stdout: %v\n", printErr)
+	slog.Error("print json envelope", "error", printErr.Error())
 }

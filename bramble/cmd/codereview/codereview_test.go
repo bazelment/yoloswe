@@ -1,11 +1,45 @@
 package codereview
 
 import (
+	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
+
+func TestReportEnvelopePrintError_WritesToStderr(t *testing.T) {
+	// SetupRunLog rebinds slog.Default() to a file-only handler, so this
+	// helper must bypass slog and write directly to stderr — otherwise
+	// stdout-serialization failures would only land in the per-run log
+	// where the operator never looks.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
+
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+
+	reportEnvelopePrintError(errors.New("broken pipe"))
+	_ = w.Close()
+	got := <-done
+
+	if !strings.Contains(got, "broken pipe") {
+		t.Errorf("stderr missing wrapped error: %q", got)
+	}
+	if !strings.Contains(got, "code-review") {
+		t.Errorf("stderr missing source tag: %q", got)
+	}
+}
 
 func TestRedactPath(t *testing.T) {
 	tests := []struct {
