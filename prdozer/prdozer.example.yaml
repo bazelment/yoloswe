@@ -1,0 +1,38 @@
+# prdozer.yaml — example configuration with all options and their defaults.
+#
+# All fields are optional. Anything omitted falls back to the value shown
+# in the inline comment.
+
+# --- Agent ---
+# Default agent model used for the /pr-polish session.
+agent:
+  model: sonnet                         # default: "sonnet" — any model from agent.AllModels
+
+# --- Global Settings ---
+work_dir: .                             # default: "." — supports ~/path expansion
+base_branch: main                       # default: "main"
+poll_interval: 30m                      # default: 30m — how often to re-check each PR
+max_budget_usd: 50.0                    # default: 50.0 — top-level cap; polish.max_budget_usd overrides
+
+# --- PR Discovery ---
+# Which PRs to watch. CLI flags --pr / --all override source.mode.
+source:
+  mode: all                             # one of: single | list | all
+  # prs: [1234, 1235]                   # used when mode is list/single
+  filter:
+    author: "@me"                       # gh "--author" filter; "@me" = current user
+    labels: []                          # require ANY of these labels (empty = no requirement)
+    exclude_labels: ["wip", "do-not-watch"]
+  max_concurrent: 3                     # max parallel polish sessions
+
+# --- Polish (per-PR /pr-polish invocation) ---
+polish:
+  local: false                          # pass --local to /pr-polish (skip CI/bot wait)
+  auto_merge: false                     # if true, merge PRs that become mergeable
+  max_turns: 100                        # turn cap for each /pr-polish session
+  max_budget_usd: 20.0                  # per-session budget; overrides top-level max_budget_usd
+
+# --- Backoff after consecutive polish failures ---
+backoff:
+  max_consecutive_failures: 3           # trip cooldown after this many failures in a row
+  cooldown: 2h                          # skip ticks for this PR until cooldown elapses
