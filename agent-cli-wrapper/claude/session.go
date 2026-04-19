@@ -1460,6 +1460,13 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
+	// Mixed bg+sync turns fell through suppression (sync completion is real),
+	// so flag live bg work here. The suppressed-bg-error and budget-exceeded
+	// branches above already set the flag, hence the wasSuppressed/already-set guards.
+	if !wasSuppressed && !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
+		result.HasLiveBackgroundWork = true
+	}
+
 	s.finalizeTurn(result)
 }
 
