@@ -262,6 +262,37 @@ func TestWatcher_Tick_ClosedVsMerged_DistinctActions(t *testing.T) {
 	}
 }
 
+func TestFetchComments_HandlesConcatenatedPaginatePages(t *testing.T) {
+	t.Parallel()
+	// gh api --paginate emits one JSON array per page back-to-back. Verify
+	// our decoder-loop flattens two pages into one combined list.
+	twoPages := `[{"id":1,"user":{"login":"alice","type":"User"},"created_at":"2026-04-18T00:00:00Z"}]` +
+		`[{"id":2,"user":{"login":"bob","type":"User"},"created_at":"2026-04-19T00:00:00Z"}]`
+	gh := newFakeGH()
+	gh.addPrefix("api --paginate repos/o/r/pulls/42/comments", twoPages)
+
+	got, err := fetchComments(context.Background(), gh, ".", "repos/o/r/pulls/42/comments", "inline", SnapshotOptions{})
+	require.NoError(t, err)
+	require.Len(t, got, 2, "both pages must be decoded, not just the first")
+	assert.Equal(t, "inline:1", got[0].ID)
+	assert.Equal(t, "alice", got[0].Author)
+	assert.Equal(t, "inline:2", got[1].ID)
+	assert.Equal(t, "bob", got[1].Author)
+}
+
+func TestFetchBaseSHA_EscapesSlashInBranch(t *testing.T) {
+	t.Parallel()
+	gh := newFakeGH()
+	// gh.addPrefix matches by joined-args prefix; the base-branch slash MUST
+	// be URL-escaped (release/1.0 → release%2F1.0) so the refs call remains
+	// a single path segment. If the escape regresses, this expectation fails.
+	gh.addPrefix("api repos/{owner}/{repo}/git/refs/heads/release%2F1.0", "deadbeef\n")
+
+	sha, err := fetchBaseSHA(context.Background(), gh, ".", "release/1.0")
+	require.NoError(t, err)
+	assert.Equal(t, "deadbeef", sha)
+}
+
 func TestBuildPolishPrompt(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "/pr-polish 42", buildPolishPrompt(42, false))

@@ -89,9 +89,9 @@ func discoverAll(ctx context.Context, gh wt.GHRunner, dir string, f SourceFilter
 	if author := strings.TrimSpace(f.Author); author != "" {
 		args = append(args, "--author", author)
 	}
-	for _, label := range f.Labels {
-		args = append(args, "--label", label)
-	}
+	// NOTE: `gh pr list --label` repeated is ANDed by gh, but the config
+	// documents Labels as "require ANY of these labels". To honor the ANY
+	// semantic we fetch unfiltered and apply include/exclude ourselves.
 	res, err := gh.Run(ctx, args, dir)
 	if err != nil {
 		return nil, ghError(err, res)
@@ -99,6 +99,10 @@ func discoverAll(ctx context.Context, gh wt.GHRunner, dir string, f SourceFilter
 	var raws []discoverPRRaw
 	if err := json.Unmarshal([]byte(res.Stdout), &raws); err != nil {
 		return nil, fmt.Errorf("parse pr list: %w", err)
+	}
+	include := make(map[string]bool, len(f.Labels))
+	for _, l := range f.Labels {
+		include[l] = true
 	}
 	exclude := make(map[string]bool, len(f.ExcludeLabels))
 	for _, l := range f.ExcludeLabels {
@@ -110,6 +114,18 @@ raw:
 		for _, l := range r.Labels {
 			if exclude[l.Name] {
 				continue raw
+			}
+		}
+		if len(include) > 0 {
+			matched := false
+			for _, l := range r.Labels {
+				if include[l.Name] {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
 			}
 		}
 		out = append(out, toDiscovered(r))

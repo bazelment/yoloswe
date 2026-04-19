@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -264,8 +265,10 @@ func fetchBaseSHA(ctx context.Context, gh wt.GHRunner, dir, base string) (string
 	if base == "" {
 		return "", nil
 	}
+	// Branch names may contain slashes (e.g. "release/1.0"), which would be
+	// parsed as extra path segments. Escape the branch as a single segment.
 	res, err := gh.Run(ctx, []string{
-		"api", fmt.Sprintf("repos/{owner}/{repo}/git/refs/heads/%s", base),
+		"api", fmt.Sprintf("repos/{owner}/{repo}/git/refs/heads/%s", url.PathEscape(base)),
 		"--jq", ".object.sha",
 	}, dir)
 	if err != nil {

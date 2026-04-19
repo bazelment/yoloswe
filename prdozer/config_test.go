@@ -21,6 +21,24 @@ func TestDefaultConfig_Sane(t *testing.T) {
 	assert.False(t, c.Polish.AutoMerge)
 }
 
+func TestDefaultConfig_RunsValidateForBudgetInheritance(t *testing.T) {
+	t.Parallel()
+	c := DefaultConfig()
+	assert.Greater(t, c.MaxBudgetUSD, 0.0, "top-level budget must have a default")
+	assert.Equal(t, c.MaxBudgetUSD, c.Polish.MaxBudgetUSD,
+		"no-config path must inherit top-level budget into polish.max_budget_usd")
+	assert.Equal(t, "bypass", c.Polish.PermissionMode,
+		"no-config path must populate the permission mode default")
+}
+
+func TestDefaultConfig_AppliesEnvPermissionMode(t *testing.T) {
+	// No t.Parallel — mutates process env.
+	t.Setenv("PRDOZER_PERMISSION_MODE", "plan")
+	c := DefaultConfig()
+	assert.Equal(t, "plan", c.Polish.PermissionMode,
+		"PRDOZER_PERMISSION_MODE must take effect even when no config file is loaded")
+}
+
 func TestLoadConfig_Overrides(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

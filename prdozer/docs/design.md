@@ -164,7 +164,7 @@ The single-PR control loop. Each tick:
 2. If `CooldownUntil` is in the future, log and return idle (back-off).
 3. `TakeSnapshot` and `ComputeChangeset`.
 4. Decide:
-   - `PRClosed` → return `LastActionMerged`.
+   - `PRClosed` → return `LastActionMerged` (state == MERGED) or `LastActionClosed`.
    - `Mergeable && AutoMerge && !dryRun` → `gh pr merge --squash`.
    - `Mergeable` → idle.
    - `!NeedsPolish()` → idle.

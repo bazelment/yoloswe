@@ -71,9 +71,16 @@ type BackoffConfig struct {
 	Cooldown               time.Duration `yaml:"cooldown"`
 }
 
-// DefaultConfig returns the built-in defaults.
+// DefaultConfig returns the built-in defaults with validate() applied so the
+// no-config path in callers matches the file-backed path: budget inheritance,
+// PRDOZER_PERMISSION_MODE env override, etc. all take effect. validate() on the
+// built-in defaults cannot realistically fail (model/workdir are preset), but
+// treat any failure as a programming error.
 func DefaultConfig() *Config {
 	c := defaultConfig()
+	if err := c.validate(); err != nil {
+		panic(fmt.Sprintf("prdozer: DefaultConfig failed to validate: %v", err))
+	}
 	return &c
 }
 
