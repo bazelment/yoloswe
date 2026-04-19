@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -88,7 +89,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 
 	slog.Info("code-review run start",
 		"pid", os.Getpid(),
-		"cwd", workDir,
+		"cwd", redactPath(workDir),
 		"backend", backend,
 		"model", model,
 		"effort", effort,
@@ -97,7 +98,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 		"timeout", timeout.String(),
 		"json_mode", jsonOutput,
 		"skip_test_execution", skipTestExecution,
-		"goal", goal)
+		"goal_len", len(goal))
 
 	config := reviewer.Config{
 		BackendType:       reviewer.BackendType(backend),
@@ -207,6 +208,18 @@ func maxSeverity(issues []reviewer.ReviewIssue) string {
 		}
 	}
 	return best
+}
+
+// redactPath collapses an absolute working directory to the basename plus a
+// length marker. Per-run logs live on disk and are easy to share; persisting
+// the full developer path leaks home-directory layout, project locations, and
+// branch worktree structure. The basename is enough to disambiguate runs in
+// the same project without exposing the rest.
+func redactPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	return fmt.Sprintf("<redacted:%d>/%s", len(p), filepath.Base(p))
 }
 
 // emitEarlyFailure reports a pre-review failure to the caller. When --json is

@@ -1,10 +1,57 @@
 package codereview
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
+
+func TestRedactPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          string
+		wantSuffix  string
+		forbidParts []string
+	}{
+		{
+			name:        "absolute home path",
+			in:          "/home/alice/work/project-x",
+			wantSuffix:  "/project-x",
+			forbidParts: []string{"/home/alice", "/work/"},
+		},
+		{
+			name:        "worktree path",
+			in:          "/home/bob/worktrees/repo/feature/foo",
+			wantSuffix:  "/foo",
+			forbidParts: []string{"/home/bob", "worktrees", "repo", "feature"},
+		},
+		{
+			name:       "empty",
+			in:         "",
+			wantSuffix: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactPath(tt.in)
+			if tt.in == "" {
+				if got != "" {
+					t.Errorf("redactPath(\"\") = %q, want empty", got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, tt.wantSuffix) {
+				t.Errorf("redactPath(%q) = %q, want suffix %q", tt.in, got, tt.wantSuffix)
+			}
+			for _, forbidden := range tt.forbidParts {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("redactPath(%q) = %q leaked %q", tt.in, got, forbidden)
+				}
+			}
+		})
+	}
+}
 
 func TestMaxSeverity(t *testing.T) {
 	tests := []struct {
