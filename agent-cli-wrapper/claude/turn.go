@@ -618,19 +618,24 @@ func (tm *turnManager) AppendContentBlock(block ContentBlock) {
 // — task_updated payloads carry only task_id, so this mapping must be
 // captured at task_started time.
 //
-// If the task has already been marked completed (via UntrackTask seen earlier
-// due to CLI event reordering), TrackTask does NOT re-insert it into
-// liveTasks. Otherwise a terminal-before-started sequence would revive the
-// live-background-work false-positive this package is trying to kill.
-// No-op if there is no current turn.
-func (tm *turnManager) TrackTask(taskID, toolUseID string) {
+// Returns alreadyCompleted=true when the task has already reached a terminal
+// state (via an earlier UntrackTask — CLI event reordering). In that case
+// liveTasks is NOT re-inserted (preventing revival of the live-background-work
+// false-positive), but tasksEverTracked IS incremented so AllTasksCompleted
+// flips true. The caller is responsible for re-invoking
+// maybeReleaseSuppression so a suppressed turn finalizes immediately rather
+// than waiting for the safety timer. No-op if there is no current turn.
+func (tm *turnManager) TrackTask(taskID, toolUseID string) (alreadyCompleted bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil || taskID == "" {
-		return
+		return false
 	}
 	if _, done := tm.currentTurn.completedTaskIDs[taskID]; done {
 		// Terminal event already arrived for this task_id; don't resurrect.
+		// Still count it as tracked so AllTasksCompleted can return true —
+		// terminalBeforeStarted had nothing to increment when it ran.
+		tm.currentTurn.tasksEverTracked++
 		if toolUseID != "" {
 			if tm.currentTurn.taskToToolUse == nil {
 				tm.currentTurn.taskToToolUse = make(map[string]string)
@@ -641,7 +646,7 @@ func (tm *turnManager) TrackTask(taskID, toolUseID string) {
 			}
 			tm.currentTurn.completedBgToolUseIDs[toolUseID] = struct{}{}
 		}
-		return
+		return true
 	}
 	if tm.currentTurn.liveTasks == nil {
 		tm.currentTurn.liveTasks = make(map[string]struct{})
@@ -654,6 +659,7 @@ func (tm *turnManager) TrackTask(taskID, toolUseID string) {
 		}
 		tm.currentTurn.taskToToolUse[taskID] = toolUseID
 	}
+	return false
 }
 
 // UntrackTask removes a task ID from the current turn's live set and marks

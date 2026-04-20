@@ -868,7 +868,7 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 			if p.ToolUseID != nil {
 				toolUseID = *p.ToolUseID
 			}
-			s.turnManager.TrackTask(p.TaskID, toolUseID)
+			alreadyCompleted := s.turnManager.TrackTask(p.TaskID, toolUseID)
 			s.emit(TaskStartedEvent{
 				ToolUseID:    p.ToolUseID,
 				WorkflowName: p.WorkflowName,
@@ -878,6 +878,14 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 				Prompt:       p.Prompt,
 				TurnNumber:   turnNum,
 			})
+			if alreadyCompleted {
+				// CLI emitted terminal task event before task_started (event
+				// reordering). The earlier UntrackTask could not release
+				// suppression because tasksEverTracked was still 0; now that
+				// TrackTask bumped it, AllTasksCompleted flips true and the
+				// held turn can finalize without waiting for the safety timer.
+				s.maybeReleaseSuppression("task_started:late-after-terminal")
+			}
 		} else {
 			slog.Warn("failed to decode task_started payload")
 		}

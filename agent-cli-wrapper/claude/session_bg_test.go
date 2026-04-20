@@ -1774,3 +1774,70 @@ func TestTrackTaskAfterTerminalEventDoesNotRevive(t *testing.T) {
 		t.Fatal("hasLiveBackgroundWork must be false after late task_started for an already-completed task")
 	}
 }
+
+// TestReorderedTerminalThenStartedReleasesSuppressedTurn drives the full
+// turn-completion path. When the CLI reorders task_notification (terminal)
+// before task_started, the suppressed turn must finalize immediately on the
+// late task_started — NOT wait for the bg-task safety timer.
+//
+// Uses Monitor (not bg-Bash) because Monitor's release path is terminal
+// task events; bg-Bash releases via continuation ResultMessage and so
+// wouldn't exercise the task-reordering code path.
+func TestReorderedTerminalThenStartedReleasesSuppressedTurn(t *testing.T) {
+	// Use a long safety timeout so the test would hang / fail rather than
+	// silently succeed via timer-fired path.
+	s := newTestSession(t, WithBgTaskSafetyTimeout(30*time.Second))
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "tail -f log"}},
+	}
+	simulateAssistantToolUse(s, tools)
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor armed", IsError: &notErr},
+	})
+
+	// handleResult must suppress (Monitor is background-releasing; no sync tool).
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Fatal("expected suppression to be active after pure-bg Monitor turn")
+	}
+
+	// Terminal event arrives FIRST. UntrackTask records completedTaskIDs
+	// but tasksEverTracked is still 0, so maybeReleaseSuppression's
+	// AllTasksCompleted returns false and suppression persists.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-1", "status": "completed",
+	}))
+
+	s.mu.RLock()
+	suppStillActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppStillActive {
+		t.Fatal("suppression should still be active — task_started has not fired yet, tasksEverTracked is 0")
+	}
+
+	// Late task_started fires. TrackTask returns alreadyCompleted=true,
+	// session.go calls maybeReleaseSuppression, which finalizes the turn
+	// (AllTasksCompleted now flips true: tasksEverTracked==1, liveTasks empty,
+	// no uncancelled bg-Bash since Monitor is in backgroundTools).
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "tool_use_id": "tool-1",
+	}))
+
+	// Turn must complete well under the 30s safety timeout.
+	waitForTurnComplete(t, s.events, 2*time.Second)
+
+	s.mu.RLock()
+	afterActive := s.bgState.active
+	s.mu.RUnlock()
+	if afterActive {
+		t.Error("suppression should be released after late task_started via maybeReleaseSuppression")
+	}
+}
