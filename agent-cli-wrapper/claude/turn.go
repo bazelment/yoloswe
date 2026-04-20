@@ -242,10 +242,23 @@ func (turn *turnState) latestScheduleWakeupDelaySeconds() float64 {
 
 // turnState tracks the state of a single turn.
 type turnState struct {
-	StartTime              time.Time
-	UserMessage            interface{}
-	Tools                  map[string]*toolState
-	liveTasks              map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
+	StartTime   time.Time
+	UserMessage interface{}
+	Tools       map[string]*toolState
+	liveTasks   map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
+	// taskToToolUse maps task_id → tool_use_id for background tasks whose
+	// task_started frame carried a tool_use_id. task_updated payloads do not
+	// carry tool_use_id, so this reverse map lets terminal task_updated
+	// transitions mark the corresponding bg tool_use as complete even though
+	// its launch-receipt tool_result (IsError=false) still lives in
+	// ContentBlocks.
+	taskToToolUse map[string]string
+	// completedBgToolUseIDs is the set of background tool_use IDs whose task
+	// has reached a terminal state (task_notification or task_updated with
+	// completed/failed/killed). hasLiveBackgroundWork excludes these so a
+	// mixed bg+sync turn is not permanently flagged as live after the bg
+	// process has exited.
+	completedBgToolUseIDs  map[string]struct{}
 	FullText               string
 	FullThinking           string
 	ContentBlocks          []ContentBlock
@@ -334,9 +347,17 @@ func (turn *turnState) hasLiveBackgroundWork() bool {
 		if !isBackgroundToolUse(block) {
 			continue
 		}
-		if !cancelled[block.ToolUseID] {
-			return true
+		if cancelled[block.ToolUseID] {
+			continue
 		}
+		// Bg tool_use whose task_notification / terminal task_updated already
+		// arrived: the bg process has exited. Its tool_result still says
+		// "Running in background..." (that's the launch receipt, not
+		// completion), so cancellation alone misses this case.
+		if _, done := turn.completedBgToolUseIDs[block.ToolUseID]; done {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -581,8 +602,11 @@ func (tm *turnManager) AppendContentBlock(block ContentBlock) {
 }
 
 // TrackTask records a task ID as live on the current turn. Called from
-// task_started handling. No-op if there is no current turn.
-func (tm *turnManager) TrackTask(taskID string) {
+// task_started handling. toolUseID, when non-empty, lets the manager mark the
+// corresponding bg tool_use complete when the task reaches a terminal state
+// — task_updated payloads carry only task_id, so this mapping must be
+// captured at task_started time. No-op if there is no current turn.
+func (tm *turnManager) TrackTask(taskID, toolUseID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil || taskID == "" {
@@ -593,17 +617,37 @@ func (tm *turnManager) TrackTask(taskID string) {
 	}
 	tm.currentTurn.liveTasks[taskID] = struct{}{}
 	tm.currentTurn.tasksEverTracked++
+	if toolUseID != "" {
+		if tm.currentTurn.taskToToolUse == nil {
+			tm.currentTurn.taskToToolUse = make(map[string]string)
+		}
+		tm.currentTurn.taskToToolUse[taskID] = toolUseID
+	}
 }
 
-// UntrackTask removes a task ID from the current turn's live set.
+// UntrackTask removes a task ID from the current turn's live set and marks
+// any bg tool_use associated with that task as complete, so
+// hasLiveBackgroundWork no longer counts it. toolUseID, when non-empty,
+// takes precedence over the taskID mapping (task_notification carries
+// tool_use_id directly; task_updated does not).
 // No-op if the task is not tracked or there is no current turn.
-func (tm *turnManager) UntrackTask(taskID string) {
+func (tm *turnManager) UntrackTask(taskID, toolUseID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil || taskID == "" {
 		return
 	}
 	delete(tm.currentTurn.liveTasks, taskID)
+	resolvedToolUseID := toolUseID
+	if resolvedToolUseID == "" {
+		resolvedToolUseID = tm.currentTurn.taskToToolUse[taskID]
+	}
+	if resolvedToolUseID != "" {
+		if tm.currentTurn.completedBgToolUseIDs == nil {
+			tm.currentTurn.completedBgToolUseIDs = make(map[string]struct{})
+		}
+		tm.currentTurn.completedBgToolUseIDs[resolvedToolUseID] = struct{}{}
+	}
 }
 
 // HasLiveTasks reports whether the current turn has any registered live

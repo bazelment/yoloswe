@@ -864,7 +864,11 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 		}
 	case protocol.SystemSubtypeTaskStarted:
 		if p, ok := msg.AsTaskStarted(); ok {
-			s.turnManager.TrackTask(p.TaskID)
+			toolUseID := ""
+			if p.ToolUseID != nil {
+				toolUseID = *p.ToolUseID
+			}
+			s.turnManager.TrackTask(p.TaskID, toolUseID)
 			s.emit(TaskStartedEvent{
 				ToolUseID:    p.ToolUseID,
 				WorkflowName: p.WorkflowName,
@@ -892,7 +896,7 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 			if p.Patch.Status != nil {
 				switch *p.Patch.Status {
 				case "completed", "failed", "killed":
-					s.turnManager.UntrackTask(p.TaskID)
+					s.turnManager.UntrackTask(p.TaskID, "")
 					s.maybeReleaseSuppression("task_updated:" + *p.Patch.Status)
 				}
 			}
@@ -927,7 +931,11 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 			// Belt-and-suspenders: task_notification may fire without a
 			// preceding terminal task_updated (e.g. if the bg process writes
 			// stdout on exit). Drain the live set and attempt release.
-			s.turnManager.UntrackTask(p.TaskID)
+			toolUseID := ""
+			if p.ToolUseID != nil {
+				toolUseID = *p.ToolUseID
+			}
+			s.turnManager.UntrackTask(p.TaskID, toolUseID)
 			s.maybeReleaseSuppression("task_notification")
 		} else {
 			slog.Warn("failed to decode task_notification payload")
