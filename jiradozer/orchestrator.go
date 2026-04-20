@@ -583,9 +583,11 @@ func shellQuote(s string) string {
 //     merge it, so the branch must remain until the PR is merged.
 //   - StepCancelled: worktree is preserved by default so in-progress work is
 //     not lost; set forceCleanup to remove it unconditionally.
-//   - StepFailed: worktree is removed so a future retry starts clean.
+//   - StepFailed: worktree is preserved by default so the operator can
+//     inspect the failure and keep any pushed branch / open PR created by
+//     earlier steps; set forceCleanup to wipe it.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
-	preserve := step == StepDone || (step == StepCancelled && !o.forceCleanup)
+	preserve := step == StepDone || ((step == StepCancelled || step == StepFailed) && !o.forceCleanup)
 	if preserve {
 		o.logger.Info("preserving worktree",
 			"step", step,
