@@ -637,7 +637,7 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 }
 
 // runStepAgentDetailed is overridable so unit tests can stub the agent call.
-var runStepAgentDetailed = jiradozer.RunStepAgentDetailed
+var runStepAgentDetailed = jiradozer.RunStepAgent
 
 func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, renderer *render.Renderer, logger *slog.Logger) error {
 	stepCfg, ok := cfg.StepByName(stepName)
@@ -674,11 +674,7 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 
 	res, err := runStepAgentDetailed(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
 	if res.HasLiveBackgroundWork {
-		logger.Error("step ended with live background work — refusing to advance",
-			"step", stepName,
-			"session_id", res.SessionID,
-			"agent_error", err,
-		)
+		jiradozer.LogLiveBackgroundWorkRefusal(logger, stepName, res.SessionID, 0, 0, err)
 		return fmt.Errorf("run-step %s: %w", stepName, jiradozer.LiveBackgroundWorkError(res.SessionID))
 	}
 	if err != nil {
@@ -724,13 +720,7 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 				sessionIDs = append(sessionIDs, res.SessionID)
 			}
 			if res.HasLiveBackgroundWork {
-				logger.Error("round ended with live background work — refusing to advance",
-					"step", stepName,
-					"round", i+1,
-					"total", totalRounds,
-					"session_id", res.SessionID,
-					"agent_error", err,
-				)
+				jiradozer.LogLiveBackgroundWorkRefusal(logger, stepName, res.SessionID, i+1, totalRounds, err)
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, jiradozer.LiveBackgroundWorkError(res.SessionID))
 			}
 			if err != nil {

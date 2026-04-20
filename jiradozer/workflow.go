@@ -73,7 +73,7 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		redoCounts:   make(map[WorkflowStep]int),
 		phases:       make(map[string]phaseState),
 		maxRedos:     DefaultMaxRedos,
-		runStepAgent: RunStepAgentDetailed,
+		runStepAgent: RunStepAgent,
 	}
 	if issue != nil {
 		// Shallow-copy so Labels mutations on w.issue don't bleed back into
@@ -262,6 +262,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 				roundSessionIDs = append(roundSessionIDs, res.SessionID)
 			}
 			if res.HasLiveBackgroundWork {
+				LogLiveBackgroundWorkRefusal(w.logger, stepName, res.SessionID, i+1, totalRounds, err)
 				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, LiveBackgroundWorkError(res.SessionID)))
 				return
 			}
@@ -323,6 +324,7 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	cfg := w.config.ResolveStep(stepCfg)
 	res, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.renderer, w.logger)
 	if res.HasLiveBackgroundWork {
+		LogLiveBackgroundWorkRefusal(w.logger, stepName, res.SessionID, 0, 0, err)
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, LiveBackgroundWorkError(res.SessionID)))
 		return
 	}

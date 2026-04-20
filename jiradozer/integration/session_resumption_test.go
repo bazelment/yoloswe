@@ -55,30 +55,30 @@ func TestSessionResumption_PlanFeedbackLoop(t *testing.T) {
 
 	// --- Step 1: First execution (no session ID, no feedback) ---
 	t.Log("Step 1: First planning execution")
-	output1, sessionID1, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)
+	res1, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err, "first plan execution should succeed")
-	require.NotEmpty(t, output1, "first plan output should not be empty")
-	require.NotEmpty(t, sessionID1, "first execution should return a session ID")
-	t.Logf("Session ID from step 1: %s", sessionID1)
-	t.Logf("Plan output (first 200 chars): %.200s", output1)
+	require.NotEmpty(t, res1.Output, "first plan output should not be empty")
+	require.NotEmpty(t, res1.SessionID, "first execution should return a session ID")
+	t.Logf("Session ID from step 1: %s", res1.SessionID)
+	t.Logf("Plan output (first 200 chars): %.200s", res1.Output)
 
 	// --- Step 2: Resume with feedback (same session ID) ---
 	t.Log("Step 2: Resume with feedback (redo)")
 	feedback := "Please also add validation for required fields and return typed errors instead of generic errors"
-	output2, sessionID2, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, feedback, sessionID1, nil, logger)
+	res2, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, feedback, res1.SessionID, nil, logger)
 	require.NoError(t, err, "resumed plan execution should succeed")
-	require.NotEmpty(t, output2, "resumed plan output should not be empty")
-	require.NotEmpty(t, sessionID2, "resumed execution should return a session ID")
-	t.Logf("Session ID from step 2: %s", sessionID2)
-	t.Logf("Plan output (first 200 chars): %.200s", output2)
+	require.NotEmpty(t, res2.Output, "resumed plan output should not be empty")
+	require.NotEmpty(t, res2.SessionID, "resumed execution should return a session ID")
+	t.Logf("Session ID from step 2: %s", res2.SessionID)
+	t.Logf("Plan output (first 200 chars): %.200s", res2.Output)
 
 	// --- Assertions ---
 	// The resumed output should be different from the first (feedback was incorporated).
-	assert.NotEqual(t, output1, output2, "resumed output should differ from first execution")
+	assert.NotEqual(t, res1.Output, res2.Output, "resumed output should differ from first execution")
 
 	// The session IDs should be related (same or evolved).
 	// Claude's session resume keeps the same session ID.
-	t.Logf("Session IDs: first=%s, second=%s", sessionID1, sessionID2)
+	t.Logf("Session IDs: first=%s, second=%s", res1.SessionID, res2.SessionID)
 }
 
 // TestSessionResumption_BuildAfterPlan verifies that the plan output from
@@ -112,11 +112,11 @@ func TestSessionResumption_BuildAfterPlan(t *testing.T) {
 	// Plan step.
 	t.Log("Running plan step")
 	data := jiradozer.NewPromptData(issue, "main")
-	planOutput, planSessionID, err := jiradozer.RunStepAgent(ctx, "plan", data, planCfg, workDir, "", "", nil, logger)
+	planRes, err := jiradozer.RunStepAgent(ctx, "plan", data, planCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err)
-	require.NotEmpty(t, planOutput)
-	require.NotEmpty(t, planSessionID)
-	t.Logf("Plan session ID: %s", planSessionID)
+	require.NotEmpty(t, planRes.Output)
+	require.NotEmpty(t, planRes.SessionID)
+	t.Logf("Plan session ID: %s", planRes.SessionID)
 
 	// Build step — uses the plan output.
 	buildCfg := jiradozer.StepConfig{
@@ -125,15 +125,15 @@ func TestSessionResumption_BuildAfterPlan(t *testing.T) {
 		MaxTurns:       3,
 		MaxBudgetUSD:   1.0,
 	}
-	data.Plan = planOutput
+	data.Plan = planRes.Output
 
 	t.Log("Running build step with plan output")
-	buildOutput, buildSessionID, err := jiradozer.RunStepAgent(ctx, "build", data, buildCfg, workDir, "", "", nil, logger)
+	buildRes, err := jiradozer.RunStepAgent(ctx, "build", data, buildCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err)
-	require.NotEmpty(t, buildOutput)
-	require.NotEmpty(t, buildSessionID)
-	t.Logf("Build session ID: %s", buildSessionID)
+	require.NotEmpty(t, buildRes.Output)
+	require.NotEmpty(t, buildRes.SessionID)
+	t.Logf("Build session ID: %s", buildRes.SessionID)
 
 	// Build and plan should have different session IDs (different steps).
-	assert.NotEqual(t, planSessionID, buildSessionID, "plan and build should have different sessions")
+	assert.NotEqual(t, planRes.SessionID, buildRes.SessionID, "plan and build should have different sessions")
 }

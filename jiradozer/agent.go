@@ -127,18 +127,40 @@ func LiveBackgroundWorkError(sessionID string) error {
 	return fmt.Errorf("session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", sessionID)
 }
 
-// RunStepAgent runs an agent session for the given workflow step.
+// LogLiveBackgroundWorkRefusal emits a uniform slog.Error for every call site
+// that surfaces LiveBackgroundWorkError, so field names and wording cannot drift
+// between the workflow paths and the CLI single-shot paths. Pass total > 0 (and
+// the corresponding round) on the rounds path; pass (0, 0) from single-step
+// call sites. err is the original agent error that coincided with the bg-work
+// refusal — logged so it survives even though the returned error surfaces the
+// bg-work message instead.
+func LogLiveBackgroundWorkRefusal(logger *slog.Logger, stepName, sessionID string, round, total int, err error) {
+	if logger == nil {
+		return
+	}
+	if total > 0 {
+		logger.Error("round ended with live background work — refusing to advance",
+			"step", stepName,
+			"round", round,
+			"total", total,
+			"session_id", sessionID,
+			"agent_error", err,
+		)
+		return
+	}
+	logger.Error("step ended with live background work — refusing to advance",
+		"step", stepName,
+		"session_id", sessionID,
+		"agent_error", err,
+	)
+}
+
+// RunStepAgent runs an agent session for the given workflow step and returns
+// the full StepAgentResult (including HasLiveBackgroundWork).
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
 // If renderer is non-nil, agent events are streamed to the terminal.
-func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
-	res, err := RunStepAgentDetailed(ctx, stepName, data, cfg, workDir, feedback, resumeSessionID, renderer, logger)
-	return res.Output, res.SessionID, err
-}
-
-// RunStepAgentDetailed is RunStepAgent but returns the full StepAgentResult
-// (including HasLiveBackgroundWork).
-func RunStepAgentDetailed(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
+func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
 	if err != nil {
 		return StepAgentResult{}, fmt.Errorf("render %s prompt: %w", stepName, err)

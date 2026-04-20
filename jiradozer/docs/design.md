@@ -148,9 +148,11 @@ type PromptData struct {
 
 // RunStepAgent is the single entry point for all steps.
 // First call: renders prompt template. Follow-up: resumes session with feedback.
-func RunStepAgent(ctx context.Context, stepName string, issue *tracker.Issue, data PromptData,
+// Returns StepAgentResult (Output, SessionID, HasLiveBackgroundWork) so callers
+// can refuse to advance past a turn that still has live bg Bash/Monitor tasks.
+func RunStepAgent(ctx context.Context, stepName string, data PromptData,
     cfg StepConfig, workDir string, feedback string, resumeSessionID string,
-    logger *slog.Logger) (string, string, error)
+    renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
 ```
 
 Each step has a built-in default prompt template:
@@ -233,10 +235,12 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
     data.Plan = w.plan
     data.BuildOutput = w.buildOutput
 
-    output, sessionID, err := RunStepAgent(ctx, stepName, w.issue, data, cfg,
-        w.config.WorkDir, w.feedback, w.sessionIDs[w.state.Current()], w.logger)
-    // ...
-    w.sessionIDs[w.state.Current()] = sessionID
+    res, err := RunStepAgent(ctx, stepName, data, cfg,
+        w.config.WorkDir, w.feedback, w.sessionIDs[w.state.Current()], nil, w.logger)
+    if res.HasLiveBackgroundWork {
+        // Refuse to advance past a mixed bg+sync turn; see jiradozer/agent.go.
+    }
+    w.sessionIDs[w.state.Current()] = res.SessionID
 }
 ```
 

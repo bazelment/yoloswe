@@ -1555,6 +1555,15 @@ func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
+		// Mirror handleResult: the wakeup safety timer firing does not tell
+		// us anything about bg work state. If the logical turn still has
+		// uncancelled bg Bash/Monitor tools, surface HasLiveBackgroundWork so
+		// retry loops do not interrupt them. Parallel to completeSuppressedTurn
+		// (which sets this unconditionally because bg-task suppression only
+		// activates when bg work exists) and handleResult's mixed-turn check.
+		if !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
+			result.HasLiveBackgroundWork = true
+		}
 	}
 	s.mu.Unlock()
 

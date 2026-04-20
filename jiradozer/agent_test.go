@@ -1,7 +1,9 @@
 package jiradozer
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -476,4 +478,43 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	assert.Contains(t, buildPrompt, "# Plan")
 	assert.Contains(t, buildPrompt, "1. Fix widget")
 	assert.Contains(t, buildPrompt, "Approved Plan")
+}
+
+func TestLogLiveBackgroundWorkRefusal_StepShape(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	LogLiveBackgroundWorkRefusal(logger, "plan", "sess-step", 0, 0, errors.New("boom"))
+
+	out := buf.String()
+	assert.Contains(t, out, "step ended with live background work")
+	assert.Contains(t, out, "step=plan")
+	assert.Contains(t, out, "session_id=sess-step")
+	assert.Contains(t, out, "agent_error=boom")
+	assert.NotContains(t, out, "round=", "single-step path must not emit round fields")
+	assert.NotContains(t, out, "total=", "single-step path must not emit total fields")
+}
+
+func TestLogLiveBackgroundWorkRefusal_RoundShape(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	LogLiveBackgroundWorkRefusal(logger, "build", "sess-round", 2, 5, errors.New("kaboom"))
+
+	out := buf.String()
+	assert.Contains(t, out, "round ended with live background work")
+	assert.Contains(t, out, "step=build")
+	assert.Contains(t, out, "round=2")
+	assert.Contains(t, out, "total=5")
+	assert.Contains(t, out, "session_id=sess-round")
+	assert.Contains(t, out, "agent_error=kaboom")
+}
+
+func TestLogLiveBackgroundWorkRefusal_NilLoggerNoPanic(t *testing.T) {
+	// A nil logger is not a supported call-site shape, but the helper must
+	// refuse to panic if a defensive caller ever hands one in, since its
+	// purpose is observability and crashing the process would defeat that.
+	assert.NotPanics(t, func() {
+		LogLiveBackgroundWorkRefusal(nil, "plan", "sess", 0, 0, errors.New("x"))
+	})
 }

@@ -1525,3 +1525,64 @@ func TestHasLiveBackgroundWork_PureBgTurnUsesSuppressionPath(t *testing.T) {
 	}
 	s.mu.Unlock()
 }
+
+// TestScheduleWakeup_SafetyTimerSurfacesLiveBgWork verifies that when the
+// wakeup safety timer fires on a turn that ALSO has an uncancelled bg Bash
+// tool use, the emitted TurnCompleteEvent carries HasLiveBackgroundWork=true.
+// Mirrors handleResult's mixed-turn check at session.go:1466 and closes a
+// parallel-path drift gap: without this, a wakeup-suppressed turn could
+// swallow the bg-work signal, letting an orchestrator advance or stop the
+// session while a bg tool was still running in the CLI.
+func TestScheduleWakeup_SafetyTimerSurfacesLiveBgWork(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "wake-1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60),
+			"prompt":       "check",
+			"reason":       "waiting",
+		}},
+		{ID: "bg-1", Name: "Bash", Input: map[string]interface{}{
+			"command":           "sleep 60",
+			"run_in_background": true,
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "wake-1", Content: "scheduled", IsError: &isErrFalse},
+		{ToolUseID: "bg-1", Content: "queued bg", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	// Replace the real safety timer with a short one so the test does
+	// not block for the full ScheduleWakeup delay + 60s buffer.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+	}
+	safetyResult := TurnResult{TurnNumber: 1, Success: true}
+	s.wakeupState.timer = time.AfterFunc(20*time.Millisecond, func() {
+		s.completeWakeupSuppressedTurn(safetyResult)
+	})
+	s.mu.Unlock()
+
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
+	if !tc.HasLiveBackgroundWork {
+		t.Error("wakeup safety-timer completion with a live bg Bash must surface HasLiveBackgroundWork=true")
+	}
+
+	// Clean up bg safety timer to avoid leaking a goroutine.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+	}
+	s.mu.Unlock()
+}
