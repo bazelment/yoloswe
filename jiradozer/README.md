@@ -158,6 +158,8 @@ In team mode (`--filter`), each issue gets its own git worktree under a dedicate
 - **Left intact on failure or cancellation** (`StepFailed`, `StepCancelled`) by default, so the operator can inspect the state and keep any pushed branch / open PR created by earlier steps.
 - **Removed only with `--force-cleanup`** when a run fails or is cancelled. Pass the flag to wipe the worktree and branch so a future retry starts from a clean state.
 
+On shared or untrusted machines (CI runners, shared dev hosts), prefer `--force-cleanup` so a failed run does not leave secrets, tokens, or untracked files from the agent on disk.
+
 After merging the PR, remove the worktree manually:
 
 ```bash
