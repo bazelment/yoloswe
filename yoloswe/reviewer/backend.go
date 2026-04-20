@@ -147,13 +147,33 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 // start/end, turn complete, error). The slog side is cheap and writes to the
 // handler installed by SetupRunLog; when no file handler is installed it
 // still flows through the default slog writer, which tests may override.
+//
+// It additionally emits machine-readable ProgressEvents through the attached
+// ProgressEmitter so automation consumers get a live stream of reviewer
+// progress alongside the final JSON envelope. The emitter is expected to
+// coalesce bursty events (e.g. tool-use) so the stream stays within
+// Monitor's event budget.
 type rendererEventHandler struct {
 	r        *render.Renderer
 	reviewer *Reviewer // optional; captures lastSessionID when set
+	progress ProgressEmitter
 }
 
 func (r *Reviewer) newEventHandler() *rendererEventHandler {
-	return &rendererEventHandler{r: r.renderer, reviewer: r}
+	p := r.progress
+	if p == nil {
+		p = NoopProgressEmitter()
+	}
+	return &rendererEventHandler{r: r.renderer, reviewer: r, progress: p}
+}
+
+// backendName returns the configured backend as a plain string, or "" if no
+// reviewer is attached. Used as a default for ProgressEvent.Backend.
+func (h *rendererEventHandler) backendName() string {
+	if h.reviewer == nil {
+		return ""
+	}
+	return string(h.reviewer.config.BackendType)
 }
 
 func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
@@ -165,6 +185,12 @@ func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
 		}
 	}
 	slog.Info("reviewer session started", "session_id", sessionID, "model", model)
+	h.progress.Emit(ProgressEvent{
+		Kind:      ProgressKindSessionStarted,
+		Backend:   h.backendName(),
+		Model:     model,
+		SessionID: sessionID,
+	})
 }
 
 func (h *rendererEventHandler) OnText(delta string) {
@@ -181,6 +207,11 @@ func (h *rendererEventHandler) OnToolStart(name, callID string, input map[string
 		"tool", name,
 		"call_id", callID,
 		"input_summary", summarizeToolInput(input))
+	h.progress.Emit(ProgressEvent{
+		Kind:    ProgressKindToolUse,
+		Backend: h.backendName(),
+		Tool:    name,
+	})
 }
 
 func (h *rendererEventHandler) OnToolComplete(name string, callID string, _ map[string]interface{}, result interface{}, isError bool) {
@@ -205,6 +236,10 @@ func (h *rendererEventHandler) OnTurnComplete(success bool, durationMs int64) {
 	slog.Info("reviewer turn complete",
 		"success", success,
 		"duration_ms", durationMs)
+	h.progress.Emit(ProgressEvent{
+		Kind:    ProgressKindTurnComplete,
+		Backend: h.backendName(),
+	})
 }
 
 func (h *rendererEventHandler) OnError(err error, context string) {
@@ -212,6 +247,11 @@ func (h *rendererEventHandler) OnError(err error, context string) {
 	slog.Error("reviewer error",
 		"context", context,
 		"error", err.Error())
+	h.progress.Emit(ProgressEvent{
+		Kind:    ProgressKindError,
+		Backend: h.backendName(),
+		Detail:  context,
+	})
 }
 
 // sensitiveToolInputKeys names keys whose values may contain shell commands,

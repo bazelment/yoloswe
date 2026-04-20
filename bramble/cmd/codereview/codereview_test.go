@@ -132,7 +132,10 @@ func TestEmitEarlyFailure_JSONMode_WritesEnvelopeToStdout(t *testing.T) {
 	boom := errors.New("backend unreachable")
 	var returned error
 	stdout, _ := captureStdStreams(t, func() {
-		returned = emitEarlyFailure(boom, "gpt-x")
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		returned = emitEarlyFailure(boom, "gpt-x", emit)
 	})
 
 	if returned == nil || !strings.Contains(returned.Error(), "backend unreachable") {
@@ -166,10 +169,169 @@ func TestEmitEarlyFailure_NonJSONMode_NoStdout(t *testing.T) {
 	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
 
 	stdout, _ := captureStdStreams(t, func() {
-		_ = emitEarlyFailure(errors.New("boom"), "")
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		_ = emitEarlyFailure(errors.New("boom"), "", emit)
 	})
 	if stdout != "" {
 		t.Errorf("stdout should be empty in prose mode, got %q", stdout)
+	}
+}
+
+func TestFinalizeEnvelope_SuccessDoesNotDoubleEmit(t *testing.T) {
+	// When runCodeReview's happy path has already flushed an envelope, the
+	// top-level defer must not synthesize a second one — otherwise automation
+	// sees two JSON objects and has no way to know which is authoritative.
+	written := true
+	var retErr error
+	emitted := 0
+	emit := func(reviewer.ResultEnvelope) {
+		emitted++
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		jsonOutput:      true,
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+	})
+	if emitted != 0 {
+		t.Errorf("emit called %d times, want 0 on happy path", emitted)
+	}
+}
+
+func TestFinalizeEnvelope_UnwrittenReturnSynthesizesEnvelope(t *testing.T) {
+	// The PR #162 scenario in the small: the reviewer exited 0 but never
+	// wrote an envelope. The defer must detect this and put a parseable
+	// error envelope on stdout so /pr-polish can distinguish "ran and found
+	// nothing" from "ran and emitted nothing".
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		jsonOutput:      true,
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+	})
+	if !written {
+		t.Fatalf("expected emit to have been called")
+	}
+	if got.Status != reviewer.StatusError {
+		t.Errorf("status = %s, want error", got.Status)
+	}
+	if !strings.Contains(got.Error, "without producing a review") {
+		t.Errorf("error message %q missing sentinel substring", got.Error)
+	}
+	if got.Backend != "codex" {
+		t.Errorf("backend = %s, want codex", got.Backend)
+	}
+}
+
+func TestFinalizeEnvelope_PanicEmitsEnvelopeThenRepanics(t *testing.T) {
+	// Panics anywhere below must not cost us the envelope — but they must
+	// still propagate so cobra exits non-zero. Verify both: emit runs once
+	// with a panic-flavored message, and the original panic value re-raises.
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic to re-raise, got nil")
+		}
+		if rs, _ := r.(string); rs != "kaboom" {
+			t.Errorf("re-raised value = %v, want %q", r, "kaboom")
+		}
+		if !written {
+			t.Fatalf("envelope was not emitted before re-panic")
+		}
+		if got.Status != reviewer.StatusError {
+			t.Errorf("status = %s, want error", got.Status)
+		}
+		if !strings.Contains(got.Error, "panic in code-review") {
+			t.Errorf("error %q missing panic prefix", got.Error)
+		}
+		if !strings.Contains(got.Error, "kaboom") {
+			t.Errorf("error %q missing panic value", got.Error)
+		}
+		if retErr == nil || !strings.Contains(retErr.Error(), "kaboom") {
+			t.Errorf("retErr = %v, want wrapping of panic value", retErr)
+		}
+	}()
+
+	finalizeEnvelope(envelopeGuardArgs{
+		jsonOutput:      true,
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        "kaboom",
+		emit:            emit,
+	})
+}
+
+func TestFinalizeEnvelope_ProseModePanicRepanicsWithoutEnvelope(t *testing.T) {
+	// In prose mode (--json not set) we have no envelope contract — the
+	// guard must re-raise panics as-is and leave stdout completely alone.
+	written := false
+	var retErr error
+	emit := func(reviewer.ResultEnvelope) { t.Fatalf("emit must not run in prose mode") }
+
+	defer func() {
+		if r := recover(); r != "boom" {
+			t.Errorf("re-raised value = %v, want %q", r, "boom")
+		}
+		if written {
+			t.Errorf("envelope was emitted in prose mode")
+		}
+	}()
+
+	finalizeEnvelope(envelopeGuardArgs{
+		jsonOutput:      false,
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        "boom",
+		emit:            emit,
+	})
+}
+
+func TestFinalizeEnvelope_ReturnErrorPropagatesToEnvelopeMessage(t *testing.T) {
+	// When the function is returning a regular (non-panic) error and no
+	// envelope has been written yet, the synthesized envelope should carry
+	// the error's message rather than the generic sentinel — so automation
+	// can tell which error code path fired.
+	written := false
+	retErr := errors.New("reviewer drive-by: auth denied")
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		jsonOutput:      true,
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+	})
+	if got.Error != "reviewer drive-by: auth denied" {
+		t.Errorf("envelope.error = %q, want %q", got.Error, retErr.Error())
 	}
 }
 

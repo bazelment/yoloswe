@@ -188,6 +188,7 @@ type Reviewer struct {
 	output         io.Writer
 	backend        Backend
 	renderer       *render.Renderer
+	progress       ProgressEmitter
 	lastSessionID  string
 	effectiveModel string // updated from backend session info when available
 	config         Config
@@ -233,9 +234,32 @@ func New(config Config) *Reviewer {
 		config:         config,
 		output:         os.Stderr,
 		renderer:       render.NewRendererWithOptions(os.Stderr, config.Verbose, config.NoColor),
+		progress:       NoopProgressEmitter(),
 		backend:        backend,
 		effectiveModel: config.Model,
 	}
+}
+
+// SetProgressEmitter installs an emitter that receives one ProgressEvent per
+// backend lifecycle boundary (session-started, tool-use, turn-complete,
+// verdict, error). Intended for --json callers: the emitter writes NDJSON to
+// stdout so automation can stream progress without parsing renderer prose.
+// Passing nil resets to a no-op emitter.
+func (r *Reviewer) SetProgressEmitter(p ProgressEmitter) {
+	if p == nil {
+		p = NoopProgressEmitter()
+	}
+	r.progress = p
+}
+
+// ProgressEmitter returns the installed emitter, or a no-op if none is set.
+// Callers use this to emit synthetic events around the reviewer lifecycle
+// (e.g. a verdict event from the codereview subcommand after BuildEnvelope).
+func (r *Reviewer) ProgressEmitter() ProgressEmitter {
+	if r.progress == nil {
+		return NoopProgressEmitter()
+	}
+	return r.progress
 }
 
 // SetOutput sets the output writer for streaming responses.
