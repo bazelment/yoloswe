@@ -1841,3 +1841,57 @@ func TestReorderedTerminalThenStartedReleasesSuppressedTurn(t *testing.T) {
 		t.Error("suppression should be released after late task_started via maybeReleaseSuppression")
 	}
 }
+
+// TestHasLiveBackgroundWork_MixedTurnTerminalWithoutToolUseIDDrains exercises
+// the completedBgToolUseIDs fallback path on a mixed sync+bg turn. task_started
+// carries tool_use_id (populating taskToToolUse), then a terminal task event
+// arrives WITHOUT tool_use_id. UntrackTask must resolve the id via the stored
+// mapping and populate completedBgToolUseIDs so hasLiveBackgroundWork's
+// ContentBlocks walk clears the bg block — and the final TurnCompleteEvent
+// reports HasLiveBackgroundWork=false.
+func TestHasLiveBackgroundWork_MixedTurnTerminalWithoutToolUseIDDrains(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-bg", Name: "Monitor", Input: map[string]interface{}{"command": "tail -f log"}},
+		{ID: "tool-sync", Name: "Bash", Input: map[string]interface{}{"command": "echo sync"}},
+	}
+	simulateAssistantToolUse(s, tools)
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-bg", Content: "Monitor armed", IsError: &notErr},
+		{ToolUseID: "tool-sync", Content: "sync", IsError: &notErr},
+	})
+
+	turn := s.turnManager.CurrentTurn()
+	if !turn.hasLiveBackgroundWork() {
+		t.Fatal("bg tool should be live before terminal task event arrives")
+	}
+
+	// task_started carries tool_use_id — populates taskToToolUse mapping.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-bg",
+	}))
+
+	// Terminal task_notification OMITS tool_use_id. UntrackTask must fall back
+	// to the taskToToolUse mapping to populate completedBgToolUseIDs.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "status": "completed",
+	}))
+
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must clear after terminal-without-tool_use_id drains both liveTasks and completedBgToolUseIDs via mapping fallback")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, 2*time.Second)
+	if tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be false — bg tool drained via fallback mapping")
+	}
+	if !tce.Success {
+		t.Error("TurnCompleteEvent.Success must be true")
+	}
+}
