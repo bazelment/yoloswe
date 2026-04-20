@@ -1460,6 +1460,13 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
+	// Mixed bg+sync turns fell through suppression (sync completion is real),
+	// so flag live bg work here. The suppressed-bg-error and budget-exceeded
+	// branches above already set the flag, hence the wasSuppressed/already-set guards.
+	if !wasSuppressed && !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
+		result.HasLiveBackgroundWork = true
+	}
+
 	s.finalizeTurn(result)
 }
 
@@ -1548,6 +1555,15 @@ func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
+		// Mirror handleResult: the wakeup safety timer firing does not tell
+		// us anything about bg work state. If the logical turn still has
+		// uncancelled bg Bash/Monitor tools, surface HasLiveBackgroundWork so
+		// retry loops do not interrupt them. Parallel to completeSuppressedTurn
+		// (which sets this unconditionally because bg-task suppression only
+		// activates when bg work exists) and handleResult's mixed-turn check.
+		if !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
+			result.HasLiveBackgroundWork = true
+		}
 	}
 	s.mu.Unlock()
 

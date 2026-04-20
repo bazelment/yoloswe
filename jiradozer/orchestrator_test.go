@@ -421,7 +421,11 @@ func TestOrchestrator_CancelWithForceCleanup(t *testing.T) {
 func TestOrchestrator_CancelWithCleanExit(t *testing.T) {
 	// Verify that a subprocess that traps SIGINT and exits 0 is still
 	// classified as StepCancelled, not StepDone.
-	t.Parallel()
+	//
+	// Intentionally NOT t.Parallel(): fork/exec of the freshly written
+	// test.sh races ETXTBSY against other tests' cmd.Start() calls under
+	// load (observed on GitHub Actions). The other Cancel* tests in this
+	// file are also serial for the same reason.
 	cfg := testOrchestratorConfig()
 
 	// Script traps SIGINT and exits cleanly (exit 0).
@@ -682,8 +686,9 @@ func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
 // triggering a ClearSeen (which would cause an infinite retry storm when slots
 // free up).
 func TestRunWithDiscovery_ConcurrencyLimitKeepsPending(t *testing.T) {
-	t.Parallel()
-
+	// Intentionally NOT t.Parallel(): fork/exec of a freshly written
+	// shell script can race ETXTBSY against other tests' cmd.Start()
+	// calls under load.
 	// Use a script that exits quickly so slots free up.
 	fastScript := writeTestScript(t, "exit 0")
 

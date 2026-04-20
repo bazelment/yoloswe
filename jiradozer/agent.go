@@ -114,14 +114,56 @@ func truncate(s string, maxLen int) string {
 	return s
 }
 
-// RunStepAgent runs an agent session for the given workflow step.
+type StepAgentResult struct {
+	Output                string
+	SessionID             string
+	HasLiveBackgroundWork bool
+}
+
+// LiveBackgroundWorkError formats the shared refusal message for a session
+// that ended with live background work. Callers wrap it with their own
+// step/round context prefix.
+func LiveBackgroundWorkError(sessionID string) error {
+	return fmt.Errorf("session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", sessionID)
+}
+
+// LogLiveBackgroundWorkRefusal emits a uniform slog.Error for every call site
+// that surfaces LiveBackgroundWorkError, so field names and wording cannot drift
+// between the workflow paths and the CLI single-shot paths. Pass total > 0 (and
+// the corresponding round) on the rounds path; pass (0, 0) from single-step
+// call sites. err is the original agent error that coincided with the bg-work
+// refusal — logged so it survives even though the returned error surfaces the
+// bg-work message instead.
+func LogLiveBackgroundWorkRefusal(logger *slog.Logger, stepName, sessionID string, round, total int, err error) {
+	if logger == nil {
+		return
+	}
+	if total > 0 {
+		logger.Error("round ended with live background work — refusing to advance",
+			"step", stepName,
+			"round", round,
+			"total", total,
+			"session_id", sessionID,
+			"agent_error", err,
+		)
+		return
+	}
+	logger.Error("step ended with live background work — refusing to advance",
+		"step", stepName,
+		"session_id", sessionID,
+		"agent_error", err,
+	)
+}
+
+// RunStepAgent runs an agent session for the given workflow step and returns
+// the full StepAgentResult (including HasLiveBackgroundWork).
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
 // If renderer is non-nil, agent events are streamed to the terminal.
-func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
+func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
 	if err != nil {
-		return "", "", fmt.Errorf("render %s prompt: %w", stepName, err)
+		return StepAgentResult{}, fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
 	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
 }
@@ -429,14 +471,14 @@ func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 // runAgent runs an agent with the given prompt and step configuration.
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
-func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (string, string, error) {
+func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	model, ok := agent.ModelByID(cfg.Model)
 	if !ok {
-		return "", "", fmt.Errorf("unknown model: %q", cfg.Model)
+		return StepAgentResult{}, fmt.Errorf("unknown model: %q", cfg.Model)
 	}
 	provider, err := agent.NewProviderForModel(model)
 	if err != nil {
-		return "", "", fmt.Errorf("create provider: %w", err)
+		return StepAgentResult{}, fmt.Errorf("create provider: %w", err)
 	}
 	defer provider.Close()
 
@@ -485,14 +527,18 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	result, err := provider.Execute(ctx, prompt, nil, opts...)
 	if err != nil {
 		logHandler.flushText()
-		return "", "", fmt.Errorf("agent execution: %w", err)
+		return StepAgentResult{}, fmt.Errorf("agent execution: %w", err)
 	}
 	if !result.Success {
 		logHandler.flushText()
-		if result.Error != nil {
-			return "", "", result.Error
+		failed := StepAgentResult{
+			SessionID:             result.SessionID,
+			HasLiveBackgroundWork: result.HasLiveBackgroundWork,
 		}
-		return "", "", fmt.Errorf("agent failed")
+		if result.Error != nil {
+			return failed, result.Error
+		}
+		return failed, fmt.Errorf("agent failed")
 	}
 
 	logger.Info("agent completed",
@@ -516,7 +562,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	if e := result.UnresolvedToolError; e != nil && output != result.Text {
 		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
 	}
-	return output, result.SessionID, nil
+	return StepAgentResult{
+		Output:                output,
+		SessionID:             result.SessionID,
+		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
+	}, nil
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.

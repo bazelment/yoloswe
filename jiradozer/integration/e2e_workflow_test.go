@@ -205,11 +205,11 @@ func TestE2E_PlanStep_Smoke(t *testing.T) {
 		MaxBudgetUSD:   1.0,
 	}
 
-	output, sessionID, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)
+	res, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)
 	require.NoError(t, err, "plan step should succeed")
-	assert.NotEmpty(t, output, "plan output should not be empty")
-	assert.NotEmpty(t, sessionID, "should return a session ID")
-	t.Logf("Plan output (first 300 chars): %.300s", output)
+	assert.NotEmpty(t, res.Output, "plan output should not be empty")
+	assert.NotEmpty(t, res.SessionID, "should return a session ID")
+	t.Logf("Plan output (first 300 chars): %.300s", res.Output)
 }
 
 // TestE2E_HumanFeedback runs the full workflow with human feedback injected

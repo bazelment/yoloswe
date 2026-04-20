@@ -1,6 +1,7 @@
 package jiradozer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -150,6 +151,11 @@ func (m *mockWorkflowTracker) getCalls(method string) []trackerCall {
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}
+
+func capturingLogger() (*slog.Logger, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
 }
 
 func testIssue() *tracker.Issue {
@@ -670,8 +676,8 @@ func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 	wf.lastCommentAt = staleTime
 
 	// Stub runStepAgent so runStep executes without invoking a real agent.
-	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (string, string, error) {
-		return "step output", "session-1", nil
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		return StepAgentResult{Output: "step output", SessionID: "session-1"}, nil
 	}
 
 	wf.runStep(context.Background(), "plan", cfg.Plan, StepPlanReview, "plan_complete")
@@ -718,8 +724,8 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 	wf.lastCommentAt = staleTime
 
 	// Stub runStepAgent so rounds execute without a real agent.
-	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (string, string, error) {
-		return "round output", "", nil
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		return StepAgentResult{Output: "round output"}, nil
 	}
 
 	wf.runStepRounds(context.Background(), "plan", roundsCfg, StepPlanReview, "plan_complete")
@@ -758,14 +764,141 @@ func TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection(t *testing.T) {
 	wf.feedback = "please fix the tests"
 
 	var capturedFeedback string
-	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, feedback string, _ string, _ *render.Renderer, _ *slog.Logger) (string, string, error) {
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, feedback string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
 		capturedFeedback = feedback
-		return "agent output", "", nil
+		return StepAgentResult{Output: "agent output"}, nil
 	}
 
 	wf.runStepRounds(context.Background(), "build", roundsCfg, StepBuildReview, "build_complete")
 
 	assert.Equal(t, "please fix the tests", capturedFeedback, "feedback should be injected into the first agent round")
+}
+
+// TestWorkflow_RunStep_RejectsLiveBackgroundWork verifies that the single-step
+// workflow path fails when the agent result reports HasLiveBackgroundWork,
+// preventing silent advancement past bg work that the CLI harness would
+// otherwise orphan.
+func TestWorkflow_RunStep_RejectsLiveBackgroundWork(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		return StepAgentResult{
+			Output:                "agent output",
+			SessionID:             "sess-live-step",
+			HasLiveBackgroundWork: true,
+		}, nil
+	}
+
+	wf.runStep(context.Background(), "plan", testConfig().Plan, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	assert.Contains(t, wf.lastError.Error(), "live background work")
+	assert.Contains(t, wf.lastError.Error(), "sess-live-step")
+}
+
+// TestWorkflow_RunStepRounds_RejectsLiveBackgroundWork verifies that the
+// multi-round workflow path short-circuits when any round reports
+// HasLiveBackgroundWork and does not run subsequent rounds.
+func TestWorkflow_RunStepRounds_RejectsLiveBackgroundWork(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	roundsCfg := StepConfig{
+		Rounds: []RoundConfig{
+			{Prompt: "round one"},
+			{Prompt: "round two"}, // must NOT run
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	var calls int
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		calls++
+		return StepAgentResult{
+			Output:                "round one output",
+			SessionID:             "sess-live-round",
+			HasLiveBackgroundWork: true,
+		}, nil
+	}
+
+	wf.runStepRounds(context.Background(), "plan", roundsCfg, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	assert.Contains(t, wf.lastError.Error(), "live background work")
+	assert.Contains(t, wf.lastError.Error(), "sess-live-round")
+	assert.Equal(t, 1, calls, "guard must short-circuit before round 2")
+}
+
+// TestWorkflow_RunStep_PrefersLiveBgWorkOverAgentError asserts the
+// workflow single-step path surfaces the bg-work refusal even when the
+// agent also returned an error — otherwise a failing mixed turn would
+// swallow the premature-exit signal.
+func TestWorkflow_RunStep_PrefersLiveBgWorkOverAgentError(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		return StepAgentResult{
+			SessionID:             "sess-err-live-wf",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: boom")
+	}
+
+	wf.runStep(context.Background(), "plan", testConfig().Plan, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	assert.Contains(t, wf.lastError.Error(), "live background work")
+	assert.Contains(t, wf.lastError.Error(), "sess-err-live-wf")
+	assert.NotContains(t, wf.lastError.Error(), "boom", "bg-work message wins over the raw agent error")
+}
+
+// TestWorkflow_RunStepRounds_PrefersLiveBgWorkOverAgentError is the
+// round-based analogue: the bg-work refusal must fire on the first round
+// that reports HasLiveBackgroundWork, regardless of whether the round also
+// returned an error. Mirrors the single-step test above.
+func TestWorkflow_RunStepRounds_PrefersLiveBgWorkOverAgentError(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	roundsCfg := StepConfig{
+		Rounds: []RoundConfig{
+			{Prompt: "r1"},
+			{Prompt: "r2"}, // must NOT run
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	var calls int
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		calls++
+		return StepAgentResult{
+			SessionID:             "sess-err-live-wf-rounds",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: boom")
+	}
+
+	wf.runStepRounds(context.Background(), "plan", roundsCfg, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	assert.Contains(t, wf.lastError.Error(), "live background work")
+	assert.Contains(t, wf.lastError.Error(), "sess-err-live-wf-rounds")
+	assert.NotContains(t, wf.lastError.Error(), "boom", "bg-work message wins over the raw agent error")
+	assert.Equal(t, 1, calls, "guard must short-circuit before round 2")
 }
 
 // TestWorkflow_TransitionToReview_PreservesLastCommentAt verifies that
@@ -1688,4 +1821,71 @@ func TestWorkflow_Redo_SamePhase(t *testing.T) {
 		assert.NotEqual(t, "RemoveLabel:jiradozer-plan-done", call,
 			"plan was never done; no -done removal should fire")
 	}
+}
+
+// TestWorkflow_RunStep_LogsAgentErrorOnLiveBgWork asserts that when the
+// single-step workflow path surfaces the live-bg-work refusal, it also logs
+// the original agent error so production debugging retains the context the
+// error itself drops. Mirrors the behaviour of the CLI runStep path in
+// jiradozer/cmd/jiradozer/main.go.
+func TestWorkflow_RunStep_LogsAgentErrorOnLiveBgWork(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	logger, buf := capturingLogger()
+	wf := NewWorkflow(mt, testIssue(), testConfig(), logger)
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		return StepAgentResult{
+			SessionID:             "sess-live-log-wf",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: kaboom")
+	}
+
+	wf.runStep(context.Background(), "plan", testConfig().Plan, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	out := buf.String()
+	assert.Contains(t, out, "live background work", "refusal must be logged")
+	assert.Contains(t, out, "sess-live-log-wf", "session id must be logged")
+	assert.Contains(t, out, "agent_error", "agent error key must be logged")
+	assert.Contains(t, out, "kaboom", "original agent error must survive in logs")
+}
+
+// TestWorkflow_RunStepRounds_LogsAgentErrorOnLiveBgWork is the round-based
+// analogue: the refusal path in runStepRounds must log the raw agent error so
+// it is not silently swallowed when the bg-work message is returned instead.
+func TestWorkflow_RunStepRounds_LogsAgentErrorOnLiveBgWork(t *testing.T) {
+	t.Parallel()
+
+	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}
+	roundsCfg := StepConfig{
+		Rounds: []RoundConfig{
+			{Prompt: "r1"},
+			{Prompt: "r2"}, // must NOT run
+		},
+	}
+
+	logger, buf := capturingLogger()
+	wf := NewWorkflow(mt, testIssue(), testConfig(), logger)
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.runStepAgent = func(_ context.Context, _ string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		return StepAgentResult{
+			SessionID:             "sess-live-log-rounds",
+			HasLiveBackgroundWork: true,
+		}, errors.New("agent execution: kaboom-rounds")
+	}
+
+	wf.runStepRounds(context.Background(), "plan", roundsCfg, StepPlanReview, "plan_complete")
+
+	require.Error(t, wf.lastError)
+	out := buf.String()
+	assert.Contains(t, out, "live background work", "refusal must be logged")
+	assert.Contains(t, out, "sess-live-log-rounds", "session id must be logged")
+	assert.Contains(t, out, "agent_error", "agent error key must be logged")
+	assert.Contains(t, out, "kaboom-rounds", "original agent error must survive in logs")
 }

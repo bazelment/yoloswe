@@ -1379,3 +1379,210 @@ func TestScheduleWakeup_SafetyTimerPreventsLateResultDoubleCompletion(t *testing
 		}
 	}
 }
+
+// TestHasLiveBackgroundWork_MixedTurnFlagsFinalResult reproduces the jiradozer
+// round 2 scenario: the agent launches run_in_background:true Bash tasks and
+// then continues calling synchronous tools in the same turn. shouldSuppress
+// must be false (sync completion is real), but the final TurnResult must
+// carry HasLiveBackgroundWork=true so orchestrators know bg work is still
+// running.
+func TestHasLiveBackgroundWork_MixedTurnFlagsFinalResult(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "bramble code-review", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "git push"}},
+		{ID: "tool-3", Name: "Bash", Input: map[string]interface{}{"command": "until [ -s /tmp/x ]; do sleep 5; done", "run_in_background": true}},
+		{ID: "tool-4", Name: "Bash", Input: map[string]interface{}{"command": "jq .status /tmp/x"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Command running in background with ID: b1", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "pushed", IsError: &notErr},
+		{ToolUseID: "tool-3", Content: "Command running in background with ID: b2", IsError: &notErr},
+		{ToolUseID: "tool-4", Content: "not-ready", IsError: &notErr},
+	})
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.shouldSuppressForBgTasks() {
+		t.Fatal("mixed bg+sync turn must not be suppressed")
+	}
+	if !turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must return true when uncancelled bg tools are present")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, time.Second)
+	if !tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be true for mixed turn with live bg work")
+	}
+	if !tce.Success {
+		t.Error("TurnCompleteEvent.Success must be true — sync work completed without error")
+	}
+}
+
+// TestHasLiveBackgroundWork_PureSyncTurnDoesNotFlag asserts that a turn
+// with no bg tool_use blocks completes with HasLiveBackgroundWork=false.
+func TestHasLiveBackgroundWork_PureSyncTurnDoesNotFlag(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Read", Input: map[string]interface{}{"file_path": "/tmp/x"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "echo hi"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "file contents", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "hi", IsError: &notErr},
+	})
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must return false when no bg tools are present")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, time.Second)
+	if tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be false for pure-sync turn")
+	}
+}
+
+// TestHasLiveBackgroundWork_CancelledBgToolDoesNotFlag asserts that a
+// cancelled bg tool_use (its tool_result is an error) does not count as live
+// bg work — the CLI never launched it. Covers both the turn predicate and
+// the end-to-end handleResult → TurnCompleteEvent path.
+func TestHasLiveBackgroundWork_CancelledBgToolDoesNotFlag(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "exit 1"}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "bramble review", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErr := true
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "exit code 1", IsError: &isErr},
+		{ToolUseID: "tool-2", Content: "Cancelled: parallel tool call errored", IsError: &isErr},
+	})
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("cancelled bg tool must not register as live background work")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, time.Second)
+	if tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be false when the only bg tool was cancelled")
+	}
+}
+
+// TestHasLiveBackgroundWork_PureBgTurnUsesSuppressionPath confirms the fix
+// does not disturb the pure-bg path: a turn with only bg tools still
+// suppresses (no immediate TurnCompleteEvent) via the existing branch.
+func TestHasLiveBackgroundWork_PureBgTurnUsesSuppressionPath(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "bramble review", "run_in_background": true}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Command running in background with ID: b1", IsError: &notErr},
+	})
+
+	turn := s.turnManager.CurrentTurn()
+	if !turn.shouldSuppressForBgTasks() {
+		t.Fatal("pure-bg turn must still suppress")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	select {
+	case event := <-s.events:
+		if _, ok := event.(TurnCompleteEvent); ok {
+			t.Error("pure-bg turn must not emit TurnCompleteEvent immediately — suppression path changed")
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Clean up safety timer so the test does not leak a goroutine.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+	}
+	s.mu.Unlock()
+}
+
+// TestScheduleWakeup_SafetyTimerSurfacesLiveBgWork verifies that when the
+// wakeup safety timer fires on a turn that ALSO has an uncancelled bg Bash
+// tool use, the emitted TurnCompleteEvent carries HasLiveBackgroundWork=true.
+// Mirrors handleResult's mixed-turn check at session.go:1466 and closes a
+// parallel-path drift gap: without this, a wakeup-suppressed turn could
+// swallow the bg-work signal, letting an orchestrator advance or stop the
+// session while a bg tool was still running in the CLI.
+func TestScheduleWakeup_SafetyTimerSurfacesLiveBgWork(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "wake-1", Name: "ScheduleWakeup", Input: map[string]interface{}{
+			"delaySeconds": float64(60),
+			"prompt":       "check",
+			"reason":       "waiting",
+		}},
+		{ID: "bg-1", Name: "Bash", Input: map[string]interface{}{
+			"command":           "sleep 60",
+			"run_in_background": true,
+		}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	isErrFalse := false
+	results := []protocol.ToolResultBlock{
+		{ToolUseID: "wake-1", Content: "scheduled", IsError: &isErrFalse},
+		{ToolUseID: "bg-1", Content: "queued bg", IsError: &isErrFalse},
+	}
+	simulateUserToolResults(t, s, results)
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{
+		Type: "result", IsError: false,
+		Usage: protocol.UsageDetails{InputTokens: 10, OutputTokens: 5},
+	})
+
+	// Replace the real safety timer with a short one so the test does
+	// not block for the full ScheduleWakeup delay + 60s buffer.
+	s.mu.Lock()
+	if s.wakeupState.timer != nil {
+		s.wakeupState.timer.Stop()
+	}
+	safetyResult := TurnResult{TurnNumber: 1, Success: true}
+	s.wakeupState.timer = time.AfterFunc(20*time.Millisecond, func() {
+		s.completeWakeupSuppressedTurn(safetyResult)
+	})
+	s.mu.Unlock()
+
+	tc := drainUntilTurnComplete(t, s.events, time.Second)
+	if !tc.HasLiveBackgroundWork {
+		t.Error("wakeup safety-timer completion with a live bg Bash must surface HasLiveBackgroundWork=true")
+	}
+
+	// Clean up bg safety timer to avoid leaking a goroutine.
+	s.mu.Lock()
+	if s.bgState.timer != nil {
+		s.bgState.timer.Stop()
+	}
+	s.mu.Unlock()
+}

@@ -636,6 +636,9 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 	return wf.Run(ctx)
 }
 
+// runStepAgentDetailed is overridable so unit tests can stub the agent call.
+var runStepAgentDetailed = jiradozer.RunStepAgent
+
 func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, renderer *render.Renderer, logger *slog.Logger) error {
 	stepCfg, ok := cfg.StepByName(stepName)
 	if !ok {
@@ -669,12 +672,17 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, renderer, logger)
 	}
 
-	output, sessionID, err := jiradozer.RunStepAgent(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
+	res, err := runStepAgentDetailed(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
+	if res.HasLiveBackgroundWork {
+		jiradozer.LogLiveBackgroundWorkRefusal(logger, stepName, res.SessionID, 0, 0, err)
+		return fmt.Errorf("run-step %s: %w", stepName, jiradozer.LiveBackgroundWorkError(res.SessionID))
+	}
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
 	}
+	output := res.Output
 	if output == "" {
-		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", sessionID)
+		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", res.SessionID)
 	} else {
 		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
 	}
@@ -707,13 +715,18 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			}
 		} else {
 			roundCfg := jiradozer.ResolveRound(round, resolved)
-			var sessionID string
-			var err error
-			output, sessionID, err = jiradozer.RunStepAgent(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
+			res, err := runStepAgentDetailed(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
+			if res.SessionID != "" {
+				sessionIDs = append(sessionIDs, res.SessionID)
+			}
+			if res.HasLiveBackgroundWork {
+				jiradozer.LogLiveBackgroundWorkRefusal(logger, stepName, res.SessionID, i+1, totalRounds, err)
+				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, jiradozer.LiveBackgroundWorkError(res.SessionID))
+			}
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
 			}
-			sessionIDs = append(sessionIDs, sessionID)
+			output = res.Output
 		}
 		allOutputs = append(allOutputs, output)
 	}

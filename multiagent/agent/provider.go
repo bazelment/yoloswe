@@ -18,6 +18,10 @@ type AgentResult struct {
 	Usage               AgentUsage
 	DurationMs          int64
 	Success             bool
+	// HasLiveBackgroundWork mirrors claude.TurnResult.HasLiveBackgroundWork:
+	// orchestrators must not advance past or Stop() a session when this is set,
+	// or live bg tasks are orphaned.
+	HasLiveBackgroundWork bool
 }
 
 // UnresolvedToolError records an unresolved tool error that persisted after
