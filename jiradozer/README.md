@@ -155,7 +155,10 @@ In team mode (`--filter`), each issue gets its own git worktree under a dedicate
 
 - **Created** when the issue is picked up and `Start()` is called.
 - **Left intact** when the workflow completes successfully (`StepDone`). The ship step typically opens a PR but does not merge it — the branch must remain until the PR is reviewed and merged.
-- **Removed** only on workflow failure (`StepFailed`). Failed runs clean up the worktree and branch so a future retry starts from a clean state.
+- **Left intact on failure or cancellation** (`StepFailed`, `StepCancelled`) by default, so the operator can inspect the state and keep any pushed branch / open PR created by earlier steps.
+- **Removed only with `--force-cleanup`** when a run fails or is cancelled. Pass the flag to wipe the worktree and branch so a future retry starts from a clean state.
+
+On shared or untrusted machines (CI runners, shared dev hosts), prefer `--force-cleanup` so a failed run does not leave secrets, tokens, or untracked files from the agent on disk.
 
 After merging the PR, remove the worktree manually:
 

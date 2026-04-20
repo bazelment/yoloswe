@@ -464,7 +464,12 @@ func TestOrchestrator_CancelWithCleanExit(t *testing.T) {
 	require.Empty(t, removed, "cancelled worktree should not be removed")
 }
 
-func TestOrchestrator_FailedStillCleansUp(t *testing.T) {
+// TestOrchestrator_FailedWorktreePreservedByDefault asserts that a StepFailed
+// workflow preserves its worktree and branches by default. Failing steps
+// often fire mid-workflow after real work exists (pushed branch, open PR);
+// silently deleting that work is destructive. Operators can rerun with
+// --force-cleanup to wipe.
+func TestOrchestrator_FailedWorktreePreservedByDefault(t *testing.T) {
 	cfg := testOrchestratorConfig()
 
 	script := writeTestScript(t, "exit 1")
@@ -485,11 +490,42 @@ func TestOrchestrator_FailedStillCleansUp(t *testing.T) {
 
 	orch.Wait()
 
-	// Failed worktrees should still be cleaned up.
 	wtm.mu.Lock()
 	removed := wtm.removed
 	wtm.mu.Unlock()
-	require.Len(t, removed, 1, "failed worktree should be removed")
+	require.Empty(t, removed, "failed worktree must NOT be removed by default")
+
+	preserved := orch.PreservedWorktrees()
+	require.Len(t, preserved, 1)
+	require.Equal(t, "ENG-1", preserved[0].Issue)
+	require.Equal(t, StepFailed, preserved[0].Step)
+}
+
+func TestOrchestrator_FailedWithForceCleanup(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	script := writeTestScript(t, "exit 1")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+	orch.SetForceCleanup(true)
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	err := orch.Start(context.Background(), issue)
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-orch.StatusUpdates():
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for status")
+		}
+	}
+
+	orch.Wait()
+
+	wtm.mu.Lock()
+	removed := wtm.removed
+	wtm.mu.Unlock()
+	require.Len(t, removed, 1, "failed worktree must be removed with --force-cleanup")
 	require.Empty(t, orch.PreservedWorktrees())
 }
 

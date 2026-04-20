@@ -98,7 +98,7 @@ func main() {
 	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
 	rootCmd.Flags().StringVar(&planFile, "plan-file", "", "Plan file for build step (use - for stdin)")
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Team mode only: for each newly-discovered issue, print the equivalent `bramble new-session` command instead of launching a workflow. TUI remains empty — look at stdout for the printed commands.")
-	rootCmd.Flags().BoolVar(&forceCleanup, "force-cleanup", false, "Team mode only: delete all worktrees on cancellation (Ctrl+C). By default, worktrees with in-progress work are preserved.")
+	rootCmd.Flags().BoolVar(&forceCleanup, "force-cleanup", false, "Team mode only: delete worktrees even for failed or cancelled runs. By default, failed and cancelled worktrees are preserved so in-progress work (including pushed branches / open PRs) is not lost.")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -508,13 +508,16 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 		fmt.Fprintf(os.Stderr, "\nPreserved %d worktree(s):\n", len(preserved))
 		for _, pw := range preserved {
 			reason := "cancelled"
-			if pw.Step == jiradozer.StepDone {
+			switch pw.Step {
+			case jiradozer.StepDone:
 				reason = "shipped (PR open, not yet merged)"
+			case jiradozer.StepFailed:
+				reason = "failed (inspect and recover; pushed branch / open PR still intact)"
 			}
 			fmt.Fprintf(os.Stderr, "  %s  %s  (%s)  [%s]\n", pw.Issue, pw.Branch, pw.WorktreePath, reason)
 		}
 		fmt.Fprintf(os.Stderr, "\nTo remove after merging: wt remove <branch>\n")
-		fmt.Fprintf(os.Stderr, "To remove cancelled worktrees on next run: re-run with --force-cleanup\n")
+		fmt.Fprintf(os.Stderr, "To remove failed/cancelled worktrees on next run: re-run with --force-cleanup\n")
 	}
 
 	return err

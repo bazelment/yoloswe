@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -242,10 +243,33 @@ func (turn *turnState) latestScheduleWakeupDelaySeconds() float64 {
 
 // turnState tracks the state of a single turn.
 type turnState struct {
-	StartTime              time.Time
-	UserMessage            interface{}
-	Tools                  map[string]*toolState
-	liveTasks              map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
+	StartTime   time.Time
+	UserMessage interface{}
+	Tools       map[string]*toolState
+	liveTasks   map[string]struct{} // task IDs registered via task_started that have not reached a terminal state
+	// taskToToolUse maps task_id → tool_use_id for background tasks whose
+	// task_started frame carried a tool_use_id. task_updated payloads do not
+	// carry tool_use_id, so this reverse map lets terminal task_updated
+	// transitions mark the corresponding bg tool_use as complete even though
+	// its launch-receipt tool_result (IsError=false) still lives in
+	// ContentBlocks.
+	taskToToolUse map[string]string
+	// completedBgToolUseIDs is the set of background tool_use IDs whose task
+	// has reached a terminal state (task_notification or task_updated with
+	// completed/failed/killed). hasLiveBackgroundWork excludes these so a
+	// mixed bg+sync turn is not permanently flagged as live after the bg
+	// process has exited.
+	completedBgToolUseIDs map[string]struct{}
+	// completedTaskIDs is the set of task IDs that have reached a terminal
+	// state. Tracked independently of tool_use_id so that:
+	//   1. A late task_started (if the CLI ever reorders terminal-before-started
+	//      for the same task_id) cannot re-insert an already-completed task
+	//      into liveTasks — TrackTask skips such task IDs.
+	//   2. task_notification without a tool_use_id on either the start or the
+	//      terminal event can still record completion by task_id, which is
+	//      enough to keep liveTasks drained even if the per-block
+	//      completedBgToolUseIDs bucket is never populated for that task.
+	completedTaskIDs       map[string]struct{}
 	FullText               string
 	FullThinking           string
 	ContentBlocks          []ContentBlock
@@ -334,9 +358,17 @@ func (turn *turnState) hasLiveBackgroundWork() bool {
 		if !isBackgroundToolUse(block) {
 			continue
 		}
-		if !cancelled[block.ToolUseID] {
-			return true
+		if cancelled[block.ToolUseID] {
+			continue
 		}
+		// Bg tool_use whose task_notification / terminal task_updated already
+		// arrived: the bg process has exited. Its tool_result still says
+		// "Running in background..." (that's the launch receipt, not
+		// completion), so cancellation alone misses this case.
+		if _, done := turn.completedBgToolUseIDs[block.ToolUseID]; done {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -581,29 +613,96 @@ func (tm *turnManager) AppendContentBlock(block ContentBlock) {
 }
 
 // TrackTask records a task ID as live on the current turn. Called from
-// task_started handling. No-op if there is no current turn.
-func (tm *turnManager) TrackTask(taskID string) {
+// task_started handling. toolUseID, when non-empty, lets the manager mark the
+// corresponding bg tool_use complete when the task reaches a terminal state
+// — task_updated payloads carry only task_id, so this mapping must be
+// captured at task_started time.
+//
+// Returns alreadyCompleted=true when the task has already reached a terminal
+// state (via an earlier UntrackTask — CLI event reordering). In that case
+// liveTasks is NOT re-inserted (preventing revival of the live-background-work
+// false-positive), but tasksEverTracked IS incremented so AllTasksCompleted
+// flips true. The caller is responsible for re-invoking
+// maybeReleaseSuppression so a suppressed turn finalizes immediately rather
+// than waiting for the safety timer. No-op if there is no current turn.
+func (tm *turnManager) TrackTask(taskID, toolUseID string) (alreadyCompleted bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil || taskID == "" {
-		return
+		return false
+	}
+	if _, done := tm.currentTurn.completedTaskIDs[taskID]; done {
+		// Terminal event already arrived for this task_id; don't resurrect.
+		// Still count it as tracked so AllTasksCompleted can return true —
+		// terminalBeforeStarted had nothing to increment when it ran.
+		tm.currentTurn.tasksEverTracked++
+		if toolUseID != "" {
+			if tm.currentTurn.taskToToolUse == nil {
+				tm.currentTurn.taskToToolUse = make(map[string]string)
+			}
+			tm.currentTurn.taskToToolUse[taskID] = toolUseID
+			if tm.currentTurn.completedBgToolUseIDs == nil {
+				tm.currentTurn.completedBgToolUseIDs = make(map[string]struct{})
+			}
+			tm.currentTurn.completedBgToolUseIDs[toolUseID] = struct{}{}
+		}
+		return true
 	}
 	if tm.currentTurn.liveTasks == nil {
 		tm.currentTurn.liveTasks = make(map[string]struct{})
 	}
 	tm.currentTurn.liveTasks[taskID] = struct{}{}
 	tm.currentTurn.tasksEverTracked++
+	if toolUseID != "" {
+		if tm.currentTurn.taskToToolUse == nil {
+			tm.currentTurn.taskToToolUse = make(map[string]string)
+		}
+		tm.currentTurn.taskToToolUse[taskID] = toolUseID
+	}
+	return false
 }
 
-// UntrackTask removes a task ID from the current turn's live set.
-// No-op if the task is not tracked or there is no current turn.
-func (tm *turnManager) UntrackTask(taskID string) {
+// UntrackTask removes a task ID from the current turn's live set and marks
+// any bg tool_use associated with that task as complete, so
+// hasLiveBackgroundWork no longer counts it. toolUseID, when non-empty,
+// takes precedence over the taskID mapping (task_notification carries
+// tool_use_id directly; task_updated does not).
+//
+// Completion is recorded at two layers: by task_id in completedTaskIDs
+// (always) and by tool_use_id in completedBgToolUseIDs (when resolvable).
+// The task_id layer guards against CLI event reordering — a late
+// task_started for an already-completed task will not revive liveTasks.
+// The tool_use_id layer is what hasLiveBackgroundWork consults when walking
+// ContentBlocks, so it is the critical one for draining the bg signal; when
+// it cannot be populated (both events omitted tool_use_id and no link was
+// ever captured) a warning is logged since the bg block may remain flagged
+// live until the suppression safety timer fires.
+//
+// No-op if taskID is empty or there is no current turn.
+func (tm *turnManager) UntrackTask(taskID, toolUseID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil || taskID == "" {
 		return
 	}
 	delete(tm.currentTurn.liveTasks, taskID)
+	if tm.currentTurn.completedTaskIDs == nil {
+		tm.currentTurn.completedTaskIDs = make(map[string]struct{})
+	}
+	tm.currentTurn.completedTaskIDs[taskID] = struct{}{}
+	resolvedToolUseID := toolUseID
+	if resolvedToolUseID == "" {
+		resolvedToolUseID = tm.currentTurn.taskToToolUse[taskID]
+	}
+	if resolvedToolUseID == "" {
+		slog.Warn("UntrackTask: no tool_use_id on terminal event or task_started mapping; bg tool may remain marked live until safety timeout",
+			"task_id", taskID)
+		return
+	}
+	if tm.currentTurn.completedBgToolUseIDs == nil {
+		tm.currentTurn.completedBgToolUseIDs = make(map[string]struct{})
+	}
+	tm.currentTurn.completedBgToolUseIDs[resolvedToolUseID] = struct{}{}
 }
 
 // HasLiveTasks reports whether the current turn has any registered live
@@ -644,6 +743,14 @@ func (tm *turnManager) AllTasksCompleted() bool {
 	// hasContinuationBgTools is set conservatively on tool_use append. Check
 	// whether any such tool is actually uncancelled (i.e. has a non-error
 	// tool_result) — cancelled bg-Bash tools never produce a continuation.
+	//
+	// Note: completedBgToolUseIDs is NOT consulted here. Unlike
+	// hasLiveBackgroundWork (which answers "are any bg tools still running?"),
+	// AllTasksCompleted gates turn finalization for suppressed turns, and
+	// bg-Bash tools release suppression via the continuation ResultMessage
+	// path — not via terminal task events. Even if a bg-Bash task_notification
+	// arrived (populating completedBgToolUseIDs), the turn must still wait for
+	// its continuation ResultMessage before finalizing.
 	cancelled := tm.currentTurn.cancelledToolIDs()
 	for _, block := range tm.currentTurn.ContentBlocks {
 		if block.Type == ContentBlockTypeToolUse &&

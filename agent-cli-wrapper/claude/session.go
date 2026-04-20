@@ -864,7 +864,11 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 		}
 	case protocol.SystemSubtypeTaskStarted:
 		if p, ok := msg.AsTaskStarted(); ok {
-			s.turnManager.TrackTask(p.TaskID)
+			toolUseID := ""
+			if p.ToolUseID != nil {
+				toolUseID = *p.ToolUseID
+			}
+			alreadyCompleted := s.turnManager.TrackTask(p.TaskID, toolUseID)
 			s.emit(TaskStartedEvent{
 				ToolUseID:    p.ToolUseID,
 				WorkflowName: p.WorkflowName,
@@ -874,6 +878,14 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 				Prompt:       p.Prompt,
 				TurnNumber:   turnNum,
 			})
+			if alreadyCompleted {
+				// CLI emitted terminal task event before task_started (event
+				// reordering). The earlier UntrackTask could not release
+				// suppression because tasksEverTracked was still 0; now that
+				// TrackTask bumped it, AllTasksCompleted flips true and the
+				// held turn can finalize without waiting for the safety timer.
+				s.maybeReleaseSuppression("task_started:late-after-terminal")
+			}
 		} else {
 			slog.Warn("failed to decode task_started payload")
 		}
@@ -892,7 +904,7 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 			if p.Patch.Status != nil {
 				switch *p.Patch.Status {
 				case "completed", "failed", "killed":
-					s.turnManager.UntrackTask(p.TaskID)
+					s.turnManager.UntrackTask(p.TaskID, "")
 					s.maybeReleaseSuppression("task_updated:" + *p.Patch.Status)
 				}
 			}
@@ -927,7 +939,11 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 			// Belt-and-suspenders: task_notification may fire without a
 			// preceding terminal task_updated (e.g. if the bg process writes
 			// stdout on exit). Drain the live set and attempt release.
-			s.turnManager.UntrackTask(p.TaskID)
+			toolUseID := ""
+			if p.ToolUseID != nil {
+				toolUseID = *p.ToolUseID
+			}
+			s.turnManager.UntrackTask(p.TaskID, toolUseID)
 			s.maybeReleaseSuppression("task_notification")
 		} else {
 			slog.Warn("failed to decode task_notification payload")

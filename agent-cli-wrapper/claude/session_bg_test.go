@@ -1586,3 +1586,312 @@ func TestScheduleWakeup_SafetyTimerSurfacesLiveBgWork(t *testing.T) {
 	}
 	s.mu.Unlock()
 }
+
+// TestHasLiveBackgroundWork_BgBashCompletedViaTaskNotification reproduces
+// the jiradozer validate round 2 false positive. The agent launched bg-Bash
+// (e.g. `bramble_ops.py launch` with run_in_background=true) in a mixed
+// sync+bg turn. The CLI later emits task_notification with a terminal
+// status, meaning the bg process has exited. The turn must NOT finalize
+// with HasLiveBackgroundWork=true — the launch-receipt tool_result
+// ("Command running in background with ID: …", IsError=false) is not
+// completion; task_notification is.
+func TestHasLiveBackgroundWork_BgBashCompletedViaTaskNotification(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "bramble code-review", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "git status"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Command running in background with ID: b1", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "clean", IsError: &notErr},
+	})
+
+	// task_started carries tool_use_id → the manager records the mapping
+	// so a later terminal task event can flag the tool_use as complete.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-1",
+	}))
+	// task_notification fires when the bg process exits.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "tool_use_id": "tool-1", "status": "completed",
+	}))
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must be false once task_notification marked the bg tool_use complete")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, time.Second)
+	if tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be false when bg tasks have task_notified")
+	}
+	if !tce.Success {
+		t.Error("TurnCompleteEvent.Success must be true — sync and bg work both completed")
+	}
+}
+
+// TestHasLiveBackgroundWork_BgBashTaskStartedButStillLive asserts that
+// between task_started and task_notification, the bg tool_use is still
+// considered live — only the terminal signal clears it.
+func TestHasLiveBackgroundWork_BgBashTaskStartedButStillLive(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "sleep 60", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "echo sync"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Command running in background with ID: b1", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "sync", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-1",
+	}))
+
+	turn := s.turnManager.CurrentTurn()
+	if !turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must remain true while task_started has fired but no terminal signal arrived")
+	}
+}
+
+// TestHasLiveBackgroundWork_TerminalTaskUpdatedMarksToolUseComplete covers
+// the task_updated path (no tool_use_id on the wire) — the manager must
+// resolve the tool_use via the taskID→toolUseID map recorded on task_started.
+func TestHasLiveBackgroundWork_TerminalTaskUpdatedMarksToolUseComplete(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "true", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "echo sync"}},
+	}
+	simulateAssistantToolUse(s, tools)
+
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Command running in background with ID: b1", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "sync", IsError: &notErr},
+	})
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-1",
+	}))
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_updated", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1",
+		"patch":   map[string]interface{}{"status": "completed"},
+	}))
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must be false once task_updated:completed drained the task")
+	}
+}
+
+// TestHasLiveBackgroundWork_TaskNotificationWithoutToolUseIDDrainsLiveTasks
+// covers the wire edge-case where the CLI omits tool_use_id on BOTH
+// task_started and task_notification. hasLiveBackgroundWork's liveTasks
+// check must still return false, because UntrackTask records completion by
+// task_id independent of tool_use_id. (The per-block bg tool_use may remain
+// marked live until the safety timer fires — that is the structural limit
+// of the protocol — but liveTasks must drain.)
+func TestHasLiveBackgroundWork_TaskNotificationWithoutToolUseIDDrainsLiveTasks(t *testing.T) {
+	s := newTestSession(t)
+
+	// Only sync tools in content (no bg tool_use block) so the ContentBlocks
+	// loop is a no-op and hasLiveBackgroundWork reduces to the liveTasks check.
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-sync", Name: "Bash", Input: map[string]interface{}{"command": "echo sync"}},
+	}
+	simulateAssistantToolUse(s, tools)
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-sync", Content: "sync", IsError: &notErr},
+	})
+
+	// task_started with NO tool_use_id — e.g. a CLI-internal subagent task.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1",
+	}))
+
+	turn := s.turnManager.CurrentTurn()
+	if !turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must be true while the task is live")
+	}
+
+	// task_notification also without tool_use_id.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "status": "completed",
+	}))
+
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must be false after terminal task_notification drains liveTasks, even without tool_use_id")
+	}
+}
+
+// TestTrackTaskAfterTerminalEventDoesNotRevive asserts that if the CLI ever
+// emits task_notification (terminal) before task_started for the same
+// task_id, a later task_started must not re-insert the task into liveTasks.
+// Otherwise the false-positive class the PR kills could come back via event
+// reordering.
+func TestTrackTaskAfterTerminalEventDoesNotRevive(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Bash", Input: map[string]interface{}{"command": "true", "run_in_background": true}},
+		{ID: "tool-2", Name: "Bash", Input: map[string]interface{}{"command": "echo sync"}},
+	}
+	simulateAssistantToolUse(s, tools)
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Command running in background with ID: b1", IsError: &notErr},
+		{ToolUseID: "tool-2", Content: "sync", IsError: &notErr},
+	})
+
+	// Terminal event arrives FIRST (event reordering).
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-1", "status": "completed",
+	}))
+
+	// Late task_started for the same task_id.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "tool_use_id": "tool-1",
+	}))
+
+	turn := s.turnManager.CurrentTurn()
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must be false after late task_started for an already-completed task")
+	}
+}
+
+// TestReorderedTerminalThenStartedReleasesSuppressedTurn drives the full
+// turn-completion path. When the CLI reorders task_notification (terminal)
+// before task_started, the suppressed turn must finalize immediately on the
+// late task_started — NOT wait for the bg-task safety timer.
+//
+// Uses Monitor (not bg-Bash) because Monitor's release path is terminal
+// task events; bg-Bash releases via continuation ResultMessage and so
+// wouldn't exercise the task-reordering code path.
+func TestReorderedTerminalThenStartedReleasesSuppressedTurn(t *testing.T) {
+	// Use a long safety timeout so the test would hang / fail rather than
+	// silently succeed via timer-fired path.
+	s := newTestSession(t, WithBgTaskSafetyTimeout(30*time.Second))
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-1", Name: "Monitor", Input: map[string]interface{}{"command": "tail -f log"}},
+	}
+	simulateAssistantToolUse(s, tools)
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-1", Content: "Monitor armed", IsError: &notErr},
+	})
+
+	// handleResult must suppress (Monitor is background-releasing; no sync tool).
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	s.mu.RLock()
+	suppActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppActive {
+		t.Fatal("expected suppression to be active after pure-bg Monitor turn")
+	}
+
+	// Terminal event arrives FIRST. UntrackTask records completedTaskIDs
+	// but tasksEverTracked is still 0, so maybeReleaseSuppression's
+	// AllTasksCompleted returns false and suppression persists.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-1", "status": "completed",
+	}))
+
+	s.mu.RLock()
+	suppStillActive := s.bgState.active
+	s.mu.RUnlock()
+	if !suppStillActive {
+		t.Fatal("suppression should still be active — task_started has not fired yet, tasksEverTracked is 0")
+	}
+
+	// Late task_started fires. TrackTask returns alreadyCompleted=true,
+	// session.go calls maybeReleaseSuppression, which finalizes the turn
+	// (AllTasksCompleted now flips true: tasksEverTracked==1, liveTasks empty,
+	// no uncancelled bg-Bash since Monitor is in backgroundTools).
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "tool_use_id": "tool-1",
+	}))
+
+	// Turn must complete well under the 30s safety timeout.
+	waitForTurnComplete(t, s.events, 2*time.Second)
+
+	s.mu.RLock()
+	afterActive := s.bgState.active
+	s.mu.RUnlock()
+	if afterActive {
+		t.Error("suppression should be released after late task_started via maybeReleaseSuppression")
+	}
+}
+
+// TestHasLiveBackgroundWork_MixedTurnTerminalWithoutToolUseIDDrains exercises
+// the completedBgToolUseIDs fallback path on a mixed sync+bg turn. task_started
+// carries tool_use_id (populating taskToToolUse), then a terminal task event
+// arrives WITHOUT tool_use_id. UntrackTask must resolve the id via the stored
+// mapping and populate completedBgToolUseIDs so hasLiveBackgroundWork's
+// ContentBlocks walk clears the bg block — and the final TurnCompleteEvent
+// reports HasLiveBackgroundWork=false.
+func TestHasLiveBackgroundWork_MixedTurnTerminalWithoutToolUseIDDrains(t *testing.T) {
+	s := newTestSession(t)
+
+	tools := []protocol.ToolUseBlock{
+		{ID: "tool-bg", Name: "Monitor", Input: map[string]interface{}{"command": "tail -f log"}},
+		{ID: "tool-sync", Name: "Bash", Input: map[string]interface{}{"command": "echo sync"}},
+	}
+	simulateAssistantToolUse(s, tools)
+	simulateUserToolResults(t, s, []protocol.ToolResultBlock{
+		{ToolUseID: "tool-bg", Content: "Monitor armed", IsError: &notErr},
+		{ToolUseID: "tool-sync", Content: "sync", IsError: &notErr},
+	})
+
+	turn := s.turnManager.CurrentTurn()
+	if !turn.hasLiveBackgroundWork() {
+		t.Fatal("bg tool should be live before terminal task event arrives")
+	}
+
+	// task_started carries tool_use_id — populates taskToToolUse mapping.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_started", "session_id": "s", "uuid": "u1",
+		"task_id": "task-1", "tool_use_id": "tool-bg",
+	}))
+
+	// Terminal task_notification OMITS tool_use_id. UntrackTask must fall back
+	// to the taskToToolUse mapping to populate completedBgToolUseIDs.
+	s.handleSystem(makeSystemMessage(t, map[string]interface{}{
+		"type": "system", "subtype": "task_notification", "session_id": "s", "uuid": "u2",
+		"task_id": "task-1", "status": "completed",
+	}))
+
+	if turn.hasLiveBackgroundWork() {
+		t.Fatal("hasLiveBackgroundWork must clear after terminal-without-tool_use_id drains both liveTasks and completedBgToolUseIDs via mapping fallback")
+	}
+
+	_ = s.state.Transition(TransitionUserMessageSent)
+	s.handleResult(protocol.ResultMessage{Type: "result", IsError: false})
+
+	tce := drainUntilTurnComplete(t, s.events, 2*time.Second)
+	if tce.HasLiveBackgroundWork {
+		t.Error("TurnCompleteEvent.HasLiveBackgroundWork must be false — bg tool drained via fallback mapping")
+	}
+	if !tce.Success {
+		t.Error("TurnCompleteEvent.Success must be true")
+	}
+}
