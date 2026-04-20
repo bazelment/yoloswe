@@ -202,7 +202,7 @@ func TestOrchestrator_WorktreeCreation(t *testing.T) {
 	require.NotContains(t, removed, "jiradozer/ENG-2")
 }
 
-func TestOrchestrator_WorktreeRemovedOnFailure(t *testing.T) {
+func TestOrchestrator_WorktreePreservedOnFailure(t *testing.T) {
 	t.Parallel()
 	issues := []*tracker.Issue{
 		testIssue("1", "ENG-1", "Feature A"),
@@ -221,9 +221,39 @@ func TestOrchestrator_WorktreeRemovedOnFailure(t *testing.T) {
 	// Wait for subprocess to complete.
 	orch.Wait()
 
-	// On failure the worktree must be cleaned up.
+	// Failed workflows preserve the worktree by default so the operator can
+	// inspect the failure and keep any pushed branch / open PR intact.
+	removed := wtm.getRemoved()
+	require.NotContains(t, removed, "jiradozer/ENG-1")
+
+	preserved := orch.PreservedWorktrees()
+	require.Len(t, preserved, 1)
+	require.Equal(t, "jiradozer/ENG-1", preserved[0].Branch)
+	require.Equal(t, "ENG-1", preserved[0].Issue)
+}
+
+func TestOrchestrator_WorktreeRemovedOnFailureWithForceCleanup(t *testing.T) {
+	t.Parallel()
+	issues := []*tracker.Issue{
+		testIssue("1", "ENG-1", "Feature A"),
+	}
+	wtm := newMockWTManager(t)
+	cfg := testOrchestratorConfig()
+	script := writeIntegrationTestScript(t, "exit 1")
+	orch := newOrchWithScript(t, cfg, wtm, script)
+	orch.SetForceCleanup(true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := orch.Start(ctx, issues[0])
+	require.NoError(t, err)
+
+	orch.Wait()
+
 	removed := wtm.getRemoved()
 	require.Contains(t, removed, "jiradozer/ENG-1")
+	require.Empty(t, orch.PreservedWorktrees())
 }
 
 func TestOrchestrator_ConcurrencyLimit(t *testing.T) {

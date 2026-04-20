@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -631,6 +632,13 @@ func (tm *turnManager) TrackTask(taskID, toolUseID string) {
 // takes precedence over the taskID mapping (task_notification carries
 // tool_use_id directly; task_updated does not).
 // No-op if the task is not tracked or there is no current turn.
+//
+// When both the caller's toolUseID and the task_started mapping are empty
+// — i.e. neither the terminal event nor its preceding task_started carried
+// a tool_use_id — the task cannot be linked back to a bg tool_use block.
+// completedBgToolUseIDs is left untouched; hasLiveBackgroundWork then keeps
+// the launch-receipt bg tool marked live until the suppression safety
+// timeout fires. A warning is logged so this shows up in traces.
 func (tm *turnManager) UntrackTask(taskID, toolUseID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -642,12 +650,15 @@ func (tm *turnManager) UntrackTask(taskID, toolUseID string) {
 	if resolvedToolUseID == "" {
 		resolvedToolUseID = tm.currentTurn.taskToToolUse[taskID]
 	}
-	if resolvedToolUseID != "" {
-		if tm.currentTurn.completedBgToolUseIDs == nil {
-			tm.currentTurn.completedBgToolUseIDs = make(map[string]struct{})
-		}
-		tm.currentTurn.completedBgToolUseIDs[resolvedToolUseID] = struct{}{}
+	if resolvedToolUseID == "" {
+		slog.Warn("UntrackTask: no tool_use_id on terminal event or task_started mapping; bg tool may remain marked live until safety timeout",
+			"task_id", taskID)
+		return
 	}
+	if tm.currentTurn.completedBgToolUseIDs == nil {
+		tm.currentTurn.completedBgToolUseIDs = make(map[string]struct{})
+	}
+	tm.currentTurn.completedBgToolUseIDs[resolvedToolUseID] = struct{}{}
 }
 
 // HasLiveTasks reports whether the current turn has any registered live
