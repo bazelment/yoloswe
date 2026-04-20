@@ -48,7 +48,11 @@ func ComputeChangeset(prev *State, snap *Snapshot) Changeset {
 	if !firstRun && prev.LastSeenHeadSHA != "" && prev.LastSeenHeadSHA != snap.PR.HeadRefOid {
 		cs.HeadMoved = true
 	}
-	if !firstRun && prev.LastSeenBaseSHA != "" && snap.BaseSHA != "" && prev.LastSeenBaseSHA != snap.BaseSHA {
+	// Fail-open on a missing baseline: if we have a current base SHA but the
+	// previous tick recorded no baseline (e.g. a transient fetchBaseSHA
+	// failure), treat recovery as a base move. Otherwise a real base move that
+	// happened during the gap is silently absorbed as the new baseline.
+	if !firstRun && snap.BaseSHA != "" && prev.LastSeenBaseSHA != snap.BaseSHA {
 		cs.BaseMoved = true
 	}
 

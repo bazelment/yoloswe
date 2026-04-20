@@ -186,7 +186,14 @@ func (w *Watcher) merge(ctx context.Context) error {
 
 // recordSnapshot mutates s to reflect snap and action, returning true iff any
 // persistable field changed (so the caller can skip disk writes on no-op ticks).
+// Dry-run is fully observe-only: it skips every persisted-state mutation so a
+// later live tick still sees the same triggers (new HEAD, new comments, new
+// failed CI runs) and can react to them.
 func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) bool {
+	if action == LastActionDryRun {
+		return false
+	}
+
 	firstRun := s.LastCheckAt.IsZero()
 	dirty := firstRun
 
@@ -232,10 +239,6 @@ func (w *Watcher) recordSnapshot(s *State, snap *Snapshot, action LastAction) bo
 		}
 		s.ConsecutiveFailures = 0
 		s.CooldownUntil = time.Time{}
-	case LastActionDryRun:
-		// Dry-run is observe-only: it must NOT clear an existing cooldown,
-		// otherwise running `prdozer --once --dry-run` during a real backoff
-		// silently lifts the protection before the next live tick.
 	}
 	if dirty {
 		s.LastCheckAt = snap.TakenAt

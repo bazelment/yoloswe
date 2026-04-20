@@ -92,6 +92,21 @@ func TestLoadConfig_ListModeRequiresPRs(t *testing.T) {
 	assert.Contains(t, err.Error(), "source.prs")
 }
 
+func TestLoadConfig_AllModeRejectsExplicitPRs(t *testing.T) {
+	t.Parallel()
+	// defaultConfig() seeds mode=all. A YAML that sets source.prs without
+	// also setting source.mode ends up in the "all + non-empty prs" state,
+	// which silently ignored the PR list. validate() now rejects this so the
+	// misconfiguration is loud.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prdozer.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("source:\n  prs: [101, 102]\n"), 0o600))
+	_, err := LoadConfig(path)
+	require.Error(t, err, "mode=all with explicit prs must not silently ignore the list")
+	assert.Contains(t, err.Error(), "source.mode \"all\"")
+	assert.Contains(t, err.Error(), "source.prs")
+}
+
 func TestLoadConfig_InvalidMode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

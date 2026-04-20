@@ -313,6 +313,54 @@ func TestWatcher_DryRun_DoesNotClearCooldown(t *testing.T) {
 		"dry-run must not clear CooldownUntil")
 }
 
+func TestWatcher_DryRun_DoesNotAdvanceSeenState(t *testing.T) {
+	// Dry-run must be fully observe-only: it must not persist new HEAD/base
+	// SHAs, new comment IDs, or new failed-run IDs. Otherwise a --dry-run tick
+	// consumes the very triggers the following live tick would need to react
+	// to, silently suppressing polish on the next run.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	statePath := StatePath("r", 42)
+	prevCheck := time.Now().Add(-time.Hour)
+	require.NoError(t, (&State{
+		LastCheckAt:        prevCheck,
+		LastSeenHeadSHA:    "old-head",
+		LastSeenBaseSHA:    "old-base",
+		LastSeenCommentIDs: []string{"inline:old"},
+		LastSeenCIRunIDs:   []int64{1},
+		LastAction:         LastActionIdle,
+	}).Save(statePath))
+
+	// Snapshot diverges in every persistable dimension.
+	gh := setupGH(buildPRJSON(okPRJSON, "FAILURE"), `[{"databaseId":99}]`, "new-base")
+	gh.addPrefix(
+		"api --paginate repos/o/r/pulls/42/comments",
+		`[{"id":123,"user":{"login":"alice","type":"User"},"created_at":"2026-04-19T00:00:00Z"}]`,
+	)
+	polish := &stubPolish{}
+	cfg := DefaultConfig()
+	cfg.PollInterval = 10 * time.Millisecond
+	w := NewWatcher(cfg, gh, polish, 42, ".", "r", nil, WithDryRun(true))
+
+	res, err := w.Tick(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, LastActionDryRun, res.Action)
+	assert.Empty(t, polish.calls)
+
+	s, err := LoadState(statePath)
+	require.NoError(t, err)
+	assert.Equal(t, "old-head", s.LastSeenHeadSHA, "dry-run must not advance head")
+	assert.Equal(t, "old-base", s.LastSeenBaseSHA, "dry-run must not advance base")
+	assert.Equal(t, []string{"inline:old"}, s.LastSeenCommentIDs,
+		"dry-run must not persist newly observed comment IDs")
+	assert.Equal(t, []int64{1}, s.LastSeenCIRunIDs,
+		"dry-run must not persist newly observed failed-run IDs")
+	assert.Equal(t, LastActionIdle, s.LastAction,
+		"dry-run must not rewrite LastAction")
+	assert.Equal(t, prevCheck.Unix(), s.LastCheckAt.Unix(),
+		"dry-run must not advance LastCheckAt")
+}
+
 func TestFetchComments_HandlesConcatenatedPaginatePages(t *testing.T) {
 	t.Parallel()
 	// gh api --paginate emits one JSON array per page back-to-back. Verify

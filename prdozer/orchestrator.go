@@ -81,7 +81,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	tick := func() {
 		prs, err := DiscoverPRs(ctx, o.gh, o.workDir, o.cfg.Source)
 		if err != nil {
+			// Surface discovery failures to both the structured log and the
+			// user-visible renderer. Without the status line, a long-running
+			// `prdozer` with a broken `gh` config would look idle — every tick
+			// silently skipped with only a warn in the log file.
 			o.logger.Warn("discovery failed", "error", err)
+			o.status("Discovery failed: %v — retrying in %s", err, o.cfg.PollInterval)
 			return
 		}
 		if _, err := o.tickAll(ctx, prs, false); err != nil && !errors.Is(err, context.Canceled) {

@@ -163,6 +163,25 @@ func TestComputeChangeset_GhMergeableConflicting(t *testing.T) {
 		"CONFLICTING PRs must not be flagged mergeable even with APPROVED + SUCCESS")
 }
 
+func TestComputeChangeset_BaseRecoveryFromMissingBaseline(t *testing.T) {
+	t.Parallel()
+	// Transient base-SHA fetch failure: prev tick recorded no baseline. Fail
+	// open — when the next successful tick produces a base SHA, treat it as a
+	// base move, not silently as the new ground truth. Otherwise a real move
+	// that happened during the outage is invisible.
+	prev := &State{
+		LastCheckAt:     time.Now(),
+		LastSeenHeadSHA: "head1",
+		LastSeenBaseSHA: "",
+	}
+	snap := snapWithRollup("SUCCESS")
+	snap.BaseSHA = "recovered-base"
+	cs := ComputeChangeset(prev, snap)
+	assert.True(t, cs.BaseMoved,
+		"recovery from an empty baseline must be treated as a base move")
+	assert.True(t, cs.NeedsPolish())
+}
+
 func TestComputeChangeset_BaseMovedSuppressesMergeable(t *testing.T) {
 	t.Parallel()
 	prev := &State{

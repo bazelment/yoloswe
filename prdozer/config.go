@@ -147,6 +147,14 @@ func (c *Config) validate() error {
 		if len(c.Source.PRs) == 0 {
 			return fmt.Errorf("source.mode %q requires source.prs to be non-empty", c.Source.Mode)
 		}
+	case SourceModeAll:
+		// Fail loudly when the user supplied an explicit list of PR numbers in
+		// a mode that ignores them. defaultConfig() seeds mode=all, so a YAML
+		// that sets source.prs without mode would silently fall through to
+		// discovery — watching the wrong PR set.
+		if len(c.Source.PRs) > 0 {
+			return fmt.Errorf("source.mode \"all\" does not accept source.prs (got %d entries); set source.mode to \"single\" or \"list\"", len(c.Source.PRs))
+		}
 	}
 	if c.Source.Mode == SourceModeAll && c.Source.Filter.Author == "" {
 		c.Source.Filter.Author = "@me"
