@@ -61,11 +61,13 @@ type ProgressEmitter interface {
 // call site to stay within Monitor's event budget.
 //
 // Coalescing strategy: each kind+tool pair has an independent minimum
-// interval. session-started and verdict always pass through (interval 0) so
-// the terminal bookends never get suppressed. tool-use passes the first event
-// immediately, then drops further events for the same tool for the
-// configured interval — this matches Monitor's "one notification per event"
-// contract while still surfacing new tool invocations quickly.
+// interval. Structural kinds (session-started, verdict, turn-complete, error)
+// always pass through unconditionally — they are exempt by kind, not by
+// interval. tool-use passes the first event immediately, then drops further
+// events for the same (kind,tool) key for the configured interval — this
+// matches Monitor's "one notification per event" contract while still
+// surfacing new tool invocations quickly. State resets on turn-complete so
+// a reused Reviewer never suppresses the first event of the next turn.
 type NDJSONProgressEmitter struct {
 	w        io.Writer
 	now      func() time.Time
@@ -100,41 +102,49 @@ func (e *NDJSONProgressEmitter) SetNow(now func() time.Time) {
 // progress-stream hiccup bring down the review. The error would otherwise have
 // to propagate up through the event bridge and we'd lose the review itself to
 // a reporting problem.
+//
+// The entire suppress-check → encode → write sequence is held under mu so
+// concurrent callers cannot both pass suppression before either has written,
+// which would interleave bytes on the underlying io.Writer.
 func (e *NDJSONProgressEmitter) Emit(ev ProgressEvent) {
 	if e == nil || e.w == nil {
 		return
 	}
 	ev.Event = "progress"
-	if e.shouldSuppress(ev) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.shouldSuppressLocked(ev) {
 		return
 	}
 	encoded, err := json.Marshal(ev)
 	if err != nil {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	_, _ = e.w.Write(encoded)
-	_, _ = e.w.Write([]byte{'\n'})
+	_, _ = e.w.Write(append(encoded, '\n'))
 }
 
-// shouldSuppress checks whether ev falls inside the coalesce window for its
-// (kind, tool) key. It also updates the last-seen timestamp on pass-through.
+// shouldSuppressLocked checks whether ev falls inside the coalesce window for
+// its (kind, tool) key. Must be called with e.mu held. It also updates the
+// last-seen timestamp on pass-through and clears stale state on TurnComplete
+// so per-turn coalescing resets between turns on a reused Reviewer.
+//
 // Kinds that are never coalesced (session-started, verdict, turn-complete,
-// error) bypass the check entirely so the stream's structural markers always
-// land promptly.
-func (e *NDJSONProgressEmitter) shouldSuppress(ev ProgressEvent) bool {
-	if e.interval <= 0 {
-		return false
-	}
+// error) bypass the interval check so structural markers always land promptly.
+func (e *NDJSONProgressEmitter) shouldSuppressLocked(ev ProgressEvent) bool {
 	switch ev.Kind {
 	case ProgressKindSessionStarted, ProgressKindVerdict,
 		ProgressKindTurnComplete, ProgressKindError:
+		if ev.Kind == ProgressKindTurnComplete {
+			// Reset coalesce state so the first event of the next turn is
+			// never suppressed due to a window left open by the previous turn.
+			e.last = map[string]time.Time{}
+		}
+		return false
+	}
+	if e.interval <= 0 {
 		return false
 	}
 	key := ev.Kind + ":" + ev.Tool
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	now := e.now()
 	if last, ok := e.last[key]; ok {
 		if now.Sub(last) < e.interval {

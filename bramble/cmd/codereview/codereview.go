@@ -41,7 +41,10 @@ Supported backends: cursor, codex.
 
 Output:
   Default:      free-form review text on stdout, diagnostics on stderr.
-  --json:       a stable JSON envelope on stdout (one object, trailing newline).
+  --json:       NDJSON stream on stdout. Each line is a JSON object:
+                  - progress events:  {"event":"progress","kind":"..."}
+                  - terminal envelope: {"schema_version":1,"status":"ok",...}
+                The terminal envelope is always the last line with "schema_version".
                 Use this for automated pipelines (e.g. /pr-polish).
 
 Every run also writes a structured klogfmt log to
@@ -80,6 +83,9 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
 		if err := reviewer.PrintJSONResult(os.Stdout, env); err != nil {
 			reportEnvelopePrintError(err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to write JSON envelope: %w", err)
+			}
 			return
 		}
 		envelopeWritten = true
@@ -205,19 +211,27 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			"issue_count", len(env.Review.Issues),
 			"max_severity", maxSeverity(env.Review.Issues),
 			"total_duration_ms", time.Since(runStart).Milliseconds())
-		// Emit a verdict progress event just before the envelope so consumers
-		// see a clean "reviewer concluded" marker without having to parse the
-		// envelope; some Monitor consumers only forward lines with
-		// "event":"progress" to the user and rely on this event to announce
-		// completion.
-		r.ProgressEmitter().Emit(reviewer.ProgressEvent{
-			Kind:       reviewer.ProgressKindVerdict,
-			Backend:    env.Backend,
-			Model:      env.Model,
-			SessionID:  env.SessionID,
-			Detail:     env.Review.Verdict,
-			IssueCount: len(env.Review.Issues),
-		})
+		// Emit a progress event just before the envelope so consumers see a
+		// clean completion marker without parsing the envelope. Use verdict on
+		// success, error on failure — never emit a verdict event for an error
+		// envelope as that produces a false "review concluded" signal.
+		if env.Status == reviewer.StatusOK {
+			r.ProgressEmitter().Emit(reviewer.ProgressEvent{
+				Kind:       reviewer.ProgressKindVerdict,
+				Backend:    env.Backend,
+				Model:      env.Model,
+				SessionID:  env.SessionID,
+				Detail:     env.Review.Verdict,
+				IssueCount: len(env.Review.Issues),
+			})
+		} else {
+			r.ProgressEmitter().Emit(reviewer.ProgressEvent{
+				Kind:    reviewer.ProgressKindError,
+				Backend: env.Backend,
+				Model:   env.Model,
+				Detail:  env.Error,
+			})
+		}
 		emitEnvelope(env)
 		return nil
 	}

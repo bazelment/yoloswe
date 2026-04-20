@@ -187,10 +187,7 @@ func PrintJSONResult(w io.Writer, env ResultEnvelope) error {
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
-	if _, err := w.Write(encoded); err != nil {
-		return err
-	}
-	_, err = w.Write([]byte("\n"))
+	_, err = w.Write(append(encoded, '\n'))
 	return err
 }
 

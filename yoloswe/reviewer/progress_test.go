@@ -108,6 +108,29 @@ func TestNoopProgressEmitter_Silent(t *testing.T) {
 	// Nothing to assert — a missing side effect is the contract.
 }
 
+func TestNDJSONProgressEmitter_TurnCompleteResetsCoalesceState(t *testing.T) {
+	// When a Reviewer is reused across turns, the coalescer must not suppress
+	// the first tool-use event of turn N+1 because it shares a key with a
+	// tool-use event from turn N that arrived inside the coalesce window.
+	var buf bytes.Buffer
+	e := NewNDJSONProgressEmitter(&buf, 10*time.Second)
+	fixed := time.Unix(1_000_000, 0)
+	e.SetNow(func() time.Time { return fixed })
+
+	// Turn 1: emit tool-use, then turn-complete.
+	e.Emit(ProgressEvent{Kind: ProgressKindToolUse, Tool: "read"})
+	e.Emit(ProgressEvent{Kind: ProgressKindTurnComplete})
+
+	// Turn 2: same tool, same instant — must pass through because TurnComplete reset state.
+	e.Emit(ProgressEvent{Kind: ProgressKindToolUse, Tool: "read"})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	// Expect: tool-use (turn1) + turn-complete + tool-use (turn2) = 3 lines
+	if len(lines) != 3 {
+		t.Fatalf("want 3 lines, got %d: %q", len(lines), buf.String())
+	}
+}
+
 func TestNDJSONProgressEmitter_EventFieldAlwaysSet(t *testing.T) {
 	// Consumers key on event=="progress" to separate progress lines from
 	// the final envelope. The emitter is responsible for stamping this
