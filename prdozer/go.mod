@@ -1,4 +1,4 @@
-module github.com/bazelment/yoloswe/jiradozer
+module github.com/bazelment/yoloswe/prdozer
 
 go 1.25.0
 

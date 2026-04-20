@@ -1,0 +1,41 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "prdozer",
+    srcs = [
+        "agent.go",
+        "changeset.go",
+        "config.go",
+        "discovery.go",
+        "orchestrator.go",
+        "snapshot.go",
+        "state.go",
+        "watcher.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/prdozer",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude/render",
+        "//multiagent/agent",
+        "//wt",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "prdozer_test",
+    srcs = [
+        "changeset_test.go",
+        "config_test.go",
+        "discovery_test.go",
+        "orchestrator_test.go",
+        "state_test.go",
+        "watcher_test.go",
+    ],
+    embed = [":prdozer"],
+    deps = [
+        "//wt",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
