@@ -183,6 +183,7 @@ func TestStreamBg_I1_PureBgMonitor(t *testing.T) {
 
 	sanityCheckTasksEmitted(t, state, "Monitor")
 	assertAllTasksTerminal(t, state)
+	assertTurnCompleteEmitted(t, state)
 	if len(state.ResultMessages) == 0 {
 		t.Error("expected at least one ResultMessageEvent")
 	}
@@ -226,6 +227,7 @@ func TestStreamBg_I2_MixedSyncBg(t *testing.T) {
 
 	sanityCheckTasksEmitted(t, state, "Monitor")
 	assertAllTasksTerminal(t, state)
+	assertTurnCompleteEmitted(t, state)
 	if len(state.ResultMessages) == 0 {
 		t.Error("expected at least one ResultMessageEvent")
 	}
@@ -268,6 +270,7 @@ func TestStreamBg_I4_PureBgBash(t *testing.T) {
 
 	sanityCheckTasksEmitted(t, state, "bg Bash")
 	assertAllTasksTerminal(t, state)
+	assertTurnCompleteEmitted(t, state)
 	hasBgToolUseID := false
 	for _, ts := range state.TaskStarted {
 		if ts.ToolUseID != nil && *ts.ToolUseID != "" {
@@ -472,6 +475,17 @@ func assertAllTasksTerminal(t *testing.T, state *bgStreamState) {
 			t.Errorf("task %s (tool_use_id=%v) never reached a terminal status — "+
 				"consumer would wait forever", ts.TaskID, ts.ToolUseID)
 		}
+	}
+}
+
+// assertTurnCompleteEmitted fails if the raw stream never surfaced a
+// TurnCompleteEvent. The consumer-side logicalTurnState gates LogicalTurnDone
+// on observing TurnComplete, so losing this event in the CLI would silently
+// hang Execute — these integration tests must pin the contract.
+func assertTurnCompleteEmitted(t *testing.T, state *bgStreamState) {
+	t.Helper()
+	if len(state.TurnCompletes) == 0 {
+		t.Errorf("expected at least one TurnCompleteEvent — consumer gates logical-turn done on it")
 	}
 }
 

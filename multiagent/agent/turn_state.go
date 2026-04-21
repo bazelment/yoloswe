@@ -17,6 +17,7 @@ type logicalTurnState struct {
 	err error
 
 	liveTaskIDs           map[string]struct{}
+	terminalTaskIDs       map[string]struct{}
 	cancelledToolUseIDs   map[string]struct{}
 	completedBgToolUseIDs map[string]struct{}
 	taskToToolUse         map[string]string
@@ -37,6 +38,7 @@ type logicalTurnState struct {
 func newLogicalTurnState() *logicalTurnState {
 	return &logicalTurnState{
 		liveTaskIDs:           make(map[string]struct{}),
+		terminalTaskIDs:       make(map[string]struct{}),
 		cancelledToolUseIDs:   make(map[string]struct{}),
 		completedBgToolUseIDs: make(map[string]struct{}),
 		taskToToolUse:         make(map[string]string),
@@ -71,14 +73,24 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		}
 
 	case claude.TaskStartedEvent:
-		s.liveTaskIDs[e.TaskID] = struct{}{}
 		if e.ToolUseID != nil && *e.ToolUseID != "" {
 			s.taskToToolUse[e.TaskID] = *e.ToolUseID
 		}
+		// Ignore a TaskStartedEvent if the terminal event already arrived for
+		// this task (possible under stream reorder). Re-adding a terminal
+		// task to liveTaskIDs would strand LogicalTurnDone forever.
+		if _, terminal := s.terminalTaskIDs[e.TaskID]; terminal {
+			if tuid := s.taskToToolUse[e.TaskID]; tuid != "" {
+				s.completedBgToolUseIDs[tuid] = struct{}{}
+			}
+			break
+		}
+		s.liveTaskIDs[e.TaskID] = struct{}{}
 
 	case claude.TaskNotificationEvent:
 		// Any terminal TaskNotificationEvent drains the task from the live
 		// set — completed, failed, killed, timeout all count as "done".
+		s.terminalTaskIDs[e.TaskID] = struct{}{}
 		delete(s.liveTaskIDs, e.TaskID)
 		toolUseID := ""
 		if e.ToolUseID != nil {
@@ -95,6 +107,7 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		if e.Status != nil {
 			switch *e.Status {
 			case "completed", "failed", "killed", "timeout":
+				s.terminalTaskIDs[e.TaskID] = struct{}{}
 				delete(s.liveTaskIDs, e.TaskID)
 				if tuid := s.taskToToolUse[e.TaskID]; tuid != "" {
 					s.completedBgToolUseIDs[tuid] = struct{}{}
@@ -105,6 +118,13 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 	case claude.ResultMessageEvent:
 		result := e
 		s.lastResult = &result
+		// Each ResultMessageEvent starts a new completion wave; drop any
+		// stale TurnCompleteEvent from a prior wave so LogicalTurnDone only
+		// fires once the TurnCompleteEvent paired with *this* Result arrives.
+		// Without this, a continuation Result + an earlier wave's
+		// TurnComplete would satisfy the gate and cause streamTurn to return
+		// before the matching TurnComplete is drained from the channel.
+		s.lastTurnComplete = nil
 		s.turnNumber = e.TurnNumber
 		s.usage.Add(e.Usage)
 		// Track the latest error; a successful continuation clears it.

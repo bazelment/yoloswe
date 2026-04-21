@@ -100,7 +100,8 @@ func TestTurnState_C1_PureBgMonitorTurn(t *testing.T) {
 		"pure-bg turn must not be done while bg task is still live")
 	require.True(t, s.HasLiveTasks())
 
-	// Turn 2 (auto-continuation): task completes, then CLI emits ResultMessage.
+	// Turn 2 (auto-continuation): task completes, then CLI emits ResultMessage
+	// and its paired TurnCompleteEvent.
 	status := "completed"
 	s.Apply(claude.TaskUpdatedEvent{TaskID: "task1", Status: &status})
 	s.Apply(claude.TaskNotificationEvent{
@@ -108,12 +109,23 @@ func TestTurnState_C1_PureBgMonitorTurn(t *testing.T) {
 		ToolUseID: strPtr("toolu_bg1"),
 		Status:    "completed",
 	})
+	// After the continuation ResultMessage, the state must require the
+	// matching TurnCompleteEvent — a stale wave-1 TurnComplete alone must
+	// not satisfy LogicalTurnDone.
 	rm := resultMessage(false)
 	rm.TurnNumber = 2
 	s.Apply(rm)
+	require.False(t, s.LogicalTurnDone(),
+		"continuation ResultMessage must invalidate the prior wave's TurnComplete")
+	s.Apply(claude.TurnCompleteEvent{
+		TurnNumber: 2,
+		Success:    true,
+		DurationMs: rm.DurationMs,
+		Usage:      rm.Usage,
+	})
 
 	require.True(t, s.LogicalTurnDone(),
-		"logical turn done once bg task terminal and continuation ResultMessage arrived")
+		"logical turn done once bg task terminal and continuation ResultMessage + TurnComplete arrived")
 	require.False(t, s.HasLiveTasks())
 }
 
@@ -307,27 +319,20 @@ func TestTurnState_C7_ReorderedTaskStartedAfterNotification(t *testing.T) {
 		ToolUseID: strPtr("toolu_bg"),
 		Status:    "completed",
 	})
+	// The belated TaskStartedEvent must NOT re-register task1 as live — the
+	// terminal event already drained it. Without this, a single stray
+	// TaskStartedEvent after terminal would strand LogicalTurnDone forever
+	// since no further terminal event is guaranteed.
 	s.Apply(claude.TaskStartedEvent{
 		TaskID:    "task1",
 		ToolUseID: strPtr("toolu_bg"),
 	})
-	// The delayed TaskStartedEvent re-registers task1 as live. But the tool_use
-	// was already marked completed, so logical turn still finishes when the
-	// terminal ResultMessage arrives, because the bg tool_use is completed.
-	// liveTaskIDs contains task1 though — that is a known wrapper-state
-	// artifact of reorder. In practice, a subsequent TaskNotificationEvent
-	// will drain it; if not, the turn stays gated on HasLiveTasks.
-	endOfCLITurn(s, false)
-	require.False(t, s.LogicalTurnDone(),
-		"reordered TaskStartedEvent re-inserts live task — wait for drain")
+	require.False(t, s.HasLiveTasks(),
+		"belated TaskStartedEvent must not resurrect a task that already reached terminal")
 
-	// Drain arrives.
-	s.Apply(claude.TaskNotificationEvent{
-		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
-		Status: "completed",
-	})
 	endOfCLITurn(s, false)
-	require.True(t, s.LogicalTurnDone())
+	require.True(t, s.LogicalTurnDone(),
+		"logical turn done: terminal already observed, ResultMessage + TurnComplete closed the turn")
 }
 
 // C8: Budget exceeded mid-bg turn — Execute stops cleanly, no orphan. From
@@ -500,4 +505,58 @@ func TestTurnState_UsageAccumulatesAcrossResultMessages(t *testing.T) {
 	require.Equal(t, 150, u.InputTokens)
 	require.Equal(t, 30, u.OutputTokens)
 	require.InDelta(t, 0.015, u.CostUSD, 1e-9)
+}
+
+// A new ResultMessageEvent must drop any previously-observed TurnCompleteEvent
+// so LogicalTurnDone requires the TurnComplete paired with *this* Result. The
+// bg-continuation flow is the classic trigger: wave 1 fires (Result1,
+// TurnComplete1), then wave 2 fires Result2 with its own TurnComplete2. If the
+// state kept TurnComplete1 around, streamTurn would exit before consuming
+// TurnComplete2 from the session channel.
+func TestTurnState_NewResultMessageInvalidatesPriorTurnComplete(t *testing.T) {
+	s := newLogicalTurnState()
+
+	s.Apply(claude.AssistantMessageEvent{TurnNumber: 1})
+	endOfCLITurn(s, false)
+	require.True(t, s.LogicalTurnDone(),
+		"a completed sync turn should be done after Result+TurnComplete")
+
+	rm2 := resultMessage(false)
+	rm2.TurnNumber = 2
+	s.Apply(rm2)
+	require.False(t, s.LogicalTurnDone(),
+		"a new ResultMessage must require a fresh TurnComplete — the prior wave's TurnComplete is stale")
+
+	s.Apply(claude.TurnCompleteEvent{TurnNumber: 2, Success: true})
+	require.True(t, s.LogicalTurnDone(),
+		"logical turn done once the TurnComplete paired with the latest Result arrives")
+}
+
+// A terminal TaskNotificationEvent that arrives before the corresponding
+// TaskStartedEvent (stream reorder) must not leave the task stuck live when
+// the belated TaskStartedEvent finally shows up.
+func TestTurnState_TerminalBeforeTaskStartedStillCompletes(t *testing.T) {
+	s := newLogicalTurnState()
+
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+	})
+	// Terminal first.
+	s.Apply(claude.TaskNotificationEvent{
+		TaskID:    "task1",
+		ToolUseID: strPtr("toolu_bg1"),
+		Status:    "completed",
+	})
+	// Belated start.
+	s.Apply(claude.TaskStartedEvent{
+		TaskID:    "task1",
+		ToolUseID: strPtr("toolu_bg1"),
+	})
+
+	endOfCLITurn(s, false)
+
+	require.False(t, s.HasLiveTasks(),
+		"belated TaskStartedEvent must not re-add a task that already reached terminal")
+	require.True(t, s.LogicalTurnDone())
 }

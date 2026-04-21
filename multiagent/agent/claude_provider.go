@@ -328,6 +328,16 @@ func (p *ClaudeLongRunningProvider) Stop() error {
 // AgentEvent channel. Execute drives this synchronously so it can feed
 // logicalTurnState on the same goroutine — long-running providers use
 // bridgeEvents instead.
+//
+// Only events that implement agentstream.Event (Ready, Text, Thinking,
+// ToolStart, ToolEnd, TurnComplete, Error) are bridged to the generic
+// AgentEvent surface. Claude-specific raw events (ResultMessageEvent,
+// AssistantMessageEvent, UserMessageEvent, Task*) are intentionally NOT
+// forwarded: they are consumed internally by logicalTurnState to decide when
+// the logical turn is done, and the agentstream contract is a deliberately
+// smaller, cross-provider subset. Consumers that need the raw Claude event
+// stream should read claude.Session.Events() directly instead of relying on
+// Execute's AgentEvent channel/EventHandler.
 func dispatchClaudeEvent(ev claude.Event, handler EventHandler, out chan<- AgentEvent) {
 	sev, ok := any(ev).(agentstream.Event)
 	if !ok {

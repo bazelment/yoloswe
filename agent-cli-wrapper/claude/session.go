@@ -1170,19 +1170,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.ContentBlocks = turn.ContentBlocks
 	}
 
-	if msg.IsError {
-		// Per the protocol, error subtypes populate Errors, not Result.
-		// Fall back to Result/subtype if Errors is empty so we never surface
-		// a blank error string.
-		switch {
-		case len(msg.Errors) > 0:
-			result.Error = fmt.Errorf("%s", strings.Join(msg.Errors, "; "))
-		case msg.Result != "":
-			result.Error = fmt.Errorf("%s", msg.Result)
-		default:
-			result.Error = fmt.Errorf("turn failed: %s", msg.Subtype)
-		}
-	}
+	result.Error = resultMessageError(msg)
 
 	// Check if the turn ends with a NEW ScheduleWakeup tool call. When present,
 	// the CLI will auto-inject a continuation user message after the specified
