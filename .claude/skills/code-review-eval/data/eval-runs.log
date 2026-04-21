@@ -483,3 +483,34 @@ Unique to cursor:
 Unique to codex-5.4-mini: none beyond consensus
 
 Disagreements: none — codex found a strict subset of cursor's findings
+
+## 2026-04-21 (round 12) — feature/bramble-stream-envelope-guard (post commit 4bd67cc)
+
+Diff: 10 files, +539/-155 lines (replace fmt.Fprintf+slog duplication with dual-write tee handler; address round 11 correctness gaps)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 2 | 0 | rejected | high | 173s |
+| codex-5.4-mini | 3 | 0 | rejected | high | 177s |
+
+Envelope guard fired: No — both configs received proper envelopes via --envelope-file.
+
+Consensus (both):
+- [high] `emitEnvelope` write failure on success path: `return nil` at the end of the success path silently discards the error from `PrintJSONResult` (codereview.go:205 area). Backend failures and write errors exit 0 while stdout has no valid envelope. This is the **same finding as round 11** — not yet fixed.
+
+Unique to cursor:
+- [high] Double-envelope on partial write: if `emitEnvelope` fails after a partial write (open succeeds, write fails), `envelopeWritten` stays false and `finalizeEnvelope` emits a second error envelope to the same sink — truncated first JSON + second object corrupts line-by-line consumers (codereview.go:288). Also a **recurring finding** from rounds 8-11.
+
+Unique to codex-5.4-mini:
+- [medium] `os.Create` for `--envelope-file` uses default umask permissions instead of explicit `0600` — envelope can contain repo paths and review findings, may be world-readable by default (codereview.go:253).
+- [medium] `--envelope-file` open failure: if the file cannot be opened, `emitEnvelope` logs and returns without writing anywhere; the deferred `finalizeEnvelope` retries the same broken path — callers lose the machine-readable result entirely (codereview.go:83).
+
+Disagreements: none — both flagged the same root issue (exit-0 on write failure) but cursor added the double-envelope consequence and codex-5.4-mini added the file-permission and open-failure concerns.
+
+Notes:
+- The consensus exit-0-on-write-failure finding has now appeared in rounds 8, 9, 10, 11, and 12 (5 consecutive rounds). The round 11 fix addressed some paths but left the success-path `return nil` intact. This is now the clearest remaining blocker.
+- codex-5.4-mini's file permission finding (0600 vs umask) is new — appeared first this round despite the `os.Create` being present since the --envelope-file feature landed. High signal novel finding.
+- codex-5.4-mini's open-failure fallback finding is also new and complements the permission concern — both are about the file-opening path.
+- cursor's double-envelope concern (rounds 8+) remains open. A single atomic write would fix it, but the root cause is that `envelopeWritten` isn't set on partial-write failure.
+- Both configs ran in ~175s — unusually tight timing (within 4s of each other). No envelope guard activations.
+- The dual-entrypoint `yoloswe/cmd/code-review/main.go` was NOT raised this round by either reviewer. May have been addressed or deprioritized.

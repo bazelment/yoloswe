@@ -44,7 +44,8 @@ WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
   2>"$LOG_DIR/{NAME}-stderr.txt"
 ```
 
-Set Monitor `timeout_ms=600000`. After it completes, read `$ENVELOPE_FILE` for the
+Arm all Monitors in the same turn so configs run in parallel. Set Monitor
+`timeout_ms=600000`. After all Monitors complete, read each `$ENVELOPE_FILE` for the
 ResultEnvelope (`verdict`, `issues[]`, `summary`). Note: codex only reports shell
 command tool calls on stdout; file reads are internal to the codex SDK and not surfaced.
 

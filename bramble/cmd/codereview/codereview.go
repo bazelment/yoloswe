@@ -80,6 +80,10 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// produced nothing at all".
 	var envelopeWritten bool
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
+		// Mark as attempted immediately so finalizeEnvelope never retries the
+		// same sink — a partial write followed by a second emit would corrupt
+		// line-by-line consumers more than a single failed write.
+		envelopeWritten = true
 		w, closeW, openErr := openEnvelopeWriter()
 		if openErr != nil {
 			slog.Error("failed to open envelope-file", "error", openErr.Error())
@@ -96,7 +100,6 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			}
 			return
 		}
-		envelopeWritten = true
 	}
 	defer func() {
 		finalizeEnvelope(envelopeGuardArgs{
@@ -250,7 +253,7 @@ func openEnvelopeWriter() (w *os.File, close func(), err error) {
 	if envelopeFile == "" {
 		return os.Stdout, func() {}, nil
 	}
-	f, err := os.Create(envelopeFile)
+	f, err := os.OpenFile(envelopeFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, func() {}, err
 	}
