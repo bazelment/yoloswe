@@ -27,6 +27,13 @@ type logicalTurnState struct {
 	// decide done-ness.
 	lastResult *claude.ResultMessageEvent
 
+	// lastTurnComplete is the most recent TurnCompleteEvent observed. Used
+	// as the terminal signal: the wrapper emits ResultMessage first, then
+	// runs finalization logic (usage accounting, state transitions) and
+	// emits TurnComplete. Gating LogicalTurnDone on TurnComplete ensures
+	// downstream dispatch sees both events before the consumer loop exits.
+	lastTurnComplete *claude.TurnCompleteEvent
+
 	// err is populated when the final result message carries an error and
 	// no subsequent non-error continuation turn arrived.
 	err error
@@ -167,6 +174,11 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 			s.err = nil
 		}
 
+	case claude.TurnCompleteEvent:
+		tc := e
+		s.lastTurnComplete = &tc
+		s.turnNumber = e.TurnNumber
+
 	case claude.ErrorEvent:
 		if s.err == nil {
 			s.err = e.Error
@@ -175,17 +187,26 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 }
 
 // LogicalTurnDone reports whether the logical turn has finished. Requires:
-//   - at least one ResultMessageEvent has arrived, AND
+//   - at least one ResultMessageEvent AND its paired TurnCompleteEvent have
+//     arrived, AND
 //   - the live task set is empty, AND
 //   - no uncancelled bg tool_use block is still awaiting its continuation.
 //
-// Pure-bg turns return false after the first ResultMessageEvent (bg task
+// Gating on TurnCompleteEvent (not just ResultMessageEvent) guarantees the
+// consumer loop continues pumping dispatchClaudeEvent through the final
+// turn-complete notification — otherwise EventHandler.OnTurnComplete would
+// race with loop exit and silently drop.
+//
+// Pure-bg turns return false after the first TurnCompleteEvent (bg task
 // still live) and flip to true after the TaskNotificationEvent + the
-// auto-continuation ResultMessageEvent arrive. Mixed sync+bg turns behave
-// the same — the sync tools fire their ResultMessage, but liveTaskIDs is
-// non-empty, so the state waits for the bg path to drain.
+// auto-continuation ResultMessageEvent+TurnCompleteEvent arrive. Mixed
+// sync+bg turns behave the same — the sync tools fire their ResultMessage,
+// but liveTaskIDs is non-empty, so the state waits for the bg path to drain.
 func (s *logicalTurnState) LogicalTurnDone() bool {
 	if !s.haveResult {
+		return false
+	}
+	if s.lastTurnComplete == nil {
 		return false
 	}
 	if len(s.liveTaskIDs) > 0 {

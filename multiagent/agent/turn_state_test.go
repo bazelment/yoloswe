@@ -64,6 +64,21 @@ func resultMessage(isError bool) claude.ResultMessageEvent {
 	return ev
 }
 
+// endOfCLITurn feeds the paired ResultMessageEvent + TurnCompleteEvent that
+// the wrapper emits at the end of every CLI turn. LogicalTurnDone gates on
+// observing both, so tests must apply both to drive the state past a turn
+// boundary.
+func endOfCLITurn(s *logicalTurnState, isError bool) {
+	rm := resultMessage(isError)
+	s.Apply(rm)
+	s.Apply(claude.TurnCompleteEvent{
+		TurnNumber: rm.TurnNumber,
+		Success:    !isError,
+		DurationMs: rm.DurationMs,
+		Usage:      rm.Usage,
+	})
+}
+
 // C1: Pure-bg Monitor turn — ResultMessage fires before task completes.
 // Execute must not report done until TaskNotificationEvent + continuation
 // ResultMessage.
@@ -80,7 +95,7 @@ func TestTurnState_C1_PureBgMonitorTurn(t *testing.T) {
 		ToolUseID:  strPtr("toolu_bg1"),
 		TurnNumber: 1,
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 
 	require.False(t, s.LogicalTurnDone(),
 		"pure-bg turn must not be done while bg task is still live")
@@ -129,7 +144,7 @@ func TestTurnState_C2_MixedSyncBgTurn(t *testing.T) {
 		TurnNumber: 1,
 	})
 	// ResultMessage fires while Monitor still running.
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 
 	require.False(t, s.LogicalTurnDone(),
 		"mixed turn must not be done while Monitor bg task is live")
@@ -140,7 +155,7 @@ func TestTurnState_C2_MixedSyncBgTurn(t *testing.T) {
 		ToolUseID: strPtr("toolu_bg1"),
 		Status:    "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone())
 }
 
@@ -164,7 +179,7 @@ func TestTurnState_C3_TwoParallelMonitorsOneFailsFast(t *testing.T) {
 		TaskID:    "task_slow",
 		ToolUseID: strPtr("toolu_bg_slow"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 
 	// Fast monitor fails.
 	s.Apply(claude.TaskNotificationEvent{
@@ -172,7 +187,7 @@ func TestTurnState_C3_TwoParallelMonitorsOneFailsFast(t *testing.T) {
 		ToolUseID: strPtr("toolu_bg_fast"),
 		Status:    "failed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone(),
 		"one bg task still live — not done")
 
@@ -182,7 +197,7 @@ func TestTurnState_C3_TwoParallelMonitorsOneFailsFast(t *testing.T) {
 		ToolUseID: strPtr("toolu_bg_slow"),
 		Status:    "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone())
 }
 
@@ -199,7 +214,7 @@ func TestTurnState_C4_PureBgBashRunInBackground(t *testing.T) {
 		TaskID:    "task_bash",
 		ToolUseID: strPtr("toolu_bg_bash"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone())
 	require.True(t, s.HasLiveTasks())
 
@@ -208,7 +223,7 @@ func TestTurnState_C4_PureBgBashRunInBackground(t *testing.T) {
 		ToolUseID: strPtr("toolu_bg_bash"),
 		Status:    "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone())
 }
 
@@ -229,7 +244,7 @@ func TestTurnState_C5_MixedMonitorAndBgBash(t *testing.T) {
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task_bash", ToolUseID: strPtr("toolu_bash"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone())
 
 	// Monitor terminates first.
@@ -237,7 +252,7 @@ func TestTurnState_C5_MixedMonitorAndBgBash(t *testing.T) {
 		TaskID: "task_mon", ToolUseID: strPtr("toolu_mon"),
 		Status: "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone(), "bg Bash still live")
 
 	// Bash terminates.
@@ -245,7 +260,7 @@ func TestTurnState_C5_MixedMonitorAndBgBash(t *testing.T) {
 		TaskID: "task_bash", ToolUseID: strPtr("toolu_bash"),
 		Status: "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone())
 }
 
@@ -262,7 +277,7 @@ func TestTurnState_C6_TaskNotificationMissingToolUseID(t *testing.T) {
 		TaskID:    "task1",
 		ToolUseID: strPtr("toolu_bg"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone())
 
 	// TaskNotification with no tool_use_id. Mapping lookup must fire so the
@@ -272,7 +287,7 @@ func TestTurnState_C6_TaskNotificationMissingToolUseID(t *testing.T) {
 		ToolUseID: nil,
 		Status:    "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone(),
 		"must drain bg tool_use via taskToToolUse mapping")
 }
@@ -303,7 +318,7 @@ func TestTurnState_C7_ReorderedTaskStartedAfterNotification(t *testing.T) {
 	// liveTaskIDs contains task1 though — that is a known wrapper-state
 	// artifact of reorder. In practice, a subsequent TaskNotificationEvent
 	// will drain it; if not, the turn stays gated on HasLiveTasks.
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone(),
 		"reordered TaskStartedEvent re-inserts live task — wait for drain")
 
@@ -312,7 +327,7 @@ func TestTurnState_C7_ReorderedTaskStartedAfterNotification(t *testing.T) {
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 		Status: "completed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone())
 }
 
@@ -329,7 +344,7 @@ func TestTurnState_C8_BudgetExceededMidBg(t *testing.T) {
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.False(t, s.LogicalTurnDone())
 
 	// Budget-exceeded surfaces as ErrorEvent.
@@ -351,13 +366,13 @@ func TestTurnState_C9_BgMonitorToolError(t *testing.T) {
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 
 	s.Apply(claude.TaskNotificationEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 		Status: "failed",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone(),
 		"failed bg task is terminal — turn completes")
 }
@@ -374,13 +389,13 @@ func TestTurnState_C10_MonitorTimeoutMs(t *testing.T) {
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 
 	s.Apply(claude.TaskNotificationEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 		Status: "timeout",
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone(),
 		"timeout bg task is terminal — turn completes")
 }
@@ -394,7 +409,7 @@ func TestTurnState_C11_PlainSyncTurn(t *testing.T) {
 		Blocks:     []claude.ContentBlock{asstTextBlock("hello world")},
 	})
 	require.False(t, s.LogicalTurnDone(), "no result message yet")
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone(),
 		"sync turn with no tools — done immediately on ResultMessage")
 	require.Equal(t, "hello world", s.Text())
@@ -412,7 +427,7 @@ func TestTurnState_C12_CloseWhileBgLive(t *testing.T) {
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 
 	// Consumer stops listening — state still says bg is live.
 	require.True(t, s.HasLiveTasks())
@@ -432,7 +447,7 @@ func TestTurnState_C13_ToolErrorRetryAfterBgSettles(t *testing.T) {
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.HasLiveTasks(), "should NOT retry while bg live")
 
 	// Bg settles, final continuation ResultMessage carries an error.
@@ -440,7 +455,7 @@ func TestTurnState_C13_ToolErrorRetryAfterBgSettles(t *testing.T) {
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
 		Status: "completed",
 	})
-	s.Apply(resultMessage(true)) // error turn
+	endOfCLITurn(s, true) // error turn
 
 	require.True(t, s.LogicalTurnDone())
 	require.False(t, s.HasLiveTasks(),
@@ -463,7 +478,7 @@ func TestTurnState_CancelledBgToolDoesNotBlock(t *testing.T) {
 		TurnNumber: 1,
 		Blocks:     []claude.ContentBlock{toolResult("toolu_bg", true)},
 	})
-	s.Apply(resultMessage(false))
+	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone(),
 		"cancelled bg tool marked via tool_result IsError — no continuation expected")
 	require.False(t, s.HasLiveTasks())
