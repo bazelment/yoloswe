@@ -514,3 +514,47 @@ Notes:
 - cursor's double-envelope concern (rounds 8+) remains open. A single atomic write would fix it, but the root cause is that `envelopeWritten` isn't set on partial-write failure.
 - Both configs ran in ~175s — unusually tight timing (within 4s of each other). No envelope guard activations.
 - The dual-entrypoint `yoloswe/cmd/code-review/main.go` was NOT raised this round by either reviewer. May have been addressed or deprioritized.
+
+## 2026-04-21 — feature/code-review-gemini (Gemini-only model comparison)
+
+Diff: 10 files, +617/-21 lines (Gemini backend via ACP, integration test, tests)
+
+**Purpose:** Compare three Gemini models for quality and speed — not a multi-backend round.
+
+| Config | Findings | FPs | Verdict | Time | Tokens (in/out) |
+|--------|----------|-----|---------|------|-----------------|
+| gemini-3.1-flash-lite-preview | 0 | 0 | accepted | 31s | — |
+| gemini-3-flash-preview | 2 | 0 | rejected | 145s | — |
+| gemini-3.1-pro-preview | 2 | 0 | accepted | 364s | — |
+
+Envelope guard fired: No — all three received proper envelopes.
+
+gemini-3.1-flash-lite-preview findings: none. Summary: "Implementation appears correct and consistent across the codebase."
+
+gemini-3-flash-preview findings (verdict: rejected):
+1. **high** (`backend_gemini.go:115`): Turn-level errors from `TurnCompleteEvent` not extracted or reported in `ReviewResult.ErrorMessage` — similar to how `backend_cursor.go` handles it. Silent failure risk.
+2. **low** (`backend_cursor.go:202`): `shortPath` helper is private to `backend_cursor.go` but used conceptually by `backend_gemini.go` — suggests moving to a shared location.
+
+gemini-3.1-pro-preview findings (verdict: accepted):
+1. **medium** (`backend_gemini.go:147`): Event adapter normalizes tool names in `ToolCallStartEvent` but not in `ToolCallUpdateEvent` — end events receive unformatted names, mismatching start events in logs.
+2. **low** (`backend_gemini.go:61`): Stderr handler force-appends newline to every non-newline-terminated chunk — progress bars or continuous output emit on separate lines with `[gemini stderr]` prefix.
+
+Consensus (gemini-3-flash + gemini-3.1-pro): none — each model found distinct issues.
+
+Unique to gemini-3-flash-preview: TurnCompleteEvent error not propagated (high — real correctness gap).
+Unique to gemini-3.1-pro-preview: ToolCallUpdateEvent tool name not normalized (medium — logging inconsistency).
+
+**Model comparison:**
+| Model | Speed | Depth | Verdict | Notes |
+|-------|-------|-------|---------|-------|
+| gemini-3.1-flash-lite-preview | 31s (fastest) | shallow | accepted | Found nothing — likely insufficient diff comprehension |
+| gemini-3-flash-preview | 145s | medium | rejected | Found a real correctness bug; showed reasoning trace in stderr |
+| gemini-3.1-pro-preview | 364s (slowest, hit 429 rate-limit retry) | deep | accepted | Found two real issues but graded leniently; most thorough logging analysis |
+
+Notes:
+- gemini-3.1-flash-lite-preview was 4.5× faster than flash but found nothing — likely too shallow for Go code review with substantial diffs.
+- gemini-3-flash-preview found the most actionable issue (TurnComplete error extraction) and was 2.5× faster than pro — best quality/time tradeoff.
+- gemini-3.1-pro-preview hit a 429 rate-limit retry (visible in stderr), contributing to 364s total time. Despite two real findings, it issued "accepted" — lenient verdict calibration.
+- Token counts unavailable for all Gemini runs (not reported by Gemini backend).
+- Gemini backends show reasoning traces on stdout (flash) — useful for understanding why findings were made.
+- The TurnComplete error extraction finding (flash) is the most actionable: real missing defensive code, directly comparable to `backend_cursor.go` pattern.
