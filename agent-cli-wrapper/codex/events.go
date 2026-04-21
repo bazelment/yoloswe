@@ -115,12 +115,11 @@ func (e TurnCompletedEvent) Type() EventType { return EventTypeTurnCompleted }
 func (e TurnCompletedEvent) StreamEventKind() agentstream.EventKind {
 	return agentstream.KindTurnComplete
 }
-func (e TurnCompletedEvent) StreamTurnNum() int                { return TurnNumberFromID(e.TurnID) }
-func (e TurnCompletedEvent) StreamIsSuccess() bool             { return e.Success }
-func (e TurnCompletedEvent) StreamDuration() int64             { return e.DurationMs }
-func (e TurnCompletedEvent) StreamCost() float64               { return 0 }
-func (e TurnCompletedEvent) StreamHasLiveBackgroundWork() bool { return false }
-func (e TurnCompletedEvent) ScopeID() string                   { return e.ThreadID }
+func (e TurnCompletedEvent) StreamTurnNum() int    { return TurnNumberFromID(e.TurnID) }
+func (e TurnCompletedEvent) StreamIsSuccess() bool { return e.Success }
+func (e TurnCompletedEvent) StreamDuration() int64 { return e.DurationMs }
+func (e TurnCompletedEvent) StreamCost() float64   { return 0 }
+func (e TurnCompletedEvent) ScopeID() string       { return e.ThreadID }
 
 // TextDeltaEvent contains streaming text chunks.
 type TextDeltaEvent struct {

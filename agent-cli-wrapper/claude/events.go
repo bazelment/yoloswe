@@ -59,6 +59,27 @@ const (
 	EventTypeToolExecutionProgress
 	// EventTypeLocalCommandOutput fires with text from a local slash command.
 	EventTypeLocalCommandOutput
+	// EventTypeAssistantMessage fires per assistant message, with the full
+	// per-message content blocks as the CLI emitted them. Parallel to the
+	// Python claude-agent-sdk AssistantMessage. Always emitted — independent
+	// of any wrapper-level turn coalescing.
+	EventTypeAssistantMessage
+	// EventTypeResultMessage fires once per CLI "turn" (every ResultMessage
+	// the CLI emits — the Python SDK surfaces each one as ResultMessage).
+	// Unlike TurnCompleteEvent, this is NOT coalesced across suppressed /
+	// auto-continued turns: pure-bg and mixed-bg turns each produce a
+	// ResultMessageEvent at their own ResultMessage boundary. Consumers that
+	// need "logical turn done" semantics must observe the event stream
+	// (bg tool lifecycle + ResultMessage) themselves.
+	EventTypeResultMessage
+	// EventTypeUserMessage fires per user message (CLI-injected tool_result
+	// frames and user-initiated text). Parallel to the Python SDK's
+	// UserMessage. Not coalesced.
+	EventTypeUserMessage
+	// EventTypeSystemMessage fires per system message the CLI emits that is
+	// not already surfaced as a dedicated typed event. Parallel to the Python
+	// SDK's SystemMessage catch-all. Subtype identifies the kind.
+	EventTypeSystemMessage
 )
 
 // HookPhase identifies which hook lifecycle stage a HookLifecycleEvent represents.
@@ -190,11 +211,10 @@ func (e TurnCompleteEvent) Type() EventType { return EventTypeTurnComplete }
 func (e TurnCompleteEvent) StreamEventKind() agentstream.EventKind {
 	return agentstream.KindTurnComplete
 }
-func (e TurnCompleteEvent) StreamTurnNum() int                { return e.TurnNumber }
-func (e TurnCompleteEvent) StreamIsSuccess() bool             { return e.Success }
-func (e TurnCompleteEvent) StreamDuration() int64             { return e.DurationMs }
-func (e TurnCompleteEvent) StreamCost() float64               { return e.Usage.CostUSD }
-func (e TurnCompleteEvent) StreamHasLiveBackgroundWork() bool { return e.HasLiveBackgroundWork }
+func (e TurnCompleteEvent) StreamTurnNum() int    { return e.TurnNumber }
+func (e TurnCompleteEvent) StreamIsSuccess() bool { return e.Success }
+func (e TurnCompleteEvent) StreamDuration() int64 { return e.DurationMs }
+func (e TurnCompleteEvent) StreamCost() float64   { return e.Usage.CostUSD }
 
 // ErrorEvent contains session errors.
 type ErrorEvent struct {
@@ -423,3 +443,61 @@ type LocalCommandOutputEvent struct {
 
 // Type returns the event type.
 func (e LocalCommandOutputEvent) Type() EventType { return EventTypeLocalCommandOutput }
+
+// AssistantMessageEvent fires per assistant message with the full per-message
+// content blocks as the CLI emitted them. Parallel to the Python SDK's
+// AssistantMessage. Emitted raw — independent of any wrapper-level
+// suppression/coalescing of turn completion.
+type AssistantMessageEvent struct {
+	ParentToolUse *string
+	Model         string
+	Blocks        []ContentBlock
+	TurnNumber    int
+}
+
+// Type returns the event type.
+func (e AssistantMessageEvent) Type() EventType { return EventTypeAssistantMessage }
+
+// UserMessageEvent fires per user message. Parallel to the Python SDK's
+// UserMessage. Emitted raw alongside existing typed CLI events.
+type UserMessageEvent struct {
+	ParentToolUse *string
+	Blocks        []ContentBlock
+	TurnNumber    int
+}
+
+// Type returns the event type.
+func (e UserMessageEvent) Type() EventType { return EventTypeUserMessage }
+
+// ResultMessageEvent fires once per CLI ResultMessage (every turn the CLI
+// emits). Parallel to the Python SDK's ResultMessage. Unlike
+// TurnCompleteEvent, this event is NEVER coalesced: pure-bg and mixed-bg
+// turns each produce a ResultMessageEvent at their own ResultMessage
+// boundary. Consumers that need "logical turn done" semantics must observe
+// the raw event stream (bg tool lifecycle + ResultMessage) directly.
+type ResultMessageEvent struct {
+	Error         error
+	Subtype       string
+	StopReason    string
+	Usage         TurnUsage
+	DurationMs    int64
+	DurationAPIMs int64
+	TotalCostUSD  float64
+	TurnNumber    int
+	NumTurns      int
+	IsError       bool
+}
+
+// Type returns the event type.
+func (e ResultMessageEvent) Type() EventType { return EventTypeResultMessage }
+
+// SystemMessageEvent fires per system message that isn't already surfaced as
+// a dedicated typed event. Parallel to the Python SDK's SystemMessage.
+type SystemMessageEvent struct {
+	Data       map[string]interface{}
+	Subtype    string
+	TurnNumber int
+}
+
+// Type returns the event type.
+func (e SystemMessageEvent) Type() EventType { return EventTypeSystemMessage }

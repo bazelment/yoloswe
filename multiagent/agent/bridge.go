@@ -144,18 +144,16 @@ func bridgeEvents[E any](
 				success := tc.StreamIsSuccess()
 				duration := tc.StreamDuration()
 				cost := tc.StreamCost()
-				hasLiveBg := tc.StreamHasLiveBackgroundWork()
 				if handler != nil {
 					handler.OnTurnComplete(turnNum, success, duration, cost)
 				}
 				if out != nil {
 					select {
 					case out <- TurnCompleteAgentEvent{
-						TurnNumber:            turnNum,
-						Success:               success,
-						DurationMs:            duration,
-						CostUSD:               cost,
-						HasLiveBackgroundWork: hasLiveBg,
+						TurnNumber: turnNum,
+						Success:    success,
+						DurationMs: duration,
+						CostUSD:    cost,
 					}:
 					default:
 					}

@@ -15,6 +15,7 @@ go_library(
         "provider_check.go",
         "query.go",
         "session.go",
+        "turn_state.go",
     ],
     importpath = "github.com/bazelment/yoloswe/multiagent/agent",
     visibility = ["//visibility:public"],
@@ -41,6 +42,7 @@ go_test(
         "provider_check_test.go",
         "query_test.go",
         "session_test.go",
+        "turn_state_test.go",
     ],
     embed = [":agent"],
     deps = [

@@ -285,6 +285,17 @@ func (s *Session) Events() <-chan Event {
 	return s.events
 }
 
+// Query sends a user message and starts a new turn. Name and signature
+// mirror the Python claude-agent-sdk's ClaudeSDKClient.query() — consumers
+// that drive the session via the raw Events() stream should use Query
+// rather than SendMessage so the Go and Python APIs read the same.
+// Returns nil on success; the turn number is observable via
+// Events()/CurrentTurnNumber().
+func (s *Session) Query(ctx context.Context, prompt string) error {
+	_, err := s.SendMessage(ctx, prompt)
+	return err
+}
+
 // SendMessage sends a user message and starts a new turn.
 // Returns the turn number.
 func (s *Session) SendMessage(ctx context.Context, content string) (int, error) {
@@ -981,6 +992,18 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		return
 	}
 
+	// Emit raw AssistantMessageEvent for consumers that use the Python-SDK-
+	// parallel streaming API. Fires once per assistant message, carrying the
+	// full per-message blocks as the CLI emitted them. Independent of any
+	// wrapper-level coalescing — pure-bg and mixed-bg turns each produce
+	// their own AssistantMessageEvent.
+	s.emit(AssistantMessageEvent{
+		Model:         msg.Message.Model,
+		Blocks:        protocolBlocksToContentBlocks(blocks),
+		ParentToolUse: msg.ParentToolUseID,
+		TurnNumber:    s.turnManager.CurrentTurnNumber(),
+	})
+
 	// Extract text from complete message
 	for _, block := range blocks {
 		if textBlock, ok := block.(protocol.TextBlock); ok {
@@ -1066,6 +1089,16 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 		return
 	}
 
+	// Emit raw UserMessageEvent for consumers that use the Python-SDK-parallel
+	// streaming API. Mirrors AssistantMessageEvent — fires once per CLI-
+	// emitted user message (typically tool_result frames injected by the CLI
+	// after auto-executed tools).
+	s.emit(UserMessageEvent{
+		Blocks:        protocolBlocksToContentBlocks(blocks),
+		ParentToolUse: msg.ParentToolUseID,
+		TurnNumber:    s.turnManager.CurrentTurnNumber(),
+	})
+
 	// Process tool_result blocks from CLI (CLI auto-executed tools)
 	for _, block := range blocks {
 		if resultBlock, ok := block.(protocol.ToolResultBlock); ok {
@@ -1110,6 +1143,31 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
+	// Emit raw ResultMessageEvent first, BEFORE any suppression decisions.
+	// Consumers on the Python-SDK-parallel streaming API get one event per
+	// CLI ResultMessage, regardless of whether the wrapper-level TurnComplete
+	// path coalesces or suppresses subsequent continuations. This is the
+	// ground truth the new `turn_state.go` policy layer operates on.
+	stopReason := ""
+	s.emit(ResultMessageEvent{
+		Subtype:    msg.Subtype,
+		StopReason: stopReason,
+		TurnNumber: s.turnManager.CurrentTurnNumber(),
+		NumTurns:   msg.NumTurns,
+		Usage: TurnUsage{
+			InputTokens:         msg.Usage.InputTokens,
+			OutputTokens:        msg.Usage.OutputTokens,
+			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
+			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
+			CostUSD:             msg.TotalCostUSD,
+		},
+		DurationMs:    msg.DurationMs,
+		DurationAPIMs: msg.DurationAPIMs,
+		TotalCostUSD:  msg.TotalCostUSD,
+		IsError:       msg.IsError,
+		Error:         resultMessageError(msg),
+	})
+
 	// Cancel any pending background-task safety timer — a normal continuation
 	// ResultMessage has arrived, so the safety path is no longer needed.
 	// If bgState.timerFired is set, the safety timer already completed this turn;
@@ -2022,6 +2080,59 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 		resp = protocol.ElicitationResponse{Action: "cancel"}
 	}
 	s.sendControlSuccess(requestID, resp)
+}
+
+// protocolBlocksToContentBlocks converts parsed protocol blocks into the
+// shared ContentBlock representation used across SDK events. Unknown block
+// types are dropped (they are already logged elsewhere).
+func protocolBlocksToContentBlocks(blocks protocol.ContentBlocks) []ContentBlock {
+	out := make([]ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case protocol.TextBlock:
+			out = append(out, ContentBlock{Type: ContentBlockTypeText, Text: b.Text})
+		case protocol.ThinkingBlock:
+			out = append(out, ContentBlock{Type: ContentBlockTypeThinking, Thinking: b.Thinking})
+		case protocol.ToolUseBlock:
+			out = append(out, ContentBlock{
+				Type:      ContentBlockTypeToolUse,
+				ToolUseID: b.ID,
+				ToolName:  b.Name,
+				ToolInput: b.Input,
+			})
+		case protocol.ToolResultBlock:
+			isError := false
+			if b.IsError != nil {
+				isError = *b.IsError
+			}
+			out = append(out, ContentBlock{
+				Type:       ContentBlockTypeToolResult,
+				ToolUseID:  b.ToolUseID,
+				ToolResult: b.Content,
+				IsError:    isError,
+			})
+		}
+	}
+	return out
+}
+
+// resultMessageError extracts the non-nil error value from a ResultMessage
+// when the CLI reports a failed turn. Mirrors handleResult's error
+// construction but does not depend on accumulated suppression state, so the
+// raw ResultMessageEvent can surface error detail before the coalescing
+// branches run. Returns nil when msg.IsError is false.
+func resultMessageError(msg protocol.ResultMessage) error {
+	if !msg.IsError {
+		return nil
+	}
+	switch {
+	case len(msg.Errors) > 0:
+		return fmt.Errorf("%s", strings.Join(msg.Errors, "; "))
+	case msg.Result != "":
+		return fmt.Errorf("%s", msg.Result)
+	default:
+		return fmt.Errorf("turn failed: %s", msg.Subtype)
+	}
 }
 
 // generateRequestID generates a unique request ID.

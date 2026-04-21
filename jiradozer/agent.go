@@ -115,48 +115,12 @@ func truncate(s string, maxLen int) string {
 }
 
 type StepAgentResult struct {
-	Output                string
-	SessionID             string
-	HasLiveBackgroundWork bool
-}
-
-// LiveBackgroundWorkError formats the shared refusal message for a session
-// that ended with live background work. Callers wrap it with their own
-// step/round context prefix.
-func LiveBackgroundWorkError(sessionID string) error {
-	return fmt.Errorf("session %s ended with live background work (bg Bash/Monitor tasks still running); advancing would silently discard their output — rerun after the bg work completes, or have the agent use ScheduleWakeup/Monitor to wait", sessionID)
-}
-
-// LogLiveBackgroundWorkRefusal emits a uniform slog.Error for every call site
-// that surfaces LiveBackgroundWorkError, so field names and wording cannot drift
-// between the workflow paths and the CLI single-shot paths. Pass total > 0 (and
-// the corresponding round) on the rounds path; pass (0, 0) from single-step
-// call sites. err is the original agent error that coincided with the bg-work
-// refusal — logged so it survives even though the returned error surfaces the
-// bg-work message instead.
-func LogLiveBackgroundWorkRefusal(logger *slog.Logger, stepName, sessionID string, round, total int, err error) {
-	if logger == nil {
-		return
-	}
-	if total > 0 {
-		logger.Error("round ended with live background work — refusing to advance",
-			"step", stepName,
-			"round", round,
-			"total", total,
-			"session_id", sessionID,
-			"agent_error", err,
-		)
-		return
-	}
-	logger.Error("step ended with live background work — refusing to advance",
-		"step", stepName,
-		"session_id", sessionID,
-		"agent_error", err,
-	)
+	Output    string
+	SessionID string
 }
 
 // RunStepAgent runs an agent session for the given workflow step and returns
-// the full StepAgentResult (including HasLiveBackgroundWork).
+// the StepAgentResult.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
 // If renderer is non-nil, agent events are streamed to the terminal.
@@ -339,13 +303,7 @@ func (h *logEventHandler) OnRetry(attempt, max int, tool, excerpt string) {
 
 func (h *logEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 	h.flushText()
-	msg := "retry loop aborted"
-	if reason == agent.RetryStopBgWorkLive {
-		// Expected-case gate: the turn ended with live bg work, so retry
-		// was intentionally skipped. Not a failure.
-		msg = "retry skipped: background work still live"
-	}
-	h.logger.Info(msg,
+	h.logger.Info("retry loop aborted",
 		"step", h.step,
 		"reason", reason,
 		"tool", tool,
@@ -396,10 +354,6 @@ func (h *rendererEventHandler) OnRetry(attempt, max int, tool, _ string) {
 }
 
 func (h *rendererEventHandler) OnRetryAbort(reason, tool, _ string) {
-	if reason == agent.RetryStopBgWorkLive {
-		h.r.Status(fmt.Sprintf("Retry skipped: background work still live (tool %s)", tool))
-		return
-	}
 	h.r.Status(fmt.Sprintf("Retry loop aborted (%s) on tool %s", reason, tool))
 }
 
@@ -532,8 +486,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	if !result.Success {
 		logHandler.flushText()
 		failed := StepAgentResult{
-			SessionID:             result.SessionID,
-			HasLiveBackgroundWork: result.HasLiveBackgroundWork,
+			SessionID: result.SessionID,
 		}
 		if result.Error != nil {
 			return failed, result.Error
@@ -563,9 +516,8 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		output = agent.AppendUnresolvedToolErrorMarker(output, *e)
 	}
 	return StepAgentResult{
-		Output:                output,
-		SessionID:             result.SessionID,
-		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
+		Output:    output,
+		SessionID: result.SessionID,
 	}, nil
 }
 
