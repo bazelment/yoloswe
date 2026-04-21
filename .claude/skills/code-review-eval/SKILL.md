@@ -32,11 +32,9 @@ git diff $(git merge-base origin/main HEAD)..HEAD --stat
 
 ## Step 2: Run each config
 
-Run `bramble code-review --envelope-file` for each config using the Monitor tool.
-`--envelope-file` writes the final ResultEnvelope to a dedicated file; stdout carries
-only NDJSON progress events — exactly what Monitor streams line-by-line. Codex
-defaults to `--read-only` (denies file writes via approval handler). Cursor has no
-read-only mode, so run it last.
+Use the **Monitor tool** for each config. `--envelope-file` writes the final
+ResultEnvelope to a file; stdout carries plain-text progress lines for Monitor to
+stream. Codex defaults to `--read-only`. Cursor has no read-only mode, so run it last.
 
 Create a fresh `$LOG_DIR` under `/tmp/code-review-eval-{timestamp}/`. For each config:
 
@@ -47,30 +45,9 @@ WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
   2>"$LOG_DIR/{NAME}-stderr.txt"
 ```
 
-Where `{FLAGS}` are taken from the config table (e.g. `--backend codex --model gpt-5.4`).
-
-Use the **Monitor tool** with the above command so you can observe progress events
-mid-run and react to them. Set `timeout_ms=600000`. After Monitor signals completion
-for each config, read `$ENVELOPE_FILE` to get the ResultEnvelope.
-
-### Parsing output
-
-Progress events arrive on Monitor's stdout stream (one JSON object per line):
-
-- **Progress events**: `{"event":"progress","kind":"...","tool":"...","detail":"...",...}`
-  - Kinds: `session_info`, `tool_use`, `verdict`
-  - The `verdict` progress event carries `issue_count` (emitted just before the envelope;
-    always emitted even if the envelope file write fails)
-
-After Monitor completes, read the envelope file:
-
-- **ResultEnvelope** (`$ENVELOPE_FILE`): `{"schema_version":1,"verdict":"...","issues":[...],...}`
-
-The always-emit envelope guard ensures a ResultEnvelope is written even if the review
-goroutine panics mid-stream; check stderr for any "envelope guard" messages that indicate
-the guard fired rather than the normal path.
-
-Parse the final envelope to extract: `verdict`, `confidence`, `issues[]`, `summary`.
+Set Monitor `timeout_ms=600000`. After it completes, read `$ENVELOPE_FILE` for the
+ResultEnvelope (`verdict`, `issues[]`, `summary`). Note: codex only reports shell
+command tool calls on stdout; file reads are internal to the codex SDK and not surfaced.
 
 ## Step 3: Compare findings
 
@@ -139,7 +116,6 @@ Recommendation: ...
 |------|-------|
 | Review CLI | `bramble/cmd/codereview/codereview.go` |
 | Reviewer impl | `yoloswe/reviewer/reviewer.go` |
-| Progress stream | `yoloswe/reviewer/progress.go` |
 | Cursor backend | `yoloswe/reviewer/backend_cursor.go` |
 | Codex backend | `yoloswe/reviewer/backend_codex.go` |
 | Run history | `.claude/skills/code-review-eval/data/eval-runs.log` |
