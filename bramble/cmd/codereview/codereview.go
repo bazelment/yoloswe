@@ -207,7 +207,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Fprintf(os.Stdout, "error: %s\n", env.Error)
 	}
 	emitEnvelope(env)
-	return nil
+	return retErr
 }
 
 // maxSeverity returns the highest severity label in issues, using the order

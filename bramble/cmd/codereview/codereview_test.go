@@ -89,10 +89,9 @@ func TestRedactPath(t *testing.T) {
 }
 
 // captureStdStreams redirects os.Stdout and os.Stderr to pipes for the
-// duration of fn, returning whatever was written to each. Many of the
-// --json paths in runCodeReview write the envelope to stdout and
-// diagnostics to stderr; isolating both lets a test assert on the
-// machine-readable contract and the operator-visible message independently.
+// duration of fn, returning whatever was written to each. runCodeReview writes
+// the envelope to stdout (or --envelope-file) and diagnostics to stderr;
+// isolating both lets a test assert on each surface independently.
 func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
 	t.Helper()
 	origOut, origErr := os.Stdout, os.Stderr
@@ -254,38 +253,6 @@ func TestFinalizeEnvelope_PanicEmitsEnvelopeThenRepanics(t *testing.T) {
 		envelopeWritten: &written,
 		retErr:          &retErr,
 		panicVal:        "kaboom",
-		emit:            emit,
-	})
-}
-
-func TestFinalizeEnvelope_PanicAlwaysEmitsAndRepanics(t *testing.T) {
-	// A panic must always produce an envelope (so automation gets a result)
-	// AND re-raise (so the process exits non-zero).
-	written := false
-	var retErr error
-	var got reviewer.ResultEnvelope
-	emit := func(env reviewer.ResultEnvelope) {
-		got = env
-		written = true
-	}
-
-	defer func() {
-		if r := recover(); r != "boom" {
-			t.Errorf("re-raised value = %v, want %q", r, "boom")
-		}
-		if !written {
-			t.Errorf("envelope was not emitted on panic")
-		}
-		if got.Status != reviewer.StatusError {
-			t.Errorf("status = %s, want error", got.Status)
-		}
-	}()
-
-	finalizeEnvelope(envelopeGuardArgs{
-		backend:         "codex",
-		envelopeWritten: &written,
-		retErr:          &retErr,
-		panicVal:        "boom",
 		emit:            emit,
 	})
 }

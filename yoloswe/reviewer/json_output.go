@@ -67,8 +67,9 @@ const (
 	StatusError EnvelopeStatus = "error"
 )
 
-// ResultEnvelope is the stable stdout format emitted by --json mode. The
-// schema_version field lets consumers reject incompatible payloads cleanly.
+// ResultEnvelope is the structured result written on every exit path. It goes
+// to --envelope-file when set, otherwise to stdout. The schema_version field
+// lets consumers reject incompatible payloads cleanly.
 type ResultEnvelope struct {
 	Status        EnvelopeStatus `json:"status"`
 	Backend       string         `json:"backend"`

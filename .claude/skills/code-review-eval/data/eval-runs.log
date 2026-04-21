@@ -313,3 +313,173 @@ Notes:
 - Both codex models converged on **CLI integration test gap** as the remaining real concern. Worth fixing — would be the cleanest way to catch future regressions like the slog-routing one before they ship.
 - cursor's 0.90 confidence is the highest signal of branch readiness yet. With its broad coverage and "correct" verdict, the branch is in solid shape for merge.
 - The dual-entrypoint finding has been raised in 8 of 8 rounds on this branch by codex-5.4 (and most rounds by cursor). Until someone decides to delete or sync `yoloswe/cmd/code-review/main.go`, every reviewer will keep raising it. Consider closing the loop with an explicit decision commit.
+
+## 2026-04-20 (round 7) — feature/bramble-stream-envelope-guard
+
+Diff: 7 files, +621/-19 lines (progress stream + always-emit envelope guard)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 3 | 0 | rejected | — | 77s |
+| codex-5.4-mini | 1 | 0 | rejected | — | 169s |
+| codex-5.4 | 1 | 0 | rejected | — | 220s |
+
+**Note on codex-5.4 observation:** For the first ~200s of the run, the stdout file showed only the `session-started` progress event and the log had only 2 lines (no exit entry). The process eventually completed at 220s. This delayed-output pattern is expected with `run_in_background` + `tee` — the task runner captures stdout when the pipe closes, so intermediate output isn't visible until the process exits.
+
+Cursor findings:
+1. **high**: `emitEnvelope` marks `envelopeWritten` only after `PrintJSONResult` returns nil, but `PrintJSONResult` does two separate `Write` calls. If the first write succeeds and the second fails, the JSON object is already on stdout but `envelopeWritten` stays false — `finalizeEnvelope` then emits a second envelope, breaking the single-envelope guarantee. Fix: single `Write` for payload+newline in `PrintJSONResult`.
+2. **medium**: `OnError` copies `StreamErrorContext` into `ProgressEvent.Detail` without sanitization, potentially leaking host-specific paths via `--json` progress stream to automation consumers. The ProgressEvent doc claims Detail avoids full paths.
+3. **medium**: `Cmd.Long` still describes `--json` as emitting "a stable JSON object on stdout" — help text is now misleading since NDJSON progress lines precede the envelope.
+
+codex-5.4-mini findings:
+1. **high**: `finalizeEnvelope` fallback path (line 306) emits an error envelope when no JSON was written, but never sets `*a.retErr`. The command can exit 0 while stdout reports failure. Fix: set `*a.retErr` before emitting the synthesized error envelope.
+
+codex-5.4 findings:
+1. **medium**: `OnToolStart` in `backend.go` (line ~213) stores the rendered tool label in `ProgressEvent.Tool`. On Cursor, that label includes per-call path/command context (e.g. `read .../file.go`), so the coalescer keys each invocation separately — bursts never coalesce by tool type, defeating the event-budget protection. Fix: emit stable tool identifier (`read`, `shell`) in `Tool`; put optional context in a sanitized `Detail` field.
+
+Consensus: none — each reviewer found a distinct concern.
+
+Unique to cursor: two-write atomicity in `PrintJSONResult` (high); `OnError` Detail sanitization; `Cmd.Long` help text staleness.
+
+Unique to codex-5.4-mini: `finalizeEnvelope` fallback returns nil on guard-emit (exit-0 on synthesized failure).
+
+Unique to codex-5.4: coalescing key uses rendered label (path-enriched) instead of stable tool type — coalescing never fires for Cursor in practice.
+
+Notes:
+- This is the first round on this branch. Three reviewers found three distinct real bugs.
+- The `NDJSONProgressEmitter` data race (score 100 from /review agents) was NOT caught by any of the three reviewers — all focused on `finalizeEnvelope` and coalescing instead.
+- codex-5.4-mini's finding (exit-0 on guard-emit) is the most actionable for automation consumers.
+- codex-5.4's coalescing-key finding is novel: `summarizeToolInput` labels include path context, so each `read` of a different file is a unique key — the 10s window is effectively dead for Cursor.
+- cursor's two-write atomicity concern is real but lower probability than the mutex race and exit-code issue.
+- Times: cursor 77s (3 findings), mini 169s (1 finding), codex-5.4 220s (1 finding).
+
+## 2026-04-20 (round 8) — feature/bramble-stream-envelope-guard (same commit, second run)
+
+Diff: 7 files, +621/-19 lines (same as round 7 — no new commits)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 2 | 0 | **accepted** | — | 55s |
+| codex-5.4 | 2 | 0 | rejected | — | 195s |
+| codex-5.4-mini | 2 | 0 | rejected | — | 202s |
+
+Cursor findings (medium):
+1. `Cmd.Long` still says `--json` emits a single JSON object — misleading since NDJSON progress precedes envelope (9th+ round raising this)
+2. `PrintJSONResult` does two `Write` calls — partial write leaves `envelopeWritten=false`, guard emits second envelope
+
+codex-5.4 findings:
+1. **high**: `emitEnvelope` swallows `PrintJSONResult` failures on the success path and `retErr` stays nil — if stdout is broken/pipe closed, command exits 0 with no valid envelope on stdout. Regresses the previous behavior where write errors surfaced as command errors.
+2. **medium**: help text stale (same as cursor finding 1)
+
+codex-5.4-mini findings:
+1. **high**: Same as codex-5.4 high — write failure on success path keeps `retErr` nil, `finalizeEnvelope` returns success. Exit 0 with no valid envelope.
+2. **medium**: `ProgressKindVerdict` emitted unconditionally even when `BuildEnvelope` classifies run as `StatusError` (malformed reviewer JSON, non-success backend). Produces a normal completion marker (`issue_count`) for a failed review.
+
+Consensus (codex-5.4 + codex-5.4-mini): `emitEnvelope` write failure → exit 0 with no envelope. This is the highest-signal finding of round 8 and sharpens round 7's `retErr` concern — the root is that `emitEnvelope`'s error goes to stderr only, not into `retErr`.
+
+Consensus (cursor + codex-5.4): help text stale (2nd round in a row).
+
+Unique to codex-5.4-mini: `ProgressKindVerdict` emitted on `StatusError` runs — false success signal for error exits.
+
+Notes:
+- Cursor flipped to "accepted" this round (was "rejected" round 7). It accepted despite raising the two-write atomicity concern again — it now considers the overall design correct, gaps are documentation/defensive only.
+- Both codex models independently zeroed in on the write-failure/exit-0 gap. This is the most actionable finding: fix `emitEnvelope` to return an error and propagate into `retErr` on the success path.
+- codex-5.4-mini's `ProgressKindVerdict` finding is new and real — the verdict event should only fire on `StatusOK` or should carry the error status, not always fire.
+- The NDJSONProgressEmitter mutex race (score 100 from /review) still not caught by any reviewer in round 8 either. Two rounds, three reviewers each, zero hits on the race.
+- The help text finding (raised every round by all reviewers) is now clearly the #1 low-effort fix: update `Cmd.Long` to describe NDJSON stream.
+
+## 2026-04-20 (round 9) — feature/bramble-stream-envelope-guard (same commit, third run)
+
+Diff: 7 files, +621/-19 lines (no new commits since rounds 7-8)
+
+| Config | Findings | FPs | Verdict | Time |
+|--------|----------|-----|---------|------|
+| cursor-composer2 | 3 | 0 | **accepted** | 59s |
+| codex-5.4-mini | 2 | 0 | rejected | 122s |
+| codex-5.4 | 3 | 0 | rejected | 284s |
+
+Cursor findings:
+1. **medium**: `Cmd.Long` help text stale — describes `--json` as single envelope, now NDJSON (every round)
+2. **medium**: `emitEnvelope` write failure leaves `envelopeWritten=false`/`retErr=nil`; `finalizeEnvelope` then emits generic "exited without review" instead of surfacing the real write failure
+3. **low**: Comment at `progress.go:63` says structural kinds pass because "interval 0" but they actually pass via switch-case exemption — misleading for maintainers
+
+codex-5.4-mini findings:
+1. **high**: Installing progress emitter on `os.Stdout` for `--json` makes the stream emit multiple JSON objects — breaks existing single-envelope contract, callers that unmarshal-once fail on first progress event
+2. **medium**: Coalescer `last` map never resets on `ProgressKindTurnComplete`; reused `Reviewer` or multi-turn run suppresses the first tool-use event of the next turn if it arrives inside the previous window
+
+codex-5.4 findings:
+1. **high**: `ProgressEvent.Tool` stores the renderer display name (e.g. `read .../file.go`) not a canonical tool kind — leaks path fragments to `--json` stdout, coalescer never dedupes repeated `read`/`shell` across different files (same finding as round 7, now called high severity)
+2. **medium**: `ProgressKindVerdict` emitted unconditionally even when `env.Status == "error"` — same as round 8 mini finding, now confirmed by codex-5.4
+3. **medium**: help text stale (same as cursor)
+
+Consensus (all 3): `Cmd.Long` help text stale — lowest-effort fix, every reviewer in every round.
+Consensus (codex-5.4 + codex-5.4-mini): `ProgressKindVerdict` on error runs — 2nd consecutive round both raise this; real bug.
+Consensus (codex-5.4 + codex-5.4-mini, design disagreement with cursor): NDJSON-on-stdout breaks single-envelope contract vs. cursor accepting this as intentional design with stale docs.
+
+Unique to codex-5.4-mini: coalescer `last` map leaks across turns — new finding, not previously raised.
+Unique to codex-5.4: Tool field uses rendered display name not canonical kind (3rd round raising this).
+Unique to cursor: stale-comment in `progress.go:63` — new low finding.
+
+Notes:
+- The NDJSON-vs-single-envelope contract debate is the core design question for this branch: is `--json` intentionally NDJSON now (update docs) or should progress go to stderr to preserve the single-envelope contract? codex-5.4-mini rates it high (breaking change); cursor rates it medium/docs (intentional). This needs an explicit decision.
+- The coalescer turn-reset finding (mini) is novel and worth fixing: `Reviewer` is documented as reusable, and the `last` map is never cleared, so a second review session on the same `Reviewer` instance would suppress early events. Easy fix: clear `e.last` on `TurnComplete` or scope by session ID.
+- The `ProgressKindVerdict`-on-error finding has now appeared in 3 consecutive reviewer runs across 2 rounds (round 8 mini, round 9 mini+codex-5.4). Strong consensus — fix it.
+- codex-5.4 was slowest again (284s vs 122s for mini, 59s for cursor).
+- The mutex race in `NDJSONProgressEmitter` (score 100) still not caught by any reviewer — 9 total reviewer runs, 0 hits.
+
+## 2026-04-21 (round 10) — feature/bramble-stream-envelope-guard (post commit 19b02b8)
+
+Diff: 7 files, +652/-23 lines (after fixes: mutex race, ProgressKindVerdict gating, emitEnvelope error propagation, single-Write atomicity, TurnComplete coalescer reset, help text, stale comment)
+
+| Config | Findings | FPs | Verdict | Time |
+|--------|----------|-----|---------|------|
+| cursor-composer2 | 3 | 0 | **accepted** | 58s |
+| codex-5.4 | 1 | 0 | rejected | 199s |
+| codex-5.4-mini | 2 | 0 | rejected | 193s |
+
+Verified fixes (none of the three raised these): mutex race, ProgressKindVerdict on StatusError, stale help text (Cmd.Long now describes NDJSON stream), stale progress.go comment, TurnComplete coalescer reset (all three did not re-raise any of these).
+
+cursor-composer2 findings (all medium):
+1. If `PrintJSONResult` fails after a partial write, `envelopeWritten` stays false and `finalizeEnvelope` emits a second error envelope — truncated first line + second JSON object breaks line-by-line consumers (`codereview.go:84`)
+2. Progress write errors silently discarded — broken stdout or serialization failure causes silent loss of progress lines with no signal to automation (`progress.go:123`)
+3. No integration-style test for full `--json` stdout ordering: multiple progress lines + exactly one terminal envelope (`codereview_test.go:121`)
+
+codex-5.4 findings:
+1. **high**: `ProgressKindVerdict` emitted at lines 218-235 before `emitEnvelope(env)` call. If `emitEnvelope` fails, the deferred guard synthesizes an error envelope — consumer sees a success `verdict` event followed by an error terminal result, reintroducing the false-success signal on stdout I/O failure (`codereview.go:218`)
+
+codex-5.4-mini findings:
+1. **high**: `emitEnvelope` sets `retErr` but subsequent `return emitEarlyFailure(...)` / `return nil` paths can overwrite it — stdout write failure not reliably surfaced on all exit paths (`codereview.go:83`)
+2. **medium**: Coalescer only resets on `TurnComplete`, not `session-started` or `error` — aborted-turn reuse still suppresses first tool-use of next session (`progress.go:137`)
+
+Consensus: none across all three. Each reviewer found distinct remaining concerns.
+
+Notes:
+- The mutex race, ProgressKindVerdict gating, and single-Write atomicity fixes all landed cleanly — no reviewer re-raised any of them.
+- codex-5.4 and codex-5.4-mini both zeroed in on the same failure mode (verdict-before-write / retErr-overwritten) from different angles. The root concern is identical: a stdout write failure on the happy path can still produce a misleading success signal. The codex-5.4-mini framing (return-path overwrites) is the more precise characterization.
+- codex-5.4-mini's second finding (reset on session-started) is novel and was flagged in round 10's preview — it's a legitimate edge case for aborted sessions but lower-priority than the write-failure issue.
+- cursor accepted the overall design again (3 medium findings, no blockers). Its "double envelope on partial write" finding is a residual atomicity concern — the single-Write fix in this commit helps but doesn't fully eliminate the window if the kernel partial-writes the combined buffer.
+- The mutex race (score 100 from /review) was never caught in 10 rounds across 3 reviewers = 10 total runs. Now fixed, no regression observed.
+- **This is the final eval round per user instruction.**
+
+## 2026-04-21 — feature/bramble-stream-envelope-guard
+
+Diff: 7 files, +346/-114 lines (replace --json with --envelope-file, remove NDJSON progress machinery)
+
+| Config | Findings | FPs | Verdict | Confidence | Time |
+|--------|----------|-----|---------|------------|------|
+| cursor-composer2 | 6 | 0 | rejected | high | 154s |
+| codex-5.4-mini | 2 | 0 | rejected | high | 275s |
+
+Consensus (both): 
+- [high] return nil on success path silently discards envelope write errors from emitEnvelope (codereview.go:209-210)
+- [medium] no end-to-end test for --envelope-file / stdout-split contract
+
+Unique to cursor:
+- [medium] OnError omits actual err value from stdout line (backend.go:231)
+- [low] ResultEnvelope doc comment still references removed --json flag (json_output.go:70)
+- [low] captureStdStreams test comment still says "--json paths" (codereview_test.go:93)
+- [low] TestFinalizeEnvelope_PanicAlwaysEmitsAndRepanics largely duplicates TestFinalizeEnvelope_PanicEmitsEnvelopeThenRepanics
+
+Unique to codex-5.4-mini: none beyond consensus
+
+Disagreements: none — codex found a strict subset of cursor's findings

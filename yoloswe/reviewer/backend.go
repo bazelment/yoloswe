@@ -195,7 +195,6 @@ func (h *rendererEventHandler) OnToolStart(name, callID string, input map[string
 		"tool", name,
 		"call_id", callID,
 		"input_summary", summarizeToolInput(input))
-	fmt.Fprintf(os.Stdout, "%s\n", name)
 }
 
 func (h *rendererEventHandler) OnToolComplete(name string, callID string, _ map[string]interface{}, result interface{}, isError bool) {
@@ -220,7 +219,6 @@ func (h *rendererEventHandler) OnTurnComplete(success bool, durationMs int64) {
 	slog.Info("reviewer turn complete",
 		"success", success,
 		"duration_ms", durationMs)
-	fmt.Fprintf(os.Stdout, "turn complete\n")
 }
 
 func (h *rendererEventHandler) OnError(err error, context string) {
@@ -228,7 +226,7 @@ func (h *rendererEventHandler) OnError(err error, context string) {
 	slog.Error("reviewer error",
 		"context", context,
 		"error", err.Error())
-	fmt.Fprintf(os.Stdout, "error: %s\n", context)
+	fmt.Fprintf(os.Stdout, "error: %s: %v\n", context, err)
 }
 
 // sensitiveToolInputKeys names keys whose values may contain shell commands,
