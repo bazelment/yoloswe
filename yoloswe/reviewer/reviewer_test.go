@@ -249,6 +249,7 @@ func TestValidateBackend(t *testing.T) {
 	}{
 		{"cursor", false},
 		{"codex", false},
+		{"gemini", false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -259,6 +260,63 @@ func TestValidateBackend(t *testing.T) {
 				t.Errorf("ValidateBackend(%q) error = %v, wantErr %v", tt.backend, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestNew_GeminiBackend(t *testing.T) {
+	r := New(Config{
+		BackendType: BackendGemini,
+	})
+
+	if r.config.BackendType != BackendGemini {
+		t.Errorf("expected gemini backend, got %s", r.config.BackendType)
+	}
+	if r.config.Model != "gemini-2.5-pro" {
+		t.Errorf("expected default model gemini-2.5-pro, got %s", r.config.Model)
+	}
+	if r.backend == nil {
+		t.Error("backend should not be nil for gemini")
+	}
+	// Gemini backend Start and Stop are no-ops.
+	if err := r.backend.Start(nil); err != nil { //nolint:staticcheck
+		t.Errorf("gemini start should be no-op, got error: %v", err)
+	}
+	if err := r.backend.Stop(); err != nil {
+		t.Errorf("gemini stop should be no-op, got error: %v", err)
+	}
+}
+
+func TestNew_GeminiBackend_CustomModel(t *testing.T) {
+	r := New(Config{
+		BackendType: BackendGemini,
+		Model:       "gemini-2.5-flash",
+	})
+	if r.config.Model != "gemini-2.5-flash" {
+		t.Errorf("expected custom model gemini-2.5-flash, got %s", r.config.Model)
+	}
+}
+
+func TestNew_ApprovalPolicyNotOverriddenForGemini(t *testing.T) {
+	r := New(Config{BackendType: BackendGemini})
+	if r.config.ApprovalPolicy != "" {
+		t.Errorf("expected gemini approval policy to remain empty, got %q", r.config.ApprovalPolicy)
+	}
+}
+
+func TestEffectiveModel_GeminiDefault(t *testing.T) {
+	r := New(Config{BackendType: BackendGemini})
+	if got := r.EffectiveModel(); got != "gemini-2.5-pro" {
+		t.Errorf("EffectiveModel() = %q, want gemini-2.5-pro", got)
+	}
+}
+
+func TestValidateBackend_GeminiErrorMessage(t *testing.T) {
+	err := ValidateBackend("unknown")
+	if err == nil {
+		t.Fatal("expected error for unknown backend")
+	}
+	if !containsString(err.Error(), "gemini") {
+		t.Errorf("error message should mention gemini: %q", err.Error())
 	}
 }
 

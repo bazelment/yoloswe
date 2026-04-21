@@ -20,6 +20,7 @@ type BackendType string
 const (
 	BackendCodex  BackendType = "codex"
 	BackendCursor BackendType = "cursor"
+	BackendGemini BackendType = "gemini"
 )
 
 // Config holds reviewer configuration.
@@ -197,6 +198,13 @@ func New(config Config) *Reviewer {
 	if config.BackendType == "" {
 		config.BackendType = BackendCodex
 	}
+	// Apply Gemini-specific defaults.
+	if config.BackendType == BackendGemini {
+		if config.Model == "" {
+			config.Model = "gemini-2.5-pro"
+		}
+	}
+
 	// Apply codex-specific defaults only for codex backend.
 	// See Config doc for why danger-full-access is the default sandbox.
 	if config.BackendType == BackendCodex {
@@ -224,6 +232,8 @@ func New(config Config) *Reviewer {
 	switch config.BackendType {
 	case BackendCursor:
 		backend = newCursorBackend(config)
+	case BackendGemini:
+		backend = newGeminiBackend(config)
 	default:
 		backend = newCodexBackend(config)
 	}
@@ -306,10 +316,10 @@ func (r *Reviewer) LastSessionID() string { return r.lastSessionID }
 // ValidateBackend returns an error if the given backend string is not supported.
 func ValidateBackend(backend string) error {
 	switch BackendType(backend) {
-	case BackendCursor, BackendCodex:
+	case BackendCursor, BackendCodex, BackendGemini:
 		return nil
 	default:
-		return fmt.Errorf("unknown backend %q (supported: cursor, codex)", backend)
+		return fmt.Errorf("unknown backend %q (supported: cursor, codex, gemini)", backend)
 	}
 }
 
