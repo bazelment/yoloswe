@@ -60,9 +60,6 @@ func TestStreamBg_I3_TwoParallelMonitorsOneFailsFast(t *testing.T) {
 	// terminal. Assert each started task reached a terminal status.
 	assertAllTasksTerminal(t, state)
 
-	for status := range map[string]struct{}{} {
-		_ = status
-	}
 	// Each task's terminal status must be one of the known terminal
 	// statuses (completed / failed / killed / timeout). Not a predicate
 	// on which one — the pre-refactor bug was about missing the event
