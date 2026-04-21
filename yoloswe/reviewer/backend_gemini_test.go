@@ -246,7 +246,7 @@ func TestFilterGeminiEvents_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestNewGeminiBackend_StartsAndStopsCleanly(t *testing.T) {
+func TestNewGeminiBackend_StopBeforeStartIsNoop(t *testing.T) {
 	b := newGeminiBackend(Config{
 		BackendType: BackendGemini,
 		Model:       "gemini-2.5-pro",
@@ -254,10 +254,8 @@ func TestNewGeminiBackend_StartsAndStopsCleanly(t *testing.T) {
 	if b == nil {
 		t.Fatal("expected non-nil backend")
 	}
-	if err := b.Start(nil); err != nil { //nolint:staticcheck
-		t.Errorf("Start should be no-op, got error: %v", err)
-	}
+	// Stop before Start must be safe (client is nil).
 	if err := b.Stop(); err != nil {
-		t.Errorf("Stop should be no-op, got error: %v", err)
+		t.Errorf("Stop before Start should be no-op, got error: %v", err)
 	}
 }

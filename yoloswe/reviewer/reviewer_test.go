@@ -264,13 +264,6 @@ func TestNew_GeminiBackend(t *testing.T) {
 	if r.backend == nil {
 		t.Error("backend should not be nil for gemini")
 	}
-	// Gemini backend Start and Stop are no-ops.
-	if err := r.backend.Start(nil); err != nil { //nolint:staticcheck
-		t.Errorf("gemini start should be no-op, got error: %v", err)
-	}
-	if err := r.backend.Stop(); err != nil {
-		t.Errorf("gemini stop should be no-op, got error: %v", err)
-	}
 }
 
 func TestNew_GeminiBackend_CustomModel(t *testing.T) {

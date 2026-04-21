@@ -289,7 +289,10 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {
-		return nil, err
+		if result != nil {
+			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
+		}
+		return result, err
 	}
 	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
@@ -300,7 +303,10 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {
-		return nil, err
+		if result != nil {
+			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
+		}
+		return result, err
 	}
 	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil

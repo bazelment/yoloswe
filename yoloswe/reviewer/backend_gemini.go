@@ -9,7 +9,8 @@ import (
 )
 
 // geminiBackend wraps the Gemini ACP client as a Backend.
-// Each RunPrompt call is a one-shot execution (no persistent session).
+// The ACP client is started once in Start() and reused across RunPrompt calls
+// to support multi-turn review via FollowUp.
 //
 // # Verified model IDs (tested against live Gemini CLI, 2026-04-21)
 //
@@ -23,6 +24,7 @@ import (
 //	Loaded cached credentials.
 //	[STARTUP] Phase 'cli_startup' was started but never ended. Skipping metrics.
 type geminiBackend struct {
+	client *acp.Client
 	config Config
 }
 
@@ -30,20 +32,11 @@ func newGeminiBackend(config Config) *geminiBackend {
 	return &geminiBackend{config: config}
 }
 
-func (b *geminiBackend) Start(_ context.Context) error {
-	return nil
-}
-
-func (b *geminiBackend) Stop() error {
-	return nil
-}
-
-func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
+func (b *geminiBackend) Start(ctx context.Context) error {
 	binaryArgs := []string{"--experimental-acp"}
 	if b.config.Model != "" {
 		binaryArgs = append(binaryArgs, "--model", b.config.Model)
 	}
-
 	client := acp.NewClient(
 		acp.WithClientName("gemini-review"),
 		acp.WithClientVersion("1.0.0"),
@@ -51,16 +44,30 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		acp.WithStderrHandler(stderrPrefixHandler("gemini")),
 	)
 	if err := client.Start(ctx); err != nil {
-		return nil, fmt.Errorf("gemini: failed to start ACP client: %w", err)
+		return fmt.Errorf("gemini: failed to start ACP client: %w", err)
 	}
-	defer client.Stop()
+	b.client = client
+	return nil
+}
+
+func (b *geminiBackend) Stop() error {
+	if b.client != nil {
+		return b.client.Stop()
+	}
+	return nil
+}
+
+func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
+	if b.client == nil {
+		return nil, fmt.Errorf("gemini: backend not started")
+	}
 
 	var sessionOpts []acp.SessionOption
 	if b.config.WorkDir != "" {
 		sessionOpts = append(sessionOpts, acp.WithSessionCWD(b.config.WorkDir))
 	}
 
-	session, err := client.NewSession(ctx, sessionOpts...)
+	session, err := b.client.NewSession(ctx, sessionOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("gemini: failed to create session: %w", err)
 	}
@@ -79,7 +86,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	bridged := make(chan *bridgeResult, 1)
 	bridgeErr := make(chan error, 1)
 	go func() {
-		r, err := bridgeStreamEvents(adapterCtx, filterGeminiEvents(adapterCtx, client.Events()), handler, "")
+		r, err := bridgeStreamEvents(adapterCtx, filterGeminiEvents(adapterCtx, b.client.Events()), handler, "")
 		if err != nil {
 			bridgeErr <- err
 		} else {
@@ -89,10 +96,11 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 
 	_, promptErr := session.Prompt(ctx, prompt)
 
-	// Cancel the adapter context to unblock the bridge goroutine regardless
-	// of whether Prompt succeeded or failed, then drain whatever it produced.
-	// This preserves any text or metadata already streamed before the error.
-	adapterCancel()
+	if promptErr != nil {
+		// Cancel the adapter context to unblock the bridge goroutine on the
+		// error path so we can drain any partial output already streamed.
+		adapterCancel()
+	}
 
 	var r *bridgeResult
 	select {
