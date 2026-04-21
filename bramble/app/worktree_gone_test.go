@@ -70,6 +70,49 @@ func TestUpdateWorktreeDropdown_GoneFiltering(t *testing.T) {
 	}
 }
 
+// TestUpdateWorktreeDropdown_GoneWorktreeSkipsGitStatus verifies that a gone
+// worktree does not render a git-status-derived subtitle (e.g. "clean").
+// GetGitStatus silently ignores errors on missing directories and returns a
+// zero WorktreeStatus, which would otherwise render as a misleading green
+// "clean" badge next to "(gone)". fetchGitStatuses is expected to skip gone
+// worktrees, and updateWorktreeDropdown should not render cached status for
+// them either — we simulate a stale cached status here and assert it's ignored.
+func TestUpdateWorktreeDropdown_GoneWorktreeSkipsGitStatus(t *testing.T) {
+	t.Parallel()
+
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTmux})
+	defer mgr.Close()
+
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
+
+	m.worktrees = []wt.Worktree{
+		{Path: "/tmp/wt/gone-with-sessions", Branch: "gone-with-sessions", IsGone: true},
+	}
+
+	// Simulate a stale cached status from before the worktree went away.
+	m.worktreeStatuses = map[string]*wt.WorktreeStatus{
+		"gone-with-sessions": {IsDirty: false},
+	}
+
+	if _, err := mgr.TrackTmuxWindow("/tmp/wt/gone-with-sessions", "some-task", "@42"); err != nil {
+		t.Fatalf("TrackTmuxWindow: %v", err)
+	}
+
+	m.updateWorktreeDropdown()
+
+	for _, item := range m.worktreeDropdown.items {
+		if item.ID != "gone-with-sessions" {
+			continue
+		}
+		if strings.Contains(item.Subtitle, "clean") {
+			t.Errorf("gone worktree subtitle must not contain 'clean' (stale git status), got %q", item.Subtitle)
+		}
+		if !strings.Contains(item.Subtitle, "sessions") {
+			t.Errorf("gone worktree subtitle should surface session count, got %q", item.Subtitle)
+		}
+	}
+}
+
 func TestUpdateWorktreeDropdown_PreservesSelection(t *testing.T) {
 	t.Parallel()
 

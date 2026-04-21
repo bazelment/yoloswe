@@ -388,13 +388,21 @@ func (m *Model) updateWorktreeDropdown() {
 		}
 
 		var subtitle string
-		if m.worktreeStatuses != nil {
-			if st, ok := m.worktreeStatuses[w.Branch]; ok {
-				subtitle = formatWorktreeStatus(st, sessionCount, m.styles)
+		// Gone worktrees skip git status (directory is gone; git would silently
+		// fail and produce a misleading "clean" status). Show only session count.
+		if w.IsGone {
+			if sessionCount > 0 {
+				subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
 			}
-		}
-		if subtitle == "" && sessionCount > 0 {
-			subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
+		} else {
+			if m.worktreeStatuses != nil {
+				if st, ok := m.worktreeStatuses[w.Branch]; ok {
+					subtitle = formatWorktreeStatus(st, sessionCount, m.styles)
+				}
+			}
+			if subtitle == "" && sessionCount > 0 {
+				subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
+			}
 		}
 
 		var badge string
@@ -571,7 +579,10 @@ func (m Model) fetchGitStatuses() tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(m.worktrees))
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
-		if w.IsGone && len(m.sessionManager.GetSessionsForWorktree(w.Path)) == 0 {
+		// Skip gone worktrees entirely: the directory no longer exists, so git
+		// commands silently fail and produce a zero-valued status that renders
+		// as a misleading green "clean" subtitle next to the "(gone)" badge.
+		if w.IsGone {
 			continue
 		}
 		cmds = append(cmds, func() tea.Msg {
