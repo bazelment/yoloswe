@@ -1,5 +1,5 @@
 // Package reviewer provides a multi-backend wrapper for code review using
-// agent CLIs (Codex, Cursor).
+// agent CLIs (Codex, Cursor, Gemini).
 package reviewer
 
 import (

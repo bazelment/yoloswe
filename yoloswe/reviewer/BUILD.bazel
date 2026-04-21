@@ -37,6 +37,7 @@ go_test(
     ],
     embed = [":reviewer"],
     deps = [
+        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/codex",
     ],

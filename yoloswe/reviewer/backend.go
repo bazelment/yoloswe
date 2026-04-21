@@ -242,9 +242,11 @@ var sensitiveToolInputKeys = map[string]bool{
 	"path":             true,
 	"file_path":        true,
 	"pattern":          true,
+	"query":            true,
 	"simpleCommands":   true,
 	"parsingResult":    true,
 	"args":             true,
+	"url":              true,
 	"workingDirectory": true,
 }
 

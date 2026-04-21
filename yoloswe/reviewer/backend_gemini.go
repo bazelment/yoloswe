@@ -87,17 +87,32 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		}
 	}()
 
-	if _, promptErr := session.Prompt(ctx, prompt); promptErr != nil {
-		return nil, fmt.Errorf("gemini: prompt failed: %w", promptErr)
-	}
+	_, promptErr := session.Prompt(ctx, prompt)
+
+	// Cancel the adapter context to unblock the bridge goroutine regardless
+	// of whether Prompt succeeded or failed, then drain whatever it produced.
+	// This preserves any text or metadata already streamed before the error.
+	adapterCancel()
 
 	var r *bridgeResult
 	select {
 	case r = <-bridged:
 	case err := <-bridgeErr:
+		if promptErr != nil {
+			return nil, fmt.Errorf("gemini: prompt failed: %w (bridge: %v)", promptErr, err)
+		}
 		return nil, fmt.Errorf("gemini: %w", err)
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+
+	if promptErr != nil {
+		return &ReviewResult{
+			ResponseText: r.responseText,
+			Success:      false,
+			DurationMs:   r.durationMs,
+			ErrorMessage: promptErr.Error(),
+		}, fmt.Errorf("gemini: prompt failed: %w", promptErr)
 	}
 
 	if tc, ok := r.turnEvent.(acp.TurnCompleteEvent); ok && tc.Error != nil {

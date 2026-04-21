@@ -1,7 +1,10 @@
 package reviewer
 
 import (
+	"context"
 	"testing"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 )
 
 func TestFormatGeminiToolDisplay(t *testing.T) {
@@ -145,6 +148,101 @@ func TestGeminiFallbackName(t *testing.T) {
 				t.Errorf("geminiFallbackName(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func makeGeminiEventChan(events ...acp.Event) <-chan acp.Event {
+	ch := make(chan acp.Event, len(events))
+	for _, e := range events {
+		ch <- e
+	}
+	close(ch)
+	return ch
+}
+
+func collectFilteredGeminiEvents(ctx context.Context, events ...acp.Event) []acp.Event {
+	out := filterGeminiEvents(ctx, makeGeminiEventChan(events...))
+	var result []acp.Event
+	for e := range out {
+		result = append(result, e)
+	}
+	return result
+}
+
+func TestFilterGeminiEvents_DropsInfrastructureEvents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	got := collectFilteredGeminiEvents(ctx,
+		acp.ClientReadyEvent{AgentName: "gemini"},
+		acp.SessionCreatedEvent{SessionID: "s1"},
+		acp.TextDeltaEvent{Delta: "hello"},
+	)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d: %v", len(got), got)
+	}
+	if _, ok := got[0].(acp.TextDeltaEvent); !ok {
+		t.Errorf("expected TextDeltaEvent, got %T", got[0])
+	}
+}
+
+func TestFilterGeminiEvents_NormalizesToolCallStartName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	got := collectFilteredGeminiEvents(ctx,
+		acp.ToolCallStartEvent{
+			ToolName: "read_file",
+			Input:    map[string]interface{}{"path": "/a/b/c.go"},
+		},
+	)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+	e, ok := got[0].(acp.ToolCallStartEvent)
+	if !ok {
+		t.Fatalf("expected ToolCallStartEvent, got %T", got[0])
+	}
+	if e.ToolName != "read .../b/c.go" {
+		t.Errorf("ToolName = %q, want %q", e.ToolName, "read .../b/c.go")
+	}
+}
+
+func TestFilterGeminiEvents_NormalizesToolCallUpdateName(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	got := collectFilteredGeminiEvents(ctx,
+		acp.ToolCallUpdateEvent{
+			ToolName: "run_shell",
+			Input:    map[string]interface{}{"command": "ls"},
+			Status:   "completed",
+		},
+	)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+	e, ok := got[0].(acp.ToolCallUpdateEvent)
+	if !ok {
+		t.Fatalf("expected ToolCallUpdateEvent, got %T", got[0])
+	}
+	if e.ToolName != "shell: ls" {
+		t.Errorf("ToolName = %q, want %q", e.ToolName, "shell: ls")
+	}
+}
+
+func TestFilterGeminiEvents_ContextCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+
+	// A blocked (non-buffered, never written) channel should drain immediately
+	// because the context is already cancelled.
+	in := make(chan acp.Event)
+	out := filterGeminiEvents(ctx, in)
+	var got []acp.Event
+	for e := range out {
+		got = append(got, e)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 events with cancelled context, got %d", len(got))
 	}
 }
 
