@@ -261,11 +261,6 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 			if res.SessionID != "" {
 				roundSessionIDs = append(roundSessionIDs, res.SessionID)
 			}
-			if res.HasLiveBackgroundWork {
-				LogLiveBackgroundWorkRefusal(w.logger, stepName, res.SessionID, i+1, totalRounds, err)
-				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, LiveBackgroundWorkError(res.SessionID)))
-				return
-			}
 			if err != nil {
 				w.fail(ctx, fmt.Errorf("%s round %d/%d: %w", stepName, i+1, totalRounds, err))
 				return
@@ -323,11 +318,6 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	stepStart := time.Now()
 	cfg := w.config.ResolveStep(stepCfg)
 	res, err := w.runStepAgent(ctx, stepName, w.promptData(), cfg, w.config.WorkDir, feedback, sessionID, w.renderer, w.logger)
-	if res.HasLiveBackgroundWork {
-		LogLiveBackgroundWorkRefusal(w.logger, stepName, res.SessionID, 0, 0, err)
-		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, LiveBackgroundWorkError(res.SessionID)))
-		return
-	}
 	if err != nil {
 		w.fail(ctx, fmt.Errorf("%s step: %w", stepName, err))
 		return

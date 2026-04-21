@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -24,11 +25,6 @@ const (
 	RetryStopNoProgress     = "no_progress"
 	RetryStopBudgetExceeded = "budget_exceeded"
 	RetryStopCtxCancelled   = "ctx_cancelled"
-	// RetryStopBgWorkLive fires when the turn ended with uncancelled
-	// background work the agent deliberately parked on. Re-Asking the
-	// session would interrupt the park and, on ephemeral sessions, the
-	// defer Stop() would orphan the bg work. No retry is attempted.
-	RetryStopBgWorkLive = "bg_work_live"
 )
 
 // FormatUnresolvedToolErrorMarker returns the marker string used to surface
@@ -88,11 +84,24 @@ func emitRetryAbort(h EventHandler, reason, toolName, excerpt string) {
 	}
 }
 
-// retrySession is the minimal slice of *claude.Session that the retry
-// loop depends on. Exists so tests can drive runRetryLoop with a fake
-// that scripts a sequence of TurnResults without spawning a real CLI.
+// retrySession is the minimal slice that the retry loop depends on. Exists
+// so tests can drive runRetryLoop with a fake that scripts a sequence of
+// TurnResults without spawning a real CLI. Production callers supply a
+// streamTurnSession that issues each retry via the raw streaming loop.
 type retrySession interface {
 	Ask(ctx context.Context, content string) (*claude.TurnResult, error)
+}
+
+// streamTurnSession adapts a streaming-turn closure to retrySession. Used by
+// Execute so the retry loop can issue "retry" turns via the same streaming
+// path the initial turn used, without runRetryLoop needing to know about
+// logicalTurnState.
+type streamTurnSession struct {
+	fn func(ctx context.Context, prompt string) (*claude.TurnResult, error)
+}
+
+func (s streamTurnSession) Ask(ctx context.Context, content string) (*claude.TurnResult, error) {
+	return s.fn(ctx, content)
 }
 
 // ClaudeProvider wraps the Claude SDK behind the Provider interface.
@@ -112,14 +121,10 @@ func NewClaudeProvider(sessionOpts ...claude.SessionOption) *ClaudeProvider {
 
 func (p *ClaudeProvider) Name() string { return "claude" }
 
-// runRetryLoop drives the provider-layer retry-on-tool-error loop. Takes
-// the result of the initial Ask and may issue follow-up Asks up to
-// cfg.MaxToolErrorRetries times. Exits early when the turn is parked on
-// bg work (G2), no tool_use_error is present or agent self-recovered (G1/G4), the retry budget is
-// exhausted, or the ctx is cancelled. Returns the final TurnResult, the
-// number of retry Asks issued, and the stop reason recorded on the last
-// decision. The caller appends the unresolved marker and fires
-// OnRetryAbort on the returned stop reason when applicable.
+// runRetryLoop drives the retry-on-tool-error loop: re-issues the turn up to
+// cfg.MaxToolErrorRetries times while a tool_use_error is present. Returns
+// the final result, retry count, and the stop reason (exhausted, no_progress,
+// budget_exceeded, ctx_cancelled, or self-recovered).
 func runRetryLoop(ctx context.Context, session retrySession, initial *claude.TurnResult, cfg ExecuteConfig) (*claude.TurnResult, int, string, error) {
 	result := initial
 	start := time.Now()
@@ -131,14 +136,6 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 		attempts    int
 	)
 	for attempts < cfg.MaxToolErrorRetries {
-		// G2: never retry when the turn ended with live background work.
-		// Re-Ask would interrupt the park and defer session.Stop() would
-		// orphan the bg tasks. Check before the content walk so the signal
-		// dominates even on turns that also carry a tool_use_error.
-		if result.HasLiveBackgroundWork {
-			stopReason = RetryStopBgWorkLive
-			break
-		}
 		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
 		if !ok {
 			break
@@ -214,33 +211,40 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if err := session.Start(ctx); err != nil {
 		return nil, err
 	}
+	defer session.Stop()
 
-	// Bridge Claude events to AgentEvent channel and EventHandler.
-	// session.Stop() closes the events channel, which causes bridgeEvents
-	// to exit naturally after draining all buffered events. We wait on
-	// bridgeDone to ensure all OnToolComplete callbacks (including
-	// ExitPlanMode) have fired before Execute() returns.
-	var bridgeDone chan struct{}
-	if cfg.EventHandler != nil {
-		bridgeDone = make(chan struct{})
-		go func() {
-			bridgeEvents(session.Events(), cfg.EventHandler, p.events, nil, "", nil)
-			close(bridgeDone)
-		}()
-	}
-	defer func() {
-		session.Stop()
-		if bridgeDone != nil {
-			<-bridgeDone
+	// streamTurn drives one logical turn against the session using the raw
+	// event stream. Replaces the old session.Ask path: consume events until
+	// logicalTurnState.LogicalTurnDone() flips, feeding EventHandler + the
+	// AgentEvent channel along the way.
+	streamTurn := func(ctx context.Context, prompt string) (*claude.TurnResult, error) {
+		if err := session.Query(ctx, prompt); err != nil {
+			return nil, err
 		}
-	}()
+		state := newLogicalTurnState()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case ev, ok := <-session.Events():
+				if !ok {
+					return state.ToTurnResult(), state.Err()
+				}
+				state.Apply(ev)
+				dispatchClaudeEvent(ev, cfg.EventHandler, p.events)
+				if state.LogicalTurnDone() {
+					return state.ToTurnResult(), state.Err()
+				}
+			}
+		}
+	}
 
-	result, err := session.Ask(ctx, fullPrompt)
+	result, err := streamTurn(ctx, fullPrompt)
 	if err != nil {
 		return nil, err
 	}
 
-	result, attempts, stopReason, err := runRetryLoop(ctx, session, result, cfg)
+	result, attempts, stopReason, err := runRetryLoop(ctx, streamTurnSession{fn: streamTurn}, result, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -249,12 +253,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
 	}
-	// When bg work is live the retry loop deliberately skips retrying — the
-	// session parked normally and the bg tasks are still running. The result
-	// may still contain a tool_use_error block (e.g. a Skill error that
-	// triggered the park), but surfacing it as an unresolved-tool-error
-	// marker would be misleading: no retry was ever attempted or warranted.
-	if cfg.MaxToolErrorRetries > 0 && stopReason != RetryStopBgWorkLive {
+	if cfg.MaxToolErrorRetries > 0 {
 		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
 			unresolved := &UnresolvedToolError{
 				Tool:     toolName,
@@ -268,7 +267,6 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			// Fire the abort callback once per loop execution that stopped
 			// with a tool error still present. Covers all four stop reasons:
 			// exhausted, no_progress, budget_exceeded, ctx_cancelled.
-			// bg_work_live is excluded above — no retry was attempted.
 			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
 		}
 	}
@@ -326,18 +324,39 @@ func (p *ClaudeLongRunningProvider) Stop() error {
 	return nil
 }
 
+// dispatchClaudeEvent fans a single claude.Event out to an EventHandler and/or
+// AgentEvent channel. Execute drives this synchronously so it can feed
+// logicalTurnState on the same goroutine — long-running providers use
+// bridgeEvents instead.
+//
+// Only events that implement agentstream.Event (Ready, Text, Thinking,
+// ToolStart, ToolEnd, TurnComplete, Error) are bridged to the generic
+// AgentEvent surface. Claude-specific raw events (ResultMessageEvent,
+// AssistantMessageEvent, UserMessageEvent, Task*) are intentionally NOT
+// forwarded: they are consumed internally by logicalTurnState to decide when
+// the logical turn is done, and the agentstream contract is a deliberately
+// smaller, cross-provider subset. Consumers that need the raw Claude event
+// stream should read claude.Session.Events() directly instead of relying on
+// Execute's AgentEvent channel/EventHandler.
+func dispatchClaudeEvent(ev claude.Event, handler EventHandler, out chan<- AgentEvent) {
+	sev, ok := any(ev).(agentstream.Event)
+	if !ok {
+		return
+	}
+	dispatchStreamEvent(sev, handler, out)
+}
+
 // ClaudeResultToAgentResult converts a claude.TurnResult to AgentResult.
 func ClaudeResultToAgentResult(r *claude.TurnResult) *AgentResult {
 	if r == nil {
 		return nil
 	}
 	return &AgentResult{
-		Text:                  r.Text,
-		Thinking:              r.Thinking,
-		Success:               r.Success,
-		Error:                 r.Error,
-		DurationMs:            r.DurationMs,
-		HasLiveBackgroundWork: r.HasLiveBackgroundWork,
+		Text:       r.Text,
+		Thinking:   r.Thinking,
+		Success:    r.Success,
+		Error:      r.Error,
+		DurationMs: r.DurationMs,
 		Usage: AgentUsage{
 			InputTokens:     r.Usage.InputTokens,
 			OutputTokens:    r.Usage.OutputTokens,

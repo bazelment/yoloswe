@@ -9,6 +9,7 @@ go_test(
         "github_test.go",
         "orchestrator_test.go",
         "session_resumption_test.go",
+        "validate_pr_polish_local_test.go",
         "workflow_test.go",
     ],
     env_inherit = [

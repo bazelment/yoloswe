@@ -69,22 +69,21 @@ func cleanBlocks() []claude.ContentBlock {
 	return []claude.ContentBlock{{Type: claude.ContentBlockTypeText, Text: "done"}}
 }
 
-func turnResult(text string, blocks []claude.ContentBlock, bgLive bool) *claude.TurnResult {
+func turnResult(text string, blocks []claude.ContentBlock) *claude.TurnResult {
 	return &claude.TurnResult{
-		Text:                  text,
-		ContentBlocks:         blocks,
-		HasLiveBackgroundWork: bgLive,
-		Success:               true,
+		Text:          text,
+		ContentBlocks: blocks,
+		Success:       true,
 	}
 }
 
 func TestRunRetryLoop_RetriesUntilClean(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("err1", realToolUseErrorBlocks("first"), false)
+	initial := turnResult("err1", realToolUseErrorBlocks("first"))
 	fake := &scriptedSession{
 		responses: []*claude.TurnResult{
-			turnResult("err2", realToolUseErrorBlocks("second"), false),
-			turnResult("clean", cleanBlocks(), false),
+			turnResult("err2", realToolUseErrorBlocks("second")),
+			turnResult("clean", cleanBlocks()),
 		},
 	}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
@@ -111,11 +110,11 @@ func TestRunRetryLoop_RetriesUntilClean(t *testing.T) {
 
 func TestRunRetryLoop_RespectsCountLimit(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("err1", realToolUseErrorBlocks("same"), false)
+	initial := turnResult("err1", realToolUseErrorBlocks("same"))
 	fake := &scriptedSession{
 		responses: []*claude.TurnResult{
 			// second excerpt must differ or no_progress would short-circuit
-			turnResult("err2", realToolUseErrorBlocks("different"), false),
+			turnResult("err2", realToolUseErrorBlocks("different")),
 		},
 	}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 1}
@@ -137,10 +136,10 @@ func TestRunRetryLoop_RespectsCountLimit(t *testing.T) {
 
 func TestRunRetryLoop_NoProgressAborts(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("err1", realToolUseErrorBlocks("identical"), false)
+	initial := turnResult("err1", realToolUseErrorBlocks("identical"))
 	fake := &scriptedSession{
 		responses: []*claude.TurnResult{
-			turnResult("err2", realToolUseErrorBlocks("identical"), false),
+			turnResult("err2", realToolUseErrorBlocks("identical")),
 		},
 	}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 5}
@@ -159,7 +158,7 @@ func TestRunRetryLoop_NoProgressAborts(t *testing.T) {
 
 func TestRunRetryLoop_CtxCancelled(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("err1", realToolUseErrorBlocks("first"), false)
+	initial := turnResult("err1", realToolUseErrorBlocks("first"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before the loop runs
 	fake := &scriptedSession{}
@@ -182,7 +181,7 @@ func TestRunRetryLoop_CtxCancelled(t *testing.T) {
 
 func TestRunRetryLoop_DisabledByDefault(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("err1", realToolUseErrorBlocks("first"), false)
+	initial := turnResult("err1", realToolUseErrorBlocks("first"))
 	fake := &scriptedSession{}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 0}
 
@@ -201,41 +200,12 @@ func TestRunRetryLoop_DisabledByDefault(t *testing.T) {
 	}
 }
 
-// TestRunRetryLoop_SkipsWhenBgWorkLive is the G2 regression for
-// evidence log 1: a Skill disable-model-invocation tool_use_error fired
-// while bg Bash work was parked. Retry would orphan the parked work;
-// the gate must block before the content walk.
-func TestRunRetryLoop_SkipsWhenBgWorkLive(t *testing.T) {
-	t.Parallel()
-	initial := turnResult(
-		"parked",
-		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"),
-		true, // HasLiveBackgroundWork
-	)
-	fake := &scriptedSession{}
-	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
-
-	_, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if attempts != 0 {
-		t.Errorf("expected no retries when bg work is live, got %d", attempts)
-	}
-	if len(fake.asks) != 0 {
-		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
-	}
-	if reason != RetryStopBgWorkLive {
-		t.Errorf("expected stopReason=%s, got %s", RetryStopBgWorkLive, reason)
-	}
-}
-
 // TestRunRetryLoop_SkipsOnNonzeroExitBash is the G1 regression for
 // evidence log 2: `gh pr checks` exit 8 sets IsError but no wrapper.
 // FinalTurnToolError returns ok=false, retry does not fire.
 func TestRunRetryLoop_SkipsOnNonzeroExitBash(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("polling", nonzeroExitBashBlocks(), false)
+	initial := turnResult("polling", nonzeroExitBashBlocks())
 	fake := &scriptedSession{}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
 
@@ -254,14 +224,14 @@ func TestRunRetryLoop_SkipsOnNonzeroExitBash(t *testing.T) {
 	}
 }
 
-// TestRunRetryLoop_RetriesCleanlyOnRealToolUseError ensures G1+G2
+// TestRunRetryLoop_RetriesCleanlyOnRealToolUseError ensures the G1
 // tightening did not break the PLA-212 recover-on-retry path.
 func TestRunRetryLoop_RetriesCleanlyOnRealToolUseError(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("parallel-cancelled", realToolUseErrorBlocks("Cancelled: parallel tool call"), false)
+	initial := turnResult("parallel-cancelled", realToolUseErrorBlocks("Cancelled: parallel tool call"))
 	fake := &scriptedSession{
 		responses: []*claude.TurnResult{
-			turnResult("fixed", cleanBlocks(), false),
+			turnResult("fixed", cleanBlocks()),
 		},
 	}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 2}
@@ -275,67 +245,6 @@ func TestRunRetryLoop_RetriesCleanlyOnRealToolUseError(t *testing.T) {
 	}
 	if result.Text != "fixed" {
 		t.Errorf("expected recovered result, got %q", result.Text)
-	}
-}
-
-// TestRunRetryLoop_SkipsWhenBgWorkLiveAndParallelCancel checks that G2
-// dominates G1 — even a real tool_use_error with the marker does not
-// retry when bg work is live.
-func TestRunRetryLoop_SkipsWhenBgWorkLiveAndParallelCancel(t *testing.T) {
-	t.Parallel()
-	initial := turnResult(
-		"parked+error",
-		realToolUseErrorBlocks("Cancelled: parallel tool call Bash(ruff check) errored"),
-		true,
-	)
-	fake := &scriptedSession{}
-	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
-
-	_, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if attempts != 0 {
-		t.Errorf("expected no retries, got %d", attempts)
-	}
-	if reason != RetryStopBgWorkLive {
-		t.Errorf("expected stopReason=%s, got %s", RetryStopBgWorkLive, reason)
-	}
-}
-
-// TestRunRetryLoop_BgWorkLiveNoUnresolvedError verifies the contract that
-// Execute relies on: when HasLiveBackgroundWork=true and a tool_use_error
-// is present, runRetryLoop returns stopReason=RetryStopBgWorkLive with
-// attempts=0, which causes Execute to SKIP the post-loop UnresolvedToolError
-// block (guarded by stopReason != RetryStopBgWorkLive). This ensures the
-// parked-session case never pollutes agentResult.Text with a spurious
-// "[unresolved tool error (bg_work_live) after 0/N retries]" marker.
-func TestRunRetryLoop_BgWorkLiveNoUnresolvedError(t *testing.T) {
-	t.Parallel()
-	initial := turnResult(
-		"parked",
-		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"),
-		true, // HasLiveBackgroundWork — G2 gate fires
-	)
-	fake := &scriptedSession{}
-	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
-
-	result, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if attempts != 0 {
-		t.Errorf("expected no retries when bg work is live, got %d", attempts)
-	}
-	if reason != RetryStopBgWorkLive {
-		t.Errorf("expected stopReason=%s, got %s", RetryStopBgWorkLive, reason)
-	}
-	// Confirm: FinalTurnToolError WOULD return ok=true on this result,
-	// so the Execute guard (stopReason != RetryStopBgWorkLive) is what
-	// prevents the UnresolvedToolError marker from being appended.
-	_, _, ok := claude.FinalTurnToolError(result.ContentBlocks)
-	if !ok {
-		t.Error("FinalTurnToolError must return ok=true on this result — the Execute guard is what suppresses the marker, not the absence of an error block")
 	}
 }
 
@@ -390,7 +299,7 @@ func TestRunRetryLoop_SkipsWhenAgentRecovered(t *testing.T) {
 // aborts the loop cleanly without masking.
 func TestRunRetryLoop_PropagatesAskError(t *testing.T) {
 	t.Parallel()
-	initial := turnResult("err1", realToolUseErrorBlocks("first"), false)
+	initial := turnResult("err1", realToolUseErrorBlocks("first"))
 	askErr := errors.New("transport boom")
 	fake := &scriptedSession{askErrs: []error{askErr}}
 	cfg := ExecuteConfig{MaxToolErrorRetries: 3}

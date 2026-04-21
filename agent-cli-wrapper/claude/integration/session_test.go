@@ -86,6 +86,45 @@ func CollectTurnEvents(ctx context.Context, s *claude.Session) (*TurnEvents, err
 	}
 }
 
+// CollectTurnEventsWhile keeps draining events until keepGoing returns false
+// OR the context is cancelled. Used for tests that need to consume multiple
+// CLI turns (e.g. background-task continuations) as one logical unit. After
+// each event, keepGoing is invoked with the accumulated state to decide
+// whether to stop; it is also called when TurnCompleteEvent arrives so the
+// caller can observe the per-CLI-turn boundary.
+func CollectTurnEventsWhile(ctx context.Context, s *claude.Session, keepGoing func(*TurnEvents) bool) (*TurnEvents, error) {
+	events := &TurnEvents{}
+	for {
+		select {
+		case <-ctx.Done():
+			return events, ctx.Err()
+		case event, ok := <-s.Events():
+			if !ok {
+				return events, context.Canceled
+			}
+			switch e := event.(type) {
+			case claude.ReadyEvent:
+				events.Ready = &e
+			case claude.TextEvent:
+				events.TextEvents = append(events.TextEvents, e)
+			case claude.ToolStartEvent:
+				events.ToolStarts = append(events.ToolStarts, e)
+			case claude.ToolCompleteEvent:
+				events.ToolComplete = append(events.ToolComplete, e)
+			case claude.CLIToolResultEvent:
+				events.ToolResults = append(events.ToolResults, e)
+			case claude.TurnCompleteEvent:
+				events.TurnComplete = &e
+			case claude.ErrorEvent:
+				events.Errors = append(events.Errors, e)
+			}
+			if !keepGoing(events) {
+				return events, nil
+			}
+		}
+	}
+}
+
 // HasToolNamed checks if any tool with the given name was started.
 func (te *TurnEvents) HasToolNamed(name string) bool {
 	for _, t := range te.ToolStarts {
@@ -573,9 +612,39 @@ func TestSession_Integration_BackgroundTask(t *testing.T) {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
 
-	events, err := CollectTurnEvents(ctx, session)
+	// Post-PR-5 the wrapper no longer coalesces continuation turns. The CLI
+	// emits one ResultMessage+TurnComplete when the agent's first turn ends
+	// (bg task still running) and a second pair after the task-notification
+	// auto-continues the session. The test must pump events through both.
+	events, err := CollectTurnEventsWhile(ctx, session, func(te *TurnEvents) bool {
+		if te.TurnComplete == nil {
+			return true // still collecting first turn
+		}
+		foundBg := false
+		for _, tc := range te.ToolComplete {
+			if tc.Name == "Bash" {
+				if rib, ok := tc.Input["run_in_background"]; ok {
+					if b, ok := rib.(bool); ok && b {
+						foundBg = true
+						break
+					}
+				}
+			}
+		}
+		if !foundBg {
+			// No bg work — single turn is the final answer.
+			return false
+		}
+		// Bg task was used. Keep collecting until the marker text arrives
+		// (continuation turn's text) OR context expires.
+		full := ""
+		for _, t := range te.TextEvents {
+			full += t.Text
+		}
+		return !containsAny(full, "BG_TASK_DONE_MARKER", "bg_task_done_marker", "bg-done")
+	})
 	if err != nil {
-		t.Fatalf("CollectTurnEvents failed: %v", err)
+		t.Fatalf("CollectTurnEventsWhile failed: %v", err)
 	}
 
 	if events.TurnComplete == nil {
@@ -602,8 +671,8 @@ func TestSession_Integration_BackgroundTask(t *testing.T) {
 	}
 
 	// Check that the final text includes the background task output marker.
-	// This confirms the session waited for the background task to complete
-	// rather than returning the intermediate "running in background" text.
+	// This confirms the session delivered the continuation turn's text, not
+	// just the intermediate "running in background" response.
 	fullText := ""
 	for _, te := range events.TextEvents {
 		fullText += te.Text
@@ -611,12 +680,10 @@ func TestSession_Integration_BackgroundTask(t *testing.T) {
 	t.Logf("Final response text (truncated): %.300s", fullText)
 
 	if foundBgTask {
-		// If the agent did use a background task, the final output should
-		// contain our marker string, proving the session waited for completion.
 		if !containsAny(fullText, "BG_TASK_DONE_MARKER", "bg_task_done_marker", "bg-done") {
 			t.Error("Expected final text to contain background task output marker, " +
 				"but got intermediate 'running in background' response instead. " +
-				"This suggests the session did not wait for the background task to complete.")
+				"This suggests the session did not deliver the continuation turn.")
 		}
 	}
 

@@ -59,6 +59,20 @@ const (
 	EventTypeToolExecutionProgress
 	// EventTypeLocalCommandOutput fires with text from a local slash command.
 	EventTypeLocalCommandOutput
+	// EventTypeAssistantMessage fires per assistant message with its full
+	// content blocks. Not coalesced by wrapper-level turn logic.
+	EventTypeAssistantMessage
+	// EventTypeResultMessage fires once per CLI ResultMessage. Unlike
+	// TurnCompleteEvent this is NOT coalesced across bg-continuation turns —
+	// consumers that need "logical turn done" semantics must observe the raw
+	// event stream (see logicalTurnState in multiagent/agent).
+	EventTypeResultMessage
+	// EventTypeUserMessage fires per user message (including CLI-injected
+	// tool_result frames). Not coalesced.
+	EventTypeUserMessage
+	// EventTypeSystemMessage fires for any CLI system message not surfaced
+	// via a dedicated typed event. Subtype identifies the kind.
+	EventTypeSystemMessage
 )
 
 // HookPhase identifies which hook lifecycle stage a HookLifecycleEvent represents.
@@ -176,12 +190,11 @@ func (e CLIToolResultEvent) Type() EventType { return EventTypeCLIToolResult }
 
 // TurnCompleteEvent fires when a turn finishes.
 type TurnCompleteEvent struct {
-	Error                 error
-	Usage                 TurnUsage
-	TurnNumber            int
-	DurationMs            int64
-	Success               bool
-	HasLiveBackgroundWork bool
+	Error      error
+	Usage      TurnUsage
+	TurnNumber int
+	DurationMs int64
+	Success    bool
 }
 
 // Type returns the event type.
@@ -190,11 +203,10 @@ func (e TurnCompleteEvent) Type() EventType { return EventTypeTurnComplete }
 func (e TurnCompleteEvent) StreamEventKind() agentstream.EventKind {
 	return agentstream.KindTurnComplete
 }
-func (e TurnCompleteEvent) StreamTurnNum() int                { return e.TurnNumber }
-func (e TurnCompleteEvent) StreamIsSuccess() bool             { return e.Success }
-func (e TurnCompleteEvent) StreamDuration() int64             { return e.DurationMs }
-func (e TurnCompleteEvent) StreamCost() float64               { return e.Usage.CostUSD }
-func (e TurnCompleteEvent) StreamHasLiveBackgroundWork() bool { return e.HasLiveBackgroundWork }
+func (e TurnCompleteEvent) StreamTurnNum() int    { return e.TurnNumber }
+func (e TurnCompleteEvent) StreamIsSuccess() bool { return e.Success }
+func (e TurnCompleteEvent) StreamDuration() int64 { return e.DurationMs }
+func (e TurnCompleteEvent) StreamCost() float64   { return e.Usage.CostUSD }
 
 // ErrorEvent contains session errors.
 type ErrorEvent struct {
@@ -423,3 +435,54 @@ type LocalCommandOutputEvent struct {
 
 // Type returns the event type.
 func (e LocalCommandOutputEvent) Type() EventType { return EventTypeLocalCommandOutput }
+
+// AssistantMessageEvent fires per assistant message with its full content
+// blocks. Not coalesced by wrapper-level turn logic.
+type AssistantMessageEvent struct {
+	ParentToolUse *string
+	Model         string
+	Blocks        []ContentBlock
+	TurnNumber    int
+}
+
+// Type returns the event type.
+func (e AssistantMessageEvent) Type() EventType { return EventTypeAssistantMessage }
+
+// UserMessageEvent fires per user message (including CLI-injected tool_result
+// frames). Not coalesced.
+type UserMessageEvent struct {
+	ParentToolUse *string
+	Blocks        []ContentBlock
+	TurnNumber    int
+}
+
+// Type returns the event type.
+func (e UserMessageEvent) Type() EventType { return EventTypeUserMessage }
+
+// ResultMessageEvent fires once per CLI ResultMessage. Unlike
+// TurnCompleteEvent it is never coalesced across bg-continuation turns.
+type ResultMessageEvent struct {
+	Error         error
+	Subtype       string
+	Usage         TurnUsage
+	DurationMs    int64
+	DurationAPIMs int64
+	TotalCostUSD  float64
+	TurnNumber    int
+	NumTurns      int
+	IsError       bool
+}
+
+// Type returns the event type.
+func (e ResultMessageEvent) Type() EventType { return EventTypeResultMessage }
+
+// SystemMessageEvent fires for any CLI system message not surfaced via a
+// dedicated typed event. Subtype identifies the kind.
+type SystemMessageEvent struct {
+	Data       map[string]interface{}
+	Subtype    string
+	TurnNumber int
+}
+
+// Type returns the event type.
+func (e SystemMessageEvent) Type() EventType { return EventTypeSystemMessage }

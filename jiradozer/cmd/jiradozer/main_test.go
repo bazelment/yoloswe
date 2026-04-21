@@ -1,15 +1,10 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
@@ -168,113 +163,3 @@ func TestRedactArgs(t *testing.T) {
 		})
 	}
 }
-
-// TestRunSingleStepRounds_RejectsLiveBackgroundWork asserts the multi-round
-// single-step CLI path refuses to advance past a round whose agent result
-// reports HasLiveBackgroundWork.
-func TestRunSingleStepRounds_RejectsLiveBackgroundWork(t *testing.T) {
-	prev := runStepAgentDetailed
-	t.Cleanup(func() { runStepAgentDetailed = prev })
-
-	var calls int
-	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _, _, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
-		calls++
-		return jiradozer.StepAgentResult{
-			Output:                "round output",
-			SessionID:             "sess-live",
-			HasLiveBackgroundWork: true,
-		}, nil
-	}
-
-	resolved := jiradozer.StepConfig{
-		Rounds: []jiradozer.RoundConfig{
-			{Prompt: "first round"},
-			{Prompt: "second round"}, // must NOT run — first round's guard must short-circuit.
-		},
-	}
-
-	err := runSingleStepRounds(context.Background(), "plan", jiradozer.PromptData{}, resolved, t.TempDir(), nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "live background work")
-	assert.Contains(t, err.Error(), "sess-live")
-	assert.Equal(t, 1, calls, "guard must short-circuit before round 2")
-}
-
-// TestRunSingleStep_RejectsLiveBackgroundWork asserts the non-round single-step
-// CLI path (runSingleStep → RunStepAgentDetailed) also refuses to advance.
-func TestRunSingleStep_RejectsLiveBackgroundWork(t *testing.T) {
-	prev := runStepAgentDetailed
-	t.Cleanup(func() { runStepAgentDetailed = prev })
-
-	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _, _, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
-		return jiradozer.StepAgentResult{
-			Output:                "oneshot output",
-			SessionID:             "sess-oneshot",
-			HasLiveBackgroundWork: true,
-		}, nil
-	}
-
-	cfg := &jiradozer.Config{
-		Plan: jiradozer.StepConfig{Prompt: "inline"},
-	}
-	issue := &tracker.Issue{Identifier: "ENG-1", Title: "t"}
-
-	err := runSingleStep(context.Background(), "plan", issue, cfg, "", nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "live background work")
-	assert.Contains(t, err.Error(), "sess-oneshot")
-}
-
-// TestRunSingleStep_PrefersLiveBgWorkOverAgentError asserts that when the
-// agent returns BOTH an error AND HasLiveBackgroundWork, the bg-work refusal
-// path fires — the bg-work message is the actionable one, and swallowing it
-// because the turn also errored would re-open the premature-exit gap.
-func TestRunSingleStep_PrefersLiveBgWorkOverAgentError(t *testing.T) {
-	prev := runStepAgentDetailed
-	t.Cleanup(func() { runStepAgentDetailed = prev })
-
-	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _, _, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
-		return jiradozer.StepAgentResult{
-			SessionID:             "sess-err-live",
-			HasLiveBackgroundWork: true,
-		}, errors.New("agent execution: boom")
-	}
-
-	cfg := &jiradozer.Config{Plan: jiradozer.StepConfig{Prompt: "inline"}}
-	issue := &tracker.Issue{Identifier: "ENG-1", Title: "t"}
-
-	err := runSingleStep(context.Background(), "plan", issue, cfg, "", nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "live background work")
-	assert.Contains(t, err.Error(), "sess-err-live")
-	assert.NotContains(t, err.Error(), "boom", "bg-work message wins over the raw agent error")
-}
-
-// TestRunSingleStepRounds_PrefersLiveBgWorkOverAgentError is the round-based
-// analogue: the bg-work refusal must fire on the first round that reports
-// HasLiveBackgroundWork, regardless of whether the round also returned an
-// error.
-func TestRunSingleStepRounds_PrefersLiveBgWorkOverAgentError(t *testing.T) {
-	prev := runStepAgentDetailed
-	t.Cleanup(func() { runStepAgentDetailed = prev })
-
-	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _, _, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
-		return jiradozer.StepAgentResult{
-			SessionID:             "sess-err-live-rounds",
-			HasLiveBackgroundWork: true,
-		}, errors.New("agent execution: boom")
-	}
-
-	resolved := jiradozer.StepConfig{
-		Rounds: []jiradozer.RoundConfig{{Prompt: "r1"}, {Prompt: "r2"}},
-	}
-
-	err := runSingleStepRounds(context.Background(), "plan", jiradozer.PromptData{}, resolved, t.TempDir(), nil, slog.New(slog.NewTextHandler(discardWriter{}, nil)))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "live background work")
-	assert.Contains(t, err.Error(), "sess-err-live-rounds")
-}
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }

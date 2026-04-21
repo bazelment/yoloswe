@@ -2,6 +2,13 @@
 
 ## Status
 
+**SUPERSEDED.** The `HasLiveBackgroundWork` / `CurrentTurnHasLiveBackgroundWork`
+/ `RetryStopBgWorkLive` approach described below was replaced by the
+Python-SDK-aligned raw event stream + `logicalTurnState` in
+`multiagent/agent/turn_state.go`. The bg-work gate is now implicit: Execute
+does not complete a logical turn while bg tasks are live, so the retry loop
+only ever sees settled results. Kept for historical context.
+
 Follow-up to `jiradozer-tool-error-retry.md` (PR #152, commit 4d57278).
 The v1 design shipped the retry loop in `ClaudeProvider.Execute`, gated on
 `FinalTurnToolError`. In production it fires on turns that should not be

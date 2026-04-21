@@ -65,8 +65,7 @@ func (sa *streamAccumulator) HandleEvent(event protocol.StreamEvent) {
 }
 
 func (sa *streamAccumulator) handleMessageStart(e protocol.MessageStartEvent) {
-	// Reset block states for new message
-	sa.blocks = make(map[int]*blockState)
+	clear(sa.blocks)
 }
 
 func (sa *streamAccumulator) handleContentBlockStart(e protocol.ContentBlockStartEvent) {
@@ -222,11 +221,10 @@ func (sa *streamAccumulator) handleMessageDelta(e protocol.MessageDeltaEvent) {
 }
 
 func (sa *streamAccumulator) handleMessageStop(e protocol.MessageStopEvent) {
-	// Message complete, clean up
-	sa.blocks = make(map[int]*blockState)
+	clear(sa.blocks)
 }
 
 // Reset clears all accumulated state.
 func (sa *streamAccumulator) Reset() {
-	sa.blocks = make(map[int]*blockState)
+	clear(sa.blocks)
 }

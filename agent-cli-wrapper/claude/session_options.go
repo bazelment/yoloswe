@@ -2,7 +2,6 @@ package claude
 
 import (
 	"context"
-	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
@@ -53,7 +52,6 @@ type SessionConfig struct {
 	AllowedTools               []string
 	Agents                     []AgentDefinition
 	DisallowedTools            []string
-	BgTaskSafetyTimeout        time.Duration
 	MaxTurns                   int
 	MaxBudgetUSD               float64
 	EventBufferSize            int
@@ -266,14 +264,6 @@ func WithTools(tools string) SessionOption {
 func WithExtraArgs(args ...string) SessionOption {
 	return func(c *SessionConfig) {
 		c.ExtraArgs = args
-	}
-}
-
-// WithBgTaskSafetyTimeout overrides the default safety timeout for background
-// task turn suppression. Useful for testing. 0 means use the default (90s).
-func WithBgTaskSafetyTimeout(d time.Duration) SessionOption {
-	return func(c *SessionConfig) {
-		c.BgTaskSafetyTimeout = d
 	}
 }
 

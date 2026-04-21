@@ -676,10 +676,6 @@ func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, c
 	}
 
 	res, err := runStepAgentDetailed(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
-	if res.HasLiveBackgroundWork {
-		jiradozer.LogLiveBackgroundWorkRefusal(logger, stepName, res.SessionID, 0, 0, err)
-		return fmt.Errorf("run-step %s: %w", stepName, jiradozer.LiveBackgroundWorkError(res.SessionID))
-	}
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
 	}
@@ -721,10 +717,6 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 			res, err := runStepAgentDetailed(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
 			if res.SessionID != "" {
 				sessionIDs = append(sessionIDs, res.SessionID)
-			}
-			if res.HasLiveBackgroundWork {
-				jiradozer.LogLiveBackgroundWorkRefusal(logger, stepName, res.SessionID, i+1, totalRounds, err)
-				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, jiradozer.LiveBackgroundWorkError(res.SessionID))
 			}
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
