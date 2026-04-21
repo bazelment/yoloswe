@@ -9,6 +9,7 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "integration_test",
     srcs = [
+        "claude_provider_bg_test.go",
         "gemini_session_test.go",
         # plan_permission_test.go excluded: PlanOnlyPermissionHandler tests need
         # rework for Gemini (uses FsHandler for reads, not PermissionHandler).
