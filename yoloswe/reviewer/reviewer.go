@@ -1,5 +1,5 @@
 // Package reviewer provides a multi-backend wrapper for code review using
-// agent CLIs (Codex, Cursor).
+// agent CLIs (Codex, Cursor, Gemini).
 package reviewer
 
 import (
@@ -20,6 +20,11 @@ type BackendType string
 const (
 	BackendCodex  BackendType = "codex"
 	BackendCursor BackendType = "cursor"
+	BackendGemini BackendType = "gemini"
+
+	// DefaultGeminiModel is the model used when BackendGemini is selected and
+	// no --model flag is provided.
+	DefaultGeminiModel = "gemini-3.1-flash-lite-preview"
 )
 
 // Config holds reviewer configuration.
@@ -197,6 +202,13 @@ func New(config Config) *Reviewer {
 	if config.BackendType == "" {
 		config.BackendType = BackendCodex
 	}
+	// Apply Gemini-specific defaults.
+	if config.BackendType == BackendGemini {
+		if config.Model == "" {
+			config.Model = DefaultGeminiModel
+		}
+	}
+
 	// Apply codex-specific defaults only for codex backend.
 	// See Config doc for why danger-full-access is the default sandbox.
 	if config.BackendType == BackendCodex {
@@ -224,6 +236,8 @@ func New(config Config) *Reviewer {
 	switch config.BackendType {
 	case BackendCursor:
 		backend = newCursorBackend(config)
+	case BackendGemini:
+		backend = newGeminiBackend(config)
 	default:
 		backend = newCodexBackend(config)
 	}
@@ -275,7 +289,10 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {
-		return nil, err
+		if result != nil {
+			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
+		}
+		return result, err
 	}
 	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
@@ -286,7 +303,10 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {
-		return nil, err
+		if result != nil {
+			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
+		}
+		return result, err
 	}
 	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
@@ -306,10 +326,10 @@ func (r *Reviewer) LastSessionID() string { return r.lastSessionID }
 // ValidateBackend returns an error if the given backend string is not supported.
 func ValidateBackend(backend string) error {
 	switch BackendType(backend) {
-	case BackendCursor, BackendCodex:
+	case BackendCursor, BackendCodex, BackendGemini:
 		return nil
 	default:
-		return fmt.Errorf("unknown backend %q (supported: cursor, codex)", backend)
+		return fmt.Errorf("unknown backend %q (supported: cursor, codex, gemini)", backend)
 	}
 }
 
@@ -332,7 +352,7 @@ func ResolveWorkDir() (string, error) {
 // collisions between concurrent runs. Returns "" if no log dir is configured.
 //
 // Note: protocol session logging is currently only supported by the Codex
-// backend; the Cursor backend silently ignores SessionLogPath.
+// backend; Cursor and Gemini backends silently ignore SessionLogPath.
 func ResolveProtocolLogPath(flagValue string) (string, error) {
 	dir := flagValue
 	if dir == "" {

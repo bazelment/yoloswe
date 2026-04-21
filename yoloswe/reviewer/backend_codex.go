@@ -3,7 +3,6 @@ package reviewer
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
@@ -23,13 +22,7 @@ func (b *codexBackend) Start(ctx context.Context) error {
 	opts := []codex.ClientOption{
 		codex.WithClientName("codex-review"),
 		codex.WithClientVersion("1.0.0"),
-		codex.WithStderrHandler(func(data []byte) {
-			s := string(data)
-			if s != "" && s[len(s)-1] != '\n' {
-				s += "\n"
-			}
-			fmt.Fprintf(os.Stderr, "[codex stderr] %s", s)
-		}),
+		codex.WithStderrHandler(stderrPrefixHandler("codex")),
 	}
 	// Wire the read-only approval handler at the client level. This is
 	// paired with ApprovalPolicyOnFailure on the thread (set in

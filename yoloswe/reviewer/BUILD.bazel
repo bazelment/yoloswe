@@ -6,13 +6,16 @@ go_library(
         "backend.go",
         "backend_codex.go",
         "backend_cursor.go",
+        "backend_gemini.go",
         "json_output.go",
         "reviewer.go",
         "runlog.go",
+        "tool_display.go",
     ],
     importpath = "github.com/bazelment/yoloswe/yoloswe/reviewer",
     visibility = ["//visibility:public"],
     deps = [
+        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/claude/render",
         "//agent-cli-wrapper/codex",
@@ -25,6 +28,7 @@ go_test(
     name = "reviewer_test",
     srcs = [
         "backend_cursor_test.go",
+        "backend_gemini_test.go",
         "backend_test.go",
         "bridge_test.go",
         "json_output_test.go",
@@ -33,6 +37,7 @@ go_test(
     ],
     embed = [":reviewer"],
     deps = [
+        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/codex",
     ],

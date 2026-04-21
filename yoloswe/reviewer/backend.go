@@ -4,11 +4,25 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 )
+
+// stderrPrefixHandler returns a stderr chunk handler that writes each chunk to
+// os.Stderr tagged with "[prefix stderr] ", ensuring a trailing newline.
+func stderrPrefixHandler(prefix string) func([]byte) {
+	tag := "[" + prefix + " stderr] "
+	return func(data []byte) {
+		os.Stderr.WriteString(tag)
+		os.Stderr.Write(data)
+		if len(data) == 0 || data[len(data)-1] != '\n' {
+			os.Stderr.WriteString("\n")
+		}
+	}
+}
 
 // Backend abstracts the agent lifecycle for different providers.
 type Backend interface {
@@ -228,9 +242,11 @@ var sensitiveToolInputKeys = map[string]bool{
 	"path":             true,
 	"file_path":        true,
 	"pattern":          true,
+	"query":            true,
 	"simpleCommands":   true,
 	"parsingResult":    true,
 	"args":             true,
+	"url":              true,
 	"workingDirectory": true,
 }
 

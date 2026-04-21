@@ -39,7 +39,7 @@ func TestBuildPrompt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prompt := BuildPrompt(tt.goal)
 			for _, s := range tt.contains {
-				if !containsString(prompt, s) {
+				if !strings.Contains(prompt, s) {
 					t.Errorf("BuildPrompt(%q) should contain %q", tt.goal, s)
 				}
 			}
@@ -88,7 +88,7 @@ func TestBuildJSONPrompt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prompt := BuildJSONPrompt(tt.goal)
 			for _, s := range tt.contains {
-				if !containsString(prompt, s) {
+				if !strings.Contains(prompt, s) {
 					t.Errorf("BuildJSONPrompt(%q) should contain %q", tt.goal, s)
 				}
 			}
@@ -197,19 +197,6 @@ func TestNew_CursorBackend(t *testing.T) {
 	}
 }
 
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStringHelper(s, substr))
-}
-
-func containsStringHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
 func TestNew_SessionLogPath(t *testing.T) {
 	r := New(Config{
 		SessionLogPath: "/tmp/test-session.jsonl",
@@ -249,6 +236,7 @@ func TestValidateBackend(t *testing.T) {
 	}{
 		{"cursor", false},
 		{"codex", false},
+		{"gemini", false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -259,6 +247,56 @@ func TestValidateBackend(t *testing.T) {
 				t.Errorf("ValidateBackend(%q) error = %v, wantErr %v", tt.backend, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestNew_GeminiBackend(t *testing.T) {
+	r := New(Config{
+		BackendType: BackendGemini,
+	})
+
+	if r.config.BackendType != BackendGemini {
+		t.Errorf("expected gemini backend, got %s", r.config.BackendType)
+	}
+	if r.config.Model != "gemini-3.1-flash-lite-preview" {
+		t.Errorf("expected default model gemini-3.1-flash-lite-preview, got %s", r.config.Model)
+	}
+	if r.backend == nil {
+		t.Error("backend should not be nil for gemini")
+	}
+}
+
+func TestNew_GeminiBackend_CustomModel(t *testing.T) {
+	r := New(Config{
+		BackendType: BackendGemini,
+		Model:       "gemini-2.5-flash",
+	})
+	if r.config.Model != "gemini-2.5-flash" {
+		t.Errorf("expected custom model gemini-2.5-flash, got %s", r.config.Model)
+	}
+}
+
+func TestNew_ApprovalPolicyNotOverriddenForGemini(t *testing.T) {
+	r := New(Config{BackendType: BackendGemini})
+	if r.config.ApprovalPolicy != "" {
+		t.Errorf("expected gemini approval policy to remain empty, got %q", r.config.ApprovalPolicy)
+	}
+}
+
+func TestEffectiveModel_GeminiDefault(t *testing.T) {
+	r := New(Config{BackendType: BackendGemini})
+	if got := r.EffectiveModel(); got != "gemini-3.1-flash-lite-preview" {
+		t.Errorf("EffectiveModel() = %q, want gemini-3.1-flash-lite-preview", got)
+	}
+}
+
+func TestValidateBackend_GeminiErrorMessage(t *testing.T) {
+	err := ValidateBackend("unknown")
+	if err == nil {
+		t.Fatal("expected error for unknown backend")
+	}
+	if !strings.Contains(err.Error(), "gemini") {
+		t.Errorf("error message should mention gemini: %q", err.Error())
 	}
 }
 
