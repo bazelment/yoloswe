@@ -15,39 +15,6 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
-// defaultBgTaskSafetyTimeout is the maximum time to wait for a continuation
-// ResultMessage after suppressing a turn due to background tasks. If no
-// continuation arrives within this duration, the turn completes with
-// accumulated data to prevent indefinite blocking.
-const defaultBgTaskSafetyTimeout = 90 * time.Second
-
-// bgSuppressionState groups all background-task turn-suppression state.
-// When the CLI runs background tasks (run_in_background: true or tools
-// in backgroundTools such as Monitor), the SDK suppresses the
-// intermediate ResultMessage and waits for either a continuation
-// ResultMessage (auto-continued bg-Bash path) or all registered tasks to
-// reach a terminal state via task_updated/task_notification (Monitor path).
-// Use reset() to clear all fields at turn boundaries.
-type bgSuppressionState struct {
-	timer            *time.Timer // fires if no release signal arrives; see completeSuppressedTurn
-	heldResult       *TurnResult // captured intermediate result, finalized by the release path
-	accumulatedUsage TurnUsage   // token/cost totals from suppressed intermediate results
-	active           bool        // true while waiting for release; cleared by timer, task terminal, or continuation result
-	timerFired       bool        // set by completeSuppressedTurn; cleared at start of next turn
-}
-
-// reset clears all suppression state and stops any pending timer.
-func (b *bgSuppressionState) reset() {
-	b.active = false
-	b.timerFired = false
-	if b.timer != nil {
-		b.timer.Stop()
-		b.timer = nil
-	}
-	b.accumulatedUsage = TurnUsage{}
-	b.heldResult = nil
-}
-
 // wakeupSuppressionState tracks cross-turn suppression for ScheduleWakeup.
 // When the agent calls ScheduleWakeup, the CLI will inject a continuation
 // user message after the specified delay, starting a new assistant turn.
@@ -106,7 +73,6 @@ type Session struct {
 
 	// Value / struct fields.
 	config            SessionConfig
-	bgState           bgSuppressionState     // background-task turn-suppression state; protected by mu
 	wakeupState       wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
 	cumulativeCostUSD float64
 
@@ -311,10 +277,9 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	// Clear any stale suppression state from the previous turn. A safety
-	// timer for Turn N must not fire after Turn N+1 has started, and the
-	// suppressed turn number must not bleed across user-initiated turns.
-	s.bgState.reset()
+	// Clear any stale wakeup suppression state from the previous turn. A
+	// safety timer for Turn N must not fire after Turn N+1 has started, and
+	// the suppressed turn number must not bleed across user-initiated turns.
 	s.wakeupState.reset()
 
 	// Record turn start
@@ -355,8 +320,7 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
-	// Clear any stale suppression state from the previous turn.
-	s.bgState.reset()
+	// Clear any stale wakeup suppression state from the previous turn.
 	s.wakeupState.reset()
 
 	// Record turn start
@@ -426,12 +390,11 @@ func (s *Session) CollectResponse(ctx context.Context) (*TurnResult, []Event, er
 			events = append(events, evt)
 			if tc, ok := evt.(TurnCompleteEvent); ok {
 				result := &TurnResult{
-					TurnNumber:            tc.TurnNumber,
-					Success:               tc.Success,
-					DurationMs:            tc.DurationMs,
-					Usage:                 tc.Usage,
-					Error:                 tc.Error,
-					HasLiveBackgroundWork: tc.HasLiveBackgroundWork,
+					TurnNumber: tc.TurnNumber,
+					Success:    tc.Success,
+					DurationMs: tc.DurationMs,
+					Usage:      tc.Usage,
+					Error:      tc.Error,
 				}
 				// Populate text/blocks from the recorded TurnResult when
 				// available. finalizeTurn stores the final turn's content
@@ -531,7 +494,6 @@ func (s *Session) Stop() error {
 		return nil
 	}
 	s.stopping = true
-	s.bgState.reset()
 	s.wakeupState.reset()
 	s.mu.Unlock()
 
@@ -875,11 +837,6 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 		}
 	case protocol.SystemSubtypeTaskStarted:
 		if p, ok := msg.AsTaskStarted(); ok {
-			toolUseID := ""
-			if p.ToolUseID != nil {
-				toolUseID = *p.ToolUseID
-			}
-			alreadyCompleted := s.turnManager.TrackTask(p.TaskID, toolUseID)
 			s.emit(TaskStartedEvent{
 				ToolUseID:    p.ToolUseID,
 				WorkflowName: p.WorkflowName,
@@ -889,14 +846,6 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 				Prompt:       p.Prompt,
 				TurnNumber:   turnNum,
 			})
-			if alreadyCompleted {
-				// CLI emitted terminal task event before task_started (event
-				// reordering). The earlier UntrackTask could not release
-				// suppression because tasksEverTracked was still 0; now that
-				// TrackTask bumped it, AllTasksCompleted flips true and the
-				// held turn can finalize without waiting for the safety timer.
-				s.maybeReleaseSuppression("task_started:late-after-terminal")
-			}
 		} else {
 			slog.Warn("failed to decode task_started payload")
 		}
@@ -912,13 +861,6 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 				TaskID:         p.TaskID,
 				TurnNumber:     turnNum,
 			})
-			if p.Patch.Status != nil {
-				switch *p.Patch.Status {
-				case "completed", "failed", "killed":
-					s.turnManager.UntrackTask(p.TaskID, "")
-					s.maybeReleaseSuppression("task_updated:" + *p.Patch.Status)
-				}
-			}
 		} else {
 			slog.Warn("failed to decode task_updated payload")
 		}
@@ -947,15 +889,6 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 				Usage:      p.Usage,
 				TurnNumber: turnNum,
 			})
-			// Belt-and-suspenders: task_notification may fire without a
-			// preceding terminal task_updated (e.g. if the bg process writes
-			// stdout on exit). Drain the live set and attempt release.
-			toolUseID := ""
-			if p.ToolUseID != nil {
-				toolUseID = *p.ToolUseID
-			}
-			s.turnManager.UntrackTask(p.TaskID, toolUseID)
-			s.maybeReleaseSuppression("task_notification")
 		} else {
 			slog.Warn("failed to decode task_notification payload")
 		}
@@ -1168,30 +1101,10 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		Error:         resultMessageError(msg),
 	})
 
-	// Cancel any pending background-task safety timer — a normal continuation
-	// ResultMessage has arrived, so the safety path is no longer needed.
-	// If bgState.timerFired is set, the safety timer already completed this turn;
-	// return early to prevent a duplicate TurnCompleteEvent.
-	s.mu.Lock()
-	if s.bgState.timer != nil {
-		s.bgState.timer.Stop()
-		s.bgState.timer = nil
-	}
-	timerAlreadyFired := s.bgState.timerFired
-	s.bgState.timerFired = false // clear; also reset by SendMessage at next turn start
-	// wasSuppressed is true when a prior ResultMessage triggered suppression and
-	// this ResultMessage is the bg-Bash continuation that releases it. In that
-	// case shouldSuppressForBgTasks would still return true (the bg-Bash tool_use
-	// remains in ContentBlocks), but we must NOT re-suppress — this IS the final
-	// result. We detect it by checking whether suppression was active when we
-	// arrive: if active was true, we just cleared it, so this is the continuation.
-	wasSuppressed := s.bgState.active
-	s.bgState.active = false
-	s.bgState.heldResult = nil
-
 	// Cancel any pending wakeup-suppression safety timer.
 	// If the wakeup timer already fired, a duplicate TurnCompleteEvent must
 	// not be emitted — return early.
+	s.mu.Lock()
 	if s.wakeupState.timer != nil {
 		s.wakeupState.timer.Stop()
 		s.wakeupState.timer = nil
@@ -1214,7 +1127,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// branch below re-arms it.
 	s.wakeupState.active = false
 
-	if timerAlreadyFired || wakeupTimerFired {
+	if wakeupTimerFired {
 		s.mu.Unlock()
 		return
 	}
@@ -1228,13 +1141,10 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		durationMs = time.Since(turn.StartTime).Milliseconds()
 	}
 
-	// Collect any accumulated usage from suppressed intermediate results
-	// (background task continuation turns and wakeup-suppressed turns)
-	// to report the full logical-turn cost.
+	// Collect any accumulated usage from wakeup-suppressed turns to report
+	// the full logical-turn cost.
 	s.mu.Lock()
-	accUsage := s.bgState.accumulatedUsage
-	s.bgState.accumulatedUsage = TurnUsage{}
-	accUsage.Add(s.wakeupState.accumulatedUsage)
+	accUsage := s.wakeupState.accumulatedUsage
 	s.wakeupState.accumulatedUsage = TurnUsage{}
 	s.mu.Unlock()
 
@@ -1284,144 +1194,6 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 			result.Error = fmt.Errorf("%s", msg.Result)
 		default:
 			result.Error = fmt.Errorf("turn failed: %s", msg.Subtype)
-		}
-	}
-
-	// Check if ALL non-cancelled tools in this turn were background tasks.
-	// If so, the CLI will auto-continue after the tasks complete (delivering
-	// task-notification messages and starting a new assistant turn). Suppress
-	// turn completion so callers of Ask()/WaitForTurn()/CollectResponse()
-	// block until the truly-final turn.
-	//
-	// When non-bg tools are present (mixed turn), the ResultMessage represents
-	// completion of synchronous work and must not be suppressed.
-	//
-	// When wasSuppressed is true, this ResultMessage is the bg-Bash continuation
-	// that releases prior suppression. The turn's ContentBlocks still contain the
-	// bg-Bash tool_use (so shouldSuppressForBgTasks would return true), but
-	// suppression must not be re-armed — this IS the final result for the turn.
-	shouldSuppress := !wasSuppressed && turn.shouldSuppressForBgTasks()
-
-	// costAccounted tracks whether cumulativeCostUSD has already been updated
-	// for this result (the background-task branch does it early to enable budget
-	// checks mid-turn; the normal path must not double-count).
-	costAccounted := false
-
-	if shouldSuppress {
-		// If the intermediate result carries an error, propagate it now rather
-		// than silently dropping it — the background task continuation will not
-		// arrive, so the session would otherwise stay stuck in StateProcessing.
-		// result.Error was already set above from msg.IsError; just fall through.
-		if msg.IsError {
-			// Fall through to the normal completion path below. Mark the
-			// result as having live bg work so downstream retry loops do
-			// not interrupt the parked tasks — defer session.Stop() on a
-			// retry would orphan them.
-			result.HasLiveBackgroundWork = true
-		} else {
-			// Accumulate cost and token usage from this intermediate result so
-			// the final TurnResult reports the true total for the logical turn.
-			// Also re-add accUsage (usage from earlier suppressed results that was
-			// snapshotted at the top of this call) so multi-background-task turns
-			// accumulate correctly across all suppressed intermediate results.
-			s.mu.Lock()
-			s.cumulativeCostUSD += msg.TotalCostUSD
-			totalCostSoFar := s.cumulativeCostUSD
-			s.bgState.accumulatedUsage.InputTokens += msg.Usage.InputTokens + accUsage.InputTokens
-			s.bgState.accumulatedUsage.OutputTokens += msg.Usage.OutputTokens + accUsage.OutputTokens
-			s.bgState.accumulatedUsage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens + accUsage.CacheCreationTokens
-			s.bgState.accumulatedUsage.CacheReadTokens += msg.Usage.CacheReadInputTokens + accUsage.CacheReadTokens
-			s.bgState.accumulatedUsage.CostUSD += msg.TotalCostUSD + accUsage.CostUSD
-			s.mu.Unlock()
-			costAccounted = true
-
-			// Enforce budget limit: if the intermediate result already pushed us
-			// over budget, surface ErrBudgetExceeded now rather than letting the
-			// continuation turn run up additional cost. Clear accumulated usage so
-			// it does not leak into the next turn's TurnResult.
-			//
-			// Note: the background task is still running in the CLI process and will
-			// send a task-notification when it finishes, producing an unattended
-			// assistant continuation turn. This is an acceptable edge case (budget
-			// exceeded mid-background-turn) and matches existing budget enforcement,
-			// which also does not cancel the CLI process. Callers should call Stop()
-			// after receiving ErrBudgetExceeded if they want to halt fully.
-			if s.config.MaxBudgetUSD > 0 && totalCostSoFar >= s.config.MaxBudgetUSD {
-				result.Error = ErrBudgetExceeded
-				// The background task is still running in the CLI process. Mark
-				// so retry loops do not interrupt it (same guard as the error
-				// and safety-timer paths).
-				result.HasLiveBackgroundWork = true
-				s.mu.Lock()
-				s.bgState.accumulatedUsage = TurnUsage{}
-				s.mu.Unlock()
-				// Fall through to normal completion path to emit TurnCompleteEvent.
-			} else {
-				// Reset accumulator so the continuation turn's streaming events
-				// are processed cleanly.
-				s.accumulator.Reset()
-
-				// Start a safety timer: if no release signal arrives within the
-				// timeout, complete the turn with accumulated data to prevent
-				// indefinite blocking.
-				//
-				// Two release paths exist:
-				//   1. A continuation ResultMessage (auto-continued bg-Bash path).
-				//      The CLI auto-starts a new assistant turn when bg work
-				//      finishes. handleResult clears bgState.active at the top,
-				//      then the new turn has no bg tools so shouldSuppressForBgTasks
-				//      returns false and the turn completes normally.
-				//   2. All registered tasks reach a terminal state via
-				//      task_updated/task_notification (Monitor path —
-				//      maybeReleaseSuppression fires from handleSystem; or the
-				//      AllTasksCompleted fast path fires if tasks completed before
-				//      this ResultMessage arrived).
-				//
-				// The timeout is max(configured, longest bg tool timeout_ms,
-				// 1h upper clamp) so it never releases before the agent's own
-				// deadline (Monitor lets callers pass timeout_ms up to 1h).
-				timeout := defaultBgTaskSafetyTimeout
-				if s.config.BgTaskSafetyTimeout > 0 {
-					timeout = s.config.BgTaskSafetyTimeout
-				}
-				if toolMs := turn.longestBackgroundToolTimeoutMs(); toolMs > 0 {
-					toolTimeout := time.Duration(toolMs) * time.Millisecond
-					if toolTimeout > timeout {
-						timeout = toolTimeout
-					}
-				}
-				if maxTimeout := time.Hour; timeout > maxTimeout {
-					timeout = maxTimeout
-				}
-				safetyResult := result
-				s.mu.Lock()
-				// Fast path: all bg tasks already completed before this
-				// ResultMessage arrived (task_updated/task_notification arrived
-				// first). In that case liveTasks is already empty and no future
-				// task event will call maybeReleaseSuppression, so we must
-				// finalize now rather than hanging until the safety timer fires.
-				//
-				// Only applies when tasks were actually registered (Monitor
-				// path); bg-Bash turns never register tasks and use the
-				// continuation-ResultMessage release path instead.
-				if s.turnManager.AllTasksCompleted() {
-					s.bgState.accumulatedUsage = TurnUsage{}
-					s.mu.Unlock()
-					s.finalizeTurn(safetyResult)
-					return
-				}
-				s.bgState.active = true
-				s.bgState.timerFired = false // reset for this turn's timer
-				s.bgState.heldResult = &safetyResult
-				if s.bgState.timer != nil {
-					s.bgState.timer.Stop()
-				}
-				s.bgState.timer = time.AfterFunc(timeout, func() {
-					s.completeSuppressedTurn(safetyResult)
-				})
-				s.mu.Unlock()
-				return
-			}
 		}
 	}
 
@@ -1508,9 +1280,8 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// Update cumulative cost and check SDK-level limits.
 	// SDK limit errors are only set if there is no existing error from the CLI,
 	// to avoid silently overwriting the real error.
-	// Skip if the background-task branch already accounted for this result's cost.
 	s.mu.Lock()
-	if !costAccounted && !shouldSuppressWakeup {
+	if !shouldSuppressWakeup {
 		s.cumulativeCostUSD += msg.TotalCostUSD
 	}
 	totalCost := s.cumulativeCostUSD
@@ -1534,18 +1305,12 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
-	// Mixed bg+sync turns fell through suppression (sync completion is real),
-	// so flag live bg work here. The suppressed-bg-error and budget-exceeded
-	// branches above already set the flag, hence the wasSuppressed/already-set guards.
-	if !wasSuppressed && !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
-		result.HasLiveBackgroundWork = true
-	}
-
 	s.finalizeTurn(result)
 }
 
-// finalizeTurn records, emits, and completes the turn. Called from both the
-// normal handleResult path and the safety-timer path (completeSuppressedTurn).
+// finalizeTurn records, emits, and completes the turn. Called from the
+// normal handleResult path and from the wakeup safety-timer path
+// (completeWakeupSuppressedTurn).
 //
 // Ordering: turnManager.CompleteTurn runs before s.emit so that any
 // CollectResponse/WaitForTurn caller observing TurnCompleteEvent can look
@@ -1562,46 +1327,12 @@ func (s *Session) finalizeTurn(result TurnResult) {
 	_ = s.state.Transition(TransitionResultReceived)
 	s.turnManager.CompleteTurn(result)
 	s.emit(TurnCompleteEvent{
-		TurnNumber:            result.TurnNumber,
-		Success:               result.Success,
-		DurationMs:            result.DurationMs,
-		Usage:                 result.Usage,
-		Error:                 result.Error,
-		HasLiveBackgroundWork: result.HasLiveBackgroundWork,
+		TurnNumber: result.TurnNumber,
+		Success:    result.Success,
+		DurationMs: result.DurationMs,
+		Usage:      result.Usage,
+		Error:      result.Error,
 	})
-}
-
-// completeSuppressedTurn is called by the background-task safety timer when
-// no release signal arrives within the timeout. It completes the turn with
-// whatever data was accumulated, preventing indefinite blocking.
-func (s *Session) completeSuppressedTurn(result TurnResult) {
-	s.mu.Lock()
-	if !s.bgState.active {
-		s.mu.Unlock()
-		return // Already completed by normal path
-	}
-	s.bgState.active = false
-	s.bgState.timerFired = true
-	s.bgState.timer = nil
-	s.bgState.accumulatedUsage = TurnUsage{}
-	s.bgState.heldResult = nil
-	s.mu.Unlock()
-
-	// Incorporate streaming updates from the correct turn only. Guard with
-	// TurnNumber to avoid cross-contaminating with a new turn that may have
-	// started between the lock release above and this read.
-	turn := s.turnManager.CurrentTurn()
-	if turn != nil && turn.Number == result.TurnNumber {
-		result.Text = turn.FullText
-		result.Thinking = turn.FullThinking
-		result.ContentBlocks = turn.ContentBlocks
-	}
-	// The safety timer fired without any release signal. The bg work is
-	// still live from the session's perspective — mark so retry loops do
-	// not interrupt it.
-	result.HasLiveBackgroundWork = true
-
-	s.finalizeTurn(result)
 }
 
 // completeWakeupSuppressedTurn is the safety-timer equivalent for
@@ -1629,71 +1360,8 @@ func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
 		result.Text = turn.FullText
 		result.Thinking = turn.FullThinking
 		result.ContentBlocks = turn.ContentBlocks
-		// Mirror handleResult: the wakeup safety timer firing does not tell
-		// us anything about bg work state. If the logical turn still has
-		// uncancelled bg Bash/Monitor tools, surface HasLiveBackgroundWork so
-		// retry loops do not interrupt them. Parallel to completeSuppressedTurn
-		// (which sets this unconditionally because bg-task suppression only
-		// activates when bg work exists) and handleResult's mixed-turn check.
-		if !result.HasLiveBackgroundWork && turn.hasLiveBackgroundWork() {
-			result.HasLiveBackgroundWork = true
-		}
 	}
 	s.mu.Unlock()
-
-	s.finalizeTurn(result)
-}
-
-// maybeReleaseSuppression releases a suppressed turn when all live tasks
-// have reached a terminal state. Called from task_updated and
-// task_notification handling after a terminal state is observed. No-op if
-// suppression is not active, if the live set is still non-empty, or if the
-// held result no longer matches the current turn (stale release from a
-// prior turn's leftover task).
-//
-// Unlike completeSuppressedTurn (which is timer-driven and finalizes with a
-// captured copy), this uses bgState.heldResult so both paths surface the
-// same TurnResult.
-func (s *Session) maybeReleaseSuppression(reason string) {
-	s.mu.Lock()
-	if !s.bgState.active || s.bgState.heldResult == nil {
-		s.mu.Unlock()
-		return
-	}
-	// AllTasksCompleted returns false when liveTasks is non-empty (Monitor task
-	// still running), when no tasks were ever registered (bg-Bash only turns
-	// that use the continuation-ResultMessage release path), or when uncancelled
-	// bg-Bash tools are present (mixed Monitor+bg-Bash must defer to the
-	// continuation-ResultMessage path).
-	if !s.turnManager.AllTasksCompleted() {
-		s.mu.Unlock()
-		return
-	}
-	result := *s.bgState.heldResult
-	currentTurnNum := s.turnManager.CurrentTurnNumber()
-	if result.TurnNumber != currentTurnNum {
-		s.mu.Unlock()
-		return
-	}
-	s.bgState.active = false
-	s.bgState.heldResult = nil
-	if s.bgState.timer != nil {
-		s.bgState.timer.Stop()
-		s.bgState.timer = nil
-	}
-	// Leave accumulatedUsage alone — the held result already includes
-	// accumulated usage folded into result.Usage at handleResult time.
-	s.bgState.accumulatedUsage = TurnUsage{}
-	s.mu.Unlock()
-
-	slog.Debug("releasing suppressed turn", "reason", reason, "turn", result.TurnNumber)
-
-	turn := s.turnManager.CurrentTurn()
-	if turn != nil && turn.Number == result.TurnNumber {
-		result.Text = turn.FullText
-		result.Thinking = turn.FullThinking
-		result.ContentBlocks = turn.ContentBlocks
-	}
 
 	s.finalizeTurn(result)
 }
