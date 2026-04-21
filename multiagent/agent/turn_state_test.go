@@ -104,11 +104,20 @@ func TestTurnState_C1_PureBgMonitorTurn(t *testing.T) {
 	// and its paired TurnCompleteEvent.
 	status := "completed"
 	s.Apply(claude.TaskUpdatedEvent{TaskID: "task1", Status: &status})
+	// Gap after terminal task event, before continuation ResultMessage: the
+	// wave-1 (Result, TurnComplete) pair is still in state but a terminal
+	// bg-task event has landed since. LogicalTurnDone MUST stay false —
+	// otherwise streamTurn would return before draining the continuation
+	// wave's Result + TurnComplete.
+	require.False(t, s.LogicalTurnDone(),
+		"terminal TaskUpdatedEvent must invalidate the prior wave's Result+TurnComplete — continuation wave has not arrived")
 	s.Apply(claude.TaskNotificationEvent{
 		TaskID:    "task1",
 		ToolUseID: strPtr("toolu_bg1"),
 		Status:    "completed",
 	})
+	require.False(t, s.LogicalTurnDone(),
+		"terminal TaskNotificationEvent must also keep LogicalTurnDone false until continuation wave arrives")
 	// After the continuation ResultMessage, the state must require the
 	// matching TurnCompleteEvent — a stale wave-1 TurnComplete alone must
 	// not satisfy LogicalTurnDone.
@@ -116,7 +125,7 @@ func TestTurnState_C1_PureBgMonitorTurn(t *testing.T) {
 	rm.TurnNumber = 2
 	s.Apply(rm)
 	require.False(t, s.LogicalTurnDone(),
-		"continuation ResultMessage must invalidate the prior wave's TurnComplete")
+		"continuation ResultMessage must require a fresh TurnComplete")
 	s.Apply(claude.TurnCompleteEvent{
 		TurnNumber: 2,
 		Success:    true,
@@ -530,6 +539,75 @@ func TestTurnState_NewResultMessageInvalidatesPriorTurnComplete(t *testing.T) {
 	s.Apply(claude.TurnCompleteEvent{TurnNumber: 2, Success: true})
 	require.True(t, s.LogicalTurnDone(),
 		"logical turn done once the TurnComplete paired with the latest Result arrives")
+}
+
+// Pure-bg ordering: wave-1 fires (Result1, TurnComplete1) while the bg task
+// is still live, then a terminal TaskNotificationEvent drains the task. At
+// that instant lastResult+lastTurnComplete are both set AND liveTaskIDs is
+// empty AND the bg tool_use is marked done — the naive gate would flip to
+// true here. But the CLI auto-continues after any terminal bg event, so the
+// logical turn is not done until the continuation wave's Result+TurnComplete
+// arrives.
+func TestTurnState_TerminalBgDrainAfterResultRequiresContinuation(t *testing.T) {
+	s := newLogicalTurnState()
+
+	// Wave 1: assistant launches bg Monitor; CLI fires Result+TurnComplete
+	// immediately because it has nothing else to say.
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+	})
+	s.Apply(claude.TaskStartedEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"),
+	})
+	endOfCLITurn(s, false)
+	require.False(t, s.LogicalTurnDone(),
+		"wave-1 alone cannot complete the logical turn while bg task is live")
+
+	// Terminal bg event arrives — drains liveTaskIDs AND marks the bg
+	// tool_use completed. The prior Result+TurnComplete are stale now; the
+	// continuation wave must land before LogicalTurnDone can flip.
+	s.Apply(claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"),
+		Status: "completed",
+	})
+	require.False(t, s.LogicalTurnDone(),
+		"terminal bg event after wave-1 Result+TurnComplete must NOT satisfy LogicalTurnDone — continuation wave pending")
+
+	// Continuation wave lands: Result2 alone is still not enough.
+	rm2 := resultMessage(false)
+	rm2.TurnNumber = 2
+	s.Apply(rm2)
+	require.False(t, s.LogicalTurnDone(),
+		"continuation Result alone cannot satisfy LogicalTurnDone without its paired TurnComplete")
+
+	// Paired TurnComplete closes the turn.
+	s.Apply(claude.TurnCompleteEvent{TurnNumber: 2, Success: true})
+	require.True(t, s.LogicalTurnDone())
+}
+
+// Same shape but using TaskUpdatedEvent (status=completed) as the terminal
+// signal — both event types must invalidate a prior wave's Result+TurnComplete.
+func TestTurnState_TerminalTaskUpdatedAfterResultRequiresContinuation(t *testing.T) {
+	s := newLogicalTurnState()
+
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+	})
+	s.Apply(claude.TaskStartedEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"),
+	})
+	endOfCLITurn(s, false)
+	require.False(t, s.LogicalTurnDone())
+
+	status := "completed"
+	s.Apply(claude.TaskUpdatedEvent{TaskID: "task1", Status: &status})
+	require.False(t, s.LogicalTurnDone(),
+		"terminal TaskUpdatedEvent after wave-1 Result+TurnComplete must invalidate the prior wave")
+
+	endOfCLITurn(s, false)
+	require.True(t, s.LogicalTurnDone())
 }
 
 // A terminal TaskNotificationEvent that arrives before the corresponding

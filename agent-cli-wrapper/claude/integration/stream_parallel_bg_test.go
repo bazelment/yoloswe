@@ -60,6 +60,12 @@ func TestStreamBg_I3_TwoParallelMonitorsOneFailsFast(t *testing.T) {
 	// terminal. Assert each started task reached a terminal status.
 	assertAllTasksTerminal(t, state)
 
+	// The raw stream must emit TurnCompleteEvent for this parallel-bg flow
+	// — parity with I1/I2/I4 in stream_bg_test.go. Without this, the
+	// consumer-side logicalTurnState would never see the gate close on
+	// turns that launch two parallel Monitors.
+	assertTurnCompleteEmitted(t, state)
+
 	// Each task's terminal status must be one of the known terminal
 	// statuses (completed / failed / killed / timeout). Not a predicate
 	// on which one — the pre-refactor bug was about missing the event

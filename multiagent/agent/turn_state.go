@@ -102,6 +102,7 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		if toolUseID != "" {
 			s.completedBgToolUseIDs[toolUseID] = struct{}{}
 		}
+		s.invalidateForContinuation()
 
 	case claude.TaskUpdatedEvent:
 		if e.Status != nil {
@@ -112,6 +113,7 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 				if tuid := s.taskToToolUse[e.TaskID]; tuid != "" {
 					s.completedBgToolUseIDs[tuid] = struct{}{}
 				}
+				s.invalidateForContinuation()
 			}
 		}
 
@@ -166,6 +168,22 @@ func (s *logicalTurnState) LogicalTurnDone() bool {
 // parked session would interrupt the bg work.
 func (s *logicalTurnState) HasLiveTasks() bool {
 	return len(s.liveTaskIDs) > 0 || s.hasUncancelledBgToolUse()
+}
+
+// invalidateForContinuation drops the currently-observed Result+TurnComplete
+// pair when a terminal bg-task event lands after the wave's ResultMessage
+// already arrived. The CLI auto-continues after any terminal bg event, so the
+// logical turn must wait for the continuation wave's Result+TurnComplete pair
+// before it can be considered done. Without this, a wave-1 (Result, TurnComplete)
+// pair followed by a terminal bg event would satisfy LogicalTurnDone
+// immediately — before the continuation wave drains — causing streamTurn to
+// return prematurely.
+func (s *logicalTurnState) invalidateForContinuation() {
+	if s.lastResult == nil {
+		return
+	}
+	s.lastResult = nil
+	s.lastTurnComplete = nil
 }
 
 func (s *logicalTurnState) hasUncancelledBgToolUse() bool {
