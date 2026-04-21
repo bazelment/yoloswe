@@ -3,8 +3,6 @@ package reviewer
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
@@ -46,13 +44,7 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	// with AppArmor unprivileged userns restrictions (same bwrap issue as
 	// Codex—see Config doc in reviewer.go). With or without --force, the
 	// session ends without result when --sandbox is enabled.
-	opts = append(opts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(func(data []byte) {
-		s := string(data)
-		if s != "" && s[len(s)-1] != '\n' {
-			s += "\n"
-		}
-		fmt.Fprintf(os.Stderr, "[cursor stderr] %s", s)
-	}))
+	opts = append(opts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(stderrPrefixHandler("cursor")))
 
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
 	if err != nil {
@@ -130,80 +122,33 @@ func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 	return out
 }
 
-// cursorToolNames maps Cursor tool call names to short display names.
-var cursorToolNames = map[string]string{
-	"readToolCall":        "read",
-	"shellToolCall":       "shell",
-	"globToolCall":        "glob",
-	"grepToolCall":        "grep",
-	"editToolCall":        "edit",
-	"writeToolCall":       "write",
-	"updateTodosToolCall": "updateTodos",
+// cursorToolDisplay renders Cursor's ToolCall events for terminal output.
+var cursorToolDisplay = toolDisplay{
+	tools: map[string]toolInfo{
+		"readToolCall":        {Display: "read", ArgKey: "path", ArgFormat: argFormatPath},
+		"shellToolCall":       {Display: "shell", ArgKey: "command", ArgFormat: argFormatCommand},
+		"globToolCall":        {Display: "glob", ArgKey: "globPattern", ArgFormat: argFormatPlain},
+		"grepToolCall":        {Display: "grep", ArgKey: "pattern", ArgFormat: argFormatPlain},
+		"editToolCall":        {Display: "edit", ArgKey: "path", ArgFormat: argFormatPath},
+		"writeToolCall":       {Display: "write", ArgKey: "path", ArgFormat: argFormatPath},
+		"updateTodosToolCall": {Display: "updateTodos"},
+	},
+	fallback: cursorFallbackName,
 }
 
-// cursorToolArgKeys maps Cursor tool call names to the most informative arg key.
-var cursorToolArgKeys = map[string]string{
-	"readToolCall":  "path",
-	"shellToolCall": "command",
-	"globToolCall":  "globPattern",
-	"grepToolCall":  "pattern",
-	"editToolCall":  "path",
-	"writeToolCall": "path",
+// cursorFallbackName strips the "ToolCall" suffix and lowercases the first
+// letter; e.g. "listFilesToolCall" → "listFiles".
+func cursorFallbackName(name string) string {
+	if !strings.HasSuffix(name, "ToolCall") {
+		return name
+	}
+	s := strings.TrimSuffix(name, "ToolCall")
+	if s == "" {
+		return name
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
 
-// formatCursorToolDisplay formats a cursor tool call into a human-readable display string.
-// e.g. "readToolCall" + {path: "/foo/bar/baz.go"} → "read .../bar/baz.go"
 func formatCursorToolDisplay(name string, input map[string]interface{}) string {
-	displayName, ok := cursorToolNames[name]
-	if !ok {
-		// Strip "ToolCall" suffix and lowercase for unknown tools
-		displayName = name
-		if strings.HasSuffix(displayName, "ToolCall") {
-			displayName = strings.TrimSuffix(displayName, "ToolCall")
-			if displayName != "" {
-				displayName = strings.ToLower(displayName[:1]) + displayName[1:]
-			}
-		}
-	}
-
-	argKey := cursorToolArgKeys[name]
-	if argKey == "" || input == nil {
-		return displayName
-	}
-
-	argVal, ok := input[argKey]
-	if !ok {
-		return displayName
-	}
-
-	argStr, ok := argVal.(string)
-	if !ok || argStr == "" {
-		return displayName
-	}
-
-	// Format the argument value
-	switch argKey {
-	case "path":
-		argStr = shortPath(argStr)
-	case "command":
-		if len(argStr) > 50 {
-			argStr = argStr[:47] + "..."
-		}
-	}
-
-	if name == "shellToolCall" {
-		return displayName + ": " + argStr
-	}
-	return displayName + " " + argStr
-}
-
-// shortPath returns the last 2 path components prefixed with ".../"
-// e.g. "/home/user/project/pkg/file.go" → ".../pkg/file.go"
-func shortPath(p string) string {
-	dir, file := filepath.Split(p)
-	if dir == "" {
-		return file
-	}
-	parent := filepath.Base(filepath.Clean(dir))
-	return ".../" + parent + "/" + file
+	return cursorToolDisplay.format(name, input)
 }

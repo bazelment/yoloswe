@@ -3,7 +3,6 @@ package reviewer
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
@@ -31,38 +30,26 @@ func newGeminiBackend(config Config) *geminiBackend {
 	return &geminiBackend{config: config}
 }
 
-// Start is a no-op for Gemini (one-shot per prompt via ACP).
 func (b *geminiBackend) Start(_ context.Context) error {
 	return nil
 }
 
-// Stop is a no-op for Gemini (one-shot per prompt via ACP).
 func (b *geminiBackend) Stop() error {
 	return nil
 }
 
 func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
-	// Build ACP client options. The default binary is "gemini" with
-	// "--experimental-acp"; we override args to also set --model if specified.
 	binaryArgs := []string{"--experimental-acp"}
 	if b.config.Model != "" {
 		binaryArgs = append(binaryArgs, "--model", b.config.Model)
 	}
 
-	opts := []acp.ClientOption{
+	client := acp.NewClient(
 		acp.WithClientName("gemini-review"),
 		acp.WithClientVersion("1.0.0"),
 		acp.WithBinaryArgs(binaryArgs...),
-		acp.WithStderrHandler(func(data []byte) {
-			s := string(data)
-			if s != "" && s[len(s)-1] != '\n' {
-				s += "\n"
-			}
-			fmt.Fprintf(os.Stderr, "[gemini stderr] %s", s)
-		}),
-	}
-
-	client := acp.NewClient(opts...)
+		acp.WithStderrHandler(stderrPrefixHandler("gemini")),
+	)
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("gemini: failed to start ACP client: %w", err)
 	}
@@ -77,26 +64,22 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	if err != nil {
 		return nil, fmt.Errorf("gemini: failed to create session: %w", err)
 	}
-
-	// Extract agent info from ClientReadyEvent for OnSessionInfo.
-	// The session ID comes from SessionCreatedEvent; we capture it from
-	// the events channel before prompting, since Prompt blocks until done.
-	sessionID := session.ID()
-
-	// Notify the handler with session info (model may be empty when Gemini picks its own default).
 	if handler != nil {
-		handler.OnSessionInfo(sessionID, b.config.Model)
+		// ACP does not emit a ReadyEvent equivalent with model info; report
+		// what we configured so callers see a stable session start.
+		handler.OnSessionInfo(session.ID(), b.config.Model)
 	}
 
-	// Use a derived context so the adapter goroutine is unblocked on early return.
+	// Derived context unblocks the filter goroutine's sends on early return.
 	adapterCtx, adapterCancel := context.WithCancel(ctx)
 	defer adapterCancel()
 
-	// Start the event adapter goroutine before Prompt (which blocks until turn complete).
-	adapter := &geminiEventAdapter{handler: handler, events: client.Events()}
-	bridged, bridgeErr := make(chan *bridgeResult, 1), make(chan error, 1)
+	// Prompt blocks until turn complete while events are delivered through
+	// the event channel, so the bridge must drain concurrently.
+	bridged := make(chan *bridgeResult, 1)
+	bridgeErr := make(chan error, 1)
 	go func() {
-		r, err := bridgeStreamEvents(adapterCtx, adapter.filtered(adapterCtx), handler, "")
+		r, err := bridgeStreamEvents(adapterCtx, filterGeminiEvents(adapterCtx, client.Events()), handler, "")
 		if err != nil {
 			bridgeErr <- err
 		} else {
@@ -104,55 +87,59 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		}
 	}()
 
-	result, promptErr := session.Prompt(ctx, prompt)
-	if promptErr != nil {
+	if _, promptErr := session.Prompt(ctx, prompt); promptErr != nil {
 		return nil, fmt.Errorf("gemini: prompt failed: %w", promptErr)
 	}
-	_ = result // bridgeStreamEvents handles TurnComplete
 
-	// Wait for the bridge goroutine to finish processing events.
+	var r *bridgeResult
 	select {
-	case r := <-bridged:
-		return &ReviewResult{
-			ResponseText: r.responseText,
-			Success:      r.success,
-			DurationMs:   r.durationMs,
-		}, nil
+	case r = <-bridged:
 	case err := <-bridgeErr:
 		return nil, fmt.Errorf("gemini: %w", err)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+
+	if tc, ok := r.turnEvent.(acp.TurnCompleteEvent); ok && tc.Error != nil {
+		if handler != nil {
+			handler.OnError(tc.Error, "turn_complete")
+		}
+		return nil, fmt.Errorf("gemini turn failed: %w", tc.Error)
+	}
+
+	return &ReviewResult{
+		ResponseText: r.responseText,
+		Success:      r.success,
+		DurationMs:   r.durationMs,
+	}, nil
 }
 
-// geminiEventAdapter filters ACP events before they reach bridgeStreamEvents.
-// It handles ClientReadyEvent and SessionCreatedEvent out-of-band and
-// normalizes Gemini tool names for display.
-type geminiEventAdapter struct {
-	handler EventHandler
-	events  <-chan acp.Event
-}
-
-// filtered returns a channel that re-emits ACP events as acp.Event,
-// handling infrastructure events separately and normalizing tool names.
-func (a *geminiEventAdapter) filtered(ctx context.Context) <-chan acp.Event {
+// filterGeminiEvents re-emits ACP events, dropping infrastructure events
+// (ClientReady/SessionCreated) and normalizing tool names on start/update
+// events so the bridge and downstream renderer see the display name.
+func filterGeminiEvents(ctx context.Context, events <-chan acp.Event) <-chan acp.Event {
 	out := make(chan acp.Event)
 	go func() {
 		defer close(out)
-		for ev := range a.events {
-			switch e := ev.(type) {
-			case acp.ClientReadyEvent, acp.SessionCreatedEvent:
-				// Infrastructure events: not part of agentstream; drop silently.
-				_ = e
-			case acp.ToolCallStartEvent:
-				// Normalize Gemini tool names before bridge sees them.
-				e.ToolName = formatGeminiToolDisplay(e.ToolName, e.Input)
-				select {
-				case out <- e:
-				case <-ctx.Done():
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-events:
+				if !ok {
 					return
 				}
-			default:
+				switch e := ev.(type) {
+				case acp.ClientReadyEvent, acp.SessionCreatedEvent:
+					// agentstream.KindUnknown; bridge would drop anyway.
+					continue
+				case acp.ToolCallStartEvent:
+					e.ToolName = formatGeminiToolDisplay(e.ToolName, e.Input)
+					ev = e
+				case acp.ToolCallUpdateEvent:
+					e.ToolName = formatGeminiToolDisplay(e.ToolName, e.Input)
+					ev = e
+				}
 				select {
 				case out <- ev:
 				case <-ctx.Done():
@@ -164,98 +151,35 @@ func (a *geminiEventAdapter) filtered(ctx context.Context) <-chan acp.Event {
 	return out
 }
 
-// geminiToolNames maps Gemini CLI tool names to short display names.
-var geminiToolNames = map[string]string{
-	"read_file":   "read",
-	"write_file":  "write",
-	"run_shell":   "shell",
-	"list_dir":    "ls",
-	"glob":        "glob",
-	"grep":        "grep",
-	"edit":        "edit",
-	"search":      "search",
-	"web_fetch":   "fetch",
-	"web_search":  "search",
-	"view_file":   "read",
-	"create_file": "write",
-	"delete_file": "delete",
-	"rename_file": "rename",
-	"list_files":  "ls",
-	"bash":        "shell",
-	"python":      "python",
+// geminiToolDisplay renders Gemini's ACP tool calls for terminal output.
+// Entries here reflect tools observed in live Gemini CLI runs; unknown names
+// fall through to geminiFallbackName (strip _file/_text/_dir).
+var geminiToolDisplay = toolDisplay{
+	tools: map[string]toolInfo{
+		"read_file":  {Display: "read", ArgKey: "path", ArgFormat: argFormatPath},
+		"write_file": {Display: "write", ArgKey: "path", ArgFormat: argFormatPath},
+		"edit":       {Display: "edit", ArgKey: "path", ArgFormat: argFormatPath},
+		"list_dir":   {Display: "ls", ArgKey: "path", ArgFormat: argFormatPath},
+		"run_shell":  {Display: "shell", ArgKey: "command", ArgFormat: argFormatCommand},
+		"bash":       {Display: "shell", ArgKey: "command", ArgFormat: argFormatCommand},
+		"glob":       {Display: "glob", ArgKey: "pattern", ArgFormat: argFormatPlain},
+		"grep":       {Display: "grep", ArgKey: "pattern", ArgFormat: argFormatPlain},
+		"web_fetch":  {Display: "fetch", ArgKey: "url", ArgFormat: argFormatLongIdentifier},
+		"web_search": {Display: "search", ArgKey: "query", ArgFormat: argFormatQuery},
+	},
+	fallback: geminiFallbackName,
 }
 
-// geminiToolArgKeys maps Gemini tool names to the most informative input key.
-var geminiToolArgKeys = map[string]string{
-	"read_file":   "path",
-	"write_file":  "path",
-	"view_file":   "path",
-	"create_file": "path",
-	"delete_file": "path",
-	"rename_file": "old_path",
-	"run_shell":   "command",
-	"bash":        "command",
-	"python":      "code",
-	"glob":        "pattern",
-	"grep":        "pattern",
-	"search":      "query",
-	"web_fetch":   "url",
-	"web_search":  "query",
-	"list_dir":    "path",
-	"list_files":  "path",
-	"edit":        "path",
-}
-
-// formatGeminiToolDisplay formats a Gemini tool call into a human-readable string.
-// e.g. "read_file" + {path: "/foo/bar/baz.go"} → "read .../bar/baz.go"
-func formatGeminiToolDisplay(name string, input map[string]interface{}) string {
-	displayName, ok := geminiToolNames[name]
-	if !ok {
-		// Convert snake_case to camelCase-ish short form for unknown tools.
-		displayName = geminiShortName(name)
-	}
-
-	argKey := geminiToolArgKeys[name]
-	if argKey == "" || input == nil {
-		return displayName
-	}
-
-	argVal, ok := input[argKey]
-	if !ok {
-		return displayName
-	}
-
-	argStr, ok := argVal.(string)
-	if !ok || argStr == "" {
-		return displayName
-	}
-
-	switch argKey {
-	case "path", "old_path":
-		argStr = shortPath(argStr)
-	case "command", "code":
-		if len(argStr) > 50 {
-			argStr = argStr[:47] + "..."
-		}
-	case "url", "query":
-		if len(argStr) > 60 {
-			argStr = argStr[:57] + "..."
-		}
-	}
-
-	if argKey == "command" || argKey == "code" {
-		return displayName + ": " + argStr
-	}
-	return displayName + " " + argStr
-}
-
-// geminiShortName converts a snake_case tool name to a compact display name.
-func geminiShortName(name string) string {
-	// Strip trailing _file, _text, _dir suffixes for brevity
+// geminiFallbackName trims common suffixes from snake_case tool names.
+func geminiFallbackName(name string) string {
 	for _, suffix := range []string{"_file", "_text", "_dir"} {
 		if strings.HasSuffix(name, suffix) {
 			return strings.TrimSuffix(name, suffix)
 		}
 	}
 	return name
+}
+
+func formatGeminiToolDisplay(name string, input map[string]interface{}) string {
+	return geminiToolDisplay.format(name, input)
 }

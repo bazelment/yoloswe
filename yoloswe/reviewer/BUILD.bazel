@@ -10,6 +10,7 @@ go_library(
         "json_output.go",
         "reviewer.go",
         "runlog.go",
+        "tool_display.go",
     ],
     importpath = "github.com/bazelment/yoloswe/yoloswe/reviewer",
     visibility = ["//visibility:public"],

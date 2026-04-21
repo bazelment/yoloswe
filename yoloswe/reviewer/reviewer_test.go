@@ -39,7 +39,7 @@ func TestBuildPrompt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prompt := BuildPrompt(tt.goal)
 			for _, s := range tt.contains {
-				if !containsString(prompt, s) {
+				if !strings.Contains(prompt, s) {
 					t.Errorf("BuildPrompt(%q) should contain %q", tt.goal, s)
 				}
 			}
@@ -88,7 +88,7 @@ func TestBuildJSONPrompt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prompt := BuildJSONPrompt(tt.goal)
 			for _, s := range tt.contains {
-				if !containsString(prompt, s) {
+				if !strings.Contains(prompt, s) {
 					t.Errorf("BuildJSONPrompt(%q) should contain %q", tt.goal, s)
 				}
 			}
@@ -197,19 +197,6 @@ func TestNew_CursorBackend(t *testing.T) {
 	}
 }
 
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStringHelper(s, substr))
-}
-
-func containsStringHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
 func TestNew_SessionLogPath(t *testing.T) {
 	r := New(Config{
 		SessionLogPath: "/tmp/test-session.jsonl",
@@ -315,7 +302,7 @@ func TestValidateBackend_GeminiErrorMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown backend")
 	}
-	if !containsString(err.Error(), "gemini") {
+	if !strings.Contains(err.Error(), "gemini") {
 		t.Errorf("error message should mention gemini: %q", err.Error())
 	}
 }

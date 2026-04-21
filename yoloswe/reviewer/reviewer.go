@@ -346,7 +346,7 @@ func ResolveWorkDir() (string, error) {
 // collisions between concurrent runs. Returns "" if no log dir is configured.
 //
 // Note: protocol session logging is currently only supported by the Codex
-// backend; the Cursor backend silently ignores SessionLogPath.
+// backend; Cursor and Gemini backends silently ignore SessionLogPath.
 func ResolveProtocolLogPath(flagValue string) (string, error) {
 	dir := flagValue
 	if dir == "" {

@@ -125,7 +125,7 @@ func TestFormatGeminiToolDisplay(t *testing.T) {
 	}
 }
 
-func TestGeminiShortName(t *testing.T) {
+func TestGeminiFallbackName(t *testing.T) {
 	tests := []struct {
 		input string
 		want  string
@@ -140,9 +140,9 @@ func TestGeminiShortName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := geminiShortName(tt.input)
+			got := geminiFallbackName(tt.input)
 			if got != tt.want {
-				t.Errorf("geminiShortName(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("geminiFallbackName(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -156,7 +156,6 @@ func TestNewGeminiBackend_StartsAndStopsCleanly(t *testing.T) {
 	if b == nil {
 		t.Fatal("expected non-nil backend")
 	}
-	// Start and Stop are no-ops for Gemini
 	if err := b.Start(nil); err != nil { //nolint:staticcheck
 		t.Errorf("Start should be no-op, got error: %v", err)
 	}
