@@ -13,7 +13,6 @@ then compare their findings side-by-side.
 
 | Name | Backend | Model | Flags |
 |------|---------|-------|-------|
-| codex-5.4 | codex | gpt-5.4 | `--backend codex --model gpt-5.4` |
 | codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini` |
 | cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
 
@@ -60,14 +59,14 @@ After all configs complete, read each output and extract the findings. For each 
 
 Then produce a comparison:
 
-| Finding | cursor-composer2 | codex-5.4 | codex-5.4-mini |
-|---------|-----------------|-----------|----------------|
-| Issue X | found (medium) | found (high) | missed |
-| Issue Y | missed | found (low) | found (low) |
-| FP: ... | flagged | — | — |
+| Finding | cursor-composer2 | codex-5.4-mini |
+|---------|-----------------|----------------|
+| Issue X | found (medium) | missed |
+| Issue Y | missed | found (low) |
+| FP: ... | flagged | — |
 
 Identify:
-- **Consensus findings**: flagged by all configs (high confidence these are real)
+- **Consensus findings**: flagged by both configs (high confidence these are real)
 - **Unique findings**: only one config caught it (investigate — real issue or FP?)
 - **False positives**: findings that are clearly not issues
 - **Disagreements**: findings where configs differ on severity or applicability
@@ -87,12 +86,10 @@ Diff: {N} files, {+/-} lines
 | Config | Findings | FPs | Verdict | Confidence | Time |
 |--------|----------|-----|---------|------------|------|
 | cursor-composer2 | N | N | ... | ... | ... |
-| codex-5.4 | N | N | ... | ... | ... |
 | codex-5.4-mini | N | N | ... | ... | ... |
 
 Consensus: ...
 Unique to cursor: ...
-Unique to codex-5.4: ...
 Unique to codex-5.4-mini: ...
 Disagreements: ...
 ```
