@@ -11,6 +11,18 @@ import (
 
 // geminiBackend wraps the Gemini ACP client as a Backend.
 // Each RunPrompt call is a one-shot execution (no persistent session).
+//
+// # Verified model IDs (tested against live Gemini CLI, 2026-04-21)
+//
+//   - gemini-3.1-flash-lite-preview: ~670ms turn, working
+//   - gemini-2.5-flash: ~1700ms turn, working
+//
+// # Known stderr noise
+//
+// The Gemini CLI emits these lines on every startup; they are harmless:
+//
+//	Loaded cached credentials.
+//	[STARTUP] Phase 'cli_startup' was started but never ended. Skipping metrics.
 type geminiBackend struct {
 	config Config
 }
