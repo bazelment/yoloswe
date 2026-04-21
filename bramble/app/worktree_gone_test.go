@@ -69,3 +69,36 @@ func TestUpdateWorktreeDropdown_GoneFiltering(t *testing.T) {
 		t.Errorf("gone worktree with live sessions should remain in dropdown")
 	}
 }
+
+func TestUpdateWorktreeDropdown_PreservesSelection(t *testing.T) {
+	t.Parallel()
+
+	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: session.SessionModeTmux})
+	defer mgr.Close()
+
+	m := NewModel(context.Background(), "/tmp/wt", "test-repo", "", mgr, nil, nil, 80, 24, nil, nil, session.ManagerConfig{}, nil)
+
+	m.worktrees = []wt.Worktree{
+		{Path: "/tmp/wt/main", Branch: "main", IsGone: false},
+		{Path: "/tmp/wt/feature", Branch: "feature", IsGone: false},
+		{Path: "/tmp/wt/gone-no-sessions", Branch: "gone-no-sessions", IsGone: true},
+	}
+
+	m.updateWorktreeDropdown()
+	// Select "feature" (index 1 in the two-item list after filtering)
+	m.worktreeDropdown.SelectByID("feature")
+	if m.worktreeDropdown.SelectedItem() == nil || m.worktreeDropdown.SelectedItem().ID != "feature" {
+		t.Fatal("pre-condition: expected 'feature' to be selected")
+	}
+
+	// Refresh with a new list where "gone-no-sessions" is still filtered.
+	// Item count is unchanged, but SetItems must not drift the index.
+	m.updateWorktreeDropdown()
+	if got := m.worktreeDropdown.SelectedItem(); got == nil || got.ID != "feature" {
+		gotID := "<nil>"
+		if got != nil {
+			gotID = got.ID
+		}
+		t.Errorf("selection after refresh = %q, want %q", gotID, "feature")
+	}
+}

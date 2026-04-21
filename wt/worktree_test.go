@@ -65,6 +65,21 @@ detached
 			},
 		},
 		{
+			name: "prunable gone worktree",
+			output: `worktree /path/to/.bare
+bare
+
+worktree /path/to/gone-branch
+HEAD abc1234567890
+branch refs/heads/gone-branch
+prunable gitdir file points to non-existent location
+
+`,
+			expected: []Worktree{
+				{Path: "/path/to/gone-branch", Branch: "gone-branch", Commit: "abc12345", IsDetached: false, IsGone: true},
+			},
+		},
+		{
 			name:     "empty output",
 			output:   "",
 			expected: nil,
@@ -90,6 +105,9 @@ detached
 				}
 				if w.IsDetached != exp.IsDetached {
 					t.Errorf("worktrees[%d].IsDetached = %v, want %v", i, w.IsDetached, exp.IsDetached)
+				}
+				if w.IsGone != exp.IsGone {
+					t.Errorf("worktrees[%d].IsGone = %v, want %v", i, w.IsGone, exp.IsGone)
 				}
 			}
 		})

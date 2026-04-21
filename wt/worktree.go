@@ -156,7 +156,6 @@ func (w *Worktree) Name() string {
 	return filepath.Base(w.Path)
 }
 
-// WorktreeStatus contains extended status information.
 // WorktreeStatus holds extended status for a worktree.
 type WorktreeStatus struct {
 	LastCommitTime time.Time

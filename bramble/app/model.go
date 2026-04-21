@@ -571,6 +571,9 @@ func (m Model) fetchGitStatuses() tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(m.worktrees))
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
+		if w.IsGone && len(m.sessionManager.GetSessionsForWorktree(w.Path)) == 0 {
+			continue
+		}
 		cmds = append(cmds, func() tea.Msg {
 			manager := wt.NewManager(wtRoot, repoName)
 			status, err := manager.GetGitStatus(ctx, w)

@@ -43,9 +43,12 @@ func NewDropdown(items []DropdownItem) *Dropdown {
 // If the previously selected item is no longer present, the selection falls
 // back to the nearest valid index.
 func (d *Dropdown) SetItems(items []DropdownItem) {
+	// Capture the selected ID before ClearFilter resets filteredIndices.
+	// Use the same indirection as SelectedItem() so filtered dropdowns
+	// resolve the ID from d.items (not the filtered position).
 	var prevID string
-	if d.selectedIdx >= 0 && d.selectedIdx < len(d.items) {
-		prevID = d.items[d.selectedIdx].ID
+	if selected := d.SelectedItem(); selected != nil {
+		prevID = selected.ID
 	}
 	d.items = items
 	d.ClearFilter()
