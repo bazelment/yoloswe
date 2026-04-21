@@ -78,7 +78,6 @@ type Config struct {
 	ReadOnly       bool // Deny file writes via approval handler (Codex only; CLI entrypoints default this to true)
 	Verbose        bool
 	NoColor        bool
-	JSONOutput     bool
 	// SkipTestExecution instructs the reviewer not to run test/build commands
 	// (bazel, go test, etc.). Callers that already run tests in a separate step
 	// (e.g. /pr-polish quality gates) should enable this to avoid duplicate work.

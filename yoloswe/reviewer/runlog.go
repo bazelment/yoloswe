@@ -33,23 +33,19 @@ func SetupRunLog() (string, func(), error) {
 	}
 	logPath := filepath.Join(logDir, fmt.Sprintf("code-review-%s-%d.log",
 		time.Now().Format("20060102-150405"), os.Getpid()))
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	prev := slog.Default()
+	closeFile, err := klogfmt.InitWithLogFileAndLevels(logPath, slog.LevelDebug, slog.LevelError)
 	if err != nil {
 		return "", func() {}, fmt.Errorf("open log file %s: %w", logPath, err)
 	}
 
-	handler := klogfmt.New(f, klogfmt.WithLevel(slog.LevelDebug))
-	base := slog.New(handler)
-
 	if tag := os.Getenv(RunLogEnvTag); tag != "" {
-		base = base.With("run_tag", tag)
+		slog.SetDefault(slog.Default().With("run_tag", tag))
 	}
-	prev := slog.Default()
-	slog.SetDefault(base)
 
 	cleanup := func() {
 		slog.SetDefault(prev)
-		_ = f.Close()
+		_ = closeFile()
 	}
 	return logPath, cleanup, nil
 }

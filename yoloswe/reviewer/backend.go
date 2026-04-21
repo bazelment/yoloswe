@@ -144,9 +144,8 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 
 // rendererEventHandler adapts EventHandler to a render.Renderer and also
 // emits a structured slog record for each boundary event (session info, tool
-// start/end, turn complete, error). The slog side is cheap and writes to the
-// handler installed by SetupRunLog; when no file handler is installed it
-// still flows through the default slog writer, which tests may override.
+// start/end, turn complete, error). slog writes to both the log file and
+// stderr (at ERROR level) via the tee handler installed by SetupRunLog.
 type rendererEventHandler struct {
 	r        *render.Renderer
 	reviewer *Reviewer // optional; captures lastSessionID when set

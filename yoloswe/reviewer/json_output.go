@@ -67,8 +67,9 @@ const (
 	StatusError EnvelopeStatus = "error"
 )
 
-// ResultEnvelope is the stable stdout format emitted by --json mode. The
-// schema_version field lets consumers reject incompatible payloads cleanly.
+// ResultEnvelope is the structured result written on every exit path. It goes
+// to --envelope-file when set, otherwise to stdout. The schema_version field
+// lets consumers reject incompatible payloads cleanly.
 type ResultEnvelope struct {
 	Status        EnvelopeStatus `json:"status"`
 	Backend       string         `json:"backend"`
@@ -187,10 +188,7 @@ func PrintJSONResult(w io.Writer, env ResultEnvelope) error {
 	if err != nil {
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
-	if _, err := w.Write(encoded); err != nil {
-		return err
-	}
-	_, err = w.Write([]byte("\n"))
+	_, err = w.Write(append(encoded, '\n'))
 	return err
 }
 

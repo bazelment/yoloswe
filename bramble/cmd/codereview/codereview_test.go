@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -12,33 +13,21 @@ import (
 )
 
 func TestReportEnvelopePrintError_WritesToStderr(t *testing.T) {
-	// SetupRunLog rebinds slog.Default() to a file-only handler, so this
-	// helper must bypass slog and write directly to stderr — otherwise
-	// stdout-serialization failures would only land in the per-run log
-	// where the operator never looks.
-	origStderr := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-	defer func() { os.Stderr = origStderr }()
-
-	done := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
+	// reportEnvelopePrintError uses slog.Error. In production the tee handler
+	// (installed by SetupRunLog) routes ERROR records to stderr. Install a
+	// temporary slog handler that writes to a buffer so the output is observable
+	// without replacing os.Stderr (which slog's default handler doesn't follow
+	// after dynamic reassignment).
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	reportEnvelopePrintError(errors.New("broken pipe"))
-	_ = w.Close()
-	got := <-done
 
+	got := buf.String()
 	if !strings.Contains(got, "broken pipe") {
-		t.Errorf("stderr missing wrapped error: %q", got)
-	}
-	if !strings.Contains(got, "code-review") {
-		t.Errorf("stderr missing source tag: %q", got)
+		t.Errorf("slog output missing wrapped error: %q", got)
 	}
 }
 
@@ -89,10 +78,9 @@ func TestRedactPath(t *testing.T) {
 }
 
 // captureStdStreams redirects os.Stdout and os.Stderr to pipes for the
-// duration of fn, returning whatever was written to each. Many of the
-// --json paths in runCodeReview write the envelope to stdout and
-// diagnostics to stderr; isolating both lets a test assert on the
-// machine-readable contract and the operator-visible message independently.
+// duration of fn, returning whatever was written to each. runCodeReview writes
+// the envelope to stdout (or --envelope-file) and diagnostics to stderr;
+// isolating both lets a test assert on each surface independently.
 func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
 	t.Helper()
 	origOut, origErr := os.Stdout, os.Stderr
@@ -118,21 +106,21 @@ func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
 	return <-outCh, <-errCh
 }
 
-func TestEmitEarlyFailure_JSONMode_WritesEnvelopeToStdout(t *testing.T) {
-	// Guards the --json contract: a pre-review failure (validation, cwd
-	// resolution, backend start) must still emit one parseable envelope on
-	// stdout so /pr-polish and similar automation never have to distinguish
-	// "bramble failed early" from "bramble failed late". This is the exact
-	// invariant the round-4 slog regression broke.
-	origJSON, origBackend := jsonOutput, backend
-	jsonOutput = true
+func TestEmitEarlyFailure_WritesEnvelopeToStdout(t *testing.T) {
+	// emitEarlyFailure must always emit one parseable envelope so automation
+	// (e.g. /pr-polish) never has to distinguish "bramble failed early" from
+	// "bramble failed late".
+	origBackend := backend
 	backend = "codex"
-	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
+	t.Cleanup(func() { backend = origBackend })
 
 	boom := errors.New("backend unreachable")
 	var returned error
 	stdout, _ := captureStdStreams(t, func() {
-		returned = emitEarlyFailure(boom, "gpt-x")
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		returned = emitEarlyFailure(boom, "gpt-x", emit)
 	})
 
 	if returned == nil || !strings.Contains(returned.Error(), "backend unreachable") {
@@ -156,20 +144,129 @@ func TestEmitEarlyFailure_JSONMode_WritesEnvelopeToStdout(t *testing.T) {
 	}
 }
 
-func TestEmitEarlyFailure_NonJSONMode_NoStdout(t *testing.T) {
-	// The text output contract: prose mode must leave stdout untouched on
-	// early failure so humans see the error via stderr and shells that pipe
-	// stdout (| tee, | grep) don't pick up stray JSON they can't render.
-	origJSON, origBackend := jsonOutput, backend
-	jsonOutput = false
-	backend = "codex"
-	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
-
-	stdout, _ := captureStdStreams(t, func() {
-		_ = emitEarlyFailure(errors.New("boom"), "")
+func TestFinalizeEnvelope_SuccessDoesNotDoubleEmit(t *testing.T) {
+	// When runCodeReview's happy path has already flushed an envelope, the
+	// top-level defer must not synthesize a second one — otherwise automation
+	// sees two JSON objects and has no way to know which is authoritative.
+	written := true
+	var retErr error
+	emitted := 0
+	emit := func(reviewer.ResultEnvelope) {
+		emitted++
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
 	})
-	if stdout != "" {
-		t.Errorf("stdout should be empty in prose mode, got %q", stdout)
+	if emitted != 0 {
+		t.Errorf("emit called %d times, want 0 on happy path", emitted)
+	}
+}
+
+func TestFinalizeEnvelope_UnwrittenReturnSynthesizesEnvelope(t *testing.T) {
+	// The PR #162 scenario in the small: the reviewer exited 0 but never
+	// wrote an envelope. The defer must detect this and put a parseable
+	// error envelope on stdout so /pr-polish can distinguish "ran and found
+	// nothing" from "ran and emitted nothing".
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+	})
+	if !written {
+		t.Fatalf("expected emit to have been called")
+	}
+	if got.Status != reviewer.StatusError {
+		t.Errorf("status = %s, want error", got.Status)
+	}
+	if !strings.Contains(got.Error, "without producing a review") {
+		t.Errorf("error message %q missing sentinel substring", got.Error)
+	}
+	if got.Backend != "codex" {
+		t.Errorf("backend = %s, want codex", got.Backend)
+	}
+}
+
+func TestFinalizeEnvelope_PanicEmitsEnvelopeThenRepanics(t *testing.T) {
+	// Panics anywhere below must not cost us the envelope — but they must
+	// still propagate so cobra exits non-zero. Verify both: emit runs once
+	// with a panic-flavored message, and the original panic value re-raises.
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic to re-raise, got nil")
+		}
+		if rs, _ := r.(string); rs != "kaboom" {
+			t.Errorf("re-raised value = %v, want %q", r, "kaboom")
+		}
+		if !written {
+			t.Fatalf("envelope was not emitted before re-panic")
+		}
+		if got.Status != reviewer.StatusError {
+			t.Errorf("status = %s, want error", got.Status)
+		}
+		if !strings.Contains(got.Error, "panic in code-review") {
+			t.Errorf("error %q missing panic prefix", got.Error)
+		}
+		if !strings.Contains(got.Error, "kaboom") {
+			t.Errorf("error %q missing panic value", got.Error)
+		}
+		if retErr == nil || !strings.Contains(retErr.Error(), "kaboom") {
+			t.Errorf("retErr = %v, want wrapping of panic value", retErr)
+		}
+	}()
+
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        "kaboom",
+		emit:            emit,
+	})
+}
+
+func TestFinalizeEnvelope_ReturnErrorPropagatesToEnvelopeMessage(t *testing.T) {
+	// When the function is returning a regular (non-panic) error and no
+	// envelope has been written yet, the synthesized envelope should carry
+	// the error's message rather than the generic sentinel — so automation
+	// can tell which error code path fired.
+	written := false
+	retErr := errors.New("reviewer drive-by: auth denied")
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+	})
+	if got.Error != "reviewer drive-by: auth denied" {
+		t.Errorf("envelope.error = %q, want %q", got.Error, retErr.Error())
 	}
 }
 

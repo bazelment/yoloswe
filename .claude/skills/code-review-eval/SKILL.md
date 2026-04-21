@@ -13,7 +13,6 @@ then compare their findings side-by-side.
 
 | Name | Backend | Model | Flags |
 |------|---------|-------|-------|
-| codex-5.4 | codex | gpt-5.4 | `--backend codex --model gpt-5.4` |
 | codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini` |
 | cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
 
@@ -32,19 +31,23 @@ git diff $(git merge-base origin/main HEAD)..HEAD --stat
 
 ## Step 2: Run each config
 
-Run `bramble code-review` for each config sequentially. Codex defaults to `--read-only`
-(denies file writes via approval handler). Cursor has no read-only mode, so run it last.
+Use the **Monitor tool** for each config. `--envelope-file` writes the final
+ResultEnvelope to a file; stdout carries plain-text progress lines for Monitor to
+stream. Codex defaults to `--read-only`. Cursor has no read-only mode, so run it last.
+
+Create a fresh `$LOG_DIR` under `/tmp/code-review-eval-{timestamp}/`. For each config:
 
 ```bash
+ENVELOPE_FILE="$LOG_DIR/{NAME}-envelope.json"
 WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
-  {FLAGS} --verbose --timeout 10m \
-  2>"$LOG_DIR/{NAME}-stderr.txt" | tee "$LOG_DIR/{NAME}-stdout.txt"
+  {FLAGS} --verbose --timeout 10m --envelope-file "$ENVELOPE_FILE" \
+  2>"$LOG_DIR/{NAME}-stderr.txt"
 ```
 
-Where `{FLAGS}` are taken from the config table (e.g. `--backend codex --model gpt-5.4`).
-
-Use `run_in_background` + `timeout=600000` so you can read completed results while
-the next config runs. Create a fresh `$LOG_DIR` under `/tmp/code-review-eval-{timestamp}/`.
+Arm all Monitors in the same turn so configs run in parallel. Set Monitor
+`timeout_ms=600000`. After all Monitors complete, read each `$ENVELOPE_FILE` for the
+ResultEnvelope (`verdict`, `issues[]`, `summary`). Note: codex only reports shell
+command tool calls on stdout; file reads are internal to the codex SDK and not surfaced.
 
 ## Step 3: Compare findings
 
@@ -53,17 +56,18 @@ After all configs complete, read each output and extract the findings. For each 
 - Verdict (correct/incorrect)
 - Confidence score
 - Wall clock time (token counts are only reported by codex backends, not cursor)
+- Whether the always-emit envelope guard fired (check stderr for "envelope guard" lines)
 
 Then produce a comparison:
 
-| Finding | cursor-composer2 | codex-5.4 | codex-5.4-mini |
-|---------|-----------------|-----------|----------------|
-| Issue X | found (medium) | found (high) | missed |
-| Issue Y | missed | found (low) | found (low) |
-| FP: ... | flagged | — | — |
+| Finding | cursor-composer2 | codex-5.4-mini |
+|---------|-----------------|----------------|
+| Issue X | found (medium) | missed |
+| Issue Y | missed | found (low) |
+| FP: ... | flagged | — |
 
 Identify:
-- **Consensus findings**: flagged by all configs (high confidence these are real)
+- **Consensus findings**: flagged by both configs (high confidence these are real)
 - **Unique findings**: only one config caught it (investigate — real issue or FP?)
 - **False positives**: findings that are clearly not issues
 - **Disagreements**: findings where configs differ on severity or applicability
@@ -83,12 +87,10 @@ Diff: {N} files, {+/-} lines
 | Config | Findings | FPs | Verdict | Confidence | Time |
 |--------|----------|-----|---------|------------|------|
 | cursor-composer2 | N | N | ... | ... | ... |
-| codex-5.4 | N | N | ... | ... | ... |
 | codex-5.4-mini | N | N | ... | ... | ... |
 
 Consensus: ...
 Unique to cursor: ...
-Unique to codex-5.4: ...
 Unique to codex-5.4-mini: ...
 Disagreements: ...
 ```
