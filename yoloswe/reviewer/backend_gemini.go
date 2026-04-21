@@ -9,8 +9,10 @@ import (
 )
 
 // geminiBackend wraps the Gemini ACP client as a Backend.
-// The ACP client is started once in Start() and reused across RunPrompt calls
-// to support multi-turn review via FollowUp.
+// The ACP client process is started once in Start() and kept alive across
+// RunPrompt calls to amortize startup cost. Each RunPrompt creates a new ACP
+// session, so there is no shared conversation context between turns — FollowUp
+// calls start fresh conversations, unlike the codex backend which reuses a thread.
 //
 // # Verified model IDs (tested against live Gemini CLI, 2026-04-21)
 //
