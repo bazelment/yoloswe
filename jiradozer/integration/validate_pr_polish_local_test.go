@@ -162,7 +162,7 @@ After BOTH settle, report their terminal statuses. Do not edit any files.`,
 	start := time.Now()
 	err := wf.Run(ctx)
 	elapsed := time.Since(start)
-	require.NoError(t, err, "workflow should not error — the old HasLiveBackgroundWork guard is gone")
+	require.NoError(t, err, "workflow should not error")
 
 	// Invariant 1: Validate step transitioned past review (not refused).
 	mu.Lock()

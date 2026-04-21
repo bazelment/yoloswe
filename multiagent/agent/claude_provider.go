@@ -121,18 +121,10 @@ func NewClaudeProvider(sessionOpts ...claude.SessionOption) *ClaudeProvider {
 
 func (p *ClaudeProvider) Name() string { return "claude" }
 
-// runRetryLoop drives the provider-layer retry-on-tool-error loop. Takes
-// the result of the initial Ask and may issue follow-up Asks up to
-// cfg.MaxToolErrorRetries times. Exits early when no tool_use_error is
-// present or agent self-recovered (G1/G4), the retry budget is exhausted,
-// or the ctx is cancelled. Returns the final TurnResult, the number of
-// retry Asks issued, and the stop reason recorded on the last decision.
-// The caller appends the unresolved marker and fires OnRetryAbort on the
-// returned stop reason when applicable.
-//
-// Live background work is no longer gated here: the raw event stream in
-// Execute never completes a logical turn while bg tasks are outstanding,
-// so runRetryLoop only sees results after bg settles.
+// runRetryLoop drives the retry-on-tool-error loop: re-issues the turn up to
+// cfg.MaxToolErrorRetries times while a tool_use_error is present. Returns
+// the final result, retry count, and the stop reason (exhausted, no_progress,
+// budget_exceeded, ctx_cancelled, or self-recovered).
 func runRetryLoop(ctx context.Context, session retrySession, initial *claude.TurnResult, cfg ExecuteConfig) (*claude.TurnResult, int, string, error) {
 	result := initial
 	start := time.Now()
@@ -332,127 +324,16 @@ func (p *ClaudeLongRunningProvider) Stop() error {
 	return nil
 }
 
-// dispatchClaudeEvent mirrors bridgeEvents' kind-dispatch for a single
-// Claude Event, invoking the EventHandler callbacks and emitting AgentEvent
-// values. Inlined here so Execute can drive the event loop synchronously on
-// the caller's goroutine — no bridge goroutine, no channel tee.
-//
-// Keep in sync with bridgeEvents (multiagent/agent/bridge.go). The two
-// dispatch paths coexist because Execute needs to feed logicalTurnState
-// alongside EventHandler on the same goroutine, while long-running providers
-// still use the generic bridge.
+// dispatchClaudeEvent fans a single claude.Event out to an EventHandler and/or
+// AgentEvent channel. Execute drives this synchronously so it can feed
+// logicalTurnState on the same goroutine — long-running providers use
+// bridgeEvents instead.
 func dispatchClaudeEvent(ev claude.Event, handler EventHandler, out chan<- AgentEvent) {
 	sev, ok := any(ev).(agentstream.Event)
 	if !ok {
 		return
 	}
-	kind := sev.StreamEventKind()
-	if kind == agentstream.KindUnknown {
-		return
-	}
-	switch kind {
-	case agentstream.KindReady:
-		if handler != nil {
-			if sh, ok := handler.(SessionInitHandler); ok {
-				if re, ok := sev.(agentstream.Ready); ok {
-					sh.OnSessionInit(re.StreamSessionID())
-				}
-			}
-		}
-	case agentstream.KindText:
-		te := sev.(agentstream.Text)
-		delta := te.StreamDelta()
-		if handler != nil {
-			handler.OnText(delta)
-		}
-		if out != nil {
-			select {
-			case out <- TextAgentEvent{Text: delta}:
-			default:
-			}
-		}
-	case agentstream.KindThinking:
-		te := sev.(agentstream.Text)
-		delta := te.StreamDelta()
-		if handler != nil {
-			handler.OnThinking(delta)
-		}
-		if out != nil {
-			select {
-			case out <- ThinkingAgentEvent{Thinking: delta}:
-			default:
-			}
-		}
-	case agentstream.KindToolStart:
-		ts := sev.(agentstream.ToolStart)
-		name := ts.StreamToolName()
-		callID := ts.StreamToolCallID()
-		input := ts.StreamToolInput()
-		if handler != nil {
-			handler.OnToolStart(name, callID, input)
-		}
-		if out != nil {
-			select {
-			case out <- ToolStartAgentEvent{Name: name, ID: callID, Input: input}:
-			default:
-			}
-		}
-	case agentstream.KindToolEnd:
-		te := sev.(agentstream.ToolEnd)
-		name := te.StreamToolName()
-		callID := te.StreamToolCallID()
-		input := te.StreamToolInput()
-		result := te.StreamToolResult()
-		isError := te.StreamToolIsError()
-		if handler != nil {
-			handler.OnToolComplete(name, callID, input, result, isError)
-		}
-		if out != nil {
-			select {
-			case out <- ToolCompleteAgentEvent{
-				Name:    name,
-				ID:      callID,
-				Input:   input,
-				Result:  result,
-				IsError: isError,
-			}:
-			default:
-			}
-		}
-	case agentstream.KindTurnComplete:
-		tc := sev.(agentstream.TurnComplete)
-		turnNum := tc.StreamTurnNum()
-		success := tc.StreamIsSuccess()
-		duration := tc.StreamDuration()
-		cost := tc.StreamCost()
-		if handler != nil {
-			handler.OnTurnComplete(turnNum, success, duration, cost)
-		}
-		if out != nil {
-			select {
-			case out <- TurnCompleteAgentEvent{
-				TurnNumber: turnNum,
-				Success:    success,
-				DurationMs: duration,
-				CostUSD:    cost,
-			}:
-			default:
-			}
-		}
-	case agentstream.KindError:
-		ee := sev.(agentstream.Error)
-		err := ee.StreamErr()
-		errCtx := ee.StreamErrorContext()
-		if handler != nil {
-			handler.OnError(err, errCtx)
-		}
-		if out != nil {
-			select {
-			case out <- ErrorAgentEvent{Err: err, Context: errCtx}:
-			default:
-			}
-		}
-	}
+	dispatchStreamEvent(sev, handler, out)
 }
 
 // ClaudeResultToAgentResult converts a claude.TurnResult to AgentResult.

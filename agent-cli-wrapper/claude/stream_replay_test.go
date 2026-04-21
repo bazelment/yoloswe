@@ -405,19 +405,12 @@ func TestStream_Replay_R12_CloseSessionWhileBgLive(t *testing.T) {
 		"wrapper never fabricates a terminal task_notification at close")
 }
 
-// TestStream_Replay_R14_INF401_ValidateRound2 (R14) — the regression test.
-// Replays the real pr-polish-shaped session from testdata: sync Bash tool,
-// two Monitor launches, end_turn ResultMessage, then task_notification
-// events arrive (one failed, one completed), then a final ResultMessage
-// for the auto-continued turn.
-//
-// Pre-refactor: wrapper would have coalesced the two ResultMessages into
-// one TurnResult with HasLiveBackgroundWork=true while the bg was live,
-// and jiradozer's guard would refuse to advance.
-// Post-refactor: both ResultMessageEvents emit raw; the consumer
-// (logicalTurnState) sees live tasks drain and returns only after the
-// second ResultMessage. This test is the clearest pre/post regression
-// signal: same fixture, same session code, different consumer outcome.
+// TestStream_Replay_R14_INF401_ValidateRound2 (R14) — INF-401 regression.
+// Replays a real pr-polish session: sync Bash tool, two Monitor launches,
+// end_turn ResultMessage, then task_notification events (one failed, one
+// completed), then a final ResultMessage for the auto-continued turn.
+// Both ResultMessageEvents must emit raw so logicalTurnState can wait for
+// the bg tasks to drain before signalling done.
 func TestStream_Replay_R14_INF401_ValidateRound2(t *testing.T) {
 	f, err := os.Open("testdata/replay/inf401_validate_round2.jsonl")
 	require.NoError(t, err, "INF-401 fixture must exist for the regression test")

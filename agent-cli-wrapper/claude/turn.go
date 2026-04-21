@@ -168,43 +168,43 @@ type TurnResult struct {
 // callers exit prematurely.
 const scheduleWakeupToolName = "ScheduleWakeup"
 
-// latestScheduleWakeupToolID returns the tool_use_id of the LAST ScheduleWakeup
-// block in the turn, or "" if none. Used to detect when a continuation appends
-// a new ScheduleWakeup (different ID) vs the stale original block.
-func (turn *turnState) latestScheduleWakeupToolID() string {
+// latestScheduleWakeup returns the last ScheduleWakeup tool_use block in the
+// turn (in arrival order), or nil if none. For chained wakeups a continuation
+// appends a new block; the safety timer should read from the newest.
+func (turn *turnState) latestScheduleWakeup() *ContentBlock {
 	if turn == nil {
-		return ""
+		return nil
 	}
-	id := ""
-	for _, block := range turn.ContentBlocks {
+	for i := len(turn.ContentBlocks) - 1; i >= 0; i-- {
+		block := &turn.ContentBlocks[i]
 		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
-			id = block.ToolUseID
+			return block
 		}
 	}
-	return id
+	return nil
 }
 
-// latestScheduleWakeupDelaySeconds extracts the delaySeconds from the LAST
-// ScheduleWakeup block. For chained wakeups the continuation appends a new
-// block; the safety timer should be set from the newest delay, not the first.
+func (turn *turnState) latestScheduleWakeupToolID() string {
+	if b := turn.latestScheduleWakeup(); b != nil {
+		return b.ToolUseID
+	}
+	return ""
+}
+
 func (turn *turnState) latestScheduleWakeupDelaySeconds() float64 {
-	if turn == nil {
+	b := turn.latestScheduleWakeup()
+	if b == nil {
 		return 0
 	}
-	delay := float64(0)
-	for _, block := range turn.ContentBlocks {
-		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
-			switch v := block.ToolInput["delaySeconds"].(type) {
-			case float64:
-				delay = v
-			case int:
-				delay = float64(v)
-			case int64:
-				delay = float64(v)
-			}
-		}
+	switch v := b.ToolInput["delaySeconds"].(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
 	}
-	return delay
+	return 0
 }
 
 // turnState tracks the state of a single turn.

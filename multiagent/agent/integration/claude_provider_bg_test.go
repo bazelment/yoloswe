@@ -59,10 +59,8 @@ func mkClaudeProvider(t *testing.T) (agent.Provider, string, func()) {
 }
 
 // TestClaudeProviderBg_C1_PureBgMonitor (C1) — Execute must not return
-// until the Monitor bg task reaches a terminal state. Before the refactor,
-// Execute returned an AgentResult with HasLiveBackgroundWork=true on the
-// first ResultMessage; after, Execute returns only after the auto-
-// continuation ResultMessage.
+// until the Monitor bg task reaches a terminal state and the CLI's
+// auto-continuation ResultMessage arrives.
 func TestClaudeProviderBg_C1_PureBgMonitor(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()

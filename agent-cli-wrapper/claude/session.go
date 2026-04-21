@@ -925,11 +925,6 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		return
 	}
 
-	// Emit raw AssistantMessageEvent for consumers that use the Python-SDK-
-	// parallel streaming API. Fires once per assistant message, carrying the
-	// full per-message blocks as the CLI emitted them. Independent of any
-	// wrapper-level coalescing — pure-bg and mixed-bg turns each produce
-	// their own AssistantMessageEvent.
 	s.emit(AssistantMessageEvent{
 		Model:         msg.Message.Model,
 		Blocks:        protocolBlocksToContentBlocks(blocks),
@@ -1022,10 +1017,6 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 		return
 	}
 
-	// Emit raw UserMessageEvent for consumers that use the Python-SDK-parallel
-	// streaming API. Mirrors AssistantMessageEvent — fires once per CLI-
-	// emitted user message (typically tool_result frames injected by the CLI
-	// after auto-executed tools).
 	s.emit(UserMessageEvent{
 		Blocks:        protocolBlocksToContentBlocks(blocks),
 		ParentToolUse: msg.ParentToolUseID,
@@ -1076,15 +1067,11 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
-	// Emit raw ResultMessageEvent first, BEFORE any suppression decisions.
-	// Consumers on the Python-SDK-parallel streaming API get one event per
-	// CLI ResultMessage, regardless of whether the wrapper-level TurnComplete
-	// path coalesces or suppresses subsequent continuations. This is the
-	// ground truth the new `turn_state.go` policy layer operates on.
-	stopReason := ""
+	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
+	// wrapper-level suppression. This is the ground truth policy layers
+	// (e.g. logicalTurnState) read.
 	s.emit(ResultMessageEvent{
 		Subtype:    msg.Subtype,
-		StopReason: stopReason,
 		TurnNumber: s.turnManager.CurrentTurnNumber(),
 		NumTurns:   msg.NumTurns,
 		Usage: TurnUsage{

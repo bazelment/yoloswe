@@ -50,7 +50,6 @@ func toolResult(id string, isError bool) claude.ContentBlock {
 func resultMessage(isError bool) claude.ResultMessageEvent {
 	ev := claude.ResultMessageEvent{
 		Subtype:      "success",
-		StopReason:   "end_turn",
 		TurnNumber:   1,
 		NumTurns:     1,
 		DurationMs:   100,

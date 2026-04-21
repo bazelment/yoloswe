@@ -59,26 +59,19 @@ const (
 	EventTypeToolExecutionProgress
 	// EventTypeLocalCommandOutput fires with text from a local slash command.
 	EventTypeLocalCommandOutput
-	// EventTypeAssistantMessage fires per assistant message, with the full
-	// per-message content blocks as the CLI emitted them. Parallel to the
-	// Python claude-agent-sdk AssistantMessage. Always emitted — independent
-	// of any wrapper-level turn coalescing.
+	// EventTypeAssistantMessage fires per assistant message with its full
+	// content blocks. Not coalesced by wrapper-level turn logic.
 	EventTypeAssistantMessage
-	// EventTypeResultMessage fires once per CLI "turn" (every ResultMessage
-	// the CLI emits — the Python SDK surfaces each one as ResultMessage).
-	// Unlike TurnCompleteEvent, this is NOT coalesced across suppressed /
-	// auto-continued turns: pure-bg and mixed-bg turns each produce a
-	// ResultMessageEvent at their own ResultMessage boundary. Consumers that
-	// need "logical turn done" semantics must observe the event stream
-	// (bg tool lifecycle + ResultMessage) themselves.
+	// EventTypeResultMessage fires once per CLI ResultMessage. Unlike
+	// TurnCompleteEvent this is NOT coalesced across bg-continuation turns —
+	// consumers that need "logical turn done" semantics must observe the raw
+	// event stream (see logicalTurnState in multiagent/agent).
 	EventTypeResultMessage
-	// EventTypeUserMessage fires per user message (CLI-injected tool_result
-	// frames and user-initiated text). Parallel to the Python SDK's
-	// UserMessage. Not coalesced.
+	// EventTypeUserMessage fires per user message (including CLI-injected
+	// tool_result frames). Not coalesced.
 	EventTypeUserMessage
-	// EventTypeSystemMessage fires per system message the CLI emits that is
-	// not already surfaced as a dedicated typed event. Parallel to the Python
-	// SDK's SystemMessage catch-all. Subtype identifies the kind.
+	// EventTypeSystemMessage fires for any CLI system message not surfaced
+	// via a dedicated typed event. Subtype identifies the kind.
 	EventTypeSystemMessage
 )
 
@@ -443,10 +436,8 @@ type LocalCommandOutputEvent struct {
 // Type returns the event type.
 func (e LocalCommandOutputEvent) Type() EventType { return EventTypeLocalCommandOutput }
 
-// AssistantMessageEvent fires per assistant message with the full per-message
-// content blocks as the CLI emitted them. Parallel to the Python SDK's
-// AssistantMessage. Emitted raw — independent of any wrapper-level
-// suppression/coalescing of turn completion.
+// AssistantMessageEvent fires per assistant message with its full content
+// blocks. Not coalesced by wrapper-level turn logic.
 type AssistantMessageEvent struct {
 	ParentToolUse *string
 	Model         string
@@ -457,8 +448,8 @@ type AssistantMessageEvent struct {
 // Type returns the event type.
 func (e AssistantMessageEvent) Type() EventType { return EventTypeAssistantMessage }
 
-// UserMessageEvent fires per user message. Parallel to the Python SDK's
-// UserMessage. Emitted raw alongside existing typed CLI events.
+// UserMessageEvent fires per user message (including CLI-injected tool_result
+// frames). Not coalesced.
 type UserMessageEvent struct {
 	ParentToolUse *string
 	Blocks        []ContentBlock
@@ -468,16 +459,11 @@ type UserMessageEvent struct {
 // Type returns the event type.
 func (e UserMessageEvent) Type() EventType { return EventTypeUserMessage }
 
-// ResultMessageEvent fires once per CLI ResultMessage (every turn the CLI
-// emits). Parallel to the Python SDK's ResultMessage. Unlike
-// TurnCompleteEvent, this event is NEVER coalesced: pure-bg and mixed-bg
-// turns each produce a ResultMessageEvent at their own ResultMessage
-// boundary. Consumers that need "logical turn done" semantics must observe
-// the raw event stream (bg tool lifecycle + ResultMessage) directly.
+// ResultMessageEvent fires once per CLI ResultMessage. Unlike
+// TurnCompleteEvent it is never coalesced across bg-continuation turns.
 type ResultMessageEvent struct {
 	Error         error
 	Subtype       string
-	StopReason    string
 	Usage         TurnUsage
 	DurationMs    int64
 	DurationAPIMs int64
@@ -490,8 +476,8 @@ type ResultMessageEvent struct {
 // Type returns the event type.
 func (e ResultMessageEvent) Type() EventType { return EventTypeResultMessage }
 
-// SystemMessageEvent fires per system message that isn't already surfaced as
-// a dedicated typed event. Parallel to the Python SDK's SystemMessage.
+// SystemMessageEvent fires for any CLI system message not surfaced via a
+// dedicated typed event. Subtype identifies the kind.
 type SystemMessageEvent struct {
 	Data       map[string]interface{}
 	Subtype    string

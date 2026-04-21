@@ -192,10 +192,8 @@ func TestStreamBg_I1_PureBgMonitor(t *testing.T) {
 }
 
 // TestStreamBg_I2_MixedSyncBg (I2): a turn that uses a sync tool AND launches
-// a Monitor. Pre-refactor, this case was the INF-401 trigger — the wrapper
-// set HasLiveBackgroundWork=true and jiradozer refused to advance. Raw
-// stream must surface the task events for the bg tool and the subprocess
-// must run to completion.
+// a Monitor. The raw stream must surface the task events for the bg tool and
+// the Monitor subprocess must run to completion.
 func TestStreamBg_I2_MixedSyncBg(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
