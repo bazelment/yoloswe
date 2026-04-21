@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
@@ -145,12 +144,8 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 
 // rendererEventHandler adapts EventHandler to a render.Renderer and also
 // emits a structured slog record for each boundary event (session info, tool
-// start/end, turn complete, error). The slog side is cheap and writes to the
-// handler installed by SetupRunLog; when no file handler is installed it
-// still flows through the default slog writer, which tests may override.
-//
-// It also prints plain-text progress lines to stdout so the Monitor tool can
-// surface live activity to Claude without requiring JSON parsing.
+// start/end, turn complete, error). slog writes to both the log file and
+// stderr (at ERROR level) via the tee handler installed by SetupRunLog.
 type rendererEventHandler struct {
 	r        *render.Renderer
 	reviewer *Reviewer // optional; captures lastSessionID when set
@@ -158,15 +153,6 @@ type rendererEventHandler struct {
 
 func (r *Reviewer) newEventHandler() *rendererEventHandler {
 	return &rendererEventHandler{r: r.renderer, reviewer: r}
-}
-
-// backendName returns the configured backend as a plain string, or "" if no
-// reviewer is attached. Used as a default for ProgressEvent.Backend.
-func (h *rendererEventHandler) backendName() string {
-	if h.reviewer == nil {
-		return ""
-	}
-	return string(h.reviewer.config.BackendType)
 }
 
 func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
@@ -178,7 +164,6 @@ func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
 		}
 	}
 	slog.Info("reviewer session started", "session_id", sessionID, "model", model)
-	fmt.Fprintf(os.Stdout, "session started (%s %s)\n", h.backendName(), model)
 }
 
 func (h *rendererEventHandler) OnText(delta string) {
@@ -226,7 +211,6 @@ func (h *rendererEventHandler) OnError(err error, context string) {
 	slog.Error("reviewer error",
 		"context", context,
 		"error", err.Error())
-	fmt.Fprintf(os.Stdout, "error: %s: %v\n", context, err)
 }
 
 // sensitiveToolInputKeys names keys whose values may contain shell commands,

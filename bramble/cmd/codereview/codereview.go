@@ -82,7 +82,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
 		w, closeW, openErr := openEnvelopeWriter()
 		if openErr != nil {
-			fmt.Fprintf(os.Stderr, "[code-review] failed to open envelope-file: %v\n", openErr)
+			slog.Error("failed to open envelope-file", "error", openErr.Error())
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to open envelope-file: %w", openErr)
 			}
@@ -188,11 +188,6 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
-	fmt.Fprintf(os.Stderr, "\n=== Review Result ===\n")
-	fmt.Fprintf(os.Stderr, "Status: %s\n", env.Status)
-	fmt.Fprintf(os.Stderr, "Duration: %dms\n", env.DurationMs)
-	fmt.Fprintf(os.Stderr, "Tokens: %d in / %d out\n", env.InputTokens, env.OutputTokens)
-	fmt.Fprintf(os.Stderr, "Response length: %d chars\n", len(result.ResponseText))
 	slog.Info("code-review run exit",
 		"status", string(env.Status),
 		"verdict", env.Review.Verdict,
@@ -317,13 +312,9 @@ func emitEarlyFailure(err error, effectiveModel string, emit func(reviewer.Resul
 	return err
 }
 
-// reportEnvelopePrintError surfaces a write failure to the operator. Once
-// SetupRunLog runs, slog.Default() is rebound to a file-only handler; using
-// slog here would write the message to disk where the operator won't see it.
-// Writing directly to os.Stderr guarantees the message reaches the terminal
-// regardless of slog redirection, while a parallel slog.Error keeps the same
-// record in the per-run log for forensics.
+// reportEnvelopePrintError surfaces a write failure to the operator. slog
+// writes to both file and stderr (ERROR level) via the tee handler installed
+// by SetupRunLog.
 func reportEnvelopePrintError(printErr error) {
-	fmt.Fprintf(os.Stderr, "[code-review] failed to write JSON envelope: %v\n", printErr)
 	slog.Error("print json envelope", "error", printErr.Error())
 }
