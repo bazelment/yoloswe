@@ -39,10 +39,24 @@ func NewDropdown(items []DropdownItem) *Dropdown {
 	}
 }
 
-// SetItems replaces the dropdown items.
+// SetItems replaces the dropdown items, preserving the selected item by ID.
+// If the previously selected item is no longer present, the selection falls
+// back to the nearest valid index.
 func (d *Dropdown) SetItems(items []DropdownItem) {
+	var prevID string
+	if d.selectedIdx >= 0 && d.selectedIdx < len(d.items) {
+		prevID = d.items[d.selectedIdx].ID
+	}
 	d.items = items
 	d.ClearFilter()
+	if prevID != "" {
+		for i, item := range items {
+			if item.ID == prevID {
+				d.selectedIdx = i
+				return
+			}
+		}
+	}
 	if d.selectedIdx >= len(items) {
 		d.selectedIdx = max(0, len(items)-1)
 	}
