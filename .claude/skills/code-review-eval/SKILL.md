@@ -1,6 +1,6 @@
 ---
 name: code-review-eval
-description: "Compare bramble code-review output across reviewer configs (cursor with composer-2, codex with gpt-5.4-mini, gemini with gemini-2.5-pro). Runs bramble code-review for each config, compares findings side-by-side, and logs results."
+description: "Compare bramble code-review output across reviewer configs (cursor with composer-2, codex with gpt-5.4-mini, gemini with gemini-3.1-flash-lite-preview). Runs bramble code-review for each config, compares findings side-by-side, and logs results."
 argument-hint: "[branch]"
 ---
 
@@ -15,7 +15,7 @@ then compare their findings side-by-side.
 |------|---------|-------|-------|
 | codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini` |
 | cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
-| gemini-2.5-pro | gemini | gemini-2.5-pro | `--backend gemini --model gemini-2.5-pro` |
+| gemini-3.1-flash-lite-preview | gemini | gemini-3.1-flash-lite-preview | `--backend gemini --model gemini-3.1-flash-lite-preview` |
 
 ## Step 1: Build and identify target
 
@@ -63,7 +63,7 @@ After all configs complete, read each output and extract the findings. For each 
 
 Then produce a comparison:
 
-| Finding | cursor-composer2 | codex-5.4-mini | gemini-2.5-pro |
+| Finding | cursor-composer2 | codex-5.4-mini | gemini-3.1-flash-lite-preview |
 |---------|-----------------|----------------|----------------|
 | Issue X | found (medium) | missed | found (high) |
 | Issue Y | missed | found (low) | missed |
@@ -92,13 +92,13 @@ Diff: {N} files, {+/-} lines
 |--------|----------|-----|---------|------------|------|-----------------|
 | cursor-composer2 | N | N | ... | ... | ...s | — |
 | codex-5.4-mini | N | N | ... | ... | ...s | N/N |
-| gemini-2.5-pro | N | N | ... | ... | ...s | — |
+| gemini-3.1-flash-lite-preview | N | N | ... | ... | ...s | — |
 
 Consensus (all 3): ...
 Majority (2 of 3): ...
 Unique to cursor: ...
 Unique to codex-5.4-mini: ...
-Unique to gemini-2.5-pro: ...
+Unique to gemini-3.1-flash-lite-preview: ...
 Disagreements: ...
 ```
 
@@ -114,7 +114,7 @@ Schema note: the `Tokens (in/out)` column was added when Gemini support was intr
 |--------|----------|-----|---------|------|
 | cursor-composer2 | | | | |
 | codex-5.4-mini | | | | |
-| gemini-2.5-pro | | | | |
+| gemini-3.1-flash-lite-preview | | | | |
 
 Best config: ...
 Recommendation: ...

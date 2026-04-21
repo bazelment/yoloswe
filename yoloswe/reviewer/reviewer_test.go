@@ -271,8 +271,8 @@ func TestNew_GeminiBackend(t *testing.T) {
 	if r.config.BackendType != BackendGemini {
 		t.Errorf("expected gemini backend, got %s", r.config.BackendType)
 	}
-	if r.config.Model != "gemini-2.5-pro" {
-		t.Errorf("expected default model gemini-2.5-pro, got %s", r.config.Model)
+	if r.config.Model != "gemini-3.1-flash-lite-preview" {
+		t.Errorf("expected default model gemini-3.1-flash-lite-preview, got %s", r.config.Model)
 	}
 	if r.backend == nil {
 		t.Error("backend should not be nil for gemini")
@@ -305,8 +305,8 @@ func TestNew_ApprovalPolicyNotOverriddenForGemini(t *testing.T) {
 
 func TestEffectiveModel_GeminiDefault(t *testing.T) {
 	r := New(Config{BackendType: BackendGemini})
-	if got := r.EffectiveModel(); got != "gemini-2.5-pro" {
-		t.Errorf("EffectiveModel() = %q, want gemini-2.5-pro", got)
+	if got := r.EffectiveModel(); got != "gemini-3.1-flash-lite-preview" {
+		t.Errorf("EffectiveModel() = %q, want gemini-3.1-flash-lite-preview", got)
 	}
 }
 

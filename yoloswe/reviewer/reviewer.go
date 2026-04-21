@@ -201,7 +201,7 @@ func New(config Config) *Reviewer {
 	// Apply Gemini-specific defaults.
 	if config.BackendType == BackendGemini {
 		if config.Model == "" {
-			config.Model = "gemini-2.5-pro"
+			config.Model = "gemini-3.1-flash-lite-preview"
 		}
 	}
 

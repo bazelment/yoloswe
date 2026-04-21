@@ -265,15 +265,15 @@ func TestBuildEnvelope_GeminiBackend(t *testing.T) {
 		Success:      true,
 		DurationMs:   5000,
 	}
-	env := BuildEnvelope(result, BackendGemini, "gemini-2.5-pro", "sess-gemini-1")
+	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "sess-gemini-1")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok", env.Status)
 	}
 	if env.Backend != "gemini" {
 		t.Errorf("backend = %q, want gemini", env.Backend)
 	}
-	if env.Model != "gemini-2.5-pro" {
-		t.Errorf("model = %q, want gemini-2.5-pro", env.Model)
+	if env.Model != "gemini-3.1-flash-lite-preview" {
+		t.Errorf("model = %q, want gemini-3.1-flash-lite-preview", env.Model)
 	}
 	if env.SessionID != "sess-gemini-1" {
 		t.Errorf("session_id = %q, want sess-gemini-1", env.SessionID)
@@ -291,7 +291,7 @@ func TestBuildEnvelope_GeminiBackendError(t *testing.T) {
 		ErrorMessage: "gemini: ACP client failed to start",
 		Success:      false,
 	}
-	env := BuildEnvelope(result, BackendGemini, "gemini-2.5-pro", "")
+	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error", env.Status)
 	}
