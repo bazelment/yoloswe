@@ -4,11 +4,14 @@ package integration
 
 import (
 	"context"
+	"flag"
 	"testing"
 	"time"
 
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
+
+var geminiModel = flag.String("gemini-model", reviewer.DefaultGeminiModel, "Gemini model ID to use in integration tests")
 
 // TestReviewWithResult_Codex tests that a simple review round-trip completes
 // within a reasonable time using the codex backend.
@@ -85,7 +88,7 @@ func TestReviewWithResult_Cursor(t *testing.T) {
 func TestReviewWithResult_Gemini(t *testing.T) {
 	config := reviewer.Config{
 		BackendType: reviewer.BackendGemini,
-		Model:       "gemini-2.5-flash",
+		Model:       *geminiModel,
 		WorkDir:     t.TempDir(),
 		Verbose:     true,
 	}

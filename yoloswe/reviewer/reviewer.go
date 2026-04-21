@@ -21,6 +21,10 @@ const (
 	BackendCodex  BackendType = "codex"
 	BackendCursor BackendType = "cursor"
 	BackendGemini BackendType = "gemini"
+
+	// DefaultGeminiModel is the model used when BackendGemini is selected and
+	// no --model flag is provided.
+	DefaultGeminiModel = "gemini-3.1-flash-lite-preview"
 )
 
 // Config holds reviewer configuration.
@@ -201,7 +205,7 @@ func New(config Config) *Reviewer {
 	// Apply Gemini-specific defaults.
 	if config.BackendType == BackendGemini {
 		if config.Model == "" {
-			config.Model = "gemini-3.1-flash-lite-preview"
+			config.Model = DefaultGeminiModel
 		}
 	}
 
