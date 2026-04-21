@@ -41,13 +41,13 @@ func TestUpdateWorktreeDropdown_GoneFiltering(t *testing.T) {
 		}
 	}
 
-	// "main" must be visible with no "(gone)" decoration.
+	// "main" must be visible with no "(gone)" badge.
 	foundMain := false
 	for _, item := range items {
 		if item.ID == "main" {
 			foundMain = true
-			if strings.Contains(item.Label, "gone") {
-				t.Errorf("healthy worktree label should not contain 'gone', got %q", item.Label)
+			if strings.Contains(item.Badge, "gone") {
+				t.Errorf("healthy worktree badge should not contain 'gone', got %q", item.Badge)
 			}
 		}
 	}
@@ -55,13 +55,13 @@ func TestUpdateWorktreeDropdown_GoneFiltering(t *testing.T) {
 		t.Errorf("healthy worktree 'main' missing from dropdown")
 	}
 
-	// "gone-with-sessions" must be visible and labeled with "(gone)".
+	// "gone-with-sessions" must be visible and carry a "(gone)" badge.
 	foundGoneWithSessions := false
 	for _, item := range items {
 		if item.ID == "gone-with-sessions" {
 			foundGoneWithSessions = true
-			if !strings.Contains(item.Label, "gone") {
-				t.Errorf("gone worktree with sessions should have 'gone' in label, got %q", item.Label)
+			if !strings.Contains(item.Badge, "gone") {
+				t.Errorf("gone worktree with sessions should have 'gone' in badge, got %q", item.Badge)
 			}
 		}
 	}
