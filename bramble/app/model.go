@@ -377,29 +377,45 @@ func (m *Model) visibleSessions() []session.SessionInfo {
 
 // updateWorktreeDropdown updates the worktree dropdown items.
 func (m *Model) updateWorktreeDropdown() {
-	items := make([]DropdownItem, len(m.worktrees))
-	for i, w := range m.worktrees {
-		// Count sessions for badge
+	items := make([]DropdownItem, 0, len(m.worktrees))
+	for _, w := range m.worktrees {
 		sessionCount := len(m.sessionManager.GetSessionsForWorktree(w.Path))
 
-		label := w.Branch
+		// Gone worktrees with no live sessions are hidden — surfacing them
+		// would only invite the user to try to open a dead directory.
+		if w.IsGone && sessionCount == 0 {
+			continue
+		}
 
-		// Build subtitle with status details
 		var subtitle string
-		if m.worktreeStatuses != nil {
-			if st, ok := m.worktreeStatuses[w.Branch]; ok {
-				subtitle = formatWorktreeStatus(st, sessionCount, m.styles)
+		// Gone worktrees skip git status (directory is gone; git would silently
+		// fail and produce a misleading "clean" status). Show only session count.
+		if w.IsGone {
+			if sessionCount > 0 {
+				subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
+			}
+		} else {
+			if m.worktreeStatuses != nil {
+				if st, ok := m.worktreeStatuses[w.Branch]; ok {
+					subtitle = formatWorktreeStatus(st, sessionCount, m.styles)
+				}
+			}
+			if subtitle == "" && sessionCount > 0 {
+				subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
 			}
 		}
-		if subtitle == "" && sessionCount > 0 {
-			subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
+
+		var badge string
+		if w.IsGone {
+			badge = m.styles.Failed.Render("(gone)")
 		}
 
-		items[i] = DropdownItem{
+		items = append(items, DropdownItem{
 			ID:       w.Branch,
-			Label:    label,
+			Label:    w.Branch,
 			Subtitle: subtitle,
-		}
+			Badge:    badge,
+		})
 	}
 	m.worktreeDropdown.SetItems(items)
 }
@@ -563,6 +579,12 @@ func (m Model) fetchGitStatuses() tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(m.worktrees))
 	for _, w := range m.worktrees {
 		w := w // capture loop variable
+		// Skip gone worktrees entirely: the directory no longer exists, so git
+		// commands silently fail and produce a zero-valued status that renders
+		// as a misleading green "clean" subtitle next to the "(gone)" badge.
+		if w.IsGone {
+			continue
+		}
 		cmds = append(cmds, func() tea.Msg {
 			manager := wt.NewManager(wtRoot, repoName)
 			status, err := manager.GetGitStatus(ctx, w)

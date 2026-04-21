@@ -146,6 +146,9 @@ type Worktree struct {
 	Branch     string
 	Commit     string
 	IsDetached bool
+	// IsGone is true when git knows about the worktree but its directory no
+	// longer exists on disk (e.g. removed via `rm -rf` or `git worktree remove`).
+	IsGone bool
 }
 
 // Name returns the worktree name (directory name).
@@ -153,7 +156,6 @@ func (w *Worktree) Name() string {
 	return filepath.Base(w.Path)
 }
 
-// WorktreeStatus contains extended status information.
 // WorktreeStatus holds extended status for a worktree.
 type WorktreeStatus struct {
 	LastCommitTime time.Time
@@ -577,7 +579,16 @@ func (m *Manager) List(ctx context.Context) ([]Worktree, error) {
 		return nil, err
 	}
 
-	return parseWorktreeList(result.Stdout), nil
+	worktrees := parseWorktreeList(result.Stdout)
+	for i := range worktrees {
+		if worktrees[i].IsGone {
+			continue
+		}
+		if _, statErr := os.Stat(worktrees[i].Path); os.IsNotExist(statErr) {
+			worktrees[i].IsGone = true
+		}
+	}
+	return worktrees, nil
 }
 
 // parseWorktreeList parses git worktree list --porcelain output.
@@ -585,25 +596,16 @@ func parseWorktreeList(output string) []Worktree {
 	var worktrees []Worktree
 	current := make(map[string]string)
 
+	flush := func() {
+		if w, ok := worktreeFromFields(current); ok {
+			worktrees = append(worktrees, w)
+		}
+		current = make(map[string]string)
+	}
+
 	for _, line := range strings.Split(output, "\n") {
 		if line == "" {
-			if _, isBare := current["bare"]; !isBare && current["worktree"] != "" {
-				branch := strings.TrimPrefix(current["branch"], "refs/heads/")
-				if branch == "" {
-					branch = "(detached)"
-				}
-				commit := current["HEAD"]
-				if len(commit) > 8 {
-					commit = commit[:8]
-				}
-				worktrees = append(worktrees, Worktree{
-					Path:       current["worktree"],
-					Branch:     branch,
-					Commit:     commit,
-					IsDetached: current["detached"] == "true",
-				})
-			}
-			current = make(map[string]string)
+			flush()
 		} else if strings.HasPrefix(line, "worktree ") {
 			current["worktree"] = line[9:]
 		} else if strings.HasPrefix(line, "HEAD ") {
@@ -614,28 +616,39 @@ func parseWorktreeList(output string) []Worktree {
 			current["bare"] = "true"
 		} else if line == "detached" {
 			current["detached"] = "true"
+		} else if line == "prunable" || strings.HasPrefix(line, "prunable ") {
+			current["prunable"] = "true"
 		}
 	}
-
-	// Handle last entry
-	if _, isBare := current["bare"]; !isBare && current["worktree"] != "" {
-		branch := strings.TrimPrefix(current["branch"], "refs/heads/")
-		if branch == "" {
-			branch = "(detached)"
-		}
-		commit := current["HEAD"]
-		if len(commit) > 8 {
-			commit = commit[:8]
-		}
-		worktrees = append(worktrees, Worktree{
-			Path:       current["worktree"],
-			Branch:     branch,
-			Commit:     commit,
-			IsDetached: current["detached"] == "true",
-		})
-	}
+	flush()
 
 	return worktrees
+}
+
+// worktreeFromFields builds a Worktree from a parsed porcelain record.
+// The second return is false for bare repos or empty records, which should be skipped.
+func worktreeFromFields(fields map[string]string) (Worktree, bool) {
+	if _, isBare := fields["bare"]; isBare {
+		return Worktree{}, false
+	}
+	if fields["worktree"] == "" {
+		return Worktree{}, false
+	}
+	branch := strings.TrimPrefix(fields["branch"], "refs/heads/")
+	if branch == "" {
+		branch = "(detached)"
+	}
+	commit := fields["HEAD"]
+	if len(commit) > 8 {
+		commit = commit[:8]
+	}
+	return Worktree{
+		Path:       fields["worktree"],
+		Branch:     branch,
+		Commit:     commit,
+		IsDetached: fields["detached"] == "true",
+		IsGone:     fields["prunable"] == "true",
+	}, true
 }
 
 // GetGitStatus returns local git status for a worktree (no network calls).
