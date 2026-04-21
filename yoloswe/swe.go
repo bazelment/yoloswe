@@ -186,7 +186,6 @@ func New(config Config) *SWEWrapper {
 		Goal:           config.Goal,
 		SessionLogPath: filepath.Join(config.RecordingDir, "reviewer.jsonl"),
 		Verbose:        config.Verbose,
-		JSONOutput:     true,
 	}
 	rev := reviewer.New(reviewerConfig)
 	rev.SetOutput(output)

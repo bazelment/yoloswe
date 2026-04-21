@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
@@ -148,23 +149,15 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 // handler installed by SetupRunLog; when no file handler is installed it
 // still flows through the default slog writer, which tests may override.
 //
-// It additionally emits machine-readable ProgressEvents through the attached
-// ProgressEmitter so automation consumers get a live stream of reviewer
-// progress alongside the final JSON envelope. The emitter is expected to
-// coalesce bursty events (e.g. tool-use) so the stream stays within
-// Monitor's event budget.
+// It also prints plain-text progress lines to stdout so the Monitor tool can
+// surface live activity to Claude without requiring JSON parsing.
 type rendererEventHandler struct {
 	r        *render.Renderer
 	reviewer *Reviewer // optional; captures lastSessionID when set
-	progress ProgressEmitter
 }
 
 func (r *Reviewer) newEventHandler() *rendererEventHandler {
-	p := r.progress
-	if p == nil {
-		p = NoopProgressEmitter()
-	}
-	return &rendererEventHandler{r: r.renderer, reviewer: r, progress: p}
+	return &rendererEventHandler{r: r.renderer, reviewer: r}
 }
 
 // backendName returns the configured backend as a plain string, or "" if no
@@ -185,12 +178,7 @@ func (h *rendererEventHandler) OnSessionInfo(sessionID, model string) {
 		}
 	}
 	slog.Info("reviewer session started", "session_id", sessionID, "model", model)
-	h.progress.Emit(ProgressEvent{
-		Kind:      ProgressKindSessionStarted,
-		Backend:   h.backendName(),
-		Model:     model,
-		SessionID: sessionID,
-	})
+	fmt.Fprintf(os.Stdout, "session started (%s %s)\n", h.backendName(), model)
 }
 
 func (h *rendererEventHandler) OnText(delta string) {
@@ -207,11 +195,7 @@ func (h *rendererEventHandler) OnToolStart(name, callID string, input map[string
 		"tool", name,
 		"call_id", callID,
 		"input_summary", summarizeToolInput(input))
-	h.progress.Emit(ProgressEvent{
-		Kind:    ProgressKindToolUse,
-		Backend: h.backendName(),
-		Tool:    name,
-	})
+	fmt.Fprintf(os.Stdout, "%s\n", name)
 }
 
 func (h *rendererEventHandler) OnToolComplete(name string, callID string, _ map[string]interface{}, result interface{}, isError bool) {
@@ -236,10 +220,7 @@ func (h *rendererEventHandler) OnTurnComplete(success bool, durationMs int64) {
 	slog.Info("reviewer turn complete",
 		"success", success,
 		"duration_ms", durationMs)
-	h.progress.Emit(ProgressEvent{
-		Kind:    ProgressKindTurnComplete,
-		Backend: h.backendName(),
-	})
+	fmt.Fprintf(os.Stdout, "turn complete\n")
 }
 
 func (h *rendererEventHandler) OnError(err error, context string) {
@@ -247,11 +228,7 @@ func (h *rendererEventHandler) OnError(err error, context string) {
 	slog.Error("reviewer error",
 		"context", context,
 		"error", err.Error())
-	h.progress.Emit(ProgressEvent{
-		Kind:    ProgressKindError,
-		Backend: h.backendName(),
-		Detail:  context,
-	})
+	fmt.Fprintf(os.Stdout, "error: %s\n", context)
 }
 
 // sensitiveToolInputKeys names keys whose values may contain shell commands,

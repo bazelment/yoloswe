@@ -118,16 +118,13 @@ func captureStdStreams(t *testing.T, fn func()) (stdout, stderr string) {
 	return <-outCh, <-errCh
 }
 
-func TestEmitEarlyFailure_JSONMode_WritesEnvelopeToStdout(t *testing.T) {
-	// Guards the --json contract: a pre-review failure (validation, cwd
-	// resolution, backend start) must still emit one parseable envelope on
-	// stdout so /pr-polish and similar automation never have to distinguish
-	// "bramble failed early" from "bramble failed late". This is the exact
-	// invariant the round-4 slog regression broke.
-	origJSON, origBackend := jsonOutput, backend
-	jsonOutput = true
+func TestEmitEarlyFailure_WritesEnvelopeToStdout(t *testing.T) {
+	// emitEarlyFailure must always emit one parseable envelope so automation
+	// (e.g. /pr-polish) never has to distinguish "bramble failed early" from
+	// "bramble failed late".
+	origBackend := backend
 	backend = "codex"
-	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
+	t.Cleanup(func() { backend = origBackend })
 
 	boom := errors.New("backend unreachable")
 	var returned error
@@ -159,26 +156,6 @@ func TestEmitEarlyFailure_JSONMode_WritesEnvelopeToStdout(t *testing.T) {
 	}
 }
 
-func TestEmitEarlyFailure_NonJSONMode_NoStdout(t *testing.T) {
-	// The text output contract: prose mode must leave stdout untouched on
-	// early failure so humans see the error via stderr and shells that pipe
-	// stdout (| tee, | grep) don't pick up stray JSON they can't render.
-	origJSON, origBackend := jsonOutput, backend
-	jsonOutput = false
-	backend = "codex"
-	t.Cleanup(func() { jsonOutput, backend = origJSON, origBackend })
-
-	stdout, _ := captureStdStreams(t, func() {
-		emit := func(env reviewer.ResultEnvelope) {
-			_ = reviewer.PrintJSONResult(os.Stdout, env)
-		}
-		_ = emitEarlyFailure(errors.New("boom"), "", emit)
-	})
-	if stdout != "" {
-		t.Errorf("stdout should be empty in prose mode, got %q", stdout)
-	}
-}
-
 func TestFinalizeEnvelope_SuccessDoesNotDoubleEmit(t *testing.T) {
 	// When runCodeReview's happy path has already flushed an envelope, the
 	// top-level defer must not synthesize a second one — otherwise automation
@@ -191,7 +168,6 @@ func TestFinalizeEnvelope_SuccessDoesNotDoubleEmit(t *testing.T) {
 		written = true
 	}
 	finalizeEnvelope(envelopeGuardArgs{
-		jsonOutput:      true,
 		backend:         "codex",
 		envelopeWritten: &written,
 		retErr:          &retErr,
@@ -216,7 +192,6 @@ func TestFinalizeEnvelope_UnwrittenReturnSynthesizesEnvelope(t *testing.T) {
 		written = true
 	}
 	finalizeEnvelope(envelopeGuardArgs{
-		jsonOutput:      true,
 		backend:         "codex",
 		envelopeWritten: &written,
 		retErr:          &retErr,
@@ -275,7 +250,6 @@ func TestFinalizeEnvelope_PanicEmitsEnvelopeThenRepanics(t *testing.T) {
 	}()
 
 	finalizeEnvelope(envelopeGuardArgs{
-		jsonOutput:      true,
 		backend:         "codex",
 		envelopeWritten: &written,
 		retErr:          &retErr,
@@ -284,24 +258,30 @@ func TestFinalizeEnvelope_PanicEmitsEnvelopeThenRepanics(t *testing.T) {
 	})
 }
 
-func TestFinalizeEnvelope_ProseModePanicRepanicsWithoutEnvelope(t *testing.T) {
-	// In prose mode (--json not set) we have no envelope contract — the
-	// guard must re-raise panics as-is and leave stdout completely alone.
+func TestFinalizeEnvelope_PanicAlwaysEmitsAndRepanics(t *testing.T) {
+	// A panic must always produce an envelope (so automation gets a result)
+	// AND re-raise (so the process exits non-zero).
 	written := false
 	var retErr error
-	emit := func(reviewer.ResultEnvelope) { t.Fatalf("emit must not run in prose mode") }
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
 
 	defer func() {
 		if r := recover(); r != "boom" {
 			t.Errorf("re-raised value = %v, want %q", r, "boom")
 		}
-		if written {
-			t.Errorf("envelope was emitted in prose mode")
+		if !written {
+			t.Errorf("envelope was not emitted on panic")
+		}
+		if got.Status != reviewer.StatusError {
+			t.Errorf("status = %s, want error", got.Status)
 		}
 	}()
 
 	finalizeEnvelope(envelopeGuardArgs{
-		jsonOutput:      false,
 		backend:         "codex",
 		envelopeWritten: &written,
 		retErr:          &retErr,
@@ -323,7 +303,6 @@ func TestFinalizeEnvelope_ReturnErrorPropagatesToEnvelopeMessage(t *testing.T) {
 		written = true
 	}
 	finalizeEnvelope(envelopeGuardArgs{
-		jsonOutput:      true,
 		backend:         "codex",
 		envelopeWritten: &written,
 		retErr:          &retErr,
