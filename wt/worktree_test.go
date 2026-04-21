@@ -96,6 +96,79 @@ detached
 	}
 }
 
+func TestParseWorktreeListPrunable(t *testing.T) {
+	output := `worktree /path/to/.bare
+bare
+
+worktree /path/to/main
+HEAD abc1234567890
+branch refs/heads/main
+
+worktree /path/to/gone-branch
+HEAD def5678901234
+branch refs/heads/gone-branch
+prunable gitdir file points to non-existent location
+
+`
+	got := parseWorktreeList(output)
+	if len(got) != 2 {
+		t.Fatalf("len(parseWorktreeList()) = %d, want 2", len(got))
+	}
+	if got[0].IsGone {
+		t.Errorf("worktrees[0].IsGone = true, want false")
+	}
+	if !got[1].IsGone {
+		t.Errorf("worktrees[1].IsGone = false, want true")
+	}
+	if got[1].Branch != "gone-branch" {
+		t.Errorf("worktrees[1].Branch = %q, want %q", got[1].Branch, "gone-branch")
+	}
+}
+
+func TestManagerListIsGoneForMissingDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a real directory for "main" and a non-existent path for "gone".
+	mainDir := filepath.Join(repoDir, "main")
+	if err := os.MkdirAll(mainDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gonePath := filepath.Join(repoDir, "gone-branch")
+	// gonePath is intentionally not created.
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + mainDir + "\nHEAD abc1234567890\nbranch refs/heads/main\n\n" +
+			"worktree " + gonePath + "\nHEAD def5678901234\nbranch refs/heads/gone-branch\n\n",
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithOutput(output))
+
+	ctx := context.Background()
+	worktrees, err := m.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(worktrees) != 2 {
+		t.Fatalf("List() returned %d worktrees, want 2", len(worktrees))
+	}
+	if worktrees[0].IsGone {
+		t.Errorf("worktrees[0] (%q) IsGone = true, want false", worktrees[0].Branch)
+	}
+	if !worktrees[1].IsGone {
+		t.Errorf("worktrees[1] (%q) IsGone = false, want true", worktrees[1].Branch)
+	}
+}
+
 func TestWorktreeName(t *testing.T) {
 	wt := Worktree{Path: "/home/user/worktrees/repo/feature-branch"}
 	if wt.Name() != "feature-branch" {

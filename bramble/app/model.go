@@ -377,10 +377,15 @@ func (m *Model) visibleSessions() []session.SessionInfo {
 
 // updateWorktreeDropdown updates the worktree dropdown items.
 func (m *Model) updateWorktreeDropdown() {
-	items := make([]DropdownItem, len(m.worktrees))
-	for i, w := range m.worktrees {
-		// Count sessions for badge
+	items := make([]DropdownItem, 0, len(m.worktrees))
+	for _, w := range m.worktrees {
+		// Count live in-memory sessions for this worktree.
 		sessionCount := len(m.sessionManager.GetSessionsForWorktree(w.Path))
+
+		// Gone worktrees with no live sessions are hidden from the dropdown.
+		if w.IsGone && sessionCount == 0 {
+			continue
+		}
 
 		label := w.Branch
 
@@ -395,11 +400,20 @@ func (m *Model) updateWorktreeDropdown() {
 			subtitle = m.styles.Dim.Render(fmt.Sprintf("%d sessions", sessionCount))
 		}
 
-		items[i] = DropdownItem{
+		if w.IsGone {
+			label = w.Branch + " (gone)"
+			if subtitle == "" {
+				subtitle = m.styles.Failed.Render("directory missing")
+			} else {
+				subtitle = m.styles.Failed.Render("(gone)") + " " + subtitle
+			}
+		}
+
+		items = append(items, DropdownItem{
 			ID:       w.Branch,
 			Label:    label,
 			Subtitle: subtitle,
-		}
+		})
 	}
 	m.worktreeDropdown.SetItems(items)
 }

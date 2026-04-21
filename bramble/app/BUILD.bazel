@@ -86,6 +86,7 @@ go_test(
         "update_scroll_test.go",
         "welcome_test.go",
         "width_test.go",
+        "worktree_gone_test.go",
         "worktree_warning_test.go",
     ],
     embed = [":app"],

@@ -146,6 +146,9 @@ type Worktree struct {
 	Branch     string
 	Commit     string
 	IsDetached bool
+	// IsGone is true when git knows about the worktree but its directory no
+	// longer exists on disk (e.g. removed via `rm -rf` or `git worktree remove`).
+	IsGone bool
 }
 
 // Name returns the worktree name (directory name).
@@ -577,7 +580,16 @@ func (m *Manager) List(ctx context.Context) ([]Worktree, error) {
 		return nil, err
 	}
 
-	return parseWorktreeList(result.Stdout), nil
+	worktrees := parseWorktreeList(result.Stdout)
+	for i := range worktrees {
+		if worktrees[i].IsGone {
+			continue
+		}
+		if _, statErr := os.Stat(worktrees[i].Path); os.IsNotExist(statErr) {
+			worktrees[i].IsGone = true
+		}
+	}
+	return worktrees, nil
 }
 
 // parseWorktreeList parses git worktree list --porcelain output.
@@ -601,6 +613,7 @@ func parseWorktreeList(output string) []Worktree {
 					Branch:     branch,
 					Commit:     commit,
 					IsDetached: current["detached"] == "true",
+					IsGone:     current["prunable"] == "true",
 				})
 			}
 			current = make(map[string]string)
@@ -614,6 +627,8 @@ func parseWorktreeList(output string) []Worktree {
 			current["bare"] = "true"
 		} else if line == "detached" {
 			current["detached"] = "true"
+		} else if line == "prunable gitdir file points to non-existent location" || strings.HasPrefix(line, "prunable") {
+			current["prunable"] = "true"
 		}
 	}
 
@@ -632,6 +647,7 @@ func parseWorktreeList(output string) []Worktree {
 			Branch:     branch,
 			Commit:     commit,
 			IsDetached: current["detached"] == "true",
+			IsGone:     current["prunable"] == "true",
 		})
 	}
 
