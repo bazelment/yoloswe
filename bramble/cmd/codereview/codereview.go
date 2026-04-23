@@ -68,8 +68,33 @@ func init() {
 	Cmd.Flags().BoolVar(&skipTestExecution, "skip-test-execution", false, "Instruct the reviewer not to run tests/build commands (caller runs them separately)")
 }
 
-func runCodeReview(cmd *cobra.Command, args []string) error {
+func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	runStart := time.Now()
+	// envelopeWritten tracks whether any --json path has already flushed an
+	// envelope to stdout. A top-level defer uses it to guarantee exactly one
+	// envelope reaches stdout in --json mode, even on panic, unexpected return,
+	// or error paths that pre-date this contract. Without the guard a silent
+	// exit leaves automation (e.g. /pr-polish) unable to distinguish "run
+	// succeeded with zero findings" from "run produced nothing at all".
+	var envelopeWritten bool
+	emitEnvelope := func(env reviewer.ResultEnvelope) {
+		if err := reviewer.PrintJSONResult(os.Stdout, env); err != nil {
+			reportEnvelopePrintError(err)
+			return
+		}
+		envelopeWritten = true
+	}
+	defer func() {
+		finalizeEnvelope(envelopeGuardArgs{
+			jsonOutput:      jsonOutput,
+			backend:         backend,
+			envelopeWritten: &envelopeWritten,
+			retErr:          &retErr,
+			panicVal:        recover(),
+			emit:            emitEnvelope,
+		})
+	}()
+
 	logPath, logClose, logErr := reviewer.SetupRunLog()
 	defer logClose()
 	if logErr != nil {
@@ -79,12 +104,12 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := reviewer.ValidateBackend(backend); err != nil {
-		return emitEarlyFailure(err, "")
+		return emitEarlyFailure(err, "", emitEnvelope)
 	}
 
 	workDir, err := reviewer.ResolveWorkDir()
 	if err != nil {
-		return emitEarlyFailure(err, "")
+		return emitEarlyFailure(err, "", emitEnvelope)
 	}
 
 	slog.Info("code-review run start",
@@ -114,11 +139,21 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
 	if err != nil {
-		return emitEarlyFailure(err, "")
+		return emitEarlyFailure(err, "", emitEnvelope)
 	}
 	config.SessionLogPath = logPath2
 
 	r := reviewer.New(config)
+	// When --json is in force, install an NDJSON progress emitter so
+	// automation consumers see lifecycle events (session-started, tool-use,
+	// verdict) interleaved with the final envelope on stdout. The 10-second
+	// coalesce interval keeps tool-use bursts inside Monitor's event budget
+	// while still passing structural markers (session-started, verdict)
+	// through unchanged. In prose mode this stays off; the renderer's stderr
+	// output is the only surface and --verbose controls its depth.
+	if jsonOutput {
+		r.SetProgressEmitter(reviewer.NewNDJSONProgressEmitter(os.Stdout, 10*time.Second))
+	}
 	// Snapshot before Start for early-failure paths. After the backend
 	// session begins (OnSessionInfo), call r.EffectiveModel() fresh so the
 	// envelope reports the model the backend actually ran (Cursor picks its
@@ -133,7 +168,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 
 	if err := r.Start(ctx); err != nil {
 		slog.Error("reviewer start failed", "error", err.Error())
-		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), earlyModel)
+		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), earlyModel, emitEnvelope)
 	}
 	defer r.Stop()
 
@@ -152,9 +187,7 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 			env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 				ErrorMessage: err.Error(),
 			}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
-			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
-				reportEnvelopePrintError(printErr)
-			}
+			emitEnvelope(env)
 		}
 		return fmt.Errorf("review failed: %w", err)
 	}
@@ -172,9 +205,20 @@ func runCodeReview(cmd *cobra.Command, args []string) error {
 			"issue_count", len(env.Review.Issues),
 			"max_severity", maxSeverity(env.Review.Issues),
 			"total_duration_ms", time.Since(runStart).Milliseconds())
-		if err := reviewer.PrintJSONResult(os.Stdout, env); err != nil {
-			return fmt.Errorf("print json result: %w", err)
-		}
+		// Emit a verdict progress event just before the envelope so consumers
+		// see a clean "reviewer concluded" marker without having to parse the
+		// envelope; some Monitor consumers only forward lines with
+		// "event":"progress" to the user and rely on this event to announce
+		// completion.
+		r.ProgressEmitter().Emit(reviewer.ProgressEvent{
+			Kind:       reviewer.ProgressKindVerdict,
+			Backend:    env.Backend,
+			Model:      env.Model,
+			SessionID:  env.SessionID,
+			Detail:     env.Review.Verdict,
+			IssueCount: len(env.Review.Issues),
+		})
+		emitEnvelope(env)
 		return nil
 	}
 
@@ -222,19 +266,68 @@ func redactPath(p string) string {
 	return fmt.Sprintf("<redacted:%d>/%s", len(p), filepath.Base(p))
 }
 
+// envelopeGuardArgs is the input to finalizeEnvelope. Extracted so tests can
+// drive the guard without spinning up a real reviewer. All pointer fields are
+// read and mutated — the caller owns the storage.
+type envelopeGuardArgs struct {
+	panicVal        any
+	envelopeWritten *bool
+	retErr          *error
+	emit            func(reviewer.ResultEnvelope)
+	backend         string
+	jsonOutput      bool
+}
+
+// finalizeEnvelope is the body of the top-level defer in runCodeReview. It
+// guarantees that in --json mode exactly one envelope lands on stdout before
+// the function returns, and it re-panics so the process exit code still
+// reflects the original failure. In prose mode it is nearly a no-op: it only
+// re-panics if a panic was in flight.
+func finalizeEnvelope(a envelopeGuardArgs) {
+	if !a.jsonOutput {
+		if a.panicVal != nil {
+			panic(a.panicVal)
+		}
+		return
+	}
+	if *a.envelopeWritten && a.panicVal == nil {
+		return
+	}
+	msg := "bramble code-review exited without producing a review"
+	switch {
+	case a.panicVal != nil:
+		msg = fmt.Sprintf("panic in code-review: %v", a.panicVal)
+		if *a.retErr == nil {
+			*a.retErr = fmt.Errorf("%s", msg)
+		}
+	case *a.retErr != nil:
+		msg = (*a.retErr).Error()
+	}
+	if !*a.envelopeWritten {
+		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{ErrorMessage: msg},
+			reviewer.BackendType(a.backend), "", "")
+		a.emit(env)
+	}
+	if a.panicVal != nil {
+		// Re-raise so the process still exits non-zero; the envelope is
+		// already on stdout for automation to parse.
+		panic(a.panicVal)
+	}
+}
+
 // emitEarlyFailure reports a pre-review failure to the caller. When --json is
 // set it also writes a minimal error envelope to stdout so automation sees a
 // single stable output shape regardless of where the failure occurred.
 // effectiveModel is the model after reviewer.New defaults were applied; pass
-// "" when the reviewer hasn't been constructed yet.
-func emitEarlyFailure(err error, effectiveModel string) error {
+// "" when the reviewer hasn't been constructed yet. emit is the envelope
+// emitter from the runCodeReview scope; it flips the envelopeWritten flag so
+// the top-level defer guard does not double-emit.
+func emitEarlyFailure(err error, effectiveModel string, emit func(reviewer.ResultEnvelope)) error {
 	if jsonOutput {
 		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 			ErrorMessage: err.Error(),
 		}, reviewer.BackendType(backend), effectiveModel, "")
-		if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
-			reportEnvelopePrintError(printErr)
-		}
+		emit(env)
 	}
 	return err
 }
