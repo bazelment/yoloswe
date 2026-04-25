@@ -263,12 +263,19 @@ func (s *Session) GetEffort(ctx context.Context) (*EffortSettings, error) {
 		Effort: EffortAuto,
 		Auto:   true,
 	}
-	if model, ok := settings.Applied["model"].(string); ok {
+	// Model: prefer the explicitly applied value; fall back to the effective
+	// (merged) value so info.Model is always populated when the CLI reports one.
+	if model, ok := settings.Applied["model"].(string); ok && model != "" {
+		info.Model = model
+	} else if model, ok := settings.Effective["model"].(string); ok {
 		info.Model = model
 	}
 	if effort, ok := settings.Applied["effort"].(string); ok && effort != "" {
-		info.Effort = EffortLevel(effort)
-		info.Auto = false
+		level := EffortLevel(effort)
+		if level.validExplicitEffort() {
+			info.Effort = level
+			info.Auto = false
+		}
 	}
 	return info, nil
 }
@@ -440,6 +447,10 @@ func (s *Session) usageOAuthToken() (oauthCreds, error) {
 	}
 	// CLAUDE_CODE_OAUTH_TOKEN is API-token style auth without profile scope —
 	// the /usage endpoint requires user:profile, so treat it as "no usage".
+	// Check session-level env overlay first, then host env.
+	if token := s.config.Env["CLAUDE_CODE_OAUTH_TOKEN"]; token != "" {
+		return oauthCreds{}, nil
+	}
 	if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
 		return oauthCreds{}, nil
 	}

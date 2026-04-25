@@ -273,6 +273,94 @@ func TestUsageUnavailableOnRejectedToken(t *testing.T) {
 	require.ErrorIs(t, err, ErrUsageUnavailable)
 }
 
+func TestUsageUnavailableOnExpiredStoredToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	expiredAt := time.Now().Add(-time.Hour).UnixMilli()
+	credentials := `{"claudeAiOauth":{"accessToken":"expired_tok","expiresAt":` + jsonNumber(expiredAt) + `,"subscriptionType":"max","scopes":["user:profile","user:inference"]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(credentials), 0o600))
+
+	s := NewSession()
+	_, err := s.Usage(context.Background())
+	require.ErrorIs(t, err, ErrUsageUnavailable)
+}
+
+func TestUsageReturnsEmptyWhenSessionEnvHasInferenceOnlyToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+
+	s := NewSession(WithEnv(map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "session_inference_only"}))
+	usage, err := s.Usage(context.Background())
+	require.NoError(t, err)
+	require.False(t, usage.HasData())
+}
+
+func TestUsageErrorOnHTTP500(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	s := NewSession(WithOAuthToken("tok"), WithUsageBaseURL(server.URL))
+	_, err := s.Usage(context.Background())
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrUsageUnavailable)
+	require.Contains(t, err.Error(), "500")
+}
+
+func TestUsageErrorOnMalformedJSON(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not valid json`))
+	}))
+	defer server.Close()
+
+	s := NewSession(WithOAuthToken("tok"), WithUsageBaseURL(server.URL))
+	_, err := s.Usage(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "decode usage")
+}
+
+func TestGetEffortUsesEffectiveModelWhenNotApplied(t *testing.T) {
+	t.Parallel()
+	s, buf := newStartedControlTestSession(t)
+
+	resultCh := make(chan struct {
+		settings *EffortSettings
+		err      error
+	}, 1)
+	go func() {
+		settings, err := s.GetEffort(context.Background())
+		resultCh <- struct {
+			settings *EffortSettings
+			err      error
+		}{settings: settings, err: err}
+	}()
+
+	getID := waitForPendingControlRequest(t, s, "")
+	requireWrittenControlSubtype(t, buf, "get_settings")
+	// Model only in effective (CLI default), not in applied (no explicit override).
+	sendControlSuccess(t, s, getID, map[string]any{
+		"effective": map[string]any{"model": "claude-sonnet-4-6"},
+		"sources":   []any{},
+		"applied":   map[string]any{},
+	})
+
+	select {
+	case got := <-resultCh:
+		require.NoError(t, got.err)
+		require.Equal(t, "claude-sonnet-4-6", got.settings.Model)
+		require.Equal(t, EffortAuto, got.settings.Effort)
+		require.True(t, got.settings.Auto)
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetEffort did not return")
+	}
+}
+
 func newStartedControlTestSession(t *testing.T) (*Session, *bytes.Buffer) {
 	t.Helper()
 	s := newTestSession(t)

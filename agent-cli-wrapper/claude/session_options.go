@@ -263,7 +263,11 @@ func WithEnv(env map[string]string) SessionOption {
 	}
 }
 
-// WithOAuthToken sets the OAuth token used by Usage.
+// WithOAuthToken sets the profile-scoped OAuth token used by Usage. The token
+// must carry the user:inference and user:profile scopes. Treat it as a secret —
+// it grants access to subscription data. When pairing with WithUsageBaseURL,
+// ensure the URL is a trusted Anthropic endpoint; the token is sent as a Bearer
+// credential to whatever host is configured.
 func WithOAuthToken(token string) SessionOption {
 	return func(c *SessionConfig) {
 		c.OAuthToken = token
