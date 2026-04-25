@@ -369,6 +369,39 @@ func TestAnalyzeUsageStats_ByFamilyRollup(t *testing.T) {
 	assert.EqualValues(t, 30, sonnet.Usage.OutputTokens)
 }
 
+func TestAnalyzeUsageStats_SessionModelAttributedWhenInitBeforeWindow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	// system/init is before the --since window; result event is inside the window.
+	// The result event has no modelUsage so it must fall back to sessionModel.
+	// Without the fix, sessionModel stays empty and the result goes to "(unknown)".
+	require.NoError(t, writeJSONLLines(path,
+		eventLine(map[string]interface{}{
+			"type":      "system",
+			"subtype":   "init",
+			"timestamp": "2026-03-31T00:00:00Z", // before Since
+			"model":     "claude-sonnet-4-6",
+		}),
+		eventLine(map[string]interface{}{
+			"type":           "result",
+			"timestamp":      "2026-04-02T00:00:00Z", // inside Since
+			"total_cost_usd": 0.01,
+		}),
+	))
+
+	cfg := DefaultStatsConfig()
+	cfg.Since = mustTime(t, "2026-04-01T00:00:00Z")
+	report, err := AnalyzeUsageStats([]string{dir}, cfg)
+	require.NoError(t, err)
+
+	// The result cost must be attributed to the correct model, not "(unknown)".
+	require.Len(t, report.ByModel, 1)
+	assert.Equal(t, "claude-sonnet-4-6", report.ByModel[0].Model)
+	assert.InDelta(t, 0.01, report.ByModel[0].ObservedCostUSD, 1e-9)
+}
+
 func TestAnalyzeUsageStats_UntilFiltering(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

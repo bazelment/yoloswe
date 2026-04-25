@@ -523,12 +523,14 @@ func (a *statsAggregator) scanFile(path string) error {
 				hasTimestamp = true
 			}
 		}
-		if !a.shouldIncludeEvent(eventTime, hasTimestamp) {
-			continue
-		}
-
+		// Always process system/init to capture the session model even when the
+		// event falls outside the configured time window.
 		if env.Type == "system" && env.Subtype == "init" && env.Model != "" {
 			sessionModel = env.Model
+		}
+
+		if !a.shouldIncludeEvent(eventTime, hasTimestamp) {
+			continue
 		}
 
 		if env.Message != nil && env.Type == "assistant" {
