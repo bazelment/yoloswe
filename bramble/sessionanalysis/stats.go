@@ -178,7 +178,7 @@ func LoadPricingTable(path string) (PricingTable, error) {
 	// than silently keeping whichever map iteration order wins.
 	normalized := make(map[string]ModelPricing, len(t.Models))
 	for k, v := range t.Models {
-		lower := strings.ToLower(k)
+		lower := strings.ToLower(strings.TrimSpace(k))
 		if _, exists := normalized[lower]; exists {
 			return PricingTable{}, fmt.Errorf("pricing file has duplicate key after case normalization: %q", lower)
 		}

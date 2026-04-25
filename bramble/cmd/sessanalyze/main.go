@@ -261,8 +261,8 @@ func renderStatsMarkdown(w io.Writer, report *sessionanalysis.StatsReport, maxRo
 	fmt.Fprintf(w, "- Files scanned: %d\n", report.FilesScanned)
 	fmt.Fprintf(w, "- Events scanned: %d (parse errors: %d)\n", report.EventsScanned, report.ParseErrors)
 	fmt.Fprintf(w, "- Pricing: %s (%s)\n",
-		strings.ReplaceAll(report.Pricing.Version, "|", "\\|"),
-		strings.ReplaceAll(report.Pricing.Source, "|", "\\|"))
+		sanitizeMarkdownText(report.Pricing.Version),
+		sanitizeMarkdownText(report.Pricing.Source))
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "## Totals")
@@ -335,19 +335,9 @@ func renderBucketTable[T any](
 		var b strings.Builder
 		b.WriteByte('|')
 		for _, v := range labelVals {
-			// Sanitize control chars, backticks, and pipes to avoid breaking
-			// the Markdown table structure.
-			safe := strings.Map(func(r rune) rune {
-				switch {
-				case r == '`':
-					return -1 // strip (breaks inline code span)
-				case r == '|':
-					return -1 // strip (breaks table column boundary; escaping isn't reliable)
-				case r < 0x20 || r == 0x7f:
-					return -1 // strip control characters
-				}
-				return r
-			}, v)
+			// Strip pipes (break table column boundaries) in addition to
+			// control chars and backticks stripped by sanitizeMarkdownText.
+			safe := strings.ReplaceAll(sanitizeMarkdownText(v), "|", "")
 			fmt.Fprintf(&b, " `%s` |", safe)
 		}
 		fmt.Fprintf(&b, " %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |",
@@ -367,6 +357,17 @@ func renderBucketTable[T any](
 		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(rows))
 	}
 	fmt.Fprintln(w)
+}
+
+// sanitizeMarkdownText strips characters that break markdown list items or
+// table cells: control characters (including newlines) and backticks.
+func sanitizeMarkdownText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '`' {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func formatBound(t time.Time) string {
