@@ -673,7 +673,8 @@ func collectJSONLFiles(paths []string, includeSubagents bool) ([]string, error) 
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
-			return nil, err
+			// Skip individual unreadable paths rather than aborting the whole scan.
+			continue
 		}
 		if info.IsDir() {
 			top, err := filepath.Glob(filepath.Join(p, "*.jsonl"))
