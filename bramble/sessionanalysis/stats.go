@@ -521,12 +521,16 @@ func (a *statsAggregator) scanFile(path string) error {
 			if ts, err := time.Parse(time.RFC3339Nano, env.Timestamp); err == nil {
 				eventTime = ts
 				hasTimestamp = true
+			} else {
+				// Non-empty but unparseable timestamp: count as a parse error and
+				// treat the event as timestamp-less (included in any window).
+				a.parseErrors++
 			}
 		}
 		// Always process system/init to capture the session model even when the
 		// event falls outside the configured time window.
 		if env.Type == "system" && env.Subtype == "init" && env.Model != "" {
-			sessionModel = env.Model
+			sessionModel = strings.ToLower(strings.TrimSpace(env.Model))
 		}
 
 		if !a.shouldIncludeEvent(eventTime, hasTimestamp) {
@@ -536,7 +540,7 @@ func (a *statsAggregator) scanFile(path string) error {
 		if env.Message != nil && env.Type == "assistant" {
 			msgID := strings.TrimSpace(env.Message.ID)
 
-			model := strings.TrimSpace(env.Message.Model)
+			model := strings.ToLower(strings.TrimSpace(env.Message.Model))
 			if model == "" {
 				model = sessionModel
 			}
@@ -580,7 +584,7 @@ func (a *statsAggregator) scanFile(path string) error {
 
 			if len(env.ModelUsage) > 0 {
 				for model, mu := range env.ModelUsage {
-					a.addObservedCost(sessionKey, project, model, mu.CostUSD)
+					a.addObservedCost(sessionKey, project, strings.ToLower(strings.TrimSpace(model)), mu.CostUSD)
 				}
 				continue
 			}
