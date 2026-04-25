@@ -40,12 +40,16 @@ type SessionConfig struct {
 	Env                        map[string]string
 	Tools                      *string
 	HookCallbackHandler        func(ctx context.Context, req protocol.HookCallbackRequest) (map[string]any, error)
+	UsageHTTPClient            UsageHTTPClient
 	Model                      string
 	SystemPrompt               string
 	Resume                     string
 	RecordingDir               string
 	CLIPath                    string
 	WorkDir                    string
+	OAuthToken                 string
+	UsageBaseURL               string
+	Effort                     EffortLevel
 	PermissionMode             PermissionMode
 	Betas                      []string
 	ExtraArgs                  []string
@@ -69,6 +73,14 @@ type SessionOption func(*SessionConfig)
 func WithModel(model string) SessionOption {
 	return func(c *SessionConfig) {
 		c.Model = model
+	}
+}
+
+// WithEffort sets the reasoning effort level for models that support effort.
+// EffortAuto omits the --effort flag and lets the CLI/model default apply.
+func WithEffort(level EffortLevel) SessionOption {
+	return func(c *SessionConfig) {
+		c.Effort = level
 	}
 }
 
@@ -248,6 +260,27 @@ func WithAgents(agents ...AgentDefinition) SessionOption {
 func WithEnv(env map[string]string) SessionOption {
 	return func(c *SessionConfig) {
 		c.Env = env
+	}
+}
+
+// WithOAuthToken sets the OAuth token used by Usage.
+func WithOAuthToken(token string) SessionOption {
+	return func(c *SessionConfig) {
+		c.OAuthToken = token
+	}
+}
+
+// WithUsageBaseURL overrides the Anthropic API base URL used by Usage.
+func WithUsageBaseURL(url string) SessionOption {
+	return func(c *SessionConfig) {
+		c.UsageBaseURL = url
+	}
+}
+
+// WithUsageHTTPClient overrides the HTTP client used by Usage.
+func WithUsageHTTPClient(client UsageHTTPClient) SessionOption {
+	return func(c *SessionConfig) {
+		c.UsageHTTPClient = client
 	}
 }
 

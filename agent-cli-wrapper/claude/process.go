@@ -54,6 +54,10 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 		"--model", pm.config.Model,
 	}
 
+	if pm.config.Effort != "" && pm.config.Effort != EffortAuto {
+		args = append(args, "--effort", string(pm.config.Effort))
+	}
+
 	if pm.config.PermissionMode != "" {
 		args = append(args, "--permission-mode", string(pm.config.PermissionMode))
 	}

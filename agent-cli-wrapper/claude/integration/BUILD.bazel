@@ -15,6 +15,7 @@ go_test(
         "sdk_mcp_test.go",
         "sdk_mcp_typed_test.go",
         "session_test.go",
+        "special_commands_test.go",
         "stream_bg_test.go",
         "stream_parallel_bg_test.go",
     ],
