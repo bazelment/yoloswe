@@ -11,7 +11,12 @@ import (
 	"time"
 )
 
-// UsageTotals stores token usage counters.
+// unknownLabel is the placeholder used when a model/project/family cannot be
+// determined. Centralized so renderers can recognize it consistently.
+const unknownLabel = "(unknown)"
+
+// UsageTotals stores token usage counters. The JSON tags match the on-disk
+// JSONL `usage` object so it can be unmarshaled directly during scanning.
 type UsageTotals struct {
 	InputTokens              int64 `json:"input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
@@ -211,24 +216,8 @@ type statsMessage struct {
 	ID      string          `json:"id,omitempty"`
 	Role    string          `json:"role,omitempty"`
 	Model   string          `json:"model,omitempty"`
-	Usage   *statsUsage     `json:"usage,omitempty"`
+	Usage   *UsageTotals    `json:"usage,omitempty"`
 	Content json.RawMessage `json:"content,omitempty"`
-}
-
-type statsUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-}
-
-func (u statsUsage) totals() UsageTotals {
-	return UsageTotals{
-		InputTokens:              u.InputTokens,
-		OutputTokens:             u.OutputTokens,
-		CacheReadInputTokens:     u.CacheReadInputTokens,
-		CacheCreationInputTokens: u.CacheCreationInputTokens,
-	}
 }
 
 type modelUsage struct {
@@ -239,6 +228,13 @@ type contentBlock struct {
 	Type string `json:"type"`
 	Name string `json:"name,omitempty"`
 	ID   string `json:"id,omitempty"`
+}
+
+// projectModelKey is a struct map key — preferred over string concatenation
+// with sentinel separators because it makes the dimensionality explicit.
+type projectModelKey struct {
+	Project string
+	Model   string
 }
 
 type mutableBucket struct { //nolint:govet // fieldalignment: readability over packing
@@ -290,6 +286,24 @@ func (b *mutableBucket) finalized() BucketStats {
 	return out
 }
 
+// orDefault returns s if non-empty, otherwise unknownLabel.
+func orDefault(s string) string {
+	if s == "" {
+		return unknownLabel
+	}
+	return s
+}
+
+// getOrCreate looks up a key in m and lazy-inits a fresh bucket on miss.
+func getOrCreate[K comparable](m map[K]*mutableBucket, key K) *mutableBucket {
+	if b, ok := m[key]; ok {
+		return b
+	}
+	b := newMutableBucket()
+	m[key] = b
+	return b
+}
+
 type statsAggregator struct {
 	cfg StatsConfig
 
@@ -298,7 +312,7 @@ type statsAggregator struct {
 	byFamily       map[string]*mutableBucket
 	byModel        map[string]*mutableBucket
 	byProject      map[string]*mutableBucket
-	byProjectModel map[string]*mutableBucket
+	byProjectModel map[projectModelKey]*mutableBucket
 
 	filesScanned  int
 	eventsScanned int64
@@ -312,95 +326,49 @@ func newStatsAggregator(cfg StatsConfig) *statsAggregator {
 		byFamily:       make(map[string]*mutableBucket),
 		byModel:        make(map[string]*mutableBucket),
 		byProject:      make(map[string]*mutableBucket),
-		byProjectModel: make(map[string]*mutableBucket),
+		byProjectModel: make(map[projectModelKey]*mutableBucket),
 	}
 }
 
-func (a *statsAggregator) getFamilyBucket(family string) *mutableBucket {
-	if family == "" {
-		family = "(unknown)"
+// affectedBuckets returns the five buckets that any event for (project, model)
+// must update: total, family, model, project, project+model. Centralized so
+// adding a dimension only requires touching this method.
+func (a *statsAggregator) affectedBuckets(project, model string) []*mutableBucket {
+	project = orDefault(project)
+	model = orDefault(model)
+	family := modelFamily(model)
+	return []*mutableBucket{
+		a.total,
+		getOrCreate(a.byFamily, family),
+		getOrCreate(a.byModel, model),
+		getOrCreate(a.byProject, project),
+		getOrCreate(a.byProjectModel, projectModelKey{project, model}),
 	}
-	if b, ok := a.byFamily[family]; ok {
-		return b
-	}
-	b := newMutableBucket()
-	a.byFamily[family] = b
-	return b
-}
-
-func (a *statsAggregator) getModelBucket(model string) *mutableBucket {
-	if model == "" {
-		model = "(unknown)"
-	}
-	if b, ok := a.byModel[model]; ok {
-		return b
-	}
-	b := newMutableBucket()
-	a.byModel[model] = b
-	return b
-}
-
-func (a *statsAggregator) getProjectBucket(project string) *mutableBucket {
-	if project == "" {
-		project = "(unknown)"
-	}
-	if b, ok := a.byProject[project]; ok {
-		return b
-	}
-	b := newMutableBucket()
-	a.byProject[project] = b
-	return b
-}
-
-func (a *statsAggregator) getProjectModelBucket(project, model string) *mutableBucket {
-	if project == "" {
-		project = "(unknown)"
-	}
-	if model == "" {
-		model = "(unknown)"
-	}
-	key := project + "\x00" + model
-	if b, ok := a.byProjectModel[key]; ok {
-		return b
-	}
-	b := newMutableBucket()
-	a.byProjectModel[key] = b
-	return b
 }
 
 func (a *statsAggregator) addUsage(sessionKey, project, model string, usage UsageTotals) {
 	estimateUSD, priced, unpriced := estimateCost(model, usage, a.cfg.Pricing)
-	family := modelFamily(model)
-
-	a.total.addUsage(sessionKey, usage, estimateUSD, priced, unpriced)
-	a.getFamilyBucket(family).addUsage(sessionKey, usage, estimateUSD, priced, unpriced)
-	a.getModelBucket(model).addUsage(sessionKey, usage, estimateUSD, priced, unpriced)
-	a.getProjectBucket(project).addUsage(sessionKey, usage, estimateUSD, priced, unpriced)
-	a.getProjectModelBucket(project, model).addUsage(sessionKey, usage, estimateUSD, priced, unpriced)
+	for _, b := range a.affectedBuckets(project, model) {
+		b.addUsage(sessionKey, usage, estimateUSD, priced, unpriced)
+	}
 }
 
 func (a *statsAggregator) addToolUses(sessionKey, project, model string, toolUses int64) {
 	if toolUses <= 0 {
 		return
 	}
-	family := modelFamily(model)
-	a.total.addToolUses(sessionKey, toolUses)
-	a.getFamilyBucket(family).addToolUses(sessionKey, toolUses)
-	a.getModelBucket(model).addToolUses(sessionKey, toolUses)
-	a.getProjectBucket(project).addToolUses(sessionKey, toolUses)
-	a.getProjectModelBucket(project, model).addToolUses(sessionKey, toolUses)
+	for _, b := range a.affectedBuckets(project, model) {
+		b.addToolUses(sessionKey, toolUses)
+	}
 }
 
 func (a *statsAggregator) addObservedCost(sessionKey, project, model string, costUSD float64) {
 	if costUSD == 0 {
 		return
 	}
-	family := modelFamily(model)
-	a.total.addObservedCost(sessionKey, costUSD)
-	a.getFamilyBucket(family).addObservedCost(sessionKey, costUSD)
-	a.getModelBucket(model).addObservedCost(sessionKey, costUSD)
-	a.getProjectBucket(project).addObservedCost(sessionKey, costUSD)
-	a.getProjectModelBucket(project, model).addObservedCost(sessionKey, costUSD)
+	for _, b := range a.affectedBuckets(project, model) {
+		b.addObservedCost(sessionKey, costUSD)
+	}
 }
 
 func (a *statsAggregator) shouldIncludeEvent(ts time.Time, hasTimestamp bool) bool {
@@ -450,67 +418,57 @@ func AnalyzeUsageStatsFromFiles(files []string, cfg StatsConfig) (*StatsReport, 
 		},
 	}
 
-	for family, bucket := range a.byFamily {
-		report.ByFamily = append(report.ByFamily, FamilyBucket{
-			Family:      family,
-			BucketStats: bucket.finalized(),
-		})
-	}
-	sort.Slice(report.ByFamily, func(i, j int) bool {
-		if report.ByFamily[i].EstimatedCostUSD == report.ByFamily[j].EstimatedCostUSD {
-			return report.ByFamily[i].Family < report.ByFamily[j].Family
-		}
-		return report.ByFamily[i].EstimatedCostUSD > report.ByFamily[j].EstimatedCostUSD
+	report.ByFamily = collectBuckets(a.byFamily, func(family string, stats BucketStats) FamilyBucket {
+		return FamilyBucket{Family: family, BucketStats: stats}
+	}, func(b FamilyBucket) (float64, string) {
+		return b.EstimatedCostUSD, b.Family
 	})
 
-	for model, bucket := range a.byModel {
-		report.ByModel = append(report.ByModel, ModelBucket{
-			Model:       model,
-			BucketStats: bucket.finalized(),
-		})
-	}
-	sort.Slice(report.ByModel, func(i, j int) bool {
-		if report.ByModel[i].EstimatedCostUSD == report.ByModel[j].EstimatedCostUSD {
-			return report.ByModel[i].Model < report.ByModel[j].Model
-		}
-		return report.ByModel[i].EstimatedCostUSD > report.ByModel[j].EstimatedCostUSD
+	report.ByModel = collectBuckets(a.byModel, func(model string, stats BucketStats) ModelBucket {
+		return ModelBucket{Model: model, BucketStats: stats}
+	}, func(b ModelBucket) (float64, string) {
+		return b.EstimatedCostUSD, b.Model
 	})
 
-	for project, bucket := range a.byProject {
-		report.ByProject = append(report.ByProject, ProjectBucket{
-			Project:     project,
-			BucketStats: bucket.finalized(),
-		})
-	}
-	sort.Slice(report.ByProject, func(i, j int) bool {
-		if report.ByProject[i].EstimatedCostUSD == report.ByProject[j].EstimatedCostUSD {
-			return report.ByProject[i].Project < report.ByProject[j].Project
-		}
-		return report.ByProject[i].EstimatedCostUSD > report.ByProject[j].EstimatedCostUSD
+	report.ByProject = collectBuckets(a.byProject, func(project string, stats BucketStats) ProjectBucket {
+		return ProjectBucket{Project: project, BucketStats: stats}
+	}, func(b ProjectBucket) (float64, string) {
+		return b.EstimatedCostUSD, b.Project
 	})
 
-	for key, bucket := range a.byProjectModel {
-		parts := strings.SplitN(key, "\x00", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		report.ByProjectModel = append(report.ByProjectModel, ProjectModelBucket{
-			Project:     parts[0],
-			Model:       parts[1],
-			BucketStats: bucket.finalized(),
-		})
-	}
-	sort.Slice(report.ByProjectModel, func(i, j int) bool {
-		if report.ByProjectModel[i].EstimatedCostUSD == report.ByProjectModel[j].EstimatedCostUSD {
-			if report.ByProjectModel[i].Project == report.ByProjectModel[j].Project {
-				return report.ByProjectModel[i].Model < report.ByProjectModel[j].Model
-			}
-			return report.ByProjectModel[i].Project < report.ByProjectModel[j].Project
-		}
-		return report.ByProjectModel[i].EstimatedCostUSD > report.ByProjectModel[j].EstimatedCostUSD
+	report.ByProjectModel = collectBuckets(a.byProjectModel, func(k projectModelKey, stats BucketStats) ProjectModelBucket {
+		return ProjectModelBucket{Project: k.Project, Model: k.Model, BucketStats: stats}
+	}, func(b ProjectModelBucket) (float64, string) {
+		return b.EstimatedCostUSD, b.Project + "\x00" + b.Model
 	})
 
 	return report, nil
+}
+
+// collectBuckets materializes a map of mutable buckets into a sorted slice of
+// rows. Rows sort by descending estimated cost with a deterministic name
+// fallback so output is stable across runs.
+func collectBuckets[K comparable, R any](
+	m map[K]*mutableBucket,
+	build func(K, BucketStats) R,
+	sortKey func(R) (cost float64, name string),
+) []R {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]R, 0, len(m))
+	for k, b := range m {
+		out = append(out, build(k, b.finalized()))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ci, ni := sortKey(out[i])
+		cj, nj := sortKey(out[j])
+		if ci != cj {
+			return ci > cj
+		}
+		return ni < nj
+	})
+	return out
 }
 
 func (a *statsAggregator) scanFile(path string) error {
@@ -571,7 +529,7 @@ func (a *statsAggregator) scanFile(path string) error {
 				model = sessionModel
 			}
 			if model == "" {
-				model = "(unknown)"
+				model = unknownLabel
 			}
 
 			toolUses := extractToolUseCount(env.Message.Content, seenToolUseIDs)
@@ -588,8 +546,7 @@ func (a *statsAggregator) scanFile(path string) error {
 				seenUsageMessageIDs[msgID] = struct{}{}
 			}
 
-			usage := env.Message.Usage.totals()
-			a.addUsage(sessionKey, project, model, usage)
+			a.addUsage(sessionKey, project, model, *env.Message.Usage)
 			continue
 		}
 
@@ -611,7 +568,7 @@ func (a *statsAggregator) scanFile(path string) error {
 
 			model := sessionModel
 			if model == "" {
-				model = "(unknown)"
+				model = unknownLabel
 			}
 			a.addObservedCost(sessionKey, project, model, env.TotalCostUSD)
 		}
@@ -744,12 +701,13 @@ func perTokenCost(tokens int64, usdPerMTok float64) float64 {
 	return (float64(tokens) / 1_000_000.0) * usdPerMTok
 }
 
+// lookupPricing falls back to a family baseline (e.g. opus -> claude-opus-4-7)
+// when an exact model ID isn't in the table — needed because new versioned
+// IDs ship before pricing is added.
 func lookupPricing(model string, table map[string]ModelPricing) (ModelPricing, bool) {
 	if rate, ok := table[model]; ok {
 		return rate, true
 	}
-
-	// Family fallbacks for versioned model IDs.
 	switch {
 	case strings.Contains(model, "opus"):
 		if rate, ok := table["claude-opus-4-7"]; ok {
@@ -770,8 +728,8 @@ func lookupPricing(model string, table map[string]ModelPricing) (ModelPricing, b
 func modelFamily(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	switch {
-	case m == "", m == "(unknown)":
-		return "(unknown)"
+	case m == "", m == unknownLabel:
+		return unknownLabel
 	case strings.Contains(m, "synthetic"):
 		return "synthetic"
 	case strings.Contains(m, "opus"):

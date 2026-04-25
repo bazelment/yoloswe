@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -369,7 +370,7 @@ func TestAnalyzeUsageStats_ByFamilyRollup(t *testing.T) {
 }
 
 func writeJSONLLines(path string, lines ...string) error {
-	return os.WriteFile(path, []byte(stringsJoin(lines, "\n")+"\n"), 0o644)
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
 func eventLine(v map[string]interface{}) string {
@@ -385,25 +386,4 @@ func mustTime(t *testing.T, s string) time.Time {
 	out, err := time.Parse(time.RFC3339, s)
 	require.NoError(t, err)
 	return out
-}
-
-func stringsJoin(parts []string, sep string) string {
-	switch len(parts) {
-	case 0:
-		return ""
-	case 1:
-		return parts[0]
-	}
-	n := len(sep) * (len(parts) - 1)
-	for i := range parts {
-		n += len(parts[i])
-	}
-	b := make([]byte, 0, n)
-	for i, p := range parts {
-		if i > 0 {
-			b = append(b, sep...)
-		}
-		b = append(b, p...)
-	}
-	return string(b)
 }

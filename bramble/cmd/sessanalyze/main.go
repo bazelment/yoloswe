@@ -121,8 +121,6 @@ func main() {
 	os.Exit(exitCode)
 }
 
-// flags is the FlagSet used by parseFlags, stored at package level so that
-// flag.NArg() / flag.Args() callers can reference it after parsing.
 var flags = flag.NewFlagSet("sessanalyze", flag.ExitOnError)
 
 func parseFlags(args []string) config {
@@ -281,97 +279,79 @@ func renderStatsMarkdown(w io.Writer, report *sessionanalysis.StatsReport, maxRo
 	fmt.Fprintf(w, "| Estimated Coverage | %.1f%% |\n", report.Total.Coverage()*100)
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "## By Family")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "| Family | Sessions | Input | Output | Cache Read | Cache Create | Tool Uses | Observed $ | Estimated $ | Coverage |")
-	fmt.Fprintln(w, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-	for _, row := range limitFamilyRows(report.ByFamily, maxRows) {
-		fmt.Fprintf(w, "| `%s` | %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |\n",
-			row.Family,
-			row.Sessions,
-			formatInt(row.Usage.InputTokens),
-			formatInt(row.Usage.OutputTokens),
-			formatInt(row.Usage.CacheReadInputTokens),
-			formatInt(row.Usage.CacheCreationInputTokens),
-			row.ToolUses,
-			row.ObservedCostUSD,
-			row.EstimatedCostUSD,
-			row.Coverage()*100,
-		)
-	}
-	if len(report.ByFamily) > maxRows {
-		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(report.ByFamily))
-	}
-	fmt.Fprintln(w)
+	renderBucketTable(w, "By Family", []string{"Family"}, report.ByFamily, maxRows,
+		func(b sessionanalysis.FamilyBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Family}, b.BucketStats
+		})
 
-	fmt.Fprintln(w, "## By Model")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "| Model | Sessions | Input | Output | Cache Read | Cache Create | Tool Uses | Observed $ | Estimated $ | Coverage |")
-	fmt.Fprintln(w, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-	for _, row := range limitModelRows(report.ByModel, maxRows) {
-		fmt.Fprintf(w, "| `%s` | %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |\n",
-			row.Model,
-			row.Sessions,
-			formatInt(row.Usage.InputTokens),
-			formatInt(row.Usage.OutputTokens),
-			formatInt(row.Usage.CacheReadInputTokens),
-			formatInt(row.Usage.CacheCreationInputTokens),
-			row.ToolUses,
-			row.ObservedCostUSD,
-			row.EstimatedCostUSD,
-			row.Coverage()*100,
-		)
-	}
-	if len(report.ByModel) > maxRows {
-		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(report.ByModel))
-	}
-	fmt.Fprintln(w)
+	renderBucketTable(w, "By Model", []string{"Model"}, report.ByModel, maxRows,
+		func(b sessionanalysis.ModelBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Model}, b.BucketStats
+		})
 
-	fmt.Fprintln(w, "## By Project")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "| Project | Sessions | Input | Output | Cache Read | Cache Create | Tool Uses | Observed $ | Estimated $ | Coverage |")
-	fmt.Fprintln(w, "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-	for _, row := range limitProjectRows(report.ByProject, maxRows) {
-		fmt.Fprintf(w, "| `%s` | %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |\n",
-			row.Project,
-			row.Sessions,
-			formatInt(row.Usage.InputTokens),
-			formatInt(row.Usage.OutputTokens),
-			formatInt(row.Usage.CacheReadInputTokens),
-			formatInt(row.Usage.CacheCreationInputTokens),
-			row.ToolUses,
-			row.ObservedCostUSD,
-			row.EstimatedCostUSD,
-			row.Coverage()*100,
-		)
-	}
-	if len(report.ByProject) > maxRows {
-		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(report.ByProject))
-	}
-	fmt.Fprintln(w)
+	renderBucketTable(w, "By Project", []string{"Project"}, report.ByProject, maxRows,
+		func(b sessionanalysis.ProjectBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Project}, b.BucketStats
+		})
 
-	fmt.Fprintln(w, "## By Project + Model")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "| Project | Model | Sessions | Input | Output | Cache Read | Cache Create | Tool Uses | Observed $ | Estimated $ | Coverage |")
-	fmt.Fprintln(w, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
-	for _, row := range limitProjectModelRows(report.ByProjectModel, maxRows) {
-		fmt.Fprintf(w, "| `%s` | `%s` | %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |\n",
-			row.Project,
-			row.Model,
-			row.Sessions,
-			formatInt(row.Usage.InputTokens),
-			formatInt(row.Usage.OutputTokens),
-			formatInt(row.Usage.CacheReadInputTokens),
-			formatInt(row.Usage.CacheCreationInputTokens),
-			row.ToolUses,
-			row.ObservedCostUSD,
-			row.EstimatedCostUSD,
-			row.Coverage()*100,
+	renderBucketTable(w, "By Project + Model", []string{"Project", "Model"}, report.ByProjectModel, maxRows,
+		func(b sessionanalysis.ProjectModelBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Project, b.Model}, b.BucketStats
+		})
+}
+
+// renderBucketTable writes a markdown breakdown table for a slice of bucket
+// rows. labels are the leading label-column names (rendered with backticks);
+// the remaining columns are the standard usage/cost stats. row returns the
+// label cell values plus the BucketStats for each row.
+func renderBucketTable[T any](
+	w io.Writer,
+	title string,
+	labels []string,
+	rows []T,
+	maxRows int,
+	row func(T) ([]string, sessionanalysis.BucketStats),
+) {
+	fmt.Fprintf(w, "## %s\n\n", title)
+
+	statHeaders := []string{"Sessions", "Input", "Output", "Cache Read", "Cache Create", "Tool Uses", "Observed $", "Estimated $", "Coverage"}
+	header := "|"
+	sep := "|"
+	for _, l := range labels {
+		header += " " + l + " |"
+		sep += "---|"
+	}
+	for _, h := range statHeaders {
+		header += " " + h + " |"
+		sep += "---:|"
+	}
+	fmt.Fprintln(w, header)
+	fmt.Fprintln(w, sep)
+
+	for _, r := range limitRows(rows, maxRows) {
+		labelVals, stats := row(r)
+		var b strings.Builder
+		b.WriteByte('|')
+		for _, v := range labelVals {
+			fmt.Fprintf(&b, " `%s` |", v)
+		}
+		fmt.Fprintf(&b, " %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |",
+			stats.Sessions,
+			formatInt(stats.Usage.InputTokens),
+			formatInt(stats.Usage.OutputTokens),
+			formatInt(stats.Usage.CacheReadInputTokens),
+			formatInt(stats.Usage.CacheCreationInputTokens),
+			stats.ToolUses,
+			stats.ObservedCostUSD,
+			stats.EstimatedCostUSD,
+			stats.Coverage()*100,
 		)
+		fmt.Fprintln(w, b.String())
 	}
-	if len(report.ByProjectModel) > maxRows {
-		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(report.ByProjectModel))
+	if len(rows) > maxRows {
+		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(rows))
 	}
+	fmt.Fprintln(w)
 }
 
 func formatBound(t time.Time) string {
@@ -381,28 +361,7 @@ func formatBound(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-func limitModelRows(rows []sessionanalysis.ModelBucket, n int) []sessionanalysis.ModelBucket {
-	if n <= 0 || len(rows) <= n {
-		return rows
-	}
-	return rows[:n]
-}
-
-func limitFamilyRows(rows []sessionanalysis.FamilyBucket, n int) []sessionanalysis.FamilyBucket {
-	if n <= 0 || len(rows) <= n {
-		return rows
-	}
-	return rows[:n]
-}
-
-func limitProjectRows(rows []sessionanalysis.ProjectBucket, n int) []sessionanalysis.ProjectBucket {
-	if n <= 0 || len(rows) <= n {
-		return rows
-	}
-	return rows[:n]
-}
-
-func limitProjectModelRows(rows []sessionanalysis.ProjectModelBucket, n int) []sessionanalysis.ProjectModelBucket {
+func limitRows[T any](rows []T, n int) []T {
 	if n <= 0 || len(rows) <= n {
 		return rows
 	}
