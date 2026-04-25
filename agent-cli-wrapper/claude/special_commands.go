@@ -307,6 +307,10 @@ func (s *Session) ClearEffort(ctx context.Context) (*EffortSettings, error) {
 // credentials available), it returns an empty PlanUsage like the interactive
 // CLI command. ErrUsageUnavailable is returned only when credentials exist but
 // are expired or rejected by the server.
+//
+// When the token comes from WithOAuthToken (not stored credentials),
+// PlanUsage.SubscriptionType and RateLimitTier will be empty, which means
+// subscription-conditional rows (e.g. Extra usage) are skipped in ReportLines.
 func (s *Session) Usage(ctx context.Context) (*PlanUsage, error) {
 	creds, err := s.usageOAuthToken()
 	if err != nil {
@@ -455,7 +459,7 @@ func (s *Session) usageOAuthToken() (oauthCreds, error) {
 		return oauthCreds{}, nil
 	}
 
-	creds, err := readStoredCredentials()
+	creds, err := readStoredCredentials(s.config.Env)
 	if err != nil {
 		return oauthCreds{}, err
 	}
@@ -477,8 +481,8 @@ func (s *Session) usageOAuthToken() (oauthCreds, error) {
 	}, nil
 }
 
-func readStoredCredentials() (*storedCredentials, error) {
-	path := filepath.Join(claudeConfigHomeDir(), ".credentials.json")
+func readStoredCredentials(sessionEnv map[string]string) (*storedCredentials, error) {
+	path := filepath.Join(claudeConfigHomeDir(sessionEnv), ".credentials.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -493,7 +497,12 @@ func readStoredCredentials() (*storedCredentials, error) {
 	return &creds, nil
 }
 
-func claudeConfigHomeDir() string {
+// claudeConfigHomeDir returns the Claude config directory, checking the
+// session env overlay before falling back to the host env and ~/.claude.
+func claudeConfigHomeDir(sessionEnv map[string]string) string {
+	if dir := sessionEnv["CLAUDE_CONFIG_DIR"]; dir != "" {
+		return dir
+	}
 	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return dir
 	}

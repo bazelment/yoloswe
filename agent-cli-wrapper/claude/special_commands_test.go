@@ -325,6 +325,32 @@ func TestUsageErrorOnMalformedJSON(t *testing.T) {
 	require.Contains(t, err.Error(), "decode usage")
 }
 
+func TestUsageReadsCredentialsFromSessionEnvConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	// Host CLAUDE_CONFIG_DIR points somewhere empty; session env overrides it.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	expiresAt := time.Now().Add(time.Hour).UnixMilli()
+	credentials := `{"claudeAiOauth":{"accessToken":"session_tok","expiresAt":` + jsonNumber(expiresAt) + `,"subscriptionType":"pro","scopes":["user:profile","user:inference"]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(credentials), 0o600))
+
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"five_hour":{"utilization":50}}`))
+	}))
+	defer server.Close()
+
+	s := NewSession(
+		WithEnv(map[string]string{"CLAUDE_CONFIG_DIR": dir}),
+		WithUsageBaseURL(server.URL),
+	)
+	usage, err := s.Usage(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "Bearer session_tok", gotAuth)
+	require.NotNil(t, usage.FiveHour)
+}
+
 func TestGetEffortUsesEffectiveModelWhenNotApplied(t *testing.T) {
 	t.Parallel()
 	s, buf := newStartedControlTestSession(t)

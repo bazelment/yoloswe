@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -55,6 +56,9 @@ func (pm *processManager) BuildCLIArgs() ([]string, error) {
 	}
 
 	if pm.config.Effort != "" && pm.config.Effort != EffortAuto {
+		if !pm.config.Effort.validExplicitEffort() {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidEffort, pm.config.Effort)
+		}
 		args = append(args, "--effort", string(pm.config.Effort))
 	}
 

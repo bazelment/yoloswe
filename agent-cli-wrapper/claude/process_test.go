@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -144,6 +145,20 @@ func TestBuildCLIArgs_Effort(t *testing.T) {
 				t.Errorf("--effort value = %q, want %q", args[foundIdx+1], tt.wantVal)
 			}
 		})
+	}
+}
+
+func TestBuildCLIArgs_InvalidEffortReturnsError(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Effort = EffortLevel("turbo")
+	pm := newProcessManager(config)
+	_, err := pm.BuildCLIArgs()
+	if err == nil {
+		t.Fatal("expected error for invalid effort level, got nil")
+	}
+	if !errors.Is(err, ErrInvalidEffort) {
+		t.Fatalf("expected ErrInvalidEffort, got %v", err)
 	}
 }
 
