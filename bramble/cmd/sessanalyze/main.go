@@ -335,9 +335,19 @@ func renderBucketTable[T any](
 		var b strings.Builder
 		b.WriteByte('|')
 		for _, v := range labelVals {
-			// Strip backticks (which would break the inline code span) and pipes
-			// (which would break the table column boundary).
-			safe := strings.NewReplacer("`", "", "|", "\\|").Replace(v)
+			// Sanitize control chars, backticks, and pipes to avoid breaking
+			// the Markdown table structure.
+			safe := strings.Map(func(r rune) rune {
+				switch {
+				case r == '`':
+					return -1 // strip (breaks inline code span)
+				case r == '|':
+					return -1 // strip (breaks table column boundary; escaping isn't reliable)
+				case r < 0x20 || r == 0x7f:
+					return -1 // strip control characters
+				}
+				return r
+			}, v)
 			fmt.Fprintf(&b, " `%s` |", safe)
 		}
 		fmt.Fprintf(&b, " %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |",

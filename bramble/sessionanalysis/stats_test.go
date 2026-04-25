@@ -402,6 +402,35 @@ func TestAnalyzeUsageStats_SessionModelAttributedWhenInitBeforeWindow(t *testing
 	assert.InDelta(t, 0.01, report.ByModel[0].ObservedCostUSD, 1e-9)
 }
 
+func TestAnalyzeUsageStats_MalformedTimestampCounted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	// Event with non-empty but non-RFC3339Nano timestamp should increment parseErrors
+	// and still be included in the window (treated as timestamp-less).
+	require.NoError(t, writeJSONLLines(path,
+		eventLine(map[string]interface{}{
+			"type":      "assistant",
+			"timestamp": "not-a-timestamp",
+			"message": map[string]interface{}{
+				"id":    "msg-1",
+				"model": "claude-sonnet-4-6",
+				"usage": map[string]interface{}{"input_tokens": 100, "output_tokens": 10},
+			},
+		}),
+	))
+
+	cfg := DefaultStatsConfig()
+	cfg.Since = mustTime(t, "2026-01-01T00:00:00Z")
+	report, err := AnalyzeUsageStats([]string{dir}, cfg)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 1, report.ParseErrors, "malformed timestamp must increment ParseErrors")
+	// Event is still included (treated as timestamp-less when window is active).
+	assert.EqualValues(t, 100, report.Total.Usage.InputTokens)
+}
+
 func TestAnalyzeUsageStats_UntilFiltering(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

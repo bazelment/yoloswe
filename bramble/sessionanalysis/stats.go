@@ -174,9 +174,15 @@ func LoadPricingTable(path string) (PricingTable, error) {
 		t.Models = make(map[string]ModelPricing)
 	}
 	// Normalize keys to lowercase so lookupPricing's ToLower model normalization matches.
+	// Keys that collide after lowercasing are an authoring error; return an error rather
+	// than silently keeping whichever map iteration order wins.
 	normalized := make(map[string]ModelPricing, len(t.Models))
 	for k, v := range t.Models {
-		normalized[strings.ToLower(k)] = v
+		lower := strings.ToLower(k)
+		if _, exists := normalized[lower]; exists {
+			return PricingTable{}, fmt.Errorf("pricing file has duplicate key after case normalization: %q", lower)
+		}
+		normalized[lower] = v
 	}
 	t.Models = normalized
 	if t.Version == "" {
@@ -548,7 +554,10 @@ func (a *statsAggregator) scanFile(path string) error {
 				model = unknownLabel
 			}
 
-			toolUses := extractToolUseCount(env.Message.Content, seenToolUseIDs)
+			toolUses, ok := extractToolUseCount(env.Message.Content, seenToolUseIDs)
+			if !ok {
+				a.parseErrors++
+			}
 			a.addToolUses(sessionKey, project, model, toolUses)
 
 			if env.Message.Usage == nil {
@@ -602,13 +611,13 @@ func (a *statsAggregator) scanFile(path string) error {
 	return nil
 }
 
-func extractToolUseCount(contentRaw json.RawMessage, seenToolUseIDs map[string]struct{}) int64 {
+func extractToolUseCount(contentRaw json.RawMessage, seenToolUseIDs map[string]struct{}) (int64, bool) {
 	if len(contentRaw) == 0 || contentRaw[0] != '[' {
-		return 0
+		return 0, true
 	}
 	var blocks []contentBlock
 	if err := json.Unmarshal(contentRaw, &blocks); err != nil {
-		return 0
+		return 0, false
 	}
 	var n int64
 	for _, b := range blocks {
@@ -623,7 +632,7 @@ func extractToolUseCount(contentRaw json.RawMessage, seenToolUseIDs map[string]s
 		}
 		n++
 	}
-	return n
+	return n, true
 }
 
 func projectFromLogPath(path string) string {
