@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -90,6 +91,74 @@ func TestBuildCLIArgs_Tools(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildCLIArgs_Effort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		effort   EffortLevel
+		wantVal  string
+		wantFlag bool
+	}{
+		{name: "unset omits flag", effort: "", wantFlag: false},
+		{name: "auto omits flag", effort: EffortAuto, wantFlag: false},
+		{name: "low adds flag", effort: EffortLow, wantFlag: true, wantVal: "low"},
+		{name: "medium adds flag", effort: EffortMed, wantFlag: true, wantVal: "medium"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := defaultConfig()
+			config.Effort = tt.effort
+
+			pm := newProcessManager(config)
+			args, err := pm.BuildCLIArgs()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			foundIdx := -1
+			for i, arg := range args {
+				if arg == "--effort" {
+					foundIdx = i
+					break
+				}
+			}
+
+			if !tt.wantFlag {
+				if foundIdx != -1 {
+					t.Fatalf("unexpected --effort flag in %v", args)
+				}
+				return
+			}
+			if foundIdx == -1 {
+				t.Fatalf("expected --effort flag in %v", args)
+			}
+			if foundIdx+1 >= len(args) {
+				t.Fatal("--effort flag has no value")
+			}
+			if args[foundIdx+1] != tt.wantVal {
+				t.Errorf("--effort value = %q, want %q", args[foundIdx+1], tt.wantVal)
+			}
+		})
+	}
+}
+
+func TestBuildCLIArgs_InvalidEffortReturnsError(t *testing.T) {
+	t.Parallel()
+	config := defaultConfig()
+	config.Effort = EffortLevel("turbo")
+	pm := newProcessManager(config)
+	_, err := pm.BuildCLIArgs()
+	if err == nil {
+		t.Fatal("expected error for invalid effort level, got nil")
+	}
+	if !errors.Is(err, ErrInvalidEffort) {
+		t.Fatalf("expected ErrInvalidEffort, got %v", err)
 	}
 }
 
