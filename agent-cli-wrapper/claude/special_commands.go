@@ -8,9 +8,10 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
@@ -48,6 +49,12 @@ type UsageHTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
+// Shared default client for Usage so connections / TLS sessions get reused
+// across polls (status bars typically fetch /usage on a short interval).
+var defaultUsageHTTPClient = sync.OnceValue(func() *http.Client {
+	return &http.Client{Timeout: 5 * time.Second}
+})
+
 // ContextCategory is one category in the current context window.
 type ContextCategory struct {
 	Name       string `json:"name"`
@@ -66,12 +73,12 @@ type ContextAPIUsage struct {
 
 // ContextUsage contains the structured SDK response behind /context.
 type ContextUsage struct {
-	APIUsage     *ContextAPIUsage           `json:"apiUsage"`
-	Raw          map[string]json.RawMessage `json:"-"`
-	Categories   []ContextCategory          `json:"categories"`
-	TotalTokens  int                        `json:"totalTokens"`
-	MaxTokens    int                        `json:"maxTokens"`
-	RawMaxTokens int                        `json:"rawMaxTokens"`
+	APIUsage     *ContextAPIUsage  `json:"apiUsage"`
+	Raw          json.RawMessage   `json:"-"`
+	Categories   []ContextCategory `json:"categories"`
+	TotalTokens  int               `json:"totalTokens"`
+	MaxTokens    int               `json:"maxTokens"`
+	RawMaxTokens int               `json:"rawMaxTokens"`
 }
 
 // EffectiveMaxTokens returns the populated max token field. Older CLI builds
@@ -107,15 +114,15 @@ type ExtraUsage struct {
 
 // PlanUsage is the real Claude.ai plan/rate-limit usage payload.
 type PlanUsage struct {
-	Raw              map[string]json.RawMessage `json:"-"`
-	FiveHour         *UsageRateLimit            `json:"five_hour,omitempty"`
-	SevenDay         *UsageRateLimit            `json:"seven_day,omitempty"`
-	SevenDayOAuthApp *UsageRateLimit            `json:"seven_day_oauth_apps,omitempty"`
-	SevenDayOpus     *UsageRateLimit            `json:"seven_day_opus,omitempty"`
-	SevenDaySonnet   *UsageRateLimit            `json:"seven_day_sonnet,omitempty"`
-	ExtraUsage       *ExtraUsage                `json:"extra_usage,omitempty"`
-	SubscriptionType string                     `json:"-"`
-	RateLimitTier    string                     `json:"-"`
+	FiveHour         *UsageRateLimit `json:"five_hour,omitempty"`
+	SevenDay         *UsageRateLimit `json:"seven_day,omitempty"`
+	SevenDayOAuthApp *UsageRateLimit `json:"seven_day_oauth_apps,omitempty"`
+	SevenDayOpus     *UsageRateLimit `json:"seven_day_opus,omitempty"`
+	SevenDaySonnet   *UsageRateLimit `json:"seven_day_sonnet,omitempty"`
+	ExtraUsage       *ExtraUsage     `json:"extra_usage,omitempty"`
+	SubscriptionType string          `json:"-"`
+	RateLimitTier    string          `json:"-"`
+	Raw              json.RawMessage `json:"-"`
 }
 
 // UsageReportLine is one display row from Claude Code's /usage view.
@@ -210,42 +217,44 @@ func (l UsageReportLine) String() string {
 
 // ContextUsage returns the structured data behind Claude Code's /context.
 func (s *Session) ContextUsage(ctx context.Context) (*ContextUsage, error) {
-	if err := s.ensureControlSessionReady(); err != nil {
+	if err := s.checkControlSessionReady(); err != nil {
 		return nil, err
 	}
 
-	resp, err := s.sendControlRequestLocked(ctx, protocol.GetContextUsageRequestToSend{
-		Subtype: string(protocol.ControlRequestSubtypeGetContextUsage),
-	}, controlRequestDefaultTimeout)
+	resp, err := s.sendControlRequestLocked(ctx, subtypeOnlyRequest(protocol.ControlRequestSubtypeGetContextUsage), controlRequestDefaultTimeout)
 	if err != nil {
 		return nil, err
 	}
 
+	raw, err := marshalControlPayload(resp.Response)
+	if err != nil {
+		return nil, fmt.Errorf("marshal context usage: %w", err)
+	}
 	var usage ContextUsage
-	if err := decodeControlPayload(resp.Response, &usage); err != nil {
+	if err := json.Unmarshal(raw, &usage); err != nil {
 		return nil, fmt.Errorf("decode context usage: %w", err)
 	}
-	if err := decodeControlPayload(resp.Response, &usage.Raw); err != nil {
-		return nil, fmt.Errorf("decode raw context usage: %w", err)
-	}
+	usage.Raw = raw
 	return &usage, nil
 }
 
 // GetEffort returns the effort level the CLI says will be applied.
 func (s *Session) GetEffort(ctx context.Context) (*EffortSettings, error) {
-	if err := s.ensureControlSessionReady(); err != nil {
+	if err := s.checkControlSessionReady(); err != nil {
 		return nil, err
 	}
 
-	resp, err := s.sendControlRequestLocked(ctx, protocol.GetSettingsRequestToSend{
-		Subtype: string(protocol.ControlRequestSubtypeGetSettings),
-	}, controlRequestDefaultTimeout)
+	resp, err := s.sendControlRequestLocked(ctx, subtypeOnlyRequest(protocol.ControlRequestSubtypeGetSettings), controlRequestDefaultTimeout)
 	if err != nil {
 		return nil, err
 	}
 
+	raw, err := marshalControlPayload(resp.Response)
+	if err != nil {
+		return nil, fmt.Errorf("marshal settings: %w", err)
+	}
 	var settings protocol.GetSettingsResponse
-	if err := decodeControlPayload(resp.Response, &settings); err != nil {
+	if err := json.Unmarshal(raw, &settings); err != nil {
 		return nil, fmt.Errorf("decode settings: %w", err)
 	}
 
@@ -287,15 +296,17 @@ func (s *Session) ClearEffort(ctx context.Context) (*EffortSettings, error) {
 }
 
 // Usage fetches the real Claude.ai plan usage backing /usage. If the current
-// auth source cannot expose subscription usage, it returns an empty PlanUsage
-// like the interactive CLI command.
+// auth source cannot expose subscription usage (no profile-scoped OAuth
+// credentials available), it returns an empty PlanUsage like the interactive
+// CLI command. ErrUsageUnavailable is returned only when credentials exist but
+// are expired or rejected by the server.
 func (s *Session) Usage(ctx context.Context) (*PlanUsage, error) {
-	token, ok, subscriptionType, rateLimitTier, err := s.usageOAuthToken()
+	creds, err := s.usageOAuthToken()
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
-		return &PlanUsage{Raw: map[string]json.RawMessage{}}, nil
+	if !creds.OK {
+		return &PlanUsage{}, nil
 	}
 
 	baseURL := s.config.UsageBaseURL
@@ -308,12 +319,12 @@ func (s *Session) Usage(ctx context.Context) (*PlanUsage, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "claude-cli/unknown (sdk-go)")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+creds.Token)
 	req.Header.Set("anthropic-beta", oauthBetaHeader)
 
 	client := s.config.UsageHTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
+		client = defaultUsageHTTPClient()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -337,16 +348,14 @@ func (s *Session) Usage(ctx context.Context) (*PlanUsage, error) {
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return nil, fmt.Errorf("decode usage: %w", err)
 	}
-	if err := json.Unmarshal(body, &usage.Raw); err != nil {
-		return nil, fmt.Errorf("decode raw usage: %w", err)
-	}
-	usage.SubscriptionType = subscriptionType
-	usage.RateLimitTier = rateLimitTier
+	usage.Raw = body
+	usage.SubscriptionType = creds.SubscriptionType
+	usage.RateLimitTier = creds.RateLimitTier
 	return &usage, nil
 }
 
 func (s *Session) updateEnvironmentVariables(vars map[string]string) error {
-	if err := s.ensureControlSessionReady(); err != nil {
+	if err := s.checkControlSessionReady(); err != nil {
 		return err
 	}
 	msg := protocol.UpdateEnvironmentVariablesMessage{
@@ -362,7 +371,11 @@ func (s *Session) updateEnvironmentVariables(vars map[string]string) error {
 	return nil
 }
 
-func (s *Session) ensureControlSessionReady() error {
+// checkControlSessionReady is a best-effort precondition check. It is not
+// atomic with the subsequent send — Stop() may race in between, in which case
+// the underlying WriteMessage will return an error. Matches the existing
+// pattern used by sendInitialize.
+func (s *Session) checkControlSessionReady() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.started || s.process == nil {
@@ -374,15 +387,22 @@ func (s *Session) ensureControlSessionReady() error {
 	return nil
 }
 
-func decodeControlPayload(payload interface{}, out interface{}) error {
+// subtypeOnlyRequest builds the wire body for control requests whose only
+// field is the subtype (get_context_usage, get_settings, interrupt, ...).
+func subtypeOnlyRequest(subtype protocol.ControlRequestSubtype) any {
+	return struct {
+		Subtype string `json:"subtype"`
+	}{Subtype: string(subtype)}
+}
+
+// marshalControlPayload normalises a control response payload into JSON bytes.
+// Control responses arrive as map[string]any after the line-level decode, so
+// the only way to typed-decode them is a marshal+unmarshal round-trip.
+func marshalControlPayload(payload any) ([]byte, error) {
 	if payload == nil {
-		return json.Unmarshal([]byte("{}"), out)
+		return []byte("{}"), nil
 	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, out)
+	return json.Marshal(payload)
 }
 
 func (level EffortLevel) validExplicitEffort() bool {
@@ -406,29 +426,44 @@ type storedOAuth struct {
 	Scopes           []string `json:"scopes"`
 }
 
-func (s *Session) usageOAuthToken() (string, bool, string, string, error) {
+// oauthCreds is the resolved OAuth credential used by Usage.
+type oauthCreds struct {
+	Token            string
+	SubscriptionType string
+	RateLimitTier    string
+	OK               bool
+}
+
+func (s *Session) usageOAuthToken() (oauthCreds, error) {
 	if s.config.OAuthToken != "" {
-		return s.config.OAuthToken, true, "", "", nil
+		return oauthCreds{Token: s.config.OAuthToken, OK: true}, nil
 	}
+	// CLAUDE_CODE_OAUTH_TOKEN is API-token style auth without profile scope —
+	// the /usage endpoint requires user:profile, so treat it as "no usage".
 	if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
-		return "", false, "", "", nil
+		return oauthCreds{}, nil
 	}
 
 	creds, err := readStoredCredentials()
 	if err != nil {
-		return "", false, "", "", err
+		return oauthCreds{}, err
 	}
 	if creds == nil || creds.ClaudeAIOAuth == nil || creds.ClaudeAIOAuth.AccessToken == "" {
-		return "", false, "", "", nil
+		return oauthCreds{}, nil
 	}
 	oauth := creds.ClaudeAIOAuth
-	if !hasScope(oauth.Scopes, "user:inference") || !hasScope(oauth.Scopes, "user:profile") {
-		return "", false, "", "", nil
+	if !slices.Contains(oauth.Scopes, "user:inference") || !slices.Contains(oauth.Scopes, "user:profile") {
+		return oauthCreds{}, nil
 	}
 	if oauth.ExpiresAt != nil && time.Now().UnixMilli() >= *oauth.ExpiresAt {
-		return "", false, "", "", fmt.Errorf("%w: OAuth token is expired", ErrUsageUnavailable)
+		return oauthCreds{}, fmt.Errorf("%w: OAuth token is expired", ErrUsageUnavailable)
 	}
-	return oauth.AccessToken, true, oauth.SubscriptionType, oauth.RateLimitTier, nil
+	return oauthCreds{
+		Token:            oauth.AccessToken,
+		SubscriptionType: oauth.SubscriptionType,
+		RateLimitTier:    oauth.RateLimitTier,
+		OK:               true,
+	}, nil
 }
 
 func readStoredCredentials() (*storedCredentials, error) {
@@ -453,22 +488,9 @@ func claudeConfigHomeDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		current, currentErr := user.Current()
-		if currentErr != nil || current.HomeDir == "" {
-			return "."
-		}
-		home = current.HomeDir
+		return "."
 	}
 	return filepath.Join(home, ".claude")
-}
-
-func hasScope(scopes []string, want string) bool {
-	for _, scope := range scopes {
-		if scope == want {
-			return true
-		}
-	}
-	return false
 }
 
 func formatUsageCostCents(cents float64) string {

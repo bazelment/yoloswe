@@ -56,7 +56,7 @@ func TestContextUsageSendsControlRequestAndDecodes(t *testing.T) {
 		require.Equal(t, 200000, got.usage.EffectiveMaxTokens())
 		require.Len(t, got.usage.Categories, 1)
 		require.Equal(t, 10, got.usage.APIUsage.InputTokens)
-		require.Contains(t, got.usage.Raw, "categories")
+		require.Contains(t, string(got.usage.Raw), `"categories"`)
 	case <-time.After(2 * time.Second):
 		t.Fatal("ContextUsage did not return")
 	}

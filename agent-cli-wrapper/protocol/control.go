@@ -591,22 +591,6 @@ type SetModelRequestToSend struct {
 	Model   string `json:"model"`
 }
 
-// GetContextUsageRequestToSend is the request body for context usage.
-type GetContextUsageRequestToSend struct {
-	Subtype string `json:"subtype"`
-}
-
-// GetSettingsRequestToSend is the request body for current settings.
-type GetSettingsRequestToSend struct {
-	Subtype string `json:"subtype"`
-}
-
-// ApplyFlagSettingsRequestToSend is the request body for session flag settings.
-type ApplyFlagSettingsRequestToSend struct {
-	Settings map[string]any `json:"settings"`
-	Subtype  string         `json:"subtype"`
-}
-
 // ToolUseRequest contains parsed information about a tool use from a control request.
 type ToolUseRequest struct {
 	Input       map[string]interface{}
