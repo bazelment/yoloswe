@@ -28,8 +28,11 @@ import (
 type config struct { //nolint:govet // fieldalignment: readability over packing
 	summaryWordLimit int
 	sinceStr         string
+	untilStr         string
+	pricingFile      string
 	modelStr         string
 	limit            int
+	statsMaxRows     int
 	minTurns         int
 	concurrency      int
 	jsonOutput       bool
@@ -37,6 +40,8 @@ type config struct { //nolint:govet // fieldalignment: readability over packing
 	listProjects     bool
 	allProjects      bool
 	summarize        bool
+	stats            bool
+	topLevelOnly     bool
 }
 
 func main() {
@@ -48,6 +53,14 @@ func main() {
 
 	if cfg.listProjects {
 		listProjects()
+		return
+	}
+
+	if cfg.stats {
+		if err := runStats(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -108,13 +121,12 @@ func main() {
 	os.Exit(exitCode)
 }
 
-// flags is the FlagSet used by parseFlags, stored at package level so that
-// flag.NArg() / flag.Args() callers can reference it after parsing.
 var flags = flag.NewFlagSet("sessanalyze", flag.ExitOnError)
 
 func parseFlags(args []string) config {
 	cfg := config{
 		summaryWordLimit: 100,
+		statsMaxRows:     25,
 	}
 	flags.IntVar(&cfg.summaryWordLimit, "summary-limit", 100,
 		"word limit before summarizing agent responses with Haiku (0=no summarization)")
@@ -122,12 +134,17 @@ func parseFlags(args []string) config {
 	flags.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
 	flags.BoolVar(&cfg.listProjects, "list", false, "list available projects")
 	flags.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
+	flags.StringVar(&cfg.untilStr, "until", "", "filter sessions up to and including this time (e.g. '2026-04-23T12:00:00Z'); stats mode only")
 	flags.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
 	flags.BoolVar(&cfg.summarize, "summarize", false, "use an LLM to generate session summaries")
 	flags.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
+	flags.StringVar(&cfg.pricingFile, "pricing-file", "", "JSON file with model pricing table for estimated cost")
 	flags.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
+	flags.IntVar(&cfg.statsMaxRows, "max-rows", 25, "max rows per stats breakdown table")
 	flags.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
 	flags.IntVar(&cfg.concurrency, "j", 10, "number of concurrent LLM summarization workers")
+	flags.BoolVar(&cfg.stats, "stats", false, "show usage/cost stats instead of per-session transcripts")
+	flags.BoolVar(&cfg.topLevelOnly, "top-level-only", false, "in --stats mode, exclude subagent logs")
 	flags.Parse(args) //nolint:errcheck // ExitOnError mode handles errors
 	return cfg
 }
@@ -139,6 +156,72 @@ func buildQueryFunc(model string) sessionanalysis.QueryFunc {
 	default:
 		return sessionanalysis.HaikuQueryFunc()
 	}
+}
+
+func runStats(cfg config) error {
+	statsCfg := sessionanalysis.DefaultStatsConfig()
+	statsCfg.IncludeSubagents = !cfg.topLevelOnly
+
+	now := time.Now()
+
+	if cfg.sinceStr != "" {
+		since, err := parseTimeBound(cfg.sinceStr, now)
+		if err != nil {
+			return fmt.Errorf("invalid --since value: %w", err)
+		}
+		statsCfg.Since = since
+	}
+	if cfg.untilStr != "" {
+		until, err := parseTimeBound(cfg.untilStr, now)
+		if err != nil {
+			return fmt.Errorf("invalid --until value: %w", err)
+		}
+		statsCfg.Until = until
+	}
+	if !statsCfg.Since.IsZero() && !statsCfg.Until.IsZero() && statsCfg.Since.After(statsCfg.Until) {
+		return fmt.Errorf("--since must be before --until")
+	}
+	if cfg.minTurns > 0 {
+		fmt.Fprintf(os.Stderr, "warning: --min-turns is ignored in --stats mode\n")
+	}
+
+	if cfg.pricingFile != "" {
+		tbl, err := sessionanalysis.LoadPricingTable(cfg.pricingFile)
+		if err != nil {
+			return fmt.Errorf("load pricing file: %w", err)
+		}
+		statsCfg.Pricing = tbl
+	}
+
+	var paths []string
+	if cfg.allProjects {
+		projects, err := sessionanalysis.ListProjects()
+		if err != nil {
+			return err
+		}
+		for i := range projects {
+			paths = append(paths, projects[i].Path)
+		}
+	} else {
+		if flags.NArg() == 0 {
+			listProjects()
+			return nil
+		}
+		paths = append(paths, flags.Args()...)
+	}
+
+	report, err := sessionanalysis.AnalyzeUsageStats(paths, statsCfg)
+	if err != nil {
+		return err
+	}
+
+	if cfg.jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+	renderStatsMarkdown(os.Stdout, report, cfg.statsMaxRows)
+	return nil
 }
 
 func summarizeWithProgress(sessions []*sessionanalysis.Session, wordLimit int, query sessionanalysis.QueryFunc, concurrency int) {
@@ -163,6 +246,172 @@ func render(w io.Writer, sessions []*sessionanalysis.Session, cfg config) {
 	} else {
 		renderMarkdown(w, sessions, cfg)
 	}
+}
+
+func renderStatsMarkdown(w io.Writer, report *sessionanalysis.StatsReport, maxRows int) {
+	if maxRows <= 0 {
+		maxRows = 25
+	}
+
+	fmt.Fprintln(w, "# Usage Stats")
+	fmt.Fprintln(w)
+
+	if !report.Since.IsZero() || !report.Until.IsZero() {
+		fmt.Fprintf(w, "- Window: %s → %s\n", formatBound(report.Since), formatBound(report.Until))
+	} else {
+		fmt.Fprintln(w, "- Window: all events")
+	}
+	fmt.Fprintf(w, "- Files scanned: %d\n", report.FilesScanned)
+	fmt.Fprintf(w, "- Events scanned: %d (parse errors: %d)\n", report.EventsScanned, report.ParseErrors)
+	fmt.Fprintf(w, "- Pricing: %s (%s)\n",
+		sanitizeMarkdownText(report.Pricing.Version),
+		sanitizeMarkdownText(report.Pricing.Source))
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "## Totals")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "| Metric | Value |")
+	fmt.Fprintln(w, "|---|---:|")
+	fmt.Fprintf(w, "| Sessions | %d |\n", report.Total.Sessions)
+	fmt.Fprintf(w, "| Usage Events | %d |\n", report.Total.UsageEvents)
+	fmt.Fprintf(w, "| Tool Uses | %d |\n", report.Total.ToolUses)
+	fmt.Fprintf(w, "| Input Tokens | %s |\n", formatInt(report.Total.Usage.InputTokens))
+	fmt.Fprintf(w, "| Output Tokens | %s |\n", formatInt(report.Total.Usage.OutputTokens))
+	fmt.Fprintf(w, "| Cache Read Tokens | %s |\n", formatInt(report.Total.Usage.CacheReadInputTokens))
+	fmt.Fprintf(w, "| Cache Creation Tokens | %s |\n", formatInt(report.Total.Usage.CacheCreationInputTokens))
+	fmt.Fprintf(w, "| Observed Cost (USD) | $%.4f |\n", report.Total.ObservedCostUSD)
+	fmt.Fprintf(w, "| Estimated Cost (USD) | $%.4f |\n", report.Total.EstimatedCostUSD)
+	fmt.Fprintf(w, "| Estimated Coverage | %.1f%% |\n", report.Total.Coverage()*100)
+	fmt.Fprintln(w)
+
+	renderBucketTable(w, "By Family", []string{"Family"}, report.ByFamily, maxRows,
+		func(b sessionanalysis.FamilyBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Family}, b.BucketStats
+		})
+
+	renderBucketTable(w, "By Model", []string{"Model"}, report.ByModel, maxRows,
+		func(b sessionanalysis.ModelBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Model}, b.BucketStats
+		})
+
+	renderBucketTable(w, "By Project", []string{"Project"}, report.ByProject, maxRows,
+		func(b sessionanalysis.ProjectBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Project}, b.BucketStats
+		})
+
+	renderBucketTable(w, "By Project + Model", []string{"Project", "Model"}, report.ByProjectModel, maxRows,
+		func(b sessionanalysis.ProjectModelBucket) ([]string, sessionanalysis.BucketStats) {
+			return []string{b.Project, b.Model}, b.BucketStats
+		})
+}
+
+// renderBucketTable writes a markdown breakdown table for a slice of bucket
+// rows. labels are the leading label-column names (rendered with backticks);
+// the remaining columns are the standard usage/cost stats. row returns the
+// label cell values plus the BucketStats for each row.
+func renderBucketTable[T any](
+	w io.Writer,
+	title string,
+	labels []string,
+	rows []T,
+	maxRows int,
+	row func(T) ([]string, sessionanalysis.BucketStats),
+) {
+	fmt.Fprintf(w, "## %s\n\n", title)
+
+	statHeaders := []string{"Sessions", "Input", "Output", "Cache Read", "Cache Create", "Tool Uses", "Observed $", "Estimated $", "Coverage"}
+	header := "|"
+	sep := "|"
+	for _, l := range labels {
+		header += " " + l + " |"
+		sep += "---|"
+	}
+	for _, h := range statHeaders {
+		header += " " + h + " |"
+		sep += "---:|"
+	}
+	fmt.Fprintln(w, header)
+	fmt.Fprintln(w, sep)
+
+	for _, r := range limitRows(rows, maxRows) {
+		labelVals, stats := row(r)
+		var b strings.Builder
+		b.WriteByte('|')
+		for _, v := range labelVals {
+			// Strip pipes (break table column boundaries) in addition to
+			// control chars and backticks stripped by sanitizeMarkdownText.
+			safe := strings.ReplaceAll(sanitizeMarkdownText(v), "|", "")
+			fmt.Fprintf(&b, " `%s` |", safe)
+		}
+		fmt.Fprintf(&b, " %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |",
+			stats.Sessions,
+			formatInt(stats.Usage.InputTokens),
+			formatInt(stats.Usage.OutputTokens),
+			formatInt(stats.Usage.CacheReadInputTokens),
+			formatInt(stats.Usage.CacheCreationInputTokens),
+			stats.ToolUses,
+			stats.ObservedCostUSD,
+			stats.EstimatedCostUSD,
+			stats.Coverage()*100,
+		)
+		fmt.Fprintln(w, b.String())
+	}
+	if len(rows) > maxRows {
+		fmt.Fprintf(w, "\n*Showing top %d of %d rows.*\n", maxRows, len(rows))
+	}
+	fmt.Fprintln(w)
+}
+
+// sanitizeMarkdownText strips characters that break markdown list items or
+// table cells: control characters (including newlines) and backticks.
+func sanitizeMarkdownText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '`' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func formatBound(t time.Time) string {
+	if t.IsZero() {
+		return "(unset)"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func limitRows[T any](rows []T, n int) []T {
+	if n <= 0 || len(rows) <= n {
+		return rows
+	}
+	return rows[:n]
+}
+
+func formatInt(v int64) string {
+	s := fmt.Sprintf("%d", v)
+	if len(s) <= 3 {
+		return s
+	}
+	sign := ""
+	if s[0] == '-' {
+		sign = "-"
+		s = s[1:]
+	}
+	var out []byte
+	rem := len(s) % 3
+	if rem > 0 {
+		out = append(out, s[:rem]...)
+		if len(s) > rem {
+			out = append(out, ',')
+		}
+	}
+	for i := rem; i < len(s); i += 3 {
+		out = append(out, s[i:i+3]...)
+		if i+3 < len(s) {
+			out = append(out, ',')
+		}
+	}
+	return sign + string(out)
 }
 
 func listProjects() {
@@ -341,18 +590,24 @@ func renderTurnMD(w io.Writer, turn *sessionanalysis.Turn, cfg config) {
 
 // parseSince parses duration strings like "2d", "24h" or date strings like "2026-03-04".
 func parseSince(s string) (time.Time, error) {
+	return parseTimeBound(s, time.Now())
+}
+
+// parseTimeBound parses duration strings like "2d", "24h" or date strings.
+// Relative values are interpreted as "now - duration".
+func parseTimeBound(s string, now time.Time) (time.Time, error) {
 	// Try relative duration with day suffix.
 	if strings.HasSuffix(s, "d") {
 		days := strings.TrimSuffix(s, "d")
 		var n int
 		if _, err := fmt.Sscanf(days, "%d", &n); err == nil && n > 0 {
-			return time.Now().AddDate(0, 0, -n), nil
+			return now.AddDate(0, 0, -n), nil
 		}
 	}
 
 	// Try Go duration (e.g. "24h", "2h30m").
 	if d, err := time.ParseDuration(s); err == nil {
-		return time.Now().Add(-d), nil
+		return now.Add(-d), nil
 	}
 
 	// Try date formats.
