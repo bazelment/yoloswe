@@ -260,7 +260,9 @@ func renderStatsMarkdown(w io.Writer, report *sessionanalysis.StatsReport, maxRo
 	}
 	fmt.Fprintf(w, "- Files scanned: %d\n", report.FilesScanned)
 	fmt.Fprintf(w, "- Events scanned: %d (parse errors: %d)\n", report.EventsScanned, report.ParseErrors)
-	fmt.Fprintf(w, "- Pricing: %s (%s)\n", report.Pricing.Version, report.Pricing.Source)
+	fmt.Fprintf(w, "- Pricing: %s (%s)\n",
+		strings.ReplaceAll(report.Pricing.Version, "|", "\\|"),
+		strings.ReplaceAll(report.Pricing.Source, "|", "\\|"))
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "## Totals")
@@ -333,7 +335,10 @@ func renderBucketTable[T any](
 		var b strings.Builder
 		b.WriteByte('|')
 		for _, v := range labelVals {
-			fmt.Fprintf(&b, " `%s` |", strings.NewReplacer("`", "\\`", "|", "\\|").Replace(v))
+			// Strip backticks (which would break the inline code span) and pipes
+			// (which would break the table column boundary).
+			safe := strings.NewReplacer("`", "", "|", "\\|").Replace(v)
+			fmt.Fprintf(&b, " `%s` |", safe)
 		}
 		fmt.Fprintf(&b, " %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |",
 			stats.Sessions,
