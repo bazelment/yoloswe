@@ -4,6 +4,7 @@ go_library(
     name = "sessionanalysis",
     srcs = [
         "analysis.go",
+        "stats.go",
         "summarize.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/sessionanalysis",
@@ -18,7 +19,10 @@ go_library(
 
 go_test(
     name = "sessionanalysis_test",
-    srcs = ["analysis_test.go"],
+    srcs = [
+        "analysis_test.go",
+        "stats_test.go",
+    ],
     embed = [":sessionanalysis"],
     deps = [
         "//bramble/sessionmodel",
