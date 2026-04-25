@@ -369,6 +369,113 @@ func TestAnalyzeUsageStats_ByFamilyRollup(t *testing.T) {
 	assert.EqualValues(t, 30, sonnet.Usage.OutputTokens)
 }
 
+func TestAnalyzeUsageStats_UntilFiltering(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	require.NoError(t, writeJSONLLines(path,
+		eventLine(map[string]interface{}{
+			"type":      "assistant",
+			"timestamp": "2026-04-01T00:00:00Z",
+			"message": map[string]interface{}{
+				"id":    "msg-before",
+				"model": "claude-sonnet-4-6",
+				"usage": map[string]interface{}{"input_tokens": 100, "output_tokens": 50},
+			},
+		}),
+		eventLine(map[string]interface{}{
+			"type":      "assistant",
+			"timestamp": "2026-04-10T00:00:00Z",
+			"message": map[string]interface{}{
+				"id":    "msg-after",
+				"model": "claude-sonnet-4-6",
+				"usage": map[string]interface{}{"input_tokens": 200, "output_tokens": 80},
+			},
+		}),
+	))
+
+	cfg := DefaultStatsConfig()
+	cfg.Until = mustTime(t, "2026-04-05T00:00:00Z")
+	report, err := AnalyzeUsageStats([]string{dir}, cfg)
+	require.NoError(t, err)
+
+	// Only the event before the Until cutoff should be counted.
+	assert.EqualValues(t, 100, report.Total.Usage.InputTokens)
+	assert.EqualValues(t, 50, report.Total.Usage.OutputTokens)
+}
+
+func TestAnalyzeUsageStats_ResultEventObservedCost(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	require.NoError(t, writeJSONLLines(path,
+		// result with UUID — should be counted once even if duplicated
+		eventLine(map[string]interface{}{
+			"type":      "result",
+			"timestamp": "2026-04-01T00:00:00Z",
+			"uuid":      "result-uuid-1",
+			"modelUsage": map[string]interface{}{
+				"claude-sonnet-4-6": map[string]interface{}{"costUSD": 0.005},
+			},
+		}),
+		// duplicate of the same UUID — should be deduplicated
+		eventLine(map[string]interface{}{
+			"type":      "result",
+			"timestamp": "2026-04-01T00:01:00Z",
+			"uuid":      "result-uuid-1",
+			"modelUsage": map[string]interface{}{
+				"claude-sonnet-4-6": map[string]interface{}{"costUSD": 0.005},
+			},
+		}),
+		// result without UUID — should be counted once
+		eventLine(map[string]interface{}{
+			"type":           "result",
+			"timestamp":      "2026-04-01T00:02:00Z",
+			"total_cost_usd": 0.010,
+		}),
+		// second uuid-less result — should be deduplicated (only first counts)
+		eventLine(map[string]interface{}{
+			"type":           "result",
+			"timestamp":      "2026-04-01T00:03:00Z",
+			"total_cost_usd": 0.010,
+		}),
+	))
+
+	report, err := AnalyzeUsageStats([]string{dir}, DefaultStatsConfig())
+	require.NoError(t, err)
+
+	// UUID-based result: 0.005 (deduplicated from 2 identical events)
+	// UUID-less result: 0.010 (first of 2 identical events, second deduplicated)
+	assert.InDelta(t, 0.015, report.Total.ObservedCostUSD, 1e-9)
+}
+
+func TestLoadPricingTable_NormalizesKeyCasing(t *testing.T) {
+	t.Parallel()
+	f, err := os.CreateTemp(t.TempDir(), "pricing*.json")
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(f).Encode(map[string]interface{}{
+		"version": "test",
+		"models": map[string]interface{}{
+			// Mixed-case keys — should be normalized to lowercase so lookupPricing finds them.
+			"Claude-Sonnet-4-6": map[string]interface{}{
+				"input_per_mtok":  3.0,
+				"output_per_mtok": 15.0,
+			},
+		},
+	}))
+	require.NoError(t, f.Close())
+
+	tbl, err := LoadPricingTable(f.Name())
+	require.NoError(t, err)
+
+	// The key must exist in lowercase for lookupPricing to match.
+	_, ok := tbl.Models["claude-sonnet-4-6"]
+	assert.True(t, ok, "expected lowercase key after normalization")
+	// Original mixed-case key must not survive.
+	_, ok = tbl.Models["Claude-Sonnet-4-6"]
+	assert.False(t, ok, "mixed-case key should have been removed")
+}
+
 func writeJSONLLines(path string, lines ...string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }

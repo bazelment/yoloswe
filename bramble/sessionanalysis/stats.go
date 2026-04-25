@@ -173,6 +173,12 @@ func LoadPricingTable(path string) (PricingTable, error) {
 	if t.Models == nil {
 		t.Models = make(map[string]ModelPricing)
 	}
+	// Normalize keys to lowercase so lookupPricing's ToLower model normalization matches.
+	normalized := make(map[string]ModelPricing, len(t.Models))
+	for k, v := range t.Models {
+		normalized[strings.ToLower(k)] = v
+	}
+	t.Models = normalized
 	if t.Version == "" {
 		t.Version = "custom"
 	}
@@ -371,6 +377,9 @@ func (a *statsAggregator) addObservedCost(sessionKey, project, model string, cos
 	}
 }
 
+// shouldIncludeEvent returns true when an event falls within the configured
+// time window. Events that lack a parseable timestamp are always included
+// because their position in the window cannot be determined.
 func (a *statsAggregator) shouldIncludeEvent(ts time.Time, hasTimestamp bool) bool {
 	if !hasTimestamp {
 		return true
@@ -487,6 +496,7 @@ func (a *statsAggregator) scanFile(path string) error {
 	seenUsageMessageIDs := make(map[string]struct{})
 	seenToolUseIDs := make(map[string]struct{})
 	seenResultUUIDs := make(map[string]struct{})
+	seenUUIDlessResult := false
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 1024*1024)
@@ -557,6 +567,13 @@ func (a *statsAggregator) scanFile(path string) error {
 					continue
 				}
 				seenResultUUIDs[uuid] = struct{}{}
+			} else {
+				// No UUID: only count the first result event to avoid double-counting
+				// sessions that were resumed or have multiple result lines.
+				if seenUUIDlessResult {
+					continue
+				}
+				seenUUIDlessResult = true
 			}
 
 			if len(env.ModelUsage) > 0 {

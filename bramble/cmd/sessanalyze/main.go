@@ -134,7 +134,7 @@ func parseFlags(args []string) config {
 	flags.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
 	flags.BoolVar(&cfg.listProjects, "list", false, "list available projects")
 	flags.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
-	flags.StringVar(&cfg.untilStr, "until", "", "filter sessions before this time (e.g. '2026-04-23T12:00:00Z')")
+	flags.StringVar(&cfg.untilStr, "until", "", "filter sessions before this time (e.g. '2026-04-23T12:00:00Z'); stats mode only")
 	flags.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
 	flags.BoolVar(&cfg.summarize, "summarize", false, "use an LLM to generate session summaries")
 	flags.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
@@ -333,7 +333,7 @@ func renderBucketTable[T any](
 		var b strings.Builder
 		b.WriteByte('|')
 		for _, v := range labelVals {
-			fmt.Fprintf(&b, " `%s` |", v)
+			fmt.Fprintf(&b, " `%s` |", strings.NewReplacer("`", "\\`", "|", "\\|").Replace(v))
 		}
 		fmt.Fprintf(&b, " %d | %s | %s | %s | %s | %d | %.4f | %.4f | %.1f%% |",
 			stats.Sessions,
