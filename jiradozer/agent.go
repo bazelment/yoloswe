@@ -475,7 +475,11 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		opts = append(opts, agent.WithProviderMaxBudgetUSD(cfg.MaxBudgetUSD))
 	}
 	if cfg.Effort != "" {
-		opts = append(opts, agent.WithProviderEffort(cfg.Effort))
+		level, err := agent.ParseEffort(cfg.Effort)
+		if err != nil {
+			return StepAgentResult{}, fmt.Errorf("effort: %w", err)
+		}
+		opts = append(opts, agent.WithProviderEffort(level))
 	}
 	if resumeSessionID != "" {
 		opts = append(opts, agent.WithProviderResumeSessionID(resumeSessionID))

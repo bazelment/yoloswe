@@ -203,11 +203,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		sessionOpts = append(sessionOpts, claude.WithMaxBudgetUSD(cfg.MaxBudgetUSD))
 	}
 	if cfg.Effort != "" {
-		level, err := claude.ParseEffort(cfg.Effort)
-		if err != nil {
-			return nil, err
-		}
-		sessionOpts = append(sessionOpts, claude.WithEffort(level))
+		sessionOpts = append(sessionOpts, claude.WithEffort(claudeEffortLevel(cfg.Effort)))
 	}
 	if cfg.ResumeSessionID != "" {
 		sessionOpts = append(sessionOpts, claude.WithResume(cfg.ResumeSessionID))
@@ -351,6 +347,25 @@ func dispatchClaudeEvent(ev claude.Event, handler EventHandler, out chan<- Agent
 		return
 	}
 	dispatchStreamEvent(sev, handler, out)
+}
+
+// claudeEffortLevel maps the neutral agent.EffortLevel to claude.EffortLevel.
+// The strings happen to match today, but the conversion is explicit so a
+// future divergence does not silently break the wiring.
+func claudeEffortLevel(level EffortLevel) claude.EffortLevel {
+	switch level {
+	case EffortAuto:
+		return claude.EffortAuto
+	case EffortLow:
+		return claude.EffortLow
+	case EffortMedium:
+		return claude.EffortMed
+	case EffortHigh:
+		return claude.EffortHigh
+	case EffortMax:
+		return claude.EffortMax
+	}
+	panic(fmt.Sprintf("BUG: unhandled EffortLevel %q in claudeEffortLevel", level))
 }
 
 // ClaudeResultToAgentResult converts a claude.TurnResult to AgentResult.

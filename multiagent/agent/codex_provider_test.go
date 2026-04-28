@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
 
@@ -235,6 +238,34 @@ func TestCodexResultToAgentResult_MapsCachedInputTokens(t *testing.T) {
 	}
 	if result.Usage.OutputTokens != 45 {
 		t.Fatalf("OutputTokens = %d, want 45", result.Usage.OutputTokens)
+	}
+}
+
+func TestCodexTurnOptions_NoEffortYieldsNoOptions(t *testing.T) {
+	t.Parallel()
+
+	opts := codexTurnOptions(ExecuteConfig{})
+	assert.Empty(t, opts, "no effort set => no turn options")
+}
+
+func TestCodexTurnOptions_WiresAllValidLevels(t *testing.T) {
+	t.Parallel()
+
+	for _, level := range []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortMax, EffortAuto} {
+		level := level
+		t.Run(string(level), func(t *testing.T) {
+			t.Parallel()
+
+			opts := codexTurnOptions(ExecuteConfig{Effort: level})
+			require.Len(t, opts, 1, "expected exactly one turn option for effort=%q", level)
+
+			// Apply the option to a default TurnConfig and assert the
+			// underlying SDK field carries the requested string verbatim.
+			// Mirrors the pattern in agent-cli-wrapper/codex/client_options_test.go:250.
+			cfg := codex.TurnConfig{}
+			opts[0](&cfg)
+			assert.Equal(t, string(level), cfg.Effort)
+		})
 	}
 }
 

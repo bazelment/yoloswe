@@ -14,7 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
@@ -89,7 +88,7 @@ func main() {
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
-	rootCmd.Flags().StringVar(&thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max, auto (overrides config; Claude provider only)")
+	rootCmd.Flags().StringVar(&thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max, auto (overrides config; rejected by providers without an effort knob, e.g. cursor, gemini)")
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
@@ -211,7 +210,7 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 		cfg.Agent.Model = args.modelID
 	}
 	if args.thinkingLevel != "" {
-		if _, err := claude.ParseEffort(args.thinkingLevel); err != nil {
+		if _, err := agent.ParseEffort(args.thinkingLevel); err != nil {
 			return fmt.Errorf("--thinking-level: %w", err)
 		}
 		cfg.Agent.Effort = args.thinkingLevel

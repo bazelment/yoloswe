@@ -26,6 +26,14 @@ func (p *CursorProvider) Name() string { return "cursor" }
 func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
 
+	// Cursor has no reasoning-effort knob — fail fast rather than silently
+	// dropping the requested level. EffortAuto is the explicit "use the
+	// provider default" sentinel, which a no-knob provider already satisfies,
+	// so it passes through.
+	if cfg.Effort != "" && cfg.Effort != EffortAuto {
+		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
+	}
+
 	// Build full prompt with worktree context
 	fullPrompt := prompt
 	if wtCtx != nil {

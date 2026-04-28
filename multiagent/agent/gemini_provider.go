@@ -38,6 +38,14 @@ func (p *GeminiProvider) Name() string { return "gemini" }
 func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
 
+	// ACP has no reasoning-effort knob — fail fast before spawning the
+	// subprocess. EffortAuto is the explicit "use the provider default"
+	// sentinel, which a no-knob provider already satisfies, so it passes
+	// through.
+	if cfg.Effort != "" && cfg.Effort != EffortAuto {
+		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
+	}
+
 	// Build full prompt with worktree context
 	fullPrompt := prompt
 	if wtCtx != nil {
