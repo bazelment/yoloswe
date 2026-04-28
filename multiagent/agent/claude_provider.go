@@ -202,6 +202,13 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if cfg.MaxBudgetUSD > 0 {
 		sessionOpts = append(sessionOpts, claude.WithMaxBudgetUSD(cfg.MaxBudgetUSD))
 	}
+	if cfg.Effort != "" {
+		level, err := claude.ParseEffort(cfg.Effort)
+		if err != nil {
+			return nil, err
+		}
+		sessionOpts = append(sessionOpts, claude.WithEffort(level))
+	}
 	if cfg.ResumeSessionID != "" {
 		sessionOpts = append(sessionOpts, claude.WithResume(cfg.ResumeSessionID))
 	}

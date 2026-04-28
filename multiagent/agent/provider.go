@@ -191,6 +191,7 @@ type ExecuteOption func(*ExecuteConfig)
 type ExecuteConfig struct {
 	EventHandler        EventHandler
 	Model               string
+	Effort              string
 	WorkDir             string
 	SystemPrompt        string
 	PermissionMode      string
@@ -204,6 +205,11 @@ type ExecuteConfig struct {
 // WithProviderModel sets the model for a provider execution.
 func WithProviderModel(model string) ExecuteOption {
 	return func(c *ExecuteConfig) { c.Model = model }
+}
+
+// WithProviderEffort sets the reasoning effort level for a provider execution.
+func WithProviderEffort(level string) ExecuteOption {
+	return func(c *ExecuteConfig) { c.Effort = level }
 }
 
 // WithProviderWorkDir sets the working directory for a provider execution.

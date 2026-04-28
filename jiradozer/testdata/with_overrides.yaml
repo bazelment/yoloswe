@@ -4,11 +4,13 @@ tracker:
 
 agent:
   model: sonnet
+  effort: medium
 
 max_budget_usd: 50.0
 
 plan:
   model: opus
+  effort: high
   max_budget_usd: 10.0
   max_turns: 5
 

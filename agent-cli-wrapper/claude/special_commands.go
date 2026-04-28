@@ -425,6 +425,17 @@ func (level EffortLevel) validExplicitEffort() bool {
 	}
 }
 
+// ParseEffort parses a user-supplied string into an EffortLevel. It accepts
+// EffortAuto in addition to the explicit levels — callers that need to forbid
+// "auto" should compare the result against EffortAuto themselves.
+func ParseEffort(s string) (EffortLevel, error) {
+	level := EffortLevel(s)
+	if level == EffortAuto || level.validExplicitEffort() {
+		return level, nil
+	}
+	return "", fmt.Errorf("%w: %q (valid: low, medium, high, max, auto)", ErrInvalidEffort, s)
+}
+
 type storedCredentials struct {
 	ClaudeAIOAuth *storedOAuth `json:"claudeAiOauth"`
 }
