@@ -347,6 +347,63 @@ func TestLoadPromptOptions_MissingFileFallsBack(t *testing.T) {
 	}
 }
 
+func TestBuildPromptForRun_WidensWithRealHintsFile(t *testing.T) {
+	// End-to-end seam: a real hints file on disk should produce a prompt
+	// carrying both the test-quality clause (because test_paths is
+	// non-empty) and the cross-service clause (because >=2 packages).
+	// This is the test codex flagged as missing: a regression that drops
+	// scopeHintsFile from the prompt path, or stops calling
+	// loadPromptOptions, would still pass the lower-level tests but fail
+	// here.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	contents := `{"schema_version":1,"test_paths":["pkg/test_x.py"],"cross_service_packages":["a/","b/"]}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write hints: %v", err)
+	}
+	got := buildPromptForRun("review goal", path, false)
+	if !strings.Contains(got, "## Test quality") {
+		t.Errorf("prompt missing test-quality clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Cross-service contract sweep") {
+		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "pkg/test_x.py") {
+		t.Errorf("prompt missing inlined test path; got:\n%s", got)
+	}
+	if !strings.Contains(got, "review goal") {
+		t.Errorf("prompt missing goal text; got:\n%s", got)
+	}
+}
+
+func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
+	// Empty hints path must produce today's narrow prompt, byte-equal to
+	// the legacy BuildJSONPrompt output. This is the no-regressions
+	// guarantee for callers that haven't opted into the wider scope.
+	got := buildPromptForRun("g", "", false)
+	want := reviewer.BuildJSONPrompt("g")
+	if got != want {
+		t.Errorf("empty hints path must equal legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
+	// A malformed hints file is the same outcome as no hints file: the
+	// legacy narrow prompt. The slog fallback warning is exercised by
+	// TestLoadPromptOptions_MalformedFallsBack; this test guards the
+	// next layer up.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write hints: %v", err)
+	}
+	got := buildPromptForRun("g", path, true)
+	want := reviewer.BuildJSONPromptWithOptions("g", true)
+	if got != want {
+		t.Errorf("malformed hints must fall back to legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 func TestMaxSeverity(t *testing.T) {
 	tests := []struct {
 		name   string

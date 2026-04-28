@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func writeHintsBytes(t *testing.T, contents []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scope-hints.json")
+	if err := os.WriteFile(path, contents, 0o644); err != nil {
+		t.Fatalf("write hints file: %v", err)
+	}
+	return path
+}
+
 func writeHintsFile(t *testing.T, contents string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -61,8 +71,8 @@ func TestLoadScopeHints_MissingFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
-	if !strings.Contains(err.Error(), "read scope-hints file") {
-		t.Errorf("error should describe the read failure: %v", err)
+	if !strings.Contains(err.Error(), "open scope-hints file") {
+		t.Errorf("error should describe the open failure: %v", err)
 	}
 }
 
@@ -124,10 +134,74 @@ func TestScopeHints_ToPromptOptions(t *testing.T) {
 	}
 }
 
+func TestLoadScopeHints_RejectsOversizeFile(t *testing.T) {
+	// A 1 MiB+ file shouldn't be parsed; the size cap defends against
+	// hostile or accidental inputs (a /dev/zero symlink, a runaway
+	// producer) without changing behavior for the realistic small files
+	// scope_gate.py emits.
+	big := make([]byte, scopeHintsMaxBytes+1)
+	for i := range big {
+		big[i] = 'x'
+	}
+	path := writeHintsBytes(t, big)
+	_, err := LoadScopeHints(path)
+	if err == nil {
+		t.Fatal("expected error for oversized hints file")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error should mention size cap: %v", err)
+	}
+}
+
+func TestLoadScopeHints_AtCapSucceeds(t *testing.T) {
+	// Exactly at the cap is valid input — JSON shouldn't round up to
+	// "deny." The file content here is structurally valid JSON padded
+	// with whitespace (which json.Unmarshal happily ignores) up to the
+	// cap, so we exercise both the read and the parse path at the limit.
+	pad := make([]byte, scopeHintsMaxBytes)
+	for i := range pad {
+		pad[i] = ' '
+	}
+	body := []byte(`{"schema_version":1,"test_paths":[],"cross_service_packages":[]}`)
+	if len(body) > len(pad) {
+		t.Fatalf("test setup: body %d bytes exceeds pad %d", len(body), len(pad))
+	}
+	copy(pad, body)
+	// Length is now exactly scopeHintsMaxBytes.
+	path := writeHintsBytes(t, pad)
+	if _, err := LoadScopeHints(path); err != nil {
+		t.Errorf("at-cap file should parse, got: %v", err)
+	}
+}
+
+func TestLoadScopeHints_ErrorsUseBasenameNotFullPath(t *testing.T) {
+	// LoadScopeHints embeds the file name in its error text. The CLI
+	// surfaces that text in slog warnings on the fallback path, and run
+	// logs are routinely shared across machines/PRs, so the embedded name
+	// must be just the basename — never the developer's worktree path.
+	dir := t.TempDir()
+	full := filepath.Join(dir, "scope-hints.json")
+	if err := os.WriteFile(full, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write hints file: %v", err)
+	}
+	_, err := LoadScopeHints(full)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("error leaks tmpdir path %q: %v", dir, err)
+	}
+	if !strings.Contains(err.Error(), "scope-hints.json") {
+		t.Errorf("error should still cite basename for debuggability: %v", err)
+	}
+}
+
 func TestScopeHints_ToPromptOptions_NilSafe(t *testing.T) {
-	// LoadScopeHints returns a nil *ScopeHints on error; the CLI layer
-	// passes that nil through ToPromptOptions to get a clean fallback. The
-	// method must not panic on nil receiver.
+	// ToPromptOptions must be safe to call on a nil receiver so callers
+	// don't have to nil-check first. The codereview CLI doesn't actually
+	// pass nil today (it short-circuits to PromptOptions{} on error), but
+	// nil-safety is a property of the method that other future callers
+	// might rely on, and panicking here would be a footgun.
 	var h *ScopeHints
 	opts := h.ToPromptOptions(false)
 	if opts.SkipTestExecution {

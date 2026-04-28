@@ -3,7 +3,9 @@ package reviewer
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 )
 
 // ScopeHintsSchemaVersion is the wire-format version of the scope-hints
@@ -11,6 +13,16 @@ import (
 // bump only happens on a breaking shape change; new optional fields can be
 // added without a bump.
 const ScopeHintsSchemaVersion = 1
+
+// scopeHintsMaxBytes caps the size of a scope-hints file LoadScopeHints will
+// read. The expected on-disk shape is small (test_paths capped at 50 entries
+// + a list of top-level packages), so a realistic file fits in a few KiB;
+// 1 MiB is generous headroom. The cap defends against a hostile or accidental
+// input — a symlink to /dev/zero, a never-completing FIFO, a runaway producer
+// — that could otherwise read until OOM. Reads above the cap fail with a
+// descriptive error and trigger the CLI's warn-and-fallback path, identical
+// to malformed JSON.
+const scopeHintsMaxBytes = 1 << 20
 
 // ScopeHints is the JSON contract between bramble and any caller (today: the
 // /pr-polish skill's scope_gate.py) that wants to widen the review scope.
@@ -45,19 +57,40 @@ type ScopeHints struct {
 // The CLI layer is expected to log-and-fall-back on errors here rather than
 // abort the review — a malformed scope-hints file should never block a
 // caller from getting today's narrow review.
+//
+// Error messages identify the file by basename only. The full path is the
+// caller's input — they already know it — and run logs are routinely shared
+// across machines and PRs, so embedding the developer's worktree layout in
+// every fallback warning weakens the same path-redaction hygiene used
+// elsewhere in the run-log pipeline.
 func LoadScopeHints(path string) (*ScopeHints, error) {
-	data, err := os.ReadFile(path)
+	tag := filepath.Base(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read scope-hints file %s: %w", path, err)
+		return nil, fmt.Errorf("open scope-hints file %s: %w", tag, err)
+	}
+	defer f.Close()
+
+	// LimitReader so a /dev/zero-shaped input can't OOM the process. The
+	// +1 lets us detect overflow: if we read scopeHintsMaxBytes+1 bytes
+	// the file is at-or-above the cap and we reject before parsing.
+	data, err := io.ReadAll(io.LimitReader(f, scopeHintsMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read scope-hints file %s: %w", tag, err)
+	}
+	if len(data) > scopeHintsMaxBytes {
+		return nil, fmt.Errorf(
+			"scope-hints file %s: exceeds %d-byte cap", tag, scopeHintsMaxBytes,
+		)
 	}
 	var h ScopeHints
 	if err := json.Unmarshal(data, &h); err != nil {
-		return nil, fmt.Errorf("parse scope-hints file %s: %w", path, err)
+		return nil, fmt.Errorf("parse scope-hints file %s: %w", tag, err)
 	}
 	if h.SchemaVersion != ScopeHintsSchemaVersion {
 		return nil, fmt.Errorf(
 			"scope-hints file %s: schema_version=%d, want %d",
-			path, h.SchemaVersion, ScopeHintsSchemaVersion,
+			tag, h.SchemaVersion, ScopeHintsSchemaVersion,
 		)
 	}
 	return &h, nil
