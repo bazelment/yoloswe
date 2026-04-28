@@ -14,6 +14,7 @@ var AllModels = []AgentModel{
 	{ID: "opus", Provider: ProviderClaude, Label: "opus"},
 	{ID: "sonnet", Provider: ProviderClaude, Label: "sonnet"},
 	{ID: "haiku", Provider: ProviderClaude, Label: "haiku"},
+	{ID: "gpt-5.5", Provider: ProviderCodex, Label: "gpt-5.5"},
 	{ID: "gpt-5.3-codex", Provider: ProviderCodex, Label: "gpt-5.3-codex"},
 	{ID: "gpt-5.2", Provider: ProviderCodex, Label: "gpt-5.2"},
 	{ID: "gpt-5.1-codex-max", Provider: ProviderCodex, Label: "gpt-5.1-codex-max"},

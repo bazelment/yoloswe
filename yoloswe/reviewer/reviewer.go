@@ -25,6 +25,14 @@ const (
 	// DefaultGeminiModel is the model used when BackendGemini is selected and
 	// no --model flag is provided.
 	DefaultGeminiModel = "gemini-3.1-flash-lite-preview"
+
+	// DefaultCodexModel is the model used when BackendCodex is selected and
+	// no --model flag is provided.
+	DefaultCodexModel = "gpt-5.4-mini"
+
+	// DefaultCursorModel is the model used when BackendCursor is selected and
+	// no --model flag is provided.
+	DefaultCursorModel = "composer-2"
 )
 
 // Config holds reviewer configuration.
@@ -209,11 +217,18 @@ func New(config Config) *Reviewer {
 		}
 	}
 
+	// Apply cursor-specific defaults.
+	if config.BackendType == BackendCursor {
+		if config.Model == "" {
+			config.Model = DefaultCursorModel
+		}
+	}
+
 	// Apply codex-specific defaults only for codex backend.
 	// See Config doc for why danger-full-access is the default sandbox.
 	if config.BackendType == BackendCodex {
 		if config.Model == "" {
-			config.Model = "gpt-5.2-codex"
+			config.Model = DefaultCodexModel
 		}
 		if config.ApprovalPolicy == "" {
 			if config.ReadOnly {

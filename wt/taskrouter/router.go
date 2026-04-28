@@ -68,7 +68,7 @@ type RouteProposal struct {
 
 // Config holds configuration for the router.
 type Config struct {
-	// Model is the Codex model to use (default: gpt-5.2-codex).
+	// Model is the Codex model to use (default: gpt-5.5).
 	Model string
 	// WorkDir is the working directory for Codex.
 	WorkDir string
@@ -89,7 +89,7 @@ type Router struct {
 // New creates a new task router.
 func New(config Config) *Router {
 	if config.Model == "" {
-		config.Model = "gpt-5.2-codex"
+		config.Model = "gpt-5.5"
 	}
 	return &Router{
 		config:   config,

@@ -99,8 +99,8 @@ func TestBuildJSONPrompt(t *testing.T) {
 func TestNew_DefaultValues(t *testing.T) {
 	r := New(Config{})
 
-	if r.config.Model != "gpt-5.2-codex" {
-		t.Errorf("expected default model gpt-5.2-codex, got %s", r.config.Model)
+	if r.config.Model != DefaultCodexModel {
+		t.Errorf("expected default model %s, got %s", DefaultCodexModel, r.config.Model)
 	}
 	if r.config.ApprovalPolicy != codex.ApprovalPolicyNever {
 		t.Errorf("expected default approval policy never, got %s", r.config.ApprovalPolicy)
@@ -124,8 +124,8 @@ func TestEffectiveModel_ReportsDefaultAfterNew(t *testing.T) {
 	// --model flag, which is empty when a default applies. EffectiveModel
 	// must surface the post-default value so consumers can correlate runs.
 	r := New(Config{BackendType: BackendCodex})
-	if got := r.EffectiveModel(); got != "gpt-5.2-codex" {
-		t.Errorf("EffectiveModel() = %q, want gpt-5.2-codex", got)
+	if got := r.EffectiveModel(); got != DefaultCodexModel {
+		t.Errorf("EffectiveModel() = %q, want %s", got, DefaultCodexModel)
 	}
 
 	r2 := New(Config{BackendType: BackendCodex, Model: "gpt-5.4"})
@@ -135,12 +135,11 @@ func TestEffectiveModel_ReportsDefaultAfterNew(t *testing.T) {
 }
 
 func TestEffectiveModel_UpdatesFromSessionInfo(t *testing.T) {
-	// Cursor's CLI picks a default model when --model is empty and reports
-	// the choice via ReadyEvent → OnSessionInfo. The envelope must surface
-	// that real model instead of a stale empty/config value.
+	// Cursor's CLI reports its chosen model via ReadyEvent → OnSessionInfo.
+	// The envelope must surface that real model instead of the config default.
 	r := New(Config{BackendType: BackendCursor})
-	if got := r.EffectiveModel(); got != "" {
-		t.Errorf("pre-session EffectiveModel() = %q, want empty", got)
+	if got := r.EffectiveModel(); got != DefaultCursorModel {
+		t.Errorf("pre-session EffectiveModel() = %q, want %s", got, DefaultCursorModel)
 	}
 	h := r.newEventHandler()
 	h.OnSessionInfo("session-abc", "Composer 2")
