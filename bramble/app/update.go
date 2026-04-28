@@ -988,18 +988,9 @@ func (m *Model) refreshCommandCenter() {
 	}
 	m.commandCenter.UpdateSessions(m.gatherActiveSessions(), m.width, m.height)
 	// Re-capture preview content if a preview is still open.
-	if sid := m.commandCenter.PreviewedSessionID(); sid != "" {
-		// Resolve the correct session manager: the previewed session may belong to a
-		// different repo than the currently active one (multi-repo support).
-		var previewSess *session.SessionInfo
-		for i, sessions := 0, m.commandCenter.Sessions(); i < len(sessions); i++ {
-			if sessions[i].ID == sid {
-				previewSess = &sessions[i]
-				break
-			}
-		}
+	if previewSess := m.commandCenter.PreviewedSession(); previewSess != nil {
 		mgr := m.managerForSession(previewSess)
-		lines, err := mgr.CapturePaneText(sid, 10)
+		lines, err := mgr.CapturePaneText(previewSess.ID, 10)
 		if err == nil {
 			m.commandCenter.SetPreviewText(lines)
 		}

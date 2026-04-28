@@ -121,22 +121,6 @@ func TestCommandCenter_NavigationGrid(t *testing.T) {
 	assert.Equal(t, 3, cc.selectedIdx) // clamped to len-1
 }
 
-func TestCommandCenter_RestoreSelectionByID(t *testing.T) {
-	cc := NewCommandCenter()
-	sessions := makeSessions()
-	cc.Show(sessions, 120, 40)
-	cc.selectedIdx = 0
-
-	// After refresh, the session order may change; restore by ID
-	cc.RestoreSelectionByID("sess-pending")
-	// sess-pending should be at index 2 after sort (idle, running, pending, completed)
-	assert.Equal(t, 2, cc.selectedIdx)
-
-	// Missing ID: clamp to valid range
-	cc.RestoreSelectionByID("nonexistent-id")
-	assert.True(t, cc.selectedIdx >= 0 && cc.selectedIdx < len(cc.sessions))
-}
-
 func TestCommandCenter_SelectByNumber(t *testing.T) {
 	cc := NewCommandCenter()
 	sessions := makeSessions()
@@ -234,6 +218,8 @@ func TestCommandCenter_UpdateSessionsPreservesPreview(t *testing.T) {
 	// UpdateSessions should preserve the preview
 	cc.UpdateSessions(sessions, 120, 40)
 	assert.Equal(t, previewedID, cc.PreviewedSessionID())
+	require.NotNil(t, cc.PreviewedSession())
+	assert.Equal(t, previewedID, cc.PreviewedSession().ID)
 	assert.NotEqual(t, -1, cc.previewIdx)
 	// Preview text is preserved (not cleared by UpdateSessions)
 	assert.Equal(t, []string{"line1", "line2"}, cc.previewText)
@@ -252,6 +238,7 @@ func TestCommandCenter_UpdateSessionsClearsPreviewIfGone(t *testing.T) {
 	// UpdateSessions with a list that doesn't contain the previewed session
 	cc.UpdateSessions([]session.SessionInfo{sessions[2], sessions[3]}, 120, 40)
 	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Nil(t, cc.PreviewedSession())
 	assert.Equal(t, -1, cc.previewIdx)
 	assert.Nil(t, cc.previewText)
 }
@@ -267,6 +254,7 @@ func TestCommandCenter_HideClearsPreviewState(t *testing.T) {
 	assert.Equal(t, -1, cc.previewIdx)
 	assert.Nil(t, cc.previewText)
 	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Nil(t, cc.PreviewedSession())
 }
 
 func TestCommandCenter_TogglePreviewTracksSessionID(t *testing.T) {
@@ -283,6 +271,7 @@ func TestCommandCenter_TogglePreviewTracksSessionID(t *testing.T) {
 	result := cc.TogglePreview()
 	assert.Nil(t, result)
 	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Nil(t, cc.PreviewedSession())
 }
 
 func TestSessionPriority(t *testing.T) {
@@ -337,19 +326,22 @@ func TestCommandCenter_UpdateSessionsPreservesSelectionByID(t *testing.T) {
 
 	cc.selectedIdx = 1
 	require.NotNil(t, cc.SelectedSession())
+	oldIdx := cc.selectedIdx
 	selID := cc.SelectedSession().ID
 	require.Equal(t, session.SessionID("sess-running"), selID)
 
-	// Flip running → idle so the priority sort lifts this session to the head.
 	mutated := makeSessions()
 	for i := range mutated {
 		if mutated[i].ID == "sess-running" {
 			mutated[i].Status = session.StatusIdle
+			mutated[i].Progress.LastActivity = time.Now().Add(time.Minute)
 		}
 	}
 	cc.UpdateSessions(mutated, 120, 40)
 
 	require.NotNil(t, cc.SelectedSession())
+	assert.NotEqual(t, oldIdx, cc.selectedIdx)
+	assert.Equal(t, 0, cc.selectedIdx)
 	assert.Equal(t, selID, cc.SelectedSession().ID,
 		"selection must follow the session by ID across re-sort")
 }

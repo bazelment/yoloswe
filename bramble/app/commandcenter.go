@@ -30,12 +30,9 @@ func NewCommandCenter() *CommandCenter {
 	return &CommandCenter{previewIdx: -1}
 }
 
-// loadSessions copies, sorts, and resizes the session list, preserving the
-// cursor's session by ID across re-sorts. If the previously selected session
-// is gone, the cursor clamps into the new range.
-func (cc *CommandCenter) loadSessions(sessions []session.SessionInfo, w, h int) {
+func (cc *CommandCenter) loadSessions(sessions []session.SessionInfo, w, h int, preserveSelection bool) {
 	var prevSelectedID session.SessionID
-	if cc.selectedIdx >= 0 && cc.selectedIdx < len(cc.sessions) {
+	if preserveSelection && cc.selectedIdx >= 0 && cc.selectedIdx < len(cc.sessions) {
 		prevSelectedID = cc.sessions[cc.selectedIdx].ID
 	}
 
@@ -45,12 +42,39 @@ func (cc *CommandCenter) loadSessions(sessions []session.SessionInfo, w, h int) 
 	cc.width = w
 	cc.height = h
 
-	if i := cc.findSessionIndexByID(prevSelectedID); i >= 0 {
-		cc.selectedIdx = i
-	} else if len(cc.sessions) == 0 {
-		cc.selectedIdx = 0
-	} else {
+	selectedIdx, previewIdx := -1, -1
+	if prevSelectedID != "" || cc.previewSessionID != "" {
+		for i := range cc.sessions {
+			id := cc.sessions[i].ID
+			if prevSelectedID != "" && id == prevSelectedID {
+				selectedIdx = i
+			}
+			if cc.previewSessionID != "" && id == cc.previewSessionID {
+				previewIdx = i
+			}
+			if (prevSelectedID == "" || selectedIdx >= 0) &&
+				(cc.previewSessionID == "" || previewIdx >= 0) {
+				break
+			}
+		}
+	}
+
+	if selectedIdx >= 0 {
+		cc.selectedIdx = selectedIdx
+	} else if preserveSelection && len(cc.sessions) > 0 {
 		cc.selectedIdx = clamp(cc.selectedIdx, 0, len(cc.sessions)-1)
+	} else {
+		cc.selectedIdx = 0
+	}
+
+	cc.previewIdx = previewIdx
+	if cc.previewSessionID != "" && previewIdx == -1 {
+		cc.previewSessionID = ""
+		cc.previewText = nil
+	}
+	if preserveSelection && len(cc.sessions) > 0 {
+		cc.ensureSelectedVisible()
+		return
 	}
 	cc.clampScrollY()
 }
@@ -62,42 +86,27 @@ func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	cc.previewIdx = -1
 	cc.previewText = nil
 	cc.previewSessionID = ""
-	cc.loadSessions(sessions, w, h)
-	cc.selectedIdx = 0
-	cc.clampScrollY()
-}
-
-// findSessionIndexByID returns the index of the session with the given ID, or -1.
-// An empty ID always returns -1.
-func (cc *CommandCenter) findSessionIndexByID(id session.SessionID) int {
-	if id == "" {
-		return -1
-	}
-	for i := range cc.sessions {
-		if cc.sessions[i].ID == id {
-			return i
-		}
-	}
-	return -1
+	cc.loadSessions(sessions, w, h, false)
 }
 
 // UpdateSessions replaces the session list while preserving preview state.
 // Used by refreshCommandCenter() to avoid losing the open preview on session events.
 func (cc *CommandCenter) UpdateSessions(sessions []session.SessionInfo, w, h int) {
-	cc.loadSessions(sessions, w, h)
-
-	cc.previewIdx = cc.findSessionIndexByID(cc.previewSessionID)
-	if cc.previewSessionID != "" && cc.previewIdx == -1 {
-		// Previewed session no longer in the active list.
-		cc.previewSessionID = ""
-		cc.previewText = nil
-	}
+	cc.loadSessions(sessions, w, h, true)
 }
 
 // PreviewedSessionID returns the ID of the session currently being previewed,
 // or empty if no preview is open.
 func (cc *CommandCenter) PreviewedSessionID() session.SessionID {
 	return cc.previewSessionID
+}
+
+// PreviewedSession returns the session currently being previewed, or nil.
+func (cc *CommandCenter) PreviewedSession() *session.SessionInfo {
+	if cc.previewIdx < 0 || cc.previewIdx >= len(cc.sessions) {
+		return nil
+	}
+	return &cc.sessions[cc.previewIdx]
 }
 
 // Hide closes the command center.
@@ -189,20 +198,6 @@ func (cc *CommandCenter) SelectedSession() *session.SessionInfo {
 // Sessions returns the current session list.
 func (cc *CommandCenter) Sessions() []session.SessionInfo {
 	return cc.sessions
-}
-
-// RestoreSelectionByID finds a session by ID and restores selection to it.
-func (cc *CommandCenter) RestoreSelectionByID(id session.SessionID) {
-	if i := cc.findSessionIndexByID(id); i >= 0 {
-		cc.selectedIdx = i
-		cc.ensureSelectedVisible()
-		return
-	}
-	if len(cc.sessions) == 0 {
-		cc.selectedIdx = 0
-		return
-	}
-	cc.selectedIdx = clamp(cc.selectedIdx, 0, len(cc.sessions)-1)
 }
 
 // TogglePreview toggles the expanded pane preview for the selected session.
