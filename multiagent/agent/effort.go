@@ -23,8 +23,10 @@ const (
 var ErrInvalidEffort = errors.New("invalid effort level")
 
 // ErrEffortUnsupported is returned by providers that have no reasoning-effort
-// concept (e.g. Cursor, Gemini today) when ExecuteConfig.Effort is non-empty.
-// Wrapped with the provider name and requested level.
+// concept (e.g. Cursor, Gemini today) when ExecuteConfig.Effort is set to an
+// explicit non-auto level. EffortAuto means "use the provider default" and
+// must not produce this error. Wrapped with the provider name and requested
+// level.
 var ErrEffortUnsupported = errors.New("provider does not support reasoning effort")
 
 // ParseEffort parses a user-supplied string into an EffortLevel. It accepts
@@ -41,7 +43,8 @@ func ParseEffort(s string) (EffortLevel, error) {
 
 // EffortUnsupportedError builds the canonical ErrEffortUnsupported wrap with
 // the provider name and the level that was rejected. Providers should call
-// this when cfg.Effort is non-empty and they have no way to honor it.
+// this when cfg.Effort is an explicit non-auto level and they have no way to
+// honor it. EffortAuto and the empty level should never be passed here.
 func EffortUnsupportedError(provider string, level EffortLevel) error {
 	return fmt.Errorf("%w: provider=%s level=%q", ErrEffortUnsupported, provider, string(level))
 }

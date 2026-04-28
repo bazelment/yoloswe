@@ -39,8 +39,10 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	cfg := applyOptions(opts)
 
 	// ACP has no reasoning-effort knob — fail fast before spawning the
-	// subprocess.
-	if cfg.Effort != "" {
+	// subprocess. EffortAuto is the explicit "use the provider default"
+	// sentinel, which a no-knob provider already satisfies, so it passes
+	// through.
+	if cfg.Effort != "" && cfg.Effort != EffortAuto {
 		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
 	}
 

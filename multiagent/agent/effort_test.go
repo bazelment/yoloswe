@@ -81,10 +81,10 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 // rather than another silent ignore.
 //
 // Claude and Codex accept all five levels; Cursor and Gemini reject any
-// non-empty effort with ErrEffortUnsupported. Empty effort is always a
-// no-op success path. (Invalid string parsing is covered by
-// TestParseEffort_RejectsInvalidLevels — providers receive a validated
-// EffortLevel and trust the boundary.)
+// explicit non-auto effort with ErrEffortUnsupported. EffortAuto and empty
+// effort both mean "use the provider default" and are never rejected.
+// (Invalid string parsing is covered by TestParseEffort_RejectsInvalidLevels
+// — providers receive a validated EffortLevel and trust the boundary.)
 func TestProviderEffortMatrix(t *testing.T) {
 	t.Parallel()
 
@@ -158,9 +158,13 @@ func TestProviderEffortMatrix(t *testing.T) {
 				assert.NoError(t, err, "empty effort should be a no-op")
 			}
 
-			expectUnsupported := prov.name == "cursor" || prov.name == "gemini"
+			noKnobProvider := prov.name == "cursor" || prov.name == "gemini"
 			for _, level := range validLevels {
 				err := prov.run(t, level)
+				// EffortAuto means "use provider default" — a no-knob
+				// provider satisfies that trivially, so it must not be
+				// rejected even though it has no effort plumbing.
+				expectUnsupported := noKnobProvider && level != EffortAuto
 				if expectUnsupported {
 					require.Error(t, err)
 					assert.ErrorIs(t, err, ErrEffortUnsupported,
@@ -171,8 +175,17 @@ func TestProviderEffortMatrix(t *testing.T) {
 						"error should name the provider")
 					assert.Contains(t, err.Error(), string(level),
 						"error should name the rejected level")
-				} else {
+				} else if !noKnobProvider {
 					assert.NoError(t, err, "level %q on %s should be supported", level, prov.name)
+				}
+				// For no-knob providers with EffortAuto we deliberately
+				// don't assert NoError: Execute may still fail downstream
+				// when the subprocess can't start in the test environment.
+				// We only care that the error, if any, is NOT
+				// ErrEffortUnsupported.
+				if noKnobProvider && level == EffortAuto && err != nil {
+					assert.False(t, errors.Is(err, ErrEffortUnsupported),
+						"EffortAuto on %s must not be rejected as unsupported, got %v", prov.name, err)
 				}
 			}
 		})
