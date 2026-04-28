@@ -68,7 +68,7 @@ func TestResolveAgentModel_UnknownModelFails(t *testing.T) {
 	_, err := resolveAgentModel("foo-bar", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "foo-bar")
-	assert.Contains(t, err.Error(), "supported prefixes")
+	assert.Contains(t, err.Error(), "gpt-")
 }
 
 func TestResolveAgentModel_EmptyModelFails(t *testing.T) {
@@ -110,7 +110,7 @@ func TestManager_UnknownModelLandsInStatusFailed(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, s.Error)
 	assert.Contains(t, s.Error.Error(), "foo-bar")
-	assert.Contains(t, s.Error.Error(), "supported prefixes")
+	assert.Contains(t, s.Error.Error(), "gpt-")
 
 	lines := mgr.GetSessionOutput(sid)
 	var hasError bool

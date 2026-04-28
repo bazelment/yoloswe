@@ -1322,11 +1322,6 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	}
 }
 
-// resolveAgentModel resolves a model ID to an AgentModel using:
-// 1. The filtered registry (if non-nil).
-// 2. The global AllModels list (exact match).
-// 3. Prefix-based provider inference for forward-compat IDs.
-// Returns an error if none of the above succeed.
 func resolveAgentModel(modelID string, registry *agent.ModelRegistry) (agent.AgentModel, error) {
 	if registry != nil {
 		if m, ok := registry.ModelByID(modelID); ok {
@@ -1336,10 +1331,10 @@ func resolveAgentModel(modelID string, registry *agent.ModelRegistry) (agent.Age
 	if m, ok := agent.ModelByID(modelID); ok {
 		return m, nil
 	}
-	if provider, ok := agent.ProviderForModelID(modelID); ok {
+	if provider, ok := agent.ProviderByModelPrefix(modelID); ok {
 		return agent.AgentModel{ID: modelID, Provider: provider, Label: modelID}, nil
 	}
-	return agent.AgentModel{}, fmt.Errorf("unknown model %q (no curated entry and no recognized prefix; supported prefixes: gpt-, gemini-, cursor-, composer-, claude-)", modelID)
+	return agent.AgentModel{}, fmt.Errorf("unknown model %q: no curated entry and no recognized prefix (%s)", modelID, agent.KnownModelPrefixes())
 }
 
 // runSession runs a session in a goroutine, handling both planner and builder types.

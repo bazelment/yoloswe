@@ -203,3 +203,42 @@ func TestProviderForModelID(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderByModelPrefix(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		id       string
+		provider string
+		ok       bool
+	}{
+		{"gpt-future-9000", ProviderCodex, true},
+		{"gemini-99-ultra", ProviderGemini, true},
+		{"cursor-fast", ProviderCursor, true},
+		{"composer-3", ProviderCursor, true},
+		{"claude-opus-5", ProviderClaude, true},
+		// Exact-match IDs still work via prefix
+		{"gpt-5.5", ProviderCodex, true},
+		// Non-matching
+		{"foo-bar", "", false},
+		{"", "", false},
+		{"opus", "", false}, // no prefix match for bare IDs
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			t.Parallel()
+			provider, ok := ProviderByModelPrefix(tc.id)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.provider, provider)
+		})
+	}
+}
+
+func TestKnownModelPrefixes(t *testing.T) {
+	t.Parallel()
+	s := KnownModelPrefixes()
+	assert.Contains(t, s, "gpt-")
+	assert.Contains(t, s, "gemini-")
+	assert.Contains(t, s, "claude-")
+}
