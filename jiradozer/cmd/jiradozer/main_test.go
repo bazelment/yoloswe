@@ -108,6 +108,47 @@ func TestResolveRepoName(t *testing.T) {
 	}
 }
 
+func TestBuildChildArgs(t *testing.T) {
+	tests := []struct {
+		wantContain []string
+		wantOmit    []string
+		name        string
+		args        runArgs
+	}{
+		{
+			name:        "thinking-level set is propagated",
+			args:        runArgs{thinkingLevel: "high"},
+			wantContain: []string{"--thinking-level", "high"},
+		},
+		{
+			name:     "thinking-level empty is omitted",
+			args:     runArgs{},
+			wantOmit: []string{"--thinking-level"},
+		},
+		{
+			name:        "model + thinking-level both propagated",
+			args:        runArgs{modelID: "opus", thinkingLevel: "max"},
+			wantContain: []string{"--model", "opus", "--thinking-level", "max"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildChildArgs(tt.args, "/tmp/jiradozer.yaml")
+			joined := ""
+			for _, a := range got {
+				joined += a + " "
+			}
+			for _, want := range tt.wantContain {
+				assert.Contains(t, joined, want)
+			}
+			for _, want := range tt.wantOmit {
+				assert.NotContains(t, joined, want)
+			}
+		})
+	}
+}
+
 func TestRedactArgs(t *testing.T) {
 	tests := []struct {
 		name string
