@@ -169,3 +169,37 @@ func TestModelByID_Global(t *testing.T) {
 	_, ok = ModelByID("nonexistent")
 	assert.False(t, ok)
 }
+
+func TestProviderForModelID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		id       string
+		provider string
+		ok       bool
+	}{
+		// Exact match wins over prefix
+		{"opus", ProviderClaude, true},
+		{"gpt-5.5", ProviderCodex, true},
+		// Prefix-only matches (forward-compat IDs not in AllModels)
+		{"gpt-future-9000", ProviderCodex, true},
+		{"gemini-99-ultra", ProviderGemini, true},
+		{"cursor-fast", ProviderCursor, true},
+		{"composer-3", ProviderCursor, true},
+		{"claude-opus-5", ProviderClaude, true},
+		// Non-matching
+		{"foo-bar", "", false},
+		{"", "", false},
+		{"gpt", "", false},    // bare token without hyphen must NOT match
+		{"gemini", "", false}, // bare token without hyphen must NOT match
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			t.Parallel()
+			provider, ok := ProviderForModelID(tc.id)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.provider, provider)
+		})
+	}
+}

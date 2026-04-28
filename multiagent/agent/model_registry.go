@@ -1,6 +1,9 @@
 package agent
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
@@ -35,6 +38,41 @@ func ModelByID(id string) (AgentModel, bool) {
 		}
 	}
 	return AgentModel{}, false
+}
+
+// modelPrefixRules maps hyphenated prefixes (e.g. "gpt-") to providers.
+// Order matters: first match wins.
+var modelPrefixRules = []struct {
+	prefix   string
+	provider string
+}{
+	{"gpt-", ProviderCodex},
+	{"gemini-", ProviderGemini},
+	{"cursor-", ProviderCursor},
+	{"composer-", ProviderCursor},
+	{"claude-", ProviderClaude},
+}
+
+// ProviderForModelID resolves the provider for a model ID.
+// 1. Exact match in AllModels — return that provider.
+// 2. Prefix rules (forward-compat for IDs not yet in AllModels):
+//
+//	gpt-*                   → ProviderCodex
+//	gemini-*                → ProviderGemini
+//	cursor-* | composer-*   → ProviderCursor
+//	claude-*                → ProviderClaude
+//
+// 3. Otherwise return ("", false).
+func ProviderForModelID(id string) (provider string, ok bool) {
+	if m, found := ModelByID(id); found {
+		return m.Provider, true
+	}
+	for _, rule := range modelPrefixRules {
+		if strings.HasPrefix(id, rule.prefix) {
+			return rule.provider, true
+		}
+	}
+	return "", false
 }
 
 // ModelRegistry provides a filtered view of models based on provider
