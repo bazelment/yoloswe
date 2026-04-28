@@ -40,9 +40,10 @@ func ValidateConfig(config Config) error {
 
 	// Validate reviewer model
 	validReviewerModels := map[string]bool{
-		"gpt-5.2-codex": true,
-		"o4-mini":       true,
-		"o4":            true,
+		"gpt-5.4-mini": true,
+		"gpt-5.5":      true,
+		"o4-mini":      true,
+		"o4":           true,
 	}
 	if config.ReviewerModel != "" && !validReviewerModels[config.ReviewerModel] {
 		// Warning only, allow custom models
@@ -168,7 +169,7 @@ func ValidatePrompt(prompt string) error {
 //
 // Default values applied:
 //   - BuilderModel: "sonnet" (good balance of capability and cost)
-//   - ReviewerModel: "gpt-5.2-codex" (specialized code reviewer)
+//   - ReviewerModel: "gpt-5.4-mini" (specialized code reviewer)
 //   - RecordingDir: "~/.yoloswe" (home directory for session logs)
 //   - MaxBudgetUSD: $100.00 (prevents runaway costs)
 //   - MaxTimeSeconds: 3600 (1 hour wall-clock time)
@@ -185,7 +186,7 @@ func SanitizeConfig(config *Config) {
 		config.BuilderModel = "sonnet"
 	}
 	if config.ReviewerModel == "" {
-		config.ReviewerModel = "gpt-5.2-codex"
+		config.ReviewerModel = "gpt-5.4-mini"
 	}
 
 	// Apply recording directory default (expand ~ to home directory)

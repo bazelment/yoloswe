@@ -155,7 +155,7 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 
 	m, ok := reg.FirstModelForProvider(ProviderCodex)
 	require.True(t, ok)
-	assert.Equal(t, "gpt-5.3-codex", m.ID)
+	assert.Equal(t, "gpt-5.5", m.ID)
 
 	_, ok = reg.FirstModelForProvider(ProviderGemini)
 	assert.False(t, ok)

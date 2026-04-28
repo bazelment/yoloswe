@@ -180,7 +180,7 @@ The loop continues until the reviewer accepts or limits are reached.`,
 	}
 
 	cmd.Flags().StringVar(&flags.builderModel, "builder-model", "sonnet", "Builder model: haiku, sonnet, opus")
-	cmd.Flags().StringVar(&flags.reviewerModel, "reviewer-model", "gpt-5.2-codex", "Reviewer model: gpt-5.2-codex, o4-mini")
+	cmd.Flags().StringVar(&flags.reviewerModel, "reviewer-model", "", "Reviewer model (default: gpt-5.4-mini)")
 	cmd.Flags().StringVar(&flags.dir, "dir", "", "Working directory (default: current)")
 	cmd.Flags().Float64Var(&flags.budget, "budget", 100.0, "Max USD for builder session")
 	cmd.Flags().IntVar(&flags.timeout, "timeout", 3600, "Max seconds")

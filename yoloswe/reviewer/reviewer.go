@@ -25,6 +25,14 @@ const (
 	// DefaultGeminiModel is the model used when BackendGemini is selected and
 	// no --model flag is provided.
 	DefaultGeminiModel = "gemini-3.1-flash-lite-preview"
+
+	// DefaultCodexModel is the model used when BackendCodex is selected and
+	// no --model flag is provided.
+	DefaultCodexModel = "gpt-5.4-mini"
+
+	// DefaultCursorModel is the model used when BackendCursor is selected and
+	// no --model flag is provided.
+	DefaultCursorModel = "composer-2"
 )
 
 // Config holds reviewer configuration.
@@ -209,11 +217,18 @@ func New(config Config) *Reviewer {
 		}
 	}
 
+	// Apply cursor-specific defaults.
+	if config.BackendType == BackendCursor {
+		if config.Model == "" {
+			config.Model = DefaultCursorModel
+		}
+	}
+
 	// Apply codex-specific defaults only for codex backend.
 	// See Config doc for why danger-full-access is the default sandbox.
 	if config.BackendType == BackendCodex {
 		if config.Model == "" {
-			config.Model = "gpt-5.2-codex"
+			config.Model = DefaultCodexModel
 		}
 		if config.ApprovalPolicy == "" {
 			if config.ReadOnly {
@@ -312,11 +327,12 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	return result, nil
 }
 
-// EffectiveModel returns the model actually used by the backend. For Codex
-// this is the post-default config value; for Cursor this is updated from the
-// backend's ReadyEvent once the session starts (the CLI picks its own default
-// when --model is empty). Callers should prefer this over the raw --model
-// flag, which may be empty or differ from what the backend actually ran.
+// EffectiveModel returns the model actually used by the backend. Defaults for
+// all backends (Codex, Cursor, Gemini) are applied in New, so the value is
+// set before the session starts. For Cursor, it may be replaced by the model
+// reported in the backend's ReadyEvent (OnSessionInfo). Callers should prefer
+// this over the raw --model flag, which may be empty or differ from what the
+// backend actually ran.
 func (r *Reviewer) EffectiveModel() string { return r.effectiveModel }
 
 // LastSessionID returns the session/thread ID from the most recent backend
