@@ -34,6 +34,7 @@ func TestRun_ExitCodes(t *testing.T) {
 		{"bad_verbosity", 2},
 		{"bad_color", 2},
 		{"missing_toolname", 2},
+		{"nil_opts", 2},
 	}
 	for _, c := range cases {
 		t.Run(c.scenario, func(t *testing.T) {
@@ -147,6 +148,8 @@ func runChildScenario(scenario string) {
 	case "missing_toolname":
 		opts := Options{}
 		code = Run(&opts, func(ctx context.Context, app *App) error { return nil })
+	case "nil_opts":
+		code = Run(nil, func(ctx context.Context, app *App) error { return nil })
 	case "banner":
 		opts := Options{
 			ToolName:       "testtool",
@@ -170,37 +173,57 @@ func runChildScenario(scenario string) {
 // of opts before cobra had a chance to populate it.
 func TestRun_StandardFlagsPreParsed(t *testing.T) {
 	if scenario := os.Getenv("TEST_RUN_SCENARIO"); scenario == "preparse" {
-		// Fake args are injected by the parent so Run sees --verbose.
+		// Fake args are injected by the parent so Run sees the test flags.
 		if extra := os.Getenv("TEST_FAKE_ARGS"); extra != "" {
 			os.Args = append([]string{os.Args[0]}, strings.Split(extra, "|")...)
 		}
 		opts := Options{ToolName: "testtool"}
 		var gotVerbosity string
+		var gotColor int
 		code := Run(&opts, func(_ context.Context, app *App) error {
 			gotVerbosity = app.Verbosity.String()
+			gotColor = int(app.Color)
 			return nil
 		})
-		// Print the verbosity to stdout so the parent can read it.
-		fmt.Println(gotVerbosity)
+		// Print verbosity:color-int so the parent can assert both.
+		fmt.Printf("%s:%d\n", gotVerbosity, gotColor)
 		os.Exit(code)
 	}
 
-	tmpHome := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run", "TestRun_StandardFlagsPreParsed")
-	cmd.Env = append(os.Environ(),
-		"TEST_RUN_SCENARIO=preparse",
-		"TEST_FAKE_ARGS=--verbose",
-		"HOME="+tmpHome,
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("child failed: %v\nstderr:\n%s", err, stderr.String())
+	// ColorAuto=0, ColorAlways=1, ColorNever=2
+	cases := []struct {
+		name          string
+		fakeArgs      string
+		wantVerbosity string
+		wantColor     int
+	}{
+		{"--verbose", "--verbose", "verbose", 0},
+		{"--verbosity=debug", "--verbosity|debug", "debug", 0},
+		{"--color=never", "--color|never", "normal", 2},
+		{"--verbose_--color=always", "--verbose|--color|always", "verbose", 1},
 	}
-	got := strings.TrimSpace(stdout.String())
-	if got != "verbose" {
-		t.Errorf("app.Verbosity = %q, want %q (--verbose not pre-parsed)", got, "verbose")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			tmpHome := t.TempDir()
+			cmd := exec.Command(os.Args[0], "-test.run", "TestRun_StandardFlagsPreParsed")
+			cmd.Env = append(os.Environ(),
+				"TEST_RUN_SCENARIO=preparse",
+				"TEST_FAKE_ARGS="+c.fakeArgs,
+				"HOME="+tmpHome,
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("child failed: %v\nstderr:\n%s", err, stderr.String())
+			}
+			got := strings.TrimSpace(stdout.String())
+			want := fmt.Sprintf("%s:%d", c.wantVerbosity, c.wantColor)
+			if got != want {
+				t.Errorf("app output = %q, want %q (flags not pre-parsed)", got, want)
+			}
+		})
 	}
 }
 

@@ -107,6 +107,10 @@ func FromContext(ctx context.Context) *App {
 //  7. Invokes fn. nil → 0; ctx-cancellation → 130; otherwise logs the error
 //     via slog and returns 1.
 func Run(opts *Options, fn RunFunc) int {
+	if opts == nil {
+		fmt.Fprintln(os.Stderr, "cliapp: Options must not be nil")
+		return 2
+	}
 	if opts.ToolName == "" {
 		fmt.Fprintln(os.Stderr, "cliapp: ToolName is required")
 		return 2

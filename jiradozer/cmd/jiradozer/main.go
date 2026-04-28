@@ -419,7 +419,8 @@ func runMultiIssue(ctx context.Context, app *cliapp.App, issueTracker tracker.Is
 	childArgs := buildChildArgs(app, args, absConfig)
 	logDir, err := cliapp.LogDir("jiradozer")
 	if err != nil {
-		return fmt.Errorf("resolve log dir: %w", err)
+		logger.Warn("could not create log dir, child logs go to temp dir", "error", err)
+		logDir = os.TempDir()
 	}
 
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, &wtAdapter{mgr: wtMgr}, repoName, logger)
