@@ -1520,6 +1520,14 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				model:        session.Model,
 				workDir:      session.WorktreePath,
 			}
+		} else if agentModel.Provider == ProviderCursor {
+			// Cursor provider backend
+			runner = &providerRunner{
+				provider:     agent.NewCursorProvider(),
+				eventHandler: eventHandler,
+				model:        session.Model,
+				workDir:      session.WorktreePath,
+			}
 		} else {
 			// Default: use hardcoded planner/builder runners with model from session
 			switch session.Type {

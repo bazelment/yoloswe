@@ -25,6 +25,7 @@ const (
 	ProviderClaude = agent.ProviderClaude
 	ProviderCodex  = agent.ProviderCodex
 	ProviderGemini = agent.ProviderGemini
+	ProviderCursor = agent.ProviderCursor
 )
 
 // AgentModel is an alias for agent.AgentModel.
