@@ -32,8 +32,6 @@ var readOnlyGitSubcmds = map[string]bool{
 	"rev-parse":    true,
 	"symbolic-ref": true,
 	"ls-remote":    true,
-	"worktree":     true,
-	"branch":       true,
 	"show":         true,
 }
 

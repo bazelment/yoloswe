@@ -2,58 +2,63 @@ package wt
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 )
 
-// captureGitRunner records the full args slice (including any injected flags)
-// passed to exec.Command so tests can assert on them without spawning git.
-type captureGitRunner struct {
-	lastArgs []string
-}
-
-func (c *captureGitRunner) Run(_ context.Context, args []string, _ string) (*CmdResult, error) {
-	r := DefaultGitRunner{}
-	// Replicate the injection logic without actually running git.
-	finalArgs := args
-	if len(args) > 0 && readOnlyGitSubcmds[args[0]] {
-		finalArgs = make([]string, 0, len(args)+1)
-		finalArgs = append(finalArgs, "--no-optional-locks")
-		finalArgs = append(finalArgs, args...)
+// initTempRepo creates a minimal git repo in a temp dir suitable for read-only
+// git commands (status, log, etc.) in tests.
+func initTempRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", dir},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
-	c.lastArgs = finalArgs
-	_ = r
-	return &CmdResult{}, nil
+	return dir
 }
 
 func TestDefaultGitRunnerNoOptionalLocks(t *testing.T) {
 	t.Parallel()
+	dir := initTempRepo(t)
+	runner := &DefaultGitRunner{}
+	ctx := context.Background()
 
-	readOnly := []string{"status", "diff", "log", "ls-files", "rev-list", "rev-parse", "symbolic-ref", "ls-remote", "worktree", "branch", "show"}
-	readWrite := []string{"fetch", "rebase", "config", "push", "worktree add"}
-
-	for _, sub := range readOnly {
-		sub := sub
-		t.Run("injects_"+sub, func(t *testing.T) {
+	// These subcommands must succeed with --no-optional-locks prepended.
+	readOnly := [][]string{
+		{"status", "--porcelain"},
+		{"diff"},
+		{"log", "--oneline"},
+		{"ls-files"},
+		{"rev-parse", "HEAD"},
+		{"show", "HEAD"},
+	}
+	for _, args := range readOnly {
+		args := args
+		t.Run("injects_"+args[0], func(t *testing.T) {
 			t.Parallel()
-			c := &captureGitRunner{}
-			c.Run(context.Background(), []string{sub, "--some-flag"}, "")
-			if len(c.lastArgs) == 0 || c.lastArgs[0] != "--no-optional-locks" {
-				t.Errorf("expected --no-optional-locks prepended for %q, got %v", sub, c.lastArgs)
+			if _, err := runner.Run(ctx, args, dir); err != nil {
+				t.Errorf("Run(%v) failed: %v — --no-optional-locks may have broken a read-only subcommand", args, err)
 			}
 		})
 	}
 
-	for _, sub := range readWrite {
-		sub := sub
-		t.Run("no_inject_"+sub, func(t *testing.T) {
-			t.Parallel()
-			c := &captureGitRunner{}
-			c.Run(context.Background(), []string{sub}, "")
-			if len(c.lastArgs) > 0 && c.lastArgs[0] == "--no-optional-locks" {
-				t.Errorf("did not expect --no-optional-locks for %q, got %v", sub, c.lastArgs)
-			}
-		})
+	// Write subcommands must NOT get --no-optional-locks. We verify by checking
+	// the map directly — these must not be in readOnlyGitSubcmds.
+	writeSubcmds := []string{"fetch", "rebase", "config", "push", "worktree", "branch"}
+	for _, sub := range writeSubcmds {
+		if readOnlyGitSubcmds[sub] {
+			t.Errorf("write subcommand %q is in readOnlyGitSubcmds — would inject --no-optional-locks into write operations", sub)
+		}
 	}
 }
 
