@@ -330,26 +330,17 @@ func TestCommandCenter_NewSession_PBC(t *testing.T) {
 	}
 }
 
-// TestCommandCenter_UpdateSessionsPreservesSelectionByID exercises the
-// repro for the "wrong worktree" bug at the unit level: the user
-// highlights a non-first session, a status-driven re-sort happens, and
-// the cursor must still point at the same session by ID, not at whatever
-// numeric index it held before.
 func TestCommandCenter_UpdateSessionsPreservesSelectionByID(t *testing.T) {
 	cc := NewCommandCenter()
 	sessions := makeSessions()
 	cc.Show(sessions, 120, 40)
 
-	// Navigate to a non-first session. After Show()'s priority sort the
-	// order is [idle, running, pending, completed]; pick the running one
-	// at index 1 so a sort-order change is observable.
 	cc.selectedIdx = 1
 	require.NotNil(t, cc.SelectedSession())
 	selID := cc.SelectedSession().ID
 	require.Equal(t, session.SessionID("sess-running"), selID)
 
-	// Mutate the running session into idle so the next sort lifts it to
-	// the top of the list (idle priority < running).
+	// Flip running → idle so the priority sort lifts this session to the head.
 	mutated := makeSessions()
 	for i := range mutated {
 		if mutated[i].ID == "sess-running" {
@@ -358,39 +349,29 @@ func TestCommandCenter_UpdateSessionsPreservesSelectionByID(t *testing.T) {
 	}
 	cc.UpdateSessions(mutated, 120, 40)
 
-	// Same session by ID, possibly different numeric index.
 	require.NotNil(t, cc.SelectedSession())
 	assert.Equal(t, selID, cc.SelectedSession().ID,
 		"selection must follow the session by ID across re-sort")
 }
 
-// TestCommandCenter_ShowResetsSelection documents that Show() always lands
-// the cursor on the highest-priority card, regardless of where it was on
-// the previous visit. Opening the overlay is a fresh survey.
 func TestCommandCenter_ShowResetsSelection(t *testing.T) {
 	cc := NewCommandCenter()
 	cc.Show(makeSessions(), 120, 40)
-	cc.selectedIdx = 2 // user navigates somewhere
+	cc.selectedIdx = 2
 	cc.Hide()
 
 	cc.Show(makeSessions(), 120, 40)
 	assert.Equal(t, 0, cc.selectedIdx)
 	require.NotNil(t, cc.SelectedSession())
-	// After priority sort the idle session leads.
 	assert.Equal(t, session.StatusIdle, cc.SelectedSession().Status)
 }
 
-// TestCommandCenter_UpdateSessionsClampsToTailWhenSelectedGone covers the
-// case where the previously selected session disappears entirely and the
-// list also shrinks below the old numeric index. The cursor lands on the
-// new tail rather than the head.
 func TestCommandCenter_UpdateSessionsClampsToTailWhenSelectedGone(t *testing.T) {
 	cc := NewCommandCenter()
 	sessions := makeSessions()
 	cc.Show(sessions, 120, 40)
-	cc.selectedIdx = 3 // last card
+	cc.selectedIdx = 3
 
-	// Remove the previously selected session and shrink the list.
 	sorted := cc.Sessions()
 	keep := []session.SessionInfo{sorted[0], sorted[1]}
 	cc.UpdateSessions(keep, 120, 40)
@@ -399,8 +380,6 @@ func TestCommandCenter_UpdateSessionsClampsToTailWhenSelectedGone(t *testing.T) 
 	assert.Equal(t, 1, cc.selectedIdx, "cursor should land on new tail, not bounce to head")
 }
 
-// TestCommandCenter_UpdateSessionsEmptyList ensures SelectedSession is
-// nil-safe after an UpdateSessions that empties the list.
 func TestCommandCenter_UpdateSessionsEmptyList(t *testing.T) {
 	cc := NewCommandCenter()
 	cc.Show(makeSessions(), 120, 40)
@@ -410,17 +389,9 @@ func TestCommandCenter_UpdateSessionsEmptyList(t *testing.T) {
 	assert.Nil(t, cc.SelectedSession())
 }
 
-// TestCommandCenter_NewSession_AfterReSort is the regression test for the
-// user-visible bug. The user opens the command center, navigates to a
-// non-first session, an UpdateSessions tick re-sorts the list, then they
-// press 'p'/'b'/'c'. The resulting startSessionMsg must carry the worktree
-// of the navigated session, not the worktree of whichever session is
-// currently first in the list.
-//
-// Setup: three running sessions A/B/C. User navigates to B (index 1).
-// Then C transitions to idle, which lifts it to index 0 — pushing A to 1
-// and B to 2. Without the fix, selectedIdx stays at 1 and silently
-// retargets onto A's worktree. With the fix, the cursor follows B by ID.
+// TestCommandCenter_NewSession_AfterReSort is the end-to-end regression for the
+// "wrong worktree" bug: navigate to a non-first session, a re-sort happens,
+// then 'p'/'b'/'c' must spawn against the navigated session's worktree.
 func TestCommandCenter_NewSession_AfterReSort(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},
@@ -443,14 +414,11 @@ func TestCommandCenter_NewSession_AfterReSort(t *testing.T) {
 	m.commandCenter.Show(sessions, m.width, m.height)
 	m.focus = FocusCommandCenter
 
-	// Navigate to sess-b. With LastActivity desc within the running tier the
-	// initial sorted order is [A, B, C]; one MoveSelection lands on B.
+	// Initial sort within the running tier is [A, B, C] by LastActivity desc.
 	m.commandCenter.MoveSelection(1)
 	require.Equal(t, session.SessionID("sess-b"), m.commandCenter.SelectedSession().ID)
 
-	// Status-driven re-sort: sess-c flips to idle (highest priority tier),
-	// so the new sorted order is [C, A, B]. A naive numeric cursor at
-	// index 1 would now point at sess-a — exactly the user-visible bug.
+	// Flip C to idle → new sort is [C, A, B]; numeric cursor at 1 would point at A.
 	mutated := []session.SessionInfo{
 		mkSession("sess-a", "/tmp/wt/A", "A", session.StatusRunning, 1*time.Minute),
 		mkSession("sess-b", "/tmp/wt/B", "B", session.StatusRunning, 2*time.Minute),
