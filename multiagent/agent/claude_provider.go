@@ -365,8 +365,7 @@ func claudeEffortLevel(level EffortLevel) claude.EffortLevel {
 	case EffortMax:
 		return claude.EffortMax
 	}
-	// ParseEffort is the only caller path; an unknown value here is a bug.
-	return claude.EffortAuto
+	panic(fmt.Sprintf("BUG: unhandled EffortLevel %q in claudeEffortLevel", level))
 }
 
 // ClaudeResultToAgentResult converts a claude.TurnResult to AgentResult.
