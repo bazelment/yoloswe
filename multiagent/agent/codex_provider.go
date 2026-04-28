@@ -101,10 +101,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		return nil, err
 	}
 
-	turnOpts, err := codexTurnOptions(cfg)
-	if err != nil {
-		return nil, err
-	}
+	turnOpts := codexTurnOptions(cfg)
 
 	result, err := thread.Ask(ctx, fullPrompt, turnOpts...)
 	if err != nil {
@@ -133,18 +130,13 @@ func (p *CodexProvider) Close() error {
 // unit-tested without spawning the codex subprocess.
 //
 // Codex accepts the effort string opaquely and forwards it to the model
-// (see agent-cli-wrapper/codex/jsonrpc.go field "effort"). Validation against
-// the multiagent vocabulary happens here; the SDK does not pre-validate.
-func codexTurnOptions(cfg ExecuteConfig) ([]codex.TurnOption, error) {
-	var opts []codex.TurnOption
-	if cfg.Effort != "" {
-		level, err := ParseEffort(cfg.Effort)
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, codex.WithEffort(string(level)))
+// (see agent-cli-wrapper/codex/jsonrpc.go field "effort"). The agent.EffortLevel
+// vocabulary is already validated upstream by ParseEffort.
+func codexTurnOptions(cfg ExecuteConfig) []codex.TurnOption {
+	if cfg.Effort == "" {
+		return nil
 	}
-	return opts, nil
+	return []codex.TurnOption{codex.WithEffort(string(cfg.Effort))}
 }
 
 // codexResultToAgentResult converts a codex.TurnResult to AgentResult.

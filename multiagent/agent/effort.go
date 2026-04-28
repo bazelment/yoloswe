@@ -42,6 +42,6 @@ func ParseEffort(s string) (EffortLevel, error) {
 // EffortUnsupportedError builds the canonical ErrEffortUnsupported wrap with
 // the provider name and the level that was rejected. Providers should call
 // this when cfg.Effort is non-empty and they have no way to honor it.
-func EffortUnsupportedError(provider, level string) error {
-	return fmt.Errorf("%w: provider=%s level=%q", ErrEffortUnsupported, provider, level)
+func EffortUnsupportedError(provider string, level EffortLevel) error {
+	return fmt.Errorf("%w: provider=%s level=%q", ErrEffortUnsupported, provider, string(level))
 }

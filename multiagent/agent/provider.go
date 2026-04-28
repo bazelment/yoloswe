@@ -191,7 +191,7 @@ type ExecuteOption func(*ExecuteConfig)
 type ExecuteConfig struct {
 	EventHandler        EventHandler
 	Model               string
-	Effort              string
+	Effort              EffortLevel
 	WorkDir             string
 	SystemPrompt        string
 	PermissionMode      string
@@ -208,7 +208,9 @@ func WithProviderModel(model string) ExecuteOption {
 }
 
 // WithProviderEffort sets the reasoning effort level for a provider execution.
-func WithProviderEffort(level string) ExecuteOption {
+// Callers parse user input with ParseEffort once at the CLI/config boundary;
+// providers receive a validated EffortLevel.
+func WithProviderEffort(level EffortLevel) ExecuteOption {
 	return func(c *ExecuteConfig) { c.Effort = level }
 }
 

@@ -10,8 +10,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // Config is the top-level configuration for jiradozer.
@@ -40,7 +40,7 @@ type TrackerConfig struct {
 // AgentConfig specifies the agent backend.
 type AgentConfig struct {
 	Model  string `yaml:"model"`  // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
-	Effort string `yaml:"effort"` // reasoning effort; see claude.EffortLevel constants
+	Effort string `yaml:"effort"` // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
 }
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
@@ -180,7 +180,7 @@ func (c *Config) validate() error {
 		c.PollInterval = 15 * time.Second
 	}
 	if c.Agent.Effort != "" {
-		if _, err := claude.ParseEffort(c.Agent.Effort); err != nil {
+		if _, err := agent.ParseEffort(c.Agent.Effort); err != nil {
 			return fmt.Errorf("agent.effort: %w", err)
 		}
 	}
@@ -204,7 +204,7 @@ func (c *Config) validate() error {
 // through the pointer.
 func validateStep(name string, step *StepConfig) error {
 	if step.Effort != "" {
-		if _, err := claude.ParseEffort(step.Effort); err != nil {
+		if _, err := agent.ParseEffort(step.Effort); err != nil {
 			return fmt.Errorf("%s.effort: %w", name, err)
 		}
 	}

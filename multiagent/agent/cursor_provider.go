@@ -27,12 +27,8 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	cfg := applyOptions(opts)
 
 	// Cursor has no reasoning-effort knob — fail fast rather than silently
-	// dropping the requested level. Validate the string first so a typo
-	// surfaces ErrInvalidEffort instead of ErrEffortUnsupported.
+	// dropping the requested level.
 	if cfg.Effort != "" {
-		if _, err := ParseEffort(cfg.Effort); err != nil {
-			return nil, err
-		}
 		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
 	}
 

@@ -82,74 +82,62 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 //
 // Claude and Codex accept all five levels; Cursor and Gemini reject any
 // non-empty effort with ErrEffortUnsupported. Empty effort is always a
-// no-op success path. Invalid strings always surface ErrInvalidEffort
-// before any provider-specific work.
+// no-op success path. (Invalid string parsing is covered by
+// TestParseEffort_RejectsInvalidLevels — providers receive a validated
+// EffortLevel and trust the boundary.)
 func TestProviderEffortMatrix(t *testing.T) {
 	t.Parallel()
 
-	type expect int
-	const (
-		expectOK expect = iota
-		expectUnsupported
-		expectInvalid
-	)
-
-	validLevels := []string{"low", "medium", "high", "max", "auto"}
+	validLevels := []EffortLevel{EffortLow, EffortMedium, EffortHigh, EffortMax, EffortAuto}
 
 	// Field order: function pointer (8 bytes) before string (16 bytes) to
 	// satisfy fieldalignment.
 	type providerCase struct {
-		// run returns the error from a hypothetical Execute call with the
-		// given effort string. For Claude/Codex we exercise the actual
-		// option-builder paths (no subprocess); for Cursor/Gemini we call
-		// Execute directly because the early-return happens before any
-		// subprocess work.
-		run  func(t *testing.T, effort string) error
+		// run returns the error a provider produces for the given effort
+		// level. For Claude/Codex we exercise the option-builder paths
+		// (no subprocess); for Cursor/Gemini we call Execute directly
+		// because the early-return happens before any subprocess work.
+		run  func(t *testing.T, level EffortLevel) error
 		name string
 	}
 
 	providers := []providerCase{
 		{
 			name: "claude",
-			run: func(t *testing.T, effort string) error {
+			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
-				if effort == "" {
+				if level == "" {
 					return nil
 				}
-				level, err := ParseEffort(effort)
-				if err != nil {
-					return err
-				}
-				// Sanity-check the mapper for valid inputs.
 				_ = claudeEffortLevel(level)
 				return nil
 			},
 		},
 		{
 			name: "codex",
-			run: func(t *testing.T, effort string) error {
+			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
-				_, err := codexTurnOptions(ExecuteConfig{Effort: effort})
-				return err
+				_ = codexTurnOptions(ExecuteConfig{Effort: level})
+				return nil
 			},
 		},
 		{
 			name: "cursor",
-			run: func(t *testing.T, effort string) error {
+			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
 				p := NewCursorProvider()
 				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(effort))
+				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
 				return err
 			},
 		},
 		{
 			name: "gemini",
-			run: func(t *testing.T, effort string) error {
+			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
 				p := NewGeminiProvider()
 				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(effort))
+				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
 				return err
 			},
 		},
@@ -170,25 +158,10 @@ func TestProviderEffortMatrix(t *testing.T) {
 				assert.NoError(t, err, "empty effort should be a no-op")
 			}
 
-			// Invalid strings must surface ErrInvalidEffort, regardless of provider.
-			for _, bad := range []string{"turbo", "Low", "minimum"} {
-				err := prov.run(t, bad)
-				require.Error(t, err, "bad effort %q on %s should error", bad, prov.name)
-				assert.ErrorIs(t, err, ErrInvalidEffort,
-					"bad effort %q on %s should wrap ErrInvalidEffort", bad, prov.name)
-			}
-
-			// Valid levels: Claude and Codex accept; Cursor and Gemini reject.
-			want := expectOK
-			if prov.name == "cursor" || prov.name == "gemini" {
-				want = expectUnsupported
-			}
+			expectUnsupported := prov.name == "cursor" || prov.name == "gemini"
 			for _, level := range validLevels {
 				err := prov.run(t, level)
-				switch want {
-				case expectOK:
-					assert.NoError(t, err, "level %q on %s should be supported", level, prov.name)
-				case expectUnsupported:
+				if expectUnsupported {
 					require.Error(t, err)
 					assert.ErrorIs(t, err, ErrEffortUnsupported,
 						"level %q on %s should wrap ErrEffortUnsupported", level, prov.name)
@@ -196,11 +169,10 @@ func TestProviderEffortMatrix(t *testing.T) {
 					// so the user can fix the config without code-diving.
 					assert.Contains(t, err.Error(), prov.name,
 						"error should name the provider")
-					assert.Contains(t, err.Error(), level,
+					assert.Contains(t, err.Error(), string(level),
 						"error should name the rejected level")
-				case expectInvalid:
-					require.Error(t, err)
-					assert.ErrorIs(t, err, ErrInvalidEffort)
+				} else {
+					assert.NoError(t, err, "level %q on %s should be supported", level, prov.name)
 				}
 			}
 		})
