@@ -29,6 +29,7 @@ var (
 	protocolLogDir    string
 	envelopeFile      string
 	skipTestExecution bool
+	scopeHintsFile    string
 )
 
 // Cmd is the cobra command for code review.
@@ -68,6 +69,7 @@ func init() {
 	Cmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for protocol session logs (Codex only; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 	Cmd.Flags().StringVar(&envelopeFile, "envelope-file", "", "Write the JSON ResultEnvelope to this file instead of stdout (stdout then carries only progress events)")
 	Cmd.Flags().BoolVar(&skipTestExecution, "skip-test-execution", false, "Instruct the reviewer not to run tests/build commands (caller runs them separately)")
+	Cmd.Flags().StringVar(&scopeHintsFile, "scope-hints-file", "", "JSON file with co-located test paths and cross-service packages to widen review scope; see reviewer.ScopeHints. Missing/malformed files log a warning and fall back to today's narrow review.")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
@@ -139,6 +141,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"timeout", timeout.String(),
 		"envelope_file", envelopeFile != "",
 		"skip_test_execution", skipTestExecution,
+		"scope_hints_file", scopeHintsFile != "",
 		"goal_len", len(goal))
 
 	config := reviewer.Config{
@@ -177,7 +180,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer r.Stop()
 
-	prompt := reviewer.BuildJSONPromptWithOptions(goal, skipTestExecution)
+	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution)
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
@@ -320,4 +323,44 @@ func emitEarlyFailure(err error, effectiveModel string, emit func(reviewer.Resul
 // by SetupRunLog.
 func reportEnvelopePrintError(printErr error) {
 	slog.Error("print json envelope", "error", printErr.Error())
+}
+
+// buildPromptForRun composes the JSON-output review prompt for one
+// runCodeReview turn. Splitting this off (rather than inlining
+// loadPromptOptions + BuildJSONPromptWithScope at the call site) gives
+// tests a single seam to drive end-to-end: they pass a real hints file
+// path and assert the resulting prompt carries the expected scope clauses.
+// Without this seam, a regression that quietly stops threading
+// scopeHintsFile into the reviewer would slip through helper-level tests
+// that only exercise loadPromptOptions in isolation.
+func buildPromptForRun(goal, hintsPath string, skipTestExecution bool) string {
+	opts := loadPromptOptions(hintsPath, skipTestExecution)
+	return reviewer.BuildJSONPromptWithScope(goal, opts)
+}
+
+// loadPromptOptions reads the scope-hints file when set and converts it to
+// PromptOptions. A missing or malformed file logs a warning and falls back
+// to PromptOptions{SkipTestExecution: ...} — the legacy narrow-review path.
+// This is split out so tests can drive the fallback behavior without a real
+// reviewer session.
+//
+// The fallback warning records only the basename of the hints file. The
+// full path is the operator's own input and run logs are routinely shared
+// across machines and PRs, so embedding the developer's worktree layout
+// here would weaken the path-redaction hygiene used elsewhere in this file
+// (see redactPath). LoadScopeHints itself also identifies the file by
+// basename in its error text, so the slog "error" attribute is
+// already path-clean.
+func loadPromptOptions(hintsPath string, skipTestExecution bool) reviewer.PromptOptions {
+	if hintsPath == "" {
+		return reviewer.PromptOptions{SkipTestExecution: skipTestExecution}
+	}
+	hints, err := reviewer.LoadScopeHints(hintsPath)
+	if err != nil {
+		slog.Warn("scope-hints file ignored, using narrow review",
+			"file", filepath.Base(hintsPath),
+			"error", err.Error())
+		return reviewer.PromptOptions{SkipTestExecution: skipTestExecution}
+	}
+	return hints.ToPromptOptions(skipTestExecution)
 }

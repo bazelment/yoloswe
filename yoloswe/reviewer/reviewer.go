@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
@@ -112,6 +113,41 @@ const skipTestExecutionSuffix = `
 
 Do NOT run tests or build commands. The caller runs tests separately. Read test files to assess coverage, but do not invoke bazel, go test, go build, npm test, pytest, etc.`
 
+// PromptOptions configures the optional clauses appended to a review prompt.
+//
+// Each clause is gated by data presence rather than a separate boolean: an
+// empty TestScopeHints means "no test-quality clause", and fewer than two
+// CrossServicePackages means "no cross-service clause". This collapses the
+// (boolean, list) cartesian product into a single source of truth — the
+// caller controls everything by what they put in the lists.
+type PromptOptions struct {
+	// TestScopeHints lists co-located test paths the agent should read. When
+	// non-empty, the test-quality clause is appended to the prompt and the
+	// paths are inlined under it (capped at testScopeHintsCap entries).
+	TestScopeHints []string
+
+	// CrossServicePackages names the top-level packages this PR touches. When
+	// it has at least two entries, the cross-service contract-sweep clause is
+	// appended.
+	CrossServicePackages []string
+
+	// SkipTestExecution discourages the agent from spawning bazel/go test/etc.
+	SkipTestExecution bool
+}
+
+// testScopeHintsCap bounds the number of test paths inlined into the prompt
+// so token spend stays predictable on very large multi-package PRs.
+const testScopeHintsCap = 50
+
+// crossServicePackagesCap bounds the number of cross-service packages
+// inlined into the prompt. The realistic shape is small (a typical
+// monorepo has under a dozen top-level service buckets) but the upstream
+// LoadScopeHints accepts files up to 1 MiB, so a hostile or buggy
+// producer could pack thousands of short package strings and inflate
+// tokens without ever hitting that cap. Symmetrical with
+// testScopeHintsCap.
+const crossServicePackagesCap = 50
+
 // buildBasePrompt creates the common review prompt content.
 func buildBasePrompt(goal string, skipTestExecution bool) string {
 	base := fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
@@ -134,14 +170,206 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 	return base
 }
 
+// SanitizePromptHint returns true when s is safe to inline verbatim into a
+// prompt clause. It rejects entries that would distort the surrounding
+// Markdown structure or look like injected instructions:
+//
+//   - Bullet-list / blockquote / heading / setext block-level prefixes at
+//     the very start: # - * + > =.
+//   - Ordered-list markers at the very start: a digit run followed by
+//     "." or ")" (e.g. 1. or 42)).
+//   - Newlines or carriage returns anywhere in the entry.
+//   - Leading/trailing whitespace, which renders awkwardly in joined lines.
+//   - Empty strings (would produce blank lines in the prompt).
+//
+// We deliberately do NOT reject leading underscore. TS/JS conventions
+// produce __tests__/foo.test.ts and Python writes _helper.py — both
+// legitimate scope-hint inputs the producer (scope_gate.py) emits
+// without prompting. Underscore at the start of a line in Markdown only
+// renders as emphasis when paired with a matching closing underscore on
+// the same line; a leading-underscore path inlined as one of many
+// path-per-line entries is safe.
+//
+// LoadScopeHints calls this at the file-load boundary so a producer bug
+// fails loudly with a CLI warning. The prompt builders also filter via
+// this function as defense-in-depth: any direct caller of
+// BuildJSONPromptWithScope (an exported entry point) gets the same
+// guarantee even if they bypass LoadScopeHints. The realistic threat
+// here is a buggy producer, not a malicious one — scope_gate.py walks
+// the filesystem of the worktree under review — but bramble owns the
+// prompt structure, so it shouldn't trust callers to have validated.
+func SanitizePromptHint(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.ContainsAny(s, "\r\n") {
+		return false
+	}
+	if s != strings.TrimSpace(s) {
+		return false
+	}
+	// Block-level Markdown control prefixes at the very first byte. We
+	// don't strip them — that would silently rewrite producer output —
+	// we just skip the entry. Realistic filesystem paths don't start
+	// with these.
+	switch s[0] {
+	case '#', '-', '*', '+', '>', '=':
+		return false
+	}
+	// Ordered-list markers: ``1.`` / ``12)`` / etc. CommonMark accepts
+	// up to nine digits followed by ``.`` or ``)``. We're conservative
+	// and reject any leading digit run terminated by either character.
+	if s[0] >= '0' && s[0] <= '9' {
+		i := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i < len(s) && (s[i] == '.' || s[i] == ')') {
+			return false
+		}
+	}
+	return true
+}
+
+// filterPromptHints drops entries that fail SanitizePromptHint. The
+// contract is "best-effort safe inlining": callers that produced clean
+// data get all their entries, and a buggy/hostile entry is silently
+// elided rather than corrupting the surrounding Markdown structure.
+// LoadScopeHints already errors on the same shapes earlier in the
+// pipeline, so this filter usually has nothing to do — its purpose is
+// to harden the prompt-builder boundary itself.
+func filterPromptHints(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		if SanitizePromptHint(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// testQualityClause returns the test-quality scrutiny clause with the given
+// co-located test paths inlined.
+//
+// Deliberately stated as a principle, not an enumerated checklist. An earlier
+// draft listed six concrete anti-patterns derived directly from the kernel
+// evidence corpus (tautological asserts, broad Exception catches, missing
+// kwargs, etc.); see plans/issue-175-widen-review-scope.md and the
+// conversation around #179. The risk of overfitting to those specific shapes
+// — anchoring the reviewer on a small list and crowding out the long tail of
+// real test-quality issues — outweighed the recall benefit on the eval set.
+// Tunings here should add principles, not specific bug examples; let
+// measurement (Phase 3, #178) drive any expansion.
+//
+// The caller must guarantee len(paths) > 0 — buildScopeSuffix is the only
+// caller and gates on that.
+func testQualityClause(paths []string) string {
+	paths = filterPromptHints(paths)
+	if len(paths) == 0 {
+		// All entries were filtered out by sanitization. The caller's
+		// gating (len > 0) was based on raw input; if everything got
+		// dropped here, emit no clause rather than an empty bullet list.
+		return ""
+	}
+	displayed := paths
+	suffix := ""
+	if len(displayed) > testScopeHintsCap {
+		extra := len(displayed) - testScopeHintsCap
+		displayed = displayed[:testScopeHintsCap]
+		suffix = fmt.Sprintf("\n(... and %d more — read tests/ directories under the changed package roots)", extra)
+	}
+	return `
+
+## Test quality
+Read the co-located test files listed below alongside the diff. For each,
+assess whether the tests would actually catch a regression of the change
+under review — not just whether they pass. Flag tests that exercise mocks
+or harness side-effects rather than the behavior under review, and tests
+whose assertions would still hold if the new behavior were silently removed.
+
+Continue to avoid nit-level comments unless they block understanding of
+the diff or weaken a stated regression signal.
+
+Co-located test files to read (in addition to anything in the diff):
+` + strings.Join(displayed, "\n") + suffix
+}
+
+// crossServiceClause returns the cross-service contract-sweep clause naming
+// the touched packages. The caller must guarantee len(packages) >= 2.
+//
+// The four numbered items track the issue body's draft (#175). An earlier
+// version added a fifth item naming specific shapes (FastAPI path-parameter
+// ordering, ORM mixins, OpenAPI tag collisions) drawn from kernel-2998; it
+// was removed for the same anti-overfitting reason as testQualityClause.
+// New items should describe failure modes, not specific framework bugs.
+func crossServiceClause(packages []string) string {
+	packages = filterPromptHints(packages)
+	if len(packages) < 2 {
+		// Sanitization filtered the list below the >=2 threshold the
+		// caller's gate assumed. Drop the clause rather than emit one
+		// with a single (or zero) package — the prompt would read
+		// nonsensically.
+		return ""
+	}
+	suffix := ""
+	if len(packages) > crossServicePackagesCap {
+		extra := len(packages) - crossServicePackagesCap
+		packages = packages[:crossServicePackagesCap]
+		suffix = fmt.Sprintf(" (and %d more)", extra)
+	}
+	return `
+
+## Cross-service contract sweep
+This PR touches multiple top-level packages: ` + strings.Join(packages, ", ") + suffix + `.
+Trace every public API/handler/exported symbol modified in one package to its
+consumers in the others. Read both sides of each surface and flag:
+1. Signature or shape changes that don't match consumer expectations
+   (request/response field names, types, optionality, enum values).
+2. Async state updates that desync between producer and consumer
+   (optimistic UI updates that diverge from refetched server state,
+   stale-while-revalidate paths returning prior values).
+3. Error or loading paths whose handling differs across packages
+   (one side throws, the other silently falls back; one side surfaces a
+   typed error, the other treats it as success).
+4. Silent fallbacks that swallow values from another service (default
+   values masking missing fields, empty arrays masking failed lookups).
+
+When citing an issue, name both sides (file:line) and explain the desync
+explicitly. If both sides agree, do not flag the surface.`
+}
+
+// buildScopeSuffix concatenates the optional clauses dictated by opts. Each
+// clause is gated purely by data presence so callers without scope info pay
+// no cost — the returned string is empty when neither clause applies, which
+// keeps legacy callers byte-equal to today's prompt.
+func buildScopeSuffix(opts PromptOptions) string {
+	var s string
+	if len(opts.TestScopeHints) > 0 {
+		s += testQualityClause(opts.TestScopeHints)
+	}
+	if len(opts.CrossServicePackages) >= 2 {
+		s += crossServiceClause(opts.CrossServicePackages)
+	}
+	return s
+}
+
 // BuildPrompt creates the review prompt with free-form text output.
 func BuildPrompt(goal string) string {
 	return BuildPromptWithOptions(goal, false)
 }
 
 // BuildPromptWithOptions is BuildPrompt with the skip-test-execution toggle.
+// Kept as a shim around BuildPromptWithScope so existing callers compile
+// unchanged; passes empty TestScopeHints/CrossServicePackages so the legacy
+// output is byte-equal to today's.
 func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
-	return buildBasePrompt(goal, skipTestExecution) + `
+	return BuildPromptWithScope(goal, PromptOptions{SkipTestExecution: skipTestExecution})
+}
+
+// BuildPromptWithScope creates the free-form review prompt with scope clauses
+// gated by opts. Empty PromptOptions{} produces today's legacy prompt.
+func BuildPromptWithScope(goal string, opts PromptOptions) string {
+	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
 
 After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.`
 }
@@ -151,9 +379,18 @@ func BuildJSONPrompt(goal string) string {
 	return BuildJSONPromptWithOptions(goal, false)
 }
 
-// BuildJSONPromptWithOptions is BuildJSONPrompt with the skip-test-execution toggle.
+// BuildJSONPromptWithOptions is BuildJSONPrompt with the skip-test-execution
+// toggle. Kept as a shim around BuildJSONPromptWithScope.
 func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
-	return buildBasePrompt(goal, skipTestExecution) + `
+	return BuildJSONPromptWithScope(goal, PromptOptions{SkipTestExecution: skipTestExecution})
+}
+
+// BuildJSONPromptWithScope creates the JSON-output review prompt with scope
+// clauses gated by opts. Empty PromptOptions{} produces today's legacy
+// prompt; the scope clauses (test-quality, cross-service) are inserted
+// between the base prompt and the JSON output rules.
+func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
+	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:
