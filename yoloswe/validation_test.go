@@ -28,7 +28,7 @@ func TestValidateConfig(t *testing.T) {
 			name: "valid full config",
 			config: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.2-codex",
+				ReviewerModel:  "gpt-5.4-mini",
 				BuilderWorkDir: tmpDir,
 				RecordingDir:   tmpDir,
 				MaxBudgetUSD:   5.0,
@@ -204,7 +204,7 @@ func TestSanitizeConfig(t *testing.T) {
 			input: Config{},
 			expected: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.2-codex",
+				ReviewerModel:  "gpt-5.4-mini",
 				RecordingDir:   defaultRecordingDir,
 				MaxBudgetUSD:   100.0,
 				MaxTimeSeconds: 3600,
@@ -240,7 +240,7 @@ func TestSanitizeConfig(t *testing.T) {
 			},
 			expected: Config{
 				BuilderModel:   "haiku",
-				ReviewerModel:  "gpt-5.2-codex",
+				ReviewerModel:  "gpt-5.4-mini",
 				RecordingDir:   defaultRecordingDir,
 				MaxBudgetUSD:   100.0,
 				MaxTimeSeconds: 3600,
@@ -256,7 +256,7 @@ func TestSanitizeConfig(t *testing.T) {
 			},
 			expected: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.2-codex",
+				ReviewerModel:  "gpt-5.4-mini",
 				RecordingDir:   defaultRecordingDir,
 				MaxBudgetUSD:   100.0,
 				MaxTimeSeconds: 3600,
@@ -273,7 +273,7 @@ func TestSanitizeConfig(t *testing.T) {
 			},
 			expected: Config{
 				BuilderModel:   "sonnet",
-				ReviewerModel:  "gpt-5.2-codex",
+				ReviewerModel:  "gpt-5.4-mini",
 				BuilderWorkDir: "/tmp/work",
 				RecordingDir:   "/tmp/recordings",
 				SystemPrompt:   "custom prompt",

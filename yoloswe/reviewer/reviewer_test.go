@@ -257,8 +257,8 @@ func TestNew_GeminiBackend(t *testing.T) {
 	if r.config.BackendType != BackendGemini {
 		t.Errorf("expected gemini backend, got %s", r.config.BackendType)
 	}
-	if r.config.Model != "gemini-3.1-flash-lite-preview" {
-		t.Errorf("expected default model gemini-3.1-flash-lite-preview, got %s", r.config.Model)
+	if r.config.Model != DefaultGeminiModel {
+		t.Errorf("expected default model %s, got %s", DefaultGeminiModel, r.config.Model)
 	}
 	if r.backend == nil {
 		t.Error("backend should not be nil for gemini")

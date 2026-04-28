@@ -327,11 +327,12 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	return result, nil
 }
 
-// EffectiveModel returns the model actually used by the backend. For Codex
-// this is the post-default config value; for Cursor this is updated from the
-// backend's ReadyEvent once the session starts (the CLI picks its own default
-// when --model is empty). Callers should prefer this over the raw --model
-// flag, which may be empty or differ from what the backend actually ran.
+// EffectiveModel returns the model actually used by the backend. Defaults for
+// all backends (Codex, Cursor, Gemini) are applied in New, so the value is
+// set before the session starts. For Cursor, it may be replaced by the model
+// reported in the backend's ReadyEvent (OnSessionInfo). Callers should prefer
+// this over the raw --model flag, which may be empty or differ from what the
+// backend actually ran.
 func (r *Reviewer) EffectiveModel() string { return r.effectiveModel }
 
 // LastSessionID returns the session/thread ID from the most recent backend
