@@ -11,7 +11,7 @@ import (
 func TestNew(t *testing.T) {
 	r := New(Config{})
 	require.NotNil(t, r)
-	assert.Equal(t, "gpt-5.2-codex", r.config.Model)
+	assert.Equal(t, "gpt-5.5", r.config.Model)
 }
 
 func TestNewWithModel(t *testing.T) {
