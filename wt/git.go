@@ -24,17 +24,17 @@ type GitRunner interface {
 // DefaultGitRunner prepends --no-optional-locks for these to avoid creating
 // index.lock files that would block concurrent git operations in other worktrees.
 var readOnlyGitSubcmds = map[string]bool{
-	"status":      true,
-	"diff":        true,
-	"log":         true,
-	"ls-files":    true,
-	"rev-list":    true,
-	"rev-parse":   true,
+	"status":       true,
+	"diff":         true,
+	"log":          true,
+	"ls-files":     true,
+	"rev-list":     true,
+	"rev-parse":    true,
 	"symbolic-ref": true,
-	"ls-remote":   true,
-	"worktree":    true,
-	"branch":      true,
-	"show":        true,
+	"ls-remote":    true,
+	"worktree":     true,
+	"branch":       true,
+	"show":         true,
 }
 
 // DefaultGitRunner implements GitRunner using os/exec.
