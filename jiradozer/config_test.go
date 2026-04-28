@@ -171,16 +171,60 @@ func TestResolveStep_InheritsFromTopLevel(t *testing.T) {
 	cfg, err := LoadConfig("testdata/with_overrides.yaml")
 	require.NoError(t, err)
 
-	// Plan step has its own model and budget.
+	// Plan step has its own model, effort, and budget.
 	plan := cfg.ResolveStep(cfg.Plan)
 	assert.Equal(t, "opus", plan.Model)
+	assert.Equal(t, "high", plan.Effort)
 	assert.Equal(t, 10.0, plan.MaxBudgetUSD)
 	assert.Equal(t, 5, plan.MaxTurns)
 
-	// Build step has empty model and zero budget — should inherit.
+	// Build step has empty fields — should inherit from agent defaults.
 	build := cfg.ResolveStep(cfg.Build)
 	assert.Equal(t, "sonnet", build.Model)
+	assert.Equal(t, "medium", build.Effort)
 	assert.Equal(t, 50.0, build.MaxBudgetUSD)
+}
+
+func TestLoadConfig_InvalidEffort(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "agent_effort",
+			yaml: "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  effort: turbo\n",
+		},
+		{
+			name: "step_effort",
+			yaml: "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\nplan:\n  effort: hihg\n",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.yaml), 0644))
+			_, err := LoadConfig(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "effort")
+		})
+	}
+}
+
+func TestLoadConfig_ValidEffort(t *testing.T) {
+	for _, level := range []string{"low", "medium", "high", "max", "auto"} {
+		level := level
+		t.Run(level, func(t *testing.T) {
+			t.Parallel()
+			yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  effort: " + level + "\n"
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+			cfg, err := LoadConfig(path)
+			require.NoError(t, err)
+			assert.Equal(t, level, cfg.Agent.Effort)
+		})
+	}
 }
 
 func TestStepByName(t *testing.T) {
@@ -294,6 +338,7 @@ func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
 func TestResolveRound_InheritsFromStep(t *testing.T) {
 	parent := StepConfig{
 		Model:          "sonnet",
+		Effort:         "high",
 		SystemPrompt:   "parent system prompt",
 		PermissionMode: "bypass",
 		MaxTurns:       10,
@@ -306,6 +351,7 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	assert.Equal(t, "do stuff", resolved.Prompt)
 	assert.Equal(t, "parent system prompt", resolved.SystemPrompt)
 	assert.Equal(t, "sonnet", resolved.Model)
+	assert.Equal(t, "high", resolved.Effort)
 	assert.Equal(t, "bypass", resolved.PermissionMode)
 	assert.Equal(t, 10, resolved.MaxTurns)
 	assert.Equal(t, 25.0, resolved.MaxBudgetUSD)

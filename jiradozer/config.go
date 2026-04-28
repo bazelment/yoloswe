@@ -283,6 +283,7 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		Prompt:         round.Prompt,
 		SystemPrompt:   systemPrompt,
 		PermissionMode: parent.PermissionMode,
+		Effort:         parent.Effort,
 	}
 	if round.Model != "" {
 		resolved.Model = round.Model

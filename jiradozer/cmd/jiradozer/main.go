@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
@@ -271,6 +272,9 @@ func run(ctx context.Context, args runArgs) error {
 		cfg.Agent.Model = args.modelID
 	}
 	if args.thinkingLevel != "" {
+		if _, err := claude.ParseEffort(args.thinkingLevel); err != nil {
+			return fmt.Errorf("--thinking-level: %w", err)
+		}
 		cfg.Agent.Effort = args.thinkingLevel
 	}
 	if args.pollInterval > 0 {
