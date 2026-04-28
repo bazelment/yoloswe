@@ -590,11 +590,10 @@ func (m *Manager) ReconcileTmuxSessions() error {
 		}
 
 		for _, meta := range sessions {
-			// Only consider tmux sessions that were running, pending, or idle
 			if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
 				continue
 			}
-			if meta.Status != StatusRunning && meta.Status != StatusPending && meta.Status != StatusIdle {
+			if meta.Status.IsTerminal() {
 				continue
 			}
 
@@ -721,7 +720,7 @@ func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
 				if meta.RunnerType != RunnerTypeTmux && meta.RunnerType != RunnerTypeTmuxTracked {
 					continue
 				}
-				if meta.Status != StatusRunning && meta.Status != StatusPending && meta.Status != StatusIdle {
+				if meta.Status.IsTerminal() {
 					continue
 				}
 
@@ -757,8 +756,7 @@ func ReposWithLiveTmuxSessions(store *Store, activeRepo string) []string {
 func (m *Manager) Close() {
 	// Persist all active tmux sessions BEFORE canceling so that goroutines
 	// (monitorTrackedTmuxWindow, runSession) have not yet transitioned the
-	// status to StatusStopped. ReconcileTmuxSessions re-adopts sessions
-	// whose persisted status is StatusRunning, StatusPending, or StatusIdle.
+	// status to StatusStopped — ReconcileTmuxSessions skips terminal sessions.
 	if m.config.SessionMode == SessionModeTmux && m.config.Store != nil {
 		m.mu.RLock()
 		sessions := make([]*Session, 0, len(m.sessions))
