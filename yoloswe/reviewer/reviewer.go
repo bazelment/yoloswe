@@ -139,6 +139,15 @@ type PromptOptions struct {
 // so token spend stays predictable on very large multi-package PRs.
 const testScopeHintsCap = 50
 
+// crossServicePackagesCap bounds the number of cross-service packages
+// inlined into the prompt. The realistic shape is small (a typical
+// monorepo has under a dozen top-level service buckets) but the upstream
+// LoadScopeHints accepts files up to 1 MiB, so a hostile or buggy
+// producer could pack thousands of short package strings and inflate
+// tokens without ever hitting that cap. Symmetrical with
+// testScopeHintsCap.
+const crossServicePackagesCap = 50
+
 // buildBasePrompt creates the common review prompt content.
 func buildBasePrompt(goal string, skipTestExecution bool) string {
 	base := fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
@@ -165,9 +174,10 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 // prompt clause. It rejects entries that would distort the surrounding
 // Markdown structure or look like injected instructions:
 //
-//   - Block-level Markdown control characters at the start (#, -, *, >,
-//     =) that open headings, lists, blockquotes, or setext rules and
-//     reshape what comes after.
+//   - Bullet-list / blockquote / heading / setext block-level prefixes at
+//     the very start: # - * + > =.
+//   - Ordered-list markers at the very start: a digit run followed by
+//     "." or ")" (e.g. 1. or 42)).
 //   - Newlines or carriage returns anywhere in the entry.
 //   - Leading/trailing whitespace, which renders awkwardly in joined lines.
 //   - Empty strings (would produce blank lines in the prompt).
@@ -203,8 +213,20 @@ func SanitizePromptHint(s string) bool {
 	// we just skip the entry. Realistic filesystem paths don't start
 	// with these.
 	switch s[0] {
-	case '#', '-', '*', '>', '=':
+	case '#', '-', '*', '+', '>', '=':
 		return false
+	}
+	// Ordered-list markers: ``1.`` / ``12)`` / etc. CommonMark accepts
+	// up to nine digits followed by ``.`` or ``)``. We're conservative
+	// and reject any leading digit run terminated by either character.
+	if s[0] >= '0' && s[0] <= '9' {
+		i := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i < len(s) && (s[i] == '.' || s[i] == ')') {
+			return false
+		}
 	}
 	return true
 }
@@ -289,10 +311,16 @@ func crossServiceClause(packages []string) string {
 		// nonsensically.
 		return ""
 	}
+	suffix := ""
+	if len(packages) > crossServicePackagesCap {
+		extra := len(packages) - crossServicePackagesCap
+		packages = packages[:crossServicePackagesCap]
+		suffix = fmt.Sprintf(" (and %d more)", extra)
+	}
 	return `
 
 ## Cross-service contract sweep
-This PR touches multiple top-level packages: ` + strings.Join(packages, ", ") + `.
+This PR touches multiple top-level packages: ` + strings.Join(packages, ", ") + suffix + `.
 Trace every public API/handler/exported symbol modified in one package to its
 consumers in the others. Read both sides of each surface and flag:
 1. Signature or shape changes that don't match consumer expectations

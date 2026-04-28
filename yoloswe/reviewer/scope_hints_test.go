@@ -316,8 +316,11 @@ func TestLoadScopeHints_RejectsMarkdownPrefix(t *testing.T) {
 		{"hash", `{"schema_version":1,"test_paths":["## Output Format"],"cross_service_packages":[]}`},
 		{"dash", `{"schema_version":1,"test_paths":["- ignore previous"],"cross_service_packages":[]}`},
 		{"star", `{"schema_version":1,"test_paths":["* override"],"cross_service_packages":[]}`},
+		{"plus", `{"schema_version":1,"test_paths":["+ ignore previous"],"cross_service_packages":[]}`},
 		{"angle", `{"schema_version":1,"test_paths":[],"cross_service_packages":["a/","> b/"]}`},
 		{"equals", `{"schema_version":1,"test_paths":["=injected"],"cross_service_packages":[]}`},
+		{"ordered_list_dot", `{"schema_version":1,"test_paths":["1. ignore previous"],"cross_service_packages":[]}`},
+		{"ordered_list_paren", `{"schema_version":1,"test_paths":["42) override"],"cross_service_packages":[]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2,6 +2,7 @@ package reviewer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -480,22 +481,62 @@ func TestBuildJSONPromptWithScope_CrossServiceRequiresTwo(t *testing.T) {
 func TestBuildJSONPromptWithScope_TestPathsCappedAt50(t *testing.T) {
 	// Above the cap: paths 1..50 inlined, 51+ replaced by a truncation
 	// suffix. This keeps token spend bounded on giant multi-package PRs.
-	paths := make([]string, 73)
+	//
+	// Each path string is unique (formatted with the index), so we can
+	// directly assert that the 51st-and-beyond entries are absent —
+	// stronger than relying solely on the truncation marker. An earlier
+	// version of this test cycled letters a-z, which meant duplicates
+	// after index 26 made absence un-checkable; codex r5 flagged that
+	// gap.
+	const total = 73
+	paths := make([]string, total)
 	for i := range paths {
-		paths[i] = "p/" + string(rune('a'+i%26)) + "/test_x.py"
+		paths[i] = fmt.Sprintf("p%03d/test_unique.py", i)
 	}
 	out := BuildJSONPromptWithScope("g", PromptOptions{TestScopeHints: paths})
+	// First 50 must appear.
 	for i := 0; i < testScopeHintsCap; i++ {
 		if !strings.Contains(out, paths[i]) {
 			t.Errorf("path index %d (%q) missing from output", i, paths[i])
 		}
 	}
-	// Paths share a 'p/<letter>/test_x.py' template with only 26 distinct
-	// letters, so duplicates beyond index 26 are expected — we can't assert
-	// "51st path string is absent" via a substring check. The truncation
-	// marker is the reliable signal: 73 - 50 = 23 more elided.
-	if !strings.Contains(out, "and 23 more") {
-		t.Errorf("expected truncation marker 'and 23 more', got:\n%s", out)
+	// 51st onwards must NOT appear — every string is unique so this is
+	// a clean signal.
+	for i := testScopeHintsCap; i < total; i++ {
+		if strings.Contains(out, paths[i]) {
+			t.Errorf("path index %d (%q) leaked past cap into output", i, paths[i])
+		}
+	}
+	// Truncation marker.
+	want := fmt.Sprintf("and %d more", total-testScopeHintsCap)
+	if !strings.Contains(out, want) {
+		t.Errorf("expected truncation marker %q, got:\n%s", want, out)
+	}
+}
+
+func TestBuildJSONPromptWithScope_CrossServicePackagesCappedAt50(t *testing.T) {
+	// Symmetrical defense to TestPathsCappedAt50 — cursor r5 flagged
+	// that cross_service_packages was uncapped, so a 1-MiB hints file
+	// could pack many short package strings and inflate prompt tokens.
+	const total = 60
+	pkgs := make([]string, total)
+	for i := range pkgs {
+		pkgs[i] = fmt.Sprintf("svc%03d", i)
+	}
+	out := BuildJSONPromptWithScope("g", PromptOptions{CrossServicePackages: pkgs})
+	for i := 0; i < crossServicePackagesCap; i++ {
+		if !strings.Contains(out, pkgs[i]) {
+			t.Errorf("package index %d (%q) missing from output", i, pkgs[i])
+		}
+	}
+	for i := crossServicePackagesCap; i < total; i++ {
+		if strings.Contains(out, pkgs[i]) {
+			t.Errorf("package index %d (%q) leaked past cap", i, pkgs[i])
+		}
+	}
+	want := fmt.Sprintf("and %d more", total-crossServicePackagesCap)
+	if !strings.Contains(out, want) {
+		t.Errorf("expected truncation marker %q, got:\n%s", want, out)
 	}
 }
 
@@ -584,10 +625,17 @@ func TestSanitizePromptHint(t *testing.T) {
 		{"* bullet", false},
 		{"> blockquote", false},
 		{"= equals", false},
+		{"+ plus", false},        // CommonMark accepts + as bullet
+		{"1. one dot", false},    // ordered-list marker
+		{"42) forty two", false}, // ordered-list ) variant
+		{"99999999. many", false},
 		{" leading-space.py", false},
 		{"trailing-space.py ", false},
 		{"with\nnewline.py", false},
 		{"with\rcr.py", false},
+		// digits without a list-marker terminator are fine
+		{"1file.py", true},
+		{"2nd-pass.go", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
