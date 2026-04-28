@@ -30,24 +30,50 @@ func NewCommandCenter() *CommandCenter {
 	return &CommandCenter{previewIdx: -1}
 }
 
-// loadSessions copies, sorts, and resizes the session list, then clamps selectedIdx and scrollY.
-// It is the shared core of Show() and UpdateSessions().
+// loadSessions copies, sorts, and resizes the session list. After it returns,
+// the cursor still points at the same session it pointed at before (by ID),
+// if that session is still in the list; otherwise the cursor clamps to the
+// new tail. It is the shared core of Show() and UpdateSessions().
 func (cc *CommandCenter) loadSessions(sessions []session.SessionInfo, w, h int) {
+	var prevSelectedID session.SessionID
+	if cc.selectedIdx >= 0 && cc.selectedIdx < len(cc.sessions) {
+		prevSelectedID = cc.sessions[cc.selectedIdx].ID
+	}
+
 	cc.sessions = make([]session.SessionInfo, len(sessions))
 	copy(cc.sessions, sessions)
 	sortSessionsByPriority(cc.sessions)
 	cc.width = w
 	cc.height = h
+
+	if prevSelectedID != "" {
+		for i := range cc.sessions {
+			if cc.sessions[i].ID == prevSelectedID {
+				cc.selectedIdx = i
+				cc.clampScrollY()
+				return
+			}
+		}
+	}
 	if cc.selectedIdx >= len(cc.sessions) {
+		cc.selectedIdx = len(cc.sessions) - 1
+	}
+	if cc.selectedIdx < 0 {
 		cc.selectedIdx = 0
 	}
 	cc.clampScrollY()
 }
 
 // Show populates the command center with sessions, sorts by priority, and makes it visible.
+// Selection resets to the top — opening the command center is a fresh survey,
+// so it should land on the highest-priority card regardless of where the cursor
+// was on the previous visit. Clearing cc.sessions before loadSessions runs
+// ensures loadSessions's ID-preservation step finds nothing to preserve.
 func (cc *CommandCenter) Show(sessions []session.SessionInfo, w, h int) {
 	cc.visible = true
 	cc.scrollY = 0
+	cc.selectedIdx = 0
+	cc.sessions = nil
 	cc.previewIdx = -1
 	cc.previewText = nil
 	cc.previewSessionID = ""
