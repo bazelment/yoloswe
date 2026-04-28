@@ -50,12 +50,13 @@ func main() {
 		SensitiveFlags: []string{"--description"},
 	}
 
+	var args runArgs
 	rootCmd := &cobra.Command{
 		Use:   "jiradozer",
 		Short: "Issue-driven development workflow",
 		Long:  "Drives a plan → build → validate → ship workflow from an issue tracker with human-in-the-loop approval at each step.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			args := runArgs{
+			args = runArgs{
 				issueID:         issueID,
 				configPath:      configPath,
 				workDir:         workDir,
@@ -67,9 +68,6 @@ func main() {
 				sourceFilters:   sourceFilters,
 				maxConcurrent:   maxConcurrent,
 				branchPrefix:    branchPrefix,
-				verbose:         opts.Verbose,
-				verbosity:       opts.Verbosity,
-				color:           opts.Color,
 				description:     description,
 				descriptionFile: descriptionFile,
 				planFile:        planFile,
@@ -77,10 +75,8 @@ func main() {
 				dryRunSet:       cmd.Flags().Changed("dry-run"),
 				forceCleanup:    forceCleanup,
 			}
-			cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
-				return run(ctx, app, args)
-			})
-			return nil // unreachable; cliapp.Run calls os.Exit
+			app := cliapp.FromContext(cmd.Context())
+			return run(cmd.Context(), app, args)
 		},
 	}
 	rootCmd.SilenceUsage = true
@@ -103,9 +99,9 @@ func main() {
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Team mode only: for each newly-discovered issue, print the equivalent `bramble new-session` command instead of launching a workflow. TUI remains empty — look at stdout for the printed commands.")
 	rootCmd.Flags().BoolVar(&forceCleanup, "force-cleanup", false, "Team mode only: delete worktrees even for failed or cancelled runs. By default, failed and cancelled worktrees are preserved so in-progress work (including pushed branches / open PRs) is not lost.")
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	}))
 }
 
 type runArgs struct {
@@ -118,15 +114,12 @@ type runArgs struct {
 	autoApprove     string
 	branchPrefix    string
 	issueID         string
-	color           string
 	descriptionFile string
 	planContent     string
-	verbosity       string
 	sourceFilters   []string
 	pollInterval    time.Duration
 	maxBudget       float64
 	maxConcurrent   int
-	verbose         bool
 	dryRun          bool
 	dryRunSet       bool
 	forceCleanup    bool
@@ -324,7 +317,7 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 
 	// Multi-issue team mode (only when no --issue flag was given).
 	if cfg.Source.HasSource() && args.issueID == "" {
-		return runMultiIssue(ctx, issueTracker, cfg, args, renderer, logger)
+		return runMultiIssue(ctx, app, issueTracker, cfg, args)
 	}
 
 	// Single-issue headless mode.
@@ -388,7 +381,9 @@ func resolveRepoName(cfg *jiradozer.Config) string {
 	return repoName
 }
 
-func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, args runArgs, renderer *render.Renderer, logger *slog.Logger) error {
+func runMultiIssue(ctx context.Context, app *cliapp.App, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, args runArgs) error {
+	renderer := app.Renderer
+	logger := app.Logger
 	orchCtx, orchCancel := context.WithCancel(ctx)
 	defer orchCancel()
 
@@ -421,8 +416,11 @@ func runMultiIssue(ctx context.Context, issueTracker tracker.IssueTracker, cfg *
 	if err != nil {
 		return fmt.Errorf("resolve config path: %w", err)
 	}
-	childArgs := buildChildArgs(args, absConfig)
-	logDir := jiradozerLogDir()
+	childArgs := buildChildArgs(app, args, absConfig)
+	logDir, err := cliapp.LogDir("jiradozer")
+	if err != nil {
+		return fmt.Errorf("resolve log dir: %w", err)
+	}
 
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, &wtAdapter{mgr: wtMgr}, repoName, logger)
 	orch.SetSubprocessMode(selfPath, childArgs, logDir)
@@ -490,9 +488,8 @@ func resolveWTManager() (*wt.Manager, error) {
 
 // buildChildArgs constructs CLI flags to propagate from the parent
 // team-mode process to each child single-issue subprocess.
-func buildChildArgs(args runArgs, absConfigPath string) []string {
-	var out []string
-	out = append(out, "--config", absConfigPath)
+func buildChildArgs(app *cliapp.App, args runArgs, absConfigPath string) []string {
+	out := []string{"--config", absConfigPath}
 	if args.modelID != "" {
 		out = append(out, "--model", args.modelID)
 	}
@@ -502,29 +499,8 @@ func buildChildArgs(args runArgs, absConfigPath string) []string {
 	if args.autoApprove != "" {
 		out = append(out, "--auto-approve", args.autoApprove)
 	}
-	if args.verbose {
-		out = append(out, "--verbose")
-	} else if args.verbosity != "normal" && args.verbosity != "" {
-		out = append(out, "--verbosity", args.verbosity)
-	}
-	if args.color != "auto" && args.color != "" {
-		out = append(out, "--color", args.color)
-	}
+	out = append(out, app.StandardChildArgs()...)
 	return out
-}
-
-// jiradozerLogDir returns the directory for jiradozer log files, creating
-// it if necessary.
-func jiradozerLogDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return os.TempDir()
-	}
-	dir := filepath.Join(home, ".jiradozer", "logs")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return os.TempDir()
-	}
-	return dir
 }
 
 func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker, error) {

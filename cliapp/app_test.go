@@ -106,7 +106,7 @@ func TestRun_LogFileContainsBanner(t *testing.T) {
 }
 
 // runChildScenario is invoked when the test re-execs itself. It calls Run
-// with a scripted RunFunc and never returns (Run calls os.Exit).
+// with a scripted RunFunc and exits with the resulting code.
 func runChildScenario(scenario string) {
 	// If the parent set TEST_FAKE_ARGS, splice the values into os.Args so
 	// Run's banner-redaction sees them. Real CLI flags can't be passed to a
@@ -114,34 +114,35 @@ func runChildScenario(scenario string) {
 	if extra := os.Getenv("TEST_FAKE_ARGS"); extra != "" {
 		os.Args = append([]string{os.Args[0]}, strings.Split(extra, "|")...)
 	}
+	var code int
 	switch scenario {
 	case "success":
-		Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
+		code = Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
 			return nil
 		})
 	case "plain_error":
-		Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
+		code = Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
 			return errors.New("scripted failure")
 		})
 	case "ctx_cancelled_via_signal":
-		Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
+		code = Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
 			// Trigger Run's signal handler by SIGINTing ourselves.
 			_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 			<-ctx.Done()
 			return ctx.Err()
 		})
 	case "bad_verbosity":
-		Run(Options{ToolName: "testtool", Verbosity: "loud"}, func(ctx context.Context, app *App) error {
+		code = Run(Options{ToolName: "testtool", Verbosity: "loud"}, func(ctx context.Context, app *App) error {
 			return nil
 		})
 	case "bad_color":
-		Run(Options{ToolName: "testtool", Color: "rainbow"}, func(ctx context.Context, app *App) error {
+		code = Run(Options{ToolName: "testtool", Color: "rainbow"}, func(ctx context.Context, app *App) error {
 			return nil
 		})
 	case "missing_toolname":
-		Run(Options{}, func(ctx context.Context, app *App) error { return nil })
+		code = Run(Options{}, func(ctx context.Context, app *App) error { return nil })
 	case "banner":
-		Run(Options{
+		code = Run(Options{
 			ToolName:       "testtool",
 			SensitiveFlags: []string{"--token"},
 		}, func(ctx context.Context, app *App) error {
@@ -152,6 +153,7 @@ func runChildScenario(scenario string) {
 		fmt.Fprintf(os.Stderr, "unknown TEST_RUN_SCENARIO: %s\n", scenario)
 		os.Exit(99)
 	}
+	os.Exit(code)
 }
 
 func exitCode(err error) int {

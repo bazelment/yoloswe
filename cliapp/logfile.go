@@ -7,20 +7,31 @@ import (
 	"time"
 )
 
-// resolveLogPath returns the path of the log file to open and the directory
-// it lives in. If logDirOverride is empty, the log directory is
-// $HOME/.<toolName>/logs. The filename always includes a timestamp and pid
-// to keep concurrent runs from clobbering each other.
-func resolveLogPath(toolName, logDirOverride string) (logDir, logPath string, err error) {
-	if logDirOverride != "" {
-		logDir = logDirOverride
-	} else {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return "", "", fmt.Errorf("determine home directory: %w", herr)
-		}
-		logDir = filepath.Join(home, "."+toolName, "logs")
+// LogDir returns the standard log directory for the given tool name
+// ($HOME/.<toolName>/logs), creating it if necessary. Tools that need to
+// hand the directory path to a child subprocess can use this instead of
+// re-deriving the path.
+func LogDir(toolName string) (string, error) {
+	dir, _, err := resolveLogPath(toolName)
+	if err != nil {
+		return "", err
 	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create log dir %q: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// resolveLogPath returns the path of the log file to open and the directory
+// it lives in. The log directory is $HOME/.<toolName>/logs. The filename
+// always includes a timestamp and pid to keep concurrent runs from
+// clobbering each other.
+func resolveLogPath(toolName string) (logDir, logPath string, err error) {
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		return "", "", fmt.Errorf("determine home directory: %w", herr)
+	}
+	logDir = filepath.Join(home, "."+toolName, "logs")
 	logPath = filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log",
 		toolName, time.Now().Format("20060102-150405"), os.Getpid()))
 	return logDir, logPath, nil

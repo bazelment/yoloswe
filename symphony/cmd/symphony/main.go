@@ -30,19 +30,17 @@ func main() {
 			if len(args) > 0 {
 				workflowPath = args[0]
 			}
-			cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
-				return run(ctx, app, workflowPath, port)
-			})
-			return nil // unreachable; cliapp.Run calls os.Exit
+			app := cliapp.FromContext(cmd.Context())
+			return run(cmd.Context(), app, workflowPath, port)
 		},
 	}
 
 	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 	rootCmd.Flags().IntVar(&port, "port", 0, "HTTP server port (0 = disabled unless set in config)")
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	}))
 }
 
 func run(ctx context.Context, app *cliapp.App, workflowPath string, port int) error {

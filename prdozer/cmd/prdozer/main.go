@@ -42,7 +42,7 @@ func main() {
 		Use:   "prdozer",
 		Short: "Watch PRs and keep them merge-ready via /pr-polish",
 		Long:  "Polls one or more GitHub pull requests at a configured interval. When the base moves, CI fails, or new review comments arrive, invokes the /pr-polish skill to bring the PR back to merge-ready state.",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			args := runArgs{
 				configPath:   configPath,
 				workDir:      workDir,
@@ -57,10 +57,8 @@ func main() {
 				autoMerge:    autoMerge,
 				repoOverride: repoOverride,
 			}
-			cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
-				return run(ctx, app, args)
-			})
-			return nil // unreachable; cliapp.Run calls os.Exit
+			app := cliapp.FromContext(cmd.Context())
+			return run(cmd.Context(), app, args)
 		},
 	}
 	rootCmd.SilenceUsage = true
@@ -79,9 +77,9 @@ func main() {
 	rootCmd.Flags().BoolVar(&autoMerge, "auto-merge", false, "Merge PRs that become mergeable")
 	rootCmd.Flags().StringVar(&repoOverride, "repo", "", "Short repo name for state-file path (default: derive from cwd)")
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	}))
 }
 
 type runArgs struct {

@@ -32,20 +32,34 @@ func NewOutput(w io.Writer, colorized bool) *Output {
 	return &Output{w: w, colorized: colorized}
 }
 
-// ColorPreference is set by the CLI from --color and overrides the auto
-// detection performed by DefaultOutput. Values: "auto" (default), "always",
-// or "never".
-var ColorPreference = "auto"
+// ColorMode controls whether DefaultOutput emits ANSI color codes.
+type ColorMode int
 
-// DefaultOutput creates an Output for stdout. Color is enabled when the
-// caller's --color preference is "always", or "auto" with stdout attached to
-// a terminal and NO_COLOR unset.
+const (
+	// ColorAuto colorizes when stdout is a terminal and NO_COLOR is unset.
+	ColorAuto ColorMode = iota
+	// ColorAlways always colorizes.
+	ColorAlways
+	// ColorNever never colorizes.
+	ColorNever
+)
+
+// defaultColorMode is the process-wide color preference used by
+// DefaultOutput. Set once at startup via SetDefaultColorMode.
+var defaultColorMode = ColorAuto
+
+// SetDefaultColorMode pins the color preference used by DefaultOutput.
+// Intended to be called once from main.
+func SetDefaultColorMode(m ColorMode) { defaultColorMode = m }
+
+// DefaultOutput creates an Output for stdout, honoring the color mode set
+// via SetDefaultColorMode (ColorAuto by default).
 func DefaultOutput() *Output {
 	var colorized bool
-	switch ColorPreference {
-	case "always":
+	switch defaultColorMode {
+	case ColorAlways:
 		colorized = true
-	case "never":
+	case ColorNever:
 		colorized = false
 	default:
 		colorized = isTerminal() && os.Getenv("NO_COLOR") == ""

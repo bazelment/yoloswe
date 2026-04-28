@@ -64,9 +64,31 @@ func resolveColor(s string) (render.ColorMode, error) {
 	return render.ColorAuto, fmt.Errorf("unknown --color %q (valid: auto, always, never)", s)
 }
 
+// StandardChildArgs returns the canonical --verbose/--verbosity/--color
+// flags that should be propagated when a tool re-invokes itself as a child
+// subprocess. Defaults (normal/auto) are skipped so the child argv stays
+// minimal.
+func (a *App) StandardChildArgs() []string {
+	var out []string
+	switch a.Verbosity {
+	case render.VerbosityQuiet:
+		out = append(out, "--verbosity", "quiet")
+	case render.VerbosityVerbose:
+		out = append(out, "--verbose")
+	case render.VerbosityDebug:
+		out = append(out, "--verbosity", "debug")
+	}
+	switch a.Color {
+	case render.ColorAlways:
+		out = append(out, "--color", "always")
+	case render.ColorNever:
+		out = append(out, "--color", "never")
+	}
+	return out
+}
+
 // stderrLevelFor maps a render.Verbosity to a slog.Level used as the stderr
-// fallback when the log file isn't writable. Mirrors the level table that
-// jiradozer and prdozer have copy-pasted.
+// fallback when the log file isn't writable.
 func stderrLevelFor(v render.Verbosity) slog.Level {
 	switch {
 	case v >= render.VerbosityDebug:

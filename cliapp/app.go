@@ -8,18 +8,12 @@
 //	func main() {
 //	    var opts cliapp.Options
 //	    opts.ToolName = "mycli"
-//	    var args runArgs
-//	    rootCmd := &cobra.Command{
-//	        Use: "mycli",
-//	        RunE: func(cmd *cobra.Command, _ []string) error {
-//	            return cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
-//	                return run(ctx, app, args)
-//	            })
-//	        },
-//	    }
+//	    rootCmd := &cobra.Command{Use: "mycli", ...}
 //	    cliapp.RegisterStandardFlags(rootCmd, &opts)
 //	    // ... domain flags ...
-//	    _ = rootCmd.Execute()
+//	    os.Exit(cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
+//	        return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+//	    }))
 //	}
 package cliapp
 
@@ -33,21 +27,17 @@ import (
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 )
 
-// Options configures a CLI lifecycle. Fields populated by RegisterStandardFlags
-// are Verbose, Verbosity, and Color; ToolName and SensitiveFlags are set by
-// the caller before calling Run.
+// Options configures a CLI lifecycle. Verbose, Verbosity, and Color are
+// populated by RegisterStandardFlags; ToolName, LogFileLevel, and
+// SensitiveFlags are set by the caller before calling Run.
 type Options struct { //nolint:govet // fieldalignment: readability over packing
-	// ToolName is used for the log directory ($HOME/.<ToolName>/logs by
-	// default) and the log filename prefix.
+	// ToolName is used for the log directory ($HOME/.<ToolName>/logs) and
+	// the log filename prefix.
 	ToolName string
 	// Verbosity is "quiet", "normal", "verbose", or "debug".
 	Verbosity string
 	// Color is "auto", "always", or "never".
 	Color string
-	// LogDirOverride lets the caller pin the log directory to a specific
-	// path (e.g. medivac uses <repo-root>/.medivac/logs). When empty,
-	// the default $HOME/.<ToolName>/logs is used.
-	LogDirOverride string
 	// LogFileLevel controls the minimum slog level captured in the log
 	// file. Defaults to slog.LevelDebug. Tools that emit custom levels
 	// below Debug (e.g. medivac's LevelTrace/LevelDump) can set this to
@@ -60,18 +50,15 @@ type Options struct { //nolint:govet // fieldalignment: readability over packing
 	Verbose bool
 }
 
-// App is the runtime handle passed to the user's run function. Logger and
-// Renderer are always non-nil. LogPath and LogFile are empty/nil if the log
-// file couldn't be opened (in which case slog has been initialized to write
-// to stderr at the resolved verbosity level).
-//
-// LogFile is exposed for callers that need to pass the raw file handle to
-// subprocesses or other writers (e.g. medivac's engine.Config.LogFile).
+// App is the runtime handle passed to the user's run function. All fields
+// are non-zero except LogPath (empty if the log file couldn't be opened, in
+// which case slog has been initialized to write to stderr).
 type App struct {
-	Logger   *slog.Logger
-	Renderer *render.Renderer
-	LogFile  *os.File
-	LogPath  string
+	Logger    *slog.Logger
+	Renderer  *render.Renderer
+	LogPath   string
+	Verbosity render.Verbosity
+	Color     render.ColorMode
 }
 
 // RunFunc is the user's entry point. The returned error determines the exit
@@ -95,38 +82,42 @@ func FromContext(ctx context.Context) *App {
 	return app
 }
 
-// Run is the lifecycle entry point. It never returns — it calls os.Exit at
-// the end. Behavior:
+// Run is the lifecycle entry point. It returns the process exit code; the
+// caller is expected to do `os.Exit(cliapp.Run(...))`. Returning instead of
+// calling os.Exit directly lets defers run, so log-file flushes are not
+// truncated.
 //
-//  1. Resolves verbosity and color from opts. Returns exit code 2 with a
-//     stderr message on bad flag values.
-//  2. Opens the log file (DEBUG level) and sets slog.Default. On failure,
-//     falls back to stderr-only logging at the verbosity-mapped level and
-//     emits a warning.
+// Behavior:
+//
+//  1. Resolves verbosity and color from opts. Returns 2 with a stderr
+//     message on bad flag values.
+//  2. Opens the log file (DEBUG level by default) and sets slog.Default. On
+//     failure, falls back to stderr-only logging at the verbosity-mapped
+//     level and emits a warning.
 //  3. Builds the render.Renderer on stderr.
 //  4. Logs an invocation banner with redacted os.Args[1:].
-//  5. Sets up a context with double-signal force-exit (Ctrl-C twice → exit 130).
-//  6. Invokes fn. On nil → exit 0. On ctx-cancellation → exit 130. Otherwise
-//     logs the error via slog and exits 1.
-func Run(opts Options, fn RunFunc) {
+//  5. Sets up a context with double-signal force-exit (Ctrl-C twice → 130).
+//  6. Invokes fn. nil → 0; ctx-cancellation → 130; otherwise logs the error
+//     via slog and returns 1.
+func Run(opts Options, fn RunFunc) int {
 	if opts.ToolName == "" {
 		fmt.Fprintln(os.Stderr, "cliapp: ToolName is required")
-		os.Exit(2)
+		return 2
 	}
 
 	v, err := resolveVerbosity(opts.Verbose, opts.Verbosity)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		return 2
 	}
 	colorMode, err := resolveColor(opts.Color)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		return 2
 	}
 
-	logFile, cleanup, logPath := setupLogging(opts, v)
-	defer cleanup()
+	logger, logPath, closeLog := setupLogging(opts, v)
+	defer closeLog()
 
 	renderer := render.New(os.Stderr,
 		render.WithVerbosity(v),
@@ -135,8 +126,6 @@ func Run(opts Options, fn RunFunc) {
 	if logPath != "" {
 		renderer.Status("Logging to " + logPath)
 	}
-
-	logger := slog.Default()
 
 	cwd, _ := os.Getwd()
 	sensitive := append(append([]string(nil), DefaultSensitiveFlags...), opts.SensitiveFlags...)
@@ -148,45 +137,46 @@ func Run(opts Options, fn RunFunc) {
 
 	ctx, cancel := notifyContext(context.Background(), func() {
 		fmt.Fprintln(os.Stderr, "Received second signal, forcing exit")
+		// Best-effort flush before the hard exit.
+		closeLog()
 		os.Exit(130)
 	})
 	defer cancel()
 
 	app := &App{
-		Logger:   logger,
-		Renderer: renderer,
-		LogFile:  logFile,
-		LogPath:  logPath,
+		Logger:    logger,
+		Renderer:  renderer,
+		LogPath:   logPath,
+		Verbosity: v,
+		Color:     colorMode,
 	}
 
 	runErr := fn(ctx, app)
 
 	switch {
 	case runErr == nil:
-		os.Exit(0)
+		return 0
 	case ctx.Err() != nil:
-		// Interrupted via signal. The user's fn returned because of
-		// cancellation; treat as 130 regardless of what err it surfaced.
-		os.Exit(130)
+		return 130
 	default:
 		logger.Error(opts.ToolName+" failed", "error", runErr)
-		os.Exit(1)
+		return 1
 	}
 }
 
-// setupLogging opens the log file and sets slog.Default to write to it at
+// setupLogging opens the log file and returns a logger that writes to it at
 // the configured file level. On failure, falls back to klogfmt.Init at the
 // verbosity-mapped stderr level and emits a slog.Warn describing the
-// fallback. Returns the open file handle (or nil), a cleanup func, and the
-// active log path (empty when fallback engaged).
-func setupLogging(opts Options, v render.Verbosity) (*os.File, func(), string) {
+// fallback. The returned closer is always safe to call multiple times.
+func setupLogging(opts Options, v render.Verbosity) (logger *slog.Logger, logPath string, closer func()) {
+	noop := func() {}
 	stderrLevel := stderrLevelFor(v)
 
-	logDir, candidatePath, err := resolveLogPath(opts.ToolName, opts.LogDirOverride)
+	logDir, candidatePath, err := resolveLogPath(opts.ToolName)
 	if err != nil {
 		klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 		slog.Warn("could not determine log path, logging to stderr only", "error", err)
-		return nil, func() {}, ""
+		return slog.Default(), "", noop
 	}
 
 	f, err := openLogFile(logDir, candidatePath)
@@ -194,13 +184,23 @@ func setupLogging(opts Options, v render.Verbosity) (*os.File, func(), string) {
 		klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 		slog.Warn("failed to open log file, logging to stderr only",
 			"path", candidatePath, "error", err)
-		return nil, func() {}, ""
+		return slog.Default(), "", noop
 	}
 
 	fileLevel := slog.Leveler(slog.LevelDebug)
 	if opts.LogFileLevel != nil {
 		fileLevel = opts.LogFileLevel
 	}
-	slog.SetDefault(slog.New(klogfmt.New(f, klogfmt.WithLevel(fileLevel))))
-	return f, func() { _ = f.Close() }, candidatePath
+	l := slog.New(klogfmt.New(f, klogfmt.WithLevel(fileLevel)))
+	slog.SetDefault(l)
+
+	var closeOnce bool
+	return l, candidatePath, func() {
+		if closeOnce {
+			return
+		}
+		closeOnce = true
+		_ = f.Sync()
+		_ = f.Close()
+	}
 }

@@ -7,31 +7,12 @@ import (
 	"testing"
 )
 
-func TestResolveLogPath_Override(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	logDir, logPath, err := resolveLogPath("mytool", dir)
-	if err != nil {
-		t.Fatalf("resolveLogPath: %v", err)
-	}
-	if logDir != dir {
-		t.Errorf("logDir = %q, want override %q", logDir, dir)
-	}
-	if filepath.Dir(logPath) != dir {
-		t.Errorf("logPath %q is not inside override dir %q", logPath, dir)
-	}
-	base := filepath.Base(logPath)
-	if !strings.HasPrefix(base, "mytool-") || !strings.HasSuffix(base, ".log") {
-		t.Errorf("logPath base = %q, want mytool-<ts>-<pid>.log", base)
-	}
-}
-
 func TestResolveLogPath_DefaultsToHome(t *testing.T) {
 	// Cannot t.Parallel — we set HOME, which is process-global.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
 
-	logDir, logPath, err := resolveLogPath("mytool", "")
+	logDir, logPath, err := resolveLogPath("mytool")
 	if err != nil {
 		t.Fatalf("resolveLogPath: %v", err)
 	}
@@ -42,13 +23,39 @@ func TestResolveLogPath_DefaultsToHome(t *testing.T) {
 	if !strings.HasPrefix(logPath, wantDir) {
 		t.Errorf("logPath %q not under %q", logPath, wantDir)
 	}
+	base := filepath.Base(logPath)
+	if !strings.HasPrefix(base, "mytool-") || !strings.HasSuffix(base, ".log") {
+		t.Errorf("logPath base = %q, want mytool-<ts>-<pid>.log", base)
+	}
 }
 
 func TestResolveLogPath_HomeUnset(t *testing.T) {
 	// Cannot t.Parallel — we unset HOME, which is process-global.
 	t.Setenv("HOME", "")
-	if _, _, err := resolveLogPath("mytool", ""); err == nil {
+	if _, _, err := resolveLogPath("mytool"); err == nil {
 		t.Errorf("resolveLogPath with HOME unset should error")
+	}
+}
+
+func TestLogDir_CreatesDir(t *testing.T) {
+	// Cannot t.Parallel — we set HOME.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	dir, err := LogDir("mytool")
+	if err != nil {
+		t.Fatalf("LogDir: %v", err)
+	}
+	want := filepath.Join(fakeHome, ".mytool", "logs")
+	if dir != want {
+		t.Errorf("LogDir = %q, want %q", dir, want)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat created dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("LogDir result is not a directory")
 	}
 }
 

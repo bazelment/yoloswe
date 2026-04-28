@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -25,12 +26,21 @@ var (
 )
 
 func main() {
-	cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
-		// Propagate the user's --color preference into wt.DefaultOutput()'s
-		// color decision so colored CLI output respects --color=always|never.
-		wt.ColorPreference = rootOpts.Color
+	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+		wt.SetDefaultColorMode(toWTColorMode(app.Color))
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
-	})
+	}))
+}
+
+func toWTColorMode(c render.ColorMode) wt.ColorMode {
+	switch c {
+	case render.ColorAlways:
+		return wt.ColorAlways
+	case render.ColorNever:
+		return wt.ColorNever
+	default:
+		return wt.ColorAuto
+	}
 }
 
 var rootCmd = &cobra.Command{

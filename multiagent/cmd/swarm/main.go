@@ -61,9 +61,9 @@ func init() {
 }
 
 func main() {
-	cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
-	})
+	}))
 }
 
 // resolveSessionDir returns the session directory, defaulting to work-dir/.claude-swarm/sessions
@@ -74,19 +74,14 @@ func resolveSessionDir() string {
 	return filepath.Join(workDir, ".claude-swarm", "sessions")
 }
 
-// createProgressReporter creates a progress reporter based on the resolved
-// --verbosity (which absorbs --verbose).
-func createProgressReporter() (*progress.ConsoleReporter, *progress.AgentReporter) {
-	v := render.ParseVerbosity(rootOpts.Verbosity)
-	if rootOpts.Verbose && v < render.VerbosityVerbose {
-		v = render.VerbosityVerbose
-	}
-
+// createProgressReporter creates a progress reporter from the verbosity
+// already resolved by cliapp.
+func createProgressReporter(app *cliapp.App) (*progress.ConsoleReporter, *progress.AgentReporter) {
 	outputMode := progress.OutputNormal
 	switch {
-	case v <= render.VerbosityQuiet:
+	case app.Verbosity <= render.VerbosityQuiet:
 		outputMode = progress.OutputMinimal
-	case v >= render.VerbosityVerbose:
+	case app.Verbosity >= render.VerbosityVerbose:
 		outputMode = progress.OutputVerbose
 	}
 	consoleReporter := progress.NewConsoleReporter(progress.WithMode(outputMode))

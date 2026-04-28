@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
@@ -36,9 +37,9 @@ Use 'build' to run a builder-reviewer loop for autonomous task execution.`,
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newBuildCmd())
 
-	cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
-	})
+	}))
 }
 
 // Plan command flags
@@ -66,8 +67,8 @@ The AI will explore the codebase, consider approaches, and produce a detailed pl
   echo "Add tests" | yoloswe plan
   yoloswe plan --build new --external-builder ./yoloswe "Add comprehensive tests"`,
 		Args: cobra.ArbitraryArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			runPlan(cmd, args, flags)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPlan(cmd, args, flags)
 		},
 	}
 
@@ -83,43 +84,38 @@ The AI will explore the codebase, consider approaches, and produce a detailed pl
 	return cmd
 }
 
-func runPlan(cmd *cobra.Command, args []string, flags *planFlags) {
-	// Get prompt from args or stdin
+func runPlan(cmd *cobra.Command, args []string, flags *planFlags) error {
+	app := cliapp.FromContext(cmd.Context())
+
 	prompt := strings.Join(args, " ")
 	if prompt == "" {
 		prompt = readFromStdin()
 	}
 	if prompt == "" {
-		fmt.Fprintln(os.Stderr, "Error: no prompt provided")
 		_ = cmd.Usage()
-		os.Exit(1)
+		return fmt.Errorf("no prompt provided")
 	}
 
-	// Set default working directory
 	workDir := flags.workDir
 	if workDir == "" {
 		var err error
 		workDir, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting working directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
-	// Validate build mode
 	buildMode := planner.BuildMode(flags.build)
 	if !buildMode.IsValid() {
-		fmt.Fprintf(os.Stderr, "Error: invalid build mode %q. Valid values: 'current', 'new', or empty\n", flags.build)
-		os.Exit(1)
+		return fmt.Errorf("invalid build mode %q (valid: 'current', 'new', or empty)", flags.build)
 	}
 
-	// Create config
 	config := planner.Config{
 		Model:               flags.model,
 		WorkDir:             workDir,
 		RecordingDir:        flags.recordDir,
 		SystemPrompt:        flags.systemPrompt,
-		Verbose:             rootOpts.Verbose,
+		Verbose:             app.Verbosity >= render.VerbosityVerbose,
 		Simple:              flags.simple,
 		Prompt:              prompt,
 		BuildMode:           buildMode,
@@ -127,34 +123,26 @@ func runPlan(cmd *cobra.Command, args []string, flags *planFlags) {
 		BuildModel:          flags.buildModel,
 	}
 
-	// Create planner wrapper
 	p := planner.NewPlannerWrapper(config)
 
 	ctx := cmd.Context()
-
-	// Start the session
 	if err := p.Start(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting session: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("start session: %w", err)
 	}
 	defer p.Stop()
 
-	// Run the planner
 	if err := p.Run(ctx, prompt); err != nil {
 		if ctx.Err() != nil {
-			os.Exit(0)
+			return nil
 		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
-	// Print usage summary
 	p.PrintUsageSummary()
-
-	// Print recording path
 	if path := p.RecordingPath(); path != "" {
 		fmt.Fprintf(os.Stderr, "\nSession recorded to: %s\n", path)
 	}
+	return nil
 }
 
 // Build command flags
@@ -186,8 +174,8 @@ The loop continues until the reviewer accepts or limits are reached.`,
   yoloswe build --builder-model opus "Fix the authentication bug"
   yoloswe build "Implement feature X" --timeout 7200`,
 		Args: cobra.MinimumNArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			runBuild(cmd, args, flags)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBuild(cmd, args, flags)
 		},
 	}
 
@@ -206,33 +194,28 @@ The loop continues until the reviewer accepts or limits are reached.`,
 	return cmd
 }
 
-func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) {
+func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) error {
 	app := cliapp.FromContext(cmd.Context())
 	prompt := strings.Join(args, " ")
 
-	// Get working directory
 	workDir := flags.dir
 	if workDir == "" {
 		var err error
 		workDir, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting working directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("get working directory: %w", err)
 		}
 	}
 
-	// Set default recording directory if not specified
 	recordingDir := flags.record
 	if recordingDir == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("get home directory: %w", err)
 		}
 		recordingDir = filepath.Join(homeDir, ".yoloswe")
 	}
 
-	// Create config - use prompt as the goal for reviewer context
 	config := yoloswe.Config{
 		BuilderModel:    flags.builderModel,
 		BuilderWorkDir:  workDir,
@@ -246,7 +229,7 @@ func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) {
 		MaxBudgetUSD:    flags.budget,
 		MaxTimeSeconds:  flags.timeout,
 		MaxIterations:   flags.maxIterations,
-		Verbose:         rootOpts.Verbose,
+		Verbose:         app.Verbosity >= render.VerbosityVerbose,
 	}
 
 	app.Logger.Info("yoloswe build config",
@@ -259,25 +242,16 @@ func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) {
 		"prompt", prompt,
 	)
 
-	ctx := cmd.Context()
-
-	// Create and run SWE wrapper
 	swe := yoloswe.New(config)
-
-	if err := swe.Run(ctx, prompt); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		swe.PrintSummary()
-		os.Exit(1)
-	}
-
+	runErr := swe.Run(cmd.Context(), prompt)
 	swe.PrintSummary()
-
-	// Exit with appropriate code based on result
-	stats := swe.Stats()
-	if stats.ExitReason == yoloswe.ExitReasonAccepted {
-		os.Exit(0)
+	if runErr != nil {
+		return runErr
 	}
-	os.Exit(1)
+	if swe.Stats().ExitReason != yoloswe.ExitReasonAccepted {
+		return fmt.Errorf("build did not complete successfully (reason: %v)", swe.Stats().ExitReason)
+	}
+	return nil
 }
 
 // readFromStdin reads input from stdin if available.

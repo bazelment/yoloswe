@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/bazelment/yoloswe/cliapp"
 )
 
 var runCmd = &cobra.Command{
@@ -36,7 +38,7 @@ func runMissionCmd(cmd *cobra.Command, args []string) error {
 	ctx, cancel := setupContext(cmd.Context())
 	defer cancel()
 
-	consoleReporter, progressReporter := createProgressReporter()
+	consoleReporter, progressReporter := createProgressReporter(cliapp.FromContext(cmd.Context()))
 	config := createSwarmConfig(progressReporter)
 
 	orch, err := startOrchestrator(ctx, config)

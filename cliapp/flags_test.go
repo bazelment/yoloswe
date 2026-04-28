@@ -82,6 +82,39 @@ func TestResolveColor(t *testing.T) {
 	}
 }
 
+func TestStandardChildArgs(t *testing.T) {
+	t.Parallel()
+	tests := []struct { //nolint:govet // fieldalignment: readability
+		name string
+		want []string
+		v    render.Verbosity
+		c    render.ColorMode
+	}{
+		{name: "defaults emit nothing", v: render.VerbosityNormal, c: render.ColorAuto, want: nil},
+		{name: "verbose", v: render.VerbosityVerbose, c: render.ColorAuto, want: []string{"--verbose"}},
+		{name: "debug", v: render.VerbosityDebug, c: render.ColorAuto, want: []string{"--verbosity", "debug"}},
+		{name: "quiet", v: render.VerbosityQuiet, c: render.ColorAuto, want: []string{"--verbosity", "quiet"}},
+		{name: "color always", v: render.VerbosityNormal, c: render.ColorAlways, want: []string{"--color", "always"}},
+		{name: "color never", v: render.VerbosityNormal, c: render.ColorNever, want: []string{"--color", "never"}},
+		{name: "verbose + color never", v: render.VerbosityVerbose, c: render.ColorNever, want: []string{"--verbose", "--color", "never"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			app := &App{Verbosity: tt.v, Color: tt.c}
+			got := app.StandardChildArgs()
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("got[%d]=%q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestStderrLevelFor(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
