@@ -6,7 +6,6 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/jiradozer/cmd/jiradozer",
     visibility = ["//visibility:private"],
     deps = [
-        "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
         "//cliapp",
         "//jiradozer",

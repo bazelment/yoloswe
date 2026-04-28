@@ -38,6 +38,16 @@ func (p *GeminiProvider) Name() string { return "gemini" }
 func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
 
+	// ACP has no reasoning-effort knob — fail fast before spawning the
+	// subprocess. Validate the string first so a typo surfaces
+	// ErrInvalidEffort instead of ErrEffortUnsupported.
+	if cfg.Effort != "" {
+		if _, err := ParseEffort(cfg.Effort); err != nil {
+			return nil, err
+		}
+		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
+	}
+
 	// Build full prompt with worktree context
 	fullPrompt := prompt
 	if wtCtx != nil {

@@ -1,12 +1,54 @@
 package agent
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 )
+
+// TestGeminiProvider_RejectsEffort verifies Gemini fails fast when
+// cfg.Effort is set. ACP has no reasoning-effort input parameter, so the
+// check must happen before client.Start spawns a subprocess. This lets
+// the test run without a real gemini binary on PATH.
+func TestGeminiProvider_RejectsEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, level := range []string{"low", "medium", "high", "max", "auto"} {
+		level := level
+		t.Run(level, func(t *testing.T) {
+			t.Parallel()
+
+			p := NewGeminiProvider()
+			defer p.Close()
+
+			_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
+			require.Error(t, err, "gemini should reject effort=%q", level)
+			assert.ErrorIs(t, err, ErrEffortUnsupported)
+			assert.Contains(t, err.Error(), "gemini")
+			assert.Contains(t, err.Error(), level)
+		})
+	}
+}
+
+// TestGeminiProvider_RejectsInvalidEffortFirst mirrors the cursor test:
+// a typo surfaces ErrInvalidEffort, not ErrEffortUnsupported.
+func TestGeminiProvider_RejectsInvalidEffortFirst(t *testing.T) {
+	t.Parallel()
+
+	p := NewGeminiProvider()
+	defer p.Close()
+
+	_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort("turbo"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidEffort)
+	assert.NotErrorIs(t, err, ErrEffortUnsupported)
+}
 
 // TestGeminiLongRunningProvider_EventBridgeInitialization verifies that
 // the event bridge is properly initialized in Start() and cleaned up in Close().

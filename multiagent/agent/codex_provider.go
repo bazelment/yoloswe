@@ -101,7 +101,12 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		return nil, err
 	}
 
-	result, err := thread.Ask(ctx, fullPrompt)
+	turnOpts, err := codexTurnOptions(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := thread.Ask(ctx, fullPrompt, turnOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +126,25 @@ func (p *CodexProvider) Close() error {
 		return p.client.Stop()
 	}
 	return nil
+}
+
+// codexTurnOptions builds the per-turn codex options derived from the
+// provider-neutral ExecuteConfig. Extracted so the effort wiring can be
+// unit-tested without spawning the codex subprocess.
+//
+// Codex accepts the effort string opaquely and forwards it to the model
+// (see agent-cli-wrapper/codex/jsonrpc.go field "effort"). Validation against
+// the multiagent vocabulary happens here; the SDK does not pre-validate.
+func codexTurnOptions(cfg ExecuteConfig) ([]codex.TurnOption, error) {
+	var opts []codex.TurnOption
+	if cfg.Effort != "" {
+		level, err := ParseEffort(cfg.Effort)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, codex.WithEffort(string(level)))
+	}
+	return opts, nil
 }
 
 // codexResultToAgentResult converts a codex.TurnResult to AgentResult.
