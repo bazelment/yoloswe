@@ -20,14 +20,16 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/yoloswe/sessionplayer"
 )
 
 func main() {
 	klogfmt.Init()
-	verbose := flag.Bool("verbose", false, "Show all output (tool results, item events)")
-	noColor := flag.Bool("no-color", false, "Disable ANSI color codes")
+	verbose := flag.Bool("verbose", false, "Verbose output (shorthand for --verbosity=verbose)")
+	verbosity := flag.String("verbosity", "normal", "Output verbosity: quiet, normal, verbose, debug")
+	color := flag.String("color", "auto", "Color output: auto, always, never")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <path>\n\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "Play back recorded Claude or Codex session messages with colored output.")
@@ -39,7 +41,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\nExamples:")
 		fmt.Fprintln(os.Stderr, "  sessionplayer .planner-sessions/session-abc123-1234567890/")
 		fmt.Fprintln(os.Stderr, "  sessionplayer session.jsonl")
-		fmt.Fprintln(os.Stderr, "  sessionplayer -verbose -no-color session.jsonl")
+		fmt.Fprintln(os.Stderr, "  sessionplayer -verbosity=verbose -color=never session.jsonl")
 	}
 	flag.Parse()
 
@@ -49,14 +51,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	v := render.ParseVerbosity(*verbosity)
+	if *verbose && v < render.VerbosityVerbose {
+		v = render.VerbosityVerbose
+	}
+	verboseEffective := v >= render.VerbosityVerbose
+
+	colorMode := render.ParseColorMode(*color)
+	noColor := colorMode == render.ColorNever
+
 	// Handle multiple paths (shell glob expansion)
 	paths := flag.Args()
 
 	var player *sessionplayer.Player
-	if *noColor {
-		player = sessionplayer.NewPlayerWithOptions(os.Stdout, *verbose, true)
+	if noColor {
+		player = sessionplayer.NewPlayerWithOptions(os.Stdout, verboseEffective, true)
 	} else {
-		player = sessionplayer.NewPlayer(os.Stdout, *verbose)
+		player = sessionplayer.NewPlayer(os.Stdout, verboseEffective)
 	}
 
 	for i, path := range paths {

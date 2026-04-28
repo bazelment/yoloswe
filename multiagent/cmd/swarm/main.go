@@ -5,14 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/logging/klogfmt"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/multiagent/orchestrator"
 	"github.com/bazelment/yoloswe/multiagent/progress"
@@ -24,13 +23,12 @@ var (
 	workDir           string
 	sessionDir        string
 	enableCheckpoint  bool
-	verbose           bool
-	quiet             bool
 	orchestratorModel string
 	plannerModel      string
 	designerModel     string
 	builderModel      string
 	reviewerModel     string
+	rootOpts          = cliapp.Options{ToolName: "swarm"}
 )
 
 // Command-specific flags
@@ -52,8 +50,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&workDir, "work-dir", ".", "Working directory")
 	rootCmd.PersistentFlags().StringVar(&sessionDir, "session-dir", "", "Session recording directory (default: <work-dir>/.claude-swarm/sessions)")
 	rootCmd.PersistentFlags().BoolVar(&enableCheckpoint, "checkpoint", true, "Enable checkpointing for error recovery")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output (shows tool activity)")
-	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Enable quiet mode (minimal output)")
+	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 
 	// Model flags
 	rootCmd.PersistentFlags().StringVar(&orchestratorModel, "orchestrator-model", "sonnet", "Model for Orchestrator")
@@ -64,10 +61,9 @@ func init() {
 }
 
 func main() {
-	klogfmt.Init()
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(cliapp.Run(&rootOpts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	}))
 }
 
 // resolveSessionDir returns the session directory, defaulting to work-dir/.claude-swarm/sessions
@@ -78,13 +74,15 @@ func resolveSessionDir() string {
 	return filepath.Join(workDir, ".claude-swarm", "sessions")
 }
 
-// createProgressReporter creates a progress reporter based on verbosity flags
-func createProgressReporter() (*progress.ConsoleReporter, *progress.AgentReporter) {
+// createProgressReporter creates a progress reporter from the verbosity
+// already resolved by cliapp.
+func createProgressReporter(app *cliapp.App) (*progress.ConsoleReporter, *progress.AgentReporter) {
 	outputMode := progress.OutputNormal
-	if verbose {
-		outputMode = progress.OutputVerbose
-	} else if quiet {
+	switch {
+	case app.Verbosity <= render.VerbosityQuiet:
 		outputMode = progress.OutputMinimal
+	case app.Verbosity >= render.VerbosityVerbose:
+		outputMode = progress.OutputVerbose
 	}
 	consoleReporter := progress.NewConsoleReporter(progress.WithMode(outputMode))
 	progressReporter := progress.NewAgentReporter(consoleReporter)
@@ -108,32 +106,15 @@ func createSwarmConfig(progressReporter *progress.AgentReporter) agent.SwarmConf
 	}
 }
 
-// setupContext creates a context with cancellation and optional timeout, plus signal handling
-func setupContext() (context.Context, context.CancelFunc) {
-	var ctx context.Context
-	var cancel context.CancelFunc
-
+// setupContext layers an optional --timeout on top of the parent ctx
+// supplied by cliapp.Run (which already handles signals). Subcommands pass
+// cmd.Context() as the parent.
+func setupContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), timeout)
 		fmt.Printf("Timeout set to %v\n", timeout)
-	} else {
-		ctx, cancel = context.WithCancel(context.Background())
+		return context.WithTimeout(parent, timeout)
 	}
-
-	// Handle signals for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		fmt.Printf("\nReceived signal %v, initiating graceful shutdown...\n", sig)
-		cancel()
-		// Second signal forces exit
-		sig = <-sigCh
-		fmt.Printf("\nReceived second signal %v, forcing exit\n", sig)
-		os.Exit(1)
-	}()
-
-	return ctx, cancel
+	return context.WithCancel(parent)
 }
 
 // startOrchestrator creates and starts the orchestrator

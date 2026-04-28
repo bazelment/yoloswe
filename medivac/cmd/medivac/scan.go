@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/medivac/engine"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -24,8 +25,7 @@ var scanCmd = &cobra.Command{
 			return err
 		}
 
-		log, logFile, closeLog := newFileLogger(root)
-		defer closeLog()
+		app := cliapp.FromContext(cmd.Context())
 		eng, err := engine.New(engine.Config{
 			GHRunner:    &wt.DefaultGHRunner{},
 			RepoDir:     root,
@@ -34,8 +34,8 @@ var scanCmd = &cobra.Command{
 			RunLimit:    scanLimit,
 			TriageModel: scanTriageModel,
 			DryRun:      dryRun,
-			LogFile:     logFile,
-			Logger:      log,
+			LogFile:     app.LogPath,
+			Logger:      app.Logger,
 		})
 		if err != nil {
 			return fmt.Errorf("create engine: %w", err)

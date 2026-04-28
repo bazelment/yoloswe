@@ -6,11 +6,12 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/symphony/cmd/symphony",
     visibility = ["//visibility:private"],
     deps = [
+        "//cliapp",
         "//symphony/config",
         "//symphony/http",
-        "//symphony/logging",
         "//symphony/orchestrator",
         "//symphony/tracker",
+        "@com_github_spf13_cobra//:cobra",
     ],
 )
 

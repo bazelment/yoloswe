@@ -8,12 +8,12 @@ go_library(
     deps = [
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
+        "//cliapp",
         "//jiradozer",
         "//jiradozer/tracker",
         "//jiradozer/tracker/github",
         "//jiradozer/tracker/linear",
         "//jiradozer/tracker/local",
-        "//logging/klogfmt",
         "//multiagent/agent",
         "//wt",
         "@com_github_spf13_cobra//:cobra",
@@ -31,6 +31,7 @@ go_test(
     srcs = ["main_test.go"],
     embed = [":jiradozer_lib"],
     deps = [
+        "//cliapp",
         "//jiradozer",
         "//jiradozer/tracker",
         "@com_github_stretchr_testify//assert",

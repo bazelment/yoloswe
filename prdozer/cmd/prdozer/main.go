@@ -6,10 +6,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,8 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
-	"github.com/bazelment/yoloswe/logging/klogfmt"
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/prdozer"
 	"github.com/bazelment/yoloswe/wt"
@@ -37,17 +34,16 @@ func main() {
 		dryRun       bool
 		local        bool
 		autoMerge    bool
-		verbose      bool
-		verbosity    string
-		color        string
 		repoOverride string
 	)
+	opts := cliapp.Options{ToolName: "prdozer"}
+
 	rootCmd := &cobra.Command{
 		Use:   "prdozer",
 		Short: "Watch PRs and keep them merge-ready via /pr-polish",
 		Long:  "Polls one or more GitHub pull requests at a configured interval. When the base moves, CI fails, or new review comments arrive, invokes the /pr-polish skill to bring the PR back to merge-ready state.",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd.Context(), runArgs{
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			args := runArgs{
 				configPath:   configPath,
 				workDir:      workDir,
 				modelID:      modelID,
@@ -59,15 +55,15 @@ func main() {
 				dryRun:       dryRun,
 				local:        local,
 				autoMerge:    autoMerge,
-				verbose:      verbose,
-				verbosity:    verbosity,
-				color:        color,
 				repoOverride: repoOverride,
-			})
+			}
+			app := cliapp.FromContext(cmd.Context())
+			return run(cmd.Context(), app, args)
 		},
 	}
 	rootCmd.SilenceUsage = true
 
+	cliapp.RegisterStandardFlags(rootCmd, &opts)
 	rootCmd.Flags().StringVar(&configPath, "config", "prdozer.yaml", "Path to config file (optional)")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
@@ -79,16 +75,11 @@ func main() {
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Detect changes and log decisions without invoking the agent")
 	rootCmd.Flags().BoolVar(&local, "local", false, "Pass --local to /pr-polish (no CI/bot wait)")
 	rootCmd.Flags().BoolVar(&autoMerge, "auto-merge", false, "Merge PRs that become mergeable")
-	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output (shorthand for --verbosity=verbose)")
-	rootCmd.Flags().StringVar(&verbosity, "verbosity", "normal", "Output verbosity: quiet, normal, verbose, debug")
-	rootCmd.Flags().StringVar(&color, "color", "auto", "Color output: auto, always, never")
 	rootCmd.Flags().StringVar(&repoOverride, "repo", "", "Short repo name for state-file path (default: derive from cwd)")
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(cliapp.Run(&opts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	}))
 }
 
 type runArgs struct {
@@ -96,8 +87,6 @@ type runArgs struct {
 	workDir      string
 	modelID      string
 	prList       string
-	verbosity    string
-	color        string
 	repoOverride string
 	pollInterval time.Duration
 	maxBudget    float64
@@ -106,59 +95,13 @@ type runArgs struct {
 	dryRun       bool
 	local        bool
 	autoMerge    bool
-	verbose      bool
 }
 
-func run(ctx context.Context, args runArgs) error {
-	v := render.ParseVerbosity(args.verbosity)
-	if args.verbose && v < render.VerbosityVerbose {
-		v = render.VerbosityVerbose
-	}
-	colorMode := render.ParseColorMode(args.color)
-
-	stderrLevel := slog.LevelInfo
-	if v >= render.VerbosityDebug {
-		stderrLevel = slog.LevelDebug
-	} else if v <= render.VerbosityQuiet {
-		stderrLevel = slog.LevelWarn
-	}
-
-	var activeLogPath string
-	if home, err := os.UserHomeDir(); err == nil {
-		logDir := filepath.Join(home, ".prdozer", "logs")
-		logPath := filepath.Join(logDir, fmt.Sprintf("prdozer-%s-%d.log",
-			time.Now().Format("20060102-150405"), os.Getpid()))
-		if err := os.MkdirAll(logDir, 0o755); err == nil {
-			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-			if err == nil {
-				defer f.Close()
-				slog.SetDefault(slog.New(klogfmt.New(f, klogfmt.WithLevel(slog.LevelDebug))))
-				activeLogPath = logPath
-			} else {
-				klogfmt.Init(klogfmt.WithLevel(stderrLevel))
-				slog.Warn("failed to open log file, logging to stderr only", "path", logPath, "error", err)
-			}
-		} else {
-			klogfmt.Init(klogfmt.WithLevel(stderrLevel))
-			slog.Warn("failed to create log directory, logging to stderr only", "path", logDir, "error", err)
-		}
-	} else {
-		klogfmt.Init(klogfmt.WithLevel(stderrLevel))
-		slog.Warn("could not determine home directory, logging to stderr only", "error", err)
-	}
-	logger := slog.Default()
-
-	renderer := render.New(os.Stderr,
-		render.WithVerbosity(v),
-		render.WithColorMode(colorMode),
-	)
-	if activeLogPath != "" {
-		renderer.Status("Logging to " + activeLogPath)
-	}
+func run(ctx context.Context, app *cliapp.App, args runArgs) error {
+	logger := app.Logger
+	renderer := app.Renderer
 
 	cwd, _ := os.Getwd()
-	logger.Info("prdozer starting", "args", os.Args[1:], "cwd", cwd, "pid", os.Getpid())
-
 	cfg, err := loadConfig(args)
 	if err != nil {
 		return err

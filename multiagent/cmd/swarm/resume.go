@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/multiagent/checkpoint"
 )
 
@@ -50,10 +51,10 @@ func runResumeCmd(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Resuming session %s from phase: %s\n", sessionID, cp.ResumePhase())
 
-	ctx, cancel := setupContext()
+	ctx, cancel := setupContext(cmd.Context())
 	defer cancel()
 
-	consoleReporter, progressReporter := createProgressReporter()
+	consoleReporter, progressReporter := createProgressReporter(cliapp.FromContext(cmd.Context()))
 	config := createSwarmConfig(progressReporter)
 	config.SessionID = sessionID // Use existing session ID
 
