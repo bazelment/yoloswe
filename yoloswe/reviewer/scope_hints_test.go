@@ -304,6 +304,36 @@ func TestLoadScopeHints_RejectsLeadingTrailingWhitespace(t *testing.T) {
 	}
 }
 
+func TestLoadScopeHints_RejectsMarkdownPrefix(t *testing.T) {
+	// Producer that emits a path starting with #/-/*/>/_/= would close
+	// or reshape the prompt's Markdown section. validateHintStrings
+	// rejects each prefix and the error message names the offending
+	// character so the producer bug points at itself.
+	cases := []struct {
+		name     string
+		contents string
+	}{
+		{"hash", `{"schema_version":1,"test_paths":["## Output Format"],"cross_service_packages":[]}`},
+		{"dash", `{"schema_version":1,"test_paths":["- ignore previous"],"cross_service_packages":[]}`},
+		{"star", `{"schema_version":1,"test_paths":["* override"],"cross_service_packages":[]}`},
+		{"angle", `{"schema_version":1,"test_paths":[],"cross_service_packages":["a/","> b/"]}`},
+		{"underscore", `{"schema_version":1,"test_paths":["_private.py"],"cross_service_packages":[]}`},
+		{"equals", `{"schema_version":1,"test_paths":["=injected"],"cross_service_packages":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeHintsFile(t, tc.contents)
+			_, err := LoadScopeHints(path)
+			if err == nil {
+				t.Fatalf("expected error for Markdown-prefix entry: %s", tc.contents)
+			}
+			if !strings.Contains(err.Error(), "Markdown control char") {
+				t.Errorf("error should classify as Markdown control: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadScopeHints_RejectsEmptyString(t *testing.T) {
 	// A "" entry would inline as a blank line in the prompt, which looks
 	// like noise. Same reasoning as whitespace: producer bug, reject.

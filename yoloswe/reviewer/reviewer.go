@@ -161,6 +161,62 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 	return base
 }
 
+// SanitizePromptHint returns true when s is safe to inline verbatim into a
+// prompt clause. It rejects entries that would distort the surrounding
+// Markdown structure or look like injected instructions:
+//
+//   - Markdown control characters at the start (#, -, *, >, _, =) — these
+//     can close or open a section, list, or blockquote and reshape what
+//     comes after.
+//   - Newlines or carriage returns anywhere in the entry.
+//   - Leading/trailing whitespace, which renders awkwardly in joined lines.
+//   - Empty strings (would produce blank lines in the prompt).
+//
+// LoadScopeHints calls this at the file-load boundary so a producer bug
+// fails loudly with a CLI warning. The prompt builders also filter via
+// this function as defense-in-depth: any direct caller of
+// BuildJSONPromptWithScope (an exported entry point) gets the same
+// guarantee even if they bypass LoadScopeHints. The realistic threat
+// here is a buggy producer, not a malicious one — scope_gate.py walks
+// the filesystem of the worktree under review — but bramble owns the
+// prompt structure, so it shouldn't trust callers to have validated.
+func SanitizePromptHint(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.ContainsAny(s, "\r\n") {
+		return false
+	}
+	if s != strings.TrimSpace(s) {
+		return false
+	}
+	// Markdown control prefixes at the very first byte. We don't strip
+	// them — that would silently rewrite producer output — we just skip
+	// the entry. Realistic filesystem paths don't start with these.
+	switch s[0] {
+	case '#', '-', '*', '>', '_', '=':
+		return false
+	}
+	return true
+}
+
+// filterPromptHints drops entries that fail SanitizePromptHint. The
+// contract is "best-effort safe inlining": callers that produced clean
+// data get all their entries, and a buggy/hostile entry is silently
+// elided rather than corrupting the surrounding Markdown structure.
+// LoadScopeHints already errors on the same shapes earlier in the
+// pipeline, so this filter usually has nothing to do — its purpose is
+// to harden the prompt-builder boundary itself.
+func filterPromptHints(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		if SanitizePromptHint(s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // testQualityClause returns the test-quality scrutiny clause with the given
 // co-located test paths inlined.
 //
@@ -177,6 +233,13 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 // The caller must guarantee len(paths) > 0 — buildScopeSuffix is the only
 // caller and gates on that.
 func testQualityClause(paths []string) string {
+	paths = filterPromptHints(paths)
+	if len(paths) == 0 {
+		// All entries were filtered out by sanitization. The caller's
+		// gating (len > 0) was based on raw input; if everything got
+		// dropped here, emit no clause rather than an empty bullet list.
+		return ""
+	}
 	displayed := paths
 	suffix := ""
 	if len(displayed) > testScopeHintsCap {
@@ -209,6 +272,14 @@ Co-located test files to read (in addition to anything in the diff):
 // was removed for the same anti-overfitting reason as testQualityClause.
 // New items should describe failure modes, not specific framework bugs.
 func crossServiceClause(packages []string) string {
+	packages = filterPromptHints(packages)
+	if len(packages) < 2 {
+		// Sanitization filtered the list below the >=2 threshold the
+		// caller's gate assumed. Drop the clause rather than emit one
+		// with a single (or zero) package — the prompt would read
+		// nonsensically.
+		return ""
+	}
 	return `
 
 ## Cross-service contract sweep

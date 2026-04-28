@@ -404,6 +404,35 @@ func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
 	}
 }
 
+func TestCmd_ScopeHintsFileFlagIsWired(t *testing.T) {
+	// Cobra-level proof that --scope-hints-file is registered, parses,
+	// and binds to the global the prompt builder reads. Defends against:
+	//   - the flag being removed from init()
+	//   - the flag string changing (e.g. typo to --scope-hint-file)
+	//   - the StringVar binding being unhooked from &scopeHintsFile
+	// All three would still pass the helper-level loadPromptOptions and
+	// buildPromptForRun tests, because those bypass Cobra entirely.
+	prev := scopeHintsFile
+	t.Cleanup(func() { scopeHintsFile = prev })
+	scopeHintsFile = ""
+
+	if err := Cmd.ParseFlags([]string{"--scope-hints-file", "/tmp/example-hints.json"}); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+	if scopeHintsFile != "/tmp/example-hints.json" {
+		t.Errorf("scopeHintsFile global = %q, want /tmp/example-hints.json", scopeHintsFile)
+	}
+
+	// And once more with a different value, to confirm the binding
+	// re-parses on each call rather than freezing on first read.
+	if err := Cmd.ParseFlags([]string{"--scope-hints-file", "/other/path.json"}); err != nil {
+		t.Fatalf("ParseFlags second pass failed: %v", err)
+	}
+	if scopeHintsFile != "/other/path.json" {
+		t.Errorf("scopeHintsFile global after second parse = %q, want /other/path.json", scopeHintsFile)
+	}
+}
+
 func TestMaxSeverity(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -152,16 +152,31 @@ func sanitizedFSError(op, tag string, err error) error {
 	}
 }
 
-// validateHintStrings rejects entries that would distort the prompt's
-// section structure. The clauses inline these strings line-by-line under
-// fixed Markdown headings, so a hint containing a newline could close
-// "## Test quality" early and inject content before "## Output Format".
-// scope_gate.py emits filesystem paths and package buckets — neither
-// shape contains newlines or leading whitespace — so this is a defense
-// against a buggy or hostile producer, not a normal input shape.
+// validateHintStrings rejects entries that SanitizePromptHint would also
+// reject at the prompt-builder boundary. The clauses inline these strings
+// line-by-line under fixed Markdown headings, so a hint containing a
+// newline could close "## Test quality" early, and a leading Markdown
+// control character (#, -, *, >, _, =) could open a new section or list
+// at line start. scope_gate.py emits filesystem paths and package buckets,
+// neither of which exhibits these shapes — so this is a defense against a
+// buggy or hostile producer, not a normal input.
+//
+// Failing here gives the operator a clear CLI warning ("test_paths[3]
+// starts with Markdown control char '#'") that points straight at the
+// producer bug. The prompt builder also filters on the same rules so a
+// future direct caller of BuildJSONPromptWithScope can't bypass the file
+// loader to inject Markdown — but it does so silently to keep prompt
+// construction infallible. Errors live here; defense-in-depth lives there.
 func validateHintStrings(tag string, items []string, field string) error {
 	for i, s := range items {
+		if SanitizePromptHint(s) {
+			continue
+		}
 		switch {
+		case s == "":
+			return fmt.Errorf(
+				"scope-hints file %s: %s[%d] is empty", tag, field, i,
+			)
 		case strings.ContainsAny(s, "\r\n"):
 			return fmt.Errorf(
 				"scope-hints file %s: %s[%d] contains newline", tag, field, i,
@@ -171,9 +186,10 @@ func validateHintStrings(tag string, items []string, field string) error {
 				"scope-hints file %s: %s[%d] has leading or trailing whitespace",
 				tag, field, i,
 			)
-		case s == "":
+		default:
 			return fmt.Errorf(
-				"scope-hints file %s: %s[%d] is empty", tag, field, i,
+				"scope-hints file %s: %s[%d] starts with Markdown control char %q",
+				tag, field, i, s[0],
 			)
 		}
 	}
