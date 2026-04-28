@@ -11,7 +11,7 @@
 //	    rootCmd := &cobra.Command{Use: "mycli", ...}
 //	    cliapp.RegisterStandardFlags(rootCmd, &opts)
 //	    // ... domain flags ...
-//	    os.Exit(cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
+//	    os.Exit(cliapp.Run(&opts, func(ctx context.Context, app *cliapp.App) error {
 //	        return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
 //	    }))
 //	}
@@ -87,23 +87,35 @@ func FromContext(ctx context.Context) *App {
 // calling os.Exit directly lets defers run, so log-file flushes are not
 // truncated.
 //
+// opts must be a pointer to the same Options struct that was passed to
+// RegisterStandardFlags, so that Run reads the values cobra will write during
+// flag parsing. Run pre-parses --verbose, --verbosity, and --color from
+// os.Args before fn is called, so the logger and renderer are set up with the
+// user's actual flag values rather than the defaults.
+//
 // Behavior:
 //
-//  1. Resolves verbosity and color from opts. Returns 2 with a stderr
+//  1. Pre-parses standard flags from os.Args so opts reflects user intent.
+//  2. Resolves verbosity and color from opts. Returns 2 with a stderr
 //     message on bad flag values.
-//  2. Opens the log file (DEBUG level by default) and sets slog.Default. On
+//  3. Opens the log file (DEBUG level by default) and sets slog.Default. On
 //     failure, falls back to stderr-only logging at the verbosity-mapped
 //     level and emits a warning.
-//  3. Builds the render.Renderer on stderr.
-//  4. Logs an invocation banner with redacted os.Args[1:].
-//  5. Sets up a context with double-signal force-exit (Ctrl-C twice → 130).
-//  6. Invokes fn. nil → 0; ctx-cancellation → 130; otherwise logs the error
+//  4. Builds the render.Renderer on stderr.
+//  5. Logs an invocation banner with redacted os.Args[1:].
+//  6. Sets up a context with double-signal force-exit (Ctrl-C twice → 130).
+//  7. Invokes fn. nil → 0; ctx-cancellation → 130; otherwise logs the error
 //     via slog and returns 1.
-func Run(opts Options, fn RunFunc) int {
+func Run(opts *Options, fn RunFunc) int {
 	if opts.ToolName == "" {
 		fmt.Fprintln(os.Stderr, "cliapp: ToolName is required")
 		return 2
 	}
+
+	// Pre-parse the standard flags from os.Args so the logger and renderer
+	// are configured with the user's actual values. Cobra will parse them
+	// again during fn; this early pass just ensures our setup sees them.
+	preParseStandardFlags(opts)
 
 	v, err := resolveVerbosity(opts.Verbose, opts.Verbosity)
 	if err != nil {
@@ -168,7 +180,7 @@ func Run(opts Options, fn RunFunc) int {
 // the configured file level. On failure, falls back to klogfmt.Init at the
 // verbosity-mapped stderr level and emits a slog.Warn describing the
 // fallback. The returned closer is always safe to call multiple times.
-func setupLogging(opts Options, v render.Verbosity) (logger *slog.Logger, logPath string, closer func()) {
+func setupLogging(opts *Options, v render.Verbosity) (logger *slog.Logger, logPath string, closer func()) {
 	noop := func() {}
 	stderrLevel := stderrLevelFor(v)
 

@@ -37,7 +37,7 @@ Use 'build' to run a builder-reviewer loop for autonomous task execution.`,
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newBuildCmd())
 
-	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+	os.Exit(cliapp.Run(&rootOpts, func(ctx context.Context, app *cliapp.App) error {
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
 	}))
 }

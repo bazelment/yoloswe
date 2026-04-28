@@ -99,7 +99,7 @@ func main() {
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Team mode only: for each newly-discovered issue, print the equivalent `bramble new-session` command instead of launching a workflow. TUI remains empty — look at stdout for the printed commands.")
 	rootCmd.Flags().BoolVar(&forceCleanup, "force-cleanup", false, "Team mode only: delete worktrees even for failed or cancelled runs. By default, failed and cancelled worktrees are preserved so in-progress work (including pushed branches / open PRs) is not lost.")
 
-	os.Exit(cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
+	os.Exit(cliapp.Run(&opts, func(ctx context.Context, app *cliapp.App) error {
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
 	}))
 }

@@ -26,7 +26,7 @@ var (
 )
 
 func main() {
-	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+	os.Exit(cliapp.Run(&rootOpts, func(ctx context.Context, app *cliapp.App) error {
 		wt.SetDefaultColorMode(toWTColorMode(app.Color))
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
 	}))

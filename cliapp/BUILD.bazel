@@ -17,6 +17,7 @@ go_library(
         "//agent-cli-wrapper/claude/render",
         "//logging/klogfmt",
         "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
     ],
 )
 

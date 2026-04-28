@@ -117,35 +117,42 @@ func runChildScenario(scenario string) {
 	var code int
 	switch scenario {
 	case "success":
-		code = Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
+		opts := Options{ToolName: "testtool"}
+		code = Run(&opts, func(ctx context.Context, app *App) error {
 			return nil
 		})
 	case "plain_error":
-		code = Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
+		opts := Options{ToolName: "testtool"}
+		code = Run(&opts, func(ctx context.Context, app *App) error {
 			return errors.New("scripted failure")
 		})
 	case "ctx_cancelled_via_signal":
-		code = Run(Options{ToolName: "testtool"}, func(ctx context.Context, app *App) error {
+		opts := Options{ToolName: "testtool"}
+		code = Run(&opts, func(ctx context.Context, app *App) error {
 			// Trigger Run's signal handler by SIGINTing ourselves.
 			_ = syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 			<-ctx.Done()
 			return ctx.Err()
 		})
 	case "bad_verbosity":
-		code = Run(Options{ToolName: "testtool", Verbosity: "loud"}, func(ctx context.Context, app *App) error {
+		opts := Options{ToolName: "testtool", Verbosity: "loud"}
+		code = Run(&opts, func(ctx context.Context, app *App) error {
 			return nil
 		})
 	case "bad_color":
-		code = Run(Options{ToolName: "testtool", Color: "rainbow"}, func(ctx context.Context, app *App) error {
+		opts := Options{ToolName: "testtool", Color: "rainbow"}
+		code = Run(&opts, func(ctx context.Context, app *App) error {
 			return nil
 		})
 	case "missing_toolname":
-		code = Run(Options{}, func(ctx context.Context, app *App) error { return nil })
+		opts := Options{}
+		code = Run(&opts, func(ctx context.Context, app *App) error { return nil })
 	case "banner":
-		code = Run(Options{
+		opts := Options{
 			ToolName:       "testtool",
 			SensitiveFlags: []string{"--token"},
-		}, func(ctx context.Context, app *App) error {
+		}
+		code = Run(&opts, func(ctx context.Context, app *App) error {
 			slog.Default().Info("child running")
 			return nil
 		})
@@ -154,6 +161,47 @@ func runChildScenario(scenario string) {
 		os.Exit(99)
 	}
 	os.Exit(code)
+}
+
+// TestRun_StandardFlagsPreParsed verifies that --verbose/--verbosity/--color
+// passed on the command line are reflected in the App handed to fn, even
+// though cobra's full flag parsing happens inside fn. This is the regression
+// test for the stale-copy bug where Run(opts, ...) received a by-value copy
+// of opts before cobra had a chance to populate it.
+func TestRun_StandardFlagsPreParsed(t *testing.T) {
+	if scenario := os.Getenv("TEST_RUN_SCENARIO"); scenario == "preparse" {
+		// Fake args are injected by the parent so Run sees --verbose.
+		if extra := os.Getenv("TEST_FAKE_ARGS"); extra != "" {
+			os.Args = append([]string{os.Args[0]}, strings.Split(extra, "|")...)
+		}
+		opts := Options{ToolName: "testtool"}
+		var gotVerbosity string
+		code := Run(&opts, func(_ context.Context, app *App) error {
+			gotVerbosity = app.Verbosity.String()
+			return nil
+		})
+		// Print the verbosity to stdout so the parent can read it.
+		fmt.Println(gotVerbosity)
+		os.Exit(code)
+	}
+
+	tmpHome := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run", "TestRun_StandardFlagsPreParsed")
+	cmd.Env = append(os.Environ(),
+		"TEST_RUN_SCENARIO=preparse",
+		"TEST_FAKE_ARGS=--verbose",
+		"HOME="+tmpHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("child failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	got := strings.TrimSpace(stdout.String())
+	if got != "verbose" {
+		t.Errorf("app.Verbosity = %q, want %q (--verbose not pre-parsed)", got, "verbose")
+	}
 }
 
 func exitCode(err error) int {

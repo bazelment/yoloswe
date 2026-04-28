@@ -3,8 +3,10 @@ package cliapp
 import (
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 )
@@ -98,4 +100,22 @@ func stderrLevelFor(v render.Verbosity) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// preParseStandardFlags extracts --verbose, --verbosity, and --color from
+// os.Args into opts before Run sets up the logger and renderer. Cobra will
+// parse these flags again when fn calls rootCmd.Execute; this early pass
+// exists solely so the logging and renderer configuration reflects the user's
+// actual flag values rather than the zero/default values present before cobra
+// runs. Unknown flags are silently ignored so subcommand-specific flags don't
+// cause errors here.
+func preParseStandardFlags(opts *Options) {
+	fs := pflag.NewFlagSet("cliapp-pre-parse", pflag.ContinueOnError)
+	fs.ParseErrorsWhitelist.UnknownFlags = true
+	fs.BoolVar(&opts.Verbose, "verbose", opts.Verbose, "")
+	fs.StringVar(&opts.Verbosity, "verbosity", opts.Verbosity, "")
+	fs.StringVar(&opts.Color, "color", opts.Color, "")
+	// Discard errors: unknown flags are expected (subcommand flags, positional
+	// args with - prefix), and --help should not exit here.
+	_ = fs.Parse(os.Args[1:])
 }

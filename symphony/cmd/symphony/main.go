@@ -38,7 +38,7 @@ func main() {
 	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 	rootCmd.Flags().IntVar(&port, "port", 0, "HTTP server port (0 = disabled unless set in config)")
 
-	os.Exit(cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+	os.Exit(cliapp.Run(&rootOpts, func(ctx context.Context, app *cliapp.App) error {
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
 	}))
 }
