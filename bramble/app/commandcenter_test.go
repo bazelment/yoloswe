@@ -121,22 +121,6 @@ func TestCommandCenter_NavigationGrid(t *testing.T) {
 	assert.Equal(t, 3, cc.selectedIdx) // clamped to len-1
 }
 
-func TestCommandCenter_RestoreSelectionByID(t *testing.T) {
-	cc := NewCommandCenter()
-	sessions := makeSessions()
-	cc.Show(sessions, 120, 40)
-	cc.selectedIdx = 0
-
-	// After refresh, the session order may change; restore by ID
-	cc.RestoreSelectionByID("sess-pending")
-	// sess-pending should be at index 2 after sort (idle, running, pending, completed)
-	assert.Equal(t, 2, cc.selectedIdx)
-
-	// Missing ID: clamp to valid range
-	cc.RestoreSelectionByID("nonexistent-id")
-	assert.True(t, cc.selectedIdx >= 0 && cc.selectedIdx < len(cc.sessions))
-}
-
 func TestCommandCenter_SelectByNumber(t *testing.T) {
 	cc := NewCommandCenter()
 	sessions := makeSessions()
@@ -234,9 +218,46 @@ func TestCommandCenter_UpdateSessionsPreservesPreview(t *testing.T) {
 	// UpdateSessions should preserve the preview
 	cc.UpdateSessions(sessions, 120, 40)
 	assert.Equal(t, previewedID, cc.PreviewedSessionID())
+	require.NotNil(t, cc.PreviewedSession())
+	assert.Equal(t, previewedID, cc.PreviewedSession().ID)
 	assert.NotEqual(t, -1, cc.previewIdx)
 	// Preview text is preserved (not cleared by UpdateSessions)
 	assert.Equal(t, []string{"line1", "line2"}, cc.previewText)
+}
+
+func TestCommandCenter_UpdateSessionsPreservesPreviewAcrossReSort(t *testing.T) {
+	cc := NewCommandCenter()
+	sessions := makeSessions()
+	cc.Show(sessions, 120, 40)
+
+	// Open preview on the running session (post-sort idx 1).
+	cc.selectedIdx = 1
+	sess := cc.TogglePreview()
+	require.NotNil(t, sess)
+	previewedID := sess.ID
+	require.Equal(t, session.SessionID("sess-running"), previewedID)
+	cc.SetPreviewText([]string{"line1", "line2"})
+	prevPreviewIdx := cc.previewIdx
+
+	// Mutate: flip sess-running to idle so it sorts ahead of sess-idle,
+	// changing the previewed session's row index.
+	mutated := makeSessions()
+	for i := range mutated {
+		if mutated[i].ID == "sess-running" {
+			mutated[i].Status = session.StatusIdle
+			mutated[i].Progress.LastActivity = time.Now().Add(time.Minute)
+		}
+	}
+	cc.UpdateSessions(mutated, 120, 40)
+
+	require.NotNil(t, cc.PreviewedSession())
+	assert.Equal(t, previewedID, cc.PreviewedSessionID(),
+		"preview must follow the session by ID across re-sort")
+	assert.Equal(t, previewedID, cc.PreviewedSession().ID)
+	assert.NotEqual(t, prevPreviewIdx, cc.previewIdx,
+		"previewIdx must move to the session's new post-sort row")
+	assert.Equal(t, []string{"line1", "line2"}, cc.previewText,
+		"preview text must survive re-sort")
 }
 
 func TestCommandCenter_UpdateSessionsClearsPreviewIfGone(t *testing.T) {
@@ -252,6 +273,7 @@ func TestCommandCenter_UpdateSessionsClearsPreviewIfGone(t *testing.T) {
 	// UpdateSessions with a list that doesn't contain the previewed session
 	cc.UpdateSessions([]session.SessionInfo{sessions[2], sessions[3]}, 120, 40)
 	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Nil(t, cc.PreviewedSession())
 	assert.Equal(t, -1, cc.previewIdx)
 	assert.Nil(t, cc.previewText)
 }
@@ -267,6 +289,7 @@ func TestCommandCenter_HideClearsPreviewState(t *testing.T) {
 	assert.Equal(t, -1, cc.previewIdx)
 	assert.Nil(t, cc.previewText)
 	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Nil(t, cc.PreviewedSession())
 }
 
 func TestCommandCenter_TogglePreviewTracksSessionID(t *testing.T) {
@@ -283,6 +306,7 @@ func TestCommandCenter_TogglePreviewTracksSessionID(t *testing.T) {
 	result := cc.TogglePreview()
 	assert.Nil(t, result)
 	assert.Equal(t, session.SessionID(""), cc.PreviewedSessionID())
+	assert.Nil(t, cc.PreviewedSession())
 }
 
 func TestSessionPriority(t *testing.T) {
@@ -328,6 +352,121 @@ func TestCommandCenter_NewSession_PBC(t *testing.T) {
 			assert.Equal(t, tc.sessionType, m2.pendingSessionType)
 		})
 	}
+}
+
+func TestCommandCenter_UpdateSessionsPreservesSelectionByID(t *testing.T) {
+	cc := NewCommandCenter()
+	sessions := makeSessions()
+	cc.Show(sessions, 120, 40)
+
+	cc.selectedIdx = 1
+	require.NotNil(t, cc.SelectedSession())
+	oldIdx := cc.selectedIdx
+	selID := cc.SelectedSession().ID
+	require.Equal(t, session.SessionID("sess-running"), selID)
+
+	mutated := makeSessions()
+	for i := range mutated {
+		if mutated[i].ID == "sess-running" {
+			mutated[i].Status = session.StatusIdle
+			mutated[i].Progress.LastActivity = time.Now().Add(time.Minute)
+		}
+	}
+	cc.UpdateSessions(mutated, 120, 40)
+
+	require.NotNil(t, cc.SelectedSession())
+	assert.NotEqual(t, oldIdx, cc.selectedIdx)
+	assert.Equal(t, 0, cc.selectedIdx)
+	assert.Equal(t, selID, cc.SelectedSession().ID,
+		"selection must follow the session by ID across re-sort")
+}
+
+func TestCommandCenter_ShowResetsSelection(t *testing.T) {
+	cc := NewCommandCenter()
+	cc.Show(makeSessions(), 120, 40)
+	cc.selectedIdx = 2
+	cc.Hide()
+
+	cc.Show(makeSessions(), 120, 40)
+	assert.Equal(t, 0, cc.selectedIdx)
+	require.NotNil(t, cc.SelectedSession())
+	assert.Equal(t, session.StatusIdle, cc.SelectedSession().Status)
+}
+
+func TestCommandCenter_UpdateSessionsClampsToTailWhenSelectedGone(t *testing.T) {
+	cc := NewCommandCenter()
+	sessions := makeSessions()
+	cc.Show(sessions, 120, 40)
+	cc.selectedIdx = 3
+
+	sorted := cc.Sessions()
+	keep := []session.SessionInfo{sorted[0], sorted[1]}
+	cc.UpdateSessions(keep, 120, 40)
+
+	require.NotNil(t, cc.SelectedSession())
+	assert.Equal(t, 1, cc.selectedIdx, "cursor should land on new tail, not bounce to head")
+}
+
+func TestCommandCenter_UpdateSessionsEmptyList(t *testing.T) {
+	cc := NewCommandCenter()
+	cc.Show(makeSessions(), 120, 40)
+	cc.selectedIdx = 2
+
+	cc.UpdateSessions(nil, 120, 40)
+	assert.Nil(t, cc.SelectedSession())
+}
+
+// TestCommandCenter_NewSession_AfterReSort is the end-to-end regression for the
+// "wrong worktree" bug: navigate to a non-first session, a re-sort happens,
+// then 'p'/'b'/'c' must spawn against the navigated session's worktree.
+func TestCommandCenter_NewSession_AfterReSort(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+	}, "test-repo")
+	m.worktreeDropdown.SelectIndex(0)
+
+	now := time.Now()
+	mkSession := func(id, path, name string, status session.SessionStatus, age time.Duration) session.SessionInfo {
+		return session.SessionInfo{
+			ID: session.SessionID(id), Status: status,
+			WorktreePath: path, WorktreeName: name, RepoName: "test-repo",
+			Progress: session.SessionProgressSnapshot{LastActivity: now.Add(-age)},
+		}
+	}
+	sessions := []session.SessionInfo{
+		mkSession("sess-a", "/tmp/wt/A", "A", session.StatusRunning, 1*time.Minute),
+		mkSession("sess-b", "/tmp/wt/B", "B", session.StatusRunning, 2*time.Minute),
+		mkSession("sess-c", "/tmp/wt/C", "C", session.StatusRunning, 3*time.Minute),
+	}
+	m.commandCenter.Show(sessions, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	// Initial sort within the running tier is [A, B, C] by LastActivity desc.
+	m.commandCenter.MoveSelection(1)
+	require.Equal(t, session.SessionID("sess-b"), m.commandCenter.SelectedSession().ID)
+
+	// Flip C to idle → new sort is [C, A, B]; numeric cursor at 1 would point at A.
+	mutated := []session.SessionInfo{
+		mkSession("sess-a", "/tmp/wt/A", "A", session.StatusRunning, 1*time.Minute),
+		mkSession("sess-b", "/tmp/wt/B", "B", session.StatusRunning, 2*time.Minute),
+		mkSession("sess-c", "/tmp/wt/C", "C", session.StatusIdle, 3*time.Minute),
+	}
+	m.commandCenter.UpdateSessions(mutated, m.width, m.height)
+
+	require.NotNil(t, m.commandCenter.SelectedSession())
+	require.Equal(t, session.SessionID("sess-b"), m.commandCenter.SelectedSession().ID,
+		"cursor must follow sess-b across re-sort")
+
+	newModel, _ := m.handleCommandCenter(keyPress('p'))
+	m2 := newModel.(Model)
+	require.True(t, m2.inputMode)
+
+	_, cmd := m2.Update(promptInputMsg{value: "do thing"})
+	require.NotNil(t, cmd)
+	startMsg, ok := cmd().(startSessionMsg)
+	require.True(t, ok)
+	assert.Equal(t, "/tmp/wt/B", startMsg.worktreePath,
+		"new session must target the navigated session's worktree, not the first card's")
 }
 
 func TestCommandCenter_NewSession_NoSession(t *testing.T) {
