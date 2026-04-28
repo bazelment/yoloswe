@@ -165,12 +165,20 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 // prompt clause. It rejects entries that would distort the surrounding
 // Markdown structure or look like injected instructions:
 //
-//   - Markdown control characters at the start (#, -, *, >, _, =) — these
-//     can close or open a section, list, or blockquote and reshape what
-//     comes after.
+//   - Block-level Markdown control characters at the start (#, -, *, >,
+//     =) that open headings, lists, blockquotes, or setext rules and
+//     reshape what comes after.
 //   - Newlines or carriage returns anywhere in the entry.
 //   - Leading/trailing whitespace, which renders awkwardly in joined lines.
 //   - Empty strings (would produce blank lines in the prompt).
+//
+// We deliberately do NOT reject leading underscore. TS/JS conventions
+// produce __tests__/foo.test.ts and Python writes _helper.py — both
+// legitimate scope-hint inputs the producer (scope_gate.py) emits
+// without prompting. Underscore at the start of a line in Markdown only
+// renders as emphasis when paired with a matching closing underscore on
+// the same line; a leading-underscore path inlined as one of many
+// path-per-line entries is safe.
 //
 // LoadScopeHints calls this at the file-load boundary so a producer bug
 // fails loudly with a CLI warning. The prompt builders also filter via
@@ -190,11 +198,12 @@ func SanitizePromptHint(s string) bool {
 	if s != strings.TrimSpace(s) {
 		return false
 	}
-	// Markdown control prefixes at the very first byte. We don't strip
-	// them — that would silently rewrite producer output — we just skip
-	// the entry. Realistic filesystem paths don't start with these.
+	// Block-level Markdown control prefixes at the very first byte. We
+	// don't strip them — that would silently rewrite producer output —
+	// we just skip the entry. Realistic filesystem paths don't start
+	// with these.
 	switch s[0] {
-	case '#', '-', '*', '>', '_', '=':
+	case '#', '-', '*', '>', '=':
 		return false
 	}
 	return true

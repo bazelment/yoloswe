@@ -571,13 +571,18 @@ func TestSanitizePromptHint(t *testing.T) {
 		{"path/to/valid.py", true},
 		{"package_with_underscore", true}, // _ inside, not at start
 		{"a-thing/x.py", true},            // - inside, not at start
+		// TS/JS __tests__ convention and Python _helper.py both start
+		// with underscore. These are legitimate scope-hint inputs from
+		// scope_gate.py — must accept.
+		{"__tests__/foo.test.ts", true},
+		{"_helper.py", true},
+		{"_test_module.py", true},
 		{"", false},
 		{"# comment", false},
 		{"## heading", false},
 		{"- list item", false},
 		{"* bullet", false},
 		{"> blockquote", false},
-		{"_underscore at start", false},
 		{"= equals", false},
 		{" leading-space.py", false},
 		{"trailing-space.py ", false},

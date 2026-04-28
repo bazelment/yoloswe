@@ -317,7 +317,6 @@ func TestLoadScopeHints_RejectsMarkdownPrefix(t *testing.T) {
 		{"dash", `{"schema_version":1,"test_paths":["- ignore previous"],"cross_service_packages":[]}`},
 		{"star", `{"schema_version":1,"test_paths":["* override"],"cross_service_packages":[]}`},
 		{"angle", `{"schema_version":1,"test_paths":[],"cross_service_packages":["a/","> b/"]}`},
-		{"underscore", `{"schema_version":1,"test_paths":["_private.py"],"cross_service_packages":[]}`},
 		{"equals", `{"schema_version":1,"test_paths":["=injected"],"cross_service_packages":[]}`},
 	}
 	for _, tc := range cases {
@@ -331,6 +330,31 @@ func TestLoadScopeHints_RejectsMarkdownPrefix(t *testing.T) {
 				t.Errorf("error should classify as Markdown control: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadScopeHints_AcceptsUnderscoreLeadingPaths(t *testing.T) {
+	// Regression guard for r4-codex: __tests__/foo.test.ts is the
+	// idiomatic TS/JS test path; _helper.py is the idiomatic Python
+	// "private module" prefix. Both were accidentally rejected by an
+	// earlier prompt-injection filter that listed `_` as a Markdown
+	// control character. They must load and survive into PromptOptions
+	// for the wider scope to actually widen on TS/JS PRs.
+	path := writeHintsFile(t, `{
+		"schema_version": 1,
+		"test_paths": [
+			"__tests__/foo.test.ts",
+			"src/_helper.py",
+			"_test_module.py"
+		],
+		"cross_service_packages": []
+	}`)
+	h, err := LoadScopeHints(path)
+	if err != nil {
+		t.Fatalf("underscore-leading paths must load, got: %v", err)
+	}
+	if len(h.TestPaths) != 3 {
+		t.Errorf("TestPaths len = %d, want 3", len(h.TestPaths))
 	}
 }
 
