@@ -14,20 +14,23 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/logging/klogfmt"
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/wt"
 )
 
 var (
 	repoFlag string
 	wtRoot   string
+	rootOpts = cliapp.Options{ToolName: "wt"}
 )
 
 func main() {
-	klogfmt.Init()
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+		// Propagate the user's --color preference into wt.DefaultOutput()'s
+		// color decision so colored CLI output respects --color=always|never.
+		wt.ColorPreference = rootOpts.Color
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	})
 }
 
 var rootCmd = &cobra.Command{
@@ -51,6 +54,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVarP(&repoFlag, "repo", "R", "",
 		"Target repository (default: auto-detect from cwd)")
+	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(newCmd)

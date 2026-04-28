@@ -30,7 +30,7 @@ func init() {
 }
 
 func runInteractiveCmd(cmd *cobra.Command, args []string) error {
-	ctx, cancel := setupContext()
+	ctx, cancel := setupContext(cmd.Context())
 	defer cancel()
 
 	consoleReporter, progressReporter := createProgressReporter()

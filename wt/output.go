@@ -32,9 +32,24 @@ func NewOutput(w io.Writer, colorized bool) *Output {
 	return &Output{w: w, colorized: colorized}
 }
 
-// DefaultOutput creates an Output for stdout with auto-detected color support.
+// ColorPreference is set by the CLI from --color and overrides the auto
+// detection performed by DefaultOutput. Values: "auto" (default), "always",
+// or "never".
+var ColorPreference = "auto"
+
+// DefaultOutput creates an Output for stdout. Color is enabled when the
+// caller's --color preference is "always", or "auto" with stdout attached to
+// a terminal and NO_COLOR unset.
 func DefaultOutput() *Output {
-	colorized := isTerminal() && os.Getenv("NO_COLOR") == ""
+	var colorized bool
+	switch ColorPreference {
+	case "always":
+		colorized = true
+	case "never":
+		colorized = false
+	default:
+		colorized = isTerminal() && os.Getenv("NO_COLOR") == ""
+	}
 	return NewOutput(os.Stdout, colorized)
 }
 

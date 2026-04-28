@@ -2,15 +2,13 @@
 package main
 
 import (
-	"io"
-	"log/slog"
+	"context"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/logging/klogfmt"
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/medivac/engine"
 )
 
@@ -19,8 +17,14 @@ var (
 	trackerPath string
 	sessionDir  string
 	dryRun      bool
-	verbosity   int
 )
+
+var rootOpts = cliapp.Options{
+	ToolName: "medivac",
+	// Capture LevelTrace and LevelDump in the log file so prompts, LLM
+	// responses, and raw CI logs land alongside Info events for postmortem.
+	LogFileLevel: engine.LevelDump,
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "medivac",
@@ -35,13 +39,14 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&trackerPath, "tracker", "", "Path to issues.json (default: <repo-root>/.medivac/issues.json)")
 	rootCmd.PersistentFlags().StringVar(&sessionDir, "session-dir", "", "Session recording directory (default: <repo-root>/.medivac/sessions)")
 	rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without making changes")
-	rootCmd.PersistentFlags().CountVarP(&verbosity, "verbose", "v", "Increase verbosity (-v, -vv, -vvv)")
+
+	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	})
 }
 
 // resolveRepoRoot finds the repo root from flags or git.
@@ -49,7 +54,6 @@ func resolveRepoRoot() (string, error) {
 	if repoRoot != "" {
 		return repoRoot, nil
 	}
-	// Default to current directory
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -76,8 +80,6 @@ func resolveSessionDir(root string) string {
 // resolveWTRoot walks up from the repo root to find the wt-managed repository
 // root (the directory containing .bare). Returns (wtRoot, repoName) where
 // wtRoot is the parent of the repo dir and repoName is the repo directory name.
-// For example, given /Users/x/worktrees/org/kernel/feature/scanner where
-// /Users/x/worktrees/org/kernel/.bare exists, returns ("/Users/x/worktrees/org", "kernel").
 func resolveWTRoot(repoRoot string) (string, string, error) {
 	dir := repoRoot
 	for {
@@ -87,53 +89,8 @@ func resolveWTRoot(repoRoot string) (string, string, error) {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			// Reached filesystem root without finding .bare
-			// Fall back to simple parent/base split
 			return filepath.Dir(repoRoot), filepath.Base(repoRoot), nil
 		}
 		dir = parent
 	}
-}
-
-// verbosityLevel maps the -v count to a slog.Level.
-//
-//	0 → Info, 1 → Debug, 2 → Trace (-8), 3+ → Dump (-12)
-func verbosityLevel() slog.Level {
-	switch {
-	case verbosity >= 3:
-		return engine.LevelDump
-	case verbosity == 2:
-		return engine.LevelTrace
-	case verbosity == 1:
-		return slog.LevelDebug
-	default:
-		return slog.LevelInfo
-	}
-}
-
-// newLogger creates a klog-formatted logger that writes to stderr.
-func newLogger() *slog.Logger {
-	return slog.New(klogfmt.New(os.Stderr, klogfmt.WithLevel(verbosityLevel())))
-}
-
-// newFileLogger creates a logger that writes to both stderr and a persistent
-// log file under <root>/.medivac/logs/. Returns the logger, the log file path,
-// and a cleanup function to close the log file.
-func newFileLogger(root string) (*slog.Logger, string, func()) {
-	level := verbosityLevel()
-
-	logDir := filepath.Join(root, ".medivac", "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		// Fall back to stderr-only.
-		return newLogger(), "", func() {}
-	}
-
-	logFile := filepath.Join(logDir, time.Now().Format("2006-01-02T15-04-05")+".log")
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return newLogger(), "", func() {}
-	}
-
-	w := io.MultiWriter(os.Stderr, f)
-	return slog.New(klogfmt.New(w, klogfmt.WithLevel(level))), logFile, func() { f.Close() }
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/medivac/engine"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -31,8 +32,7 @@ and creates a PR. Supports Claude, Gemini, and Codex providers.`,
 			return err
 		}
 
-		log, logFile, closeLog := newFileLogger(root)
-		defer closeLog()
+		app := cliapp.FromContext(cmd.Context())
 
 		// Determine worktree root (find .bare directory up the tree)
 		wtRoot, wtRepoName, err := resolveWTRoot(root)
@@ -62,8 +62,8 @@ and creates a PR. Supports Claude, Gemini, and Codex providers.`,
 			AgentBudget: fixBudget,
 			DryRun:      dryRun,
 			Branch:      fixBranch,
-			LogFile:     logFile,
-			Logger:      log,
+			LogFile:     app.LogPath,
+			Logger:      app.Logger,
 		})
 		if err != nil {
 			return fmt.Errorf("create engine: %w", err)

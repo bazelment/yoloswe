@@ -33,7 +33,7 @@ func init() {
 func runMissionCmd(cmd *cobra.Command, args []string) error {
 	mission := args[0]
 
-	ctx, cancel := setupContext()
+	ctx, cancel := setupContext(cmd.Context())
 	defer cancel()
 
 	consoleReporter, progressReporter := createProgressReporter()

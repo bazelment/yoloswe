@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,12 +15,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	ghtracker "github.com/bazelment/yoloswe/jiradozer/tracker/github"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/linear"
 	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
-	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -39,9 +38,6 @@ func main() {
 		sourceFilters   []string
 		maxConcurrent   int
 		branchPrefix    string
-		verbose         bool
-		verbosity       string
-		color           string
 		description     string
 		descriptionFile string
 		planFile        string
@@ -49,12 +45,17 @@ func main() {
 		forceCleanup    bool
 	)
 
+	opts := cliapp.Options{
+		ToolName:       "jiradozer",
+		SensitiveFlags: []string{"--description"},
+	}
+
 	rootCmd := &cobra.Command{
 		Use:   "jiradozer",
 		Short: "Issue-driven development workflow",
 		Long:  "Drives a plan → build → validate → ship workflow from an issue tracker with human-in-the-loop approval at each step.",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd.Context(), runArgs{
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			args := runArgs{
 				issueID:         issueID,
 				configPath:      configPath,
 				workDir:         workDir,
@@ -66,20 +67,25 @@ func main() {
 				sourceFilters:   sourceFilters,
 				maxConcurrent:   maxConcurrent,
 				branchPrefix:    branchPrefix,
-				verbose:         verbose,
-				verbosity:       verbosity,
-				color:           color,
+				verbose:         opts.Verbose,
+				verbosity:       opts.Verbosity,
+				color:           opts.Color,
 				description:     description,
 				descriptionFile: descriptionFile,
 				planFile:        planFile,
 				dryRun:          dryRun,
 				dryRunSet:       cmd.Flags().Changed("dry-run"),
 				forceCleanup:    forceCleanup,
+			}
+			cliapp.Run(opts, func(ctx context.Context, app *cliapp.App) error {
+				return run(ctx, app, args)
 			})
+			return nil // unreachable; cliapp.Run calls os.Exit
 		},
 	}
 	rootCmd.SilenceUsage = true
 
+	cliapp.RegisterStandardFlags(rootCmd, &opts)
 	rootCmd.Flags().StringVar(&issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123, owner/repo#42, or https://github.com/owner/repo/issues/42)")
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
@@ -91,19 +97,13 @@ func main() {
 	rootCmd.Flags().StringArrayVar(&sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
 	rootCmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	rootCmd.Flags().StringVar(&branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
-	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose output (shorthand for --verbosity=verbose)")
-	rootCmd.Flags().StringVar(&verbosity, "verbosity", "normal", "Output verbosity: quiet, normal, verbose, debug")
-	rootCmd.Flags().StringVar(&color, "color", "auto", "Color output: auto, always, never")
 	rootCmd.Flags().StringVar(&description, "description", "", "Task description for local mode (no external tracker needed)")
 	rootCmd.Flags().StringVar(&descriptionFile, "description-file", "", "Read task description from file (use - for stdin)")
 	rootCmd.Flags().StringVar(&planFile, "plan-file", "", "Plan file for build step (use - for stdin)")
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Team mode only: for each newly-discovered issue, print the equivalent `bramble new-session` command instead of launching a workflow. TUI remains empty — look at stdout for the printed commands.")
 	rootCmd.Flags().BoolVar(&forceCleanup, "force-cleanup", false, "Team mode only: delete worktrees even for failed or cancelled runs. By default, failed and cancelled worktrees are preserved so in-progress work (including pushed branches / open PRs) is not lost.")
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
@@ -132,63 +132,9 @@ type runArgs struct {
 	forceCleanup    bool
 }
 
-func run(ctx context.Context, args runArgs) error {
-	// Resolve verbosity: --verbose is shorthand for --verbosity=verbose.
-	v := render.ParseVerbosity(args.verbosity)
-	if args.verbose && v < render.VerbosityVerbose {
-		v = render.VerbosityVerbose
-	}
-	colorMode := render.ParseColorMode(args.color)
-
-	// Map verbosity to a slog level for stderr fallback paths.
-	// The log file always uses LevelDebug (full detail); stderr respects --verbosity.
-	stderrLevel := slog.LevelInfo
-	if v >= render.VerbosityDebug {
-		stderrLevel = slog.LevelDebug
-	} else if v <= render.VerbosityQuiet {
-		stderrLevel = slog.LevelWarn
-	}
-
-	// Set up logger: log file gets DEBUG-level detail, terminal output goes through renderer.
-	var activeLogPath string
-	if home, err := os.UserHomeDir(); err == nil {
-		logDir := filepath.Join(home, ".jiradozer", "logs")
-		logPath := filepath.Join(logDir, fmt.Sprintf("jiradozer-%s-%d.log",
-			time.Now().Format("20060102-150405"), os.Getpid()))
-		if err := os.MkdirAll(logDir, 0o755); err == nil {
-			f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-			if err == nil {
-				defer f.Close()
-				// Log file only — all terminal output goes through the renderer.
-				slog.SetDefault(slog.New(klogfmt.New(f, klogfmt.WithLevel(slog.LevelDebug))))
-				activeLogPath = logPath
-			} else {
-				klogfmt.Init(klogfmt.WithLevel(stderrLevel))
-				slog.Warn("failed to open log file, logging to stderr only", "path", logPath, "error", err)
-			}
-		} else {
-			klogfmt.Init(klogfmt.WithLevel(stderrLevel))
-			slog.Warn("failed to create log directory, logging to stderr only", "path", logDir, "error", err)
-		}
-	} else {
-		klogfmt.Init(klogfmt.WithLevel(stderrLevel))
-		slog.Warn("could not determine home directory, logging to stderr only", "error", err)
-	}
-	logger := slog.Default()
-
-	// Create the terminal renderer for headless modes (not TUI).
-	renderer := render.New(os.Stderr,
-		render.WithVerbosity(v),
-		render.WithColorMode(colorMode),
-	)
-	if activeLogPath != "" {
-		renderer.Status("Logging to " + activeLogPath)
-	}
-
-	// Log invocation banner with CLI args and working directory.
-	// Redact values of flags that may contain secrets.
-	cwd, _ := os.Getwd()
-	logger.Info("jiradozer starting", "args", redactArgs(os.Args[1:]), "cwd", cwd, "pid", os.Getpid())
+func run(ctx context.Context, app *cliapp.App, args runArgs) error {
+	logger := app.Logger
+	renderer := app.Renderer
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {
@@ -558,10 +504,10 @@ func buildChildArgs(args runArgs, absConfigPath string) []string {
 	}
 	if args.verbose {
 		out = append(out, "--verbose")
-	} else if args.verbosity != "normal" {
+	} else if args.verbosity != "normal" && args.verbosity != "" {
 		out = append(out, "--verbosity", args.verbosity)
 	}
-	if args.color != "auto" {
+	if args.color != "auto" && args.color != "" {
 		out = append(out, "--color", args.color)
 	}
 	return out
@@ -770,33 +716,9 @@ func availableModels() string {
 	return fmt.Sprintf("[%s]", strings.Join(names, ", "))
 }
 
-// sensitiveFlags lists flag prefixes whose values should be redacted from logs.
-var sensitiveFlags = []string{"--api-key", "--token", "--secret", "--password", "--description"}
-
-// redactArgs returns a copy of args with values of sensitive flags replaced by "***".
 // rendererStatus is a nil-safe wrapper around renderer.Status.
 func rendererStatus(r *render.Renderer, msg string) {
 	if r != nil {
 		r.Status(msg)
 	}
-}
-
-func redactArgs(args []string) []string {
-	out := make([]string, len(args))
-	copy(out, args)
-	for i, arg := range out {
-		for _, prefix := range sensitiveFlags {
-			// --flag=value form
-			if strings.HasPrefix(arg, prefix+"=") {
-				out[i] = prefix + "=***"
-				break
-			}
-			// --flag value form: redact the next arg
-			if arg == prefix && i+1 < len(out) {
-				out[i+1] = "***"
-				break
-			}
-		}
-	}
-	return out
 }

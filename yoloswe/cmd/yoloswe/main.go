@@ -10,20 +10,19 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/logging/klogfmt"
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
 )
 
+var rootOpts = cliapp.Options{ToolName: "yoloswe"}
+
 func main() {
-	klogfmt.Init()
 	rootCmd := &cobra.Command{
 		Use:   "yoloswe",
 		Short: "AI-assisted software engineering tool",
@@ -33,12 +32,13 @@ Use 'plan' to design and plan implementations before execution.
 Use 'build' to run a builder-reviewer loop for autonomous task execution.`,
 	}
 
+	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newBuildCmd())
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	cliapp.Run(rootOpts, func(ctx context.Context, app *cliapp.App) error {
+		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
+	})
 }
 
 // Plan command flags
@@ -50,7 +50,6 @@ type planFlags struct {
 	build           string
 	externalBuilder string
 	buildModel      string
-	verbose         bool
 	simple          bool
 }
 
@@ -76,7 +75,6 @@ The AI will explore the codebase, consider approaches, and produce a detailed pl
 	cmd.Flags().StringVar(&flags.workDir, "dir", "", "Working directory (defaults to current directory)")
 	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Directory for session recordings (defaults to ~/.yoloswe)")
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
-	cmd.Flags().BoolVar(&flags.verbose, "verbose", false, "Show detailed tool results (errors are always shown)")
 	cmd.Flags().BoolVar(&flags.simple, "simple", false, "Auto-answer questions with first option and export plan on completion")
 	cmd.Flags().StringVar(&flags.build, "build", "", "After planning, execute: 'current' (same session) or 'new' (fresh session)")
 	cmd.Flags().StringVar(&flags.externalBuilder, "external-builder", "", "Path to external builder executable (e.g., yoloswe build). Used with --build new.")
@@ -93,7 +91,7 @@ func runPlan(cmd *cobra.Command, args []string, flags *planFlags) {
 	}
 	if prompt == "" {
 		fmt.Fprintln(os.Stderr, "Error: no prompt provided")
-		cmd.Usage()
+		_ = cmd.Usage()
 		os.Exit(1)
 	}
 
@@ -121,7 +119,7 @@ func runPlan(cmd *cobra.Command, args []string, flags *planFlags) {
 		WorkDir:             workDir,
 		RecordingDir:        flags.recordDir,
 		SystemPrompt:        flags.systemPrompt,
-		Verbose:             flags.verbose,
+		Verbose:             rootOpts.Verbose,
 		Simple:              flags.simple,
 		Prompt:              prompt,
 		BuildMode:           buildMode,
@@ -132,17 +130,7 @@ func runPlan(cmd *cobra.Command, args []string, flags *planFlags) {
 	// Create planner wrapper
 	p := planner.NewPlannerWrapper(config)
 
-	// Setup context with signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		fmt.Fprintln(os.Stderr, "\nInterrupted, shutting down...")
-		cancel()
-	}()
+	ctx := cmd.Context()
 
 	// Start the session
 	if err := p.Start(ctx); err != nil {
@@ -154,7 +142,6 @@ func runPlan(cmd *cobra.Command, args []string, flags *planFlags) {
 	// Run the planner
 	if err := p.Run(ctx, prompt); err != nil {
 		if ctx.Err() != nil {
-			// Context cancelled, exit gracefully
 			os.Exit(0)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -181,7 +168,6 @@ type buildFlags struct {
 	budget          float64
 	timeout         int
 	maxIterations   int
-	verbose         bool
 	requireApproval bool
 	reviewFirst     bool
 }
@@ -212,7 +198,6 @@ The loop continues until the reviewer accepts or limits are reached.`,
 	cmd.Flags().IntVar(&flags.timeout, "timeout", 3600, "Max seconds")
 	cmd.Flags().IntVar(&flags.maxIterations, "max-iterations", 100, "Max builder-reviewer iterations")
 	cmd.Flags().StringVar(&flags.record, "record", "", "Session recordings directory (default: ~/.yoloswe)")
-	cmd.Flags().BoolVar(&flags.verbose, "verbose", false, "Show detailed output")
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt for builder")
 	cmd.Flags().BoolVar(&flags.requireApproval, "require-approval", false, "Require user approval for tool executions (default: auto-approve)")
 	cmd.Flags().StringVar(&flags.resumeSession, "resume", "", "Resume from a previous session ID")
@@ -222,6 +207,7 @@ The loop continues until the reviewer accepts or limits are reached.`,
 }
 
 func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) {
+	app := cliapp.FromContext(cmd.Context())
 	prompt := strings.Join(args, " ")
 
 	// Get working directory
@@ -256,39 +242,24 @@ func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) {
 		ResumeSessionID: flags.resumeSession,
 		ReviewFirst:     flags.reviewFirst,
 		ReviewerModel:   flags.reviewerModel,
-		Goal:            prompt, // Use prompt as goal
+		Goal:            prompt,
 		MaxBudgetUSD:    flags.budget,
 		MaxTimeSeconds:  flags.timeout,
 		MaxIterations:   flags.maxIterations,
-		Verbose:         flags.verbose,
+		Verbose:         rootOpts.Verbose,
 	}
 
-	// Setup context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	app.Logger.Info("yoloswe build config",
+		"builder_model", config.BuilderModel,
+		"reviewer_model", config.ReviewerModel,
+		"work_dir", config.BuilderWorkDir,
+		"budget_usd", config.MaxBudgetUSD,
+		"timeout_seconds", config.MaxTimeSeconds,
+		"max_iterations", config.MaxIterations,
+		"prompt", prompt,
+	)
 
-	// Handle signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		fmt.Fprintln(os.Stderr, "\nInterrupted, shutting down...")
-		cancel()
-	}()
-
-	// Print configuration
-	fmt.Println(strings.Repeat("=", 60))
-	fmt.Println("YOLOSWE - Builder-Reviewer Loop")
-	fmt.Println(strings.Repeat("-", 60))
-	fmt.Printf("Builder model:  %s\n", config.BuilderModel)
-	fmt.Printf("Reviewer model: %s\n", config.ReviewerModel)
-	fmt.Printf("Working dir:    %s\n", config.BuilderWorkDir)
-	fmt.Printf("Budget:         $%.2f\n", config.MaxBudgetUSD)
-	fmt.Printf("Timeout:        %ds\n", config.MaxTimeSeconds)
-	fmt.Printf("Max iterations: %d\n", config.MaxIterations)
-	fmt.Println(strings.Repeat("-", 60))
-	fmt.Printf("Prompt: %s\n", prompt)
-	fmt.Println(strings.Repeat("=", 60))
+	ctx := cmd.Context()
 
 	// Create and run SWE wrapper
 	swe := yoloswe.New(config)

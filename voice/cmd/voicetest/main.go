@@ -12,10 +12,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"time"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 	"github.com/bazelment/yoloswe/voice/stt"
 	"github.com/bazelment/yoloswe/voice/stt/deepgram"
@@ -23,11 +25,30 @@ import (
 )
 
 func main() {
-	klogfmt.Init()
 	provider := flag.String("provider", "deepgram", "STT provider (deepgram)")
 	file := flag.String("file", "", "WAV file to transcribe (omit for live mic)")
 	logFile := flag.String("log", "", "JSONL log file path")
+	verbose := flag.Bool("verbose", false, "Verbose output (shorthand for --verbosity=verbose)")
+	verbosity := flag.String("verbosity", "normal", "Output verbosity: quiet, normal, verbose, debug")
+	color := flag.String("color", "auto", "Color output: auto, always, never")
 	flag.Parse()
+
+	v := render.ParseVerbosity(*verbosity)
+	if *verbose && v < render.VerbosityVerbose {
+		v = render.VerbosityVerbose
+	}
+	// --color is parsed for symmetry with sibling tools; voicetest doesn't
+	// produce ANSI output today, so the value is logged but otherwise unused.
+	_ = render.ParseColorMode(*color)
+
+	stderrLevel := slog.LevelInfo
+	switch {
+	case v >= render.VerbosityDebug:
+		stderrLevel = slog.LevelDebug
+	case v <= render.VerbosityQuiet:
+		stderrLevel = slog.LevelWarn
+	}
+	klogfmt.Init(klogfmt.WithLevel(stderrLevel))
 
 	if err := run(*provider, *file, *logFile); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

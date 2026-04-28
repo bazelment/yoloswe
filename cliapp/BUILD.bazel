@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# Marker BUILD file for the cliapp module root.
+
+go_library(
+    name = "cliapp",
+    srcs = [
+        "app.go",
+        "flags.go",
+        "logfile.go",
+        "redact.go",
+        "signals.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/cliapp",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agent-cli-wrapper/claude/render",
+        "//logging/klogfmt",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+go_test(
+    name = "cliapp_test",
+    srcs = [
+        "app_test.go",
+        "flags_test.go",
+        "logfile_test.go",
+        "redact_test.go",
+        "signals_test.go",
+    ],
+    embed = [":cliapp"],
+    deps = ["//agent-cli-wrapper/claude/render"],
+)

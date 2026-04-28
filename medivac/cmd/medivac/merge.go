@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/medivac/engine"
 	"github.com/bazelment/yoloswe/wt"
 )
@@ -19,8 +20,7 @@ var mergeCmd = &cobra.Command{
 			return err
 		}
 
-		log, logFile, closeLog := newFileLogger(root)
-		defer closeLog()
+		app := cliapp.FromContext(cmd.Context())
 
 		wtRoot, wtRepoName, err := resolveWTRoot(root)
 		if err != nil {
@@ -44,8 +44,8 @@ var mergeCmd = &cobra.Command{
 			TrackerPath: resolveTrackerPath(root),
 			SessionDir:  sessDir,
 			DryRun:      dryRun,
-			LogFile:     logFile,
-			Logger:      log,
+			LogFile:     app.LogPath,
+			Logger:      app.Logger,
 		})
 		if err != nil {
 			return fmt.Errorf("create engine: %w", err)
