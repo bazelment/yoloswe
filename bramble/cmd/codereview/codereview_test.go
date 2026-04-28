@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -267,6 +268,82 @@ func TestFinalizeEnvelope_ReturnErrorPropagatesToEnvelopeMessage(t *testing.T) {
 	})
 	if got.Error != "reviewer drive-by: auth denied" {
 		t.Errorf("envelope.error = %q, want %q", got.Error, retErr.Error())
+	}
+}
+
+func TestLoadPromptOptions_NoFile(t *testing.T) {
+	// Empty path is the legacy/default case: no hints loaded, but
+	// SkipTestExecution must still pass through.
+	opts := loadPromptOptions("", true)
+	if !opts.SkipTestExecution {
+		t.Error("SkipTestExecution should be passed through with empty path")
+	}
+	if len(opts.TestScopeHints) != 0 || len(opts.CrossServicePackages) != 0 {
+		t.Errorf("expected empty hints for empty path, got %+v", opts)
+	}
+}
+
+func TestLoadPromptOptions_ValidFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	contents := `{"schema_version":1,"test_paths":["x/test_y.py"],"cross_service_packages":["a/","b/"]}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write hints file: %v", err)
+	}
+	opts := loadPromptOptions(path, false)
+	if len(opts.TestScopeHints) != 1 || opts.TestScopeHints[0] != "x/test_y.py" {
+		t.Errorf("TestScopeHints = %v", opts.TestScopeHints)
+	}
+	if len(opts.CrossServicePackages) != 2 {
+		t.Errorf("CrossServicePackages len = %d, want 2", len(opts.CrossServicePackages))
+	}
+}
+
+func TestLoadPromptOptions_MalformedFallsBack(t *testing.T) {
+	// The contract: a malformed/missing hints file must NOT abort the
+	// review. Falls back to narrow-review options and logs a warning. This
+	// matches the plan's "log-and-fall-back" behavior — automation
+	// (/pr-polish) can pass a hints file without worrying that its
+	// scope_gate.py emitting garbage will brick the run.
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("write hints file: %v", err)
+	}
+	opts := loadPromptOptions(path, true)
+	if !opts.SkipTestExecution {
+		t.Error("SkipTestExecution should pass through even on fallback")
+	}
+	if len(opts.TestScopeHints) != 0 {
+		t.Errorf("expected empty TestScopeHints on fallback, got %v", opts.TestScopeHints)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "scope-hints file ignored") {
+		t.Errorf("expected warning log, got: %q", logged)
+	}
+	if !strings.Contains(logged, "narrow review") {
+		t.Errorf("warning should mention narrow-review fallback, got: %q", logged)
+	}
+}
+
+func TestLoadPromptOptions_MissingFileFallsBack(t *testing.T) {
+	// Same fallback behavior for a path that doesn't exist on disk.
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	opts := loadPromptOptions(filepath.Join(t.TempDir(), "nonexistent.json"), false)
+	if len(opts.TestScopeHints) != 0 {
+		t.Errorf("expected empty TestScopeHints on missing-file fallback, got %v", opts.TestScopeHints)
+	}
+	if !strings.Contains(buf.String(), "scope-hints file ignored") {
+		t.Errorf("expected warning log, got: %q", buf.String())
 	}
 }
 

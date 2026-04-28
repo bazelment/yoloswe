@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
@@ -112,6 +113,32 @@ const skipTestExecutionSuffix = `
 
 Do NOT run tests or build commands. The caller runs tests separately. Read test files to assess coverage, but do not invoke bazel, go test, go build, npm test, pytest, etc.`
 
+// PromptOptions configures the optional clauses appended to a review prompt.
+//
+// Each clause is gated by data presence rather than a separate boolean: an
+// empty TestScopeHints means "no test-quality clause", and fewer than two
+// CrossServicePackages means "no cross-service clause". This collapses the
+// (boolean, list) cartesian product into a single source of truth — the
+// caller controls everything by what they put in the lists.
+type PromptOptions struct {
+	// TestScopeHints lists co-located test paths the agent should read. When
+	// non-empty, the test-quality clause is appended to the prompt and the
+	// paths are inlined under it (capped at testScopeHintsCap entries).
+	TestScopeHints []string
+
+	// CrossServicePackages names the top-level packages this PR touches. When
+	// it has at least two entries, the cross-service contract-sweep clause is
+	// appended.
+	CrossServicePackages []string
+
+	// SkipTestExecution discourages the agent from spawning bazel/go test/etc.
+	SkipTestExecution bool
+}
+
+// testScopeHintsCap bounds the number of test paths inlined into the prompt
+// so token spend stays predictable on very large multi-package PRs.
+const testScopeHintsCap = 50
+
 // buildBasePrompt creates the common review prompt content.
 func buildBasePrompt(goal string, skipTestExecution bool) string {
 	base := fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
@@ -134,14 +161,106 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 	return base
 }
 
+// testQualityClause returns the test-quality scrutiny clause with the given
+// co-located test paths inlined. Each bullet maps to a real bot finding from
+// the kernel evidence corpus (see plans/issue-175-widen-review-scope.md).
+//
+// The caller must guarantee len(paths) > 0 — buildScopeSuffix is the only
+// caller and gates on that.
+func testQualityClause(paths []string) string {
+	displayed := paths
+	suffix := ""
+	if len(displayed) > testScopeHintsCap {
+		extra := len(displayed) - testScopeHintsCap
+		displayed = displayed[:testScopeHintsCap]
+		suffix = fmt.Sprintf("\n(... and %d more — read tests/ directories under the changed package roots)", extra)
+	}
+	return `
+
+## Test quality
+For each test file in scope (whether in the diff or co-located, see paths
+listed below), assess whether the tests would actually catch a regression
+of the change under review. Flag patterns that weaken regression signal:
+- Tautological assertions (e.g. ` + "`type(x) == type(x)`" + `, ` + "`assert x == x`" + `,
+  ` + "`assert isinstance(x, type(x))`" + `).
+- Mock setups that bypass the system under test (e.g. patching the function
+  itself, asserting only the mock was called, never the new behavior).
+- Negative controls that catch too broad an exception class
+  (` + "`pytest.raises((Specific, Exception))`" + ` is ` + "`Exception`" + `).
+- Tests that "pass" only because of incidental side-effects in the harness
+  (logger sinks that aren't actually written by the workflow under test;
+  context managers that force-pass a check the test claims to verify).
+- Unused imports, unused locals, unused fixtures (cite by line).
+- Missing kwargs/args on construction that the production code now requires
+  for behavior under test (e.g. ` + "`Worker(...)`" + ` called without
+  ` + "`workflow_runner=`" + ` when production code passes it).
+
+Continue to avoid nit-level comments unless they block understanding of
+the diff or weaken a stated regression signal.
+
+Co-located test files to read (in addition to anything in the diff):
+` + strings.Join(displayed, "\n") + suffix
+}
+
+// crossServiceClause returns the cross-service contract-sweep clause naming
+// the touched packages. The caller must guarantee len(packages) >= 2.
+func crossServiceClause(packages []string) string {
+	return `
+
+## Cross-service contract sweep
+This PR touches multiple top-level packages: ` + strings.Join(packages, ", ") + `.
+Trace every public API/handler/exported symbol modified in one package to its
+consumers in the others. Read both sides of each surface and flag:
+1. Signature or shape changes that don't match consumer expectations
+   (request/response field names, types, optionality, enum values).
+2. Async state updates that desync between producer and consumer
+   (optimistic UI updates that diverge from refetched server state,
+   stale-while-revalidate paths returning prior values).
+3. Error or loading paths whose handling differs across packages
+   (one side throws, the other silently falls back; one side surfaces a
+   typed error, the other treats it as success).
+4. Silent fallbacks that swallow values from another service (default
+   values masking missing fields, empty arrays masking failed lookups).
+5. Route-table or schema ordering issues where one definition shadows or
+   conflicts with another (FastAPI path-parameter ordering, ORM-mixin
+   columns vs explicit migrations, OpenAPI tag collisions).
+
+When citing an issue, name both sides (file:line) and explain the desync
+explicitly. If both sides agree, do not flag the surface.`
+}
+
+// buildScopeSuffix concatenates the optional clauses dictated by opts. Each
+// clause is gated purely by data presence so callers without scope info pay
+// no cost — the returned string is empty when neither clause applies, which
+// keeps legacy callers byte-equal to today's prompt.
+func buildScopeSuffix(opts PromptOptions) string {
+	var s string
+	if len(opts.TestScopeHints) > 0 {
+		s += testQualityClause(opts.TestScopeHints)
+	}
+	if len(opts.CrossServicePackages) >= 2 {
+		s += crossServiceClause(opts.CrossServicePackages)
+	}
+	return s
+}
+
 // BuildPrompt creates the review prompt with free-form text output.
 func BuildPrompt(goal string) string {
 	return BuildPromptWithOptions(goal, false)
 }
 
 // BuildPromptWithOptions is BuildPrompt with the skip-test-execution toggle.
+// Kept as a shim around BuildPromptWithScope so existing callers compile
+// unchanged; passes empty TestScopeHints/CrossServicePackages so the legacy
+// output is byte-equal to today's.
 func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
-	return buildBasePrompt(goal, skipTestExecution) + `
+	return BuildPromptWithScope(goal, PromptOptions{SkipTestExecution: skipTestExecution})
+}
+
+// BuildPromptWithScope creates the free-form review prompt with scope clauses
+// gated by opts. Empty PromptOptions{} produces today's legacy prompt.
+func BuildPromptWithScope(goal string, opts PromptOptions) string {
+	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
 
 After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.`
 }
@@ -151,9 +270,18 @@ func BuildJSONPrompt(goal string) string {
 	return BuildJSONPromptWithOptions(goal, false)
 }
 
-// BuildJSONPromptWithOptions is BuildJSONPrompt with the skip-test-execution toggle.
+// BuildJSONPromptWithOptions is BuildJSONPrompt with the skip-test-execution
+// toggle. Kept as a shim around BuildJSONPromptWithScope.
 func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
-	return buildBasePrompt(goal, skipTestExecution) + `
+	return BuildJSONPromptWithScope(goal, PromptOptions{SkipTestExecution: skipTestExecution})
+}
+
+// BuildJSONPromptWithScope creates the JSON-output review prompt with scope
+// clauses gated by opts. Empty PromptOptions{} produces today's legacy
+// prompt; the scope clauses (test-quality, cross-service) are inserted
+// between the base prompt and the JSON output rules.
+func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
+	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:

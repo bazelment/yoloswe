@@ -10,6 +10,13 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
 
+// updateGoldens lets the developer regenerate the legacy-prompt golden file
+// after intentional prompt changes via `bazel test --test_env=UPDATE_GOLDENS=1`.
+// Without that env var, mismatches fail the test so unintended prompt drift
+// is caught at CI time. Mirrors the UPDATE_FIXTURES pattern documented in
+// CLAUDE.md.
+func updateGoldens() bool { return os.Getenv("UPDATE_GOLDENS") == "1" }
+
 func TestBuildPrompt(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -406,5 +413,160 @@ func TestResolveProtocolLogPath_UniqueFilenames(t *testing.T) {
 	}
 	if !strings.Contains(filepath.Base(path2), "reviewer-session-") {
 		t.Errorf("expected timestamped filename, got %s", filepath.Base(path2))
+	}
+}
+
+// --- Scope-clause tests -----------------------------------------------------
+
+const testQualityMarker = "## Test quality"
+const crossServiceMarker = "## Cross-service contract sweep"
+
+func TestBuildJSONPromptWithScope_NoOptionsMatchesLegacy(t *testing.T) {
+	// The shim contract: BuildJSONPrompt(goal) and
+	// BuildJSONPromptWithScope(goal, PromptOptions{}) must produce
+	// byte-identical output. yoloswe/swe.go:383 still calls the legacy
+	// shim; this guarantees its prompt doesn't drift by accident when the
+	// scope clauses get added or tuned.
+	for _, goal := range []string{"add user authentication", ""} {
+		t.Run("goal="+goal, func(t *testing.T) {
+			legacy := BuildJSONPrompt(goal)
+			scope := BuildJSONPromptWithScope(goal, PromptOptions{})
+			if legacy != scope {
+				t.Errorf("legacy and scope-empty outputs differ\n--- legacy ---\n%s\n--- scope-empty ---\n%s", legacy, scope)
+			}
+			if strings.Contains(scope, testQualityMarker) {
+				t.Errorf("empty PromptOptions must not emit test-quality clause; found %q in output", testQualityMarker)
+			}
+			if strings.Contains(scope, crossServiceMarker) {
+				t.Errorf("empty PromptOptions must not emit cross-service clause; found %q in output", crossServiceMarker)
+			}
+		})
+	}
+}
+
+func TestBuildJSONPromptWithScope_TestQualityGatedByPaths(t *testing.T) {
+	// Single-path is enough; two-path verifies join.
+	hints := []string{"a/test_x.py", "b/test_y.py"}
+	out := BuildJSONPromptWithScope("g", PromptOptions{TestScopeHints: hints})
+	if !strings.Contains(out, testQualityMarker) {
+		t.Errorf("non-empty TestScopeHints must emit test-quality clause")
+	}
+	for _, p := range hints {
+		if !strings.Contains(out, p) {
+			t.Errorf("output missing inlined path %q", p)
+		}
+	}
+	// Cross-service clause must not leak in just because test paths are set.
+	if strings.Contains(out, crossServiceMarker) {
+		t.Errorf("test-only opts must not emit cross-service clause")
+	}
+}
+
+func TestBuildJSONPromptWithScope_CrossServiceRequiresTwo(t *testing.T) {
+	// A single package isn't a multi-package PR; the clause must stay off.
+	one := BuildJSONPromptWithScope("g", PromptOptions{CrossServicePackages: []string{"a/"}})
+	if strings.Contains(one, crossServiceMarker) {
+		t.Errorf("single package must not emit cross-service clause")
+	}
+	two := BuildJSONPromptWithScope("g", PromptOptions{CrossServicePackages: []string{"a/", "b/"}})
+	if !strings.Contains(two, crossServiceMarker) {
+		t.Errorf("two packages must emit cross-service clause")
+	}
+	if !strings.Contains(two, "a/, b/") {
+		t.Errorf("output should list packages comma-joined; got:\n%s", two)
+	}
+}
+
+func TestBuildJSONPromptWithScope_TestPathsCappedAt50(t *testing.T) {
+	// Above the cap: paths 1..50 inlined, 51+ replaced by a truncation
+	// suffix. This keeps token spend bounded on giant multi-package PRs.
+	paths := make([]string, 73)
+	for i := range paths {
+		paths[i] = "p/" + string(rune('a'+i%26)) + "/test_x.py"
+	}
+	out := BuildJSONPromptWithScope("g", PromptOptions{TestScopeHints: paths})
+	for i := 0; i < testScopeHintsCap; i++ {
+		if !strings.Contains(out, paths[i]) {
+			t.Errorf("path index %d (%q) missing from output", i, paths[i])
+		}
+	}
+	// Paths share a 'p/<letter>/test_x.py' template with only 26 distinct
+	// letters, so duplicates beyond index 26 are expected — we can't assert
+	// "51st path string is absent" via a substring check. The truncation
+	// marker is the reliable signal: 73 - 50 = 23 more elided.
+	if !strings.Contains(out, "and 23 more") {
+		t.Errorf("expected truncation marker 'and 23 more', got:\n%s", out)
+	}
+}
+
+func TestBuildJSONPromptWithScope_BothClausesPresent(t *testing.T) {
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		TestScopeHints:       []string{"a/test_x.py"},
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+	})
+	if !strings.Contains(out, testQualityMarker) {
+		t.Errorf("expected test-quality clause")
+	}
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause")
+	}
+	// Test-quality clause must come before cross-service clause: tests
+	// scrutinize the diff itself, the contract sweep is an extra lens.
+	tqIdx := strings.Index(out, testQualityMarker)
+	csIdx := strings.Index(out, crossServiceMarker)
+	if tqIdx >= csIdx {
+		t.Errorf("expected test-quality clause before cross-service clause; got tq=%d cs=%d", tqIdx, csIdx)
+	}
+	// Both must be before the JSON output rules — otherwise the agent sees
+	// the schema before the scope guidance, and the scope guidance reads
+	// like trailing fluff instead of behavior to apply.
+	jsonIdx := strings.Index(out, "## Output Format")
+	if jsonIdx < 0 || csIdx >= jsonIdx {
+		t.Errorf("expected scope clauses before JSON output rules; got cs=%d json=%d", csIdx, jsonIdx)
+	}
+}
+
+func TestBuildJSONPromptWithScope_SkipTestExecutionPropagates(t *testing.T) {
+	out := BuildJSONPromptWithScope("g", PromptOptions{SkipTestExecution: true})
+	if !strings.Contains(out, "Do NOT run tests or build commands") {
+		t.Errorf("SkipTestExecution did not propagate; output missing the suffix")
+	}
+}
+
+func TestBuildPromptWithScope_NoOptionsMatchesLegacy(t *testing.T) {
+	// Same shim guarantee for the free-form variant.
+	for _, goal := range []string{"x", ""} {
+		legacy := BuildPrompt(goal)
+		scope := BuildPromptWithScope(goal, PromptOptions{})
+		if legacy != scope {
+			t.Errorf("free-form legacy/scope-empty differ for goal=%q", goal)
+		}
+	}
+}
+
+// TestLegacyJSONPromptGolden pins today's BuildJSONPrompt output byte-for-
+// byte. Drift is most likely to creep in when someone edits the base prompt
+// or the JSON output rules without realizing yoloswe/swe.go and any
+// caller-without-hints expects byte-stability.
+//
+// To regenerate after an intentional change: bazel test --test_env=UPDATE_GOLDENS=1.
+func TestLegacyJSONPromptGolden(t *testing.T) {
+	got := BuildJSONPrompt("review auth changes")
+	goldenPath := filepath.Join("testdata", "legacy_json_prompt.txt")
+	if updateGoldens() {
+		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+			t.Fatalf("mkdir testdata: %v", err)
+		}
+		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
+			t.Fatalf("write golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden (run with UPDATE_GOLDENS=1 to create): %v", err)
+	}
+	if string(want) != got {
+		t.Errorf("legacy JSON prompt drift detected.\n--- want (testdata/legacy_json_prompt.txt) ---\n%s\n--- got ---\n%s", want, got)
 	}
 }

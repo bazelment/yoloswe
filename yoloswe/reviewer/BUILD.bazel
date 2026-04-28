@@ -10,6 +10,7 @@ go_library(
         "json_output.go",
         "reviewer.go",
         "runlog.go",
+        "scope_hints.go",
         "tool_display.go",
     ],
     importpath = "github.com/bazelment/yoloswe/yoloswe/reviewer",
@@ -34,7 +35,9 @@ go_test(
         "json_output_test.go",
         "reviewer_test.go",
         "runlog_test.go",
+        "scope_hints_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":reviewer"],
     deps = [
         "//agent-cli-wrapper/acp",
