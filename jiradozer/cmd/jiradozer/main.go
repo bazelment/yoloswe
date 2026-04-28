@@ -86,7 +86,7 @@ func main() {
 	rootCmd.Flags().StringVar(&configPath, "config", "jiradozer.yaml", "Path to config file")
 	rootCmd.Flags().StringVar(&workDir, "work-dir", "", "Working directory (overrides config)")
 	rootCmd.Flags().StringVar(&modelID, "model", "", "Agent model ID (overrides config)")
-	rootCmd.Flags().StringVar(&thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max (overrides config)")
+	rootCmd.Flags().StringVar(&thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max, auto (overrides config)")
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	rootCmd.Flags().Float64Var(&maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	rootCmd.Flags().StringVar(&runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
@@ -364,14 +364,6 @@ func run(ctx context.Context, args runArgs) error {
 	// Validate agent model.
 	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
 		return fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
-	}
-	// Validate effort level if set.
-	if cfg.Agent.Effort != "" {
-		switch cfg.Agent.Effort {
-		case "low", "medium", "high", "max", "auto":
-		default:
-			return fmt.Errorf("unknown thinking level %q — valid values: low, medium, high, max", cfg.Agent.Effort)
-		}
 	}
 	logger.Info("using agent",
 		"model", cfg.Agent.Model,

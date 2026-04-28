@@ -10,6 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
@@ -39,7 +40,7 @@ type TrackerConfig struct {
 // AgentConfig specifies the agent backend.
 type AgentConfig struct {
 	Model  string `yaml:"model"`  // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
-	Effort string `yaml:"effort"` // reasoning effort level: "low", "medium", "high", "max", "auto"
+	Effort string `yaml:"effort"` // reasoning effort; see claude.EffortLevel constants
 }
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
@@ -178,41 +179,61 @@ func (c *Config) validate() error {
 	if c.PollInterval <= 0 {
 		c.PollInterval = 15 * time.Second
 	}
+	if c.Agent.Effort != "" {
+		if _, err := claude.ParseEffort(c.Agent.Effort); err != nil {
+			return fmt.Errorf("agent.effort: %w", err)
+		}
+	}
 	namedSteps := []struct {
 		step *StepConfig
 		name string
 	}{
-		{&c.Plan, "plan"}, {&c.Build, "build"}, {&c.CreatePR, "create_pr"}, {&c.Validate, "validate"}, {&c.Ship, "ship"},
+		{&c.Plan, "plan"}, {&c.Build, "build"}, {&c.CreatePR, "create_pr"},
+		{&c.Validate, "validate"}, {&c.Ship, "ship"},
 	}
 	for _, ns := range namedSteps {
-		name, step := ns.name, ns.step
-		if name == "create_pr" && len(step.Rounds) > 0 {
-			return fmt.Errorf("create_pr does not support rounds")
+		if err := validateStep(ns.name, ns.step); err != nil {
+			return err
 		}
-		if step.Prompt != "" && len(step.Rounds) > 0 {
-			return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
+	}
+	return nil
+}
+
+// validateStep checks one named step. The pointer receiver avoids copying the
+// 152-byte StepConfig per iteration in validate(); the function does not mutate
+// through the pointer.
+func validateStep(name string, step *StepConfig) error {
+	if step.Effort != "" {
+		if _, err := claude.ParseEffort(step.Effort); err != nil {
+			return fmt.Errorf("%s.effort: %w", name, err)
 		}
-		if step.Prompt != "" {
-			if _, err := template.New(name).Parse(step.Prompt); err != nil {
-				return fmt.Errorf("%s.prompt template: %w", name, err)
+	}
+	if name == "create_pr" && len(step.Rounds) > 0 {
+		return fmt.Errorf("create_pr does not support rounds")
+	}
+	if step.Prompt != "" && len(step.Rounds) > 0 {
+		return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
+	}
+	if step.Prompt != "" {
+		if _, err := template.New(name).Parse(step.Prompt); err != nil {
+			return fmt.Errorf("%s.prompt template: %w", name, err)
+		}
+	}
+	for i, round := range step.Rounds {
+		if round.Prompt == "" && round.Command == "" {
+			return fmt.Errorf("%s.rounds[%d]: prompt or command is required", name, i)
+		}
+		if round.Prompt != "" && round.Command != "" {
+			return fmt.Errorf("%s.rounds[%d]: prompt and command are mutually exclusive", name, i)
+		}
+		if round.Prompt != "" {
+			if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
+				return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
 			}
 		}
-		for i, round := range step.Rounds {
-			if round.Prompt == "" && round.Command == "" {
-				return fmt.Errorf("%s.rounds[%d]: prompt or command is required", name, i)
-			}
-			if round.Prompt != "" && round.Command != "" {
-				return fmt.Errorf("%s.rounds[%d]: prompt and command are mutually exclusive", name, i)
-			}
-			if round.Prompt != "" {
-				if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
-					return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
-				}
-			}
-			if round.Command != "" {
-				if _, err := template.New(fmt.Sprintf("%s_round_%d_cmd", name, i)).Parse(round.Command); err != nil {
-					return fmt.Errorf("%s.rounds[%d].command template: %w", name, i, err)
-				}
+		if round.Command != "" {
+			if _, err := template.New(fmt.Sprintf("%s_round_%d_cmd", name, i)).Parse(round.Command); err != nil {
+				return fmt.Errorf("%s.rounds[%d].command template: %w", name, i, err)
 			}
 		}
 	}
