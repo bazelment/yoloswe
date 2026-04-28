@@ -162,8 +162,17 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 }
 
 // testQualityClause returns the test-quality scrutiny clause with the given
-// co-located test paths inlined. Each bullet maps to a real bot finding from
-// the kernel evidence corpus (see plans/issue-175-widen-review-scope.md).
+// co-located test paths inlined.
+//
+// Deliberately stated as a principle, not an enumerated checklist. An earlier
+// draft listed six concrete anti-patterns derived directly from the kernel
+// evidence corpus (tautological asserts, broad Exception catches, missing
+// kwargs, etc.); see plans/issue-175-widen-review-scope.md and the
+// conversation around #179. The risk of overfitting to those specific shapes
+// — anchoring the reviewer on a small list and crowding out the long tail of
+// real test-quality issues — outweighed the recall benefit on the eval set.
+// Tunings here should add principles, not specific bug examples; let
+// measurement (Phase 3, #178) drive any expansion.
 //
 // The caller must guarantee len(paths) > 0 — buildScopeSuffix is the only
 // caller and gates on that.
@@ -178,22 +187,11 @@ func testQualityClause(paths []string) string {
 	return `
 
 ## Test quality
-For each test file in scope (whether in the diff or co-located, see paths
-listed below), assess whether the tests would actually catch a regression
-of the change under review. Flag patterns that weaken regression signal:
-- Tautological assertions (e.g. ` + "`type(x) == type(x)`" + `, ` + "`assert x == x`" + `,
-  ` + "`assert isinstance(x, type(x))`" + `).
-- Mock setups that bypass the system under test (e.g. patching the function
-  itself, asserting only the mock was called, never the new behavior).
-- Negative controls that catch too broad an exception class
-  (` + "`pytest.raises((Specific, Exception))`" + ` is ` + "`Exception`" + `).
-- Tests that "pass" only because of incidental side-effects in the harness
-  (logger sinks that aren't actually written by the workflow under test;
-  context managers that force-pass a check the test claims to verify).
-- Unused imports, unused locals, unused fixtures (cite by line).
-- Missing kwargs/args on construction that the production code now requires
-  for behavior under test (e.g. ` + "`Worker(...)`" + ` called without
-  ` + "`workflow_runner=`" + ` when production code passes it).
+Read the co-located test files listed below alongside the diff. For each,
+assess whether the tests would actually catch a regression of the change
+under review — not just whether they pass. Flag tests that exercise mocks
+or harness side-effects rather than the behavior under review, and tests
+whose assertions would still hold if the new behavior were silently removed.
 
 Continue to avoid nit-level comments unless they block understanding of
 the diff or weaken a stated regression signal.
@@ -204,6 +202,12 @@ Co-located test files to read (in addition to anything in the diff):
 
 // crossServiceClause returns the cross-service contract-sweep clause naming
 // the touched packages. The caller must guarantee len(packages) >= 2.
+//
+// The four numbered items track the issue body's draft (#175). An earlier
+// version added a fifth item naming specific shapes (FastAPI path-parameter
+// ordering, ORM mixins, OpenAPI tag collisions) drawn from kernel-2998; it
+// was removed for the same anti-overfitting reason as testQualityClause.
+// New items should describe failure modes, not specific framework bugs.
 func crossServiceClause(packages []string) string {
 	return `
 
@@ -221,9 +225,6 @@ consumers in the others. Read both sides of each surface and flag:
    typed error, the other treats it as success).
 4. Silent fallbacks that swallow values from another service (default
    values masking missing fields, empty arrays masking failed lookups).
-5. Route-table or schema ordering issues where one definition shadows or
-   conflicts with another (FastAPI path-parameter ordering, ORM-mixin
-   columns vs explicit migrations, OpenAPI tag collisions).
 
 When citing an issue, name both sides (file:line) and explain the desync
 explicitly. If both sides agree, do not flag the surface.`

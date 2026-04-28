@@ -111,11 +111,13 @@ Composition order in the prompt body:
 
 1. `buildBasePrompt(goal, opts.SkipTestExecution)` — unchanged.
 2. Test-quality clause — emitted iff `len(opts.TestScopeHints) > 0`.
-   Includes the bullet list of patterns to flag and the path list (capped
-   at 50; "(... and N more)" suffix when truncated).
+   States the principle (do the tests catch a regression of the change?)
+   and inlines the path list (capped at 50; "(... and N more)" suffix
+   when truncated).
 3. Cross-service clause — emitted iff `len(opts.CrossServicePackages) >= 2`.
-   Includes the package list verbatim and the 5-item flag list (signature
-   shape, async desync, error path, silent fallback, route/schema ordering).
+   Includes the package list verbatim and a 4-item flag list
+   (signature shape, async desync, error path, silent fallback) tracking
+   the issue body's draft.
 4. JSON output rules — unchanged from today's `BuildJSONPromptWithOptions`.
 
 Each clause is gated by *the data being present*, not by a separate
@@ -123,8 +125,9 @@ boolean. This collapses the (boolean, list) cartesian product into a
 single source of truth: an empty list means "don't emit." The hints
 file controls everything; there's nothing to disable independently.
 
-The exact text for both clauses is in **Appendix A** at the end of this
-plan; each bullet maps to a real bot finding from the kernel evidence.
+The exact text for both clauses is in **Appendix A**. Both are stated at
+principle level rather than as enumerated bug-shape checklists — see the
+appendix for why.
 
 ### 2. New flag on `bramble code-review` in `bramble/cmd/codereview/codereview.go`
 
@@ -436,22 +439,11 @@ a report of which substantive bot findings were caught in r1 vs r2.
 
 ```
 ## Test quality
-For each test file in scope (whether in the diff or co-located, see paths
-listed below), assess whether the tests would actually catch a regression
-of the change under review. Flag patterns that weaken regression signal:
-- Tautological assertions (e.g. `type(x) == type(x)`, `assert x == x`,
-  `assert isinstance(x, type(x))`).
-- Mock setups that bypass the system under test (e.g. patching the function
-  itself, asserting only the mock was called, never the new behavior).
-- Negative controls that catch too broad an exception class
-  (`pytest.raises((Specific, Exception))` is `Exception`).
-- Tests that "pass" only because of incidental side-effects in the harness
-  (logger sinks that aren't actually written by the workflow under test;
-  context managers that force-pass a check the test claims to verify).
-- Unused imports, unused locals, unused fixtures (cite by line).
-- Missing kwargs/args on construction that the production code now requires
-  for behavior under test (e.g. `Worker(...)` called without
-  `workflow_runner=` when production code passes it).
+Read the co-located test files listed below alongside the diff. For each,
+assess whether the tests would actually catch a regression of the change
+under review — not just whether they pass. Flag tests that exercise mocks
+or harness side-effects rather than the behavior under review, and tests
+whose assertions would still hold if the new behavior were silently removed.
 
 Continue to avoid nit-level comments unless they block understanding of
 the diff or weaken a stated regression signal.
@@ -459,17 +451,6 @@ the diff or weaken a stated regression signal.
 Co-located test files to read (in addition to anything in the diff):
 <one path per line, capped at 50; truncation suffix when applicable>
 ```
-
-Each bullet maps to a real bot finding from the kernel evidence:
-
-| Bullet | Evidence |
-|---|---|
-| Tautological asserts | issue body cites kernel-2978 type==type |
-| Mock-bypass | codex envelope kernel-2978 test_smoke.py:45 |
-| Broad `Exception` catch | cursor[bot] kernel-2978 negative-control low-sev |
-| Incidental harness side-effects | cursor[bot] kernel-2978 loguru sink test |
-| Unused imports | github-code-quality kernel-2799 |
-| Missing constructor kwargs | cursor[bot] kernel-2978 several workers |
 
 ### Cross-service clause (gated by multi-package detection)
 
@@ -488,17 +469,37 @@ consumers in the others. Read both sides of each surface and flag:
    typed error, the other treats it as success).
 4. Silent fallbacks that swallow values from another service (default
    values masking missing fields, empty arrays masking failed lookups).
-5. Route-table or schema ordering issues where one definition shadows or
-   conflicts with another (FastAPI path-parameter ordering, ORM-mixin
-   columns vs explicit migrations, OpenAPI tag collisions).
 
 When citing an issue, name both sides (file:line) and explain the desync
 explicitly. If both sides agree, do not flag the surface.
 ```
 
-Item 5 is added beyond the issue body's draft because kernel-2998
-evidence shows route-ordering and ORM-vs-migration are the same shape of
-bug and bots reliably catch them.
+### Why principle-level, not enumerated bug-shape checklists
+
+An earlier draft of both clauses listed concrete anti-patterns derived
+directly from the kernel evidence corpus — six bullets in the test-quality
+clause (tautological `type(x) == type(x)`, broad `Exception` catches,
+mock-bypass, missing `Worker(workflow_runner=...)` kwargs, etc.) and a
+fifth item in the cross-service clause naming FastAPI path-parameter
+ordering and ORM-mixin / migration mismatches drawn from kernel-2998.
+
+That version was cut for two reasons:
+
+1. **Anchoring bias.** A specific list of N bug shapes implicitly tells the
+   reviewer "these are what matter." Real test-quality issues have many
+   more shapes than fit in a list; enumeration crowds them out instead of
+   surfacing them.
+2. **Overfitting to the eval set.** The bullets came from the same four
+   PRs (kernel-2978/2799/2998/2755) used to verify the change. Including
+   them and then measuring against the same PRs is teaching to the test —
+   the next 10 PRs will have different gap shapes and a model anchored on
+   the previous six is worse-prepared, not better.
+
+Tunings here should add **principles** (e.g. "consider whether the
+assertion would hold if the new behavior were silently removed"), not
+specific framework or library bug examples. Phase 3 (#178) is the place
+to measure whether the principle-level prompt catches enough; if it
+doesn't, expand by principle, not by shape.
 
 ---
 
