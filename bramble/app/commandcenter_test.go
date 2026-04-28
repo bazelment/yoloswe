@@ -225,6 +225,41 @@ func TestCommandCenter_UpdateSessionsPreservesPreview(t *testing.T) {
 	assert.Equal(t, []string{"line1", "line2"}, cc.previewText)
 }
 
+func TestCommandCenter_UpdateSessionsPreservesPreviewAcrossReSort(t *testing.T) {
+	cc := NewCommandCenter()
+	sessions := makeSessions()
+	cc.Show(sessions, 120, 40)
+
+	// Open preview on the running session (post-sort idx 1).
+	cc.selectedIdx = 1
+	sess := cc.TogglePreview()
+	require.NotNil(t, sess)
+	previewedID := sess.ID
+	require.Equal(t, session.SessionID("sess-running"), previewedID)
+	cc.SetPreviewText([]string{"line1", "line2"})
+	prevPreviewIdx := cc.previewIdx
+
+	// Mutate: flip sess-running to idle so it sorts ahead of sess-idle,
+	// changing the previewed session's row index.
+	mutated := makeSessions()
+	for i := range mutated {
+		if mutated[i].ID == "sess-running" {
+			mutated[i].Status = session.StatusIdle
+			mutated[i].Progress.LastActivity = time.Now().Add(time.Minute)
+		}
+	}
+	cc.UpdateSessions(mutated, 120, 40)
+
+	require.NotNil(t, cc.PreviewedSession())
+	assert.Equal(t, previewedID, cc.PreviewedSessionID(),
+		"preview must follow the session by ID across re-sort")
+	assert.Equal(t, previewedID, cc.PreviewedSession().ID)
+	assert.NotEqual(t, prevPreviewIdx, cc.previewIdx,
+		"previewIdx must move to the session's new post-sort row")
+	assert.Equal(t, []string{"line1", "line2"}, cc.previewText,
+		"preview text must survive re-sort")
+}
+
 func TestCommandCenter_UpdateSessionsClearsPreviewIfGone(t *testing.T) {
 	cc := NewCommandCenter()
 	sessions := makeSessions()
