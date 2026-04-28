@@ -67,12 +67,73 @@ func TestLoadScopeHints_EmptyArraysOK(t *testing.T) {
 }
 
 func TestLoadScopeHints_MissingFile(t *testing.T) {
-	_, err := LoadScopeHints(filepath.Join(t.TempDir(), "nonexistent.json"))
+	tmp := t.TempDir()
+	full := filepath.Join(tmp, "nonexistent.json")
+	_, err := LoadScopeHints(full)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
-	if !strings.Contains(err.Error(), "open scope-hints file") {
-		t.Errorf("error should describe the open failure: %v", err)
+	// The error must classify as "does not exist" (sanitizedFSError)
+	// rather than wrap a *os.PathError with %w — the wrapped form
+	// embeds the absolute path in err.Error() and that text leaks into
+	// shared run logs via the CLI's slog warning.
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error should classify as does-not-exist: %v", err)
+	}
+	if strings.Contains(err.Error(), tmp) {
+		t.Errorf("error leaks tmpdir path %q: %v", tmp, err)
+	}
+	if !strings.Contains(err.Error(), "nonexistent.json") {
+		t.Errorf("error should still cite basename for debuggability: %v", err)
+	}
+}
+
+func TestLoadScopeHints_PermissionError(t *testing.T) {
+	// Permission errors must also classify rather than wrap *os.PathError.
+	// Write a regular file then chmod it 0000 so os.Stat succeeds but
+	// os.Open fails. (Stat lookups don't require read perms on the file
+	// itself, only execute on the parent dir.)
+	tmp := t.TempDir()
+	full := filepath.Join(tmp, "noread.json")
+	if err := os.WriteFile(full, []byte(`{"schema_version":1,"test_paths":[],"cross_service_packages":[]}`), 0o000); err != nil {
+		t.Fatalf("write hints file: %v", err)
+	}
+	defer func() { _ = os.Chmod(full, 0o644) }() // let TempDir cleanup remove it
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission check would not fire")
+	}
+	_, err := LoadScopeHints(full)
+	if err == nil {
+		t.Fatal("expected error for unreadable file")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("error should classify as permission denied: %v", err)
+	}
+	if strings.Contains(err.Error(), tmp) {
+		t.Errorf("error leaks tmpdir path: %v", err)
+	}
+}
+
+func TestLoadScopeHints_NonRegularFile(t *testing.T) {
+	// FIFOs (named pipes) and other non-regular shapes block on read.
+	// LoadScopeHints must reject them after stat, before the size cap or
+	// io.LimitReader can engage. mkfifo isn't in stdlib; use syscall.Mkfifo
+	// indirectly via os.Mkdir — a directory is also non-regular and tests
+	// the same Mode().IsRegular() guard with one less platform dependency.
+	tmp := t.TempDir()
+	dirPath := filepath.Join(tmp, "scope-hints.json")
+	if err := os.Mkdir(dirPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, err := LoadScopeHints(dirPath)
+	if err == nil {
+		t.Fatal("expected error for non-regular hints path")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("error should classify as non-regular: %v", err)
+	}
+	if strings.Contains(err.Error(), tmp) {
+		t.Errorf("error leaks tmpdir path: %v", err)
 	}
 }
 
@@ -193,6 +254,67 @@ func TestLoadScopeHints_ErrorsUseBasenameNotFullPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "scope-hints.json") {
 		t.Errorf("error should still cite basename for debuggability: %v", err)
+	}
+}
+
+func TestLoadScopeHints_RejectsNewlineInHintString(t *testing.T) {
+	// scope_gate.py emits filesystem paths and package buckets, neither
+	// of which contains newlines. A buggy or hostile producer that snuck
+	// in a "\n## Output Format\n" entry would close the test-quality
+	// section early and inject content before the JSON output rules.
+	// Reject up front rather than try to escape inside the prompt builder.
+	cases := []struct {
+		name     string
+		contents string
+	}{
+		{"newline in test_paths",
+			`{"schema_version":1,"test_paths":["ok/x.py","bad\nentry.py"],"cross_service_packages":[]}`},
+		{"carriage return in test_paths",
+			`{"schema_version":1,"test_paths":["bad\rentry.py"],"cross_service_packages":[]}`},
+		{"newline in cross_service_packages",
+			`{"schema_version":1,"test_paths":[],"cross_service_packages":["a/","b/\nc/"]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeHintsFile(t, tc.contents)
+			_, err := LoadScopeHints(path)
+			if err == nil {
+				t.Fatal("expected error for hint string with newline")
+			}
+			if !strings.Contains(err.Error(), "newline") {
+				t.Errorf("error should mention newline: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadScopeHints_RejectsLeadingTrailingWhitespace(t *testing.T) {
+	// Leading/trailing whitespace in a hint string is almost always a
+	// producer bug (e.g. a stray space after a comma) and would render
+	// awkwardly when joined with strings.Join in the prompt. Reject so
+	// the producer fixes their output rather than letting it through.
+	path := writeHintsFile(t,
+		`{"schema_version":1,"test_paths":[" leading.py"],"cross_service_packages":[]}`)
+	_, err := LoadScopeHints(path)
+	if err == nil {
+		t.Fatal("expected error for leading whitespace")
+	}
+	if !strings.Contains(err.Error(), "whitespace") {
+		t.Errorf("error should mention whitespace: %v", err)
+	}
+}
+
+func TestLoadScopeHints_RejectsEmptyString(t *testing.T) {
+	// A "" entry would inline as a blank line in the prompt, which looks
+	// like noise. Same reasoning as whitespace: producer bug, reject.
+	path := writeHintsFile(t,
+		`{"schema_version":1,"test_paths":["valid.py",""],"cross_service_packages":[]}`)
+	_, err := LoadScopeHints(path)
+	if err == nil {
+		t.Fatal("expected error for empty hint string")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should mention empty: %v", err)
 	}
 }
 

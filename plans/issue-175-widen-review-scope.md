@@ -158,7 +158,7 @@ type ScopeHints struct {
 }
 
 func LoadScopeHints(path string) (*ScopeHints, error) { ... }
-func (h *ScopeHints) ToPromptOptions() PromptOptions { ... }
+func (h *ScopeHints) ToPromptOptions(skipTestExecution bool) PromptOptions { ... }
 ```
 
 `schema_version: 1` is the wire contract. Future fields (e.g. a list of

@@ -2,10 +2,12 @@ package reviewer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ScopeHintsSchemaVersion is the wire-format version of the scope-hints
@@ -58,16 +60,40 @@ type ScopeHints struct {
 // abort the review — a malformed scope-hints file should never block a
 // caller from getting today's narrow review.
 //
+// # Path-redaction hygiene
+//
 // Error messages identify the file by basename only. The full path is the
 // caller's input — they already know it — and run logs are routinely shared
 // across machines and PRs, so embedding the developer's worktree layout in
 // every fallback warning weakens the same path-redaction hygiene used
-// elsewhere in the run-log pipeline.
+// elsewhere in the run-log pipeline. Note this means we never wrap raw
+// *os.PathError values with %w (their .Error() text contains the absolute
+// path); we classify them via errors.Is and emit basename-only messages.
+//
+// # Defensive open
+//
+// Stat-then-open: rejecting non-regular files (FIFOs, /dev/zero, sockets)
+// before os.Open closes a separate denial-of-service shape from the
+// 1-MiB read cap — opening a FIFO blocks indefinitely on read, so the
+// size cap alone wouldn't help. Symlinks are followed (os.Stat, not
+// Lstat) because the realistic producer (/pr-polish/scope_gate.py)
+// writes to a known directory and a malicious symlink there is already
+// a much bigger problem than this code can address.
 func LoadScopeHints(path string) (*ScopeHints, error) {
 	tag := filepath.Base(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, sanitizedFSError("stat", tag, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf(
+			"scope-hints file %s: not a regular file (mode=%s)",
+			tag, info.Mode().String(),
+		)
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open scope-hints file %s: %w", tag, err)
+		return nil, sanitizedFSError("open", tag, err)
 	}
 	defer f.Close()
 
@@ -76,7 +102,7 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 	// the file is at-or-above the cap and we reject before parsing.
 	data, err := io.ReadAll(io.LimitReader(f, scopeHintsMaxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read scope-hints file %s: %w", tag, err)
+		return nil, sanitizedFSError("read", tag, err)
 	}
 	if len(data) > scopeHintsMaxBytes {
 		return nil, fmt.Errorf(
@@ -93,7 +119,65 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 			tag, h.SchemaVersion, ScopeHintsSchemaVersion,
 		)
 	}
+	if err := validateHintStrings(tag, h.TestPaths, "test_paths"); err != nil {
+		return nil, err
+	}
+	if err := validateHintStrings(tag, h.CrossServicePackages, "cross_service_packages"); err != nil {
+		return nil, err
+	}
 	return &h, nil
+}
+
+// sanitizedFSError converts an os filesystem error into a basename-only
+// message. Wrapping the original error with %w would re-export the
+// absolute path embedded in *os.PathError.Error() — exactly what the
+// path-redaction hygiene above is trying to prevent.
+//
+// The classification is intentionally narrow: we identify a few common
+// shapes (not-exist, permission, deadline) and fall back to a generic
+// "operation failed" otherwise. The CLI's slog warning gives operators
+// enough signal to investigate via the path they already passed in;
+// callers needing the raw error chain can use os.Stat / os.Open
+// directly instead of this loader.
+func sanitizedFSError(op, tag string, err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("%s scope-hints file %s: does not exist", op, tag)
+	case errors.Is(err, os.ErrPermission):
+		return fmt.Errorf("%s scope-hints file %s: permission denied", op, tag)
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return fmt.Errorf("%s scope-hints file %s: deadline exceeded", op, tag)
+	default:
+		return fmt.Errorf("%s scope-hints file %s: %s failed", op, tag, op)
+	}
+}
+
+// validateHintStrings rejects entries that would distort the prompt's
+// section structure. The clauses inline these strings line-by-line under
+// fixed Markdown headings, so a hint containing a newline could close
+// "## Test quality" early and inject content before "## Output Format".
+// scope_gate.py emits filesystem paths and package buckets — neither
+// shape contains newlines or leading whitespace — so this is a defense
+// against a buggy or hostile producer, not a normal input shape.
+func validateHintStrings(tag string, items []string, field string) error {
+	for i, s := range items {
+		switch {
+		case strings.ContainsAny(s, "\r\n"):
+			return fmt.Errorf(
+				"scope-hints file %s: %s[%d] contains newline", tag, field, i,
+			)
+		case s != strings.TrimSpace(s):
+			return fmt.Errorf(
+				"scope-hints file %s: %s[%d] has leading or trailing whitespace",
+				tag, field, i,
+			)
+		case s == "":
+			return fmt.Errorf(
+				"scope-hints file %s: %s[%d] is empty", tag, field, i,
+			)
+		}
+	}
+	return nil
 }
 
 // ToPromptOptions converts hints into PromptOptions, preserving the caller's
