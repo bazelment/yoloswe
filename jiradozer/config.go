@@ -38,7 +38,8 @@ type TrackerConfig struct {
 
 // AgentConfig specifies the agent backend.
 type AgentConfig struct {
-	Model string `yaml:"model"` // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
+	Model  string `yaml:"model"`  // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
+	Effort string `yaml:"effort"` // reasoning effort level: "low", "medium", "high", "max", "auto"
 }
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
@@ -65,6 +66,7 @@ type StepConfig struct {
 	Prompt              string        `yaml:"prompt"`          // Go text/template; empty = built-in default
 	SystemPrompt        string        `yaml:"system_prompt"`   // optional system prompt passed to the agent
 	Model               string        `yaml:"model"`           // override agent.model; empty = inherit
+	Effort              string        `yaml:"effort"`          // override agent.effort; empty = inherit
 	PermissionMode      string        `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
 	Rounds              []RoundConfig `yaml:"rounds"`          // multi-round execution; mutually exclusive with Prompt
 	MaxBudgetUSD        float64       `yaml:"max_budget_usd"`  // override top-level; 0 = inherit
@@ -176,9 +178,14 @@ func (c *Config) validate() error {
 	if c.PollInterval <= 0 {
 		c.PollInterval = 15 * time.Second
 	}
-	for name, step := range map[string]StepConfig{
-		"plan": c.Plan, "build": c.Build, "create_pr": c.CreatePR, "validate": c.Validate, "ship": c.Ship,
-	} {
+	namedSteps := []struct {
+		step *StepConfig
+		name string
+	}{
+		{&c.Plan, "plan"}, {&c.Build, "build"}, {&c.CreatePR, "create_pr"}, {&c.Validate, "validate"}, {&c.Ship, "ship"},
+	}
+	for _, ns := range namedSteps {
+		name, step := ns.name, ns.step
 		if name == "create_pr" && len(step.Rounds) > 0 {
 			return fmt.Errorf("create_pr does not support rounds")
 		}
@@ -234,6 +241,9 @@ func (c *Config) StepByName(name string) (StepConfig, bool) {
 func (c *Config) ResolveStep(step StepConfig) StepConfig {
 	if step.Model == "" {
 		step.Model = c.Agent.Model
+	}
+	if step.Effort == "" {
+		step.Effort = c.Agent.Effort
 	}
 	if step.MaxBudgetUSD == 0 {
 		step.MaxBudgetUSD = c.MaxBudgetUSD
