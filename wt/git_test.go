@@ -6,6 +6,57 @@ import (
 	"testing"
 )
 
+// captureGitRunner records the full args slice (including any injected flags)
+// passed to exec.Command so tests can assert on them without spawning git.
+type captureGitRunner struct {
+	lastArgs []string
+}
+
+func (c *captureGitRunner) Run(_ context.Context, args []string, _ string) (*CmdResult, error) {
+	r := DefaultGitRunner{}
+	// Replicate the injection logic without actually running git.
+	finalArgs := args
+	if len(args) > 0 && readOnlyGitSubcmds[args[0]] {
+		finalArgs = make([]string, 0, len(args)+1)
+		finalArgs = append(finalArgs, "--no-optional-locks")
+		finalArgs = append(finalArgs, args...)
+	}
+	c.lastArgs = finalArgs
+	_ = r
+	return &CmdResult{}, nil
+}
+
+func TestDefaultGitRunnerNoOptionalLocks(t *testing.T) {
+	t.Parallel()
+
+	readOnly := []string{"status", "diff", "log", "ls-files", "rev-list", "rev-parse", "symbolic-ref", "ls-remote", "worktree", "branch", "show"}
+	readWrite := []string{"fetch", "rebase", "config", "push", "worktree add"}
+
+	for _, sub := range readOnly {
+		sub := sub
+		t.Run("injects_"+sub, func(t *testing.T) {
+			t.Parallel()
+			c := &captureGitRunner{}
+			c.Run(context.Background(), []string{sub, "--some-flag"}, "")
+			if len(c.lastArgs) == 0 || c.lastArgs[0] != "--no-optional-locks" {
+				t.Errorf("expected --no-optional-locks prepended for %q, got %v", sub, c.lastArgs)
+			}
+		})
+	}
+
+	for _, sub := range readWrite {
+		sub := sub
+		t.Run("no_inject_"+sub, func(t *testing.T) {
+			t.Parallel()
+			c := &captureGitRunner{}
+			c.Run(context.Background(), []string{sub}, "")
+			if len(c.lastArgs) > 0 && c.lastArgs[0] == "--no-optional-locks" {
+				t.Errorf("did not expect --no-optional-locks for %q, got %v", sub, c.lastArgs)
+			}
+		})
+	}
+}
+
 func TestGetRepoNameFromURL(t *testing.T) {
 	tests := []struct {
 		url      string

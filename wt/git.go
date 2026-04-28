@@ -20,12 +20,35 @@ type GitRunner interface {
 	Run(ctx context.Context, args []string, dir string) (*CmdResult, error)
 }
 
+// readOnlyGitSubcmds is the set of git subcommands that never write the index.
+// DefaultGitRunner prepends --no-optional-locks for these to avoid creating
+// index.lock files that would block concurrent git operations in other worktrees.
+var readOnlyGitSubcmds = map[string]bool{
+	"status":      true,
+	"diff":        true,
+	"log":         true,
+	"ls-files":    true,
+	"rev-list":    true,
+	"rev-parse":   true,
+	"symbolic-ref": true,
+	"ls-remote":   true,
+	"worktree":    true,
+	"branch":      true,
+	"show":        true,
+}
+
 // DefaultGitRunner implements GitRunner using os/exec.
 type DefaultGitRunner struct{}
 
 // Run executes a git command.
 func (r *DefaultGitRunner) Run(ctx context.Context, args []string, dir string) (*CmdResult, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	finalArgs := args
+	if len(args) > 0 && readOnlyGitSubcmds[args[0]] {
+		finalArgs = make([]string, 0, len(args)+1)
+		finalArgs = append(finalArgs, "--no-optional-locks")
+		finalArgs = append(finalArgs, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", finalArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if dir != "" {
 		cmd.Dir = dir
