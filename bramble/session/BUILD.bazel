@@ -41,6 +41,7 @@ go_test(
         "manager_test.go",
         "provider_runner_test.go",
         "registry_test.go",
+        "resolve_agent_model_test.go",
         "store_test.go",
         "summary_test.go",
         "tmux_name_test.go",

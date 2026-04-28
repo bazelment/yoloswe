@@ -1322,6 +1322,21 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	}
 }
 
+func resolveAgentModel(modelID string, registry *agent.ModelRegistry) (agent.AgentModel, error) {
+	if registry != nil {
+		if m, ok := registry.ModelByID(modelID); ok {
+			return m, nil
+		}
+	}
+	if m, ok := agent.ModelByID(modelID); ok {
+		return m, nil
+	}
+	if provider, ok := agent.ProviderByModelPrefix(modelID); ok {
+		return agent.AgentModel{ID: modelID, Provider: provider, Label: modelID}, nil
+	}
+	return agent.AgentModel{}, fmt.Errorf("unknown model %q: no curated entry and no recognized prefix (%s)", modelID, agent.KnownModelPrefixes())
+}
+
 // runSession runs a session in a goroutine, handling both planner and builder types.
 // Both types follow the same lifecycle: start → run turns → idle → follow-up → ...
 func (m *Manager) runSession(session *Session, prompt string) {
@@ -1334,17 +1349,19 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 	// Resolve model provider for runner routing.
 	// Prefer the filtered registry if available, fall back to the full list.
-	var agentModel AgentModel
-	var modelFound bool
-	if m.config.ModelRegistry != nil {
-		agentModel, modelFound = m.config.ModelRegistry.ModelByID(session.Model)
-	}
-	if !modelFound {
-		agentModel, modelFound = ModelByID(session.Model)
-	}
-	if !modelFound {
-		// Unknown model — default to claude provider
-		agentModel = AgentModel{ID: session.Model, Provider: ProviderClaude}
+	agentModel, resolveErr := resolveAgentModel(session.Model, m.config.ModelRegistry)
+	if resolveErr != nil {
+		m.updateSessionStatus(session, StatusFailed)
+		session.mu.Lock()
+		session.Error = resolveErr
+		session.mu.Unlock()
+		m.addOutput(session.ID, OutputLine{
+			Timestamp: time.Now(),
+			Type:      OutputTypeError,
+			Content:   resolveErr.Error(),
+		})
+		m.persistSession(session)
+		return
 	}
 
 	// If a registry is configured and the model's provider is not available,
@@ -1499,6 +1516,14 @@ func (m *Manager) runSession(session *Session, prompt string) {
 
 			runner = &providerRunner{
 				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
+				eventHandler: eventHandler,
+				model:        session.Model,
+				workDir:      session.WorktreePath,
+			}
+		} else if agentModel.Provider == ProviderCursor {
+			// Cursor provider backend
+			runner = &providerRunner{
+				provider:     agent.NewCursorProvider(),
 				eventHandler: eventHandler,
 				model:        session.Model,
 				workDir:      session.WorktreePath,
