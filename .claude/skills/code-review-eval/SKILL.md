@@ -13,7 +13,7 @@ then compare their findings side-by-side.
 
 | Name | Backend | Model | Flags |
 |------|---------|-------|-------|
-| codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini` |
+| codex-5.4-mini | codex | gpt-5.4-mini | `--backend codex --model gpt-5.4-mini --effort medium` |
 | cursor-composer2 | cursor | composer-2 | `--backend cursor --model composer-2` |
 | gemini-3.1-flash-lite-preview | gemini | gemini-3.1-flash-lite-preview | `--backend gemini --model gemini-3.1-flash-lite-preview` |
 

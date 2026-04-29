@@ -558,3 +558,34 @@ Notes:
 - Token counts unavailable for all Gemini runs (not reported by Gemini backend).
 - Gemini backends show reasoning traces on stdout (flash) — useful for understanding why findings were made.
 - The TurnComplete error extraction finding (flash) is the most actionable: real missing defensive code, directly comparable to `backend_cursor.go` pattern.
+
+## 2026-04-29 — fix/codex-readloop-blocking
+
+Diff: 3 files, +50 / -17 lines (codex client readLoop split, code-review SilenceUsage, tmux observeContentLines clone optimization)
+
+| Config | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | 0 | accepted | — | 76s | — |
+| codex-5.4-mini | 2 | 0 | rejected | — | 466s | 0/0 (not reported) |
+| gemini-3.1-flash-lite-preview | 0 | 0 | accepted | — | 130s | — |
+
+Envelope guard fired: No (all three received proper envelopes).
+
+Findings:
+- **codex high** (`client.go:175`): `Stop()` closes `c.events` without waiting for `readLines`/`readLoop` to exit. Race: after `close(c.done)`, readLoop's select may fire on a buffered `c.lines` value, call `handleMessage` → `emit` → send on closed `c.events` channel → panic. `emit()`'s `default:` branch only protects against full channels, not closed ones. Suggests adding a WaitGroup/`readDone` signal to join readers before closing events. **Verified real.**
+- **codex low** (`client.go:376`): No regression test for the new readLines/readLoop shutdown/drain path.
+- **cursor medium** (`client.go:392`): Same missing-test concern as codex's low — concurrency-sensitive change without focused unit test.
+
+Consensus (all 3): none.
+Majority (2 of 3): missing regression test for shutdown path (cursor + codex).
+Unique to codex-5.4-mini: **`Stop()` events-close race** — only codex caught this, the highest-impact finding of the round.
+Unique to cursor-composer2: none beyond the shared "missing test" call-out.
+Unique to gemini-3.1-flash-lite-preview: none — accepted with 0 issues; missed both the Stop() race and the test gap.
+Disagreements: verdict — codex rejected (high-severity race), cursor and gemini accepted.
+
+Notes:
+- Codex was the only backend to verify lifecycle interactions across `Stop()` and the new read goroutines. Its summary explicitly cites "Bazel unit tests pass" — it actually ran tests as part of the review.
+- Gemini-flash-lite continues the pattern from 2026-04-21: very fast (2nd fastest at 130s) but shallow — accepted a diff with a real concurrency bug.
+- Cursor was the fastest (76s) and produced a concise, accurate summary, but missed the load-bearing race condition.
+- Codex took 6× longer than cursor (466s vs 76s) but the extra time bought a verified high-severity finding that would have shipped silently otherwise.
+- Codex stderr token counters reported `0 input / 0 output` — token reporting may be broken for this model/backend combo (worth investigating; historically codex did report tokens).
