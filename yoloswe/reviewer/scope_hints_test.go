@@ -27,7 +27,8 @@ func writeHintsFile(t *testing.T, contents string) string {
 	return path
 }
 
-func TestLoadScopeHints_Valid(t *testing.T) {
+func TestLoadScopeHints_ValidV1(t *testing.T) {
+	// v1 files (schema_version=1) must still load for backwards compat.
 	path := writeHintsFile(t, `{
 		"schema_version": 1,
 		"test_paths": ["a/test_x.py", "b/test_y.go"],
@@ -45,6 +46,30 @@ func TestLoadScopeHints_Valid(t *testing.T) {
 	}
 	if len(h.CrossServicePackages) != 2 || h.CrossServicePackages[1] != "svc/b/" {
 		t.Errorf("CrossServicePackages = %v", h.CrossServicePackages)
+	}
+}
+
+func TestLoadScopeHints_ValidV2(t *testing.T) {
+	// v2 files include changed_packages and dependency_packages.
+	path := writeHintsFile(t, `{
+		"schema_version": 2,
+		"test_paths": ["a/test_x.py"],
+		"cross_service_packages": ["svc/a/", "svc/b/"],
+		"changed_packages": ["svc/a/"],
+		"dependency_packages": ["svc/b/"]
+	}`)
+	h, err := LoadScopeHints(path)
+	if err != nil {
+		t.Fatalf("unexpected error for v2 file: %v", err)
+	}
+	if h.SchemaVersion != 2 {
+		t.Errorf("SchemaVersion = %d, want 2", h.SchemaVersion)
+	}
+	if len(h.ChangedPackages) != 1 || h.ChangedPackages[0] != "svc/a/" {
+		t.Errorf("ChangedPackages = %v, want [svc/a/]", h.ChangedPackages)
+	}
+	if len(h.DependencyPackages) != 1 || h.DependencyPackages[0] != "svc/b/" {
+		t.Errorf("DependencyPackages = %v, want [svc/b/]", h.DependencyPackages)
 	}
 }
 
@@ -149,20 +174,19 @@ func TestLoadScopeHints_MalformedJSON(t *testing.T) {
 }
 
 func TestLoadScopeHints_SchemaVersionMismatch(t *testing.T) {
-	// A future caller writing schema_version=2 must fail loudly here, not
-	// silently succeed with a degenerate prompt. The CLI layer treats this
-	// as a "log warning, fall back to narrow review" — the reviewer never
-	// reads a future-shape file.
-	path := writeHintsFile(t, `{"schema_version": 2, "test_paths": [], "cross_service_packages": []}`)
+	// A future caller writing schema_version=3 must fail loudly — the
+	// reviewer never reads a future-shape file it doesn't understand.
+	// schema_version=1 and schema_version=2 are both accepted.
+	path := writeHintsFile(t, `{"schema_version": 3, "test_paths": [], "cross_service_packages": []}`)
 	_, err := LoadScopeHints(path)
 	if err == nil {
-		t.Fatal("expected error for schema_version=2")
+		t.Fatal("expected error for schema_version=3")
 	}
-	if !strings.Contains(err.Error(), "schema_version=2") {
+	if !strings.Contains(err.Error(), "schema_version=3") {
 		t.Errorf("error should include observed version: %v", err)
 	}
-	if !strings.Contains(err.Error(), "want 1") {
-		t.Errorf("error should include expected version: %v", err)
+	if !strings.Contains(err.Error(), "want 1 or 2") {
+		t.Errorf("error should include accepted versions: %v", err)
 	}
 }
 
@@ -372,6 +396,25 @@ func TestLoadScopeHints_RejectsEmptyString(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "empty") {
 		t.Errorf("error should mention empty: %v", err)
+	}
+}
+
+func TestScopeHints_ToPromptOptions_V2Fields(t *testing.T) {
+	// v2 hints must pass ChangedPackages and DependencyPackages through to
+	// PromptOptions so the prompt builder can use caller/callee framing.
+	h := &ScopeHints{
+		SchemaVersion:        2,
+		TestPaths:            []string{"a/test_x.py"},
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+		ChangedPackages:      []string{"svc/a/"},
+		DependencyPackages:   []string{"svc/b/"},
+	}
+	opts := h.ToPromptOptions(false)
+	if len(opts.ChangedPackages) != 1 || opts.ChangedPackages[0] != "svc/a/" {
+		t.Errorf("ChangedPackages = %v, want [svc/a/]", opts.ChangedPackages)
+	}
+	if len(opts.DependencyPackages) != 1 || opts.DependencyPackages[0] != "svc/b/" {
+		t.Errorf("DependencyPackages = %v, want [svc/b/]", opts.DependencyPackages)
 	}
 }
 

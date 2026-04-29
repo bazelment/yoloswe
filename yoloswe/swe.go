@@ -126,12 +126,18 @@ type Stats struct {
 }
 
 // ReviewIssue represents a single issue found during review.
+//
+// Confidence mirrors reviewer.ReviewIssue.Confidence: an optional value in
+// (0.0, 1.0] the reviewer assigns when it can; nil means "no signal". Kept
+// in sync so the JSON the reviewer emits doesn't get silently truncated on
+// the builder-feedback path.
 type ReviewIssue struct {
-	Severity   string `json:"severity"`
-	File       string `json:"file"`
-	Message    string `json:"message"`
-	Suggestion string `json:"suggestion,omitempty"`
-	Line       int    `json:"line,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Severity   string   `json:"severity"`
+	File       string   `json:"file"`
+	Message    string   `json:"message"`
+	Suggestion string   `json:"suggestion,omitempty"`
+	Line       int      `json:"line,omitempty"`
 }
 
 // ReviewVerdictJSON is the JSON structure returned by the reviewer.
@@ -413,6 +419,14 @@ func (s *SWEWrapper) parseVerdict(text string) *ReviewVerdict {
 		}
 	}
 
+	// Note: parseVerdict is deliberately lenient — its job is best-effort
+	// extraction of a verdict + feedback for the builder, even when the JSON
+	// is missing fields the strict envelope schema requires (line numbers,
+	// confidence range, etc.). reviewer.ValidateReviewJSON is available for
+	// callers that need strict semantics. Tightening this path would reject
+	// imperfect-but-actionable reviewer output and starve the builder of
+	// guidance, so the trade-off is intentional.
+
 	// Trim whitespace from verdict for robust comparison
 	verdict := strings.TrimSpace(result.Verdict)
 	accepted := strings.EqualFold(verdict, "accepted")
@@ -577,6 +591,9 @@ func formatFeedback(result ReviewVerdictJSON) string {
 			if issue.Line > 0 {
 				sb.WriteString(fmt.Sprintf(":%d", issue.Line))
 			}
+		}
+		if issue.Confidence != nil {
+			sb.WriteString(fmt.Sprintf("\n   Confidence: %.2f", *issue.Confidence))
 		}
 		if issue.Suggestion != "" {
 			sb.WriteString(fmt.Sprintf("\n   Suggestion: %s", issue.Suggestion))

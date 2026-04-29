@@ -691,6 +691,85 @@ func TestBuildPromptWithScope_NoOptionsMatchesLegacy(t *testing.T) {
 	}
 }
 
+func TestBuildJSONPromptWithScope_CallerCalleeFraming(t *testing.T) {
+	// When ChangedPackages is set, the prompt uses explicit caller/callee
+	// framing instead of the generic flat-list framing.
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+		ChangedPackages:      []string{"svc/a/"},
+		DependencyPackages:   []string{"svc/b/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause with ChangedPackages set")
+	}
+	if !strings.Contains(out, "primarily modifies") {
+		t.Errorf("expected caller/callee framing with 'primarily modifies'")
+	}
+	if !strings.Contains(out, "svc/a/") {
+		t.Errorf("changed package svc/a/ missing from output")
+	}
+	if !strings.Contains(out, "callers or dependencies") {
+		t.Errorf("expected 'callers or dependencies' framing in output")
+	}
+	if !strings.Contains(out, "svc/b/") {
+		t.Errorf("dependency package svc/b/ missing from output")
+	}
+}
+
+func TestBuildJSONPromptWithScope_CallerCalleeOmitsDepLineWhenNoDeps(t *testing.T) {
+	// ChangedPackages set but no DependencyPackages: clause still emits
+	// with the primary-modifies line but no callers/dependencies line.
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		ChangedPackages: []string{"svc/a/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause with ChangedPackages set")
+	}
+	if !strings.Contains(out, "primarily modifies") {
+		t.Errorf("expected 'primarily modifies' framing")
+	}
+	if strings.Contains(out, "callers or dependencies") {
+		t.Errorf("expected no callers/dependencies line when DependencyPackages is empty")
+	}
+}
+
+func TestBuildJSONPromptWithScope_GenericFallbackWhenNoChangedPackages(t *testing.T) {
+	// Without ChangedPackages the generic framing should be used (v1 compat).
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause")
+	}
+	if strings.Contains(out, "primarily modifies") {
+		t.Errorf("generic framing must not use 'primarily modifies'")
+	}
+	if !strings.Contains(out, "touches multiple top-level packages") {
+		t.Errorf("expected generic 'touches multiple top-level packages' framing")
+	}
+}
+
+func TestBuildJSONPromptWithScope_GenericFallbackWhenChangedPackagesAllSanitized(t *testing.T) {
+	// Direct callers that bypass LoadScopeHints can pass ChangedPackages
+	// entries that SanitizePromptHint rejects (e.g. leading '#'). The
+	// caller/callee clause then comes back empty — but if CrossServicePackages
+	// has >=2 entries the prompt must still get the generic cross-service
+	// guidance instead of dropping the section entirely.
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		ChangedPackages:      []string{"#bogus", "-also-bogus"},
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected generic cross-service clause when ChangedPackages all sanitized out")
+	}
+	if strings.Contains(out, "primarily modifies") {
+		t.Errorf("caller/callee framing must not appear when ChangedPackages was all sanitized out")
+	}
+	if !strings.Contains(out, "touches multiple top-level packages") {
+		t.Errorf("expected generic framing fallback")
+	}
+}
+
 // TestLegacyJSONPromptGolden pins today's BuildJSONPrompt output byte-for-
 // byte. Drift is most likely to creep in when someone edits the base prompt
 // or the JSON output rules without realizing yoloswe/swe.go and any

@@ -24,7 +24,8 @@ You MUST respond with valid JSON in this exact format:
       "file": "path/to/file.go",
       "line": 42,
       "message": "Description of the issue",
-      "suggestion": "How to fix it"
+      "suggestion": "How to fix it",
+      "confidence": 0.9
     }
   ]
 }
@@ -40,4 +41,5 @@ You MUST respond with valid JSON in this exact format:
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
+- confidence is an optional float in (0.0, 1.0]: 1.0 = certain, 0.5 = plausible but unverified; omit only when you cannot assess (the field is treated as "no signal", not as a default value)
 - Output ONLY the JSON object, no other text

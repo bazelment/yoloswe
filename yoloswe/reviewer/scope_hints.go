@@ -11,10 +11,20 @@ import (
 )
 
 // ScopeHintsSchemaVersion is the wire-format version of the scope-hints
-// JSON file consumed by `bramble code-review --scope-hints-file`. A version
-// bump only happens on a breaking shape change; new optional fields can be
-// added without a bump.
-const ScopeHintsSchemaVersion = 1
+// JSON file consumed by `bramble code-review --scope-hints-file`. Bump
+// when the loader needs to distinguish shapes — i.e. when a new field
+// changes the prompt-building path on the reviewer side, so old producers
+// shouldn't accidentally activate it. Pure additions that don't reroute
+// existing inputs (a new optional field that no clause reads) can land
+// without a bump.
+//
+// v1: original shape (cross_service_packages only).
+// v2: adds changed_packages and dependency_packages, which select the
+//
+//	caller/callee framing in buildScopeSuffix. cross_service_packages is
+//	still accepted (union of both new fields) so v1 producers keep
+//	working through a rolling upgrade.
+const ScopeHintsSchemaVersion = 2
 
 // scopeHintsMaxBytes caps the size of a scope-hints file LoadScopeHints will
 // read. The expected on-disk shape is small (test_paths capped at 50 entries
@@ -38,14 +48,30 @@ type ScopeHints struct {
 	// clause is appended to the prompt.
 	TestPaths []string `json:"test_paths"`
 
-	// CrossServicePackages names the top-level packages the PR touches.
-	// When it has at least two entries, the cross-service contract-sweep
-	// clause is appended.
+	// CrossServicePackages names all top-level packages the PR touches
+	// (union of ChangedPackages and DependencyPackages). Kept for
+	// backwards compatibility with v1 consumers; v2 files populate this
+	// alongside the split fields.
 	CrossServicePackages []string `json:"cross_service_packages"`
 
-	// SchemaVersion must equal ScopeHintsSchemaVersion. LoadScopeHints
-	// rejects any other value to make incompatible upgrades fail loudly
-	// instead of silently producing a degenerate prompt.
+	// ChangedPackages names the top-level packages directly modified by
+	// this diff (v2+). When non-empty, the cross-service clause uses
+	// explicit caller/callee framing — DependencyPackages is optional and
+	// gates only the "callers or dependencies" sentence.
+	ChangedPackages []string `json:"changed_packages,omitempty"`
+
+	// DependencyPackages names packages that import or are imported by the
+	// changed packages — the callers/callees to check for contract drift
+	// (v2+). The cross-service clause flags these as the "other side" of
+	// each interface.
+	DependencyPackages []string `json:"dependency_packages,omitempty"`
+
+	// SchemaVersion must be 1 or ScopeHintsSchemaVersion (currently 2).
+	// LoadScopeHints accepts both to allow a rolling upgrade: old
+	// scope_gate.py output (v1, no split fields) keeps working while
+	// callers adopt the v2 shape (split fields present). Anything else
+	// is rejected loudly so a future breaking change is caught rather
+	// than silently producing a degenerate prompt.
 	SchemaVersion int `json:"schema_version"`
 }
 
@@ -113,9 +139,13 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 	if err := json.Unmarshal(data, &h); err != nil {
 		return nil, fmt.Errorf("parse scope-hints file %s: %w", tag, err)
 	}
-	if h.SchemaVersion != ScopeHintsSchemaVersion {
+	// Accept v1 (original shape) and v2 (adds changed_packages /
+	// dependency_packages). Reject anything else loudly so a future
+	// breaking change is caught rather than silently producing a
+	// degenerate prompt.
+	if h.SchemaVersion != 1 && h.SchemaVersion != ScopeHintsSchemaVersion {
 		return nil, fmt.Errorf(
-			"scope-hints file %s: schema_version=%d, want %d",
+			"scope-hints file %s: schema_version=%d, want 1 or %d",
 			tag, h.SchemaVersion, ScopeHintsSchemaVersion,
 		)
 	}
@@ -123,6 +153,12 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 		return nil, err
 	}
 	if err := validateHintStrings(tag, h.CrossServicePackages, "cross_service_packages"); err != nil {
+		return nil, err
+	}
+	if err := validateHintStrings(tag, h.ChangedPackages, "changed_packages"); err != nil {
+		return nil, err
+	}
+	if err := validateHintStrings(tag, h.DependencyPackages, "dependency_packages"); err != nil {
 		return nil, err
 	}
 	return &h, nil
@@ -156,10 +192,14 @@ func sanitizedFSError(op, tag string, err error) error {
 // reject at the prompt-builder boundary. The clauses inline these strings
 // line-by-line under fixed Markdown headings, so a hint containing a
 // newline could close "## Test quality" early, and a leading Markdown
-// control character (#, -, *, >, _, =) could open a new section or list
-// at line start. scope_gate.py emits filesystem paths and package buckets,
-// neither of which exhibits these shapes — so this is a defense against a
-// buggy or hostile producer, not a normal input.
+// control character (#, -, *, +, >, =) or an ordered-list marker (e.g.
+// "1." / "12)") could open a new section or list at line start.
+// Underscore is intentionally allowed — TS/JS __tests__/ paths and
+// Python _helper.py paths are legitimate scope-hint inputs (see the
+// SanitizePromptHint godoc for the rationale). scope_gate.py emits
+// filesystem paths and package buckets, neither of which exhibits the
+// rejected shapes — so this is a defense against a buggy or hostile
+// producer, not a normal input.
 //
 // Failing here gives the operator a clear CLI warning ("test_paths[3]
 // starts with Markdown control char '#'") that points straight at the
@@ -206,5 +246,7 @@ func (h *ScopeHints) ToPromptOptions(skipTestExecution bool) PromptOptions {
 	}
 	opts.TestScopeHints = h.TestPaths
 	opts.CrossServicePackages = h.CrossServicePackages
+	opts.ChangedPackages = h.ChangedPackages
+	opts.DependencyPackages = h.DependencyPackages
 	return opts
 }

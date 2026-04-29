@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 )
 
@@ -11,12 +12,20 @@ import (
 const JSONSchemaVersion = 1
 
 // ReviewIssue mirrors the per-issue shape requested by BuildJSONPrompt.
+//
+// Confidence is *float64 so JSON omission and an explicit value are
+// distinguishable. The prompt contract is "omit when unassessed; otherwise
+// emit a value in (0.0, 1.0]" — a plain float64 with omitempty would treat
+// the boundary value 0 as missing and leave the validator unable to reject
+// out-of-range values. Consumers should treat nil as "no signal" rather
+// than synthesizing a default.
 type ReviewIssue struct {
-	Severity   string `json:"severity"`
-	File       string `json:"file"`
-	Message    string `json:"message"`
-	Suggestion string `json:"suggestion,omitempty"`
-	Line       int    `json:"line,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Severity   string   `json:"severity"`
+	File       string   `json:"file"`
+	Message    string   `json:"message"`
+	Suggestion string   `json:"suggestion,omitempty"`
+	Line       int      `json:"line,omitempty"`
 }
 
 // ReviewBody is the parsed reviewer-level JSON. When the reviewer's response
@@ -134,6 +143,29 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 	return env
 }
 
+// ValidateReviewJSON parses an extracted reviewer JSON object and runs the
+// same schema validation that BuildEnvelope applies to ResultEnvelope.Review.
+// Returns nil on a well-formed, schema-compliant body.
+//
+// Input contract: raw must be the bare JSON object the reviewer emitted,
+// without any narration prefix or fenced code block — same shape that
+// extractReviewBody returns. Feeding it raw model response text (which may
+// be wrapped in ``` fences or follow narration) will fail to unmarshal.
+// Callers wanting a one-shot "extract + validate" should go through
+// BuildEnvelope, which composes both steps.
+//
+// Use case: callers outside this package (e.g. yoloswe/swe.go's parseVerdict)
+// that already have the JSON blob in hand and want strict schema semantics
+// — confidence ∈ (0.0, 1.0], line ≥ 1, valid severity/verdict — without
+// constructing a full ResultEnvelope.
+func ValidateReviewJSON(raw []byte) error {
+	var body ReviewBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return fmt.Errorf("unmarshal reviewer JSON: %w", err)
+	}
+	return validateReviewBody(body)
+}
+
 // validateReviewBody checks the parsed body against the required reviewer
 // schema. A non-nil error means the envelope must report status="error" so
 // downstream automation never acts on malformed reviewer output.
@@ -143,6 +175,7 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 //   - each issue has severity ∈ {low, medium, high, critical}, message, file, line ≥ 1
 //   - "rejected" carries at least one issue (otherwise nothing was rejected)
 //   - "accepted" carries no high/critical issues (those block merge by definition)
+//   - confidence, when present, is in (0.0, 1.0] and finite (no NaN/Inf)
 //
 // The line requirement matches the prompt contract in buildBasePrompt, which
 // instructs the reviewer to "cite the affected file and line range" — without
@@ -167,6 +200,15 @@ func validateReviewBody(body ReviewBody) error {
 		}
 		if issue.Line < 1 {
 			return fmt.Errorf("issue[%d] missing line", i)
+		}
+		if issue.Confidence != nil {
+			c := *issue.Confidence
+			if math.IsNaN(c) || math.IsInf(c, 0) {
+				return fmt.Errorf("issue[%d] confidence not finite: %v", i, c)
+			}
+			if c <= 0 || c > 1 {
+				return fmt.Errorf("issue[%d] confidence %v not in (0.0, 1.0]", i, c)
+			}
 		}
 		if _, blocks := blockingSeverities[issue.Severity]; blocks {
 			hasBlocking = true

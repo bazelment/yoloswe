@@ -115,21 +115,40 @@ Do NOT run tests or build commands. The caller runs tests separately. Read test 
 
 // PromptOptions configures the optional clauses appended to a review prompt.
 //
-// Each clause is gated by data presence rather than a separate boolean: an
-// empty TestScopeHints means "no test-quality clause", and fewer than two
-// CrossServicePackages means "no cross-service clause". This collapses the
-// (boolean, list) cartesian product into a single source of truth — the
-// caller controls everything by what they put in the lists.
+// Each clause is gated by data presence rather than a separate boolean. The
+// test-quality clause is appended when TestScopeHints is non-empty. The
+// cross-service clause has two framings, picked in this order:
+//
+//   - When ChangedPackages is non-empty, the caller/callee framing names the
+//     changed packages explicitly and uses DependencyPackages (when set) to
+//     name the other side; a single changed package is fine.
+//   - Otherwise, when CrossServicePackages has at least two entries, the
+//     generic flat-list framing is used (v1 compat — kept so old scope-hints
+//     producers still get the clause without ChangedPackages).
+//
+// This collapses the (boolean, list) cartesian product into a single source
+// of truth — the caller controls everything by what they put in the lists.
 type PromptOptions struct {
 	// TestScopeHints lists co-located test paths the agent should read. When
 	// non-empty, the test-quality clause is appended to the prompt and the
 	// paths are inlined under it (capped at testScopeHintsCap entries).
 	TestScopeHints []string
 
-	// CrossServicePackages names the top-level packages this PR touches. When
-	// it has at least two entries, the cross-service contract-sweep clause is
-	// appended.
+	// CrossServicePackages names all top-level packages this PR touches.
+	// When it has at least two entries and ChangedPackages is empty, the
+	// generic flat-list cross-service contract-sweep clause is appended.
 	CrossServicePackages []string
+
+	// ChangedPackages names the top-level packages directly modified by
+	// this diff. When non-empty, the cross-service clause uses explicit
+	// caller/callee framing — naming the changed packages and the
+	// callers/dependencies separately — instead of the flat list.
+	ChangedPackages []string
+
+	// DependencyPackages names packages that import or are imported by the
+	// changed packages. Inlined as the "callers or dependencies" side in
+	// the caller/callee framing.
+	DependencyPackages []string
 
 	// SkipTestExecution discourages the agent from spawning bazel/go test/etc.
 	SkipTestExecution bool
@@ -248,6 +267,22 @@ func filterPromptHints(items []string) []string {
 	return out
 }
 
+// capAndJoin caps items at max entries and returns a comma-separated string
+// with " (and N more)" appended when items were dropped. Returns "" when
+// items is empty. Caller is responsible for any sanitization.
+func capAndJoin(items []string, max int) string {
+	if len(items) == 0 {
+		return ""
+	}
+	suffix := ""
+	if len(items) > max {
+		extra := len(items) - max
+		items = items[:max]
+		suffix = fmt.Sprintf(" (and %d more)", extra)
+	}
+	return strings.Join(items, ", ") + suffix
+}
+
 // testQualityClause returns the test-quality scrutiny clause with the given
 // co-located test paths inlined.
 //
@@ -294,35 +329,15 @@ Co-located test files to read (in addition to anything in the diff):
 ` + strings.Join(displayed, "\n") + suffix
 }
 
-// crossServiceClause returns the cross-service contract-sweep clause naming
-// the touched packages. The caller must guarantee len(packages) >= 2.
+// crossServiceContractItems is the trailing checklist shared by both
+// framings of the cross-service contract-sweep clause.
 //
 // The four numbered items track the issue body's draft (#175). An earlier
 // version added a fifth item naming specific shapes (FastAPI path-parameter
 // ordering, ORM mixins, OpenAPI tag collisions) drawn from kernel-2998; it
 // was removed for the same anti-overfitting reason as testQualityClause.
 // New items should describe failure modes, not specific framework bugs.
-func crossServiceClause(packages []string) string {
-	packages = filterPromptHints(packages)
-	if len(packages) < 2 {
-		// Sanitization filtered the list below the >=2 threshold the
-		// caller's gate assumed. Drop the clause rather than emit one
-		// with a single (or zero) package — the prompt would read
-		// nonsensically.
-		return ""
-	}
-	suffix := ""
-	if len(packages) > crossServicePackagesCap {
-		extra := len(packages) - crossServicePackagesCap
-		packages = packages[:crossServicePackagesCap]
-		suffix = fmt.Sprintf(" (and %d more)", extra)
-	}
-	return `
-
-## Cross-service contract sweep
-This PR touches multiple top-level packages: ` + strings.Join(packages, ", ") + suffix + `.
-Trace every public API/handler/exported symbol modified in one package to its
-consumers in the others. Read both sides of each surface and flag:
+const crossServiceContractItems = `
 1. Signature or shape changes that don't match consumer expectations
    (request/response field names, types, optionality, enum values).
 2. Async state updates that desync between producer and consumer
@@ -336,19 +351,73 @@ consumers in the others. Read both sides of each surface and flag:
 
 When citing an issue, name both sides (file:line) and explain the desync
 explicitly. If both sides agree, do not flag the surface.`
+
+// crossServiceClauseGeneric is a flat list of touched packages with no
+// caller/callee distinction, used when only CrossServicePackages is set.
+// The caller must guarantee len(packages) >= 2.
+func crossServiceClauseGeneric(packages []string) string {
+	// Sanitization may have filtered the list below the >=2 threshold the
+	// caller's gate assumed. Drop the clause rather than emit one with a
+	// single (or zero) package — the prompt would read nonsensically.
+	filtered := filterPromptHints(packages)
+	if len(filtered) < 2 {
+		return ""
+	}
+	return `
+
+## Cross-service contract sweep
+This PR touches multiple top-level packages: ` + capAndJoin(filtered, crossServicePackagesCap) + `.
+Trace every public API/handler/exported symbol modified in one package to its
+consumers in the others. Read both sides of each surface and flag:` + crossServiceContractItems
+}
+
+// crossServiceClauseCallerCallee names which packages were changed and which
+// are the callers/dependencies to check. Used when ChangedPackages is set.
+func crossServiceClauseCallerCallee(changedPkgs, depPkgs []string) string {
+	changed := filterPromptHints(changedPkgs)
+	if len(changed) == 0 {
+		return ""
+	}
+	depSection := ""
+	if deps := filterPromptHints(depPkgs); len(deps) > 0 {
+		depSection = `
+The following packages are callers or dependencies — check whether the interface
+contract (HTTP request shape, event schema, error codes, async message format)
+changed on the modified side without a matching update on these sides: ` + capAndJoin(deps, crossServicePackagesCap) + `.`
+	}
+	return `
+
+## Cross-service contract sweep
+The diff primarily modifies: ` + capAndJoin(changed, crossServicePackagesCap) + `.` + depSection + `
+Trace every public API/handler/exported symbol modified in the changed packages
+to its consumers. Read both sides of each surface and flag:` + crossServiceContractItems
 }
 
 // buildScopeSuffix concatenates the optional clauses dictated by opts. Each
 // clause is gated purely by data presence so callers without scope info pay
 // no cost — the returned string is empty when neither clause applies, which
 // keeps legacy callers byte-equal to today's prompt.
+//
+// The caller/callee branch tries to emit first (it's the more informative
+// framing), but if every ChangedPackages entry was filtered out by
+// SanitizePromptHint the clause comes back empty — in that case we fall
+// back to the generic flat-list framing rather than dropping the entire
+// cross-service section. A direct PromptOptions caller that bypassed
+// LoadScopeHints could otherwise lose all cross-service guidance just
+// because their ChangedPackages list happened to be unsanitary.
 func buildScopeSuffix(opts PromptOptions) string {
 	var s string
 	if len(opts.TestScopeHints) > 0 {
 		s += testQualityClause(opts.TestScopeHints)
 	}
-	if len(opts.CrossServicePackages) >= 2 {
-		s += crossServiceClause(opts.CrossServicePackages)
+	if len(opts.ChangedPackages) > 0 {
+		clause := crossServiceClauseCallerCallee(opts.ChangedPackages, opts.DependencyPackages)
+		if clause == "" && len(opts.CrossServicePackages) >= 2 {
+			clause = crossServiceClauseGeneric(opts.CrossServicePackages)
+		}
+		s += clause
+	} else if len(opts.CrossServicePackages) >= 2 {
+		s += crossServiceClauseGeneric(opts.CrossServicePackages)
 	}
 	return s
 }
@@ -371,7 +440,7 @@ func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
 func BuildPromptWithScope(goal string, opts PromptOptions) string {
 	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
 
-After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.`
+After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and an overall confidence score in [0.0, 1.0]. This overall score is distinct from the optional per-issue confidence in the JSON output format (which is in (0.0, 1.0]); it summarizes confidence in the verdict itself.`
 }
 
 // BuildJSONPrompt creates a review prompt that requests JSON output format.
@@ -403,7 +472,8 @@ You MUST respond with valid JSON in this exact format:
       "file": "path/to/file.go",
       "line": 42,
       "message": "Description of the issue",
-      "suggestion": "How to fix it"
+      "suggestion": "How to fix it",
+      "confidence": 0.9
     }
   ]
 }
@@ -419,6 +489,7 @@ You MUST respond with valid JSON in this exact format:
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
+- confidence is an optional float in (0.0, 1.0]: 1.0 = certain, 0.5 = plausible but unverified; omit only when you cannot assess (the field is treated as "no signal", not as a default value)
 - Output ONLY the JSON object, no other text`
 }
 
