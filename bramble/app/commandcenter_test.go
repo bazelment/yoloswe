@@ -421,7 +421,9 @@ func TestCommandCenter_UpdateSessionsEmptyList(t *testing.T) {
 // then 'p'/'b'/'c' must spawn against the navigated session's worktree.
 func TestCommandCenter_NewSession_AfterReSort(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
-		{Branch: "main", Path: "/tmp/wt/main"},
+		{Branch: "A", Path: "/tmp/wt/A"},
+		{Branch: "B", Path: "/tmp/wt/B"},
+		{Branch: "C", Path: "/tmp/wt/C"},
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0)
 

@@ -68,6 +68,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over packing
 	styles                *Styles
 	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
 	sharedManagerConfig   session.ManagerConfig
+	pendingSessionTarget  sessionTarget
 	pendingModel          string
 	repoName              string
 	historyBranch         string
@@ -94,6 +95,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over packing
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
+	worktreesLoaded       bool
 	// Voice reporting.
 	voiceReporter *VoiceReporter
 }
@@ -183,6 +185,8 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	m.repoSettingsDialog.SetSize(width, height)
 	m.configureAllDropdownsForViewport()
 
+	m.worktreesLoaded = initialWorktrees != nil
+
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {
 		m.worktrees = initialWorktrees
@@ -196,6 +200,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		sessionManager:   sessionManager,
 		taskRouter:       taskRouter,
 		worktrees:        m.worktrees,
+		worktreesLoaded:  m.worktreesLoaded,
 		worktreeDropdown: m.worktreeDropdown,
 		sessionDropdown:  m.sessionDropdown,
 		scrollPositions:  m.scrollPositions,

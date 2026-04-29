@@ -104,11 +104,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.repoName != m.repoName {
 			if rc, ok := m.repos[msg.repoName]; ok {
 				rc.worktrees = msg.worktrees
+				rc.worktreesLoaded = true
 			}
 			return m, nil
 		}
 		m.worktrees = msg.worktrees
+		m.worktreesLoaded = true
 		m.updateWorktreeDropdown()
+
+		if m.inputMode && m.pendingSessionTarget.mode != 0 && m.pendingTargetAppliesToCurrentRepo() {
+			switch m.sessionTargetAvailability(m.pendingSessionTarget) {
+			case sessionTargetUnavailable:
+				return m.cancelPendingSessionPrompt("Target worktree no longer available")
+			case sessionTargetAvailable:
+				if m.selectTargetWorktree(m.pendingSessionTarget) {
+					m.updateSessionDropdown()
+				}
+			}
+		}
 
 		// Check for pending worktree selection (from worktree creation)
 		if m.pendingWorktreeSelect != "" {
@@ -363,6 +376,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pendingSessionType := m.pendingSessionType
 		m.pendingModel = ""
 		m.pendingSessionType = ""
+		m.pendingSessionTarget = sessionTarget{}
 		if m.inputHandler != nil {
 			cmd := m.inputHandler(msg.value, pendingModel, pendingSessionType)
 			m.inputHandler = nil
@@ -372,7 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case startSessionMsg:
 		m.saveDefaultModel(msg.sessionType, msg.model)
-		if msg.target.mode == sessionTargetCapturedSelection &&
+		if msg.target.mode != 0 &&
 			m.sessionTargetAvailability(msg.target) == sessionTargetUnavailable {
 			toastCmd := m.addToast("Target worktree no longer available", ToastError)
 			return m, toastCmd
@@ -1200,6 +1214,7 @@ func (m Model) handleInputMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.inputHandler = nil
 		m.pendingModel = ""
 		m.pendingSessionType = ""
+		m.pendingSessionTarget = sessionTarget{}
 		return m, nil
 
 	case TextAreaQuit:
@@ -1339,12 +1354,18 @@ func (m Model) sessionTargetAvailability(target sessionTarget) sessionTargetAvai
 	}
 
 	worktrees := m.worktrees
+	worktreesLoaded := m.worktreesLoaded
 	if target.repoName != "" && target.repoName != m.repoName {
 		rc, ok := m.repos[target.repoName]
 		if !ok {
 			return sessionTargetUnknown
 		}
 		worktrees = rc.worktrees
+		worktreesLoaded = rc.worktreesLoaded
+	}
+
+	if !worktreesLoaded {
+		return sessionTargetUnknown
 	}
 
 	for _, wt := range worktrees {
@@ -1357,6 +1378,26 @@ func (m Model) sessionTargetAvailability(target sessionTarget) sessionTargetAvai
 	}
 
 	return sessionTargetUnavailable
+}
+
+func (m Model) pendingTargetAppliesToCurrentRepo() bool {
+	return m.pendingSessionTarget.repoName == "" || m.pendingSessionTarget.repoName == m.repoName
+}
+
+func (m *Model) selectTargetWorktree(target sessionTarget) bool {
+	return m.selectSessionWorktree(&session.SessionInfo{WorktreePath: target.worktreePath})
+}
+
+func (m Model) cancelPendingSessionPrompt(message string) (Model, tea.Cmd) {
+	m.inputMode = false
+	m.inputArea.Reset()
+	m.inputHandler = nil
+	m.pendingModel = ""
+	m.pendingSessionType = ""
+	m.pendingSessionTarget = sessionTarget{}
+	m.focus = FocusOutput
+	toastCmd := m.addToast(message, ToastError)
+	return m, toastCmd
 }
 
 func truncateSessionID(id session.SessionID) string {
@@ -1414,6 +1455,7 @@ func (m Model) promptNewSession(sessionType session.SessionType, target sessionT
 	defaultModel, promptLabel, placeholder := m.sessionPromptConfig(sessionType)
 	m.pendingModel = defaultModel
 	m.pendingSessionType = sessionType
+	m.pendingSessionTarget = target
 	return m.promptInput(promptLabel, func(prompt, model string, _ session.SessionType) tea.Cmd {
 		return func() tea.Msg {
 			return startSessionMsg{
@@ -1441,6 +1483,71 @@ func (m *Model) selectSessionWorktree(sess *session.SessionInfo) bool {
 	return false
 }
 
+func sessionWorktreeBranch(sess *session.SessionInfo) string {
+	if sess == nil {
+		return ""
+	}
+	if sess.WorktreeName != "" {
+		return sess.WorktreeName
+	}
+	if sess.WorktreePath != "" {
+		return filepath.Base(sess.WorktreePath)
+	}
+	return ""
+}
+
+func (m *Model) ensureSessionWorktreeVisible(sess *session.SessionInfo) bool {
+	if m.selectSessionWorktree(sess) {
+		return true
+	}
+	if sess == nil || sess.WorktreePath == "" || m.worktreesLoaded {
+		return false
+	}
+
+	branch := sessionWorktreeBranch(sess)
+	if branch == "" {
+		return false
+	}
+	m.worktrees = append(m.worktrees, wt.Worktree{
+		Branch: branch,
+		Path:   sess.WorktreePath,
+	})
+	m.updateWorktreeDropdown()
+	return m.worktreeDropdown.SelectByID(branch)
+}
+
+func (m Model) validateExistingSessionTarget(sess *session.SessionInfo) (sessionTarget, tea.Cmd, bool) {
+	if sess == nil {
+		toastCmd := m.addToast("No session selected", ToastInfo)
+		return sessionTarget{}, toastCmd, false
+	}
+	if sess.WorktreePath == "" {
+		toastCmd := m.addToast("Selected session has no worktree", ToastInfo)
+		return sessionTarget{}, toastCmd, false
+	}
+
+	targetRepo := sess.RepoName
+	if targetRepo == "" {
+		targetRepo = m.repoName
+	}
+	target := existingSessionTarget(targetRepo, sess.WorktreePath)
+
+	if targetRepo != "" && targetRepo != m.repoName {
+		rc, ok := m.repos[targetRepo]
+		if !ok || rc.sessionManager == nil {
+			toastCmd := m.addToast("Target repo no longer available", ToastError)
+			return target, toastCmd, false
+		}
+	}
+
+	if m.sessionTargetAvailability(target) == sessionTargetUnavailable {
+		toastCmd := m.addToast("Target worktree no longer available", ToastError)
+		return target, toastCmd, false
+	}
+
+	return target, nil, true
+}
+
 func (m Model) showSessionContext(sess *session.SessionInfo) (Model, tea.Cmd) {
 	if sess == nil {
 		return m, nil
@@ -1455,7 +1562,7 @@ func (m Model) showSessionContext(sess *session.SessionInfo) (Model, tea.Cmd) {
 		}
 	}
 
-	if m.selectSessionWorktree(sess) {
+	if m.ensureSessionWorktreeVisible(sess) {
 		m.updateSessionDropdown()
 		cmds = append(cmds, m.refreshFileTree(), m.refreshHistorySessions())
 	}
@@ -1471,26 +1578,16 @@ func (m Model) showSessionContext(sess *session.SessionInfo) (Model, tea.Cmd) {
 // the given session's worktree. hideOverlay is called only after validation
 // succeeds, so the overlay stays visible on error (preventing focus-state bugs).
 func (m Model) startNewSessionFromOverlay(sess *session.SessionInfo, sessionType session.SessionType, hideOverlay func()) (tea.Model, tea.Cmd) {
-	if sess == nil {
-		toastCmd := m.addToast("No session selected", ToastInfo)
-		return m, toastCmd
-	}
-	if sess.WorktreePath == "" {
-		toastCmd := m.addToast("Selected session has no worktree", ToastInfo)
+	target, toastCmd, ok := m.validateExistingSessionTarget(sess)
+	if !ok {
 		return m, toastCmd
 	}
 
 	hideOverlay()
 	m.focus = FocusOutput
 
-	targetRepo := sess.RepoName
-	if targetRepo == "" {
-		targetRepo = m.repoName
-	}
-	worktreePath := sess.WorktreePath
-
 	m, contextCmd := m.showSessionContext(sess)
-	model, promptCmd := m.promptNewSession(sessionType, existingSessionTarget(targetRepo, worktreePath))
+	model, promptCmd := m.promptNewSession(sessionType, target)
 	return model, tea.Batch(contextCmd, promptCmd)
 }
 

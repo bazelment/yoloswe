@@ -213,6 +213,77 @@ func TestCommandCenterNewSession_ShowsSelectedSessionWorktreeWhilePromptOpen(t *
 	assert.NotContains(t, view, "Session A")
 }
 
+func TestCommandCenterNewSession_SelectsByWorktreePathWhenNameIsStale(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/main"},
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("main"))
+
+	sess := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "s1",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/feature",
+		WorktreeName: "stale-name",
+		RepoName:     "repoA",
+		Title:        "Feature session",
+	})
+	m.commandCenter.Show([]session.SessionInfo{sess}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	newModel, _ := m.handleCommandCenter(keyPress('p'))
+	m2 := newModel.(Model)
+
+	require.True(t, m2.inputMode)
+	selected := m2.worktreeDropdown.SelectedItem()
+	require.NotNil(t, selected)
+	assert.Equal(t, "feature", selected.ID)
+	assert.Equal(t, session.SessionID("s1"), m2.viewingSessionID)
+	assert.Contains(t, m2.View().Content, "Feature session")
+}
+
+func TestStartSessionMsg_ExistingSessionWorktreeRemovedBeforeDispatch(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "A", Path: "/tmp/wt/A"},
+		{Branch: "B", Path: "/tmp/wt/B"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("A"))
+
+	sess := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "sB",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/B",
+		WorktreeName: "B",
+		RepoName:     "repoA",
+		Title:        "Session B",
+	})
+	m.commandCenter.Show([]session.SessionInfo{sess}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	newModel, _ := m.handleCommandCenter(keyPress('b'))
+	m2 := newModel.(Model)
+	require.True(t, m2.inputMode)
+
+	newModel2, cmd := m2.Update(promptInputMsg{value: "build on B"})
+	m3 := newModel2.(Model)
+	require.NotNil(t, cmd)
+	startMsg, ok := cmd().(startSessionMsg)
+	require.True(t, ok)
+	require.Equal(t, sessionTargetExistingSession, startMsg.target.mode)
+
+	m3.worktrees = []wt.Worktree{{Branch: "A", Path: "/tmp/wt/A"}}
+	m3.updateWorktreeDropdown()
+
+	newModel3, _ := m3.Update(startMsg)
+	m4 := newModel3.(Model)
+
+	assert.True(t, m4.toasts.HasToasts())
+	assert.Contains(t, m4.toasts.toasts[0].Message, "Target worktree no longer available")
+	assert.Len(t, m4.sessionManager.GetAllSessions(), 1, "removed target must not receive a new session")
+}
+
 func TestConfirmTask_UnknownExistingWorktreeDoesNotFallBackToCurrentSelection(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
 		{Branch: "A", Path: "/tmp/wt/A"},

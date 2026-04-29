@@ -25,6 +25,7 @@ type RepoContext struct {
 	worktrees            []wt.Worktree
 	selectedSessionIndex int
 	scrollOffset         int
+	worktreesLoaded      bool
 }
 
 // saveActiveContext copies per-repo fields from Model into the active RepoContext.
@@ -41,6 +42,7 @@ func (m *Model) saveActiveContext() {
 	rc.historyBranch = m.historyBranch
 	rc.sessions = m.sessions
 	rc.worktreeDropdown = m.worktreeDropdown
+	rc.worktreesLoaded = m.worktreesLoaded
 	rc.sessionDropdown = m.sessionDropdown
 	rc.viewingSessionID = m.viewingSessionID
 	rc.viewingHistoryData = m.viewingHistoryData
@@ -72,6 +74,7 @@ func (m *Model) loadContext(repoName string) {
 	m.sessionManager = rc.sessionManager
 	m.taskRouter = rc.taskRouter
 	m.worktrees = rc.worktrees
+	m.worktreesLoaded = rc.worktreesLoaded
 	m.worktreeStatuses = rc.worktreeStatuses
 	m.cachedHistory = rc.cachedHistory
 	m.historyBranch = rc.historyBranch

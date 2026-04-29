@@ -38,6 +38,7 @@ func addTestSession(t *testing.T, mgr *session.Manager, sess *session.Session) s
 func setRepoWorktrees(m *Model, repoName string, worktrees []wt.Worktree) {
 	rc := m.repos[repoName]
 	rc.worktrees = worktrees
+	rc.worktreesLoaded = true
 
 	items := make([]DropdownItem, 0, len(worktrees))
 	for _, wt := range worktrees {
@@ -81,6 +82,7 @@ func TestNewSessionFromOverlay_CrossRepo_UsesTargetManager(t *testing.T) {
 	selected := m2.worktreeDropdown.SelectedItem()
 	require.NotNil(t, selected)
 	assert.Equal(t, "feature", selected.ID, "prompt view should show the selected session worktree")
+	assert.Contains(t, m2.View().Content, "Repo B session")
 
 	newModel2, cmd := m2.Update(promptInputMsg{value: "do the thing"})
 	m3 := newModel2.(Model)
@@ -137,6 +139,7 @@ func TestNewSessionFromCommandCenter_CrossRepo_UsesTargetManager(t *testing.T) {
 	selected := m2.worktreeDropdown.SelectedItem()
 	require.NotNil(t, selected)
 	assert.Equal(t, "feature", selected.ID)
+	assert.Contains(t, m2.View().Content, "Repo B session")
 
 	newModel2, cmd := m2.Update(promptInputMsg{value: "plan something"})
 	m3 := newModel2.(Model)
@@ -162,6 +165,17 @@ func TestNewSessionFromOverlay_SameRepo_SyncsWorktreeDropdown(t *testing.T) {
 	}, "test-repo")
 	m.worktreeDropdown.SelectIndex(0) // start on "main"
 
+	mainSess := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "s0",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/main",
+		WorktreeName: "main",
+		RepoName:     "test-repo",
+		Title:        "Main session",
+	})
+	m.switchViewingSession(mainSess.ID)
+
 	sess := addTestSession(t, m.sessionManager, &session.Session{
 		ID:           "s1",
 		Type:         session.SessionTypeBuilder,
@@ -183,4 +197,138 @@ func TestNewSessionFromOverlay_SameRepo_SyncsWorktreeDropdown(t *testing.T) {
 	assert.Equal(t, "feature", selected.ID, "same-repo overlay must sync worktree dropdown")
 	assert.Equal(t, session.SessionID("s1"), m2.viewingSessionID, "prompt view should show selected session output")
 	assert.Contains(t, m2.View().Content, "Feature session")
+	assert.NotContains(t, m2.View().Content, "Main session")
+}
+
+func TestNewSessionFromCommandCenter_CrossRepoColdContext_ShowsSelectedSessionWorktree(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/repoA-main"},
+	}, "repoA")
+	m.worktreeDropdown.SelectIndex(0)
+
+	mgrB := injectSecondRepo(t, &m, "repoB")
+	repoBSess := addTestSession(t, mgrB, &session.Session{
+		ID:           "b1",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/repoB-feature",
+		WorktreeName: "feature",
+		RepoName:     "repoB",
+		Title:        "Repo B session",
+	})
+	m.commandCenter.Show([]session.SessionInfo{repoBSess}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	newModel, _ := m.handleCommandCenter(keyPress('p'))
+	m2 := newModel.(Model)
+
+	assert.Equal(t, "repoB", m2.repoName)
+	assert.True(t, m2.inputMode)
+	assert.False(t, m2.worktreesLoaded, "repoB worktrees are still loading")
+	selected := m2.worktreeDropdown.SelectedItem()
+	require.NotNil(t, selected)
+	assert.Equal(t, "feature", selected.ID)
+	assert.Contains(t, m2.View().Content, "Repo B session")
+
+	refreshedModel, _ := m2.Update(worktreesMsg{repoName: "repoB", worktrees: []wt.Worktree{
+		{Branch: "feature", Path: "/tmp/wt/repoB-feature"},
+	}})
+	m3 := refreshedModel.(Model)
+
+	assert.True(t, m3.inputMode)
+	assert.True(t, m3.worktreesLoaded)
+	selected = m3.worktreeDropdown.SelectedItem()
+	require.NotNil(t, selected)
+	assert.Equal(t, "feature", selected.ID)
+}
+
+func TestNewSessionFromOverlay_CrossRepoColdContext_ShowsSelectedSessionWorktree(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/repoA-main"},
+	}, "repoA")
+	m.worktreeDropdown.SelectIndex(0)
+
+	mgrB := injectSecondRepo(t, &m, "repoB")
+	repoBSess := addTestSession(t, mgrB, &session.Session{
+		ID:           "b1",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/repoB-feature",
+		WorktreeName: "feature",
+		RepoName:     "repoB",
+		Title:        "Repo B session",
+	})
+	m.allSessionsOverlay.Show([]session.SessionInfo{repoBSess}, m.width, m.height)
+	m.focus = FocusAllSessions
+
+	newModel, _ := m.handleAllSessionsOverlay(keyPress('b'))
+	m2 := newModel.(Model)
+
+	assert.Equal(t, "repoB", m2.repoName)
+	assert.True(t, m2.inputMode)
+	assert.False(t, m2.worktreesLoaded, "repoB worktrees are still loading")
+	selected := m2.worktreeDropdown.SelectedItem()
+	require.NotNil(t, selected)
+	assert.Equal(t, "feature", selected.ID)
+	assert.Contains(t, m2.View().Content, "Repo B session")
+}
+
+func TestNewSessionFromCommandCenter_MissingRepoDoesNotOpenPrompt(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/repoA-main"},
+	}, "repoA")
+	m.worktreeDropdown.SelectIndex(0)
+
+	m.commandCenter.Show([]session.SessionInfo{{
+		ID:           "b1",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/repoB-feature",
+		WorktreeName: "feature",
+		RepoName:     "repoB",
+		Title:        "Repo B session",
+	}}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	newModel, _ := m.handleCommandCenter(keyPress('p'))
+	m2 := newModel.(Model)
+
+	assert.False(t, m2.inputMode)
+	assert.True(t, m2.commandCenter.IsVisible(), "command center should stay visible on validation error")
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Target repo no longer available")
+}
+
+func TestNewSessionPrompt_WorktreeRefreshCancelsWhenSelectedWorktreeDisappears(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "main", Path: "/tmp/wt/repoA-main"},
+	}, "repoA")
+	m.worktreeDropdown.SelectIndex(0)
+
+	mgrB := injectSecondRepo(t, &m, "repoB")
+	repoBSess := addTestSession(t, mgrB, &session.Session{
+		ID:           "b1",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/repoB-feature",
+		WorktreeName: "feature",
+		RepoName:     "repoB",
+		Title:        "Repo B session",
+	})
+	m.commandCenter.Show([]session.SessionInfo{repoBSess}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	newModel, _ := m.handleCommandCenter(keyPress('p'))
+	m2 := newModel.(Model)
+	require.True(t, m2.inputMode)
+
+	refreshedModel, _ := m2.Update(worktreesMsg{repoName: "repoB", worktrees: []wt.Worktree{
+		{Branch: "other", Path: "/tmp/wt/repoB-other"},
+	}})
+	m3 := refreshedModel.(Model)
+
+	assert.False(t, m3.inputMode)
+	assert.Equal(t, FocusOutput, m3.focus)
+	assert.True(t, m3.toasts.HasToasts())
+	assert.Contains(t, m3.toasts.toasts[0].Message, "Target worktree no longer available")
 }
