@@ -14,7 +14,12 @@ import (
 // JSON file consumed by `bramble code-review --scope-hints-file`. A version
 // bump only happens on a breaking shape change; new optional fields can be
 // added without a bump.
-const ScopeHintsSchemaVersion = 1
+//
+// v1: original shape (cross_service_packages only)
+// v2: adds changed_packages and dependency_packages; cross_service_packages
+//
+//	is kept for backwards compat (union of both new fields).
+const ScopeHintsSchemaVersion = 2
 
 // scopeHintsMaxBytes caps the size of a scope-hints file LoadScopeHints will
 // read. The expected on-disk shape is small (test_paths capped at 50 entries
@@ -38,14 +43,27 @@ type ScopeHints struct {
 	// clause is appended to the prompt.
 	TestPaths []string `json:"test_paths"`
 
-	// CrossServicePackages names the top-level packages the PR touches.
-	// When it has at least two entries, the cross-service contract-sweep
-	// clause is appended.
+	// CrossServicePackages names all top-level packages the PR touches
+	// (union of ChangedPackages and DependencyPackages). Kept for
+	// backwards compatibility with v1 consumers; v2 files populate this
+	// alongside the split fields.
 	CrossServicePackages []string `json:"cross_service_packages"`
 
+	// ChangedPackages names the top-level packages directly modified by
+	// this diff (v2+). When non-empty alongside DependencyPackages, the
+	// cross-service clause uses explicit caller/callee framing.
+	ChangedPackages []string `json:"changed_packages,omitempty"`
+
+	// DependencyPackages names packages that import or are imported by the
+	// changed packages — the callers/callees to check for contract drift
+	// (v2+). The cross-service clause flags these as the "other side" of
+	// each interface.
+	DependencyPackages []string `json:"dependency_packages,omitempty"`
+
 	// SchemaVersion must equal ScopeHintsSchemaVersion. LoadScopeHints
-	// rejects any other value to make incompatible upgrades fail loudly
-	// instead of silently producing a degenerate prompt.
+	// accepts v1 (no split fields) and v2 (split fields present) to
+	// allow a rolling upgrade: old scope_gate.py output keeps working
+	// while callers adopt the new shape.
 	SchemaVersion int `json:"schema_version"`
 }
 
@@ -113,7 +131,11 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 	if err := json.Unmarshal(data, &h); err != nil {
 		return nil, fmt.Errorf("parse scope-hints file %s: %w", tag, err)
 	}
-	if h.SchemaVersion != ScopeHintsSchemaVersion {
+	// Accept v1 (original shape) and v2 (adds changed_packages /
+	// dependency_packages). Reject anything else loudly so a future
+	// breaking change is caught rather than silently producing a
+	// degenerate prompt.
+	if h.SchemaVersion != 1 && h.SchemaVersion != ScopeHintsSchemaVersion {
 		return nil, fmt.Errorf(
 			"scope-hints file %s: schema_version=%d, want %d",
 			tag, h.SchemaVersion, ScopeHintsSchemaVersion,
@@ -123,6 +145,12 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 		return nil, err
 	}
 	if err := validateHintStrings(tag, h.CrossServicePackages, "cross_service_packages"); err != nil {
+		return nil, err
+	}
+	if err := validateHintStrings(tag, h.ChangedPackages, "changed_packages"); err != nil {
+		return nil, err
+	}
+	if err := validateHintStrings(tag, h.DependencyPackages, "dependency_packages"); err != nil {
 		return nil, err
 	}
 	return &h, nil
@@ -206,5 +234,7 @@ func (h *ScopeHints) ToPromptOptions(skipTestExecution bool) PromptOptions {
 	}
 	opts.TestScopeHints = h.TestPaths
 	opts.CrossServicePackages = h.CrossServicePackages
+	opts.ChangedPackages = h.ChangedPackages
+	opts.DependencyPackages = h.DependencyPackages
 	return opts
 }

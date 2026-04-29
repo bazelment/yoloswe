@@ -691,6 +691,64 @@ func TestBuildPromptWithScope_NoOptionsMatchesLegacy(t *testing.T) {
 	}
 }
 
+func TestBuildJSONPromptWithScope_CallerCalleeFraming(t *testing.T) {
+	// When ChangedPackages is set, the prompt uses explicit caller/callee
+	// framing instead of the generic flat-list framing.
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+		ChangedPackages:      []string{"svc/a/"},
+		DependencyPackages:   []string{"svc/b/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause with ChangedPackages set")
+	}
+	if !strings.Contains(out, "primarily modifies") {
+		t.Errorf("expected caller/callee framing with 'primarily modifies'")
+	}
+	if !strings.Contains(out, "svc/a/") {
+		t.Errorf("changed package svc/a/ missing from output")
+	}
+	if !strings.Contains(out, "callers or dependencies") {
+		t.Errorf("expected 'callers or dependencies' framing in output")
+	}
+	if !strings.Contains(out, "svc/b/") {
+		t.Errorf("dependency package svc/b/ missing from output")
+	}
+}
+
+func TestBuildJSONPromptWithScope_CallerCalleeFallsBackToGenericWhenNoDeps(t *testing.T) {
+	// ChangedPackages set but no DependencyPackages: clause still emits
+	// with the primary-modifies line but no callers/dependencies line.
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		ChangedPackages: []string{"svc/a/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause with ChangedPackages set")
+	}
+	if !strings.Contains(out, "primarily modifies") {
+		t.Errorf("expected 'primarily modifies' framing")
+	}
+	if strings.Contains(out, "callers or dependencies") {
+		t.Errorf("expected no callers/dependencies line when DependencyPackages is empty")
+	}
+}
+
+func TestBuildJSONPromptWithScope_GenericFallbackWhenNoChangedPackages(t *testing.T) {
+	// Without ChangedPackages the generic framing should be used (v1 compat).
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected cross-service clause")
+	}
+	if strings.Contains(out, "primarily modifies") {
+		t.Errorf("generic framing must not use 'primarily modifies'")
+	}
+	if !strings.Contains(out, "touches multiple top-level packages") {
+		t.Errorf("expected generic 'touches multiple top-level packages' framing")
+	}
+}
+
 // TestLegacyJSONPromptGolden pins today's BuildJSONPrompt output byte-for-
 // byte. Drift is most likely to creep in when someone edits the base prompt
 // or the JSON output rules without realizing yoloswe/swe.go and any

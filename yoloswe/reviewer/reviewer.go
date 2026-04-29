@@ -126,10 +126,20 @@ type PromptOptions struct {
 	// paths are inlined under it (capped at testScopeHintsCap entries).
 	TestScopeHints []string
 
-	// CrossServicePackages names the top-level packages this PR touches. When
-	// it has at least two entries, the cross-service contract-sweep clause is
-	// appended.
+	// CrossServicePackages names all top-level packages this PR touches. When
+	// it has at least two entries and ChangedPackages is empty, the generic
+	// cross-service contract-sweep clause is appended.
 	CrossServicePackages []string
+
+	// ChangedPackages names the top-level packages directly modified by this
+	// diff (v2+ scope hints). When non-empty, the cross-service clause uses
+	// explicit caller/callee framing instead of the generic multi-package list.
+	ChangedPackages []string
+
+	// DependencyPackages names packages that import or are imported by the
+	// changed packages (v2+ scope hints). Used alongside ChangedPackages in
+	// the explicit caller/callee framing.
+	DependencyPackages []string
 
 	// SkipTestExecution discourages the agent from spawning bazel/go test/etc.
 	SkipTestExecution bool
@@ -294,15 +304,30 @@ Co-located test files to read (in addition to anything in the diff):
 ` + strings.Join(displayed, "\n") + suffix
 }
 
-// crossServiceClause returns the cross-service contract-sweep clause naming
-// the touched packages. The caller must guarantee len(packages) >= 2.
+// crossServiceClause returns the cross-service contract-sweep clause.
+//
+// When changedPkgs is non-empty, the clause uses explicit caller/callee
+// framing: it names the directly modified packages and tells the reviewer
+// which packages are the callers/dependencies to check. When changedPkgs is
+// empty (v1 hints or no split available), it falls back to the generic
+// multi-package framing using allPkgs.
 //
 // The four numbered items track the issue body's draft (#175). An earlier
 // version added a fifth item naming specific shapes (FastAPI path-parameter
 // ordering, ORM mixins, OpenAPI tag collisions) drawn from kernel-2998; it
 // was removed for the same anti-overfitting reason as testQualityClause.
 // New items should describe failure modes, not specific framework bugs.
-func crossServiceClause(packages []string) string {
+func crossServiceClause(allPkgs, changedPkgs, depPkgs []string) string {
+	if len(changedPkgs) > 0 {
+		return crossServiceClauseCallerCallee(changedPkgs, depPkgs)
+	}
+	return crossServiceClauseGeneric(allPkgs)
+}
+
+// crossServiceClauseGeneric is the v1 fallback: a flat list of touched
+// packages with no caller/callee distinction. The caller must guarantee
+// len(packages) >= 2.
+func crossServiceClauseGeneric(packages []string) string {
 	packages = filterPromptHints(packages)
 	if len(packages) < 2 {
 		// Sanitization filtered the list below the >=2 threshold the
@@ -338,6 +363,59 @@ When citing an issue, name both sides (file:line) and explain the desync
 explicitly. If both sides agree, do not flag the surface.`
 }
 
+// crossServiceClauseCallerCallee is the v2 explicit framing: it names which
+// packages were changed and which are the callers/dependencies to check.
+func crossServiceClauseCallerCallee(changedPkgs, depPkgs []string) string {
+	changedPkgs = filterPromptHints(changedPkgs)
+	depPkgs = filterPromptHints(depPkgs)
+	if len(changedPkgs) == 0 {
+		return ""
+	}
+
+	changedSuffix := ""
+	if len(changedPkgs) > crossServicePackagesCap {
+		extra := len(changedPkgs) - crossServicePackagesCap
+		changedPkgs = changedPkgs[:crossServicePackagesCap]
+		changedSuffix = fmt.Sprintf(" (and %d more)", extra)
+	}
+	changedLine := strings.Join(changedPkgs, ", ") + changedSuffix
+
+	depSection := ""
+	if len(depPkgs) > 0 {
+		depSuffix := ""
+		if len(depPkgs) > crossServicePackagesCap {
+			extra := len(depPkgs) - crossServicePackagesCap
+			depPkgs = depPkgs[:crossServicePackagesCap]
+			depSuffix = fmt.Sprintf(" (and %d more)", extra)
+		}
+		depLine := strings.Join(depPkgs, ", ") + depSuffix
+		depSection = `
+The following packages are callers or dependencies — check whether the interface
+contract (HTTP request shape, event schema, error codes, async message format)
+changed on the modified side without a matching update on these sides: ` + depLine + `.`
+	}
+
+	return `
+
+## Cross-service contract sweep
+The diff primarily modifies: ` + changedLine + `.` + depSection + `
+Trace every public API/handler/exported symbol modified in the changed packages
+to its consumers. Read both sides of each surface and flag:
+1. Signature or shape changes that don't match consumer expectations
+   (request/response field names, types, optionality, enum values).
+2. Async state updates that desync between producer and consumer
+   (optimistic UI updates that diverge from refetched server state,
+   stale-while-revalidate paths returning prior values).
+3. Error or loading paths whose handling differs across packages
+   (one side throws, the other silently falls back; one side surfaces a
+   typed error, the other treats it as success).
+4. Silent fallbacks that swallow values from another service (default
+   values masking missing fields, empty arrays masking failed lookups).
+
+When citing an issue, name both sides (file:line) and explain the desync
+explicitly. If both sides agree, do not flag the surface.`
+}
+
 // buildScopeSuffix concatenates the optional clauses dictated by opts. Each
 // clause is gated purely by data presence so callers without scope info pay
 // no cost — the returned string is empty when neither clause applies, which
@@ -347,8 +425,10 @@ func buildScopeSuffix(opts PromptOptions) string {
 	if len(opts.TestScopeHints) > 0 {
 		s += testQualityClause(opts.TestScopeHints)
 	}
-	if len(opts.CrossServicePackages) >= 2 {
-		s += crossServiceClause(opts.CrossServicePackages)
+	// v2: use explicit caller/callee framing when ChangedPackages is set.
+	// v1 fallback: generic framing when only CrossServicePackages is set.
+	if len(opts.ChangedPackages) >= 1 || len(opts.CrossServicePackages) >= 2 {
+		s += crossServiceClause(opts.CrossServicePackages, opts.ChangedPackages, opts.DependencyPackages)
 	}
 	return s
 }
@@ -403,7 +483,8 @@ You MUST respond with valid JSON in this exact format:
       "file": "path/to/file.go",
       "line": 42,
       "message": "Description of the issue",
-      "suggestion": "How to fix it"
+      "suggestion": "How to fix it",
+      "confidence": 0.9
     }
   ]
 }
@@ -419,6 +500,7 @@ You MUST respond with valid JSON in this exact format:
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
+- confidence is a float 0.0–1.0: reviewer's confidence in this finding (1.0 = certain, 0.5 = plausible but unverified, 0.0 = speculative); omit or set to 1.0 if certain
 - Output ONLY the JSON object, no other text`
 }
 

@@ -12,11 +12,12 @@ const JSONSchemaVersion = 1
 
 // ReviewIssue mirrors the per-issue shape requested by BuildJSONPrompt.
 type ReviewIssue struct {
-	Severity   string `json:"severity"`
-	File       string `json:"file"`
-	Message    string `json:"message"`
-	Suggestion string `json:"suggestion,omitempty"`
-	Line       int    `json:"line,omitempty"`
+	Severity   string  `json:"severity"`
+	File       string  `json:"file"`
+	Message    string  `json:"message"`
+	Suggestion string  `json:"suggestion,omitempty"`
+	Line       int     `json:"line,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 // ReviewBody is the parsed reviewer-level JSON. When the reviewer's response
