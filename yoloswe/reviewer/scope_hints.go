@@ -11,14 +11,19 @@ import (
 )
 
 // ScopeHintsSchemaVersion is the wire-format version of the scope-hints
-// JSON file consumed by `bramble code-review --scope-hints-file`. A version
-// bump only happens on a breaking shape change; new optional fields can be
-// added without a bump.
+// JSON file consumed by `bramble code-review --scope-hints-file`. Bump
+// when the loader needs to distinguish shapes — i.e. when a new field
+// changes the prompt-building path on the reviewer side, so old producers
+// shouldn't accidentally activate it. Pure additions that don't reroute
+// existing inputs (a new optional field that no clause reads) can land
+// without a bump.
 //
-// v1: original shape (cross_service_packages only)
-// v2: adds changed_packages and dependency_packages; cross_service_packages
+// v1: original shape (cross_service_packages only).
+// v2: adds changed_packages and dependency_packages, which select the
 //
-//	is kept for backwards compat (union of both new fields).
+//	caller/callee framing in buildScopeSuffix. cross_service_packages is
+//	still accepted (union of both new fields) so v1 producers keep
+//	working through a rolling upgrade.
 const ScopeHintsSchemaVersion = 2
 
 // scopeHintsMaxBytes caps the size of a scope-hints file LoadScopeHints will

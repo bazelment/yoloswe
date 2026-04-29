@@ -397,13 +397,25 @@ to its consumers. Read both sides of each surface and flag:` + crossServiceContr
 // clause is gated purely by data presence so callers without scope info pay
 // no cost — the returned string is empty when neither clause applies, which
 // keeps legacy callers byte-equal to today's prompt.
+//
+// The caller/callee branch tries to emit first (it's the more informative
+// framing), but if every ChangedPackages entry was filtered out by
+// SanitizePromptHint the clause comes back empty — in that case we fall
+// back to the generic flat-list framing rather than dropping the entire
+// cross-service section. A direct PromptOptions caller that bypassed
+// LoadScopeHints could otherwise lose all cross-service guidance just
+// because their ChangedPackages list happened to be unsanitary.
 func buildScopeSuffix(opts PromptOptions) string {
 	var s string
 	if len(opts.TestScopeHints) > 0 {
 		s += testQualityClause(opts.TestScopeHints)
 	}
 	if len(opts.ChangedPackages) > 0 {
-		s += crossServiceClauseCallerCallee(opts.ChangedPackages, opts.DependencyPackages)
+		clause := crossServiceClauseCallerCallee(opts.ChangedPackages, opts.DependencyPackages)
+		if clause == "" && len(opts.CrossServicePackages) >= 2 {
+			clause = crossServiceClauseGeneric(opts.CrossServicePackages)
+		}
+		s += clause
 	} else if len(opts.CrossServicePackages) >= 2 {
 		s += crossServiceClauseGeneric(opts.CrossServicePackages)
 	}

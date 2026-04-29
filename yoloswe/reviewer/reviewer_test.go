@@ -749,6 +749,27 @@ func TestBuildJSONPromptWithScope_GenericFallbackWhenNoChangedPackages(t *testin
 	}
 }
 
+func TestBuildJSONPromptWithScope_GenericFallbackWhenChangedPackagesAllSanitized(t *testing.T) {
+	// Direct callers that bypass LoadScopeHints can pass ChangedPackages
+	// entries that SanitizePromptHint rejects (e.g. leading '#'). The
+	// caller/callee clause then comes back empty — but if CrossServicePackages
+	// has >=2 entries the prompt must still get the generic cross-service
+	// guidance instead of dropping the section entirely.
+	out := BuildJSONPromptWithScope("g", PromptOptions{
+		ChangedPackages:      []string{"#bogus", "-also-bogus"},
+		CrossServicePackages: []string{"svc/a/", "svc/b/"},
+	})
+	if !strings.Contains(out, crossServiceMarker) {
+		t.Errorf("expected generic cross-service clause when ChangedPackages all sanitized out")
+	}
+	if strings.Contains(out, "primarily modifies") {
+		t.Errorf("caller/callee framing must not appear when ChangedPackages was all sanitized out")
+	}
+	if !strings.Contains(out, "touches multiple top-level packages") {
+		t.Errorf("expected generic framing fallback")
+	}
+}
+
 // TestLegacyJSONPromptGolden pins today's BuildJSONPrompt output byte-for-
 // byte. Drift is most likely to creep in when someone edits the base prompt
 // or the JSON output rules without realizing yoloswe/swe.go and any
