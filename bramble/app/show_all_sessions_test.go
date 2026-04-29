@@ -328,6 +328,48 @@ func TestAllSessionsOverlay_NewSession_PBC(t *testing.T) {
 	}
 }
 
+func TestAllSessionsOverlay_NewSession_TmuxModeShowsSelectedSessionContext(t *testing.T) {
+	m := setupModel(t, session.SessionModeTmux, []wt.Worktree{
+		{Branch: "A", Path: "/tmp/wt/A"},
+		{Branch: "B", Path: "/tmp/wt/B"},
+	}, "test-repo")
+	require.True(t, m.worktreeDropdown.SelectByID("A"))
+
+	sessionA := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "sA",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/A",
+		WorktreeName: "A",
+		RepoName:     "test-repo",
+		Title:        "Session A",
+	})
+	sessionB := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "sB",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusRunning,
+		WorktreePath: "/tmp/wt/B",
+		WorktreeName: "B",
+		RepoName:     "test-repo",
+		Title:        "Session B",
+	})
+	m.switchViewingSession(sessionA.ID)
+	m.allSessionsOverlay.Show([]session.SessionInfo{sessionA, sessionB}, m.width, m.height)
+	m.focus = FocusAllSessions
+	require.True(t, m.allSessionsOverlay.SelectByNumber(2))
+
+	newModel, _ := m.handleAllSessionsOverlay(keyPress('b'))
+	m2 := newModel.(Model)
+
+	require.True(t, m2.inputMode)
+	assert.Equal(t, session.SessionID("sB"), m2.viewingSessionID)
+	selected := m2.worktreeDropdown.SelectedItem()
+	require.NotNil(t, selected)
+	assert.Equal(t, "B", selected.ID)
+	assert.Contains(t, m2.View().Content, "sB")
+	assert.NotContains(t, m2.View().Content, "sA")
+}
+
 func TestAllSessionsOverlay_NewSession_NoSession(t *testing.T) {
 	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/main"},

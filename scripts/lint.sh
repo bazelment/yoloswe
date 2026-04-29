@@ -28,6 +28,17 @@ if ! command -v golangci-lint &> /dev/null; then
     exit 1
 fi
 
+# Use a persistent per-worktree cache so concurrent worktrees do not fight over
+# golangci-lint's global cache lock, while repeated runs still stay warm.
+if [[ -z "${GOLANGCI_LINT_CACHE:-}" ]]; then
+    cache_root="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/golangci-lint/workspaces"
+    workspace_key="$(printf '%s' "${WORKSPACE_ROOT}" | cksum | cut -d ' ' -f 1)"
+    workspace_slug="$(basename "${WORKSPACE_ROOT}" | tr -c '[:alnum:]_.-' '_')"
+    GOLANGCI_LINT_CACHE="${cache_root}/${workspace_slug}-${workspace_key}"
+    mkdir -p "${GOLANGCI_LINT_CACHE}"
+    export GOLANGCI_LINT_CACHE
+fi
+
 # Run golangci-lint on each module in go.work
 GO_LINT_FAILED=0
 

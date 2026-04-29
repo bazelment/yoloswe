@@ -68,6 +68,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over packing
 	styles                *Styles
 	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
 	sharedManagerConfig   session.ManagerConfig
+	pendingSessionTarget  sessionTarget
 	pendingModel          string
 	repoName              string
 	historyBranch         string
@@ -94,6 +95,7 @@ type Model struct { //nolint:govet // fieldalignment: readability over packing
 	focus                 FocusArea
 	inputMode             bool
 	confirmQuit           bool
+	worktreesLoaded       bool
 	// Voice reporting.
 	voiceReporter *VoiceReporter
 }
@@ -183,6 +185,12 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	m.repoSettingsDialog.SetSize(width, height)
 	m.configureAllDropdownsForViewport()
 
+	// Treat a non-empty initial slice as a real prefetched snapshot. An empty
+	// slice (or nil) is left as "not yet loaded" so explicit-path targets
+	// fall back to the on-disk stat check until a worktreesMsg lands with
+	// the actual data.
+	m.worktreesLoaded = len(initialWorktrees) > 0
+
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {
 		m.worktrees = initialWorktrees
@@ -196,6 +204,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		sessionManager:   sessionManager,
 		taskRouter:       taskRouter,
 		worktrees:        m.worktrees,
+		worktreesLoaded:  m.worktreesLoaded,
 		worktreeDropdown: m.worktreeDropdown,
 		sessionDropdown:  m.sessionDropdown,
 		scrollPositions:  m.scrollPositions,
@@ -775,11 +784,10 @@ type (
 	sessionsUpdated struct{}
 	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
-		sessionType  session.SessionType
-		prompt       string
-		model        string
-		worktreePath string // if set, starts on this path instead of selected worktree
-		repoName     string // if set and != m.repoName, starts on that repo's manager
+		sessionType session.SessionType
+		prompt      string
+		model       string
+		target      sessionTarget
 	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }
@@ -883,6 +891,11 @@ type (
 		action string // "delete", "reset", "keep"
 	}
 )
+
+type sessionTarget struct {
+	repoName     string
+	worktreePath string
+}
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.
 type RouteProposal = struct {

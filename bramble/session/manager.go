@@ -1146,13 +1146,12 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 			contentChanged = captureState.observeContentLines(contentLines)
 		}
 
-		displayLines := contentLines
-		if len(displayLines) > sessionmodel.RecentOutputDisplayLines {
-			displayLines = displayLines[len(displayLines)-sessionmodel.RecentOutputDisplayLines:]
+		if len(contentLines) > sessionmodel.RecentOutputDisplayLines {
+			contentLines = contentLines[len(contentLines)-sessionmodel.RecentOutputDisplayLines:]
 		}
 
 		session.Progress.Update(func(p *SessionProgress) {
-			p.RecentOutput = displayLines
+			p.RecentOutput = contentLines
 			if contentChanged {
 				p.LastActivity = time.Now()
 			}
