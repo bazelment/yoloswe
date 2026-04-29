@@ -1364,6 +1364,161 @@ func TestUpdateSessionStatus_PendingToRunningSetsStartedAt(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), *session.StartedAt, time.Second)
 }
 
+func TestTrackedTmuxCaptureState_ObserveContentLines(t *testing.T) {
+	t.Parallel()
+
+	var state trackedTmuxCaptureState
+
+	lines := []string{"first line"}
+	assert.False(t, state.observeContentLines(lines), "first capture establishes baseline")
+
+	lines[0] = "mutated after observe"
+	assert.False(t, state.observeContentLines([]string{"first line"}), "baseline should be cloned")
+	assert.True(t, state.observeContentLines([]string{"first line", "second line"}))
+	assert.False(t, state.observeContentLines([]string{"first line", "second line"}))
+}
+
+func TestShouldReviveIdleTmuxSession(t *testing.T) {
+	t.Parallel()
+
+	parsedIdlePane := &PaneStatus{IsIdle: true}
+	workingPane := &PaneStatus{IsWorking: true}
+
+	tests := []struct { //nolint:govet // test struct
+		name           string
+		status         SessionStatus
+		paneStatus     *PaneStatus
+		contentChanged bool
+		want           bool
+	}{
+		{
+			name:           "idle content changed",
+			status:         StatusIdle,
+			paneStatus:     parsedIdlePane,
+			contentChanged: true,
+			want:           true,
+		},
+		{
+			name:       "idle sampled working state",
+			status:     StatusIdle,
+			paneStatus: workingPane,
+			want:       true,
+		},
+		{
+			name:       "idle unchanged content",
+			status:     StatusIdle,
+			paneStatus: parsedIdlePane,
+			want:       false,
+		},
+		{
+			name:           "running content changed",
+			status:         StatusRunning,
+			paneStatus:     parsedIdlePane,
+			contentChanged: true,
+			want:           false,
+		},
+		{
+			name:           "unparsed pane content changed",
+			status:         StatusIdle,
+			contentChanged: true,
+			want:           false,
+		},
+		{
+			name:           "terminal content changed",
+			status:         StatusCompleted,
+			paneStatus:     parsedIdlePane,
+			contentChanged: true,
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, shouldReviveIdleTmuxSession(tt.status, tt.paneStatus, tt.contentChanged))
+		})
+	}
+}
+
+func TestTryUpdateSessionStatus_IdleToRunning(t *testing.T) {
+	m := NewManager()
+	defer m.Close()
+
+	originalStart := time.Now().Add(-5 * time.Minute)
+	session := &Session{
+		ID:        "idle-session",
+		Status:    StatusIdle,
+		StartedAt: &originalStart,
+	}
+
+	updated := m.tryUpdateSessionStatus(session, StatusIdle, StatusRunning)
+
+	assert.True(t, updated)
+	assert.Equal(t, StatusRunning, session.Status)
+	assert.Equal(t, originalStart, *session.StartedAt, "StartedAt should be preserved when resuming from idle")
+
+	evt := requireStateChangeEvent(t, m)
+	assert.Equal(t, session.ID, evt.SessionID)
+	assert.Equal(t, StatusIdle, evt.OldStatus)
+	assert.Equal(t, StatusRunning, evt.NewStatus)
+	assertNoStateChangeEvent(t, m)
+}
+
+func TestTryUpdateSessionStatus_RequiresCurrentStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status SessionStatus
+	}{
+		{name: "pending", status: StatusPending},
+		{name: "running", status: StatusRunning},
+		{name: "completed", status: StatusCompleted},
+		{name: "failed", status: StatusFailed},
+		{name: "stopped", status: StatusStopped},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManager()
+			defer m.Close()
+
+			session := &Session{
+				ID:     SessionID("session-" + tt.name),
+				Status: tt.status,
+			}
+
+			updated := m.tryUpdateSessionStatus(session, StatusIdle, StatusRunning)
+
+			assert.False(t, updated)
+			assert.Equal(t, tt.status, session.Status)
+			assertNoStateChangeEvent(t, m)
+		})
+	}
+}
+
+func requireStateChangeEvent(t *testing.T, m *Manager) SessionStateChangeEvent {
+	t.Helper()
+
+	select {
+	case raw := <-m.Events():
+		evt, ok := raw.(SessionStateChangeEvent)
+		require.Truef(t, ok, "event type = %T", raw)
+		return evt
+	default:
+		require.Fail(t, "expected state change event")
+		return SessionStateChangeEvent{}
+	}
+}
+
+func assertNoStateChangeEvent(t *testing.T, m *Manager) {
+	t.Helper()
+
+	select {
+	case raw := <-m.Events():
+		require.Failf(t, "unexpected state change event", "event = %#v", raw)
+	default:
+	}
+}
+
 func TestReposWithLiveTmuxSessions_NilStore(t *testing.T) {
 	liveRepos := ReposWithLiveTmuxSessions(nil, "active-repo")
 	assert.Nil(t, liveRepos)
