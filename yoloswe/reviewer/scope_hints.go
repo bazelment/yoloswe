@@ -192,10 +192,14 @@ func sanitizedFSError(op, tag string, err error) error {
 // reject at the prompt-builder boundary. The clauses inline these strings
 // line-by-line under fixed Markdown headings, so a hint containing a
 // newline could close "## Test quality" early, and a leading Markdown
-// control character (#, -, *, >, _, =) could open a new section or list
-// at line start. scope_gate.py emits filesystem paths and package buckets,
-// neither of which exhibits these shapes — so this is a defense against a
-// buggy or hostile producer, not a normal input.
+// control character (#, -, *, +, >, =) or an ordered-list marker (e.g.
+// "1." / "12)") could open a new section or list at line start.
+// Underscore is intentionally allowed — TS/JS __tests__/ paths and
+// Python _helper.py paths are legitimate scope-hint inputs (see the
+// SanitizePromptHint godoc for the rationale). scope_gate.py emits
+// filesystem paths and package buckets, neither of which exhibits the
+// rejected shapes — so this is a defense against a buggy or hostile
+// producer, not a normal input.
 //
 // Failing here gives the operator a clear CLI warning ("test_paths[3]
 // starts with Markdown control char '#'") that points straight at the

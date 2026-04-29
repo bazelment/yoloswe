@@ -217,6 +217,39 @@ func TestParseVerdict(t *testing.T) {
 	}
 }
 
+func TestParseVerdict_PreservesConfidence(t *testing.T) {
+	// Guard against the confidence field being silently stripped on the
+	// SWE feedback path: parseVerdict → ReviewVerdictJSON.Issues should
+	// preserve the *float64 confidence end-to-end.
+	swe := New(Config{})
+	text := `{"verdict": "rejected", "summary": "found one", "issues": [{"severity":"high","file":"a.go","line":1,"message":"bug","confidence":0.85}]}`
+	verdict := swe.parseVerdict(text)
+	if len(verdict.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(verdict.Issues))
+	}
+	if verdict.Issues[0].Confidence == nil {
+		t.Fatal("Confidence was dropped during parse")
+	}
+	if got := *verdict.Issues[0].Confidence; got != 0.85 {
+		t.Errorf("Confidence = %v, want 0.85", got)
+	}
+}
+
+func TestParseVerdict_ConfidenceOmittedStaysNil(t *testing.T) {
+	// An issue without a confidence field should keep Confidence as nil
+	// (no synthetic default) so callers can distinguish "no signal" from
+	// "low confidence".
+	swe := New(Config{})
+	text := `{"verdict": "rejected", "summary": "found one", "issues": [{"severity":"high","file":"a.go","line":1,"message":"bug"}]}`
+	verdict := swe.parseVerdict(text)
+	if len(verdict.Issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(verdict.Issues))
+	}
+	if verdict.Issues[0].Confidence != nil {
+		t.Errorf("Confidence = %v, want nil for omitted field", *verdict.Issues[0].Confidence)
+	}
+}
+
 func TestExtractJSON(t *testing.T) {
 	tests := []struct {
 		name     string
