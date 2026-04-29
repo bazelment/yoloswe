@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 )
 
@@ -11,13 +12,20 @@ import (
 const JSONSchemaVersion = 1
 
 // ReviewIssue mirrors the per-issue shape requested by BuildJSONPrompt.
+//
+// Confidence is *float64 so JSON omission and an explicit value are
+// distinguishable. The prompt contract is "omit when unassessed; otherwise
+// emit a value in (0.0, 1.0]" — a plain float64 with omitempty would treat
+// the boundary value 0 as missing and leave the validator unable to reject
+// out-of-range values. Consumers should treat nil as "no signal" rather
+// than synthesizing a default.
 type ReviewIssue struct {
-	Severity   string  `json:"severity"`
-	File       string  `json:"file"`
-	Message    string  `json:"message"`
-	Suggestion string  `json:"suggestion,omitempty"`
-	Line       int     `json:"line,omitempty"`
-	Confidence float64 `json:"confidence,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Severity   string   `json:"severity"`
+	File       string   `json:"file"`
+	Message    string   `json:"message"`
+	Suggestion string   `json:"suggestion,omitempty"`
+	Line       int      `json:"line,omitempty"`
 }
 
 // ReviewBody is the parsed reviewer-level JSON. When the reviewer's response
@@ -144,6 +152,7 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 //   - each issue has severity ∈ {low, medium, high, critical}, message, file, line ≥ 1
 //   - "rejected" carries at least one issue (otherwise nothing was rejected)
 //   - "accepted" carries no high/critical issues (those block merge by definition)
+//   - confidence, when present, is in (0.0, 1.0] and finite (no NaN/Inf)
 //
 // The line requirement matches the prompt contract in buildBasePrompt, which
 // instructs the reviewer to "cite the affected file and line range" — without
@@ -168,6 +177,15 @@ func validateReviewBody(body ReviewBody) error {
 		}
 		if issue.Line < 1 {
 			return fmt.Errorf("issue[%d] missing line", i)
+		}
+		if issue.Confidence != nil {
+			c := *issue.Confidence
+			if math.IsNaN(c) || math.IsInf(c, 0) {
+				return fmt.Errorf("issue[%d] confidence not finite: %v", i, c)
+			}
+			if c <= 0 || c > 1 {
+				return fmt.Errorf("issue[%d] confidence %v not in (0.0, 1.0]", i, c)
+			}
 		}
 		if _, blocks := blockingSeverities[issue.Severity]; blocks {
 			hasBlocking = true

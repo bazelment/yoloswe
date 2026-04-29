@@ -50,8 +50,9 @@ type ScopeHints struct {
 	CrossServicePackages []string `json:"cross_service_packages"`
 
 	// ChangedPackages names the top-level packages directly modified by
-	// this diff (v2+). When non-empty alongside DependencyPackages, the
-	// cross-service clause uses explicit caller/callee framing.
+	// this diff (v2+). When non-empty, the cross-service clause uses
+	// explicit caller/callee framing — DependencyPackages is optional and
+	// gates only the "callers or dependencies" sentence.
 	ChangedPackages []string `json:"changed_packages,omitempty"`
 
 	// DependencyPackages names packages that import or are imported by the
@@ -60,10 +61,12 @@ type ScopeHints struct {
 	// each interface.
 	DependencyPackages []string `json:"dependency_packages,omitempty"`
 
-	// SchemaVersion must equal ScopeHintsSchemaVersion. LoadScopeHints
-	// accepts v1 (no split fields) and v2 (split fields present) to
-	// allow a rolling upgrade: old scope_gate.py output keeps working
-	// while callers adopt the new shape.
+	// SchemaVersion must be 1 or ScopeHintsSchemaVersion (currently 2).
+	// LoadScopeHints accepts both to allow a rolling upgrade: old
+	// scope_gate.py output (v1, no split fields) keeps working while
+	// callers adopt the v2 shape (split fields present). Anything else
+	// is rejected loudly so a future breaking change is caught rather
+	// than silently producing a degenerate prompt.
 	SchemaVersion int `json:"schema_version"`
 }
 

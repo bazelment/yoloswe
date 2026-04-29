@@ -41,5 +41,5 @@ You MUST respond with valid JSON in this exact format:
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
-- confidence is a float in (0.0, 1.0]: reviewer's confidence in this finding (1.0 = certain, 0.5 = plausible but unverified); omit when certain or when you can't assess
+- confidence is an optional float in (0.0, 1.0]: 1.0 = certain, 0.5 = plausible but unverified; omit only when you cannot assess (the field is treated as "no signal", not as a default value)
 - Output ONLY the JSON object, no other text

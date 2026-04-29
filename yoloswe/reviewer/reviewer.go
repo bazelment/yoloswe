@@ -115,11 +115,19 @@ Do NOT run tests or build commands. The caller runs tests separately. Read test 
 
 // PromptOptions configures the optional clauses appended to a review prompt.
 //
-// Each clause is gated by data presence rather than a separate boolean: an
-// empty TestScopeHints means "no test-quality clause", and fewer than two
-// CrossServicePackages means "no cross-service clause". This collapses the
-// (boolean, list) cartesian product into a single source of truth — the
-// caller controls everything by what they put in the lists.
+// Each clause is gated by data presence rather than a separate boolean. The
+// test-quality clause is appended when TestScopeHints is non-empty. The
+// cross-service clause has two framings, picked in this order:
+//
+//   - When ChangedPackages is non-empty, the caller/callee framing names the
+//     changed packages explicitly and uses DependencyPackages (when set) to
+//     name the other side; a single changed package is fine.
+//   - Otherwise, when CrossServicePackages has at least two entries, the
+//     generic flat-list framing is used (v1 compat — kept so old scope-hints
+//     producers still get the clause without ChangedPackages).
+//
+// This collapses the (boolean, list) cartesian product into a single source
+// of truth — the caller controls everything by what they put in the lists.
 type PromptOptions struct {
 	// TestScopeHints lists co-located test paths the agent should read. When
 	// non-empty, the test-quality clause is appended to the prompt and the
@@ -469,7 +477,7 @@ You MUST respond with valid JSON in this exact format:
 - If there are any critical or high severity issues, verdict MUST be "rejected"
 - issues array can be empty if verdict is "accepted"
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
-- confidence is a float in (0.0, 1.0]: reviewer's confidence in this finding (1.0 = certain, 0.5 = plausible but unverified); omit when certain or when you can't assess
+- confidence is an optional float in (0.0, 1.0]: 1.0 = certain, 0.5 = plausible but unverified; omit only when you cannot assess (the field is treated as "no signal", not as a default value)
 - Output ONLY the JSON object, no other text`
 }
 

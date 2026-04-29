@@ -235,6 +235,66 @@ func TestBuildEnvelope_AcceptedWithLowIssue(t *testing.T) {
 	}
 }
 
+func TestBuildEnvelope_ConfidenceValid(t *testing.T) {
+	// A valid confidence in (0.0, 1.0] passes validation and round-trips
+	// through to the envelope.
+	result := &ReviewResult{
+		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":0.7}]}`,
+		Success:      true,
+	}
+	env := BuildEnvelope(result, BackendCodex, "m", "")
+	if env.Status != StatusOK {
+		t.Errorf("status = %s, want ok for valid confidence", env.Status)
+	}
+	if len(env.Review.Issues) != 1 || env.Review.Issues[0].Confidence == nil {
+		t.Fatalf("confidence not preserved: %+v", env.Review.Issues)
+	}
+	if got := *env.Review.Issues[0].Confidence; got != 0.7 {
+		t.Errorf("confidence = %v, want 0.7", got)
+	}
+}
+
+func TestBuildEnvelope_ConfidenceOmitted(t *testing.T) {
+	// An issue without a confidence field is valid — the prompt makes the
+	// field optional ("omit when you cannot assess").
+	result := &ReviewResult{
+		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit"}]}`,
+		Success:      true,
+	}
+	env := BuildEnvelope(result, BackendCodex, "m", "")
+	if env.Status != StatusOK {
+		t.Errorf("status = %s, want ok when confidence is omitted", env.Status)
+	}
+	if len(env.Review.Issues) != 1 {
+		t.Fatalf("issue count = %d, want 1", len(env.Review.Issues))
+	}
+	if env.Review.Issues[0].Confidence != nil {
+		t.Errorf("confidence = %v, want nil for omitted field", *env.Review.Issues[0].Confidence)
+	}
+}
+
+func TestBuildEnvelope_ConfidenceOutOfRange(t *testing.T) {
+	// Confidence must be in (0.0, 1.0]. The boundary 0.0 is excluded so a
+	// reviewer cannot use it to mean "speculative" — that intent should be
+	// expressed as a small positive value or by omitting the field.
+	cases := []struct {
+		name string
+		json string
+	}{
+		{"zero", `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":0.0}]}`},
+		{"negative", `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":-0.1}]}`},
+		{"above_one", `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":1.5}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := BuildEnvelope(&ReviewResult{ResponseText: tc.json, Success: true}, BackendCodex, "m", "")
+			if env.Status != StatusError {
+				t.Errorf("status = %s, want error for confidence=%s", env.Status, tc.name)
+			}
+		})
+	}
+}
+
 func TestBuildEnvelope_UnparseableText(t *testing.T) {
 	result := &ReviewResult{
 		ResponseText: "the reviewer refused to produce JSON",
