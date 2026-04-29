@@ -459,6 +459,78 @@ func TestStartSessionMsg_AcceptsColdCrossRepoTargetWhenPathExists(t *testing.T) 
 	assert.Equal(t, "/tmp/wt/repoB-main", mgrB.GetAllSessions()[0].WorktreePath)
 }
 
+// Main view plan approval (handleKeyPress 'a') must reject a removed
+// worktree before it completes the planner — otherwise the planner is lost
+// and the builder cannot start. Mirrors the command-center variant.
+func TestMainView_PlanApproval_RejectsRemovedWorktree(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("feature"))
+
+	planner := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "sP",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusIdle,
+		WorktreePath: "/tmp/wt/feature",
+		WorktreeName: "feature",
+		RepoName:     "repoA",
+		PlanFilePath: "/tmp/wt/feature/PLAN.md",
+		Title:        "Planner",
+	})
+	m.switchViewingSession(planner.ID)
+
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "/tmp/wt/feature" }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	newModel, _ := m.handleKeyPress(keyPress('a'))
+	m2 := newModel.(Model)
+
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Target worktree no longer available")
+	require.Len(t, m2.sessionManager.GetAllSessions(), 1,
+		"original planner must not be completed when preflight rejects")
+	assert.Equal(t, session.SessionTypePlanner, m2.sessionManager.GetAllSessions()[0].Type)
+}
+
+// Command-center plan approval should keep the overlay visible when the
+// preflight rejects, instead of dumping the user onto FocusOutput with only
+// a toast.
+func TestCommandCenter_PlanApproval_KeepsOverlayOnReject(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("feature"))
+
+	planner := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "sP",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusIdle,
+		WorktreePath: "/tmp/wt/feature",
+		WorktreeName: "feature",
+		RepoName:     "repoA",
+		PlanFilePath: "/tmp/wt/feature/PLAN.md",
+		Title:        "Planner",
+	})
+	m.commandCenter.Show([]session.SessionInfo{planner}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "/tmp/wt/feature" }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	newModel, _ := m.handleCommandCenter(keyPress('a'))
+	m2 := newModel.(Model)
+
+	assert.Equal(t, FocusCommandCenter, m2.focus,
+		"rejection should leave focus on the command center")
+	assert.True(t, m2.commandCenter.IsVisible(),
+		"rejection should keep the command center visible")
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Target worktree no longer available")
+}
+
 // Plan approval (command-center "a") must apply the same disk-stat
 // preflight as confirmTask / startSessionMsg. A planner left idle with a
 // plan file can become stale if its worktree is removed between idle review

@@ -185,7 +185,11 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	m.repoSettingsDialog.SetSize(width, height)
 	m.configureAllDropdownsForViewport()
 
-	m.worktreesLoaded = initialWorktrees != nil
+	// Treat a non-empty initial slice as a real prefetched snapshot. An empty
+	// slice (or nil) is left as "not yet loaded" so explicit-path targets
+	// fall back to the on-disk stat check until a worktreesMsg lands with
+	// the actual data.
+	m.worktreesLoaded = len(initialWorktrees) > 0
 
 	// Pre-populate worktrees so the first View() render shows branch names.
 	if len(initialWorktrees) > 0 {

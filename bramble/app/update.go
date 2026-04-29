@@ -889,32 +889,14 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "a":
 		// Approve plan and start builder session
-		if sess := m.selectedSession(); sess != nil &&
-			sess.Status == session.StatusIdle &&
-			sess.Type == session.SessionTypePlanner &&
-			sess.PlanFilePath != "" {
-			worktreePath := sess.WorktreePath
-			planPath := sess.PlanFilePath
-			_ = m.sessionManager.CompleteSession(sess.ID)
-			m.sessions = m.sessionManager.GetAllSessions()
-			m.updateSessionDropdown()
-			planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
-			sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt, m.defaultBuildModel)
-			if err != nil {
-				toastCmd := m.addToast(err.Error(), ToastError)
-				return m, toastCmd
-			}
-			if m.viewingSessionID != "" {
-				m.scrollPositions[m.viewingSessionID] = m.scrollOffset
-			}
-			m.viewingSessionID = sessionID
-			m.scrollOffset = 0 // New builder session starts at bottom
-			m.sessions = m.sessionManager.GetAllSessions()
-			m.updateSessionDropdown()
-			return m, nil
+		sess := m.selectedSession()
+		if sess == nil || sess.Status != session.StatusIdle ||
+			sess.Type != session.SessionTypePlanner || sess.PlanFilePath == "" {
+			toastCmd := m.addToast("No plan ready to approve", ToastInfo)
+			return m, toastCmd
 		}
-		toastCmd := m.addToast("No plan ready to approve", ToastInfo)
-		return m, toastCmd
+		newM, cmd, _ := m.approveAndStartBuilder(sess)
+		return newM, cmd
 
 	case "m":
 		// Merge PR
@@ -1413,6 +1395,40 @@ func (m Model) canLaunchSessionOnTarget(target sessionTarget) bool {
 	default:
 		return worktreePathExists(target.worktreePath)
 	}
+}
+
+// approveAndStartBuilder completes the planner session and launches a builder
+// against the same worktree. Used by both plan-approval entry points (main
+// view 'a' and command-center 'a') so the preflight, completion, and start
+// logic stay in lockstep.
+func (m Model) approveAndStartBuilder(sess *session.SessionInfo) (Model, tea.Cmd, bool) {
+	if sess == nil {
+		toastCmd := m.addToast("No plan ready to approve", ToastInfo)
+		return m, toastCmd, false
+	}
+	if !m.canLaunchSessionOnTarget(sessionTarget{repoName: m.repoName, worktreePath: sess.WorktreePath}) {
+		toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
+		return m, toastCmd, false
+	}
+	worktreePath := sess.WorktreePath
+	planPath := sess.PlanFilePath
+	_ = m.sessionManager.CompleteSession(sess.ID)
+	m.sessions = m.sessionManager.GetAllSessions()
+	m.updateSessionDropdown()
+	planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
+	sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt, m.defaultBuildModel)
+	if err != nil {
+		toastCmd := m.addToast(err.Error(), ToastError)
+		return m, toastCmd, false
+	}
+	if m.viewingSessionID != "" {
+		m.scrollPositions[m.viewingSessionID] = m.scrollOffset
+	}
+	m.viewingSessionID = sessionID
+	m.scrollOffset = 0
+	m.sessions = m.sessionManager.GetAllSessions()
+	m.updateSessionDropdown()
+	return m, nil, true
 }
 
 func (m *Model) selectWorktreeByPath(path string) bool {
@@ -2441,42 +2457,28 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			toastCmd := m.addToast("No plan ready to approve", ToastInfo)
 			return m, toastCmd
 		}
-		sessRepoName := sess.RepoName
-		m.commandCenter.Hide()
-		m.focus = FocusOutput
-		// Switch repo if needed
-		if sessRepoName != "" && sessRepoName != m.repoName {
-			if _, ok := m.repos[sessRepoName]; ok {
-				m.saveActiveContext()
-				m.loadContext(sessRepoName)
-			}
+		// Run the disk-stat preflight against the destination repo *before*
+		// dismissing the overlay, so a rejection keeps the user in the
+		// command center instead of dumping them onto FocusOutput with only
+		// a toast as feedback.
+		destRepo := sess.RepoName
+		if destRepo == "" {
+			destRepo = m.repoName
 		}
-		worktreePath := sess.WorktreePath
-		planPath := sess.PlanFilePath
-		// Match the disk-stat preflight used by confirmTask / startSessionMsg:
-		// the plan was authored against this worktree, but the directory may
-		// have been removed between idle plan review and approval.
-		if !m.canLaunchSessionOnTarget(sessionTarget{repoName: m.repoName, worktreePath: worktreePath}) {
+		if !m.canLaunchSessionOnTarget(sessionTarget{repoName: destRepo, worktreePath: sess.WorktreePath}) {
 			toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 			return m, toastCmd
 		}
-		_ = m.sessionManager.CompleteSession(sess.ID)
-		m.sessions = m.sessionManager.GetAllSessions()
-		m.updateSessionDropdown()
-		planPrompt := fmt.Sprintf("Implement the plan in %s", planPath)
-		sessionID, err := m.sessionManager.StartSession(session.SessionTypeBuilder, worktreePath, planPrompt, m.defaultBuildModel)
-		if err != nil {
-			toastCmd := m.addToast(err.Error(), ToastError)
-			return m, toastCmd
+		m.commandCenter.Hide()
+		m.focus = FocusOutput
+		if destRepo != m.repoName {
+			if _, ok := m.repos[destRepo]; ok {
+				m.saveActiveContext()
+				m.loadContext(destRepo)
+			}
 		}
-		if m.viewingSessionID != "" {
-			m.scrollPositions[m.viewingSessionID] = m.scrollOffset
-		}
-		m.viewingSessionID = sessionID
-		m.scrollOffset = 0
-		m.sessions = m.sessionManager.GetAllSessions()
-		m.updateSessionDropdown()
-		return m, nil
+		newM, cmd, _ := m.approveAndStartBuilder(sess)
+		return newM, cmd
 
 	case "p", "b", "c":
 		st := sessionTypeFromKey(msg.String())
