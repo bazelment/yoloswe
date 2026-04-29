@@ -1104,15 +1104,15 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 	// captureRecentOutput grabs the last lines from the tmux pane and updates
 	// the session's RecentOutput and status bar fields so the command center
 	// can display rich information about the session.
-	var prevCapturedOutput []string
+	var captureState trackedTmuxCaptureState
 	captureRecentOutput := func() {
 		session.mu.RLock()
 		wID := session.TmuxWindowID
 		wName := session.TmuxWindowName
-		status := session.Status
+		statusAtCapture := session.Status
 		session.mu.RUnlock()
 
-		if status != StatusRunning && status != StatusIdle {
+		if statusAtCapture != StatusRunning && statusAtCapture != StatusIdle {
 			return
 		}
 		target := wID
@@ -1140,14 +1140,15 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 		}
 
 		// Extract meaningful content lines, stripping TUI chrome.
-		displayLines := ContentLines(lines, paneStatus)
-		if len(displayLines) > sessionmodel.RecentOutputDisplayLines {
-			displayLines = displayLines[len(displayLines)-sessionmodel.RecentOutputDisplayLines:]
+		contentLines := ContentLines(lines, paneStatus)
+		contentChanged := false
+		if paneStatus != nil {
+			contentChanged = captureState.observeContentLines(contentLines)
 		}
 
-		contentChanged := !slices.Equal(displayLines, prevCapturedOutput)
-		if contentChanged {
-			prevCapturedOutput = displayLines
+		displayLines := contentLines
+		if len(displayLines) > sessionmodel.RecentOutputDisplayLines {
+			displayLines = displayLines[len(displayLines)-sessionmodel.RecentOutputDisplayLines:]
 		}
 
 		session.Progress.Update(func(p *SessionProgress) {
@@ -1169,8 +1170,8 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 		})
 
 		// If pane shows working state but session is idle, transition back to running.
-		if paneStatus != nil && paneStatus.IsWorking && status == StatusIdle {
-			m.updateSessionStatus(session, StatusRunning)
+		if shouldReviveIdleTmuxSession(statusAtCapture, paneStatus, contentChanged) {
+			m.tryUpdateSessionStatus(session, StatusIdle, StatusRunning)
 		}
 
 		// Update session model if parsed status indicates idle
@@ -1958,12 +1959,59 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	}
 }
 
+type trackedTmuxCaptureState struct {
+	prevContentLines   []string
+	haveContentCapture bool
+}
+
+func (s *trackedTmuxCaptureState) observeContentLines(contentLines []string) bool {
+	contentChanged := s.haveContentCapture && !slices.Equal(contentLines, s.prevContentLines)
+	s.prevContentLines = slices.Clone(contentLines)
+	s.haveContentCapture = true
+	return contentChanged
+}
+
+func shouldReviveIdleTmuxSession(statusAtCapture SessionStatus, paneStatus *PaneStatus, contentChanged bool) bool {
+	if statusAtCapture != StatusIdle || paneStatus == nil {
+		return false
+	}
+	return contentChanged || paneStatus.IsWorking
+}
+
 // updateSessionStatus updates session status and emits event.
 func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus) {
 	session.mu.Lock()
 	oldStatus := session.Status
-	session.Status = newStatus
+	applySessionStatusLocked(session, oldStatus, newStatus)
+	session.mu.Unlock()
 
+	m.emitSessionStateChange(SessionStateChangeEvent{
+		SessionID: session.ID,
+		OldStatus: oldStatus,
+		NewStatus: newStatus,
+	})
+}
+
+func (m *Manager) tryUpdateSessionStatus(session *Session, fromStatus, toStatus SessionStatus) bool {
+	session.mu.Lock()
+	oldStatus := session.Status
+	if oldStatus != fromStatus {
+		session.mu.Unlock()
+		return false
+	}
+	applySessionStatusLocked(session, oldStatus, toStatus)
+	session.mu.Unlock()
+
+	m.emitSessionStateChange(SessionStateChangeEvent{
+		SessionID: session.ID,
+		OldStatus: oldStatus,
+		NewStatus: toStatus,
+	})
+	return true
+}
+
+func applySessionStatusLocked(session *Session, oldStatus, newStatus SessionStatus) {
+	session.Status = newStatus
 	now := time.Now()
 	switch newStatus {
 	case StatusRunning:
@@ -1975,19 +2023,14 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 	case StatusCompleted, StatusFailed, StatusStopped:
 		session.CompletedAt = &now
 	}
-	session.mu.Unlock()
+}
 
-	evt := SessionStateChangeEvent{
-		SessionID: session.ID,
-		OldStatus: oldStatus,
-		NewStatus: newStatus,
-	}
-
+func (m *Manager) emitSessionStateChange(evt SessionStateChangeEvent) {
 	// Emit state change event
 	select {
 	case m.events <- evt:
 	default:
-		log.Printf("WARNING: events channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
+		log.Printf("WARNING: events channel full, dropping state change event for session %s (%s -> %s)", evt.SessionID, evt.OldStatus, evt.NewStatus)
 	}
 
 	// Notify state subscribers (used by delegator child watchers)
@@ -1996,7 +2039,7 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 		select {
 		case ch <- evt:
 		default:
-			log.Printf("WARNING: state subscriber channel full, dropping state change event for session %s (%s -> %s)", session.ID, oldStatus, newStatus)
+			log.Printf("WARNING: state subscriber channel full, dropping state change event for session %s (%s -> %s)", evt.SessionID, evt.OldStatus, evt.NewStatus)
 		}
 	}
 	m.stateSubscribersMu.Unlock()

@@ -563,6 +563,36 @@ func TestContentLines_NilStatus(t *testing.T) {
 	assert.Equal(t, []string{"line1", "line2"}, content)
 }
 
+func TestContentLines_StatusBarOnlyChangeDoesNotChangeContent(t *testing.T) {
+	t.Parallel()
+
+	linesWithOldStatus := []string{
+		"● Bash(git status)",
+		"  ⎿  On branch feature/x",
+		"───────── ▪▪▪ ─",
+		"❯ ",
+		"───────────────────────────────────────",
+		"  ~/project  feature/x  Opus 4.6  ctx:20%  tokens:10k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}
+	linesWithNewStatus := []string{
+		"● Bash(git status)",
+		"  ⎿  On branch feature/x",
+		"───────── ▪▪▪ ─",
+		"❯ ",
+		"───────────────────────────────────────",
+		"  ~/project  feature/x  Opus 4.6  ctx:21%  tokens:11k",
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #123",
+	}
+
+	oldStatus := ParseClaudeStatusBarWithCursor(linesWithOldStatus, len(linesWithOldStatus)-1)
+	newStatus := ParseClaudeStatusBarWithCursor(linesWithNewStatus, len(linesWithNewStatus)-1)
+	require.NotNil(t, oldStatus)
+	require.NotNil(t, newStatus)
+
+	assert.Equal(t, ContentLines(linesWithOldStatus, oldStatus), ContentLines(linesWithNewStatus, newStatus))
+}
+
 func TestParseClaudeStatusBarWithCursor(t *testing.T) {
 	t.Parallel()
 
