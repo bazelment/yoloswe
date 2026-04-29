@@ -1965,10 +1965,16 @@ type trackedTmuxCaptureState struct {
 }
 
 func (s *trackedTmuxCaptureState) observeContentLines(contentLines []string) bool {
-	contentChanged := s.haveContentCapture && !slices.Equal(contentLines, s.prevContentLines)
+	if !s.haveContentCapture {
+		s.prevContentLines = slices.Clone(contentLines)
+		s.haveContentCapture = true
+		return false
+	}
+	if slices.Equal(contentLines, s.prevContentLines) {
+		return false
+	}
 	s.prevContentLines = slices.Clone(contentLines)
-	s.haveContentCapture = true
-	return contentChanged
+	return true
 }
 
 func shouldReviveIdleTmuxSession(statusAtCapture SessionStatus, paneStatus *PaneStatus, contentChanged bool) bool {

@@ -93,8 +93,6 @@ func (c *Client) Start(ctx context.Context) error {
 		c.process.startStderrReader(c.config.StderrHandler)
 	}
 
-	// readLines blocks on ReadLine() forever; it feeds c.lines so that
-	// readLoop can select on ctx.Done() / c.done without being blocked.
 	go c.readLines()
 	go c.readLoop(ctx)
 
