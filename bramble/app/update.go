@@ -385,16 +385,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case startSessionMsg:
 		m.saveDefaultModel(msg.sessionType, msg.model)
-		// At submit time, refuse explicit worktree targets that the snapshot
-		// flags as gone OR that no longer exist on disk. The disk check fires
-		// even when the in-memory snapshot is unloaded (cold repo context),
-		// so a session can never launch against a stale or missing path.
-		if msg.target.worktreePath != "" {
-			if m.sessionTargetAvailability(msg.target) == sessionTargetUnavailable ||
-				!worktreePathExists(msg.target.worktreePath) {
-				toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
-				return m, toastCmd
-			}
+		if msg.target.worktreePath != "" && !m.canLaunchSessionOnTarget(msg.target) {
+			toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
+			return m, toastCmd
 		}
 		if msg.target.repoName != "" && msg.target.repoName != m.repoName {
 			return m.startSessionOnRepo(msg.target.repoName, msg.sessionType, msg.prompt, msg.model, msg.target.worktreePath)
@@ -1406,6 +1399,22 @@ var worktreePathExists = func(worktreePath string) bool {
 	return info.IsDir()
 }
 
+// canLaunchSessionOnTarget reports whether an explicit-target session may be
+// launched. Available targets pass directly; Unknown (cold context, no
+// snapshot yet) falls back to a single on-disk stat. The Available branch
+// already statted inside sessionTargetAvailability, so this routes around the
+// double stat the previous implementation performed on the happy path.
+func (m Model) canLaunchSessionOnTarget(target sessionTarget) bool {
+	switch m.sessionTargetAvailability(target) {
+	case sessionTargetAvailable:
+		return true
+	case sessionTargetUnavailable:
+		return false
+	default:
+		return worktreePathExists(target.worktreePath)
+	}
+}
+
 func (m *Model) selectWorktreeByPath(path string) bool {
 	if path == "" {
 		return false
@@ -2217,7 +2226,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		return m, errToastCmd
 	}
 	wt := m.selectedWorktree()
-	if wt == nil || wt.IsGone || !worktreePathExists(wt.Path) {
+	if wt == nil || !m.canLaunchSessionOnTarget(sessionTarget{repoName: m.repoName, worktreePath: wt.Path}) {
 		errToastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 		return m, errToastCmd
 	}
@@ -2444,6 +2453,13 @@ func (m Model) handleCommandCenter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		worktreePath := sess.WorktreePath
 		planPath := sess.PlanFilePath
+		// Match the disk-stat preflight used by confirmTask / startSessionMsg:
+		// the plan was authored against this worktree, but the directory may
+		// have been removed between idle plan review and approval.
+		if !m.canLaunchSessionOnTarget(sessionTarget{repoName: m.repoName, worktreePath: worktreePath}) {
+			toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
+			return m, toastCmd
+		}
 		_ = m.sessionManager.CompleteSession(sess.ID)
 		m.sessions = m.sessionManager.GetAllSessions()
 		m.updateSessionDropdown()

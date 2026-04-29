@@ -422,3 +422,97 @@ func TestStartSessionMsg_TargetGoneOnDiskBetweenPromptAndSubmit(t *testing.T) {
 	assert.Contains(t, m4.toasts.toasts[0].Message, "Target worktree no longer available")
 	assert.Empty(t, m4.sessionManager.GetAllSessions())
 }
+
+// Happy path for the cold cross-repo case: target repo's worktrees are still
+// loading (worktreesLoaded=false), but the path exists on disk. Submit must
+// proceed and start the session against the target repo's manager.
+func TestStartSessionMsg_AcceptsColdCrossRepoTargetWhenPathExists(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "A", Path: "/tmp/wt/A"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("A"))
+
+	mgrB := injectSecondRepo(t, &m, "repoB")
+	rcB := m.repos["repoB"]
+	rcB.worktreesLoaded = false
+	rcB.worktrees = nil
+
+	prev := worktreePathExists
+	worktreePathExists = func(string) bool { return true }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	startMsg := startSessionMsg{
+		sessionType: session.SessionTypePlanner,
+		prompt:      "plan on cold repo",
+		model:       "claude-opus-4-7",
+		target: sessionTarget{
+			repoName:     "repoB",
+			worktreePath: "/tmp/wt/repoB-main",
+		},
+	}
+
+	newModel, _ := m.Update(startMsg)
+	m2 := newModel.(Model)
+
+	assert.Equal(t, "repoA", m2.repoName, "cross-repo dispatch must not switch active repo")
+	require.Len(t, mgrB.GetAllSessions(), 1)
+	assert.Equal(t, "/tmp/wt/repoB-main", mgrB.GetAllSessions()[0].WorktreePath)
+}
+
+// Plan approval (command-center "a") must apply the same disk-stat
+// preflight as confirmTask / startSessionMsg. A planner left idle with a
+// plan file can become stale if its worktree is removed between idle review
+// and approval — the builder must not launch in that case.
+func TestCommandCenter_PlanApproval_RejectsRemovedWorktree(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("feature"))
+
+	planner := addTestSession(t, m.sessionManager, &session.Session{
+		ID:           "sP",
+		Type:         session.SessionTypePlanner,
+		Status:       session.StatusIdle,
+		WorktreePath: "/tmp/wt/feature",
+		WorktreeName: "feature",
+		RepoName:     "repoA",
+		PlanFilePath: "/tmp/wt/feature/PLAN.md",
+		Title:        "Planner",
+	})
+	m.commandCenter.Show([]session.SessionInfo{planner}, m.width, m.height)
+	m.focus = FocusCommandCenter
+
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "/tmp/wt/feature" }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	newModel, _ := m.handleCommandCenter(keyPress('a'))
+	m2 := newModel.(Model)
+
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Target worktree no longer available")
+	// Original planner session must remain — CompleteSession should not fire.
+	require.Len(t, m2.sessionManager.GetAllSessions(), 1)
+	assert.Equal(t, session.SessionTypePlanner, m2.sessionManager.GetAllSessions()[0].Type)
+}
+
+// Happy path for confirmTask: existing worktree, snapshot is loaded, disk
+// stat agrees the path exists. Planner session must start.
+func TestConfirmTask_AcceptsExistingWorktreeWhenPathExists(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("feature"))
+
+	newModel, _ := m.confirmTask(taskConfirmMsg{
+		worktree: "feature",
+		prompt:   "plan on feature",
+		isNew:    false,
+	})
+	m2 := newModel.(Model)
+
+	require.Len(t, m2.sessionManager.GetAllSessions(), 1)
+	sess := m2.sessionManager.GetAllSessions()[0]
+	assert.Equal(t, session.SessionTypePlanner, sess.Type)
+	assert.Equal(t, "/tmp/wt/feature", sess.WorktreePath)
+}
