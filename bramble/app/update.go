@@ -385,10 +385,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case startSessionMsg:
 		m.saveDefaultModel(msg.sessionType, msg.model)
-		if msg.target.worktreePath != "" &&
-			m.sessionTargetAvailability(msg.target) == sessionTargetUnavailable {
-			toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
-			return m, toastCmd
+		// At submit time, refuse explicit worktree targets that the snapshot
+		// flags as gone OR that no longer exist on disk. The disk check fires
+		// even when the in-memory snapshot is unloaded (cold repo context),
+		// so a session can never launch against a stale or missing path.
+		if msg.target.worktreePath != "" {
+			if m.sessionTargetAvailability(msg.target) == sessionTargetUnavailable ||
+				!worktreePathExists(msg.target.worktreePath) {
+				toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
+				return m, toastCmd
+			}
 		}
 		if msg.target.repoName != "" && msg.target.repoName != m.repoName {
 			return m.startSessionOnRepo(msg.target.repoName, msg.sessionType, msg.prompt, msg.model, msg.target.worktreePath)
@@ -2211,7 +2217,7 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 		return m, errToastCmd
 	}
 	wt := m.selectedWorktree()
-	if wt == nil || wt.IsGone {
+	if wt == nil || wt.IsGone || !worktreePathExists(wt.Path) {
 		errToastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 		return m, errToastCmd
 	}

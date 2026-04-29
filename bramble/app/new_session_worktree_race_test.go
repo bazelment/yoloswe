@@ -332,6 +332,67 @@ func TestWorktreesMsg_PendingTargetGoneStillRunsRefreshFlow(t *testing.T) {
 	require.NotNil(t, cmd, "deferred refresh must still fire after cancellation")
 }
 
+// Cold target repo: when the captured target points at a repo whose worktree
+// snapshot has not finished loading, sessionTargetAvailability returns
+// Unknown. Submit must still reject if the path is gone on disk.
+func TestStartSessionMsg_RejectsColdTargetWhenPathMissingOnDisk(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "A", Path: "/tmp/wt/A"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("A"))
+
+	// Register repoB but leave its worktrees unloaded — simulates the cold
+	// cross-repo path added by this branch.
+	injectSecondRepo(t, &m, "repoB")
+	rcB := m.repos["repoB"]
+	rcB.worktreesLoaded = false
+	rcB.worktrees = nil
+
+	startMsg := startSessionMsg{
+		sessionType: session.SessionTypePlanner,
+		prompt:      "plan on cold repo",
+		model:       "claude-opus-4-7",
+		target: sessionTarget{
+			repoName:     "repoB",
+			worktreePath: "/tmp/wt/repoB-gone",
+		},
+	}
+
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "/tmp/wt/repoB-gone" }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	newModel, _ := m.Update(startMsg)
+	m2 := newModel.(Model)
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Target worktree no longer available")
+	assert.Empty(t, rcB.sessionManager.GetAllSessions())
+}
+
+// confirmTask should reject a worktree that the snapshot still lists but that
+// no longer exists on disk — same disk-stat policy as startSessionMsg.
+func TestConfirmTask_RejectsWorktreeMissingOnDisk(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "feature", Path: "/tmp/wt/feature"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("feature"))
+
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "/tmp/wt/feature" }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	newModel, _ := m.confirmTask(taskConfirmMsg{
+		worktree: "feature",
+		prompt:   "plan on removed worktree",
+		isNew:    false,
+	})
+	m2 := newModel.(Model)
+
+	assert.True(t, m2.toasts.HasToasts())
+	assert.Contains(t, m2.toasts.toasts[0].Message, "Target worktree no longer available")
+	assert.Empty(t, m2.sessionManager.GetAllSessions())
+}
+
 // Snapshot can lag behind reality: the worktree slice still lists the path
 // after the directory was removed on disk. Submit must reject in that case.
 func TestStartSessionMsg_TargetGoneOnDiskBetweenPromptAndSubmit(t *testing.T) {
