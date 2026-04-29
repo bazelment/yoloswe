@@ -34,8 +34,9 @@ var (
 
 // Cmd is the cobra command for code review.
 var Cmd = &cobra.Command{
-	Use:   "code-review",
-	Short: "Run a one-shot code review using an agent backend",
+	Use:          "code-review",
+	SilenceUsage: true,
+	Short:        "Run a one-shot code review using an agent backend",
 	Long: `Run a one-shot code review using an agent backend.
 
 Supported backends: cursor, codex, gemini.

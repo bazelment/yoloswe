@@ -23,10 +23,17 @@ type Client struct {
 	accumulator *streamAccumulator
 	info        *ConnectionInfo
 	done        chan struct{}
+	lines       chan lineResult // buffered; fed by readLines goroutine
 	config      ClientConfig
 	mu          sync.RWMutex
 	started     bool
 	stopping    bool
+}
+
+// lineResult carries one line from the subprocess stdout or a terminal error.
+type lineResult struct {
+	err  error
+	data []byte
 }
 
 // ConnectionInfo contains connection metadata after initialization.
@@ -57,6 +64,7 @@ func NewClient(opts ...ClientOption) *Client {
 		events:      make(chan Event, config.EventBufferSize),
 		accumulator: newStreamAccumulator(),
 		done:        make(chan struct{}),
+		lines:       make(chan lineResult, 1),
 	}
 }
 
@@ -85,7 +93,7 @@ func (c *Client) Start(ctx context.Context) error {
 		c.process.startStderrReader(c.config.StderrHandler)
 	}
 
-	// Start message reading goroutine
+	go c.readLines()
 	go c.readLoop(ctx)
 
 	c.started = true
@@ -362,27 +370,45 @@ func (c *Client) waitForThreadReady(ctx context.Context, threadID string) error 
 	}
 }
 
-// readLoop reads and processes messages from the app-server.
+// readLines runs in its own goroutine and feeds c.lines. It blocks on
+// ReadLine() and is unblocked when the subprocess is killed (EOF).
+// It closes c.lines on exit so readLoop's drain terminates.
+func (c *Client) readLines() {
+	defer close(c.lines)
+	for {
+		line, err := c.process.ReadLine()
+		c.lines <- lineResult{data: line, err: err}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// readLoop dispatches messages from c.lines, exiting when the context is
+// cancelled or the done channel is closed. On exit it stops the process so
+// that the blocking readLines goroutine gets an EOF and can terminate.
+// After stopping, it drains c.lines so readLines can unblock from any
+// in-flight send and exit cleanly.
 func (c *Client) readLoop(ctx context.Context) {
+	defer func() {
+		c.process.Stop()
+		for range c.lines {
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-c.done:
 			return
-		default:
-			line, err := c.process.ReadLine()
-			if err != nil {
-				if err == io.EOF {
-					return
-				}
-				if !c.stopping {
-					c.emitError("", "", err, "read_line")
+		case lr := <-c.lines:
+			if lr.err != nil {
+				if lr.err != io.EOF && !c.stopping {
+					c.emitError("", "", lr.err, "read_line")
 				}
 				return
 			}
-
-			c.handleMessage(line)
+			c.handleMessage(lr.data)
 		}
 	}
 }
