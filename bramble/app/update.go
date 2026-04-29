@@ -112,12 +112,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.worktreesLoaded = true
 		m.updateWorktreeDropdown()
 
+		var pendingCancelCmd tea.Cmd
 		pending := m.pendingSessionTarget
 		if m.inputMode && pending.worktreePath != "" &&
 			(pending.repoName == "" || pending.repoName == m.repoName) {
 			switch m.sessionTargetAvailability(pending) {
 			case sessionTargetUnavailable:
-				return m.cancelPendingSessionPrompt(errTargetWorktreeUnavailable)
+				// Cancel the pending prompt but fall through so the rest of
+				// the worktree-refresh flow (auto-select, session dropdown,
+				// deferred refresh) still runs in the same update cycle.
+				m, pendingCancelCmd = m.cancelPendingSessionPrompt(errTargetWorktreeUnavailable)
 			case sessionTargetAvailable:
 				if m.selectWorktreeByPath(pending.worktreePath) {
 					m.updateSessionDropdown()
@@ -136,9 +140,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prompt != "" {
 				model, cmd := m.startSession(session.SessionTypePlanner, prompt, m.defaultPlanModel)
 				// Defer heavy loading so the UI renders the worktree name first
-				return model, tea.Batch(cmd, deferredRefreshCmd())
+				return model, tea.Batch(pendingCancelCmd, cmd, deferredRefreshCmd())
 			}
-			return m, deferredRefreshCmd()
+			return m, tea.Batch(pendingCancelCmd, deferredRefreshCmd())
 		}
 
 		// Auto-select first worktree if none selected
@@ -148,7 +152,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update session dropdown with live sessions immediately;
 		// defer git statuses, file tree, and history to let the UI render first.
 		m.updateSessionDropdown()
-		return m, deferredRefreshCmd()
+		return m, tea.Batch(pendingCancelCmd, deferredRefreshCmd())
 
 	case deferredRefreshMsg:
 		return m, tea.Batch(
@@ -1365,15 +1369,35 @@ func (m Model) sessionTargetAvailability(target sessionTarget) sessionTargetAvai
 	}
 
 	for _, wt := range worktrees {
-		if wt.Path == target.worktreePath {
-			if wt.IsGone {
-				return sessionTargetUnavailable
-			}
-			return sessionTargetAvailable
+		if wt.Path != target.worktreePath {
+			continue
 		}
+		if wt.IsGone {
+			return sessionTargetUnavailable
+		}
+		// Re-validate on disk: the snapshot can lag behind reality if the
+		// worktree was removed/renamed after the last refresh. Treat any
+		// stat failure as unavailable so the submit path can never launch a
+		// session against a stale path.
+		if !worktreePathExists(target.worktreePath) {
+			return sessionTargetUnavailable
+		}
+		return sessionTargetAvailable
 	}
 
 	return sessionTargetUnavailable
+}
+
+// worktreePathExists reports whether worktreePath still resolves to a directory
+// on disk. Symlinks are followed so an externally-managed link target moving
+// also counts as gone. Indirected through a package var so tests can stub the
+// disk check without creating real directories for every fake path.
+var worktreePathExists = func(worktreePath string) bool {
+	info, err := os.Stat(worktreePath)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }
 
 func (m *Model) selectWorktreeByPath(path string) bool {

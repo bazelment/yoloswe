@@ -17,8 +17,22 @@ func setupModel(t *testing.T, mode session.SessionMode, worktrees []wt.Worktree,
 	ctx := context.Background()
 	mgr := session.NewManagerWithConfig(session.ManagerConfig{SessionMode: mode})
 	t.Cleanup(func() { mgr.Close() })
+	// Tests use synthetic worktree paths like "/tmp/wt/A" that don't exist on
+	// disk. Treat the in-memory snapshot as ground truth so the production
+	// stat fallback never spuriously rejects a fake path.
+	stubWorktreePathExists(t)
 	m := NewModel(ctx, "/tmp/wt", repoName, "", mgr, nil, worktrees, 80, 24, nil, nil, session.ManagerConfig{}, nil)
 	return m
+}
+
+// stubWorktreePathExists overrides the package-level on-disk worktree check so
+// any non-empty path is treated as existing for the duration of the test. The
+// previous value is restored on cleanup.
+func stubWorktreePathExists(t *testing.T) {
+	t.Helper()
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "" }
+	t.Cleanup(func() { worktreePathExists = prev })
 }
 
 func TestKeyFeedback_P_NoWorktree(t *testing.T) {

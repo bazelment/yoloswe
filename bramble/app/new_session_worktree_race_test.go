@@ -299,3 +299,65 @@ func TestConfirmTask_UnknownExistingWorktreeDoesNotFallBackToCurrentSelection(t 
 	assert.Contains(t, m2.toasts.toasts[0].Message, "Target worktree no longer available")
 	assert.Empty(t, m2.sessionManager.GetAllSessions())
 }
+
+// A worktreesMsg that strips the pending target must both cancel the prompt
+// and run the rest of the refresh flow (auto-select + deferred refresh) so
+// that pendingWorktreeSelect, the session dropdown, and downstream refreshes
+// stay coherent in the same update cycle.
+func TestWorktreesMsg_PendingTargetGoneStillRunsRefreshFlow(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "A", Path: "/tmp/wt/A"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("A"))
+
+	newModel, _ := m.handleKeyPress(keyPress('p'))
+	m2 := newModel.(Model)
+	require.True(t, m2.inputMode)
+	require.Equal(t, "/tmp/wt/A", m2.pendingSessionTarget.worktreePath)
+
+	// Simulate a refresh that drops "A" and offers "B" instead.
+	refreshedModel, cmd := m2.Update(worktreesMsg{
+		repoName:  "repoA",
+		worktrees: []wt.Worktree{{Branch: "B", Path: "/tmp/wt/B"}},
+	})
+	m3 := refreshedModel.(Model)
+
+	assert.False(t, m3.inputMode, "pending prompt must be cancelled")
+	assert.Equal(t, sessionTarget{}, m3.pendingSessionTarget)
+	assert.True(t, m3.toasts.HasToasts())
+	assert.Contains(t, m3.toasts.toasts[0].Message, "Target worktree no longer available")
+	require.NotNil(t, m3.worktreeDropdown.SelectedItem(),
+		"refresh flow must auto-select the surviving worktree")
+	assert.Equal(t, "B", m3.worktreeDropdown.SelectedItem().ID)
+	require.NotNil(t, cmd, "deferred refresh must still fire after cancellation")
+}
+
+// Snapshot can lag behind reality: the worktree slice still lists the path
+// after the directory was removed on disk. Submit must reject in that case.
+func TestStartSessionMsg_TargetGoneOnDiskBetweenPromptAndSubmit(t *testing.T) {
+	m := setupModel(t, session.SessionModeTUI, []wt.Worktree{
+		{Branch: "A", Path: "/tmp/wt/A"},
+	}, "repoA")
+	require.True(t, m.worktreeDropdown.SelectByID("A"))
+
+	newModel, _ := m.handleKeyPress(keyPress('p'))
+	m2 := newModel.(Model)
+	require.True(t, m2.inputMode)
+
+	newModel2, cmd := m2.Update(promptInputMsg{value: "plan"})
+	m3 := newModel2.(Model)
+	require.NotNil(t, cmd)
+	startMsg, ok := cmd().(startSessionMsg)
+	require.True(t, ok)
+
+	prev := worktreePathExists
+	worktreePathExists = func(p string) bool { return p != "/tmp/wt/A" }
+	t.Cleanup(func() { worktreePathExists = prev })
+
+	newModel3, _ := m3.Update(startMsg)
+	m4 := newModel3.(Model)
+
+	assert.True(t, m4.toasts.HasToasts())
+	assert.Contains(t, m4.toasts.toasts[0].Message, "Target worktree no longer available")
+	assert.Empty(t, m4.sessionManager.GetAllSessions())
+}
