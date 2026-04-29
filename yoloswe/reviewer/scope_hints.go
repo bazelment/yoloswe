@@ -137,7 +137,7 @@ func LoadScopeHints(path string) (*ScopeHints, error) {
 	// degenerate prompt.
 	if h.SchemaVersion != 1 && h.SchemaVersion != ScopeHintsSchemaVersion {
 		return nil, fmt.Errorf(
-			"scope-hints file %s: schema_version=%d, want %d",
+			"scope-hints file %s: schema_version=%d, want 1 or %d",
 			tag, h.SchemaVersion, ScopeHintsSchemaVersion,
 		)
 	}

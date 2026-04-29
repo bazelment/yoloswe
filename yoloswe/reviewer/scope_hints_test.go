@@ -185,8 +185,8 @@ func TestLoadScopeHints_SchemaVersionMismatch(t *testing.T) {
 	if !strings.Contains(err.Error(), "schema_version=3") {
 		t.Errorf("error should include observed version: %v", err)
 	}
-	if !strings.Contains(err.Error(), "want 2") {
-		t.Errorf("error should include expected version: %v", err)
+	if !strings.Contains(err.Error(), "want 1 or 2") {
+		t.Errorf("error should include accepted versions: %v", err)
 	}
 }
 

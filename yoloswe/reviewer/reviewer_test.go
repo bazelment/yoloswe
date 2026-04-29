@@ -716,7 +716,7 @@ func TestBuildJSONPromptWithScope_CallerCalleeFraming(t *testing.T) {
 	}
 }
 
-func TestBuildJSONPromptWithScope_CallerCalleeFallsBackToGenericWhenNoDeps(t *testing.T) {
+func TestBuildJSONPromptWithScope_CallerCalleeOmitsDepLineWhenNoDeps(t *testing.T) {
 	// ChangedPackages set but no DependencyPackages: clause still emits
 	// with the primary-modifies line but no callers/dependencies line.
 	out := BuildJSONPromptWithScope("g", PromptOptions{
