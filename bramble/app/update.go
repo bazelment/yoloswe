@@ -112,12 +112,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.worktreesLoaded = true
 		m.updateWorktreeDropdown()
 
-		if m.inputMode && m.pendingSessionTarget.mode != 0 && m.pendingTargetAppliesToCurrentRepo() {
-			switch m.sessionTargetAvailability(m.pendingSessionTarget) {
+		pending := m.pendingSessionTarget
+		if m.inputMode && pending.worktreePath != "" &&
+			(pending.repoName == "" || pending.repoName == m.repoName) {
+			switch m.sessionTargetAvailability(pending) {
 			case sessionTargetUnavailable:
-				return m.cancelPendingSessionPrompt("Target worktree no longer available")
+				return m.cancelPendingSessionPrompt(errTargetWorktreeUnavailable)
 			case sessionTargetAvailable:
-				if m.selectTargetWorktree(m.pendingSessionTarget) {
+				if m.selectWorktreeByPath(pending.worktreePath) {
 					m.updateSessionDropdown()
 				}
 			}
@@ -368,27 +370,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case promptInputMsg:
-		// Input completed
-		m.inputMode = false
-		// Save pending state before clearing — closures created at prompt-open
-		// time capture a stale copy of m, so we snapshot the live values here.
 		pendingModel := m.pendingModel
 		pendingSessionType := m.pendingSessionType
-		m.pendingModel = ""
-		m.pendingSessionType = ""
-		m.pendingSessionTarget = sessionTarget{}
-		if m.inputHandler != nil {
-			cmd := m.inputHandler(msg.value, pendingModel, pendingSessionType)
-			m.inputHandler = nil
-			return m, cmd
+		handler := m.inputHandler
+		m.clearPendingPrompt()
+		if handler != nil {
+			return m, handler(msg.value, pendingModel, pendingSessionType)
 		}
 		return m, nil
 
 	case startSessionMsg:
 		m.saveDefaultModel(msg.sessionType, msg.model)
-		if msg.target.mode != 0 &&
+		if msg.target.worktreePath != "" &&
 			m.sessionTargetAvailability(msg.target) == sessionTargetUnavailable {
-			toastCmd := m.addToast("Target worktree no longer available", ToastError)
+			toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 			return m, toastCmd
 		}
 		if msg.target.repoName != "" && msg.target.repoName != m.repoName {
@@ -720,7 +715,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "p", "b", "c":
 		st := sessionTypeFromKey(msg.String())
 		if wt := m.selectedWorktree(); wt != nil {
-			return m.promptNewSession(st, capturedSelectionTarget(m.repoName, wt.Path))
+			return m.promptNewSession(st, sessionTarget{repoName: m.repoName, worktreePath: wt.Path})
 		}
 		toastCmd := m.addToast("Select a worktree first (Alt-W)", ToastInfo)
 		return m, toastCmd
@@ -1209,12 +1204,8 @@ func (m Model) handleInputMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case TextAreaCancel:
-		m.inputMode = false
+		m.clearPendingPrompt()
 		m.inputArea.Reset()
-		m.inputHandler = nil
-		m.pendingModel = ""
-		m.pendingSessionType = ""
-		m.pendingSessionTarget = sessionTarget{}
 		return m, nil
 
 	case TextAreaQuit:
@@ -1340,6 +1331,11 @@ func (m Model) startSession(sessionType session.SessionType, prompt, model strin
 	return m.startSessionOnPath(sessionType, prompt, model, wt.Path)
 }
 
+const (
+	errTargetWorktreeUnavailable = "Target worktree no longer available"
+	errTargetRepoUnavailable     = "Target repo no longer available"
+)
+
 type sessionTargetAvailability int
 
 const (
@@ -1380,21 +1376,29 @@ func (m Model) sessionTargetAvailability(target sessionTarget) sessionTargetAvai
 	return sessionTargetUnavailable
 }
 
-func (m Model) pendingTargetAppliesToCurrentRepo() bool {
-	return m.pendingSessionTarget.repoName == "" || m.pendingSessionTarget.repoName == m.repoName
+func (m *Model) selectWorktreeByPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, wt := range m.worktrees {
+		if wt.Path == path {
+			return m.worktreeDropdown.SelectByID(wt.Branch)
+		}
+	}
+	return false
 }
 
-func (m *Model) selectTargetWorktree(target sessionTarget) bool {
-	return m.selectSessionWorktree(&session.SessionInfo{WorktreePath: target.worktreePath})
-}
-
-func (m Model) cancelPendingSessionPrompt(message string) (Model, tea.Cmd) {
+func (m *Model) clearPendingPrompt() {
 	m.inputMode = false
-	m.inputArea.Reset()
 	m.inputHandler = nil
 	m.pendingModel = ""
 	m.pendingSessionType = ""
 	m.pendingSessionTarget = sessionTarget{}
+}
+
+func (m Model) cancelPendingSessionPrompt(message string) (Model, tea.Cmd) {
+	m.clearPendingPrompt()
+	m.inputArea.Reset()
 	m.focus = FocusOutput
 	toastCmd := m.addToast(message, ToastError)
 	return m, toastCmd
@@ -1530,18 +1534,18 @@ func (m Model) validateExistingSessionTarget(sess *session.SessionInfo) (session
 	if targetRepo == "" {
 		targetRepo = m.repoName
 	}
-	target := existingSessionTarget(targetRepo, sess.WorktreePath)
+	target := sessionTarget{repoName: targetRepo, worktreePath: sess.WorktreePath}
 
 	if targetRepo != "" && targetRepo != m.repoName {
 		rc, ok := m.repos[targetRepo]
 		if !ok || rc.sessionManager == nil {
-			toastCmd := m.addToast("Target repo no longer available", ToastError)
+			toastCmd := m.addToast(errTargetRepoUnavailable, ToastError)
 			return target, toastCmd, false
 		}
 	}
 
 	if m.sessionTargetAvailability(target) == sessionTargetUnavailable {
-		toastCmd := m.addToast("Target worktree no longer available", ToastError)
+		toastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 		return target, toastCmd, false
 	}
 
@@ -2179,12 +2183,12 @@ func (m Model) confirmTask(msg taskConfirmMsg) (tea.Model, tea.Cmd) {
 
 	// Use existing worktree - select it and start planner
 	if !m.worktreeDropdown.SelectByID(msg.worktree) {
-		errToastCmd := m.addToast("Target worktree no longer available", ToastError)
+		errToastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 		return m, errToastCmd
 	}
 	wt := m.selectedWorktree()
 	if wt == nil || wt.IsGone {
-		errToastCmd := m.addToast("Target worktree no longer available", ToastError)
+		errToastCmd := m.addToast(errTargetWorktreeUnavailable, ToastError)
 		return m, errToastCmd
 	}
 

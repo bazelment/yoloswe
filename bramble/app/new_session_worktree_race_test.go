@@ -35,7 +35,6 @@ func TestMainViewNewSession_CapturesWorktreeBeforePrompt(t *testing.T) {
 			assert.Equal(t, sessionType, startMsg.sessionType)
 			assert.Equal(t, "repoA", startMsg.target.repoName)
 			assert.Equal(t, "/tmp/wt/A", startMsg.target.worktreePath)
-			assert.Equal(t, sessionTargetCapturedSelection, startMsg.target.mode)
 
 			newModel3, _ := m3.Update(startMsg)
 			m4 := newModel3.(Model)
@@ -55,9 +54,9 @@ func TestMainViewNewSession_CapturedRepoSurvivesRepoSwitchBeforePromptSubmit(t *
 	require.True(t, m.worktreeDropdown.SelectByID("main"))
 
 	mgrB := injectSecondRepo(t, &m, "repoB")
-	m.repos["repoB"].worktrees = []wt.Worktree{
+	setRepoWorktrees(&m, "repoB", []wt.Worktree{
 		{Branch: "main", Path: "/tmp/wt/repoB-main"},
-	}
+	})
 
 	newModel, _ := m.handleKeyPress(keyPress('p'))
 	m2 := newModel.(Model)
@@ -75,7 +74,6 @@ func TestMainViewNewSession_CapturedRepoSurvivesRepoSwitchBeforePromptSubmit(t *
 	require.True(t, ok)
 	assert.Equal(t, "repoA", startMsg.target.repoName)
 	assert.Equal(t, "/tmp/wt/repoA-main", startMsg.target.worktreePath)
-	assert.Equal(t, sessionTargetCapturedSelection, startMsg.target.mode)
 
 	newModel3, _ := m3.Update(startMsg)
 	m4 := newModel3.(Model)
@@ -152,7 +150,6 @@ func TestAllSessionsOverlayNewSession_UsesCapturedSessionWorktreeAfterSelectionC
 	assert.Equal(t, session.SessionTypeBuilder, startMsg.sessionType)
 	assert.Equal(t, "repoA", startMsg.target.repoName)
 	assert.Equal(t, "/tmp/wt/B", startMsg.target.worktreePath)
-	assert.Equal(t, sessionTargetExistingSession, startMsg.target.mode)
 
 	newModel3, _ := m3.Update(startMsg)
 	m4 := newModel3.(Model)
@@ -271,7 +268,7 @@ func TestStartSessionMsg_ExistingSessionWorktreeRemovedBeforeDispatch(t *testing
 	require.NotNil(t, cmd)
 	startMsg, ok := cmd().(startSessionMsg)
 	require.True(t, ok)
-	require.Equal(t, sessionTargetExistingSession, startMsg.target.mode)
+	require.Equal(t, "/tmp/wt/B", startMsg.target.worktreePath)
 
 	m3.worktrees = []wt.Worktree{{Branch: "A", Path: "/tmp/wt/A"}}
 	m3.updateWorktreeDropdown()

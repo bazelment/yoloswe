@@ -888,33 +888,9 @@ type (
 	}
 )
 
-type sessionTargetMode int
-
-const (
-	sessionTargetCapturedSelection sessionTargetMode = iota + 1
-	sessionTargetExistingSession
-)
-
 type sessionTarget struct {
 	repoName     string
 	worktreePath string
-	mode         sessionTargetMode
-}
-
-func capturedSelectionTarget(repoName, worktreePath string) sessionTarget {
-	return sessionTarget{
-		repoName:     repoName,
-		worktreePath: worktreePath,
-		mode:         sessionTargetCapturedSelection,
-	}
-}
-
-func existingSessionTarget(repoName, worktreePath string) sessionTarget {
-	return sessionTarget{
-		repoName:     repoName,
-		worktreePath: worktreePath,
-		mode:         sessionTargetExistingSession,
-	}
 }
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.
