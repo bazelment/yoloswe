@@ -341,6 +341,26 @@ func TestFormatFeedback(t *testing.T) {
 			},
 			shouldMatch: []string{"Multiple issues", "[CRITICAL]", "SQL injection", "[MEDIUM]", "Unused variable"},
 		},
+		{
+			name: "issue with confidence",
+			verdict: ReviewVerdictJSON{
+				Summary: "Maybe an issue",
+				Issues: []ReviewIssue{
+					{Severity: "low", File: "x.go", Line: 1, Message: "perhaps", Confidence: floatPtr(0.7)},
+				},
+			},
+			shouldMatch: []string{"perhaps", "Confidence: 0.70"},
+		},
+		{
+			name: "issue without confidence (omitted)",
+			verdict: ReviewVerdictJSON{
+				Summary: "Sure thing",
+				Issues: []ReviewIssue{
+					{Severity: "low", File: "x.go", Line: 1, Message: "definitely"},
+				},
+			},
+			shouldMatch: []string{"definitely"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1001,3 +1021,5 @@ func TestFormatFeedbackEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func floatPtr(f float64) *float64 { return &f }

@@ -419,6 +419,14 @@ func (s *SWEWrapper) parseVerdict(text string) *ReviewVerdict {
 		}
 	}
 
+	// Note: parseVerdict is deliberately lenient — its job is best-effort
+	// extraction of a verdict + feedback for the builder, even when the JSON
+	// is missing fields the strict envelope schema requires (line numbers,
+	// confidence range, etc.). reviewer.ValidateReviewJSON is available for
+	// callers that need strict semantics. Tightening this path would reject
+	// imperfect-but-actionable reviewer output and starve the builder of
+	// guidance, so the trade-off is intentional.
+
 	// Trim whitespace from verdict for robust comparison
 	verdict := strings.TrimSpace(result.Verdict)
 	accepted := strings.EqualFold(verdict, "accepted")

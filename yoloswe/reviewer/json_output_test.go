@@ -295,6 +295,35 @@ func TestBuildEnvelope_ConfidenceOutOfRange(t *testing.T) {
 	}
 }
 
+func TestValidateReviewJSON(t *testing.T) {
+	// The exported helper lets callers outside this package (e.g.
+	// yoloswe/swe.go) reuse the envelope's schema check without going
+	// through BuildEnvelope. Cover the boundary cases of the contract.
+	cases := []struct {
+		name      string
+		json      string
+		expectErr bool
+	}{
+		{"valid_accepted_with_confidence", `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":0.7}]}`, false},
+		{"valid_accepted_no_issues", `{"verdict":"accepted","issues":[]}`, false},
+		{"unknown_verdict", `{"verdict":"maybe","issues":[]}`, true},
+		{"confidence_out_of_range", `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":2.0}]}`, true},
+		{"missing_line", `{"verdict":"rejected","issues":[{"severity":"high","file":"a.go","message":"bug"}]}`, true},
+		{"malformed_json", `not json at all`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateReviewJSON([]byte(tc.json))
+			if tc.expectErr && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !tc.expectErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildEnvelope_UnparseableText(t *testing.T) {
 	result := &ReviewResult{
 		ResponseText: "the reviewer refused to produce JSON",
