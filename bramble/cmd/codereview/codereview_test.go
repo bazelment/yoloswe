@@ -376,6 +376,39 @@ func TestBuildPromptForRun_WidensWithRealHintsFile(t *testing.T) {
 	}
 }
 
+func TestBuildPromptForRun_V2HintsThreadCallerCalleeFraming(t *testing.T) {
+	// End-to-end seam for the v2 scope-hints shape: changed_packages and
+	// dependency_packages should reach the prompt builder and select the
+	// caller/callee framing instead of the generic flat-list framing.
+	// Guards against a regression that drops the new fields somewhere
+	// between LoadScopeHints and BuildJSONPromptWithScope.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	contents := `{
+		"schema_version": 2,
+		"test_paths": ["pkg/test_x.py"],
+		"cross_service_packages": ["svc/a/", "svc/b/"],
+		"changed_packages": ["svc/a/"],
+		"dependency_packages": ["svc/b/"]
+	}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write hints: %v", err)
+	}
+	got := buildPromptForRun("review goal", path, false)
+	if !strings.Contains(got, "## Cross-service contract sweep") {
+		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "primarily modifies") {
+		t.Errorf("prompt missing caller/callee framing; got:\n%s", got)
+	}
+	if !strings.Contains(got, "callers or dependencies") {
+		t.Errorf("prompt missing callers/dependencies line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "svc/a/") || !strings.Contains(got, "svc/b/") {
+		t.Errorf("prompt missing changed/dependency packages; got:\n%s", got)
+	}
+}
+
 func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 	// Empty hints path must produce today's narrow prompt, byte-equal to
 	// the legacy BuildJSONPrompt output. This is the no-regressions

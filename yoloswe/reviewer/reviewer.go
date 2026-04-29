@@ -440,7 +440,7 @@ func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
 func BuildPromptWithScope(goal string, opts PromptOptions) string {
 	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
 
-After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and a confidence score between 0 and 1.`
+After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and an overall confidence score in [0.0, 1.0]. This overall score is distinct from the optional per-issue confidence in the JSON output format (which is in (0.0, 1.0]); it summarizes confidence in the verdict itself.`
 }
 
 // BuildJSONPrompt creates a review prompt that requests JSON output format.

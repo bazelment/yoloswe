@@ -143,13 +143,21 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 	return env
 }
 
-// ValidateReviewJSON parses raw reviewer JSON and runs the same schema
-// validation that BuildEnvelope applies. Returns nil on a well-formed,
-// schema-compliant body. Callers outside this package (e.g. yoloswe/swe.go's
-// parseVerdict) should run this before acting on reviewer JSON so the
-// builder-feedback path enforces the same contract as the envelope path —
-// otherwise out-of-range confidence, missing line numbers, etc. would slip
-// past one entrypoint while being rejected by the other.
+// ValidateReviewJSON parses an extracted reviewer JSON object and runs the
+// same schema validation that BuildEnvelope applies to ResultEnvelope.Review.
+// Returns nil on a well-formed, schema-compliant body.
+//
+// Input contract: raw must be the bare JSON object the reviewer emitted,
+// without any narration prefix or fenced code block — same shape that
+// extractReviewBody returns. Feeding it raw model response text (which may
+// be wrapped in ``` fences or follow narration) will fail to unmarshal.
+// Callers wanting a one-shot "extract + validate" should go through
+// BuildEnvelope, which composes both steps.
+//
+// Use case: callers outside this package (e.g. yoloswe/swe.go's parseVerdict)
+// that already have the JSON blob in hand and want strict schema semantics
+// — confidence ∈ (0.0, 1.0], line ≥ 1, valid severity/verdict — without
+// constructing a full ResultEnvelope.
 func ValidateReviewJSON(raw []byte) error {
 	var body ReviewBody
 	if err := json.Unmarshal(raw, &body); err != nil {
