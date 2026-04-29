@@ -372,7 +372,9 @@ func (c *Client) waitForThreadReady(ctx context.Context, threadID string) error 
 
 // readLines runs in its own goroutine and feeds c.lines. It blocks on
 // ReadLine() and is unblocked when the subprocess is killed (EOF).
+// It closes c.lines on exit so readLoop's drain terminates.
 func (c *Client) readLines() {
+	defer close(c.lines)
 	for {
 		line, err := c.process.ReadLine()
 		c.lines <- lineResult{data: line, err: err}
@@ -385,8 +387,14 @@ func (c *Client) readLines() {
 // readLoop dispatches messages from c.lines, exiting when the context is
 // cancelled or the done channel is closed. On exit it stops the process so
 // that the blocking readLines goroutine gets an EOF and can terminate.
+// After stopping, it drains c.lines so readLines can unblock from any
+// in-flight send and exit cleanly.
 func (c *Client) readLoop(ctx context.Context) {
-	defer c.process.Stop()
+	defer func() {
+		c.process.Stop()
+		for range c.lines {
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
