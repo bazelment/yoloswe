@@ -775,11 +775,10 @@ type (
 	sessionsUpdated struct{}
 	promptInputMsg  struct{ value string }
 	startSessionMsg struct {
-		sessionType  session.SessionType
-		prompt       string
-		model        string
-		worktreePath string // if set, starts on this path instead of selected worktree
-		repoName     string // if set and != m.repoName, starts on that repo's manager
+		sessionType session.SessionType
+		prompt      string
+		model       string
+		target      sessionTarget
 	}
 	createWorktreeMsg struct{ branch string }
 	editorResultMsg   struct{ err error }
@@ -883,6 +882,35 @@ type (
 		action string // "delete", "reset", "keep"
 	}
 )
+
+type sessionTargetMode int
+
+const (
+	sessionTargetCapturedSelection sessionTargetMode = iota + 1
+	sessionTargetExistingSession
+)
+
+type sessionTarget struct {
+	repoName     string
+	worktreePath string
+	mode         sessionTargetMode
+}
+
+func capturedSelectionTarget(repoName, worktreePath string) sessionTarget {
+	return sessionTarget{
+		repoName:     repoName,
+		worktreePath: worktreePath,
+		mode:         sessionTargetCapturedSelection,
+	}
+}
+
+func existingSessionTarget(repoName, worktreePath string) sessionTarget {
+	return sessionTarget{
+		repoName:     repoName,
+		worktreePath: worktreePath,
+		mode:         sessionTargetExistingSession,
+	}
+}
 
 // RouteProposal wraps taskrouter.RouteProposal for use in the app.
 type RouteProposal = struct {

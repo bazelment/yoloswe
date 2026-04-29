@@ -465,7 +465,7 @@ func TestCommandCenter_NewSession_AfterReSort(t *testing.T) {
 	require.NotNil(t, cmd)
 	startMsg, ok := cmd().(startSessionMsg)
 	require.True(t, ok)
-	assert.Equal(t, "/tmp/wt/B", startMsg.worktreePath,
+	assert.Equal(t, "/tmp/wt/B", startMsg.target.worktreePath,
 		"new session must target the navigated session's worktree, not the first card's")
 }
 
