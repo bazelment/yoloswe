@@ -166,15 +166,17 @@ func testIssue() *tracker.Issue {
 	}
 }
 
-// testStep returns a StepConfig with the comment_template / round_comment_template
-// fields populated so workflow tests can post step / round comments without
-// hitting the bootstrap-or-die validation. The Prompt field is left empty —
-// the tests that exercise runStep/runStepRounds stub out runStepAgent, so
-// resolvePromptForExecution is never reached.
+// testStep returns a StepConfig that mirrors a real loaded YAML step:
+// non-empty Prompt + comment templates, so workflow tests resemble what
+// LoadConfig would produce. Tests stub runStepAgent, so the prompt body
+// never actually runs — but seeding it means the scaffold passes
+// validateStep and a future test that calls the real RunStepAgent
+// without a stub won't silently bypass prompt-related codepaths.
 func testStep(permissionMode string, maxTurns int) StepConfig {
 	return StepConfig{
 		PermissionMode:       permissionMode,
 		MaxTurns:             maxTurns,
+		Prompt:               "noop {{.Identifier}}",
 		CommentTemplate:      "## {{.Heading}} Complete\n\n{{.Output}}",
 		RoundCommentTemplate: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
 	}

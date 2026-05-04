@@ -51,7 +51,7 @@ func newRunCommand(args *runArgs) *cobra.Command {
 		Short: "Run the jiradozer workflow",
 		Long:  "Execute the plan → build → validate → ship workflow against one or many issues.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			args.dryRunSet = cmd.Flags().Changed("dry-run")
+			args.dryRunSet = dryRunChanged(cmd)
 			app := cliapp.FromContext(cmd.Context())
 			return run(cmd.Context(), app, *args)
 		},
@@ -59,6 +59,21 @@ func newRunCommand(args *runArgs) *cobra.Command {
 	cmd.SilenceUsage = true
 	registerRunFlags(cmd, args)
 	return cmd
+}
+
+// dryRunChanged reports whether --dry-run was set on cmd or any ancestor.
+// The flag is registered on both the root command (for the legacy
+// `jiradozer --dry-run --filter ...` invocation) and the `run` subcommand,
+// so cobra parses it on whichever FlagSet matches the user's placement —
+// `jiradozer --dry-run run` lands on root, `jiradozer run --dry-run` on run.
+// Without walking the tree we silently drop the user's flag.
+func dryRunChanged(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Flags().Changed("dry-run") {
+			return true
+		}
+	}
+	return false
 }
 
 // registerRunFlags binds the run-specific flags onto cmd. Shared between the

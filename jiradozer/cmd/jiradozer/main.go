@@ -58,7 +58,7 @@ func newRootCommand(opts *cliapp.Options) *cobra.Command {
 	// them, and they share the same runArgs pointer so values flow through.
 	registerRunFlags(rootCmd, &rargs)
 	rootCmd.RunE = func(cmd *cobra.Command, _ []string) error {
-		rargs.dryRunSet = cmd.Flags().Changed("dry-run")
+		rargs.dryRunSet = dryRunChanged(cmd)
 		app := cliapp.FromContext(cmd.Context())
 		return run(cmd.Context(), app, rargs)
 	}

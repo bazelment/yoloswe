@@ -45,10 +45,11 @@ func TestBootstrapPromptParity(t *testing.T) {
 }
 
 // TestBootstrapRoundTrip writes a starter config via bootstrapYAML, then
-// reloads it via jiradozer.LoadConfig. The reload must succeed with
-// non-empty Prompt and CommentTemplate for every named step — otherwise the
-// generated YAML is broken and `jiradozer bootstrap` would hand users a
-// config that fails on first run.
+// reloads it via jiradozer.LoadConfig. The reload must succeed and the
+// CommentTemplate fields must equal the canonical bootstrap constants
+// byte-for-byte; otherwise the generated YAML drifted from
+// BootstrapCompleteCommentTemplate / BootstrapRoundCommentTemplate and
+// users would see different comment shapes than the docs describe.
 func TestBootstrapRoundTrip(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "test-bootstrap-api-key")
 
@@ -69,9 +70,18 @@ func TestBootstrapRoundTrip(t *testing.T) {
 		"create_pr": cfg.CreatePR,
 		"ship":      cfg.Ship,
 	}
+	// Steps with rounds support seed RoundCommentTemplate; create_pr cannot
+	// have rounds (validate() rejects it), and plan is single-shot in the
+	// bootstrap shape, so neither gets a round template.
+	stepsWithRoundTemplate := map[string]bool{"build": true, "validate": true, "ship": true}
 	for name, step := range steps {
 		assert.NotEmptyf(t, step.Prompt, "step %s: bootstrap must seed a prompt", name)
-		assert.NotEmptyf(t, step.CommentTemplate, "step %s: bootstrap must seed a comment_template", name)
+		assert.Equalf(t, jiradozer.BootstrapCompleteCommentTemplate, step.CommentTemplate,
+			"step %s: bootstrap → YAML → load round-trip must preserve comment_template byte-for-byte", name)
+		if stepsWithRoundTemplate[name] {
+			assert.Equalf(t, jiradozer.BootstrapRoundCommentTemplate, step.RoundCommentTemplate,
+				"step %s: bootstrap → YAML → load round-trip must preserve round_comment_template byte-for-byte", name)
+		}
 	}
 }
 

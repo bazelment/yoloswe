@@ -2,6 +2,7 @@ package jiradozer
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,7 +135,13 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultConfig returns the default config with sensible defaults.
+// DefaultConfig returns the framework defaults: tracker kind, agent model,
+// branch prefix, work_dir, and step PermissionMode/MaxTurns. It does NOT
+// seed prompts or comment templates — those live in jiradozer.yaml and
+// must be supplied (via `jiradozer bootstrap`, LoadConfig, or explicit
+// field assignment) before the result can pass validate() or feed into
+// RunStepAgent. Library / test code that needs a runnable Config should
+// load it from disk or layer prompts on top.
 func DefaultConfig() *Config {
 	cfg := defaultConfig()
 	return &cfg
@@ -218,22 +225,29 @@ func validateStep(name string, step *StepConfig) error {
 		return fmt.Errorf("%s: prompt is required (run `jiradozer bootstrap` to generate a starter config)", name)
 	}
 	if step.Prompt != "" {
-		if _, err := template.New(name).Parse(step.Prompt); err != nil {
-			return fmt.Errorf("%s.prompt template: %w", name, err)
+		if err := validatePromptTemplate(name+".prompt", step.Prompt); err != nil {
+			return err
 		}
 	}
-	if step.CommentTemplate == "" {
-		return fmt.Errorf("%s: comment_template is required (run `jiradozer bootstrap` to generate a starter config)", name)
+	// comment_template feeds runStep (single-shot steps) and is not rendered
+	// by runStepRounds, so round-only steps don't need it. Single-shot steps
+	// still require it; bootstrap seeds both for convenience.
+	if len(step.Rounds) == 0 {
+		if step.CommentTemplate == "" {
+			return fmt.Errorf("%s: comment_template is required (run `jiradozer bootstrap` to generate a starter config)", name)
+		}
 	}
-	if _, err := template.New(name + "_comment").Parse(step.CommentTemplate); err != nil {
-		return fmt.Errorf("%s.comment_template: %w", name, err)
+	if step.CommentTemplate != "" {
+		if err := validateCommentTemplate(name+".comment_template", step.CommentTemplate); err != nil {
+			return err
+		}
 	}
 	if len(step.Rounds) > 0 {
 		if step.RoundCommentTemplate == "" {
 			return fmt.Errorf("%s: round_comment_template is required when rounds is set (run `jiradozer bootstrap` to generate a starter config)", name)
 		}
-		if _, err := template.New(name + "_round_comment").Parse(step.RoundCommentTemplate); err != nil {
-			return fmt.Errorf("%s.round_comment_template: %w", name, err)
+		if err := validateCommentTemplate(name+".round_comment_template", step.RoundCommentTemplate); err != nil {
+			return err
 		}
 	}
 	for i, round := range step.Rounds {
@@ -244,15 +258,45 @@ func validateStep(name string, step *StepConfig) error {
 			return fmt.Errorf("%s.rounds[%d]: prompt and command are mutually exclusive", name, i)
 		}
 		if round.Prompt != "" {
-			if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
-				return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
+			if err := validatePromptTemplate(fmt.Sprintf("%s.rounds[%d].prompt", name, i), round.Prompt); err != nil {
+				return err
 			}
 		}
 		if round.Command != "" {
-			if _, err := template.New(fmt.Sprintf("%s_round_%d_cmd", name, i)).Parse(round.Command); err != nil {
-				return fmt.Errorf("%s.rounds[%d].command template: %w", name, i, err)
+			if err := validatePromptTemplate(fmt.Sprintf("%s.rounds[%d].command", name, i), round.Command); err != nil {
+				return err
 			}
 		}
+	}
+	return nil
+}
+
+// validatePromptTemplate parses tmpl and renders it against a zero-value
+// PromptData so typos like {{.Headng}} fail at LoadConfig time rather than
+// at the first run that posts a comment. Missing-field errors that the
+// runtime catches via Option("missingkey=error") would otherwise hide
+// behind the validation-only Parse() call.
+func validatePromptTemplate(label, tmpl string) error {
+	t, err := template.New(label).Option("missingkey=error").Parse(tmpl)
+	if err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
+	}
+	if err := t.Execute(io.Discard, PromptData{}); err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
+	}
+	return nil
+}
+
+// validateCommentTemplate is the CommentData counterpart of
+// validatePromptTemplate: parse + execute against a zero-value CommentData
+// so a misspelled field is caught at config load.
+func validateCommentTemplate(label, tmpl string) error {
+	t, err := template.New(label).Option("missingkey=error").Parse(tmpl)
+	if err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
+	}
+	if err := t.Execute(io.Discard, CommentData{}); err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
 	}
 	return nil
 }

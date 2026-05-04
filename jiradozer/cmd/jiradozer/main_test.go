@@ -3,7 +3,9 @@ package main
 import (
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
@@ -104,6 +106,43 @@ func TestResolveRepoName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := resolveRepoName(tt.cfg)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestDryRunFlagPlacement verifies --dry-run is honored regardless of where
+// the user puts it relative to the run subcommand. Because the flag is
+// registered on both root and `run` (via registerRunFlags) but cobra only
+// records `Changed=true` on whichever FlagSet actually parsed it, a naive
+// `cmd.Flags().Changed("dry-run")` in run's RunE silently drops the flag
+// when the user wrote `jiradozer --dry-run run …`.
+func TestDryRunFlagPlacement(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "no dry-run", argv: []string{"run"}, want: false},
+		{name: "dry-run on run subcommand", argv: []string{"run", "--dry-run"}, want: true},
+		{name: "dry-run before run subcommand", argv: []string{"--dry-run", "run"}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rargs runArgs
+			rootCmd := &cobra.Command{Use: "jiradozer"}
+			runCmd := &cobra.Command{
+				Use:  "run",
+				RunE: func(cmd *cobra.Command, _ []string) error { return nil },
+			}
+			registerRunFlags(rootCmd, &rargs)
+			registerRunFlags(runCmd, &rargs)
+			rootCmd.AddCommand(runCmd)
+			rootCmd.SetArgs(tt.argv)
+			require.NoError(t, rootCmd.Execute())
+
+			got := dryRunChanged(runCmd)
 			assert.Equal(t, tt.want, got)
 		})
 	}
