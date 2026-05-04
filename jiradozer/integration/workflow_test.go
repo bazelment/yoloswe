@@ -198,6 +198,9 @@ func TestLinear_LGTM_Variants_RealComments(t *testing.T) {
 		{"lgtm", jiradozer.FeedbackApprove},
 		{"LGTM", jiradozer.FeedbackApprove},
 		{"approve", jiradozer.FeedbackApprove},
+		{"approve all", jiradozer.FeedbackApproveAll},
+		{"approve_all", jiradozer.FeedbackApproveAll},
+		{"yolo", jiradozer.FeedbackApproveAll},
 		{"redo", jiradozer.FeedbackRedo},
 		{"Please fix the tests", jiradozer.FeedbackComment},
 	}

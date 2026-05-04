@@ -211,6 +211,8 @@ Polls tracker every N seconds for new comments. Filters out bot comments. Parses
 - `redo` / `retry` → `FeedbackRedo`
 - Anything else → `FeedbackComment` (incorporated into next agent prompt)
 
+Runtime approve-all is intentionally in-memory and scoped to the current process run. Auto-approved gates skip waiting comments, but perform a single immediate comment check before advancing so a newer `redo` or feedback comment can cancel approve-all and rewind the workflow.
+
 ### 6. Workflow Engine (`workflow.go`)
 
 All four steps are driven by the same `runStep` method. The workflow tracks session IDs per step so redo/feedback resumes the agent session instead of starting fresh.

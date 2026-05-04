@@ -165,6 +165,8 @@ At each review gate, comment on the issue:
 - `redo` -- re-run the current step
 - Any other text -- treated as feedback, incorporated into the next agent run
 
+When approve-all is active, Jiradozer still checks for newer comments at each review gate before auto-approving. A newer `redo` or feedback comment cancels approve-all and rewinds for another human-reviewed pass.
+
 ### Worktree lifecycle (team mode)
 
 In team mode (`--filter`), each issue gets its own git worktree under a dedicated branch (`<branch-prefix>/<identifier>`). The worktree lifecycle is:

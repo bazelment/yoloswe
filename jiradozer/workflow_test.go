@@ -533,6 +533,38 @@ func TestWorkflow_RunReview_ApproveAllEnablesRemainingAutoApproval(t *testing.T)
 	assert.False(t, wf.shouldAutoApprove(StepBuilding), "non-review steps should not auto-approve")
 }
 
+func TestWorkflow_RunReview_ApproveAllAutoApprovesLaterGate(t *testing.T) {
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	walkTo(t, wf.state, StepBuildReview)
+
+	wf.runReview(context.Background(), StepValidating, StepBuilding)
+
+	assert.Equal(t, StepValidating, wf.state.Current())
+	assert.Empty(t, wf.feedback)
+	assert.True(t, wf.approveAllRemaining)
+}
+
+func TestWorkflow_RunReview_ApproveAllObservesLateRedo(t *testing.T) {
+	now := time.Now()
+	mt := &mockWorkflowTracker{
+		comments: []tracker.Comment{
+			{ID: "c1", Body: "redo\n\nPlease revisit the build", IsSelf: false, CreatedAt: now.Add(time.Second)},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	wf.lastCommentAt = now
+	walkTo(t, wf.state, StepBuildReview)
+
+	wf.runReview(context.Background(), StepValidating, StepBuilding)
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Contains(t, wf.feedback, "Please revisit the build")
+	assert.False(t, wf.approveAllRemaining)
+}
+
 // TestWorkflow_RunReview_Redo tests that a redo comment goes back to the redo target.
 func TestWorkflow_RunReview_Redo(t *testing.T) {
 	mt := &mockWorkflowTracker{

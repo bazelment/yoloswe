@@ -420,6 +420,13 @@ func capitalize(s string) string {
 // runReview waits for human feedback and transitions accordingly.
 func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget WorkflowStep) {
 	if w.shouldAutoApprove(w.state.Current()) {
+		fb, err := w.fetchImmediateFeedback(ctx)
+		if err != nil {
+			w.logger.Warn("failed to check for feedback before auto-approval", "step", w.state.Current(), "error", err)
+		} else if fb != nil {
+			w.handleReviewFeedback(ctx, fb, approveTarget, redoTarget)
+			return
+		}
 		w.logger.Info("auto-approving", "step", w.state.Current())
 		w.status(fmt.Sprintf("Auto-approved %s", w.state.Current()))
 		w.feedback = ""
@@ -439,7 +446,10 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 	}
 
 	w.lastCommentAt = fb.Comment.CreatedAt
+	w.handleReviewFeedback(ctx, fb, approveTarget, redoTarget)
+}
 
+func (w *Workflow) handleReviewFeedback(ctx context.Context, fb *FeedbackResult, approveTarget, redoTarget WorkflowStep) {
 	switch fb.Action {
 	case FeedbackApprove:
 		w.applyReviewApproval(ctx, approveTarget, reviewApproval{
@@ -482,15 +492,38 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 
 func (w *Workflow) applyReviewApproval(ctx context.Context, approveTarget WorkflowStep, approval reviewApproval) {
 	w.logger.Info(approval.logMessage, "step", w.state.Current())
-	w.status(approval.statusMessage)
-	w.feedback = ""
 	if err := w.approveTransition(ctx, approveTarget, approval.transitionReason); err != nil {
 		w.fail(ctx, err)
 		return
 	}
+	w.status(approval.statusMessage)
+	w.feedback = ""
 	if approval.approveAll {
 		w.approveAllRemaining = true
 	}
+}
+
+func (w *Workflow) fetchImmediateFeedback(ctx context.Context) (*FeedbackResult, error) {
+	comments, err := w.tracker.FetchComments(ctx, w.issue.ID, w.lastCommentAt)
+	if err != nil {
+		return nil, err
+	}
+
+	exclude := make(map[string]bool, len(w.botCommentIDs))
+	for _, id := range w.botCommentIDs {
+		exclude[id] = true
+	}
+	for i := len(comments) - 1; i >= 0; i-- {
+		if exclude[comments[i].ID] {
+			continue
+		}
+		return &FeedbackResult{
+			Action:  ParseCommentAction(comments[i].Body),
+			Message: comments[i].Body,
+			Comment: comments[i],
+		}, nil
+	}
+	return nil, nil
 }
 
 // approveTransition advances to approveTarget, then closes out the prior
@@ -798,7 +831,6 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 	}
 
 	if w.shouldAutoApprove(reviewStep) {
-		w.lastCommentAt = time.Now()
 		return
 	}
 

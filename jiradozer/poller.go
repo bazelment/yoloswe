@@ -119,6 +119,6 @@ func isApproveAllAction(normalized string) bool {
 // PostWaitingComment posts a standardized "waiting for review" comment and
 // returns the created comment with its server-assigned timestamp.
 func PostWaitingComment(ctx context.Context, t tracker.IssueTracker, issueID string, step WorkflowStep) (tracker.Comment, error) {
-	body := fmt.Sprintf("**%s** — Waiting for review.\n\nReply with:\n- `approve` to proceed to the next step\n- %s to approve this and all remaining review gates\n- `redo` to re-run this step\n- Any other comment to provide feedback for revision", step, approveAllActionDisplay)
+	body := fmt.Sprintf("**%s** — Waiting for review.\n\nReply with:\n- `approve` to proceed to the next step\n- %s to approve this and all remaining review gates in the current run\n- `redo` to re-run this step\n- Any other comment to provide feedback for revision", step, approveAllActionDisplay)
 	return t.PostComment(ctx, issueID, body)
 }
