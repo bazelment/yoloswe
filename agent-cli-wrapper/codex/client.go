@@ -680,11 +680,6 @@ func (c *Client) handleTokenCount(params json.RawMessage) {
 		}
 	}
 
-	// Store usage in thread for TurnCompletedEvent. Prefer LastTokenUsage
-	// (per-turn) when present; fall back to TotalTokenUsage so we still
-	// surface token counts on protocol versions that don't populate the
-	// per-turn field. Without the fallback, jiradozer's `agent completed`
-	// log reads input_tokens=0 / output_tokens=0 for every codex run.
 	c.mu.RLock()
 	thread, ok := c.threads[notif.ConversationID]
 	c.mu.RUnlock()

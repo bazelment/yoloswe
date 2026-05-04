@@ -583,9 +583,7 @@ func TestExtractErrorMessage(t *testing.T) {
 
 // TestClient_TokenUsageFallsBackToTotal verifies that when a TokenCount
 // notification carries only TotalTokenUsage (no per-turn LastTokenUsage),
-// the fallback path still surfaces tokens on TurnCompletedEvent. Without
-// this, jiradozer's `agent completed` log reads zero tokens for every
-// codex run on protocol versions that omit the per-turn field.
+// the fallback path still surfaces tokens on TurnCompletedEvent.
 func TestClient_TokenUsageFallsBackToTotal(t *testing.T) {
 	client := NewClient(WithEventBufferSize(10))
 

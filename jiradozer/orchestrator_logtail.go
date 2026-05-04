@@ -11,40 +11,21 @@ import (
 	"time"
 )
 
-// logTailPollInterval is the gap between EOF retries when tailing a subprocess
-// log. Short enough that operators see step transitions promptly, long enough
-// that an idle workflow doesn't burn a CPU.
 const logTailPollInterval = 250 * time.Millisecond
-
-// watchdogTickInterval is how often the watchdog re-checks the idle gap.
-// The check itself is cheap (one atomic load + duration compare), so erring
-// toward responsiveness over efficiency makes sense.
 const watchdogTickInterval = 30 * time.Second
 
-// klogfmtLineRe extracts a klog/slog-style log line's leading severity letter
-// (I/W/E/D), the source file, and the message body. The body keeps key=value
-// pairs intact for downstream extraction.
-//
 // Example matched line:
 //
 //	I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=...
 var klogfmtLineRe = regexp.MustCompile(`^([IWED])\d{4} \d{2}:\d{2}:\d{2}\.\d+ +\d+ +([^\]]+)\] (.*)$`)
 
-// keyValueRe extracts key=value pairs from a klogfmt body. Values may be
-// bare tokens or double-quoted strings; we accept both.
 var keyValueRe = regexp.MustCompile(`(\w+)=("[^"]*"|\S+)`)
-
-// prURLRe captures GitHub pull-request URLs anywhere in a line.
 var prURLRe = regexp.MustCompile(`https://github\.com/[^\s"']+/pull/\d+`)
 
-// tailSubprocessLog watches the per-issue log file and re-emits a narrow set
-// of step-transition lines on the parent logger. It also updates
-// mw.lastOutputAt on every line (regardless of allow-list match) so the
-// watchdog can distinguish "agent slow but progressing" from "agent stuck."
-//
-// The goroutine exits when stop is closed or the file is removed. Errors
-// other than EOF are logged at debug level — the tailer is best-effort and
-// must not crash the parent.
+// tailSubprocessLog watches the per-issue log file, re-emits a narrow set of
+// step-transition lines on the parent logger, and updates mw.lastOutputAt on
+// every line so the watchdog can distinguish "agent slow but progressing"
+// from "agent stuck."
 func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, stop <-chan struct{}) {
 	f, err := os.Open(logPath)
 	if err != nil {
@@ -88,23 +69,14 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 
 // maybeEmitTransition parses one log line and re-emits it on the parent
 // logger if it matches the allow-list. Returns true when a PR URL was
-// re-emitted; the caller uses this to enforce once-per-workflow semantics.
-// allowPRURL guards the URL emission so we don't repeat it after the first
-// time (PR URLs typically appear in several lines around create_pr).
-//
-// Allow-list (matched on the slog `msg` body):
-//   - "step: <name>" → records currentStep + IdleTimeout, emits "subprocess step"
-//   - "step completed" → emits "subprocess step completed" with duration
-//   - "waiting for approval" → emits "subprocess waiting for approval"
-//   - "feedback: ..." → emits "subprocess feedback"
-//   - any line containing a github.com/.../pull/N URL → emits "subprocess pr_url" once
-//
-// Unknown lines are silently dropped — they still updated lastOutputAt for
-// the watchdog, which is the only signal the rest of the orchestrator needs.
+// re-emitted so the caller can stop allowing further URL emissions
+// (PR URLs appear in several lines around create_pr).
 func (o *Orchestrator) maybeEmitTransition(mw *managedWorkflow, rawLine string, allowPRURL bool) bool {
 	line := strings.TrimRight(rawLine, "\r\n")
 	emittedPRURL := false
-	if allowPRURL {
+	// Cheap Contains() prefilter avoids running the regex on every agent
+	// text line (the dominant case before create_pr).
+	if allowPRURL && strings.Contains(line, "/pull/") {
 		if url := prURLRe.FindString(line); url != "" {
 			o.logger.Info("subprocess pr_url",
 				"issue", mw.issue.Identifier, "url", url)
@@ -115,12 +87,11 @@ func (o *Orchestrator) maybeEmitTransition(mw *managedWorkflow, rawLine string, 
 	if m == nil {
 		return emittedPRURL
 	}
-	body := m[3]
-
-	// Extract the slog `msg` field. klog renders the message as the first
-	// token after the bracket, followed by key=value pairs. We take
-	// everything up to the first ` key=` boundary.
-	msg, kv := splitMsgAndKV(body)
+	msg, kv := splitMsgAndKV(m[3])
+	if !isAllowListedMsg(msg) {
+		// Most klog lines are agent text/tool calls — skip parseKV entirely.
+		return emittedPRURL
+	}
 	fields := parseKV(kv)
 
 	switch {
@@ -165,17 +136,19 @@ func (o *Orchestrator) maybeEmitTransition(mw *managedWorkflow, rawLine string, 
 	return emittedPRURL
 }
 
-// recordStepTransition stores the current step name and looks up its idle
-// timeout from config so the watchdog can use the right threshold.
+func isAllowListedMsg(msg string) bool {
+	return strings.HasPrefix(msg, "step: ") ||
+		msg == "step completed" ||
+		msg == "waiting for approval" ||
+		strings.HasPrefix(msg, "feedback: ")
+}
+
 func (o *Orchestrator) recordStepTransition(mw *managedWorkflow, stepName string) {
 	mw.stepMu.Lock()
 	mw.currentStep = stepName
-	mw.currentStepIdleTimeout = o.idleTimeoutForStep(stepName)
 	mw.stepMu.Unlock()
 }
 
-// idleTimeoutForStep returns the configured IdleTimeout for a named step,
-// or 0 if the step is unknown or has no timeout set (watchdog disabled).
 func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 	if o.config == nil {
 		return 0
@@ -186,12 +159,10 @@ func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 	return 0
 }
 
-// runWatchdog ticks every tickInterval and cancels the workflow's context
-// if the gap between now and lastOutputAt exceeds the current step's
-// IdleTimeout. The cancel triggers SIGINT via cmd.Cancel, which the
-// existing cmd.Wait() goroutine handles as StepCancelled.
-//
-// Exits when stop is closed (subprocess already exited).
+// runWatchdog cancels the workflow context when the gap between now and
+// lastOutputAt exceeds the current step's IdleTimeout. The cancel propagates
+// to cmd via exec.CommandContext, which cmd.Wait() then surfaces as
+// StepCancelled.
 func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -202,8 +173,8 @@ func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Durati
 		case <-ticker.C:
 			mw.stepMu.Lock()
 			step := mw.currentStep
-			timeout := mw.currentStepIdleTimeout
 			mw.stepMu.Unlock()
+			timeout := o.idleTimeoutForStep(step)
 			if timeout <= 0 {
 				continue
 			}
@@ -229,14 +200,9 @@ func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Durati
 	}
 }
 
-// releaseLockLabel removes the LockLabel from the issue. Called from cleanup
-// on every termination path (StepDone, StepCancelled, StepFailed) so the
-// label does not leak and block re-discovery. Best-effort: tracker errors
-// are logged at warn level (mirrors the AddLabel pattern in claimIssueInProgress).
-//
-// Uses a fresh background context with a short timeout so a cancelled parent
-// context does not also strand the cleanup call (which is the case that
-// matters most — operator hits Ctrl+C, we still want the label removed).
+// releaseLockLabel removes the LockLabel from the issue. Uses a fresh
+// background context so an operator's Ctrl+C (which cancelled the workflow
+// context) does not also strand this cleanup call.
 func (o *Orchestrator) releaseLockLabel(mw *managedWorkflow) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -249,16 +215,14 @@ func (o *Orchestrator) releaseLockLabel(mw *managedWorkflow) {
 		"issue", mw.issue.Identifier, "label", LockLabel)
 }
 
-// splitMsgAndKV separates a klog message body into its leading message text
-// and the trailing key=value cluster. We split at the first occurrence of
-// ` <word>=`, which is reliable as long as messages don't contain literal
-// `=` after a word boundary — true for every site we care about.
+// splitMsgAndKV splits a klog body at the first ` <word>=`. The split is
+// reliable for our log sites because none of them put literal `=` after a
+// word boundary in the message text.
 func splitMsgAndKV(body string) (msg, kv string) {
 	loc := keyValueRe.FindStringIndex(body)
 	if loc == nil {
 		return strings.TrimSpace(body), ""
 	}
-	// Walk back over whitespace so the message doesn't include a trailing space.
 	end := loc[0]
 	for end > 0 && body[end-1] == ' ' {
 		end--
@@ -266,8 +230,6 @@ func splitMsgAndKV(body string) (msg, kv string) {
 	return strings.TrimSpace(body[:end]), body[loc[0]:]
 }
 
-// parseKV extracts a flat key=value map from the trailing portion of a klog
-// line. Quoted values have their surrounding quotes stripped.
 func parseKV(s string) map[string]string {
 	out := map[string]string{}
 	for _, m := range keyValueRe.FindAllStringSubmatch(s, -1) {

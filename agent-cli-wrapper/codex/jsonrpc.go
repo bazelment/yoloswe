@@ -282,6 +282,19 @@ type TokenUsageInfo struct {
 	ModelContextWindow int         `json:"model_context_window"`
 }
 
+// PreferredUsage returns LastTokenUsage when populated, falling back to
+// TotalTokenUsage for protocol versions that only emit cumulative totals.
+// Returns nil when neither is set.
+func (info *TokenUsageInfo) PreferredUsage() *TokenUsage {
+	if info == nil {
+		return nil
+	}
+	if info.LastTokenUsage != nil {
+		return info.LastTokenUsage
+	}
+	return info.TotalTokenUsage
+}
+
 // TokenUsage contains token counts.
 type TokenUsage struct {
 	InputTokens           int64 `json:"input_tokens"`

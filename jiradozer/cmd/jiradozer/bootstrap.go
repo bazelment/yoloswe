@@ -305,7 +305,7 @@ type stepBlock struct {
 func renderStepBlock(s stepBlock) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# ---- %s ----\n", s.Heading)
-	fmt.Fprintf(&b, "# %s\n", wrapComment(s.Description, 76))
+	fmt.Fprintf(&b, "# %s\n", wrapComment(s.Description, 76, "# "))
 	fmt.Fprintf(&b, "%s:\n", s.Key)
 
 	b.WriteString("    # Initial prompt; Go text/template rendered with issue data (PromptData).\n")
@@ -328,15 +328,13 @@ func renderStepBlock(s stepBlock) string {
 
 	if s.IdleTimeout > 0 {
 		b.WriteString("    # Parent kills the subprocess if it emits no log line for this long while\n")
-		// "    # inside this step. " is 22 visible characters; subtract from
-		// the 76-char target so the wrapped continuation lines stay inside
-		// the same right margin as the rest of the block.
+		// firstLinePrefix is 22 visible chars; subtract from the 76-char
+		// target so wrapped continuation lines stay inside the right margin.
 		const firstLinePrefix = "    # inside this step. "
 		const contPrefix = "    # "
 		fmt.Fprintf(&b, "%s%s\n",
 			firstLinePrefix,
-			strings.ReplaceAll(wrapComment(s.IdleTimeoutComment, 76-len(firstLinePrefix)),
-				"\n# ", "\n"+contPrefix))
+			wrapComment(s.IdleTimeoutComment, 76-len(firstLinePrefix), contPrefix))
 		fmt.Fprintf(&b, "    idle_timeout: %s\n", formatDurationShort(s.IdleTimeout))
 	}
 
@@ -376,10 +374,8 @@ func renderStepBlock(s stepBlock) string {
 	return b.String()
 }
 
-// formatDurationShort renders a Duration as the shortest YAML-friendly form
-// (e.g. 5m0s → "5m", 20m0s → "20m", 1h30m → "1h30m"). time.Duration.String()
-// always emits trailing seconds for sub-hour values; we trim "0s" so the
-// rendered YAML is the form a human would write.
+// formatDurationShort trims trailing "0s" / "0m" so 5m0s renders as "5m"
+// and 1h0m as "1h" — the form a human would write into YAML.
 func formatDurationShort(d time.Duration) string {
 	s := d.String()
 	if strings.HasSuffix(s, "m0s") {
@@ -408,10 +404,10 @@ func indentBlock(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// wrapComment soft-wraps s at width characters, joining lines with
-// "\n# " so the result can be inlined into a comment block. The first
-// line is returned without a leading "# " (the caller already wrote one).
-func wrapComment(s string, width int) string {
+// wrapComment soft-wraps s at width characters and joins continuation lines
+// with linePrefix. The first line has no prefix (the caller already wrote
+// the leading "# " itself).
+func wrapComment(s string, width int, linePrefix string) string {
 	words := strings.Fields(s)
 	if len(words) == 0 {
 		return ""
@@ -427,5 +423,5 @@ func wrapComment(s string, width int) string {
 		current += " " + w
 	}
 	lines = append(lines, current)
-	return strings.Join(lines, "\n# ")
+	return strings.Join(lines, "\n"+linePrefix)
 }

@@ -54,10 +54,6 @@ func (h *recordingHandler) findAll(msg string) []map[string]any {
 func TestMaybeEmitTransition_AllowList(t *testing.T) {
 	t.Parallel()
 
-	h := &recordingHandler{}
-	o := &Orchestrator{logger: slog.New(h), config: testOrchestratorConfig()}
-	mw := &managedWorkflow{issue: &tracker.Issue{ID: "1", Identifier: "ENG-1"}}
-
 	cases := []struct {
 		name   string
 		line   string
@@ -92,33 +88,27 @@ func TestMaybeEmitTransition_AllowList(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h.mu.Lock()
-			before := len(h.records)
-			h.mu.Unlock()
+			h := &recordingHandler{}
+			o := &Orchestrator{logger: slog.New(h), config: testOrchestratorConfig()}
+			mw := &managedWorkflow{issue: &tracker.Issue{ID: "1", Identifier: "ENG-1"}}
 
 			o.maybeEmitTransition(mw, tc.line, true)
 
-			h.mu.Lock()
-			after := append([]map[string]any(nil), h.records[before:]...)
-			h.mu.Unlock()
-
 			if tc.expect == "" {
-				require.Empty(t, after, "expected no parent-log emission")
+				h.mu.Lock()
+				require.Empty(t, h.records, "expected no parent-log emission")
+				h.mu.Unlock()
 				return
 			}
-			var found bool
-			for _, r := range after {
-				if r["msg"] == tc.expect {
-					found = true
-					break
-				}
-			}
-			require.True(t, found, "expected msg %q in %+v", tc.expect, after)
+			require.Len(t, h.findAll(tc.expect), 1, "expected exactly one %q emission", tc.expect)
 		})
 	}
 
 	// PR URL re-emit: appears in many lines around create_pr; allowPRURL=false
 	// after the first hit gates further emissions.
+	h := &recordingHandler{}
+	o := &Orchestrator{logger: slog.New(h), config: testOrchestratorConfig()}
+	mw := &managedWorkflow{issue: &tracker.Issue{ID: "1", Identifier: "ENG-1"}}
 	prLine := "I0504 22:17:54.349691 1350798 agent.go:146] agent text step=create_pr text=https://github.com/owner/repo/pull/42\n"
 	o.maybeEmitTransition(mw, prLine, true)
 	o.maybeEmitTransition(mw, prLine, false)
@@ -128,8 +118,8 @@ func TestMaybeEmitTransition_AllowList(t *testing.T) {
 }
 
 // TestMaybeEmitTransition_RecordsCurrentStep verifies that seeing a "step:"
-// line populates currentStep + currentStepIdleTimeout from config, so the
-// watchdog uses the right threshold for the active step.
+// line populates currentStep so the watchdog can resolve the right timeout
+// from config for the active step.
 func TestMaybeEmitTransition_RecordsCurrentStep(t *testing.T) {
 	t.Parallel()
 
@@ -143,14 +133,14 @@ func TestMaybeEmitTransition_RecordsCurrentStep(t *testing.T) {
 	o.maybeEmitTransition(mw, "I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=ENG-1\n", true)
 	mw.stepMu.Lock()
 	require.Equal(t, "plan", mw.currentStep)
-	require.Equal(t, 7*time.Minute, mw.currentStepIdleTimeout)
 	mw.stepMu.Unlock()
+	require.Equal(t, 7*time.Minute, o.idleTimeoutForStep(mw.currentStep))
 
 	o.maybeEmitTransition(mw, "I0504 22:04:01.672857 1350798 workflow.go:339] step: build issue=ENG-1\n", true)
 	mw.stepMu.Lock()
 	require.Equal(t, "build", mw.currentStep)
-	require.Equal(t, 22*time.Minute, mw.currentStepIdleTimeout)
 	mw.stepMu.Unlock()
+	require.Equal(t, 22*time.Minute, o.idleTimeoutForStep(mw.currentStep))
 }
 
 // TestTailSubprocessLog_StreamsAndUpdatesLastOutput verifies that the
@@ -211,15 +201,16 @@ func TestRunWatchdog_CancelsOnIdle(t *testing.T) {
 
 	cancelled := atomic.Bool{}
 	mw := &managedWorkflow{
-		issue:                  &tracker.Issue{ID: "1", Identifier: "ENG-1"},
-		cancel:                 func() { cancelled.Store(true) },
-		currentStep:            "plan",
-		currentStepIdleTimeout: 50 * time.Millisecond,
+		issue:       &tracker.Issue{ID: "1", Identifier: "ENG-1"},
+		cancel:      func() { cancelled.Store(true) },
+		currentStep: "plan",
 	}
 	mw.lastOutputAt.Store(time.Now().Add(-10 * time.Second).UnixNano())
 
+	cfg := testOrchestratorConfig()
+	cfg.Plan.IdleTimeout = 50 * time.Millisecond
 	h := &recordingHandler{}
-	o := &Orchestrator{logger: slog.New(h)}
+	o := &Orchestrator{logger: slog.New(h), config: cfg}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -246,14 +237,15 @@ func TestRunWatchdog_DoesNotCancelWhenNoTimeout(t *testing.T) {
 
 	cancelled := atomic.Bool{}
 	mw := &managedWorkflow{
-		issue:                  &tracker.Issue{ID: "1", Identifier: "ENG-1"},
-		cancel:                 func() { cancelled.Store(true) },
-		currentStep:            "plan",
-		currentStepIdleTimeout: 0,
+		issue:       &tracker.Issue{ID: "1", Identifier: "ENG-1"},
+		cancel:      func() { cancelled.Store(true) },
+		currentStep: "plan",
 	}
 	mw.lastOutputAt.Store(time.Now().Add(-time.Hour).UnixNano())
 
-	o := &Orchestrator{logger: slog.New(&recordingHandler{})}
+	// testOrchestratorConfig leaves IdleTimeout zero on every step, so the
+	// watchdog has nothing to fire on.
+	o := &Orchestrator{logger: slog.New(&recordingHandler{}), config: testOrchestratorConfig()}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {

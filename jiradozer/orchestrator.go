@@ -82,26 +82,21 @@ type Orchestrator struct {
 	preserved    []PreservedWorktree
 }
 
-//nolint:govet // fieldalignment: grouping by purpose (lifecycle vs watchdog) is more readable than tighter packing
 type managedWorkflow struct {
+	startedAt    time.Time
 	issue        *tracker.Issue
 	cmd          *exec.Cmd
 	logFile      *os.File
 	cancel       context.CancelFunc
-	startedAt    time.Time
 	worktreePath string
 	branch       string
 	pid          int
 	cancelled    bool
 	currentStep  string
-	// stepMu guards currentStep and currentStepIdleTimeout. Both are written
-	// by the tailer when it sees a "step: <name>" line and read by the
-	// watchdog ticker.
-	stepMu                 sync.Mutex
-	currentStepIdleTimeout time.Duration
-	// lastOutputAt tracks the wall-clock time (unix nanos) of the most recent
-	// log line emitted by the subprocess. Updated by tailSubprocessLog;
-	// consumed by runWatchdog to detect "no output for N minutes" hangs.
+	stepMu       sync.Mutex
+	// lastOutputAt is unix-nanos of the most recent log line from the
+	// subprocess. Written by tailSubprocessLog, read by runWatchdog to
+	// detect idle gaps.
 	lastOutputAt atomic.Int64
 }
 
