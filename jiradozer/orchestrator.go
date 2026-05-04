@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -81,6 +82,7 @@ type Orchestrator struct {
 	preserved    []PreservedWorktree
 }
 
+//nolint:govet // fieldalignment: grouping by purpose (lifecycle vs watchdog) is more readable than tighter packing
 type managedWorkflow struct {
 	issue        *tracker.Issue
 	cmd          *exec.Cmd
@@ -91,6 +93,16 @@ type managedWorkflow struct {
 	branch       string
 	pid          int
 	cancelled    bool
+	currentStep  string
+	// stepMu guards currentStep and currentStepIdleTimeout. Both are written
+	// by the tailer when it sees a "step: <name>" line and read by the
+	// watchdog ticker.
+	stepMu                 sync.Mutex
+	currentStepIdleTimeout time.Duration
+	// lastOutputAt tracks the wall-clock time (unix nanos) of the most recent
+	// log line emitted by the subprocess. Updated by tailSubprocessLog;
+	// consumed by runWatchdog to detect "no output for N minutes" hangs.
+	lastOutputAt atomic.Int64
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -374,6 +386,10 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.active[issue.ID] = mw
 	o.mu.Unlock()
 
+	// Seed lastOutputAt to startup time so the watchdog has a sensible
+	// baseline before any log lines are tailed.
+	mw.lastOutputAt.Store(time.Now().UnixNano())
+
 	o.emitStatus(mw, StepInit, nil)
 	o.logger.Info("subprocess started",
 		"issue", issue.Identifier,
@@ -381,10 +397,19 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		"log", logPath,
 	)
 
+	// Tailer + watchdog share a stop channel; both exit when cmd.Wait
+	// returns. The tailer re-emits step transitions on the parent log and
+	// updates mw.lastOutputAt; the watchdog cancels the workflow context
+	// when the gap exceeds the current step's IdleTimeout.
+	stop := make(chan struct{})
+	go o.tailSubprocessLog(mw, logPath, stop)
+	go o.runWatchdog(mw, watchdogTickInterval, stop)
+
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
 		defer logFile.Close()
+		defer close(stop)
 		err := cmd.Wait()
 		switch {
 		case wfCtx.Err() != nil:
@@ -657,6 +682,11 @@ func shellQuote(s string) string {
 //     inspect the failure and keep any pushed branch / open PR created by
 //     earlier steps; set forceCleanup to wipe it.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
+	// Always release the lock label, regardless of how the workflow ended.
+	// The label is added in claimIssueInProgress and was previously never
+	// removed — every completed run leaked it, blocking re-discovery.
+	o.releaseLockLabel(mw)
+
 	o.mu.RLock()
 	forceCleanup := o.forceCleanup
 	o.mu.RUnlock()

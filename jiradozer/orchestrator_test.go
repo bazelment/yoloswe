@@ -775,11 +775,12 @@ func TestRunWithDiscovery_WorktreeExistsNoClearSeen(t *testing.T) {
 //nolint:govet // fieldalignment: embedded struct ordering is intentional for readability
 type mockClaimTracker struct {
 	mockDiscoveryTracker
-	stateUpdates []string // issueIDs passed to UpdateIssueState
-	stateIDs     []string // stateIDs passed to UpdateIssueState
-	labelIssues  []string // issueIDs passed to AddLabel
-	labelNames   []string // labels passed to AddLabel
-	claimMu      sync.Mutex
+	stateUpdates  []string // issueIDs passed to UpdateIssueState
+	stateIDs      []string // stateIDs passed to UpdateIssueState
+	labelIssues   []string // issueIDs passed to AddLabel
+	labelNames    []string // labels passed to AddLabel
+	removedLabels []string // labels passed to RemoveLabel
+	claimMu       sync.Mutex
 }
 
 func (m *mockClaimTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
@@ -803,6 +804,19 @@ func (m *mockClaimTracker) AddLabel(_ context.Context, issueID string, label str
 	m.labelIssues = append(m.labelIssues, issueID)
 	m.labelNames = append(m.labelNames, label)
 	return nil
+}
+
+func (m *mockClaimTracker) RemoveLabel(_ context.Context, _ string, label string) error {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	m.removedLabels = append(m.removedLabels, label)
+	return nil
+}
+
+func (m *mockClaimTracker) getRemovedLabels() []string {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	return append([]string(nil), m.removedLabels...)
 }
 
 func (m *mockClaimTracker) getStateUpdates() ([]string, []string) {

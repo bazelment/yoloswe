@@ -118,6 +118,11 @@ plan:
     permission_mode: plan
     # Max agent turns before giving up (Claude provider only).
     max_turns: 10
+    # Parent kills the subprocess if it emits no log line for this long while
+    # inside this step. Tracks gap between log lines, not
+    # wall-clock-since-start, so a slow-but-progressing
+    # agent is not interrupted. 0 disables the watchdog.
+    idle_timeout: 5m
     # ----- optional overrides (uncomment to use) -----
     # Optional system prompt prepended to the agent session.
     #system_prompt: ""
@@ -187,6 +192,11 @@ build:
     permission_mode: bypass
     # Max agent turns before giving up (Claude provider only).
     max_turns: 30
+    # Parent kills the subprocess if it emits no log line for this long while
+    # inside this step. Build runs the longest because tests can take many
+    # minutes; the gap-based watchdog only trips when
+    # output truly stops.
+    idle_timeout: 20m
     # Per-round comment posted when this step runs as multi-round.
     # Validated even when `rounds` is empty so a typo here fails fast.
     round_comment_template: |-
@@ -234,6 +244,8 @@ create_pr:
     # Initial prompt; Go text/template rendered with issue data (PromptData).
     # Required unless `rounds` is set.
     prompt: |-
+        Gates (lint, build, tests) already passed in the previous step on the current code — do NOT re-run them. Your job is purely git + gh: commit and push, then create or update the PR.
+
         First, check for any uncommitted changes (staged or unstaged, including untracked files).
         - If there are uncommitted changes: stage them, commit with a clear message referencing the work done, and push to the remote.
         - If there are no uncommitted changes but unpushed commits: push to the remote.
@@ -251,6 +263,10 @@ create_pr:
     permission_mode: bypass
     # Max agent turns before giving up (Claude provider only).
     max_turns: 5
+    # Parent kills the subprocess if it emits no log line for this long while
+    # inside this step. create_pr is short — gh + git push only — so a
+    # tight timeout catches gh hangs quickly.
+    idle_timeout: 5m
     # ----- optional overrides (uncomment to use) -----
     # Optional system prompt prepended to the agent session.
     #system_prompt: ""

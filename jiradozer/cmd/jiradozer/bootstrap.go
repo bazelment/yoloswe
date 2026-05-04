@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -79,6 +80,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             10,
 		RoundsCapable:        false,
 		RoundCommentTemplate: "",
+		IdleTimeout:          5 * time.Minute,
+		IdleTimeoutComment:   "Tracks gap between log lines, not wall-clock-since-start, so a slow-but-progressing agent is not interrupted. 0 disables the watchdog.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "build",
@@ -90,6 +93,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             30,
 		RoundsCapable:        true,
 		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:          20 * time.Minute,
+		IdleTimeoutComment:   "Build runs the longest because tests can take many minutes; the gap-based watchdog only trips when output truly stops.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "create_pr",
@@ -101,6 +106,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             5,
 		RoundsCapable:        false,
 		RoundCommentTemplate: "",
+		IdleTimeout:          5 * time.Minute,
+		IdleTimeoutComment:   "create_pr is short — gh + git push only — so a tight timeout catches gh hangs quickly.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "validate",
@@ -279,15 +286,17 @@ const roundsExampleBlock = `    # Multi-round execution. Replaces the single ` +
 
 // stepBlock is the data we need to lay out one step in the YAML.
 type stepBlock struct {
-	Key                  string // YAML key, e.g. "plan"
-	Heading              string // human heading shown in the section comment
-	Description          string // one-paragraph blurb explaining what this step does
-	Prompt               string // canonical prompt (required)
-	CommentTemplate      string // canonical comment template (required for single-shot steps)
-	PermissionMode       string // step default permission mode
-	RoundCommentTemplate string // canonical round comment template (only used when RoundsCapable)
-	MaxTurns             int    // step default max turns
-	RoundsCapable        bool   // whether bootstrap should seed round_comment_template uncommented
+	Key                  string        // YAML key, e.g. "plan"
+	Heading              string        // human heading shown in the section comment
+	Description          string        // one-paragraph blurb explaining what this step does
+	Prompt               string        // canonical prompt (required)
+	CommentTemplate      string        // canonical comment template (required for single-shot steps)
+	PermissionMode       string        // step default permission mode
+	RoundCommentTemplate string        // canonical round comment template (only used when RoundsCapable)
+	IdleTimeoutComment   string        // step-specific blurb describing why this timeout (rendered in YAML comment); only emitted when IdleTimeout > 0
+	MaxTurns             int           // step default max turns
+	IdleTimeout          time.Duration // step default idle timeout; 0 = omit from rendered YAML
+	RoundsCapable        bool          // whether bootstrap should seed round_comment_template uncommented
 }
 
 // renderStepBlock emits one step's YAML with field-level comments. Optional
@@ -316,6 +325,20 @@ func renderStepBlock(s stepBlock) string {
 
 	fmt.Fprintf(&b, "    # Max agent turns before giving up (Claude provider only).\n")
 	fmt.Fprintf(&b, "    max_turns: %d\n", s.MaxTurns)
+
+	if s.IdleTimeout > 0 {
+		b.WriteString("    # Parent kills the subprocess if it emits no log line for this long while\n")
+		// "    # inside this step. " is 22 visible characters; subtract from
+		// the 76-char target so the wrapped continuation lines stay inside
+		// the same right margin as the rest of the block.
+		const firstLinePrefix = "    # inside this step. "
+		const contPrefix = "    # "
+		fmt.Fprintf(&b, "%s%s\n",
+			firstLinePrefix,
+			strings.ReplaceAll(wrapComment(s.IdleTimeoutComment, 76-len(firstLinePrefix)),
+				"\n# ", "\n"+contPrefix))
+		fmt.Fprintf(&b, "    idle_timeout: %s\n", formatDurationShort(s.IdleTimeout))
+	}
 
 	if s.RoundsCapable {
 		b.WriteString("    # Per-round comment posted when this step runs as multi-round.\n")
@@ -351,6 +374,21 @@ func renderStepBlock(s stepBlock) string {
 
 	b.WriteString("\n")
 	return b.String()
+}
+
+// formatDurationShort renders a Duration as the shortest YAML-friendly form
+// (e.g. 5m0s → "5m", 20m0s → "20m", 1h30m → "1h30m"). time.Duration.String()
+// always emits trailing seconds for sub-hour values; we trim "0s" so the
+// rendered YAML is the form a human would write.
+func formatDurationShort(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // indentBlock prefixes every non-empty line of s with prefix. Empty lines
