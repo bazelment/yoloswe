@@ -118,3 +118,24 @@ func TestSessionEventHandler_OnToolResultPreservesCompletedDuration(t *testing.T
 	assert.Equal(t, completedDuration, output[0].DurationMs)
 	assert.Equal(t, "file contents", output[0].ToolResult)
 }
+
+func TestSessionEventHandler_OnToolResultRefreshesProgress(t *testing.T) {
+	manager, handler, sessionID := newTestSessionEventHandler(t)
+
+	handler.OnText("prior assistant text")
+	handler.OnToolStart("Read", "tool-1", nil)
+	handler.OnToolComplete("Read", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
+	manager.updateSessionProgress(sessionID, func(p *SessionProgress) {
+		p.LastActivity = time.Time{}
+		p.RecentOutput = nil
+	})
+
+	handler.OnToolResult("Read", "tool-1", "file contents", false)
+
+	session, ok := manager.GetSession(sessionID)
+	require.True(t, ok)
+	progress := session.Progress
+	require.NotNil(t, progress)
+	assert.False(t, progress.LastActivity.IsZero())
+	assert.Equal(t, []string{"prior assistant text"}, progress.RecentOutput)
+}
