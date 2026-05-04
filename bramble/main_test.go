@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,4 +80,77 @@ func TestDetectRepoFromPath_NoBareDir(t *testing.T) {
 
 	_, err := detectRepoFromPath(cwd, wtRoot)
 	assert.Error(t, err)
+}
+
+func TestCheckCodetalkModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		modelID   string
+		errSubstr string
+		wantErr   bool
+	}{
+		{
+			name:    "opus is Claude — no error",
+			modelID: "opus",
+			wantErr: false,
+		},
+		{
+			name:    "sonnet is Claude — no error",
+			modelID: "sonnet",
+			wantErr: false,
+		},
+		{
+			name:    "unknown model ID — no error (not routed to non-Claude)",
+			modelID: "some-future-model",
+			wantErr: false,
+		},
+		{
+			name:      "gpt-5.5 is Codex — error with TUI hint",
+			modelID:   "gpt-5.5",
+			wantErr:   true,
+			errSubstr: "bramble TUI",
+		},
+		{
+			name:      "gemini-3-pro-preview is Gemini — error with TUI hint",
+			modelID:   "gemini-3-pro-preview",
+			wantErr:   true,
+			errSubstr: "bramble TUI",
+		},
+		{
+			name:      "cursor-default is Cursor — error with TUI hint",
+			modelID:   "cursor-default",
+			wantErr:   true,
+			errSubstr: "bramble TUI",
+		},
+		{
+			name:      "gpt- prefix triggers Codex routing — error",
+			modelID:   "gpt-9-future",
+			wantErr:   true,
+			errSubstr: "codex",
+		},
+		{
+			name:      "gemini- prefix triggers Gemini routing — error",
+			modelID:   "gemini-99",
+			wantErr:   true,
+			errSubstr: "gemini",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkCodetalkModel(tt.modelID)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errSubstr != "" {
+					assert.True(t, strings.Contains(err.Error(), tt.errSubstr),
+						"expected error to contain %q, got: %v", tt.errSubstr, err)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

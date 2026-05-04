@@ -667,6 +667,10 @@ After the initial exploration, it accepts follow-up questions interactively.`,
 		systemPrompt, _ := cmd.Flags().GetString("system")
 		verbose, _ := cmd.Flags().GetBool("verbose")
 
+		if err := checkCodetalkModel(model); err != nil {
+			return err
+		}
+
 		if workDir == "" {
 			var err error
 			workDir, err = os.Getwd()
@@ -732,6 +736,17 @@ After the initial exploration, it accepts follow-up questions interactively.`,
 		}
 		return nil
 	},
+}
+
+// checkCodetalkModel returns an error if the model ID belongs to a non-Claude
+// provider. The standalone codetalk CLI is Claude-only; non-Claude models must
+// use the bramble TUI, which has full provider routing built in.
+func checkCodetalkModel(modelID string) error {
+	provider, ok := agent.ProviderForModelID(modelID)
+	if ok && provider != agent.ProviderClaude {
+		return fmt.Errorf("bramble codetalk only supports Claude models; %q uses provider %q — use the bramble TUI (bramble) to start a CodeTalk session with non-Claude models", modelID, provider)
+	}
+	return nil
 }
 
 func init() {
