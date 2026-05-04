@@ -244,7 +244,7 @@ func (r *delegatorRunner) forwardEvents(ctx context.Context) {
 			case claude.ToolCompleteEvent:
 				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, nil, false)
 			case claude.CLIToolResultEvent:
-				r.eventHandler.OnToolComplete(e.ToolName, e.ToolUseID, nil, e.Content, e.IsError)
+				r.eventHandler.OnToolResult(e.ToolName, e.ToolUseID, e.Content, e.IsError)
 			case claude.TurnCompleteEvent:
 				// TurnEnd is emitted synchronously by the manager after
 				// RunTurn returns, so we skip it here to avoid duplicates.

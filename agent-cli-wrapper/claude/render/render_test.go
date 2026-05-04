@@ -231,6 +231,7 @@ func TestToolResultForTool_UsesExplicitToolIdentity(t *testing.T) {
 	})
 
 	r.ToolStart("Bash", "tool-2")
+	r.ToolComplete("Bash", map[string]interface{}{"command": "echo hi"})
 	r.ToolResultForTool("Read", "tool-1", "file contents", false)
 
 	if gotName != "Read" || gotID != "tool-1" {
@@ -238,6 +239,15 @@ func TestToolResultForTool_UsesExplicitToolIdentity(t *testing.T) {
 	}
 	if gotContent != "file contents" || gotIsError {
 		t.Errorf("OnToolResult got (%v, %v), want (%q, false)", gotContent, gotIsError, "file contents")
+	}
+
+	r.ToolResult("bash output", false)
+
+	if gotName != "Bash" || gotID != "tool-2" {
+		t.Errorf("fallback OnToolResult got tool (%q, %q), want (%q, %q)", gotName, gotID, "Bash", "tool-2")
+	}
+	if gotContent != "bash output" || gotIsError {
+		t.Errorf("fallback OnToolResult got (%v, %v), want (%q, false)", gotContent, gotIsError, "bash output")
 	}
 }
 
