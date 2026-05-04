@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
@@ -206,5 +207,53 @@ func TestBuildChildArgs(t *testing.T) {
 				assert.NotContains(t, joined, want)
 			}
 		})
+	}
+}
+
+// TestBuildChildArgsOrdering pins the argv layout: persistent (root-level)
+// flags — --config and the standard --verbose/--verbosity/--color set —
+// must appear before the `run` subcommand token, and run-only flags
+// (--model, --thinking-level, --max-budget, --auto-approve) must appear
+// after it. Cobra's PersistentFlags inheritance means either side parses
+// today, but mixing breaks the rule that a flag is declared adjacent to
+// the command that owns it; this test fails fast if a future edit puts a
+// run-only flag before `run` or vice versa.
+func TestBuildChildArgsOrdering(t *testing.T) {
+	app := &cliapp.App{Verbosity: render.VerbosityVerbose, Color: render.ColorAlways}
+	args := runArgs{
+		modelID:       "opus",
+		thinkingLevel: "max",
+		maxBudget:     12.5,
+		autoApprove:   "all",
+	}
+	got := buildChildArgs(app, args, "/tmp/jiradozer.yaml")
+
+	indexOf := func(needle string) int {
+		for i, a := range got {
+			if a == needle {
+				return i
+			}
+		}
+		return -1
+	}
+	runIdx := indexOf("run")
+	require.NotEqual(t, -1, runIdx, "argv must contain `run` subcommand token; got %v", got)
+
+	persistentBeforeRun := []string{"--config", "--verbose", "--color"}
+	for _, flag := range persistentBeforeRun {
+		idx := indexOf(flag)
+		if idx == -1 {
+			continue
+		}
+		assert.Lessf(t, idx, runIdx,
+			"persistent flag %s must appear before `run` (got argv: %v)", flag, got)
+	}
+
+	runOnlyAfterRun := []string{"--model", "--thinking-level", "--max-budget", "--auto-approve"}
+	for _, flag := range runOnlyAfterRun {
+		idx := indexOf(flag)
+		require.NotEqualf(t, -1, idx, "argv must contain run-only flag %s; got %v", flag, got)
+		assert.Greaterf(t, idx, runIdx,
+			"run-only flag %s must appear after `run` (got argv: %v)", flag, got)
 	}
 }

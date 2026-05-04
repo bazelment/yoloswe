@@ -460,9 +460,16 @@ func resolveWTManager() (*wt.Manager, error) {
 // buildChildArgs constructs CLI flags to propagate from the parent
 // team-mode process to each child single-issue subprocess.
 func buildChildArgs(app *cliapp.App, args runArgs, absConfigPath string) []string {
-	// Children invoke the `run` subcommand explicitly so their behavior is
-	// independent of any future change to the back-compat root delegation.
-	out := []string{"--config", absConfigPath, "run"}
+	// Group persistent (root-level) flags before the subcommand token, then
+	// run-subcommand flags after. --config and --verbose/--verbosity/--color
+	// are registered as PersistentFlags on root, so cobra accepts them either
+	// side, but keeping them on root's side matches where they were declared
+	// and keeps `jiradozer --help`-style introspection consistent. Children
+	// invoke the `run` subcommand explicitly so their behavior is independent
+	// of any future change to the back-compat root delegation.
+	out := []string{"--config", absConfigPath}
+	out = append(out, app.StandardChildArgs()...)
+	out = append(out, "run")
 	if args.modelID != "" {
 		out = append(out, "--model", args.modelID)
 	}
@@ -475,7 +482,6 @@ func buildChildArgs(app *cliapp.App, args runArgs, absConfigPath string) []strin
 	if args.autoApprove != "" {
 		out = append(out, "--auto-approve", args.autoApprove)
 	}
-	out = append(out, app.StandardChildArgs()...)
 	return out
 }
 

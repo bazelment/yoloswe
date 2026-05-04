@@ -21,7 +21,6 @@ go_library(
         "//multiagent/agent",
         "//wt",
         "@com_github_spf13_cobra//:cobra",
-        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 
@@ -43,6 +42,7 @@ go_test(
     embed = [":jiradozer_lib"],
     rundir = ".",
     deps = [
+        "//agent-cli-wrapper/claude/render",
         "//cliapp",
         "//jiradozer",
         "//jiradozer/tracker",
