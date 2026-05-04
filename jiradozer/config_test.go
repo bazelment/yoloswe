@@ -417,6 +417,44 @@ ship:
 	assert.NotEmpty(t, cfg.Validate.RoundCommentTemplate)
 }
 
+// TestLoadConfig_RoundCommentTemplateTypoOnSingleShotStep locks in
+// validation of round_comment_template on steps with no rounds. Bootstrap
+// seeds round_comment_template on every rounds-capable step, so a typo
+// there should fail at LoadConfig time even when rounds aren't enabled
+// — otherwise the only test coverage was the rounds-set path.
+func TestLoadConfig_RoundCommentTemplateTypoOnSingleShotStep(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  round_comment_template: "## {{.Headng}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "V"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.round_comment_template")
+	assert.Contains(t, err.Error(), "Headng")
+}
+
 // TestLoadConfig_ConditionalBranchTypoCaughtAtLoad locks in the second
 // (filled-data) Execute pass: a typo guarded by `{{- if .X}}` branches
 // is invisible to the zero-value pass because the branch is false.
