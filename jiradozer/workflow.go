@@ -47,6 +47,13 @@ const (
 	phaseDone
 )
 
+type reviewApproval struct {
+	logMessage       string
+	statusMessage    string
+	transitionReason string
+	approveAll       bool
+}
+
 // Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
 	lastCommentAt       time.Time
@@ -435,20 +442,18 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 
 	switch fb.Action {
 	case FeedbackApprove:
-		w.logger.Info("feedback: approved", "step", w.state.Current())
-		w.status("Approved")
-		w.feedback = ""
-		if err := w.approveTransition(ctx, approveTarget, "approved"); err != nil {
-			w.fail(ctx, err)
-		}
+		w.applyReviewApproval(ctx, approveTarget, reviewApproval{
+			logMessage:       "feedback: approved",
+			statusMessage:    "Approved",
+			transitionReason: "approved",
+		})
 	case FeedbackApproveAll:
-		w.logger.Info("feedback: approve all", "step", w.state.Current())
-		w.status("Approve-all enabled")
-		w.feedback = ""
-		w.approveAllRemaining = true
-		if err := w.approveTransition(ctx, approveTarget, "approve_all"); err != nil {
-			w.fail(ctx, err)
-		}
+		w.applyReviewApproval(ctx, approveTarget, reviewApproval{
+			logMessage:       "feedback: approve all",
+			statusMessage:    "Approve-all enabled",
+			transitionReason: "approve_all",
+			approveAll:       true,
+		})
 	case FeedbackRedo:
 		w.logger.Info("feedback: redo", "step", w.state.Current())
 		w.status("Redo requested")
@@ -472,6 +477,18 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 				w.fail(ctx, err)
 			}
 		}
+	}
+}
+
+func (w *Workflow) applyReviewApproval(ctx context.Context, approveTarget WorkflowStep, approval reviewApproval) {
+	w.logger.Info(approval.logMessage, "step", w.state.Current())
+	w.status(approval.statusMessage)
+	w.feedback = ""
+	if approval.approveAll {
+		w.approveAllRemaining = true
+	}
+	if err := w.approveTransition(ctx, approveTarget, approval.transitionReason); err != nil {
+		w.fail(ctx, err)
 	}
 }
 
@@ -806,9 +823,16 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 // shouldAutoApprove returns true if the given review step should be
 // auto-approved (skipping human feedback polling).
 func (w *Workflow) shouldAutoApprove(reviewStep WorkflowStep) bool {
-	if w.approveAllRemaining && reviewStep.IsReview() {
+	if !reviewStep.IsReview() {
+		return false
+	}
+	if w.approveAllRemaining {
 		return true
 	}
+	return w.shouldConfigAutoApprove(reviewStep)
+}
+
+func (w *Workflow) shouldConfigAutoApprove(reviewStep WorkflowStep) bool {
 	switch reviewStep {
 	case StepPlanReview:
 		return w.config.Plan.AutoApprove
