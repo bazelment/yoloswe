@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,6 +72,13 @@ func TestSessionEventHandler_OnToolResultUsesExplicitToolID(t *testing.T) {
 	assert.Equal(t, ToolStateComplete, output[0].ToolState)
 	assert.Nil(t, output[1].ToolResult)
 	assert.Equal(t, ToolStateRunning, output[1].ToolState)
+
+	session, ok := manager.GetSession(sessionID)
+	require.True(t, ok)
+	progress := session.Progress
+	require.NotNil(t, progress)
+	assert.Equal(t, "Bash", progress.CurrentTool)
+	assert.Equal(t, "tool_execution", progress.CurrentPhase)
 }
 
 func TestSessionEventHandler_OnToolResultIgnoresMissingToolID(t *testing.T) {
@@ -83,4 +91,30 @@ func TestSessionEventHandler_OnToolResultIgnoresMissingToolID(t *testing.T) {
 	output := manager.GetSessionOutput(sessionID)
 	require.Len(t, output, 1)
 	assert.Nil(t, output[0].ToolResult)
+}
+
+func TestSessionEventHandler_OnToolResultPreservesCompletedDuration(t *testing.T) {
+	manager, handler, sessionID := newTestSessionEventHandler(t)
+
+	start := time.Now().Add(-time.Second)
+	handler.OnToolStart("Read", "tool-1", nil)
+	manager.updateToolOutput(sessionID, "tool-1", func(line *OutputLine) {
+		line.StartTime = start
+	})
+	handler.OnToolComplete("Read", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
+
+	output := manager.GetSessionOutput(sessionID)
+	require.Len(t, output, 1)
+	completedDuration := output[0].DurationMs
+	require.Positive(t, completedDuration)
+
+	manager.updateToolOutput(sessionID, "tool-1", func(line *OutputLine) {
+		line.StartTime = time.Now().Add(-time.Hour)
+	})
+	handler.OnToolResult("Read", "tool-1", "file contents", false)
+
+	output = manager.GetSessionOutput(sessionID)
+	require.Len(t, output, 1)
+	assert.Equal(t, completedDuration, output[0].DurationMs)
+	assert.Equal(t, "file contents", output[0].ToolResult)
 }

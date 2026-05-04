@@ -75,7 +75,7 @@ func (h *sessionEventHandler) OnToolStart(name, id string, input map[string]inte
 func (h *sessionEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
 	now := time.Now()
 
-	h.updateToolLine(name, id, input, result, isError, now)
+	h.updateToolLine(name, id, input, result, isError, now, false)
 	h.clearToolProgress()
 }
 
@@ -83,10 +83,11 @@ func (h *sessionEventHandler) OnToolResult(name, id string, content interface{},
 	if id == "" {
 		return
 	}
-	h.updateToolLine(name, id, nil, content, isError, time.Now())
+	h.updateToolLine(name, id, nil, content, isError, time.Now(), true)
+	h.refreshToolResultProgress()
 }
 
-func (h *sessionEventHandler) updateToolLine(name, id string, input map[string]interface{}, result interface{}, isError bool, now time.Time) {
+func (h *sessionEventHandler) updateToolLine(name, id string, input map[string]interface{}, result interface{}, isError bool, now time.Time, preserveDuration bool) {
 	h.manager.updateToolOutput(h.sessionID, id, func(line *OutputLine) {
 		if input != nil {
 			line.ToolInput = input
@@ -99,7 +100,7 @@ func (h *sessionEventHandler) updateToolLine(name, id string, input map[string]i
 		} else {
 			line.ToolState = ToolStateComplete
 		}
-		if !line.StartTime.IsZero() {
+		if !line.StartTime.IsZero() && (!preserveDuration || line.DurationMs == 0) {
 			line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 		}
 	})
@@ -110,6 +111,14 @@ func (h *sessionEventHandler) clearToolProgress() {
 	h.manager.updateSessionProgress(h.sessionID, func(p *SessionProgress) {
 		p.CurrentTool = ""
 		p.CurrentPhase = ""
+		p.LastActivity = time.Now()
+		p.RecentOutput = recent
+	})
+}
+
+func (h *sessionEventHandler) refreshToolResultProgress() {
+	recent := h.manager.RecentOutputLines(h.sessionID, sessionmodel.RecentOutputDisplayLines)
+	h.manager.updateSessionProgress(h.sessionID, func(p *SessionProgress) {
 		p.LastActivity = time.Now()
 		p.RecentOutput = recent
 	})
