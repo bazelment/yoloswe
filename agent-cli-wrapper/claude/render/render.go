@@ -278,16 +278,34 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 	r.lastToolID = ""
 }
 
-// ToolResult prints the result of a tool execution.
+// ToolResult prints the result of the most recently completed tool execution.
 func (r *Renderer) ToolResult(content interface{}, isError bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.eventHandler != nil {
-		r.eventHandler.OnToolResult(r.lastCompletedToolName, r.lastCompletedToolID, content, isError)
-	}
+	r.emitToolResult(r.lastCompletedToolName, r.lastCompletedToolID, content, isError)
 	r.lastCompletedToolName = ""
 	r.lastCompletedToolID = ""
+}
+
+// ToolResultForTool prints the result of the specified tool execution.
+func (r *Renderer) ToolResultForTool(name, id string, content interface{}, isError bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.emitToolResult(name, id, content, isError)
+	if r.lastCompletedToolID == id {
+		r.lastCompletedToolName = ""
+		r.lastCompletedToolID = ""
+	}
+}
+
+// emitToolResult emits the semantic event and terminal output for a tool result.
+// Must be called with mutex held.
+func (r *Renderer) emitToolResult(name, id string, content interface{}, isError bool) {
+	if r.eventHandler != nil {
+		r.eventHandler.OnToolResult(name, id, content, isError)
+	}
 
 	// Errors always shown (even in Quiet); success results at Verbose+
 	if !isError && r.verbosity < VerbosityVerbose {

@@ -188,7 +188,7 @@ func runMockConversation(ctx context.Context, s *claude.Session, mock *session.M
 			case claude.ToolCompleteEvent:
 				r.ToolComplete(e.Name, e.Input)
 			case claude.CLIToolResultEvent:
-				r.ToolResult(e.Content, e.IsError)
+				r.ToolResultForTool(e.ToolName, e.ToolUseID, e.Content, e.IsError)
 			case claude.ToolExecutionProgressEvent:
 				r.ToolExecutionProgress(e.ToolName, e.ToolUseID, e.ElapsedTimeSeconds)
 			case claude.TaskStartedEvent:

@@ -447,7 +447,7 @@ func (p *PlannerWrapper) handleEvent(ctx context.Context, event claude.Event) (b
 		}
 
 	case claude.CLIToolResultEvent:
-		p.renderer.ToolResult(e.Content, e.IsError)
+		p.renderer.ToolResultForTool(e.ToolName, e.ToolUseID, e.Content, e.IsError)
 
 	case claude.TurnCompleteEvent:
 		p.renderer.TurnSummary(e)
@@ -927,7 +927,7 @@ func (p *PlannerWrapper) RunTurn(ctx context.Context, message string) (*claude.T
 				p.renderer.ToolComplete(e.Name, e.Input)
 
 			case claude.CLIToolResultEvent:
-				p.renderer.ToolResult(e.Content, e.IsError)
+				p.renderer.ToolResultForTool(e.ToolName, e.ToolUseID, e.Content, e.IsError)
 
 			case claude.TurnCompleteEvent:
 				p.renderer.TurnSummary(e)

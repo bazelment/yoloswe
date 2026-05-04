@@ -156,7 +156,7 @@ func (b *baseSession) RunTurn(ctx context.Context, message string) (*claude.Turn
 				b.renderer.ToolComplete(e.Name, e.Input)
 
 			case claude.CLIToolResultEvent:
-				b.renderer.ToolResult(e.Content, e.IsError)
+				b.renderer.ToolResultForTool(e.ToolName, e.ToolUseID, e.Content, e.IsError)
 
 			case claude.TurnCompleteEvent:
 				b.stats.TurnCount++
