@@ -37,11 +37,16 @@ go_test(
         "bootstrap_test.go",
         "main_test.go",
     ],
+    data = [
+        "//jiradozer:jiradozer.example.yaml",
+    ],
     embed = [":jiradozer_lib"],
+    rundir = ".",
     deps = [
         "//cliapp",
         "//jiradozer",
         "//jiradozer/tracker",
+        "@com_github_spf13_cobra//:cobra",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

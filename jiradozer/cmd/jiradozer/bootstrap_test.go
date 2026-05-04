@@ -85,6 +85,30 @@ func TestBootstrapRoundTrip(t *testing.T) {
 	}
 }
 
+// TestExampleYAMLMatchesBootstrap asserts jiradozer/jiradozer.example.yaml
+// is byte-identical to `jiradozer bootstrap` output. The example file is
+// committed documentation; without this check it can silently drift from
+// the canonical prompts.go / bootstrap constants and mislead anyone who
+// reads it instead of running bootstrap.
+//
+// Regenerate with:
+//
+//	bazel run //jiradozer/cmd/jiradozer -- bootstrap --output jiradozer/jiradozer.example.yaml --force
+func TestExampleYAMLMatchesBootstrap(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	want, err := bootstrapYAML()
+	require.NoError(t, err)
+
+	// rundir = "." in BUILD.bazel keeps the test cwd at the workspace
+	// root, so the data dep resolves at jiradozer/jiradozer.example.yaml.
+	got, err := os.ReadFile(filepath.Join("jiradozer", "jiradozer.example.yaml"))
+	require.NoError(t, err, "jiradozer.example.yaml must exist (generated via `jiradozer bootstrap`)")
+
+	assert.Equal(t, string(want), string(got),
+		"jiradozer.example.yaml drifted from bootstrap output — regenerate via `jiradozer bootstrap --output jiradozer/jiradozer.example.yaml --force`")
+}
+
 // TestBootstrapRefusesExistingFile verifies that --force is required when
 // the output path already exists.
 func TestBootstrapRefusesExistingFile(t *testing.T) {

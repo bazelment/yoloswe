@@ -275,41 +275,32 @@ func validateStep(name string, step *StepConfig) error {
 	return nil
 }
 
-// validatePromptTemplate parses tmpl and renders it against both a
-// zero-value and a "filled" PromptData so typos like {{.Headng}} fail at
-// LoadConfig time rather than at the first run that posts a comment. Two
-// passes are needed because typos hidden behind a conditional branch
-// (e.g. {{- if .Description}}{{.Decsription}}{{- end}}) skip the
-// non-existent field on the zero-value pass.
+// validatePromptTemplate runs the eager validation pattern against
+// PromptData: two Execute passes (zero-value and filled) so typos hidden
+// behind a conditional branch (e.g. {{- if .X}}{{.Decsription}}{{- end}})
+// can't sneak past — the zero-value pass would skip the false branch.
 func validatePromptTemplate(label, tmpl string) error {
-	t, err := template.New(label).Parse(tmpl)
-	if err != nil {
-		return fmt.Errorf("%s template: %w", label, err)
-	}
-	if err := t.Execute(io.Discard, PromptData{}); err != nil {
-		return fmt.Errorf("%s template: %w", label, err)
-	}
-	if err := t.Execute(io.Discard, samplePromptData); err != nil {
-		return fmt.Errorf("%s template: %w", label, err)
-	}
-	return nil
+	return validateTemplate(label, tmpl, PromptData{}, samplePromptData)
 }
 
 // validateCommentTemplate is the CommentData counterpart of
-// validatePromptTemplate: parse + execute against both zero-value and
-// filled CommentData so a misspelled field is caught at config load,
-// even when the typo lives inside a conditional that only fires when
-// the relevant field is non-empty.
+// validatePromptTemplate; same two-pass strategy.
 func validateCommentTemplate(label, tmpl string) error {
+	return validateTemplate(label, tmpl, CommentData{}, sampleCommentData)
+}
+
+// validateTemplate parses tmpl once and runs Execute against each sample.
+// All errors are wrapped with label so the caller sees which field failed
+// (e.g. "plan.comment_template template: ...").
+func validateTemplate(label, tmpl string, samples ...any) error {
 	t, err := template.New(label).Parse(tmpl)
 	if err != nil {
 		return fmt.Errorf("%s template: %w", label, err)
 	}
-	if err := t.Execute(io.Discard, CommentData{}); err != nil {
-		return fmt.Errorf("%s template: %w", label, err)
-	}
-	if err := t.Execute(io.Discard, sampleCommentData); err != nil {
-		return fmt.Errorf("%s template: %w", label, err)
+	for _, sample := range samples {
+		if err := t.Execute(io.Discard, sample); err != nil {
+			return fmt.Errorf("%s template: %w", label, err)
+		}
 	}
 	return nil
 }
