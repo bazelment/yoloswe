@@ -3,3 +3,19 @@ tracker:
 
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "Open PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "Run tests"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship it"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"

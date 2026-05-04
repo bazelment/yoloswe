@@ -62,6 +62,65 @@ func TestNewPromptData_NilOptionalFields(t *testing.T) {
 	assert.Empty(t, data.Labels)
 }
 
+// testPlanPrompt mirrors the canonical prompt that `jiradozer bootstrap`
+// emits, kept inline so renderPrompt assertions still exercise the same
+// template features (conditional sections, dotted access). The runtime no
+// longer carries built-in defaults.
+const testPlanPrompt = `Issue: {{.Identifier}} — {{.Title}}
+{{- if .Description}}
+
+Description:
+{{.Description}}
+{{- end}}
+{{- if .URL}}
+
+URL: {{.URL}}
+{{- end}}
+{{- if .Labels}}
+Labels: {{.Labels}}
+{{- end}}
+
+Create a detailed implementation plan for this issue. Include: files to modify, approach, testing strategy, and any risks.`
+
+const testBuildPrompt = `Issue: {{.Identifier}} — {{.Title}}
+{{- if .Description}}
+
+Description:
+{{.Description}}
+{{- end}}
+{{- if .Plan}}
+
+Approved Plan:
+{{.Plan}}
+
+Implement the changes described in the approved plan above.
+{{- else}}
+
+No plan is available. Implement the changes based on the issue description above.
+{{- end}}`
+
+const testValidatePrompt = `Issue: {{.Identifier}} — {{.Title}}
+
+Run the project's tests and linters to validate the changes. Fix any failures you find. Report what passed and what you fixed.`
+
+const testCreatePRPrompt = `First, check for any uncommitted changes (staged or unstaged, including untracked files).
+- If there are uncommitted changes: stage them, commit with a clear message referencing the work done, and push to the remote.
+- If there are no uncommitted changes but unpushed commits: push to the remote.
+
+Then, check if a pull request already exists for the current branch against {{.BaseBranch}}.
+- If a PR exists: update its description to reflect the current state of the code. Report the PR URL.
+- If no PR exists: create one against {{.BaseBranch}} with a clear title and description. Report the PR URL.`
+
+const testShipPrompt = `Issue: {{.Identifier}} — {{.Title}}
+{{- if .URL}}
+
+Linear: {{.URL}}
+{{- end}}
+
+Check if a pull request already exists for the current branch against {{.BaseBranch}}.
+- If a PR exists: update its description if needed and ensure it is ready for review. Report the PR URL.
+- If no PR exists: create one using gh pr create with "{{.Identifier}}: {{.Title}}" as the title.`
+
 func TestRenderPrompt_DefaultPlan(t *testing.T) {
 	data := PromptData{
 		Identifier:  "ENG-123",
@@ -72,7 +131,7 @@ func TestRenderPrompt_DefaultPlan(t *testing.T) {
 		BaseBranch:  "main",
 	}
 
-	output, err := renderPrompt(defaultPlanPrompt, data)
+	output, err := renderPrompt(testPlanPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "ENG-123")
 	assert.Contains(t, output, "Widget bug")
@@ -90,7 +149,7 @@ func TestRenderPrompt_DefaultBuild_WithPlan(t *testing.T) {
 		Plan:        "1. Edit widget.go\n2. Update tests",
 	}
 
-	output, err := renderPrompt(defaultBuildPrompt, data)
+	output, err := renderPrompt(testBuildPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "Approved Plan")
 	assert.Contains(t, output, "1. Edit widget.go")
@@ -104,7 +163,7 @@ func TestRenderPrompt_DefaultBuild_WithoutPlan(t *testing.T) {
 		Description: "Fix the widget",
 	}
 
-	output, err := renderPrompt(defaultBuildPrompt, data)
+	output, err := renderPrompt(testBuildPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "No plan is available")
 	assert.NotContains(t, output, "Approved Plan")
@@ -116,7 +175,7 @@ func TestRenderPrompt_DefaultValidate(t *testing.T) {
 		Title:      "Widget bug",
 	}
 
-	output, err := renderPrompt(defaultValidatePrompt, data)
+	output, err := renderPrompt(testValidatePrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "ENG-123")
 	assert.Contains(t, output, "tests and linters")
@@ -127,7 +186,7 @@ func TestRenderPrompt_DefaultCreatePR(t *testing.T) {
 		BaseBranch: "main",
 	}
 
-	output, err := renderPrompt(defaultCreatePRPrompt, data)
+	output, err := renderPrompt(testCreatePRPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "pull request")
 	assert.Contains(t, output, "main")
@@ -142,7 +201,7 @@ func TestRenderPrompt_DefaultShip(t *testing.T) {
 		BaseBranch: "main",
 	}
 
-	output, err := renderPrompt(defaultShipPrompt, data)
+	output, err := renderPrompt(testShipPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, output, "pull request")
 	assert.Contains(t, output, "already exists")
@@ -169,19 +228,10 @@ func TestRenderPrompt_InvalidTemplate(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse template")
 }
 
-func TestDefaultPromptForStep(t *testing.T) {
-	assert.NotEmpty(t, DefaultPromptForStep("plan"))
-	assert.NotEmpty(t, DefaultPromptForStep("build"))
-	assert.NotEmpty(t, DefaultPromptForStep("validate"))
-	assert.NotEmpty(t, DefaultPromptForStep("create_pr"))
-	assert.NotEmpty(t, DefaultPromptForStep("ship"))
-	assert.Empty(t, DefaultPromptForStep("unknown"))
-}
-
 func TestResolvePromptForExecution_FirstExecution(t *testing.T) {
 	data := PromptData{Identifier: "ENG-1", Title: "Test"}
 
-	prompt, err := resolvePromptForExecution("", defaultPlanPrompt, data, "", "")
+	prompt, err := resolvePromptForExecution("plan", testPlanPrompt, data, "", "")
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "ENG-1")
 	assert.Contains(t, prompt, "implementation plan")
@@ -190,16 +240,31 @@ func TestResolvePromptForExecution_FirstExecution(t *testing.T) {
 func TestResolvePromptForExecution_CustomPrompt(t *testing.T) {
 	data := PromptData{Identifier: "ENG-1", Title: "Test"}
 
-	prompt, err := resolvePromptForExecution("Custom: {{.Identifier}}", defaultPlanPrompt, data, "", "")
+	prompt, err := resolvePromptForExecution("plan", "Custom: {{.Identifier}}", data, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, "Custom: ENG-1", prompt)
 }
 
+// TestResolvePromptForExecution_EmptyPromptIsHardError verifies the
+// bootstrap-or-die contract: with no resume session and no configured
+// prompt, jiradozer refuses to fall back to a built-in default and instead
+// points the user at `jiradozer bootstrap`.
+func TestResolvePromptForExecution_EmptyPromptIsHardError(t *testing.T) {
+	data := PromptData{Identifier: "ENG-1", Title: "Test"}
+
+	_, err := resolvePromptForExecution("plan", "", data, "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan")
+	assert.Contains(t, err.Error(), "prompt is required")
+	assert.Contains(t, err.Error(), "jiradozer bootstrap")
+}
+
+// Resume sessions with feedback are exempt: the feedback becomes the entire
+// prompt, so the absence of a configured template is not an error.
 func TestResolvePromptForExecution_ResumeWithFeedback(t *testing.T) {
 	data := PromptData{Identifier: "ENG-1", Title: "Test"}
 
-	// When resuming with feedback, the feedback IS the prompt.
-	prompt, err := resolvePromptForExecution("", defaultPlanPrompt, data, "Please use the new API", "session-123")
+	prompt, err := resolvePromptForExecution("plan", "", data, "Please use the new API", "session-123")
 	require.NoError(t, err)
 	assert.Equal(t, "Please use the new API", prompt)
 }
@@ -208,7 +273,7 @@ func TestResolvePromptForExecution_FeedbackWithoutSession(t *testing.T) {
 	data := PromptData{Identifier: "ENG-1", Title: "Test"}
 
 	// Feedback without session: render template + append feedback.
-	prompt, err := resolvePromptForExecution("", defaultPlanPrompt, data, "Consider edge cases", "")
+	prompt, err := resolvePromptForExecution("plan", testPlanPrompt, data, "Consider edge cases", "")
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "ENG-1")
 	assert.Contains(t, prompt, "Previous feedback to incorporate")
@@ -219,7 +284,7 @@ func TestResolvePromptForExecution_ResumeWithoutFeedback(t *testing.T) {
 	data := PromptData{Identifier: "ENG-1", Title: "Test"}
 
 	// Resume session but no feedback: render template normally.
-	prompt, err := resolvePromptForExecution("", defaultPlanPrompt, data, "", "session-123")
+	prompt, err := resolvePromptForExecution("plan", testPlanPrompt, data, "", "session-123")
 	require.NoError(t, err)
 	assert.Contains(t, prompt, "ENG-1")
 	assert.NotContains(t, prompt, "feedback")
@@ -471,7 +536,7 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	// Verify plan would be included in build step's prompt data.
 	data := NewPromptData(wf.issue, wf.config.BaseBranch)
 	data.Plan = wf.plan
-	buildPrompt, err := renderPrompt(defaultBuildPrompt, data)
+	buildPrompt, err := renderPrompt(testBuildPrompt, data)
 	require.NoError(t, err)
 	assert.Contains(t, buildPrompt, "# Plan")
 	assert.Contains(t, buildPrompt, "1. Fix widget")

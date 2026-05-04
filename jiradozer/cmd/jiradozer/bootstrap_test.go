@@ -1,0 +1,122 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/jiradozer"
+)
+
+// TestBootstrapPromptParity exists as the wire that catches prompt-content
+// drift: if anyone edits the canonical bootstrap prompts in bootstrap.go,
+// these golden assertions force them to also acknowledge what the rendered
+// step prompt looks like in production. The slog "agent prompt" line at
+// agent.go:449 will see exactly these strings, so a passing test is the
+// behavior-parity guarantee the migration plan calls for.
+func TestBootstrapPromptParity(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test-bootstrap-api-key")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jiradozer.yaml")
+	content, err := bootstrapYAML()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, content, 0o644))
+
+	cfg, err := jiradozer.LoadConfig(path)
+	require.NoError(t, err)
+
+	steps := map[string]string{
+		"plan":      cfg.Plan.Prompt,
+		"build":     cfg.Build.Prompt,
+		"validate":  cfg.Validate.Prompt,
+		"create_pr": cfg.CreatePR.Prompt,
+		"ship":      cfg.Ship.Prompt,
+	}
+	originals := map[string]string{
+		"plan":      bootstrapPlanPrompt,
+		"build":     bootstrapBuildPrompt,
+		"validate":  bootstrapValidatePrompt,
+		"create_pr": bootstrapCreatePRPrompt,
+		"ship":      bootstrapShipPrompt,
+	}
+	for name, want := range originals {
+		assert.Equalf(t, want, steps[name], "step %s: bootstrap → YAML → load round-trip must preserve prompt byte-for-byte", name)
+	}
+}
+
+// TestBootstrapRoundTrip writes a starter config via bootstrapYAML, then
+// reloads it via jiradozer.LoadConfig. The reload must succeed with
+// non-empty Prompt and CommentTemplate for every named step — otherwise the
+// generated YAML is broken and `jiradozer bootstrap` would hand users a
+// config that fails on first run.
+func TestBootstrapRoundTrip(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test-bootstrap-api-key")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jiradozer.yaml")
+
+	content, err := bootstrapYAML()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, content, 0o644))
+
+	cfg, err := jiradozer.LoadConfig(path)
+	require.NoError(t, err)
+
+	steps := map[string]jiradozer.StepConfig{
+		"plan":      cfg.Plan,
+		"build":     cfg.Build,
+		"validate":  cfg.Validate,
+		"create_pr": cfg.CreatePR,
+		"ship":      cfg.Ship,
+	}
+	for name, step := range steps {
+		assert.NotEmptyf(t, step.Prompt, "step %s: bootstrap must seed a prompt", name)
+		assert.NotEmptyf(t, step.CommentTemplate, "step %s: bootstrap must seed a comment_template", name)
+	}
+}
+
+// TestBootstrapRefusesExistingFile verifies that --force is required when
+// the output path already exists.
+func TestBootstrapRefusesExistingFile(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jiradozer.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("# pre-existing\n"), 0o644))
+
+	args := &bootstrapArgs{}
+	cmd := newBootstrapCommand(args)
+	cmd.SetArgs([]string{"--output", path})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+
+	// Verify the original file was not overwritten.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "# pre-existing\n", string(got))
+}
+
+// TestBootstrapForceOverwrites verifies that --force lets bootstrap replace
+// an existing file.
+func TestBootstrapForceOverwrites(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jiradozer.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("# pre-existing\n"), 0o644))
+
+	args := &bootstrapArgs{}
+	cmd := newBootstrapCommand(args)
+	cmd.SetArgs([]string{"--output", path, "--force"})
+	require.NoError(t, cmd.Execute())
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotEqual(t, "# pre-existing\n", string(got))
+	assert.Contains(t, string(got), "jiradozer bootstrap")
+}

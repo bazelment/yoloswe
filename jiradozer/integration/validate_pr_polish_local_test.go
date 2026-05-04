@@ -134,11 +134,12 @@ func TestValidate_PRPolishLocal(t *testing.T) {
 	// actually ran to completion before the step returned.
 	slowMarker := filepath.Join(workDir, "c14_slow.txt")
 	cfg.Validate = jiradozer.StepConfig{
-		Model:          "haiku",
-		PermissionMode: "bypass",
-		MaxTurns:       6,
-		MaxBudgetUSD:   2.0,
-		AutoApprove:    true,
+		Model:           "haiku",
+		PermissionMode:  "bypass",
+		MaxTurns:        6,
+		MaxBudgetUSD:    2.0,
+		AutoApprove:     true,
+		CommentTemplate: e2eCompleteCommentTemplate,
 		Prompt: `Issue: {{.Identifier}} — {{.Title}}
 
 You MUST launch TWO bg tool_uses in the SAME turn (do both before waiting):

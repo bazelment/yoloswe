@@ -3,7 +3,24 @@ tracker:
   api_key: test-key
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+
 build:
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  round_comment_template: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
   rounds:
     - prompt: "Valid prompt"
     - prompt: "{{.Invalid"
+
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "Validate"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"

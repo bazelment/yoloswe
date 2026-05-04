@@ -64,16 +64,18 @@ func (s SourceConfig) HasSource() bool {
 
 // StepConfig configures a single workflow step (plan or build).
 type StepConfig struct {
-	Prompt              string        `yaml:"prompt"`          // Go text/template; empty = built-in default
-	SystemPrompt        string        `yaml:"system_prompt"`   // optional system prompt passed to the agent
-	Model               string        `yaml:"model"`           // override agent.model; empty = inherit
-	Effort              string        `yaml:"effort"`          // override agent.effort; empty = inherit
-	PermissionMode      string        `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
-	Rounds              []RoundConfig `yaml:"rounds"`          // multi-round execution; mutually exclusive with Prompt
-	MaxBudgetUSD        float64       `yaml:"max_budget_usd"`  // override top-level; 0 = inherit
-	MaxTurns            int           `yaml:"max_turns"`
-	MaxToolErrorRetries int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
-	AutoApprove         bool          `yaml:"auto_approve"`           // skip human review after this step
+	Prompt               string        `yaml:"prompt"`                 // Go text/template; required unless rounds is set. No built-in default — run `jiradozer bootstrap` to scaffold.
+	SystemPrompt         string        `yaml:"system_prompt"`          // optional system prompt passed to the agent
+	Model                string        `yaml:"model"`                  // override agent.model; empty = inherit
+	Effort               string        `yaml:"effort"`                 // override agent.effort; empty = inherit
+	PermissionMode       string        `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
+	CommentTemplate      string        `yaml:"comment_template"`       // text/template rendered with CommentData; required for every step
+	RoundCommentTemplate string        `yaml:"round_comment_template"` // text/template rendered with CommentData per round; required when rounds is non-empty
+	Rounds               []RoundConfig `yaml:"rounds"`                 // multi-round execution; mutually exclusive with Prompt
+	MaxBudgetUSD         float64       `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
+	MaxTurns             int           `yaml:"max_turns"`
+	MaxToolErrorRetries  int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
+	AutoApprove          bool          `yaml:"auto_approve"`           // skip human review after this step
 }
 
 // RoundConfig configures a single round within a multi-round step.
@@ -200,8 +202,8 @@ func (c *Config) validate() error {
 }
 
 // validateStep checks one named step. The pointer receiver avoids copying the
-// 152-byte StepConfig per iteration in validate(); the function does not mutate
-// through the pointer.
+// StepConfig per iteration in validate(); the function does not mutate through
+// the pointer.
 func validateStep(name string, step *StepConfig) error {
 	if step.Effort != "" {
 		if _, err := agent.ParseEffort(step.Effort); err != nil {
@@ -214,9 +216,26 @@ func validateStep(name string, step *StepConfig) error {
 	if step.Prompt != "" && len(step.Rounds) > 0 {
 		return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
 	}
+	if step.Prompt == "" && len(step.Rounds) == 0 {
+		return fmt.Errorf("%s: prompt is required (run `jiradozer bootstrap` to generate a starter config)", name)
+	}
 	if step.Prompt != "" {
 		if _, err := template.New(name).Parse(step.Prompt); err != nil {
 			return fmt.Errorf("%s.prompt template: %w", name, err)
+		}
+	}
+	if step.CommentTemplate == "" {
+		return fmt.Errorf("%s: comment_template is required (run `jiradozer bootstrap` to generate a starter config)", name)
+	}
+	if _, err := template.New(name + "_comment").Parse(step.CommentTemplate); err != nil {
+		return fmt.Errorf("%s.comment_template: %w", name, err)
+	}
+	if len(step.Rounds) > 0 {
+		if step.RoundCommentTemplate == "" {
+			return fmt.Errorf("%s: round_comment_template is required when rounds is set (run `jiradozer bootstrap` to generate a starter config)", name)
+		}
+		if _, err := template.New(name + "_round_comment").Parse(step.RoundCommentTemplate); err != nil {
+			return fmt.Errorf("%s.round_comment_template: %w", name, err)
 		}
 	}
 	for i, round := range step.Rounds {

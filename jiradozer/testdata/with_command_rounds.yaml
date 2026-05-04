@@ -3,9 +3,25 @@ tracker:
   api_key: test-key
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "Open PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "Run tests"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship it"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+
 build:
   permission_mode: bypass
   max_turns: 30
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  round_comment_template: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
   rounds:
     - command: "git pull origin {{.BaseBranch}}"
     - prompt: "Implement changes for {{.Identifier}}: {{.Title}}"
