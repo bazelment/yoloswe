@@ -67,16 +67,29 @@ func (m *mockWorkflowTracker) ListIssues(_ context.Context, _ tracker.IssueFilte
 	return nil, nil
 }
 
-func (m *mockWorkflowTracker) FetchComments(_ context.Context, issueID string, _ time.Time) ([]tracker.Comment, error) {
+func (m *mockWorkflowTracker) FetchComments(_ context.Context, issueID string, since time.Time) ([]tracker.Comment, error) {
 	m.recordCall("FetchComments", issueID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.commentSets != nil && m.commentIdx < len(m.commentSets) {
 		comments := m.commentSets[m.commentIdx]
 		m.commentIdx++
-		return comments, nil
+		return commentsSince(comments, since), nil
 	}
-	return m.comments, nil
+	return commentsSince(m.comments, since), nil
+}
+
+func commentsSince(comments []tracker.Comment, since time.Time) []tracker.Comment {
+	if since.IsZero() {
+		return comments
+	}
+	var out []tracker.Comment
+	for _, c := range comments {
+		if !c.CreatedAt.Before(since) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID string) ([]tracker.WorkflowState, error) {
@@ -563,6 +576,25 @@ func TestWorkflow_RunReview_ApproveAllObservesLateRedo(t *testing.T) {
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Contains(t, wf.feedback, "Please revisit the build")
 	assert.False(t, wf.approveAllRemaining)
+}
+
+func TestWorkflow_RunReview_ApproveAllIgnoresHistoricalCommentWithoutAnchor(t *testing.T) {
+	now := time.Now()
+	mt := &mockWorkflowTracker{
+		comments: []tracker.Comment{
+			{ID: "c1", Body: "redo\n\nstale feedback", IsSelf: false, CreatedAt: now.Add(-time.Minute)},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	walkTo(t, wf.state, StepBuildReview)
+
+	wf.runReview(context.Background(), StepValidating, StepBuilding)
+
+	assert.Equal(t, StepValidating, wf.state.Current())
+	assert.Empty(t, wf.feedback)
+	assert.True(t, wf.approveAllRemaining)
 }
 
 // TestWorkflow_RunReview_Redo tests that a redo comment goes back to the redo target.

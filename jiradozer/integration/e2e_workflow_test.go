@@ -190,7 +190,7 @@ func TestE2E_HappyPath_AllAutoApprove(t *testing.T) {
 		assertBodyContains(t, postBodies, heading)
 	}
 
-	assert.Empty(t, ft.CallsFor("FetchComments"), "FetchComments should not be called with auto-approve")
+	assert.GreaterOrEqual(t, len(ft.CallsFor("FetchComments")), 3, "auto-approved review gates should still check for late feedback")
 }
 
 // TestE2E_PlanStep_Smoke is a fast smoke test that runs only the plan step

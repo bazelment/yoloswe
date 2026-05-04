@@ -63,15 +63,7 @@ func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string
 			continue
 		}
 
-		// Use the last (most recent) comment not posted by the bot, since
-		// Linear returns comments in ascending createdAt order.
-		var latest *tracker.Comment
-		for i := len(comments) - 1; i >= 0; i-- {
-			if !exclude[comments[i].ID] {
-				latest = &comments[i]
-				break
-			}
-		}
+		latest := latestFeedbackComment(comments, exclude)
 		if latest != nil {
 			action := ParseCommentAction(latest.Body)
 			return &FeedbackResult{
@@ -81,6 +73,15 @@ func PollForFeedback(ctx context.Context, t tracker.IssueTracker, issueID string
 			}, nil
 		}
 	}
+}
+
+func latestFeedbackComment(comments []tracker.Comment, exclude map[string]bool) *tracker.Comment {
+	for i := len(comments) - 1; i >= 0; i-- {
+		if !exclude[comments[i].ID] {
+			return &comments[i]
+		}
+	}
+	return nil
 }
 
 // ParseCommentAction determines the feedback action from a comment body.

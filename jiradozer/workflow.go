@@ -420,6 +420,9 @@ func capitalize(s string) string {
 // runReview waits for human feedback and transitions accordingly.
 func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget WorkflowStep) {
 	if w.shouldAutoApprove(w.state.Current()) {
+		if w.lastCommentAt.IsZero() {
+			w.lastCommentAt = time.Now()
+		}
 		fb, err := w.fetchImmediateFeedback(ctx)
 		if err != nil {
 			w.logger.Warn("failed to check for feedback before auto-approval", "step", w.state.Current(), "error", err)
@@ -513,14 +516,12 @@ func (w *Workflow) fetchImmediateFeedback(ctx context.Context) (*FeedbackResult,
 	for _, id := range w.botCommentIDs {
 		exclude[id] = true
 	}
-	for i := len(comments) - 1; i >= 0; i-- {
-		if exclude[comments[i].ID] {
-			continue
-		}
+	latest := latestFeedbackComment(comments, exclude)
+	if latest != nil {
 		return &FeedbackResult{
-			Action:  ParseCommentAction(comments[i].Body),
-			Message: comments[i].Body,
-			Comment: comments[i],
+			Action:  ParseCommentAction(latest.Body),
+			Message: latest.Body,
+			Comment: *latest,
 		}, nil
 	}
 	return nil, nil
