@@ -33,7 +33,6 @@ func main() {
 func newRootCommand(opts *cliapp.Options) *cobra.Command {
 	var rargs runArgs
 	var bargs bootstrapArgs
-	var vargs validateConfigArgs
 
 	rootCmd := &cobra.Command{
 		Use:   "jiradozer",
@@ -49,7 +48,7 @@ func newRootCommand(opts *cliapp.Options) *cobra.Command {
 
 	runCmd := newRunCommand(&rargs)
 	bootstrapCmd := newBootstrapCommand(&bargs)
-	validateConfigCmd := newValidateConfigCommand(&vargs, &rargs)
+	validateConfigCmd := newValidateConfigCommand(&rargs.configPath)
 
 	rootCmd.AddCommand(runCmd, bootstrapCmd, validateConfigCmd)
 

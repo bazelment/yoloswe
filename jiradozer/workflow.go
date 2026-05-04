@@ -1,13 +1,11 @@
 package jiradozer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
@@ -24,18 +22,8 @@ type CommentData struct {
 	TotalRounds int    // total rounds; only meaningful for round comments
 }
 
-// renderCommentTemplate renders a comment_template / round_comment_template
-// (Go text/template) with CommentData. Mirrors renderPrompt.
 func renderCommentTemplate(tmplStr string, data CommentData) (string, error) {
-	t, err := template.New("comment").Parse(tmplStr)
-	if err != nil {
-		return "", fmt.Errorf("parse template: %w", err)
-	}
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("execute template: %w", err)
-	}
-	return buf.String(), nil
+	return renderTemplate("comment", tmplStr, data)
 }
 
 // State keys for the stateIDs map, mapping logical workflow states to tracker state IDs.

@@ -201,9 +201,7 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateStep checks one named step. The pointer receiver avoids copying the
-// StepConfig per iteration in validate(); the function does not mutate through
-// the pointer.
+// validateStep checks one named step.
 func validateStep(name string, step *StepConfig) error {
 	if step.Effort != "" {
 		if _, err := agent.ParseEffort(step.Effort); err != nil {

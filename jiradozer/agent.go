@@ -91,9 +91,8 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 }
 
 // resolvePromptForExecution determines the prompt to send to the agent.
-// On first execution (no resume session), configPrompt is required —
-// jiradozer no longer carries built-in defaults; users must supply prompts
-// in their YAML (run `jiradozer bootstrap` to scaffold one).
+// On first execution (no resume session), configPrompt is required; users
+// supply prompts in their YAML (run `jiradozer bootstrap` to scaffold one).
 func resolvePromptForExecution(stepName, configPrompt string, data PromptData, feedback, resumeSessionID string) (string, error) {
 	// Resume: send feedback directly as the prompt.
 	if resumeSessionID != "" && feedback != "" {
@@ -575,7 +574,11 @@ func GenerateTitle(description string) string {
 }
 
 func renderPrompt(tmplStr string, data PromptData) (string, error) {
-	t, err := template.New("prompt").Parse(tmplStr)
+	return renderTemplate("prompt", tmplStr, data)
+}
+
+func renderTemplate(name, tmplStr string, data any) (string, error) {
+	t, err := template.New(name).Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}

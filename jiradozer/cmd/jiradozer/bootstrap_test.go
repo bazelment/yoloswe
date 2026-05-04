@@ -11,12 +11,8 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer"
 )
 
-// TestBootstrapPromptParity exists as the wire that catches prompt-content
-// drift: if anyone edits the canonical bootstrap prompts in bootstrap.go,
-// these golden assertions force them to also acknowledge what the rendered
-// step prompt looks like in production. The slog "agent prompt" line at
-// agent.go:449 will see exactly these strings, so a passing test is the
-// behavior-parity guarantee the migration plan calls for.
+// TestBootstrapPromptParity catches prompt drift: a bootstrap → YAML →
+// LoadConfig round-trip must yield each canonical prompt byte-for-byte.
 func TestBootstrapPromptParity(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "test-bootstrap-api-key")
 
@@ -37,11 +33,11 @@ func TestBootstrapPromptParity(t *testing.T) {
 		"ship":      cfg.Ship.Prompt,
 	}
 	originals := map[string]string{
-		"plan":      bootstrapPlanPrompt,
-		"build":     bootstrapBuildPrompt,
-		"validate":  bootstrapValidatePrompt,
-		"create_pr": bootstrapCreatePRPrompt,
-		"ship":      bootstrapShipPrompt,
+		"plan":      jiradozer.BootstrapPlanPrompt,
+		"build":     jiradozer.BootstrapBuildPrompt,
+		"validate":  jiradozer.BootstrapValidatePrompt,
+		"create_pr": jiradozer.BootstrapCreatePRPrompt,
+		"ship":      jiradozer.BootstrapShipPrompt,
 	}
 	for name, want := range originals {
 		assert.Equalf(t, want, steps[name], "step %s: bootstrap → YAML → load round-trip must preserve prompt byte-for-byte", name)

@@ -8,6 +8,7 @@ go_library(
         "discovery.go",
         "orchestrator.go",
         "poller.go",
+        "prompts.go",
         "state.go",
         "steplabels.go",
         "workflow.go",
