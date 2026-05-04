@@ -219,6 +219,18 @@ func TestShouldAutoApprove(t *testing.T) {
 	}
 }
 
+func TestShouldAutoApprove_RuntimeApproveAll(t *testing.T) {
+	cfg := &Config{}
+	w := &Workflow{config: cfg, approveAllRemaining: true}
+
+	for _, step := range []WorkflowStep{StepPlanReview, StepBuildReview, StepValidateReview, StepShipReview} {
+		assert.True(t, w.shouldAutoApprove(step), "step %s should auto-approve with runtime approve-all", step)
+	}
+
+	assert.False(t, w.shouldAutoApprove(StepPlanning))
+	assert.False(t, w.shouldAutoApprove(StepDone))
+}
+
 // walkTo transitions the state machine to the target step via the happy path.
 func walkTo(t *testing.T, sm *StateMachine, target WorkflowStep) {
 	t.Helper()

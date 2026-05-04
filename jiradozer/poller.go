@@ -15,6 +15,7 @@ type FeedbackAction int
 
 const (
 	FeedbackApprove FeedbackAction = iota
+	FeedbackApproveAll
 	FeedbackRedo
 	FeedbackComment // general feedback to incorporate
 )
@@ -91,6 +92,8 @@ func ParseCommentAction(body string) FeedbackAction {
 	// Strip trailing punctuation for keyword matching.
 	normalized := strings.TrimRight(lower, ".!?")
 	switch {
+	case normalized == "approve all" || normalized == "approve_all" || normalized == "yolo":
+		return FeedbackApproveAll
 	case normalized == "approve" || normalized == "lgtm" || normalized == "ship it" || normalized == "approved":
 		return FeedbackApprove
 	case strings.HasPrefix(lower, "redo") || strings.HasPrefix(lower, "retry"):
@@ -103,6 +106,6 @@ func ParseCommentAction(body string) FeedbackAction {
 // PostWaitingComment posts a standardized "waiting for review" comment and
 // returns the created comment with its server-assigned timestamp.
 func PostWaitingComment(ctx context.Context, t tracker.IssueTracker, issueID string, step WorkflowStep) (tracker.Comment, error) {
-	body := fmt.Sprintf("**%s** — Waiting for review.\n\nReply with:\n- `approve` to proceed to the next step\n- `redo` to re-run this step\n- Any other comment to provide feedback for revision", step)
+	body := fmt.Sprintf("**%s** — Waiting for review.\n\nReply with:\n- `approve` to proceed to the next step\n- `approve all`, `approve_all`, or `yolo` to approve this and all remaining review gates\n- `redo` to re-run this step\n- Any other comment to provide feedback for revision", step)
 	return t.PostComment(ctx, issueID, body)
 }

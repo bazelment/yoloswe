@@ -417,6 +417,8 @@ func TestPostWaitingComment(t *testing.T) {
 	body := calls[0].args[1]
 	assert.Contains(t, body, "plan_review")
 	assert.Contains(t, body, "approve")
+	assert.Contains(t, body, "approve_all")
+	assert.Contains(t, body, "yolo")
 	assert.Contains(t, body, "redo")
 }
 
@@ -474,6 +476,22 @@ func TestWorkflow_TransitionToReview_SkipsReviewMachineryForNonReviewStep(t *tes
 	assert.Empty(t, mt.getCalls("PostComment"), "should not post waiting comment for non-review step")
 }
 
+func TestWorkflow_TransitionToReview_ApproveAllSkipsWaitingComment(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		workflowStates: testWorkflowStates(),
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	walkTo(t, wf.state, StepCreatingPR)
+
+	wf.transitionToReview(context.Background(), StepBuildReview, "pr_created")
+
+	assert.Equal(t, StepBuildReview, wf.state.Current())
+	assert.Empty(t, mt.getCalls("PostComment"), "approve-all should not post waiting comments for later review gates")
+}
+
 // TestWorkflow_RunReview_Approve tests that an approve comment advances to the next step.
 func TestWorkflow_RunReview_Approve(t *testing.T) {
 	mt := &mockWorkflowTracker{
@@ -490,6 +508,29 @@ func TestWorkflow_RunReview_Approve(t *testing.T) {
 
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Empty(t, wf.feedback) // Feedback cleared on approve.
+}
+
+func TestWorkflow_RunReview_ApproveAllEnablesRemainingAutoApproval(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		commentSets: [][]tracker.Comment{
+			{{ID: "c1", Body: "approve_all", IsSelf: false, CreatedAt: time.Now()}},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.feedback = "previous feedback"
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+	wf.runReview(context.Background(), StepBuilding, StepPlanning)
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Empty(t, wf.feedback)
+	assert.True(t, wf.approveAllRemaining)
+	for _, step := range []WorkflowStep{StepBuildReview, StepValidateReview, StepShipReview} {
+		assert.True(t, wf.shouldAutoApprove(step), "step %s should auto-approve after approve_all", step)
+	}
+	assert.False(t, wf.shouldAutoApprove(StepBuilding), "non-review steps should not auto-approve")
 }
 
 // TestWorkflow_RunReview_Redo tests that a redo comment goes back to the redo target.

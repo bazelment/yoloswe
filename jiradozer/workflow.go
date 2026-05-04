@@ -49,27 +49,28 @@ const (
 
 // Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
-	lastCommentAt   time.Time
-	tracker         tracker.IssueTracker
-	lastError       error
-	config          *Config
-	state           *StateMachine
-	logger          *slog.Logger
-	sessionIDs      map[WorkflowStep]string
-	stateIDs        map[string]string
-	redoCounts      map[WorkflowStep]int
-	phases          map[string]phaseState
-	OnTransition    func(step WorkflowStep)
-	OnRoundProgress func(roundIndex, roundTotal int)
-	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
-	renderer        *render.Renderer
-	issue           *tracker.Issue
-	plan            string
-	buildOutput     string
-	feedback        string
-	botCommentIDs   []string
-	lastLabels      []string
-	maxRedos        int
+	lastCommentAt       time.Time
+	tracker             tracker.IssueTracker
+	lastError           error
+	config              *Config
+	state               *StateMachine
+	logger              *slog.Logger
+	sessionIDs          map[WorkflowStep]string
+	stateIDs            map[string]string
+	redoCounts          map[WorkflowStep]int
+	phases              map[string]phaseState
+	OnTransition        func(step WorkflowStep)
+	OnRoundProgress     func(roundIndex, roundTotal int)
+	runStepAgent        func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
+	renderer            *render.Renderer
+	issue               *tracker.Issue
+	plan                string
+	buildOutput         string
+	feedback            string
+	botCommentIDs       []string
+	lastLabels          []string
+	maxRedos            int
+	approveAllRemaining bool
 }
 
 // NewWorkflow creates a new workflow for the given issue. The caller's
@@ -440,6 +441,14 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 		if err := w.approveTransition(ctx, approveTarget, "approved"); err != nil {
 			w.fail(ctx, err)
 		}
+	case FeedbackApproveAll:
+		w.logger.Info("feedback: approve all", "step", w.state.Current())
+		w.status("Approve-all enabled")
+		w.feedback = ""
+		w.approveAllRemaining = true
+		if err := w.approveTransition(ctx, approveTarget, "approve_all"); err != nil {
+			w.fail(ctx, err)
+		}
 	case FeedbackRedo:
 		w.logger.Info("feedback: redo", "step", w.state.Current())
 		w.status("Redo requested")
@@ -797,6 +806,9 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 // shouldAutoApprove returns true if the given review step should be
 // auto-approved (skipping human feedback polling).
 func (w *Workflow) shouldAutoApprove(reviewStep WorkflowStep) bool {
+	if w.approveAllRemaining && reviewStep.IsReview() {
+		return true
+	}
 	switch reviewStep {
 	case StepPlanReview:
 		return w.config.Plan.AutoApprove

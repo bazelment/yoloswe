@@ -29,6 +29,16 @@ func TestParseCommentAction(t *testing.T) {
 		{"Ship It", FeedbackApprove},
 		{"SHIP IT", FeedbackApprove},
 
+		// Approve-all variants.
+		{"approve all", FeedbackApproveAll},
+		{"Approve All", FeedbackApproveAll},
+		{"APPROVE ALL", FeedbackApproveAll},
+		{"  approve all  ", FeedbackApproveAll},
+		{"approve_all", FeedbackApproveAll},
+		{"APPROVE_ALL", FeedbackApproveAll},
+		{"yolo", FeedbackApproveAll},
+		{"YOLO", FeedbackApproveAll},
+
 		// Approve with trailing punctuation (stripped before matching).
 		{"lgtm!", FeedbackApprove},
 		{"lgtm.", FeedbackApprove},
@@ -39,11 +49,15 @@ func TestParseCommentAction(t *testing.T) {
 		{"approve!", FeedbackApprove},
 		{"ship it!", FeedbackApprove},
 		{"ship it!!", FeedbackApprove},
+		{"approve all!", FeedbackApproveAll},
+		{"approve_all.", FeedbackApproveAll},
+		{"yolo?", FeedbackApproveAll},
 
 		// Approve with trailing text on first line (not just punctuation — still rejected).
 		{"approve this", FeedbackComment}, // "approve this" is not "approve"
 		{"ship it now", FeedbackComment},  // "ship it now" is not "ship it"
 		{"lgtm yeah", FeedbackComment},    // "lgtm yeah" is not "lgtm"
+		{"approve all please", FeedbackComment},
 
 		// Redo variants.
 		{"redo", FeedbackRedo},
