@@ -27,6 +27,10 @@ bazel-bin/jiradozer/cmd/jiradozer/jiradozer \
 
 Create a `jiradozer.yaml` in your working directory:
 
+```bash
+jiradozer bootstrap
+```
+
 ```yaml
 tracker:
   kind: linear
@@ -63,6 +67,17 @@ states:
 ```
 
 The `states` section maps logical workflow states to your tracker's state names. Jiradozer uses these to transition the issue as it moves through the workflow.
+
+You can keep multiple configs in the same directory by selecting the path
+with `--config`. `bootstrap` writes to `--config` by default; `--output`
+is still supported when you want to write somewhere else.
+
+```bash
+jiradozer bootstrap --config jiradozer.linear.yaml
+jiradozer bootstrap --config jiradozer.github.yaml
+jiradozer validate-config --config jiradozer.linear.yaml
+jiradozer run --config jiradozer.github.yaml --issue owner/repo#42
+```
 
 ### Step configuration
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -255,5 +257,94 @@ func TestBuildChildArgsOrdering(t *testing.T) {
 		require.NotEqualf(t, -1, idx, "argv must contain run-only flag %s; got %v", flag, got)
 		assert.Greaterf(t, idx, runIdx,
 			"run-only flag %s must appear after `run` (got argv: %v)", flag, got)
+	}
+}
+
+func TestBootstrapUsesConfigPathFromRoot(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	tests := []struct {
+		name     string
+		wantFile string
+		args     []string
+	}{
+		{
+			name:     "config before bootstrap",
+			wantFile: "custom.yaml",
+			args:     []string{"--config", "custom.yaml", "bootstrap"},
+		},
+		{
+			name:     "config after bootstrap",
+			wantFile: "custom.yaml",
+			args:     []string{"bootstrap", "--config", "custom.yaml"},
+		},
+		{
+			name:     "output overrides config",
+			wantFile: "output.yaml",
+			args:     []string{"bootstrap", "--config", "config.yaml", "--output", "output.yaml"},
+		},
+		{
+			name:     "output still works without config",
+			wantFile: "output.yaml",
+			args:     []string{"bootstrap", "--output", "output.yaml"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+
+			cmd := newRootCommand(&cliapp.Options{ToolName: "jiradozer"})
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetArgs(tt.args)
+			require.NoError(t, cmd.Execute())
+
+			got, err := os.ReadFile(tt.wantFile)
+			require.NoError(t, err)
+			assert.Contains(t, string(got), "jiradozer bootstrap")
+
+			if tt.wantFile == "output.yaml" {
+				_, err := os.Stat("config.yaml")
+				assert.ErrorIs(t, err, os.ErrNotExist)
+			}
+		})
+	}
+}
+
+func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "config before validate-config",
+			args: []string{"--config", "custom.yaml", "validate-config"},
+		},
+		{
+			name: "config after validate-config",
+			args: []string{"validate-config", "--config", "custom.yaml"},
+		},
+	}
+
+	content, err := bootstrapYAML()
+	require.NoError(t, err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			require.NoError(t, os.WriteFile("custom.yaml", content, 0o644))
+
+			cmd := newRootCommand(&cliapp.Options{ToolName: "jiradozer"})
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetArgs(tt.args)
+			require.NoError(t, cmd.Execute())
+			assert.Contains(t, out.String(), "ok: custom.yaml")
+		})
 	}
 }
