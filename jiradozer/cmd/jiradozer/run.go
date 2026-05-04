@@ -139,133 +139,9 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 		}
 	}
 
-	// Load config. Prompts and comment templates live exclusively in YAML;
-	// there are no built-in defaults. Both tracker-backed and local
-	// description modes therefore require a config file.
-	cfg, err := jiradozer.LoadConfig(args.configPath)
+	cfg, err := loadRunConfig(args)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	if args.description != "" {
-		// Force local tracker, clear team, and reset state names to match the
-		// local tracker's fixed states ("In Progress", "In Review", "Done").
-		cfg.Tracker.Kind = "local"
-		cfg.Source.Filters = nil
-		defaults := jiradozer.DefaultConfig()
-		cfg.States = defaults.States
-		// Default all steps to auto-approve in local mode unless overridden.
-		if args.autoApprove == "" {
-			cfg.Plan.AutoApprove = true
-			cfg.Build.AutoApprove = true
-			cfg.Validate.AutoApprove = true
-			cfg.Ship.AutoApprove = true
-		}
-	}
-
-	// Apply CLI flag overrides.
-	if args.workDir != "" {
-		cfg.WorkDir = jiradozer.ExpandHome(args.workDir)
-	}
-	if args.modelID != "" {
-		cfg.Agent.Model = args.modelID
-	}
-	if args.thinkingLevel != "" {
-		if _, err := agent.ParseEffort(args.thinkingLevel); err != nil {
-			return fmt.Errorf("--thinking-level: %w", err)
-		}
-		cfg.Agent.Effort = args.thinkingLevel
-	}
-	if args.pollInterval > 0 {
-		cfg.PollInterval = args.pollInterval
-	}
-	if args.maxBudget > 0 {
-		cfg.MaxBudgetUSD = args.maxBudget
-	}
-
-	// Apply source overrides.
-	if len(args.sourceFilters) > 0 {
-		if cfg.Source.Filters == nil {
-			cfg.Source.Filters = make(map[string]string)
-		}
-		for _, kv := range args.sourceFilters {
-			k, v, ok := strings.Cut(kv, "=")
-			if !ok {
-				return fmt.Errorf("invalid --filter %q: expected key=value", kv)
-			}
-			k = strings.TrimSpace(k)
-			if k == "" {
-				return fmt.Errorf("invalid --filter %q: empty key", kv)
-			}
-			cfg.Source.Filters[k] = strings.TrimSpace(v)
-		}
-	}
-	if args.maxConcurrent > 0 {
-		cfg.Source.MaxConcurrent = args.maxConcurrent
-	}
-	if args.branchPrefix != "" {
-		cfg.Source.BranchPrefix = args.branchPrefix
-	}
-	// --dry-run overrides the config in both directions: explicitly passing
-	// --dry-run=true/false lets a user flip the setting without editing YAML.
-	// When the flag is not set at all, the config value stands.
-	if args.dryRunSet {
-		cfg.Source.DryRun = args.dryRun
-	}
-
-	// Validate mutual exclusivity. CLI flags (--issue, --description) take
-	// precedence over config-file values (source.filters). Only count
-	// source.filters as a mode when no CLI flag is given, so users can have
-	// source.filters in their config for multi-issue mode and still use
-	// --issue for single-issue.
-	modeCount := 0
-	if args.issueID != "" {
-		modeCount++
-	}
-	if args.description != "" {
-		modeCount++
-	}
-	if modeCount == 0 && cfg.Source.HasSource() {
-		modeCount++
-	}
-	if modeCount > 1 {
-		return fmt.Errorf("--issue and --description/--description-file are mutually exclusive")
-	}
-	if modeCount == 0 {
-		return fmt.Errorf("either --issue, --filter, --description/--description-file, or source.filters in config is required")
-	}
-
-	if err := validateDryRunMode(cfg, args); err != nil {
 		return err
-	}
-
-	// Apply auto-approve overrides.
-	if args.autoApprove != "" {
-		for _, s := range parseAutoApprove(args.autoApprove) {
-			switch s {
-			case "plan":
-				cfg.Plan.AutoApprove = true
-			case "build":
-				cfg.Build.AutoApprove = true
-			case "validate":
-				cfg.Validate.AutoApprove = true
-			case "ship":
-				cfg.Ship.AutoApprove = true
-			case "create_pr":
-				// create_pr has no review step; auto-approve is a no-op.
-			default:
-				return fmt.Errorf("unknown step %q in --auto-approve (valid: %s, all)", s, strings.Join(allSteps, ", "))
-			}
-		}
-	}
-
-	// Validate work_dir after CLI overrides.
-	if err := jiradozer.ValidateWorkDir(cfg.WorkDir); err != nil {
-		return err
-	}
-
-	// Validate agent model.
-	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
-		return fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
 	}
 	logger.Info("using agent",
 		"model", cfg.Agent.Model,
@@ -306,6 +182,138 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	wf.SetRenderer(renderer)
 	return wf.Run(ctx)
+}
+
+func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
+	// Load config. Prompts and comment templates live exclusively in YAML;
+	// there are no built-in defaults. Both tracker-backed and local
+	// description modes therefore require a config file.
+	cfg, err := jiradozer.LoadConfig(args.configPath)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	if args.description != "" {
+		// Force local tracker, clear team, and reset state names to match the
+		// local tracker's fixed states ("In Progress", "In Review", "Done").
+		cfg.Tracker.Kind = "local"
+		cfg.Source.Filters = nil
+		defaults := jiradozer.DefaultConfig()
+		cfg.States = defaults.States
+		// Default all steps to auto-approve in local mode unless overridden.
+		if args.autoApprove == "" {
+			cfg.Plan.AutoApprove = true
+			cfg.Build.AutoApprove = true
+			cfg.Validate.AutoApprove = true
+			cfg.Ship.AutoApprove = true
+		}
+	}
+
+	// Apply CLI flag overrides.
+	if args.workDir != "" {
+		cfg.WorkDir = jiradozer.ExpandHome(args.workDir)
+	}
+	if args.modelID != "" {
+		cfg.Agent.Model = args.modelID
+	}
+	if args.thinkingLevel != "" {
+		if _, err := agent.ParseEffort(args.thinkingLevel); err != nil {
+			return nil, fmt.Errorf("--thinking-level: %w", err)
+		}
+		cfg.Agent.Effort = args.thinkingLevel
+	}
+	if args.pollInterval > 0 {
+		cfg.PollInterval = args.pollInterval
+	}
+	if args.maxBudget > 0 {
+		cfg.MaxBudgetUSD = args.maxBudget
+	}
+
+	// Apply source overrides.
+	if len(args.sourceFilters) > 0 {
+		if cfg.Source.Filters == nil {
+			cfg.Source.Filters = make(map[string]string)
+		}
+		for _, kv := range args.sourceFilters {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				return nil, fmt.Errorf("invalid --filter %q: expected key=value", kv)
+			}
+			k = strings.TrimSpace(k)
+			if k == "" {
+				return nil, fmt.Errorf("invalid --filter %q: empty key", kv)
+			}
+			cfg.Source.Filters[k] = strings.TrimSpace(v)
+		}
+	}
+	if args.maxConcurrent > 0 {
+		cfg.Source.MaxConcurrent = args.maxConcurrent
+	}
+	if args.branchPrefix != "" {
+		cfg.Source.BranchPrefix = args.branchPrefix
+	}
+	// --dry-run overrides the config in both directions: explicitly passing
+	// --dry-run=true/false lets a user flip the setting without editing YAML.
+	// When the flag is not set at all, the config value stands.
+	if args.dryRunSet {
+		cfg.Source.DryRun = args.dryRun
+	}
+
+	// Validate mutual exclusivity. CLI flags (--issue, --description) take
+	// precedence over config-file values (source.filters). Only count
+	// source.filters as a mode when no CLI flag is given, so users can have
+	// source.filters in their config for multi-issue mode and still use
+	// --issue for single-issue.
+	modeCount := 0
+	if args.issueID != "" {
+		modeCount++
+	}
+	if args.description != "" {
+		modeCount++
+	}
+	if modeCount == 0 && cfg.Source.HasSource() {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return nil, fmt.Errorf("--issue and --description/--description-file are mutually exclusive")
+	}
+	if modeCount == 0 {
+		return nil, fmt.Errorf("either --issue, --filter, --description/--description-file, or source.filters in config is required")
+	}
+
+	if err := validateDryRunMode(cfg, args); err != nil {
+		return nil, err
+	}
+
+	// Apply auto-approve overrides.
+	if args.autoApprove != "" {
+		for _, s := range parseAutoApprove(args.autoApprove) {
+			switch s {
+			case "plan":
+				cfg.Plan.AutoApprove = true
+			case "build":
+				cfg.Build.AutoApprove = true
+			case "validate":
+				cfg.Validate.AutoApprove = true
+			case "ship":
+				cfg.Ship.AutoApprove = true
+			case "create_pr":
+				// create_pr has no review step; auto-approve is a no-op.
+			default:
+				return nil, fmt.Errorf("unknown step %q in --auto-approve (valid: %s, all)", s, strings.Join(allSteps, ", "))
+			}
+		}
+	}
+
+	// Validate work_dir after CLI overrides.
+	if err := jiradozer.ValidateWorkDir(cfg.WorkDir); err != nil {
+		return nil, err
+	}
+
+	// Validate agent model.
+	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
+		return nil, fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
+	}
+	return cfg, nil
 }
 
 // wtAdapter adapts wt.Manager to the jiradozer.WorktreeManager interface.
@@ -352,90 +360,11 @@ func resolveRepoName(cfg *jiradozer.Config) string {
 }
 
 func runMultiIssue(ctx context.Context, app *cliapp.App, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, args runArgs) error {
-	renderer := app.Renderer
-	logger := app.Logger
-	orchCtx, orchCancel := context.WithCancel(ctx)
-	defer orchCancel()
-
-	repoName := resolveRepoName(cfg)
-	disc := jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, logger)
-
-	// Dry-run mode: print bramble new-session commands to stdout. No real
-	// worktrees are needed; the wtManager won't be called.
-	if cfg.Source.DryRun {
-		dummyWtMgr := &wtAdapter{mgr: wt.NewManager(".", repoName)}
-		orch := jiradozer.NewOrchestrator(issueTracker, cfg, dummyWtMgr, repoName, logger)
-		err := orch.RunWithDiscovery(orchCtx, disc)
-		orchCancel()
-		orch.Shutdown()
+	sup, err := newTeamSupervisor(app, issueTracker, cfg, args)
+	if err != nil {
 		return err
 	}
-
-	// Non-dry-run: detect the real wt-managed repository.
-	wtMgr, err := resolveWTManager()
-	if err != nil {
-		return fmt.Errorf("team mode requires a wt-managed repository: %w", err)
-	}
-	logger.Info("resolved wt-managed repository", "repo_dir", wtMgr.RepoDir())
-
-	selfPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve jiradozer binary path: %w", err)
-	}
-	absConfig, err := filepath.Abs(args.configPath)
-	if err != nil {
-		return fmt.Errorf("resolve config path: %w", err)
-	}
-	childArgs := buildChildArgs(app, args, absConfig)
-	logDir, err := cliapp.LogDir("jiradozer")
-	if err != nil {
-		logger.Warn("could not create log dir, child logs go to temp dir", "error", err)
-		logDir = os.TempDir()
-	}
-
-	orch := jiradozer.NewOrchestrator(issueTracker, cfg, &wtAdapter{mgr: wtMgr}, repoName, logger)
-	orch.SetSubprocessMode(selfPath, childArgs, logDir)
-	orch.SetForceCleanup(args.forceCleanup)
-
-	// Print status updates to stderr.
-	go func() {
-		for status := range orch.StatusUpdates() {
-			switch {
-			case status.Step == jiradozer.StepInit:
-				renderer.Status(fmt.Sprintf("[%s] started — %s", status.Issue.Identifier, status.Issue.Title))
-			case status.Step == jiradozer.StepDone:
-				elapsed := time.Since(status.StartedAt).Truncate(time.Second)
-				renderer.Status(fmt.Sprintf("[%s] completed (%s)", status.Issue.Identifier, elapsed))
-			case status.Step == jiradozer.StepCancelled:
-				renderer.Status(fmt.Sprintf("[%s] cancelled", status.Issue.Identifier))
-			case status.Step == jiradozer.StepFailed:
-				renderer.Error(status.Error, fmt.Sprintf("[%s] failed", status.Issue.Identifier))
-			}
-		}
-	}()
-
-	err = orch.RunWithDiscovery(orchCtx, disc)
-	orchCancel()
-	orch.Shutdown()
-
-	// Report preserved worktrees so the user knows what's left.
-	if preserved := orch.PreservedWorktrees(); len(preserved) > 0 {
-		fmt.Fprintf(os.Stderr, "\nPreserved %d worktree(s):\n", len(preserved))
-		for _, pw := range preserved {
-			reason := "cancelled"
-			switch pw.Step {
-			case jiradozer.StepDone:
-				reason = "shipped (PR open, not yet merged)"
-			case jiradozer.StepFailed:
-				reason = "failed (inspect and recover; pushed branch / open PR still intact)"
-			}
-			fmt.Fprintf(os.Stderr, "  %s  %s  (%s)  [%s]\n", pw.Issue, pw.Branch, pw.WorktreePath, reason)
-		}
-		fmt.Fprintf(os.Stderr, "\nTo remove after merging: wt remove <branch>\n")
-		fmt.Fprintf(os.Stderr, "To remove failed/cancelled worktrees on next run: re-run with --force-cleanup\n")
-	}
-
-	return err
+	return sup.Run(ctx)
 }
 
 // resolveWTManager detects the wt-managed repository from the current

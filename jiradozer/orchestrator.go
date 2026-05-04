@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
@@ -88,6 +89,8 @@ type managedWorkflow struct {
 	startedAt    time.Time
 	worktreePath string
 	branch       string
+	logPath      string
+	pid          int
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -96,7 +99,7 @@ type managedWorkflow struct {
 func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager, repoName string, logger *slog.Logger) *Orchestrator {
 	return &Orchestrator{
 		tracker:    t,
-		config:     cfg,
+		config:     cloneConfig(cfg),
 		logger:     logger,
 		wtManager:  wtMgr,
 		active:     make(map[string]*managedWorkflow),
@@ -119,8 +122,10 @@ func (o *Orchestrator) SetDryRunOutput(w io.Writer) {
 // to the jiradozer binary, childArgs are flags propagated to each child
 // (e.g. --config, --model), and logDir is the directory for per-issue logs.
 func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, logDir string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.selfPath = selfPath
-	o.childArgs = childArgs
+	o.childArgs = append([]string(nil), childArgs...)
 	o.logDir = logDir
 }
 
@@ -133,7 +138,31 @@ func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, lo
 // preserved regardless of this flag — the ship step opens a PR but does not
 // merge it, so the branch must remain until the PR is merged.
 func (o *Orchestrator) SetForceCleanup(force bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.forceCleanup = force
+}
+
+// UpdateConfig replaces the config used for future discovery decisions and
+// child launches. Already-running children keep their original argv/config.
+func (o *Orchestrator) UpdateConfig(cfg *Config) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.config = cloneConfig(cfg)
+}
+
+// ConfigSnapshot returns a defensive copy of the current config.
+func (o *Orchestrator) ConfigSnapshot() *Config {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return cloneConfig(o.config)
+}
+
+// UpdateChildArgs replaces the argv suffix used for future child launches.
+func (o *Orchestrator) UpdateChildArgs(childArgs []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.childArgs = append([]string(nil), childArgs...)
 }
 
 // StatusUpdates returns the channel that receives status updates for all workflows.
@@ -155,6 +184,25 @@ func (o *Orchestrator) Snapshot() []IssueStatus {
 		})
 	}
 	return statuses
+}
+
+// ActiveWorkflowSnapshots returns enough metadata to restore child tracking
+// after an exec restart.
+func (o *Orchestrator) ActiveWorkflowSnapshots() []ManagedWorkflowSnapshot {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	out := make([]ManagedWorkflowSnapshot, 0, len(o.active))
+	for _, mw := range o.active {
+		out = append(out, ManagedWorkflowSnapshot{
+			Issue:        cloneIssue(mw.issue),
+			PID:          mw.pid,
+			Branch:       mw.branch,
+			WorktreePath: mw.worktreePath,
+			StartedAt:    mw.startedAt,
+			LogPath:      mw.logPath,
+		})
+	}
+	return out
 }
 
 // ActiveCount returns the number of currently running workflows.
@@ -181,6 +229,7 @@ func (o *Orchestrator) ActiveCount() int {
 // abort the workflow start, since missing team ID or transient API failures
 // should not prevent local work from proceeding.
 func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.Issue) {
+	cfg := o.ConfigSnapshot()
 	// Attach the lock label first — it signals intent even if the state
 	// transition below fails.
 	if err := o.tracker.AddLabel(ctx, issue.ID, LockLabel); err != nil {
@@ -205,7 +254,7 @@ func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.
 	}
 
 	for _, s := range states {
-		if s.Name == o.config.States.InProgress {
+		if s.Name == cfg.States.InProgress {
 			if err := o.tracker.UpdateIssueState(ctx, issue.ID, s.ID); err != nil {
 				o.logger.Warn("failed to transition issue to in_progress",
 					"issue", issue.Identifier, "state", s.Name, "error", err)
@@ -218,17 +267,18 @@ func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.
 	}
 
 	o.logger.Warn("in_progress state not found in workflow states",
-		"issue", issue.Identifier, "expected_name", o.config.States.InProgress)
+		"issue", issue.Identifier, "expected_name", cfg.States.InProgress)
 }
 
 // Start launches a workflow for the given issue in a new worktree.
 // Returns an error if the concurrency limit is reached or worktree creation fails.
 func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
+	cfg := o.ConfigSnapshot()
 	// Dry-run: print the equivalent bramble new-session command and return
 	// success without reserving a slot or touching the worktree manager.
 	// RunWithDiscovery only clears the seen set on error, so returning nil
 	// keeps the issue out of subsequent polls.
-	if o.config.Source.DryRun {
+	if cfg.Source.DryRun {
 		o.printDryRunCommand(issue)
 		return nil
 	}
@@ -236,9 +286,9 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	// Hold the lock for the entire check-and-reserve sequence to prevent
 	// TOCTOU races on both the concurrency limit and the duplicate check.
 	o.mu.Lock()
-	if o.activeCountLocked() >= o.config.Source.MaxConcurrent {
+	if o.activeCountLocked() >= cfg.Source.MaxConcurrent {
 		o.mu.Unlock()
-		return fmt.Errorf("%w (%d)", errConcurrencyLimit, o.config.Source.MaxConcurrent)
+		return fmt.Errorf("%w (%d)", errConcurrencyLimit, cfg.Source.MaxConcurrent)
 	}
 	if _, exists := o.active[issue.ID]; exists {
 		o.mu.Unlock()
@@ -249,8 +299,8 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.active[issue.ID] = placeholder
 	o.mu.Unlock()
 
-	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
-	worktreePath, err := o.wtManager.NewWorktree(ctx, branch, o.config.BaseBranch, issue.Title)
+	branch := fmt.Sprintf("%s/%s", cfg.Source.BranchPrefix, issue.Identifier)
+	worktreePath, err := o.wtManager.NewWorktree(ctx, branch, cfg.BaseBranch, issue.Title)
 	if err != nil {
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
@@ -266,11 +316,16 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	wfCtx, cancel := context.WithCancel(ctx)
 
 	// Build child process arguments: --issue <ID> --work-dir <path> + propagated flags.
-	args := make([]string, 0, len(o.childArgs)+4)
+	o.mu.RLock()
+	selfPath := o.selfPath
+	childArgs := append([]string(nil), o.childArgs...)
+	logDir := o.logDir
+	o.mu.RUnlock()
+	args := make([]string, 0, len(childArgs)+4)
 	args = append(args, "--issue", issue.Identifier, "--work-dir", worktreePath)
-	args = append(args, o.childArgs...)
+	args = append(args, childArgs...)
 
-	cmd := exec.CommandContext(wfCtx, o.selfPath, args...)
+	cmd := exec.CommandContext(wfCtx, selfPath, args...)
 	cmd.Dir = worktreePath
 	// Graceful shutdown: send SIGINT so the child can clean up, then
 	// force-kill after WaitDelay if it hasn't exited.
@@ -281,7 +336,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	// Sanitize identifier for use as a filename: GitHub identifiers like
 	// "acme/app#42" contain "/" and "#" which are problematic in file paths.
 	safeID := sanitizeForFilename(issue.Identifier)
-	logPath := filepath.Join(o.logDir, fmt.Sprintf("%s-%s.log",
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.log",
 		safeID, time.Now().Format("20060102-150405")))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -314,6 +369,8 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		startedAt:    time.Now(),
 		cmd:          cmd,
 		logFile:      logFile,
+		logPath:      logPath,
+		pid:          cmd.Process.Pid,
 	}
 
 	o.mu.Lock()
@@ -377,8 +434,17 @@ func (o *Orchestrator) Cancel(issueID string) {
 	o.mu.RLock()
 	mw, ok := o.active[issueID]
 	o.mu.RUnlock()
-	if ok && mw.cancel != nil {
+	if !ok {
+		return
+	}
+	if mw.cancel != nil {
 		mw.cancel()
+		return
+	}
+	if mw.pid > 0 {
+		if proc, err := os.FindProcess(mw.pid); err == nil {
+			_ = proc.Signal(os.Interrupt)
+		}
 	}
 }
 
@@ -474,7 +540,7 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 		active := o.ActiveCount()
 		remaining := pending[:0]
 		for _, issue := range pending {
-			if active >= o.config.Source.MaxConcurrent {
+			if active >= o.ConfigSnapshot().Source.MaxConcurrent {
 				remaining = append(remaining, issue)
 				continue
 			}
@@ -497,7 +563,7 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				o.Wait()
 				return nil
 			}
-			if o.ActiveCount() < o.config.Source.MaxConcurrent {
+			if o.ActiveCount() < o.ConfigSnapshot().Source.MaxConcurrent {
 				if !tryStart(issue) {
 					pending = append(pending, issue)
 				}
@@ -540,7 +606,8 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 // `--prompt` is a hand-authored starter, not a rendered plan/build prompt.
 // Branch, base branch, model, repo, and goal do match the live path.
 func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
-	branch := fmt.Sprintf("%s/%s", o.config.Source.BranchPrefix, issue.Identifier)
+	cfg := o.ConfigSnapshot()
+	branch := fmt.Sprintf("%s/%s", cfg.Source.BranchPrefix, issue.Identifier)
 	prompt := fmt.Sprintf("Work on %s: %s", issue.Identifier, issue.Title)
 	if issue.URL != nil && *issue.URL != "" {
 		prompt = fmt.Sprintf("%s\n\n%s", prompt, *issue.URL)
@@ -552,8 +619,8 @@ func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
 		"  --type planner",
 		"  --create-worktree",
 		"  --branch " + sq(branch),
-		"  --from " + sq(o.config.BaseBranch),
-		"  --model " + sq(o.config.Agent.Model),
+		"  --from " + sq(cfg.BaseBranch),
+		"  --model " + sq(cfg.Agent.Model),
 	}
 	if o.repoName != "" {
 		args = append(args, "  --repo "+sq(o.repoName))
@@ -587,7 +654,10 @@ func shellQuote(s string) string {
 //     inspect the failure and keep any pushed branch / open PR created by
 //     earlier steps; set forceCleanup to wipe it.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
-	preserve := step == StepDone || ((step == StepCancelled || step == StepFailed) && !o.forceCleanup)
+	o.mu.RLock()
+	forceCleanup := o.forceCleanup
+	o.mu.RUnlock()
+	preserve := step == StepDone || ((step == StepCancelled || step == StepFailed) && !forceCleanup)
 	if preserve {
 		o.logger.Info("preserving worktree",
 			"step", step,
@@ -616,6 +686,57 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 	select {
 	case o.slotFreed <- struct{}{}:
 	default:
+	}
+}
+
+// RestoreActive starts wait goroutines for active child processes restored
+// after syscall.Exec. The restored children must still be children of this
+// process; that is true for an in-place exec restart.
+func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) {
+	for _, snap := range snapshots {
+		if snap.PID <= 0 || snap.Issue.ID == "" {
+			continue
+		}
+		mw := &managedWorkflow{
+			issue:        cloneIssue(snap.Issue),
+			startedAt:    snap.StartedAt,
+			worktreePath: snap.WorktreePath,
+			branch:       snap.Branch,
+			logPath:      snap.LogPath,
+			pid:          snap.PID,
+		}
+		o.mu.Lock()
+		if _, exists := o.active[mw.issue.ID]; exists {
+			o.mu.Unlock()
+			continue
+		}
+		o.active[mw.issue.ID] = mw
+		o.mu.Unlock()
+		o.emitStatus(mw, StepInit, nil)
+		o.wg.Add(1)
+		go o.waitRestored(mw)
+	}
+}
+
+func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
+	defer o.wg.Done()
+	var status syscall.WaitStatus
+	var usage syscall.Rusage
+	_, err := syscall.Wait4(mw.pid, &status, 0, &usage)
+	switch {
+	case err != nil:
+		o.logger.Error("restored subprocess wait failed", "issue", mw.issue.Identifier, "pid", mw.pid, "error", err)
+		o.emitStatus(mw, StepFailed, err)
+		o.cleanup(context.Background(), mw, StepFailed)
+	case status.Exited() && status.ExitStatus() == 0:
+		o.logger.Info("restored subprocess completed", "issue", mw.issue.Identifier, "pid", mw.pid)
+		o.emitStatus(mw, StepDone, nil)
+		o.cleanup(context.Background(), mw, StepDone)
+	default:
+		err := fmt.Errorf("subprocess pid %d exited with wait status %d", mw.pid, status)
+		o.logger.Error("restored subprocess failed", "issue", mw.issue.Identifier, "pid", mw.pid, "status", int(status))
+		o.emitStatus(mw, StepFailed, err)
+		o.cleanup(context.Background(), mw, StepFailed)
 	}
 }
 

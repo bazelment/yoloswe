@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -114,6 +116,59 @@ func TestResolveRepoName(t *testing.T) {
 	}
 }
 
+func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
+	cfgPath := writeRunConfig(t, "linear", t.TempDir())
+	cfg, err := loadRunConfig(runArgs{
+		configPath:    cfgPath,
+		sourceFilters: []string{"team=ENG"},
+		modelID:       "opus",
+		pollInterval:  2 * time.Second,
+		maxConcurrent: 7,
+		branchPrefix:  "hotfix",
+		dryRunSet:     true,
+		dryRun:        true,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "opus", cfg.Agent.Model)
+	require.Equal(t, 2*time.Second, cfg.PollInterval)
+	require.Equal(t, "ENG", cfg.Source.Filters[tracker.FilterTeam])
+	require.Equal(t, 7, cfg.Source.MaxConcurrent)
+	require.Equal(t, "hotfix", cfg.Source.BranchPrefix)
+	require.True(t, cfg.Source.DryRun)
+}
+
+func TestValidateReloadCompatibleRejectsTrackerChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "old"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "github"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "tracker kind change")
+
+	newCfg = &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "new"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "tracker config changes")
+}
+
+func TestValidateReloadCompatibleRejectsSourceModeChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "source mode change")
+}
+
 // TestDryRunFlagPlacement verifies --dry-run is honored regardless of where
 // the user puts it relative to the run subcommand. Because the flag is
 // registered on both root and `run` (via registerRunFlags) but cobra only
@@ -210,6 +265,39 @@ func TestBuildChildArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func writeRunConfig(t *testing.T, trackerKind, workDir string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jiradozer.yaml")
+	apiKey := "api_key: test-key"
+	if trackerKind == "github" || trackerKind == "local" {
+		apiKey = ""
+	}
+	content := "tracker:\n" +
+		"  kind: " + trackerKind + "\n" +
+		"  " + apiKey + "\n" +
+		"agent:\n" +
+		"  model: sonnet\n" +
+		"work_dir: " + workDir + "\n" +
+		"base_branch: main\n" +
+		"plan:\n" +
+		"  prompt: \"Plan {{.Identifier}}\"\n" +
+		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
+		"build:\n" +
+		"  prompt: \"Build {{.Identifier}}\"\n" +
+		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
+		"create_pr:\n" +
+		"  prompt: \"PR {{.Identifier}}\"\n" +
+		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
+		"validate:\n" +
+		"  prompt: \"Validate {{.Identifier}}\"\n" +
+		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
+		"ship:\n" +
+		"  prompt: \"Ship {{.Identifier}}\"\n" +
+		"  comment_template: \"{{.Heading}} {{.Output}}\"\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return path
 }
 
 // TestBuildChildArgsOrdering pins the argv layout: persistent (root-level)
