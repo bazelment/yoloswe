@@ -29,18 +29,20 @@ const (
 
 // Renderer handles terminal output with ANSI colors and verbosity control.
 type Renderer struct {
-	out          io.Writer
-	eventHandler EventHandler
-	commands     map[string]string
-	outputs      map[string]*strings.Builder
-	lastToolName string
-	lastToolID   string
-	textBuffer   strings.Builder
-	mu           sync.Mutex
-	verbosity    Verbosity
-	palette      Palette
-	inToolOutput bool
-	inReasoning  bool
+	out                   io.Writer
+	eventHandler          EventHandler
+	commands              map[string]string
+	outputs               map[string]*strings.Builder
+	lastToolName          string
+	lastToolID            string
+	lastCompletedToolName string
+	lastCompletedToolID   string
+	textBuffer            strings.Builder
+	mu                    sync.Mutex
+	verbosity             Verbosity
+	palette               Palette
+	inToolOutput          bool
+	inReasoning           bool
 }
 
 // Option configures a Renderer.
@@ -246,6 +248,9 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.lastCompletedToolName = name
+	r.lastCompletedToolID = r.lastToolID
+
 	// Don't print for interactive tools, but still notify the event handler.
 	if name == "AskUserQuestion" || name == "ExitPlanMode" {
 		r.inToolOutput = false
@@ -277,6 +282,14 @@ func (r *Renderer) ToolComplete(name string, input map[string]interface{}) {
 func (r *Renderer) ToolResult(content interface{}, isError bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.eventHandler != nil {
+		r.eventHandler.OnToolResult(content, isError)
+	}
+	if r.lastCompletedToolName != "" || r.lastCompletedToolID != "" {
+		r.lastCompletedToolName = ""
+		r.lastCompletedToolID = ""
+	}
 
 	// Errors always shown (even in Quiet); success results at Verbose+
 	if !isError && r.verbosity < VerbosityVerbose {
