@@ -417,6 +417,46 @@ ship:
 	assert.NotEmpty(t, cfg.Validate.RoundCommentTemplate)
 }
 
+// TestLoadConfig_ConditionalBranchTypoCaughtAtLoad locks in the second
+// (filled-data) Execute pass: a typo guarded by `{{- if .X}}` branches
+// is invisible to the zero-value pass because the branch is false.
+// Without the filled-data pass, validation misses these.
+func TestLoadConfig_ConditionalBranchTypoCaughtAtLoad(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: |-
+    Issue: {{.Identifier}}
+    {{- if .Description}}
+    Description: {{.Decsription}}
+    {{- end}}
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "V"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.prompt")
+	assert.Contains(t, err.Error(), "Decsription")
+}
+
 // TestLoadConfig_TemplateFieldTypoCaughtAtLoad ensures the eager
 // Execute() in validatePromptTemplate / validateCommentTemplate catches
 // references to non-existent struct fields. Without execution-time

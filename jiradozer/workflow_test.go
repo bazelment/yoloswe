@@ -738,6 +738,15 @@ func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 
 	// Must be resultTime (result comment), not waitingTime (waiting comment) or staleTime.
 	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be set from result comment, not waiting comment or stale value")
+
+	// Lock in PostComment body so a regression that drops
+	// renderCommentTemplate or sidesteps CommentTemplate is caught here.
+	// First call is the step result comment (rendered from
+	// CommentTemplate); the waiting comment follows.
+	postCalls := mt.getCalls("PostComment")
+	require.GreaterOrEqual(t, len(postCalls), 1, "expected at least the result comment")
+	assert.Equal(t, "## Plan Complete\n\nstep output", postCalls[0].args[1],
+		"step result comment body must be rendered from CommentTemplate (Heading capitalized, Output substituted)")
 }
 
 // TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound verifies that
@@ -789,6 +798,16 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 
 	// Must be round2Time (final round's result comment), not round1Time, waitingTime, or staleTime.
 	assert.Equal(t, round2Time, wf.lastCommentAt, "lastCommentAt should be set from final round's result comment")
+
+	// Lock in PostComment bodies so a regression that drops
+	// renderCommentTemplate or routes around RoundCommentTemplate is
+	// caught here, not in the field. Order: round1, round2, waiting.
+	postCalls := mt.getCalls("PostComment")
+	require.GreaterOrEqual(t, len(postCalls), 2, "expected round comments + waiting comment")
+	assert.Equal(t, "## Plan Round 1/2\n\nround output", postCalls[0].args[1],
+		"round 1 comment body must be rendered from RoundCommentTemplate with Round=1")
+	assert.Equal(t, "## Plan Round 2/2\n\nround output", postCalls[1].args[1],
+		"round 2 comment body must be rendered from RoundCommentTemplate with Round=2")
 }
 
 // TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection verifies that when

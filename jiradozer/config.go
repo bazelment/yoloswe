@@ -242,10 +242,14 @@ func validateStep(name string, step *StepConfig) error {
 			return err
 		}
 	}
-	if len(step.Rounds) > 0 {
-		if step.RoundCommentTemplate == "" {
-			return fmt.Errorf("%s: round_comment_template is required when rounds is set (run `jiradozer bootstrap` to generate a starter config)", name)
-		}
+	if len(step.Rounds) > 0 && step.RoundCommentTemplate == "" {
+		return fmt.Errorf("%s: round_comment_template is required when rounds is set (run `jiradozer bootstrap` to generate a starter config)", name)
+	}
+	// Validate round_comment_template whenever it is set, even on steps
+	// with no rounds — bootstrap seeds it on every rounds-capable step,
+	// and a typo there should fail at LoadConfig instead of waiting for
+	// the day someone enables rounds.
+	if step.RoundCommentTemplate != "" {
 		if err := validateCommentTemplate(name+".round_comment_template", step.RoundCommentTemplate); err != nil {
 			return err
 		}
@@ -271,11 +275,12 @@ func validateStep(name string, step *StepConfig) error {
 	return nil
 }
 
-// validatePromptTemplate parses tmpl and renders it against a zero-value
-// PromptData so typos like {{.Headng}} fail at LoadConfig time rather than
-// at the first run that posts a comment. Go's text/template always errors
-// on unknown struct fields during Execute, so this catches the same field
-// typos the runtime renderTemplate (agent.go) would catch — just earlier.
+// validatePromptTemplate parses tmpl and renders it against both a
+// zero-value and a "filled" PromptData so typos like {{.Headng}} fail at
+// LoadConfig time rather than at the first run that posts a comment. Two
+// passes are needed because typos hidden behind a conditional branch
+// (e.g. {{- if .Description}}{{.Decsription}}{{- end}}) skip the
+// non-existent field on the zero-value pass.
 func validatePromptTemplate(label, tmpl string) error {
 	t, err := template.New(label).Parse(tmpl)
 	if err != nil {
@@ -284,12 +289,17 @@ func validatePromptTemplate(label, tmpl string) error {
 	if err := t.Execute(io.Discard, PromptData{}); err != nil {
 		return fmt.Errorf("%s template: %w", label, err)
 	}
+	if err := t.Execute(io.Discard, samplePromptData); err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
+	}
 	return nil
 }
 
 // validateCommentTemplate is the CommentData counterpart of
-// validatePromptTemplate: parse + execute against a zero-value CommentData
-// so a misspelled field is caught at config load instead of comment-post time.
+// validatePromptTemplate: parse + execute against both zero-value and
+// filled CommentData so a misspelled field is caught at config load,
+// even when the typo lives inside a conditional that only fires when
+// the relevant field is non-empty.
 func validateCommentTemplate(label, tmpl string) error {
 	t, err := template.New(label).Parse(tmpl)
 	if err != nil {
@@ -298,8 +308,35 @@ func validateCommentTemplate(label, tmpl string) error {
 	if err := t.Execute(io.Discard, CommentData{}); err != nil {
 		return fmt.Errorf("%s template: %w", label, err)
 	}
+	if err := t.Execute(io.Discard, sampleCommentData); err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
+	}
 	return nil
 }
+
+// samplePromptData / sampleCommentData supply non-zero values so
+// validation traverses {{- if .X}} branches that the zero-value pass
+// would skip. Values are arbitrary strings of the right shape; only
+// presence matters for branch coverage.
+var (
+	samplePromptData = PromptData{
+		Identifier:  "ENG-1",
+		Title:       "sample",
+		Description: "sample description",
+		URL:         "https://example.com/issue/1",
+		Labels:      "bug",
+		BaseBranch:  "main",
+		Plan:        "sample plan",
+		BuildOutput: "sample build output",
+	}
+	sampleCommentData = CommentData{
+		Step:        "plan",
+		Heading:     "Plan",
+		Output:      "sample output",
+		Round:       1,
+		TotalRounds: 3,
+	}
+)
 
 // StepByName returns the StepConfig for a named step.
 func (c *Config) StepByName(name string) (StepConfig, bool) {
