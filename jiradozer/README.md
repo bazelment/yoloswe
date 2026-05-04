@@ -161,7 +161,7 @@ Each run goes through four steps. After each step, results are posted as a comme
 At each review gate, comment on the issue:
 
 - `approve` or `lgtm` -- proceed to the next step
-- `approve all`, `approve_all`, or `yolo` -- approve this and all remaining review gates
+- `approve all`, `approve_all`, or `yolo` -- approve this and all remaining review gates in the current run; later redo/feedback rework asks for review again
 - `redo` -- re-run the current step
 - Any other text -- treated as feedback, incorporated into the next agent run
 

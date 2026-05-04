@@ -700,6 +700,7 @@ func (w *Workflow) completePhase(ctx context.Context, phase string) {
 // Returns an error (and transitions to StepFailed) if the step has been re-run
 // maxRedos times.
 func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
+	w.approveAllRemaining = false
 	w.redoCounts[redoTarget]++
 	count := w.redoCounts[redoTarget]
 	if count > w.maxRedos {

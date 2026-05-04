@@ -1116,6 +1116,19 @@ func TestWorkflow_CircuitBreaker_IndependentPerStep(t *testing.T) {
 	assert.Equal(t, StepBuilding, wf.state.Current())
 }
 
+func TestWorkflow_TryRedoClearsApproveAll(t *testing.T) {
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+	require.NoError(t, wf.tryRedo(context.Background(), StepPlanning))
+
+	assert.Equal(t, StepPlanning, wf.state.Current())
+	assert.False(t, wf.approveAllRemaining)
+	assert.False(t, wf.shouldAutoApprove(StepBuildReview))
+}
+
 // --- FeedbackComment Per-Step Tests ---
 
 // TestWorkflow_RunReview_CommentPerStep verifies FeedbackComment transitions
