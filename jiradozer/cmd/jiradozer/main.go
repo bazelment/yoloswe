@@ -47,7 +47,7 @@ func newRootCommand(opts *cliapp.Options) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&rargs.configPath, "config", "jiradozer.yaml", "Path to config file")
 
 	runCmd := newRunCommand(&rargs)
-	bootstrapCmd := newBootstrapCommand(&bargs)
+	bootstrapCmd := newBootstrapCommand(&bargs, &rargs.configPath)
 	validateConfigCmd := newValidateConfigCommand(&rargs.configPath)
 
 	rootCmd.AddCommand(runCmd, bootstrapCmd, validateConfigCmd)

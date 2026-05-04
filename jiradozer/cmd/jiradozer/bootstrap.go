@@ -18,15 +18,19 @@ type bootstrapArgs struct {
 	force  bool
 }
 
-func newBootstrapCommand(args *bootstrapArgs) *cobra.Command {
+func newBootstrapCommand(args *bootstrapArgs, configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bootstrap",
-		Short: "Generate a starter jiradozer.yaml",
-		Long: `Write a jiradozer.yaml seeded with the canonical step prompts and
-comment templates. Edit the prompts to taste; the generated file is the
-source of truth for what the agent says.`,
+		Short: "Generate a starter config file",
+		Long: `Write a starter config file seeded with the canonical step prompts and
+comment templates. By default bootstrap writes to --config; use --output
+to write somewhere else. Edit the prompts to taste; the generated file is
+the source of truth for what the agent says.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			path := args.output
+			if path == "" {
+				path = *configPath
+			}
 			if path == "" {
 				path = "jiradozer.yaml"
 			}
@@ -47,7 +51,7 @@ source of truth for what the agent says.`,
 		},
 	}
 	cmd.SilenceUsage = true
-	cmd.Flags().StringVarP(&args.output, "output", "o", "jiradozer.yaml", "Path to write the starter config")
+	cmd.Flags().StringVarP(&args.output, "output", "o", "", "Path to write the starter config; overrides --config")
 	cmd.Flags().BoolVarP(&args.force, "force", "f", false, "Overwrite the output file if it already exists")
 	return cmd
 }

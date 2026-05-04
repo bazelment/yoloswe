@@ -203,7 +203,8 @@ func TestBootstrapRefusesExistingFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("# pre-existing\n"), 0o644))
 
 	args := &bootstrapArgs{}
-	cmd := newBootstrapCommand(args)
+	configPath := "jiradozer.yaml"
+	cmd := newBootstrapCommand(args, &configPath)
 	cmd.SetArgs([]string{"--output", path})
 	err := cmd.Execute()
 	require.Error(t, err)
@@ -225,12 +226,31 @@ func TestBootstrapForceOverwrites(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("# pre-existing\n"), 0o644))
 
 	args := &bootstrapArgs{}
-	cmd := newBootstrapCommand(args)
+	configPath := "jiradozer.yaml"
+	cmd := newBootstrapCommand(args, &configPath)
 	cmd.SetArgs([]string{"--output", path, "--force"})
 	require.NoError(t, cmd.Execute())
 
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.NotEqual(t, "# pre-existing\n", string(got))
+	assert.Contains(t, string(got), "jiradozer bootstrap")
+}
+
+// TestBootstrapDefaultPath verifies direct bootstrap invocation still writes
+// jiradozer.yaml when neither --config nor --output is set by a root command.
+func TestBootstrapDefaultPath(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	args := &bootstrapArgs{}
+	configPath := "jiradozer.yaml"
+	cmd := newBootstrapCommand(args, &configPath)
+	require.NoError(t, cmd.Execute())
+
+	got, err := os.ReadFile(filepath.Join(dir, "jiradozer.yaml"))
+	require.NoError(t, err)
 	assert.Contains(t, string(got), "jiradozer bootstrap")
 }
