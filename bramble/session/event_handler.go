@@ -12,11 +12,9 @@ import (
 // It converts semantic events from the renderer into structured OutputLine
 // entries that the TUI can display.
 type sessionEventHandler struct {
-	manager             *Manager
-	sessionID           SessionID
-	currentToolID       string
-	lastCompletedToolID string
-	suppressTurnEnd     bool // true when manager emits TurnEnd synchronously after RunTurn
+	manager         *Manager
+	sessionID       SessionID
+	suppressTurnEnd bool // true when manager emits TurnEnd synchronously after RunTurn
 }
 
 // Ensure interface compliance at compile time
@@ -52,7 +50,6 @@ func (h *sessionEventHandler) OnThinking(thinking string) {
 }
 
 func (h *sessionEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
-	h.currentToolID = id
 	now := time.Now()
 	h.manager.addOutput(h.sessionID, OutputLine{
 		Timestamp: now,
@@ -76,12 +73,21 @@ func (h *sessionEventHandler) OnToolStart(name, id string, input map[string]inte
 }
 
 func (h *sessionEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
-	h.lastCompletedToolID = id
 	now := time.Now()
 
-	// Update the existing tool line in-place
+	h.updateToolLine(name, id, input, result, isError, now)
+	h.clearToolProgress()
+}
+
+func (h *sessionEventHandler) OnToolResult(name, id string, content interface{}, isError bool) {
+	if id == "" {
+		return
+	}
+	h.updateToolLine(name, id, nil, content, isError, time.Now())
+}
+
+func (h *sessionEventHandler) updateToolLine(name, id string, input map[string]interface{}, result interface{}, isError bool, now time.Time) {
 	h.manager.updateToolOutput(h.sessionID, id, func(line *OutputLine) {
-		// Update input and content (input is nil at OnToolStart, available now)
 		if input != nil {
 			line.ToolInput = input
 			line.Content = formatToolContent(name, input)
@@ -93,44 +99,13 @@ func (h *sessionEventHandler) OnToolComplete(name, id string, input map[string]i
 		} else {
 			line.ToolState = ToolStateComplete
 		}
-		// Calculate duration from StartTime
 		if !line.StartTime.IsZero() {
 			line.DurationMs = now.Sub(line.StartTime).Milliseconds()
 		}
-	})
-
-	recent := h.manager.RecentOutputLines(h.sessionID, sessionmodel.RecentOutputDisplayLines)
-	h.manager.updateSessionProgress(h.sessionID, func(p *SessionProgress) {
-		p.CurrentTool = ""
-		p.CurrentPhase = ""
-		p.LastActivity = time.Now()
-		p.RecentOutput = recent
 	})
 }
 
-func (h *sessionEventHandler) OnToolResult(content interface{}, isError bool) {
-	toolID := h.lastCompletedToolID
-	if toolID == "" {
-		toolID = h.currentToolID
-	}
-	if toolID == "" {
-		return
-	}
-	now := time.Now()
-
-	h.manager.updateToolOutput(h.sessionID, toolID, func(line *OutputLine) {
-		line.ToolResult = content
-		line.IsError = isError
-		if isError {
-			line.ToolState = ToolStateError
-		} else {
-			line.ToolState = ToolStateComplete
-		}
-		if !line.StartTime.IsZero() {
-			line.DurationMs = now.Sub(line.StartTime).Milliseconds()
-		}
-	})
-
+func (h *sessionEventHandler) clearToolProgress() {
 	recent := h.manager.RecentOutputLines(h.sessionID, sessionmodel.RecentOutputDisplayLines)
 	h.manager.updateSessionProgress(h.sessionID, func(p *SessionProgress) {
 		p.CurrentTool = ""
@@ -138,7 +113,6 @@ func (h *sessionEventHandler) OnToolResult(content interface{}, isError bool) {
 		p.LastActivity = time.Now()
 		p.RecentOutput = recent
 	})
-	h.lastCompletedToolID = ""
 }
 
 // formatToolContent creates a display-friendly content string for tool results.

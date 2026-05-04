@@ -187,7 +187,7 @@ func TestToolResult_Success_NotifiesEventHandlerAtNormalVerbosity(t *testing.T) 
 	var gotIsError bool
 	var called bool
 	r.SetEventHandler(&testEventHandler{
-		onToolResult: func(content interface{}, isError bool) {
+		onToolResult: func(name, id string, content interface{}, isError bool) {
 			called = true
 			gotContent = content
 			gotIsError = isError
@@ -209,17 +209,22 @@ func TestToolResult_Success_NotifiesEventHandlerAtNormalVerbosity(t *testing.T) 
 
 func TestToolResult_Error_NotifiesEventHandlerAtQuietVerbosity(t *testing.T) {
 	r, buf := newTestRenderer(VerbosityQuiet)
+	var gotName, gotID string
 	var gotContent interface{}
 	var gotIsError bool
 	var called bool
 	r.SetEventHandler(&testEventHandler{
-		onToolResult: func(content interface{}, isError bool) {
+		onToolResult: func(name, id string, content interface{}, isError bool) {
 			called = true
+			gotName = name
+			gotID = id
 			gotContent = content
 			gotIsError = isError
 		},
 	})
 
+	r.ToolStart("Read", "tool-1")
+	r.ToolComplete("Read", map[string]interface{}{"file_path": "/tmp/test.go"})
 	r.ToolResult("something failed", true)
 
 	if !strings.Contains(buf.String(), "something failed") {
@@ -227,6 +232,9 @@ func TestToolResult_Error_NotifiesEventHandlerAtQuietVerbosity(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("EventHandler should receive error tool result at quiet verbosity")
+	}
+	if gotName != "Read" || gotID != "tool-1" {
+		t.Errorf("OnToolResult got tool (%q, %q), want (%q, %q)", gotName, gotID, "Read", "tool-1")
 	}
 	if gotContent != "something failed" || !gotIsError {
 		t.Errorf("OnToolResult got (%v, %v), want (%q, true)", gotContent, gotIsError, "something failed")
@@ -247,7 +255,7 @@ func TestToolResult_InternalErrorFilteringIsTerminalOnly(t *testing.T) {
 	var gotIsError bool
 	var called bool
 	r.SetEventHandler(&testEventHandler{
-		onToolResult: func(content interface{}, isError bool) {
+		onToolResult: func(name, id string, content interface{}, isError bool) {
 			called = true
 			gotContent = content
 			gotIsError = isError
@@ -511,7 +519,7 @@ type testEventHandler struct {
 	onText         func(string)
 	onToolStart    func(name, id string, input map[string]interface{})
 	onToolComplete func(name, id string, input map[string]interface{}, result interface{}, isError bool)
-	onToolResult   func(content interface{}, isError bool)
+	onToolResult   func(name, id string, content interface{}, isError bool)
 	onStatus       func(string)
 }
 
@@ -533,9 +541,9 @@ func (h *testEventHandler) OnToolComplete(name, id string, input map[string]inte
 	}
 }
 
-func (h *testEventHandler) OnToolResult(content interface{}, isError bool) {
+func (h *testEventHandler) OnToolResult(name, id string, content interface{}, isError bool) {
 	if h.onToolResult != nil {
-		h.onToolResult(content, isError)
+		h.onToolResult(name, id, content, isError)
 	}
 }
 

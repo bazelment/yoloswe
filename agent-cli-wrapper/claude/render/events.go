@@ -24,7 +24,7 @@ type EventHandler interface {
 	OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool)
 
 	// OnToolResult is called when a tool result is emitted after completion.
-	OnToolResult(content interface{}, isError bool)
+	OnToolResult(name, id string, content interface{}, isError bool)
 
 	// OnTurnComplete is called when a conversation turn finishes.
 	OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64)
@@ -44,7 +44,7 @@ func (NoOpEventHandler) OnText(string)                                          
 func (NoOpEventHandler) OnThinking(string)                                                {}
 func (NoOpEventHandler) OnToolStart(string, string, map[string]interface{})               {}
 func (NoOpEventHandler) OnToolComplete(string, string, map[string]interface{}, any, bool) {}
-func (NoOpEventHandler) OnToolResult(any, bool)                                           {}
+func (NoOpEventHandler) OnToolResult(string, string, any, bool)                           {}
 func (NoOpEventHandler) OnTurnComplete(int, bool, int64, float64)                         {}
 func (NoOpEventHandler) OnStatus(string)                                                  {}
 func (NoOpEventHandler) OnError(error, string)                                            {}

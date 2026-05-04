@@ -29,7 +29,7 @@ func TestSessionEventHandler_OnToolResultUpdatesCompletedToolLine(t *testing.T) 
 
 	handler.OnToolStart("Read", "tool-1", nil)
 	handler.OnToolComplete("Read", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
-	handler.OnToolResult("file contents", false)
+	handler.OnToolResult("Read", "tool-1", "file contents", false)
 
 	output := manager.GetSessionOutput(sessionID)
 	require.Len(t, output, 1)
@@ -46,7 +46,7 @@ func TestSessionEventHandler_OnToolResultMarksError(t *testing.T) {
 
 	handler.OnToolStart("Read", "tool-1", nil)
 	handler.OnToolComplete("Read", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
-	handler.OnToolResult("failed", true)
+	handler.OnToolResult("Read", "tool-1", "failed", true)
 
 	output := manager.GetSessionOutput(sessionID)
 	require.Len(t, output, 1)
@@ -57,13 +57,13 @@ func TestSessionEventHandler_OnToolResultMarksError(t *testing.T) {
 	assert.True(t, line.IsError)
 }
 
-func TestSessionEventHandler_OnToolResultUsesLastCompletedTool(t *testing.T) {
+func TestSessionEventHandler_OnToolResultUsesExplicitToolID(t *testing.T) {
 	manager, handler, sessionID := newTestSessionEventHandler(t)
 
 	handler.OnToolStart("Read", "tool-1", nil)
 	handler.OnToolComplete("Read", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
 	handler.OnToolStart("Bash", "tool-2", nil)
-	handler.OnToolResult("file contents", false)
+	handler.OnToolResult("Read", "tool-1", "file contents", false)
 
 	output := manager.GetSessionOutput(sessionID)
 	require.Len(t, output, 2)
@@ -71,4 +71,16 @@ func TestSessionEventHandler_OnToolResultUsesLastCompletedTool(t *testing.T) {
 	assert.Equal(t, ToolStateComplete, output[0].ToolState)
 	assert.Nil(t, output[1].ToolResult)
 	assert.Equal(t, ToolStateRunning, output[1].ToolState)
+}
+
+func TestSessionEventHandler_OnToolResultIgnoresMissingToolID(t *testing.T) {
+	manager, handler, sessionID := newTestSessionEventHandler(t)
+
+	handler.OnToolStart("Read", "tool-1", nil)
+	handler.OnToolComplete("Read", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
+	handler.OnToolResult("Read", "", "file contents", false)
+
+	output := manager.GetSessionOutput(sessionID)
+	require.Len(t, output, 1)
+	assert.Nil(t, output[0].ToolResult)
 }

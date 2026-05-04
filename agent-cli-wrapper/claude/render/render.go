@@ -284,12 +284,10 @@ func (r *Renderer) ToolResult(content interface{}, isError bool) {
 	defer r.mu.Unlock()
 
 	if r.eventHandler != nil {
-		r.eventHandler.OnToolResult(content, isError)
+		r.eventHandler.OnToolResult(r.lastCompletedToolName, r.lastCompletedToolID, content, isError)
 	}
-	if r.lastCompletedToolName != "" || r.lastCompletedToolID != "" {
-		r.lastCompletedToolName = ""
-		r.lastCompletedToolID = ""
-	}
+	r.lastCompletedToolName = ""
+	r.lastCompletedToolID = ""
 
 	// Errors always shown (even in Quiet); success results at Verbose+
 	if !isError && r.verbosity < VerbosityVerbose {
