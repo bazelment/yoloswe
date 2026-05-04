@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 func TestDelegatorRunnerConstruction(t *testing.T) {
@@ -73,6 +75,42 @@ func TestDelegatorToolRegistry(t *testing.T) {
 	assert.Contains(t, toolNames, "stop_session")
 	assert.Contains(t, toolNames, "get_session_progress")
 	assert.Contains(t, toolNames, "send_followup")
+}
+
+func TestDelegatorRunnerForwardEventForwardsCLIToolResult(t *testing.T) {
+	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
+	defer m.Close()
+
+	sessionID := SessionID("test-session")
+	m.AddSession(&Session{
+		ID:       sessionID,
+		Status:   StatusRunning,
+		Progress: &SessionProgress{},
+	})
+	m.InitOutputBuffer(sessionID)
+
+	runner := &delegatorRunner{
+		eventHandler: newSessionEventHandler(m, sessionID),
+	}
+	runner.forwardEvent(claude.ToolStartEvent{Name: "Read", ID: "tool-1"})
+	runner.forwardEvent(claude.ToolCompleteEvent{
+		Name:  "Read",
+		ID:    "tool-1",
+		Input: map[string]interface{}{"file_path": "x"},
+	})
+	runner.forwardEvent(claude.CLIToolResultEvent{
+		ToolName:  "Read",
+		ToolUseID: "tool-1",
+		Content:   "file contents",
+		IsError:   false,
+	})
+
+	output := m.GetSessionOutput(sessionID)
+	require.Len(t, output, 1)
+	assert.Equal(t, "tool-1", output[0].ToolID)
+	assert.Equal(t, "Read", output[0].ToolName)
+	assert.Equal(t, "file contents", output[0].ToolResult)
+	assert.False(t, output[0].IsError)
 }
 
 func TestDelegatorSystemPromptWithModels(t *testing.T) {

@@ -234,24 +234,28 @@ func (r *delegatorRunner) forwardEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			switch e := evt.(type) {
-			case claude.TextEvent:
-				r.eventHandler.OnText(e.Text)
-			case claude.ThinkingEvent:
-				r.eventHandler.OnThinking(e.Thinking)
-			case claude.ToolStartEvent:
-				r.eventHandler.OnToolStart(e.Name, e.ID, nil)
-			case claude.ToolCompleteEvent:
-				r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, nil, false)
-			case claude.CLIToolResultEvent:
-				r.eventHandler.OnToolComplete(e.ToolName, e.ToolUseID, nil, e.Content, e.IsError)
-			case claude.TurnCompleteEvent:
-				// TurnEnd is emitted synchronously by the manager after
-				// RunTurn returns, so we skip it here to avoid duplicates.
-				_ = e
-			case claude.ErrorEvent:
-				r.eventHandler.OnError(e.Error, "delegator")
-			}
+			r.forwardEvent(evt)
 		}
+	}
+}
+
+func (r *delegatorRunner) forwardEvent(evt claude.Event) {
+	switch e := evt.(type) {
+	case claude.TextEvent:
+		r.eventHandler.OnText(e.Text)
+	case claude.ThinkingEvent:
+		r.eventHandler.OnThinking(e.Thinking)
+	case claude.ToolStartEvent:
+		r.eventHandler.OnToolStart(e.Name, e.ID, nil)
+	case claude.ToolCompleteEvent:
+		r.eventHandler.OnToolComplete(e.Name, e.ID, e.Input, nil, false)
+	case claude.CLIToolResultEvent:
+		r.eventHandler.OnToolResult(e.ToolName, e.ToolUseID, e.Content, e.IsError)
+	case claude.TurnCompleteEvent:
+		// TurnEnd is emitted synchronously by the manager after RunTurn returns,
+		// so we skip it here to avoid duplicates.
+		_ = e
+	case claude.ErrorEvent:
+		r.eventHandler.OnError(e.Error, "delegator")
 	}
 }

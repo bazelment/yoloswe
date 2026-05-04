@@ -181,11 +181,141 @@ func TestToolResult_Success_VerboseOnly(t *testing.T) {
 	}
 }
 
+func TestToolResult_Success_NotifiesEventHandlerAtNormalVerbosity(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityNormal)
+	var gotContent interface{}
+	var gotIsError bool
+	var gotName, gotID string
+	var called bool
+	r.SetEventHandler(&testEventHandler{
+		onToolResult: func(name, id string, content interface{}, isError bool) {
+			called = true
+			gotName = name
+			gotID = id
+			gotContent = content
+			gotIsError = isError
+		},
+	})
+
+	r.ToolStart("Read", "tool-1")
+	r.ToolComplete("Read", map[string]interface{}{"file_path": "/tmp/test.go"})
+	buf.Reset()
+	r.ToolResult("success output", false)
+
+	if buf.Len() != 0 {
+		t.Errorf("Normal mode should still suppress successful tool result output, got %q", buf.String())
+	}
+	if !called {
+		t.Fatal("EventHandler should receive successful tool result at normal verbosity")
+	}
+	if gotName != "Read" || gotID != "tool-1" {
+		t.Errorf("OnToolResult got tool (%q, %q), want (%q, %q)", gotName, gotID, "Read", "tool-1")
+	}
+	if gotContent != "success output" || gotIsError {
+		t.Errorf("OnToolResult got (%v, %v), want (%q, false)", gotContent, gotIsError, "success output")
+	}
+}
+
+func TestToolResultForTool_UsesExplicitToolIdentity(t *testing.T) {
+	r, _ := newTestRenderer(VerbosityNormal)
+	var gotName, gotID string
+	var gotContent interface{}
+	var gotIsError bool
+	r.SetEventHandler(&testEventHandler{
+		onToolResult: func(name, id string, content interface{}, isError bool) {
+			gotName = name
+			gotID = id
+			gotContent = content
+			gotIsError = isError
+		},
+	})
+
+	r.ToolStart("Bash", "tool-2")
+	r.ToolComplete("Bash", map[string]interface{}{"command": "echo hi"})
+	r.ToolResultForTool("Read", "tool-1", "file contents", false)
+
+	if gotName != "Read" || gotID != "tool-1" {
+		t.Errorf("OnToolResult got tool (%q, %q), want (%q, %q)", gotName, gotID, "Read", "tool-1")
+	}
+	if gotContent != "file contents" || gotIsError {
+		t.Errorf("OnToolResult got (%v, %v), want (%q, false)", gotContent, gotIsError, "file contents")
+	}
+
+	r.ToolResult("bash output", false)
+
+	if gotName != "Bash" || gotID != "tool-2" {
+		t.Errorf("fallback OnToolResult got tool (%q, %q), want (%q, %q)", gotName, gotID, "Bash", "tool-2")
+	}
+	if gotContent != "bash output" || gotIsError {
+		t.Errorf("fallback OnToolResult got (%v, %v), want (%q, false)", gotContent, gotIsError, "bash output")
+	}
+}
+
+func TestToolResult_Error_NotifiesEventHandlerAtQuietVerbosity(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityQuiet)
+	var gotName, gotID string
+	var gotContent interface{}
+	var gotIsError bool
+	var called bool
+	r.SetEventHandler(&testEventHandler{
+		onToolResult: func(name, id string, content interface{}, isError bool) {
+			called = true
+			gotName = name
+			gotID = id
+			gotContent = content
+			gotIsError = isError
+		},
+	})
+
+	r.ToolStart("Read", "tool-1")
+	r.ToolComplete("Read", map[string]interface{}{"file_path": "/tmp/test.go"})
+	r.ToolResult("something failed", true)
+
+	if !strings.Contains(buf.String(), "something failed") {
+		t.Errorf("Quiet mode should show error tool result, got %q", buf.String())
+	}
+	if !called {
+		t.Fatal("EventHandler should receive error tool result at quiet verbosity")
+	}
+	if gotName != "Read" || gotID != "tool-1" {
+		t.Errorf("OnToolResult got tool (%q, %q), want (%q, %q)", gotName, gotID, "Read", "tool-1")
+	}
+	if gotContent != "something failed" || !gotIsError {
+		t.Errorf("OnToolResult got (%v, %v), want (%q, true)", gotContent, gotIsError, "something failed")
+	}
+}
+
 func TestToolResult_SkipsInternalErrors(t *testing.T) {
 	r, buf := newTestRenderer(VerbosityNormal)
 	r.ToolResult("Answer questions?", true)
 	if buf.Len() != 0 {
 		t.Errorf("Internal AskUserQuestion errors should be skipped, got %q", buf.String())
+	}
+}
+
+func TestToolResult_InternalErrorFilteringIsTerminalOnly(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityNormal)
+	var gotContent interface{}
+	var gotIsError bool
+	var called bool
+	r.SetEventHandler(&testEventHandler{
+		onToolResult: func(name, id string, content interface{}, isError bool) {
+			called = true
+			gotContent = content
+			gotIsError = isError
+		},
+	})
+
+	r.ToolResult("Answer questions?", true)
+
+	if buf.Len() != 0 {
+		t.Errorf("Internal AskUserQuestion errors should be skipped in terminal output, got %q", buf.String())
+	}
+	if !called {
+		t.Fatal("EventHandler should receive internal tool result")
+	}
+	if gotContent != "Answer questions?" || !gotIsError {
+		t.Errorf("OnToolResult got (%v, %v), want (%q, true)", gotContent, gotIsError, "Answer questions?")
 	}
 }
 
@@ -433,6 +563,7 @@ type testEventHandler struct {
 	onText         func(string)
 	onToolStart    func(name, id string, input map[string]interface{})
 	onToolComplete func(name, id string, input map[string]interface{}, result interface{}, isError bool)
+	onToolResult   func(name, id string, content interface{}, isError bool)
 	onStatus       func(string)
 }
 
@@ -451,6 +582,12 @@ func (h *testEventHandler) OnToolStart(name, id string, input map[string]interfa
 func (h *testEventHandler) OnToolComplete(name, id string, input map[string]interface{}, result interface{}, isError bool) {
 	if h.onToolComplete != nil {
 		h.onToolComplete(name, id, input, result, isError)
+	}
+}
+
+func (h *testEventHandler) OnToolResult(name, id string, content interface{}, isError bool) {
+	if h.onToolResult != nil {
+		h.onToolResult(name, id, content, isError)
 	}
 }
 
