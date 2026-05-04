@@ -187,11 +187,7 @@ func TestPollForFeedback_ContextCanceled(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel after a short delay.
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
-	}()
+	cancel()
 
 	logger := discardLogger()
 	_, err := PollForFeedback(ctx, mt, "issue-1", time.Time{}, 50*time.Millisecond, logger, nil)

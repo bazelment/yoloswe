@@ -207,6 +207,7 @@ Transitions with feedback loops:
 
 Polls tracker every N seconds for new comments. Filters out bot comments. Parses keywords:
 - `approve` / `lgtm` / `ship it` → `FeedbackApprove`
+- `approve all` / `approve_all` / `yolo` → `FeedbackApproveAll`
 - `redo` / `retry` → `FeedbackRedo`
 - Anything else → `FeedbackComment` (incorporated into next agent prompt)
 

@@ -484,11 +484,12 @@ func (w *Workflow) applyReviewApproval(ctx context.Context, approveTarget Workfl
 	w.logger.Info(approval.logMessage, "step", w.state.Current())
 	w.status(approval.statusMessage)
 	w.feedback = ""
-	if approval.approveAll {
-		w.approveAllRemaining = true
-	}
 	if err := w.approveTransition(ctx, approveTarget, approval.transitionReason); err != nil {
 		w.fail(ctx, err)
+		return
+	}
+	if approval.approveAll {
+		w.approveAllRemaining = true
 	}
 }
 
