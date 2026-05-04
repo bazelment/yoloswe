@@ -237,8 +237,8 @@ func TestBootstrapForceOverwrites(t *testing.T) {
 	assert.Contains(t, string(got), "jiradozer bootstrap")
 }
 
-// TestBootstrapDefaultPath verifies direct bootstrap invocation still writes
-// jiradozer.yaml when neither --config nor --output is set by a root command.
+// TestBootstrapDefaultPath verifies standalone bootstrap invocation writes to
+// the configured default path when no output override is supplied.
 func TestBootstrapDefaultPath(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "test")
 
