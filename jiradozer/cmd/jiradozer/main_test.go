@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -265,66 +264,53 @@ func TestBootstrapUsesConfigPathFromRoot(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "test")
 
 	tests := []struct {
-		name string
-		args []string
+		name     string
+		wantFile string
+		args     []string
 	}{
 		{
-			name: "config before bootstrap",
-			args: []string{"--config", "custom.yaml", "bootstrap"},
+			name:     "config before bootstrap",
+			wantFile: "custom.yaml",
+			args:     []string{"--config", "custom.yaml", "bootstrap"},
 		},
 		{
-			name: "config after bootstrap",
-			args: []string{"bootstrap", "--config", "custom.yaml"},
+			name:     "config after bootstrap",
+			wantFile: "custom.yaml",
+			args:     []string{"bootstrap", "--config", "custom.yaml"},
 		},
 		{
-			name: "output overrides config",
-			args: []string{"bootstrap", "--config", "config.yaml", "--output", "output.yaml"},
+			name:     "output overrides config",
+			wantFile: "output.yaml",
+			args:     []string{"bootstrap", "--config", "config.yaml", "--output", "output.yaml"},
 		},
 		{
-			name: "output still works without config",
-			args: []string{"bootstrap", "--output", "output.yaml"},
+			name:     "output still works without config",
+			wantFile: "output.yaml",
+			args:     []string{"bootstrap", "--output", "output.yaml"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			args := append([]string{}, tt.args...)
-			for i, arg := range args {
-				if filepath.Ext(arg) == ".yaml" {
-					args[i] = filepath.Join(dir, arg)
-				}
-			}
+			t.Chdir(dir)
 
 			cmd := newRootCommand(&cliapp.Options{ToolName: "jiradozer"})
 			var out bytes.Buffer
 			cmd.SetOut(&out)
-			cmd.SetArgs(args)
+			cmd.SetArgs(tt.args)
 			require.NoError(t, cmd.Execute())
 
-			wantFile := "custom.yaml"
-			if containsArg(tt.args, "output.yaml") {
-				wantFile = "output.yaml"
-			}
-			got, err := os.ReadFile(filepath.Join(dir, wantFile))
+			got, err := os.ReadFile(tt.wantFile)
 			require.NoError(t, err)
 			assert.Contains(t, string(got), "jiradozer bootstrap")
 
-			if wantFile == "output.yaml" {
-				_, err := os.Stat(filepath.Join(dir, "config.yaml"))
+			if tt.wantFile == "output.yaml" {
+				_, err := os.Stat("config.yaml")
 				assert.ErrorIs(t, err, os.ErrNotExist)
 			}
 		})
 	}
-}
-
-func containsArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
@@ -350,22 +336,15 @@ func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			configPath := filepath.Join(dir, "custom.yaml")
-			require.NoError(t, os.WriteFile(configPath, content, 0o644))
-
-			args := append([]string{}, tt.args...)
-			for i, arg := range args {
-				if arg == "custom.yaml" {
-					args[i] = configPath
-				}
-			}
+			t.Chdir(dir)
+			require.NoError(t, os.WriteFile("custom.yaml", content, 0o644))
 
 			cmd := newRootCommand(&cliapp.Options{ToolName: "jiradozer"})
 			var out bytes.Buffer
 			cmd.SetOut(&out)
-			cmd.SetArgs(args)
+			cmd.SetArgs(tt.args)
 			require.NoError(t, cmd.Execute())
-			assert.Contains(t, out.String(), "ok: "+configPath)
+			assert.Contains(t, out.String(), "ok: custom.yaml")
 		})
 	}
 }
