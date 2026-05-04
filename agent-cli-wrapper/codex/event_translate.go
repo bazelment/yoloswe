@@ -147,18 +147,25 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 		if err := json.Unmarshal(notif.Msg, &msg); err != nil {
 			return MappedEvent{}, false
 		}
-		if msg.Info == nil || msg.Info.TotalTokenUsage == nil {
+		if msg.Info == nil {
 			return MappedEvent{}, false
 		}
-		var usage TurnUsage
-		if msg.Info.TotalTokenUsage != nil {
-			usage = TurnUsage{
-				InputTokens:           msg.Info.TotalTokenUsage.InputTokens,
-				CachedInputTokens:     msg.Info.TotalTokenUsage.CachedInputTokens,
-				OutputTokens:          msg.Info.TotalTokenUsage.OutputTokens,
-				ReasoningOutputTokens: msg.Info.TotalTokenUsage.ReasoningOutputTokens,
-				TotalTokens:           msg.Info.TotalTokenUsage.TotalTokens,
-			}
+		// Prefer LastTokenUsage (per-turn) when populated; fall back to
+		// TotalTokenUsage so we still emit a usage event on protocol
+		// versions that omit the per-turn field.
+		src := msg.Info.LastTokenUsage
+		if src == nil {
+			src = msg.Info.TotalTokenUsage
+		}
+		if src == nil {
+			return MappedEvent{}, false
+		}
+		usage := TurnUsage{
+			InputTokens:           src.InputTokens,
+			CachedInputTokens:     src.CachedInputTokens,
+			OutputTokens:          src.OutputTokens,
+			ReasoningOutputTokens: src.ReasoningOutputTokens,
+			TotalTokens:           src.TotalTokens,
 		}
 		return MappedEvent{
 			Kind:     MappedEventTokenUsage,

@@ -140,6 +140,12 @@ func codexTurnOptions(cfg ExecuteConfig) []codex.TurnOption {
 }
 
 // codexResultToAgentResult converts a codex.TurnResult to AgentResult.
+//
+// CostUSD is left at zero: the codex protocol does not currently emit a
+// per-turn cost, and we deliberately do not invent one from a hard-coded
+// pricing table — wrong numbers in operator dashboards are worse than
+// missing ones. Token counts alone are sufficient to detect a runaway
+// agent. Revisit if codex starts shipping cost in token_count.
 func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 	if r == nil {
 		return nil

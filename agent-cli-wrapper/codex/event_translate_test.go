@@ -25,6 +25,64 @@ func TestParseMappedNotification_TurnCompleted(t *testing.T) {
 	}
 }
 
+// TestParseMappedNotification_TokenCount_FallbackToTotal verifies that when
+// a TokenCount notification carries only TotalTokenUsage, the mapper still
+// emits a usage event by falling back to the cumulative total.
+func TestParseMappedNotification_TokenCount_FallbackToTotal(t *testing.T) {
+	notif := CodexEventNotification{
+		ConversationID: "conv-1",
+		Msg: mustJSON(t, TokenCountMsg{
+			Info: &TokenUsageInfo{
+				TotalTokenUsage: &TokenUsage{InputTokens: 200, OutputTokens: 75, TotalTokens: 275},
+			},
+		}),
+	}
+	params := mustJSON(t, notif)
+
+	ev, ok := ParseMappedNotification(NotifyCodexEventTokenCount, params)
+	if !ok {
+		t.Fatal("expected mapped event when only TotalTokenUsage is set")
+	}
+	if ev.Kind != MappedEventTokenUsage {
+		t.Fatalf("Kind = %v, want token usage", ev.Kind)
+	}
+	if ev.Usage.InputTokens != 200 || ev.Usage.OutputTokens != 75 {
+		t.Fatalf("Usage = %+v, want input=200 output=75", ev.Usage)
+	}
+}
+
+// TestParseMappedNotification_TokenCount_PrefersLast verifies that when both
+// LastTokenUsage and TotalTokenUsage are present, the per-turn last value wins.
+func TestParseMappedNotification_TokenCount_PrefersLast(t *testing.T) {
+	notif := CodexEventNotification{
+		ConversationID: "conv-1",
+		Msg: mustJSON(t, TokenCountMsg{
+			Info: &TokenUsageInfo{
+				TotalTokenUsage: &TokenUsage{InputTokens: 1000, OutputTokens: 500},
+				LastTokenUsage:  &TokenUsage{InputTokens: 100, OutputTokens: 50},
+			},
+		}),
+	}
+	params := mustJSON(t, notif)
+
+	ev, ok := ParseMappedNotification(NotifyCodexEventTokenCount, params)
+	if !ok {
+		t.Fatal("expected mapped event")
+	}
+	if ev.Usage.InputTokens != 100 || ev.Usage.OutputTokens != 50 {
+		t.Fatalf("Usage = %+v, want input=100 output=50 (from Last, not Total)", ev.Usage)
+	}
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return data
+}
+
 func TestTurnNumberFromID(t *testing.T) {
 	tests := []struct {
 		name   string

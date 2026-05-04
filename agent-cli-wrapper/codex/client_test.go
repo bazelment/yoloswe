@@ -581,6 +581,50 @@ func TestExtractErrorMessage(t *testing.T) {
 	}
 }
 
+// TestClient_TokenUsageFallsBackToTotal verifies that when a TokenCount
+// notification carries only TotalTokenUsage (no per-turn LastTokenUsage),
+// the fallback path still surfaces tokens on TurnCompletedEvent. Without
+// this, jiradozer's `agent completed` log reads zero tokens for every
+// codex run on protocol versions that omit the per-turn field.
+func TestClient_TokenUsageFallsBackToTotal(t *testing.T) {
+	client := NewClient(WithEventBufferSize(10))
+
+	thread := newThread(client, "thread-456", ThreadConfig{})
+	client.threads["thread-456"] = thread
+
+	tokenMsg := TokenCountMsg{
+		Info: &TokenUsageInfo{
+			TotalTokenUsage: &TokenUsage{
+				InputTokens:  321,
+				OutputTokens: 99,
+				TotalTokens:  420,
+			},
+			// LastTokenUsage intentionally nil — simulates protocol version
+			// that only emits cumulative totals.
+		},
+	}
+	tokenMsgJSON, _ := json.Marshal(tokenMsg)
+	tokenNotif := CodexEventNotification{ConversationID: "thread-456", Msg: tokenMsgJSON}
+	tokenNotifJSON, _ := json.Marshal(tokenNotif)
+	client.handleTokenCount(tokenNotifJSON)
+	<-client.events // drain TokenUsageEvent
+
+	turnNotif := TurnCompletedNotification{ThreadID: "thread-456", Turn: Turn{ID: "t1", Status: "completed"}}
+	turnNotifJSON, _ := json.Marshal(turnNotif)
+	client.handleTurnCompleted(turnNotifJSON)
+
+	select {
+	case event := <-client.events:
+		e, ok := event.(TurnCompletedEvent)
+		require.True(t, ok, "expected TurnCompletedEvent, got %T", event)
+		require.Equal(t, int64(321), e.Usage.InputTokens, "fallback to total should populate input tokens")
+		require.Equal(t, int64(99), e.Usage.OutputTokens, "fallback to total should populate output tokens")
+		require.Equal(t, int64(420), e.Usage.TotalTokens)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("TurnCompletedEvent not received")
+	}
+}
+
 // Test that usage is cleared after turn completion
 func TestClient_TokenUsageClearedAfterTurn(t *testing.T) {
 	client := NewClient(WithEventBufferSize(10))
