@@ -2,7 +2,12 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "jiradozer_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "bootstrap.go",
+        "main.go",
+        "run.go",
+        "validate_config.go",
+    ],
     importpath = "github.com/bazelment/yoloswe/jiradozer/cmd/jiradozer",
     visibility = ["//visibility:private"],
     deps = [
@@ -27,12 +32,22 @@ go_binary(
 
 go_test(
     name = "jiradozer_test",
-    srcs = ["main_test.go"],
+    srcs = [
+        "bootstrap_test.go",
+        "main_test.go",
+    ],
+    data = [
+        "//jiradozer:jiradozer.example.yaml",
+    ],
     embed = [":jiradozer_lib"],
+    rundir = ".",
     deps = [
+        "//agent-cli-wrapper/claude/render",
         "//cliapp",
         "//jiradozer",
         "//jiradozer/tracker",
+        "@com_github_spf13_cobra//:cobra",
         "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
     ],
 )

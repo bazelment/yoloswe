@@ -4,3 +4,20 @@ tracker:
 
 agent:
   model: sonnet
+
+# Every named step needs a prompt (or rounds) and a comment_template.
+plan:
+  prompt: "Plan {{.Identifier}}: {{.Title}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "Open PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "Run tests"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship it"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"

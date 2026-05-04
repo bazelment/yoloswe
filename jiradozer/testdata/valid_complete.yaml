@@ -22,15 +22,28 @@ plan:
   permission_mode: plan
   max_turns: 5
   max_budget_usd: 20.0
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
 
 build:
+  prompt: "Build {{.Identifier}}"
   permission_mode: bypass
   max_turns: 30
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+
+create_pr:
+  prompt: "Open a PR"
+  permission_mode: bypass
+  max_turns: 5
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
 
 validate:
+  prompt: "Run tests"
   permission_mode: bypass
   max_turns: 10
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
 
 ship:
+  prompt: "Ship it"
   permission_mode: bypass
   max_turns: 10
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"

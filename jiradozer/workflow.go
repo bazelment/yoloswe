@@ -12,6 +12,20 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
 
+// CommentData is the template context for rendering tracker comment bodies
+// from StepConfig.CommentTemplate / RoundCommentTemplate.
+type CommentData struct {
+	Step        string // step name, e.g. "plan", "build"
+	Heading     string // capitalize(Step), e.g. "Plan", "Build"
+	Output      string // agent or command output for this step / round
+	Round       int    // 1-based round index; only meaningful for round comments
+	TotalRounds int    // total rounds; only meaningful for round comments
+}
+
+func renderCommentTemplate(tmplStr string, data CommentData) (string, error) {
+	return renderTemplate("comment", tmplStr, data)
+}
+
 // State keys for the stateIDs map, mapping logical workflow states to tracker state IDs.
 const (
 	stateKeyInProgress = "in_progress"
@@ -270,7 +284,17 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		allOutputs = append(allOutputs, output)
 
 		heading := capitalize(stepName)
-		comment := fmt.Sprintf("## %s Round %d/%d\n\n%s", heading, i+1, totalRounds, output)
+		comment, err := renderCommentTemplate(stepCfg.RoundCommentTemplate, CommentData{
+			Step:        stepName,
+			Heading:     heading,
+			Output:      output,
+			Round:       i + 1,
+			TotalRounds: totalRounds,
+		})
+		if err != nil {
+			w.fail(ctx, fmt.Errorf("%s round %d/%d: render round_comment_template: %w", stepName, i+1, totalRounds, err))
+			return
+		}
 		roundComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
 		if err != nil {
 			w.logger.Warn("failed to post round comment", "step", stepName, "round", i+1, "error", err)
@@ -332,7 +356,15 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.captureOutput(stepName, output)
 
 	heading := capitalize(stepName)
-	comment := fmt.Sprintf("## %s Complete\n\n%s", heading, output)
+	comment, err := renderCommentTemplate(stepCfg.CommentTemplate, CommentData{
+		Step:    stepName,
+		Heading: heading,
+		Output:  output,
+	})
+	if err != nil {
+		w.fail(ctx, fmt.Errorf("%s: render comment_template: %w", stepName, err))
+		return
+	}
 	resultComment, err := w.tracker.PostComment(ctx, w.issue.ID, comment)
 	if err != nil {
 		w.logger.Warn("failed to post step comment", "step", stepName, "error", err)

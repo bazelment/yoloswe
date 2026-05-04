@@ -51,6 +51,14 @@ func TestSessionResumption_PlanFeedbackLoop(t *testing.T) {
 		PermissionMode: "plan",
 		MaxTurns:       3,
 		MaxBudgetUSD:   1.0,
+		Prompt: `Issue: {{.Identifier}} — {{.Title}}
+{{- if .Description}}
+
+Description:
+{{.Description}}
+{{- end}}
+
+Create a brief implementation plan.`,
 	}
 
 	// --- Step 1: First execution (no session ID, no feedback) ---
@@ -107,6 +115,14 @@ func TestSessionResumption_BuildAfterPlan(t *testing.T) {
 		PermissionMode: "plan",
 		MaxTurns:       3,
 		MaxBudgetUSD:   1.0,
+		Prompt: `Issue: {{.Identifier}} — {{.Title}}
+{{- if .Description}}
+
+Description:
+{{.Description}}
+{{- end}}
+
+Create a short implementation plan.`,
 	}
 
 	// Plan step.
@@ -124,6 +140,14 @@ func TestSessionResumption_BuildAfterPlan(t *testing.T) {
 		PermissionMode: "bypass",
 		MaxTurns:       3,
 		MaxBudgetUSD:   1.0,
+		Prompt: `Issue: {{.Identifier}} — {{.Title}}
+{{- if .Plan}}
+
+Approved Plan:
+{{.Plan}}
+{{- end}}
+
+Implement the changes.`,
 	}
 	data.Plan = planRes.Output
 

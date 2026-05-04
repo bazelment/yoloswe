@@ -3,8 +3,11 @@ package main
 import (
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
@@ -109,6 +112,59 @@ func TestResolveRepoName(t *testing.T) {
 	}
 }
 
+// TestDryRunFlagPlacement verifies --dry-run is honored regardless of where
+// the user puts it relative to the run subcommand. Because the flag is
+// registered on both root and `run` (via registerRunFlags) but cobra only
+// records `Changed=true` on whichever FlagSet actually parsed it, a naive
+// `cmd.Flags().Changed("dry-run")` in run's RunE silently drops the flag
+// when the user wrote `jiradozer --dry-run run …`. Both invocation paths
+// run through dryRunChanged: the run-subcommand RunE consults runCmd, and
+// the back-compat root RunE (`jiradozer --dry-run` with no subcommand)
+// consults rootCmd directly.
+func TestDryRunFlagPlacement(t *testing.T) {
+	tests := []struct {
+		name     string
+		checkCmd string // "run" or "root" — which command's RunE actually fires
+		argv     []string
+		want     bool
+	}{
+		{name: "no dry-run", argv: []string{"run"}, checkCmd: "run", want: false},
+		{name: "dry-run on run subcommand", argv: []string{"run", "--dry-run"}, checkCmd: "run", want: true},
+		{name: "dry-run before run subcommand", argv: []string{"--dry-run", "run"}, checkCmd: "run", want: true},
+		// Back-compat path: bare `jiradozer --dry-run --filter team=ENG`
+		// (no `run`) lands on root's RunE, so dryRunChanged is invoked
+		// against rootCmd. registerRunFlags is bound on root for this case.
+		{name: "dry-run on root, no subcommand", argv: []string{"--dry-run"}, checkCmd: "root", want: true},
+		{name: "no dry-run on root, no subcommand", argv: []string{}, checkCmd: "root", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rargs runArgs
+			rootCmd := &cobra.Command{
+				Use:  "jiradozer",
+				RunE: func(cmd *cobra.Command, _ []string) error { return nil },
+			}
+			runCmd := &cobra.Command{
+				Use:  "run",
+				RunE: func(cmd *cobra.Command, _ []string) error { return nil },
+			}
+			registerRunFlags(rootCmd, &rargs)
+			registerRunFlags(runCmd, &rargs)
+			rootCmd.AddCommand(runCmd)
+			rootCmd.SetArgs(tt.argv)
+			require.NoError(t, rootCmd.Execute())
+
+			target := runCmd
+			if tt.checkCmd == "root" {
+				target = rootCmd
+			}
+			got := dryRunChanged(target)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // Redaction is tested in cliapp/redact_test.go; jiradozer just composes its
 // sensitive flag list into cliapp.Options.SensitiveFlags.
 
@@ -151,5 +207,53 @@ func TestBuildChildArgs(t *testing.T) {
 				assert.NotContains(t, joined, want)
 			}
 		})
+	}
+}
+
+// TestBuildChildArgsOrdering pins the argv layout: persistent (root-level)
+// flags — --config and the standard --verbose/--verbosity/--color set —
+// must appear before the `run` subcommand token, and run-only flags
+// (--model, --thinking-level, --max-budget, --auto-approve) must appear
+// after it. Cobra's PersistentFlags inheritance means either side parses
+// today, but mixing breaks the rule that a flag is declared adjacent to
+// the command that owns it; this test fails fast if a future edit puts a
+// run-only flag before `run` or vice versa.
+func TestBuildChildArgsOrdering(t *testing.T) {
+	app := &cliapp.App{Verbosity: render.VerbosityVerbose, Color: render.ColorAlways}
+	args := runArgs{
+		modelID:       "opus",
+		thinkingLevel: "max",
+		maxBudget:     12.5,
+		autoApprove:   "all",
+	}
+	got := buildChildArgs(app, args, "/tmp/jiradozer.yaml")
+
+	indexOf := func(needle string) int {
+		for i, a := range got {
+			if a == needle {
+				return i
+			}
+		}
+		return -1
+	}
+	runIdx := indexOf("run")
+	require.NotEqual(t, -1, runIdx, "argv must contain `run` subcommand token; got %v", got)
+
+	persistentBeforeRun := []string{"--config", "--verbose", "--color"}
+	for _, flag := range persistentBeforeRun {
+		idx := indexOf(flag)
+		if idx == -1 {
+			continue
+		}
+		assert.Lessf(t, idx, runIdx,
+			"persistent flag %s must appear before `run` (got argv: %v)", flag, got)
+	}
+
+	runOnlyAfterRun := []string{"--model", "--thinking-level", "--max-budget", "--auto-approve"}
+	for _, flag := range runOnlyAfterRun {
+		idx := indexOf(flag)
+		require.NotEqualf(t, -1, idx, "argv must contain run-only flag %s; got %v", flag, got)
+		assert.Greaterf(t, idx, runIdx,
+			"run-only flag %s must appear after `run` (got argv: %v)", flag, got)
 	}
 }

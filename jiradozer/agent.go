@@ -31,81 +31,6 @@ type PromptData struct {
 	BuildOutput string // build output from the build step
 }
 
-// Default prompt templates for each step.
-
-const defaultPlanPrompt = `Issue: {{.Identifier}} — {{.Title}}
-{{- if .Description}}
-
-Description:
-{{.Description}}
-{{- end}}
-{{- if .URL}}
-
-URL: {{.URL}}
-{{- end}}
-{{- if .Labels}}
-Labels: {{.Labels}}
-{{- end}}
-
-Create a detailed implementation plan for this issue. Include: files to modify, approach, testing strategy, and any risks.`
-
-const defaultBuildPrompt = `Issue: {{.Identifier}} — {{.Title}}
-{{- if .Description}}
-
-Description:
-{{.Description}}
-{{- end}}
-{{- if .Plan}}
-
-Approved Plan:
-{{.Plan}}
-
-Implement the changes described in the approved plan above.
-{{- else}}
-
-No plan is available. Implement the changes based on the issue description above.
-{{- end}}`
-
-const defaultValidatePrompt = `Issue: {{.Identifier}} — {{.Title}}
-
-Run the project's tests and linters to validate the changes. Fix any failures you find. Report what passed and what you fixed.`
-
-const defaultCreatePRPrompt = `First, check for any uncommitted changes (staged or unstaged, including untracked files).
-- If there are uncommitted changes: stage them, commit with a clear message referencing the work done, and push to the remote.
-- If there are no uncommitted changes but unpushed commits: push to the remote.
-
-Then, check if a pull request already exists for the current branch against {{.BaseBranch}}.
-- If a PR exists: update its description to reflect the current state of the code. Report the PR URL.
-- If no PR exists: create one against {{.BaseBranch}} with a clear title and description. Report the PR URL.`
-
-const defaultShipPrompt = `Issue: {{.Identifier}} — {{.Title}}
-{{- if .URL}}
-
-Linear: {{.URL}}
-{{- end}}
-
-Check if a pull request already exists for the current branch against {{.BaseBranch}}.
-- If a PR exists: update its description if needed and ensure it is ready for review. Report the PR URL.
-- If no PR exists: create one using gh pr create with "{{.Identifier}}: {{.Title}}" as the title.`
-
-// DefaultPromptForStep returns the built-in default prompt template for a step name.
-func DefaultPromptForStep(stepName string) string {
-	switch stepName {
-	case "plan":
-		return defaultPlanPrompt
-	case "build":
-		return defaultBuildPrompt
-	case "validate":
-		return defaultValidatePrompt
-	case "create_pr":
-		return defaultCreatePRPrompt
-	case "ship":
-		return defaultShipPrompt
-	default:
-		return ""
-	}
-}
-
 func truncate(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) > maxLen {
@@ -125,7 +50,7 @@ type StepAgentResult struct {
 // On follow-up (resumeSessionID != ""), feedback is sent directly to the resumed session.
 // If renderer is non-nil, agent events are streamed to the terminal.
 func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
-	prompt, err := resolvePromptForExecution(cfg.Prompt, DefaultPromptForStep(stepName), data, feedback, resumeSessionID)
+	prompt, err := resolvePromptForExecution(stepName, cfg.Prompt, data, feedback, resumeSessionID)
 	if err != nil {
 		return StepAgentResult{}, fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
@@ -166,18 +91,20 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 }
 
 // resolvePromptForExecution determines the prompt to send to the agent.
-func resolvePromptForExecution(configPrompt, defaultPrompt string, data PromptData, feedback, resumeSessionID string) (string, error) {
+// On first execution (no resume session), configPrompt is required; users
+// supply prompts in their YAML (run `jiradozer bootstrap` to scaffold one).
+func resolvePromptForExecution(stepName, configPrompt string, data PromptData, feedback, resumeSessionID string) (string, error) {
 	// Resume: send feedback directly as the prompt.
 	if resumeSessionID != "" && feedback != "" {
 		return feedback, nil
 	}
 
-	// First execution: render template.
-	tmplStr := configPrompt
-	if tmplStr == "" {
-		tmplStr = defaultPrompt
+	if configPrompt == "" {
+		return "", fmt.Errorf("%s: prompt is required (run `jiradozer bootstrap` to generate a starter config)", stepName)
 	}
-	prompt, err := renderPrompt(tmplStr, data)
+
+	// First execution: render template.
+	prompt, err := renderPrompt(configPrompt, data)
 	if err != nil {
 		return "", err
 	}
@@ -647,7 +574,11 @@ func GenerateTitle(description string) string {
 }
 
 func renderPrompt(tmplStr string, data PromptData) (string, error) {
-	t, err := template.New("prompt").Parse(tmplStr)
+	return renderTemplate("prompt", tmplStr, data)
+}
+
+func renderTemplate(name, tmplStr string, data any) (string, error) {
+	t, err := template.New(name).Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}

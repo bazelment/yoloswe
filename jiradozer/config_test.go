@@ -93,7 +93,10 @@ func TestLoadConfig_MissingTrackerKind(t *testing.T) {
 func TestLoadConfig_InvalidTemplate(t *testing.T) {
 	_, err := LoadConfig("testdata/invalid_template.yaml")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "template")
+	// Pin to the prompt parse failure: every other step is well-formed so
+	// the load reaches plan's "{{.Identifier} missing closing brace" rather
+	// than tripping on a missing comment_template elsewhere.
+	assert.Contains(t, err.Error(), "plan.prompt template")
 }
 
 func TestLoadConfig_NonexistentFile(t *testing.T) {
@@ -151,13 +154,37 @@ tracker:
 agent:
   model: sonnet
 poll_interval: 0s
-`
+` + minimalSteps()
 	path := filepath.Join(dir, "cfg.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
 
 	cfg, err := LoadConfig(path)
 	require.NoError(t, err)
 	assert.Equal(t, 15*time.Second, cfg.PollInterval)
+}
+
+// minimalSteps returns a YAML block populating the prompt and
+// comment_template fields jiradozer requires for every named step. Useful
+// for inline-YAML test cases that exercise something *other than* the
+// step-validation rules but still must satisfy the bootstrap-or-die check.
+func minimalSteps() string {
+	return `
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "Open PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "Run tests"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship it"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
 }
 
 func TestLoadConfig_GitHubTrackerNoAPIKey(t *testing.T) {
@@ -217,7 +244,7 @@ func TestLoadConfig_ValidEffort(t *testing.T) {
 		level := level
 		t.Run(level, func(t *testing.T) {
 			t.Parallel()
-			yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  effort: " + level + "\n"
+			yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  effort: " + level + "\n" + minimalSteps()
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
 			cfg, err := LoadConfig(path)
@@ -318,9 +345,26 @@ tracker:
   api_key: test-key
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+
+# create_pr cannot use rounds; validation must reject this before getting
+# tangled in any prompt/comment_template checks.
 create_pr:
   rounds:
     - command: "echo hello"
+
+validate:
+  prompt: "Validate"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
 `
 	path := dir + "/cfg.yaml"
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
@@ -333,6 +377,159 @@ func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
 	_, err := LoadConfig("testdata/rounds_invalid_template.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "template")
+}
+
+// TestLoadConfig_RoundsOmitsCommentTemplate documents the relaxed
+// validation rule: a step with rounds set may omit comment_template
+// because runStepRounds only renders round_comment_template. Without
+// this test the relaxation could silently regress (re-tightened
+// validation would still pass every other test).
+func TestLoadConfig_RoundsOmitsCommentTemplate(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  round_comment_template: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
+  rounds:
+    - prompt: "Run tests"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Validate.CommentTemplate)
+	assert.NotEmpty(t, cfg.Validate.RoundCommentTemplate)
+}
+
+// TestLoadConfig_RoundCommentTemplateTypoOnSingleShotStep locks in
+// validation of round_comment_template on steps with no rounds. Bootstrap
+// seeds round_comment_template on every rounds-capable step, so a typo
+// there should fail at LoadConfig time even when rounds aren't enabled
+// — otherwise the only test coverage was the rounds-set path.
+func TestLoadConfig_RoundCommentTemplateTypoOnSingleShotStep(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  round_comment_template: "## {{.Headng}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "V"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.round_comment_template")
+	assert.Contains(t, err.Error(), "Headng")
+}
+
+// TestLoadConfig_ConditionalBranchTypoCaughtAtLoad locks in the second
+// (filled-data) Execute pass: a typo guarded by `{{- if .X}}` branches
+// is invisible to the zero-value pass because the branch is false.
+// Without the filled-data pass, validation misses these.
+func TestLoadConfig_ConditionalBranchTypoCaughtAtLoad(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: |-
+    Issue: {{.Identifier}}
+    {{- if .Description}}
+    Description: {{.Decsription}}
+    {{- end}}
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "V"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.prompt")
+	assert.Contains(t, err.Error(), "Decsription")
+}
+
+// TestLoadConfig_TemplateFieldTypoCaughtAtLoad ensures the eager
+// Execute() in validatePromptTemplate / validateCommentTemplate catches
+// references to non-existent struct fields. Without execution-time
+// validation, {{.Headng}} (typo of Heading) only fails when a comment
+// is posted at runtime.
+func TestLoadConfig_TemplateFieldTypoCaughtAtLoad(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Headng}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "V"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.comment_template")
+	assert.Contains(t, err.Error(), "Headng")
 }
 
 func TestResolveRound_InheritsFromStep(t *testing.T) {
@@ -409,9 +606,26 @@ tracker:
   api_key: test-key
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+
 build:
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+  round_comment_template: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
   rounds:
     - max_turns: 5
+
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+validate:
+  prompt: "Validate"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
 `
 	path := dir + "/cfg.yaml"
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
@@ -424,6 +638,105 @@ func TestRoundConfig_IsCommand(t *testing.T) {
 	assert.True(t, RoundConfig{Command: "echo hello"}.IsCommand())
 	assert.False(t, RoundConfig{Prompt: "do stuff"}.IsCommand())
 	assert.False(t, RoundConfig{}.IsCommand())
+}
+
+// TestValidateStepRequiresPrompt verifies the bootstrap-or-die contract for
+// step configs without prompts (and without rounds). The error must point at
+// `jiradozer bootstrap`.
+func TestValidateStepRequiresPrompt(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  permission_mode: plan
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan")
+	assert.Contains(t, err.Error(), "prompt is required")
+	assert.Contains(t, err.Error(), "jiradozer bootstrap")
+}
+
+// TestValidateStepRequiresCommentTemplate verifies that comment_template is
+// required for every step.
+func TestValidateStepRequiresCommentTemplate(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  permission_mode: plan
+  prompt: "Plan {{.Identifier}}"
+build:
+  permission_mode: bypass
+  prompt: "Build {{.Identifier}}"
+create_pr:
+  permission_mode: bypass
+  prompt: "PR"
+validate:
+  permission_mode: bypass
+  prompt: "Validate"
+ship:
+  permission_mode: bypass
+  prompt: "Ship"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "comment_template is required")
+	assert.Contains(t, err.Error(), "jiradozer bootstrap")
+}
+
+// TestValidateStepRequiresRoundCommentTemplateWhenRounds verifies that a
+// step with rounds set must also supply round_comment_template; otherwise
+// loading fails.
+func TestValidateStepRequiresRoundCommentTemplateWhenRounds(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  permission_mode: plan
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  permission_mode: bypass
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  permission_mode: bypass
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  permission_mode: bypass
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  rounds:
+    - prompt: "Run tests"
+ship:
+  permission_mode: bypass
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validate")
+	assert.Contains(t, err.Error(), "round_comment_template is required")
 }
 
 func TestResolveEnv(t *testing.T) {

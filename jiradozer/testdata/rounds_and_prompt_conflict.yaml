@@ -3,8 +3,26 @@ tracker:
   api_key: test-key
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+
+# This step intentionally sets BOTH prompt and rounds — validateStep must
+# reject it as mutually exclusive before any later check fires.
 validate:
   prompt: "Run tests"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
   rounds:
     - prompt: "Round 1"
     - prompt: "Round 2"
+
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"

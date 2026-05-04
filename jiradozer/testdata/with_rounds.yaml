@@ -3,10 +3,26 @@ tracker:
   api_key: test-key
 agent:
   model: sonnet
+
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "Open PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship it"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+
 validate:
   permission_mode: bypass
   max_turns: 10
   max_budget_usd: 25.0
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  round_comment_template: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
   rounds:
     - prompt: "Review code for {{.Identifier}}: simplify where possible."
       max_turns: 15

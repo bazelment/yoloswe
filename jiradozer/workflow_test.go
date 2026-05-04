@@ -166,6 +166,22 @@ func testIssue() *tracker.Issue {
 	}
 }
 
+// testStep returns a StepConfig that mirrors a real loaded YAML step:
+// non-empty Prompt + comment templates, so workflow tests resemble what
+// LoadConfig would produce. Tests stub runStepAgent, so the prompt body
+// never actually runs — but seeding it means the scaffold passes
+// validateStep and a future test that calls the real RunStepAgent
+// without a stub won't silently bypass prompt-related codepaths.
+func testStep(permissionMode string, maxTurns int) StepConfig {
+	return StepConfig{
+		PermissionMode:       permissionMode,
+		MaxTurns:             maxTurns,
+		Prompt:               "noop {{.Identifier}}",
+		CommentTemplate:      "## {{.Heading}} Complete\n\n{{.Output}}",
+		RoundCommentTemplate: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
+	}
+}
+
 func testConfig() *Config {
 	return &Config{
 		Tracker:      TrackerConfig{Kind: "linear", APIKey: "test-key"},
@@ -174,11 +190,11 @@ func testConfig() *Config {
 		BaseBranch:   "main",
 		PollInterval: 50 * time.Millisecond,
 		MaxBudgetUSD: 50.0,
-		Plan:         StepConfig{PermissionMode: "plan", MaxTurns: 10},
-		Build:        StepConfig{PermissionMode: "bypass", MaxTurns: 30},
-		CreatePR:     StepConfig{PermissionMode: "bypass", MaxTurns: 5},
-		Validate:     StepConfig{PermissionMode: "bypass", MaxTurns: 10},
-		Ship:         StepConfig{PermissionMode: "bypass", MaxTurns: 10},
+		Plan:         testStep("plan", 10),
+		Build:        testStep("bypass", 30),
+		CreatePR:     testStep("bypass", 5),
+		Validate:     testStep("bypass", 10),
+		Ship:         testStep("bypass", 10),
 		States: StatesConfig{
 			InProgress: "In Progress",
 			InReview:   "In Review",
@@ -193,6 +209,50 @@ func testWorkflowStates() []tracker.WorkflowState {
 		{ID: "state-ir", Name: "In Review", Type: "started"},
 		{ID: "state-done", Name: "Done", Type: "completed"},
 	}
+}
+
+// TestRenderCommentTemplate exercises the comment-template engine the
+// workflow uses for both step-complete and per-round comments. Verifies
+// the {{.Round}}/{{.TotalRounds}} substitution path that distinguishes
+// round comments from step-complete comments.
+func TestRenderCommentTemplate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("step complete", func(t *testing.T) {
+		t.Parallel()
+		out, err := renderCommentTemplate(
+			"## {{.Heading}} Complete\n\n{{.Output}}",
+			CommentData{Step: "build", Heading: "Build", Output: "all done"},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, "## Build Complete\n\nall done", out)
+	})
+
+	t.Run("round comment", func(t *testing.T) {
+		t.Parallel()
+		out, err := renderCommentTemplate(
+			"## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
+			CommentData{Step: "validate", Heading: "Validate", Output: "passed", Round: 2, TotalRounds: 3},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, "## Validate Round 2/3\n\npassed", out)
+	})
+
+	t.Run("invalid template", func(t *testing.T) {
+		t.Parallel()
+		_, err := renderCommentTemplate("{{.Heading}", CommentData{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parse template")
+	})
+
+	t.Run("execute error", func(t *testing.T) {
+		t.Parallel()
+		// .Missing is not a field on CommentData; text/template errors at
+		// execute time when calling on a missing field of a struct.
+		_, err := renderCommentTemplate("{{.Missing}}", CommentData{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "execute template")
+	})
 }
 
 // --- State Machine Additional Tests ---
@@ -678,6 +738,15 @@ func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 
 	// Must be resultTime (result comment), not waitingTime (waiting comment) or staleTime.
 	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be set from result comment, not waiting comment or stale value")
+
+	// Lock in PostComment body so a regression that drops
+	// renderCommentTemplate or sidesteps CommentTemplate is caught here.
+	// First call is the step result comment (rendered from
+	// CommentTemplate); the waiting comment follows.
+	postCalls := mt.getCalls("PostComment")
+	require.GreaterOrEqual(t, len(postCalls), 1, "expected at least the result comment")
+	assert.Equal(t, "## Plan Complete\n\nstep output", postCalls[0].args[1],
+		"step result comment body must be rendered from CommentTemplate (Heading capitalized, Output substituted)")
 }
 
 // TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound verifies that
@@ -701,8 +770,11 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 	}
 
 	cfg := testConfig()
-	// Build a two-round step config.
+	// Build a two-round step config. Comment templates must be set so the
+	// round-comment render path doesn't fail before reaching the assertion.
 	roundsCfg := StepConfig{
+		CommentTemplate:      "## {{.Heading}} Complete\n\n{{.Output}}",
+		RoundCommentTemplate: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
 		Rounds: []RoundConfig{
 			{Prompt: "round one"},
 			{Prompt: "round two"},
@@ -726,6 +798,16 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 
 	// Must be round2Time (final round's result comment), not round1Time, waitingTime, or staleTime.
 	assert.Equal(t, round2Time, wf.lastCommentAt, "lastCommentAt should be set from final round's result comment")
+
+	// Lock in PostComment bodies so a regression that drops
+	// renderCommentTemplate or routes around RoundCommentTemplate is
+	// caught here, not in the field. Order: round1, round2, waiting.
+	postCalls := mt.getCalls("PostComment")
+	require.GreaterOrEqual(t, len(postCalls), 2, "expected round comments + waiting comment")
+	assert.Equal(t, "## Plan Round 1/2\n\nround output", postCalls[0].args[1],
+		"round 1 comment body must be rendered from RoundCommentTemplate with Round=1")
+	assert.Equal(t, "## Plan Round 2/2\n\nround output", postCalls[1].args[1],
+		"round 2 comment body must be rendered from RoundCommentTemplate with Round=2")
 }
 
 // TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection verifies that when
@@ -744,6 +826,8 @@ func TestWorkflow_RunStepRounds_CommandFirstFeedbackInjection(t *testing.T) {
 	cfg := testConfig()
 	// Two-round step: command first, then agent.
 	roundsCfg := StepConfig{
+		CommentTemplate:      "## {{.Heading}} Complete\n\n{{.Output}}",
+		RoundCommentTemplate: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
 		Rounds: []RoundConfig{
 			{Command: "echo command-round"},
 			{Prompt: "agent round prompt"},

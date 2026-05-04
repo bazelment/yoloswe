@@ -37,12 +37,17 @@ func e2eWorkflowStates() []tracker.WorkflowState {
 	}
 }
 
+// e2eCompleteCommentTemplate is the canonical step-complete comment shape
+// the workflow now demands per-step. Kept short and shared across steps.
+const e2eCompleteCommentTemplate = "## {{.Heading}} Complete\n\n{{.Output}}"
+
 func e2eStepConfig(autoApprove bool) jiradozer.StepConfig {
 	return jiradozer.StepConfig{
-		Model:        "haiku",
-		MaxTurns:     3,
-		MaxBudgetUSD: 2.0,
-		AutoApprove:  autoApprove,
+		Model:           "haiku",
+		MaxTurns:        3,
+		MaxBudgetUSD:    2.0,
+		AutoApprove:     autoApprove,
+		CommentTemplate: e2eCompleteCommentTemplate,
 	}
 }
 
@@ -57,8 +62,15 @@ func e2eConfig(t *testing.T, workDir string) *jiradozer.Config {
 
 	cfg.Plan = e2eStepConfig(true)
 	cfg.Plan.PermissionMode = "plan"
+	cfg.Plan.Prompt = `Issue: {{.Identifier}} — {{.Title}}
+
+Create a short implementation plan. Do not edit any files.`
+
 	cfg.Build = e2eStepConfig(true)
 	cfg.Build.PermissionMode = "bypass"
+	cfg.Build.Prompt = `Issue: {{.Identifier}} — {{.Title}}
+
+Create hello.txt containing "hello world". Do not run any tests.`
 
 	cfg.Validate = e2eStepConfig(true)
 	cfg.Validate.PermissionMode = "bypass"
@@ -203,6 +215,9 @@ func TestE2E_PlanStep_Smoke(t *testing.T) {
 		PermissionMode: "plan",
 		MaxTurns:       3,
 		MaxBudgetUSD:   1.0,
+		Prompt: `Issue: {{.Identifier}} — {{.Title}}
+
+Create a brief implementation plan. Do not edit any files.`,
 	}
 
 	res, err := jiradozer.RunStepAgent(ctx, "plan", data, stepCfg, workDir, "", "", nil, logger)

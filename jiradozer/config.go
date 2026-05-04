@@ -2,6 +2,7 @@ package jiradozer
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,16 +65,18 @@ func (s SourceConfig) HasSource() bool {
 
 // StepConfig configures a single workflow step (plan or build).
 type StepConfig struct {
-	Prompt              string        `yaml:"prompt"`          // Go text/template; empty = built-in default
-	SystemPrompt        string        `yaml:"system_prompt"`   // optional system prompt passed to the agent
-	Model               string        `yaml:"model"`           // override agent.model; empty = inherit
-	Effort              string        `yaml:"effort"`          // override agent.effort; empty = inherit
-	PermissionMode      string        `yaml:"permission_mode"` // "plan", "bypass", etc.; empty = step default
-	Rounds              []RoundConfig `yaml:"rounds"`          // multi-round execution; mutually exclusive with Prompt
-	MaxBudgetUSD        float64       `yaml:"max_budget_usd"`  // override top-level; 0 = inherit
-	MaxTurns            int           `yaml:"max_turns"`
-	MaxToolErrorRetries int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
-	AutoApprove         bool          `yaml:"auto_approve"`           // skip human review after this step
+	Prompt               string        `yaml:"prompt"`                 // Go text/template; required unless rounds is set. No built-in default — run `jiradozer bootstrap` to scaffold.
+	SystemPrompt         string        `yaml:"system_prompt"`          // optional system prompt passed to the agent
+	Model                string        `yaml:"model"`                  // override agent.model; empty = inherit
+	Effort               string        `yaml:"effort"`                 // override agent.effort; empty = inherit
+	PermissionMode       string        `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
+	CommentTemplate      string        `yaml:"comment_template"`       // text/template rendered with CommentData; required for single-shot steps (rounds-only steps may omit it)
+	RoundCommentTemplate string        `yaml:"round_comment_template"` // text/template rendered with CommentData per round; required when rounds is non-empty
+	Rounds               []RoundConfig `yaml:"rounds"`                 // multi-round execution; mutually exclusive with Prompt
+	MaxBudgetUSD         float64       `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
+	MaxTurns             int           `yaml:"max_turns"`
+	MaxToolErrorRetries  int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
+	AutoApprove          bool          `yaml:"auto_approve"`           // skip human review after this step
 }
 
 // RoundConfig configures a single round within a multi-round step.
@@ -132,7 +135,13 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultConfig returns the default config with sensible defaults.
+// DefaultConfig returns the framework defaults: tracker kind, agent model,
+// branch prefix, work_dir, and step PermissionMode/MaxTurns. It does NOT
+// seed prompts or comment templates — those live in jiradozer.yaml and
+// must be supplied (via `jiradozer bootstrap`, LoadConfig, or explicit
+// field assignment) before the result can pass validate() or feed into
+// RunStepAgent. Library / test code that needs a runnable Config should
+// load it from disk or layer prompts on top.
 func DefaultConfig() *Config {
 	cfg := defaultConfig()
 	return &cfg
@@ -199,9 +208,7 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateStep checks one named step. The pointer receiver avoids copying the
-// 152-byte StepConfig per iteration in validate(); the function does not mutate
-// through the pointer.
+// validateStep checks one named step.
 func validateStep(name string, step *StepConfig) error {
 	if step.Effort != "" {
 		if _, err := agent.ParseEffort(step.Effort); err != nil {
@@ -214,9 +221,37 @@ func validateStep(name string, step *StepConfig) error {
 	if step.Prompt != "" && len(step.Rounds) > 0 {
 		return fmt.Errorf("%s: prompt and rounds are mutually exclusive", name)
 	}
+	if step.Prompt == "" && len(step.Rounds) == 0 {
+		return fmt.Errorf("%s: prompt is required (run `jiradozer bootstrap` to generate a starter config)", name)
+	}
 	if step.Prompt != "" {
-		if _, err := template.New(name).Parse(step.Prompt); err != nil {
-			return fmt.Errorf("%s.prompt template: %w", name, err)
+		if err := validatePromptTemplate(name+".prompt", step.Prompt); err != nil {
+			return err
+		}
+	}
+	// comment_template feeds runStep (single-shot steps) and is not rendered
+	// by runStepRounds, so round-only steps don't need it. Single-shot steps
+	// still require it; bootstrap seeds both for convenience.
+	if len(step.Rounds) == 0 {
+		if step.CommentTemplate == "" {
+			return fmt.Errorf("%s: comment_template is required (run `jiradozer bootstrap` to generate a starter config)", name)
+		}
+	}
+	if step.CommentTemplate != "" {
+		if err := validateCommentTemplate(name+".comment_template", step.CommentTemplate); err != nil {
+			return err
+		}
+	}
+	if len(step.Rounds) > 0 && step.RoundCommentTemplate == "" {
+		return fmt.Errorf("%s: round_comment_template is required when rounds is set (run `jiradozer bootstrap` to generate a starter config)", name)
+	}
+	// Validate round_comment_template whenever it is set, even on steps
+	// with no rounds — bootstrap seeds it on every rounds-capable step,
+	// and a typo there should fail at LoadConfig instead of waiting for
+	// the day someone enables rounds.
+	if step.RoundCommentTemplate != "" {
+		if err := validateCommentTemplate(name+".round_comment_template", step.RoundCommentTemplate); err != nil {
+			return err
 		}
 	}
 	for i, round := range step.Rounds {
@@ -227,18 +262,72 @@ func validateStep(name string, step *StepConfig) error {
 			return fmt.Errorf("%s.rounds[%d]: prompt and command are mutually exclusive", name, i)
 		}
 		if round.Prompt != "" {
-			if _, err := template.New(fmt.Sprintf("%s_round_%d", name, i)).Parse(round.Prompt); err != nil {
-				return fmt.Errorf("%s.rounds[%d].prompt template: %w", name, i, err)
+			if err := validatePromptTemplate(fmt.Sprintf("%s.rounds[%d].prompt", name, i), round.Prompt); err != nil {
+				return err
 			}
 		}
 		if round.Command != "" {
-			if _, err := template.New(fmt.Sprintf("%s_round_%d_cmd", name, i)).Parse(round.Command); err != nil {
-				return fmt.Errorf("%s.rounds[%d].command template: %w", name, i, err)
+			if err := validatePromptTemplate(fmt.Sprintf("%s.rounds[%d].command", name, i), round.Command); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
+
+// validatePromptTemplate runs the eager validation pattern against
+// PromptData: two Execute passes (zero-value and filled) so typos hidden
+// behind a conditional branch (e.g. {{- if .X}}{{.Decsription}}{{- end}})
+// can't sneak past — the zero-value pass would skip the false branch.
+func validatePromptTemplate(label, tmpl string) error {
+	return validateTemplate(label, tmpl, PromptData{}, samplePromptData)
+}
+
+// validateCommentTemplate is the CommentData counterpart of
+// validatePromptTemplate; same two-pass strategy.
+func validateCommentTemplate(label, tmpl string) error {
+	return validateTemplate(label, tmpl, CommentData{}, sampleCommentData)
+}
+
+// validateTemplate parses tmpl once and runs Execute against each sample.
+// All errors are wrapped with label so the caller sees which field failed
+// (e.g. "plan.comment_template template: ...").
+func validateTemplate(label, tmpl string, samples ...any) error {
+	t, err := template.New(label).Parse(tmpl)
+	if err != nil {
+		return fmt.Errorf("%s template: %w", label, err)
+	}
+	for _, sample := range samples {
+		if err := t.Execute(io.Discard, sample); err != nil {
+			return fmt.Errorf("%s template: %w", label, err)
+		}
+	}
+	return nil
+}
+
+// samplePromptData / sampleCommentData supply non-zero values so
+// validation traverses {{- if .X}} branches that the zero-value pass
+// would skip. Values are arbitrary strings of the right shape; only
+// presence matters for branch coverage.
+var (
+	samplePromptData = PromptData{
+		Identifier:  "ENG-1",
+		Title:       "sample",
+		Description: "sample description",
+		URL:         "https://example.com/issue/1",
+		Labels:      "bug",
+		BaseBranch:  "main",
+		Plan:        "sample plan",
+		BuildOutput: "sample build output",
+	}
+	sampleCommentData = CommentData{
+		Step:        "plan",
+		Heading:     "Plan",
+		Output:      "sample output",
+		Round:       1,
+		TotalRounds: 3,
+	}
+)
 
 // StepByName returns the StepConfig for a named step.
 func (c *Config) StepByName(name string) (StepConfig, bool) {
