@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -107,6 +108,89 @@ func TestExampleYAMLMatchesBootstrap(t *testing.T) {
 
 	assert.Equal(t, string(want), string(got),
 		"jiradozer.example.yaml drifted from bootstrap output — regenerate via `jiradozer bootstrap --output jiradozer/jiradozer.example.yaml --force`")
+}
+
+// TestRoundsExampleUncommentsCleanly verifies the commented `rounds:` example
+// in the bootstrap output is valid YAML when the user uncomments it. We feed
+// an uncommented version into LoadConfig under a rounds-capable step (build)
+// and require it to parse and validate. Without this, a typo or off-by-one
+// indent in roundsExampleBlock would only surface for users who actually
+// try to enable rounds.
+func TestRoundsExampleUncommentsCleanly(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+
+	uncommented := uncommentRoundsExample(roundsExampleBlock)
+	require.Contains(t, uncommented, "rounds:",
+		"uncomment helper must produce a `rounds:` key (sanity check)")
+
+	// Minimal config: every step needs a prompt + comment_template, but the
+	// build step uses rounds in place of a prompt. round_comment_template
+	// is required when rounds is set. Indented 4 spaces to match the style
+	// the bootstrap uses, so the uncommented rounds block (also 4-space
+	// indented) sits at the right depth under `build:`.
+	cfg := `tracker:
+    kind: linear
+    api_key: $LINEAR_API_KEY
+agent:
+    model: sonnet
+plan:
+    prompt: "Plan {{.Identifier}}"
+    comment_template: "## {{.Heading}}\n{{.Output}}"
+create_pr:
+    prompt: "PR"
+    comment_template: "## {{.Heading}}\n{{.Output}}"
+validate:
+    prompt: "Validate"
+    comment_template: "## {{.Heading}}\n{{.Output}}"
+ship:
+    prompt: "Ship"
+    comment_template: "## {{.Heading}}\n{{.Output}}"
+build:
+    permission_mode: bypass
+    comment_template: "## {{.Heading}}\n{{.Output}}"
+    round_comment_template: "## {{.Heading}} {{.Round}}/{{.TotalRounds}}\n{{.Output}}"
+` + uncommented
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jiradozer.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(cfg), 0o644))
+
+	loaded, err := jiradozer.LoadConfig(path)
+	require.NoError(t, err, "uncommented rounds example must parse and validate; got config:\n%s", cfg)
+	require.Len(t, loaded.Build.Rounds, 2, "rounds example must produce exactly 2 rounds")
+	assert.NotEmpty(t, loaded.Build.Rounds[0].Prompt, "first example round should be an agent prompt round")
+	assert.NotEmpty(t, loaded.Build.Rounds[1].Command, "second example round should be a shell command round")
+}
+
+// uncommentRoundsExample turns the commented `roundsExampleBlock` into the
+// YAML a user gets after stripping leading `#` markers. Relies on the
+// layout invariant in roundsExampleBlock: prose lives above `#rounds:`
+// and never below it. Lines before `#rounds:` are dropped; from `#rounds:`
+// onward, every line begins with `    #` followed by YAML content, so we
+// strip the `#` to get back active YAML.
+func uncommentRoundsExample(block string) string {
+	const (
+		indent      = "    "
+		startMarker = "    #rounds:"
+	)
+	var out []string
+	started := false
+	for _, line := range strings.Split(block, "\n") {
+		if !started {
+			if line == startMarker {
+				started = true
+				out = append(out, indent+"rounds:")
+			}
+			continue
+		}
+		if strings.HasPrefix(line, indent+"#") {
+			out = append(out, indent+strings.TrimPrefix(line, indent+"#"))
+			continue
+		}
+		// First line that doesn't begin with `    #` ends the rounds block.
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 // TestBootstrapRefusesExistingFile verifies that --force is required when
