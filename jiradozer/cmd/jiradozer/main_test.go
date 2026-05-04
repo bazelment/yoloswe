@@ -116,22 +116,34 @@ func TestResolveRepoName(t *testing.T) {
 // registered on both root and `run` (via registerRunFlags) but cobra only
 // records `Changed=true` on whichever FlagSet actually parsed it, a naive
 // `cmd.Flags().Changed("dry-run")` in run's RunE silently drops the flag
-// when the user wrote `jiradozer --dry-run run …`.
+// when the user wrote `jiradozer --dry-run run …`. Both invocation paths
+// run through dryRunChanged: the run-subcommand RunE consults runCmd, and
+// the back-compat root RunE (`jiradozer --dry-run` with no subcommand)
+// consults rootCmd directly.
 func TestDryRunFlagPlacement(t *testing.T) {
 	tests := []struct {
-		name string
-		argv []string
-		want bool
+		name     string
+		checkCmd string // "run" or "root" — which command's RunE actually fires
+		argv     []string
+		want     bool
 	}{
-		{name: "no dry-run", argv: []string{"run"}, want: false},
-		{name: "dry-run on run subcommand", argv: []string{"run", "--dry-run"}, want: true},
-		{name: "dry-run before run subcommand", argv: []string{"--dry-run", "run"}, want: true},
+		{name: "no dry-run", argv: []string{"run"}, checkCmd: "run", want: false},
+		{name: "dry-run on run subcommand", argv: []string{"run", "--dry-run"}, checkCmd: "run", want: true},
+		{name: "dry-run before run subcommand", argv: []string{"--dry-run", "run"}, checkCmd: "run", want: true},
+		// Back-compat path: bare `jiradozer --dry-run --filter team=ENG`
+		// (no `run`) lands on root's RunE, so dryRunChanged is invoked
+		// against rootCmd. registerRunFlags is bound on root for this case.
+		{name: "dry-run on root, no subcommand", argv: []string{"--dry-run"}, checkCmd: "root", want: true},
+		{name: "no dry-run on root, no subcommand", argv: []string{}, checkCmd: "root", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var rargs runArgs
-			rootCmd := &cobra.Command{Use: "jiradozer"}
+			rootCmd := &cobra.Command{
+				Use:  "jiradozer",
+				RunE: func(cmd *cobra.Command, _ []string) error { return nil },
+			}
 			runCmd := &cobra.Command{
 				Use:  "run",
 				RunE: func(cmd *cobra.Command, _ []string) error { return nil },
@@ -142,7 +154,11 @@ func TestDryRunFlagPlacement(t *testing.T) {
 			rootCmd.SetArgs(tt.argv)
 			require.NoError(t, rootCmd.Execute())
 
-			got := dryRunChanged(runCmd)
+			target := runCmd
+			if tt.checkCmd == "root" {
+				target = rootCmd
+			}
+			got := dryRunChanged(target)
 			assert.Equal(t, tt.want, got)
 		})
 	}

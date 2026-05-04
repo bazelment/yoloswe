@@ -5,5 +5,22 @@ tracker:
 agent:
   model: sonnet
 
+# All steps except plan are well-formed so the load can reach plan's
+# malformed prompt template; otherwise the failure would surface on the
+# comment_template requirement of a different step instead of the
+# template-parse path this fixture exists to test.
 plan:
   prompt: "{{.Identifier} missing closing brace"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "Validate"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"

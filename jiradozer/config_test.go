@@ -93,7 +93,10 @@ func TestLoadConfig_MissingTrackerKind(t *testing.T) {
 func TestLoadConfig_InvalidTemplate(t *testing.T) {
 	_, err := LoadConfig("testdata/invalid_template.yaml")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "template")
+	// Pin to the prompt parse failure: every other step is well-formed so
+	// the load reaches plan's "{{.Identifier} missing closing brace" rather
+	// than tripping on a missing comment_template elsewhere.
+	assert.Contains(t, err.Error(), "plan.prompt template")
 }
 
 func TestLoadConfig_NonexistentFile(t *testing.T) {
@@ -374,6 +377,81 @@ func TestLoadConfig_RoundsInvalidTemplate(t *testing.T) {
 	_, err := LoadConfig("testdata/rounds_invalid_template.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "template")
+}
+
+// TestLoadConfig_RoundsOmitsCommentTemplate documents the relaxed
+// validation rule: a step with rounds set may omit comment_template
+// because runStepRounds only renders round_comment_template. Without
+// this test the relaxation could silently regress (re-tightened
+// validation would still pass every other test).
+func TestLoadConfig_RoundsOmitsCommentTemplate(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  round_comment_template: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}"
+  rounds:
+    - prompt: "Run tests"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Validate.CommentTemplate)
+	assert.NotEmpty(t, cfg.Validate.RoundCommentTemplate)
+}
+
+// TestLoadConfig_TemplateFieldTypoCaughtAtLoad ensures the eager
+// Execute() in validatePromptTemplate / validateCommentTemplate catches
+// references to non-existent struct fields. Without execution-time
+// validation, {{.Headng}} (typo of Heading) only fails when a comment
+// is posted at runtime.
+func TestLoadConfig_TemplateFieldTypoCaughtAtLoad(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Headng}} Complete\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  prompt: "V"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.comment_template")
+	assert.Contains(t, err.Error(), "Headng")
 }
 
 func TestResolveRound_InheritsFromStep(t *testing.T) {

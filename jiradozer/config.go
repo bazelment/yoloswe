@@ -70,7 +70,7 @@ type StepConfig struct {
 	Model                string        `yaml:"model"`                  // override agent.model; empty = inherit
 	Effort               string        `yaml:"effort"`                 // override agent.effort; empty = inherit
 	PermissionMode       string        `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
-	CommentTemplate      string        `yaml:"comment_template"`       // text/template rendered with CommentData; required for every step
+	CommentTemplate      string        `yaml:"comment_template"`       // text/template rendered with CommentData; required for single-shot steps (rounds-only steps may omit it)
 	RoundCommentTemplate string        `yaml:"round_comment_template"` // text/template rendered with CommentData per round; required when rounds is non-empty
 	Rounds               []RoundConfig `yaml:"rounds"`                 // multi-round execution; mutually exclusive with Prompt
 	MaxBudgetUSD         float64       `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
@@ -273,11 +273,11 @@ func validateStep(name string, step *StepConfig) error {
 
 // validatePromptTemplate parses tmpl and renders it against a zero-value
 // PromptData so typos like {{.Headng}} fail at LoadConfig time rather than
-// at the first run that posts a comment. Missing-field errors that the
-// runtime catches via Option("missingkey=error") would otherwise hide
-// behind the validation-only Parse() call.
+// at the first run that posts a comment. Go's text/template always errors
+// on unknown struct fields during Execute, so this catches the same field
+// typos the runtime renderTemplate (agent.go) would catch — just earlier.
 func validatePromptTemplate(label, tmpl string) error {
-	t, err := template.New(label).Option("missingkey=error").Parse(tmpl)
+	t, err := template.New(label).Parse(tmpl)
 	if err != nil {
 		return fmt.Errorf("%s template: %w", label, err)
 	}
@@ -289,9 +289,9 @@ func validatePromptTemplate(label, tmpl string) error {
 
 // validateCommentTemplate is the CommentData counterpart of
 // validatePromptTemplate: parse + execute against a zero-value CommentData
-// so a misspelled field is caught at config load.
+// so a misspelled field is caught at config load instead of comment-post time.
 func validateCommentTemplate(label, tmpl string) error {
-	t, err := template.New(label).Option("missingkey=error").Parse(tmpl)
+	t, err := template.New(label).Parse(tmpl)
 	if err != nil {
 		return fmt.Errorf("%s template: %w", label, err)
 	}
