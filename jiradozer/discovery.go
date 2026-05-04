@@ -3,6 +3,7 @@ package jiradozer
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -27,7 +28,7 @@ type Discovery struct {
 func NewDiscovery(t tracker.IssueTracker, filter tracker.IssueFilter, interval time.Duration, logger *slog.Logger) *Discovery {
 	return &Discovery{
 		tracker:  t,
-		filter:   filter,
+		filter:   cloneIssueFilter(filter),
 		interval: interval,
 		seen:     make(map[string]bool),
 		logger:   logger,
@@ -63,18 +64,36 @@ func (d *Discovery) Run(ctx context.Context) <-chan *tracker.Issue {
 // UpdateFilter replaces the issue filter used on future polls.
 func (d *Discovery) UpdateFilter(filter tracker.IssueFilter) {
 	d.mu.Lock()
-	d.filter = filter
+	changed := !reflect.DeepEqual(filter, d.filter)
+	d.filter = cloneIssueFilter(filter)
 	d.mu.Unlock()
-	d.notifyReload()
+	if changed {
+		d.notifyReload()
+	}
 }
 
 // UpdateInterval replaces the polling interval and wakes the poll loop so the
 // new interval takes effect immediately.
 func (d *Discovery) UpdateInterval(interval time.Duration) {
 	d.mu.Lock()
+	changed := interval != d.interval
 	d.interval = interval
 	d.mu.Unlock()
-	d.notifyReload()
+	if changed {
+		d.notifyReload()
+	}
+}
+
+// Update replaces discovery settings and wakes the poll loop once when they change.
+func (d *Discovery) Update(filter tracker.IssueFilter, interval time.Duration) {
+	d.mu.Lock()
+	changed := interval != d.interval || !reflect.DeepEqual(filter, d.filter)
+	d.filter = cloneIssueFilter(filter)
+	d.interval = interval
+	d.mu.Unlock()
+	if changed {
+		d.notifyReload()
+	}
 }
 
 // MarkSeen marks an issue ID as already seen, preventing it from being
@@ -143,11 +162,6 @@ func (d *Discovery) notifyReload() {
 
 func cloneIssueFilter(filter tracker.IssueFilter) tracker.IssueFilter {
 	cp := filter
-	if filter.Filters != nil {
-		cp.Filters = make(map[string]string, len(filter.Filters))
-		for k, v := range filter.Filters {
-			cp.Filters[k] = v
-		}
-	}
+	cp.Filters = cloneStringMap(filter.Filters)
 	return cp
 }

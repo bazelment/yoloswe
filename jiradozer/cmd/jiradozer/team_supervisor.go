@@ -19,19 +19,15 @@ const restoreStateEnv = "JIRADOZER_RESTORE_STATE"
 
 //nolint:govet // fieldalignment: keep runtime dependencies and mutable state grouped.
 type teamSupervisor struct {
-	app          *cliapp.App
-	tracker      tracker.IssueTracker
-	cfg          *jiradozer.Config
-	args         runArgs
-	logger       *slog.Logger
-	disc         *jiradozer.Discovery
-	orch         *jiradozer.Orchestrator
-	selfPath     string
-	absConfig    string
-	childArgs    []string
-	logDir       string
-	repoName     string
-	forceCleanup bool
+	app       *cliapp.App
+	cfg       *jiradozer.Config
+	args      runArgs
+	logger    *slog.Logger
+	disc      *jiradozer.Discovery
+	orch      *jiradozer.Orchestrator
+	selfPath  string
+	absConfig string
+	logDir    string
 }
 
 func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, args runArgs) (*teamSupervisor, error) {
@@ -69,19 +65,15 @@ func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *
 	orch.SetForceCleanup(args.forceCleanup)
 
 	return &teamSupervisor{
-		app:          app,
-		tracker:      issueTracker,
-		cfg:          cfg,
-		args:         args,
-		logger:       app.Logger,
-		disc:         disc,
-		orch:         orch,
-		selfPath:     selfPath,
-		absConfig:    absConfig,
-		childArgs:    childArgs,
-		logDir:       logDir,
-		repoName:     repoName,
-		forceCleanup: args.forceCleanup,
+		app:       app,
+		cfg:       cfg,
+		args:      args,
+		logger:    app.Logger,
+		disc:      disc,
+		orch:      orch,
+		selfPath:  selfPath,
+		absConfig: absConfig,
+		logDir:    logDir,
 	}, nil
 }
 
@@ -123,13 +115,9 @@ func (s *teamSupervisor) reload() {
 		return
 	}
 
-	childArgs := buildChildArgs(s.app, s.args, s.absConfig)
 	s.cfg = next
-	s.childArgs = childArgs
 	s.orch.UpdateConfig(next)
-	s.orch.UpdateChildArgs(childArgs)
-	s.disc.UpdateFilter(next.Source.ToFilter())
-	s.disc.UpdateInterval(next.PollInterval)
+	s.disc.Update(next.Source.ToFilter(), next.PollInterval)
 	s.logger.Info("config reloaded",
 		"path", s.absConfig,
 		"poll_interval", next.PollInterval,
@@ -156,13 +144,6 @@ func validateReloadCompatible(oldCfg, newCfg *jiradozer.Config) error {
 func (s *teamSupervisor) execRestart() error {
 	statePath := filepath.Join(s.logDir, "team-state", fmt.Sprintf("%d.json", os.Getpid()))
 	state := jiradozer.RuntimeState{
-		WrittenAt:      time.Now(),
-		ParentArgv:     append([]string(nil), os.Args...),
-		ConfigPath:     s.absConfig,
-		LogDir:         s.logDir,
-		RepoName:       s.repoName,
-		ChildArgs:      append([]string(nil), s.childArgs...),
-		ForceCleanup:   s.forceCleanup,
 		ActiveWorkflow: s.orch.ActiveWorkflowSnapshots(),
 	}
 	if err := jiradozer.WriteRuntimeStateAtomically(statePath, state); err != nil {

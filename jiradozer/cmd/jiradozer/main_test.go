@@ -270,33 +270,15 @@ func TestBuildChildArgs(t *testing.T) {
 func writeRunConfig(t *testing.T, trackerKind, workDir string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "jiradozer.yaml")
-	apiKey := "api_key: test-key"
+	t.Setenv("LINEAR_API_KEY", "test-key")
+	content, err := bootstrapYAML()
+	require.NoError(t, err)
+	content = bytes.Replace(content, []byte("kind: linear"), []byte("kind: "+trackerKind), 1)
+	content = bytes.Replace(content, []byte("work_dir: ."), []byte("work_dir: "+workDir), 1)
 	if trackerKind == "github" || trackerKind == "local" {
-		apiKey = ""
+		content = bytes.Replace(content, []byte("api_key: $LINEAR_API_KEY"), []byte("api_key: \"\""), 1)
 	}
-	content := "tracker:\n" +
-		"  kind: " + trackerKind + "\n" +
-		"  " + apiKey + "\n" +
-		"agent:\n" +
-		"  model: sonnet\n" +
-		"work_dir: " + workDir + "\n" +
-		"base_branch: main\n" +
-		"plan:\n" +
-		"  prompt: \"Plan {{.Identifier}}\"\n" +
-		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
-		"build:\n" +
-		"  prompt: \"Build {{.Identifier}}\"\n" +
-		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
-		"create_pr:\n" +
-		"  prompt: \"PR {{.Identifier}}\"\n" +
-		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
-		"validate:\n" +
-		"  prompt: \"Validate {{.Identifier}}\"\n" +
-		"  comment_template: \"{{.Heading}} {{.Output}}\"\n" +
-		"ship:\n" +
-		"  prompt: \"Ship {{.Identifier}}\"\n" +
-		"  comment_template: \"{{.Heading}} {{.Output}}\"\n"
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	require.NoError(t, os.WriteFile(path, content, 0o600))
 	return path
 }
 

@@ -250,7 +250,6 @@ func TestOrchestrator_RestoreActiveWaitsForChildPID(t *testing.T) {
 			Branch:       "jiradozer/ENG-1",
 			WorktreePath: "/tmp/worktrees/jiradozer/ENG-1",
 			StartedAt:    time.Now(),
-			LogPath:      "/tmp/ENG-1.log",
 		},
 	})
 

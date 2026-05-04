@@ -89,7 +89,6 @@ type managedWorkflow struct {
 	startedAt    time.Time
 	worktreePath string
 	branch       string
-	logPath      string
 	pid          int
 }
 
@@ -158,13 +157,6 @@ func (o *Orchestrator) ConfigSnapshot() *Config {
 	return cloneConfig(o.config)
 }
 
-// UpdateChildArgs replaces the argv suffix used for future child launches.
-func (o *Orchestrator) UpdateChildArgs(childArgs []string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.childArgs = append([]string(nil), childArgs...)
-}
-
 // StatusUpdates returns the channel that receives status updates for all workflows.
 func (o *Orchestrator) StatusUpdates() <-chan IssueStatus {
 	return o.statusChan
@@ -199,7 +191,6 @@ func (o *Orchestrator) ActiveWorkflowSnapshots() []ManagedWorkflowSnapshot {
 			Branch:       mw.branch,
 			WorktreePath: mw.worktreePath,
 			StartedAt:    mw.startedAt,
-			LogPath:      mw.logPath,
 		})
 	}
 	return out
@@ -210,6 +201,12 @@ func (o *Orchestrator) ActiveCount() int {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.activeCountLocked()
+}
+
+func (o *Orchestrator) maxConcurrent() int {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.config.Source.MaxConcurrent
 }
 
 // claimIssueInProgress transitions the issue to "In Progress" and attaches the
@@ -279,7 +276,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	// RunWithDiscovery only clears the seen set on error, so returning nil
 	// keeps the issue out of subsequent polls.
 	if cfg.Source.DryRun {
-		o.printDryRunCommand(issue)
+		o.printDryRunCommand(issue, cfg)
 		return nil
 	}
 
@@ -369,7 +366,6 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		startedAt:    time.Now(),
 		cmd:          cmd,
 		logFile:      logFile,
-		logPath:      logPath,
 		pid:          cmd.Process.Pid,
 	}
 
@@ -537,10 +533,11 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 
 	for {
 		// Drain pending queue while under the concurrency limit.
+		maxConcurrent := o.maxConcurrent()
 		active := o.ActiveCount()
 		remaining := pending[:0]
 		for _, issue := range pending {
-			if active >= o.ConfigSnapshot().Source.MaxConcurrent {
+			if active >= maxConcurrent {
 				remaining = append(remaining, issue)
 				continue
 			}
@@ -563,7 +560,7 @@ func (o *Orchestrator) RunWithDiscovery(ctx context.Context, discovery *Discover
 				o.Wait()
 				return nil
 			}
-			if o.ActiveCount() < o.ConfigSnapshot().Source.MaxConcurrent {
+			if o.ActiveCount() < maxConcurrent {
 				if !tryStart(issue) {
 					pending = append(pending, issue)
 				}
@@ -605,8 +602,7 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 // `wt.Manager` and the workflow/agent code directly — so the printed
 // `--prompt` is a hand-authored starter, not a rendered plan/build prompt.
 // Branch, base branch, model, repo, and goal do match the live path.
-func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue) {
-	cfg := o.ConfigSnapshot()
+func (o *Orchestrator) printDryRunCommand(issue *tracker.Issue, cfg *Config) {
 	branch := fmt.Sprintf("%s/%s", cfg.Source.BranchPrefix, issue.Identifier)
 	prompt := fmt.Sprintf("Work on %s: %s", issue.Identifier, issue.Title)
 	if issue.URL != nil && *issue.URL != "" {
@@ -702,7 +698,6 @@ func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) {
 			startedAt:    snap.StartedAt,
 			worktreePath: snap.WorktreePath,
 			branch:       snap.Branch,
-			logPath:      snap.LogPath,
 			pid:          snap.PID,
 		}
 		o.mu.Lock()
