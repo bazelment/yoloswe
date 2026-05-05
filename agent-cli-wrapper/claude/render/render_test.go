@@ -411,6 +411,12 @@ func TestReset_ClearsInFlightCommands(t *testing.T) {
 	}
 	// CommandEnd on a reset call should be a no-op.
 	r.CommandEnd("call1", 0, 50)
+
+	r.CommandStart("call2", "echo ok")
+	r.CommandOutput("call2", "ok")
+	if !r.HasOutput("call2") {
+		t.Fatal("renderer should accept new command output after Reset")
+	}
 }
 
 func TestReset_IsIdempotent(t *testing.T) {

@@ -429,12 +429,8 @@ func (r *Renderer) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for k := range r.commands {
-		delete(r.commands, k)
-	}
-	for k := range r.outputs {
-		delete(r.outputs, k)
-	}
+	r.commands = make(map[string]string)
+	r.outputs = make(map[string]*strings.Builder)
 	r.lastToolName = ""
 	r.lastToolID = ""
 	r.lastCompletedToolName = ""
