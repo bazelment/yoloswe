@@ -224,6 +224,56 @@ func TestRunRetryLoop_SkipsOnNonzeroExitBash(t *testing.T) {
 	}
 }
 
+// TestRunRetryLoop_SkipsOnPermanentError covers the canonical
+// disable-model-invocation case: a marker-bearing tool_use_error whose excerpt
+// cannot be recovered by retry. Loop exits with RetryStopPermanent and no Ask
+// is issued.
+func TestRunRetryLoop_SkipsOnPermanentError(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("blocked",
+		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"))
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	result, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no retries on permanent error, got %d", attempts)
+	}
+	if len(fake.asks) != 0 {
+		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
+	}
+	if reason != RetryStopPermanent {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopPermanent, reason)
+	}
+	if result != initial {
+		t.Error("expected original result returned unchanged")
+	}
+}
+
+// TestRunRetryLoop_RetriesNonPermanentMarkerError is a negative regression: a
+// marker-bearing error whose excerpt does not match the deny list must still
+// retry as before.
+func TestRunRetryLoop_RetriesNonPermanentMarkerError(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("parallel",
+		realToolUseErrorBlocks("Cancelled: parallel tool call errored"))
+	fake := &scriptedSession{
+		responses: []*claude.TurnResult{turnResult("ok", cleanBlocks())},
+	}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 2}
+
+	_, attempts, _, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected 1 retry Ask for non-permanent marker, got %d", attempts)
+	}
+}
+
 // TestRunRetryLoop_RetriesCleanlyOnRealToolUseError ensures the G1
 // tightening did not break the PLA-212 recover-on-retry path.
 func TestRunRetryLoop_RetriesCleanlyOnRealToolUseError(t *testing.T) {

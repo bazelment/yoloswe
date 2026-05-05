@@ -25,6 +25,7 @@ const (
 	RetryStopNoProgress     = "no_progress"
 	RetryStopBudgetExceeded = "budget_exceeded"
 	RetryStopCtxCancelled   = "ctx_cancelled"
+	RetryStopPermanent      = "permanent"
 )
 
 // FormatUnresolvedToolErrorMarker returns the marker string used to surface
@@ -124,7 +125,7 @@ func (p *ClaudeProvider) Name() string { return "claude" }
 // runRetryLoop drives the retry-on-tool-error loop: re-issues the turn up to
 // cfg.MaxToolErrorRetries times while a tool_use_error is present. Returns
 // the final result, retry count, and the stop reason (exhausted, no_progress,
-// budget_exceeded, ctx_cancelled, or self-recovered).
+// budget_exceeded, ctx_cancelled, permanent, or self-recovered).
 func runRetryLoop(ctx context.Context, session retrySession, initial *claude.TurnResult, cfg ExecuteConfig) (*claude.TurnResult, int, string, error) {
 	result := initial
 	start := time.Now()
@@ -138,6 +139,10 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 	for attempts < cfg.MaxToolErrorRetries {
 		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
 		if !ok {
+			break
+		}
+		if claude.IsPermanentToolError(excerpt) {
+			stopReason = RetryStopPermanent
 			break
 		}
 		if ctx.Err() != nil {
