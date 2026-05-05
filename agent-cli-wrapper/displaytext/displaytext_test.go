@@ -44,4 +44,14 @@ func TestTruncatePathComponents(t *testing.T) {
 	if got != ".../file.go" {
 		t.Errorf("unicode path should use rune-aware fallback: got %q", got)
 	}
+	nonASCIIFilename := "/really/long/path/世界.go"
+	got = displaytext.TruncatePathComponents(nonASCIIFilename, 10, 1)
+	if got != ".../世界.go" {
+		t.Errorf("non-ASCII filename should be preserved when it fits: got %q", got)
+	}
+	tooLongFilename := "/very/long/path/supercalifragilistic.go"
+	got = displaytext.TruncatePathComponents(tooLongFilename, 12, 1)
+	if got != "/very/lon..." {
+		t.Errorf("too-long filename should fall back to generic truncation: got %q", got)
+	}
 }

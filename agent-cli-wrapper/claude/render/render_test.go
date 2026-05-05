@@ -158,11 +158,6 @@ func TestToolComplete_TruncatesLongSummaries(t *testing.T) {
 			"command": strings.Repeat("echo very-long-command ", 8),
 		}, 80, "...", true)
 	})
-	t.Run("Task", func(t *testing.T) {
-		assertSummary(t, "Task", map[string]interface{}{
-			"description": "summarize " + strings.Repeat("details ", 20),
-		}, 0, "summarize details details", false)
-	})
 }
 
 func TestToolComplete_InteractiveTool_EventHandler(t *testing.T) {
@@ -498,6 +493,17 @@ func TestResetClosesOpenToolOutput(t *testing.T) {
 	}
 }
 
+func TestCommandEnd_TruncatesLongCommand(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", strings.Repeat("c", 80))
+	r.CommandEnd("call1", 0, 10)
+
+	want := "[" + strings.Repeat("c", 57) + "...]"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("CommandEnd output missing truncated command %q: %q", want, buf.String())
+	}
+}
+
 // --- Turn summaries ---
 
 func TestTurnSummary(t *testing.T) {
@@ -518,6 +524,25 @@ func TestTurnCompleteWithTokens(t *testing.T) {
 	}
 	if !strings.Contains(output, "1000") {
 		t.Errorf("Missing input tokens: %q", output)
+	}
+}
+
+func TestTaskLifecycle_TruncatesLongSummaries(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+
+	r.TaskStarted("1", strings.Repeat("s", 100))
+	r.TaskProgress("1", strings.Repeat("p", 100))
+	r.TaskNotification("1", "completed", strings.Repeat("n", 100))
+
+	output := buf.String()
+	for _, want := range []string{
+		strings.Repeat("s", 77) + "...",
+		strings.Repeat("p", 77) + "...",
+		strings.Repeat("n", 67) + "...",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("Task lifecycle output missing %q: %q", want, output)
+		}
 	}
 }
 
