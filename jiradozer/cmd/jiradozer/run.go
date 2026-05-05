@@ -89,7 +89,7 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().DurationVar(&args.pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	cmd.Flags().Float64Var(&args.maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	cmd.Flags().StringVar(&args.runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
-	cmd.Flags().BoolVar(&args.postResult, "post-result", false, "When used with --run-step, post the step output as a comment on the issue (uses the step's configured comment template).")
+	cmd.Flags().BoolVar(&args.postResult, "post-result", false, "When used with --run-step, post the step output as an issue comment. Single-shot steps use comment_template; steps with rounds use round_comment_template and post one aggregate comment after all rounds complete.")
 	cmd.Flags().StringVar(&args.autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
 	cmd.Flags().StringVar(&args.skipPhases, "skip-phases", "", "Skip high-level workflow phases for this run (comma-separated: plan,build,validate,ship; create_pr is part of build)")
 	cmd.Flags().StringArrayVar(&args.sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
@@ -617,7 +617,10 @@ func (r *singleStepRun) finish(stepCfg jiradozer.StepConfig, output string, tota
 	if r.stepName == "plan" {
 		jiradozer.PersistPlan(r.cfg.WorkDir, output, r.logger)
 	}
-	if r.postResult && r.poster != nil {
+	if r.postResult && r.poster == nil {
+		return fmt.Errorf("--post-result requires a comment-capable tracker")
+	}
+	if r.postResult {
 		if err := postStepResultComment(r.ctx, r.poster, r.issue, r.stepName, stepCfg, output, totalRounds); err != nil {
 			return fmt.Errorf("post step result comment: %w", err)
 		}

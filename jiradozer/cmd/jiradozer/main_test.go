@@ -263,6 +263,20 @@ func TestRunSingleStepPostResultReturnsPostError(t *testing.T) {
 	assert.ErrorContains(t, err, "tracker unavailable")
 }
 
+func TestRunSingleStepPostResultRequiresPoster(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, nil, true, "planned output")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "--post-result requires a comment-capable tracker")
+}
+
 func TestRunSingleStepPostResultRequiresCommentTemplate(t *testing.T) {
 	cfg := jiradozer.DefaultConfig()
 	cfg.WorkDir = t.TempDir()
