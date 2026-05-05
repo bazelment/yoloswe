@@ -928,7 +928,14 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 	// Get content blocks (if available)
 	blocks, ok := msg.Message.Content.AsBlocks()
 	if !ok {
-		return
+		text, ok := msg.Message.Content.AsString()
+		if !ok || text == "" {
+			return
+		}
+		blocks = protocol.ContentBlocks{protocol.TextBlock{
+			Type: protocol.ContentBlockTypeText,
+			Text: text,
+		}}
 	}
 
 	s.emit(AssistantMessageEvent{
@@ -1182,7 +1189,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// priorSuppressedWakeupToolID was snapshotted under mu above. If it matches
 	// latestWakeupID, the continuation appended no new ScheduleWakeup — the stale
 	// original block is the only one present, so we release rather than re-suppress.
-	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && latestWakeupID != "" &&
+	shouldSuppressWakeup := !resultIsError && !maxTurnsReached && latestWakeupID != "" &&
 		!(wakeupSuppressed && latestWakeupID == priorSuppressedWakeupToolID)
 	if shouldSuppressWakeup {
 		s.mu.Lock()

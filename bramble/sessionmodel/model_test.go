@@ -155,6 +155,21 @@ func TestSessionModel_StatusAllowsNonTerminal(t *testing.T) {
 	assert.Equal(t, StatusCompleted, m.Meta().Status)
 }
 
+func TestMessageParser_ResultErrorSubtypeMarksFailed(t *testing.T) {
+	m := NewSessionModel(0)
+	m.SetMeta(SessionMeta{Status: StatusRunning})
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"result","subtype":"error_max_turns","session_id":"s1","uuid":"u1","errors":["max turns exceeded"],"num_turns":1,"duration_ms":1000,"duration_api_ms":800,"total_cost_usd":0.05,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	output := m.Output()
+	require.Len(t, output, 1)
+	assert.True(t, output[0].IsError)
+	assert.Equal(t, StatusFailed, m.Meta().Status)
+}
+
 func TestSessionModel_ConcurrentAccess(t *testing.T) {
 	m := NewSessionModel(100)
 	m.SetMeta(SessionMeta{Status: StatusRunning})

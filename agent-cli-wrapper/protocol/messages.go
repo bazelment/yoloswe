@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // MessageType discriminates between message kinds.
@@ -184,6 +185,9 @@ func (fc FlexibleContent) AsBlocks() (ContentBlocks, bool) {
 	}
 	var blocks ContentBlocks
 	if err := json.Unmarshal(fc.raw, &blocks); err != nil {
+		if fc.raw[0] == '[' {
+			slog.Warn("failed to decode content blocks", "error", err)
+		}
 		return nil, false
 	}
 	return blocks, true

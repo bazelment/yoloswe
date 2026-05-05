@@ -314,7 +314,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				if meta != nil && !meta.Timestamp.IsZero() {
 					currentTurn.EndTime = meta.Timestamp
 				}
-				if m.IsError {
+				if resultMessageIsError(m) {
 					currentTurn.Errors = append(currentTurn.Errors, "Turn ended with error")
 				}
 			}
@@ -339,6 +339,11 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 	}
 
 	return sess, nil
+}
+
+func resultMessageIsError(msg protocol.ResultMessage) bool {
+	_, ok := msg.Outcome().(protocol.ResultError)
+	return ok
 }
 
 // ParseProject parses all JSONL files in a project directory, returning

@@ -111,6 +111,27 @@ func TestStream_Replay_AccumulatesStructuredContentBlocks(t *testing.T) {
 	require.IsType(t, ToolResultBlock{}, result.ContentBlocks[3])
 }
 
+func TestStream_Replay_AssistantStringContent(t *testing.T) {
+	s := newTestSession(t)
+	s.turnManager.StartTurn("hello")
+
+	assistantLine := []byte(`{"type":"assistant","message":{"model":"claude-opus-4-7","role":"assistant","content":"plain text"},"session_id":"s1","uuid":"u1"}`)
+	s.handleLine(assistantLine)
+
+	resultLine := []byte(`{"type":"result","subtype":"success","session_id":"s1","uuid":"u2","result":"plain text","num_turns":1,"duration_ms":10,"duration_api_ms":5,"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
+	s.handleLine(resultLine)
+
+	events := drainEvents(t, s)
+	require.Equal(t, 1, countEvents[AssistantMessageEvent](events))
+	require.Equal(t, 1, countEvents[TextEvent](events))
+
+	result := s.turnManager.GetCompletedResult(1)
+	require.NotNil(t, result, "turn should complete")
+	require.Equal(t, "plain text", result.Text)
+	require.Len(t, result.ContentBlocks, 1)
+	require.IsType(t, TextBlock{}, result.ContentBlocks[0])
+}
+
 // TestStream_Replay_ResultMessageEvent_Subtype asserts ResultMessageEvent
 // carries subtype and IsError faithfully. Consumers use these to
 // distinguish success vs error vs max-turns-exceeded vs bg-auto-continued
@@ -160,6 +181,22 @@ func TestStream_Replay_ResultMessageEvent_ErrorSubtypeSetsIsError(t *testing.T) 
 
 	result := s.turnManager.GetCompletedResult(1)
 	require.NotNil(t, result, "turn should complete")
+	require.False(t, result.Success)
+	require.Error(t, result.Error)
+}
+
+func TestStream_Replay_ErrorSubtypeDoesNotSuppressWakeup(t *testing.T) {
+	s := newTestSession(t)
+	s.turnManager.StartTurn("prompt")
+
+	assistantLine := []byte(`{"type":"assistant","message":{"model":"claude-opus-4-7","role":"assistant","content":[{"type":"tool_use","id":"toolu_wakeup","name":"ScheduleWakeup","input":{"delay_seconds":1}}]},"session_id":"s1","uuid":"u1"}`)
+	s.handleLine(assistantLine)
+
+	resultLine := []byte(`{"type":"result","subtype":"error_max_turns","session_id":"s1","uuid":"u_err","errors":["max turns exceeded"],"num_turns":1,"duration_ms":1000,"duration_api_ms":800,"total_cost_usd":0.05,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
+	s.handleLine(resultLine)
+
+	result := s.turnManager.GetCompletedResult(1)
+	require.NotNil(t, result, "error result should complete immediately even with ScheduleWakeup")
 	require.False(t, result.Success)
 	require.Error(t, result.Error)
 }

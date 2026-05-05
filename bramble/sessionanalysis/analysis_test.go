@@ -69,6 +69,19 @@ func TestParseSession_NonexistentFile(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestParseSession_ResultErrorSubtypeRecordsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []byte(
+		`{"type":"user","timestamp":"2026-05-05T00:00:00Z","message":{"role":"user","content":"hello"}}` + "\n" +
+			`{"type":"result","timestamp":"2026-05-05T00:00:01Z","message":{"subtype":"error_max_turns","session_id":"s1","uuid":"u1","errors":["max turns exceeded"],"num_turns":1,"duration_ms":1000,"duration_api_ms":800,"total_cost_usd":0.05,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n")
+	require.NoError(t, os.WriteFile(path, lines, 0o600))
+
+	sess, err := ParseSession(path)
+	require.NoError(t, err)
+	require.Len(t, sess.Turns, 1)
+	require.NotEmpty(t, sess.Turns[0].Errors)
+}
+
 func TestCleanUserInput_TaskNotification(t *testing.T) {
 	input := `<task-notification><task-id>abc123</task-id><summary>Background command completed</summary></task-notification>`
 	meta := &sessionmodel.RawEnvelopeMeta{IsMeta: true}
