@@ -4,7 +4,7 @@ module(
     name = "yoloswe",
 )
 
-# Go rules for building Go code - updated for Bazel 8+ compatibility
+# Go rules for building Go code
 bazel_dep(name = "rules_go", version = "0.60.0")
 
 # Gazelle for generating BUILD files automatically
