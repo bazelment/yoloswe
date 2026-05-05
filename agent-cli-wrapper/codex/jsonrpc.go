@@ -285,14 +285,30 @@ type TokenUsageInfo struct {
 // PreferredUsage returns LastTokenUsage when populated, falling back to
 // TotalTokenUsage for protocol versions that only emit cumulative totals.
 // Returns nil when neither is set.
+//
+// "Populated" means non-nil AND not all-zero. An empty JSON object on
+// the wire (`"last_token_usage": {}`) unmarshals to a non-nil pointer
+// with zero fields, which would otherwise be preferred over a populated
+// TotalTokenUsage and silently render as a zero per-turn delta.
 func (info *TokenUsageInfo) PreferredUsage() *TokenUsage {
 	if info == nil {
 		return nil
 	}
-	if info.LastTokenUsage != nil {
+	if info.LastTokenUsage != nil && !info.LastTokenUsage.isZero() {
 		return info.LastTokenUsage
 	}
 	return info.TotalTokenUsage
+}
+
+// isZero reports whether all token counts are zero — used to detect
+// the "empty struct" edge case where the wire form is `{}` instead of
+// `null`. Receiver is non-nil; callers must guard against nil.
+func (u *TokenUsage) isZero() bool {
+	return u.InputTokens == 0 &&
+		u.CachedInputTokens == 0 &&
+		u.OutputTokens == 0 &&
+		u.ReasoningOutputTokens == 0 &&
+		u.TotalTokens == 0
 }
 
 // TokenUsage contains token counts.

@@ -684,16 +684,17 @@ func (c *Client) handleTokenCount(params json.RawMessage) {
 	thread, ok := c.threads[notif.ConversationID]
 	c.mu.RUnlock()
 	if ok {
-		// Prefer the per-turn LastTokenUsage. When the protocol omits it
-		// (older codex versions), fall back to TotalTokenUsage — note this
-		// is cumulative for the thread, so on multi-turn threads
-		// TurnCompletedEvent.Usage may overstate the per-turn count.
+		// Use the centralized priority from TokenUsageInfo.PreferredUsage:
+		// per-turn LastTokenUsage when populated, else cumulative
+		// TotalTokenUsage. The cumulative fallback overstates per-turn
+		// counts on multi-turn threads (documented on TurnCompletedEvent);
 		// AgentResult consumers (multiagent/agent/codex_provider.go) treat
-		// this as a soft signal for runaway-detection, not as accounting.
-		if lastUsage != nil {
-			thread.setLastUsage(lastUsage)
-		} else if totalUsage != nil {
-			thread.setLastUsage(totalUsage)
+		// this as a soft signal for runaway-detection, not accounting.
+		if preferred := msg.Info.PreferredUsage(); preferred != nil {
+			// Copy so the thread's stored value does not alias msg.Info's
+			// pointer (which is part of a stack-allocated unmarshaled value).
+			cp := *preferred
+			thread.setLastUsage(&cp)
 		}
 	}
 

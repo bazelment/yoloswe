@@ -34,7 +34,13 @@ var logTailOpener = func(path string) (io.ReadSeekCloser, error) {
 var klogfmtLineRe = regexp.MustCompile(`^([IWED])\d{4} \d{2}:\d{2}:\d{2}\.\d+ +\d+ +([^\]]+)\] (.*)$`)
 
 var keyValueRe = regexp.MustCompile(`(\w+)=("[^"]*"|\S+)`)
-var prURLRe = regexp.MustCompile(`https://github\.com/[^\s"']+/pull/\d+`)
+
+// prURLRe matches PR URLs from any GitHub host: github.com, GitHub
+// Enterprise (github.example.com, gh.acme.io), or self-hosted gh.* URLs
+// the gh CLI prints. The /pull/<digits> tail is what makes a URL a PR
+// link, not the hostname; constraining to github.com would silently
+// hide Enterprise PR URLs from the parent log.
+var prURLRe = regexp.MustCompile(`https?://[^\s"']+/pull/\d+`)
 
 // tailSubprocessLog watches the per-issue log file, re-emits a narrow set of
 // step-transition lines on the parent logger, and updates mw.lastOutputAt on
@@ -234,11 +240,13 @@ func (o *Orchestrator) recordStepTransition(mw *managedWorkflow, stepName string
 //
 // The startup window — between subprocess Start() and the first parsed
 // "step:" line — has an empty currentStep, so a stuck child that never
-// emits any log line would otherwise escape detection. To cover that
-// case we fall back to the max IdleTimeout across all configured steps:
-// it is the loosest bound the operator already considers acceptable, so
-// it cannot trip prematurely on a step that was actually OK to run that
-// long, but it still bounds an indefinitely silent startup hang.
+// emits any log line would otherwise escape detection. We use the FIRST
+// configured step's IdleTimeout (plan's, in the bootstrap shape) as the
+// startup window: a child that never even reaches its first step is
+// presumed stuck within roughly the time plan would take, not the
+// loosest cap of any later step. Falling back to the max across all
+// steps would let a startup hang sit silent for ~20 minutes under the
+// bootstrap defaults — much weaker than the watchdog promises.
 //
 // Returns 0 when no step has a positive IdleTimeout — that is the
 // "watchdog disabled by config" signal runWatchdog already understands.
@@ -249,17 +257,20 @@ func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 	if step, ok := o.config.StepByName(stepName); ok {
 		return step.IdleTimeout
 	}
-	return o.maxConfiguredIdleTimeout()
+	return o.startupIdleTimeout()
 }
 
-func (o *Orchestrator) maxConfiguredIdleTimeout() time.Duration {
-	var max time.Duration
+// startupIdleTimeout returns the IdleTimeout to apply during the
+// pre-first-step window. Uses plan's timeout when set; falls back to
+// the next configured step in workflow order so this still works for
+// configs that disable plan or use an alternative pipeline shape.
+func (o *Orchestrator) startupIdleTimeout() time.Duration {
 	for _, name := range []string{"plan", "build", "create_pr", "validate", "ship"} {
-		if step, ok := o.config.StepByName(name); ok && step.IdleTimeout > max {
-			max = step.IdleTimeout
+		if step, ok := o.config.StepByName(name); ok && step.IdleTimeout > 0 {
+			return step.IdleTimeout
 		}
 	}
-	return max
+	return 0
 }
 
 // runWatchdog cancels the workflow context when the gap between now and

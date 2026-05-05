@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/bramble/session"
 )
 
@@ -185,6 +187,99 @@ func TestCodexParser_TurnCompletionPreservesOtherThreadApprovals(t *testing.T) {
 }
 
 // --- Compact tests ---
+
+// TestCodexParser_CumulativeUsageRendersAsPerTurnDelta verifies that on
+// older Codex protocol versions where MappedEventTokenUsage carries a
+// cumulative TotalTokenUsage (UsageIsCumulative=true), replay subtracts
+// the prior turn's cumulative baseline so the rendered "Tokens:" line
+// shows real per-turn deltas, not the running total.
+//
+// Without baseline subtraction the second turn would render
+// "Tokens: 250 input / 90 output" (the cumulative) instead of the
+// actual per-turn delta of "Tokens: 150 input / 50 output."
+func TestCodexParser_CumulativeUsageRendersAsPerTurnDelta(t *testing.T) {
+	p := newCodexReplayParser()
+	ts := time.Time{}
+
+	// Turn 1: cumulative 100 input / 40 output.
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:              codex.MappedEventTokenUsage,
+		ThreadID:          "t1",
+		Usage:             codex.TurnUsage{InputTokens: 100, OutputTokens: 40, TotalTokens: 140},
+		UsageIsCumulative: true,
+	}, ts)
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:     codex.MappedEventTurnCompleted,
+		ThreadID: "t1",
+		TurnID:   "1",
+		Success:  true,
+	}, ts)
+
+	// Turn 2: cumulative 250 input / 90 output (delta should be 150 / 50).
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:              codex.MappedEventTokenUsage,
+		ThreadID:          "t1",
+		Usage:             codex.TurnUsage{InputTokens: 250, OutputTokens: 90, TotalTokens: 340},
+		UsageIsCumulative: true,
+	}, ts)
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:     codex.MappedEventTurnCompleted,
+		ThreadID: "t1",
+		TurnID:   "2",
+		Success:  true,
+	}, ts)
+
+	// Collect all status lines that look like token summaries.
+	var tokenLines []string
+	for _, l := range p.lines {
+		if l.Type == session.OutputTypeStatus && strings.HasPrefix(l.Content, "Tokens:") {
+			tokenLines = append(tokenLines, l.Content)
+		}
+	}
+	require.Len(t, tokenLines, 2, "expected one token summary per turn")
+	assert.Equal(t, "Tokens: 100 input / 40 output", tokenLines[0],
+		"turn 1 has no prior baseline, so cumulative IS the delta")
+	assert.Equal(t, "Tokens: 150 input / 50 output", tokenLines[1],
+		"turn 2 must subtract turn 1's cumulative baseline (250-100, 90-40)")
+}
+
+// TestCodexParser_PerTurnUsageNotSubtracted verifies that when
+// MappedEventTokenUsage carries non-cumulative LastTokenUsage
+// (UsageIsCumulative=false, the modern Codex path), replay does NOT
+// subtract a baseline — the value already IS the per-turn delta.
+func TestCodexParser_PerTurnUsageNotSubtracted(t *testing.T) {
+	p := newCodexReplayParser()
+	ts := time.Time{}
+
+	for i, deltas := range [][2]int64{{100, 40}, {150, 50}} {
+		p.handleMappedEvent(codex.MappedEvent{
+			Kind:     codex.MappedEventTokenUsage,
+			ThreadID: "t1",
+			Usage: codex.TurnUsage{
+				InputTokens: deltas[0], OutputTokens: deltas[1],
+				TotalTokens: deltas[0] + deltas[1],
+			},
+			UsageIsCumulative: false, // per-turn, no baseline subtraction
+		}, ts)
+		p.handleMappedEvent(codex.MappedEvent{
+			Kind:     codex.MappedEventTurnCompleted,
+			ThreadID: "t1",
+			TurnID:   string(rune('1' + i)),
+			Success:  true,
+		}, ts)
+	}
+
+	var tokenLines []string
+	for _, l := range p.lines {
+		if l.Type == session.OutputTypeStatus && strings.HasPrefix(l.Content, "Tokens:") {
+			tokenLines = append(tokenLines, l.Content)
+		}
+	}
+	require.Len(t, tokenLines, 2)
+	assert.Equal(t, "Tokens: 100 input / 40 output", tokenLines[0])
+	assert.Equal(t, "Tokens: 150 input / 50 output", tokenLines[1],
+		"per-turn usage must render as-is, no cumulative subtraction")
+}
 
 func TestCompactLines_MergesTurnAndTokenLines(t *testing.T) {
 	lines := []session.OutputLine{

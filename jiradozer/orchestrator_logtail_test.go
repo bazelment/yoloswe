@@ -306,11 +306,13 @@ func TestMaybeEmitTransition_TogglesReviewFlag(t *testing.T) {
 	require.False(t, mw.inReview.Load(), "next step: line must clear inReview")
 }
 
-// TestIdleTimeoutForStep_PreStepFallsBackToMax verifies that when
-// currentStep is empty (the startup window before the first "step:"
-// line is parsed) idleTimeoutForStep returns the max across configured
-// steps so a silent startup hang is still caught conservatively.
-func TestIdleTimeoutForStep_PreStepFallsBackToMax(t *testing.T) {
+// TestIdleTimeoutForStep_PreStepFallsBackToFirstConfigured verifies the
+// startup-window policy: when currentStep is empty (between Start() and
+// the first "step:" line), idleTimeoutForStep returns the first
+// configured step's timeout, not the max across all steps. Using max
+// would let a silent startup hang sit ~20 min under bootstrap defaults
+// before cancellation — the watchdog promises tighter than that.
+func TestIdleTimeoutForStep_PreStepFallsBackToFirstConfigured(t *testing.T) {
 	t.Parallel()
 
 	cfg := testOrchestratorConfig()
@@ -320,11 +322,20 @@ func TestIdleTimeoutForStep_PreStepFallsBackToMax(t *testing.T) {
 
 	o := &Orchestrator{logger: slog.New(&recordingHandler{}), config: cfg}
 
-	// Empty step name: fall back to max across all steps.
-	require.Equal(t, 22*time.Minute, o.idleTimeoutForStep(""),
-		"unknown step must fall back to max configured timeout")
+	// Empty step name: fall back to plan (the first configured step).
+	require.Equal(t, 5*time.Minute, o.idleTimeoutForStep(""),
+		"unknown step must fall back to plan's timeout, not the max")
 	// Known step still wins exactly.
 	require.Equal(t, 5*time.Minute, o.idleTimeoutForStep("plan"))
+	require.Equal(t, 22*time.Minute, o.idleTimeoutForStep("build"))
+
+	// Plan disabled (0): walk through to the next configured step.
+	cfgNoPlan := testOrchestratorConfig()
+	cfgNoPlan.Plan.IdleTimeout = 0
+	cfgNoPlan.Build.IdleTimeout = 22 * time.Minute
+	noPlanO := &Orchestrator{logger: slog.New(&recordingHandler{}), config: cfgNoPlan}
+	require.Equal(t, 22*time.Minute, noPlanO.idleTimeoutForStep(""),
+		"with plan disabled, should fall through to next configured step")
 
 	// All-zero config: still return zero, preserving the existing
 	// "watchdog disabled" semantics.
