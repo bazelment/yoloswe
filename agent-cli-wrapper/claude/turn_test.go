@@ -412,17 +412,17 @@ func TestTurnManager_AppendContentBlock(t *testing.T) {
 	tm.StartTurn("Test")
 
 	// Append a text block
-	tm.AppendContentBlock(ContentBlock{
+	tm.AppendContentBlock(TextBlock{
 		Type: ContentBlockTypeText,
 		Text: "Hello world",
 	})
 
 	// Append a tool use block
-	tm.AppendContentBlock(ContentBlock{
-		Type:      ContentBlockTypeToolUse,
-		ToolUseID: "tool-1",
-		ToolName:  "Read",
-		ToolInput: map[string]interface{}{"file_path": "/test"},
+	tm.AppendContentBlock(ToolUseBlock{
+		Type:  ContentBlockTypeToolUse,
+		ID:    "tool-1",
+		Name:  "Read",
+		Input: map[string]interface{}{"file_path": "/test"},
 	})
 
 	// Verify blocks are stored
@@ -432,19 +432,21 @@ func TestTurnManager_AppendContentBlock(t *testing.T) {
 	}
 
 	// Check text block
-	if turn.ContentBlocks[0].Type != ContentBlockTypeText {
-		t.Errorf("expected text block type, got %v", turn.ContentBlocks[0].Type)
+	textBlock, ok := turn.ContentBlocks[0].(TextBlock)
+	if !ok {
+		t.Fatalf("expected text block type, got %T", turn.ContentBlocks[0])
 	}
-	if turn.ContentBlocks[0].Text != "Hello world" {
-		t.Errorf("expected text 'Hello world', got %q", turn.ContentBlocks[0].Text)
+	if textBlock.Text != "Hello world" {
+		t.Errorf("expected text 'Hello world', got %q", textBlock.Text)
 	}
 
 	// Check tool use block
-	if turn.ContentBlocks[1].Type != ContentBlockTypeToolUse {
-		t.Errorf("expected tool_use block type, got %v", turn.ContentBlocks[1].Type)
+	toolBlock, ok := turn.ContentBlocks[1].(ToolUseBlock)
+	if !ok {
+		t.Fatalf("expected tool_use block type, got %T", turn.ContentBlocks[1])
 	}
-	if turn.ContentBlocks[1].ToolName != "Read" {
-		t.Errorf("expected tool name 'Read', got %q", turn.ContentBlocks[1].ToolName)
+	if toolBlock.Name != "Read" {
+		t.Errorf("expected tool name 'Read', got %q", toolBlock.Name)
 	}
 }
 
@@ -452,7 +454,7 @@ func TestTurnManager_AppendContentBlock_NoTurn(t *testing.T) {
 	tm := newTurnManager()
 
 	// AppendContentBlock with no turn should not panic
-	tm.AppendContentBlock(ContentBlock{
+	tm.AppendContentBlock(TextBlock{
 		Type: ContentBlockTypeText,
 		Text: "test",
 	})
@@ -534,16 +536,20 @@ func TestTurnResult_ContentBlocks(t *testing.T) {
 	result := TurnResult{
 		TurnNumber: 1,
 		Success:    true,
-		ContentBlocks: []ContentBlock{
-			{Type: ContentBlockTypeText, Text: "Hello"},
-			{Type: ContentBlockTypeThinking, Thinking: "Analyzing..."},
+		ContentBlocks: ContentBlocks{
+			TextBlock{Type: ContentBlockTypeText, Text: "Hello"},
+			ThinkingBlock{Type: ContentBlockTypeThinking, Thinking: "Analyzing..."},
 		},
 	}
 
 	if len(result.ContentBlocks) != 2 {
 		t.Errorf("expected 2 content blocks, got %d", len(result.ContentBlocks))
 	}
-	if result.ContentBlocks[0].Text != "Hello" {
-		t.Errorf("expected text 'Hello', got %q", result.ContentBlocks[0].Text)
+	textBlock, ok := result.ContentBlocks[0].(TextBlock)
+	if !ok {
+		t.Fatalf("expected text block type, got %T", result.ContentBlocks[0])
+	}
+	if textBlock.Text != "Hello" {
+		t.Errorf("expected text 'Hello', got %q", textBlock.Text)
 	}
 }

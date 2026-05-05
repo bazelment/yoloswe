@@ -30,6 +30,9 @@ type wakeupSuppressionState struct {
 	timerFired             bool        // set by the safety timer
 }
 
+// TODO: Re-introduce activeTaskIDs and wire it to bg-task suppression once
+// Bramble has a deterministic task_started/task_notification consumer.
+
 // reset clears wakeup suppression state and stops any pending timer.
 func (w *wakeupSuppressionState) reset() {
 	w.active = false
@@ -702,35 +705,41 @@ func (s *Session) handleLine(line []byte) {
 	case protocol.UpdateEnvironmentVariablesMessage:
 		slog.Warn("unexpected update_environment_variables from CLI (SDK->CLI only)")
 	case protocol.UnknownMessage:
-		rawStr := string(m.Raw)
-		if len(rawStr) > 200 {
-			rawStr = rawStr[:200]
+		raw := m.Raw
+		if len(raw) > 4096 {
+			raw = raw[:4096]
 		}
-		slog.Warn("unknown top-level message type", "type", m.Type, "raw", rawStr)
+		s.emit(UnknownMessageEvent{MessageType: m.Type, Raw: raw})
+		slog.Warn("unknown top-level message type", "type", m.Type)
 	}
 }
 
 func (s *Session) handleSystem(msg protocol.SystemMessage) {
-	if msg.Subtype == "init" {
+	if msg.Subtype == string(protocol.SystemSubtypeInit) {
+		p, ok := msg.AsInit()
+		if !ok {
+			slog.Warn("failed to decode init payload")
+			return
+		}
 		s.mu.Lock()
 		s.info = &SessionInfo{
-			SessionID:      msg.SessionID,
-			Model:          msg.Model,
-			WorkDir:        msg.CWD,
-			Tools:          msg.Tools,
-			PermissionMode: PermissionMode(msg.PermissionMode),
+			SessionID:      p.SessionID,
+			Model:          p.Model,
+			WorkDir:        p.CWD,
+			Tools:          p.Tools,
+			PermissionMode: PermissionMode(p.PermissionMode),
 		}
 		s.mu.Unlock()
 
 		// Initialize recorder with session info
 		if s.recorder != nil {
 			s.recorder.Initialize(RecordingMetadata{
-				SessionID:         msg.SessionID,
-				Model:             msg.Model,
-				WorkDir:           msg.CWD,
-				Tools:             msg.Tools,
-				ClaudeCodeVersion: msg.ClaudeCodeVersion,
-				PermissionMode:    msg.PermissionMode,
+				SessionID:         p.SessionID,
+				Model:             p.Model,
+				WorkDir:           p.CWD,
+				Tools:             p.Tools,
+				ClaudeCodeVersion: p.ClaudeCodeVersion,
+				PermissionMode:    p.PermissionMode,
 			})
 		}
 
@@ -927,7 +936,7 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 
 	s.emit(AssistantMessageEvent{
 		Model:         msg.Message.Model,
-		Blocks:        protocolBlocksToContentBlocks(blocks),
+		Blocks:        blocks,
 		ParentToolUse: msg.ParentToolUseID,
 		TurnNumber:    s.turnManager.CurrentTurnNumber(),
 	})
@@ -982,24 +991,9 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 
 	// Accumulate structured content blocks
 	for _, block := range blocks {
-		switch b := block.(type) {
-		case protocol.TextBlock:
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type: ContentBlockTypeText,
-				Text: b.Text,
-			})
-		case protocol.ThinkingBlock:
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type:     ContentBlockTypeThinking,
-				Thinking: b.Thinking,
-			})
-		case protocol.ToolUseBlock:
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type:      ContentBlockTypeToolUse,
-				ToolUseID: b.ID,
-				ToolName:  b.Name,
-				ToolInput: b.Input,
-			})
+		switch block.(type) {
+		case protocol.TextBlock, protocol.ThinkingBlock, protocol.ToolUseBlock:
+			s.turnManager.AppendContentBlock(block)
 		}
 	}
 }
@@ -1018,7 +1012,7 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 
 	s.emit(UserMessageEvent{
-		Blocks:        protocolBlocksToContentBlocks(blocks),
+		Blocks:        blocks,
 		ParentToolUse: msg.ParentToolUseID,
 		TurnNumber:    s.turnManager.CurrentTurnNumber(),
 	})
@@ -1051,17 +1045,8 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 
 	// Accumulate tool result content blocks
 	for _, block := range blocks {
-		if resultBlock, ok := block.(protocol.ToolResultBlock); ok {
-			isError := false
-			if resultBlock.IsError != nil {
-				isError = *resultBlock.IsError
-			}
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type:       ContentBlockTypeToolResult,
-				ToolUseID:  resultBlock.ToolUseID,
-				ToolResult: resultBlock.Content,
-				IsError:    isError,
-			})
+		if _, ok := block.(protocol.ToolResultBlock); ok {
+			s.turnManager.AppendContentBlock(block)
 		}
 	}
 }
@@ -1725,57 +1710,25 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 	s.sendControlSuccess(requestID, resp)
 }
 
-// protocolBlocksToContentBlocks converts parsed protocol blocks into the
-// shared ContentBlock representation used across SDK events. Unknown block
-// types are dropped (they are already logged elsewhere).
-func protocolBlocksToContentBlocks(blocks protocol.ContentBlocks) []ContentBlock {
-	out := make([]ContentBlock, 0, len(blocks))
-	for _, block := range blocks {
-		switch b := block.(type) {
-		case protocol.TextBlock:
-			out = append(out, ContentBlock{Type: ContentBlockTypeText, Text: b.Text})
-		case protocol.ThinkingBlock:
-			out = append(out, ContentBlock{Type: ContentBlockTypeThinking, Thinking: b.Thinking})
-		case protocol.ToolUseBlock:
-			out = append(out, ContentBlock{
-				Type:      ContentBlockTypeToolUse,
-				ToolUseID: b.ID,
-				ToolName:  b.Name,
-				ToolInput: b.Input,
-			})
-		case protocol.ToolResultBlock:
-			isError := false
-			if b.IsError != nil {
-				isError = *b.IsError
-			}
-			out = append(out, ContentBlock{
-				Type:       ContentBlockTypeToolResult,
-				ToolUseID:  b.ToolUseID,
-				ToolResult: b.Content,
-				IsError:    isError,
-			})
-		}
-	}
-	return out
-}
-
 // resultMessageError extracts the non-nil error value from a ResultMessage
 // when the CLI reports a failed turn. Mirrors handleResult's error
 // construction but does not depend on accumulated suppression state, so the
 // raw ResultMessageEvent can surface error detail before the coalescing
-// branches run. Returns nil when msg.IsError is false.
+// branches run.
 func resultMessageError(msg protocol.ResultMessage) error {
-	if !msg.IsError {
+	switch o := msg.Outcome().(type) {
+	case protocol.ResultSuccess:
 		return nil
+	case protocol.ResultError:
+		if len(o.Errors) > 0 {
+			return fmt.Errorf("%s", strings.Join(o.Errors, "; "))
+		}
+		if o.Text != "" {
+			return fmt.Errorf("%s", o.Text)
+		}
+		return fmt.Errorf("turn failed: %s", o.Subtype)
 	}
-	switch {
-	case len(msg.Errors) > 0:
-		return fmt.Errorf("%s", strings.Join(msg.Errors, "; "))
-	case msg.Result != "":
-		return fmt.Errorf("%s", msg.Result)
-	default:
-		return fmt.Errorf("turn failed: %s", msg.Subtype)
-	}
+	return nil
 }
 
 // generateRequestID generates a unique request ID.

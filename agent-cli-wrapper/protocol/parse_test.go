@@ -55,17 +55,21 @@ func TestParseMessage_SystemInit(t *testing.T) {
 	if sysMsg.SessionID != "c4e0fdb8-ea8e-4900-a07b-a7977627afb2" {
 		t.Errorf("unexpected session_id: %q", sysMsg.SessionID)
 	}
-	if sysMsg.Model != "claude-haiku-4-5-20251001" {
-		t.Errorf("unexpected model: %q", sysMsg.Model)
+	initPayload, ok := sysMsg.AsInit()
+	if !ok {
+		t.Fatal("AsInit failed")
 	}
-	if sysMsg.PermissionMode != "bypassPermissions" {
-		t.Errorf("unexpected permissionMode: %q", sysMsg.PermissionMode)
+	if initPayload.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("unexpected model: %q", initPayload.Model)
 	}
-	if len(sysMsg.Tools) != 5 {
-		t.Errorf("expected 5 tools, got %d", len(sysMsg.Tools))
+	if initPayload.PermissionMode != "bypassPermissions" {
+		t.Errorf("unexpected permissionMode: %q", initPayload.PermissionMode)
 	}
-	if sysMsg.ClaudeCodeVersion != "2.1.12" {
-		t.Errorf("unexpected claude_code_version: %q", sysMsg.ClaudeCodeVersion)
+	if len(initPayload.Tools) != 5 {
+		t.Errorf("expected 5 tools, got %d", len(initPayload.Tools))
+	}
+	if initPayload.ClaudeCodeVersion != "2.1.12" {
+		t.Errorf("unexpected claude_code_version: %q", initPayload.ClaudeCodeVersion)
 	}
 }
 
@@ -83,14 +87,18 @@ func TestParseMessage_SystemHookResponse(t *testing.T) {
 	if sysMsg.Subtype != "hook_response" {
 		t.Errorf("expected subtype 'hook_response', got %q", sysMsg.Subtype)
 	}
-	if sysMsg.HookName != "SessionStart:startup" {
-		t.Errorf("unexpected hook_name: %q", sysMsg.HookName)
+	hookPayload, ok := sysMsg.AsHookResponse()
+	if !ok {
+		t.Fatal("AsHookResponse failed")
 	}
-	if sysMsg.HookEvent != "SessionStart" {
-		t.Errorf("unexpected hook_event: %q", sysMsg.HookEvent)
+	if hookPayload.HookName != "SessionStart:startup" {
+		t.Errorf("unexpected hook_name: %q", hookPayload.HookName)
 	}
-	if sysMsg.ExitCode == nil || *sysMsg.ExitCode != 0 {
-		t.Errorf("unexpected exit_code: %v", sysMsg.ExitCode)
+	if hookPayload.HookEvent != "SessionStart" {
+		t.Errorf("unexpected hook_event: %q", hookPayload.HookEvent)
+	}
+	if hookPayload.ExitCode == nil || *hookPayload.ExitCode != 0 {
+		t.Errorf("unexpected exit_code: %v", hookPayload.ExitCode)
 	}
 }
 

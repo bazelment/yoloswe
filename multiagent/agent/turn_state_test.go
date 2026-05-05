@@ -13,16 +13,18 @@ import (
 
 func strPtr(s string) *string { return &s }
 
+func boolPtr(v bool) *bool { return &v }
+
 func asstTextBlock(text string) claude.ContentBlock {
-	return claude.ContentBlock{Type: claude.ContentBlockTypeText, Text: text}
+	return claude.TextBlock{Type: claude.ContentBlockTypeText, Text: text}
 }
 
 func toolUseBlock(id, name string, input map[string]interface{}) claude.ContentBlock {
-	return claude.ContentBlock{
-		Type:      claude.ContentBlockTypeToolUse,
-		ToolUseID: id,
-		ToolName:  name,
-		ToolInput: input,
+	return claude.ToolUseBlock{
+		Type:  claude.ContentBlockTypeToolUse,
+		ID:    id,
+		Name:  name,
+		Input: input,
 	}
 }
 
@@ -40,10 +42,10 @@ func bgBashToolUse(id string) claude.ContentBlock {
 }
 
 func toolResult(id string, isError bool) claude.ContentBlock {
-	return claude.ContentBlock{
+	return claude.ToolResultBlock{
 		Type:      claude.ContentBlockTypeToolResult,
 		ToolUseID: id,
-		IsError:   isError,
+		IsError:   boolPtr(isError),
 	}
 }
 
@@ -87,7 +89,7 @@ func TestTurnState_C1_PureBgMonitorTurn(t *testing.T) {
 	// Turn 1: assistant launches Monitor; CLI fires ResultMessage immediately.
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID:     "task1",
@@ -147,7 +149,7 @@ func TestTurnState_C2_MixedSyncBgTurn(t *testing.T) {
 	// Assistant turn with sync Read + bg Monitor in one message.
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks: []claude.ContentBlock{
+		Blocks: claude.ContentBlocks{
 			toolUseBlock("toolu_sync1", "Read", map[string]interface{}{"file_path": "/tmp/x"}),
 			monitorToolUse("toolu_bg1"),
 		},
@@ -155,7 +157,7 @@ func TestTurnState_C2_MixedSyncBgTurn(t *testing.T) {
 	// Sync tool result arrives as user message.
 	s.Apply(claude.UserMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{toolResult("toolu_sync1", false)},
+		Blocks:     claude.ContentBlocks{toolResult("toolu_sync1", false)},
 	})
 	// Bg Monitor registers as a task.
 	s.Apply(claude.TaskStartedEvent{
@@ -186,7 +188,7 @@ func TestTurnState_C3_TwoParallelMonitorsOneFailsFast(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks: []claude.ContentBlock{
+		Blocks: claude.ContentBlocks{
 			monitorToolUse("toolu_bg_fast"),
 			monitorToolUse("toolu_bg_slow"),
 		},
@@ -228,7 +230,7 @@ func TestTurnState_C4_PureBgBashRunInBackground(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{bgBashToolUse("toolu_bg_bash")},
+		Blocks:     claude.ContentBlocks{bgBashToolUse("toolu_bg_bash")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID:    "task_bash",
@@ -253,7 +255,7 @@ func TestTurnState_C5_MixedMonitorAndBgBash(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks: []claude.ContentBlock{
+		Blocks: claude.ContentBlocks{
 			monitorToolUse("toolu_mon"),
 			bgBashToolUse("toolu_bash"),
 		},
@@ -291,7 +293,7 @@ func TestTurnState_C6_TaskNotificationMissingToolUseID(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID:    "task1",
@@ -320,7 +322,7 @@ func TestTurnState_C7_ReorderedTaskStartedAfterNotification(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	// TaskNotification arrives before TaskStarted (reordered).
 	s.Apply(claude.TaskNotificationEvent{
@@ -352,7 +354,7 @@ func TestTurnState_C8_BudgetExceededMidBg(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
@@ -374,7 +376,7 @@ func TestTurnState_C9_BgMonitorToolError(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
@@ -397,7 +399,7 @@ func TestTurnState_C10_MonitorTimeoutMs(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
@@ -419,7 +421,7 @@ func TestTurnState_C11_PlainSyncTurn(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{asstTextBlock("hello world")},
+		Blocks:     claude.ContentBlocks{asstTextBlock("hello world")},
 	})
 	require.False(t, s.LogicalTurnDone(), "no result message yet")
 	endOfCLITurn(s, false)
@@ -435,7 +437,7 @@ func TestTurnState_C12_CloseWhileBgLive(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
@@ -455,7 +457,7 @@ func TestTurnState_C13_ToolErrorRetryAfterBgSettles(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg"),
@@ -484,12 +486,12 @@ func TestTurnState_CancelledBgToolDoesNotBlock(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
 	})
 	// tool_result carries IsError — caller cancelled.
 	s.Apply(claude.UserMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{toolResult("toolu_bg", true)},
+		Blocks:     claude.ContentBlocks{toolResult("toolu_bg", true)},
 	})
 	endOfCLITurn(s, false)
 	require.True(t, s.LogicalTurnDone(),
@@ -555,7 +557,7 @@ func TestTurnState_TerminalBgDrainAfterResultRequiresContinuation(t *testing.T) 
 	// immediately because it has nothing else to say.
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"),
@@ -593,7 +595,7 @@ func TestTurnState_TerminalTaskUpdatedAfterResultRequiresContinuation(t *testing
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
 	})
 	s.Apply(claude.TaskStartedEvent{
 		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"),
@@ -618,7 +620,7 @@ func TestTurnState_TerminalBeforeTaskStartedStillCompletes(t *testing.T) {
 
 	s.Apply(claude.AssistantMessageEvent{
 		TurnNumber: 1,
-		Blocks:     []claude.ContentBlock{monitorToolUse("toolu_bg1")},
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
 	})
 	// Terminal first.
 	s.Apply(claude.TaskNotificationEvent{

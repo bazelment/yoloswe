@@ -172,7 +172,7 @@ func TestParseMessage_UpdateEnvironmentVariables(t *testing.T) {
 }
 
 func TestResultMessage_Outcome_Success(t *testing.T) {
-	m := ResultMessage{Subtype: "success", Result: "hello"}
+	m := parseResultMessage(t, `{"type":"result","subtype":"success","result":"hello","is_error":false}`)
 	out := m.Outcome()
 	s, ok := out.(ResultSuccess)
 	if !ok {
@@ -215,7 +215,7 @@ func TestResultMessage_Outcome_Errors(t *testing.T) {
 // is_error is true but the subtype string still says "success" — Outcome must
 // classify the turn as failed and preserve the diagnostic text from Result.
 func TestResultMessage_Outcome_IsErrorWithSuccessSubtype(t *testing.T) {
-	m := ResultMessage{Subtype: "success", IsError: true, Result: "boom"}
+	m := parseResultMessage(t, `{"type":"result","subtype":"success","result":"boom","is_error":true}`)
 	out := m.Outcome()
 	e, ok := out.(ResultError)
 	if !ok {
@@ -224,4 +224,17 @@ func TestResultMessage_Outcome_IsErrorWithSuccessSubtype(t *testing.T) {
 	if e.Text != "boom" {
 		t.Errorf("text: %q", e.Text)
 	}
+}
+
+func parseResultMessage(t *testing.T, raw string) ResultMessage {
+	t.Helper()
+	msg, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	result, ok := msg.(ResultMessage)
+	if !ok {
+		t.Fatalf("expected ResultMessage, got %T", msg)
+	}
+	return result
 }

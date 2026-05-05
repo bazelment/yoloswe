@@ -8,17 +8,19 @@ import (
 	"testing"
 )
 
+func boolPtr(v bool) *bool { return &v }
+
 // TestFinalTurnToolError_IsErrorPlusMarker: both IsError and the marker
 // are required. The canonical positive case.
 func TestFinalTurnToolError_IsErrorPlusMarker(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Skill"},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "<tool_use_error>Skill example:pr-polish cannot be used with Skill tool due to disable-model-invocation</tool_use_error>",
-			IsError:    true,
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Skill"},
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "t1",
+			Content:   "<tool_use_error>Skill example:pr-polish cannot be used with Skill tool due to disable-model-invocation</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
 	}
 	name, excerpt, ok := FinalTurnToolError(blocks)
@@ -39,13 +41,13 @@ func TestFinalTurnToolError_IsErrorPlusMarker(t *testing.T) {
 // evidence log 2 false positive.
 func TestFinalTurnToolError_NonzeroExitBash(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "Exit code 8\nForge Visual Tests\tpending\nPython Tests\tpending",
-			IsError:    true,
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "t1",
+			Content:   "Exit code 8\nForge Visual Tests\tpending\nPython Tests\tpending",
+			IsError:   boolPtr(true),
 		},
 	}
 	if _, _, ok := FinalTurnToolError(blocks); ok {
@@ -57,13 +59,13 @@ func TestFinalTurnToolError_NonzeroExitBash(t *testing.T) {
 // from evidence log 2. The CLI emits the wrapper, so retry fires.
 func TestFinalTurnToolError_WriteNotReadYet(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Write"},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
-			IsError:    true,
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Write"},
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "t1",
+			Content:   "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
 	}
 	if _, _, ok := FinalTurnToolError(blocks); !ok {
@@ -76,13 +78,13 @@ func TestFinalTurnToolError_WriteNotReadYet(t *testing.T) {
 // is false. Must not fire — the AND rule requires both.
 func TestFinalTurnToolError_SubstringWithoutIsError(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "log line mentions <tool_use_error> in text",
-			IsError:    false,
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "t1",
+			Content:   "log line mentions <tool_use_error> in text",
+			IsError:   boolPtr(false),
 		},
 	}
 	if _, _, ok := FinalTurnToolError(blocks); ok {
@@ -98,20 +100,20 @@ func TestFinalTurnToolError_SubstringWithoutIsError(t *testing.T) {
 // the model sees the full history in context.
 func TestFinalTurnToolError_ParallelCancelled(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "ruff", ToolName: "Bash", ToolInput: map[string]interface{}{"command": "ruff check"}},
-		{Type: ContentBlockTypeToolUse, ToolUseID: "pytest", ToolName: "Bash", ToolInput: map[string]interface{}{"command": "pytest"}},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "ruff",
-			ToolResult: "Exit code 1\nTC003 stdlib import in runtime",
-			IsError:    true,
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "ruff", Name: "Bash", Input: map[string]interface{}{"command": "ruff check"}},
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "pytest", Name: "Bash", Input: map[string]interface{}{"command": "pytest"}},
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "ruff",
+			Content:   "Exit code 1\nTC003 stdlib import in runtime",
+			IsError:   boolPtr(true),
 		},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "pytest",
-			ToolResult: "<tool_use_error>Cancelled: parallel tool call Bash(ruff check) errored</tool_use_error>",
-			IsError:    true,
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "pytest",
+			Content:   "<tool_use_error>Cancelled: parallel tool call Bash(ruff check) errored</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
 	}
 	name, excerpt, ok := FinalTurnToolError(blocks)
@@ -128,9 +130,9 @@ func TestFinalTurnToolError_ParallelCancelled(t *testing.T) {
 
 func TestFinalTurnToolError_Clean(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Read"},
-		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: "file contents", IsError: false},
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Read"},
+		ToolResultBlock{Type: ContentBlockTypeToolResult, ToolUseID: "t1", Content: "file contents", IsError: boolPtr(false)},
 	}
 	if _, _, ok := FinalTurnToolError(blocks); ok {
 		t.Fatal("expected ok=false for clean turn")
@@ -139,8 +141,8 @@ func TestFinalTurnToolError_Clean(t *testing.T) {
 
 func TestFinalTurnToolError_NoToolUse(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeText, Text: "hello"},
+	blocks := ContentBlocks{
+		TextBlock{Type: ContentBlockTypeText, Text: "hello"},
 	}
 	if _, _, ok := FinalTurnToolError(blocks); ok {
 		t.Fatal("expected ok=false for text-only turn")
@@ -160,9 +162,9 @@ func TestFinalTurnToolError_BlockShape(t *testing.T) {
 			"text": "<tool_use_error>Cancelled</tool_use_error>",
 		},
 	}
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: wireShape, IsError: true},
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		ToolResultBlock{Type: ContentBlockTypeToolResult, ToolUseID: "t1", Content: wireShape, IsError: boolPtr(true)},
 	}
 	_, excerpt, ok := FinalTurnToolError(blocks)
 	if !ok {
@@ -176,9 +178,9 @@ func TestFinalTurnToolError_BlockShape(t *testing.T) {
 func TestFinalTurnToolError_ExcerptLength(t *testing.T) {
 	t.Parallel()
 	long := "<tool_use_error>" + strings.Repeat("x", 500) + "</tool_use_error>"
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: long, IsError: true},
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		ToolResultBlock{Type: ContentBlockTypeToolResult, ToolUseID: "t1", Content: long, IsError: boolPtr(true)},
 	}
 	_, excerpt, ok := FinalTurnToolError(blocks)
 	if !ok {
@@ -213,12 +215,12 @@ func TestFinalTurnToolErrorDetails_ReturnsFullContent(t *testing.T) {
 
 func TestFinalTurnToolError_UnknownTool(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "orphan",
-			ToolResult: "<tool_use_error>err</tool_use_error>",
-			IsError:    true,
+	blocks := ContentBlocks{
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "orphan",
+			Content:   "<tool_use_error>err</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
 	}
 	name, _, ok := FinalTurnToolError(blocks)
@@ -292,15 +294,15 @@ func TestFinalTurnToolError_Fixture_EditErrorThenRecovered(t *testing.T) {
 // must still fire.
 func TestFinalTurnToolError_ErrorIsLastToolResult(t *testing.T) {
 	t.Parallel()
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Read"},
-		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: "file contents", IsError: false},
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t2", ToolName: "Edit"},
-		{
-			Type:       ContentBlockTypeToolResult,
-			ToolUseID:  "t2",
-			ToolResult: "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
-			IsError:    true,
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Read"},
+		ToolResultBlock{Type: ContentBlockTypeToolResult, ToolUseID: "t1", Content: "file contents", IsError: boolPtr(false)},
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t2", Name: "Edit"},
+		ToolResultBlock{
+			Type:      ContentBlockTypeToolResult,
+			ToolUseID: "t2",
+			Content:   "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
 	}
 	name, excerpt, ok := FinalTurnToolError(blocks)
@@ -315,17 +317,17 @@ func TestFinalTurnToolError_ErrorIsLastToolResult(t *testing.T) {
 	}
 }
 
-// loadRetryFixture reads a JSON snapshot of []ContentBlock from
+// loadRetryFixture reads a JSON snapshot of ContentBlocks from
 // testdata/retry/. Fixtures are hand-extracted from real Claude CLI
 // session JSONL files to guard the detector against regressions.
-func loadRetryFixture(t *testing.T, name string) []ContentBlock {
+func loadRetryFixture(t *testing.T, name string) ContentBlocks {
 	t.Helper()
 	path := filepath.Join("testdata", "retry", name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)
 	}
-	var blocks []ContentBlock
+	var blocks ContentBlocks
 	if err := json.Unmarshal(data, &blocks); err != nil {
 		t.Fatalf("unmarshal fixture %s: %v", name, err)
 	}

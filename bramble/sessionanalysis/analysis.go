@@ -244,9 +244,11 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 
 		switch m := msg.(type) {
 		case protocol.SystemMessage:
-			if m.Subtype == "init" {
-				sess.Model = m.Model
-				sess.CWD = m.CWD
+			if m.Subtype == string(protocol.SystemSubtypeInit) {
+				if payload, ok := m.AsInit(); ok {
+					sess.Model = payload.Model
+					sess.CWD = payload.CWD
+				}
 			}
 
 		case protocol.UserMessage:

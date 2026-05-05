@@ -84,37 +84,37 @@ func (s *cancelAfterFirstAskSession) Ask(ctx context.Context, content string) (*
 // realToolUseErrorBlocks is the minimal set of ContentBlocks that
 // FinalTurnToolError will flag as retry-worthy: IsError true and the
 // <tool_use_error> wrapper present.
-func realToolUseErrorBlocks(excerpt string) []claude.ContentBlock {
-	return []claude.ContentBlock{
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{
-			Type:       claude.ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "<tool_use_error>" + excerpt + "</tool_use_error>",
-			IsError:    true,
+func realToolUseErrorBlocks(excerpt string) claude.ContentBlocks {
+	return claude.ContentBlocks{
+		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		claude.ToolResultBlock{
+			Type:      claude.ContentBlockTypeToolResult,
+			ToolUseID: "t1",
+			Content:   "<tool_use_error>" + excerpt + "</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
 	}
 }
 
 // nonzeroExitBashBlocks mimics a `gh pr checks` exit-8 shape: IsError
 // true but no <tool_use_error> wrapper. Must not trigger retry.
-func nonzeroExitBashBlocks() []claude.ContentBlock {
-	return []claude.ContentBlock{
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{
-			Type:       claude.ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "Exit code 8\nForge Visual Tests\tpending",
-			IsError:    true,
+func nonzeroExitBashBlocks() claude.ContentBlocks {
+	return claude.ContentBlocks{
+		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		claude.ToolResultBlock{
+			Type:      claude.ContentBlockTypeToolResult,
+			ToolUseID: "t1",
+			Content:   "Exit code 8\nForge Visual Tests\tpending",
+			IsError:   boolPtr(true),
 		},
 	}
 }
 
-func cleanBlocks() []claude.ContentBlock {
-	return []claude.ContentBlock{{Type: claude.ContentBlockTypeText, Text: "done"}}
+func cleanBlocks() claude.ContentBlocks {
+	return claude.ContentBlocks{claude.TextBlock{Type: claude.ContentBlockTypeText, Text: "done"}}
 }
 
-func turnResult(text string, blocks []claude.ContentBlock) *claude.TurnResult {
+func turnResult(text string, blocks claude.ContentBlocks) *claude.TurnResult {
 	return &claude.TurnResult{
 		Text:          text,
 		ContentBlocks: blocks,
@@ -554,19 +554,19 @@ func TestRunRetryLoop_RetriesCleanlyOnRealToolUseError(t *testing.T) {
 // recoveredErrorBlocks returns a block sequence where an early Edit
 // tool_use_error is followed by a successful Read + Edit, mirroring the
 // 2026-04-18 production failure (fc29ffb6 session, line 132 → 156).
-func recoveredErrorBlocks() []claude.ContentBlock {
-	return []claude.ContentBlock{
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "edit1", ToolName: "Edit"},
-		{
-			Type:       claude.ContentBlockTypeToolResult,
-			ToolUseID:  "edit1",
-			ToolResult: "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
-			IsError:    true,
+func recoveredErrorBlocks() claude.ContentBlocks {
+	return claude.ContentBlocks{
+		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "edit1", Name: "Edit"},
+		claude.ToolResultBlock{
+			Type:      claude.ContentBlockTypeToolResult,
+			ToolUseID: "edit1",
+			Content:   "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+			IsError:   boolPtr(true),
 		},
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "read1", ToolName: "Read"},
-		{Type: claude.ContentBlockTypeToolResult, ToolUseID: "read1", ToolResult: "file contents", IsError: false},
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "edit2", ToolName: "Edit"},
-		{Type: claude.ContentBlockTypeToolResult, ToolUseID: "edit2", ToolResult: "edit applied", IsError: false},
+		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "read1", Name: "Read"},
+		claude.ToolResultBlock{Type: claude.ContentBlockTypeToolResult, ToolUseID: "read1", Content: "file contents", IsError: boolPtr(false)},
+		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "edit2", Name: "Edit"},
+		claude.ToolResultBlock{Type: claude.ContentBlockTypeToolResult, ToolUseID: "edit2", Content: "edit applied", IsError: boolPtr(false)},
 	}
 }
 

@@ -85,27 +85,10 @@ type Plugin struct {
 
 // SystemMessage represents session initialization and system events.
 type SystemMessage struct {
-	ExitCode          *int        `json:"exit_code,omitempty"`
-	UUID              string      `json:"uuid"`
-	PermissionMode    string      `json:"permissionMode,omitempty"`
-	ClaudeCodeVersion string      `json:"claude_code_version,omitempty"`
-	CWD               string      `json:"cwd,omitempty"`
-	Type              MessageType `json:"type"`
-	Subtype           string      `json:"subtype"`
-	Model             string      `json:"model,omitempty"`
-	SessionID         string      `json:"session_id"`
-	Stderr            string      `json:"stderr,omitempty"`
-	Stdout            string      `json:"stdout,omitempty"`
-	HookEvent         string      `json:"hook_event,omitempty"`
-	HookName          string      `json:"hook_name,omitempty"`
-	APIKeySource      string      `json:"apiKeySource,omitempty"`
-	OutputStyle       string      `json:"output_style,omitempty"`
-	Tools             []string    `json:"tools,omitempty"`
-	Plugins           []Plugin    `json:"plugins,omitempty"`
-	Skills            []string    `json:"skills,omitempty"`
-	Agents            []string    `json:"agents,omitempty"`
-	SlashCommands     []string    `json:"slash_commands,omitempty"`
-	MCPServers        []MCPServer `json:"mcp_servers,omitempty"`
+	Type      MessageType `json:"type"`
+	Subtype   string      `json:"subtype"`
+	UUID      string      `json:"uuid"`
+	SessionID string      `json:"session_id"`
 	// raw preserves the on-wire JSON so DecodePayload() can decode
 	// subtype-specific fields not declared on this flat envelope.
 	raw json.RawMessage `json:"-"`
@@ -263,7 +246,7 @@ type ModelUsage struct {
 
 // ResultMessage contains turn completion metrics.
 //
-// Result is populated only when Subtype == ResultSubtypeSuccess. For any of
+// result is populated only when Subtype == ResultSubtypeSuccess. For any of
 // the error subtypes the Errors slice is populated instead with one or more
 // human-readable error strings. Callers should prefer Outcome() to get a
 // sealed variant that forces handling of the error case.
@@ -273,15 +256,34 @@ type ResultMessage struct {
 	Subtype           string                `json:"subtype"`
 	UUID              string                `json:"uuid"`
 	Type              MessageType           `json:"type"`
-	Result            string                `json:"result"`
-	Errors            []string              `json:"errors,omitempty"`
-	PermissionDenials []interface{}         `json:"permission_denials,omitempty"`
-	Usage             UsageDetails          `json:"usage"`
-	TotalCostUSD      float64               `json:"total_cost_usd"`
-	NumTurns          int                   `json:"num_turns"`
-	DurationAPIMs     int64                 `json:"duration_api_ms"`
-	DurationMs        int64                 `json:"duration_ms"`
-	IsError           bool                  `json:"is_error"`
+	result            string
+	Errors            []string      `json:"errors,omitempty"`
+	PermissionDenials []interface{} `json:"permission_denials,omitempty"`
+	Usage             UsageDetails  `json:"usage"`
+	TotalCostUSD      float64       `json:"total_cost_usd"`
+	NumTurns          int           `json:"num_turns"`
+	DurationAPIMs     int64         `json:"duration_api_ms"`
+	DurationMs        int64         `json:"duration_ms"`
+	IsError           bool          `json:"is_error"`
+}
+
+// UnmarshalJSON decodes the wire result field into the unexported storage used
+// by Outcome().
+func (m *ResultMessage) UnmarshalJSON(data []byte) error {
+	type resultMessageAlias ResultMessage
+	var alias resultMessageAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*m = ResultMessage(alias)
+	var resultField struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(data, &resultField); err != nil {
+		return err
+	}
+	m.result = resultField.Result
+	return nil
 }
 
 // ResultOutcome is a sealed interface describing the outcome of a turn.
@@ -316,12 +318,12 @@ func (ResultError) isResultOutcome() {}
 // Subtype strings directly.
 func (m ResultMessage) Outcome() ResultOutcome {
 	if !m.IsError && ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
-		return ResultSuccess{Text: m.Result}
+		return ResultSuccess{Text: m.result}
 	}
 	return ResultError{
 		Subtype: ResultSubtype(m.Subtype),
 		Errors:  m.Errors,
-		Text:    m.Result,
+		Text:    m.result,
 	}
 }
 

@@ -60,16 +60,20 @@ func (p *MessageParser) HandleMessage(msg protocol.Message) {
 // --- system -----------------------------------------------------------------
 
 func (p *MessageParser) handleSystem(msg protocol.SystemMessage) {
-	if msg.Subtype == "init" {
+	if msg.Subtype == string(protocol.SystemSubtypeInit) {
+		payload, ok := msg.AsInit()
+		if !ok {
+			return
+		}
 		p.model.SetMeta(SessionMeta{
-			SessionID:         msg.SessionID,
-			Model:             msg.Model,
-			CWD:               msg.CWD,
-			ClaudeCodeVersion: msg.ClaudeCodeVersion,
-			PermissionMode:    msg.PermissionMode,
-			Tools:             msg.Tools,
-			Agents:            msg.Agents,
-			Skills:            msg.Skills,
+			SessionID:         payload.SessionID,
+			Model:             payload.Model,
+			CWD:               payload.CWD,
+			ClaudeCodeVersion: payload.ClaudeCodeVersion,
+			PermissionMode:    payload.PermissionMode,
+			Tools:             payload.Tools,
+			Agents:            payload.Agents,
+			Skills:            payload.Skills,
 			Status:            StatusRunning,
 		})
 	}

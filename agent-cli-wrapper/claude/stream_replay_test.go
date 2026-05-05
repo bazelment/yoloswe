@@ -528,7 +528,10 @@ func TestStream_Replay_R16_CancelledBgTool(t *testing.T) {
 	}
 	require.NotNil(t, cancelledUserMsg)
 	require.Len(t, cancelledUserMsg.Blocks, 1)
-	require.True(t, cancelledUserMsg.Blocks[0].IsError, "tool_result is_error surfaced raw")
+	resultBlock, ok := cancelledUserMsg.Blocks[0].(ToolResultBlock)
+	require.True(t, ok, "got %T", cancelledUserMsg.Blocks[0])
+	require.NotNil(t, resultBlock.IsError)
+	require.True(t, *resultBlock.IsError, "tool_result is_error surfaced raw")
 	require.Equal(t, 1, countEvents[TaskNotificationEvent](events),
 		"terminal task_notification also fires for cancelled bg tool")
 }

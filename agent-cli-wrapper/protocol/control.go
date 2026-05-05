@@ -302,8 +302,8 @@ type MCPStatusResponse struct {
 }
 
 // GetContextUsageResponse is the response to a get_context_usage request.
-// TODO: shape is complex (categories, gridRows, memoryFiles, mcpTools,
-// messageBreakdown, apiUsage, etc). Kept as raw map until we need to consume.
+// XXX: type this when the first in-tree consumer lands; the upstream shape is
+// broad and speculative typing has low ROI until we know which fields matter.
 type GetContextUsageResponse map[string]json.RawMessage
 
 // RewindFilesResponse is the response to a rewind_files request.

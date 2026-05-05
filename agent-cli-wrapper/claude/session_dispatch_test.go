@@ -352,13 +352,19 @@ func TestSessionDispatchUnknownMessage(t *testing.T) {
 	t.Parallel()
 	s := newTestSession(t)
 	// Completely unknown top-level type. ParseMessage returns UnknownMessage;
-	// handleLine logs a warning and emits nothing.
+	// handleLine logs a warning and emits an UnknownMessageEvent.
 	injectLine(t, s, map[string]interface{}{
 		"type":       "future_unknown_type_xyz",
 		"session_id": "s",
 		"uuid":       "u",
 	})
-	expectNoEvent(t, s, 100*time.Millisecond)
+	ev := waitForEvent(t, s, func(ev Event) bool {
+		return ev.Type() == EventTypeUnknownMessage
+	}, time.Second)
+	unknown, ok := ev.(UnknownMessageEvent)
+	require.True(t, ok, "got %T", ev)
+	require.Equal(t, protocol.MessageType("future_unknown_type_xyz"), unknown.MessageType)
+	require.Contains(t, string(unknown.Raw), "future_unknown_type_xyz")
 }
 
 // buildControlRequestLine frames an inner control-request payload inside a

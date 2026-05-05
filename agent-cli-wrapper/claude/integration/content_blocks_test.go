@@ -50,33 +50,34 @@ func TestSession_ContentBlocks(t *testing.T) {
 	var hasToolResult bool
 
 	for _, block := range result.ContentBlocks {
-		switch block.Type {
-		case claude.ContentBlockTypeText:
+		switch b := block.(type) {
+		case claude.TextBlock:
 			hasText = true
-			if block.Text == "" {
+			if b.Text == "" {
 				t.Error("text block has empty text")
 			}
-			t.Logf("Text block: %q", block.Text[:min(50, len(block.Text))])
+			t.Logf("Text block: %q", b.Text[:min(50, len(b.Text))])
 
-		case claude.ContentBlockTypeThinking:
-			t.Logf("Thinking block: %q", block.Thinking[:min(50, len(block.Thinking))])
+		case claude.ThinkingBlock:
+			t.Logf("Thinking block: %q", b.Thinking[:min(50, len(b.Thinking))])
 
-		case claude.ContentBlockTypeToolUse:
+		case claude.ToolUseBlock:
 			hasToolUse = true
-			if block.ToolUseID == "" {
+			if b.ID == "" {
 				t.Error("tool_use block has empty tool_use_id")
 			}
-			if block.ToolName == "" {
+			if b.Name == "" {
 				t.Error("tool_use block has empty tool_name")
 			}
-			t.Logf("Tool use block: name=%s, id=%s", block.ToolName, block.ToolUseID)
+			t.Logf("Tool use block: name=%s, id=%s", b.Name, b.ID)
 
-		case claude.ContentBlockTypeToolResult:
+		case claude.ToolResultBlock:
 			hasToolResult = true
-			if block.ToolUseID == "" {
+			if b.ToolUseID == "" {
 				t.Error("tool_result block has empty tool_use_id")
 			}
-			t.Logf("Tool result block: id=%s, is_error=%v", block.ToolUseID, block.IsError)
+			isError := b.IsError != nil && *b.IsError
+			t.Logf("Tool result block: id=%s, is_error=%v", b.ToolUseID, isError)
 		}
 	}
 

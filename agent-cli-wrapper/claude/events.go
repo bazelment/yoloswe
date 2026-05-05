@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
@@ -73,6 +74,9 @@ const (
 	// EventTypeSystemMessage fires for any CLI system message not surfaced
 	// via a dedicated typed event. Subtype identifies the kind.
 	EventTypeSystemMessage
+	// EventTypeUnknownMessage fires when the CLI emits an unrecognized
+	// top-level message type.
+	EventTypeUnknownMessage
 )
 
 // HookPhase identifies which hook lifecycle stage a HookLifecycleEvent represents.
@@ -441,7 +445,7 @@ func (e LocalCommandOutputEvent) Type() EventType { return EventTypeLocalCommand
 type AssistantMessageEvent struct {
 	ParentToolUse *string
 	Model         string
-	Blocks        []ContentBlock
+	Blocks        protocol.ContentBlocks
 	TurnNumber    int
 }
 
@@ -452,12 +456,22 @@ func (e AssistantMessageEvent) Type() EventType { return EventTypeAssistantMessa
 // frames). Not coalesced.
 type UserMessageEvent struct {
 	ParentToolUse *string
-	Blocks        []ContentBlock
+	Blocks        protocol.ContentBlocks
 	TurnNumber    int
 }
 
 // Type returns the event type.
 func (e UserMessageEvent) Type() EventType { return EventTypeUserMessage }
+
+// UnknownMessageEvent fires when the CLI emits a message whose top-level type
+// discriminator is not recognized.
+type UnknownMessageEvent struct {
+	MessageType protocol.MessageType
+	Raw         json.RawMessage
+}
+
+// Type returns the event type.
+func (e UnknownMessageEvent) Type() EventType { return EventTypeUnknownMessage }
 
 // ResultMessageEvent fires once per CLI ResultMessage. Unlike
 // TurnCompleteEvent it is never coalesced across bg-continuation turns.

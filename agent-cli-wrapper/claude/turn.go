@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
 // toolUseErrorMarker is the sentinel the Claude CLI wraps around tool
@@ -93,7 +95,7 @@ func excerptRunes(s string, max int) string {
 // On parallel batches where the errored group is the final group, the
 // cancelled sibling (carrying the marker) is still the last tool_result
 // in forward order, so it remains detectable.
-func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
+func FinalTurnToolError(blocks protocol.ContentBlocks) (toolName, excerpt string, ok bool) {
 	toolName, _, excerpt, ok = FinalTurnToolErrorDetails(blocks)
 	return toolName, excerpt, ok
 }
@@ -101,24 +103,25 @@ func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok boo
 // FinalTurnToolErrorDetails reports the same final tool_use_error as
 // FinalTurnToolError, returning both the full tool result content for policy
 // decisions and a bounded excerpt for display.
-func FinalTurnToolErrorDetails(blocks []ContentBlock) (toolName, content, excerpt string, ok bool) {
+func FinalTurnToolErrorDetails(blocks protocol.ContentBlocks) (toolName, content, excerpt string, ok bool) {
 	for i := len(blocks) - 1; i >= 0; i-- {
-		block := blocks[i]
-		if block.Type != ContentBlockTypeToolResult {
+		block, ok := blocks[i].(protocol.ToolResultBlock)
+		if !ok {
 			continue
 		}
-		if !block.IsError {
+		if block.IsError == nil || !*block.IsError {
 			return "", "", "", false
 		}
-		content := stringifyToolResult(block.ToolResult)
+		content := stringifyToolResult(block.Content)
 		if !strings.Contains(content, toolUseErrorMarker) {
 			return "", "", "", false
 		}
 		// Build tool name map only on the error path (uncommon case).
 		toolNames := make(map[string]string)
 		for _, b := range blocks {
-			if b.Type == ContentBlockTypeToolUse && b.ToolUseID != "" {
-				toolNames[b.ToolUseID] = b.ToolName
+			toolUse, ok := b.(protocol.ToolUseBlock)
+			if ok && toolUse.ID != "" {
+				toolNames[toolUse.ID] = toolUse.Name
 			}
 		}
 		name := toolNames[block.ToolUseID]
@@ -162,7 +165,7 @@ type TurnResult struct {
 	Error         error
 	Text          string
 	Thinking      string
-	ContentBlocks []ContentBlock
+	ContentBlocks protocol.ContentBlocks
 	Usage         TurnUsage
 	TurnNumber    int
 	DurationMs    int64
@@ -179,14 +182,14 @@ const scheduleWakeupToolName = "ScheduleWakeup"
 // latestScheduleWakeup returns the last ScheduleWakeup tool_use block in the
 // turn (in arrival order), or nil if none. For chained wakeups a continuation
 // appends a new block; the safety timer should read from the newest.
-func (turn *turnState) latestScheduleWakeup() *ContentBlock {
+func (turn *turnState) latestScheduleWakeup() *protocol.ToolUseBlock {
 	if turn == nil {
 		return nil
 	}
 	for i := len(turn.ContentBlocks) - 1; i >= 0; i-- {
-		block := &turn.ContentBlocks[i]
-		if block.Type == ContentBlockTypeToolUse && block.ToolName == scheduleWakeupToolName {
-			return block
+		block, ok := turn.ContentBlocks[i].(protocol.ToolUseBlock)
+		if ok && block.Name == scheduleWakeupToolName {
+			return &block
 		}
 	}
 	return nil
@@ -194,7 +197,7 @@ func (turn *turnState) latestScheduleWakeup() *ContentBlock {
 
 func (turn *turnState) latestScheduleWakeupToolID() string {
 	if b := turn.latestScheduleWakeup(); b != nil {
-		return b.ToolUseID
+		return b.ID
 	}
 	return ""
 }
@@ -204,7 +207,7 @@ func (turn *turnState) latestScheduleWakeupDelaySeconds() float64 {
 	if b == nil {
 		return 0
 	}
-	switch v := b.ToolInput["delaySeconds"].(type) {
+	switch v := b.Input["delaySeconds"].(type) {
 	case float64:
 		return v
 	case int:
@@ -222,7 +225,7 @@ type turnState struct {
 	Tools         map[string]*toolState
 	FullText      string
 	FullThinking  string
-	ContentBlocks []ContentBlock
+	ContentBlocks protocol.ContentBlocks
 	Number        int
 }
 
@@ -414,7 +417,7 @@ func (tm *turnManager) GetTurnHistory() []*turnState {
 }
 
 // AppendContentBlock appends a content block to the current turn.
-func (tm *turnManager) AppendContentBlock(block ContentBlock) {
+func (tm *turnManager) AppendContentBlock(block protocol.ContentBlock) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil {
