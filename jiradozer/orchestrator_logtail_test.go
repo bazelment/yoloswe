@@ -206,6 +206,7 @@ func TestRunWatchdog_CancelsOnIdle(t *testing.T) {
 		currentStep: "plan",
 	}
 	mw.lastOutputAt.Store(time.Now().Add(-10 * time.Second).UnixNano())
+	mw.tailerAlive.Store(true)
 
 	cfg := testOrchestratorConfig()
 	cfg.Plan.IdleTimeout = 50 * time.Millisecond
@@ -230,6 +231,45 @@ func TestRunWatchdog_CancelsOnIdle(t *testing.T) {
 		"expected hang log line")
 }
 
+// TestRunWatchdog_DoesNotCancelWhenTailerDead verifies that the watchdog
+// suppresses its idle check when the tailer goroutine has exited
+// (tailerAlive=false). Otherwise lastOutputAt would never refresh and
+// the watchdog would kill a still-healthy subprocess after IdleTimeout.
+func TestRunWatchdog_DoesNotCancelWhenTailerDead(t *testing.T) {
+	t.Parallel()
+
+	cancelled := atomic.Bool{}
+	mw := &managedWorkflow{
+		issue:       &tracker.Issue{ID: "1", Identifier: "ENG-1"},
+		cancel:      func() { cancelled.Store(true) },
+		currentStep: "plan",
+	}
+	mw.lastOutputAt.Store(time.Now().Add(-time.Hour).UnixNano())
+	// Tailer never alive in this test — simulates an early read-error exit.
+	mw.tailerAlive.Store(false)
+
+	cfg := testOrchestratorConfig()
+	cfg.Plan.IdleTimeout = 50 * time.Millisecond
+	o := &Orchestrator{logger: slog.New(&recordingHandler{}), config: cfg}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		o.runWatchdog(mw, 5*time.Millisecond, stop)
+		close(done)
+	}()
+
+	// Give the watchdog many ticks; it must NOT cancel.
+	time.Sleep(80 * time.Millisecond)
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWatchdog did not exit on stop")
+	}
+	require.False(t, cancelled.Load(),
+		"watchdog must not cancel when tailer is dead — lastOutputAt is stale")
+}
+
 // TestRunWatchdog_DoesNotCancelWhenNoTimeout verifies that with
 // IdleTimeout=0 the watchdog never fires.
 func TestRunWatchdog_DoesNotCancelWhenNoTimeout(t *testing.T) {
@@ -242,6 +282,7 @@ func TestRunWatchdog_DoesNotCancelWhenNoTimeout(t *testing.T) {
 		currentStep: "plan",
 	}
 	mw.lastOutputAt.Store(time.Now().Add(-time.Hour).UnixNano())
+	mw.tailerAlive.Store(true)
 
 	// testOrchestratorConfig leaves IdleTimeout zero on every step, so the
 	// watchdog has nothing to fire on.

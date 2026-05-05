@@ -99,6 +99,12 @@ type TurnStartedEvent struct {
 func (e TurnStartedEvent) Type() EventType { return EventTypeTurnStarted }
 
 // TurnCompletedEvent fires when a turn finishes.
+//
+// Usage is the per-turn LastTokenUsage when the protocol provides it.
+// Older codex versions emit only a cumulative TotalTokenUsage; in that
+// case Usage falls back to the cumulative total, so on multi-turn
+// threads it may overstate the per-turn count. Treat Usage as a soft
+// signal for runaway-detection / display, not as accounting.
 type TurnCompletedEvent struct {
 	Error      error
 	ThreadID   string

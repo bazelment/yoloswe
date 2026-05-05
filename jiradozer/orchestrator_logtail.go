@@ -26,7 +26,14 @@ var prURLRe = regexp.MustCompile(`https://github\.com/[^\s"']+/pull/\d+`)
 // step-transition lines on the parent logger, and updates mw.lastOutputAt on
 // every line so the watchdog can distinguish "agent slow but progressing"
 // from "agent stuck."
+//
+// On any exit (open failure, non-EOF read error, or stop signal) it clears
+// mw.tailerAlive so runWatchdog can skip its idle check — without fresh
+// updates to lastOutputAt the gap would grow unboundedly and kill a
+// still-healthy subprocess.
 func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, stop <-chan struct{}) {
+	defer mw.tailerAlive.Store(false)
+
 	f, err := os.Open(logPath)
 	if err != nil {
 		o.logger.Debug("log tailer: open failed",
@@ -60,7 +67,7 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 					continue
 				}
 			}
-			o.logger.Debug("log tailer: read error",
+			o.logger.Warn("log tailer: read error, watchdog disabled for this workflow",
 				"issue", mw.issue.Identifier, "error", err)
 			return
 		}
@@ -163,6 +170,12 @@ func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 // lastOutputAt exceeds the current step's IdleTimeout. The cancel propagates
 // to cmd via exec.CommandContext, which cmd.Wait() then surfaces as
 // StepCancelled.
+//
+// When the tailer goroutine has exited (mw.tailerAlive == false) the
+// idle check is skipped: lastOutputAt is no longer being updated, so the
+// gap would grow unboundedly and kill a subprocess that may still be
+// healthy. The watchdog still drains its ticker until stop closes so the
+// cmd.Wait goroutine can join cleanly.
 func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -171,6 +184,9 @@ func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Durati
 		case <-stop:
 			return
 		case <-ticker.C:
+			if !mw.tailerAlive.Load() {
+				continue
+			}
 			mw.stepMu.Lock()
 			step := mw.currentStep
 			mw.stepMu.Unlock()

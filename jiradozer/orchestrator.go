@@ -98,6 +98,12 @@ type managedWorkflow struct {
 	// subprocess. Written by tailSubprocessLog, read by runWatchdog to
 	// detect idle gaps.
 	lastOutputAt atomic.Int64
+	// tailerAlive is 1 while tailSubprocessLog is reading the log file,
+	// 0 once it has exited (EOF on stop, or a non-EOF read error).
+	// runWatchdog skips its idle check when the tailer is gone — without
+	// fresh updates to lastOutputAt the gap would grow unboundedly and
+	// kill a still-healthy subprocess.
+	tailerAlive atomic.Bool
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -275,6 +281,22 @@ func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.
 		"issue", issue.Identifier, "expected_name", cfg.States.InProgress)
 }
 
+// releaseLockLabelByID removes LockLabel using only an issue ID/identifier.
+// Used by Start() error paths that fail after claimIssueInProgress but
+// before a managedWorkflow exists. Uses a fresh background context so the
+// caller's possibly-cancelled context does not strand cleanup.
+func (o *Orchestrator) releaseLockLabelByID(issueID, identifier string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := o.tracker.RemoveLabel(ctx, issueID, LockLabel); err != nil {
+		o.logger.Warn("failed to remove lock label after start failure",
+			"issue", identifier, "label", LockLabel, "error", err)
+		return
+	}
+	o.logger.Info("released issue: removed lock label after start failure",
+		"issue", identifier, "label", LockLabel)
+}
+
 // Start launches a workflow for the given issue in a new worktree.
 // Returns an error if the concurrency limit is reached or worktree creation fails.
 func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
@@ -349,6 +371,10 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
 			o.logger.Warn("failed to remove worktree after log open failure", "branch", branch, "error", removeErr)
 		}
+		// claimIssueInProgress already attached LockLabel; without this the
+		// label leaks and blocks rediscovery — the very leak this change
+		// set was meant to fix.
+		o.releaseLockLabelByID(issue.ID, issue.Identifier)
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("open log file for %s: %w", issue.Identifier, err)
 	}
@@ -362,6 +388,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
 			o.logger.Warn("failed to remove worktree after start failure", "branch", branch, "error", removeErr)
 		}
+		o.releaseLockLabelByID(issue.ID, issue.Identifier)
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("start subprocess for %s: %w", issue.Identifier, err)
 	}
@@ -384,6 +411,9 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	// Seed lastOutputAt to startup time so the watchdog has a sensible
 	// baseline before any log lines are tailed.
 	mw.lastOutputAt.Store(time.Now().UnixNano())
+	// Mark tailer as alive before launching; tailSubprocessLog clears this
+	// flag on exit so runWatchdog can skip stale idle gaps.
+	mw.tailerAlive.Store(true)
 
 	o.emitStatus(mw, StepInit, nil)
 	o.logger.Info("subprocess started",

@@ -684,6 +684,12 @@ func (c *Client) handleTokenCount(params json.RawMessage) {
 	thread, ok := c.threads[notif.ConversationID]
 	c.mu.RUnlock()
 	if ok {
+		// Prefer the per-turn LastTokenUsage. When the protocol omits it
+		// (older codex versions), fall back to TotalTokenUsage — note this
+		// is cumulative for the thread, so on multi-turn threads
+		// TurnCompletedEvent.Usage may overstate the per-turn count.
+		// AgentResult consumers (multiagent/agent/codex_provider.go) treat
+		// this as a soft signal for runaway-detection, not as accounting.
 		if lastUsage != nil {
 			thread.setLastUsage(lastUsage)
 		} else if totalUsage != nil {

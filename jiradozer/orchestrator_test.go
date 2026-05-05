@@ -872,6 +872,82 @@ func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
 	require.Equal(t, LockLabel, labelNames[0])
 }
 
+// TestOrchestrator_StartReleasesLockLabelOnLogOpenFailure verifies that
+// when OpenFile fails after claimIssueInProgress has attached the lock
+// label, Start() releases the label so the issue is not stranded in
+// "labeled but no active workflow" — the very leak the change set fixes.
+//
+// Forces OpenFile failure by setting logDir to a regular file path: the
+// per-issue log path then has a file (not directory) as its parent.
+func TestOrchestrator_StartReleasesLockLabelOnLogOpenFailure(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	// logDir is a regular file, not a directory — OpenFile will fail
+	// because the log path's parent is not a directory.
+	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(tmpFile, nil, 0o600))
+
+	wtm := newMockWTManagerWithDir(t)
+
+	issue := &tracker.Issue{
+		ID:         "issue-1",
+		Identifier: "ENG-1",
+		Title:      "Test",
+		TeamID:     "team-eng",
+	}
+
+	mt := &mockClaimTracker{}
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode("/bin/true", nil, tmpFile)
+
+	err := orch.Start(context.Background(), issue)
+	require.Error(t, err, "OpenFile must fail when logDir is a regular file")
+	require.Contains(t, err.Error(), "open log file")
+
+	// Lock label was added in claimIssueInProgress and must be released.
+	removed := mt.getRemovedLabels()
+	require.Len(t, removed, 1, "expected lock label to be released after OpenFile failure")
+	require.Equal(t, LockLabel, removed[0])
+
+	// Slot must also be unreserved so the next Start() can reuse it.
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
+// TestOrchestrator_StartReleasesLockLabelOnCmdStartFailure verifies the
+// same lock-label release on the cmd.Start() failure path. Uses a
+// non-existent binary so exec.Cmd.Start fails fast.
+func TestOrchestrator_StartReleasesLockLabelOnCmdStartFailure(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	logDir := t.TempDir()
+	wtm := newMockWTManagerWithDir(t)
+
+	issue := &tracker.Issue{
+		ID:         "issue-1",
+		Identifier: "ENG-1",
+		Title:      "Test",
+		TeamID:     "team-eng",
+	}
+
+	mt := &mockClaimTracker{}
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	// Path that exists in t.TempDir but is not executable — cmd.Start
+	// returns "permission denied" / "exec format error".
+	nonExec := filepath.Join(t.TempDir(), "definitely-not-a-binary")
+	require.NoError(t, os.WriteFile(nonExec, []byte("not a binary"), 0o600))
+	orch.SetSubprocessMode(nonExec, nil, logDir)
+
+	err := orch.Start(context.Background(), issue)
+	require.Error(t, err, "cmd.Start must fail for a non-executable binary")
+	require.Contains(t, err.Error(), "start subprocess")
+
+	removed := mt.getRemovedLabels()
+	require.Len(t, removed, 1, "expected lock label to be released after cmd.Start failure")
+	require.Equal(t, LockLabel, removed[0])
+
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
 // TestRunWithDiscovery_ConcurrencyLimitKeepsPending verifies that a
 // concurrency-limit error keeps the issue in the pending queue rather than
 // triggering a ClearSeen (which would cause an infinite retry storm when slots
