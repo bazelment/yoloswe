@@ -671,11 +671,11 @@ func (w *Workflow) skipCompletedOrConfiguredPhases(ctx context.Context) {
 		if !hasDoneLabel && !w.isSkipPhase(phase) {
 			return
 		}
-		// The -done label is authoritative, so clear any stale -inprogress
-		// label left over from a prior interrupted run or a user toggling
-		// phase state manually. Without this, the issue can end up tagged
-		// both -inprogress and -done for the same phase.
-		if hasDoneLabel && slices.Contains(labels, inProgressLabel(phase)) {
+		// The -done label or explicit skip is authoritative, so clear any stale
+		// -inprogress label left over from a prior interrupted run or a user
+		// toggling phase state manually. Without this, the issue can show a
+		// phase as both current and already done/skipped.
+		if slices.Contains(labels, inProgressLabel(phase)) {
 			if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
 				w.logger.Warn("failed to clear stale in-progress label while skipping phase", "phase", phase, "error", err)
 			}

@@ -1623,6 +1623,21 @@ func TestWorkflow_SkipPhases_FromLabel(t *testing.T) {
 	assert.Empty(t, labelSequence(mt))
 }
 
+func TestWorkflow_SkipPhases_SourcePriority(t *testing.T) {
+	t.Parallel()
+
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+
+	wf.addSkipPhase(PhaseBuild, skipPhaseSourceConfig)
+	wf.addSkipPhase(PhaseBuild, skipPhaseSourceLabel)
+	wf.addSkipPhase(PhaseBuild, skipPhaseSourceConfig)
+	assert.Equal(t, skipPhaseSourceLabel, wf.skipPhaseSources[PhaseBuild])
+
+	wf.addSkipPhase(PhaseBuild, skipPhaseSourceCLI)
+	wf.addSkipPhase(PhaseBuild, skipPhaseSourceLabel)
+	assert.Equal(t, skipPhaseSourceCLI, wf.skipPhaseSources[PhaseBuild])
+}
+
 func TestWorkflow_SkipPhases_AllSkipped(t *testing.T) {
 	cfg := testConfig()
 	require.NoError(t, cfg.ApplySkipPhases([]string{PhasePlan, PhaseBuild, PhaseValidate, PhaseShip}, "config"))
@@ -1686,6 +1701,31 @@ func TestWorkflow_SkipDonePhases_ClearsStaleInProgress(t *testing.T) {
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
 	// The stale -inprogress should have been cleared.
+	assert.Equal(t,
+		[]string{"RemoveLabel:jiradozer-plan-inprogress"},
+		labelSequence(mt))
+}
+
+func TestWorkflow_SkipConfiguredPhase_ClearsStaleInProgress(t *testing.T) {
+	workDir := t.TempDir()
+	PersistPlan(workDir, "persisted plan", discardLogger())
+
+	issue := testIssue()
+	issue.Labels = []string{"bug", "jiradozer-plan-inprogress"}
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: issue.Labels},
+	}
+
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+	require.NoError(t, cfg.ApplySkipPhases([]string{PhasePlan}, "config"))
+	wf := NewWorkflow(mt, issue, cfg, discardLogger())
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.skipCompletedOrConfiguredPhases(context.Background())
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
 	assert.Equal(t,
 		[]string{"RemoveLabel:jiradozer-plan-inprogress"},
 		labelSequence(mt))
