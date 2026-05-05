@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // MessageType discriminates between message kinds.
@@ -85,27 +86,10 @@ type Plugin struct {
 
 // SystemMessage represents session initialization and system events.
 type SystemMessage struct {
-	ExitCode          *int        `json:"exit_code,omitempty"`
-	UUID              string      `json:"uuid"`
-	PermissionMode    string      `json:"permissionMode,omitempty"`
-	ClaudeCodeVersion string      `json:"claude_code_version,omitempty"`
-	CWD               string      `json:"cwd,omitempty"`
-	Type              MessageType `json:"type"`
-	Subtype           string      `json:"subtype"`
-	Model             string      `json:"model,omitempty"`
-	SessionID         string      `json:"session_id"`
-	Stderr            string      `json:"stderr,omitempty"`
-	Stdout            string      `json:"stdout,omitempty"`
-	HookEvent         string      `json:"hook_event,omitempty"`
-	HookName          string      `json:"hook_name,omitempty"`
-	APIKeySource      string      `json:"apiKeySource,omitempty"`
-	OutputStyle       string      `json:"output_style,omitempty"`
-	Tools             []string    `json:"tools,omitempty"`
-	Plugins           []Plugin    `json:"plugins,omitempty"`
-	Skills            []string    `json:"skills,omitempty"`
-	Agents            []string    `json:"agents,omitempty"`
-	SlashCommands     []string    `json:"slash_commands,omitempty"`
-	MCPServers        []MCPServer `json:"mcp_servers,omitempty"`
+	Type      MessageType `json:"type"`
+	Subtype   string      `json:"subtype"`
+	UUID      string      `json:"uuid"`
+	SessionID string      `json:"session_id"`
 	// raw preserves the on-wire JSON so DecodePayload() can decode
 	// subtype-specific fields not declared on this flat envelope.
 	raw json.RawMessage `json:"-"`
@@ -124,6 +108,16 @@ func (m *SystemMessage) UnmarshalJSON(data []byte) error {
 	*m = SystemMessage(tmp)
 	m.raw = append(json.RawMessage(nil), data...)
 	return nil
+}
+
+// MarshalJSON returns the original system envelope when this message came from
+// the wire, preserving subtype-specific fields not declared on SystemMessage.
+func (m SystemMessage) MarshalJSON() ([]byte, error) {
+	if len(m.raw) > 0 {
+		return m.raw, nil
+	}
+	type systemMessageAlias SystemMessage
+	return json.Marshal(systemMessageAlias(m))
 }
 
 // MsgType returns the message type.
@@ -191,6 +185,9 @@ func (fc FlexibleContent) AsBlocks() (ContentBlocks, bool) {
 	}
 	var blocks ContentBlocks
 	if err := json.Unmarshal(fc.raw, &blocks); err != nil {
+		if fc.raw[0] == '[' {
+			slog.Warn("failed to decode content blocks", "error", err)
+		}
 		return nil, false
 	}
 	return blocks, true
@@ -272,8 +269,8 @@ type ResultMessage struct {
 	SessionID         string                `json:"session_id"`
 	Subtype           string                `json:"subtype"`
 	UUID              string                `json:"uuid"`
+	Result            string                `json:"result,omitempty"`
 	Type              MessageType           `json:"type"`
-	Result            string                `json:"result"`
 	Errors            []string              `json:"errors,omitempty"`
 	PermissionDenials []interface{}         `json:"permission_denials,omitempty"`
 	Usage             UsageDetails          `json:"usage"`
@@ -282,6 +279,11 @@ type ResultMessage struct {
 	DurationAPIMs     int64                 `json:"duration_api_ms"`
 	DurationMs        int64                 `json:"duration_ms"`
 	IsError           bool                  `json:"is_error"`
+}
+
+// ResultText returns the raw result text carried by successful result frames.
+func (m ResultMessage) ResultText() string {
+	return m.Result
 }
 
 // ResultOutcome is a sealed interface describing the outcome of a turn.
@@ -313,9 +315,13 @@ func (ResultError) isResultOutcome() {}
 
 // Outcome returns a sealed variant describing whether the turn succeeded or
 // failed, so callers can switch on the concrete type instead of inspecting
-// Subtype strings directly.
+// Subtype strings directly. A frame with is_error=false is treated as success
+// when the subtype is either the explicit "success" marker or empty —
+// partial/legacy NDJSON without a subtype field should not be reported as a
+// failure if no error signal is present, matching the pre-protocol-refactor
+// !is_error behavior consumers relied on.
 func (m ResultMessage) Outcome() ResultOutcome {
-	if !m.IsError && ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
+	if !m.IsError && (m.Subtype == "" || ResultSubtype(m.Subtype) == ResultSubtypeSuccess) {
 		return ResultSuccess{Text: m.Result}
 	}
 	return ResultError{
@@ -323,6 +329,12 @@ func (m ResultMessage) Outcome() ResultOutcome {
 		Errors:  m.Errors,
 		Text:    m.Result,
 	}
+}
+
+// IsFailure reports whether the result frame represents a failed turn.
+func (m ResultMessage) IsFailure() bool {
+	_, ok := m.Outcome().(ResultError)
+	return ok
 }
 
 // MsgType returns the message type.

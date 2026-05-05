@@ -84,37 +84,36 @@ func (s *cancelAfterFirstAskSession) Ask(ctx context.Context, content string) (*
 // realToolUseErrorBlocks is the minimal set of ContentBlocks that
 // FinalTurnToolError will flag as retry-worthy: IsError true and the
 // <tool_use_error> wrapper present.
-func realToolUseErrorBlocks(excerpt string) []claude.ContentBlock {
-	return []claude.ContentBlock{
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{
-			Type:       claude.ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "<tool_use_error>" + excerpt + "</tool_use_error>",
-			IsError:    true,
-		},
+func realToolUseErrorBlocks(excerpt string) claude.ContentBlocks {
+	return claude.ContentBlocks{
+		toolUseBlock("t1", "Bash", nil),
+		toolResultContent("t1", "<tool_use_error>"+excerpt+"</tool_use_error>", true),
 	}
 }
 
 // nonzeroExitBashBlocks mimics a `gh pr checks` exit-8 shape: IsError
 // true but no <tool_use_error> wrapper. Must not trigger retry.
-func nonzeroExitBashBlocks() []claude.ContentBlock {
-	return []claude.ContentBlock{
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{
-			Type:       claude.ContentBlockTypeToolResult,
-			ToolUseID:  "t1",
-			ToolResult: "Exit code 8\nForge Visual Tests\tpending",
-			IsError:    true,
-		},
+func nonzeroExitBashBlocks() claude.ContentBlocks {
+	return claude.ContentBlocks{
+		toolUseBlock("t1", "Bash", nil),
+		toolResultContent("t1", "Exit code 8\nForge Visual Tests\tpending", true),
 	}
 }
 
-func cleanBlocks() []claude.ContentBlock {
-	return []claude.ContentBlock{{Type: claude.ContentBlockTypeText, Text: "done"}}
+func cleanBlocks() claude.ContentBlocks {
+	return claude.ContentBlocks{asstTextBlock("done")}
 }
 
-func turnResult(text string, blocks []claude.ContentBlock) *claude.TurnResult {
+func toolResultContent(id string, content interface{}, isError bool) claude.ContentBlock {
+	return claude.ToolResultBlock{
+		Type:      claude.ContentBlockTypeToolResult,
+		ToolUseID: id,
+		Content:   content,
+		IsError:   boolPtr(isError),
+	}
+}
+
+func turnResult(text string, blocks claude.ContentBlocks) *claude.TurnResult {
 	return &claude.TurnResult{
 		Text:          text,
 		ContentBlocks: blocks,
@@ -554,19 +553,14 @@ func TestRunRetryLoop_RetriesCleanlyOnRealToolUseError(t *testing.T) {
 // recoveredErrorBlocks returns a block sequence where an early Edit
 // tool_use_error is followed by a successful Read + Edit, mirroring the
 // 2026-04-18 production failure (fc29ffb6 session, line 132 → 156).
-func recoveredErrorBlocks() []claude.ContentBlock {
-	return []claude.ContentBlock{
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "edit1", ToolName: "Edit"},
-		{
-			Type:       claude.ContentBlockTypeToolResult,
-			ToolUseID:  "edit1",
-			ToolResult: "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
-			IsError:    true,
-		},
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "read1", ToolName: "Read"},
-		{Type: claude.ContentBlockTypeToolResult, ToolUseID: "read1", ToolResult: "file contents", IsError: false},
-		{Type: claude.ContentBlockTypeToolUse, ToolUseID: "edit2", ToolName: "Edit"},
-		{Type: claude.ContentBlockTypeToolResult, ToolUseID: "edit2", ToolResult: "edit applied", IsError: false},
+func recoveredErrorBlocks() claude.ContentBlocks {
+	return claude.ContentBlocks{
+		toolUseBlock("edit1", "Edit", nil),
+		toolResultContent("edit1", "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>", true),
+		toolUseBlock("read1", "Read", nil),
+		toolResultContent("read1", "file contents", false),
+		toolUseBlock("edit2", "Edit", nil),
+		toolResultContent("edit2", "edit applied", false),
 	}
 }
 
@@ -595,6 +589,45 @@ func TestRunRetryLoop_SkipsWhenAgentRecovered(t *testing.T) {
 	}
 	if result != initial {
 		t.Error("expected the original result returned unchanged")
+	}
+}
+
+// TestClaudeResultToAgentResult_MapsContentBlocksIncludingUnknown verifies
+// that the converter populates AgentResult.ContentBlocks from the claude
+// turn's blocks, including UnknownContentBlock — so downstream consumers
+// don't silently drop content the protocol layer preserves.
+func TestClaudeResultToAgentResult_MapsContentBlocksIncludingUnknown(t *testing.T) {
+	t.Parallel()
+	tr := &claude.TurnResult{
+		Text: "hello",
+		ContentBlocks: claude.ContentBlocks{
+			claude.TextBlock{Type: claude.ContentBlockTypeText, Text: "hello"},
+			claude.ThinkingBlock{Type: claude.ContentBlockTypeThinking, Thinking: "reasoning"},
+			claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "t1", Name: "Bash", Input: map[string]interface{}{"command": "ls"}},
+			claude.UnknownContentBlock{Type: "future_block_xyz", Raw: []byte(`{"type":"future_block_xyz","payload":"opaque"}`)},
+		},
+	}
+	got := ClaudeResultToAgentResult(tr)
+	if got == nil {
+		t.Fatal("nil result")
+	}
+	if len(got.ContentBlocks) != 4 {
+		t.Fatalf("blocks: got %d, want 4", len(got.ContentBlocks))
+	}
+	if got.ContentBlocks[0].Type != "text" || got.ContentBlocks[0].Text != "hello" {
+		t.Errorf("text block: %+v", got.ContentBlocks[0])
+	}
+	if got.ContentBlocks[1].Type != "thinking" || got.ContentBlocks[1].Text != "reasoning" {
+		t.Errorf("thinking block: %+v", got.ContentBlocks[1])
+	}
+	if got.ContentBlocks[2].Type != "tool_use" || got.ContentBlocks[2].ToolName != "Bash" {
+		t.Errorf("tool_use block: %+v", got.ContentBlocks[2])
+	}
+	if got.ContentBlocks[3].Type != "future_block_xyz" {
+		t.Errorf("unknown block type: %q", got.ContentBlocks[3].Type)
+	}
+	if !strings.Contains(got.ContentBlocks[3].Text, "future_block_xyz") {
+		t.Errorf("unknown block text missing type: %q", got.ContentBlocks[3].Text)
 	}
 }
 

@@ -386,7 +386,7 @@ func TestStreamBg_I11_ScheduleWakeupContinuation(t *testing.T) {
 	usedWakeup := false
 	for _, am := range state.AssistantMsgs {
 		for _, b := range am.Blocks {
-			if b.Type == claude.ContentBlockTypeToolUse && b.ToolName == "ScheduleWakeup" {
+			if tu, ok := b.(claude.ToolUseBlock); ok && tu.Name == "ScheduleWakeup" {
 				usedWakeup = true
 			}
 		}

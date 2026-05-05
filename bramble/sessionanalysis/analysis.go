@@ -244,9 +244,21 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 
 		switch m := msg.(type) {
 		case protocol.SystemMessage:
-			if m.Subtype == "init" {
-				sess.Model = m.Model
-				sess.CWD = m.CWD
+			if m.Subtype == string(protocol.SystemSubtypeInit) {
+				payload, ok := m.AsInit()
+				if !ok {
+					loose := m.InitPayloadLenient()
+					// Match the live wrapper and sessionmodel parser: skip
+					// applying init metadata if mandatory fields are missing
+					// after lenient decode, so analysis output stays aligned
+					// with the live session contract.
+					if loose.SessionID == "" || loose.Model == "" || loose.CWD == "" {
+						break
+					}
+					payload = &loose
+				}
+				sess.Model = payload.Model
+				sess.CWD = payload.CWD
 			}
 
 		case protocol.UserMessage:
@@ -267,10 +279,30 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				}
 			}
 			// Block content with tool_result updates current turn's tool states.
-			if blocks, ok := m.Message.Content.AsBlocks(); ok && currentTurn != nil {
+			// If a block-first user message arrives before any string opener,
+			// open an anonymous turn so unknown blocks and tool_result echoes
+			// are not silently dropped — matches sessionmodel's parser path,
+			// which has no turn concept and always processes the blocks.
+			if blocks, ok := m.Message.Content.AsBlocks(); ok {
+				if currentTurn == nil {
+					turnNum++
+					currentTurn = &Turn{
+						Number:    turnNum,
+						StartTime: meta.Timestamp,
+					}
+				}
 				for _, block := range blocks {
-					if tr, ok := block.(protocol.ToolResultBlock); ok {
-						updateToolResult(currentTurn, tr)
+					switch b := block.(type) {
+					case protocol.ToolResultBlock:
+						updateToolResult(currentTurn, b)
+					case protocol.UnknownContentBlock:
+						// Mirror assistant handling: keep unknown user-side
+						// blocks visible in the response transcript so the
+						// wire protocol stays observable through analysis.
+						if currentTurn.Response != "" {
+							currentTurn.Response += "\n"
+						}
+						currentTurn.Response += b.DisplayString()
 					}
 				}
 			}
@@ -295,6 +327,13 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 						}
 						currentTurn.Response += b.Text
 					}
+				case protocol.ThinkingBlock:
+					if b.Thinking != "" {
+						if currentTurn.Response != "" {
+							currentTurn.Response += "\n"
+						}
+						currentTurn.Response += b.Thinking
+					}
 				case protocol.ToolUseBlock:
 					currentTurn.ToolCalls = append(currentTurn.ToolCalls, ToolCall{
 						Name:  b.Name,
@@ -302,6 +341,15 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 						Input: b.Input,
 						State: "running",
 					})
+				case protocol.UnknownContentBlock:
+					// Preserve unknown blocks in the response transcript so
+					// analysis output stays in sync with the wire protocol.
+					// Always emit (matching sessionmodel parser behavior) so a
+					// type-only block isn't dropped silently.
+					if currentTurn.Response != "" {
+						currentTurn.Response += "\n"
+					}
+					currentTurn.Response += b.DisplayString()
 				}
 			}
 
@@ -312,7 +360,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				if meta != nil && !meta.Timestamp.IsZero() {
 					currentTurn.EndTime = meta.Timestamp
 				}
-				if m.IsError {
+				if m.IsFailure() {
 					currentTurn.Errors = append(currentTurn.Errors, "Turn ended with error")
 				}
 			}

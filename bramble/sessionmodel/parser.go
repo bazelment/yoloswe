@@ -60,16 +60,29 @@ func (p *MessageParser) HandleMessage(msg protocol.Message) {
 // --- system -----------------------------------------------------------------
 
 func (p *MessageParser) handleSystem(msg protocol.SystemMessage) {
-	if msg.Subtype == "init" {
+	if msg.Subtype == string(protocol.SystemSubtypeInit) {
+		payload, ok := msg.AsInit()
+		if !ok {
+			loose := msg.InitPayloadLenient()
+			// Match the live wrapper (claude/session.go handleSystem): if
+			// neither strict nor lenient decode recovers the mandatory init
+			// fields, skip the StatusRunning transition so a corrupt frame
+			// surfaces as no-init rather than empty-meta-running, keeping
+			// offline parsing in sync with the live session contract.
+			if loose.SessionID == "" || loose.Model == "" || loose.CWD == "" {
+				return
+			}
+			payload = &loose
+		}
 		p.model.SetMeta(SessionMeta{
-			SessionID:         msg.SessionID,
-			Model:             msg.Model,
-			CWD:               msg.CWD,
-			ClaudeCodeVersion: msg.ClaudeCodeVersion,
-			PermissionMode:    msg.PermissionMode,
-			Tools:             msg.Tools,
-			Agents:            msg.Agents,
-			Skills:            msg.Skills,
+			SessionID:         payload.SessionID,
+			Model:             payload.Model,
+			CWD:               payload.CWD,
+			ClaudeCodeVersion: payload.ClaudeCodeVersion,
+			PermissionMode:    payload.PermissionMode,
+			Tools:             payload.Tools,
+			Agents:            payload.Agents,
+			Skills:            payload.Skills,
 			Status:            StatusRunning,
 		})
 	}
@@ -121,6 +134,15 @@ func (p *MessageParser) handleAssistant(msg protocol.AssistantMessage) {
 				ToolState: ToolStateRunning,
 				StartTime: now,
 			})
+		case protocol.UnknownContentBlock:
+			// Surface unknown blocks rather than dropping them so the
+			// transcript stays in sync with the wire protocol. The raw JSON
+			// payload is preserved by the protocol decoder.
+			p.model.AppendOutput(OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeText,
+				Content:   b.DisplayString(),
+			})
 		}
 	}
 }
@@ -149,11 +171,12 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 	}
 
 	for _, block := range blocks {
-		if tr, ok := block.(protocol.ToolResultBlock); ok {
-			isError := tr.IsError != nil && *tr.IsError
+		switch b := block.(type) {
+		case protocol.ToolResultBlock:
+			isError := b.IsError != nil && *b.IsError
 			now := time.Now()
-			p.model.UpdateTool(tr.ToolUseID, func(line *OutputLine) {
-				line.ToolResult = tr.Content
+			p.model.UpdateTool(b.ToolUseID, func(line *OutputLine) {
+				line.ToolResult = b.Content
 				line.IsError = isError
 				if isError {
 					line.ToolState = ToolStateError
@@ -171,6 +194,14 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 				prog.CurrentPhase = ""
 				prog.LastActivity = time.Now()
 				prog.RecentOutput = recent
+			})
+		case protocol.UnknownContentBlock:
+			// Mirror handleAssistant: surface unknown user-side blocks so the
+			// transcript stays in sync with the wire protocol.
+			p.model.AppendOutput(OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeText,
+				Content:   b.DisplayString(),
 			})
 		}
 	}
@@ -196,12 +227,12 @@ func (p *MessageParser) handleResult(msg protocol.ResultMessage) {
 		TurnNumber: msg.NumTurns,
 		CostUSD:    msg.TotalCostUSD,
 		DurationMs: msg.DurationMs,
-		IsError:    msg.IsError,
+		IsError:    msg.IsFailure(),
 	})
 
 	// Transition the session to a terminal status now that the result is known.
 	// These transitions are from StatusRunning so the guard should never fire.
-	if msg.IsError {
+	if msg.IsFailure() {
 		_ = p.model.UpdateStatus(StatusFailed)
 	} else {
 		_ = p.model.UpdateStatus(StatusCompleted)

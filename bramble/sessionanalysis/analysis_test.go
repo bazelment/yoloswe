@@ -69,6 +69,66 @@ func TestParseSession_NonexistentFile(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestParseSession_UserPreservesUnknownBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []byte(
+		`{"type":"user","timestamp":"2026-05-05T00:00:00Z","message":{"role":"user","content":"hi"}}` + "\n" +
+			`{"type":"user","timestamp":"2026-05-05T00:00:01Z","message":{"role":"user","content":[{"type":"future_user_block","payload":"opaque"}]}}` + "\n" +
+			`{"type":"result","timestamp":"2026-05-05T00:00:02Z","message":{"subtype":"success","session_id":"s1","uuid":"u1","num_turns":1,"duration_ms":100,"duration_api_ms":50,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n")
+	require.NoError(t, os.WriteFile(path, lines, 0o600))
+
+	sess, err := ParseSession(path)
+	require.NoError(t, err)
+	require.Len(t, sess.Turns, 1)
+	assert.Contains(t, sess.Turns[0].Response, "future_user_block")
+}
+
+// TestParseSession_BlockFirstUserOpensAnonymousTurn covers the path where the
+// first user frame is block-only (no string opener). Analysis should open an
+// anonymous turn so unknown blocks and tool_result echoes are still captured.
+func TestParseSession_BlockFirstUserOpensAnonymousTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []byte(
+		`{"type":"user","timestamp":"2026-05-05T00:00:00Z","message":{"role":"user","content":[{"type":"future_user_block","payload":"opaque"}]}}` + "\n" +
+			`{"type":"result","timestamp":"2026-05-05T00:00:01Z","message":{"subtype":"success","session_id":"s1","uuid":"u1","num_turns":1,"duration_ms":100,"duration_api_ms":50,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n")
+	require.NoError(t, os.WriteFile(path, lines, 0o600))
+
+	sess, err := ParseSession(path)
+	require.NoError(t, err)
+	require.Len(t, sess.Turns, 1, "expected an anonymous turn to be opened for the block-first user frame")
+	assert.Empty(t, sess.Turns[0].UserInput)
+	assert.Contains(t, sess.Turns[0].Response, "future_user_block")
+}
+
+func TestParseSession_AssistantPreservesUnknownAndThinkingBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []byte(
+		`{"type":"user","timestamp":"2026-05-05T00:00:00Z","message":{"role":"user","content":"hi"}}` + "\n" +
+			`{"type":"assistant","timestamp":"2026-05-05T00:00:01Z","message":{"model":"claude","id":"m1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"answer"},{"type":"future_block_xyz","payload":"opaque"}],"stop_reason":"end_turn"}}` + "\n")
+	require.NoError(t, os.WriteFile(path, lines, 0o600))
+
+	sess, err := ParseSession(path)
+	require.NoError(t, err)
+	require.Len(t, sess.Turns, 1)
+	resp := sess.Turns[0].Response
+	assert.Contains(t, resp, "reasoning")
+	assert.Contains(t, resp, "answer")
+	assert.Contains(t, resp, "future_block_xyz")
+}
+
+func TestParseSession_ResultErrorSubtypeRecordsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []byte(
+		`{"type":"user","timestamp":"2026-05-05T00:00:00Z","message":{"role":"user","content":"hello"}}` + "\n" +
+			`{"type":"result","timestamp":"2026-05-05T00:00:01Z","message":{"subtype":"error_max_turns","session_id":"s1","uuid":"u1","errors":["max turns exceeded"],"num_turns":1,"duration_ms":1000,"duration_api_ms":800,"total_cost_usd":0.05,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n")
+	require.NoError(t, os.WriteFile(path, lines, 0o600))
+
+	sess, err := ParseSession(path)
+	require.NoError(t, err)
+	require.Len(t, sess.Turns, 1)
+	require.NotEmpty(t, sess.Turns[0].Errors)
+}
+
 func TestCleanUserInput_TaskNotification(t *testing.T) {
 	input := `<task-notification><task-id>abc123</task-id><summary>Background command completed</summary></task-notification>`
 	meta := &sessionmodel.RawEnvelopeMeta{IsMeta: true}

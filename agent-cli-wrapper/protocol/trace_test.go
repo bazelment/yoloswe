@@ -53,7 +53,9 @@ func TestParseTraceFromCLI(t *testing.T) {
 		case SystemMessage:
 			systemMsgs++
 			if m.Subtype == "init" {
-				t.Logf("Session init: model=%s, session_id=%s", m.Model, m.SessionID)
+				if p, ok := m.AsInit(); ok {
+					t.Logf("Session init: model=%s, session_id=%s", p.Model, p.SessionID)
+				}
 			}
 		case AssistantMessage:
 			assistantMsgs++

@@ -22,7 +22,7 @@ type logicalTurnState struct {
 	completedBgToolUseIDs map[string]struct{}
 	taskToToolUse         map[string]string
 
-	blocks []claude.ContentBlock
+	blocks claude.ContentBlocks
 
 	sessionID string
 	text      strings.Builder
@@ -56,19 +56,20 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		s.turnNumber = e.TurnNumber
 		for _, block := range e.Blocks {
 			s.blocks = append(s.blocks, block)
-			switch block.Type {
-			case claude.ContentBlockTypeText:
-				s.text.WriteString(block.Text)
-			case claude.ContentBlockTypeThinking:
-				s.thinking.WriteString(block.Thinking)
+			switch b := block.(type) {
+			case claude.TextBlock:
+				s.text.WriteString(b.Text)
+			case claude.ThinkingBlock:
+				s.thinking.WriteString(b.Thinking)
 			}
 		}
 
 	case claude.UserMessageEvent:
 		for _, block := range e.Blocks {
 			s.blocks = append(s.blocks, block)
-			if block.Type == claude.ContentBlockTypeToolResult && block.IsError {
-				s.cancelledToolUseIDs[block.ToolUseID] = struct{}{}
+			result, ok := block.(claude.ToolResultBlock)
+			if ok && result.IsError != nil && *result.IsError {
+				s.cancelledToolUseIDs[result.ToolUseID] = struct{}{}
 			}
 		}
 
@@ -188,13 +189,14 @@ func (s *logicalTurnState) invalidateForContinuation() {
 
 func (s *logicalTurnState) hasUncancelledBgToolUse() bool {
 	for _, block := range s.blocks {
-		if block.Type != claude.ContentBlockTypeToolUse || !isBackgroundToolUse(block) {
+		toolUse, ok := block.(claude.ToolUseBlock)
+		if !ok || !isBackgroundToolUse(toolUse) {
 			continue
 		}
-		if _, cancelled := s.cancelledToolUseIDs[block.ToolUseID]; cancelled {
+		if _, cancelled := s.cancelledToolUseIDs[toolUse.ID]; cancelled {
 			continue
 		}
-		if _, done := s.completedBgToolUseIDs[block.ToolUseID]; done {
+		if _, done := s.completedBgToolUseIDs[toolUse.ID]; done {
 			continue
 		}
 		return true
@@ -202,13 +204,13 @@ func (s *logicalTurnState) hasUncancelledBgToolUse() bool {
 	return false
 }
 
-func (s *logicalTurnState) Text() string                         { return s.text.String() }
-func (s *logicalTurnState) Thinking() string                     { return s.thinking.String() }
-func (s *logicalTurnState) ContentBlocks() []claude.ContentBlock { return s.blocks }
-func (s *logicalTurnState) Usage() claude.TurnUsage              { return s.usage }
-func (s *logicalTurnState) SessionID() string                    { return s.sessionID }
-func (s *logicalTurnState) Err() error                           { return s.err }
-func (s *logicalTurnState) TurnNumber() int                      { return s.turnNumber }
+func (s *logicalTurnState) Text() string                        { return s.text.String() }
+func (s *logicalTurnState) Thinking() string                    { return s.thinking.String() }
+func (s *logicalTurnState) ContentBlocks() claude.ContentBlocks { return s.blocks }
+func (s *logicalTurnState) Usage() claude.TurnUsage             { return s.usage }
+func (s *logicalTurnState) SessionID() string                   { return s.sessionID }
+func (s *logicalTurnState) Err() error                          { return s.err }
+func (s *logicalTurnState) TurnNumber() int                     { return s.turnNumber }
 
 func (s *logicalTurnState) Success() bool {
 	return s.lastResult != nil && !s.lastResult.IsError
@@ -240,12 +242,9 @@ var backgroundToolNames = map[string]bool{
 	"Monitor": true,
 }
 
-func isBackgroundToolUse(block claude.ContentBlock) bool {
-	if block.Type != claude.ContentBlockTypeToolUse {
-		return false
-	}
-	if isBg, _ := block.ToolInput["run_in_background"].(bool); isBg {
+func isBackgroundToolUse(block claude.ToolUseBlock) bool {
+	if isBg, _ := block.Input["run_in_background"].(bool); isBg {
 		return true
 	}
-	return backgroundToolNames[block.ToolName]
+	return backgroundToolNames[block.Name]
 }

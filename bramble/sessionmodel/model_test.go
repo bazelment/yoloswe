@@ -155,6 +155,83 @@ func TestSessionModel_StatusAllowsNonTerminal(t *testing.T) {
 	assert.Equal(t, StatusCompleted, m.Meta().Status)
 }
 
+func TestMessageParser_ResultErrorSubtypeMarksFailed(t *testing.T) {
+	m := NewSessionModel(0)
+	m.SetMeta(SessionMeta{Status: StatusRunning})
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"result","subtype":"error_max_turns","session_id":"s1","uuid":"u1","errors":["max turns exceeded"],"num_turns":1,"duration_ms":1000,"duration_api_ms":800,"total_cost_usd":0.05,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	output := m.Output()
+	require.Len(t, output, 1)
+	assert.True(t, output[0].IsError)
+	assert.Equal(t, StatusFailed, m.Meta().Status)
+}
+
+func TestMessageParser_UserPreservesUnknownBlock(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"user","session_id":"s1","uuid":"u1","message":{"role":"user","content":[{"type":"future_user_block","payload":"opaque"}]}}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	output := m.Output()
+	require.Len(t, output, 1)
+	assert.Equal(t, OutputTypeText, output[0].Type)
+	assert.Contains(t, output[0].Content, "future_user_block")
+	assert.Contains(t, output[0].Content, "opaque")
+}
+
+func TestMessageParser_AssistantPreservesUnknownBlock(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"assistant","session_id":"s1","uuid":"u1","message":{"id":"m1","type":"message","role":"assistant","model":"claude","stop_reason":null,"content":[{"type":"future_block_xyz","payload":"opaque"}]}}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	output := m.Output()
+	require.Len(t, output, 1)
+	assert.Equal(t, OutputTypeText, output[0].Type)
+	assert.Contains(t, output[0].Content, "future_block_xyz")
+	assert.Contains(t, output[0].Content, "opaque")
+}
+
+func TestMessageParser_InitSkipsWhenMandatoryFieldsMissing(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	// Init frame missing model and cwd. Strict AsInit() succeeds (these are
+	// strings that default to ""), so this exercises the lenient guard via
+	// the malformed `tools` field which forces strict decode to fail.
+	msg, err := FromLiveNDJSON([]byte(`{"type":"system","subtype":"init","session_id":"","uuid":"","tools":"malformed"}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	// SetMeta must not have been called: status defaults to "" rather than
+	// StatusRunning, because handleSystem refused the partial init payload.
+	assert.NotEqual(t, StatusRunning, m.Meta().Status)
+}
+
+func TestMessageParser_InitLenientFallback(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default"}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	meta := m.Meta()
+	assert.Equal(t, "s1", meta.SessionID)
+	assert.Equal(t, "claude-opus-4-6", meta.Model)
+	assert.Equal(t, "/tmp", meta.CWD)
+	assert.Equal(t, "default", meta.PermissionMode)
+	assert.Equal(t, StatusRunning, meta.Status)
+}
+
 func TestSessionModel_ConcurrentAccess(t *testing.T) {
 	m := NewSessionModel(100)
 	m.SetMeta(SessionMeta{Status: StatusRunning})

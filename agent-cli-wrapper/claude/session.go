@@ -702,35 +702,56 @@ func (s *Session) handleLine(line []byte) {
 	case protocol.UpdateEnvironmentVariablesMessage:
 		slog.Warn("unexpected update_environment_variables from CLI (SDK->CLI only)")
 	case protocol.UnknownMessage:
-		rawStr := string(m.Raw)
-		if len(rawStr) > 200 {
-			rawStr = rawStr[:200]
+		logRaw := m.Raw
+		if len(logRaw) > 4096 {
+			logRaw = logRaw[:4096]
 		}
-		slog.Warn("unknown top-level message type", "type", m.Type, "raw", rawStr)
+		s.emit(UnknownMessageEvent{MessageType: m.Type, Raw: m.Raw})
+		slog.Warn("unknown top-level message type", "type", m.Type, "raw", string(logRaw))
 	}
 }
 
 func (s *Session) handleSystem(msg protocol.SystemMessage) {
-	if msg.Subtype == "init" {
+	if msg.Subtype == string(protocol.SystemSubtypeInit) {
+		p, ok := msg.AsInit()
+		if !ok {
+			// Fall back to lenient field-by-field decode so a single malformed
+			// optional field (e.g. unexpected tools/agents shape) does not
+			// strand the session waiting for Ready forever. Mirrors the parser
+			// and analysis paths in bramble/sessionmodel and bramble/sessionanalysis.
+			loose := msg.InitPayloadLenient()
+			// Require the mandatory fields: without session_id/model/cwd the
+			// session would come up with empty metadata, which is worse than
+			// failing closed and surfacing a protocol regression in logs.
+			if loose.SessionID == "" || loose.Model == "" || loose.CWD == "" {
+				slog.Error("init payload decode failed and lenient fallback missing required fields; not transitioning to Ready",
+					"have_session_id", loose.SessionID != "",
+					"have_model", loose.Model != "",
+					"have_cwd", loose.CWD != "")
+				return
+			}
+			slog.Warn("init payload strict decode failed; using lenient fallback")
+			p = &loose
+		}
 		s.mu.Lock()
 		s.info = &SessionInfo{
-			SessionID:      msg.SessionID,
-			Model:          msg.Model,
-			WorkDir:        msg.CWD,
-			Tools:          msg.Tools,
-			PermissionMode: PermissionMode(msg.PermissionMode),
+			SessionID:      p.SessionID,
+			Model:          p.Model,
+			WorkDir:        p.CWD,
+			Tools:          p.Tools,
+			PermissionMode: PermissionMode(p.PermissionMode),
 		}
 		s.mu.Unlock()
 
 		// Initialize recorder with session info
 		if s.recorder != nil {
 			s.recorder.Initialize(RecordingMetadata{
-				SessionID:         msg.SessionID,
-				Model:             msg.Model,
-				WorkDir:           msg.CWD,
-				Tools:             msg.Tools,
-				ClaudeCodeVersion: msg.ClaudeCodeVersion,
-				PermissionMode:    msg.PermissionMode,
+				SessionID:         p.SessionID,
+				Model:             p.Model,
+				WorkDir:           p.CWD,
+				Tools:             p.Tools,
+				ClaudeCodeVersion: p.ClaudeCodeVersion,
+				PermissionMode:    p.PermissionMode,
 			})
 		}
 
@@ -922,12 +943,19 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 	// Get content blocks (if available)
 	blocks, ok := msg.Message.Content.AsBlocks()
 	if !ok {
-		return
+		text, ok := msg.Message.Content.AsString()
+		if !ok || text == "" {
+			return
+		}
+		blocks = protocol.ContentBlocks{protocol.TextBlock{
+			Type: protocol.ContentBlockTypeText,
+			Text: text,
+		}}
 	}
 
 	s.emit(AssistantMessageEvent{
 		Model:         msg.Message.Model,
-		Blocks:        protocolBlocksToContentBlocks(blocks),
+		Blocks:        blocks,
 		ParentToolUse: msg.ParentToolUseID,
 		TurnNumber:    s.turnManager.CurrentTurnNumber(),
 	})
@@ -981,27 +1009,7 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 	}
 
 	// Accumulate structured content blocks
-	for _, block := range blocks {
-		switch b := block.(type) {
-		case protocol.TextBlock:
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type: ContentBlockTypeText,
-				Text: b.Text,
-			})
-		case protocol.ThinkingBlock:
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type:     ContentBlockTypeThinking,
-				Thinking: b.Thinking,
-			})
-		case protocol.ToolUseBlock:
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type:      ContentBlockTypeToolUse,
-				ToolUseID: b.ID,
-				ToolName:  b.Name,
-				ToolInput: b.Input,
-			})
-		}
-	}
+	s.turnManager.AppendContentBlocks(blocks)
 }
 
 func (s *Session) handleUser(msg protocol.UserMessage) {
@@ -1018,7 +1026,7 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 
 	s.emit(UserMessageEvent{
-		Blocks:        protocolBlocksToContentBlocks(blocks),
+		Blocks:        blocks,
 		ParentToolUse: msg.ParentToolUseID,
 		TurnNumber:    s.turnManager.CurrentTurnNumber(),
 	})
@@ -1050,23 +1058,13 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 
 	// Accumulate tool result content blocks
-	for _, block := range blocks {
-		if resultBlock, ok := block.(protocol.ToolResultBlock); ok {
-			isError := false
-			if resultBlock.IsError != nil {
-				isError = *resultBlock.IsError
-			}
-			s.turnManager.AppendContentBlock(ContentBlock{
-				Type:       ContentBlockTypeToolResult,
-				ToolUseID:  resultBlock.ToolUseID,
-				ToolResult: resultBlock.Content,
-				IsError:    isError,
-			})
-		}
-	}
+	s.turnManager.AppendContentBlocks(blocks)
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
+	resultErr := resultMessageError(msg)
+	resultIsError := msg.IsFailure()
+
 	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
 	// wrapper-level suppression. This is the ground truth policy layers
 	// (e.g. logicalTurnState) read.
@@ -1084,8 +1082,8 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		DurationMs:    msg.DurationMs,
 		DurationAPIMs: msg.DurationAPIMs,
 		TotalCostUSD:  msg.TotalCostUSD,
-		IsError:       msg.IsError,
-		Error:         resultMessageError(msg),
+		IsError:       resultIsError,
+		Error:         resultErr,
 	})
 
 	// Cancel any pending wakeup-suppression safety timer.
@@ -1144,7 +1142,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 	result := TurnResult{
 		TurnNumber: resultTurnNumber,
-		Success:    !msg.IsError,
+		Success:    !resultIsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
 			InputTokens:         msg.Usage.InputTokens + accUsage.InputTokens,
@@ -1170,7 +1168,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.ContentBlocks = turn.ContentBlocks
 	}
 
-	result.Error = resultMessageError(msg)
+	result.Error = resultErr
 
 	// Check if the turn ends with a NEW ScheduleWakeup tool call. When present,
 	// the CLI will auto-inject a continuation user message after the specified
@@ -1193,7 +1191,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 	// priorSuppressedWakeupToolID was snapshotted under mu above. If it matches
 	// latestWakeupID, the continuation appended no new ScheduleWakeup — the stale
 	// original block is the only one present, so we release rather than re-suppress.
-	shouldSuppressWakeup := !msg.IsError && !maxTurnsReached && latestWakeupID != "" &&
+	shouldSuppressWakeup := !resultIsError && !maxTurnsReached && latestWakeupID != "" &&
 		!(wakeupSuppressed && latestWakeupID == priorSuppressedWakeupToolID)
 	if shouldSuppressWakeup {
 		s.mu.Lock()
@@ -1725,57 +1723,25 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 	s.sendControlSuccess(requestID, resp)
 }
 
-// protocolBlocksToContentBlocks converts parsed protocol blocks into the
-// shared ContentBlock representation used across SDK events. Unknown block
-// types are dropped (they are already logged elsewhere).
-func protocolBlocksToContentBlocks(blocks protocol.ContentBlocks) []ContentBlock {
-	out := make([]ContentBlock, 0, len(blocks))
-	for _, block := range blocks {
-		switch b := block.(type) {
-		case protocol.TextBlock:
-			out = append(out, ContentBlock{Type: ContentBlockTypeText, Text: b.Text})
-		case protocol.ThinkingBlock:
-			out = append(out, ContentBlock{Type: ContentBlockTypeThinking, Thinking: b.Thinking})
-		case protocol.ToolUseBlock:
-			out = append(out, ContentBlock{
-				Type:      ContentBlockTypeToolUse,
-				ToolUseID: b.ID,
-				ToolName:  b.Name,
-				ToolInput: b.Input,
-			})
-		case protocol.ToolResultBlock:
-			isError := false
-			if b.IsError != nil {
-				isError = *b.IsError
-			}
-			out = append(out, ContentBlock{
-				Type:       ContentBlockTypeToolResult,
-				ToolUseID:  b.ToolUseID,
-				ToolResult: b.Content,
-				IsError:    isError,
-			})
-		}
-	}
-	return out
-}
-
 // resultMessageError extracts the non-nil error value from a ResultMessage
 // when the CLI reports a failed turn. Mirrors handleResult's error
 // construction but does not depend on accumulated suppression state, so the
 // raw ResultMessageEvent can surface error detail before the coalescing
-// branches run. Returns nil when msg.IsError is false.
+// branches run.
 func resultMessageError(msg protocol.ResultMessage) error {
-	if !msg.IsError {
+	switch o := msg.Outcome().(type) {
+	case protocol.ResultSuccess:
 		return nil
+	case protocol.ResultError:
+		if len(o.Errors) > 0 {
+			return fmt.Errorf("%s", strings.Join(o.Errors, "; "))
+		}
+		if o.Text != "" {
+			return fmt.Errorf("%s", o.Text)
+		}
+		return fmt.Errorf("turn failed: %s", o.Subtype)
 	}
-	switch {
-	case len(msg.Errors) > 0:
-		return fmt.Errorf("%s", strings.Join(msg.Errors, "; "))
-	case msg.Result != "":
-		return fmt.Errorf("%s", msg.Result)
-	default:
-		return fmt.Errorf("turn failed: %s", msg.Subtype)
-	}
+	return nil
 }
 
 // generateRequestID generates a unique request ID.

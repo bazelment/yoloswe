@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,13 +353,39 @@ func TestSessionDispatchUnknownMessage(t *testing.T) {
 	t.Parallel()
 	s := newTestSession(t)
 	// Completely unknown top-level type. ParseMessage returns UnknownMessage;
-	// handleLine logs a warning and emits nothing.
+	// handleLine logs a warning and emits an UnknownMessageEvent.
 	injectLine(t, s, map[string]interface{}{
 		"type":       "future_unknown_type_xyz",
 		"session_id": "s",
 		"uuid":       "u",
 	})
-	expectNoEvent(t, s, 100*time.Millisecond)
+	ev := waitForEvent(t, s, func(ev Event) bool {
+		return ev.Type() == EventTypeUnknownMessage
+	}, time.Second)
+	unknown, ok := ev.(UnknownMessageEvent)
+	require.True(t, ok, "got %T", ev)
+	require.Equal(t, protocol.MessageType("future_unknown_type_xyz"), unknown.MessageType)
+	require.Contains(t, string(unknown.Raw), "future_unknown_type_xyz")
+}
+
+func TestSessionDispatchUnknownMessageKeepsFullRaw(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	payload := strings.Repeat("x", 5000)
+
+	injectLine(t, s, map[string]interface{}{
+		"type":       "future_unknown_type_xyz",
+		"session_id": "s",
+		"uuid":       "u",
+		"payload":    payload,
+	})
+
+	ev := waitForEvent(t, s, func(ev Event) bool {
+		return ev.Type() == EventTypeUnknownMessage
+	}, time.Second)
+	unknown, ok := ev.(UnknownMessageEvent)
+	require.True(t, ok, "got %T", ev)
+	require.Contains(t, string(unknown.Raw), payload)
 }
 
 // buildControlRequestLine frames an inner control-request payload inside a
@@ -586,4 +613,53 @@ func TestSessionControlRequestMalformed_RepliesWithDeny(t *testing.T) {
 	resp, ok := msg["response"].(map[string]interface{})
 	require.True(t, ok, "expected response object, got %v", msg)
 	require.Equal(t, "req-bad-1", resp["request_id"])
+}
+
+// TestSessionDispatchInit_NoFallbackWhenMandatoryFieldsMissing verifies that
+// the lenient fallback only fires when the mandatory metadata (session_id,
+// model, cwd) is recoverable. A frame missing model/cwd should leave the
+// session unready so a protocol regression surfaces in logs instead of
+// silently coming up with empty SessionInfo.
+func TestSessionDispatchInit_NoFallbackWhenMandatoryFieldsMissing(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	// Malformed `tools` triggers strict-decode failure. With model/cwd absent,
+	// lenient decode also can't recover the mandatory fields, so handleSystem
+	// must NOT emit ReadyEvent.
+	line := mkSystem(t, "init", map[string]interface{}{
+		"tools": "this-should-be-an-array",
+	})
+	s.handleLine(line)
+	expectNoEvent(t, s, 100*time.Millisecond)
+}
+
+// TestSessionDispatchInit_LenientFallbackOnMalformedField verifies that
+// a system/init frame with one malformed optional field (e.g. wrong-typed
+// `tools`) still drives the session to ready: ReadyEvent fires and SessionInfo
+// is populated from fields that decoded cleanly. Strict AsInit() returns false
+// on the bad field, but handleSystem now falls back to InitPayloadLenient()
+// instead of stranding callers waiting on a session that never becomes ready.
+func TestSessionDispatchInit_LenientFallbackOnMalformedField(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	// `tools` is documented as []string; sending a string here makes strict
+	// AsInit() fail while leaving model/cwd/session_id decodable per-field.
+	line := mkSystem(t, "init", map[string]interface{}{
+		"model":               "claude-sonnet-4-7",
+		"cwd":                 "/tmp/demo",
+		"claude_code_version": "9.9.9",
+		"permissionMode":      "default",
+		"tools":               "this-should-be-an-array",
+	})
+	s.handleLine(line)
+
+	ev := waitForEvent(t, s, func(e Event) bool {
+		_, ok := e.(ReadyEvent)
+		return ok
+	}, time.Second)
+	ready, ok := ev.(ReadyEvent)
+	require.True(t, ok)
+	require.Equal(t, "claude-sonnet-4-7", ready.Info.Model)
+	require.Equal(t, "/tmp/demo", ready.Info.WorkDir)
+	require.Equal(t, "sess-1", ready.Info.SessionID)
 }

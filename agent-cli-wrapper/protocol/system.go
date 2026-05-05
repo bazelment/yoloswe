@@ -347,112 +347,138 @@ func (m SystemMessage) DecodePayload() (any, error) {
 
 // AsInit returns the init payload if m.Subtype is "init".
 func (m SystemMessage) AsInit() (*SystemInitPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*SystemInitPayload)
-	return v, ok
+	return systemPayloadAs[*SystemInitPayload](m)
+}
+
+// InitPayloadLenient decodes only init metadata fields needed by offline
+// parsers. Each field is decoded independently so one malformed optional field
+// does not discard model/cwd/session metadata.
+func (m SystemMessage) InitPayloadLenient() SystemInitPayload {
+	payload := SystemInitPayload{
+		SessionID: m.SessionID,
+		UUID:      m.UUID,
+	}
+	var fields map[string]json.RawMessage
+	if len(m.raw) == 0 {
+		data, err := json.Marshal(m)
+		if err != nil {
+			return payload
+		}
+		_ = json.Unmarshal(data, &fields)
+	} else {
+		_ = json.Unmarshal(m.raw, &fields)
+	}
+	decodeInitField(fields, "session_id", &payload.SessionID)
+	decodeInitField(fields, "uuid", &payload.UUID)
+	decodeInitField(fields, "model", &payload.Model)
+	decodeInitField(fields, "cwd", &payload.CWD)
+	decodeInitField(fields, "claude_code_version", &payload.ClaudeCodeVersion)
+	decodeInitField(fields, "permissionMode", &payload.PermissionMode)
+	decodeInitField(fields, "apiKeySource", &payload.APIKeySource)
+	decodeInitField(fields, "output_style", &payload.OutputStyle)
+	decodeInitField(fields, "tools", &payload.Tools)
+	decodeInitField(fields, "agents", &payload.Agents)
+	decodeInitField(fields, "skills", &payload.Skills)
+	decodeInitField(fields, "betas", &payload.Betas)
+	decodeInitField(fields, "plugins", &payload.Plugins)
+	decodeInitField(fields, "slash_commands", &payload.SlashCommands)
+	decodeInitField(fields, "mcp_servers", &payload.MCPServers)
+	decodeInitField(fields, "fast_mode_state", &payload.FastModeState)
+	return payload
+}
+
+func decodeInitField[T any](fields map[string]json.RawMessage, name string, dst *T) {
+	raw, ok := fields[name]
+	if !ok {
+		return
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		slog.Warn("failed to decode system init field", "field", name, "error", err)
+	}
 }
 
 // AsStatus returns the status payload if m.Subtype is "status".
 func (m SystemMessage) AsStatus() (*SystemStatusPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*SystemStatusPayload)
-	return v, ok
+	return systemPayloadAs[*SystemStatusPayload](m)
 }
 
 // AsCompactBoundary returns the compact_boundary payload.
 func (m SystemMessage) AsCompactBoundary() (*CompactBoundaryPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*CompactBoundaryPayload)
-	return v, ok
+	return systemPayloadAs[*CompactBoundaryPayload](m)
 }
 
 // AsPostTurnSummary returns the post_turn_summary payload.
 func (m SystemMessage) AsPostTurnSummary() (*PostTurnSummaryPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*PostTurnSummaryPayload)
-	return v, ok
+	return systemPayloadAs[*PostTurnSummaryPayload](m)
 }
 
 // AsAPIRetry returns the api_retry payload.
 func (m SystemMessage) AsAPIRetry() (*APIRetryPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*APIRetryPayload)
-	return v, ok
+	return systemPayloadAs[*APIRetryPayload](m)
 }
 
 // AsLocalCommandOutput returns the local_command_output payload.
 func (m SystemMessage) AsLocalCommandOutput() (*LocalCommandOutputPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*LocalCommandOutputPayload)
-	return v, ok
+	return systemPayloadAs[*LocalCommandOutputPayload](m)
 }
 
 // AsHookStarted returns the hook_started payload.
 func (m SystemMessage) AsHookStarted() (*HookStartedPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*HookStartedPayload)
-	return v, ok
+	return systemPayloadAs[*HookStartedPayload](m)
 }
 
 // AsHookProgress returns the hook_progress payload.
 func (m SystemMessage) AsHookProgress() (*HookProgressPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*HookProgressPayload)
-	return v, ok
+	return systemPayloadAs[*HookProgressPayload](m)
 }
 
 // AsHookResponse returns the hook_response payload.
 func (m SystemMessage) AsHookResponse() (*HookResponsePayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*HookResponsePayload)
-	return v, ok
+	return systemPayloadAs[*HookResponsePayload](m)
 }
 
 // AsTaskNotification returns the task_notification payload.
 func (m SystemMessage) AsTaskNotification() (*TaskNotificationPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*TaskNotificationPayload)
-	return v, ok
+	return systemPayloadAs[*TaskNotificationPayload](m)
 }
 
 // AsTaskStarted returns the task_started payload.
 func (m SystemMessage) AsTaskStarted() (*TaskStartedPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*TaskStartedPayload)
-	return v, ok
+	return systemPayloadAs[*TaskStartedPayload](m)
 }
 
 // AsTaskProgress returns the task_progress payload.
 func (m SystemMessage) AsTaskProgress() (*TaskProgressPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*TaskProgressPayload)
-	return v, ok
+	return systemPayloadAs[*TaskProgressPayload](m)
 }
 
 // AsTaskUpdated returns the task_updated payload.
 func (m SystemMessage) AsTaskUpdated() (*TaskUpdatedPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*TaskUpdatedPayload)
-	return v, ok
+	return systemPayloadAs[*TaskUpdatedPayload](m)
 }
 
 // AsSessionStateChanged returns the session_state_changed payload.
 func (m SystemMessage) AsSessionStateChanged() (*SessionStateChangedPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*SessionStateChangedPayload)
-	return v, ok
+	return systemPayloadAs[*SessionStateChangedPayload](m)
 }
 
 // AsFilesPersisted returns the files_persisted payload.
 func (m SystemMessage) AsFilesPersisted() (*FilesPersistedPayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*FilesPersistedPayload)
-	return v, ok
+	return systemPayloadAs[*FilesPersistedPayload](m)
 }
 
 // AsElicitationComplete returns the elicitation_complete payload.
 func (m SystemMessage) AsElicitationComplete() (*ElicitationCompletePayload, bool) {
-	p, _ := m.DecodePayload()
-	v, ok := p.(*ElicitationCompletePayload)
+	return systemPayloadAs[*ElicitationCompletePayload](m)
+}
+
+func systemPayloadAs[T any](m SystemMessage) (T, bool) {
+	var zero T
+	p, err := m.DecodePayload()
+	if err != nil {
+		slog.Warn("failed to decode system payload", "subtype", m.Subtype, "error", err)
+		return zero, false
+	}
+	v, ok := p.(T)
 	return v, ok
 }

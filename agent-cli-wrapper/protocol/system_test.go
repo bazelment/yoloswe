@@ -38,6 +38,49 @@ func TestSystemSubtype_Init(t *testing.T) {
 	}
 }
 
+func TestInitPayloadLenient_PreservesOptionalFields(t *testing.T) {
+	// Strict AsInit() will fail on the malformed `tools` field. The lenient
+	// fallback should still recover model/cwd plus the other optional fields
+	// codex-bot flagged as silently dropped (apiKeySource, output_style,
+	// betas, plugins, slash_commands, mcp_servers).
+	raw := `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default","apiKeySource":"managed","output_style":"compact","betas":["beta-a"],"plugins":[{"name":"Plugin","path":"/usr/lib/p1"}],"slash_commands":["/help"],"mcp_servers":[{"name":"mcp1","status":"connected"}],"agents":["agent-a"],"skills":["skill-a"]}`
+	m := parseSystem(t, raw)
+	if _, ok := m.AsInit(); ok {
+		t.Fatal("expected strict AsInit() to fail on malformed tools field")
+	}
+	p := m.InitPayloadLenient()
+	if p.Model != "claude-opus-4-6" {
+		t.Errorf("model: %q", p.Model)
+	}
+	if p.CWD != "/tmp" {
+		t.Errorf("cwd: %q", p.CWD)
+	}
+	if p.APIKeySource != "managed" {
+		t.Errorf("apiKeySource: %q", p.APIKeySource)
+	}
+	if p.OutputStyle != "compact" {
+		t.Errorf("output_style: %q", p.OutputStyle)
+	}
+	if len(p.Betas) != 1 || p.Betas[0] != "beta-a" {
+		t.Errorf("betas: %v", p.Betas)
+	}
+	if len(p.Plugins) != 1 || p.Plugins[0].Name != "Plugin" {
+		t.Errorf("plugins: %v", p.Plugins)
+	}
+	if len(p.SlashCommands) != 1 || p.SlashCommands[0] != "/help" {
+		t.Errorf("slash_commands: %v", p.SlashCommands)
+	}
+	if len(p.MCPServers) != 1 || p.MCPServers[0].Name != "mcp1" {
+		t.Errorf("mcp_servers: %v", p.MCPServers)
+	}
+	if len(p.Agents) != 1 || p.Agents[0] != "agent-a" {
+		t.Errorf("agents: %v", p.Agents)
+	}
+	if len(p.Skills) != 1 || p.Skills[0] != "skill-a" {
+		t.Errorf("skills: %v", p.Skills)
+	}
+}
+
 func TestSystemSubtype_Status(t *testing.T) {
 	raw := `{"type":"system","subtype":"status","session_id":"s1","uuid":"u1","status":"compacting","permissionMode":"default"}`
 	m := parseSystem(t, raw)
@@ -396,5 +439,26 @@ func TestSystemDecodePayload_UnknownReturnsNil(t *testing.T) {
 	}
 	if v != nil {
 		t.Errorf("expected nil payload for unknown subtype, got %T", v)
+	}
+}
+
+func TestSystemMessage_InitPayloadLenient(t *testing.T) {
+	m := parseSystem(t, `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default"}`)
+	if _, ok := m.AsInit(); ok {
+		t.Fatal("expected strict init decode to fail")
+	}
+
+	payload := m.InitPayloadLenient()
+	if payload.SessionID != "s1" {
+		t.Errorf("session_id: %q", payload.SessionID)
+	}
+	if payload.Model != "claude-opus-4-6" {
+		t.Errorf("model: %q", payload.Model)
+	}
+	if payload.CWD != "/tmp" {
+		t.Errorf("cwd: %q", payload.CWD)
+	}
+	if payload.PermissionMode != "default" {
+		t.Errorf("permissionMode: %q", payload.PermissionMode)
 	}
 }

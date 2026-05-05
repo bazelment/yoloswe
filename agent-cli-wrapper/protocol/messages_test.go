@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -96,6 +97,21 @@ func TestParseMessage_RateLimitEvent(t *testing.T) {
 	}
 }
 
+func TestSystemMessage_MarshalJSON_PreservesRawEnvelope(t *testing.T) {
+	raw := `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":["Bash"],"permissionMode":"default"}`
+	msg, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	marshaled, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(marshaled) != raw {
+		t.Fatalf("marshaled: %s", marshaled)
+	}
+}
+
 func TestParseMessage_PromptSuggestion(t *testing.T) {
 	raw := `{"type":"prompt_suggestion","suggestion":"maybe try this","session_id":"s1","uuid":"u1"}`
 	msg, err := ParseMessage([]byte(raw))
@@ -172,7 +188,7 @@ func TestParseMessage_UpdateEnvironmentVariables(t *testing.T) {
 }
 
 func TestResultMessage_Outcome_Success(t *testing.T) {
-	m := ResultMessage{Subtype: "success", Result: "hello"}
+	m := parseResultMessage(t, `{"type":"result","subtype":"success","result":"hello","is_error":false}`)
 	out := m.Outcome()
 	s, ok := out.(ResultSuccess)
 	if !ok {
@@ -180,6 +196,26 @@ func TestResultMessage_Outcome_Success(t *testing.T) {
 	}
 	if s.Text != "hello" {
 		t.Errorf("text: %q", s.Text)
+	}
+	if m.ResultText() != "hello" {
+		t.Errorf("result text: %q", m.ResultText())
+	}
+}
+
+func TestResultMessage_MarshalJSON_PreservesResult(t *testing.T) {
+	m := parseResultMessage(t, `{"type":"result","subtype":"success","result":"hello","is_error":false}`)
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("unmarshal marshaled result: %v", err)
+	}
+	if wire.Result != "hello" {
+		t.Errorf("result: %q", wire.Result)
 	}
 }
 
@@ -215,7 +251,7 @@ func TestResultMessage_Outcome_Errors(t *testing.T) {
 // is_error is true but the subtype string still says "success" — Outcome must
 // classify the turn as failed and preserve the diagnostic text from Result.
 func TestResultMessage_Outcome_IsErrorWithSuccessSubtype(t *testing.T) {
-	m := ResultMessage{Subtype: "success", IsError: true, Result: "boom"}
+	m := parseResultMessage(t, `{"type":"result","subtype":"success","result":"boom","is_error":true}`)
 	out := m.Outcome()
 	e, ok := out.(ResultError)
 	if !ok {
@@ -224,4 +260,39 @@ func TestResultMessage_Outcome_IsErrorWithSuccessSubtype(t *testing.T) {
 	if e.Text != "boom" {
 		t.Errorf("text: %q", e.Text)
 	}
+}
+
+func TestResultMessage_IsFailure_ErrorSubtypeWithoutIsError(t *testing.T) {
+	m := parseResultMessage(t, `{"type":"result","subtype":"error_max_turns","errors":["boom"]}`)
+	if !m.IsFailure() {
+		t.Fatal("expected error subtype to indicate failure")
+	}
+}
+
+// TestResultMessage_Outcome_EmptySubtypeIsSuccess covers partial/legacy NDJSON
+// where the result frame has is_error=false but no subtype. Pre-refactor
+// callers derived success from !is_error, so these frames must remain
+// non-failures to avoid silently flipping turns from success to error.
+func TestResultMessage_Outcome_EmptySubtypeIsSuccess(t *testing.T) {
+	m := parseResultMessage(t, `{"type":"result","result":"hello","is_error":false}`)
+	out := m.Outcome()
+	if _, ok := out.(ResultSuccess); !ok {
+		t.Fatalf("expected ResultSuccess for empty subtype with is_error=false, got %T", out)
+	}
+	if m.IsFailure() {
+		t.Fatal("IsFailure must be false for empty subtype with is_error=false")
+	}
+}
+
+func parseResultMessage(t *testing.T, raw string) ResultMessage {
+	t.Helper()
+	msg, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	result, ok := msg.(ResultMessage)
+	if !ok {
+		t.Fatalf("expected ResultMessage, got %T", msg)
+	}
+	return result
 }
