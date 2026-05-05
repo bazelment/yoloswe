@@ -145,6 +145,9 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 			return fmt.Errorf("plan file is empty")
 		}
 	}
+	if args.postResult && args.runStep == "" {
+		return fmt.Errorf("--post-result requires --run-step")
+	}
 
 	cfg, err := loadRunConfig(args)
 	if err != nil {
@@ -615,18 +618,14 @@ func (r *singleStepRun) finish(stepCfg jiradozer.StepConfig, output string, tota
 		jiradozer.PersistPlan(r.cfg.WorkDir, output, r.logger)
 	}
 	if r.postResult && r.poster != nil {
-		if err := postStepResultComment(r.ctx, r.poster, r.issue, r.stepName, stepCfg, output, totalRounds, r.logger); err != nil {
-			r.logger.Warn("failed to post step result comment", "step", r.stepName, "error", err)
+		if err := postStepResultComment(r.ctx, r.poster, r.issue, r.stepName, stepCfg, output, totalRounds); err != nil {
+			return fmt.Errorf("post step result comment: %w", err)
 		}
 	}
 	return nil
 }
 
-func postStepResultComment(ctx context.Context, t jiradozer.CommentPoster, issue *tracker.Issue, stepName string, stepCfg jiradozer.StepConfig, output string, totalRounds int, logger *slog.Logger) error {
-	if output == "" {
-		logger.Info("skipping --post-result: step produced no text output", "step", stepName)
-		return nil
-	}
+func postStepResultComment(ctx context.Context, t jiradozer.CommentPoster, issue *tracker.Issue, stepName string, stepCfg jiradozer.StepConfig, output string, totalRounds int) error {
 	if totalRounds > 0 {
 		if stepCfg.RoundCommentTemplate == "" {
 			return fmt.Errorf("step %q has no round_comment_template configured", stepName)
