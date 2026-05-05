@@ -22,6 +22,16 @@ func tokenSummaryContent(usage codex.TokenUsage) string {
 	return fmt.Sprintf("Tokens: %d input / %d output", usage.InputTokens, usage.OutputTokens)
 }
 
+// clampSubInt64 returns max(0, a-b). Used in the cumulative-token
+// baseline subtraction to defend against non-monotonic cumulative
+// totals (e.g. replay of concatenated sessions, mid-log resets).
+func clampSubInt64(a, b int64) int64 {
+	if a < b {
+		return 0
+	}
+	return a - b
+}
+
 func approvalKey(callID, command, reason string) string {
 	callID = strings.TrimSpace(callID)
 	if callID != "" {

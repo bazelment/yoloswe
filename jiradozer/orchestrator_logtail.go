@@ -12,6 +12,15 @@ import (
 )
 
 const logTailPollInterval = 250 * time.Millisecond
+
+// watchdogTickInterval is the cadence at which runWatchdog evaluates
+// the idle gap. The actual cancel latency is up to one tick interval
+// LATER than the configured IdleTimeout (worst case: idle just after
+// a tick, gap crosses threshold during the next interval). Operators
+// who set a tight idle_timeout should account for this slack — for
+// the bootstrap defaults (5m+ timeouts) the 30s slack is noise, but
+// configs with sub-minute timeouts will see proportionally larger
+// effective bounds.
 const watchdogTickInterval = 30 * time.Second
 
 // logTailMaxReopenAttempts caps how many times tailSubprocessLog will try

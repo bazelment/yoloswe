@@ -312,14 +312,19 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 		// (cumulative across the thread), recover a per-turn delta by
 		// subtracting the prior turn's cumulative baseline. Falls back
 		// to the cumulative value itself for the very first turn.
+		// Each per-field subtraction is clamped at zero — if cumulative
+		// totals ever decrease (mid-log session reset, replay of
+		// concatenated logs) negative deltas would surface as confusing
+		// near-MAX_INT values once cast or as nonsensical "negative
+		// tokens" lines; clamping prefers a transient zero-delta.
 		if p.threadUsageCumulative[ev.ThreadID] {
 			baseline := p.threadCumulativeBaseline[ev.ThreadID]
 			delta := codex.TokenUsage{
-				InputTokens:           usage.InputTokens - baseline.InputTokens,
-				CachedInputTokens:     usage.CachedInputTokens - baseline.CachedInputTokens,
-				OutputTokens:          usage.OutputTokens - baseline.OutputTokens,
-				ReasoningOutputTokens: usage.ReasoningOutputTokens - baseline.ReasoningOutputTokens,
-				TotalTokens:           usage.TotalTokens - baseline.TotalTokens,
+				InputTokens:           clampSubInt64(usage.InputTokens, baseline.InputTokens),
+				CachedInputTokens:     clampSubInt64(usage.CachedInputTokens, baseline.CachedInputTokens),
+				OutputTokens:          clampSubInt64(usage.OutputTokens, baseline.OutputTokens),
+				ReasoningOutputTokens: clampSubInt64(usage.ReasoningOutputTokens, baseline.ReasoningOutputTokens),
+				TotalTokens:           clampSubInt64(usage.TotalTokens, baseline.TotalTokens),
 			}
 			p.threadCumulativeBaseline[ev.ThreadID] = usage
 			usage = delta

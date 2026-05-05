@@ -119,6 +119,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             10,
 		RoundsCapable:        true,
 		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:          20 * time.Minute,
+		IdleTimeoutComment:   "Validate runs tests + linters (potentially long); the gap-based watchdog only trips when output truly stops.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "ship",
@@ -130,6 +132,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             10,
 		RoundsCapable:        true,
 		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:          5 * time.Minute,
+		IdleTimeoutComment:   "Ship is short — gh PR-update only — so a tight timeout catches gh hangs quickly.",
 	}))
 
 	b.WriteString(bootstrapTopLevelTail)

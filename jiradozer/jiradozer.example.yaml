@@ -301,6 +301,11 @@ validate:
     permission_mode: bypass
     # Max agent turns before giving up (Claude provider only).
     max_turns: 10
+    # Parent kills the subprocess if it emits no log line for this long while
+    # inside this step. Validate runs tests + linters (potentially long);
+    # the gap-based watchdog only trips when output truly
+    # stops.
+    idle_timeout: 20m
     # Per-round comment posted when this step runs as multi-round.
     # Validated even when `rounds` is empty so a typo here fails fast.
     round_comment_template: |-
@@ -368,6 +373,10 @@ ship:
     permission_mode: bypass
     # Max agent turns before giving up (Claude provider only).
     max_turns: 10
+    # Parent kills the subprocess if it emits no log line for this long while
+    # inside this step. Ship is short — gh PR-update only — so a tight
+    # timeout catches gh hangs quickly.
+    idle_timeout: 5m
     # Per-round comment posted when this step runs as multi-round.
     # Validated even when `rounds` is empty so a typo here fails fast.
     round_comment_template: |-
