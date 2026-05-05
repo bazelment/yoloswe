@@ -4,9 +4,9 @@ go 1.25.0
 
 require (
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
-	github.com/bazelment/yoloswe/bramble v0.0.0-20260505143703-1aebb134cee1
+	github.com/bazelment/yoloswe/bramble v0.0.0
 	github.com/bazelment/yoloswe/cliapp v0.0.0
-	github.com/bazelment/yoloswe/multiagent v0.0.0-20260505143703-1aebb134cee1
+	github.com/bazelment/yoloswe/multiagent v0.0.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -32,3 +32,7 @@ replace github.com/bazelment/yoloswe/cliapp => ../cliapp
 replace github.com/bazelment/yoloswe/logging => ../logging
 
 replace github.com/bazelment/yoloswe/agent-cli-wrapper => ../agent-cli-wrapper
+
+replace github.com/bazelment/yoloswe/bramble => ../bramble
+
+replace github.com/bazelment/yoloswe/multiagent => ../multiagent

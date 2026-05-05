@@ -51,6 +51,22 @@ func TestIsTerminal_NonFileWriterIsNotTerminal(t *testing.T) {
 	}
 }
 
+type fdWriter struct {
+	*os.File
+}
+
+func TestIsTerminal_FdWriter(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	if IsTerminal(fdWriter{File: f}) {
+		t.Fatalf("%s fd writer should not be reported as a terminal", os.DevNull)
+	}
+}
+
 // --- Text output ---
 
 func TestText_Normal(t *testing.T) {

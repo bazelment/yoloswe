@@ -8,9 +8,9 @@ require (
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/bazelment/yoloswe/agent-cli-wrapper v0.0.0
 	github.com/bazelment/yoloswe/logging v0.0.0
-	github.com/bazelment/yoloswe/multiagent v0.0.0-20260505143703-1aebb134cee1
+	github.com/bazelment/yoloswe/multiagent v0.0.0
 	github.com/bazelment/yoloswe/voice v0.0.0-00010101000000-000000000000
-	github.com/bazelment/yoloswe/wt v0.0.0-20260207203406-ad2b626fcc6a
+	github.com/bazelment/yoloswe/wt v0.0.0
 	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/ergochat/readline v0.1.3
@@ -73,3 +73,5 @@ replace github.com/bazelment/yoloswe/voice => ../voice
 replace github.com/bazelment/yoloswe/wt => ../wt
 
 replace github.com/bazelment/yoloswe/yoloswe => ../yoloswe
+
+replace github.com/bazelment/yoloswe/multiagent => ../multiagent

@@ -2,7 +2,6 @@ package render
 
 import (
 	"io"
-	"os"
 
 	"golang.org/x/term"
 )
@@ -72,7 +71,7 @@ func (p Palette) colorFor(c string) string {
 
 // isTerminalWriter checks if the writer is backed by a terminal.
 func isTerminalWriter(w io.Writer) bool {
-	f, ok := w.(*os.File)
+	f, ok := w.(interface{ Fd() uintptr })
 	if !ok {
 		return false
 	}
