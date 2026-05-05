@@ -1583,6 +1583,84 @@ func TestWorkflow_SkipDonePhases_FromInit(t *testing.T) {
 	assert.Empty(t, labelSequence(mt))
 }
 
+func TestWorkflow_SkipPhases_FromConfig(t *testing.T) {
+	workDir := t.TempDir()
+	PersistPlan(workDir, "persisted plan", discardLogger())
+
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{"bug"}},
+	}
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+	require.NoError(t, cfg.ApplySkipPhases([]string{PhasePlan}, "config"))
+
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.skipDonePhases(context.Background())
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Equal(t, "persisted plan", wf.plan)
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+	assert.Equal(t, "config", wf.skipPhaseSources[PhasePlan])
+	assert.Empty(t, labelSequence(mt))
+}
+
+func TestWorkflow_SkipPhases_FromLabel(t *testing.T) {
+	issue := testIssue()
+	issue.Labels = []string{"bug", "jiradozer-skip-validate"}
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: issue.Labels},
+	}
+	wf := NewWorkflow(mt, issue, testConfig(), discardLogger())
+	walkTo(t, wf.state, StepValidating)
+
+	wf.skipDonePhases(context.Background())
+
+	assert.Equal(t, StepShipping, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
+	assert.Equal(t, "label", wf.skipPhaseSources[PhaseValidate])
+	assert.Empty(t, labelSequence(mt))
+}
+
+func TestWorkflow_SkipPhases_AllSkipped(t *testing.T) {
+	cfg := testConfig()
+	require.NoError(t, cfg.ApplySkipPhases([]string{PhasePlan, PhaseBuild, PhaseValidate, PhaseShip}, "config"))
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{}},
+	}
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.skipDonePhases(context.Background())
+
+	assert.Equal(t, StepDone, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
+	assert.Equal(t, phaseDone, wf.phases[PhaseBuild])
+	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
+	assert.Equal(t, phaseDone, wf.phases[PhaseShip])
+}
+
+func TestWorkflow_SkipPlan_LoadsPersistedPlan(t *testing.T) {
+	workDir := t.TempDir()
+	PersistPlan(workDir, "persisted plan from new skip entry", discardLogger())
+
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+	require.NoError(t, cfg.ApplySkipPhases([]string{PhasePlan}, "cli"))
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{}},
+	}
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+
+	wf.skipDonePhases(context.Background())
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Equal(t, "persisted plan from new skip entry", wf.plan)
+	assert.Equal(t, "cli", wf.skipPhaseSources[PhasePlan])
+}
+
 // TestWorkflow_SkipDonePhases_ClearsStaleInProgress verifies that when a phase
 // has both -inprogress and -done labels (e.g. from a prior interrupted run),
 // skipDonePhases removes the stale -inprogress label so the issue doesn't end

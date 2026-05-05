@@ -66,6 +66,8 @@ type Workflow struct {
 	stateIDs            map[string]string
 	redoCounts          map[WorkflowStep]int
 	phases              map[string]phaseState
+	skipPhases          map[string]bool
+	skipPhaseSources    map[string]string
 	OnTransition        func(step WorkflowStep)
 	OnRoundProgress     func(roundIndex, roundTotal int)
 	runStepAgent        func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
@@ -86,16 +88,25 @@ type Workflow struct {
 // refreshLabels) doesn't leak bookkeeping labels.
 func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logger *slog.Logger) *Workflow {
 	w := &Workflow{
-		tracker:      t,
-		state:        NewStateMachine(),
-		config:       cfg,
-		logger:       logger,
-		stateIDs:     make(map[string]string),
-		sessionIDs:   make(map[WorkflowStep]string),
-		redoCounts:   make(map[WorkflowStep]int),
-		phases:       make(map[string]phaseState),
-		maxRedos:     DefaultMaxRedos,
-		runStepAgent: RunStepAgent,
+		tracker:          t,
+		state:            NewStateMachine(),
+		config:           cfg,
+		logger:           logger,
+		stateIDs:         make(map[string]string),
+		sessionIDs:       make(map[WorkflowStep]string),
+		redoCounts:       make(map[WorkflowStep]int),
+		phases:           make(map[string]phaseState),
+		skipPhases:       make(map[string]bool),
+		skipPhaseSources: make(map[string]string),
+		maxRedos:         DefaultMaxRedos,
+		runStepAgent:     RunStepAgent,
+	}
+	for _, phase := range cfg.SkipPhases {
+		source := cfg.skipPhaseSource(phase)
+		if source == "" {
+			source = "config"
+		}
+		w.addSkipPhase(phase, source)
 	}
 	if issue != nil {
 		// Shallow-copy so Labels mutations on w.issue don't bleed back into
@@ -103,10 +114,41 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		// phase-skip decisions before the first tracker fetch.
 		issueCopy := *issue
 		w.lastLabels = slices.Clone(issue.Labels)
+		for _, label := range issue.Labels {
+			for _, p := range phaseTable {
+				if label == skipLabel(p.name) {
+					w.addSkipPhase(p.name, "label")
+				}
+			}
+		}
 		issueCopy.Labels = slices.DeleteFunc(slices.Clone(issue.Labels), isJiradozerLabel)
 		w.issue = &issueCopy
 	}
 	return w
+}
+
+func (w *Workflow) addSkipPhase(phase, source string) {
+	if !isUserPhase(phase) {
+		return
+	}
+	if prev := w.skipPhaseSources[phase]; prev != "" && skipPhasePriority(prev) > skipPhasePriority(source) {
+		return
+	}
+	w.skipPhases[phase] = true
+	w.skipPhaseSources[phase] = source
+}
+
+func skipPhasePriority(source string) int {
+	switch source {
+	case "cli":
+		return 3
+	case "label":
+		return 2
+	case "config":
+		return 1
+	default:
+		return 0
+	}
 }
 
 // SetRenderer sets the terminal renderer for streaming output.
@@ -130,6 +172,11 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		"work_dir", w.config.WorkDir,
 		"base_branch", w.config.BaseBranch,
 	)
+	for _, p := range phaseTable {
+		if w.skipPhases[p.name] {
+			w.logger.Info("phase configured to skip", "phase", p.name, "source", w.skipPhaseSources[p.name])
+		}
+	}
 	workflowStart := time.Now()
 	defer func() {
 		finalStep := w.state.Current().String()
@@ -611,6 +658,13 @@ func (w *Workflow) completePriorPhases(ctx context.Context, currentPhase string)
 // forceTransition. If all remaining phases are -done, jumps to StepDone.
 func (w *Workflow) skipDonePhases(ctx context.Context) {
 	labels := w.refreshLabels(ctx)
+	for _, label := range labels {
+		for _, p := range phaseTable {
+			if label == skipLabel(p.name) {
+				w.addSkipPhase(p.name, "label")
+			}
+		}
+	}
 
 	for {
 		cur := w.state.Current()
@@ -618,14 +672,15 @@ func (w *Workflow) skipDonePhases(ctx context.Context) {
 		if phase == "" {
 			return
 		}
-		if !slices.Contains(labels, doneLabel(phase)) {
+		hasDoneLabel := slices.Contains(labels, doneLabel(phase))
+		if !hasDoneLabel && !w.skipPhases[phase] {
 			return
 		}
 		// The -done label is authoritative, so clear any stale -inprogress
 		// label left over from a prior interrupted run or a user toggling
 		// phase state manually. Without this, the issue can end up tagged
 		// both -inprogress and -done for the same phase.
-		if slices.Contains(labels, inProgressLabel(phase)) {
+		if hasDoneLabel && slices.Contains(labels, inProgressLabel(phase)) {
 			if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
 				w.logger.Warn("failed to clear stale in-progress label while skipping phase", "phase", phase, "error", err)
 			}
@@ -633,12 +688,16 @@ func (w *Workflow) skipDonePhases(ctx context.Context) {
 		w.phases[phase] = phaseDone
 		nextPhase := phaseAfter(phase)
 		if nextPhase == "" {
-			w.logger.Info("all phases already marked done; skipping to StepDone")
+			w.logger.Info("all phases already marked done or skipped; skipping to StepDone")
 			w.forceTransition(StepDone)
 			return
 		}
 		next := startStepForPhase(nextPhase)
-		w.logger.Info("skipping phase (label present)", "phase", phase, "next", next)
+		source := "label"
+		if !hasDoneLabel {
+			source = w.skipPhaseSources[phase]
+		}
+		w.logger.Info("skipping phase", "phase", phase, "source", source, "next", next)
 		w.forceTransition(next)
 		if phase == PhasePlan && w.plan == "" {
 			if content, err := LoadPersistedPlan(w.config.WorkDir); err != nil {

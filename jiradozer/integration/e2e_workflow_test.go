@@ -193,6 +193,62 @@ func TestE2E_HappyPath_AllAutoApprove(t *testing.T) {
 	assert.GreaterOrEqual(t, len(ft.CallsFor("FetchComments")), 3, "auto-approved review gates should still check for late feedback")
 }
 
+func TestE2E_SkipPlanLabel_RunsBuildValidateShip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	workDir := t.TempDir()
+
+	issue := e2eIssue()
+	issue.Labels = []string{"jiradozer-skip-plan"}
+	ft := NewFakeTracker(e2eWorkflowStates())
+	ft.AddIssue(*issue)
+
+	cfg := e2eConfig(t, workDir)
+	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
+
+	var transitions []jiradozer.WorkflowStep
+	var mu sync.Mutex
+	wf.OnTransition = func(step jiradozer.WorkflowStep) {
+		mu.Lock()
+		transitions = append(transitions, step)
+		mu.Unlock()
+		t.Logf("transition → %s", step)
+	}
+
+	err := wf.Run(ctx)
+	require.NoError(t, err, "workflow should complete successfully")
+
+	mu.Lock()
+	got := transitions
+	mu.Unlock()
+
+	expected := []jiradozer.WorkflowStep{
+		jiradozer.StepPlanning,
+		jiradozer.StepBuilding,
+		jiradozer.StepCreatingPR,
+		jiradozer.StepBuildReview,
+		jiradozer.StepValidating,
+		jiradozer.StepValidateReview,
+		jiradozer.StepShipping,
+		jiradozer.StepShipReview,
+		jiradozer.StepDone,
+	}
+	assert.Equal(t, expected, got, "skip-plan label should omit only plan execution and review")
+
+	postBodies := postCommentBodies(ft)
+	assert.Equal(t, 0, countBodies(postBodies, "## Plan Complete"))
+	assertBodyContains(t, postBodies, "## Build Complete")
+	assertBodyContains(t, postBodies, "## Create_pr Complete")
+	assertBodyContains(t, postBodies, "## Validate Complete")
+	assertBodyContains(t, postBodies, "## Ship Complete")
+}
+
 // TestE2E_PlanStep_Smoke is a fast smoke test that runs only the plan step
 // with real Claude execution. Verifies the agent setup works before running
 // the full 10-minute E2E test.

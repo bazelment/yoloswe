@@ -16,6 +16,8 @@ import (
 )
 
 // Config is the top-level configuration for jiradozer.
+//
+//nolint:govet // fieldalignment: keep YAML fields in config-file order; skipPhaseSources is internal metadata.
 type Config struct {
 	Tracker      TrackerConfig `yaml:"tracker"`
 	Source       SourceConfig  `yaml:"source"`
@@ -28,8 +30,11 @@ type Config struct {
 	CreatePR     StepConfig    `yaml:"create_pr"`
 	Validate     StepConfig    `yaml:"validate"`
 	Ship         StepConfig    `yaml:"ship"`
+	SkipPhases   []string      `yaml:"skip_phases"`
 	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
 	PollInterval time.Duration `yaml:"poll_interval"`
+
+	skipPhaseSources map[string]string
 }
 
 // TrackerConfig specifies the issue tracker backend.
@@ -194,6 +199,21 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent.effort: %w", err)
 		}
 	}
+	skipPhases, err := NormalizeSkipPhases(c.SkipPhases)
+	if err != nil {
+		return fmt.Errorf("skip_phases: %w", err)
+	}
+	c.SkipPhases = skipPhases
+	if len(c.SkipPhases) > 0 {
+		if c.skipPhaseSources == nil {
+			c.skipPhaseSources = make(map[string]string)
+		}
+		for _, phase := range c.SkipPhases {
+			if c.skipPhaseSources[phase] == "" {
+				c.skipPhaseSources[phase] = "config"
+			}
+		}
+	}
 	namedSteps := []struct {
 		step *StepConfig
 		name string
@@ -207,6 +227,67 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// NormalizeSkipPhases validates phase names, trims whitespace, removes
+// duplicates, and preserves first-seen order.
+func NormalizeSkipPhases(phases []string) ([]string, error) {
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(phases))
+	for _, phase := range phases {
+		phase = strings.TrimSpace(phase)
+		if phase == "" {
+			continue
+		}
+		if !isUserPhase(phase) {
+			return nil, fmt.Errorf("unknown phase %q (valid: %s)", phase, strings.Join(validUserPhases(), ", "))
+		}
+		if seen[phase] {
+			continue
+		}
+		seen[phase] = true
+		out = append(out, phase)
+	}
+	return out, nil
+}
+
+// ApplySkipPhases replaces the configured skip set and records its source for
+// workflow logs. This is used by CLI overrides after LoadConfig validation.
+func (c *Config) ApplySkipPhases(phases []string, source string) error {
+	normalized, err := NormalizeSkipPhases(phases)
+	if err != nil {
+		return err
+	}
+	c.SkipPhases = normalized
+	c.skipPhaseSources = make(map[string]string)
+	for _, phase := range normalized {
+		c.skipPhaseSources[phase] = source
+	}
+	return nil
+}
+
+func (c *Config) skipPhaseSource(phase string) string {
+	if c == nil || c.skipPhaseSources == nil {
+		return ""
+	}
+	return c.skipPhaseSources[phase]
+}
+
+func validUserPhases() []string {
+	out := make([]string, 0, len(phaseTable))
+	for _, p := range phaseTable {
+		out = append(out, p.name)
+	}
+	return out
+}
+
+func isUserPhase(phase string) bool {
+	for _, p := range phaseTable {
+		if p.name == phase {
+			return true
+		}
+	}
+	return false
 }
 
 // validateStep checks one named step.
