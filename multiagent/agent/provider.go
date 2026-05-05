@@ -25,7 +25,7 @@ type AgentResult struct {
 // AgentResult.Text, which may be replaced downstream (e.g. when a plan file
 // is read instead of the agent's text). Reason distinguishes why the loop
 // stopped — "exhausted" (count budget reached), "budget_exceeded",
-// "no_progress", or "ctx_cancelled".
+// "no_progress", "ctx_cancelled", or "permanent".
 type UnresolvedToolError struct {
 	Tool     string
 	Excerpt  string

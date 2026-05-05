@@ -449,19 +449,10 @@ is the load-bearing regression coverage.
   code retried is a subset of what v2 retries plus strictly more cases
   it correctly skips. No config currently in the tree relies on the
   buggy retry behavior.
-- `HasLiveBackgroundWork` is a new field on the public `TurnResult`
-  struct. Monorepo style permits API changes; all in-tree callers are
-  exhaustively enumerated (provider, render, bramble via adapter).
-  Gazelle-regenerated BUILDs pick up the new field with no changes.
-- `RetryStopBgWorkLive` is a new abort reason string. Any log parser
-  that pattern-matches on reasons should be updated. (In tree:
-  jiradozer log consumers only; no external consumers.)
-- `OnRetryAbort` fires for `bg_work_live` even though no retry was
-  attempted. This is a semantic widening — "abort" now covers "gate
-  blocked from the start" as well as "we tried and ran out of budget."
-  `logEventHandler.OnRetryAbort` (jiradozer/agent.go) should log at
-  INFO, not WARN, when `reason == bg_work_live` since it's the
-  expected case.
+Historical note: this section originally proposed adding
+`HasLiveBackgroundWork` to `TurnResult`, `RetryStopBgWorkLive`, and
+`OnRetryAbort("bg_work_live", ...)`. That G2 approach was superseded
+before implementation; those names are not part of the shipped API.
 
 ## G4 — Error must be the final tool_result in the turn
 

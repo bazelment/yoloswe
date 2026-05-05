@@ -265,26 +265,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return nil, err
 	}
 
-	agentResult := ClaudeResultToAgentResult(result)
+	agentResult := claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason)
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
-	}
-	if cfg.MaxToolErrorRetries > 0 {
-		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
-			unresolved := &UnresolvedToolError{
-				Tool:     toolName,
-				Excerpt:  excerpt,
-				Reason:   stopReason,
-				Attempts: attempts,
-				Max:      cfg.MaxToolErrorRetries,
-			}
-			agentResult.UnresolvedToolError = unresolved
-			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
-			// Fire the abort callback once per loop execution that stopped
-			// with a tool error still present. Covers all four stop reasons:
-			// exhausted, no_progress, budget_exceeded, ctx_cancelled.
-			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
-		}
 	}
 	return agentResult, nil
 }
@@ -360,6 +343,30 @@ func dispatchClaudeEvent(ev claude.Event, handler EventHandler, out chan<- Agent
 		return
 	}
 	dispatchStreamEvent(sev, handler, out)
+}
+
+func claudeResultToAgentResultWithRetryAbort(result *claude.TurnResult, cfg ExecuteConfig, attempts int, stopReason string) *AgentResult {
+	agentResult := ClaudeResultToAgentResult(result)
+	if agentResult == nil || cfg.MaxToolErrorRetries <= 0 {
+		return agentResult
+	}
+	toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
+	if !ok {
+		return agentResult
+	}
+	unresolved := &UnresolvedToolError{
+		Tool:     toolName,
+		Excerpt:  excerpt,
+		Reason:   stopReason,
+		Attempts: attempts,
+		Max:      cfg.MaxToolErrorRetries,
+	}
+	agentResult.UnresolvedToolError = unresolved
+	agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
+	// Fire the abort callback once per loop execution that stopped with a
+	// tool error still present, including permanent errors skipped pre-retry.
+	emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
+	return agentResult
 }
 
 // claudeEffortLevel maps the neutral agent.EffortLevel to claude.EffortLevel.

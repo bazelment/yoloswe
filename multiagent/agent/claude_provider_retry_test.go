@@ -9,6 +9,33 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
+type retryAbortRecorder struct {
+	reason  string
+	tool    string
+	excerpt string
+}
+
+func (r *retryAbortRecorder) OnText(string) {}
+
+func (r *retryAbortRecorder) OnThinking(string) {}
+
+func (r *retryAbortRecorder) OnToolStart(string, string, map[string]interface{}) {}
+
+func (r *retryAbortRecorder) OnToolComplete(string, string, map[string]interface{}, interface{}, bool) {
+}
+
+func (r *retryAbortRecorder) OnTurnComplete(int, bool, int64, float64) {}
+
+func (r *retryAbortRecorder) OnError(error, string) {}
+
+func (r *retryAbortRecorder) OnRetry(int, int, string, string) {}
+
+func (r *retryAbortRecorder) OnRetryAbort(reason, tool, excerpt string) {
+	r.reason = reason
+	r.tool = tool
+	r.excerpt = excerpt
+}
+
 // scriptedSession drives runRetryLoop with a pre-scripted sequence of
 // TurnResults. The first result is returned by the caller of Execute
 // before runRetryLoop is invoked, so the slice held here represents
@@ -294,6 +321,50 @@ func TestRunRetryLoop_SkipsOnPermanentError(t *testing.T) {
 	}
 	if result != initial {
 		t.Error("expected original result returned unchanged")
+	}
+}
+
+func TestClaudeResultToAgentResultWithRetryAbort_PermanentError(t *testing.T) {
+	t.Parallel()
+	const excerpt = "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"
+	const wrappedExcerpt = "<tool_use_error>" + excerpt + "</tool_use_error>"
+	recorder := &retryAbortRecorder{}
+	result := claudeResultToAgentResultWithRetryAbort(
+		turnResult("blocked", realToolUseErrorBlocks(excerpt)),
+		ExecuteConfig{
+			MaxToolErrorRetries: 3,
+			EventHandler:        recorder,
+		},
+		0,
+		RetryStopPermanent,
+	)
+
+	if result.UnresolvedToolError == nil {
+		t.Fatal("expected unresolved tool error")
+	}
+	if result.UnresolvedToolError.Reason != RetryStopPermanent {
+		t.Errorf("expected reason=%s, got %s", RetryStopPermanent, result.UnresolvedToolError.Reason)
+	}
+	if result.UnresolvedToolError.Attempts != 0 {
+		t.Errorf("expected 0 attempts, got %d", result.UnresolvedToolError.Attempts)
+	}
+	if result.UnresolvedToolError.Max != 3 {
+		t.Errorf("expected max=3, got %d", result.UnresolvedToolError.Max)
+	}
+	if result.UnresolvedToolError.Tool != "Bash" {
+		t.Errorf("expected tool Bash, got %q", result.UnresolvedToolError.Tool)
+	}
+	if !strings.Contains(result.Text, UnresolvedToolErrorMarkerPrefix+RetryStopPermanent+")") {
+		t.Errorf("expected permanent unresolved marker in text, got %q", result.Text)
+	}
+	if recorder.reason != RetryStopPermanent {
+		t.Errorf("expected abort reason=%s, got %s", RetryStopPermanent, recorder.reason)
+	}
+	if recorder.tool != "Bash" {
+		t.Errorf("expected abort tool Bash, got %q", recorder.tool)
+	}
+	if recorder.excerpt != wrappedExcerpt {
+		t.Errorf("expected abort excerpt %q, got %q", wrappedExcerpt, recorder.excerpt)
 	}
 }
 
