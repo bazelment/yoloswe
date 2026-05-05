@@ -697,7 +697,7 @@ func (w *Workflow) skipCompletedOrConfiguredPhases(ctx context.Context) {
 		// -inprogress label left over from a prior interrupted run or a user
 		// toggling phase state manually. Without this, the issue can show a
 		// phase as both current and already done/skipped.
-		if slices.Contains(labels, inProgressLabel(phase)) {
+		if slices.Contains(labels, inProgressLabel(phase)) || w.phases[phase] == phaseInProgress {
 			if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
 				w.logger.Warn("failed to clear stale in-progress label while skipping phase", "phase", phase, "error", err)
 			}
@@ -822,6 +822,7 @@ func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
 		return err
 	}
 	w.reopenPhaseOnRedo(ctx, redoTarget)
+	w.skipCompletedOrConfiguredPhases(ctx)
 	return nil
 }
 

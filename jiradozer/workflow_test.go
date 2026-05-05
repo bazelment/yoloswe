@@ -1639,6 +1639,24 @@ func TestWorkflow_SkipPhases_RemovedLabelStopsSkipping(t *testing.T) {
 	assert.NotContains(t, wf.skipPhaseSources, PhaseValidate)
 }
 
+func TestWorkflow_SkipPhases_RemovedLabelKeepsConfigSkip(t *testing.T) {
+	issue := testIssue()
+	issue.Labels = []string{"bug", "jiradozer-skip-validate"}
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{"bug"}},
+	}
+	cfg := testConfig()
+	require.NoError(t, cfg.ApplySkipPhases([]string{PhaseValidate}, "config"))
+	wf := NewWorkflow(mt, issue, cfg, discardLogger())
+	walkTo(t, wf.state, StepValidating)
+
+	wf.skipCompletedOrConfiguredPhases(context.Background())
+
+	assert.Equal(t, StepShipping, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
+	assert.Equal(t, skipPhaseSourceConfig, wf.skipPhaseSources[PhaseValidate])
+}
+
 func TestWorkflow_SkipPhases_SourcePriority(t *testing.T) {
 	t.Parallel()
 
@@ -1996,6 +2014,30 @@ func TestWorkflow_Redo_ReopensCompletedPhase(t *testing.T) {
 		"the aborted later phase's -inprogress must be cleared")
 	assert.Contains(t, seq, "AddLabel:jiradozer-build-inprogress",
 		"the reopened phase gets a fresh -inprogress label")
+}
+
+func TestWorkflow_Redo_SkipsReopenedPhase(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{}},
+	}
+	cfg := testConfig()
+	require.NoError(t, cfg.ApplySkipPhases([]string{PhaseBuild}, "config"))
+	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
+
+	walkTo(t, wf.state, StepValidateReview)
+	wf.phases[PhasePlan] = phaseDone
+	wf.phases[PhaseBuild] = phaseDone
+	wf.phases[PhaseValidate] = phaseInProgress
+
+	require.NoError(t, wf.tryRedo(context.Background(), StepBuilding))
+
+	assert.Equal(t, StepValidating, wf.state.Current())
+	assert.Equal(t, phaseDone, wf.phases[PhaseBuild])
+	seq := labelSequence(mt)
+	assert.Contains(t, seq, "AddLabel:jiradozer-build-inprogress",
+		"redo first reopens the target phase")
+	assert.Contains(t, seq, "RemoveLabel:jiradozer-build-inprogress",
+		"skip reconciliation immediately clears the reopened phase")
 }
 
 // TestWorkflow_Redo_SamePhase verifies that a redo inside the same phase
