@@ -64,6 +64,14 @@ func (p *MessageParser) handleSystem(msg protocol.SystemMessage) {
 		payload, ok := msg.AsInit()
 		if !ok {
 			loose := msg.InitPayloadLenient()
+			// Match the live wrapper (claude/session.go handleSystem): if
+			// neither strict nor lenient decode recovers the mandatory init
+			// fields, skip the StatusRunning transition so a corrupt frame
+			// surfaces as no-init rather than empty-meta-running, keeping
+			// offline parsing in sync with the live session contract.
+			if loose.SessionID == "" || loose.Model == "" || loose.CWD == "" {
+				return
+			}
 			payload = &loose
 		}
 		p.model.SetMeta(SessionMeta{

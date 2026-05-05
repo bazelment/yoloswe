@@ -200,6 +200,22 @@ func TestMessageParser_AssistantPreservesUnknownBlock(t *testing.T) {
 	assert.Contains(t, output[0].Content, "opaque")
 }
 
+func TestMessageParser_InitSkipsWhenMandatoryFieldsMissing(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	// Init frame missing model and cwd. Strict AsInit() succeeds (these are
+	// strings that default to ""), so this exercises the lenient guard via
+	// the malformed `tools` field which forces strict decode to fail.
+	msg, err := FromLiveNDJSON([]byte(`{"type":"system","subtype":"init","session_id":"","uuid":"","tools":"malformed"}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	// SetMeta must not have been called: status defaults to "" rather than
+	// StatusRunning, because handleSystem refused the partial init payload.
+	assert.NotEqual(t, StatusRunning, m.Meta().Status)
+}
+
 func TestMessageParser_InitLenientFallback(t *testing.T) {
 	m := NewSessionModel(0)
 	p := NewMessageParser(m)

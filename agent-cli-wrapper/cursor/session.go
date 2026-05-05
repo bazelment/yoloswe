@@ -264,13 +264,14 @@ func (s *Session) handleToolCall(msg *ToolCallMessage) {
 }
 
 func (s *Session) handleResult(msg *ResultMessage) {
+	failed := msg.IsFailure()
 	var resultErr error
-	if msg.IsError {
+	if failed {
 		resultErr = fmt.Errorf("%s", msg.Result)
 	}
 
 	s.emit(TurnCompleteEvent{
-		Success:       !msg.IsError,
+		Success:       !failed,
 		DurationMs:    msg.DurationMs,
 		DurationAPIMs: msg.DurationAPIMs,
 		Error:         resultErr,

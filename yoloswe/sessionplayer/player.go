@@ -8,6 +8,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
 // Player plays back recorded session messages (Claude or Codex format).
@@ -255,18 +256,13 @@ func (p *Player) renderUserMessage(raw json.RawMessage) {
 
 // renderResultMessage renders a result/completion message.
 func (p *Player) renderResultMessage(raw json.RawMessage) {
-	var msg struct {
-		Subtype      string  `json:"subtype"`
-		IsError      bool    `json:"is_error"`
-		DurationMs   int64   `json:"duration_ms"`
-		NumTurns     int     `json:"num_turns"`
-		TotalCostUSD float64 `json:"total_cost_usd"`
-	}
+	var msg protocol.ResultMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
-
-	if msg.Subtype == "success" || msg.Subtype == "error_max_turns" {
-		p.renderer.TurnSummary(msg.NumTurns, !msg.IsError, msg.DurationMs, msg.TotalCostUSD)
-	}
+	// Render any terminal frame (success or any error_* subtype). Success is
+	// derived from protocol.IsFailure so error-subtyped frames with
+	// is_error=false are still classified as failures, matching the live
+	// session contract.
+	p.renderer.TurnSummary(msg.NumTurns, !msg.IsFailure(), msg.DurationMs, msg.TotalCostUSD)
 }

@@ -100,6 +100,14 @@ type ResultMessage struct {
 	IsError       bool   `json:"is_error"`
 }
 
+// IsFailure reports whether the result frame represents a failed turn. A turn
+// is failed when is_error is true OR the subtype is anything other than
+// "success" — error-subtyped frames sometimes leave is_error=false while
+// signalling failure via the subtype, mirroring the Claude CLI contract.
+func (m ResultMessage) IsFailure() bool {
+	return m.IsError || (m.Subtype != "" && m.Subtype != "success")
+}
+
 // Message is the union type returned by ParseMessage.
 type Message interface {
 	messageType() string

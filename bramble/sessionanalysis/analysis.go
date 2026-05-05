@@ -248,6 +248,13 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				payload, ok := m.AsInit()
 				if !ok {
 					loose := m.InitPayloadLenient()
+					// Match the live wrapper and sessionmodel parser: skip
+					// applying init metadata if mandatory fields are missing
+					// after lenient decode, so analysis output stays aligned
+					// with the live session contract.
+					if loose.SessionID == "" || loose.Model == "" || loose.CWD == "" {
+						break
+					}
 					payload = &loose
 				}
 				sess.Model = payload.Model
