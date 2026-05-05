@@ -233,7 +233,7 @@ func TestRenderCommentTemplate(t *testing.T) {
 
 	t.Run("step complete", func(t *testing.T) {
 		t.Parallel()
-		out, err := renderCommentTemplate(
+		out, err := RenderCommentTemplate(
 			"## {{.Heading}} Complete\n\n{{.Output}}",
 			CommentData{Step: "build", Heading: "Build", Output: "all done"},
 		)
@@ -243,7 +243,7 @@ func TestRenderCommentTemplate(t *testing.T) {
 
 	t.Run("round comment", func(t *testing.T) {
 		t.Parallel()
-		out, err := renderCommentTemplate(
+		out, err := RenderCommentTemplate(
 			"## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
 			CommentData{Step: "validate", Heading: "Validate", Output: "passed", Round: 2, TotalRounds: 3},
 		)
@@ -253,7 +253,7 @@ func TestRenderCommentTemplate(t *testing.T) {
 
 	t.Run("invalid template", func(t *testing.T) {
 		t.Parallel()
-		_, err := renderCommentTemplate("{{.Heading}", CommentData{})
+		_, err := RenderCommentTemplate("{{.Heading}", CommentData{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "parse template")
 	})
@@ -262,7 +262,7 @@ func TestRenderCommentTemplate(t *testing.T) {
 		t.Parallel()
 		// .Missing is not a field on CommentData; text/template errors at
 		// execute time when calling on a missing field of a struct.
-		_, err := renderCommentTemplate("{{.Missing}}", CommentData{})
+		_, err := RenderCommentTemplate("{{.Missing}}", CommentData{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "execute template")
 	})
@@ -845,7 +845,7 @@ func TestWorkflow_RunStep_SetsLastCommentAt(t *testing.T) {
 	assert.Equal(t, resultTime, wf.lastCommentAt, "lastCommentAt should be set from result comment, not waiting comment or stale value")
 
 	// Lock in PostComment body so a regression that drops
-	// renderCommentTemplate or sidesteps CommentTemplate is caught here.
+	// RenderCommentTemplate or sidesteps CommentTemplate is caught here.
 	// First call is the step result comment (rendered from
 	// CommentTemplate); the waiting comment follows.
 	postCalls := mt.getCalls("PostComment")
@@ -905,7 +905,7 @@ func TestWorkflow_RunStepRounds_SetsLastCommentAtFromFinalRound(t *testing.T) {
 	assert.Equal(t, round2Time, wf.lastCommentAt, "lastCommentAt should be set from final round's result comment")
 
 	// Lock in PostComment bodies so a regression that drops
-	// renderCommentTemplate or routes around RoundCommentTemplate is
+	// RenderCommentTemplate or routes around RoundCommentTemplate is
 	// caught here, not in the field. Order: round1, round2, waiting.
 	postCalls := mt.getCalls("PostComment")
 	require.GreaterOrEqual(t, len(postCalls), 2, "expected round comments + waiting comment")

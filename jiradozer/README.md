@@ -147,6 +147,7 @@ One of `--issue`, `--filter`, or `--description`/`--description-file` is require
 | `--branch-prefix` | from config | Worktree branch prefix |
 | `--auto-approve` | | Auto-approve review steps (`plan,build,validate,ship` or `all`) |
 | `--run-step` | | Run a single step and exit (for debugging): `plan`, `build`, `validate`, `ship` |
+| `--post-result` | `false` | With `--run-step`, post the step output as an issue comment using the step's configured comment template |
 | `--verbose` | `false` | Debug logging |
 
 ## Workflow
@@ -278,9 +279,12 @@ jiradozer --description "Create a hello.txt file containing 'hello world'" --wor
 # Run from a tracker issue
 jiradozer --issue ENG-123
 
-# Run a single step for debugging (no tracker interaction)
+# Run a single step for debugging (stdout only by default)
 jiradozer --issue ENG-123 --run-step plan
 jiradozer --issue ENG-123 --run-step build
+
+# Run a single step and post the rendered result comment
+jiradozer --issue ENG-123 --run-step plan --post-result
 
 # Use a specific model
 jiradozer --issue ENG-123 --model opus

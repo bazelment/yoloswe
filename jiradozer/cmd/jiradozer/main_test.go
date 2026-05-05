@@ -68,6 +68,48 @@ func (r *restoreDiscoveryTracker) RemoveLabel(_ context.Context, _ string, _ str
 	return nil
 }
 
+type recordingRunTracker struct {
+	comments []recordedComment
+}
+
+type recordedComment struct {
+	issueID string
+	body    string
+}
+
+func (r *recordingRunTracker) FetchIssue(_ context.Context, _ string) (*tracker.Issue, error) {
+	return nil, nil
+}
+
+func (r *recordingRunTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
+	return nil, nil
+}
+
+func (r *recordingRunTracker) FetchComments(_ context.Context, _ string, _ time.Time) ([]tracker.Comment, error) {
+	return nil, nil
+}
+
+func (r *recordingRunTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
+	return nil, nil
+}
+
+func (r *recordingRunTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
+	r.comments = append(r.comments, recordedComment{issueID: issueID, body: body})
+	return tracker.Comment{CreatedAt: time.Now()}, nil
+}
+
+func (r *recordingRunTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *recordingRunTracker) AddLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *recordingRunTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
 type restoreWTManager struct{}
 
 func (restoreWTManager) NewWorktree(_ context.Context, _, _, _ string) (string, error) {
@@ -175,6 +217,70 @@ func TestResolveRepoName(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestRunSingleStepPostResultPostsRenderedComment(t *testing.T) {
+	origRunStepAgentDetailed := runStepAgentDetailed
+	t.Cleanup(func() { runStepAgentDetailed = origRunStepAgentDetailed })
+	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+		return jiradozer.StepAgentResult{Output: "planned output", SessionID: "session-1"}, nil
+	}
+
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\nstep={{.Step}}\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStep(context.Background(), "plan", issue, cfg, "", recorder, true, nil, testMainLogger(t))
+	require.NoError(t, err)
+	require.Len(t, recorder.comments, 1)
+	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
+	assert.Equal(t, "## Plan Complete\n\nstep=plan\nplanned output", recorder.comments[0].body)
+}
+
+func TestRunSingleStepPostResultFalseDoesNotPost(t *testing.T) {
+	origRunStepAgentDetailed := runStepAgentDetailed
+	t.Cleanup(func() { runStepAgentDetailed = origRunStepAgentDetailed })
+	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+		return jiradozer.StepAgentResult{Output: "planned output", SessionID: "session-1"}, nil
+	}
+
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStep(context.Background(), "plan", issue, cfg, "", recorder, false, nil, testMainLogger(t))
+	require.NoError(t, err)
+	assert.Empty(t, recorder.comments)
+}
+
+func TestRunSingleStepRoundsPostResultPostsCombinedRoundComment(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Validate = jiradozer.StepConfig{
+		RoundCommentTemplate: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
+		Rounds: []jiradozer.RoundConfig{
+			{Command: "printf 'round one'"},
+			{Command: "printf 'round two'"},
+		},
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStep(context.Background(), "validate", issue, cfg, "", recorder, true, nil, testMainLogger(t))
+	require.NoError(t, err)
+	require.Len(t, recorder.comments, 1)
+	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
+	assert.Equal(t, "## Validate Round 2/2\n\nround one\n\n---\n\nround two", recorder.comments[0].body)
 }
 
 func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {

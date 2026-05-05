@@ -22,7 +22,8 @@ type CommentData struct {
 	TotalRounds int    // total rounds; only meaningful for round comments
 }
 
-func renderCommentTemplate(tmplStr string, data CommentData) (string, error) {
+// RenderCommentTemplate renders a configured tracker comment template.
+func RenderCommentTemplate(tmplStr string, data CommentData) (string, error) {
 	return renderTemplate("comment", tmplStr, data)
 }
 
@@ -360,8 +361,8 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 		}
 		allOutputs = append(allOutputs, output)
 
-		heading := capitalize(stepName)
-		comment, err := renderCommentTemplate(stepCfg.RoundCommentTemplate, CommentData{
+		heading := Capitalize(stepName)
+		comment, err := RenderCommentTemplate(stepCfg.RoundCommentTemplate, CommentData{
 			Step:        stepName,
 			Heading:     heading,
 			Output:      output,
@@ -432,8 +433,8 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.sessionIDs[currentStep] = newSessionID
 	w.captureOutput(stepName, output)
 
-	heading := capitalize(stepName)
-	comment, err := renderCommentTemplate(stepCfg.CommentTemplate, CommentData{
+	heading := Capitalize(stepName)
+	comment, err := RenderCommentTemplate(stepCfg.CommentTemplate, CommentData{
 		Step:    stepName,
 		Heading: heading,
 		Output:  output,
@@ -478,8 +479,8 @@ func (w *Workflow) captureOutput(stepName, output string) {
 	}
 }
 
-// capitalize returns s with the first letter uppercased.
-func capitalize(s string) string {
+// Capitalize returns s with the first letter uppercased.
+func Capitalize(s string) string {
 	if s == "" {
 		return s
 	}
