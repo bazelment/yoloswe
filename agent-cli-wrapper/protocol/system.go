@@ -374,9 +374,16 @@ func (m SystemMessage) InitPayloadLenient() SystemInitPayload {
 	decodeInitField(fields, "cwd", &payload.CWD)
 	decodeInitField(fields, "claude_code_version", &payload.ClaudeCodeVersion)
 	decodeInitField(fields, "permissionMode", &payload.PermissionMode)
+	decodeInitField(fields, "apiKeySource", &payload.APIKeySource)
+	decodeInitField(fields, "output_style", &payload.OutputStyle)
 	decodeInitField(fields, "tools", &payload.Tools)
 	decodeInitField(fields, "agents", &payload.Agents)
 	decodeInitField(fields, "skills", &payload.Skills)
+	decodeInitField(fields, "betas", &payload.Betas)
+	decodeInitField(fields, "plugins", &payload.Plugins)
+	decodeInitField(fields, "slash_commands", &payload.SlashCommands)
+	decodeInitField(fields, "mcp_servers", &payload.MCPServers)
+	decodeInitField(fields, "fast_mode_state", &payload.FastModeState)
 	return payload
 }
 

@@ -163,11 +163,12 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 	}
 
 	for _, block := range blocks {
-		if tr, ok := block.(protocol.ToolResultBlock); ok {
-			isError := tr.IsError != nil && *tr.IsError
+		switch b := block.(type) {
+		case protocol.ToolResultBlock:
+			isError := b.IsError != nil && *b.IsError
 			now := time.Now()
-			p.model.UpdateTool(tr.ToolUseID, func(line *OutputLine) {
-				line.ToolResult = tr.Content
+			p.model.UpdateTool(b.ToolUseID, func(line *OutputLine) {
+				line.ToolResult = b.Content
 				line.IsError = isError
 				if isError {
 					line.ToolState = ToolStateError
@@ -185,6 +186,14 @@ func (p *MessageParser) handleUser(msg protocol.UserMessage) {
 				prog.CurrentPhase = ""
 				prog.LastActivity = time.Now()
 				prog.RecentOutput = recent
+			})
+		case protocol.UnknownContentBlock:
+			// Mirror handleAssistant: surface unknown user-side blocks so the
+			// transcript stays in sync with the wire protocol.
+			p.model.AppendOutput(OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeText,
+				Content:   b.DisplayString(),
 			})
 		}
 	}

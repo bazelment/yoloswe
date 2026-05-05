@@ -274,8 +274,17 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 			// Block content with tool_result updates current turn's tool states.
 			if blocks, ok := m.Message.Content.AsBlocks(); ok && currentTurn != nil {
 				for _, block := range blocks {
-					if tr, ok := block.(protocol.ToolResultBlock); ok {
-						updateToolResult(currentTurn, tr)
+					switch b := block.(type) {
+					case protocol.ToolResultBlock:
+						updateToolResult(currentTurn, b)
+					case protocol.UnknownContentBlock:
+						// Mirror assistant handling: keep unknown user-side
+						// blocks visible in the response transcript so the
+						// wire protocol stays observable through analysis.
+						if currentTurn.Response != "" {
+							currentTurn.Response += "\n"
+						}
+						currentTurn.Response += b.DisplayString()
 					}
 				}
 			}

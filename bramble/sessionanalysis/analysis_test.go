@@ -69,6 +69,20 @@ func TestParseSession_NonexistentFile(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestParseSession_UserPreservesUnknownBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	lines := []byte(
+		`{"type":"user","timestamp":"2026-05-05T00:00:00Z","message":{"role":"user","content":"hi"}}` + "\n" +
+			`{"type":"user","timestamp":"2026-05-05T00:00:01Z","message":{"role":"user","content":[{"type":"future_user_block","payload":"opaque"}]}}` + "\n" +
+			`{"type":"result","timestamp":"2026-05-05T00:00:02Z","message":{"subtype":"success","session_id":"s1","uuid":"u1","num_turns":1,"duration_ms":100,"duration_api_ms":50,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n")
+	require.NoError(t, os.WriteFile(path, lines, 0o600))
+
+	sess, err := ParseSession(path)
+	require.NoError(t, err)
+	require.Len(t, sess.Turns, 1)
+	assert.Contains(t, sess.Turns[0].Response, "future_user_block")
+}
+
 func TestParseSession_AssistantPreservesUnknownAndThinkingBlocks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	lines := []byte(
