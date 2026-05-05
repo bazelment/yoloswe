@@ -77,37 +77,25 @@ type recordedComment struct {
 	body    string
 }
 
-func (r *recordingRunTracker) FetchIssue(_ context.Context, _ string) (*tracker.Issue, error) {
-	return nil, nil
-}
-
-func (r *recordingRunTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
-	return nil, nil
-}
-
-func (r *recordingRunTracker) FetchComments(_ context.Context, _ string, _ time.Time) ([]tracker.Comment, error) {
-	return nil, nil
-}
-
-func (r *recordingRunTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
-	return nil, nil
-}
-
 func (r *recordingRunTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
 	r.comments = append(r.comments, recordedComment{issueID: issueID, body: body})
 	return tracker.Comment{CreatedAt: time.Now()}, nil
 }
 
-func (r *recordingRunTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
-func (r *recordingRunTracker) AddLabel(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
-func (r *recordingRunTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
-	return nil
+func runSingleStepForTest(t testing.TB, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, poster jiradozer.CommentPoster, postResult bool, output string) error {
+	t.Helper()
+	return (&singleStepRun{
+		ctx:        context.Background(),
+		stepName:   stepName,
+		issue:      issue,
+		cfg:        cfg,
+		poster:     poster,
+		postResult: postResult,
+		logger:     testMainLogger(t),
+		runAgent: func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+			return jiradozer.StepAgentResult{Output: output, SessionID: "session-1"}, nil
+		},
+	}).run()
 }
 
 type restoreWTManager struct{}
@@ -220,12 +208,6 @@ func TestResolveRepoName(t *testing.T) {
 }
 
 func TestRunSingleStepPostResultPostsRenderedComment(t *testing.T) {
-	origRunStepAgentDetailed := runStepAgentDetailed
-	t.Cleanup(func() { runStepAgentDetailed = origRunStepAgentDetailed })
-	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
-		return jiradozer.StepAgentResult{Output: "planned output", SessionID: "session-1"}, nil
-	}
-
 	cfg := jiradozer.DefaultConfig()
 	cfg.WorkDir = t.TempDir()
 	cfg.Plan = jiradozer.StepConfig{
@@ -235,7 +217,7 @@ func TestRunSingleStepPostResultPostsRenderedComment(t *testing.T) {
 	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
 	recorder := &recordingRunTracker{}
 
-	err := runSingleStep(context.Background(), "plan", issue, cfg, "", recorder, true, nil, testMainLogger(t))
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, true, "\n planned output \n")
 	require.NoError(t, err)
 	require.Len(t, recorder.comments, 1)
 	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
@@ -243,12 +225,6 @@ func TestRunSingleStepPostResultPostsRenderedComment(t *testing.T) {
 }
 
 func TestRunSingleStepPostResultFalseDoesNotPost(t *testing.T) {
-	origRunStepAgentDetailed := runStepAgentDetailed
-	t.Cleanup(func() { runStepAgentDetailed = origRunStepAgentDetailed })
-	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
-		return jiradozer.StepAgentResult{Output: "planned output", SessionID: "session-1"}, nil
-	}
-
 	cfg := jiradozer.DefaultConfig()
 	cfg.WorkDir = t.TempDir()
 	cfg.Plan = jiradozer.StepConfig{
@@ -258,7 +234,7 @@ func TestRunSingleStepPostResultFalseDoesNotPost(t *testing.T) {
 	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
 	recorder := &recordingRunTracker{}
 
-	err := runSingleStep(context.Background(), "plan", issue, cfg, "", recorder, false, nil, testMainLogger(t))
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, false, "planned output")
 	require.NoError(t, err)
 	assert.Empty(t, recorder.comments)
 }
