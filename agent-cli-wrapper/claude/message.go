@@ -15,3 +15,4 @@ type TextBlock = protocol.TextBlock
 type ThinkingBlock = protocol.ThinkingBlock
 type ToolUseBlock = protocol.ToolUseBlock
 type ToolResultBlock = protocol.ToolResultBlock
+type UnknownContentBlock = protocol.UnknownContentBlock

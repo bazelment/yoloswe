@@ -12,12 +12,19 @@ func TestUnmarshalContentBlock_UnknownType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for unknown type, got: %v", err)
 	}
-	if block != nil {
-		t.Fatalf("expected nil block for unknown type, got: %v", block)
+	unknown, ok := block.(UnknownContentBlock)
+	if !ok {
+		t.Fatalf("expected UnknownContentBlock for unknown type, got: %T", block)
+	}
+	if unknown.BlockType() != ContentBlockType("server_tool_use") {
+		t.Fatalf("type: %q", unknown.BlockType())
+	}
+	if string(unknown.Raw) != string(raw) {
+		t.Fatalf("raw: %s", unknown.Raw)
 	}
 }
 
-func TestContentBlocks_SkipsUnknownTypes(t *testing.T) {
+func TestContentBlocks_PreservesUnknownTypes(t *testing.T) {
 	// Mix of known and unknown block types
 	raw := `[
 		{"type":"text","text":"hello"},
@@ -31,16 +38,21 @@ func TestContentBlocks_SkipsUnknownTypes(t *testing.T) {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
-	// Should only have the two known blocks (text + tool_use)
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 blocks, got %d", len(blocks))
+	if len(blocks) != 4 {
+		t.Fatalf("expected 4 blocks, got %d", len(blocks))
 	}
 
 	if blocks[0].BlockType() != ContentBlockTypeText {
 		t.Errorf("expected first block to be text, got %s", blocks[0].BlockType())
 	}
-	if blocks[1].BlockType() != ContentBlockTypeToolUse {
-		t.Errorf("expected second block to be tool_use, got %s", blocks[1].BlockType())
+	if blocks[1].BlockType() != ContentBlockType("server_tool_use") {
+		t.Errorf("expected second block to be server_tool_use, got %s", blocks[1].BlockType())
+	}
+	if blocks[2].BlockType() != ContentBlockTypeToolUse {
+		t.Errorf("expected third block to be tool_use, got %s", blocks[2].BlockType())
+	}
+	if blocks[3].BlockType() != ContentBlockType("image") {
+		t.Errorf("expected fourth block to be image, got %s", blocks[3].BlockType())
 	}
 
 	// Verify text content preserved
@@ -50,5 +62,24 @@ func TestContentBlocks_SkipsUnknownTypes(t *testing.T) {
 	}
 	if textBlock.Text != "hello" {
 		t.Errorf("expected text 'hello', got %q", textBlock.Text)
+	}
+}
+
+func TestToolResultBlock_UnmarshalLegacyToolResultField(t *testing.T) {
+	var block ToolResultBlock
+	raw := []byte(`{"type":"tool_result","tool_use_id":"toolu_1","tool_result":[{"type":"text","text":"legacy"}],"is_error":true}`)
+
+	if err := json.Unmarshal(raw, &block); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if block.ToolUseID != "toolu_1" {
+		t.Fatalf("tool_use_id: %q", block.ToolUseID)
+	}
+	if block.IsError == nil || !*block.IsError {
+		t.Fatalf("is_error: %v", block.IsError)
+	}
+	items, ok := block.Content.([]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("content: %#v", block.Content)
 	}
 }

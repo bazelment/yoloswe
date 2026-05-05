@@ -707,7 +707,7 @@ func (s *Session) handleLine(line []byte) {
 			raw = raw[:4096]
 		}
 		s.emit(UnknownMessageEvent{MessageType: m.Type, Raw: raw})
-		slog.Warn("unknown top-level message type", "type", m.Type)
+		slog.Warn("unknown top-level message type", "type", m.Type, "raw", string(raw))
 	}
 }
 
