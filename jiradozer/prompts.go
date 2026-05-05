@@ -42,7 +42,7 @@ const BootstrapValidatePrompt = `Issue: {{.Identifier}} — {{.Title}}
 
 Run the project's tests and linters to validate the changes. Fix any failures you find. Report what passed and what you fixed.`
 
-const BootstrapCreatePRPrompt = `Gates (lint, build, tests) already passed in the previous step on the current code — do NOT re-run them. Your job is purely git + gh: commit and push, then create or update the PR.
+const BootstrapCreatePRPrompt = `Your job is purely git + gh: commit and push, then create or update the PR. Do NOT run lint, build, or tests here — the next step (validate) is responsible for the full gate sweep, and re-running them now wastes minutes per issue without changing the code that ships.
 
 First, check for any uncommitted changes (staged or unstaged, including untracked files).
 - If there are uncommitted changes: stage them, commit with a clear message referencing the work done, and push to the remote.

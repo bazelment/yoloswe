@@ -244,7 +244,7 @@ create_pr:
     # Initial prompt; Go text/template rendered with issue data (PromptData).
     # Required unless `rounds` is set.
     prompt: |-
-        Gates (lint, build, tests) already passed in the previous step on the current code — do NOT re-run them. Your job is purely git + gh: commit and push, then create or update the PR.
+        Your job is purely git + gh: commit and push, then create or update the PR. Do NOT run lint, build, or tests here — the next step (validate) is responsible for the full gate sweep, and re-running them now wastes minutes per issue without changing the code that ships.
 
         First, check for any uncommitted changes (staged or unstaged, including untracked files).
         - If there are uncommitted changes: stage them, commit with a clear message referencing the work done, and push to the remote.

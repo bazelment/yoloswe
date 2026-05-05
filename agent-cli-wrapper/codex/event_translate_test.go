@@ -49,6 +49,9 @@ func TestParseMappedNotification_TokenCount_FallbackToTotal(t *testing.T) {
 	if ev.Usage.InputTokens != 200 || ev.Usage.OutputTokens != 75 {
 		t.Fatalf("Usage = %+v, want input=200 output=75", ev.Usage)
 	}
+	if !ev.UsageIsCumulative {
+		t.Fatal("UsageIsCumulative = false, want true (only TotalTokenUsage was set)")
+	}
 }
 
 // TestParseMappedNotification_TokenCount_PrefersLast verifies that when both
@@ -71,6 +74,9 @@ func TestParseMappedNotification_TokenCount_PrefersLast(t *testing.T) {
 	}
 	if ev.Usage.InputTokens != 100 || ev.Usage.OutputTokens != 50 {
 		t.Fatalf("Usage = %+v, want input=100 output=50 (from Last, not Total)", ev.Usage)
+	}
+	if ev.UsageIsCumulative {
+		t.Fatal("UsageIsCumulative = true, want false (LastTokenUsage was per-turn)")
 	}
 }
 

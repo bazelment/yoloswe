@@ -22,8 +22,9 @@ const logTailMaxReopenAttempts = 3
 
 // logTailOpener opens a log file path. Tests overwrite this to drive
 // the non-EOF read-error / reopen branch deterministically; production
-// always uses os.Open.
-var logTailOpener = func(path string) (io.ReadCloser, error) {
+// always uses os.Open. Must return a seekable reader so reopen can
+// resume from the prior offset rather than replaying the file.
+var logTailOpener = func(path string) (io.ReadSeekCloser, error) {
 	return os.Open(path)
 }
 
@@ -68,6 +69,13 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 
 	emittedPRURL := false
 	reopens := 0
+	// offset tracks bytes consumed so far, including any partial line
+	// that ReadString returned with the error (we seek past it on
+	// reopen so the next read picks up cleanly at the next newline or
+	// EOF). Without this, a transient read error followed by reopen
+	// would replay every line from byte 0 — duplicate "step:"
+	// transitions, false PR URL emissions, and an inReview flip-flop.
+	var offset int64
 	reader := bufio.NewReader(f)
 	for {
 		select {
@@ -79,6 +87,7 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 
 		line, err := reader.ReadString('\n')
 		if line != "" {
+			offset += int64(len(line))
 			mw.lastOutputAt.Store(time.Now().UnixNano())
 			if o.maybeEmitTransition(mw, line, !emittedPRURL) {
 				emittedPRURL = true
@@ -104,7 +113,7 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 				return
 			}
 			o.logger.Warn("log tailer: read error, attempting reopen",
-				"issue", mw.issue.Identifier, "error", err, "attempt", reopens)
+				"issue", mw.issue.Identifier, "error", err, "attempt", reopens, "offset", offset)
 			f.Close()
 			select {
 			case <-stop:
@@ -115,6 +124,14 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 			if err != nil {
 				o.logger.Warn("log tailer: reopen failed, watchdog disabled for this workflow",
 					"issue", mw.issue.Identifier, "error", err)
+				return
+			}
+			// Resume from the byte offset we had consumed so the tailer
+			// does not replay already-parsed step transitions.
+			if _, seekErr := f.Seek(offset, io.SeekStart); seekErr != nil {
+				o.logger.Warn("log tailer: seek after reopen failed, watchdog disabled",
+					"issue", mw.issue.Identifier, "error", seekErr, "offset", offset)
+				f.Close()
 				return
 			}
 			reader = bufio.NewReader(f)

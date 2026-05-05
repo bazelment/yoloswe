@@ -334,36 +334,43 @@ func TestIdleTimeoutForStep_PreStepFallsBackToMax(t *testing.T) {
 		"all-zero IdleTimeout must keep the watchdog disabled")
 }
 
-// errOnceReader returns one line then a non-EOF read error, then EOF.
-// Used to drive the tailer's reopen branch deterministically.
-type errOnceReader struct {
-	stage int // 0: line, 1: error, 2+: EOF
+// errOnceSeeker wraps an underlying ReadSeeker, returning a non-EOF error
+// the first time the wrapped Read encounters EOF, then delegating cleanly
+// after a Seek. This drives the tailer's reopen + offset-resume path
+// deterministically using a real seekable underlying source so offset
+// tracking is actually exercised.
+type errOnceSeeker struct {
+	r        *strings.Reader
+	errored  bool
+	seekHits int
 }
 
-func (r *errOnceReader) Read(p []byte) (int, error) {
-	switch r.stage {
-	case 0:
-		// Emit one well-formed klog line so the tailer parses it.
-		line := []byte("I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=ENG-1\n")
-		n := copy(p, line)
-		r.stage = 1
-		return n, nil
-	case 1:
-		r.stage = 2
-		return 0, errors.New("simulated transient read error")
-	default:
-		return 0, io.EOF
+func (s *errOnceSeeker) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if err == io.EOF && !s.errored {
+		s.errored = true
+		// Convert the first EOF into a transient read error so the
+		// tailer takes the reopen path. Subsequent reads (after the
+		// caller closes us and reopens) will see a fresh seeker.
+		return n, errors.New("simulated transient read error")
 	}
+	return n, err
 }
 
-func (r *errOnceReader) Close() error { return nil }
+func (s *errOnceSeeker) Seek(offset int64, whence int) (int64, error) {
+	s.seekHits++
+	return s.r.Seek(offset, whence)
+}
 
-// TestTailSubprocessLog_ReopensAfterReadError drives the reopen branch
-// of tailSubprocessLog deterministically by overriding logTailOpener to
-// hand back an errOnceReader on the first call (one line + simulated
-// read error) and a successful second-line reader on the reopen. The
-// test asserts the tailer parses both lines and stays alive — proving
-// the reopen branch is exercised end-to-end.
+func (s *errOnceSeeker) Close() error { return nil }
+
+// TestTailSubprocessLog_ReopensAfterReadError drives the reopen + offset
+// resume branch of tailSubprocessLog deterministically. The first opener
+// call hands back a wrapped seeker that fails with a non-EOF error after
+// the first line. The second opener call returns a seeker over the full
+// file (two lines), so the tailer must Seek past the first line on
+// reopen — otherwise the first line would be re-emitted, flipping
+// inReview / currentStep back to stale values.
 //
 // Not t.Parallel(): mutates the package-level logTailOpener.
 func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
@@ -371,17 +378,22 @@ func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
 	logPath := filepath.Join(dir, "subprocess.log")
 	require.NoError(t, os.WriteFile(logPath, nil, 0o600))
 
+	const line1 = "I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=ENG-1\n"
+	const line2 = "I0504 22:01:54.425221 1350798 workflow.go:339] step: build issue=ENG-1\n"
+	full := line1 + line2
+
 	calls := atomic.Int32{}
 	original := logTailOpener
-	logTailOpener = func(_ string) (io.ReadCloser, error) {
+	logTailOpener = func(_ string) (io.ReadSeekCloser, error) {
 		n := calls.Add(1)
 		if n == 1 {
-			return &errOnceReader{}, nil
+			// First open: only the first line is "available", and we
+			// trip a non-EOF error after it.
+			return &errOnceSeeker{r: strings.NewReader(line1)}, nil
 		}
-		// Reopen: hand back a reader that emits a second step line
-		// then EOF, so the tailer keeps polling normally.
-		return io.NopCloser(strings.NewReader(
-			"I0504 22:01:54.425221 1350798 workflow.go:339] step: build issue=ENG-1\n")), nil
+		// Reopen: full file is now visible. Tailer must Seek past
+		// line1 so it does not replay the "step: plan" transition.
+		return &readSeekCloserFromString{r: strings.NewReader(full)}, nil
 	}
 	t.Cleanup(func() { logTailOpener = original })
 
@@ -397,7 +409,7 @@ func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
 		close(done)
 	}()
 
-	// Both the pre-error line and the post-reopen line must reach the parent log.
+	// Both step lines must reach the parent log.
 	require.Eventually(t, func() bool {
 		return len(h.findAll("subprocess step")) >= 2
 	}, 3*time.Second, 20*time.Millisecond,
@@ -419,7 +431,42 @@ func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
 	}
 	require.False(t, mw.tailerAlive.Load(),
 		"tailerAlive must clear on graceful exit")
+
+	// Critical regression check: each step transition must have been
+	// emitted exactly once. If reopen Seek() were missing, line1 would
+	// be re-parsed and we'd see "step: plan" emitted twice.
+	steps := h.findAll("subprocess step")
+	planHits := 0
+	buildHits := 0
+	for _, r := range steps {
+		switch r["step"] {
+		case "plan":
+			planHits++
+		case "build":
+			buildHits++
+		}
+	}
+	require.Equal(t, 1, planHits, "step: plan must be emitted exactly once (no replay)")
+	require.Equal(t, 1, buildHits, "step: build must be emitted exactly once")
 }
+
+// readSeekCloserFromString is the test variant of os.Open: a seekable,
+// closable view over an in-memory string. Used to drive the tailer's
+// reopen path with deterministic content while still exercising real
+// Seek-after-reopen semantics.
+type readSeekCloserFromString struct {
+	r *strings.Reader
+}
+
+func (r *readSeekCloserFromString) Read(p []byte) (int, error) {
+	return r.r.Read(p)
+}
+
+func (r *readSeekCloserFromString) Seek(offset int64, whence int) (int64, error) {
+	return r.r.Seek(offset, whence)
+}
+
+func (r *readSeekCloserFromString) Close() error { return nil }
 
 // TestRunWatchdog_DoesNotCancelWhenTailerDead verifies that the watchdog
 // suppresses its idle check when the tailer goroutine has exited

@@ -216,6 +216,12 @@ func validateStep(name string, step *StepConfig) error {
 			return fmt.Errorf("%s.effort: %w", name, err)
 		}
 	}
+	// IdleTimeout treats 0 as "watchdog disabled by config"; negative
+	// values would silently get the same behavior at runWatchdog,
+	// turning a typo like `-5m` into a security hole. Reject loudly.
+	if step.IdleTimeout < 0 {
+		return fmt.Errorf("%s.idle_timeout: must not be negative (got %s); use 0 to disable", name, step.IdleTimeout)
+	}
 	if name == "create_pr" && len(step.Rounds) > 0 {
 		return fmt.Errorf("create_pr does not support rounds")
 	}
