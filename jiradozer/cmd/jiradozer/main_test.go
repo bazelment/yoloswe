@@ -2,8 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -14,6 +20,63 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
+
+func testMainLogger(_ testing.TB) *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}
+
+type restoreDiscoveryTracker struct {
+	listed chan struct{}
+	issues []*tracker.Issue
+}
+
+func (r *restoreDiscoveryTracker) FetchIssue(_ context.Context, _ string) (*tracker.Issue, error) {
+	return nil, nil
+}
+
+func (r *restoreDiscoveryTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
+	if r.listed != nil {
+		select {
+		case r.listed <- struct{}{}:
+		default:
+		}
+	}
+	return r.issues, nil
+}
+
+func (r *restoreDiscoveryTracker) FetchComments(_ context.Context, _ string, _ time.Time) ([]tracker.Comment, error) {
+	return nil, nil
+}
+
+func (r *restoreDiscoveryTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
+	return nil, nil
+}
+
+func (r *restoreDiscoveryTracker) PostComment(_ context.Context, _ string, _ string) (tracker.Comment, error) {
+	return tracker.Comment{}, nil
+}
+
+func (r *restoreDiscoveryTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *restoreDiscoveryTracker) AddLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *restoreDiscoveryTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+type restoreWTManager struct{}
+
+func (restoreWTManager) NewWorktree(_ context.Context, _, _, _ string) (string, error) {
+	return "", nil
+}
+
+func (restoreWTManager) RemoveWorktree(_ context.Context, _ string, _ bool) error {
+	return nil
+}
 
 func TestValidateDryRunMode(t *testing.T) {
 	dryRunCfg := func() *jiradozer.Config {
@@ -114,6 +177,245 @@ func TestResolveRepoName(t *testing.T) {
 	}
 }
 
+func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
+	cfgPath := writeRunConfig(t, "linear", t.TempDir())
+	cfg, err := loadRunConfig(runArgs{
+		configPath:    cfgPath,
+		sourceFilters: []string{"team=ENG"},
+		modelID:       "opus",
+		pollInterval:  2 * time.Second,
+		maxConcurrent: 7,
+		branchPrefix:  "hotfix",
+		dryRunSet:     true,
+		dryRun:        true,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "opus", cfg.Agent.Model)
+	require.Equal(t, 2*time.Second, cfg.PollInterval)
+	require.Equal(t, "ENG", cfg.Source.Filters[tracker.FilterTeam])
+	require.Equal(t, 7, cfg.Source.MaxConcurrent)
+	require.Equal(t, "hotfix", cfg.Source.BranchPrefix)
+	require.True(t, cfg.Source.DryRun)
+}
+
+func TestValidateReloadCompatibleRejectsTrackerChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "old"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "github"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "tracker kind change")
+
+	newCfg = &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "new"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "tracker config changes")
+}
+
+func TestValidateReloadCompatibleRejectsSourceModeChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "source mode change")
+}
+
+func TestValidateReloadCompatibleRejectsDryRunChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+		Source:  jiradozer.SourceConfig{DryRun: false, Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+		Source:  jiradozer.SourceConfig{DryRun: true, Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "source dry-run change")
+}
+
+func TestValidateReloadCompatibleRejectsWorkDirChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "local"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+		WorkDir: "/repo/old",
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "local"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+		WorkDir: "/repo/new",
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "work_dir change")
+}
+
+func TestValidateReloadCompatibleRejectsRepoNameChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "OPS"}},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "team/repository filter change")
+}
+
+func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
+	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Restored"}
+	cmd := exec.Command("sh", "-c", "exit 0")
+	require.NoError(t, cmd.Start())
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	require.NoError(t, jiradozer.WriteRuntimeStateAtomically(statePath, jiradozer.RuntimeState{
+		ActiveWorkflow: []jiradozer.ManagedWorkflowSnapshot{
+			{Issue: issue, PID: cmd.Process.Pid, StartedAt: time.Now()},
+		},
+	}))
+	t.Setenv(restoreStateEnv, statePath)
+
+	listed := make(chan struct{}, 1)
+	issueTracker := &restoreDiscoveryTracker{listed: listed, issues: []*tracker.Issue{issue}}
+	cfg := &jiradozer.Config{Source: jiradozer.SourceConfig{MaxConcurrent: 1}}
+	disc := jiradozer.NewDiscovery(issueTracker, tracker.IssueFilter{}, time.Hour, testMainLogger(t))
+	s := &teamSupervisor{
+		cfg:    cfg,
+		logger: testMainLogger(t),
+		disc:   disc,
+		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+	}
+
+	require.NoError(t, s.restoreFromEnv())
+	select {
+	case status := <-s.orch.StatusUpdates():
+		require.Equal(t, jiradozer.StepInit, status.Step)
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for restored StepInit")
+	}
+	s.orch.Wait()
+	select {
+	case status := <-s.orch.StatusUpdates():
+		require.True(t, status.IsDone())
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for restored terminal status")
+	}
+	s.orch.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := disc.Run(ctx)
+	require.Eventually(t, func() bool {
+		select {
+		case <-listed:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("restored issue was rediscovered: %s", got.Identifier)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	for range ch {
+	}
+}
+
+func TestRestoreFromEnvDoesNotMarkSkippedSnapshotsSeen(t *testing.T) {
+	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Skipped"}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	require.NoError(t, jiradozer.WriteRuntimeStateAtomically(statePath, jiradozer.RuntimeState{
+		ActiveWorkflow: []jiradozer.ManagedWorkflowSnapshot{
+			{Issue: issue},
+		},
+	}))
+	t.Setenv(restoreStateEnv, statePath)
+
+	listed := make(chan struct{}, 1)
+	issueTracker := &restoreDiscoveryTracker{listed: listed, issues: []*tracker.Issue{issue}}
+	cfg := &jiradozer.Config{Source: jiradozer.SourceConfig{MaxConcurrent: 1}}
+	disc := jiradozer.NewDiscovery(issueTracker, tracker.IssueFilter{}, time.Hour, testMainLogger(t))
+	s := &teamSupervisor{
+		cfg:    cfg,
+		logger: testMainLogger(t),
+		disc:   disc,
+		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+	}
+
+	require.NoError(t, s.restoreFromEnv())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := disc.Run(ctx)
+	require.Eventually(t, func() bool {
+		select {
+		case <-listed:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case got := <-ch:
+		require.Equal(t, issue.Identifier, got.Identifier)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for skipped restored issue to rediscover")
+	}
+	cancel()
+	for range ch {
+	}
+}
+
+func TestTeamSupervisorReloadUpdatesConfigAndOrchestrator(t *testing.T) {
+	workDir := t.TempDir()
+	cfgPath := writeRunConfig(t, "linear", workDir)
+	args := runArgs{configPath: cfgPath, sourceFilters: []string{tracker.FilterTeam + "=ENG"}}
+	cfg, err := loadRunConfig(args)
+	require.NoError(t, err)
+	cfg.Source.MaxConcurrent = 1
+
+	issueTracker := &restoreDiscoveryTracker{}
+	s := &teamSupervisor{
+		cfg:    cfg,
+		args:   args,
+		logger: testMainLogger(t),
+		disc:   jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, testMainLogger(t)),
+		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+	}
+
+	content, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	content = bytes.Replace(content, []byte("poll_interval: 15s"), []byte("poll_interval: 1s"), 1)
+	content = append(content, []byte(`
+source:
+    filters:
+        team: ENG
+    max_concurrent: 2
+`)...)
+	require.NoError(t, os.WriteFile(cfgPath, content, 0o600))
+
+	s.reload()
+
+	require.Equal(t, 2, s.cfg.Source.MaxConcurrent)
+	require.Equal(t, time.Second, s.cfg.PollInterval)
+	require.Equal(t, 2, s.orch.ConfigSnapshot().Source.MaxConcurrent)
+}
+
 // TestDryRunFlagPlacement verifies --dry-run is honored regardless of where
 // the user puts it relative to the run subcommand. Because the flag is
 // registered on both root and `run` (via registerRunFlags) but cobra only
@@ -210,6 +512,21 @@ func TestBuildChildArgs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func writeRunConfig(t *testing.T, trackerKind, workDir string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jiradozer.yaml")
+	t.Setenv("LINEAR_API_KEY", "test-key")
+	content, err := bootstrapYAML()
+	require.NoError(t, err)
+	content = bytes.Replace(content, []byte("kind: linear"), []byte("kind: "+trackerKind), 1)
+	content = bytes.Replace(content, []byte("work_dir: ."), []byte("work_dir: "+workDir), 1)
+	if trackerKind == "github" || trackerKind == "local" {
+		content = bytes.Replace(content, []byte("api_key: $LINEAR_API_KEY"), []byte("api_key: \"\""), 1)
+	}
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+	return path
 }
 
 // TestBuildChildArgsOrdering pins the argv layout: persistent (root-level)

@@ -3,6 +3,7 @@ package jiradozer
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 
 // Discovery polls the issue tracker for new issues matching a filter
 // and emits them on a channel for the orchestrator to pick up.
+//
+//nolint:govet // fieldalignment: keep related discovery state grouped.
 type Discovery struct {
 	tracker  tracker.IssueTracker
 	logger   *slog.Logger
@@ -18,16 +21,18 @@ type Discovery struct {
 	filter   tracker.IssueFilter
 	mu       sync.Mutex
 	interval time.Duration
+	reload   chan struct{}
 }
 
 // NewDiscovery creates a new issue discovery poller.
 func NewDiscovery(t tracker.IssueTracker, filter tracker.IssueFilter, interval time.Duration, logger *slog.Logger) *Discovery {
 	return &Discovery{
 		tracker:  t,
-		filter:   filter,
+		filter:   cloneIssueFilter(filter),
 		interval: interval,
 		seen:     make(map[string]bool),
 		logger:   logger,
+		reload:   make(chan struct{}, 1),
 	}
 }
 
@@ -39,7 +44,7 @@ func (d *Discovery) Run(ctx context.Context) <-chan *tracker.Issue {
 		defer close(ch)
 		// Do an immediate poll, then tick.
 		d.poll(ctx, ch)
-		ticker := time.NewTicker(d.interval)
+		ticker := time.NewTicker(d.currentInterval())
 		defer ticker.Stop()
 		for {
 			select {
@@ -47,10 +52,48 @@ func (d *Discovery) Run(ctx context.Context) <-chan *tracker.Issue {
 				return
 			case <-ticker.C:
 				d.poll(ctx, ch)
+			case <-d.reload:
+				ticker.Reset(d.currentInterval())
+				d.poll(ctx, ch)
 			}
 		}
 	}()
 	return ch
+}
+
+// UpdateFilter replaces the issue filter used on future polls.
+func (d *Discovery) UpdateFilter(filter tracker.IssueFilter) {
+	d.mu.Lock()
+	changed := !reflect.DeepEqual(filter, d.filter)
+	d.filter = cloneIssueFilter(filter)
+	d.mu.Unlock()
+	if changed {
+		d.notifyReload()
+	}
+}
+
+// UpdateInterval replaces the polling interval and wakes the poll loop so the
+// new interval takes effect immediately.
+func (d *Discovery) UpdateInterval(interval time.Duration) {
+	d.mu.Lock()
+	changed := interval != d.interval
+	d.interval = interval
+	d.mu.Unlock()
+	if changed {
+		d.notifyReload()
+	}
+}
+
+// Update replaces discovery settings and wakes the poll loop once when they change.
+func (d *Discovery) Update(filter tracker.IssueFilter, interval time.Duration) {
+	d.mu.Lock()
+	changed := interval != d.interval || !reflect.DeepEqual(filter, d.filter)
+	d.filter = cloneIssueFilter(filter)
+	d.interval = interval
+	d.mu.Unlock()
+	if changed {
+		d.notifyReload()
+	}
 }
 
 // MarkSeen marks an issue ID as already seen, preventing it from being
@@ -71,7 +114,8 @@ func (d *Discovery) ClearSeen(issueID string) {
 }
 
 func (d *Discovery) poll(ctx context.Context, ch chan<- *tracker.Issue) {
-	issues, err := d.tracker.ListIssues(ctx, d.filter)
+	filter := d.currentFilter()
+	issues, err := d.tracker.ListIssues(ctx, filter)
 	if err != nil {
 		d.logger.Warn("discovery poll failed", "error", err)
 		return
@@ -95,4 +139,29 @@ func (d *Discovery) poll(ctx context.Context, ch chan<- *tracker.Issue) {
 			return
 		}
 	}
+}
+
+func (d *Discovery) currentFilter() tracker.IssueFilter {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return cloneIssueFilter(d.filter)
+}
+
+func (d *Discovery) currentInterval() time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.interval
+}
+
+func (d *Discovery) notifyReload() {
+	select {
+	case d.reload <- struct{}{}:
+	default:
+	}
+}
+
+func cloneIssueFilter(filter tracker.IssueFilter) tracker.IssueFilter {
+	cp := filter
+	cp.Filters = cloneStringMap(filter.Filters)
+	return cp
 }

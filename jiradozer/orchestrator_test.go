@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -181,6 +182,146 @@ func TestOrchestrator_ConcurrencyLimit(t *testing.T) {
 	err3 := orch.Start(context.Background(), issue3)
 	require.Error(t, err3)
 	require.Contains(t, err3.Error(), "concurrency limit")
+}
+
+func TestOrchestrator_UpdateConfigMaxConcurrentAffectsFutureStarts(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	cfg.Source.MaxConcurrent = 1
+
+	script := writeTestScript(t, "trap 'exit 130' INT; sleep 60")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+	defer func() {
+		orch.Cancel("1")
+		orch.Cancel("2")
+		orch.Wait()
+	}()
+
+	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
+	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}
+
+	require.NoError(t, orch.Start(context.Background(), issue1))
+	require.ErrorIs(t, orch.Start(context.Background(), issue2), errConcurrencyLimit)
+
+	next := *cfg
+	next.Source.MaxConcurrent = 2
+	orch.UpdateConfig(&next)
+
+	require.NoError(t, orch.Start(context.Background(), issue2))
+}
+
+func TestOrchestrator_UpdateConfigBranchPrefixAffectsOnlyFutureStarts(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	cfg.Source.BranchPrefix = "old"
+	cfg.Source.MaxConcurrent = 2
+
+	script := writeTestScript(t, "trap 'exit 130' INT; sleep 60")
+	orch, wtm := setupSubprocessOrch(t, cfg, script)
+	defer func() {
+		orch.Cancel("1")
+		orch.Cancel("2")
+		orch.Wait()
+	}()
+
+	require.NoError(t, orch.Start(context.Background(), &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}))
+
+	next := *cfg
+	next.Source.BranchPrefix = "new"
+	orch.UpdateConfig(&next)
+
+	require.NoError(t, orch.Start(context.Background(), &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}))
+
+	created := wtm.getCreated()
+	require.Contains(t, created, "old/ENG-1")
+	require.Contains(t, created, "new/ENG-2")
+}
+
+func TestOrchestrator_RestoreActiveWaitsForChildPID(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	wtm := newMockWTManager()
+	orch := NewOrchestrator(&mockDiscoveryTracker{}, cfg, wtm, "", testLogger(t))
+
+	cmd := exec.Command("sh", "-c", "exit 0")
+	require.NoError(t, cmd.Start())
+
+	orch.RestoreActive([]ManagedWorkflowSnapshot{
+		{
+			Issue:        &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Restored"},
+			PID:          cmd.Process.Pid,
+			Branch:       "jiradozer/ENG-1",
+			WorktreePath: "/tmp/worktrees/jiradozer/ENG-1",
+			StartedAt:    time.Now(),
+		},
+	})
+
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepInit, status.Step)
+		require.Equal(t, "ENG-1", status.Issue.Identifier)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored StepInit")
+	}
+
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepDone, status.Step)
+		require.Equal(t, "ENG-1", status.Issue.Identifier)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored StepDone")
+	}
+
+	orch.Wait()
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
+func TestOrchestrator_RestoreActiveSkipsNilIssue(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	orch := NewOrchestrator(&mockDiscoveryTracker{}, cfg, newMockWTManager(), "", testLogger(t))
+
+	restored := orch.RestoreActive([]ManagedWorkflowSnapshot{{PID: 1234}})
+
+	require.Empty(t, restored)
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
+func TestOrchestrator_RestoredCancelEmitsCancelled(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	orch := NewOrchestrator(&mockDiscoveryTracker{}, cfg, newMockWTManager(), "", testLogger(t))
+
+	cmd := exec.Command("sh", "-c", "trap 'exit 130' INT; sleep 10")
+	require.NoError(t, cmd.Start())
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Restored"}
+	restored := orch.RestoreActive([]ManagedWorkflowSnapshot{
+		{
+			Issue:        issue,
+			PID:          cmd.Process.Pid,
+			Branch:       "jiradozer/ENG-1",
+			WorktreePath: "/tmp/worktrees/jiradozer/ENG-1",
+			StartedAt:    time.Now(),
+		},
+	})
+	require.Equal(t, []string{issue.ID}, restored)
+
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepInit, status.Step)
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored StepInit")
+	}
+
+	orch.Cancel(issue.ID)
+
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepCancelled, status.Step)
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored StepCancelled")
+	}
+
+	orch.Wait()
+	require.Equal(t, 0, orch.ActiveCount())
 }
 
 func TestOrchestrator_DuplicateIssue(t *testing.T) {
