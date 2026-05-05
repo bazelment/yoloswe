@@ -547,17 +547,8 @@ func (w *Workflow) handleReviewFeedback(ctx context.Context, fb *FeedbackResult,
 		w.logger.Info("feedback: comment", "step", w.state.Current(), "message", fb.Message)
 		w.status("Feedback received")
 		w.feedback = fb.Message
-		// During plan review, general comments advance to build with feedback
-		// incorporated — they don't restart the planning step. For other review
-		// steps, redo is the right behavior (the user wants changes applied).
-		if w.state.Current() == StepPlanReview {
-			if err := w.approveTransition(ctx, approveTarget, "approved_with_feedback"); err != nil {
-				w.fail(ctx, err)
-			}
-		} else {
-			if err := w.tryRedo(ctx, redoTarget); err != nil {
-				w.fail(ctx, err)
-			}
+		if err := w.tryRedo(ctx, redoTarget); err != nil {
+			w.fail(ctx, err)
 		}
 	}
 }

@@ -617,7 +617,7 @@ func TestWorkflow_RunReview_Redo(t *testing.T) {
 }
 
 // TestWorkflow_RunReview_Comment_PlanReview tests that a generic comment during
-// plan review advances to build (approve with feedback), not back to planning.
+// plan review triggers a replan, consistent with build/validate/ship review gates.
 func TestWorkflow_RunReview_Comment_PlanReview(t *testing.T) {
 	mt := &mockWorkflowTracker{
 		commentSets: [][]tracker.Comment{
@@ -631,9 +631,40 @@ func TestWorkflow_RunReview_Comment_PlanReview(t *testing.T) {
 
 	wf.runReview(context.Background(), StepBuilding, StepPlanning)
 
-	// During plan review, generic comments advance to build with feedback.
-	assert.Equal(t, StepBuilding, wf.state.Current())
+	// During plan review, generic comments trigger a replan with the
+	// feedback injected into the next planning round.
+	assert.Equal(t, StepPlanning, wf.state.Current())
 	assert.Equal(t, "Can you also handle the edge case?", wf.feedback)
+}
+
+// TestWorkflow_RunReview_Comment_PlanReview_HitsRedoLimit verifies plan-review
+// comments use the same redo circuit breaker as other review gates.
+func TestWorkflow_RunReview_Comment_PlanReview_HitsRedoLimit(t *testing.T) {
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+	wf.maxRedos = 1
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+	wf.tracker = &mockWorkflowTracker{
+		commentSets: [][]tracker.Comment{
+			{{ID: "c1", Body: "Please revise the plan", IsSelf: false, CreatedAt: time.Now()}},
+		},
+	}
+	wf.runReview(context.Background(), StepBuilding, StepPlanning)
+	assert.Equal(t, StepPlanning, wf.state.Current(), "first comment should replan")
+
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+	wf.tracker = &mockWorkflowTracker{
+		commentSets: [][]tracker.Comment{
+			{{ID: "c2", Body: "Please revise it again", IsSelf: false, CreatedAt: time.Now()}},
+		},
+	}
+	wf.runReview(context.Background(), StepBuilding, StepPlanning)
+
+	assert.Equal(t, StepFailed, wf.state.Current())
+	require.Error(t, wf.lastError)
+	assert.EqualError(t, wf.lastError, "step planning has been re-run 1 times (max 1), giving up")
 }
 
 // TestWorkflow_RunReview_Comment_BuildReview tests that a generic comment during
@@ -1196,7 +1227,7 @@ func TestWorkflow_TryRedoClearsApproveAll(t *testing.T) {
 // --- FeedbackComment Per-Step Tests ---
 
 // TestWorkflow_RunReview_CommentPerStep verifies FeedbackComment transitions
-// correctly for each review step: PlanReview advances, others redo.
+// correctly for each review step: all review gates redo on generic comments.
 func TestWorkflow_RunReview_CommentPerStep(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1205,7 +1236,7 @@ func TestWorkflow_RunReview_CommentPerStep(t *testing.T) {
 		redoTarget     WorkflowStep
 		expectedTarget WorkflowStep
 	}{
-		{"plan_review_advances", StepPlanReview, StepBuilding, StepPlanning, StepBuilding},
+		{"plan_review_redoes", StepPlanReview, StepBuilding, StepPlanning, StepPlanning},
 		{"build_review_redoes", StepBuildReview, StepValidating, StepBuilding, StepBuilding},
 		{"validate_review_redoes", StepValidateReview, StepShipping, StepValidating, StepValidating},
 		{"ship_review_redoes", StepShipReview, StepDone, StepShipping, StepShipping},
@@ -1233,10 +1264,10 @@ func TestWorkflow_RunReview_CommentPerStep(t *testing.T) {
 
 // --- Full Feedback Loop Simulation ---
 
-// TestWorkflow_FullFeedbackLoop_PlanCommentAdvancesToBuild simulates the exact
+// TestWorkflow_FullFeedbackLoop_PlanCommentReplans simulates the exact
 // scenario from the bug report: plan completes, user posts a general comment,
-// workflow should advance to build (not loop back to planning).
-func TestWorkflow_FullFeedbackLoop_PlanCommentAdvancesToBuild(t *testing.T) {
+// workflow should loop back to planning.
+func TestWorkflow_FullFeedbackLoop_PlanCommentReplans(t *testing.T) {
 	now := time.Now()
 	approveComment := tracker.Comment{ID: "human1", Body: "Looks good, but also handle error cases", IsSelf: false, CreatedAt: now.Add(3 * time.Second)}
 
@@ -1266,8 +1297,8 @@ func TestWorkflow_FullFeedbackLoop_PlanCommentAdvancesToBuild(t *testing.T) {
 
 	wf.runReview(context.Background(), StepBuilding, StepPlanning)
 
-	// Should advance to building, not loop back to planning.
-	assert.Equal(t, StepBuilding, wf.state.Current())
+	// Should loop back to planning, not advance to building.
+	assert.Equal(t, StepPlanning, wf.state.Current())
 	assert.Equal(t, "Looks good, but also handle error cases", wf.feedback)
 }
 
