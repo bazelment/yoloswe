@@ -229,40 +229,36 @@ func (o *Orchestrator) maxConcurrent() int {
 	return o.config.Source.MaxConcurrent
 }
 
-// claimIssueInProgress transitions the issue to "In Progress" and attaches the
-// LockLabel after the worktree is created. Together these provide a distributed
-// lock against concurrent jiradozer processes:
-//
-//  1. State transition: processes polling --filter state=Todo stop discovering
-//     the issue once it leaves the Todo state.
-//  2. Label: defense-in-depth for processes that poll a different state set or
-//     that discover the issue in the narrow window before the state changes.
-//
-// Called after NewWorktree so that a worktree creation failure leaves the issue
-// in its original state — discovery can retry without hitting a permanently
-// "In Progress" issue with no active process.
-//
-// Both operations are best-effort — errors are logged as warnings and do not
-// abort the workflow start, since missing team ID or transient API failures
-// should not prevent local work from proceeding.
-func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.Issue) {
-	cfg := o.ConfigSnapshot()
-	// Attach the lock label first — it signals intent even if the state
-	// transition below fails.
+// addLockLabel attaches the LockLabel to the issue. The label is the
+// quick part of the distributed claim — it signals intent immediately
+// even if the state transition (transitionToInProgress) is deferred or
+// fails. Best-effort: errors are logged as warnings and do not abort
+// the workflow start.
+func (o *Orchestrator) addLockLabel(ctx context.Context, issue *tracker.Issue) {
 	if err := o.tracker.AddLabel(ctx, issue.ID, LockLabel); err != nil {
 		o.logger.Warn("failed to add lock label to issue",
 			"issue", issue.Identifier, "label", LockLabel, "error", err)
-	} else {
-		o.logger.Info("claimed issue: added lock label",
-			"issue", issue.Identifier, "label", LockLabel)
+		return
 	}
+	o.logger.Info("claimed issue: added lock label",
+		"issue", issue.Identifier, "label", LockLabel)
+}
 
+// transitionToInProgress moves the issue into the configured InProgress
+// state. Called only after the subprocess has been successfully started
+// — earlier callers (between worktree creation and cmd.Start) would
+// strand the issue in In Progress on log-open / cmd.Start failures
+// because discovery's state-filter would no longer surface it for
+// retry, even after addLockLabel cleanup ran. Best-effort: errors are
+// logged as warnings.
+func (o *Orchestrator) transitionToInProgress(ctx context.Context, issue *tracker.Issue) {
 	if issue.TeamID == "" {
 		o.logger.Warn("issue has no team ID, skipping in_progress state transition",
 			"issue", issue.Identifier)
 		return
 	}
 
+	cfg := o.ConfigSnapshot()
 	states, err := o.tracker.FetchWorkflowStates(ctx, issue.TeamID)
 	if err != nil {
 		o.logger.Warn("failed to fetch workflow states for in_progress claim",
@@ -339,12 +335,13 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
 	}
 
-	// Claim the issue in-progress after the worktree is created. This provides
-	// a distributed lock so other jiradozer processes stop discovering the issue.
-	// Done after NewWorktree so a worktree creation failure leaves the issue in
-	// its original state — discovery can retry cleanly without ClearSeen calling
-	// into a permanently "In Progress" issue with no active process.
-	o.claimIssueInProgress(ctx, issue)
+	// Add the lock label as soon as the worktree exists. The label is the
+	// quick part of the distributed claim — it signals intent across
+	// processes immediately. The state transition (transitionToInProgress)
+	// is intentionally deferred until after cmd.Start succeeds: a failure
+	// between here and cmd.Start would otherwise strand the issue in
+	// In Progress, which discovery's state filter would never re-surface.
+	o.addLockLabel(ctx, issue)
 
 	wfCtx, cancel := context.WithCancel(ctx)
 
@@ -377,9 +374,10 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
 			o.logger.Warn("failed to remove worktree after log open failure", "branch", branch, "error", removeErr)
 		}
-		// claimIssueInProgress already attached LockLabel; without this the
-		// label leaks and blocks rediscovery — the very leak this change
-		// set was meant to fix.
+		// addLockLabel already attached LockLabel above. The state transition
+		// has not yet happened (it's deferred until after cmd.Start), so we
+		// only need to remove the label to fully roll back the claim and
+		// keep the issue rediscoverable.
 		o.releaseLockLabelByID(issue.ID, issue.Identifier)
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("open log file for %s: %w", issue.Identifier, err)
@@ -394,10 +392,20 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
 			o.logger.Warn("failed to remove worktree after start failure", "branch", branch, "error", removeErr)
 		}
+		// State transition has not yet happened — only the label needs
+		// rolling back here. transitionToInProgress runs only after we
+		// know the subprocess actually started.
 		o.releaseLockLabelByID(issue.ID, issue.Identifier)
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("start subprocess for %s: %w", issue.Identifier, err)
 	}
+
+	// Subprocess is now running. Commit to the In Progress state so other
+	// jiradozer processes polling state-filtered queries stop discovering
+	// the issue. Done here (not earlier) so that any failure on the path
+	// from worktree creation to here leaves the issue rediscoverable —
+	// only the easily-removable label is added before this point.
+	o.transitionToInProgress(ctx, issue)
 
 	mw := &managedWorkflow{
 		issue:        issue,

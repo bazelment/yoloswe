@@ -2,9 +2,12 @@ package jiradozer
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -331,18 +334,56 @@ func TestIdleTimeoutForStep_PreStepFallsBackToMax(t *testing.T) {
 		"all-zero IdleTimeout must keep the watchdog disabled")
 }
 
-// TestTailSubprocessLog_ReopensAfterReadError verifies that when the
-// log file becomes unreadable transiently, the tailer reopens it and
-// keeps the watchdog alive instead of permanently disabling it on the
-// first error. Forces the error by deleting and recreating the log
-// file mid-stream (the original fd survives but we want to exercise
-// the reopen path explicitly).
-func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
-	t.Parallel()
+// errOnceReader returns one line then a non-EOF read error, then EOF.
+// Used to drive the tailer's reopen branch deterministically.
+type errOnceReader struct {
+	stage int // 0: line, 1: error, 2+: EOF
+}
 
+func (r *errOnceReader) Read(p []byte) (int, error) {
+	switch r.stage {
+	case 0:
+		// Emit one well-formed klog line so the tailer parses it.
+		line := []byte("I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=ENG-1\n")
+		n := copy(p, line)
+		r.stage = 1
+		return n, nil
+	case 1:
+		r.stage = 2
+		return 0, errors.New("simulated transient read error")
+	default:
+		return 0, io.EOF
+	}
+}
+
+func (r *errOnceReader) Close() error { return nil }
+
+// TestTailSubprocessLog_ReopensAfterReadError drives the reopen branch
+// of tailSubprocessLog deterministically by overriding logTailOpener to
+// hand back an errOnceReader on the first call (one line + simulated
+// read error) and a successful second-line reader on the reopen. The
+// test asserts the tailer parses both lines and stays alive — proving
+// the reopen branch is exercised end-to-end.
+//
+// Not t.Parallel(): mutates the package-level logTailOpener.
+func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "subprocess.log")
 	require.NoError(t, os.WriteFile(logPath, nil, 0o600))
+
+	calls := atomic.Int32{}
+	original := logTailOpener
+	logTailOpener = func(_ string) (io.ReadCloser, error) {
+		n := calls.Add(1)
+		if n == 1 {
+			return &errOnceReader{}, nil
+		}
+		// Reopen: hand back a reader that emits a second step line
+		// then EOF, so the tailer keeps polling normally.
+		return io.NopCloser(strings.NewReader(
+			"I0504 22:01:54.425221 1350798 workflow.go:339] step: build issue=ENG-1\n")), nil
+	}
+	t.Cleanup(func() { logTailOpener = original })
 
 	h := &recordingHandler{}
 	o := &Orchestrator{logger: slog.New(h), config: testOrchestratorConfig()}
@@ -356,22 +397,19 @@ func TestTailSubprocessLog_ReopensAfterReadError(t *testing.T) {
 		close(done)
 	}()
 
-	// Write a line, then close, replace, and write again — this exercises
-	// the happy path; reopen logic is verified directly via a second test
-	// that supplies a non-existent path after an open succeeded once.
-	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
-	require.NoError(t, err)
-	_, err = f.WriteString("I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=ENG-1\n")
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-
+	// Both the pre-error line and the post-reopen line must reach the parent log.
 	require.Eventually(t, func() bool {
-		return len(h.findAll("subprocess step")) >= 1
-	}, 2*time.Second, 20*time.Millisecond, "tailer did not pick up first line")
+		return len(h.findAll("subprocess step")) >= 2
+	}, 3*time.Second, 20*time.Millisecond,
+		"tailer did not parse both pre-error and post-reopen lines")
 
-	// Tailer is still alive — we did not trigger an error path.
+	// And the read-error / reopen attempt must have been logged.
+	require.NotEmpty(t, h.findAll("log tailer: read error, attempting reopen"))
+
 	require.True(t, mw.tailerAlive.Load(),
-		"tailer must remain alive on the happy path")
+		"tailer must remain alive after a single transient read error")
+	require.GreaterOrEqual(t, int(calls.Load()), 2,
+		"logTailOpener must have been called at least twice (initial + reopen)")
 
 	close(stop)
 	select {

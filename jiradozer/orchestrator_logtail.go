@@ -20,6 +20,13 @@ const watchdogTickInterval = 30 * time.Second
 // blind hang detection; a persistent failure should not loop forever.
 const logTailMaxReopenAttempts = 3
 
+// logTailOpener opens a log file path. Tests overwrite this to drive
+// the non-EOF read-error / reopen branch deterministically; production
+// always uses os.Open.
+var logTailOpener = func(path string) (io.ReadCloser, error) {
+	return os.Open(path)
+}
+
 // Example matched line:
 //
 //	I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=...
@@ -43,7 +50,7 @@ var prURLRe = regexp.MustCompile(`https://github\.com/[^\s"']+/pull/\d+`)
 func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, stop <-chan struct{}) {
 	defer mw.tailerAlive.Store(false)
 
-	f, err := os.Open(logPath)
+	f, err := logTailOpener(logPath)
 	if err != nil {
 		o.logger.Warn("log tailer: open failed, watchdog disabled for this workflow",
 			"issue", mw.issue.Identifier, "path", logPath, "error", err)
@@ -95,7 +102,7 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 				return
 			case <-time.After(logTailPollInterval):
 			}
-			f, err = os.Open(logPath)
+			f, err = logTailOpener(logPath)
 			if err != nil {
 				o.logger.Warn("log tailer: reopen failed, watchdog disabled for this workflow",
 					"issue", mw.issue.Identifier, "error", err)

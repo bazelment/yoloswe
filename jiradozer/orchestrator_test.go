@@ -873,9 +873,9 @@ func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
 }
 
 // TestOrchestrator_StartReleasesLockLabelOnLogOpenFailure verifies that
-// when OpenFile fails after claimIssueInProgress has attached the lock
-// label, Start() releases the label so the issue is not stranded in
-// "labeled but no active workflow" — the very leak the change set fixes.
+// when OpenFile fails after addLockLabel has attached the lock label,
+// Start() releases the label and never transitions the issue state, so
+// discovery's state-filtered queries can rediscover the issue.
 //
 // Forces OpenFile failure by setting logDir to a regular file path: the
 // per-issue log path then has a file (not directory) as its parent.
@@ -904,10 +904,17 @@ func TestOrchestrator_StartReleasesLockLabelOnLogOpenFailure(t *testing.T) {
 	require.Error(t, err, "OpenFile must fail when logDir is a regular file")
 	require.Contains(t, err.Error(), "open log file")
 
-	// Lock label was added in claimIssueInProgress and must be released.
+	// Lock label was added by addLockLabel and must be released.
 	removed := mt.getRemovedLabels()
 	require.Len(t, removed, 1, "expected lock label to be released after OpenFile failure")
 	require.Equal(t, LockLabel, removed[0])
+
+	// State transition is deferred until after cmd.Start succeeds, so
+	// it must not have happened — discovery's state filter still sees
+	// the issue and can retry.
+	stateUpdates, _ := mt.getStateUpdates()
+	require.Empty(t, stateUpdates,
+		"state must not transition to In Progress on log-open failure")
 
 	// Slot must also be unreserved so the next Start() can reuse it.
 	require.Equal(t, 0, orch.ActiveCount())
@@ -944,6 +951,10 @@ func TestOrchestrator_StartReleasesLockLabelOnCmdStartFailure(t *testing.T) {
 	removed := mt.getRemovedLabels()
 	require.Len(t, removed, 1, "expected lock label to be released after cmd.Start failure")
 	require.Equal(t, LockLabel, removed[0])
+
+	stateUpdates, _ := mt.getStateUpdates()
+	require.Empty(t, stateUpdates,
+		"state must not transition to In Progress on cmd.Start failure")
 
 	require.Equal(t, 0, orch.ActiveCount())
 }
