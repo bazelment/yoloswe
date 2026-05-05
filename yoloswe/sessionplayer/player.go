@@ -68,6 +68,10 @@ func (p *Player) Play(path string) error {
 
 // playClaude plays back a Claude session recording directory.
 func (p *Player) playClaude(dirPath string) error {
+	if p.renderer != nil {
+		defer p.renderer.Reset()
+	}
+
 	// Load metadata (optional - continue without it if missing)
 	recording, metaErr := claude.LoadRecording(dirPath)
 	if metaErr == nil {

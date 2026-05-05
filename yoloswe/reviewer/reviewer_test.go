@@ -3,6 +3,7 @@ package reviewer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,26 @@ func (danglingToolBackend) Stop() error { return nil }
 func (danglingToolBackend) RunPrompt(_ context.Context, _ string, handler EventHandler) (*ReviewResult, error) {
 	handler.OnToolStart("Shell", "call-1", nil)
 	return &ReviewResult{Success: true}, nil
+}
+
+type partialTextErrorBackend struct{}
+
+func (partialTextErrorBackend) Start(context.Context) error { return nil }
+
+func (partialTextErrorBackend) Stop() error { return nil }
+
+func (partialTextErrorBackend) RunPrompt(_ context.Context, _ string, handler EventHandler) (*ReviewResult, error) {
+	handler.OnText("partial")
+	return nil, errors.New("backend failed")
+}
+
+type captureTextHandler struct {
+	render.NoOpEventHandler
+	texts []string
+}
+
+func (h *captureTextHandler) OnText(text string) {
+	h.texts = append(h.texts, text)
 }
 
 func TestBuildPrompt(t *testing.T) {
@@ -103,6 +124,46 @@ func TestFollowUpResetsRendererState(t *testing.T) {
 	r.renderer.CommandEnd("call-1", 0, 1)
 	if buf.Len() != 0 {
 		t.Errorf("FollowUp should reset dangling renderer command state, got %q", buf.String())
+	}
+}
+
+func TestReviewWithResultResetsPartialTextOnError(t *testing.T) {
+	var buf bytes.Buffer
+	texts := &captureTextHandler{}
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  partialTextErrorBackend{},
+		renderer: render.NewRendererWithOptions(&buf, false, true),
+	}
+	r.renderer.SetEventHandler(texts)
+
+	if _, err := r.ReviewWithResult(context.Background(), "review"); err == nil {
+		t.Fatal("ReviewWithResult returned nil error")
+	}
+	r.renderer.Status("next session")
+
+	if len(texts.texts) != 0 {
+		t.Errorf("ReviewWithResult should reset partial text after backend error, got %v", texts.texts)
+	}
+}
+
+func TestFollowUpResetsPartialTextOnError(t *testing.T) {
+	var buf bytes.Buffer
+	texts := &captureTextHandler{}
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  partialTextErrorBackend{},
+		renderer: render.NewRendererWithOptions(&buf, false, true),
+	}
+	r.renderer.SetEventHandler(texts)
+
+	if _, err := r.FollowUp(context.Background(), "again"); err == nil {
+		t.Fatal("FollowUp returned nil error")
+	}
+	r.renderer.Status("next session")
+
+	if len(texts.texts) != 0 {
+		t.Errorf("FollowUp should reset partial text after backend error, got %v", texts.texts)
 	}
 }
 
