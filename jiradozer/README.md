@@ -147,7 +147,7 @@ One of `--issue`, `--filter`, or `--description`/`--description-file` is require
 | `--branch-prefix` | from config | Worktree branch prefix |
 | `--auto-approve` | | Auto-approve review steps (`plan,build,validate,ship` or `all`) |
 | `--run-step` | | Run a single step and exit (for debugging): `plan`, `build`, `validate`, `ship` |
-| `--post-result` | `false` | With `--run-step`, post the step output as an issue comment using the step's configured comment template |
+| `--post-result` | `false` | With `--run-step`, post the step output as an issue comment using the step's configured comment template. For a step with configured rounds, `--run-step --post-result` posts one aggregate round comment after all rounds complete; the full workflow posts one comment per round. |
 | `--verbose` | `false` | Debug logging |
 
 ## Workflow

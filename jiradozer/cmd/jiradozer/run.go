@@ -559,7 +559,7 @@ func (r *singleStepRun) run() error {
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
 	}
-	output := strings.TrimSpace(res.Output)
+	output := res.Output
 	if output == "" {
 		r.logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", res.SessionID)
 	} else {

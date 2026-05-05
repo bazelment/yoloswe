@@ -229,7 +229,7 @@ func TestRunSingleStepPostResultPostsRenderedComment(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recorder.comments, 1)
 	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
-	assert.Equal(t, "## Plan Complete\n\nstep=plan\nplanned output", recorder.comments[0].body)
+	assert.Equal(t, "## Plan Complete\n\nstep=plan\n\n planned output \n", recorder.comments[0].body)
 }
 
 func TestRunSingleStepPostResultPostsEmptyOutput(t *testing.T) {
