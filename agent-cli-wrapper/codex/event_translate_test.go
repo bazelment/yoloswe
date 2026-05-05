@@ -54,6 +54,37 @@ func TestParseMappedNotification_TokenCount_FallbackToTotal(t *testing.T) {
 	}
 }
 
+// TestParseMappedNotification_TokenCount_EmptyLastFallsBackCumulative
+// verifies that when LastTokenUsage is present-but-all-zero (the
+// `last_token_usage: {}` wire shape) and TotalTokenUsage is populated,
+// the mapper falls back to TotalTokenUsage AND sets UsageIsCumulative
+// so replay subtracts the baseline. Without this, the producer/consumer
+// would desync: PreferredUsage falls through but UsageIsCumulative
+// stays false, and replay would render cumulative totals as per-turn.
+func TestParseMappedNotification_TokenCount_EmptyLastFallsBackCumulative(t *testing.T) {
+	notif := CodexEventNotification{
+		ConversationID: "conv-1",
+		Msg: mustJSON(t, TokenCountMsg{
+			Info: &TokenUsageInfo{
+				TotalTokenUsage: &TokenUsage{InputTokens: 200, OutputTokens: 75, TotalTokens: 275},
+				LastTokenUsage:  &TokenUsage{}, // empty struct, all zeros
+			},
+		}),
+	}
+	params := mustJSON(t, notif)
+
+	ev, ok := ParseMappedNotification(NotifyCodexEventTokenCount, params)
+	if !ok {
+		t.Fatal("expected mapped event for empty-Last fallback")
+	}
+	if ev.Usage.InputTokens != 200 || ev.Usage.OutputTokens != 75 {
+		t.Fatalf("Usage = %+v, want input=200 output=75 (from Total fallback)", ev.Usage)
+	}
+	if !ev.UsageIsCumulative {
+		t.Fatal("UsageIsCumulative = false, want true (Total was the fallback source)")
+	}
+}
+
 // TestParseMappedNotification_TokenCount_PrefersLast verifies that when both
 // LastTokenUsage and TotalTokenUsage are present, the per-turn last value wins.
 func TestParseMappedNotification_TokenCount_PrefersLast(t *testing.T) {

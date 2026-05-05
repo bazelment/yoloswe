@@ -157,9 +157,13 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 		if src == nil {
 			return MappedEvent{}, false
 		}
-		// Detect the cumulative-only fallback so consumers (replay)
-		// can render the value without claiming it's a per-turn delta.
-		cumulative := msg.Info != nil && msg.Info.LastTokenUsage == nil
+		// Cumulative when PreferredUsage fell back to TotalTokenUsage.
+		// Use pointer identity rather than `LastTokenUsage == nil` —
+		// PreferredUsage also treats a non-nil but all-zero
+		// LastTokenUsage (`{}` on the wire) as absent and returns
+		// TotalTokenUsage; the two checks must stay in lockstep, or
+		// replay would skip baseline subtraction on cumulative data.
+		cumulative := msg.Info != nil && src == msg.Info.TotalTokenUsage
 		usage := TurnUsage{
 			InputTokens:           src.InputTokens,
 			CachedInputTokens:     src.CachedInputTokens,

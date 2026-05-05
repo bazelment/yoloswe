@@ -661,22 +661,19 @@ func (c *Client) handleTokenCount(params json.RawMessage) {
 	var totalUsage, lastUsage *TokenUsage
 	if msg.Info != nil {
 		if msg.Info.TotalTokenUsage != nil {
-			totalUsage = &TokenUsage{
-				InputTokens:           msg.Info.TotalTokenUsage.InputTokens,
-				CachedInputTokens:     msg.Info.TotalTokenUsage.CachedInputTokens,
-				OutputTokens:          msg.Info.TotalTokenUsage.OutputTokens,
-				ReasoningOutputTokens: msg.Info.TotalTokenUsage.ReasoningOutputTokens,
-				TotalTokens:           msg.Info.TotalTokenUsage.TotalTokens,
-			}
+			cp := *msg.Info.TotalTokenUsage
+			totalUsage = &cp
 		}
-		if msg.Info.LastTokenUsage != nil {
-			lastUsage = &TokenUsage{
-				InputTokens:           msg.Info.LastTokenUsage.InputTokens,
-				CachedInputTokens:     msg.Info.LastTokenUsage.CachedInputTokens,
-				OutputTokens:          msg.Info.LastTokenUsage.OutputTokens,
-				ReasoningOutputTokens: msg.Info.LastTokenUsage.ReasoningOutputTokens,
-				TotalTokens:           msg.Info.LastTokenUsage.TotalTokens,
-			}
+		// Normalize a present-but-all-zero LastTokenUsage to nil so
+		// TokenUsageEvent subscribers see the same "absent" signal that
+		// PreferredUsage() and downstream consumers (replay,
+		// TurnCompletedEvent) already infer. Without this normalization,
+		// `last_token_usage: {}` on the wire would surface here as
+		// LastUsage = &TokenUsage{} while TurnCompletedEvent reports
+		// the cumulative TotalTokenUsage — internally inconsistent.
+		if msg.Info.LastTokenUsage != nil && !msg.Info.LastTokenUsage.isZero() {
+			cp := *msg.Info.LastTokenUsage
+			lastUsage = &cp
 		}
 	}
 

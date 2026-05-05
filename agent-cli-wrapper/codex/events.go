@@ -166,7 +166,14 @@ type ItemCompletedEvent struct {
 // Type returns the event type.
 func (e ItemCompletedEvent) Type() EventType { return EventTypeItemCompleted }
 
-// TokenUsageEvent contains token usage information.
+// TokenUsageEvent contains token usage information from a Codex
+// `codex/event/token_count` notification.
+//
+// LastUsage is the per-turn count when the protocol provides one,
+// nil otherwise (including when the wire form was a present-but-all-zero
+// empty struct — handleTokenCount normalizes that to nil so subscribers
+// stay consistent with TurnCompletedEvent.Usage and replay's
+// cumulative-recovery logic).
 type TokenUsageEvent struct {
 	TotalUsage *TokenUsage
 	LastUsage  *TokenUsage
