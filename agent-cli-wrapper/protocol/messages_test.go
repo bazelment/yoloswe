@@ -97,6 +97,21 @@ func TestParseMessage_RateLimitEvent(t *testing.T) {
 	}
 }
 
+func TestSystemMessage_MarshalJSON_PreservesRawEnvelope(t *testing.T) {
+	raw := `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":["Bash"],"permissionMode":"default"}`
+	msg, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	marshaled, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(marshaled) != raw {
+		t.Fatalf("marshaled: %s", marshaled)
+	}
+}
+
 func TestParseMessage_PromptSuggestion(t *testing.T) {
 	raw := `{"type":"prompt_suggestion","suggestion":"maybe try this","session_id":"s1","uuid":"u1"}`
 	msg, err := ParseMessage([]byte(raw))

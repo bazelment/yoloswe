@@ -139,6 +139,31 @@ func TestStream_Replay_ResultMessageEvent_Subtype(t *testing.T) {
 	require.InDelta(t, 0.05, rm.TotalCostUSD, 1e-9)
 }
 
+func TestStream_Replay_ResultMessageEvent_ErrorSubtypeSetsIsError(t *testing.T) {
+	s := newTestSession(t)
+	s.turnManager.StartTurn("prompt")
+
+	resultLine := []byte(`{"type":"result","subtype":"error_max_turns","session_id":"s1","uuid":"u_err","errors":["max turns exceeded"],"num_turns":3,"duration_ms":1000,"duration_api_ms":800,"total_cost_usd":0.05,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`)
+	s.handleLine(resultLine)
+
+	events := drainEvents(t, s)
+	var rm *ResultMessageEvent
+	for _, e := range events {
+		if got, ok := e.(ResultMessageEvent); ok {
+			rm = &got
+			break
+		}
+	}
+	require.NotNil(t, rm, "ResultMessageEvent must fire for error subtype turns")
+	require.True(t, rm.IsError)
+	require.Error(t, rm.Error)
+
+	result := s.turnManager.GetCompletedResult(1)
+	require.NotNil(t, result, "turn should complete")
+	require.False(t, result.Success)
+	require.Error(t, result.Error)
+}
+
 // replaySessionFromLines feeds each raw line through handleLine and returns
 // the events emitted. Newlines are trimmed before injection.
 func replaySessionFromLines(t *testing.T, lines [][]byte) []Event {

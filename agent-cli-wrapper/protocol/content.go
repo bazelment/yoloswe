@@ -71,6 +71,33 @@ type ToolUseBlock struct {
 // BlockType returns the content block type.
 func (t ToolUseBlock) BlockType() ContentBlockType { return ContentBlockTypeToolUse }
 
+// UnmarshalJSON implements json.Unmarshaler. Older recordings used
+// tool_use_id/tool_name/tool_input field names; accept them when the current
+// id/name/input fields are absent.
+func (t *ToolUseBlock) UnmarshalJSON(data []byte) error {
+	type toolUseBlock ToolUseBlock
+	var raw struct {
+		*toolUseBlock
+		LegacyInput map[string]interface{} `json:"tool_input"`
+		LegacyID    string                 `json:"tool_use_id"`
+		LegacyName  string                 `json:"tool_name"`
+	}
+	raw.toolUseBlock = (*toolUseBlock)(t)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if t.ID == "" {
+		t.ID = raw.LegacyID
+	}
+	if t.Name == "" {
+		t.Name = raw.LegacyName
+	}
+	if t.Input == nil {
+		t.Input = raw.LegacyInput
+	}
+	return nil
+}
+
 // ToolResultBlock contains tool execution results.
 type ToolResultBlock struct {
 	Content   interface{}      `json:"content"`

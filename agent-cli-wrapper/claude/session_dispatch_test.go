@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,6 +366,26 @@ func TestSessionDispatchUnknownMessage(t *testing.T) {
 	require.True(t, ok, "got %T", ev)
 	require.Equal(t, protocol.MessageType("future_unknown_type_xyz"), unknown.MessageType)
 	require.Contains(t, string(unknown.Raw), "future_unknown_type_xyz")
+}
+
+func TestSessionDispatchUnknownMessageKeepsFullRaw(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	payload := strings.Repeat("x", 5000)
+
+	injectLine(t, s, map[string]interface{}{
+		"type":       "future_unknown_type_xyz",
+		"session_id": "s",
+		"uuid":       "u",
+		"payload":    payload,
+	})
+
+	ev := waitForEvent(t, s, func(ev Event) bool {
+		return ev.Type() == EventTypeUnknownMessage
+	}, time.Second)
+	unknown, ok := ev.(UnknownMessageEvent)
+	require.True(t, ok, "got %T", ev)
+	require.Contains(t, string(unknown.Raw), payload)
 }
 
 // buildControlRequestLine frames an inner control-request payload inside a

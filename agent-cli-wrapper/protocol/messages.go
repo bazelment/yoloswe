@@ -109,6 +109,16 @@ func (m *SystemMessage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON returns the original system envelope when this message came from
+// the wire, preserving subtype-specific fields not declared on SystemMessage.
+func (m SystemMessage) MarshalJSON() ([]byte, error) {
+	if len(m.raw) > 0 {
+		return m.raw, nil
+	}
+	type systemMessageAlias SystemMessage
+	return json.Marshal(systemMessageAlias(m))
+}
+
 // MsgType returns the message type.
 func (m SystemMessage) MsgType() MessageType { return MessageTypeSystem }
 

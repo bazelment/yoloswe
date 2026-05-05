@@ -83,3 +83,21 @@ func TestToolResultBlock_UnmarshalLegacyToolResultField(t *testing.T) {
 		t.Fatalf("content: %#v", block.Content)
 	}
 }
+
+func TestToolUseBlock_UnmarshalLegacyToolUseFields(t *testing.T) {
+	var block ToolUseBlock
+	raw := []byte(`{"type":"tool_use","tool_use_id":"toolu_1","tool_name":"Bash","tool_input":{"command":"pwd"}}`)
+
+	if err := json.Unmarshal(raw, &block); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if block.ID != "toolu_1" {
+		t.Fatalf("id: %q", block.ID)
+	}
+	if block.Name != "Bash" {
+		t.Fatalf("name: %q", block.Name)
+	}
+	if block.Input["command"] != "pwd" {
+		t.Fatalf("input: %#v", block.Input)
+	}
+}

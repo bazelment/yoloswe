@@ -702,12 +702,12 @@ func (s *Session) handleLine(line []byte) {
 	case protocol.UpdateEnvironmentVariablesMessage:
 		slog.Warn("unexpected update_environment_variables from CLI (SDK->CLI only)")
 	case protocol.UnknownMessage:
-		raw := m.Raw
-		if len(raw) > 4096 {
-			raw = raw[:4096]
+		logRaw := m.Raw
+		if len(logRaw) > 4096 {
+			logRaw = logRaw[:4096]
 		}
-		s.emit(UnknownMessageEvent{MessageType: m.Type, Raw: raw})
-		slog.Warn("unknown top-level message type", "type", m.Type, "raw", string(raw))
+		s.emit(UnknownMessageEvent{MessageType: m.Type, Raw: m.Raw})
+		slog.Warn("unknown top-level message type", "type", m.Type, "raw", string(logRaw))
 	}
 }
 
@@ -1053,6 +1053,9 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
+	resultErr := resultMessageError(msg)
+	resultIsError := resultErr != nil
+
 	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
 	// wrapper-level suppression. This is the ground truth policy layers
 	// (e.g. logicalTurnState) read.
@@ -1070,8 +1073,8 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		DurationMs:    msg.DurationMs,
 		DurationAPIMs: msg.DurationAPIMs,
 		TotalCostUSD:  msg.TotalCostUSD,
-		IsError:       msg.IsError,
-		Error:         resultMessageError(msg),
+		IsError:       resultIsError,
+		Error:         resultErr,
 	})
 
 	// Cancel any pending wakeup-suppression safety timer.
@@ -1130,7 +1133,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 
 	result := TurnResult{
 		TurnNumber: resultTurnNumber,
-		Success:    !msg.IsError,
+		Success:    !resultIsError,
 		DurationMs: durationMs,
 		Usage: TurnUsage{
 			InputTokens:         msg.Usage.InputTokens + accUsage.InputTokens,
@@ -1156,7 +1159,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.ContentBlocks = turn.ContentBlocks
 	}
 
-	result.Error = resultMessageError(msg)
+	result.Error = resultErr
 
 	// Check if the turn ends with a NEW ScheduleWakeup tool call. When present,
 	// the CLI will auto-inject a continuation user message after the specified
