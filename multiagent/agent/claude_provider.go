@@ -66,11 +66,24 @@ func buildRetryPrompt() string {
 	return retryPrompt
 }
 
-func isPermanentToolError(excerpt string) bool {
-	if strings.Contains(excerpt, "disable-model-invocation") {
+func isPermanentToolError(toolResult string) bool {
+	if strings.Contains(toolResult, "disable-model-invocation") {
 		return true
 	}
-	return strings.Contains(excerpt, " cannot be used with Skill tool")
+	return strings.Contains(toolResult, " cannot be used with Skill tool")
+}
+
+func permanentToolErrorExcerpt(toolResult, excerpt string) string {
+	if isPermanentToolError(excerpt) {
+		return excerpt
+	}
+	if strings.Contains(toolResult, "disable-model-invocation") {
+		return "permanent tool error: disable-model-invocation"
+	}
+	if strings.Contains(toolResult, " cannot be used with Skill tool") {
+		return "permanent tool error: cannot be used with Skill tool"
+	}
+	return excerpt
 }
 
 // emitRetry fires the hook before each follow-up Ask so logs see the
@@ -140,17 +153,13 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 	budget := computeRetryTimeBudget(cfg)
 	stopReason := RetryStopExhausted
 	var (
-		prevExcerpt string
-		havePrev    bool
-		attempts    int
+		prevToolResult string
+		havePrev       bool
+		attempts       int
 	)
 	for attempts < cfg.MaxToolErrorRetries {
 		toolName, toolResult, excerpt, ok := claude.FinalTurnToolErrorDetails(result.ContentBlocks)
 		if !ok {
-			break
-		}
-		if isPermanentToolError(toolResult) {
-			stopReason = RetryStopPermanent
 			break
 		}
 		if ctx.Err() != nil {
@@ -161,11 +170,15 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 			stopReason = RetryStopBudgetExceeded
 			break
 		}
-		if havePrev && toolResult == prevExcerpt {
+		if isPermanentToolError(toolResult) {
+			stopReason = RetryStopPermanent
+			break
+		}
+		if havePrev && toolResult == prevToolResult {
 			stopReason = RetryStopNoProgress
 			break
 		}
-		prevExcerpt = toolResult
+		prevToolResult = toolResult
 		havePrev = true
 		attempts++
 
@@ -350,9 +363,12 @@ func claudeResultToAgentResultWithRetryAbort(result *claude.TurnResult, cfg Exec
 	if agentResult == nil || cfg.MaxToolErrorRetries <= 0 {
 		return agentResult
 	}
-	toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
+	toolName, toolResult, excerpt, ok := claude.FinalTurnToolErrorDetails(result.ContentBlocks)
 	if !ok {
 		return agentResult
+	}
+	if stopReason == RetryStopPermanent {
+		excerpt = permanentToolErrorExcerpt(toolResult, excerpt)
 	}
 	unresolved := &UnresolvedToolError{
 		Tool:     toolName,

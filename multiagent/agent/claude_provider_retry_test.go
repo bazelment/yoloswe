@@ -149,6 +149,11 @@ func TestIsPermanentToolError(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "full tool result",
+			excerpt: "<tool_use_error>" + strings.Repeat("x", 220) + " disable-model-invocation</tool_use_error>",
+			want:    true,
+		},
+		{
 			name:    "skill tool compatibility",
 			excerpt: "Skill pr-polish cannot be used with Skill tool",
 			want:    true,
@@ -276,6 +281,27 @@ func TestRunRetryLoop_CtxCancelled(t *testing.T) {
 	}
 	if len(fake.asks) != 0 {
 		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
+	}
+	if reason != RetryStopCtxCancelled {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopCtxCancelled, reason)
+	}
+}
+
+func TestRunRetryLoop_CtxCancelledTakesPrecedenceOverPermanent(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("blocked",
+		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	_, attempts, reason, err := runRetryLoop(ctx, fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no Asks before ctx check, got %d", attempts)
 	}
 	if reason != RetryStopCtxCancelled {
 		t.Errorf("expected stopReason=%s, got %s", RetryStopCtxCancelled, reason)
@@ -449,6 +475,34 @@ func TestClaudeResultToAgentResultWithRetryAbort_PermanentError(t *testing.T) {
 	}
 	if recorder.excerpt != wrappedExcerpt {
 		t.Errorf("expected abort excerpt %q, got %q", wrappedExcerpt, recorder.excerpt)
+	}
+}
+
+func TestClaudeResultToAgentResultWithRetryAbort_PermanentBeyondExcerpt(t *testing.T) {
+	t.Parallel()
+	const summary = "permanent tool error: disable-model-invocation"
+	recorder := &retryAbortRecorder{}
+	result := claudeResultToAgentResultWithRetryAbort(
+		turnResult("blocked", realToolUseErrorBlocks(strings.Repeat("x", 220)+" disable-model-invocation")),
+		ExecuteConfig{
+			MaxToolErrorRetries: 3,
+			EventHandler:        recorder,
+		},
+		0,
+		RetryStopPermanent,
+	)
+
+	if result.UnresolvedToolError == nil {
+		t.Fatal("expected unresolved tool error")
+	}
+	if result.UnresolvedToolError.Excerpt != summary {
+		t.Errorf("expected permanent summary excerpt %q, got %q", summary, result.UnresolvedToolError.Excerpt)
+	}
+	if recorder.excerpt != summary {
+		t.Errorf("expected abort excerpt %q, got %q", summary, recorder.excerpt)
+	}
+	if !strings.Contains(result.Text, summary) {
+		t.Errorf("expected marker text to include %q, got %q", summary, result.Text)
 	}
 }
 

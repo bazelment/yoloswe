@@ -267,19 +267,22 @@ classifier in `multiagent/agent` for errors that should never trigger
 retry:
 
 ```
-func isPermanentToolError(excerpt string) bool {
-    return strings.Contains(excerpt, "disable-model-invocation") ||
-        strings.Contains(excerpt, " cannot be used with Skill tool")
+func isPermanentToolError(toolResult string) bool {
+    return strings.Contains(toolResult, "disable-model-invocation") ||
+        strings.Contains(toolResult, " cannot be used with Skill tool")
 }
 ```
 
 `FinalTurnToolError` keeps its narrow contract: detect whether the final
-tool result is a CLI-reported `tool_use_error`. The retry loop applies
-`isPermanentToolError(excerpt)` after `FinalTurnToolError` returns
-`ok=true`; when it matches, the loop stops with `RetryStopPermanent =
-"permanent"` without issuing another Ask. Keep the classifier *tight*:
-each match must correspond to a real CLI error class that is
-definitionally unrecoverable within the same session.
+tool result is a CLI-reported `tool_use_error` and return a bounded
+display excerpt. Retry policy uses `FinalTurnToolErrorDetails` so
+`isPermanentToolError(toolResult)` sees the full tool result content,
+not the truncated excerpt. Cancellation and retry-budget guards take
+precedence; when the permanent classifier matches after those guards,
+the loop stops with `RetryStopPermanent = "permanent"` without issuing
+another Ask. Keep the classifier *tight*: each match must correspond to
+a real CLI error class that is definitionally unrecoverable within the
+same session.
 
 G2 alone would have caught both original evidence logs, because in both
 cases live bg work was present when the retry fired. In the current branch,
