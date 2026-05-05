@@ -63,6 +63,15 @@ func inProgressLabel(phase string) string { return "jiradozer-" + phase + "-inpr
 func doneLabel(phase string) string       { return "jiradozer-" + phase + "-done" }
 func skipLabel(phase string) string       { return "jiradozer-skip-" + phase }
 
+func phaseForSkipLabel(label string) string {
+	for _, p := range phaseTable {
+		if label == skipLabel(p.name) {
+			return p.name
+		}
+	}
+	return ""
+}
+
 // isJiradozerLabel reports whether label is one of jiradozer's bookkeeping
 // phase labels. Callers strip these from user-facing prompts so agents see
 // only substantive labels. The check is an exact-match allowlist against
@@ -70,9 +79,9 @@ func skipLabel(phase string) string       { return "jiradozer-skip-" + phase }
 // labels (e.g. a team-owned jiradozer-backlog) are left visible to agents.
 func isJiradozerLabel(label string) bool {
 	for _, p := range phaseTable {
-		if label == inProgressLabel(p.name) || label == doneLabel(p.name) || label == skipLabel(p.name) {
+		if label == inProgressLabel(p.name) || label == doneLabel(p.name) {
 			return true
 		}
 	}
-	return false
+	return phaseForSkipLabel(label) != ""
 }

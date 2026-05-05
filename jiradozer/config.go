@@ -17,7 +17,7 @@ import (
 
 // Config is the top-level configuration for jiradozer.
 //
-//nolint:govet // fieldalignment: keep YAML fields in config-file order; skipPhaseSources is internal metadata.
+//nolint:govet // fieldalignment: keep YAML fields in config-file order; skipPhaseSource is internal metadata.
 type Config struct {
 	Tracker      TrackerConfig `yaml:"tracker"`
 	Source       SourceConfig  `yaml:"source"`
@@ -34,8 +34,16 @@ type Config struct {
 	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
 	PollInterval time.Duration `yaml:"poll_interval"`
 
-	skipPhaseSources map[string]string
+	skipPhaseSource skipPhaseSource
 }
+
+type skipPhaseSource string
+
+const (
+	skipPhaseSourceConfig skipPhaseSource = "config"
+	skipPhaseSourceCLI    skipPhaseSource = "cli"
+	skipPhaseSourceLabel  skipPhaseSource = "label"
+)
 
 // TrackerConfig specifies the issue tracker backend.
 type TrackerConfig struct {
@@ -205,13 +213,8 @@ func (c *Config) validate() error {
 	}
 	c.SkipPhases = skipPhases
 	if len(c.SkipPhases) > 0 {
-		if c.skipPhaseSources == nil {
-			c.skipPhaseSources = make(map[string]string)
-		}
-		for _, phase := range c.SkipPhases {
-			if c.skipPhaseSources[phase] == "" {
-				c.skipPhaseSources[phase] = "config"
-			}
+		if c.skipPhaseSource == "" {
+			c.skipPhaseSource = skipPhaseSourceConfig
 		}
 	}
 	namedSteps := []struct {
@@ -239,7 +242,7 @@ func NormalizeSkipPhases(phases []string) ([]string, error) {
 		if phase == "" {
 			continue
 		}
-		if !isUserPhase(phase) {
+		if startStepForPhase(phase) == StepInit {
 			return nil, fmt.Errorf("unknown phase %q (valid: %s)", phase, strings.Join(validUserPhases(), ", "))
 		}
 		if seen[phase] {
@@ -258,19 +261,34 @@ func (c *Config) ApplySkipPhases(phases []string, source string) error {
 	if err != nil {
 		return err
 	}
-	c.SkipPhases = normalized
-	c.skipPhaseSources = make(map[string]string)
-	for _, phase := range normalized {
-		c.skipPhaseSources[phase] = source
+	parsedSource, err := parseSkipPhaseSource(source)
+	if err != nil {
+		return err
 	}
+	c.SkipPhases = normalized
+	c.skipPhaseSource = parsedSource
 	return nil
 }
 
-func (c *Config) skipPhaseSource(phase string) string {
-	if c == nil || c.skipPhaseSources == nil {
-		return ""
+func (c *Config) skipSourceForPhase(phase string) skipPhaseSource {
+	if c == nil || c.skipPhaseSource == "" {
+		return skipPhaseSourceConfig
 	}
-	return c.skipPhaseSources[phase]
+	for _, skippedPhase := range c.SkipPhases {
+		if skippedPhase == phase {
+			return c.skipPhaseSource
+		}
+	}
+	return ""
+}
+
+func parseSkipPhaseSource(source string) (skipPhaseSource, error) {
+	switch skipPhaseSource(source) {
+	case skipPhaseSourceConfig, skipPhaseSourceCLI, skipPhaseSourceLabel:
+		return skipPhaseSource(source), nil
+	default:
+		return "", fmt.Errorf("unknown skip phase source %q", source)
+	}
 }
 
 func validUserPhases() []string {
@@ -279,15 +297,6 @@ func validUserPhases() []string {
 		out = append(out, p.name)
 	}
 	return out
-}
-
-func isUserPhase(phase string) bool {
-	for _, p := range phaseTable {
-		if p.name == phase {
-			return true
-		}
-	}
-	return false
 }
 
 // validateStep checks one named step.

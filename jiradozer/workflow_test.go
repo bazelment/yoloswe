@@ -1418,7 +1418,7 @@ func TestWorkflow_CompletePhase_WritesDoneBeforeRemovingInProgress(t *testing.T)
 // that when -done succeeds but the subsequent -inprogress removal fails,
 // completePhase still advances the in-memory phase to phaseDone. The
 // tracker has the authoritative -done label; the stale -inprogress is a
-// cosmetic issue that skipDonePhases will reconcile on the next run.
+// cosmetic issue that skipCompletedOrConfiguredPhases will reconcile on the next run.
 func TestWorkflow_CompletePhase_RemoveInProgressFailureStillAdvances(t *testing.T) {
 	mt := &mockWorkflowTracker{
 		removeLabelErr: map[string]error{"jiradozer-plan-inprogress": errors.New("transient")},
@@ -1550,7 +1550,7 @@ func TestWorkflow_ApproveTransition_BuildToValidate(t *testing.T) {
 		labelSequence(mt))
 }
 
-// TestWorkflow_SkipDonePhases_FromInit verifies that skipDonePhases at workflow
+// TestWorkflow_SkipDonePhases_FromInit verifies that skipCompletedOrConfiguredPhases at workflow
 // start jumps over phases whose -done label is already present.
 func TestWorkflow_SkipDonePhases_FromInit(t *testing.T) {
 	workDir := t.TempDir()
@@ -1570,7 +1570,7 @@ func TestWorkflow_SkipDonePhases_FromInit(t *testing.T) {
 
 	// Workflow starts at StepPlanning (the first step after init transition).
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	// Should have jumped forward past plan and build to validating.
 	assert.Equal(t, StepValidating, wf.state.Current())
@@ -1597,12 +1597,12 @@ func TestWorkflow_SkipPhases_FromConfig(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Equal(t, "persisted plan", wf.plan)
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
-	assert.Equal(t, "config", wf.skipPhaseSources[PhasePlan])
+	assert.Equal(t, skipPhaseSourceConfig, wf.skipPhaseSources[PhasePlan])
 	assert.Empty(t, labelSequence(mt))
 }
 
@@ -1615,11 +1615,11 @@ func TestWorkflow_SkipPhases_FromLabel(t *testing.T) {
 	wf := NewWorkflow(mt, issue, testConfig(), discardLogger())
 	walkTo(t, wf.state, StepValidating)
 
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	assert.Equal(t, StepShipping, wf.state.Current())
 	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
-	assert.Equal(t, "label", wf.skipPhaseSources[PhaseValidate])
+	assert.Equal(t, skipPhaseSourceLabel, wf.skipPhaseSources[PhaseValidate])
 	assert.Empty(t, labelSequence(mt))
 }
 
@@ -1632,7 +1632,7 @@ func TestWorkflow_SkipPhases_AllSkipped(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	assert.Equal(t, StepDone, wf.state.Current())
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
@@ -1654,16 +1654,16 @@ func TestWorkflow_SkipPlan_LoadsPersistedPlan(t *testing.T) {
 	wf := NewWorkflow(mt, testIssue(), cfg, discardLogger())
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Equal(t, "persisted plan from new skip entry", wf.plan)
-	assert.Equal(t, "cli", wf.skipPhaseSources[PhasePlan])
+	assert.Equal(t, skipPhaseSourceCLI, wf.skipPhaseSources[PhasePlan])
 }
 
 // TestWorkflow_SkipDonePhases_ClearsStaleInProgress verifies that when a phase
 // has both -inprogress and -done labels (e.g. from a prior interrupted run),
-// skipDonePhases removes the stale -inprogress label so the issue doesn't end
+// skipCompletedOrConfiguredPhases removes the stale -inprogress label so the issue doesn't end
 // up with contradictory phase labels.
 func TestWorkflow_SkipDonePhases_ClearsStaleInProgress(t *testing.T) {
 	workDir := t.TempDir()
@@ -1681,7 +1681,7 @@ func TestWorkflow_SkipDonePhases_ClearsStaleInProgress(t *testing.T) {
 	wf := NewWorkflow(mt, issue, cfg, discardLogger())
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Equal(t, phaseDone, wf.phases[PhasePlan])
@@ -1708,7 +1708,7 @@ func TestWorkflow_SkipDonePhases_AllDone(t *testing.T) {
 	wf := NewWorkflow(mt, issue, testConfig(), discardLogger())
 	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
 
-	wf.skipDonePhases(context.Background())
+	wf.skipCompletedOrConfiguredPhases(context.Background())
 
 	assert.Equal(t, StepDone, wf.state.Current())
 }

@@ -233,7 +233,7 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 		cfg.MaxBudgetUSD = args.maxBudget
 	}
 	if args.skipPhases != "" {
-		if err := cfg.ApplySkipPhases(parseCSV(args.skipPhases), "cli"); err != nil {
+		if err := cfg.ApplySkipPhases(tracker.SplitCSV(args.skipPhases), "cli"); err != nil {
 			return nil, fmt.Errorf("--skip-phases: %w", err)
 		}
 	}
@@ -598,18 +598,7 @@ func parseAutoApprove(value string) []string {
 	if strings.TrimSpace(value) == "all" {
 		return allSteps
 	}
-	return parseCSV(value)
-}
-
-func parseCSV(value string) []string {
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if s := strings.TrimSpace(p); s != "" {
-			result = append(result, s)
-		}
-	}
-	return result
+	return tracker.SplitCSV(value)
 }
 
 func availableModels() string {

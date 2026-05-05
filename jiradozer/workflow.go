@@ -66,8 +66,7 @@ type Workflow struct {
 	stateIDs            map[string]string
 	redoCounts          map[WorkflowStep]int
 	phases              map[string]phaseState
-	skipPhases          map[string]bool
-	skipPhaseSources    map[string]string
+	skipPhaseSources    map[string]skipPhaseSource
 	OnTransition        func(step WorkflowStep)
 	OnRoundProgress     func(roundIndex, roundTotal int)
 	runStepAgent        func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
@@ -96,17 +95,12 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		sessionIDs:       make(map[WorkflowStep]string),
 		redoCounts:       make(map[WorkflowStep]int),
 		phases:           make(map[string]phaseState),
-		skipPhases:       make(map[string]bool),
-		skipPhaseSources: make(map[string]string),
+		skipPhaseSources: make(map[string]skipPhaseSource),
 		maxRedos:         DefaultMaxRedos,
 		runStepAgent:     RunStepAgent,
 	}
 	for _, phase := range cfg.SkipPhases {
-		source := cfg.skipPhaseSource(phase)
-		if source == "" {
-			source = "config"
-		}
-		w.addSkipPhase(phase, source)
+		w.addSkipPhase(phase, cfg.skipSourceForPhase(phase))
 	}
 	if issue != nil {
 		// Shallow-copy so Labels mutations on w.issue don't bleed back into
@@ -114,37 +108,43 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 		// phase-skip decisions before the first tracker fetch.
 		issueCopy := *issue
 		w.lastLabels = slices.Clone(issue.Labels)
-		for _, label := range issue.Labels {
-			for _, p := range phaseTable {
-				if label == skipLabel(p.name) {
-					w.addSkipPhase(p.name, "label")
-				}
-			}
-		}
+		w.addSkipPhasesFromLabels(issue.Labels)
 		issueCopy.Labels = slices.DeleteFunc(slices.Clone(issue.Labels), isJiradozerLabel)
 		w.issue = &issueCopy
 	}
 	return w
 }
 
-func (w *Workflow) addSkipPhase(phase, source string) {
-	if !isUserPhase(phase) {
+func (w *Workflow) addSkipPhase(phase string, source skipPhaseSource) {
+	if startStepForPhase(phase) == StepInit || source == "" {
 		return
 	}
 	if prev := w.skipPhaseSources[phase]; prev != "" && skipPhasePriority(prev) > skipPhasePriority(source) {
 		return
 	}
-	w.skipPhases[phase] = true
 	w.skipPhaseSources[phase] = source
 }
 
-func skipPhasePriority(source string) int {
+func (w *Workflow) addSkipPhasesFromLabels(labels []string) {
+	for _, label := range labels {
+		if phase := phaseForSkipLabel(label); phase != "" {
+			w.addSkipPhase(phase, skipPhaseSourceLabel)
+		}
+	}
+}
+
+func (w *Workflow) isSkipPhase(phase string) bool {
+	_, ok := w.skipPhaseSources[phase]
+	return ok
+}
+
+func skipPhasePriority(source skipPhaseSource) int {
 	switch source {
-	case "cli":
+	case skipPhaseSourceCLI:
 		return 3
-	case "label":
+	case skipPhaseSourceLabel:
 		return 2
-	case "config":
+	case skipPhaseSourceConfig:
 		return 1
 	default:
 		return 0
@@ -173,7 +173,7 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		"base_branch", w.config.BaseBranch,
 	)
 	for _, p := range phaseTable {
-		if w.skipPhases[p.name] {
+		if w.isSkipPhase(p.name) {
 			w.logger.Info("phase configured to skip", "phase", p.name, "source", w.skipPhaseSources[p.name])
 		}
 	}
@@ -217,7 +217,7 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 	// Honor pre-existing -done labels by skipping completed phases. A fresh
 	// workflow run never re-does plan/build/validate/ship that the user has
 	// already marked done. Users clear the label manually to re-run a phase.
-	w.skipDonePhases(ctx)
+	w.skipCompletedOrConfiguredPhases(ctx)
 	if phase := phaseForStep(w.state.Current()); phase != "" {
 		w.enterPhase(ctx, phase)
 	}
@@ -599,7 +599,7 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 		// Final sweep: completePhase's -inprogress removal is best-effort, so
 		// a transient RemoveLabel failure can leave the issue with both
 		// -inprogress and -done for a completed phase. At StepDone there's no
-		// subsequent handlePhaseBoundary to reconcile via skipDonePhases, so
+		// subsequent handlePhaseBoundary to reconcile via skipCompletedOrConfiguredPhases, so
 		// do the cleanup here.
 		w.cleanupStalePhaseLabels(ctx)
 		return
@@ -609,7 +609,7 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 		w.completePriorPhases(ctx, curPhase)
 	}
 
-	w.skipDonePhases(ctx)
+	w.skipCompletedOrConfiguredPhases(ctx)
 
 	if phase := phaseForStep(w.state.Current()); phase != "" {
 		w.enterPhase(ctx, phase)
@@ -618,7 +618,7 @@ func (w *Workflow) handlePhaseBoundary(ctx context.Context) {
 
 // cleanupStalePhaseLabels removes any -inprogress label still present on
 // the issue for a phase that bookkeeping considers phaseDone. This is the
-// terminal counterpart to skipDonePhases' stale-label reconciliation —
+// terminal counterpart to skipCompletedOrConfiguredPhases' stale-label reconciliation —
 // without it, a transient RemoveLabel failure during completePhase would
 // leave the issue permanently tagged with both -inprogress and -done.
 func (w *Workflow) cleanupStalePhaseLabels(ctx context.Context) {
@@ -653,18 +653,13 @@ func (w *Workflow) completePriorPhases(ctx context.Context, currentPhase string)
 	}
 }
 
-// skipDonePhases refreshes labels from the tracker, then walks phases forward
-// from the current step, jumping past any phase already marked -done via
-// forceTransition. If all remaining phases are -done, jumps to StepDone.
-func (w *Workflow) skipDonePhases(ctx context.Context) {
+// skipCompletedOrConfiguredPhases refreshes labels from the tracker, then walks
+// phases forward from the current step, jumping past any phase marked -done or
+// configured to skip. If all remaining phases are complete or skipped, jumps to
+// StepDone.
+func (w *Workflow) skipCompletedOrConfiguredPhases(ctx context.Context) {
 	labels := w.refreshLabels(ctx)
-	for _, label := range labels {
-		for _, p := range phaseTable {
-			if label == skipLabel(p.name) {
-				w.addSkipPhase(p.name, "label")
-			}
-		}
-	}
+	w.addSkipPhasesFromLabels(labels)
 
 	for {
 		cur := w.state.Current()
@@ -673,7 +668,7 @@ func (w *Workflow) skipDonePhases(ctx context.Context) {
 			return
 		}
 		hasDoneLabel := slices.Contains(labels, doneLabel(phase))
-		if !hasDoneLabel && !w.skipPhases[phase] {
+		if !hasDoneLabel && !w.isSkipPhase(phase) {
 			return
 		}
 		// The -done label is authoritative, so clear any stale -inprogress
@@ -693,7 +688,7 @@ func (w *Workflow) skipDonePhases(ctx context.Context) {
 			return
 		}
 		next := startStepForPhase(nextPhase)
-		source := "label"
+		source := skipPhaseSourceLabel
 		if !hasDoneLabel {
 			source = w.skipPhaseSources[phase]
 		}
@@ -766,13 +761,13 @@ func (w *Workflow) enterPhase(ctx context.Context, phase string) {
 // completePhase flips internal bookkeeping to phaseDone only after the
 // tracker confirms the -done label write. Order matters: add -done first,
 // then remove -inprogress. A crash between these two calls leaves the
-// issue with both labels, which skipDonePhases reconciles on the next run.
+// issue with both labels, which skipCompletedOrConfiguredPhases reconciles on the next run.
 // The reverse order would leave the issue with NEITHER label on crash,
 // losing durable evidence that the phase completed and causing a resumed
 // run to redo an already-finished phase.
 //
 // The -inprogress removal is best-effort (a stale -inprogress will be
-// cleared on the next skipDonePhases), but the -done write is
+// cleared on the next skipCompletedOrConfiguredPhases), but the -done write is
 // authoritative: without it the phase stays "in progress" in memory and
 // the workflow will retry the transition rather than advance past a phase
 // the tracker didn't record.
@@ -850,7 +845,7 @@ func (w *Workflow) reopenPhaseOnRedo(ctx context.Context, redoTarget WorkflowSte
 				}
 			}
 			// Force a fresh -inprogress write even if prior was phaseInProgress,
-			// in case the previous -inprogress was removed by skipDonePhases or
+			// in case the previous -inprogress was removed by skipCompletedOrConfiguredPhases or
 			// a prior boundary.
 			w.phases[phase] = phaseNotStarted
 			w.enterPhase(ctx, phase)
