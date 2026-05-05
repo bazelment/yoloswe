@@ -398,3 +398,24 @@ func TestSystemDecodePayload_UnknownReturnsNil(t *testing.T) {
 		t.Errorf("expected nil payload for unknown subtype, got %T", v)
 	}
 }
+
+func TestSystemMessage_InitPayloadLenient(t *testing.T) {
+	m := parseSystem(t, `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default"}`)
+	if _, ok := m.AsInit(); ok {
+		t.Fatal("expected strict init decode to fail")
+	}
+
+	payload := m.InitPayloadLenient()
+	if payload.SessionID != "s1" {
+		t.Errorf("session_id: %q", payload.SessionID)
+	}
+	if payload.Model != "claude-opus-4-6" {
+		t.Errorf("model: %q", payload.Model)
+	}
+	if payload.CWD != "/tmp" {
+		t.Errorf("cwd: %q", payload.CWD)
+	}
+	if payload.PermissionMode != "default" {
+		t.Errorf("permissionMode: %q", payload.PermissionMode)
+	}
+}

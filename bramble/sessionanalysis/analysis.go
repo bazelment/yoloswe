@@ -245,10 +245,13 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 		switch m := msg.(type) {
 		case protocol.SystemMessage:
 			if m.Subtype == string(protocol.SystemSubtypeInit) {
-				if payload, ok := m.AsInit(); ok {
-					sess.Model = payload.Model
-					sess.CWD = payload.CWD
+				payload, ok := m.AsInit()
+				if !ok {
+					loose := m.InitPayloadLenient()
+					payload = &loose
 				}
+				sess.Model = payload.Model
+				sess.CWD = payload.CWD
 			}
 
 		case protocol.UserMessage:
@@ -314,7 +317,7 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				if meta != nil && !meta.Timestamp.IsZero() {
 					currentTurn.EndTime = meta.Timestamp
 				}
-				if resultMessageIsError(m) {
+				if m.IsFailure() {
 					currentTurn.Errors = append(currentTurn.Errors, "Turn ended with error")
 				}
 			}
@@ -339,11 +342,6 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 	}
 
 	return sess, nil
-}
-
-func resultMessageIsError(msg protocol.ResultMessage) bool {
-	_, ok := msg.Outcome().(protocol.ResultError)
-	return ok
 }
 
 // ParseProject parses all JSONL files in a project directory, returning

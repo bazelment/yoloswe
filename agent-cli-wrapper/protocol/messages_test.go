@@ -262,6 +262,13 @@ func TestResultMessage_Outcome_IsErrorWithSuccessSubtype(t *testing.T) {
 	}
 }
 
+func TestResultMessage_IsFailure_ErrorSubtypeWithoutIsError(t *testing.T) {
+	m := parseResultMessage(t, `{"type":"result","subtype":"error_max_turns","errors":["boom"]}`)
+	if !m.IsFailure() {
+		t.Fatal("expected error subtype to indicate failure")
+	}
+}
+
 func parseResultMessage(t *testing.T, raw string) ResultMessage {
 	t.Helper()
 	msg, err := ParseMessage([]byte(raw))

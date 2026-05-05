@@ -994,14 +994,7 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 	}
 
 	// Accumulate structured content blocks
-	accumulated := make(protocol.ContentBlocks, 0, len(blocks))
-	for _, block := range blocks {
-		switch block.BlockType() {
-		case protocol.ContentBlockTypeText, protocol.ContentBlockTypeThinking, protocol.ContentBlockTypeToolUse:
-			accumulated = append(accumulated, block)
-		}
-	}
-	s.turnManager.AppendContentBlocks(accumulated)
+	s.turnManager.AppendContentBlocks(blocks)
 }
 
 func (s *Session) handleUser(msg protocol.UserMessage) {
@@ -1050,18 +1043,12 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 
 	// Accumulate tool result content blocks
-	accumulated := make(protocol.ContentBlocks, 0, len(blocks))
-	for _, block := range blocks {
-		if block.BlockType() == protocol.ContentBlockTypeToolResult {
-			accumulated = append(accumulated, block)
-		}
-	}
-	s.turnManager.AppendContentBlocks(accumulated)
+	s.turnManager.AppendContentBlocks(blocks)
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
 	resultErr := resultMessageError(msg)
-	resultIsError := resultErr != nil
+	resultIsError := msg.IsFailure()
 
 	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
 	// wrapper-level suppression. This is the ground truth policy layers

@@ -170,6 +170,22 @@ func TestMessageParser_ResultErrorSubtypeMarksFailed(t *testing.T) {
 	assert.Equal(t, StatusFailed, m.Meta().Status)
 }
 
+func TestMessageParser_InitLenientFallback(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default"}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	meta := m.Meta()
+	assert.Equal(t, "s1", meta.SessionID)
+	assert.Equal(t, "claude-opus-4-6", meta.Model)
+	assert.Equal(t, "/tmp", meta.CWD)
+	assert.Equal(t, "default", meta.PermissionMode)
+	assert.Equal(t, StatusRunning, meta.Status)
+}
+
 func TestSessionModel_ConcurrentAccess(t *testing.T) {
 	m := NewSessionModel(100)
 	m.SetMeta(SessionMeta{Status: StatusRunning})

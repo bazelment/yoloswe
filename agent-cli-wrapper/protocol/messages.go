@@ -327,6 +327,12 @@ func (m ResultMessage) Outcome() ResultOutcome {
 	}
 }
 
+// IsFailure reports whether the result frame represents a failed turn.
+func (m ResultMessage) IsFailure() bool {
+	_, ok := m.Outcome().(ResultError)
+	return ok
+}
+
 // MsgType returns the message type.
 func (m ResultMessage) MsgType() MessageType { return MessageTypeResult }
 

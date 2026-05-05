@@ -63,7 +63,8 @@ func (p *MessageParser) handleSystem(msg protocol.SystemMessage) {
 	if msg.Subtype == string(protocol.SystemSubtypeInit) {
 		payload, ok := msg.AsInit()
 		if !ok {
-			return
+			loose := msg.InitPayloadLenient()
+			payload = &loose
 		}
 		p.model.SetMeta(SessionMeta{
 			SessionID:         payload.SessionID,
@@ -200,21 +201,16 @@ func (p *MessageParser) handleResult(msg protocol.ResultMessage) {
 		TurnNumber: msg.NumTurns,
 		CostUSD:    msg.TotalCostUSD,
 		DurationMs: msg.DurationMs,
-		IsError:    resultMessageIsError(msg),
+		IsError:    msg.IsFailure(),
 	})
 
 	// Transition the session to a terminal status now that the result is known.
 	// These transitions are from StatusRunning so the guard should never fire.
-	if resultMessageIsError(msg) {
+	if msg.IsFailure() {
 		_ = p.model.UpdateStatus(StatusFailed)
 	} else {
 		_ = p.model.UpdateStatus(StatusCompleted)
 	}
-}
-
-func resultMessageIsError(msg protocol.ResultMessage) bool {
-	_, ok := msg.Outcome().(protocol.ResultError)
-	return ok
 }
 
 // --- stream_event (live streaming deltas) -----------------------------------
