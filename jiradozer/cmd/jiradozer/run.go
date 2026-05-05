@@ -44,6 +44,7 @@ type runArgs struct {
 	dryRun          bool
 	dryRunSet       bool
 	forceCleanup    bool
+	postResult      bool
 }
 
 func newRunCommand(args *runArgs) *cobra.Command {
@@ -88,6 +89,7 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().DurationVar(&args.pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	cmd.Flags().Float64Var(&args.maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	cmd.Flags().StringVar(&args.runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
+	cmd.Flags().BoolVar(&args.postResult, "post-result", false, "When used with --run-step, post the step output as an issue comment. Single-shot steps use comment_template; steps with rounds use round_comment_template and post one aggregate comment after all rounds complete.")
 	cmd.Flags().StringVar(&args.autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
 	cmd.Flags().StringVar(&args.skipPhases, "skip-phases", "", "Skip high-level workflow phases for this run (comma-separated: plan,build,validate,ship; create_pr is part of build)")
 	cmd.Flags().StringArrayVar(&args.sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
@@ -143,6 +145,9 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 			return fmt.Errorf("plan file is empty")
 		}
 	}
+	if args.postResult && args.runStep == "" {
+		return fmt.Errorf("--post-result requires --run-step")
+	}
 
 	cfg, err := loadRunConfig(args)
 	if err != nil {
@@ -163,7 +168,7 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 
 	// Local description mode.
 	if args.description != "" {
-		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, cfg, renderer, logger)
+		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, args.postResult, cfg, renderer, logger)
 	}
 
 	// Multi-issue team mode (only when no --issue flag was given).
@@ -180,7 +185,7 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
 
 	if args.runStep != "" {
-		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, renderer, logger)
+		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, issueTracker, args.postResult, renderer, logger)
 	}
 
 	// Run the full workflow.
@@ -461,7 +466,7 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	}
 }
 
-func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger) error {
+func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, postResult bool, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger) error {
 	lt, ok := issueTracker.(*local.Tracker)
 	if !ok {
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
@@ -477,7 +482,7 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
 
 	if runStep != "" {
-		return runSingleStep(ctx, runStep, issue, cfg, planContent, renderer, logger)
+		return runSingleStep(ctx, runStep, issue, cfg, planContent, issueTracker, postResult, renderer, logger)
 	}
 
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
@@ -488,79 +493,106 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 // runStepAgentDetailed is overridable so unit tests can stub the agent call.
 var runStepAgentDetailed = jiradozer.RunStepAgent
 
-func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, renderer *render.Renderer, logger *slog.Logger) error {
-	stepCfg, ok := cfg.StepByName(stepName)
+type singleStepRun struct {
+	ctx         context.Context
+	poster      jiradozer.CommentPoster
+	issue       *tracker.Issue
+	cfg         *jiradozer.Config
+	renderer    *render.Renderer
+	logger      *slog.Logger
+	runAgent    func(context.Context, string, jiradozer.PromptData, jiradozer.StepConfig, string, string, string, *render.Renderer, *slog.Logger) (jiradozer.StepAgentResult, error)
+	stepName    string
+	planContent string
+	postResult  bool
+}
+
+func runSingleStep(ctx context.Context, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, planContent string, poster jiradozer.CommentPoster, postResult bool, renderer *render.Renderer, logger *slog.Logger) error {
+	return (&singleStepRun{
+		ctx:         ctx,
+		stepName:    stepName,
+		issue:       issue,
+		cfg:         cfg,
+		planContent: planContent,
+		poster:      poster,
+		postResult:  postResult,
+		renderer:    renderer,
+		logger:      logger,
+		runAgent:    runStepAgentDetailed,
+	}).run()
+}
+
+func (r *singleStepRun) run() error {
+	stepName := r.stepName
+	stepCfg, ok := r.cfg.StepByName(stepName)
 	if !ok {
 		return fmt.Errorf("unknown step %q (valid: %s)", stepName, strings.Join(allSteps, ", "))
 	}
-	resolved := cfg.ResolveStep(stepCfg)
-	data := jiradozer.NewPromptData(issue, cfg.BaseBranch)
+	resolved := r.cfg.ResolveStep(stepCfg)
+	data := jiradozer.NewPromptData(r.issue, r.cfg.BaseBranch)
 
 	// Inject plan into prompt data for the build step.
 	// Priority: --plan-file flag > persisted plan.md > no plan.
 	if stepName == "build" {
-		if planContent != "" {
-			data.Plan = planContent
-			logger.Info("using plan from --plan-file")
+		if r.planContent != "" {
+			data.Plan = r.planContent
+			r.logger.Info("using plan from --plan-file")
 		} else {
-			content, err := jiradozer.LoadPersistedPlan(cfg.WorkDir)
+			content, err := jiradozer.LoadPersistedPlan(r.cfg.WorkDir)
 			if err != nil {
 				return err
 			}
 			if content != "" {
 				data.Plan = content
-				logger.Info("loaded persisted plan", "path", jiradozer.PlanFilePath(cfg.WorkDir))
+				r.logger.Info("loaded persisted plan", "path", jiradozer.PlanFilePath(r.cfg.WorkDir))
 			}
 		}
 		if data.Plan == "" {
-			logger.Warn("NO PLAN AVAILABLE — build step is running without a plan; use --plan-file to provide one, or run the plan step first")
+			r.logger.Warn("NO PLAN AVAILABLE — build step is running without a plan; use --plan-file to provide one, or run the plan step first")
 		}
 	}
 
 	if len(resolved.Rounds) > 0 {
-		return runSingleStepRounds(ctx, stepName, data, resolved, cfg.WorkDir, renderer, logger)
+		return r.runRounds(data, stepCfg, resolved)
 	}
 
-	res, err := runStepAgentDetailed(ctx, stepName, data, resolved, cfg.WorkDir, "", "", renderer, logger)
+	res, err := r.runAgent(r.ctx, stepName, data, resolved, r.cfg.WorkDir, "", "", r.renderer, r.logger)
 	if err != nil {
 		return fmt.Errorf("run-step %s: %w", stepName, err)
 	}
 	output := res.Output
 	if output == "" {
-		logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", res.SessionID)
+		r.logger.Warn("agent produced no text output — the result may be in tool actions (check session log)", "step", stepName, "session_id", res.SessionID)
 	} else {
 		fmt.Printf("=== %s output ===\n%s\n", stepName, output)
 	}
-	if stepName == "plan" {
-		jiradozer.PersistPlan(cfg.WorkDir, output, logger)
-	}
-	return nil
+	return r.finish(stepCfg, output, 0)
 }
 
-func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.PromptData, resolved jiradozer.StepConfig, workDir string, renderer *render.Renderer, logger *slog.Logger) error {
+func (r *singleStepRun) runRounds(data jiradozer.PromptData, stepCfg, resolved jiradozer.StepConfig) error {
+	stepName := r.stepName
 	totalRounds := len(resolved.Rounds)
-	logger.Info("step: "+stepName, "rounds", totalRounds)
-	rendererStatus(renderer, fmt.Sprintf("Step: %s (%d rounds)", stepName, totalRounds))
+	r.logger.Info("step: "+stepName, "rounds", totalRounds)
+	rendererStatus(r.renderer, fmt.Sprintf("Step: %s (%d rounds)", stepName, totalRounds))
 
 	var allOutputs []string
 	var sessionIDs []string
 	for i, round := range resolved.Rounds {
-		if ctx.Err() != nil {
-			return fmt.Errorf("run-step %s: %w", stepName, ctx.Err())
+		if r.ctx.Err() != nil {
+			return fmt.Errorf("run-step %s: %w", stepName, r.ctx.Err())
 		}
-		logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
-		rendererStatus(renderer, fmt.Sprintf("Round %d/%d", i+1, totalRounds))
+		r.logger.Info("round start", "step", stepName, "round", i+1, "total", totalRounds)
+		rendererStatus(r.renderer, fmt.Sprintf("Round %d/%d", i+1, totalRounds))
 
 		var output string
 		if round.IsCommand() {
 			var err error
-			output, err = jiradozer.RunCommand(ctx, stepName, data, round.Command, workDir, logger)
+			output, err = jiradozer.RunCommand(r.ctx, stepName, data, round.Command, r.cfg.WorkDir, r.logger)
 			if err != nil {
 				return fmt.Errorf("run-step %s round %d/%d: %w", stepName, i+1, totalRounds, err)
 			}
 		} else {
 			roundCfg := jiradozer.ResolveRound(round, resolved)
-			res, err := runStepAgentDetailed(ctx, stepName, data, roundCfg, workDir, "", "", renderer, logger)
+			res, err := r.runAgent(r.ctx, stepName, data, roundCfg, r.cfg.WorkDir, "", "", r.renderer, r.logger)
 			if res.SessionID != "" {
 				sessionIDs = append(sessionIDs, res.SessionID)
 			}
@@ -576,12 +608,39 @@ func runSingleStepRounds(ctx context.Context, stepName string, data jiradozer.Pr
 	if combined != "" {
 		fmt.Printf("=== %s output (%d rounds) ===\n%s\n", stepName, totalRounds, combined)
 	} else {
-		logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
+		r.logger.Warn("agent produced no text output across all rounds", "step", stepName, "session_ids", sessionIDs)
 	}
-	if stepName == "plan" {
-		jiradozer.PersistPlan(workDir, combined, logger)
+	return r.finish(stepCfg, combined, totalRounds)
+}
+
+func (r *singleStepRun) finish(stepCfg jiradozer.StepConfig, output string, totalRounds int) error {
+	if r.stepName == "plan" {
+		jiradozer.PersistPlan(r.cfg.WorkDir, output, r.logger)
+	}
+	if r.postResult && r.poster == nil {
+		return fmt.Errorf("--post-result requires a comment-capable tracker")
+	}
+	if r.postResult {
+		if err := postStepResultComment(r.ctx, r.poster, r.issue, r.stepName, stepCfg, output, totalRounds); err != nil {
+			return fmt.Errorf("post step result comment: %w", err)
+		}
 	}
 	return nil
+}
+
+func postStepResultComment(ctx context.Context, t jiradozer.CommentPoster, issue *tracker.Issue, stepName string, stepCfg jiradozer.StepConfig, output string, totalRounds int) error {
+	if totalRounds > 0 {
+		if stepCfg.RoundCommentTemplate == "" {
+			return fmt.Errorf("step %q has no round_comment_template configured", stepName)
+		}
+		_, err := jiradozer.PostRoundComment(ctx, t, issue.ID, stepName, stepCfg, output, totalRounds, totalRounds)
+		return err
+	}
+	if stepCfg.CommentTemplate == "" {
+		return fmt.Errorf("step %q has no comment_template configured", stepName)
+	}
+	_, err := jiradozer.PostStepComment(ctx, t, issue.ID, stepName, stepCfg, output)
+	return err
 }
 
 // readFileOrStdin reads from the given path, or from stdin if path is "-".

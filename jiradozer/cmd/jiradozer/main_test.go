@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
 )
 
 func testMainLogger(_ testing.TB) *slog.Logger {
@@ -66,6 +68,42 @@ func (r *restoreDiscoveryTracker) AddLabel(_ context.Context, _ string, _ string
 
 func (r *restoreDiscoveryTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
 	return nil
+}
+
+type recordingRunTracker struct {
+	comments []recordedComment
+}
+
+type recordedComment struct {
+	issueID string
+	body    string
+}
+
+func (r *recordingRunTracker) PostComment(_ context.Context, issueID string, body string) (tracker.Comment, error) {
+	r.comments = append(r.comments, recordedComment{issueID: issueID, body: body})
+	return tracker.Comment{CreatedAt: time.Now()}, nil
+}
+
+type failingRunTracker struct{}
+
+func (failingRunTracker) PostComment(_ context.Context, _ string, _ string) (tracker.Comment, error) {
+	return tracker.Comment{}, errors.New("tracker unavailable")
+}
+
+func runSingleStepForTest(t testing.TB, stepName string, issue *tracker.Issue, cfg *jiradozer.Config, poster jiradozer.CommentPoster, postResult bool, output string) error {
+	t.Helper()
+	return (&singleStepRun{
+		ctx:        context.Background(),
+		stepName:   stepName,
+		issue:      issue,
+		cfg:        cfg,
+		poster:     poster,
+		postResult: postResult,
+		logger:     testMainLogger(t),
+		runAgent: func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+			return jiradozer.StepAgentResult{Output: output, SessionID: "session-1"}, nil
+		},
+	}).run()
 }
 
 type restoreWTManager struct{}
@@ -175,6 +213,174 @@ func TestResolveRepoName(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestRunSingleStepPostResultPostsRenderedComment(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\nstep={{.Step}}\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, true, "\n planned output \n")
+	require.NoError(t, err)
+	require.Len(t, recorder.comments, 1)
+	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
+	assert.Equal(t, "## Plan Complete\n\nstep=plan\n\n planned output \n", recorder.comments[0].body)
+}
+
+func TestRunSingleStepPostResultPostsEmptyOutput(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, true, "")
+	require.NoError(t, err)
+	require.Len(t, recorder.comments, 1)
+	assert.Equal(t, "## Plan Complete\n\n", recorder.comments[0].body)
+}
+
+func TestRunSingleStepPostResultReturnsPostError(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, failingRunTracker{}, true, "planned output")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "post step result comment")
+	assert.ErrorContains(t, err, "tracker unavailable")
+}
+
+func TestRunSingleStepPostResultRequiresPoster(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, nil, true, "planned output")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "--post-result requires a comment-capable tracker")
+}
+
+func TestRunSingleStepPostResultRequiresCommentTemplate(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{Prompt: "plan {{.Identifier}}"}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, true, "planned output")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no comment_template configured")
+	assert.Empty(t, recorder.comments)
+}
+
+func TestRunSingleStepPostResultFalseDoesNotPost(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{
+		Prompt:          "plan {{.Identifier}}",
+		CommentTemplate: "## {{.Heading}} Complete\n\n{{.Output}}",
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, false, "planned output")
+	require.NoError(t, err)
+	assert.Empty(t, recorder.comments)
+}
+
+func TestRunSingleStepRoundsPostResultPostsCombinedRoundComment(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Validate = jiradozer.StepConfig{
+		RoundCommentTemplate: "## {{.Heading}} Round {{.Round}}/{{.TotalRounds}}\n\n{{.Output}}",
+		Rounds: []jiradozer.RoundConfig{
+			{Command: "printf 'round one'"},
+			{Command: "printf 'round two'"},
+		},
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStep(context.Background(), "validate", issue, cfg, "", recorder, true, nil, testMainLogger(t))
+	require.NoError(t, err)
+	require.Len(t, recorder.comments, 1)
+	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
+	assert.Equal(t, "## Validate Round 2/2\n\nround one\n\n---\n\nround two", recorder.comments[0].body)
+}
+
+func TestRunSingleStepRoundsPostResultRequiresRoundCommentTemplate(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Validate = jiradozer.StepConfig{
+		Rounds: []jiradozer.RoundConfig{
+			{Command: "printf 'round output'"},
+		},
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStep(context.Background(), "validate", issue, cfg, "", recorder, true, nil, testMainLogger(t))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no round_comment_template configured")
+	assert.Empty(t, recorder.comments)
+}
+
+func TestPostResultRequiresRunStep(t *testing.T) {
+	app := &cliapp.App{Logger: testMainLogger(t)}
+
+	err := run(context.Background(), app, runArgs{postResult: true})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "--post-result requires --run-step")
+}
+
+func TestRunCommandPostResultFlagReachesSingleStepPath(t *testing.T) {
+	workDir := t.TempDir()
+	cfgPath := writeRunConfig(t, "local", workDir)
+	prev := runStepAgentDetailed
+	runStepAgentDetailed = func(_ context.Context, _ string, data jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+		assert.Equal(t, "LOCAL-1", data.Identifier)
+		return jiradozer.StepAgentResult{Output: "cli planned output", SessionID: "session-1"}, nil
+	}
+	t.Cleanup(func() { runStepAgentDetailed = prev })
+
+	opts := &cliapp.Options{ToolName: "jiradozer"}
+	cmd := newRootCommand(opts)
+	app := &cliapp.App{Logger: testMainLogger(t)}
+	cmd.SetArgs([]string{
+		"--config", cfgPath,
+		"run",
+		"--description", "CLI post result task",
+		"--run-step", "plan",
+		"--post-result",
+	})
+
+	require.NoError(t, cmd.ExecuteContext(cliapp.WithApp(context.Background(), app)))
+
+	lt, err := local.NewTracker(filepath.Join(workDir, ".jiradozer", "issues"))
+	require.NoError(t, err)
+	issue, err := lt.FetchIssue(context.Background(), "LOCAL-1")
+	require.NoError(t, err)
+	comments, err := lt.FetchComments(context.Background(), issue.ID, time.Time{})
+	require.NoError(t, err)
+	require.Len(t, comments, 1)
+	assert.Equal(t, "## Plan Complete\n\ncli planned output", comments[0].Body)
 }
 
 func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
