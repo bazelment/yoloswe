@@ -258,6 +258,19 @@ func TestValidateReloadCompatibleRejectsWorkDirChanges(t *testing.T) {
 	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "work_dir change")
 }
 
+func TestValidateReloadCompatibleRejectsRepoNameChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "OPS"}},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "team/repository filter change")
+}
+
 func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Restored"}
 	cmd := exec.Command("sh", "-c", "exit 0")
@@ -320,6 +333,87 @@ func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 	cancel()
 	for range ch {
 	}
+}
+
+func TestRestoreFromEnvDoesNotMarkSkippedSnapshotsSeen(t *testing.T) {
+	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Skipped"}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	require.NoError(t, jiradozer.WriteRuntimeStateAtomically(statePath, jiradozer.RuntimeState{
+		ActiveWorkflow: []jiradozer.ManagedWorkflowSnapshot{
+			{Issue: issue},
+		},
+	}))
+	t.Setenv(restoreStateEnv, statePath)
+
+	listed := make(chan struct{}, 1)
+	issueTracker := &restoreDiscoveryTracker{listed: listed, issues: []*tracker.Issue{issue}}
+	cfg := &jiradozer.Config{Source: jiradozer.SourceConfig{MaxConcurrent: 1}}
+	disc := jiradozer.NewDiscovery(issueTracker, tracker.IssueFilter{}, time.Hour, testMainLogger(t))
+	s := &teamSupervisor{
+		cfg:    cfg,
+		logger: testMainLogger(t),
+		disc:   disc,
+		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+	}
+
+	require.NoError(t, s.restoreFromEnv())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := disc.Run(ctx)
+	require.Eventually(t, func() bool {
+		select {
+		case <-listed:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case got := <-ch:
+		require.Equal(t, issue.Identifier, got.Identifier)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for skipped restored issue to rediscover")
+	}
+	cancel()
+	for range ch {
+	}
+}
+
+func TestTeamSupervisorReloadUpdatesConfigAndOrchestrator(t *testing.T) {
+	workDir := t.TempDir()
+	cfgPath := writeRunConfig(t, "linear", workDir)
+	args := runArgs{configPath: cfgPath, sourceFilters: []string{tracker.FilterTeam + "=ENG"}}
+	cfg, err := loadRunConfig(args)
+	require.NoError(t, err)
+	cfg.Source.MaxConcurrent = 1
+
+	issueTracker := &restoreDiscoveryTracker{}
+	s := &teamSupervisor{
+		cfg:    cfg,
+		args:   args,
+		logger: testMainLogger(t),
+		disc:   jiradozer.NewDiscovery(issueTracker, cfg.Source.ToFilter(), cfg.PollInterval, testMainLogger(t)),
+		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+	}
+
+	content, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	content = bytes.Replace(content, []byte("poll_interval: 15s"), []byte("poll_interval: 1s"), 1)
+	content = append(content, []byte(`
+source:
+    filters:
+        team: ENG
+    max_concurrent: 2
+`)...)
+	require.NoError(t, os.WriteFile(cfgPath, content, 0o600))
+
+	s.reload()
+
+	require.Equal(t, 2, s.cfg.Source.MaxConcurrent)
+	require.Equal(t, time.Second, s.cfg.PollInterval)
+	require.Equal(t, 2, s.orch.ConfigSnapshot().Source.MaxConcurrent)
 }
 
 // TestDryRunFlagPlacement verifies --dry-run is honored regardless of where

@@ -148,8 +148,8 @@ func validateReloadCompatible(oldCfg, newCfg *jiradozer.Config) error {
 	if oldCfg.WorkDir != newCfg.WorkDir {
 		return fmt.Errorf("work_dir change is not supported during reload: %q -> %q", oldCfg.WorkDir, newCfg.WorkDir)
 	}
-	if oldCfg.Tracker.Kind == "github" && oldCfg.Source.Filters[tracker.FilterTeam] != newCfg.Source.Filters[tracker.FilterTeam] {
-		return fmt.Errorf("github repository filter change is not supported during reload")
+	if resolveRepoName(oldCfg) != resolveRepoName(newCfg) {
+		return fmt.Errorf("source team/repository filter change is not supported during reload")
 	}
 	return nil
 }
@@ -182,11 +182,8 @@ func (s *teamSupervisor) restoreFromEnv() error {
 	if err != nil {
 		return fmt.Errorf("restore runtime state: %w", err)
 	}
-	s.orch.RestoreActive(state.ActiveWorkflow)
-	for _, snap := range state.ActiveWorkflow {
-		if snap.Issue != nil && snap.Issue.ID != "" {
-			s.disc.MarkSeen(snap.Issue.ID)
-		}
+	for _, issueID := range s.orch.RestoreActive(state.ActiveWorkflow) {
+		s.disc.MarkSeen(issueID)
 	}
 	s.logger.Info("restored team-mode runtime state",
 		"state", statePath,

@@ -683,7 +683,8 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 // RestoreActive starts wait goroutines for active child processes restored
 // after syscall.Exec. The restored children must still be children of this
 // process; that is true for an in-place exec restart.
-func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) {
+func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) []string {
+	restoredIssueIDs := make([]string, 0, len(snapshots))
 	for _, snap := range snapshots {
 		if snap.PID <= 0 || snap.Issue.ID == "" {
 			continue
@@ -702,10 +703,12 @@ func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) {
 		}
 		o.active[mw.issue.ID] = mw
 		o.mu.Unlock()
+		restoredIssueIDs = append(restoredIssueIDs, mw.issue.ID)
 		o.emitStatus(mw, StepInit, nil)
 		o.wg.Add(1)
 		go o.waitRestored(mw)
 	}
+	return restoredIssueIDs
 }
 
 func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
