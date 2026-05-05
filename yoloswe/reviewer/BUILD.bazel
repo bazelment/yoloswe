@@ -42,6 +42,7 @@ go_test(
     deps = [
         "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/claude/render",
         "//agent-cli-wrapper/codex",
     ],
 )

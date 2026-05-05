@@ -614,3 +614,34 @@ func TestSessionControlRequestMalformed_RepliesWithDeny(t *testing.T) {
 	require.True(t, ok, "expected response object, got %v", msg)
 	require.Equal(t, "req-bad-1", resp["request_id"])
 }
+
+// TestSessionDispatchInit_LenientFallbackOnMalformedField verifies that
+// a system/init frame with one malformed optional field (e.g. wrong-typed
+// `tools`) still drives the session to ready: ReadyEvent fires and SessionInfo
+// is populated from fields that decoded cleanly. Strict AsInit() returns false
+// on the bad field, but handleSystem now falls back to InitPayloadLenient()
+// instead of stranding callers waiting on a session that never becomes ready.
+func TestSessionDispatchInit_LenientFallbackOnMalformedField(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	// `tools` is documented as []string; sending a string here makes strict
+	// AsInit() fail while leaving model/cwd/session_id decodable per-field.
+	line := mkSystem(t, "init", map[string]interface{}{
+		"model":               "claude-sonnet-4-7",
+		"cwd":                 "/tmp/demo",
+		"claude_code_version": "9.9.9",
+		"permissionMode":      "default",
+		"tools":               "this-should-be-an-array",
+	})
+	s.handleLine(line)
+
+	ev := waitForEvent(t, s, func(e Event) bool {
+		_, ok := e.(ReadyEvent)
+		return ok
+	}, time.Second)
+	ready, ok := ev.(ReadyEvent)
+	require.True(t, ok)
+	require.Equal(t, "claude-sonnet-4-7", ready.Info.Model)
+	require.Equal(t, "/tmp/demo", ready.Info.WorkDir)
+	require.Equal(t, "sess-1", ready.Info.SessionID)
+}

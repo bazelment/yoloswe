@@ -170,6 +170,21 @@ func TestMessageParser_ResultErrorSubtypeMarksFailed(t *testing.T) {
 	assert.Equal(t, StatusFailed, m.Meta().Status)
 }
 
+func TestMessageParser_AssistantPreservesUnknownBlock(t *testing.T) {
+	m := NewSessionModel(0)
+	p := NewMessageParser(m)
+
+	msg, err := FromLiveNDJSON([]byte(`{"type":"assistant","session_id":"s1","uuid":"u1","message":{"id":"m1","type":"message","role":"assistant","model":"claude","stop_reason":null,"content":[{"type":"future_block_xyz","payload":"opaque"}]}}`))
+	require.NoError(t, err)
+	p.HandleMessage(msg)
+
+	output := m.Output()
+	require.Len(t, output, 1)
+	assert.Equal(t, OutputTypeText, output[0].Type)
+	assert.Contains(t, output[0].Content, "future_block_xyz")
+	assert.Contains(t, output[0].Content, "opaque")
+}
+
 func TestMessageParser_InitLenientFallback(t *testing.T) {
 	m := NewSessionModel(0)
 	p := NewMessageParser(m)

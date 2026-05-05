@@ -126,6 +126,15 @@ func (p *MessageParser) handleAssistant(msg protocol.AssistantMessage) {
 				ToolState: ToolStateRunning,
 				StartTime: now,
 			})
+		case protocol.UnknownContentBlock:
+			// Surface unknown blocks rather than dropping them so the
+			// transcript stays in sync with the wire protocol. The raw JSON
+			// payload is preserved by the protocol decoder.
+			p.model.AppendOutput(OutputLine{
+				Timestamp: time.Now(),
+				Type:      OutputTypeText,
+				Content:   fmt.Sprintf("[unknown content block: %s] %s", b.Type, string(b.Raw)),
+			})
 		}
 	}
 }

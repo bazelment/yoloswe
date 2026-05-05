@@ -300,6 +300,13 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 						}
 						currentTurn.Response += b.Text
 					}
+				case protocol.ThinkingBlock:
+					if b.Thinking != "" {
+						if currentTurn.Response != "" {
+							currentTurn.Response += "\n"
+						}
+						currentTurn.Response += b.Thinking
+					}
 				case protocol.ToolUseBlock:
 					currentTurn.ToolCalls = append(currentTurn.ToolCalls, ToolCall{
 						Name:  b.Name,
@@ -307,6 +314,15 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 						Input: b.Input,
 						State: "running",
 					})
+				case protocol.UnknownContentBlock:
+					// Preserve unknown blocks in the response transcript so
+					// analysis output stays in sync with the wire protocol.
+					if len(b.Raw) > 0 {
+						if currentTurn.Response != "" {
+							currentTurn.Response += "\n"
+						}
+						currentTurn.Response += fmt.Sprintf("[unknown content block: %s] %s", b.Type, string(b.Raw))
+					}
 				}
 			}
 

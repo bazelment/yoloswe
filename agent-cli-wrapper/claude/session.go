@@ -715,8 +715,13 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 	if msg.Subtype == string(protocol.SystemSubtypeInit) {
 		p, ok := msg.AsInit()
 		if !ok {
-			slog.Warn("failed to decode init payload")
-			return
+			// Fall back to lenient field-by-field decode so a single malformed
+			// optional field (e.g. unexpected tools/agents shape) does not
+			// strand the session waiting for Ready forever. Mirrors the parser
+			// and analysis paths in bramble/sessionmodel and bramble/sessionanalysis.
+			slog.Warn("init payload strict decode failed; using lenient fallback")
+			loose := msg.InitPayloadLenient()
+			p = &loose
 		}
 		s.mu.Lock()
 		s.info = &SessionInfo{
