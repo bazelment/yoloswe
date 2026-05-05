@@ -174,6 +174,36 @@ func TestDiscovery_UpdateFilterAppliesToFuturePolls(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestDiscovery_UpdateAppliesFilterAndInterval(t *testing.T) {
+	mt := &mockDiscoveryTracker{
+		results: [][]*tracker.Issue{{}, {}, {}},
+	}
+	d := NewDiscovery(mt, tracker.IssueFilter{Filters: map[string]string{tracker.FilterTeam: "ENG"}}, time.Hour, testLogger(t))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := d.Run(ctx)
+	defer func() {
+		cancel()
+		for range ch {
+		}
+	}()
+
+	require.Eventually(t, func() bool {
+		mt.mu.Lock()
+		defer mt.mu.Unlock()
+		return len(mt.callArgs) >= 1
+	}, time.Second, 10*time.Millisecond)
+
+	d.Update(tracker.IssueFilter{Filters: map[string]string{tracker.FilterTeam: "INF"}}, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		mt.mu.Lock()
+		defer mt.mu.Unlock()
+		return len(mt.callArgs) >= 2 && mt.callArgs[len(mt.callArgs)-1].Filters[tracker.FilterTeam] == "INF"
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestDiscovery_ContextCancellation(t *testing.T) {
 	mt := &mockDiscoveryTracker{
 		results: [][]*tracker.Issue{{}},

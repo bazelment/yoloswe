@@ -90,6 +90,7 @@ type managedWorkflow struct {
 	worktreePath string
 	branch       string
 	pid          int
+	cancelled    bool
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -438,6 +439,9 @@ func (o *Orchestrator) Cancel(issueID string) {
 		return
 	}
 	if mw.pid > 0 {
+		o.mu.Lock()
+		mw.cancelled = true
+		o.mu.Unlock()
 		if proc, err := os.FindProcess(mw.pid); err == nil {
 			_ = proc.Signal(os.Interrupt)
 		}
@@ -470,6 +474,14 @@ func (o *Orchestrator) PreservedWorktrees() []PreservedWorktree {
 	cp := make([]PreservedWorktree, len(o.preserved))
 	copy(cp, o.preserved)
 	return cp
+}
+
+// RestorePreservedWorktrees restores preserved-worktree reporting state after
+// an exec restart.
+func (o *Orchestrator) RestorePreservedWorktrees(preserved []PreservedWorktree) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.preserved = append(o.preserved, preserved...)
 }
 
 // maxStartFailures is the number of consecutive non-transient Start failures
@@ -686,7 +698,7 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) []string {
 	restoredIssueIDs := make([]string, 0, len(snapshots))
 	for _, snap := range snapshots {
-		if snap.PID <= 0 || snap.Issue.ID == "" {
+		if snap.PID <= 0 || snap.Issue == nil || snap.Issue.ID == "" {
 			continue
 		}
 		mw := &managedWorkflow{
@@ -725,12 +737,22 @@ func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
 		o.logger.Info("restored subprocess completed", "issue", mw.issue.Identifier, "pid", mw.pid)
 		o.emitStatus(mw, StepDone, nil)
 		o.cleanup(context.Background(), mw, StepDone)
+	case o.wasCancelled(mw) || (status.Signaled() && status.Signal() == syscall.SIGINT):
+		o.logger.Info("restored subprocess cancelled", "issue", mw.issue.Identifier, "pid", mw.pid)
+		o.emitStatus(mw, StepCancelled, nil)
+		o.cleanup(context.Background(), mw, StepCancelled)
 	default:
 		err := fmt.Errorf("subprocess pid %d exited with wait status %d", mw.pid, status)
 		o.logger.Error("restored subprocess failed", "issue", mw.issue.Identifier, "pid", mw.pid, "status", int(status))
 		o.emitStatus(mw, StepFailed, err)
 		o.cleanup(context.Background(), mw, StepFailed)
 	}
+}
+
+func (o *Orchestrator) wasCancelled(mw *managedWorkflow) bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return mw.cancelled
 }
 
 // sanitizeForFilename replaces characters that are problematic in file paths

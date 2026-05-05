@@ -15,7 +15,8 @@ import (
 //
 //nolint:govet // fieldalignment: JSON shape is grouped by supervisor concern.
 type RuntimeState struct {
-	ActiveWorkflow []ManagedWorkflowSnapshot `json:"active_workflows"`
+	ActiveWorkflow    []ManagedWorkflowSnapshot `json:"active_workflows"`
+	PreservedWorktree []PreservedWorktree       `json:"preserved_worktrees,omitempty"`
 }
 
 // ManagedWorkflowSnapshot is a serializable view of one active child workflow.
@@ -100,5 +101,16 @@ func cloneIssue(issue *tracker.Issue) *tracker.Issue {
 	cp := *issue
 	cp.Labels = append([]string(nil), issue.Labels...)
 	cp.LabelIDs = append([]string(nil), issue.LabelIDs...)
+	cp.Description = cloneStringPtr(issue.Description)
+	cp.BranchName = cloneStringPtr(issue.BranchName)
+	cp.URL = cloneStringPtr(issue.URL)
+	return &cp
+}
+
+func cloneStringPtr(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	cp := *s
 	return &cp
 }

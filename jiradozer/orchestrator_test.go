@@ -273,6 +273,57 @@ func TestOrchestrator_RestoreActiveWaitsForChildPID(t *testing.T) {
 	require.Equal(t, 0, orch.ActiveCount())
 }
 
+func TestOrchestrator_RestoreActiveSkipsNilIssue(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	orch := NewOrchestrator(&mockDiscoveryTracker{}, cfg, newMockWTManager(), "", testLogger(t))
+
+	restored := orch.RestoreActive([]ManagedWorkflowSnapshot{{PID: 1234}})
+
+	require.Empty(t, restored)
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
+func TestOrchestrator_RestoredCancelEmitsCancelled(t *testing.T) {
+	cfg := testOrchestratorConfig()
+	orch := NewOrchestrator(&mockDiscoveryTracker{}, cfg, newMockWTManager(), "", testLogger(t))
+
+	cmd := exec.Command("sh", "-c", "trap 'exit 130' INT; sleep 10")
+	require.NoError(t, cmd.Start())
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Restored"}
+	restored := orch.RestoreActive([]ManagedWorkflowSnapshot{
+		{
+			Issue:        issue,
+			PID:          cmd.Process.Pid,
+			Branch:       "jiradozer/ENG-1",
+			WorktreePath: "/tmp/worktrees/jiradozer/ENG-1",
+			StartedAt:    time.Now(),
+		},
+	})
+	require.Equal(t, []string{issue.ID}, restored)
+
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepInit, status.Step)
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored StepInit")
+	}
+
+	orch.Cancel(issue.ID)
+
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepCancelled, status.Step)
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored StepCancelled")
+	}
+
+	orch.Wait()
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
 func TestOrchestrator_DuplicateIssue(t *testing.T) {
 	cfg := testOrchestratorConfig()
 

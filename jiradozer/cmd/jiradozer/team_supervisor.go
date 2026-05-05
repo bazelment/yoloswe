@@ -157,7 +157,8 @@ func validateReloadCompatible(oldCfg, newCfg *jiradozer.Config) error {
 func (s *teamSupervisor) execRestart() error {
 	statePath := filepath.Join(s.logDir, "team-state", fmt.Sprintf("%d.json", os.Getpid()))
 	state := jiradozer.RuntimeState{
-		ActiveWorkflow: s.orch.ActiveWorkflowSnapshots(),
+		ActiveWorkflow:    s.orch.ActiveWorkflowSnapshots(),
+		PreservedWorktree: s.orch.PreservedWorktrees(),
 	}
 	if err := jiradozer.WriteRuntimeStateAtomically(statePath, state); err != nil {
 		return err
@@ -185,6 +186,7 @@ func (s *teamSupervisor) restoreFromEnv() error {
 	for _, issueID := range s.orch.RestoreActive(state.ActiveWorkflow) {
 		s.disc.MarkSeen(issueID)
 	}
+	s.orch.RestorePreservedWorktrees(state.PreservedWorktree)
 	s.logger.Info("restored team-mode runtime state",
 		"state", statePath,
 		"active_children", len(state.ActiveWorkflow),
