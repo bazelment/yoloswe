@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -79,6 +80,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             10,
 		RoundsCapable:        false,
 		RoundCommentTemplate: "",
+		IdleTimeout:          5 * time.Minute,
+		IdleTimeoutComment:   "Tracks gap between log lines, not wall-clock-since-start, so a slow-but-progressing agent is not interrupted. 0 disables the watchdog.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "build",
@@ -90,6 +93,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             30,
 		RoundsCapable:        true,
 		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:          20 * time.Minute,
+		IdleTimeoutComment:   "Build runs the longest because tests can take many minutes; the gap-based watchdog only trips when output truly stops.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "create_pr",
@@ -101,6 +106,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             5,
 		RoundsCapable:        false,
 		RoundCommentTemplate: "",
+		IdleTimeout:          5 * time.Minute,
+		IdleTimeoutComment:   "create_pr is short — gh + git push only — so a tight timeout catches gh hangs quickly.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "validate",
@@ -112,6 +119,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             10,
 		RoundsCapable:        true,
 		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:          20 * time.Minute,
+		IdleTimeoutComment:   "Validate runs tests + linters (potentially long); the gap-based watchdog only trips when output truly stops.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "ship",
@@ -123,6 +132,8 @@ func bootstrapYAML() ([]byte, error) {
 		MaxTurns:             10,
 		RoundsCapable:        true,
 		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:          5 * time.Minute,
+		IdleTimeoutComment:   "Ship is short — gh PR-update only — so a tight timeout catches gh hangs quickly.",
 	}))
 
 	b.WriteString(bootstrapTopLevelTail)
@@ -279,15 +290,17 @@ const roundsExampleBlock = `    # Multi-round execution. Replaces the single ` +
 
 // stepBlock is the data we need to lay out one step in the YAML.
 type stepBlock struct {
-	Key                  string // YAML key, e.g. "plan"
-	Heading              string // human heading shown in the section comment
-	Description          string // one-paragraph blurb explaining what this step does
-	Prompt               string // canonical prompt (required)
-	CommentTemplate      string // canonical comment template (required for single-shot steps)
-	PermissionMode       string // step default permission mode
-	RoundCommentTemplate string // canonical round comment template (only used when RoundsCapable)
-	MaxTurns             int    // step default max turns
-	RoundsCapable        bool   // whether bootstrap should seed round_comment_template uncommented
+	Key                  string        // YAML key, e.g. "plan"
+	Heading              string        // human heading shown in the section comment
+	Description          string        // one-paragraph blurb explaining what this step does
+	Prompt               string        // canonical prompt (required)
+	CommentTemplate      string        // canonical comment template (required for single-shot steps)
+	PermissionMode       string        // step default permission mode
+	RoundCommentTemplate string        // canonical round comment template (only used when RoundsCapable)
+	IdleTimeoutComment   string        // step-specific blurb describing why this timeout (rendered in YAML comment); only emitted when IdleTimeout > 0
+	MaxTurns             int           // step default max turns
+	IdleTimeout          time.Duration // step default idle timeout; 0 = omit from rendered YAML
+	RoundsCapable        bool          // whether bootstrap should seed round_comment_template uncommented
 }
 
 // renderStepBlock emits one step's YAML with field-level comments. Optional
@@ -296,7 +309,7 @@ type stepBlock struct {
 func renderStepBlock(s stepBlock) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# ---- %s ----\n", s.Heading)
-	fmt.Fprintf(&b, "# %s\n", wrapComment(s.Description, 76))
+	fmt.Fprintf(&b, "# %s\n", wrapComment(s.Description, 76, "# "))
 	fmt.Fprintf(&b, "%s:\n", s.Key)
 
 	b.WriteString("    # Initial prompt; Go text/template rendered with issue data (PromptData).\n")
@@ -316,6 +329,18 @@ func renderStepBlock(s stepBlock) string {
 
 	fmt.Fprintf(&b, "    # Max agent turns before giving up (Claude provider only).\n")
 	fmt.Fprintf(&b, "    max_turns: %d\n", s.MaxTurns)
+
+	if s.IdleTimeout > 0 {
+		b.WriteString("    # Parent kills the subprocess if it emits no log line for this long while\n")
+		// firstLinePrefix is 22 visible chars; subtract from the 76-char
+		// target so wrapped continuation lines stay inside the right margin.
+		const firstLinePrefix = "    # inside this step. "
+		const contPrefix = "    # "
+		fmt.Fprintf(&b, "%s%s\n",
+			firstLinePrefix,
+			wrapComment(s.IdleTimeoutComment, 76-len(firstLinePrefix), contPrefix))
+		fmt.Fprintf(&b, "    idle_timeout: %s\n", formatDurationShort(s.IdleTimeout))
+	}
 
 	if s.RoundsCapable {
 		b.WriteString("    # Per-round comment posted when this step runs as multi-round.\n")
@@ -353,6 +378,19 @@ func renderStepBlock(s stepBlock) string {
 	return b.String()
 }
 
+// formatDurationShort trims trailing "0s" / "0m" so 5m0s renders as "5m"
+// and 1h0m as "1h" — the form a human would write into YAML.
+func formatDurationShort(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
 // indentBlock prefixes every non-empty line of s with prefix. Empty lines
 // stay truly empty so the rendered YAML doesn't carry trailing-whitespace
 // noise in `|-` block scalars.
@@ -370,10 +408,10 @@ func indentBlock(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// wrapComment soft-wraps s at width characters, joining lines with
-// "\n# " so the result can be inlined into a comment block. The first
-// line is returned without a leading "# " (the caller already wrote one).
-func wrapComment(s string, width int) string {
+// wrapComment soft-wraps s at width characters and joins continuation lines
+// with linePrefix. The first line has no prefix (the caller already wrote
+// the leading "# " itself).
+func wrapComment(s string, width int, linePrefix string) string {
 	words := strings.Fields(s)
 	if len(words) == 0 {
 		return ""
@@ -389,5 +427,5 @@ func wrapComment(s string, width int) string {
 		current += " " + w
 	}
 	lines = append(lines, current)
-	return strings.Join(lines, "\n# ")
+	return strings.Join(lines, "\n"+linePrefix)
 }

@@ -37,6 +37,7 @@ go_test(
     srcs = [
         "delegator_runner_test.go",
         "delegator_tools_test.go",
+        "event_handler_test.go",
         "manager_provider_fallback_test.go",
         "manager_test.go",
         "provider_runner_test.go",
@@ -49,6 +50,7 @@ go_test(
     ],
     embed = [":session"],
     deps = [
+        "//agent-cli-wrapper/claude",
         "//bramble/sessionmodel",
         "//multiagent/agent",
         "//wt",

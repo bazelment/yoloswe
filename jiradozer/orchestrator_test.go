@@ -775,11 +775,12 @@ func TestRunWithDiscovery_WorktreeExistsNoClearSeen(t *testing.T) {
 //nolint:govet // fieldalignment: embedded struct ordering is intentional for readability
 type mockClaimTracker struct {
 	mockDiscoveryTracker
-	stateUpdates []string // issueIDs passed to UpdateIssueState
-	stateIDs     []string // stateIDs passed to UpdateIssueState
-	labelIssues  []string // issueIDs passed to AddLabel
-	labelNames   []string // labels passed to AddLabel
-	claimMu      sync.Mutex
+	stateUpdates  []string // issueIDs passed to UpdateIssueState
+	stateIDs      []string // stateIDs passed to UpdateIssueState
+	labelIssues   []string // issueIDs passed to AddLabel
+	labelNames    []string // labels passed to AddLabel
+	removedLabels []string // labels passed to RemoveLabel
+	claimMu       sync.Mutex
 }
 
 func (m *mockClaimTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
@@ -805,6 +806,19 @@ func (m *mockClaimTracker) AddLabel(_ context.Context, issueID string, label str
 	return nil
 }
 
+func (m *mockClaimTracker) RemoveLabel(_ context.Context, _ string, label string) error {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	m.removedLabels = append(m.removedLabels, label)
+	return nil
+}
+
+func (m *mockClaimTracker) getRemovedLabels() []string {
+	m.claimMu.Lock()
+	defer m.claimMu.Unlock()
+	return append([]string(nil), m.removedLabels...)
+}
+
 func (m *mockClaimTracker) getStateUpdates() ([]string, []string) {
 	m.claimMu.Lock()
 	defer m.claimMu.Unlock()
@@ -817,10 +831,12 @@ func (m *mockClaimTracker) getLabelCalls() ([]string, []string) {
 	return append([]string(nil), m.labelIssues...), append([]string(nil), m.labelNames...)
 }
 
-// TestOrchestrator_StartClaimsInProgress verifies that Start() transitions the
-// issue to "In Progress" and adds the LockLabel before launching the subprocess,
-// providing a distributed lock so other jiradozer processes won't rediscover
-// the same issue.
+// TestOrchestrator_StartClaimsInProgress verifies the two-phase claim:
+// addLockLabel runs before cmd.Start (so the label signals intent
+// across processes immediately), and transitionToInProgress runs only
+// after cmd.Start succeeds (so failures between worktree creation and
+// cmd.Start leave the issue rediscoverable). Together they form a
+// distributed lock against concurrent jiradozer processes.
 func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	cfg.States.InProgress = "In Progress"
@@ -856,6 +872,93 @@ func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
 	require.Len(t, labelIssues, 1, "expected exactly one AddLabel call")
 	require.Equal(t, "issue-1", labelIssues[0])
 	require.Equal(t, LockLabel, labelNames[0])
+}
+
+// TestOrchestrator_StartReleasesLockLabelOnLogOpenFailure verifies that
+// when OpenFile fails after addLockLabel has attached the lock label,
+// Start() releases the label and never transitions the issue state, so
+// discovery's state-filtered queries can rediscover the issue.
+//
+// Forces OpenFile failure by setting logDir to a regular file path: the
+// per-issue log path then has a file (not directory) as its parent.
+func TestOrchestrator_StartReleasesLockLabelOnLogOpenFailure(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	// logDir is a regular file, not a directory — OpenFile will fail
+	// because the log path's parent is not a directory.
+	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(tmpFile, nil, 0o600))
+
+	wtm := newMockWTManagerWithDir(t)
+
+	issue := &tracker.Issue{
+		ID:         "issue-1",
+		Identifier: "ENG-1",
+		Title:      "Test",
+		TeamID:     "team-eng",
+	}
+
+	mt := &mockClaimTracker{}
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode("/bin/true", nil, tmpFile)
+
+	err := orch.Start(context.Background(), issue)
+	require.Error(t, err, "OpenFile must fail when logDir is a regular file")
+	require.Contains(t, err.Error(), "open log file")
+
+	// Lock label was added by addLockLabel and must be released.
+	removed := mt.getRemovedLabels()
+	require.Len(t, removed, 1, "expected lock label to be released after OpenFile failure")
+	require.Equal(t, LockLabel, removed[0])
+
+	// State transition is deferred until after cmd.Start succeeds, so
+	// it must not have happened — discovery's state filter still sees
+	// the issue and can retry.
+	stateUpdates, _ := mt.getStateUpdates()
+	require.Empty(t, stateUpdates,
+		"state must not transition to In Progress on log-open failure")
+
+	// Slot must also be unreserved so the next Start() can reuse it.
+	require.Equal(t, 0, orch.ActiveCount())
+}
+
+// TestOrchestrator_StartReleasesLockLabelOnCmdStartFailure verifies the
+// same lock-label release on the cmd.Start() failure path. Uses a
+// non-existent binary so exec.Cmd.Start fails fast.
+func TestOrchestrator_StartReleasesLockLabelOnCmdStartFailure(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	logDir := t.TempDir()
+	wtm := newMockWTManagerWithDir(t)
+
+	issue := &tracker.Issue{
+		ID:         "issue-1",
+		Identifier: "ENG-1",
+		Title:      "Test",
+		TeamID:     "team-eng",
+	}
+
+	mt := &mockClaimTracker{}
+	orch := NewOrchestrator(mt, cfg, wtm, "", testLogger(t))
+	// Path that exists in t.TempDir but is not executable — cmd.Start
+	// returns "permission denied" / "exec format error".
+	nonExec := filepath.Join(t.TempDir(), "definitely-not-a-binary")
+	require.NoError(t, os.WriteFile(nonExec, []byte("not a binary"), 0o600))
+	orch.SetSubprocessMode(nonExec, nil, logDir)
+
+	err := orch.Start(context.Background(), issue)
+	require.Error(t, err, "cmd.Start must fail for a non-executable binary")
+	require.Contains(t, err.Error(), "start subprocess")
+
+	removed := mt.getRemovedLabels()
+	require.Len(t, removed, 1, "expected lock label to be released after cmd.Start failure")
+	require.Equal(t, LockLabel, removed[0])
+
+	stateUpdates, _ := mt.getStateUpdates()
+	require.Empty(t, stateUpdates,
+		"state must not transition to In Progress on cmd.Start failure")
+
+	require.Equal(t, 0, orch.ActiveCount())
 }
 
 // TestRunWithDiscovery_ConcurrencyLimitKeepsPending verifies that a

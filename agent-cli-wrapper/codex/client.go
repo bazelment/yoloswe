@@ -661,31 +661,38 @@ func (c *Client) handleTokenCount(params json.RawMessage) {
 	var totalUsage, lastUsage *TokenUsage
 	if msg.Info != nil {
 		if msg.Info.TotalTokenUsage != nil {
-			totalUsage = &TokenUsage{
-				InputTokens:           msg.Info.TotalTokenUsage.InputTokens,
-				CachedInputTokens:     msg.Info.TotalTokenUsage.CachedInputTokens,
-				OutputTokens:          msg.Info.TotalTokenUsage.OutputTokens,
-				ReasoningOutputTokens: msg.Info.TotalTokenUsage.ReasoningOutputTokens,
-				TotalTokens:           msg.Info.TotalTokenUsage.TotalTokens,
-			}
+			cp := *msg.Info.TotalTokenUsage
+			totalUsage = &cp
 		}
-		if msg.Info.LastTokenUsage != nil {
-			lastUsage = &TokenUsage{
-				InputTokens:           msg.Info.LastTokenUsage.InputTokens,
-				CachedInputTokens:     msg.Info.LastTokenUsage.CachedInputTokens,
-				OutputTokens:          msg.Info.LastTokenUsage.OutputTokens,
-				ReasoningOutputTokens: msg.Info.LastTokenUsage.ReasoningOutputTokens,
-				TotalTokens:           msg.Info.LastTokenUsage.TotalTokens,
-			}
+		// Normalize a present-but-all-zero LastTokenUsage to nil so
+		// TokenUsageEvent subscribers see the same "absent" signal that
+		// PreferredUsage() and downstream consumers (replay,
+		// TurnCompletedEvent) already infer. Without this normalization,
+		// `last_token_usage: {}` on the wire would surface here as
+		// LastUsage = &TokenUsage{} while TurnCompletedEvent reports
+		// the cumulative TotalTokenUsage — internally inconsistent.
+		if msg.Info.LastTokenUsage != nil && !msg.Info.LastTokenUsage.isZero() {
+			cp := *msg.Info.LastTokenUsage
+			lastUsage = &cp
 		}
 	}
 
-	// Store usage in thread for TurnCompletedEvent
 	c.mu.RLock()
 	thread, ok := c.threads[notif.ConversationID]
 	c.mu.RUnlock()
-	if ok && lastUsage != nil {
-		thread.setLastUsage(lastUsage)
+	if ok {
+		// Use the centralized priority from TokenUsageInfo.PreferredUsage:
+		// per-turn LastTokenUsage when populated, else cumulative
+		// TotalTokenUsage. The cumulative fallback overstates per-turn
+		// counts on multi-turn threads (documented on TurnCompletedEvent);
+		// AgentResult consumers (multiagent/agent/codex_provider.go) treat
+		// this as a soft signal for runaway-detection, not accounting.
+		if preferred := msg.Info.PreferredUsage(); preferred != nil {
+			// Copy so the thread's stored value does not alias msg.Info's
+			// pointer (which is part of a stack-allocated unmarshaled value).
+			cp := *preferred
+			thread.setLastUsage(&cp)
+		}
 	}
 
 	c.emit(TokenUsageEvent{

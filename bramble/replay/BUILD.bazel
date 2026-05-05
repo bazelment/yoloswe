@@ -24,6 +24,7 @@ go_test(
     srcs = ["replay_test.go"],
     embed = [":replay"],
     deps = [
+        "//agent-cli-wrapper/codex",
         "//bramble/session",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

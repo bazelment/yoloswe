@@ -39,6 +39,12 @@ type MappedEvent struct { //nolint:govet // fieldalignment: keep semantic groupi
 	ExitCode     int
 	DurationMs   int64
 	Success      bool
+	// UsageIsCumulative is set on MappedEventTokenUsage when the source
+	// notification only carried TotalTokenUsage (cumulative across the
+	// thread), not the per-turn LastTokenUsage. Consumers that render
+	// per-turn deltas (e.g. bramble/replay) must label or transform the
+	// value rather than show it as a per-turn count.
+	UsageIsCumulative bool
 }
 
 // ParseMappedNotification parses a Codex protocol notification into a
@@ -147,23 +153,29 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 		if err := json.Unmarshal(notif.Msg, &msg); err != nil {
 			return MappedEvent{}, false
 		}
-		if msg.Info == nil || msg.Info.TotalTokenUsage == nil {
+		src := msg.Info.PreferredUsage()
+		if src == nil {
 			return MappedEvent{}, false
 		}
-		var usage TurnUsage
-		if msg.Info.TotalTokenUsage != nil {
-			usage = TurnUsage{
-				InputTokens:           msg.Info.TotalTokenUsage.InputTokens,
-				CachedInputTokens:     msg.Info.TotalTokenUsage.CachedInputTokens,
-				OutputTokens:          msg.Info.TotalTokenUsage.OutputTokens,
-				ReasoningOutputTokens: msg.Info.TotalTokenUsage.ReasoningOutputTokens,
-				TotalTokens:           msg.Info.TotalTokenUsage.TotalTokens,
-			}
+		// Cumulative when PreferredUsage fell back to TotalTokenUsage.
+		// Use pointer identity rather than `LastTokenUsage == nil` —
+		// PreferredUsage also treats a non-nil but all-zero
+		// LastTokenUsage (`{}` on the wire) as absent and returns
+		// TotalTokenUsage; the two checks must stay in lockstep, or
+		// replay would skip baseline subtraction on cumulative data.
+		cumulative := msg.Info != nil && src == msg.Info.TotalTokenUsage
+		usage := TurnUsage{
+			InputTokens:           src.InputTokens,
+			CachedInputTokens:     src.CachedInputTokens,
+			OutputTokens:          src.OutputTokens,
+			ReasoningOutputTokens: src.ReasoningOutputTokens,
+			TotalTokens:           src.TotalTokens,
 		}
 		return MappedEvent{
-			Kind:     MappedEventTokenUsage,
-			ThreadID: notif.ConversationID,
-			Usage:    usage,
+			Kind:              MappedEventTokenUsage,
+			ThreadID:          notif.ConversationID,
+			Usage:             usage,
+			UsageIsCumulative: cumulative,
 		}, true
 	}
 

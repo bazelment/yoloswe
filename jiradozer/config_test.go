@@ -698,6 +698,48 @@ ship:
 	assert.Contains(t, err.Error(), "jiradozer bootstrap")
 }
 
+// TestValidateStepRejectsNegativeIdleTimeout verifies that a typo'd
+// negative idle_timeout fails config load loudly instead of silently
+// disabling the watchdog at runtime (where 0 and <0 are otherwise
+// indistinguishable to runWatchdog).
+func TestValidateStepRejectsNegativeIdleTimeout(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  permission_mode: plan
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  idle_timeout: -5m
+build:
+  permission_mode: bypass
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  permission_mode: bypass
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  permission_mode: bypass
+  prompt: "Validate"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  permission_mode: bypass
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err, "negative idle_timeout must be rejected")
+	assert.Contains(t, err.Error(), "idle_timeout")
+	assert.Contains(t, err.Error(), "must not be negative")
+}
+
 // TestValidateStepRequiresRoundCommentTemplateWhenRounds verifies that a
 // step with rounds set must also supply round_comment_template; otherwise
 // loading fails.

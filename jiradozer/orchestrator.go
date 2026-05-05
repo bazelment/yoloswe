@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -81,16 +82,35 @@ type Orchestrator struct {
 	preserved    []PreservedWorktree
 }
 
+//nolint:govet // fieldalignment: grouping by purpose (lifecycle vs watchdog) is more readable than tighter packing
 type managedWorkflow struct {
+	startedAt    time.Time
 	issue        *tracker.Issue
 	cmd          *exec.Cmd
 	logFile      *os.File
 	cancel       context.CancelFunc
-	startedAt    time.Time
 	worktreePath string
 	branch       string
 	pid          int
 	cancelled    bool
+	currentStep  string
+	stepMu       sync.Mutex
+	// lastOutputAt is unix-nanos of the most recent log line from the
+	// subprocess. Written by tailSubprocessLog, read by runWatchdog to
+	// detect idle gaps.
+	lastOutputAt atomic.Int64
+	// tailerAlive is 1 while tailSubprocessLog is reading the log file,
+	// 0 once it has exited (EOF on stop, or a non-EOF read error after
+	// reopen attempts are exhausted). runWatchdog skips its idle check
+	// when the tailer is gone — without fresh updates to lastOutputAt
+	// the gap would grow unboundedly and kill a still-healthy subprocess.
+	tailerAlive atomic.Bool
+	// inReview is 1 between "waiting for approval" and the next "step:"
+	// or "feedback:" log line. The workflow legitimately blocks here on
+	// human input via PollForFeedback, so the watchdog must skip its
+	// idle check during this window — otherwise a long human review
+	// would be killed by the prior step's timeout.
+	inReview atomic.Bool
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -210,40 +230,36 @@ func (o *Orchestrator) maxConcurrent() int {
 	return o.config.Source.MaxConcurrent
 }
 
-// claimIssueInProgress transitions the issue to "In Progress" and attaches the
-// LockLabel after the worktree is created. Together these provide a distributed
-// lock against concurrent jiradozer processes:
-//
-//  1. State transition: processes polling --filter state=Todo stop discovering
-//     the issue once it leaves the Todo state.
-//  2. Label: defense-in-depth for processes that poll a different state set or
-//     that discover the issue in the narrow window before the state changes.
-//
-// Called after NewWorktree so that a worktree creation failure leaves the issue
-// in its original state — discovery can retry without hitting a permanently
-// "In Progress" issue with no active process.
-//
-// Both operations are best-effort — errors are logged as warnings and do not
-// abort the workflow start, since missing team ID or transient API failures
-// should not prevent local work from proceeding.
-func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.Issue) {
-	cfg := o.ConfigSnapshot()
-	// Attach the lock label first — it signals intent even if the state
-	// transition below fails.
+// addLockLabel attaches the LockLabel to the issue. The label is the
+// quick part of the distributed claim — it signals intent immediately
+// even if the state transition (transitionToInProgress) is deferred or
+// fails. Best-effort: errors are logged as warnings and do not abort
+// the workflow start.
+func (o *Orchestrator) addLockLabel(ctx context.Context, issue *tracker.Issue) {
 	if err := o.tracker.AddLabel(ctx, issue.ID, LockLabel); err != nil {
 		o.logger.Warn("failed to add lock label to issue",
 			"issue", issue.Identifier, "label", LockLabel, "error", err)
-	} else {
-		o.logger.Info("claimed issue: added lock label",
-			"issue", issue.Identifier, "label", LockLabel)
+		return
 	}
+	o.logger.Info("claimed issue: added lock label",
+		"issue", issue.Identifier, "label", LockLabel)
+}
 
+// transitionToInProgress moves the issue into the configured InProgress
+// state. Called only after the subprocess has been successfully started
+// — earlier callers (between worktree creation and cmd.Start) would
+// strand the issue in In Progress on log-open / cmd.Start failures
+// because discovery's state-filter would no longer surface it for
+// retry, even after addLockLabel cleanup ran. Best-effort: errors are
+// logged as warnings.
+func (o *Orchestrator) transitionToInProgress(ctx context.Context, issue *tracker.Issue) {
 	if issue.TeamID == "" {
 		o.logger.Warn("issue has no team ID, skipping in_progress state transition",
 			"issue", issue.Identifier)
 		return
 	}
 
+	cfg := o.ConfigSnapshot()
 	states, err := o.tracker.FetchWorkflowStates(ctx, issue.TeamID)
 	if err != nil {
 		o.logger.Warn("failed to fetch workflow states for in_progress claim",
@@ -266,6 +282,22 @@ func (o *Orchestrator) claimIssueInProgress(ctx context.Context, issue *tracker.
 
 	o.logger.Warn("in_progress state not found in workflow states",
 		"issue", issue.Identifier, "expected_name", cfg.States.InProgress)
+}
+
+// releaseLockLabelByID removes LockLabel using only an issue ID/identifier.
+// Used by Start() error paths that fail after addLockLabel but before
+// the managedWorkflow record exists. Uses a fresh background context
+// so the caller's possibly-cancelled context does not strand cleanup.
+func (o *Orchestrator) releaseLockLabelByID(issueID, identifier string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := o.tracker.RemoveLabel(ctx, issueID, LockLabel); err != nil {
+		o.logger.Warn("failed to remove lock label after start failure",
+			"issue", identifier, "label", LockLabel, "error", err)
+		return
+	}
+	o.logger.Info("released issue: removed lock label after start failure",
+		"issue", identifier, "label", LockLabel)
 }
 
 // Start launches a workflow for the given issue in a new worktree.
@@ -304,12 +336,13 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
 	}
 
-	// Claim the issue in-progress after the worktree is created. This provides
-	// a distributed lock so other jiradozer processes stop discovering the issue.
-	// Done after NewWorktree so a worktree creation failure leaves the issue in
-	// its original state — discovery can retry cleanly without ClearSeen calling
-	// into a permanently "In Progress" issue with no active process.
-	o.claimIssueInProgress(ctx, issue)
+	// Add the lock label as soon as the worktree exists. The label is the
+	// quick part of the distributed claim — it signals intent across
+	// processes immediately. The state transition (transitionToInProgress)
+	// is intentionally deferred until after cmd.Start succeeds: a failure
+	// between here and cmd.Start would otherwise strand the issue in
+	// In Progress, which discovery's state filter would never re-surface.
+	o.addLockLabel(ctx, issue)
 
 	wfCtx, cancel := context.WithCancel(ctx)
 
@@ -333,15 +366,25 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	// Per-issue log file for subprocess stdout/stderr.
 	// Sanitize identifier for use as a filename: GitHub identifiers like
 	// "acme/app#42" contain "/" and "#" which are problematic in file paths.
+	// Suffix with UnixNano + pid so two restarts of the same issue inside
+	// a single second still get distinct files — otherwise the tailer
+	// would replay the prior run's lines and mis-set currentStep/inReview
+	// for the new run.
 	safeID := sanitizeForFilename(issue.Identifier)
-	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.log",
-		safeID, time.Now().Format("20060102-150405")))
+	now := time.Now()
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d-%d.log",
+		safeID, now.Format("20060102-150405"), now.UnixNano(), os.Getpid()))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		cancel()
 		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
 			o.logger.Warn("failed to remove worktree after log open failure", "branch", branch, "error", removeErr)
 		}
+		// addLockLabel already attached LockLabel above. The state transition
+		// has not yet happened (it's deferred until after cmd.Start), so we
+		// only need to remove the label to fully roll back the claim and
+		// keep the issue rediscoverable.
+		o.releaseLockLabelByID(issue.ID, issue.Identifier)
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("open log file for %s: %w", issue.Identifier, err)
 	}
@@ -355,9 +398,20 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		if removeErr := o.wtManager.RemoveWorktree(context.Background(), branch, true); removeErr != nil {
 			o.logger.Warn("failed to remove worktree after start failure", "branch", branch, "error", removeErr)
 		}
+		// State transition has not yet happened — only the label needs
+		// rolling back here. transitionToInProgress runs only after we
+		// know the subprocess actually started.
+		o.releaseLockLabelByID(issue.ID, issue.Identifier)
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("start subprocess for %s: %w", issue.Identifier, err)
 	}
+
+	// Subprocess is now running. Commit to the In Progress state so other
+	// jiradozer processes polling state-filtered queries stop discovering
+	// the issue. Done here (not earlier) so that any failure on the path
+	// from worktree creation to here leaves the issue rediscoverable —
+	// only the easily-removable label is added before this point.
+	o.transitionToInProgress(ctx, issue)
 
 	mw := &managedWorkflow{
 		issue:        issue,
@@ -374,6 +428,13 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	o.active[issue.ID] = mw
 	o.mu.Unlock()
 
+	// Seed lastOutputAt to startup time so the watchdog has a sensible
+	// baseline before any log lines are tailed.
+	mw.lastOutputAt.Store(time.Now().UnixNano())
+	// Mark tailer as alive before launching; tailSubprocessLog clears this
+	// flag on exit so runWatchdog can skip stale idle gaps.
+	mw.tailerAlive.Store(true)
+
 	o.emitStatus(mw, StepInit, nil)
 	o.logger.Info("subprocess started",
 		"issue", issue.Identifier,
@@ -381,10 +442,19 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		"log", logPath,
 	)
 
+	// Tailer + watchdog share a stop channel; both exit when cmd.Wait
+	// returns. The tailer re-emits step transitions on the parent log and
+	// updates mw.lastOutputAt; the watchdog cancels the workflow context
+	// when the gap exceeds the current step's IdleTimeout.
+	stop := make(chan struct{})
+	go o.tailSubprocessLog(mw, logPath, stop)
+	go o.runWatchdog(mw, watchdogTickInterval, stop)
+
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
 		defer logFile.Close()
+		defer close(stop)
 		err := cmd.Wait()
 		switch {
 		case wfCtx.Err() != nil:
@@ -657,6 +727,12 @@ func shellQuote(s string) string {
 //     inspect the failure and keep any pushed branch / open PR created by
 //     earlier steps; set forceCleanup to wipe it.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
+	// Always release the lock label, regardless of how the workflow ended.
+	// The label is added in addLockLabel before subprocess start and was
+	// previously never removed on completion — every successful run
+	// leaked it, blocking re-discovery.
+	o.releaseLockLabel(mw)
+
 	o.mu.RLock()
 	forceCleanup := o.forceCleanup
 	o.mu.RUnlock()
