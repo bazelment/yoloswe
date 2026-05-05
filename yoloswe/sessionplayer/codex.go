@@ -79,7 +79,9 @@ func NewCodexPlayer(renderer *render.Renderer, verbose bool) *CodexPlayer {
 
 // PlayFile plays back a Codex session log file.
 func (p *CodexPlayer) PlayFile(path string) error {
-	defer p.renderer.Reset()
+	if p.renderer != nil {
+		defer p.renderer.Reset()
+	}
 
 	f, err := os.Open(path)
 	if err != nil {

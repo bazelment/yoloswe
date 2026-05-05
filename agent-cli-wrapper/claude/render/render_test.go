@@ -586,6 +586,23 @@ func TestEventHandler_TextFlush(t *testing.T) {
 	}
 }
 
+func TestResetDropsBufferedText(t *testing.T) {
+	r, _ := newTestRenderer(VerbosityNormal)
+	var received []string
+	handler := &testEventHandler{
+		onText: func(text string) { received = append(received, text) },
+	}
+	r.SetEventHandler(handler)
+
+	r.Text("partial")
+	r.Reset()
+	r.Text("fresh\n")
+
+	if len(received) != 1 || received[0] != "fresh\n" {
+		t.Errorf("Reset should discard partial text before next flush, got %v", received)
+	}
+}
+
 func TestEventHandler_StatusAlwaysEmitted(t *testing.T) {
 	r, _ := newTestRenderer(VerbosityQuiet)
 	var received string
