@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +22,24 @@ func TestUnmarshalContentBlock_UnknownType(t *testing.T) {
 	}
 	if string(unknown.Raw) != string(raw) {
 		t.Fatalf("raw: %s", unknown.Raw)
+	}
+}
+
+func TestUnknownContentBlock_DisplayString(t *testing.T) {
+	// Type-only block (no raw payload).
+	typeOnly := UnknownContentBlock{Type: ContentBlockType("server_tool_use")}
+	want := "[unknown content block: server_tool_use]"
+	if got := typeOnly.DisplayString(); got != want {
+		t.Errorf("type-only: got %q, want %q", got, want)
+	}
+	// Block with raw payload — must include both the type and the raw bytes.
+	withRaw := UnknownContentBlock{
+		Type: ContentBlockType("image"),
+		Raw:  json.RawMessage(`{"type":"image","source":"x"}`),
+	}
+	got := withRaw.DisplayString()
+	if !strings.Contains(got, "image") || !strings.Contains(got, `"source":"x"`) {
+		t.Errorf("with-raw: got %q, expected to contain 'image' and raw payload", got)
 	}
 }
 

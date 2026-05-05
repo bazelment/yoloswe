@@ -592,6 +592,45 @@ func TestRunRetryLoop_SkipsWhenAgentRecovered(t *testing.T) {
 	}
 }
 
+// TestClaudeResultToAgentResult_MapsContentBlocksIncludingUnknown verifies
+// that the converter populates AgentResult.ContentBlocks from the claude
+// turn's blocks, including UnknownContentBlock — so downstream consumers
+// don't silently drop content the protocol layer preserves.
+func TestClaudeResultToAgentResult_MapsContentBlocksIncludingUnknown(t *testing.T) {
+	t.Parallel()
+	tr := &claude.TurnResult{
+		Text: "hello",
+		ContentBlocks: claude.ContentBlocks{
+			claude.TextBlock{Type: claude.ContentBlockTypeText, Text: "hello"},
+			claude.ThinkingBlock{Type: claude.ContentBlockTypeThinking, Thinking: "reasoning"},
+			claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "t1", Name: "Bash", Input: map[string]interface{}{"command": "ls"}},
+			claude.UnknownContentBlock{Type: "future_block_xyz", Raw: []byte(`{"type":"future_block_xyz","payload":"opaque"}`)},
+		},
+	}
+	got := ClaudeResultToAgentResult(tr)
+	if got == nil {
+		t.Fatal("nil result")
+	}
+	if len(got.ContentBlocks) != 4 {
+		t.Fatalf("blocks: got %d, want 4", len(got.ContentBlocks))
+	}
+	if got.ContentBlocks[0].Type != "text" || got.ContentBlocks[0].Text != "hello" {
+		t.Errorf("text block: %+v", got.ContentBlocks[0])
+	}
+	if got.ContentBlocks[1].Type != "thinking" || got.ContentBlocks[1].Text != "reasoning" {
+		t.Errorf("thinking block: %+v", got.ContentBlocks[1])
+	}
+	if got.ContentBlocks[2].Type != "tool_use" || got.ContentBlocks[2].ToolName != "Bash" {
+		t.Errorf("tool_use block: %+v", got.ContentBlocks[2])
+	}
+	if got.ContentBlocks[3].Type != "future_block_xyz" {
+		t.Errorf("unknown block type: %q", got.ContentBlocks[3].Type)
+	}
+	if !strings.Contains(got.ContentBlocks[3].Text, "future_block_xyz") {
+		t.Errorf("unknown block text missing type: %q", got.ContentBlocks[3].Text)
+	}
+}
+
 // TestRunRetryLoop_PropagatesAskError ensures an Ask transport error
 // aborts the loop cleanly without masking.
 func TestRunRetryLoop_PropagatesAskError(t *testing.T) {

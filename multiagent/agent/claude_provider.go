@@ -8,6 +8,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -410,11 +411,12 @@ func ClaudeResultToAgentResult(r *claude.TurnResult) *AgentResult {
 		return nil
 	}
 	return &AgentResult{
-		Text:       r.Text,
-		Thinking:   r.Thinking,
-		Success:    r.Success,
-		Error:      r.Error,
-		DurationMs: r.DurationMs,
+		Text:          r.Text,
+		Thinking:      r.Thinking,
+		Success:       r.Success,
+		Error:         r.Error,
+		DurationMs:    r.DurationMs,
+		ContentBlocks: claudeBlocksToAgentBlocks(r.ContentBlocks),
 		Usage: AgentUsage{
 			InputTokens:     r.Usage.InputTokens,
 			OutputTokens:    r.Usage.OutputTokens,
@@ -422,4 +424,48 @@ func ClaudeResultToAgentResult(r *claude.TurnResult) *AgentResult {
 			CostUSD:         r.Usage.CostUSD,
 		},
 	}
+}
+
+// claudeBlocksToAgentBlocks maps protocol content blocks to the
+// provider-agnostic AgentContentBlock representation. Unknown block types are
+// preserved with their declared type and a textual rendering so downstream
+// consumers don't silently drop content the protocol layer kept.
+func claudeBlocksToAgentBlocks(blocks protocol.ContentBlocks) []AgentContentBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]AgentContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case protocol.TextBlock:
+			out = append(out, AgentContentBlock{
+				Type: string(protocol.ContentBlockTypeText),
+				Text: b.Text,
+			})
+		case protocol.ThinkingBlock:
+			out = append(out, AgentContentBlock{
+				Type: string(protocol.ContentBlockTypeThinking),
+				Text: b.Thinking,
+			})
+		case protocol.ToolUseBlock:
+			out = append(out, AgentContentBlock{
+				Type:      string(protocol.ContentBlockTypeToolUse),
+				ToolName:  b.Name,
+				ToolInput: b.Input,
+			})
+		case protocol.ToolResultBlock:
+			isError := b.IsError != nil && *b.IsError
+			out = append(out, AgentContentBlock{
+				Type:       string(protocol.ContentBlockTypeToolResult),
+				ToolResult: b.Content,
+				IsError:    isError,
+			})
+		case protocol.UnknownContentBlock:
+			out = append(out, AgentContentBlock{
+				Type: string(b.Type),
+				Text: b.DisplayString(),
+			})
+		}
+	}
+	return out
 }

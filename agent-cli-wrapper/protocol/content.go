@@ -3,6 +3,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 )
 
@@ -39,6 +40,16 @@ func (u UnknownContentBlock) MarshalJSON() ([]byte, error) {
 		}{Type: u.Type})
 	}
 	return u.Raw, nil
+}
+
+// DisplayString returns a human-readable representation of an unknown content
+// block for transcript surfaces (sessionmodel parser, sessionanalysis turn
+// aggregation, etc.) so the formatting stays consistent across consumers.
+func (u UnknownContentBlock) DisplayString() string {
+	if len(u.Raw) == 0 {
+		return fmt.Sprintf("[unknown content block: %s]", u.Type)
+	}
+	return fmt.Sprintf("[unknown content block: %s] %s", u.Type, string(u.Raw))
 }
 
 // TextBlock contains text content.

@@ -133,7 +133,7 @@ func (p *MessageParser) handleAssistant(msg protocol.AssistantMessage) {
 			p.model.AppendOutput(OutputLine{
 				Timestamp: time.Now(),
 				Type:      OutputTypeText,
-				Content:   fmt.Sprintf("[unknown content block: %s] %s", b.Type, string(b.Raw)),
+				Content:   b.DisplayString(),
 			})
 		}
 	}

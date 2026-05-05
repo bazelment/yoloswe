@@ -317,12 +317,12 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				case protocol.UnknownContentBlock:
 					// Preserve unknown blocks in the response transcript so
 					// analysis output stays in sync with the wire protocol.
-					if len(b.Raw) > 0 {
-						if currentTurn.Response != "" {
-							currentTurn.Response += "\n"
-						}
-						currentTurn.Response += fmt.Sprintf("[unknown content block: %s] %s", b.Type, string(b.Raw))
+					// Always emit (matching sessionmodel parser behavior) so a
+					// type-only block isn't dropped silently.
+					if currentTurn.Response != "" {
+						currentTurn.Response += "\n"
 					}
+					currentTurn.Response += b.DisplayString()
 				}
 			}
 
