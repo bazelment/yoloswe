@@ -626,8 +626,7 @@ func TestWorkflow_RunReview_Comment_PlanReview(t *testing.T) {
 	}
 
 	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
-	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+	walkTo(t, wf.state, StepPlanReview)
 
 	wf.runReview(context.Background(), StepBuilding, StepPlanning)
 
@@ -635,36 +634,6 @@ func TestWorkflow_RunReview_Comment_PlanReview(t *testing.T) {
 	// feedback injected into the next planning round.
 	assert.Equal(t, StepPlanning, wf.state.Current())
 	assert.Equal(t, "Can you also handle the edge case?", wf.feedback)
-}
-
-// TestWorkflow_RunReview_Comment_PlanReview_HitsRedoLimit verifies plan-review
-// comments use the same redo circuit breaker as other review gates.
-func TestWorkflow_RunReview_Comment_PlanReview_HitsRedoLimit(t *testing.T) {
-	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
-	wf.maxRedos = 1
-	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
-
-	wf.tracker = &mockWorkflowTracker{
-		commentSets: [][]tracker.Comment{
-			{{ID: "c1", Body: "Please revise the plan", IsSelf: false, CreatedAt: time.Now()}},
-		},
-	}
-	wf.runReview(context.Background(), StepBuilding, StepPlanning)
-	assert.Equal(t, StepPlanning, wf.state.Current(), "first comment should replan")
-
-	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
-
-	wf.tracker = &mockWorkflowTracker{
-		commentSets: [][]tracker.Comment{
-			{{ID: "c2", Body: "Please revise it again", IsSelf: false, CreatedAt: time.Now()}},
-		},
-	}
-	wf.runReview(context.Background(), StepBuilding, StepPlanning)
-
-	assert.Equal(t, StepFailed, wf.state.Current())
-	require.Error(t, wf.lastError)
-	assert.EqualError(t, wf.lastError, "step planning has been re-run 1 times (max 1), giving up")
 }
 
 // TestWorkflow_RunReview_Comment_BuildReview tests that a generic comment during
@@ -1264,9 +1233,8 @@ func TestWorkflow_RunReview_CommentPerStep(t *testing.T) {
 
 // --- Full Feedback Loop Simulation ---
 
-// TestWorkflow_FullFeedbackLoop_PlanCommentReplans simulates the exact
-// scenario from the bug report: plan completes, user posts a general comment,
-// workflow should loop back to planning.
+// TestWorkflow_FullFeedbackLoop_PlanCommentReplans simulates a user comment
+// after plan review starts; the workflow should loop back to planning.
 func TestWorkflow_FullFeedbackLoop_PlanCommentReplans(t *testing.T) {
 	now := time.Now()
 	approveComment := tracker.Comment{ID: "human1", Body: "Looks good, but also handle error cases", IsSelf: false, CreatedAt: now.Add(3 * time.Second)}
@@ -1303,39 +1271,52 @@ func TestWorkflow_FullFeedbackLoop_PlanCommentReplans(t *testing.T) {
 }
 
 // TestWorkflow_CircuitBreaker_TripsInRunReview verifies that the circuit breaker
-// integrates correctly with runReview — after maxRedos redo comments, the
-// workflow transitions to StepFailed.
+// integrates correctly with runReview for both explicit and implicit replans.
 func TestWorkflow_CircuitBreaker_TripsInRunReview(t *testing.T) {
-	cfg := testConfig()
-	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), cfg, discardLogger())
-	wf.maxRedos = 1
-
-	// First redo cycle.
-	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
-	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
-
-	mt1 := &mockWorkflowTracker{
-		commentSets: [][]tracker.Comment{
-			{{ID: "c1", Body: "redo: fix approach", IsSelf: false, CreatedAt: time.Now()}},
+	tests := []struct {
+		name       string
+		firstBody  string
+		secondBody string
+	}{
+		{
+			name:       "explicit_redo",
+			firstBody:  "redo: fix approach",
+			secondBody: "redo: try again",
+		},
+		{
+			name:       "generic_plan_comment",
+			firstBody:  "Please revise the plan",
+			secondBody: "Please revise it again",
 		},
 	}
-	wf.tracker = mt1
-	wf.runReview(context.Background(), StepBuilding, StepPlanning)
-	assert.Equal(t, StepPlanning, wf.state.Current(), "first redo should succeed")
 
-	// Back to review.
-	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+			wf.maxRedos = 1
+			setComment := func(id, body string) {
+				wf.tracker = &mockWorkflowTracker{
+					commentSets: [][]tracker.Comment{
+						{{ID: id, Body: body, IsSelf: false, CreatedAt: time.Now()}},
+					},
+				}
+			}
 
-	// Second redo cycle — should trip circuit breaker.
-	mt2 := &mockWorkflowTracker{
-		commentSets: [][]tracker.Comment{
-			{{ID: "c2", Body: "redo: try again", IsSelf: false, CreatedAt: time.Now()}},
-		},
+			walkTo(t, wf.state, StepPlanReview)
+
+			setComment("c1", tt.firstBody)
+			wf.runReview(context.Background(), StepBuilding, StepPlanning)
+			assert.Equal(t, StepPlanning, wf.state.Current(), "first redo should succeed")
+
+			require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+			setComment("c2", tt.secondBody)
+			wf.runReview(context.Background(), StepBuilding, StepPlanning)
+			assert.Equal(t, StepFailed, wf.state.Current(), "second redo should trip circuit breaker")
+			require.Error(t, wf.lastError)
+			assert.Contains(t, wf.lastError.Error(), "re-run")
+		})
 	}
-	wf.tracker = mt2
-	wf.runReview(context.Background(), StepBuilding, StepPlanning)
-	assert.Equal(t, StepFailed, wf.state.Current(), "second redo should trip circuit breaker")
-	assert.Contains(t, wf.lastError.Error(), "re-run")
 }
 
 // --- Phase Label Tests ---
