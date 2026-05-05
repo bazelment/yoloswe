@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +19,63 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
+
+func testMainLogger(_ testing.TB) *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}
+
+type restoreDiscoveryTracker struct {
+	listed chan struct{}
+	issues []*tracker.Issue
+}
+
+func (r *restoreDiscoveryTracker) FetchIssue(_ context.Context, _ string) (*tracker.Issue, error) {
+	return nil, nil
+}
+
+func (r *restoreDiscoveryTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
+	if r.listed != nil {
+		select {
+		case r.listed <- struct{}{}:
+		default:
+		}
+	}
+	return r.issues, nil
+}
+
+func (r *restoreDiscoveryTracker) FetchComments(_ context.Context, _ string, _ time.Time) ([]tracker.Comment, error) {
+	return nil, nil
+}
+
+func (r *restoreDiscoveryTracker) FetchWorkflowStates(_ context.Context, _ string) ([]tracker.WorkflowState, error) {
+	return nil, nil
+}
+
+func (r *restoreDiscoveryTracker) PostComment(_ context.Context, _ string, _ string) (tracker.Comment, error) {
+	return tracker.Comment{}, nil
+}
+
+func (r *restoreDiscoveryTracker) UpdateIssueState(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *restoreDiscoveryTracker) AddLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (r *restoreDiscoveryTracker) RemoveLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+type restoreWTManager struct{}
+
+func (restoreWTManager) NewWorktree(_ context.Context, _, _, _ string) (string, error) {
+	return "", nil
+}
+
+func (restoreWTManager) RemoveWorktree(_ context.Context, _ string, _ bool) error {
+	return nil
+}
 
 func TestValidateDryRunMode(t *testing.T) {
 	dryRunCfg := func() *jiradozer.Config {
@@ -167,6 +227,64 @@ func TestValidateReloadCompatibleRejectsSourceModeChanges(t *testing.T) {
 	}
 
 	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "source mode change")
+}
+
+func TestValidateReloadCompatibleRejectsDryRunChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+		Source:  jiradozer.SourceConfig{DryRun: false, Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "linear", APIKey: "key"},
+		Source:  jiradozer.SourceConfig{DryRun: true, Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "source dry-run change")
+}
+
+func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
+	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Restored"}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	require.NoError(t, jiradozer.WriteRuntimeStateAtomically(statePath, jiradozer.RuntimeState{
+		ActiveWorkflow: []jiradozer.ManagedWorkflowSnapshot{
+			{Issue: issue},
+		},
+	}))
+	t.Setenv(restoreStateEnv, statePath)
+
+	listed := make(chan struct{}, 1)
+	issueTracker := &restoreDiscoveryTracker{listed: listed, issues: []*tracker.Issue{issue}}
+	cfg := &jiradozer.Config{Source: jiradozer.SourceConfig{MaxConcurrent: 1}}
+	disc := jiradozer.NewDiscovery(issueTracker, tracker.IssueFilter{}, time.Hour, testMainLogger(t))
+	s := &teamSupervisor{
+		cfg:    cfg,
+		logger: testMainLogger(t),
+		disc:   disc,
+		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+	}
+
+	require.NoError(t, s.restoreFromEnv())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := disc.Run(ctx)
+	require.Eventually(t, func() bool {
+		select {
+		case <-listed:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("restored issue was rediscovered: %s", got.Identifier)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	for range ch {
+	}
 }
 
 // TestDryRunFlagPlacement verifies --dry-run is honored regardless of where

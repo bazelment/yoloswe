@@ -581,18 +581,13 @@ func (o *Orchestrator) emitStatus(mw *managedWorkflow, step WorkflowStep, err er
 	}
 	if status.IsDone() {
 		status.CompletedAt = time.Now()
-		// Terminal updates should not be dropped. Block unless shutdown
-		// has been called (done closed), which means no consumer remains.
-		select {
-		case o.statusChan <- status:
-		case <-o.done:
-		}
-	} else {
-		select {
-		case o.statusChan <- status:
-		default:
-			o.logger.Warn("status channel full, dropping update", "issue", mw.issue.Identifier)
-		}
+	}
+	// Status updates are part of the observable workflow state. Do not drop
+	// non-terminal updates either; restored workflows rely on StepInit reaching
+	// the supervisor after an exec restart.
+	select {
+	case o.statusChan <- status:
+	case <-o.done:
 	}
 }
 

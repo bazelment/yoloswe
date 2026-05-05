@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/cliapp"
@@ -28,6 +29,7 @@ type teamSupervisor struct {
 	selfPath  string
 	absConfig string
 	logDir    string
+	reloadMu  sync.Mutex
 }
 
 func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *jiradozer.Config, args runArgs) (*teamSupervisor, error) {
@@ -87,7 +89,7 @@ func (s *teamSupervisor) Run(ctx context.Context) error {
 	sigStop := watchTeamSignals(s.logger, func(sig teamSignal) {
 		switch sig {
 		case teamSignalReload:
-			s.reload()
+			go s.reload()
 		case teamSignalRestart:
 			if err := s.execRestart(); err != nil {
 				s.logger.Error("exec restart failed", "error", err)
@@ -105,6 +107,9 @@ func (s *teamSupervisor) Run(ctx context.Context) error {
 }
 
 func (s *teamSupervisor) reload() {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
 	next, err := loadRunConfig(s.args)
 	if err != nil {
 		s.logger.Error("config reload failed, keeping last-known-good config", "error", err)
@@ -134,6 +139,9 @@ func validateReloadCompatible(oldCfg, newCfg *jiradozer.Config) error {
 	}
 	if oldCfg.Source.HasSource() != newCfg.Source.HasSource() {
 		return fmt.Errorf("source mode change is not supported during reload")
+	}
+	if oldCfg.Source.DryRun != newCfg.Source.DryRun {
+		return fmt.Errorf("source dry-run change is not supported during reload")
 	}
 	if oldCfg.Tracker.Kind == "github" && oldCfg.Source.Filters[tracker.FilterTeam] != newCfg.Source.Filters[tracker.FilterTeam] {
 		return fmt.Errorf("github repository filter change is not supported during reload")
@@ -170,6 +178,11 @@ func (s *teamSupervisor) restoreFromEnv() error {
 		return fmt.Errorf("restore runtime state: %w", err)
 	}
 	s.orch.RestoreActive(state.ActiveWorkflow)
+	for _, snap := range state.ActiveWorkflow {
+		if snap.Issue != nil && snap.Issue.ID != "" {
+			s.disc.MarkSeen(snap.Issue.ID)
+		}
+	}
 	s.logger.Info("restored team-mode runtime state",
 		"state", statePath,
 		"active_children", len(state.ActiveWorkflow),
