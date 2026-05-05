@@ -2,8 +2,11 @@ package render
 
 import (
 	"io"
-	"os"
+
+	"golang.org/x/term"
 )
+
+var isTerminalFD = term.IsTerminal
 
 // ColorMode controls how color output is handled.
 type ColorMode int
@@ -70,12 +73,9 @@ func (p Palette) colorFor(c string) string {
 
 // isTerminalWriter checks if the writer is backed by a terminal.
 func isTerminalWriter(w io.Writer) bool {
-	if f, ok := w.(*os.File); ok {
-		stat, err := f.Stat()
-		if err != nil {
-			return false
-		}
-		return (stat.Mode() & os.ModeCharDevice) != 0
+	f, ok := w.(interface{ Fd() uintptr })
+	if !ok {
+		return false
 	}
-	return false
+	return isTerminalFD(int(f.Fd()))
 }

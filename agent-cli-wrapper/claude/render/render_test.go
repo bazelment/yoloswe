@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,69 @@ func TestNewRendererWithOptions_BackwardCompat(t *testing.T) {
 	r := NewRendererWithOptions(&buf, true, true)
 	if r.verbosity != VerbosityVerbose {
 		t.Errorf("verbose=true should map to VerbosityVerbose, got %v", r.verbosity)
+	}
+}
+
+func TestIsTerminal_DevNullNotATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	if IsTerminal(f) {
+		t.Fatalf("%s should not be reported as a terminal", os.DevNull)
+	}
+}
+
+func TestIsTerminal_NonFileWriterIsNotTerminal(t *testing.T) {
+	if IsTerminal(&bytes.Buffer{}) {
+		t.Fatal("bytes.Buffer should not be a terminal")
+	}
+}
+
+type fdWriter struct {
+	*os.File
+}
+
+func withTerminalProbe(t *testing.T, probe func(int) bool) {
+	t.Helper()
+	original := isTerminalFD
+	isTerminalFD = probe
+	t.Cleanup(func() {
+		isTerminalFD = original
+	})
+}
+
+func TestIsTerminal_FdWriter(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	if IsTerminal(fdWriter{File: f}) {
+		t.Fatalf("%s fd writer should not be reported as a terminal", os.DevNull)
+	}
+}
+
+func TestIsTerminal_FdWriterUsesWrappedFD(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	wantFD := int(f.Fd())
+	withTerminalProbe(t, func(fd int) bool {
+		if fd != wantFD {
+			t.Fatalf("terminal probe fd = %d, want %d", fd, wantFD)
+		}
+		return true
+	})
+
+	if !IsTerminal(fdWriter{File: f}) {
+		t.Fatalf("wrapped fd writer should use the terminal probe result")
 	}
 }
 
