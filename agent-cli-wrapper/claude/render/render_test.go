@@ -575,29 +575,6 @@ func TestVerbosity_String(t *testing.T) {
 	}
 }
 
-// --- Format helpers ---
-
-func TestTruncateForDisplay(t *testing.T) {
-	if got := TruncateForDisplay("hello", 10); got != "hello" {
-		t.Errorf("short string: got %q", got)
-	}
-	if got := TruncateForDisplay("hello world", 8); got != "hello..." {
-		t.Errorf("truncated: got %q", got)
-	}
-}
-
-func TestTruncatePath(t *testing.T) {
-	short := "/tmp/test.go"
-	if got := TruncatePath(short, 50); got != short {
-		t.Errorf("short path: got %q", got)
-	}
-	long := "/very/long/path/to/some/deeply/nested/file.go"
-	got := TruncatePath(long, 25)
-	if got != ".../nested/file.go" {
-		t.Errorf("truncated path should keep last two components: got %q", got)
-	}
-}
-
 // --- Event handler ---
 
 func TestEventHandler_TextFlush(t *testing.T) {

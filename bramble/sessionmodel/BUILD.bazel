@@ -16,6 +16,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/displaytext",
         "//agent-cli-wrapper/protocol",
         "//multiagent/agent",
     ],
@@ -24,6 +25,7 @@ go_library(
 go_test(
     name = "sessionmodel_test",
     srcs = [
+        "format_test.go",
         "loader_test.go",
         "model_test.go",
     ],
