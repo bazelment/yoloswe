@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -242,12 +243,30 @@ func TestValidateReloadCompatibleRejectsDryRunChanges(t *testing.T) {
 	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "source dry-run change")
 }
 
+func TestValidateReloadCompatibleRejectsWorkDirChanges(t *testing.T) {
+	oldCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "local"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+		WorkDir: "/repo/old",
+	}
+	newCfg := &jiradozer.Config{
+		Tracker: jiradozer.TrackerConfig{Kind: "local"},
+		Source:  jiradozer.SourceConfig{Filters: map[string]string{tracker.FilterTeam: "ENG"}},
+		WorkDir: "/repo/new",
+	}
+
+	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "work_dir change")
+}
+
 func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Restored"}
+	cmd := exec.Command("sh", "-c", "exit 0")
+	require.NoError(t, cmd.Start())
+
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	require.NoError(t, jiradozer.WriteRuntimeStateAtomically(statePath, jiradozer.RuntimeState{
 		ActiveWorkflow: []jiradozer.ManagedWorkflowSnapshot{
-			{Issue: issue},
+			{Issue: issue, PID: cmd.Process.Pid, StartedAt: time.Now()},
 		},
 	}))
 	t.Setenv(restoreStateEnv, statePath)
@@ -264,6 +283,22 @@ func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 	}
 
 	require.NoError(t, s.restoreFromEnv())
+	select {
+	case status := <-s.orch.StatusUpdates():
+		require.Equal(t, jiradozer.StepInit, status.Step)
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for restored StepInit")
+	}
+	s.orch.Wait()
+	select {
+	case status := <-s.orch.StatusUpdates():
+		require.True(t, status.IsDone())
+		require.Equal(t, issue.Identifier, status.Issue.Identifier)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for restored terminal status")
+	}
+	s.orch.Shutdown()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

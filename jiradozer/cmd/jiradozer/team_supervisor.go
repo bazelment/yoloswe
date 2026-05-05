@@ -80,12 +80,15 @@ func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *
 }
 
 func (s *teamSupervisor) Run(ctx context.Context) error {
+	orchCtx, orchCancel := context.WithCancel(ctx)
+	defer orchCancel()
+	go s.printStatusUpdates()
 	if err := s.restoreFromEnv(); err != nil {
+		orchCancel()
+		s.orch.Shutdown()
 		return err
 	}
 
-	orchCtx, orchCancel := context.WithCancel(ctx)
-	defer orchCancel()
 	sigStop := watchTeamSignals(s.logger, func(sig teamSignal) {
 		switch sig {
 		case teamSignalReload:
@@ -98,7 +101,6 @@ func (s *teamSupervisor) Run(ctx context.Context) error {
 	})
 	defer sigStop()
 
-	go s.printStatusUpdates()
 	err := s.orch.RunWithDiscovery(orchCtx, s.disc)
 	orchCancel()
 	s.orch.Shutdown()
@@ -142,6 +144,9 @@ func validateReloadCompatible(oldCfg, newCfg *jiradozer.Config) error {
 	}
 	if oldCfg.Source.DryRun != newCfg.Source.DryRun {
 		return fmt.Errorf("source dry-run change is not supported during reload")
+	}
+	if oldCfg.WorkDir != newCfg.WorkDir {
+		return fmt.Errorf("work_dir change is not supported during reload: %q -> %q", oldCfg.WorkDir, newCfg.WorkDir)
 	}
 	if oldCfg.Tracker.Kind == "github" && oldCfg.Source.Filters[tracker.FilterTeam] != newCfg.Source.Filters[tracker.FilterTeam] {
 		return fmt.Errorf("github repository filter change is not supported during reload")
