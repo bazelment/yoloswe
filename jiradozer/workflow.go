@@ -537,28 +537,35 @@ func (w *Workflow) handleReviewFeedback(ctx context.Context, fb *FeedbackResult,
 			approveAll:       true,
 		})
 	case FeedbackRedo:
-		w.logger.Info("feedback: redo", "step", w.state.Current())
-		w.status("Redo requested")
-		w.feedback = fb.Message
-		if err := w.tryRedo(ctx, redoTarget); err != nil {
-			w.fail(ctx, err)
-		}
+		w.applyReviewRedo(ctx, redoTarget, fb.Message, reviewRedo{
+			logMessage:    "feedback: redo",
+			statusMessage: "Redo requested",
+		})
 	case FeedbackComment:
-		w.logger.Info("feedback: comment", "step", w.state.Current(), "message", fb.Message)
-		w.status("Feedback received")
-		w.feedback = fb.Message
-		// During plan review, general comments advance to build with feedback
-		// incorporated — they don't restart the planning step. For other review
-		// steps, redo is the right behavior (the user wants changes applied).
-		if w.state.Current() == StepPlanReview {
-			if err := w.approveTransition(ctx, approveTarget, "approved_with_feedback"); err != nil {
-				w.fail(ctx, err)
-			}
-		} else {
-			if err := w.tryRedo(ctx, redoTarget); err != nil {
-				w.fail(ctx, err)
-			}
-		}
+		w.applyReviewRedo(ctx, redoTarget, fb.Message, reviewRedo{
+			logMessage:    "feedback: comment",
+			statusMessage: "Feedback received",
+			logMessageKey: "message",
+		})
+	}
+}
+
+type reviewRedo struct {
+	logMessage    string
+	statusMessage string
+	logMessageKey string
+}
+
+func (w *Workflow) applyReviewRedo(ctx context.Context, redoTarget WorkflowStep, feedback string, redo reviewRedo) {
+	logArgs := []any{"step", w.state.Current()}
+	if redo.logMessageKey != "" {
+		logArgs = append(logArgs, redo.logMessageKey, feedback)
+	}
+	w.logger.Info(redo.logMessage, logArgs...)
+	w.status(redo.statusMessage)
+	w.feedback = feedback
+	if err := w.tryRedo(ctx, redoTarget); err != nil {
+		w.fail(ctx, err)
 	}
 }
 
