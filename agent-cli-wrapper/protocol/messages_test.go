@@ -269,6 +269,21 @@ func TestResultMessage_IsFailure_ErrorSubtypeWithoutIsError(t *testing.T) {
 	}
 }
 
+// TestResultMessage_Outcome_EmptySubtypeIsSuccess covers partial/legacy NDJSON
+// where the result frame has is_error=false but no subtype. Pre-refactor
+// callers derived success from !is_error, so these frames must remain
+// non-failures to avoid silently flipping turns from success to error.
+func TestResultMessage_Outcome_EmptySubtypeIsSuccess(t *testing.T) {
+	m := parseResultMessage(t, `{"type":"result","result":"hello","is_error":false}`)
+	out := m.Outcome()
+	if _, ok := out.(ResultSuccess); !ok {
+		t.Fatalf("expected ResultSuccess for empty subtype with is_error=false, got %T", out)
+	}
+	if m.IsFailure() {
+		t.Fatal("IsFailure must be false for empty subtype with is_error=false")
+	}
+}
+
 func parseResultMessage(t *testing.T, raw string) ResultMessage {
 	t.Helper()
 	msg, err := ParseMessage([]byte(raw))

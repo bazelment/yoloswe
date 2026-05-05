@@ -315,9 +315,13 @@ func (ResultError) isResultOutcome() {}
 
 // Outcome returns a sealed variant describing whether the turn succeeded or
 // failed, so callers can switch on the concrete type instead of inspecting
-// Subtype strings directly.
+// Subtype strings directly. A frame with is_error=false is treated as success
+// when the subtype is either the explicit "success" marker or empty —
+// partial/legacy NDJSON without a subtype field should not be reported as a
+// failure if no error signal is present, matching the pre-protocol-refactor
+// !is_error behavior consumers relied on.
 func (m ResultMessage) Outcome() ResultOutcome {
-	if !m.IsError && ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
+	if !m.IsError && (m.Subtype == "" || ResultSubtype(m.Subtype) == ResultSubtypeSuccess) {
 		return ResultSuccess{Text: m.Result}
 	}
 	return ResultError{

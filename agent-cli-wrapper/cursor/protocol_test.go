@@ -151,3 +151,22 @@ func TestParseToolCallDetail_NilMessage(t *testing.T) {
 	_, err := ParseToolCallDetail(nil)
 	require.Error(t, err)
 }
+
+func TestResultMessage_IsFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  ResultMessage
+		want bool
+	}{
+		{"success_subtype_no_error", ResultMessage{Subtype: "success", IsError: false}, false},
+		{"empty_subtype_no_error", ResultMessage{Subtype: "", IsError: false}, false},
+		{"success_subtype_with_error", ResultMessage{Subtype: "success", IsError: true}, true},
+		{"error_subtype_no_iserror", ResultMessage{Subtype: "error_max_turns", IsError: false}, true},
+		{"error_subtype_with_iserror", ResultMessage{Subtype: "error", IsError: true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.msg.IsFailure())
+		})
+	}
+}
