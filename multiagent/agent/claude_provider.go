@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
@@ -25,6 +26,7 @@ const (
 	RetryStopNoProgress     = "no_progress"
 	RetryStopBudgetExceeded = "budget_exceeded"
 	RetryStopCtxCancelled   = "ctx_cancelled"
+	RetryStopPermanent      = "permanent"
 )
 
 // FormatUnresolvedToolErrorMarker returns the marker string used to surface
@@ -62,6 +64,26 @@ func computeRetryTimeBudget(cfg ExecuteConfig) time.Duration {
 
 func buildRetryPrompt() string {
 	return retryPrompt
+}
+
+func isPermanentToolError(toolResult string) bool {
+	if strings.Contains(toolResult, "disable-model-invocation") {
+		return true
+	}
+	return strings.Contains(toolResult, " cannot be used with Skill tool")
+}
+
+func permanentToolErrorExcerpt(toolResult, excerpt string) string {
+	if isPermanentToolError(excerpt) {
+		return excerpt
+	}
+	if strings.Contains(toolResult, "disable-model-invocation") {
+		return "permanent tool error: disable-model-invocation"
+	}
+	if strings.Contains(toolResult, " cannot be used with Skill tool") {
+		return "permanent tool error: cannot be used with Skill tool"
+	}
+	return excerpt
 }
 
 // emitRetry fires the hook before each follow-up Ask so logs see the
@@ -124,19 +146,19 @@ func (p *ClaudeProvider) Name() string { return "claude" }
 // runRetryLoop drives the retry-on-tool-error loop: re-issues the turn up to
 // cfg.MaxToolErrorRetries times while a tool_use_error is present. Returns
 // the final result, retry count, and the stop reason (exhausted, no_progress,
-// budget_exceeded, ctx_cancelled, or self-recovered).
+// budget_exceeded, ctx_cancelled, permanent, or self-recovered).
 func runRetryLoop(ctx context.Context, session retrySession, initial *claude.TurnResult, cfg ExecuteConfig) (*claude.TurnResult, int, string, error) {
 	result := initial
 	start := time.Now()
 	budget := computeRetryTimeBudget(cfg)
 	stopReason := RetryStopExhausted
 	var (
-		prevExcerpt string
-		havePrev    bool
-		attempts    int
+		prevToolResult string
+		havePrev       bool
+		attempts       int
 	)
 	for attempts < cfg.MaxToolErrorRetries {
-		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
+		toolName, toolResult, excerpt, ok := claude.FinalTurnToolErrorDetails(result.ContentBlocks)
 		if !ok {
 			break
 		}
@@ -148,11 +170,15 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 			stopReason = RetryStopBudgetExceeded
 			break
 		}
-		if havePrev && excerpt == prevExcerpt {
+		if isPermanentToolError(toolResult) {
+			stopReason = RetryStopPermanent
+			break
+		}
+		if havePrev && toolResult == prevToolResult {
 			stopReason = RetryStopNoProgress
 			break
 		}
-		prevExcerpt = excerpt
+		prevToolResult = toolResult
 		havePrev = true
 		attempts++
 
@@ -252,26 +278,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return nil, err
 	}
 
-	agentResult := ClaudeResultToAgentResult(result)
+	agentResult := claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason)
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
-	}
-	if cfg.MaxToolErrorRetries > 0 {
-		if toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks); ok {
-			unresolved := &UnresolvedToolError{
-				Tool:     toolName,
-				Excerpt:  excerpt,
-				Reason:   stopReason,
-				Attempts: attempts,
-				Max:      cfg.MaxToolErrorRetries,
-			}
-			agentResult.UnresolvedToolError = unresolved
-			agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
-			// Fire the abort callback once per loop execution that stopped
-			// with a tool error still present. Covers all four stop reasons:
-			// exhausted, no_progress, budget_exceeded, ctx_cancelled.
-			emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
-		}
 	}
 	return agentResult, nil
 }
@@ -347,6 +356,33 @@ func dispatchClaudeEvent(ev claude.Event, handler EventHandler, out chan<- Agent
 		return
 	}
 	dispatchStreamEvent(sev, handler, out)
+}
+
+func claudeResultToAgentResultWithRetryAbort(result *claude.TurnResult, cfg ExecuteConfig, attempts int, stopReason string) *AgentResult {
+	agentResult := ClaudeResultToAgentResult(result)
+	if agentResult == nil || cfg.MaxToolErrorRetries <= 0 {
+		return agentResult
+	}
+	toolName, toolResult, excerpt, ok := claude.FinalTurnToolErrorDetails(result.ContentBlocks)
+	if !ok {
+		return agentResult
+	}
+	if stopReason == RetryStopPermanent {
+		excerpt = permanentToolErrorExcerpt(toolResult, excerpt)
+	}
+	unresolved := &UnresolvedToolError{
+		Tool:     toolName,
+		Excerpt:  excerpt,
+		Reason:   stopReason,
+		Attempts: attempts,
+		Max:      cfg.MaxToolErrorRetries,
+	}
+	agentResult.UnresolvedToolError = unresolved
+	agentResult.Text = AppendUnresolvedToolErrorMarker(agentResult.Text, *unresolved)
+	// Fire the abort callback once per loop execution that stopped with a
+	// tool error still present, including permanent errors skipped pre-retry.
+	emitRetryAbort(cfg.EventHandler, stopReason, toolName, excerpt)
+	return agentResult
 }
 
 // claudeEffortLevel maps the neutral agent.EffortLevel to claude.EffortLevel.

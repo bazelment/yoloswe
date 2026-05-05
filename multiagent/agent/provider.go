@@ -25,7 +25,7 @@ type AgentResult struct {
 // AgentResult.Text, which may be replaced downstream (e.g. when a plan file
 // is read instead of the agent's text). Reason distinguishes why the loop
 // stopped — "exhausted" (count budget reached), "budget_exceeded",
-// "no_progress", or "ctx_cancelled".
+// "no_progress", "ctx_cancelled", or "permanent".
 type UnresolvedToolError struct {
 	Tool     string
 	Excerpt  string
@@ -147,9 +147,9 @@ type RetryHandler interface {
 	// OnRetryAbort fires once per retry-loop execution when the loop
 	// stops while a tool error is still present. reason is one of
 	// "exhausted" (count budget reached), "no_progress",
-	// "budget_exceeded", or "ctx_cancelled". The same reason is carried
-	// on UnresolvedToolError.Reason and in the appended marker, so
-	// handlers can correlate logs with downstream output.
+	// "budget_exceeded", "ctx_cancelled", or "permanent". The same
+	// reason is carried on UnresolvedToolError.Reason and in the appended
+	// marker, so handlers can correlate logs with downstream output.
 	OnRetryAbort(reason, tool, excerpt string)
 }
 

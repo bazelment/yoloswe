@@ -9,6 +9,33 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
+type retryAbortRecorder struct {
+	reason  string
+	tool    string
+	excerpt string
+}
+
+func (r *retryAbortRecorder) OnText(string) {}
+
+func (r *retryAbortRecorder) OnThinking(string) {}
+
+func (r *retryAbortRecorder) OnToolStart(string, string, map[string]interface{}) {}
+
+func (r *retryAbortRecorder) OnToolComplete(string, string, map[string]interface{}, interface{}, bool) {
+}
+
+func (r *retryAbortRecorder) OnTurnComplete(int, bool, int64, float64) {}
+
+func (r *retryAbortRecorder) OnError(error, string) {}
+
+func (r *retryAbortRecorder) OnRetry(int, int, string, string) {}
+
+func (r *retryAbortRecorder) OnRetryAbort(reason, tool, excerpt string) {
+	r.reason = reason
+	r.tool = tool
+	r.excerpt = excerpt
+}
+
 // scriptedSession drives runRetryLoop with a pre-scripted sequence of
 // TurnResults. The first result is returned by the caller of Execute
 // before runRetryLoop is invoked, so the slice held here represents
@@ -33,6 +60,24 @@ func (s *scriptedSession) Ask(ctx context.Context, content string) (*claude.Turn
 	}
 	r := s.responses[s.cursor]
 	s.cursor++
+	return r, nil
+}
+
+type cancelAfterFirstAskSession struct {
+	cancel    context.CancelFunc
+	responses []*claude.TurnResult
+	asks      []string
+	cursor    int
+}
+
+func (s *cancelAfterFirstAskSession) Ask(ctx context.Context, content string) (*claude.TurnResult, error) {
+	s.asks = append(s.asks, content)
+	if s.cursor >= len(s.responses) {
+		return nil, errors.New("cancelAfterFirstAskSession: no more responses queued")
+	}
+	r := s.responses[s.cursor]
+	s.cursor++
+	s.cancel()
 	return r, nil
 }
 
@@ -74,6 +119,69 @@ func turnResult(text string, blocks []claude.ContentBlock) *claude.TurnResult {
 		Text:          text,
 		ContentBlocks: blocks,
 		Success:       true,
+	}
+}
+
+func finalToolErrorExcerpt(t *testing.T, inner string) string {
+	t.Helper()
+	_, excerpt, ok := claude.FinalTurnToolError(realToolUseErrorBlocks(inner))
+	if !ok {
+		t.Fatal("expected realToolUseErrorBlocks to produce a final tool error")
+	}
+	return excerpt
+}
+
+func TestIsPermanentToolError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		excerpt string
+		want    bool
+	}{
+		{
+			name:    "disable model invocation",
+			excerpt: "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation",
+			want:    true,
+		},
+		{
+			name:    "exact final tool error excerpt",
+			excerpt: finalToolErrorExcerpt(t, "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"),
+			want:    true,
+		},
+		{
+			name:    "full tool result",
+			excerpt: "<tool_use_error>" + strings.Repeat("x", 220) + " disable-model-invocation</tool_use_error>",
+			want:    true,
+		},
+		{
+			name:    "skill tool compatibility",
+			excerpt: "Skill pr-polish cannot be used with Skill tool",
+			want:    true,
+		},
+		{
+			name:    "broad compatibility phrase outside skill tool",
+			excerpt: "command cannot be used with this terminal state",
+			want:    false,
+		},
+		{
+			name:    "non permanent marker error",
+			excerpt: "Cancelled: parallel tool call errored",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			excerpt: "",
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPermanentToolError(tt.excerpt); got != tt.want {
+				t.Errorf("isPermanentToolError() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -179,6 +287,54 @@ func TestRunRetryLoop_CtxCancelled(t *testing.T) {
 	}
 }
 
+func TestRunRetryLoop_CtxCancelledTakesPrecedenceOverPermanent(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("blocked",
+		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	_, attempts, reason, err := runRetryLoop(ctx, fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no Asks before ctx check, got %d", attempts)
+	}
+	if reason != RetryStopCtxCancelled {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopCtxCancelled, reason)
+	}
+}
+
+func TestRunRetryLoop_CtxCancelledBetweenRetries(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("err1", realToolUseErrorBlocks("first"))
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &cancelAfterFirstAskSession{
+		cancel: cancel,
+		responses: []*claude.TurnResult{
+			turnResult("err2", realToolUseErrorBlocks("second")),
+		},
+	}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	_, attempts, reason, err := runRetryLoop(ctx, fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected exactly 1 Ask before ctx cancellation, got %d", attempts)
+	}
+	if len(fake.asks) != 1 {
+		t.Errorf("expected 1 Ask call, got %d", len(fake.asks))
+	}
+	if reason != RetryStopCtxCancelled {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopCtxCancelled, reason)
+	}
+}
+
 func TestRunRetryLoop_DisabledByDefault(t *testing.T) {
 	t.Parallel()
 	initial := turnResult("err1", realToolUseErrorBlocks("first"))
@@ -221,6 +377,153 @@ func TestRunRetryLoop_SkipsOnNonzeroExitBash(t *testing.T) {
 	}
 	if result != initial {
 		t.Error("expected the initial result returned unchanged")
+	}
+}
+
+// TestRunRetryLoop_SkipsOnPermanentError covers the canonical
+// disable-model-invocation case: a marker-bearing tool_use_error whose excerpt
+// cannot be recovered by retry. Loop exits with RetryStopPermanent and no Ask
+// is issued.
+func TestRunRetryLoop_SkipsOnPermanentError(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("blocked",
+		realToolUseErrorBlocks("Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"))
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	result, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no retries on permanent error, got %d", attempts)
+	}
+	if len(fake.asks) != 0 {
+		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
+	}
+	if reason != RetryStopPermanent {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopPermanent, reason)
+	}
+	if result != initial {
+		t.Error("expected original result returned unchanged")
+	}
+}
+
+func TestRunRetryLoop_SkipsOnPermanentErrorBeyondExcerpt(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("blocked",
+		realToolUseErrorBlocks(strings.Repeat("x", 220)+" disable-model-invocation"))
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	result, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no retries on permanent error beyond excerpt, got %d", attempts)
+	}
+	if len(fake.asks) != 0 {
+		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
+	}
+	if reason != RetryStopPermanent {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopPermanent, reason)
+	}
+	if result != initial {
+		t.Error("expected original result returned unchanged")
+	}
+}
+
+func TestClaudeResultToAgentResultWithRetryAbort_PermanentError(t *testing.T) {
+	t.Parallel()
+	const excerpt = "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"
+	const wrappedExcerpt = "<tool_use_error>" + excerpt + "</tool_use_error>"
+	recorder := &retryAbortRecorder{}
+	result := claudeResultToAgentResultWithRetryAbort(
+		turnResult("blocked", realToolUseErrorBlocks(excerpt)),
+		ExecuteConfig{
+			MaxToolErrorRetries: 3,
+			EventHandler:        recorder,
+		},
+		0,
+		RetryStopPermanent,
+	)
+
+	if result.UnresolvedToolError == nil {
+		t.Fatal("expected unresolved tool error")
+	}
+	if result.UnresolvedToolError.Reason != RetryStopPermanent {
+		t.Errorf("expected reason=%s, got %s", RetryStopPermanent, result.UnresolvedToolError.Reason)
+	}
+	if result.UnresolvedToolError.Attempts != 0 {
+		t.Errorf("expected 0 attempts, got %d", result.UnresolvedToolError.Attempts)
+	}
+	if result.UnresolvedToolError.Max != 3 {
+		t.Errorf("expected max=3, got %d", result.UnresolvedToolError.Max)
+	}
+	if result.UnresolvedToolError.Tool != "Bash" {
+		t.Errorf("expected tool Bash, got %q", result.UnresolvedToolError.Tool)
+	}
+	if !strings.Contains(result.Text, UnresolvedToolErrorMarkerPrefix+RetryStopPermanent+")") {
+		t.Errorf("expected permanent unresolved marker in text, got %q", result.Text)
+	}
+	if recorder.reason != RetryStopPermanent {
+		t.Errorf("expected abort reason=%s, got %s", RetryStopPermanent, recorder.reason)
+	}
+	if recorder.tool != "Bash" {
+		t.Errorf("expected abort tool Bash, got %q", recorder.tool)
+	}
+	if recorder.excerpt != wrappedExcerpt {
+		t.Errorf("expected abort excerpt %q, got %q", wrappedExcerpt, recorder.excerpt)
+	}
+}
+
+func TestClaudeResultToAgentResultWithRetryAbort_PermanentBeyondExcerpt(t *testing.T) {
+	t.Parallel()
+	const summary = "permanent tool error: disable-model-invocation"
+	recorder := &retryAbortRecorder{}
+	result := claudeResultToAgentResultWithRetryAbort(
+		turnResult("blocked", realToolUseErrorBlocks(strings.Repeat("x", 220)+" disable-model-invocation")),
+		ExecuteConfig{
+			MaxToolErrorRetries: 3,
+			EventHandler:        recorder,
+		},
+		0,
+		RetryStopPermanent,
+	)
+
+	if result.UnresolvedToolError == nil {
+		t.Fatal("expected unresolved tool error")
+	}
+	if result.UnresolvedToolError.Excerpt != summary {
+		t.Errorf("expected permanent summary excerpt %q, got %q", summary, result.UnresolvedToolError.Excerpt)
+	}
+	if recorder.excerpt != summary {
+		t.Errorf("expected abort excerpt %q, got %q", summary, recorder.excerpt)
+	}
+	if !strings.Contains(result.Text, summary) {
+		t.Errorf("expected marker text to include %q, got %q", summary, result.Text)
+	}
+}
+
+// TestRunRetryLoop_RetriesNonPermanentMarkerError is a negative regression: a
+// marker-bearing error whose excerpt does not match the deny list must still
+// retry as before.
+func TestRunRetryLoop_RetriesNonPermanentMarkerError(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("parallel",
+		realToolUseErrorBlocks("Cancelled: parallel tool call errored"))
+	fake := &scriptedSession{
+		responses: []*claude.TurnResult{turnResult("ok", cleanBlocks())},
+	}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 2}
+
+	_, attempts, _, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected 1 retry Ask for non-permanent marker, got %d", attempts)
 	}
 }
 

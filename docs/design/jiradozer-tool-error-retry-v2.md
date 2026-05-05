@@ -259,27 +259,37 @@ Also-ran approaches and why they lose:
 
 The field is a minimal, immutable, point-in-time snapshot.
 
-### G3 — Permanent-class error deny list (optional, lower priority)
+### G3 — Permanent-class error deny list (shipped 2026-05-05, PR #153)
 
-Add a package-private list of error substrings that should never
-trigger retry:
+G3 shipped as a retry-loop policy check, after fresh jiradozer logs still
+showed the disable-model-invocation pattern. It adds a package-private
+classifier in `multiagent/agent` for errors that should never trigger
+retry:
 
 ```
-permanentErrorMarkers = []string{
-    "disable-model-invocation",
-    "cannot be used with",  // covers "Skill X cannot be used with Skill tool"
+func isPermanentToolError(toolResult string) bool {
+    return strings.Contains(toolResult, "disable-model-invocation") ||
+        strings.Contains(toolResult, " cannot be used with Skill tool")
 }
 ```
 
-`FinalTurnToolError` (or a new sibling `FinalTurnRetryableToolError`)
-returns `ok=false` when the excerpt matches any marker. Keep the list
-*tight* — each entry must correspond to a real CLI error class that
-is definitionally unrecoverable within the same session.
+`FinalTurnToolError` keeps its narrow contract: detect whether the final
+tool result is a CLI-reported `tool_use_error` and return a bounded
+display excerpt. Retry policy uses `FinalTurnToolErrorDetails` so
+`isPermanentToolError(toolResult)` sees the full tool result content,
+not the truncated excerpt. Cancellation and retry-budget guards take
+precedence; when the permanent classifier matches after those guards,
+the loop stops with `RetryStopPermanent = "permanent"` without issuing
+another Ask. Keep the classifier *tight*: each match must correspond to
+a real CLI error class that is definitionally unrecoverable within the
+same session.
 
-G3 is optional. G2 alone would have caught both evidence logs, because
-in both cases live bg work was present when the retry fired. Ship G1+G2
-first; add G3 only if a repro surfaces a permanent error *without*
-concurrent bg work.
+G2 alone would have caught both original evidence logs, because in both
+cases live bg work was present when the retry fired. In the current branch,
+the explicit G2 symbols are not present; that approach was superseded by
+`logicalTurnState`, as noted in this doc's status section. For future
+changes, ship G1+G2 first; add or expand G3 only if a concrete repro log
+surfaces a permanent error that still reaches the retry loop.
 
 ### Gate combination
 
@@ -287,9 +297,8 @@ Final retry decision in `ClaudeProvider.Execute`:
 
 ```
 fire retry iff:
-  result.HasLiveBackgroundWork == false AND
   FinalTurnToolError(blocks) returns ok==true AND
-  (G3 optional) excerpt does not match permanentErrorMarkers AND
+  isPermanentToolError(excerpt) == false AND
   // v1 guardrails unchanged:
   attempts < cfg.MaxToolErrorRetries AND
   time.Since(start) < budget AND
@@ -297,27 +306,23 @@ fire retry iff:
   ctx.Err() == nil
 ```
 
-Order matters: check `HasLiveBackgroundWork` *first*, before the content
-walk. It's the cheapest check and it's the most consequential — it
-blocks the destructive case where the retry orphans bg work.
+The background-work gate described earlier in this document is now handled
+by the raw event stream plus `logicalTurnState`: the provider waits for the
+logical turn to finish before it constructs the `TurnResult` consumed by
+the retry loop.
 
-When the gate blocks for bg reasons, emit a distinct
-`RetryStopReason = "bg_work_live"` via `OnRetryAbort` so triage can
-tell "we saw a tool error but chose not to retry" apart from "no tool
-error was seen at all." Without this signal the non-retry case is
-invisible in logs.
+When the gate blocks for permanent-error reasons, emit
+`RetryStopReason = "permanent"` via the existing unresolved-tool-error
+path and `OnRetryAbort`.
 
 ## File/line summary
 
 | File | Change |
 |---|---|
 | `agent-cli-wrapper/claude/turn.go:82-104` | `FinalTurnToolError` tightens to require `IsError && marker` |
-| `agent-cli-wrapper/claude/turn.go` (TurnResult struct ~L124) | New field `HasLiveBackgroundWork bool` |
-| `agent-cli-wrapper/claude/session.go:1116-1120` | Set `result.HasLiveBackgroundWork = turn.shouldSuppressForBgTasks()` before `CompleteTurn` |
-| `multiagent/agent/claude_provider.go:182-210` | Gate retry on `!result.HasLiveBackgroundWork` first; new abort reason `bg_work_live` |
-| `multiagent/agent/claude_provider.go` const block ~L22 | `RetryStopBgWorkLive = "bg_work_live"` |
-| `agent-cli-wrapper/claude/turn_retry_test.go` | Update `SubstringOnly` (now negative); add new cases (see Test Plan) |
-| `agent-cli-wrapper/claude/testdata/` (new) | Wire-shape fixtures extracted from the two evidence logs |
+| `multiagent/agent/claude_provider.go` | `RetryStopPermanent = "permanent"` and `isPermanentToolError` short-circuit after `FinalTurnToolError` |
+| `multiagent/agent/provider.go` | `RetryHandler.OnRetryAbort` documents the permanent stop reason |
+| `multiagent/agent/claude_provider_retry_test.go` | Cover permanent abort and non-permanent retry behavior |
 
 ## Test plan
 
@@ -377,24 +382,20 @@ Cases:
   single Ask, raw result returned, no marker, no
   `UnresolvedToolError`. Preserves today's behavior for jiradozer
   configs that did not opt in.
-- **`skips_when_bg_work_live`** — *G2 core test*. Fake returns one
-  `TurnResult` with `HasLiveBackgroundWork:true` AND the content
-  blocks of a real tool_use_error. Assert exactly 1 Ask, no retry,
-  `UnresolvedToolError.Reason=bg_work_live`, marker appended. This is
-  the regression test for evidence log 1.
 - **`skips_on_nonzero_exit_bash`** — *G1 core test*. Fake returns a
   `TurnResult` whose blocks have `IsError:true` but no
   `<tool_use_error>` marker. Assert exactly 1 Ask, no retry, no
   `UnresolvedToolError` (because `FinalTurnToolError` returned
   ok=false — nothing to mark unresolved). Regression test for
   evidence log 2.
+- **`skips_on_permanent_skill_error`** — *G3 core test*. Fake returns
+  one real tool_use_error whose excerpt matches the permanent Skill
+  compatibility deny list. Assert no retry,
+  `UnresolvedToolError.Reason=permanent`, marker appended, and
+  `OnRetryAbort("permanent", ...)` emitted.
 - `retries_cleanly_on_real_tool_use_error` — fake returns [real
-  tool_use_error with `HasLiveBackgroundWork:false`, clean]; assert 2
-  Asks, clean final. Ensures G1+G2 tightening did not break the
-  original PLA-212 fix path.
-- `skips_when_bg_work_live_and_cancelled_sibling` — evidence-shaped:
-  one tool_use_error, one cancelled sibling, `HasLiveBackgroundWork:
-  true`. Assert no retry (G2 dominates even when G1 would allow).
+  tool_use_error, clean]; assert 2 Asks, clean final. Ensures G1+G3
+  tightening did not break the original PLA-212 fix path.
 
 ### Fixture-driven testing
 
@@ -447,19 +448,10 @@ is the load-bearing regression coverage.
   code retried is a subset of what v2 retries plus strictly more cases
   it correctly skips. No config currently in the tree relies on the
   buggy retry behavior.
-- `HasLiveBackgroundWork` is a new field on the public `TurnResult`
-  struct. Monorepo style permits API changes; all in-tree callers are
-  exhaustively enumerated (provider, render, bramble via adapter).
-  Gazelle-regenerated BUILDs pick up the new field with no changes.
-- `RetryStopBgWorkLive` is a new abort reason string. Any log parser
-  that pattern-matches on reasons should be updated. (In tree:
-  jiradozer log consumers only; no external consumers.)
-- `OnRetryAbort` fires for `bg_work_live` even though no retry was
-  attempted. This is a semantic widening — "abort" now covers "gate
-  blocked from the start" as well as "we tried and ran out of budget."
-  `logEventHandler.OnRetryAbort` (jiradozer/agent.go) should log at
-  INFO, not WARN, when `reason == bg_work_live` since it's the
-  expected case.
+Historical note: this section originally proposed adding
+`HasLiveBackgroundWork` to `TurnResult`, `RetryStopBgWorkLive`, and
+`OnRetryAbort("bg_work_live", ...)`. That G2 approach was superseded
+before implementation; those names are not part of the shipped API.
 
 ## G4 — Error must be the final tool_result in the turn
 
