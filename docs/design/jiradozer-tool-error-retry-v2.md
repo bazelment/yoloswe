@@ -379,24 +379,20 @@ Cases:
   single Ask, raw result returned, no marker, no
   `UnresolvedToolError`. Preserves today's behavior for jiradozer
   configs that did not opt in.
-- **`skips_when_bg_work_live`** — *G2 core test*. Fake returns one
-  `TurnResult` with `HasLiveBackgroundWork:true` AND the content
-  blocks of a real tool_use_error. Assert exactly 1 Ask, no retry,
-  `UnresolvedToolError.Reason=bg_work_live`, marker appended. This is
-  the regression test for evidence log 1.
 - **`skips_on_nonzero_exit_bash`** — *G1 core test*. Fake returns a
   `TurnResult` whose blocks have `IsError:true` but no
   `<tool_use_error>` marker. Assert exactly 1 Ask, no retry, no
   `UnresolvedToolError` (because `FinalTurnToolError` returned
   ok=false — nothing to mark unresolved). Regression test for
   evidence log 2.
+- **`skips_on_permanent_skill_error`** — *G3 core test*. Fake returns
+  one real tool_use_error whose excerpt matches the permanent Skill
+  compatibility deny list. Assert no retry,
+  `UnresolvedToolError.Reason=permanent`, marker appended, and
+  `OnRetryAbort("permanent", ...)` emitted.
 - `retries_cleanly_on_real_tool_use_error` — fake returns [real
-  tool_use_error with `HasLiveBackgroundWork:false`, clean]; assert 2
-  Asks, clean final. Ensures G1+G2 tightening did not break the
-  original PLA-212 fix path.
-- `skips_when_bg_work_live_and_cancelled_sibling` — evidence-shaped:
-  one tool_use_error, one cancelled sibling, `HasLiveBackgroundWork:
-  true`. Assert no retry (G2 dominates even when G1 would allow).
+  tool_use_error, clean]; assert 2 Asks, clean final. Ensures G1+G3
+  tightening did not break the original PLA-212 fix path.
 
 ### Fixture-driven testing
 

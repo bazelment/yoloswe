@@ -104,6 +104,15 @@ func turnResult(text string, blocks []claude.ContentBlock) *claude.TurnResult {
 	}
 }
 
+func finalToolErrorExcerpt(t *testing.T, inner string) string {
+	t.Helper()
+	_, excerpt, ok := claude.FinalTurnToolError(realToolUseErrorBlocks(inner))
+	if !ok {
+		t.Fatal("expected realToolUseErrorBlocks to produce a final tool error")
+	}
+	return excerpt
+}
+
 func TestIsPermanentToolError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -114,6 +123,11 @@ func TestIsPermanentToolError(t *testing.T) {
 		{
 			name:    "disable model invocation",
 			excerpt: "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation",
+			want:    true,
+		},
+		{
+			name:    "exact final tool error excerpt",
+			excerpt: finalToolErrorExcerpt(t, "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation"),
 			want:    true,
 		},
 		{
