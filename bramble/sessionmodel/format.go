@@ -8,6 +8,8 @@ import (
 
 // FormatToolContent creates a display-friendly content string for a tool call.
 // Ported from bramble/session/event_handler.go:formatToolContent.
+// This structured-output path includes the tool name and uses narrower persisted
+// display widths; render.FormatToolInput uses terminal-oriented inline widths.
 func FormatToolContent(name string, input map[string]interface{}) string {
 	if input == nil {
 		return name

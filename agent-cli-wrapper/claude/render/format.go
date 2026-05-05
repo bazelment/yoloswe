@@ -10,6 +10,9 @@ import (
 
 // FormatToolInput formats tool input for inline display after the tool name bracket.
 // Returns an empty string for tools that should be handled specially.
+// This renderer uses terminal-oriented widths and omits the tool name because
+// ToolStart prints it separately; sessionmodel.FormatToolContent uses different
+// widths and prefixes for persisted structured output.
 func FormatToolInput(name string, input map[string]interface{}) string {
 	switch name {
 	case "Read":
