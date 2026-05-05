@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,24 @@ func TestNewRendererWithOptions_BackwardCompat(t *testing.T) {
 	r := NewRendererWithOptions(&buf, true, true)
 	if r.verbosity != VerbosityVerbose {
 		t.Errorf("verbose=true should map to VerbosityVerbose, got %v", r.verbosity)
+	}
+}
+
+func TestIsTerminal_DevNullNotATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	if IsTerminal(f) {
+		t.Fatalf("%s should not be reported as a terminal", os.DevNull)
+	}
+}
+
+func TestIsTerminal_NonFileWriterIsNotTerminal(t *testing.T) {
+	if IsTerminal(&bytes.Buffer{}) {
+		t.Fatal("bytes.Buffer should not be a terminal")
 	}
 }
 
