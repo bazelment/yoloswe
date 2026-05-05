@@ -1,13 +1,16 @@
 package reviewer
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
 
@@ -17,6 +20,37 @@ import (
 // is caught at CI time. Mirrors the UPDATE_FIXTURES pattern documented in
 // CLAUDE.md.
 func updateGoldens() bool { return os.Getenv("UPDATE_GOLDENS") == "1" }
+
+type danglingToolBackend struct{}
+
+func (danglingToolBackend) Start(context.Context) error { return nil }
+
+func (danglingToolBackend) Stop() error { return nil }
+
+func (danglingToolBackend) RunPrompt(_ context.Context, _ string, handler EventHandler) (*ReviewResult, error) {
+	handler.OnToolStart("Shell", "call-1", nil)
+	return &ReviewResult{Success: true}, nil
+}
+
+type partialTextErrorBackend struct{}
+
+func (partialTextErrorBackend) Start(context.Context) error { return nil }
+
+func (partialTextErrorBackend) Stop() error { return nil }
+
+func (partialTextErrorBackend) RunPrompt(_ context.Context, _ string, handler EventHandler) (*ReviewResult, error) {
+	handler.OnText("partial")
+	return nil, errors.New("backend failed")
+}
+
+type captureTextHandler struct {
+	render.NoOpEventHandler
+	texts []string
+}
+
+func (h *captureTextHandler) OnText(text string) {
+	h.texts = append(h.texts, text)
+}
 
 func TestBuildPrompt(t *testing.T) {
 	tests := []struct {
@@ -52,6 +86,84 @@ func TestBuildPrompt(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReviewWithResultResetsRendererState(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  danglingToolBackend{},
+		renderer: render.NewRendererWithOptions(&buf, true, true),
+	}
+
+	if _, err := r.ReviewWithResult(context.Background(), "review"); err != nil {
+		t.Fatalf("ReviewWithResult returned error: %v", err)
+	}
+	buf.Reset()
+
+	r.renderer.CommandEnd("call-1", 0, 1)
+	if buf.Len() != 0 {
+		t.Errorf("ReviewWithResult should reset dangling renderer command state, got %q", buf.String())
+	}
+}
+
+func TestFollowUpResetsRendererState(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  danglingToolBackend{},
+		renderer: render.NewRendererWithOptions(&buf, true, true),
+	}
+
+	if _, err := r.FollowUp(context.Background(), "again"); err != nil {
+		t.Fatalf("FollowUp returned error: %v", err)
+	}
+	buf.Reset()
+
+	r.renderer.CommandEnd("call-1", 0, 1)
+	if buf.Len() != 0 {
+		t.Errorf("FollowUp should reset dangling renderer command state, got %q", buf.String())
+	}
+}
+
+func TestReviewWithResultResetsPartialTextOnError(t *testing.T) {
+	var buf bytes.Buffer
+	texts := &captureTextHandler{}
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  partialTextErrorBackend{},
+		renderer: render.NewRendererWithOptions(&buf, false, true),
+	}
+	r.renderer.SetEventHandler(texts)
+
+	if _, err := r.ReviewWithResult(context.Background(), "review"); err == nil {
+		t.Fatal("ReviewWithResult returned nil error")
+	}
+	r.renderer.Status("next session")
+
+	if len(texts.texts) != 0 {
+		t.Errorf("ReviewWithResult should reset partial text after backend error, got %v", texts.texts)
+	}
+}
+
+func TestFollowUpResetsPartialTextOnError(t *testing.T) {
+	var buf bytes.Buffer
+	texts := &captureTextHandler{}
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  partialTextErrorBackend{},
+		renderer: render.NewRendererWithOptions(&buf, false, true),
+	}
+	r.renderer.SetEventHandler(texts)
+
+	if _, err := r.FollowUp(context.Background(), "again"); err == nil {
+		t.Fatal("FollowUp returned nil error")
+	}
+	r.renderer.Status("next session")
+
+	if len(texts.texts) != 0 {
+		t.Errorf("FollowUp should reset partial text after backend error, got %v", texts.texts)
 	}
 }
 

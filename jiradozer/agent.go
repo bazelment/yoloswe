@@ -378,6 +378,7 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 	logHandler := newLogEventHandler(logger, stepName)
 	var handler agent.EventHandler = logHandler
 	if renderer != nil {
+		defer renderer.Reset()
 		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, &rendererEventHandler{r: renderer}}}
 	}
 

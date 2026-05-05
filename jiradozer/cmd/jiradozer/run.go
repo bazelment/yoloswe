@@ -101,6 +101,9 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 	logger := app.Logger
 	renderer := app.Renderer
+	if renderer != nil {
+		defer renderer.Reset()
+	}
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {

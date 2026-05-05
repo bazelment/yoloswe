@@ -396,6 +396,76 @@ func TestCommandEnd_ZeroDuration(t *testing.T) {
 	}
 }
 
+func TestReset_ClearsInFlightCommands(t *testing.T) {
+	r, _ := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", "sleep 9999")
+	r.CommandOutput("call1", "buffered output...")
+	if !r.HasOutput("call1") {
+		t.Fatal("precondition: HasOutput should be true")
+	}
+
+	r.Reset()
+
+	if r.HasOutput("call1") {
+		t.Error("Reset should drop in-flight output")
+	}
+	// CommandEnd on a reset call should be a no-op.
+	r.CommandEnd("call1", 0, 50)
+
+	r.CommandStart("call2", "echo ok")
+	r.CommandOutput("call2", "ok")
+	if !r.HasOutput("call2") {
+		t.Fatal("renderer should accept new command output after Reset")
+	}
+}
+
+func TestReset_IsIdempotent(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", "sleep 9999")
+	r.CommandOutput("call1", "buffered output")
+	buf.Reset()
+
+	r.Reset()
+	r.Reset()
+
+	if r.HasOutput("call1") {
+		t.Error("Reset should keep in-flight output cleared after repeated calls")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("Reset should not produce output after repeated calls, got %q", buf.String())
+	}
+}
+
+func TestReset_DoesNotWriteOutput(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", "ls")
+	r.CommandOutput("call1", "x")
+	buf.Reset()
+
+	r.Reset()
+
+	if buf.Len() != 0 {
+		t.Errorf("Reset should not produce output, got %q", buf.String())
+	}
+}
+
+func TestResetClosesOpenToolOutput(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityNormal)
+	r.ToolStart("Read", "tool-1")
+
+	r.Reset()
+
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Errorf("Reset should close an open tool output line, got %q", buf.String())
+	}
+	buf.Reset()
+
+	r.Text("next")
+	if strings.HasPrefix(buf.String(), "\n") {
+		t.Errorf("next text should not close stale tool output, got %q", buf.String())
+	}
+}
+
 // --- Turn summaries ---
 
 func TestTurnSummary(t *testing.T) {
@@ -541,6 +611,23 @@ func TestEventHandler_TextFlush(t *testing.T) {
 	r.Text("hello\n")
 	if len(received) != 1 || received[0] != "hello\n" {
 		t.Errorf("Expected text flush at newline, got %v", received)
+	}
+}
+
+func TestResetDropsBufferedText(t *testing.T) {
+	r, _ := newTestRenderer(VerbosityNormal)
+	var received []string
+	handler := &testEventHandler{
+		onText: func(text string) { received = append(received, text) },
+	}
+	r.SetEventHandler(handler)
+
+	r.Text("partial")
+	r.Reset()
+	r.Text("fresh\n")
+
+	if len(received) != 1 || received[0] != "fresh\n" {
+		t.Errorf("Reset should discard partial text before next flush, got %v", received)
 	}
 }
 
