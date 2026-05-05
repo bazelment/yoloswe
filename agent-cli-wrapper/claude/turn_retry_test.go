@@ -33,45 +33,6 @@ func TestFinalTurnToolError_IsErrorPlusMarker(t *testing.T) {
 	}
 }
 
-func TestIsPermanentToolError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		excerpt string
-		want    bool
-	}{
-		{
-			name:    "disable model invocation",
-			excerpt: "<tool_use_error>Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation</tool_use_error>",
-			want:    true,
-		},
-		{
-			name:    "cannot be used with",
-			excerpt: "<tool_use_error>Skill pr-polish cannot be used with Skill tool</tool_use_error>",
-			want:    true,
-		},
-		{
-			name:    "non permanent marker error",
-			excerpt: "<tool_use_error>Cancelled: parallel tool call errored</tool_use_error>",
-			want:    false,
-		},
-		{
-			name:    "empty",
-			excerpt: "",
-			want:    false,
-		},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsPermanentToolError(tt.excerpt); got != tt.want {
-				t.Errorf("IsPermanentToolError() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestFinalTurnToolError_NonzeroExitBash: is_error without the marker is
 // a nonzero-exit Bash the agent ran to inspect output (gh pr checks,
 // grep, git diff). These must NOT trigger retry. Regression for the

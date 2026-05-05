@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
@@ -63,6 +64,13 @@ func computeRetryTimeBudget(cfg ExecuteConfig) time.Duration {
 
 func buildRetryPrompt() string {
 	return retryPrompt
+}
+
+func isPermanentToolError(excerpt string) bool {
+	if strings.Contains(excerpt, "disable-model-invocation") {
+		return true
+	}
+	return strings.Contains(excerpt, " cannot be used with Skill tool")
 }
 
 // emitRetry fires the hook before each follow-up Ask so logs see the
@@ -141,7 +149,7 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 		if !ok {
 			break
 		}
-		if claude.IsPermanentToolError(excerpt) {
+		if isPermanentToolError(excerpt) {
 			stopReason = RetryStopPermanent
 			break
 		}

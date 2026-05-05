@@ -77,6 +77,50 @@ func turnResult(text string, blocks []claude.ContentBlock) *claude.TurnResult {
 	}
 }
 
+func TestIsPermanentToolError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		excerpt string
+		want    bool
+	}{
+		{
+			name:    "disable model invocation",
+			excerpt: "Skill sy:pr-polish cannot be used with Skill tool due to disable-model-invocation",
+			want:    true,
+		},
+		{
+			name:    "skill tool compatibility",
+			excerpt: "Skill pr-polish cannot be used with Skill tool",
+			want:    true,
+		},
+		{
+			name:    "broad compatibility phrase outside skill tool",
+			excerpt: "command cannot be used with this terminal state",
+			want:    false,
+		},
+		{
+			name:    "non permanent marker error",
+			excerpt: "Cancelled: parallel tool call errored",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			excerpt: "",
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPermanentToolError(tt.excerpt); got != tt.want {
+				t.Errorf("isPermanentToolError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunRetryLoop_RetriesUntilClean(t *testing.T) {
 	t.Parallel()
 	initial := turnResult("err1", realToolUseErrorBlocks("first"))

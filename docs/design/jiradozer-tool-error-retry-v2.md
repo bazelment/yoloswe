@@ -263,22 +263,23 @@ The field is a minimal, immutable, point-in-time snapshot.
 
 G3 shipped as a retry-loop policy check, after fresh jiradozer logs still
 showed the disable-model-invocation pattern. It adds a package-private
-list of error substrings that should never trigger retry:
+classifier in `multiagent/agent` for errors that should never trigger
+retry:
 
 ```
-permanentToolErrorMarkers = []string{
-    "disable-model-invocation",
-    "cannot be used with",  // covers "Skill X cannot be used with Skill tool"
+func isPermanentToolError(excerpt string) bool {
+    return strings.Contains(excerpt, "disable-model-invocation") ||
+        strings.Contains(excerpt, " cannot be used with Skill tool")
 }
 ```
 
 `FinalTurnToolError` keeps its narrow contract: detect whether the final
-tool result is a CLI-reported `tool_use_error`. The retry loop calls the
-sibling helper `IsPermanentToolError(excerpt)` after
-`FinalTurnToolError` returns `ok=true`; when it matches, the loop stops
-with `RetryStopPermanent = "permanent"` without issuing another Ask.
-Keep the list *tight* — each entry must correspond to a real CLI error
-class that is definitionally unrecoverable within the same session.
+tool result is a CLI-reported `tool_use_error`. The retry loop applies
+`isPermanentToolError(excerpt)` after `FinalTurnToolError` returns
+`ok=true`; when it matches, the loop stops with `RetryStopPermanent =
+"permanent"` without issuing another Ask. Keep the classifier *tight*:
+each match must correspond to a real CLI error class that is
+definitionally unrecoverable within the same session.
 
 G2 alone would have caught both original evidence logs, because in both
 cases live bg work was present when the retry fired. In the current branch,
@@ -293,9 +294,8 @@ Final retry decision in `ClaudeProvider.Execute`:
 
 ```
 fire retry iff:
-  result.HasLiveBackgroundWork == false AND
   FinalTurnToolError(blocks) returns ok==true AND
-  IsPermanentToolError(excerpt) == false AND
+  isPermanentToolError(excerpt) == false AND
   // v1 guardrails unchanged:
   attempts < cfg.MaxToolErrorRetries AND
   time.Since(start) < budget AND
@@ -303,15 +303,10 @@ fire retry iff:
   ctx.Err() == nil
 ```
 
-Order matters: check `HasLiveBackgroundWork` *first*, before the content
-walk. It's the cheapest check and it's the most consequential — it
-blocks the destructive case where the retry orphans bg work.
-
-When the gate blocks for bg reasons, emit a distinct
-`RetryStopReason = "bg_work_live"` via `OnRetryAbort` so triage can
-tell "we saw a tool error but chose not to retry" apart from "no tool
-error was seen at all." Without this signal the non-retry case is
-invisible in logs.
+The background-work gate described earlier in this document is now handled
+by the raw event stream plus `logicalTurnState`: the provider waits for the
+logical turn to finish before it constructs the `TurnResult` consumed by
+the retry loop.
 
 When the gate blocks for permanent-error reasons, emit
 `RetryStopReason = "permanent"` via the existing unresolved-tool-error
@@ -322,14 +317,9 @@ path and `OnRetryAbort`.
 | File | Change |
 |---|---|
 | `agent-cli-wrapper/claude/turn.go:82-104` | `FinalTurnToolError` tightens to require `IsError && marker` |
-| `agent-cli-wrapper/claude/turn.go` | `permanentToolErrorMarkers` and `IsPermanentToolError` classify permanent retry-loop aborts |
-| `agent-cli-wrapper/claude/turn.go` (TurnResult struct ~L124) | New field `HasLiveBackgroundWork bool` |
-| `agent-cli-wrapper/claude/session.go:1116-1120` | Set `result.HasLiveBackgroundWork = turn.shouldSuppressForBgTasks()` before `CompleteTurn` |
-| `multiagent/agent/claude_provider.go:182-210` | Gate retry on `!result.HasLiveBackgroundWork` first; new abort reason `bg_work_live` |
-| `multiagent/agent/claude_provider.go` const block ~L22 | `RetryStopBgWorkLive = "bg_work_live"` |
-| `multiagent/agent/claude_provider.go` | `RetryStopPermanent = "permanent"` and deny-list short-circuit after `FinalTurnToolError` |
-| `agent-cli-wrapper/claude/turn_retry_test.go` | Update `SubstringOnly` (now negative); add new cases (see Test Plan) |
-| `agent-cli-wrapper/claude/testdata/` (new) | Wire-shape fixtures extracted from the two evidence logs |
+| `multiagent/agent/claude_provider.go` | `RetryStopPermanent = "permanent"` and `isPermanentToolError` short-circuit after `FinalTurnToolError` |
+| `multiagent/agent/provider.go` | `RetryHandler.OnRetryAbort` documents the permanent stop reason |
+| `multiagent/agent/claude_provider_retry_test.go` | Cover permanent abort and non-permanent retry behavior |
 
 ## Test plan
 

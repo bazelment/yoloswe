@@ -18,29 +18,6 @@ const toolUseErrorMarker = "<tool_use_error>"
 
 const toolErrorExcerptMaxRunes = 200
 
-// permanentToolErrorMarkers are substrings that, when present in a
-// tool_use_error excerpt, indicate the failure cannot be recovered by retrying
-// within the same session. The canonical case is disable-model-invocation
-// config errors: the CLI will refuse the same tool the same way every turn.
-// Keep this list tight: each entry must correspond to a CLI error class that
-// is definitionally unrecoverable.
-var permanentToolErrorMarkers = []string{
-	"disable-model-invocation",
-	"cannot be used with",
-}
-
-// IsPermanentToolError reports whether the excerpt matches a permanent-class
-// CLI error that should not be retried. Designed to be called by the retry
-// loop after FinalTurnToolError returns ok=true.
-func IsPermanentToolError(excerpt string) bool {
-	for _, marker := range permanentToolErrorMarkers {
-		if strings.Contains(excerpt, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func stringifyToolResult(result interface{}) string {
 	if result == nil {
 		return ""
