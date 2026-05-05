@@ -2028,11 +2028,13 @@ func TestWorkflow_Redo_SkipsReopenedPhase(t *testing.T) {
 	wf.phases[PhasePlan] = phaseDone
 	wf.phases[PhaseBuild] = phaseDone
 	wf.phases[PhaseValidate] = phaseInProgress
+	wf.feedback = "redo feedback for skipped build"
 
 	require.NoError(t, wf.tryRedo(context.Background(), StepBuilding))
 
 	assert.Equal(t, StepValidating, wf.state.Current())
 	assert.Equal(t, phaseDone, wf.phases[PhaseBuild])
+	assert.Empty(t, wf.feedback, "feedback for a skipped redo target must not leak into the next phase")
 	seq := labelSequence(mt)
 	assert.Contains(t, seq, "AddLabel:jiradozer-build-inprogress",
 		"redo first reopens the target phase")

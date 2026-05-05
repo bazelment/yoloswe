@@ -823,6 +823,9 @@ func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
 	}
 	w.reopenPhaseOnRedo(ctx, redoTarget)
 	w.skipCompletedOrConfiguredPhases(ctx)
+	if w.state.Current() != redoTarget {
+		w.feedback = ""
+	}
 	return nil
 }
 
