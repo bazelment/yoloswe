@@ -82,6 +82,7 @@ type Orchestrator struct {
 	preserved    []PreservedWorktree
 }
 
+//nolint:govet // fieldalignment: grouping by purpose (lifecycle vs watchdog) is more readable than tighter packing
 type managedWorkflow struct {
 	startedAt    time.Time
 	issue        *tracker.Issue
