@@ -194,9 +194,9 @@ func TestFinalTurnToolError_ExcerptLength(t *testing.T) {
 func TestFinalTurnToolErrorDetails_ReturnsFullContent(t *testing.T) {
 	t.Parallel()
 	long := "<tool_use_error>" + strings.Repeat("x", 500) + " disable-model-invocation</tool_use_error>"
-	blocks := []ContentBlock{
-		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
-		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: long, IsError: true},
+	blocks := ContentBlocks{
+		ToolUseBlock{Type: ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
+		ToolResultBlock{Type: ContentBlockTypeToolResult, ToolUseID: "t1", Content: long, IsError: boolPtr(true)},
 	}
 	name, content, excerpt, ok := FinalTurnToolErrorDetails(blocks)
 	if !ok {
