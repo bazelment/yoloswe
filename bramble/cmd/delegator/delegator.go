@@ -79,6 +79,7 @@ func runDelegator(cmd *cobra.Command, args []string) error {
 	defer stop()
 
 	renderer := render.NewRenderer(os.Stdout, verbose)
+	defer renderer.Reset()
 
 	switch mode {
 	case "mock":

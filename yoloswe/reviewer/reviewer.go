@@ -599,6 +599,8 @@ func (r *Reviewer) Review(ctx context.Context, prompt string) error {
 
 // ReviewWithResult sends a review prompt and returns the result with response text.
 func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*ReviewResult, error) {
+	defer r.renderer.Reset()
+
 	model := r.config.Model
 	if model == "" {
 		model = "default"
@@ -623,6 +625,8 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 
 // FollowUp sends a follow-up message to the existing backend session.
 func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, error) {
+	defer r.renderer.Reset()
+
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if err != nil {

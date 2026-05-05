@@ -420,6 +420,29 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 	}
 }
 
+// Reset clears any in-flight command state. Call this from session teardown
+// (context cancellation, session end, crash recovery) so commands that never
+// received a CommandEnd do not leak accumulated output.
+//
+// Reset does not flush text or write any output; it only drops state.
+func (r *Renderer) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for k := range r.commands {
+		delete(r.commands, k)
+	}
+	for k := range r.outputs {
+		delete(r.outputs, k)
+	}
+	r.lastToolName = ""
+	r.lastToolID = ""
+	r.lastCompletedToolName = ""
+	r.lastCompletedToolID = ""
+	r.inToolOutput = false
+	r.inReasoning = false
+}
+
 // ---------------------------------------------------------------------------
 // Questions
 // ---------------------------------------------------------------------------

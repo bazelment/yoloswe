@@ -396,6 +396,42 @@ func TestCommandEnd_ZeroDuration(t *testing.T) {
 	}
 }
 
+func TestReset_ClearsInFlightCommands(t *testing.T) {
+	r, _ := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", "sleep 9999")
+	r.CommandOutput("call1", "buffered output...")
+	if !r.HasOutput("call1") {
+		t.Fatal("precondition: HasOutput should be true")
+	}
+
+	r.Reset()
+
+	if r.HasOutput("call1") {
+		t.Error("Reset should drop in-flight output")
+	}
+	// CommandEnd on a reset call should be a no-op.
+	r.CommandEnd("call1", 0, 50)
+}
+
+func TestReset_IsIdempotent(t *testing.T) {
+	r, _ := newTestRenderer(VerbosityVerbose)
+	r.Reset()
+	r.Reset()
+}
+
+func TestReset_DoesNotWriteOutput(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", "ls")
+	r.CommandOutput("call1", "x")
+	buf.Reset()
+
+	r.Reset()
+
+	if buf.Len() != 0 {
+		t.Errorf("Reset should not produce output, got %q", buf.String())
+	}
+}
+
 // --- Turn summaries ---
 
 func TestTurnSummary(t *testing.T) {
