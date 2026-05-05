@@ -75,6 +75,7 @@ func cloneConfig(cfg *Config) *Config {
 	}
 	cp := *cfg
 	cp.Source.Filters = cloneStringMap(cfg.Source.Filters)
+	cp.SkipPhases = append([]string(nil), cfg.SkipPhases...)
 	cp.Plan.Rounds = append([]RoundConfig(nil), cfg.Plan.Rounds...)
 	cp.Build.Rounds = append([]RoundConfig(nil), cfg.Build.Rounds...)
 	cp.CreatePR.Rounds = append([]RoundConfig(nil), cfg.CreatePR.Rounds...)

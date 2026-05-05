@@ -247,6 +247,13 @@ work_dir: .
 # Default base branch for PRs.
 base_branch: main
 
+# Optional phases to skip for every run. Skipped phases advance in-memory
+# workflow state and clear stale -inprogress labels, but do not write -done
+# labels; use tracker labels like jiradozer-plan-done for durable completion.
+# Tracker labels like jiradozer-skip-plan are also honored; label editors are
+# trusted to bypass the matching phase.
+#skip_phases: [plan]
+
 `
 
 // bootstrapTopLevelTail — top-level scalars that come after the step blocks.

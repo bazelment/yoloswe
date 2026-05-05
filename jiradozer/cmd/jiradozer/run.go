@@ -32,6 +32,7 @@ type runArgs struct {
 	thinkingLevel   string
 	runStep         string
 	autoApprove     string
+	skipPhases      string
 	branchPrefix    string
 	issueID         string
 	descriptionFile string
@@ -88,6 +89,7 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().Float64Var(&args.maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	cmd.Flags().StringVar(&args.runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
 	cmd.Flags().StringVar(&args.autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
+	cmd.Flags().StringVar(&args.skipPhases, "skip-phases", "", "Skip high-level workflow phases for this run (comma-separated: plan,build,validate,ship; create_pr is part of build)")
 	cmd.Flags().StringArrayVar(&args.sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
 	cmd.Flags().IntVar(&args.maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	cmd.Flags().StringVar(&args.branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
@@ -229,6 +231,11 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 	}
 	if args.maxBudget > 0 {
 		cfg.MaxBudgetUSD = args.maxBudget
+	}
+	if args.skipPhases != "" {
+		if err := cfg.ApplySkipPhases(tracker.SplitCSV(args.skipPhases), "cli"); err != nil {
+			return nil, fmt.Errorf("--skip-phases: %w", err)
+		}
 	}
 
 	// Apply source overrides.
@@ -414,6 +421,9 @@ func buildChildArgs(app *cliapp.App, args runArgs, absConfigPath string) []strin
 	if args.autoApprove != "" {
 		out = append(out, "--auto-approve", args.autoApprove)
 	}
+	if args.skipPhases != "" {
+		out = append(out, "--skip-phases", args.skipPhases)
+	}
 	return out
 }
 
@@ -588,14 +598,7 @@ func parseAutoApprove(value string) []string {
 	if strings.TrimSpace(value) == "all" {
 		return allSteps
 	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if s := strings.TrimSpace(p); s != "" {
-			result = append(result, s)
-		}
-	}
-	return result
+	return tracker.SplitCSV(value)
 }
 
 func availableModels() string {

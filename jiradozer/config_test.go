@@ -163,6 +163,25 @@ poll_interval: 0s
 	assert.Equal(t, 15*time.Second, cfg.PollInterval)
 }
 
+func TestConfig_SkipPhases_ValidatesNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+skip_phases: [plan, not_a_phase]
+` + minimalSteps()
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "skip_phases")
+	assert.Contains(t, err.Error(), "not_a_phase")
+	assert.Contains(t, err.Error(), "plan, build, validate, ship")
+}
+
 // minimalSteps returns a YAML block populating the prompt and
 // comment_template fields jiradozer requires for every named step. Useful
 // for inline-YAML test cases that exercise something *other than* the

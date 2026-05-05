@@ -41,7 +41,7 @@ func TestNewPromptData_StripsJiradozerLabels(t *testing.T) {
 		ID:         "id",
 		Identifier: "ENG-1",
 		Title:      "Test",
-		Labels:     []string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done"},
+		Labels:     []string{"bug", "jiradozer-plan-inprogress", "feature", "jiradozer-build-done", "jiradozer-skip-plan"},
 	}
 
 	data := NewPromptData(issue, "main")

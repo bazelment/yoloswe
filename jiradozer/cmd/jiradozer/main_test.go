@@ -188,6 +188,7 @@ func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
 		branchPrefix:  "hotfix",
 		dryRunSet:     true,
 		dryRun:        true,
+		skipPhases:    "plan, validate",
 	})
 	require.NoError(t, err)
 
@@ -197,6 +198,24 @@ func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
 	require.Equal(t, 7, cfg.Source.MaxConcurrent)
 	require.Equal(t, "hotfix", cfg.Source.BranchPrefix)
 	require.True(t, cfg.Source.DryRun)
+	require.Equal(t, []string{"plan", "validate"}, cfg.SkipPhases)
+}
+
+func TestLoadRunConfigSkipPhasesCLIBeatsConfig(t *testing.T) {
+	cfgPath := writeRunConfig(t, "linear", t.TempDir())
+	content, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	content = append(content, []byte("\nskip_phases: [plan]\n")...)
+	require.NoError(t, os.WriteFile(cfgPath, content, 0o600))
+
+	cfg, err := loadRunConfig(runArgs{
+		configPath:    cfgPath,
+		sourceFilters: []string{"team=ENG"},
+		skipPhases:    "validate",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"validate"}, cfg.SkipPhases)
 }
 
 func TestValidateReloadCompatibleRejectsTrackerChanges(t *testing.T) {
@@ -544,6 +563,7 @@ func TestBuildChildArgsOrdering(t *testing.T) {
 		thinkingLevel: "max",
 		maxBudget:     12.5,
 		autoApprove:   "all",
+		skipPhases:    "plan,validate",
 	}
 	got := buildChildArgs(app, args, "/tmp/jiradozer.yaml")
 
@@ -568,7 +588,7 @@ func TestBuildChildArgsOrdering(t *testing.T) {
 			"persistent flag %s must appear before `run` (got argv: %v)", flag, got)
 	}
 
-	runOnlyAfterRun := []string{"--model", "--thinking-level", "--max-budget", "--auto-approve"}
+	runOnlyAfterRun := []string{"--model", "--thinking-level", "--max-budget", "--auto-approve", "--skip-phases"}
 	for _, flag := range runOnlyAfterRun {
 		idx := indexOf(flag)
 		require.NotEqualf(t, -1, idx, "argv must contain run-only flag %s; got %v", flag, got)
