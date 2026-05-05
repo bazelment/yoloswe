@@ -35,6 +35,10 @@ type WorktreeManager interface {
 	RemoveWorktree(ctx context.Context, nameOrBranch string, deleteBranch bool) error
 }
 
+type worktreeFinder interface {
+	FindWorktree(ctx context.Context, branch string) (worktreePath string, err error)
+}
+
 // IssueStatus represents the current state of a tracked issue's subprocess.
 type IssueStatus struct {
 	Issue        *tracker.Issue
@@ -332,6 +336,14 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	branch := fmt.Sprintf("%s/%s", cfg.Source.BranchPrefix, issue.Identifier)
 	worktreePath, err := o.wtManager.NewWorktree(ctx, branch, cfg.BaseBranch, issue.Title)
 	if err != nil {
+		if strings.Contains(err.Error(), "worktree already exists") {
+			if started, refineErr := o.tryStartRefineForExistingWorktree(ctx, issue, branch); refineErr != nil {
+				o.unreserveSlot(issue.ID)
+				return refineErr
+			} else if started {
+				return nil
+			}
+		}
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
 	}
@@ -476,6 +488,125 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	}()
 
 	return nil
+}
+
+func (o *Orchestrator) tryStartRefineForExistingWorktree(ctx context.Context, issue *tracker.Issue, branch string) (bool, error) {
+	feedback, ok, err := RefineFeedbackFromIssueComment(ctx, o.tracker, issue.ID)
+	if err != nil {
+		return false, fmt.Errorf("check refine feedback for %s: %w", issue.Identifier, err)
+	}
+	if !ok {
+		return false, nil
+	}
+	finder, ok := o.wtManager.(worktreeFinder)
+	if !ok {
+		return false, nil
+	}
+	worktreePath, err := finder.FindWorktree(ctx, branch)
+	if err != nil {
+		return false, fmt.Errorf("find existing worktree for refine %s: %w", issue.Identifier, err)
+	}
+	if worktreePath == "" {
+		return false, fmt.Errorf("find existing worktree for refine %s: branch %q not found", issue.Identifier, branch)
+	}
+	return true, o.startRefineChild(ctx, issue, branch, worktreePath, feedback)
+}
+
+func (o *Orchestrator) startRefineChild(ctx context.Context, issue *tracker.Issue, branch, worktreePath, feedback string) error {
+	o.addLockLabel(ctx, issue)
+	wfCtx, cancel := context.WithCancel(ctx)
+
+	o.mu.RLock()
+	selfPath := o.selfPath
+	childArgs := append([]string(nil), o.childArgs...)
+	logDir := o.logDir
+	o.mu.RUnlock()
+
+	args := refineChildArgs(childArgs)
+	args = append(args, "--issue", issue.Identifier, "--work-dir", worktreePath, "--feedback", feedback)
+
+	cmd := exec.CommandContext(wfCtx, selfPath, args...)
+	cmd.Dir = worktreePath
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 10 * time.Second
+
+	safeID := sanitizeForFilename(issue.Identifier)
+	now := time.Now()
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s-refine-%s-%d-%d.log",
+		safeID, now.Format("20060102-150405"), now.UnixNano(), os.Getpid()))
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		cancel()
+		o.releaseLockLabelByID(issue.ID, issue.Identifier)
+		return fmt.Errorf("open refine log file for %s: %w", issue.Identifier, err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		cancel()
+		o.releaseLockLabelByID(issue.ID, issue.Identifier)
+		return fmt.Errorf("start refine subprocess for %s: %w", issue.Identifier, err)
+	}
+	o.transitionToInProgress(ctx, issue)
+
+	mw := &managedWorkflow{
+		issue:        issue,
+		cancel:       cancel,
+		worktreePath: worktreePath,
+		branch:       branch,
+		startedAt:    time.Now(),
+		cmd:          cmd,
+		logFile:      logFile,
+		pid:          cmd.Process.Pid,
+	}
+	o.mu.Lock()
+	o.active[issue.ID] = mw
+	o.mu.Unlock()
+
+	mw.lastOutputAt.Store(time.Now().UnixNano())
+	mw.tailerAlive.Store(true)
+	o.emitStatus(mw, StepInit, nil)
+	o.logger.Info("refine subprocess started", "issue", issue.Identifier, "pid", cmd.Process.Pid, "log", logPath)
+
+	stop := make(chan struct{})
+	go o.tailSubprocessLog(mw, logPath, stop)
+	go o.runWatchdog(mw, watchdogTickInterval, stop)
+
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		defer logFile.Close()
+		defer close(stop)
+		err := cmd.Wait()
+		switch {
+		case wfCtx.Err() != nil:
+			o.logger.Warn("refine subprocess cancelled", "issue", issue.Identifier, "error", err)
+			o.emitStatus(mw, StepCancelled, wfCtx.Err())
+			o.cleanup(context.Background(), mw, StepCancelled)
+		case err == nil:
+			o.logger.Info("refine subprocess completed", "issue", issue.Identifier)
+			o.emitStatus(mw, StepDone, nil)
+			o.cleanup(context.Background(), mw, StepDone)
+		default:
+			o.logger.Error("refine subprocess failed", "issue", issue.Identifier, "error", err)
+			o.emitStatus(mw, StepFailed, err)
+			o.cleanup(context.Background(), mw, StepFailed)
+		}
+	}()
+	return nil
+}
+
+func refineChildArgs(childArgs []string) []string {
+	out := append([]string(nil), childArgs...)
+	for i, arg := range out {
+		if arg == "run" {
+			out[i] = "refine"
+			return out
+		}
+	}
+	return append(out, "refine")
 }
 
 // activeCountLocked returns the number of active subprocesses.

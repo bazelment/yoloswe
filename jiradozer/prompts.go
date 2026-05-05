@@ -39,6 +39,13 @@ No plan is available. Implement the changes based on the issue description above
 {{- end}}`
 
 const BootstrapValidatePrompt = `Issue: {{.Identifier}} — {{.Title}}
+{{- if .PRFeedback}}
+
+Reviewer feedback on the PR:
+{{.PRFeedback}}
+
+Please address each point. Update the PR by committing and pushing to the same branch.
+{{- end}}
 
 Run the project's tests and linters to validate the changes. Fix any failures you find. Report what passed and what you fixed.`
 

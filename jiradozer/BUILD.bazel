@@ -12,6 +12,7 @@ go_library(
         "orchestrator_logtail.go",
         "poller.go",
         "prompts.go",
+        "refine.go",
         "runtime_state.go",
         "state.go",
         "steplabels.go",
@@ -22,7 +23,9 @@ go_library(
     deps = [
         "//agent-cli-wrapper/claude/render",
         "//jiradozer/tracker",
+        "//jiradozer/tracker/github",
         "//multiagent/agent",
+        "//wt",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -36,6 +39,7 @@ go_test(
         "orchestrator_logtail_test.go",
         "orchestrator_test.go",
         "poller_test.go",
+        "refine_test.go",
         "runtime_state_test.go",
         "state_test.go",
         "steplabels_test.go",

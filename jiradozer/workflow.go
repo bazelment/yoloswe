@@ -74,10 +74,13 @@ type Workflow struct {
 	plan                string
 	buildOutput         string
 	feedback            string
+	prFeedback          string
 	botCommentIDs       []string
 	lastLabels          []string
 	maxRedos            int
 	approveAllRemaining bool
+	refineMode          bool
+	stopAtReview        bool
 }
 
 // NewWorkflow creates a new workflow for the given issue. The caller's
@@ -112,6 +115,20 @@ func NewWorkflow(t tracker.IssueTracker, issue *tracker.Issue, cfg *Config, logg
 // SetRenderer sets the terminal renderer for streaming output.
 func (w *Workflow) SetRenderer(r *render.Renderer) {
 	w.renderer = r
+}
+
+// PrepareRefine starts the workflow directly at validation with reviewer
+// feedback. It keeps the normal state graph unchanged while allowing a
+// preserved PR worktree to be revised in place.
+func (w *Workflow) PrepareRefine(feedback string) {
+	ResetForRefine(w.state)
+	w.prFeedback = feedback
+	w.refineMode = true
+}
+
+// SetStopAtReview makes Run return when the next review gate is reached.
+func (w *Workflow) SetStopAtReview(stop bool) {
+	w.stopAtReview = stop
 }
 
 // status emits a renderer status line when a renderer is configured.
@@ -157,8 +174,12 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("resolve workflow states: %w", err)
 	}
 
-	if err := w.transition(StepPlanning, "start"); err != nil {
-		return err
+	if w.state.Current() == StepInit {
+		if err := w.transition(StepPlanning, "start"); err != nil {
+			return err
+		}
+	} else if w.OnTransition != nil {
+		w.OnTransition(w.state.Current())
 	}
 
 	if id, ok := w.stateIDs[stateKeyInProgress]; ok {
@@ -167,10 +188,14 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
-	// Honor pre-existing -done labels by skipping completed phases. A fresh
-	// workflow run never re-does plan/build/validate/ship that the user has
-	// already marked done. Users clear the label manually to re-run a phase.
-	w.skipDonePhases(ctx)
+	if w.refineMode {
+		w.resetRefinePhaseLabels(ctx)
+	} else {
+		// Honor pre-existing -done labels by skipping completed phases. A fresh
+		// workflow run never re-does plan/build/validate/ship that the user has
+		// already marked done. Users clear the label manually to re-run a phase.
+		w.skipDonePhases(ctx)
+	}
 	if phase := phaseForStep(w.state.Current()); phase != "" {
 		w.enterPhase(ctx, phase)
 	}
@@ -184,6 +209,9 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		case StepPlanning:
 			w.runStepOrRounds(ctx, "plan", w.config.Plan, StepPlanReview, "plan_complete")
 		case StepPlanReview:
+			if w.stopAtReview {
+				return nil
+			}
 			w.runReview(ctx, StepBuilding, StepPlanning)
 		case StepBuilding:
 			delete(w.sessionIDs, StepCreatingPR) // Fresh build cycle invalidates old create_pr session.
@@ -194,14 +222,23 @@ func (w *Workflow) Run(ctx context.Context) (runErr error) {
 		case StepCreatingPR:
 			w.runStep(ctx, "create_pr", w.config.CreatePR, StepBuildReview, "pr_created")
 		case StepBuildReview:
+			if w.stopAtReview {
+				return nil
+			}
 			w.runReview(ctx, StepValidating, StepBuilding)
 		case StepValidating:
 			w.runStepOrRounds(ctx, "validate", w.config.Validate, StepValidateReview, "validation_complete")
 		case StepValidateReview:
+			if w.stopAtReview {
+				return nil
+			}
 			w.runReview(ctx, StepShipping, StepValidating)
 		case StepShipping:
 			w.runStepOrRounds(ctx, "ship", w.config.Ship, StepShipReview, "ship_complete")
 		case StepShipReview:
+			if w.stopAtReview {
+				return nil
+			}
 			w.runReview(ctx, StepDone, StepShipping)
 		case StepDone:
 			if id, ok := w.stateIDs[stateKeyDone]; ok {
@@ -393,6 +430,9 @@ func (w *Workflow) promptData() PromptData {
 	data := NewPromptData(w.issue, w.config.BaseBranch)
 	data.Plan = w.plan
 	data.BuildOutput = w.buildOutput
+	if w.refineMode {
+		data.PRFeedback = w.prFeedback
+	}
 	return data
 }
 
@@ -811,6 +851,18 @@ func (w *Workflow) reopenPhaseOnRedo(ctx context.Context, redoTarget WorkflowSte
 			}
 			w.phases[phase] = phaseNotStarted
 		}
+	}
+}
+
+func (w *Workflow) resetRefinePhaseLabels(ctx context.Context) {
+	for _, phase := range []string{PhaseValidate, PhaseShip} {
+		if err := w.tracker.RemoveLabel(ctx, w.issue.ID, doneLabel(phase)); err != nil {
+			w.logger.Warn("failed to remove phase done label for refine", "phase", phase, "error", err)
+		}
+		if err := w.tracker.RemoveLabel(ctx, w.issue.ID, inProgressLabel(phase)); err != nil {
+			w.logger.Warn("failed to remove phase in-progress label for refine", "phase", phase, "error", err)
+		}
+		w.phases[phase] = phaseNotStarted
 	}
 }
 

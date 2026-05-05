@@ -332,6 +332,19 @@ func (a *wtAdapter) RemoveWorktree(ctx context.Context, nameOrBranch string, del
 	return a.mgr.Remove(ctx, nameOrBranch, deleteBranch, false)
 }
 
+func (a *wtAdapter) FindWorktree(ctx context.Context, branch string) (string, error) {
+	worktrees, err := a.mgr.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, w := range worktrees {
+		if w.Branch == branch && !w.IsGone {
+			return w.Path, nil
+		}
+	}
+	return "", wt.ErrWorktreeNotFound
+}
+
 // validateDryRunMode enforces that --dry-run is only used with team mode.
 // Single-issue and local description modes already give the caller an
 // obvious command to run, so dry-run is rejected in those paths.

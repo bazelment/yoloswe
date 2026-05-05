@@ -29,6 +29,7 @@ type PromptData struct {
 	BaseBranch  string // e.g. "main"
 	Plan        string // plan output from the planning step
 	BuildOutput string // build output from the build step
+	PRFeedback  string // reviewer feedback injected during refine runs
 }
 
 func truncate(s string, maxLen int) string {

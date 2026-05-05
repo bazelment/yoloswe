@@ -191,6 +191,21 @@ func (sm *StateMachine) ForceState(to WorkflowStep) {
 	sm.step = to
 }
 
+// ResetForRefine moves the machine to validation using the explicit refine
+// trigger. It is intentionally separate from the normal transition graph so
+// StepDone remains terminal for ordinary workflow execution.
+func ResetForRefine(sm *StateMachine) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.history = append(sm.history, StepTransition{
+		From:      sm.step,
+		To:        StepValidating,
+		Trigger:   "refine",
+		Timestamp: time.Now(),
+	})
+	sm.step = StepValidating
+}
+
 // History returns a copy of the transition history.
 func (sm *StateMachine) History() []StepTransition {
 	sm.mu.RLock()

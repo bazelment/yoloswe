@@ -30,6 +30,7 @@ type issueData struct {
 	Identifier  string   `json:"identifier"`
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
+	BranchName  string   `json:"branch_name,omitempty"`
 	State       string   `json:"state"`
 	TeamID      string   `json:"team_id"`
 	Labels      []string `json:"labels"`
@@ -379,7 +380,7 @@ func (t *Tracker) nextID() (int, error) {
 
 func toTrackerIssue(d *issueData) *tracker.Issue {
 	desc := d.Description
-	return &tracker.Issue{
+	issue := &tracker.Issue{
 		ID:          d.ID,
 		Identifier:  d.Identifier,
 		Title:       d.Title,
@@ -388,4 +389,8 @@ func toTrackerIssue(d *issueData) *tracker.Issue {
 		TeamID:      d.TeamID,
 		Labels:      d.Labels,
 	}
+	if d.BranchName != "" {
+		issue.BranchName = &d.BranchName
+	}
+	return issue
 }

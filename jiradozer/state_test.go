@@ -190,6 +190,19 @@ func TestStateMachineHistory(t *testing.T) {
 	assert.Equal(t, "start", sm.History()[0].Trigger)
 }
 
+func TestResetForRefine(t *testing.T) {
+	sm := NewStateMachine()
+	ResetForRefine(sm)
+
+	assert.Equal(t, StepValidating, sm.Current())
+	history := sm.History()
+	require.Len(t, history, 1)
+	assert.Equal(t, StepInit, history[0].From)
+	assert.Equal(t, StepValidating, history[0].To)
+	assert.Equal(t, "refine", history[0].Trigger)
+	assert.False(t, validTransitions[key(StepDone, StepValidating)], "StepDone remains terminal in the normal graph")
+}
+
 func TestShouldAutoApprove(t *testing.T) {
 	cfg := &Config{}
 	w := &Workflow{config: cfg}

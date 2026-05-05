@@ -33,6 +33,7 @@ func main() {
 func newRootCommand(opts *cliapp.Options) *cobra.Command {
 	var rargs runArgs
 	var bargs bootstrapArgs
+	var fargs refineArgs
 
 	rootCmd := &cobra.Command{
 		Use:   "jiradozer",
@@ -47,10 +48,11 @@ func newRootCommand(opts *cliapp.Options) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&rargs.configPath, "config", "jiradozer.yaml", "Path to config file")
 
 	runCmd := newRunCommand(&rargs)
+	refineCmd := newRefineCommand(&fargs, &rargs.configPath)
 	bootstrapCmd := newBootstrapCommand(&bargs, &rargs.configPath)
 	validateConfigCmd := newValidateConfigCommand(&rargs.configPath)
 
-	rootCmd.AddCommand(runCmd, bootstrapCmd, validateConfigCmd)
+	rootCmd.AddCommand(runCmd, refineCmd, bootstrapCmd, validateConfigCmd)
 
 	// Back-compat: bare `jiradozer --issue X --description Y` (no
 	// subcommand) behaves like `jiradozer run --issue X --description Y`.

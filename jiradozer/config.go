@@ -326,6 +326,7 @@ var (
 		BaseBranch:  "main",
 		Plan:        "sample plan",
 		BuildOutput: "sample build output",
+		PRFeedback:  "sample PR feedback",
 	}
 	sampleCommentData = CommentData{
 		Step:        "plan",
