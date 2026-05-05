@@ -449,6 +449,23 @@ func TestReset_DoesNotWriteOutput(t *testing.T) {
 	}
 }
 
+func TestResetClosesOpenToolOutput(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityNormal)
+	r.ToolStart("Read", "tool-1")
+
+	r.Reset()
+
+	if !strings.HasSuffix(buf.String(), "\n") {
+		t.Errorf("Reset should close an open tool output line, got %q", buf.String())
+	}
+	buf.Reset()
+
+	r.Text("next")
+	if strings.HasPrefix(buf.String(), "\n") {
+		t.Errorf("next text should not close stale tool output, got %q", buf.String())
+	}
+}
+
 // --- Turn summaries ---
 
 func TestTurnSummary(t *testing.T) {

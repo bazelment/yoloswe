@@ -429,6 +429,7 @@ func (r *Renderer) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.closeToolOutput()
 	r.commands = make(map[string]string)
 	r.outputs = make(map[string]*strings.Builder)
 	r.textBuffer.Reset()
