@@ -16,11 +16,11 @@ func FormatToolContent(name string, input map[string]interface{}) string {
 	switch name {
 	case "Read":
 		if path, ok := input["file_path"].(string); ok {
-			return fmt.Sprintf("%s %s", name, displaytext.TruncatePath(path, 60))
+			return fmt.Sprintf("%s %s", name, displaytext.TruncatePathComponents(path, 60, 1))
 		}
 	case "Write", "Edit":
 		if path, ok := input["file_path"].(string); ok {
-			return fmt.Sprintf("%s → %s", name, displaytext.TruncatePath(path, 60))
+			return fmt.Sprintf("%s → %s", name, displaytext.TruncatePathComponents(path, 60, 1))
 		}
 	case "Bash":
 		if cmd, ok := input["command"].(string); ok {

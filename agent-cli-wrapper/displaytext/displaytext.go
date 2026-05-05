@@ -2,55 +2,92 @@ package displaytext
 
 import "strings"
 
-// Truncate truncates s to at most max Unicode code points, appending "..." if
-// truncation occurred (the suffix counts toward max). Rune-based indexing avoids
-// splitting multi-byte UTF-8 sequences. If max <= 3, returns max runes with no
-// suffix.
+// Truncate returns s shortened to at most max runes, appending "..." when the
+// suffix fits within max.
 func Truncate(s string, max int) string {
-	// Fast path: byte length <= max implies rune length <= max.
-	if len(s) <= max {
-		return s
+	if max <= 0 {
+		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= max {
+	if len(s) <= max || runeCountAtMost(s, max) {
 		return s
 	}
 	if max <= 3 {
-		return string(runes[:max])
+		return s[:byteIndexAfterRunes(s, max)]
 	}
-	return string(runes[:max-3]) + "..."
+	return s[:byteIndexAfterRunes(s, max-3)] + "..."
 }
 
-// TruncatePath truncates a file path, keeping the end visible. For paths longer
-// than max, prefers ".../" + last two path components; falls back to "..." +
-// filename, then to rune-truncation.
+// TruncatePath returns path shortened to at most max runes, preferring to keep
+// the last two path components visible.
 func TruncatePath(path string, max int) string {
-	// Fast path: byte length <= max implies rune length <= max.
-	if len(path) <= max {
+	return TruncatePathComponents(path, max, 2)
+}
+
+// TruncatePathComponents returns path shortened to at most max runes, preferring
+// to keep the requested number of trailing path components visible.
+func TruncatePathComponents(path string, max int, components int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(path) <= max || runeCountAtMost(path, max) {
 		return path
 	}
-	runes := []rune(path)
-	if len(runes) <= max {
-		return path
-	}
-	// Try to keep the last two components (e.g. "foo/bar.go").
-	parts := strings.Split(path, "/")
-	if len(parts) >= 2 {
-		suffix := strings.Join(parts[len(parts)-2:], "/")
-		prefixed := ".../" + suffix
-		if len(prefixed) <= max { // ASCII-safe: ".../" + path segments
-			return prefixed
+	if components > 0 {
+		if suffix := trailingPathComponents(path, components); suffix != "" {
+			if candidate := ".../" + suffix; runeCountAtMost(candidate, max) {
+				return candidate
+			}
 		}
 	}
-	// Fall back to keeping just the filename.
-	if lastSlash := strings.LastIndexByte(path, '/'); lastSlash > 0 {
-		suffix := path[lastSlash:]
-		if len(suffix) <= max-3 { // ASCII-safe: path components
-			return "..." + suffix
+	if suffix := trailingPathComponents(path, 1); suffix != "" {
+		if candidate := ".../" + suffix; runeCountAtMost(candidate, max) {
+			return candidate
 		}
 	}
-	if max <= 3 {
-		return string(runes[:max])
+	return Truncate(path, max)
+}
+
+func trailingPathComponents(path string, components int) string {
+	end := strings.TrimRight(path, "/")
+	if end == "" {
+		return ""
 	}
-	return string(runes[:max-3]) + "..."
+
+	start := len(end)
+	for i := 0; i < components; i++ {
+		slash := strings.LastIndexByte(end[:start], '/')
+		if slash < 0 {
+			return strings.TrimLeft(end, "/")
+		}
+		start = slash
+	}
+	return strings.TrimLeft(end[start:], "/")
+}
+
+func runeCountAtMost(s string, max int) bool {
+	if max < 0 {
+		return false
+	}
+	count := 0
+	for range s {
+		count++
+		if count > max {
+			return false
+		}
+	}
+	return true
+}
+
+func byteIndexAfterRunes(s string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return i
+		}
+		count++
+	}
+	return len(s)
 }

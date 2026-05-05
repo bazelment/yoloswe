@@ -38,7 +38,6 @@ func extractPrompt(lines []session.OutputLine) string {
 		if line.Type != session.OutputTypeText || line.Content == "" {
 			continue
 		}
-		// Truncate to 203 so that displaytext.Truncate keeps 200 content runes + "...".
 		s := displaytext.Truncate(line.Content, 203)
 		if line.IsUserPrompt {
 			return s

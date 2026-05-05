@@ -11,5 +11,5 @@ func TestFormatToolContentTruncatesLongPathWithParent(t *testing.T) {
 		"file_path": "/really/long/prefix/that/exceeds/sixty/chars/with/many/segments/deeply/nested/file.go",
 	})
 
-	assert.Equal(t, "Read .../nested/file.go", content)
+	assert.Equal(t, "Read .../file.go", content)
 }

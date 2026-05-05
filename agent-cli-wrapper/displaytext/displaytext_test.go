@@ -13,6 +13,12 @@ func TestTruncate(t *testing.T) {
 	if got := displaytext.Truncate("hello world", 8); got != "hello..." {
 		t.Errorf("truncated: got %q", got)
 	}
+	if got := displaytext.Truncate("hello 世界!", 8); got != "hello..." {
+		t.Errorf("unicode truncation: got %q", got)
+	}
+	if got := displaytext.Truncate("世界hello", 3); got != "世界h" {
+		t.Errorf("small max should not add suffix: got %q", got)
+	}
 }
 
 func TestTruncatePath(t *testing.T) {
@@ -24,5 +30,18 @@ func TestTruncatePath(t *testing.T) {
 	got := displaytext.TruncatePath(long, 25)
 	if got != ".../nested/file.go" {
 		t.Errorf("truncated path should keep last two components: got %q", got)
+	}
+}
+
+func TestTruncatePathComponents(t *testing.T) {
+	long := "/very/long/path/to/some/deeply/nested/file.go"
+	got := displaytext.TruncatePathComponents(long, 25, 1)
+	if got != ".../file.go" {
+		t.Errorf("truncated path should keep filename: got %q", got)
+	}
+	unicode := "/really/long/path/with/unicode/世界/file.go"
+	got = displaytext.TruncatePathComponents(unicode, 13, 2)
+	if got != ".../file.go" {
+		t.Errorf("unicode path should use rune-aware fallback: got %q", got)
 	}
 }
