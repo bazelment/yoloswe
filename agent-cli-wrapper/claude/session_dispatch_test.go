@@ -615,6 +615,24 @@ func TestSessionControlRequestMalformed_RepliesWithDeny(t *testing.T) {
 	require.Equal(t, "req-bad-1", resp["request_id"])
 }
 
+// TestSessionDispatchInit_NoFallbackWhenMandatoryFieldsMissing verifies that
+// the lenient fallback only fires when the mandatory metadata (session_id,
+// model, cwd) is recoverable. A frame missing model/cwd should leave the
+// session unready so a protocol regression surfaces in logs instead of
+// silently coming up with empty SessionInfo.
+func TestSessionDispatchInit_NoFallbackWhenMandatoryFieldsMissing(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+	// Malformed `tools` triggers strict-decode failure. With model/cwd absent,
+	// lenient decode also can't recover the mandatory fields, so handleSystem
+	// must NOT emit ReadyEvent.
+	line := mkSystem(t, "init", map[string]interface{}{
+		"tools": "this-should-be-an-array",
+	})
+	s.handleLine(line)
+	expectNoEvent(t, s, 100*time.Millisecond)
+}
+
 // TestSessionDispatchInit_LenientFallbackOnMalformedField verifies that
 // a system/init frame with one malformed optional field (e.g. wrong-typed
 // `tools`) still drives the session to ready: ReadyEvent fires and SessionInfo

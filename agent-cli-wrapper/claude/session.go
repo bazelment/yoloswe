@@ -719,8 +719,18 @@ func (s *Session) handleSystem(msg protocol.SystemMessage) {
 			// optional field (e.g. unexpected tools/agents shape) does not
 			// strand the session waiting for Ready forever. Mirrors the parser
 			// and analysis paths in bramble/sessionmodel and bramble/sessionanalysis.
-			slog.Warn("init payload strict decode failed; using lenient fallback")
 			loose := msg.InitPayloadLenient()
+			// Require the mandatory fields: without session_id/model/cwd the
+			// session would come up with empty metadata, which is worse than
+			// failing closed and surfacing a protocol regression in logs.
+			if loose.SessionID == "" || loose.Model == "" || loose.CWD == "" {
+				slog.Error("init payload decode failed and lenient fallback missing required fields; not transitioning to Ready",
+					"have_session_id", loose.SessionID != "",
+					"have_model", loose.Model != "",
+					"have_cwd", loose.CWD != "")
+				return
+			}
+			slog.Warn("init payload strict decode failed; using lenient fallback")
 			p = &loose
 		}
 		s.mu.Lock()

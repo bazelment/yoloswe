@@ -465,6 +465,14 @@ func claudeBlocksToAgentBlocks(blocks protocol.ContentBlocks) []AgentContentBloc
 				Type: string(b.Type),
 				Text: b.DisplayString(),
 			})
+		default:
+			// A future protocol.ContentBlock implementation that this switch
+			// hasn't been updated for. Preserve at least the declared type
+			// so downstream consumers can see something landed rather than
+			// silently dropping the block.
+			out = append(out, AgentContentBlock{
+				Type: string(block.BlockType()),
+			})
 		}
 	}
 	return out

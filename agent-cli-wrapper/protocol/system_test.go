@@ -43,7 +43,7 @@ func TestInitPayloadLenient_PreservesOptionalFields(t *testing.T) {
 	// fallback should still recover model/cwd plus the other optional fields
 	// codex-bot flagged as silently dropped (apiKeySource, output_style,
 	// betas, plugins, slash_commands, mcp_servers).
-	raw := `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default","apiKeySource":"managed","output_style":"compact","betas":["beta-a"],"plugins":[{"name":"Plugin","path":"/usr/lib/p1"}],"slash_commands":["/help"],"mcp_servers":[{"name":"mcp1","status":"connected"}]}`
+	raw := `{"type":"system","subtype":"init","session_id":"s1","uuid":"u1","cwd":"/tmp","model":"claude-opus-4-6","tools":"malformed","permissionMode":"default","apiKeySource":"managed","output_style":"compact","betas":["beta-a"],"plugins":[{"name":"Plugin","path":"/usr/lib/p1"}],"slash_commands":["/help"],"mcp_servers":[{"name":"mcp1","status":"connected"}],"agents":["agent-a"],"skills":["skill-a"]}`
 	m := parseSystem(t, raw)
 	if _, ok := m.AsInit(); ok {
 		t.Fatal("expected strict AsInit() to fail on malformed tools field")
@@ -72,6 +72,12 @@ func TestInitPayloadLenient_PreservesOptionalFields(t *testing.T) {
 	}
 	if len(p.MCPServers) != 1 || p.MCPServers[0].Name != "mcp1" {
 		t.Errorf("mcp_servers: %v", p.MCPServers)
+	}
+	if len(p.Agents) != 1 || p.Agents[0] != "agent-a" {
+		t.Errorf("agents: %v", p.Agents)
+	}
+	if len(p.Skills) != 1 || p.Skills[0] != "skill-a" {
+		t.Errorf("skills: %v", p.Skills)
 	}
 }
 

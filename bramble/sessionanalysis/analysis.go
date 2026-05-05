@@ -272,7 +272,18 @@ func ParseSessionWithConfig(path string, cfg Config) (*Session, error) {
 				}
 			}
 			// Block content with tool_result updates current turn's tool states.
-			if blocks, ok := m.Message.Content.AsBlocks(); ok && currentTurn != nil {
+			// If a block-first user message arrives before any string opener,
+			// open an anonymous turn so unknown blocks and tool_result echoes
+			// are not silently dropped — matches sessionmodel's parser path,
+			// which has no turn concept and always processes the blocks.
+			if blocks, ok := m.Message.Content.AsBlocks(); ok {
+				if currentTurn == nil {
+					turnNum++
+					currentTurn = &Turn{
+						Number:    turnNum,
+						StartTime: meta.Timestamp,
+					}
+				}
 				for _, block := range blocks {
 					switch b := block.(type) {
 					case protocol.ToolResultBlock:
