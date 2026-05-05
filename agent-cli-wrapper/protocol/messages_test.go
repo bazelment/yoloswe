@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -180,6 +181,26 @@ func TestResultMessage_Outcome_Success(t *testing.T) {
 	}
 	if s.Text != "hello" {
 		t.Errorf("text: %q", s.Text)
+	}
+	if m.ResultText() != "hello" {
+		t.Errorf("result text: %q", m.ResultText())
+	}
+}
+
+func TestResultMessage_MarshalJSON_PreservesResult(t *testing.T) {
+	m := parseResultMessage(t, `{"type":"result","subtype":"success","result":"hello","is_error":false}`)
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("unmarshal marshaled result: %v", err)
+	}
+	if wire.Result != "hello" {
+		t.Errorf("result: %q", wire.Result)
 	}
 }
 

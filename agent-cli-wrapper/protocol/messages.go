@@ -246,7 +246,7 @@ type ModelUsage struct {
 
 // ResultMessage contains turn completion metrics.
 //
-// result is populated only when Subtype == ResultSubtypeSuccess. For any of
+// Result is populated only when Subtype == ResultSubtypeSuccess. For any of
 // the error subtypes the Errors slice is populated instead with one or more
 // human-readable error strings. Callers should prefer Outcome() to get a
 // sealed variant that forces handling of the error case.
@@ -255,35 +255,21 @@ type ResultMessage struct {
 	SessionID         string                `json:"session_id"`
 	Subtype           string                `json:"subtype"`
 	UUID              string                `json:"uuid"`
+	Result            string                `json:"result,omitempty"`
 	Type              MessageType           `json:"type"`
-	result            string
-	Errors            []string      `json:"errors,omitempty"`
-	PermissionDenials []interface{} `json:"permission_denials,omitempty"`
-	Usage             UsageDetails  `json:"usage"`
-	TotalCostUSD      float64       `json:"total_cost_usd"`
-	NumTurns          int           `json:"num_turns"`
-	DurationAPIMs     int64         `json:"duration_api_ms"`
-	DurationMs        int64         `json:"duration_ms"`
-	IsError           bool          `json:"is_error"`
+	Errors            []string              `json:"errors,omitempty"`
+	PermissionDenials []interface{}         `json:"permission_denials,omitempty"`
+	Usage             UsageDetails          `json:"usage"`
+	TotalCostUSD      float64               `json:"total_cost_usd"`
+	NumTurns          int                   `json:"num_turns"`
+	DurationAPIMs     int64                 `json:"duration_api_ms"`
+	DurationMs        int64                 `json:"duration_ms"`
+	IsError           bool                  `json:"is_error"`
 }
 
-// UnmarshalJSON decodes the wire result field into the unexported storage used
-// by Outcome().
-func (m *ResultMessage) UnmarshalJSON(data []byte) error {
-	type resultMessageAlias ResultMessage
-	var alias resultMessageAlias
-	if err := json.Unmarshal(data, &alias); err != nil {
-		return err
-	}
-	*m = ResultMessage(alias)
-	var resultField struct {
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal(data, &resultField); err != nil {
-		return err
-	}
-	m.result = resultField.Result
-	return nil
+// ResultText returns the raw result text carried by successful result frames.
+func (m ResultMessage) ResultText() string {
+	return m.Result
 }
 
 // ResultOutcome is a sealed interface describing the outcome of a turn.
@@ -318,12 +304,12 @@ func (ResultError) isResultOutcome() {}
 // Subtype strings directly.
 func (m ResultMessage) Outcome() ResultOutcome {
 	if !m.IsError && ResultSubtype(m.Subtype) == ResultSubtypeSuccess {
-		return ResultSuccess{Text: m.result}
+		return ResultSuccess{Text: m.Result}
 	}
 	return ResultError{
 		Subtype: ResultSubtype(m.Subtype),
 		Errors:  m.Errors,
-		Text:    m.result,
+		Text:    m.Result,
 	}
 }
 

@@ -418,12 +418,20 @@ func (tm *turnManager) GetTurnHistory() []*turnState {
 
 // AppendContentBlock appends a content block to the current turn.
 func (tm *turnManager) AppendContentBlock(block protocol.ContentBlock) {
+	tm.AppendContentBlocks(protocol.ContentBlocks{block})
+}
+
+// AppendContentBlocks appends content blocks to the current turn.
+func (tm *turnManager) AppendContentBlocks(blocks protocol.ContentBlocks) {
+	if len(blocks) == 0 {
+		return
+	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.currentTurn == nil {
 		return
 	}
-	tm.currentTurn.ContentBlocks = append(tm.currentTurn.ContentBlocks, block)
+	tm.currentTurn.ContentBlocks = append(tm.currentTurn.ContentBlocks, blocks...)
 }
 
 // GetTurnByNumber returns a turn by its number.

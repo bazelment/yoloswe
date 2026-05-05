@@ -30,9 +30,6 @@ type wakeupSuppressionState struct {
 	timerFired             bool        // set by the safety timer
 }
 
-// TODO: Re-introduce activeTaskIDs and wire it to bg-task suppression once
-// Bramble has a deterministic task_started/task_notification consumer.
-
 // reset clears wakeup suppression state and stops any pending timer.
 func (w *wakeupSuppressionState) reset() {
 	w.active = false
@@ -990,12 +987,14 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 	}
 
 	// Accumulate structured content blocks
+	accumulated := make(protocol.ContentBlocks, 0, len(blocks))
 	for _, block := range blocks {
-		switch block.(type) {
-		case protocol.TextBlock, protocol.ThinkingBlock, protocol.ToolUseBlock:
-			s.turnManager.AppendContentBlock(block)
+		switch block.BlockType() {
+		case protocol.ContentBlockTypeText, protocol.ContentBlockTypeThinking, protocol.ContentBlockTypeToolUse:
+			accumulated = append(accumulated, block)
 		}
 	}
+	s.turnManager.AppendContentBlocks(accumulated)
 }
 
 func (s *Session) handleUser(msg protocol.UserMessage) {
@@ -1044,11 +1043,13 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 	}
 
 	// Accumulate tool result content blocks
+	accumulated := make(protocol.ContentBlocks, 0, len(blocks))
 	for _, block := range blocks {
-		if _, ok := block.(protocol.ToolResultBlock); ok {
-			s.turnManager.AppendContentBlock(block)
+		if block.BlockType() == protocol.ContentBlockTypeToolResult {
+			accumulated = append(accumulated, block)
 		}
 	}
+	s.turnManager.AppendContentBlocks(accumulated)
 }
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {

@@ -86,13 +86,8 @@ func (s *cancelAfterFirstAskSession) Ask(ctx context.Context, content string) (*
 // <tool_use_error> wrapper present.
 func realToolUseErrorBlocks(excerpt string) claude.ContentBlocks {
 	return claude.ContentBlocks{
-		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
-		claude.ToolResultBlock{
-			Type:      claude.ContentBlockTypeToolResult,
-			ToolUseID: "t1",
-			Content:   "<tool_use_error>" + excerpt + "</tool_use_error>",
-			IsError:   boolPtr(true),
-		},
+		toolUseBlock("t1", "Bash", nil),
+		toolResultContent("t1", "<tool_use_error>"+excerpt+"</tool_use_error>", true),
 	}
 }
 
@@ -100,18 +95,22 @@ func realToolUseErrorBlocks(excerpt string) claude.ContentBlocks {
 // true but no <tool_use_error> wrapper. Must not trigger retry.
 func nonzeroExitBashBlocks() claude.ContentBlocks {
 	return claude.ContentBlocks{
-		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "t1", Name: "Bash"},
-		claude.ToolResultBlock{
-			Type:      claude.ContentBlockTypeToolResult,
-			ToolUseID: "t1",
-			Content:   "Exit code 8\nForge Visual Tests\tpending",
-			IsError:   boolPtr(true),
-		},
+		toolUseBlock("t1", "Bash", nil),
+		toolResultContent("t1", "Exit code 8\nForge Visual Tests\tpending", true),
 	}
 }
 
 func cleanBlocks() claude.ContentBlocks {
-	return claude.ContentBlocks{claude.TextBlock{Type: claude.ContentBlockTypeText, Text: "done"}}
+	return claude.ContentBlocks{asstTextBlock("done")}
+}
+
+func toolResultContent(id string, content interface{}, isError bool) claude.ContentBlock {
+	return claude.ToolResultBlock{
+		Type:      claude.ContentBlockTypeToolResult,
+		ToolUseID: id,
+		Content:   content,
+		IsError:   boolPtr(isError),
+	}
 }
 
 func turnResult(text string, blocks claude.ContentBlocks) *claude.TurnResult {
@@ -556,17 +555,12 @@ func TestRunRetryLoop_RetriesCleanlyOnRealToolUseError(t *testing.T) {
 // 2026-04-18 production failure (fc29ffb6 session, line 132 → 156).
 func recoveredErrorBlocks() claude.ContentBlocks {
 	return claude.ContentBlocks{
-		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "edit1", Name: "Edit"},
-		claude.ToolResultBlock{
-			Type:      claude.ContentBlockTypeToolResult,
-			ToolUseID: "edit1",
-			Content:   "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
-			IsError:   boolPtr(true),
-		},
-		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "read1", Name: "Read"},
-		claude.ToolResultBlock{Type: claude.ContentBlockTypeToolResult, ToolUseID: "read1", Content: "file contents", IsError: boolPtr(false)},
-		claude.ToolUseBlock{Type: claude.ContentBlockTypeToolUse, ID: "edit2", Name: "Edit"},
-		claude.ToolResultBlock{Type: claude.ContentBlockTypeToolResult, ToolUseID: "edit2", Content: "edit applied", IsError: boolPtr(false)},
+		toolUseBlock("edit1", "Edit", nil),
+		toolResultContent("edit1", "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>", true),
+		toolUseBlock("read1", "Read", nil),
+		toolResultContent("read1", "file contents", false),
+		toolUseBlock("edit2", "Edit", nil),
+		toolResultContent("edit2", "edit applied", false),
 	}
 }
 
