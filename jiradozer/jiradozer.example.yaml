@@ -17,6 +17,7 @@
 # After plan, build, validate, and ship, jiradozer posts the agent's output
 # as a comment on the issue and waits at a review gate. Reply on the issue:
 #   - "approve" / "lgtm"  → next step
+#   - "approve all" / "approve_all" / "yolo" → approve this and all remaining gates in the current run
 #   - "redo"              → re-run the current step
 #   - any other text      → fed back to the agent as feedback
 #

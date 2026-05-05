@@ -67,16 +67,29 @@ func (m *mockWorkflowTracker) ListIssues(_ context.Context, _ tracker.IssueFilte
 	return nil, nil
 }
 
-func (m *mockWorkflowTracker) FetchComments(_ context.Context, issueID string, _ time.Time) ([]tracker.Comment, error) {
+func (m *mockWorkflowTracker) FetchComments(_ context.Context, issueID string, since time.Time) ([]tracker.Comment, error) {
 	m.recordCall("FetchComments", issueID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.commentSets != nil && m.commentIdx < len(m.commentSets) {
 		comments := m.commentSets[m.commentIdx]
 		m.commentIdx++
-		return comments, nil
+		return commentsSince(comments, since), nil
 	}
-	return m.comments, nil
+	return commentsSince(m.comments, since), nil
+}
+
+func commentsSince(comments []tracker.Comment, since time.Time) []tracker.Comment {
+	if since.IsZero() {
+		return comments
+	}
+	var out []tracker.Comment
+	for _, c := range comments {
+		if !c.CreatedAt.Before(since) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (m *mockWorkflowTracker) FetchWorkflowStates(_ context.Context, teamID string) ([]tracker.WorkflowState, error) {
@@ -417,6 +430,8 @@ func TestPostWaitingComment(t *testing.T) {
 	body := calls[0].args[1]
 	assert.Contains(t, body, "plan_review")
 	assert.Contains(t, body, "approve")
+	assert.Contains(t, body, "approve_all")
+	assert.Contains(t, body, "yolo")
 	assert.Contains(t, body, "redo")
 }
 
@@ -474,6 +489,22 @@ func TestWorkflow_TransitionToReview_SkipsReviewMachineryForNonReviewStep(t *tes
 	assert.Empty(t, mt.getCalls("PostComment"), "should not post waiting comment for non-review step")
 }
 
+func TestWorkflow_TransitionToReview_ApproveAllSkipsWaitingComment(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		workflowStates: testWorkflowStates(),
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	require.NoError(t, wf.resolveStateIDs(context.Background()))
+	walkTo(t, wf.state, StepCreatingPR)
+
+	wf.transitionToReview(context.Background(), StepBuildReview, "pr_created")
+
+	assert.Equal(t, StepBuildReview, wf.state.Current())
+	assert.Empty(t, mt.getCalls("PostComment"), "approve-all should not post waiting comments for later review gates")
+}
+
 // TestWorkflow_RunReview_Approve tests that an approve comment advances to the next step.
 func TestWorkflow_RunReview_Approve(t *testing.T) {
 	mt := &mockWorkflowTracker{
@@ -490,6 +521,80 @@ func TestWorkflow_RunReview_Approve(t *testing.T) {
 
 	assert.Equal(t, StepBuilding, wf.state.Current())
 	assert.Empty(t, wf.feedback) // Feedback cleared on approve.
+}
+
+func TestWorkflow_RunReview_ApproveAllEnablesRemainingAutoApproval(t *testing.T) {
+	mt := &mockWorkflowTracker{
+		commentSets: [][]tracker.Comment{
+			{{ID: "c1", Body: "approve_all", IsSelf: false, CreatedAt: time.Now()}},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.feedback = "previous feedback"
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+	wf.runReview(context.Background(), StepBuilding, StepPlanning)
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Empty(t, wf.feedback)
+	assert.True(t, wf.approveAllRemaining)
+	for _, step := range []WorkflowStep{StepBuildReview, StepValidateReview, StepShipReview} {
+		assert.True(t, wf.shouldAutoApprove(step), "step %s should auto-approve after approve_all", step)
+	}
+	assert.False(t, wf.shouldAutoApprove(StepBuilding), "non-review steps should not auto-approve")
+}
+
+func TestWorkflow_RunReview_ApproveAllAutoApprovesLaterGate(t *testing.T) {
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	walkTo(t, wf.state, StepBuildReview)
+
+	wf.runReview(context.Background(), StepValidating, StepBuilding)
+
+	assert.Equal(t, StepValidating, wf.state.Current())
+	assert.Empty(t, wf.feedback)
+	assert.True(t, wf.approveAllRemaining)
+}
+
+func TestWorkflow_RunReview_ApproveAllObservesLateRedo(t *testing.T) {
+	now := time.Now()
+	mt := &mockWorkflowTracker{
+		comments: []tracker.Comment{
+			{ID: "c1", Body: "redo\n\nPlease revisit the build", IsSelf: false, CreatedAt: now.Add(time.Second)},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	wf.lastCommentAt = now
+	walkTo(t, wf.state, StepBuildReview)
+
+	wf.runReview(context.Background(), StepValidating, StepBuilding)
+
+	assert.Equal(t, StepBuilding, wf.state.Current())
+	assert.Contains(t, wf.feedback, "Please revisit the build")
+	assert.False(t, wf.approveAllRemaining)
+}
+
+func TestWorkflow_RunReview_ApproveAllIgnoresHistoricalCommentWithoutAnchor(t *testing.T) {
+	now := time.Now()
+	mt := &mockWorkflowTracker{
+		comments: []tracker.Comment{
+			{ID: "c1", Body: "redo\n\nstale feedback", IsSelf: false, CreatedAt: now.Add(-time.Minute)},
+		},
+	}
+
+	wf := NewWorkflow(mt, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	walkTo(t, wf.state, StepBuildReview)
+
+	wf.runReview(context.Background(), StepValidating, StepBuilding)
+
+	assert.Equal(t, StepValidating, wf.state.Current())
+	assert.Empty(t, wf.feedback)
+	assert.True(t, wf.approveAllRemaining)
 }
 
 // TestWorkflow_RunReview_Redo tests that a redo comment goes back to the redo target.
@@ -1073,6 +1178,19 @@ func TestWorkflow_CircuitBreaker_IndependentPerStep(t *testing.T) {
 	// One redo for building — should be allowed (independent counter).
 	require.NoError(t, wf.tryRedo(context.Background(), StepBuilding))
 	assert.Equal(t, StepBuilding, wf.state.Current())
+}
+
+func TestWorkflow_TryRedoClearsApproveAll(t *testing.T) {
+	wf := NewWorkflow(&mockWorkflowTracker{}, testIssue(), testConfig(), discardLogger())
+	wf.approveAllRemaining = true
+	require.NoError(t, wf.state.Transition(StepPlanning, "start"))
+	require.NoError(t, wf.state.Transition(StepPlanReview, "plan_done"))
+
+	require.NoError(t, wf.tryRedo(context.Background(), StepPlanning))
+
+	assert.Equal(t, StepPlanning, wf.state.Current())
+	assert.False(t, wf.approveAllRemaining)
+	assert.False(t, wf.shouldAutoApprove(StepBuildReview))
 }
 
 // --- FeedbackComment Per-Step Tests ---

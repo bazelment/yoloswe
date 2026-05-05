@@ -207,8 +207,11 @@ Transitions with feedback loops:
 
 Polls tracker every N seconds for new comments. Filters out bot comments. Parses keywords:
 - `approve` / `lgtm` / `ship it` → `FeedbackApprove`
+- `approve all` / `approve_all` / `yolo` → `FeedbackApproveAll`
 - `redo` / `retry` → `FeedbackRedo`
 - Anything else → `FeedbackComment` (incorporated into next agent prompt)
+
+Runtime approve-all is intentionally in-memory and scoped to the current process run. Auto-approved gates skip waiting comments, but perform a single immediate comment check before advancing so a newer `redo` or feedback comment can cancel approve-all and rewind the workflow.
 
 ### 6. Workflow Engine (`workflow.go`)
 

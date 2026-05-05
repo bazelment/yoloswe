@@ -47,29 +47,37 @@ const (
 	phaseDone
 )
 
+type reviewApproval struct {
+	logMessage       string
+	statusMessage    string
+	transitionReason string
+	approveAll       bool
+}
+
 // Workflow drives the issue through plan → build → create_pr → validate → ship.
 type Workflow struct {
-	lastCommentAt   time.Time
-	tracker         tracker.IssueTracker
-	lastError       error
-	config          *Config
-	state           *StateMachine
-	logger          *slog.Logger
-	sessionIDs      map[WorkflowStep]string
-	stateIDs        map[string]string
-	redoCounts      map[WorkflowStep]int
-	phases          map[string]phaseState
-	OnTransition    func(step WorkflowStep)
-	OnRoundProgress func(roundIndex, roundTotal int)
-	runStepAgent    func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
-	renderer        *render.Renderer
-	issue           *tracker.Issue
-	plan            string
-	buildOutput     string
-	feedback        string
-	botCommentIDs   []string
-	lastLabels      []string
-	maxRedos        int
+	lastCommentAt       time.Time
+	tracker             tracker.IssueTracker
+	lastError           error
+	config              *Config
+	state               *StateMachine
+	logger              *slog.Logger
+	sessionIDs          map[WorkflowStep]string
+	stateIDs            map[string]string
+	redoCounts          map[WorkflowStep]int
+	phases              map[string]phaseState
+	OnTransition        func(step WorkflowStep)
+	OnRoundProgress     func(roundIndex, roundTotal int)
+	runStepAgent        func(ctx context.Context, stepName string, data PromptData, cfg StepConfig, workDir string, feedback string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error)
+	renderer            *render.Renderer
+	issue               *tracker.Issue
+	plan                string
+	buildOutput         string
+	feedback            string
+	botCommentIDs       []string
+	lastLabels          []string
+	maxRedos            int
+	approveAllRemaining bool
 }
 
 // NewWorkflow creates a new workflow for the given issue. The caller's
@@ -412,6 +420,16 @@ func capitalize(s string) string {
 // runReview waits for human feedback and transitions accordingly.
 func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget WorkflowStep) {
 	if w.shouldAutoApprove(w.state.Current()) {
+		if w.lastCommentAt.IsZero() {
+			w.lastCommentAt = time.Now()
+		}
+		fb, err := w.fetchImmediateFeedback(ctx)
+		if err != nil {
+			w.logger.Warn("failed to check for feedback before auto-approval", "step", w.state.Current(), "error", err)
+		} else if fb != nil {
+			w.handleReviewFeedback(ctx, fb, approveTarget, redoTarget)
+			return
+		}
 		w.logger.Info("auto-approving", "step", w.state.Current())
 		w.status(fmt.Sprintf("Auto-approved %s", w.state.Current()))
 		w.feedback = ""
@@ -431,15 +449,24 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 	}
 
 	w.lastCommentAt = fb.Comment.CreatedAt
+	w.handleReviewFeedback(ctx, fb, approveTarget, redoTarget)
+}
 
+func (w *Workflow) handleReviewFeedback(ctx context.Context, fb *FeedbackResult, approveTarget, redoTarget WorkflowStep) {
 	switch fb.Action {
 	case FeedbackApprove:
-		w.logger.Info("feedback: approved", "step", w.state.Current())
-		w.status("Approved")
-		w.feedback = ""
-		if err := w.approveTransition(ctx, approveTarget, "approved"); err != nil {
-			w.fail(ctx, err)
-		}
+		w.applyReviewApproval(ctx, approveTarget, reviewApproval{
+			logMessage:       "feedback: approved",
+			statusMessage:    "Approved",
+			transitionReason: "approved",
+		})
+	case FeedbackApproveAll:
+		w.applyReviewApproval(ctx, approveTarget, reviewApproval{
+			logMessage:       "feedback: approve all",
+			statusMessage:    "Approve-all enabled",
+			transitionReason: "approve_all",
+			approveAll:       true,
+		})
 	case FeedbackRedo:
 		w.logger.Info("feedback: redo", "step", w.state.Current())
 		w.status("Redo requested")
@@ -464,6 +491,40 @@ func (w *Workflow) runReview(ctx context.Context, approveTarget, redoTarget Work
 			}
 		}
 	}
+}
+
+func (w *Workflow) applyReviewApproval(ctx context.Context, approveTarget WorkflowStep, approval reviewApproval) {
+	w.logger.Info(approval.logMessage, "step", w.state.Current())
+	if err := w.approveTransition(ctx, approveTarget, approval.transitionReason); err != nil {
+		w.fail(ctx, err)
+		return
+	}
+	w.status(approval.statusMessage)
+	w.feedback = ""
+	if approval.approveAll {
+		w.approveAllRemaining = true
+	}
+}
+
+func (w *Workflow) fetchImmediateFeedback(ctx context.Context) (*FeedbackResult, error) {
+	comments, err := w.tracker.FetchComments(ctx, w.issue.ID, w.lastCommentAt)
+	if err != nil {
+		return nil, err
+	}
+
+	exclude := make(map[string]bool, len(w.botCommentIDs))
+	for _, id := range w.botCommentIDs {
+		exclude[id] = true
+	}
+	latest := latestFeedbackComment(comments, exclude)
+	if latest != nil {
+		return &FeedbackResult{
+			Action:  ParseCommentAction(latest.Body),
+			Message: latest.Body,
+			Comment: *latest,
+		}, nil
+	}
+	return nil, nil
 }
 
 // approveTransition advances to approveTarget, then closes out the prior
@@ -674,6 +735,7 @@ func (w *Workflow) completePhase(ctx context.Context, phase string) {
 // Returns an error (and transitions to StepFailed) if the step has been re-run
 // maxRedos times.
 func (w *Workflow) tryRedo(ctx context.Context, redoTarget WorkflowStep) error {
+	w.approveAllRemaining = false
 	w.redoCounts[redoTarget]++
 	count := w.redoCounts[redoTarget]
 	if count > w.maxRedos {
@@ -770,7 +832,6 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 	}
 
 	if w.shouldAutoApprove(reviewStep) {
-		w.lastCommentAt = time.Now()
 		return
 	}
 
@@ -797,6 +858,16 @@ func (w *Workflow) transitionToReview(ctx context.Context, reviewStep WorkflowSt
 // shouldAutoApprove returns true if the given review step should be
 // auto-approved (skipping human feedback polling).
 func (w *Workflow) shouldAutoApprove(reviewStep WorkflowStep) bool {
+	if !reviewStep.IsReview() {
+		return false
+	}
+	if w.approveAllRemaining {
+		return true
+	}
+	return w.shouldConfigAutoApprove(reviewStep)
+}
+
+func (w *Workflow) shouldConfigAutoApprove(reviewStep WorkflowStep) bool {
 	switch reviewStep {
 	case StepPlanReview:
 		return w.config.Plan.AutoApprove
