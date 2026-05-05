@@ -94,17 +94,25 @@ func excerptRunes(s string, max int) string {
 // cancelled sibling (carrying the marker) is still the last tool_result
 // in forward order, so it remains detectable.
 func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok bool) {
+	toolName, _, excerpt, ok = FinalTurnToolErrorDetails(blocks)
+	return toolName, excerpt, ok
+}
+
+// FinalTurnToolErrorDetails reports the same final tool_use_error as
+// FinalTurnToolError, returning both the full tool result content for policy
+// decisions and a bounded excerpt for display.
+func FinalTurnToolErrorDetails(blocks []ContentBlock) (toolName, content, excerpt string, ok bool) {
 	for i := len(blocks) - 1; i >= 0; i-- {
 		block := blocks[i]
 		if block.Type != ContentBlockTypeToolResult {
 			continue
 		}
 		if !block.IsError {
-			return "", "", false
+			return "", "", "", false
 		}
 		content := stringifyToolResult(block.ToolResult)
 		if !strings.Contains(content, toolUseErrorMarker) {
-			return "", "", false
+			return "", "", "", false
 		}
 		// Build tool name map only on the error path (uncommon case).
 		toolNames := make(map[string]string)
@@ -117,9 +125,9 @@ func FinalTurnToolError(blocks []ContentBlock) (toolName, excerpt string, ok boo
 		if name == "" {
 			name = "unknown"
 		}
-		return name, excerptRunes(content, toolErrorExcerptMaxRunes), true
+		return name, content, excerptRunes(content, toolErrorExcerptMaxRunes), true
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // TurnUsage contains token usage for a turn.

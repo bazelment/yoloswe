@@ -63,6 +63,24 @@ func (s *scriptedSession) Ask(ctx context.Context, content string) (*claude.Turn
 	return r, nil
 }
 
+type cancelAfterFirstAskSession struct {
+	cancel    context.CancelFunc
+	responses []*claude.TurnResult
+	asks      []string
+	cursor    int
+}
+
+func (s *cancelAfterFirstAskSession) Ask(ctx context.Context, content string) (*claude.TurnResult, error) {
+	s.asks = append(s.asks, content)
+	if s.cursor >= len(s.responses) {
+		return nil, errors.New("cancelAfterFirstAskSession: no more responses queued")
+	}
+	r := s.responses[s.cursor]
+	s.cursor++
+	s.cancel()
+	return r, nil
+}
+
 // realToolUseErrorBlocks is the minimal set of ContentBlocks that
 // FinalTurnToolError will flag as retry-worthy: IsError true and the
 // <tool_use_error> wrapper present.
@@ -264,6 +282,33 @@ func TestRunRetryLoop_CtxCancelled(t *testing.T) {
 	}
 }
 
+func TestRunRetryLoop_CtxCancelledBetweenRetries(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("err1", realToolUseErrorBlocks("first"))
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &cancelAfterFirstAskSession{
+		cancel: cancel,
+		responses: []*claude.TurnResult{
+			turnResult("err2", realToolUseErrorBlocks("second")),
+		},
+	}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	_, attempts, reason, err := runRetryLoop(ctx, fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected exactly 1 Ask before ctx cancellation, got %d", attempts)
+	}
+	if len(fake.asks) != 1 {
+		t.Errorf("expected 1 Ask call, got %d", len(fake.asks))
+	}
+	if reason != RetryStopCtxCancelled {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopCtxCancelled, reason)
+	}
+}
+
 func TestRunRetryLoop_DisabledByDefault(t *testing.T) {
 	t.Parallel()
 	initial := turnResult("err1", realToolUseErrorBlocks("first"))
@@ -326,6 +371,31 @@ func TestRunRetryLoop_SkipsOnPermanentError(t *testing.T) {
 	}
 	if attempts != 0 {
 		t.Errorf("expected no retries on permanent error, got %d", attempts)
+	}
+	if len(fake.asks) != 0 {
+		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))
+	}
+	if reason != RetryStopPermanent {
+		t.Errorf("expected stopReason=%s, got %s", RetryStopPermanent, reason)
+	}
+	if result != initial {
+		t.Error("expected original result returned unchanged")
+	}
+}
+
+func TestRunRetryLoop_SkipsOnPermanentErrorBeyondExcerpt(t *testing.T) {
+	t.Parallel()
+	initial := turnResult("blocked",
+		realToolUseErrorBlocks(strings.Repeat("x", 220)+" disable-model-invocation"))
+	fake := &scriptedSession{}
+	cfg := ExecuteConfig{MaxToolErrorRetries: 3}
+
+	result, attempts, reason, err := runRetryLoop(context.Background(), fake, initial, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("expected no retries on permanent error beyond excerpt, got %d", attempts)
 	}
 	if len(fake.asks) != 0 {
 		t.Errorf("expected 0 Ask calls, got %d", len(fake.asks))

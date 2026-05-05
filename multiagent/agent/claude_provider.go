@@ -145,11 +145,11 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 		attempts    int
 	)
 	for attempts < cfg.MaxToolErrorRetries {
-		toolName, excerpt, ok := claude.FinalTurnToolError(result.ContentBlocks)
+		toolName, toolResult, excerpt, ok := claude.FinalTurnToolErrorDetails(result.ContentBlocks)
 		if !ok {
 			break
 		}
-		if isPermanentToolError(excerpt) {
+		if isPermanentToolError(toolResult) {
 			stopReason = RetryStopPermanent
 			break
 		}
@@ -161,11 +161,11 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 			stopReason = RetryStopBudgetExceeded
 			break
 		}
-		if havePrev && excerpt == prevExcerpt {
+		if havePrev && toolResult == prevExcerpt {
 			stopReason = RetryStopNoProgress
 			break
 		}
-		prevExcerpt = excerpt
+		prevExcerpt = toolResult
 		havePrev = true
 		attempts++
 

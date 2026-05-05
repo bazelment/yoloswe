@@ -189,6 +189,28 @@ func TestFinalTurnToolError_ExcerptLength(t *testing.T) {
 	}
 }
 
+func TestFinalTurnToolErrorDetails_ReturnsFullContent(t *testing.T) {
+	t.Parallel()
+	long := "<tool_use_error>" + strings.Repeat("x", 500) + " disable-model-invocation</tool_use_error>"
+	blocks := []ContentBlock{
+		{Type: ContentBlockTypeToolUse, ToolUseID: "t1", ToolName: "Bash"},
+		{Type: ContentBlockTypeToolResult, ToolUseID: "t1", ToolResult: long, IsError: true},
+	}
+	name, content, excerpt, ok := FinalTurnToolErrorDetails(blocks)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if name != "Bash" {
+		t.Errorf("expected name=Bash, got %q", name)
+	}
+	if content != long {
+		t.Error("expected full content to be preserved")
+	}
+	if strings.Contains(excerpt, "disable-model-invocation") {
+		t.Errorf("expected display excerpt to be truncated before marker, got %q", excerpt)
+	}
+}
+
 func TestFinalTurnToolError_UnknownTool(t *testing.T) {
 	t.Parallel()
 	blocks := []ContentBlock{
