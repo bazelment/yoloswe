@@ -14,6 +14,12 @@ import (
 const logTailPollInterval = 250 * time.Millisecond
 const watchdogTickInterval = 30 * time.Second
 
+// logTailMaxReopenAttempts caps how many times tailSubprocessLog will try
+// to reopen the log file after a non-EOF read error before giving up and
+// disabling the watchdog. A transient FS hiccup should not permanently
+// blind hang detection; a persistent failure should not loop forever.
+const logTailMaxReopenAttempts = 3
+
 // Example matched line:
 //
 //	I0504 22:00:54.425221 1350798 workflow.go:339] step: plan issue=...
@@ -27,26 +33,30 @@ var prURLRe = regexp.MustCompile(`https://github\.com/[^\s"']+/pull/\d+`)
 // every line so the watchdog can distinguish "agent slow but progressing"
 // from "agent stuck."
 //
-// On any exit (open failure, non-EOF read error, or stop signal) it clears
-// mw.tailerAlive so runWatchdog can skip its idle check — without fresh
-// updates to lastOutputAt the gap would grow unboundedly and kill a
-// still-healthy subprocess.
+// On a non-EOF read error it tries to reopen the log file up to
+// logTailMaxReopenAttempts times so a transient FS hiccup does not
+// permanently disable hang detection. Only when reopens are exhausted
+// (or initial open fails, or stop is signalled) does it clear
+// mw.tailerAlive — runWatchdog then skips its idle check, since
+// lastOutputAt would otherwise grow unboundedly and kill a healthy
+// subprocess.
 func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, stop <-chan struct{}) {
 	defer mw.tailerAlive.Store(false)
 
 	f, err := os.Open(logPath)
 	if err != nil {
-		o.logger.Debug("log tailer: open failed",
+		o.logger.Warn("log tailer: open failed, watchdog disabled for this workflow",
 			"issue", mw.issue.Identifier, "path", logPath, "error", err)
 		return
 	}
-	defer f.Close()
 
-	reader := bufio.NewReader(f)
 	emittedPRURL := false
+	reopens := 0
+	reader := bufio.NewReader(f)
 	for {
 		select {
 		case <-stop:
+			f.Close()
 			return
 		default:
 		}
@@ -62,14 +72,36 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 			if errors.Is(err, io.EOF) {
 				select {
 				case <-stop:
+					f.Close()
 					return
 				case <-time.After(logTailPollInterval):
 					continue
 				}
 			}
-			o.logger.Warn("log tailer: read error, watchdog disabled for this workflow",
-				"issue", mw.issue.Identifier, "error", err)
-			return
+			// Non-EOF read error: try to reopen so transient FS issues
+			// don't permanently disable hang detection.
+			reopens++
+			if reopens > logTailMaxReopenAttempts {
+				o.logger.Warn("log tailer: read error after retries, watchdog disabled for this workflow",
+					"issue", mw.issue.Identifier, "error", err, "reopens", reopens-1)
+				f.Close()
+				return
+			}
+			o.logger.Warn("log tailer: read error, attempting reopen",
+				"issue", mw.issue.Identifier, "error", err, "attempt", reopens)
+			f.Close()
+			select {
+			case <-stop:
+				return
+			case <-time.After(logTailPollInterval):
+			}
+			f, err = os.Open(logPath)
+			if err != nil {
+				o.logger.Warn("log tailer: reopen failed, watchdog disabled for this workflow",
+					"issue", mw.issue.Identifier, "error", err)
+				return
+			}
+			reader = bufio.NewReader(f)
 		}
 	}
 }
@@ -105,6 +137,8 @@ func (o *Orchestrator) maybeEmitTransition(mw *managedWorkflow, rawLine string, 
 	case strings.HasPrefix(msg, "step: "):
 		stepName := strings.TrimPrefix(msg, "step: ")
 		o.recordStepTransition(mw, stepName)
+		// New step starting: review window (if any) is now closed.
+		mw.inReview.Store(false)
 		args := []any{"issue", mw.issue.Identifier, "step", stepName}
 		if v, ok := fields["resume"]; ok {
 			args = append(args, "resume", v)
@@ -125,6 +159,10 @@ func (o *Orchestrator) maybeEmitTransition(mw *managedWorkflow, rawLine string, 
 		o.logger.Info("subprocess step completed", args...)
 
 	case msg == "waiting for approval":
+		// Workflow has entered a human-review wait (PollForFeedback);
+		// suppress the watchdog so the prior step's idle_timeout does
+		// not cancel a legitimate long review.
+		mw.inReview.Store(true)
 		args := []any{"issue", mw.issue.Identifier}
 		if v, ok := fields["step"]; ok {
 			args = append(args, "step", v)
@@ -132,6 +170,8 @@ func (o *Orchestrator) maybeEmitTransition(mw *managedWorkflow, rawLine string, 
 		o.logger.Info("subprocess waiting for approval", args...)
 
 	case strings.HasPrefix(msg, "feedback: "):
+		// Reviewer responded; subprocess is about to resume real work.
+		mw.inReview.Store(false)
 		decision := strings.TrimPrefix(msg, "feedback: ")
 		args := []any{"issue", mw.issue.Identifier, "decision", decision}
 		if v, ok := fields["step"]; ok {
@@ -156,6 +196,19 @@ func (o *Orchestrator) recordStepTransition(mw *managedWorkflow, stepName string
 	mw.stepMu.Unlock()
 }
 
+// idleTimeoutForStep returns the configured idle timeout for stepName, or
+// a conservative fallback when the step is unknown.
+//
+// The startup window — between subprocess Start() and the first parsed
+// "step:" line — has an empty currentStep, so a stuck child that never
+// emits any log line would otherwise escape detection. To cover that
+// case we fall back to the max IdleTimeout across all configured steps:
+// it is the loosest bound the operator already considers acceptable, so
+// it cannot trip prematurely on a step that was actually OK to run that
+// long, but it still bounds an indefinitely silent startup hang.
+//
+// Returns 0 when no step has a positive IdleTimeout — that is the
+// "watchdog disabled by config" signal runWatchdog already understands.
 func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 	if o.config == nil {
 		return 0
@@ -163,7 +216,17 @@ func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 	if step, ok := o.config.StepByName(stepName); ok {
 		return step.IdleTimeout
 	}
-	return 0
+	return o.maxConfiguredIdleTimeout()
+}
+
+func (o *Orchestrator) maxConfiguredIdleTimeout() time.Duration {
+	var max time.Duration
+	for _, name := range []string{"plan", "build", "create_pr", "validate", "ship"} {
+		if step, ok := o.config.StepByName(name); ok && step.IdleTimeout > max {
+			max = step.IdleTimeout
+		}
+	}
+	return max
 }
 
 // runWatchdog cancels the workflow context when the gap between now and
@@ -171,10 +234,15 @@ func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 // to cmd via exec.CommandContext, which cmd.Wait() then surfaces as
 // StepCancelled.
 //
-// When the tailer goroutine has exited (mw.tailerAlive == false) the
-// idle check is skipped: lastOutputAt is no longer being updated, so the
-// gap would grow unboundedly and kill a subprocess that may still be
-// healthy. The watchdog still drains its ticker until stop closes so the
+// Skip conditions:
+//   - mw.tailerAlive=false: tailer has exited, lastOutputAt is no longer
+//     being updated, so the gap would grow unboundedly and kill a
+//     subprocess that may still be healthy.
+//   - mw.inReview=true: workflow is blocked in PollForFeedback waiting
+//     for human approval; the prior step's idle_timeout must not cancel
+//     a legitimate review wait.
+//
+// The watchdog still drains its ticker until stop closes so the
 // cmd.Wait goroutine can join cleanly.
 func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Duration, stop <-chan struct{}) {
 	ticker := time.NewTicker(tickInterval)
@@ -185,6 +253,9 @@ func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Durati
 			return
 		case <-ticker.C:
 			if !mw.tailerAlive.Load() {
+				continue
+			}
+			if mw.inReview.Load() {
 				continue
 			}
 			mw.stepMu.Lock()

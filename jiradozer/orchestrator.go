@@ -99,11 +99,17 @@ type managedWorkflow struct {
 	// detect idle gaps.
 	lastOutputAt atomic.Int64
 	// tailerAlive is 1 while tailSubprocessLog is reading the log file,
-	// 0 once it has exited (EOF on stop, or a non-EOF read error).
-	// runWatchdog skips its idle check when the tailer is gone — without
-	// fresh updates to lastOutputAt the gap would grow unboundedly and
-	// kill a still-healthy subprocess.
+	// 0 once it has exited (EOF on stop, or a non-EOF read error after
+	// reopen attempts are exhausted). runWatchdog skips its idle check
+	// when the tailer is gone — without fresh updates to lastOutputAt
+	// the gap would grow unboundedly and kill a still-healthy subprocess.
 	tailerAlive atomic.Bool
+	// inReview is 1 between "waiting for approval" and the next "step:"
+	// or "feedback:" log line. The workflow legitimately blocks here on
+	// human input via PollForFeedback, so the watchdog must skip its
+	// idle check during this window — otherwise a long human review
+	// would be killed by the prior step's timeout.
+	inReview atomic.Bool
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
