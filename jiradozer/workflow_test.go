@@ -1623,6 +1623,22 @@ func TestWorkflow_SkipPhases_FromLabel(t *testing.T) {
 	assert.Empty(t, labelSequence(mt))
 }
 
+func TestWorkflow_SkipPhases_RemovedLabelStopsSkipping(t *testing.T) {
+	issue := testIssue()
+	issue.Labels = []string{"bug", "jiradozer-skip-validate"}
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: []string{"bug"}},
+	}
+	wf := NewWorkflow(mt, issue, testConfig(), discardLogger())
+	walkTo(t, wf.state, StepValidating)
+
+	wf.skipCompletedOrConfiguredPhases(context.Background())
+
+	assert.Equal(t, StepValidating, wf.state.Current())
+	assert.NotEqual(t, phaseDone, wf.phases[PhaseValidate])
+	assert.NotContains(t, wf.skipPhaseSources, PhaseValidate)
+}
+
 func TestWorkflow_SkipPhases_SourcePriority(t *testing.T) {
 	t.Parallel()
 

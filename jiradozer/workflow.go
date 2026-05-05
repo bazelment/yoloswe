@@ -133,6 +133,28 @@ func (w *Workflow) addSkipPhasesFromLabels(labels []string) {
 	}
 }
 
+func (w *Workflow) reconcileSkipPhasesFromLabels(labels []string) {
+	labelPhases := make(map[string]bool)
+	for _, label := range labels {
+		if phase := phaseForSkipLabel(label); phase != "" {
+			labelPhases[phase] = true
+		}
+	}
+	for phase, source := range w.skipPhaseSources {
+		if source != skipPhaseSourceLabel || labelPhases[phase] {
+			continue
+		}
+		if configSource := w.config.skipSourceForPhase(phase); configSource != "" {
+			w.skipPhaseSources[phase] = configSource
+		} else {
+			delete(w.skipPhaseSources, phase)
+		}
+	}
+	for phase := range labelPhases {
+		w.addSkipPhase(phase, skipPhaseSourceLabel)
+	}
+}
+
 func (w *Workflow) isSkipPhase(phase string) bool {
 	_, ok := w.skipPhaseSources[phase]
 	return ok
@@ -659,7 +681,7 @@ func (w *Workflow) completePriorPhases(ctx context.Context, currentPhase string)
 // StepDone.
 func (w *Workflow) skipCompletedOrConfiguredPhases(ctx context.Context) {
 	labels := w.refreshLabels(ctx)
-	w.addSkipPhasesFromLabels(labels)
+	w.reconcileSkipPhasesFromLabels(labels)
 
 	for {
 		cur := w.state.Current()
@@ -688,7 +710,7 @@ func (w *Workflow) skipCompletedOrConfiguredPhases(ctx context.Context) {
 			return
 		}
 		next := startStepForPhase(nextPhase)
-		source := skipPhaseSourceLabel
+		source := skipPhaseSourceDone
 		if !hasDoneLabel {
 			source = w.skipPhaseSources[phase]
 		}

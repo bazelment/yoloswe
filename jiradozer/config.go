@@ -43,6 +43,7 @@ const (
 	skipPhaseSourceConfig skipPhaseSource = "config"
 	skipPhaseSourceCLI    skipPhaseSource = "cli"
 	skipPhaseSourceLabel  skipPhaseSource = "label"
+	skipPhaseSourceDone   skipPhaseSource = "done"
 )
 
 // TrackerConfig specifies the issue tracker backend.
@@ -271,11 +272,14 @@ func (c *Config) ApplySkipPhases(phases []string, source string) error {
 }
 
 func (c *Config) skipSourceForPhase(phase string) skipPhaseSource {
-	if c == nil || c.skipPhaseSource == "" {
-		return skipPhaseSourceConfig
+	if c == nil {
+		return ""
 	}
 	for _, skippedPhase := range c.SkipPhases {
 		if skippedPhase == phase {
+			if c.skipPhaseSource == "" {
+				return skipPhaseSourceConfig
+			}
 			return c.skipPhaseSource
 		}
 	}

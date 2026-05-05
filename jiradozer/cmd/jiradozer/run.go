@@ -89,7 +89,7 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().Float64Var(&args.maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	cmd.Flags().StringVar(&args.runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")
 	cmd.Flags().StringVar(&args.autoApprove, "auto-approve", "", "Auto-approve review steps (comma-separated: plan,build,validate,ship or 'all')")
-	cmd.Flags().StringVar(&args.skipPhases, "skip-phases", "", "Skip workflow phases for this run (comma-separated: plan,build,validate,ship)")
+	cmd.Flags().StringVar(&args.skipPhases, "skip-phases", "", "Skip high-level workflow phases for this run (comma-separated: plan,build,validate,ship; create_pr is part of build)")
 	cmd.Flags().StringArrayVar(&args.sourceFilters, "filter", nil, "Issue filter as key=value (repeatable, e.g. --filter team=ENG --filter state=Todo,Backlog)")
 	cmd.Flags().IntVar(&args.maxConcurrent, "max-concurrent", 0, "Max concurrent workflows (overrides config)")
 	cmd.Flags().StringVar(&args.branchPrefix, "branch-prefix", "", "Worktree branch prefix (overrides config)")
