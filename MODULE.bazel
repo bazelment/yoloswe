@@ -5,7 +5,7 @@ module(
 )
 
 # Go rules for building Go code - updated for Bazel 8+ compatibility
-bazel_dep(name = "rules_go", version = "0.58.3")
+bazel_dep(name = "rules_go", version = "0.60.0")
 
 # Gazelle for generating BUILD files automatically
 bazel_dep(name = "gazelle", version = "0.44.0")
