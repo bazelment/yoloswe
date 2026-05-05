@@ -1,6 +1,7 @@
 package reviewer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
 
@@ -17,6 +19,17 @@ import (
 // is caught at CI time. Mirrors the UPDATE_FIXTURES pattern documented in
 // CLAUDE.md.
 func updateGoldens() bool { return os.Getenv("UPDATE_GOLDENS") == "1" }
+
+type danglingToolBackend struct{}
+
+func (danglingToolBackend) Start(context.Context) error { return nil }
+
+func (danglingToolBackend) Stop() error { return nil }
+
+func (danglingToolBackend) RunPrompt(_ context.Context, _ string, handler EventHandler) (*ReviewResult, error) {
+	handler.OnToolStart("Shell", "call-1", nil)
+	return &ReviewResult{Success: true}, nil
+}
 
 func TestBuildPrompt(t *testing.T) {
 	tests := []struct {
@@ -52,6 +65,44 @@ func TestBuildPrompt(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReviewWithResultResetsRendererState(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  danglingToolBackend{},
+		renderer: render.NewRendererWithOptions(&buf, true, true),
+	}
+
+	if _, err := r.ReviewWithResult(context.Background(), "review"); err != nil {
+		t.Fatalf("ReviewWithResult returned error: %v", err)
+	}
+	buf.Reset()
+
+	r.renderer.CommandEnd("call-1", 0, 1)
+	if buf.Len() != 0 {
+		t.Errorf("ReviewWithResult should reset dangling renderer command state, got %q", buf.String())
+	}
+}
+
+func TestFollowUpResetsRendererState(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Reviewer{
+		config:   Config{BackendType: BackendCodex, Model: "test-model"},
+		backend:  danglingToolBackend{},
+		renderer: render.NewRendererWithOptions(&buf, true, true),
+	}
+
+	if _, err := r.FollowUp(context.Background(), "again"); err != nil {
+		t.Fatalf("FollowUp returned error: %v", err)
+	}
+	buf.Reset()
+
+	r.renderer.CommandEnd("call-1", 0, 1)
+	if buf.Len() != 0 {
+		t.Errorf("FollowUp should reset dangling renderer command state, got %q", buf.String())
 	}
 }
 

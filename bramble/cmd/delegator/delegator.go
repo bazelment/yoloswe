@@ -164,6 +164,8 @@ func runMock(ctx context.Context, renderer *render.Renderer, model, workDir, pro
 }
 
 func runMockConversation(ctx context.Context, s *claude.Session, mock *session.MockDelegatorToolHandler, r *render.Renderer, msg string, autoAdvance bool) {
+	defer r.Reset()
+
 	if _, err := s.SendMessage(ctx, msg); err != nil {
 		fmt.Fprintf(os.Stderr, "SendMessage error: %v\n", err)
 		return

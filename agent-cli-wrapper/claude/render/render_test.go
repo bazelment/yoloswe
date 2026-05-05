@@ -420,9 +420,20 @@ func TestReset_ClearsInFlightCommands(t *testing.T) {
 }
 
 func TestReset_IsIdempotent(t *testing.T) {
-	r, _ := newTestRenderer(VerbosityVerbose)
+	r, buf := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", "sleep 9999")
+	r.CommandOutput("call1", "buffered output")
+	buf.Reset()
+
 	r.Reset()
 	r.Reset()
+
+	if r.HasOutput("call1") {
+		t.Error("Reset should keep in-flight output cleared after repeated calls")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("Reset should not produce output after repeated calls, got %q", buf.String())
+	}
 }
 
 func TestReset_DoesNotWriteOutput(t *testing.T) {
