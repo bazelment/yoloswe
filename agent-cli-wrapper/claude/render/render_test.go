@@ -133,6 +133,38 @@ func TestToolComplete_Normal(t *testing.T) {
 	}
 }
 
+func TestToolComplete_TruncatesLongSummaries(t *testing.T) {
+	assertSummary := func(t *testing.T, name string, input map[string]interface{}, maxRunes int, wantPart string, wantEllip bool) {
+		t.Helper()
+		summary := FormatToolInput(name, input)
+		if maxRunes > 0 && len([]rune(summary)) > maxRunes {
+			t.Fatalf("summary length = %d, want <= %d: %q", len([]rune(summary)), maxRunes, summary)
+		}
+		if !strings.Contains(summary, wantPart) {
+			t.Fatalf("summary %q does not contain %q", summary, wantPart)
+		}
+		if strings.HasSuffix(summary, "...") != wantEllip {
+			t.Fatalf("summary ellipsis suffix = %v, want %v: %q", strings.HasSuffix(summary, "..."), wantEllip, summary)
+		}
+	}
+
+	t.Run("Read", func(t *testing.T) {
+		assertSummary(t, "Read", map[string]interface{}{
+			"file_path": "/really/long/prefix/that/exceeds/eighty/chars/with/many/segments/deeply/nested/file.go",
+		}, 80, ".../nested/file.go", false)
+	})
+	t.Run("Bash", func(t *testing.T) {
+		assertSummary(t, "Bash", map[string]interface{}{
+			"command": strings.Repeat("echo very-long-command ", 8),
+		}, 80, "...", true)
+	})
+	t.Run("Task", func(t *testing.T) {
+		assertSummary(t, "Task", map[string]interface{}{
+			"description": "summarize " + strings.Repeat("details ", 20),
+		}, 0, "summarize details details", false)
+	})
+}
+
 func TestToolComplete_InteractiveTool_EventHandler(t *testing.T) {
 	r, _ := newTestRenderer(VerbosityNormal)
 	var startedName, completedName string

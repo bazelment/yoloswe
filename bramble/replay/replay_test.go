@@ -75,6 +75,19 @@ func TestParse_AutoDetectsClaude(t *testing.T) {
 	assert.Equal(t, "hello claude", result.Prompt)
 }
 
+func TestExtractPromptTruncatesLongUserPrompt(t *testing.T) {
+	longPrompt := strings.Repeat("x", 240)
+
+	got := extractPrompt([]session.OutputLine{
+		{Type: session.OutputTypeText, Content: strings.Repeat("fallback", 40)},
+		{Type: session.OutputTypeText, Content: longPrompt, IsUserPrompt: true},
+	})
+
+	assert.Len(t, []rune(got), 203)
+	assert.True(t, strings.HasSuffix(got, "..."), "prompt should end with ellipsis: %q", got)
+	assert.Equal(t, strings.Repeat("x", 200)+"...", got)
+}
+
 // --- Codex parser tests (migrated from codexlogview) ---
 
 func TestCodexParser_TrimsPromptAndFollowUp(t *testing.T) {
