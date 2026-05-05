@@ -14,6 +14,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/displaytext",
         "//bramble/session",
         "//bramble/sessionmodel",
     ],

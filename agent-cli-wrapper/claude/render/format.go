@@ -4,23 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/displaytext"
 )
 
 // FormatToolInput formats tool input for inline display after the tool name bracket.
 // Returns an empty string for tools that should be handled specially.
+// This renderer uses terminal-oriented widths and omits the tool name because
+// ToolStart prints it separately; sessionmodel.FormatToolContent uses different
+// widths and prefixes for persisted structured output.
 func FormatToolInput(name string, input map[string]interface{}) string {
 	switch name {
 	case "Read":
 		if path, ok := input["file_path"].(string); ok {
-			return TruncatePath(path, 80)
+			return displaytext.TruncatePath(path, 80)
 		}
 	case "Write", "Edit":
 		if path, ok := input["file_path"].(string); ok {
-			return fmt.Sprintf("→ %s", TruncatePath(path, 70))
+			return fmt.Sprintf("→ %s", displaytext.TruncatePath(path, 70))
 		}
 	case "Bash":
 		if cmd, ok := input["command"].(string); ok {
-			return TruncateForDisplay(cmd, 80)
+			return displaytext.Truncate(cmd, 80)
 		}
 	case "Glob":
 		if pattern, ok := input["pattern"].(string); ok {
@@ -28,7 +33,7 @@ func FormatToolInput(name string, input map[string]interface{}) string {
 		}
 	case "Grep":
 		if pattern, ok := input["pattern"].(string); ok {
-			return TruncateForDisplay(pattern, 60)
+			return displaytext.Truncate(pattern, 60)
 		}
 	case "Task":
 		if desc, ok := input["description"].(string); ok {
@@ -39,7 +44,7 @@ func FormatToolInput(name string, input map[string]interface{}) string {
 	default:
 		if len(input) > 0 {
 			data, _ := json.Marshal(input)
-			return TruncateForDisplay(string(data), 100)
+			return displaytext.Truncate(string(data), 100)
 		}
 	}
 	return ""
@@ -64,55 +69,4 @@ func formatContent(content interface{}) string {
 		data, _ := json.Marshal(content)
 		return string(data)
 	}
-}
-
-// TruncateForDisplay truncates s to at most max Unicode code points,
-// appending "..." if truncation occurred (the suffix counts toward max).
-// Rune-based indexing avoids splitting multi-byte UTF-8 sequences.
-func TruncateForDisplay(s string, max int) string {
-	// Fast path: byte length ≤ max implies rune length ≤ max.
-	if len(s) <= max {
-		return s
-	}
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	if max <= 3 {
-		return string(runes[:max])
-	}
-	return string(runes[:max-3]) + "..."
-}
-
-// TruncatePath truncates a file path, keeping the end visible.
-// For paths longer than max, shows ".../" plus the last two path components.
-func TruncatePath(path string, max int) string {
-	// Fast path: byte length ≤ max implies rune length ≤ max.
-	if len(path) <= max {
-		return path
-	}
-	runes := []rune(path)
-	if len(runes) <= max {
-		return path
-	}
-	// Try to keep the last two components (e.g. "foo/bar.go").
-	parts := strings.Split(path, "/")
-	if len(parts) >= 2 {
-		suffix := strings.Join(parts[len(parts)-2:], "/")
-		prefixed := ".../" + suffix
-		if len(prefixed) <= max { // ASCII-safe: ".../" + path segments
-			return prefixed
-		}
-	}
-	// Fall back to keeping just the filename.
-	if lastSlash := strings.LastIndexByte(path, '/'); lastSlash > 0 {
-		suffix := path[lastSlash:]
-		if len(suffix) <= max-3 { // ASCII-safe: path components
-			return "..." + suffix
-		}
-	}
-	if max <= 3 {
-		return string(runes[:max])
-	}
-	return string(runes[:max-3]) + "..."
 }

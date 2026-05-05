@@ -10,6 +10,8 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/displaytext"
 )
 
 // ANSI color codes — kept exported for backward compatibility.
@@ -411,11 +413,11 @@ func (r *Renderer) CommandEnd(callID string, exitCode int, durationMs int64) {
 
 	if exitCode == 0 {
 		fmt.Fprintf(r.out, "%s[%s]%s %s✓%s%s\n",
-			r.color(ColorCyan), TruncateForDisplay(command, 60), r.color(ColorReset),
+			r.color(ColorCyan), displaytext.Truncate(command, 60), r.color(ColorReset),
 			r.color(ColorGreen), durationStr, r.color(ColorReset))
 	} else {
 		fmt.Fprintf(r.out, "%s[%s]%s %s✗ exit %d%s%s\n",
-			r.color(ColorCyan), TruncateForDisplay(command, 60), r.color(ColorReset),
+			r.color(ColorCyan), displaytext.Truncate(command, 60), r.color(ColorReset),
 			r.color(ColorRed), exitCode, durationStr, r.color(ColorReset))
 	}
 }
@@ -649,12 +651,12 @@ func (r *Renderer) tagged(minV Verbosity, colorCode, label, msg string) {
 
 // TaskStarted prints a task/sub-agent start notification.
 func (r *Renderer) TaskStarted(taskID, description string) {
-	r.tagged(VerbosityVerbose, ColorBlue, "Task "+taskID, TruncateForDisplay(description, 80))
+	r.tagged(VerbosityVerbose, ColorBlue, "Task "+taskID, displaytext.Truncate(description, 80))
 }
 
 // TaskProgress prints a task progress update.
 func (r *Renderer) TaskProgress(taskID, description string) {
-	r.tagged(VerbosityVerbose, ColorGray, "Task "+taskID, TruncateForDisplay(description, 80))
+	r.tagged(VerbosityVerbose, ColorGray, "Task "+taskID, displaytext.Truncate(description, 80))
 }
 
 // TaskNotification prints a task completion notification.
@@ -679,7 +681,7 @@ func (r *Renderer) TaskNotification(taskID, status, summary string) {
 
 	fmt.Fprintf(r.out, "%s%s [Task %s] %s%s %s\n",
 		r.color(colorCode), icon, taskID, status, r.color(ColorReset),
-		TruncateForDisplay(summary, 70))
+		displaytext.Truncate(summary, 70))
 }
 
 // HookLifecycle prints a hook execution event.

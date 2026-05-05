@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/displaytext"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/sessionmodel"
 )
@@ -37,8 +38,7 @@ func extractPrompt(lines []session.OutputLine) string {
 		if line.Type != session.OutputTypeText || line.Content == "" {
 			continue
 		}
-		// Truncate to 203 so that TruncateForDisplay keeps 200 content runes + "...".
-		s := sessionmodel.TruncateForDisplay(line.Content, 203)
+		s := displaytext.Truncate(line.Content, 203)
 		if line.IsUserPrompt {
 			return s
 		}

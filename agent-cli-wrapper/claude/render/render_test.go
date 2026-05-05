@@ -133,6 +133,33 @@ func TestToolComplete_Normal(t *testing.T) {
 	}
 }
 
+func TestToolComplete_TruncatesLongSummaries(t *testing.T) {
+	assertSummary := func(t *testing.T, name string, input map[string]interface{}, maxRunes int, wantPart string, wantEllip bool) {
+		t.Helper()
+		summary := FormatToolInput(name, input)
+		if maxRunes > 0 && len([]rune(summary)) > maxRunes {
+			t.Fatalf("summary length = %d, want <= %d: %q", len([]rune(summary)), maxRunes, summary)
+		}
+		if !strings.Contains(summary, wantPart) {
+			t.Fatalf("summary %q does not contain %q", summary, wantPart)
+		}
+		if strings.HasSuffix(summary, "...") != wantEllip {
+			t.Fatalf("summary ellipsis suffix = %v, want %v: %q", strings.HasSuffix(summary, "..."), wantEllip, summary)
+		}
+	}
+
+	t.Run("Read", func(t *testing.T) {
+		assertSummary(t, "Read", map[string]interface{}{
+			"file_path": "/really/long/prefix/that/exceeds/eighty/chars/with/many/segments/deeply/nested/file.go",
+		}, 80, ".../nested/file.go", false)
+	})
+	t.Run("Bash", func(t *testing.T) {
+		assertSummary(t, "Bash", map[string]interface{}{
+			"command": strings.Repeat("echo very-long-command ", 8),
+		}, 80, "...", true)
+	})
+}
+
 func TestToolComplete_InteractiveTool_EventHandler(t *testing.T) {
 	r, _ := newTestRenderer(VerbosityNormal)
 	var startedName, completedName string
@@ -466,6 +493,17 @@ func TestResetClosesOpenToolOutput(t *testing.T) {
 	}
 }
 
+func TestCommandEnd_TruncatesLongCommand(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+	r.CommandStart("call1", strings.Repeat("c", 80))
+	r.CommandEnd("call1", 0, 10)
+
+	want := "[" + strings.Repeat("c", 57) + "...]"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("CommandEnd output missing truncated command %q: %q", want, buf.String())
+	}
+}
+
 // --- Turn summaries ---
 
 func TestTurnSummary(t *testing.T) {
@@ -486,6 +524,25 @@ func TestTurnCompleteWithTokens(t *testing.T) {
 	}
 	if !strings.Contains(output, "1000") {
 		t.Errorf("Missing input tokens: %q", output)
+	}
+}
+
+func TestTaskLifecycle_TruncatesLongSummaries(t *testing.T) {
+	r, buf := newTestRenderer(VerbosityVerbose)
+
+	r.TaskStarted("1", strings.Repeat("s", 100))
+	r.TaskProgress("1", strings.Repeat("p", 100))
+	r.TaskNotification("1", "completed", strings.Repeat("n", 100))
+
+	output := buf.String()
+	for _, want := range []string{
+		strings.Repeat("s", 77) + "...",
+		strings.Repeat("p", 77) + "...",
+		strings.Repeat("n", 67) + "...",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("Task lifecycle output missing %q: %q", want, output)
+		}
 	}
 }
 
@@ -572,29 +629,6 @@ func TestVerbosity_String(t *testing.T) {
 	}
 	if VerbosityDebug.String() != "debug" {
 		t.Errorf("VerbosityDebug.String() = %q", VerbosityDebug.String())
-	}
-}
-
-// --- Format helpers ---
-
-func TestTruncateForDisplay(t *testing.T) {
-	if got := TruncateForDisplay("hello", 10); got != "hello" {
-		t.Errorf("short string: got %q", got)
-	}
-	if got := TruncateForDisplay("hello world", 8); got != "hello..." {
-		t.Errorf("truncated: got %q", got)
-	}
-}
-
-func TestTruncatePath(t *testing.T) {
-	short := "/tmp/test.go"
-	if got := TruncatePath(short, 50); got != short {
-		t.Errorf("short path: got %q", got)
-	}
-	long := "/very/long/path/to/some/deeply/nested/file.go"
-	got := TruncatePath(long, 25)
-	if got != ".../nested/file.go" {
-		t.Errorf("truncated path should keep last two components: got %q", got)
 	}
 }
 
