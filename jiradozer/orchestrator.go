@@ -284,9 +284,9 @@ func (o *Orchestrator) transitionToInProgress(ctx context.Context, issue *tracke
 }
 
 // releaseLockLabelByID removes LockLabel using only an issue ID/identifier.
-// Used by Start() error paths that fail after claimIssueInProgress but
-// before a managedWorkflow exists. Uses a fresh background context so the
-// caller's possibly-cancelled context does not strand cleanup.
+// Used by Start() error paths that fail after addLockLabel but before
+// the managedWorkflow record exists. Uses a fresh background context
+// so the caller's possibly-cancelled context does not strand cleanup.
 func (o *Orchestrator) releaseLockLabelByID(issueID, identifier string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -365,9 +365,14 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	// Per-issue log file for subprocess stdout/stderr.
 	// Sanitize identifier for use as a filename: GitHub identifiers like
 	// "acme/app#42" contain "/" and "#" which are problematic in file paths.
+	// Suffix with UnixNano + pid so two restarts of the same issue inside
+	// a single second still get distinct files — otherwise the tailer
+	// would replay the prior run's lines and mis-set currentStep/inReview
+	// for the new run.
 	safeID := sanitizeForFilename(issue.Identifier)
-	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.log",
-		safeID, time.Now().Format("20060102-150405")))
+	now := time.Now()
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d-%d.log",
+		safeID, now.Format("20060102-150405"), now.UnixNano(), os.Getpid()))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		cancel()
@@ -722,8 +727,9 @@ func shellQuote(s string) string {
 //     earlier steps; set forceCleanup to wipe it.
 func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step WorkflowStep) {
 	// Always release the lock label, regardless of how the workflow ended.
-	// The label is added in claimIssueInProgress and was previously never
-	// removed — every completed run leaked it, blocking re-discovery.
+	// The label is added in addLockLabel before subprocess start and was
+	// previously never removed on completion — every successful run
+	// leaked it, blocking re-discovery.
 	o.releaseLockLabel(mw)
 
 	o.mu.RLock()

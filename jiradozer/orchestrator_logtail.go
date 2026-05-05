@@ -52,8 +52,17 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 
 	f, err := logTailOpener(logPath)
 	if err != nil {
-		o.logger.Warn("log tailer: open failed, watchdog disabled for this workflow",
+		// The tailer is the watchdog's only signal; without it a hung
+		// subprocess would never get cancelled. Start() always creates
+		// the log file with O_CREATE before the tailer runs, so this
+		// branch is reachable only on serious failures (EACCES, EMFILE,
+		// FS error). Fail closed: cancel the workflow context so cmd
+		// gets SIGINT and Wait() surfaces the failure.
+		o.logger.Error("log tailer: open failed, cancelling workflow",
 			"issue", mw.issue.Identifier, "path", logPath, "error", err)
+		if mw.cancel != nil {
+			mw.cancel()
+		}
 		return
 	}
 

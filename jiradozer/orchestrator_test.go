@@ -831,10 +831,12 @@ func (m *mockClaimTracker) getLabelCalls() ([]string, []string) {
 	return append([]string(nil), m.labelIssues...), append([]string(nil), m.labelNames...)
 }
 
-// TestOrchestrator_StartClaimsInProgress verifies that Start() transitions the
-// issue to "In Progress" and adds the LockLabel before launching the subprocess,
-// providing a distributed lock so other jiradozer processes won't rediscover
-// the same issue.
+// TestOrchestrator_StartClaimsInProgress verifies the two-phase claim:
+// addLockLabel runs before cmd.Start (so the label signals intent
+// across processes immediately), and transitionToInProgress runs only
+// after cmd.Start succeeds (so failures between worktree creation and
+// cmd.Start leave the issue rediscoverable). Together they form a
+// distributed lock against concurrent jiradozer processes.
 func TestOrchestrator_StartClaimsInProgress(t *testing.T) {
 	cfg := testOrchestratorConfig()
 	cfg.States.InProgress = "In Progress"

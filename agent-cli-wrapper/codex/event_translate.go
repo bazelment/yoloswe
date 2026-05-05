@@ -39,6 +39,12 @@ type MappedEvent struct { //nolint:govet // fieldalignment: keep semantic groupi
 	ExitCode     int
 	DurationMs   int64
 	Success      bool
+	// UsageIsCumulative is set on MappedEventTokenUsage when the source
+	// notification only carried TotalTokenUsage (cumulative across the
+	// thread), not the per-turn LastTokenUsage. Consumers that render
+	// per-turn deltas (e.g. bramble/replay) must label or transform the
+	// value rather than show it as a per-turn count.
+	UsageIsCumulative bool
 }
 
 // ParseMappedNotification parses a Codex protocol notification into a
@@ -151,6 +157,9 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 		if src == nil {
 			return MappedEvent{}, false
 		}
+		// Detect the cumulative-only fallback so consumers (replay)
+		// can render the value without claiming it's a per-turn delta.
+		cumulative := msg.Info != nil && msg.Info.LastTokenUsage == nil
 		usage := TurnUsage{
 			InputTokens:           src.InputTokens,
 			CachedInputTokens:     src.CachedInputTokens,
@@ -159,9 +168,10 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 			TotalTokens:           src.TotalTokens,
 		}
 		return MappedEvent{
-			Kind:     MappedEventTokenUsage,
-			ThreadID: notif.ConversationID,
-			Usage:    usage,
+			Kind:              MappedEventTokenUsage,
+			ThreadID:          notif.ConversationID,
+			Usage:             usage,
+			UsageIsCumulative: cumulative,
 		}, true
 	}
 

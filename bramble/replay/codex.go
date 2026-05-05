@@ -13,20 +13,30 @@ import (
 
 // codexReplayParser accumulates state while parsing a Codex protocol log.
 type codexReplayParser struct { //nolint:govet // fieldalignment: readability over packing
-	lines             []session.OutputLine
-	itemTextLine      map[string]int
-	threadActiveItem  map[string]string
-	toolLineIndex     map[string]int
-	threadTokenUsage  map[string]codex.TokenUsage
-	threadReasoning   map[string]bool
-	threadText        map[string]*strings.Builder
-	pendingApprovals  map[string]map[string]struct{}
-	emittedApprovals  map[string]map[string]struct{}
-	prompt            string
-	turnCount         int
-	turnStarts        int
-	turnCompletions   int
-	hadProviderErrors bool
+	lines            []session.OutputLine
+	itemTextLine     map[string]int
+	threadActiveItem map[string]string
+	toolLineIndex    map[string]int
+	threadTokenUsage map[string]codex.TokenUsage
+	// threadCumulativeBaseline holds the cumulative TotalTokenUsage seen
+	// at the previous TurnCompleted on threads whose Codex protocol
+	// version omits per-turn LastTokenUsage. We subtract it from the
+	// next cumulative reading to recover a per-turn delta. Empty for
+	// modern Codex logs (LastTokenUsage is per-turn already).
+	threadCumulativeBaseline map[string]codex.TokenUsage
+	// threadUsageCumulative is true when the most recent token-usage
+	// event on this thread was a cumulative-only fallback. Replay must
+	// label such usage so it isn't read as a per-turn delta.
+	threadUsageCumulative map[string]bool
+	threadReasoning       map[string]bool
+	threadText            map[string]*strings.Builder
+	pendingApprovals      map[string]map[string]struct{}
+	emittedApprovals      map[string]map[string]struct{}
+	prompt                string
+	turnCount             int
+	turnStarts            int
+	turnCompletions       int
+	hadProviderErrors     bool
 }
 
 type codexExecApprovalRequest struct { //nolint:govet // fieldalignment: readability over packing
@@ -44,14 +54,16 @@ type codexItemApprovalRequest struct {
 
 func newCodexReplayParser() *codexReplayParser {
 	return &codexReplayParser{
-		itemTextLine:     make(map[string]int),
-		threadActiveItem: make(map[string]string),
-		toolLineIndex:    make(map[string]int),
-		threadTokenUsage: make(map[string]codex.TokenUsage),
-		threadReasoning:  make(map[string]bool),
-		threadText:       make(map[string]*strings.Builder),
-		pendingApprovals: make(map[string]map[string]struct{}),
-		emittedApprovals: make(map[string]map[string]struct{}),
+		itemTextLine:             make(map[string]int),
+		threadActiveItem:         make(map[string]string),
+		toolLineIndex:            make(map[string]int),
+		threadTokenUsage:         make(map[string]codex.TokenUsage),
+		threadCumulativeBaseline: make(map[string]codex.TokenUsage),
+		threadUsageCumulative:    make(map[string]bool),
+		threadReasoning:          make(map[string]bool),
+		threadText:               make(map[string]*strings.Builder),
+		pendingApprovals:         make(map[string]map[string]struct{}),
+		emittedApprovals:         make(map[string]map[string]struct{}),
 	}
 }
 
@@ -289,12 +301,29 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 			ReasoningOutputTokens: ev.Usage.ReasoningOutputTokens,
 			TotalTokens:           ev.Usage.TotalTokens,
 		}
+		p.threadUsageCumulative[ev.ThreadID] = ev.UsageIsCumulative
 
 	case codex.MappedEventTurnCompleted:
 		p.turnCount++
 		p.turnCompletions++
 		p.clearThreadApprovals(ev.ThreadID)
 		usage := p.threadTokenUsage[ev.ThreadID]
+		// On older Codex protocol versions that emit only TotalTokenUsage
+		// (cumulative across the thread), recover a per-turn delta by
+		// subtracting the prior turn's cumulative baseline. Falls back
+		// to the cumulative value itself for the very first turn.
+		if p.threadUsageCumulative[ev.ThreadID] {
+			baseline := p.threadCumulativeBaseline[ev.ThreadID]
+			delta := codex.TokenUsage{
+				InputTokens:           usage.InputTokens - baseline.InputTokens,
+				CachedInputTokens:     usage.CachedInputTokens - baseline.CachedInputTokens,
+				OutputTokens:          usage.OutputTokens - baseline.OutputTokens,
+				ReasoningOutputTokens: usage.ReasoningOutputTokens - baseline.ReasoningOutputTokens,
+				TotalTokens:           usage.TotalTokens - baseline.TotalTokens,
+			}
+			p.threadCumulativeBaseline[ev.ThreadID] = usage
+			usage = delta
+		}
 		p.lines = append(p.lines, session.OutputLine{
 			Timestamp:  ts,
 			Type:       session.OutputTypeTurnEnd,
