@@ -55,6 +55,15 @@ type fdWriter struct {
 	*os.File
 }
 
+func withTerminalProbe(t *testing.T, probe func(int) bool) {
+	t.Helper()
+	original := isTerminalFD
+	isTerminalFD = probe
+	t.Cleanup(func() {
+		isTerminalFD = original
+	})
+}
+
 func TestIsTerminal_FdWriter(t *testing.T) {
 	f, err := os.Open(os.DevNull)
 	if err != nil {
@@ -64,6 +73,26 @@ func TestIsTerminal_FdWriter(t *testing.T) {
 
 	if IsTerminal(fdWriter{File: f}) {
 		t.Fatalf("%s fd writer should not be reported as a terminal", os.DevNull)
+	}
+}
+
+func TestIsTerminal_FdWriterUsesWrappedFD(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	wantFD := int(f.Fd())
+	withTerminalProbe(t, func(fd int) bool {
+		if fd != wantFD {
+			t.Fatalf("terminal probe fd = %d, want %d", fd, wantFD)
+		}
+		return true
+	})
+
+	if !IsTerminal(fdWriter{File: f}) {
+		t.Fatalf("wrapped fd writer should use the terminal probe result")
 	}
 }
 

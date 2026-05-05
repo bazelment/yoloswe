@@ -6,6 +6,8 @@ import (
 	"golang.org/x/term"
 )
 
+var isTerminalFD = term.IsTerminal
+
 // ColorMode controls how color output is handled.
 type ColorMode int
 
@@ -75,5 +77,5 @@ func isTerminalWriter(w io.Writer) bool {
 	if !ok {
 		return false
 	}
-	return term.IsTerminal(int(f.Fd()))
+	return isTerminalFD(int(f.Fd()))
 }
