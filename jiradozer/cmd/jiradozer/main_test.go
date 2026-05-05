@@ -263,6 +263,19 @@ func TestRunSingleStepPostResultReturnsPostError(t *testing.T) {
 	assert.ErrorContains(t, err, "tracker unavailable")
 }
 
+func TestRunSingleStepPostResultRequiresCommentTemplate(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Plan = jiradozer.StepConfig{Prompt: "plan {{.Identifier}}"}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStepForTest(t, "plan", issue, cfg, recorder, true, "planned output")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no comment_template configured")
+	assert.Empty(t, recorder.comments)
+}
+
 func TestRunSingleStepPostResultFalseDoesNotPost(t *testing.T) {
 	cfg := jiradozer.DefaultConfig()
 	cfg.WorkDir = t.TempDir()
@@ -296,6 +309,23 @@ func TestRunSingleStepRoundsPostResultPostsCombinedRoundComment(t *testing.T) {
 	require.Len(t, recorder.comments, 1)
 	assert.Equal(t, "issue-id", recorder.comments[0].issueID)
 	assert.Equal(t, "## Validate Round 2/2\n\nround one\n\n---\n\nround two", recorder.comments[0].body)
+}
+
+func TestRunSingleStepRoundsPostResultRequiresRoundCommentTemplate(t *testing.T) {
+	cfg := jiradozer.DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.Validate = jiradozer.StepConfig{
+		Rounds: []jiradozer.RoundConfig{
+			{Command: "printf 'round output'"},
+		},
+	}
+	issue := &tracker.Issue{ID: "issue-id", Identifier: "INF-703", Title: "Test issue"}
+	recorder := &recordingRunTracker{}
+
+	err := runSingleStep(context.Background(), "validate", issue, cfg, "", recorder, true, nil, testMainLogger(t))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no round_comment_template configured")
+	assert.Empty(t, recorder.comments)
 }
 
 func TestPostResultRequiresRunStep(t *testing.T) {
@@ -336,7 +366,7 @@ func TestRunCommandPostResultFlagReachesSingleStepPath(t *testing.T) {
 	comments, err := lt.FetchComments(context.Background(), issue.ID, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, comments, 1)
-	assert.Contains(t, comments[0].Body, "cli planned output")
+	assert.Equal(t, "## Plan Complete\n\ncli planned output", comments[0].Body)
 }
 
 func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
