@@ -504,21 +504,32 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 // rather than the sole acceptable scope.
 //
 // Token-cost cuts vs the prior shape: the goal re-statement, the persona, the
-// per-issue citation/rubric instructions, the scope suffix, the
-// skip-test-execution suffix, and the full JSON output spec are all dropped.
-// They were established in the fresh prompt that started the session and are
-// already in the model's context window; restating them adds noise without
-// signal. A single-line "same severity rubric and JSON output format" pointer
-// keeps format compliance anchored without re-pasting the spec.
+// per-issue citation/rubric instructions, and the full JSON output spec are
+// dropped. They were established in the fresh prompt that started the session
+// and are already in the model's context window; restating them adds noise
+// without signal. A single-line "same severity rubric and JSON output format"
+// pointer keeps format compliance anchored without re-pasting the spec.
+//
+// The skip-test-execution suffix and the scope suffix (test-quality +
+// cross-service clauses, derived from opts) ARE conditionally appended,
+// however — round-8 codex+cursor consensus flagged that on a silent resume
+// fallback (resume_status="fallback") the model reads this prompt cold and
+// missing those clauses gives it materially less guidance than a real fresh
+// review. The few extra tokens on a successfully-resumed turn are noise vs
+// the safety net for the fallback case. Skip-test/scope clauses fire only
+// when opts.SkipTestExecution is set or the scope-hint lists are non-empty,
+// so the empty-opts case still produces the minimal prompt.
 //
 // The opts argument is preserved on the signature for symmetry with the
 // fresh prompt and so callers don't need a separate dispatch — but its
-// fields (TestScopeHints, ChangedPackages, SkipTestExecution, etc.) are
-// intentionally not re-rendered here. The same scope state existed when
-// the fresh prompt established the session; the resumed model already has it.
+// goal is intentionally not re-rendered: it was established in the fresh
+// prompt that started the session, and the no-prior-context escape hatch
+// below handles the silent-fallback case via the model's first-pass review
+// behavior rather than re-stating the goal text. opts.SkipTestExecution and
+// the scope-hint fields ARE conditionally rendered (see the design intent
+// above) so a fallback session reads them cold.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
-	_ = goal // the goal is in the resumed session's context (and in the
-	// fallback-fresh-review block below if the resume silently fell back)
+	_ = goal // see docstring: deliberate drop, escape hatch handles fallback case
 	prompt := `Continue the review on the same diff against the same goal as the prior turn.
 
 If you have no prior review context for this diff (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: examine the entire diff and apply the standard severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.

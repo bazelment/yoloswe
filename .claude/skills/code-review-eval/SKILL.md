@@ -111,18 +111,28 @@ resume id is set, which matches the path `/pr-polish` uses — the production ca
 this eval most needs to characterize. Canonical command (codex; cursor and gemini
 mirror it with backend/model swapped):
 
-> **Prompt shape note (2026-05-06):** the follow-up prompt was rewritten to
-> drop the redundant rubric/format/scope re-paste (the resumed session
-> already saw them in turn 1) and to widen the model's review scope —
-> earlier shapes used a strict "(1)(2)(3) only" framing that biased the
-> model toward ratifying the prior verdict (cursor turn 2 in the round-2
-> eval returned 0 issues with summary "HEAD is unchanged since the earlier
-> pass"). The new shape leads with "Re-review the full diff with fresh
-> eyes — including code you previously accepted" and rewards finding new
-> issues over confirming the prior verdict. Compare turn-2 finding counts
-> before/after this date to baseline the bias-guard effect: a non-biased
-> follow-up should produce turn-2 finding counts ≥ turn-1 in expectation,
-> or at least not systematically lower across all backends.
+> **Prompt shape note (2026-05-06, updated round 10):** the follow-up
+> prompt was rewritten to drop the redundant **persona and full JSON
+> output spec** re-paste (the resumed session already saw them in turn 1)
+> and to widen the model's review scope — earlier shapes used a strict
+> "(1)(2)(3) only" framing that biased the model toward ratifying the
+> prior verdict (cursor turn 2 in the round-2 eval returned 0 issues
+> with summary "HEAD is unchanged since the earlier pass"). The new
+> shape leads with "Re-review the full diff with fresh eyes — including
+> code you previously accepted" and rewards finding new issues over
+> confirming the prior verdict.
+>
+> Round-8 codex+cursor consensus refined the shape: the
+> skip-test-execution suffix and scope clauses (test-quality + cross-
+> service) are now **conditionally appended** when opts carries them,
+> so a silent resume fallback (resume_status="fallback") reading the
+> prompt cold still gets the same scope guidance a real fresh review
+> would. The persona / full output spec / goal re-statement remain
+> dropped.
+>
+> Compare turn-2 finding counts before/after this date to baseline the
+> bias-guard effect: a non-biased follow-up should not systematically
+> produce LOWER turn-2 counts than turn-1 across all backends.
 
 ```bash
 ENVELOPE_FILE="$LOG_DIR/codex-5.4-mini-envelope-r2.json"
