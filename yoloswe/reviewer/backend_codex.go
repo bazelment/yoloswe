@@ -2,7 +2,10 @@ package reviewer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
@@ -49,13 +52,28 @@ func (b *codexBackend) Stop() error {
 
 func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
 	// Create a new thread if none exists, or reuse for follow-ups.
+	resumeStatus := ""
 	if b.thread == nil {
-		thread, err := b.client.CreateThread(ctx,
+		threadOpts := []codex.ThreadOption{
 			codex.WithModel(b.config.Model),
 			codex.WithWorkDir(b.config.WorkDir),
 			codex.WithApprovalPolicy(b.config.ApprovalPolicy),
 			codex.WithSandbox(b.config.Sandbox),
-		)
+		}
+		var thread *codex.Thread
+		var err error
+		if b.config.ResumeSessionID != "" {
+			thread, err = b.client.ResumeThread(ctx, b.config.ResumeSessionID, threadOpts...)
+			if err != nil && isCodexResumeNotFound(err) {
+				slog.Warn("codex resume failed; falling back to fresh thread", "session_id", b.config.ResumeSessionID, "error", err.Error())
+				resumeStatus = "fallback"
+				thread, err = b.client.CreateThread(ctx, threadOpts...)
+			} else if err == nil {
+				resumeStatus = "ok"
+			}
+		} else {
+			thread, err = b.client.CreateThread(ctx, threadOpts...)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to create thread: %w", err)
 		}
@@ -86,6 +104,7 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		ResponseText: bridged.responseText,
 		Success:      bridged.success,
 		DurationMs:   bridged.durationMs,
+		ResumeStatus: resumeStatus,
 	}
 
 	// Extract codex-specific token usage and error from the raw turn event.
@@ -98,4 +117,17 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 	}
 
 	return result, nil
+}
+
+func isCodexResumeNotFound(err error) bool {
+	if errors.Is(err, codex.ErrThreadNotFound) {
+		return true
+	}
+	var rpcErr *codex.RPCError
+	if errors.As(err, &rpcErr) {
+		msg := strings.ToLower(rpcErr.Message)
+		return strings.Contains(msg, "not found") || strings.Contains(msg, "missing") || strings.Contains(msg, "expired")
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "missing") || strings.Contains(msg, "expired")
 }

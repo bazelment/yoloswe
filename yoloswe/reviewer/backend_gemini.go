@@ -2,7 +2,9 @@ package reviewer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
@@ -69,7 +71,21 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		sessionOpts = append(sessionOpts, acp.WithSessionCWD(b.config.WorkDir))
 	}
 
-	session, err := b.client.NewSession(ctx, sessionOpts...)
+	resumeStatus := ""
+	var session *acp.Session
+	var err error
+	if b.config.ResumeSessionID != "" {
+		session, err = b.client.LoadSession(ctx, b.config.ResumeSessionID, sessionOpts...)
+		if err != nil && errors.Is(err, acp.ErrSessionNotFound) {
+			slog.Warn("gemini resume unavailable; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
+			resumeStatus = "fallback"
+			session, err = b.client.NewSession(ctx, sessionOpts...)
+		} else if err == nil {
+			resumeStatus = "ok"
+		}
+	} else {
+		session, err = b.client.NewSession(ctx, sessionOpts...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gemini: failed to create session: %w", err)
 	}
@@ -122,6 +138,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 			Success:      false,
 			DurationMs:   r.durationMs,
 			ErrorMessage: promptErr.Error(),
+			ResumeStatus: resumeStatus,
 		}, fmt.Errorf("gemini: prompt failed: %w", promptErr)
 	}
 
@@ -136,6 +153,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		ResponseText: r.responseText,
 		Success:      r.success,
 		DurationMs:   r.durationMs,
+		ResumeStatus: resumeStatus,
 	}, nil
 }
 

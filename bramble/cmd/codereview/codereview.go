@@ -30,6 +30,8 @@ var (
 	envelopeFile      string
 	skipTestExecution bool
 	scopeHintsFile    string
+	resumeSessionID   string
+	resumePromptStyle string
 )
 
 // Cmd is the cobra command for code review.
@@ -71,6 +73,8 @@ func init() {
 	Cmd.Flags().StringVar(&envelopeFile, "envelope-file", "", "Write the JSON ResultEnvelope to this file instead of stdout (stdout then carries only progress events)")
 	Cmd.Flags().BoolVar(&skipTestExecution, "skip-test-execution", false, "Instruct the reviewer not to run tests/build commands (caller runs them separately)")
 	Cmd.Flags().StringVar(&scopeHintsFile, "scope-hints-file", "", "JSON file with co-located test paths and cross-service packages to widen review scope; see reviewer.ScopeHints. Missing/malformed files log a warning and fall back to today's narrow review.")
+	Cmd.Flags().StringVar(&resumeSessionID, "resume-session-id", "", "Resume an existing backend session/thread id")
+	Cmd.Flags().StringVar(&resumePromptStyle, "resume-prompt-style", "fresh", "Prompt style when resuming: follow-up or fresh")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
@@ -143,6 +147,8 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"envelope_file", envelopeFile != "",
 		"skip_test_execution", skipTestExecution,
 		"scope_hints_file", scopeHintsFile != "",
+		"resume_session", resumeSessionID != "",
+		"resume_prompt_style", resumePromptStyle,
 		"goal_len", len(goal))
 
 	config := reviewer.Config{
@@ -154,6 +160,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		ReadOnly:          readOnly,
 		Verbose:           verbose,
 		SkipTestExecution: skipTestExecution,
+		ResumeSessionID:   resumeSessionID,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
@@ -181,7 +188,14 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer r.Stop()
 
-	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution)
+	promptStyle := resumePromptStyle
+	if resumeSessionID != "" && promptStyle == "fresh" {
+		promptStyle = "follow-up"
+	}
+	if promptStyle != "fresh" && promptStyle != "follow-up" {
+		return emitEarlyFailure(fmt.Errorf("invalid --resume-prompt-style %q (want fresh or follow-up)", resumePromptStyle), earlyModel, emitEnvelope)
+	}
+	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution, promptStyle)
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
@@ -189,6 +203,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		// bramble-level failure from a reviewer-level "rejected".
 		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 			ErrorMessage: err.Error(),
+			ResumeStatus: r.ResumeStatus(),
 		}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
 		emitEnvelope(env)
 		return fmt.Errorf("review failed: %w", err)
@@ -334,8 +349,11 @@ func reportEnvelopePrintError(printErr error) {
 // Without this seam, a regression that quietly stops threading
 // scopeHintsFile into the reviewer would slip through helper-level tests
 // that only exercise loadPromptOptions in isolation.
-func buildPromptForRun(goal, hintsPath string, skipTestExecution bool) string {
+func buildPromptForRun(goal, hintsPath string, skipTestExecution bool, promptStyle ...string) string {
 	opts := loadPromptOptions(hintsPath, skipTestExecution)
+	if len(promptStyle) > 0 && promptStyle[0] == "follow-up" {
+		return reviewer.BuildFollowUpJSONPromptWithScope(goal, opts)
+	}
 	return reviewer.BuildJSONPromptWithScope(goal, opts)
 }
 

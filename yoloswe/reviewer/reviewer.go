@@ -81,17 +81,18 @@ const (
 // ApprovalHandler; without one the codex process blocks indefinitely
 // waiting for approval responses.
 type Config struct {
-	Model          string
-	WorkDir        string
-	Goal           string
-	SessionLogPath string
-	Effort         string               // Reasoning effort level for codex (low, medium, high)
-	Sandbox        string               // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
-	ApprovalPolicy codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
-	BackendType    BackendType
-	ReadOnly       bool // Deny file writes via approval handler (Codex only; CLI entrypoints default this to true)
-	Verbose        bool
-	NoColor        bool
+	ApprovalPolicy  codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
+	WorkDir         string
+	Goal            string
+	SessionLogPath  string
+	Effort          string // Reasoning effort level for codex (low, medium, high)
+	Sandbox         string // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
+	Model           string
+	BackendType     BackendType
+	ResumeSessionID string // Prior reviewer session/thread id to resume when supported.
+	ReadOnly        bool   // Deny file writes via approval handler (Codex only; CLI entrypoints default this to true)
+	Verbose         bool
+	NoColor         bool
 	// SkipTestExecution instructs the reviewer not to run test/build commands
 	// (bazel, go test, etc.). Callers that already run tests in a separate step
 	// (e.g. /pr-polish quality gates) should enable this to avoid duplicate work.
@@ -459,7 +460,29 @@ func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
 // prompt; the scope clauses (test-quality, cross-service) are inserted
 // between the base prompt and the JSON output rules.
 func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
-	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
+	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + jsonOutputRules()
+}
+
+// BuildFollowUpJSONPromptWithScope creates the shorter resumed-session prompt
+// used after a prior review round has already established context.
+func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
+	prompt := `The previous round's findings were addressed in the commits since the prior review turn. Re-review the current diff against the same goal.
+` + buildGoalText(goal) + `
+
+Focus on:
+1. Issues introduced by the new fix commits.
+2. Items you flagged before that you now have stronger evidence for — cite the file:line that proves it.
+3. Anything you skipped before that the new code now exposes.
+
+Do not re-list issues you previously flagged unless one of (1)-(3) applies.`
+	if opts.SkipTestExecution {
+		prompt += skipTestExecutionSuffix
+	}
+	return prompt + buildScopeSuffix(opts) + jsonOutputRules()
+}
+
+func jsonOutputRules() string {
+	return `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:
@@ -495,12 +518,13 @@ You MUST respond with valid JSON in this exact format:
 
 // ReviewResult contains the result of a review turn.
 type ReviewResult struct {
-	ResponseText string // Full response text
-	ErrorMessage string // Error from the agent backend (empty on success)
-	Success      bool
+	ResponseText string
+	ErrorMessage string
+	ResumeStatus string
 	DurationMs   int64
 	InputTokens  int64
 	OutputTokens int64
+	Success      bool
 }
 
 // Reviewer wraps an agent backend for code review operations.
@@ -509,6 +533,7 @@ type Reviewer struct {
 	backend        Backend
 	renderer       *render.Renderer
 	lastSessionID  string
+	resumeStatus   string
 	effectiveModel string // updated from backend session info when available
 	config         Config
 }
@@ -613,6 +638,9 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	r.renderer.Status(status)
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
+	if result != nil && result.ResumeStatus != "" {
+		r.resumeStatus = result.ResumeStatus
+	}
 	if err != nil {
 		if result != nil {
 			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
@@ -621,6 +649,12 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	}
 	r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
 	return result, nil
+}
+
+// ResumeStatus returns "ok" when a requested resume succeeded, "fallback"
+// when the backend had to cold-start, or "" when no resume was requested.
+func (r *Reviewer) ResumeStatus() string {
+	return r.resumeStatus
 }
 
 // FollowUp sends a follow-up message to the existing backend session.

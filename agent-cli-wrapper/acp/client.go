@@ -204,6 +204,64 @@ func (c *Client) NewSession(ctx context.Context, opts ...SessionOption) (*Sessio
 	return session, nil
 }
 
+// LoadSession loads an existing ACP session when the agent advertises support.
+func (c *Client) LoadSession(ctx context.Context, sessionID string, opts ...SessionOption) (*Session, error) {
+	c.mu.RLock()
+	if !c.started {
+		c.mu.RUnlock()
+		return nil, ErrNotStarted
+	}
+	if c.stopping {
+		c.mu.RUnlock()
+		return nil, ErrStopping
+	}
+	supportsLoad := c.agentInfo != nil &&
+		c.agentInfo.AgentCapabilities != nil &&
+		c.agentInfo.AgentCapabilities.LoadSession
+	c.mu.RUnlock()
+
+	if !supportsLoad {
+		return nil, ErrSessionNotFound
+	}
+
+	cfg := defaultACPSessionConfig()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	params := LoadSessionRequest{
+		SessionID:  sessionID,
+		CWD:        cfg.CWD,
+		McpServers: cfg.McpServers,
+	}
+	if params.McpServers == nil {
+		params.McpServers = []McpServerConfig{}
+	}
+
+	resp, err := c.sendRequestAndWait(ctx, MethodSessionLoad, params)
+	if err != nil {
+		if rpcErr, ok := err.(*RPCError); ok && (rpcErr.Code == ErrCodeResourceNotFound || rpcErr.Code == ErrCodeCapabilityUnsupported) {
+			return nil, ErrSessionNotFound
+		}
+		return nil, err
+	}
+
+	var sessionResp LoadSessionResponse
+	if err := json.Unmarshal(resp.Result, &sessionResp); err != nil {
+		return nil, &ProtocolError{Message: "failed to parse session/load response", Cause: err}
+	}
+
+	session := newSession(c, sessionResp.SessionID)
+
+	c.mu.Lock()
+	c.sessions[sessionResp.SessionID] = session
+	c.mu.Unlock()
+
+	c.emit(SessionCreatedEvent{SessionID: sessionResp.SessionID})
+
+	return session, nil
+}
+
 // Stop gracefully shuts down the client.
 func (c *Client) Stop() error {
 	c.mu.Lock()

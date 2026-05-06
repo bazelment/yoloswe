@@ -56,6 +56,16 @@ func TestBuildCLIArgs_WithExtraArgs(t *testing.T) {
 	assert.Contains(t, args, "--debug")
 }
 
+func TestBuildCLIArgs_WithResume(t *testing.T) {
+	config := defaultConfig()
+	config.Resume = "chat-123"
+	pm := newProcessManager("test", config)
+	args := pm.BuildCLIArgs()
+
+	assert.Contains(t, args, "--resume")
+	assert.Contains(t, args, "chat-123")
+}
+
 func TestBuildCLIArgs_PromptWithSpaces(t *testing.T) {
 	pm := newProcessManager("write a function that adds two numbers", defaultConfig())
 	args := pm.BuildCLIArgs()

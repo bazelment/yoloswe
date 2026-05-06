@@ -420,6 +420,22 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 	}
 }
 
+func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
+	got := buildPromptForRun("g", "", true, "follow-up")
+	if !strings.Contains(got, "The previous round's findings were addressed") {
+		t.Errorf("follow-up prompt missing opening line; got:\n%s", got)
+	}
+	if strings.Contains(got, "Focus on these areas:") {
+		t.Errorf("follow-up prompt should not use full fresh-review checklist; got:\n%s", got)
+	}
+	if !strings.Contains(got, "Do NOT run tests or build commands") {
+		t.Errorf("follow-up prompt must preserve skip-test-execution clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Output Format") {
+		t.Errorf("follow-up prompt missing JSON output rules; got:\n%s", got)
+	}
+}
+
 func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
 	// A malformed hints file is the same outcome as no hints file: the
 	// legacy narrow prompt. The slog fallback warning is exercised by
@@ -463,6 +479,27 @@ func TestCmd_ScopeHintsFileFlagIsWired(t *testing.T) {
 	}
 	if scopeHintsFile != "/other/path.json" {
 		t.Errorf("scopeHintsFile global after second parse = %q, want /other/path.json", scopeHintsFile)
+	}
+}
+
+func TestCmd_ResumeFlagsAreWired(t *testing.T) {
+	prevID := resumeSessionID
+	prevStyle := resumePromptStyle
+	t.Cleanup(func() {
+		resumeSessionID = prevID
+		resumePromptStyle = prevStyle
+	})
+	resumeSessionID = ""
+	resumePromptStyle = "fresh"
+
+	if err := Cmd.ParseFlags([]string{"--resume-session-id", "sess-1", "--resume-prompt-style", "follow-up"}); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+	if resumeSessionID != "sess-1" {
+		t.Errorf("resumeSessionID = %q, want sess-1", resumeSessionID)
+	}
+	if resumePromptStyle != "follow-up" {
+		t.Errorf("resumePromptStyle = %q, want follow-up", resumePromptStyle)
 	}
 }
 

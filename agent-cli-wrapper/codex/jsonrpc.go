@@ -86,6 +86,20 @@ type ThreadStartParams struct {
 	ApprovalPolicy string                 `json:"approvalPolicy,omitempty"`
 }
 
+// ThreadResumeParams for loading an existing thread.
+type ThreadResumeParams struct {
+	// Sandbox can be a string ("read-only", "workspace-write", "danger-full-access")
+	// or a *SandboxConfig struct for detailed configuration.
+	Sandbox        interface{}            `json:"sandbox,omitempty"`
+	Config         map[string]interface{} `json:"config,omitempty"`
+	ThreadID       string                 `json:"threadId"`
+	Model          string                 `json:"model,omitempty"`
+	ModelProvider  string                 `json:"modelProvider,omitempty"`
+	Profile        string                 `json:"profile,omitempty"`
+	CWD            string                 `json:"cwd,omitempty"`
+	ApprovalPolicy string                 `json:"approvalPolicy,omitempty"`
+}
+
 // SandboxConfig for sandbox settings.
 type SandboxConfig struct {
 	Type          string   `json:"type,omitempty"`
@@ -138,6 +152,9 @@ type ThreadStartResponse struct {
 	} `json:"sandbox"`
 	Thread ThreadInfo `json:"thread"`
 }
+
+// ThreadResumeResponse from thread/resume request.
+type ThreadResumeResponse = ThreadStartResponse
 
 // ThreadInfo contains thread metadata.
 type ThreadInfo struct {

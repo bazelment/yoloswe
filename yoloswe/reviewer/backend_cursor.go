@@ -3,6 +3,7 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
@@ -36,6 +37,10 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	if b.config.WorkDir != "" {
 		opts = append(opts, cursor.WithWorkDir(b.config.WorkDir))
 	}
+	baseOpts := append([]cursor.SessionOption{}, opts...)
+	if b.config.ResumeSessionID != "" {
+		opts = append(opts, cursor.WithResume(b.config.ResumeSessionID))
+	}
 	// Non-interactive flags for automation:
 	// --trust: trust the workspace without prompting
 	// --force: allow all tool calls (shell, write, etc.) without approval
@@ -45,7 +50,21 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	// Codex—see Config doc in reviewer.go). With or without --force, the
 	// session ends without result when --sandbox is enabled.
 	opts = append(opts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(stderrPrefixHandler("cursor")))
+	baseOpts = append(baseOpts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(stderrPrefixHandler("cursor")))
 
+	resumeStatus := ""
+	if b.config.ResumeSessionID != "" {
+		resumeStatus = "ok"
+	}
+	result, err := b.runPromptWithOptions(ctx, prompt, handler, opts, resumeStatus)
+	if err != nil && b.config.ResumeSessionID != "" && isCursorResumeNotFound(err) {
+		slog.Warn("cursor resume failed; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
+		return b.runPromptWithOptions(ctx, prompt, handler, baseOpts, "fallback")
+	}
+	return result, err
+}
+
+func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string, handler EventHandler, opts []cursor.SessionOption, resumeStatus string) (*ReviewResult, error) {
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("cursor query failed: %w", err)
@@ -77,7 +96,15 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		ResponseText: bridged.responseText,
 		Success:      bridged.success,
 		DurationMs:   bridged.durationMs,
+		ResumeStatus: resumeStatus,
 	}, nil
+}
+
+func isCursorResumeNotFound(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "session not found") ||
+		strings.Contains(msg, "chat not found") ||
+		strings.Contains(msg, "resume") && (strings.Contains(msg, "not found") || strings.Contains(msg, "missing") || strings.Contains(msg, "expired"))
 }
 
 // cursorEventAdapter filters cursor events, handling ReadyEvent out-of-band
