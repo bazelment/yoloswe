@@ -27,6 +27,11 @@ type bootstrapArgs struct {
 	force  bool
 }
 
+type bootstrapRepoWorktreeResult struct {
+	workDir    string
+	baseBranch string
+}
+
 func newBootstrapCommand(args *bootstrapArgs, configPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bootstrap",
@@ -53,18 +58,14 @@ agent says.`,
 			} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("stat %s: %w", path, err)
 			}
-			workDir := ""
+			repoResult := bootstrapRepoWorktreeResult{}
 			if args.repo != "" {
-				workDir, err = bootstrapRepoWorktree(cmd.Context(), args.repo, cmd.OutOrStdout())
+				repoResult, err = bootstrapRepoWorktree(cmd.Context(), args.repo, cmd.OutOrStdout())
 				if err != nil {
 					return err
 				}
 			}
-			baseBranch := ""
-			if workDir != "" {
-				baseBranch = filepath.Base(workDir)
-			}
-			content, err := bootstrapYAML(workDir, baseBranch)
+			content, err := bootstrapYAML(repoResult.workDir, repoResult.baseBranch)
 			if err != nil {
 				return err
 			}
@@ -101,62 +102,74 @@ func resolveBootstrapOutputPath(args *bootstrapArgs, configPath string, configEx
 	return filepath.Join(wtRoot, wt.GetRepoNameFromURL(repoURL), "jiradozer.yaml"), nil
 }
 
-func recoverExistingRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (string, error) {
+func recoverExistingRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (bootstrapRepoWorktreeResult, error) {
 	repoURL := normalizeRepoURL(repoArg)
 	wtRoot, err := resolveWTRoot()
 	if err != nil {
-		return "", err
+		return bootstrapRepoWorktreeResult{}, err
 	}
 	mgr := newBootstrapWTManager(wtRoot, repoURL, out)
 	if _, err := os.Stat(mgr.BareDir()); errors.Is(err, fs.ErrNotExist) {
-		return "", nil
+		return bootstrapRepoWorktreeResult{}, nil
 	} else if err != nil {
-		return "", fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
+		return bootstrapRepoWorktreeResult{}, fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
 	}
 	return bootstrapRepoWorktreeInternal(ctx, repoArg, out, false)
 }
 
-func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (string, error) {
+func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (bootstrapRepoWorktreeResult, error) {
 	return bootstrapRepoWorktreeInternal(ctx, repoArg, out, true)
 }
 
-func bootstrapRepoWorktreeInternal(ctx context.Context, repoArg string, out io.Writer, announceReuse bool) (string, error) {
+func bootstrapRepoWorktreeInternal(ctx context.Context, repoArg string, out io.Writer, announceReuse bool) (bootstrapRepoWorktreeResult, error) {
 	repoURL := normalizeRepoURL(repoArg)
 	wtRoot, err := resolveWTRoot()
 	if err != nil {
-		return "", err
+		return bootstrapRepoWorktreeResult{}, err
 	}
 	mgr := newBootstrapWTManager(wtRoot, repoURL, out)
 	if _, err := os.Stat(mgr.BareDir()); err == nil {
 		if err := verifyExistingRepoRemote(ctx, mgr, repoURL); err != nil {
-			return "", err
+			return bootstrapRepoWorktreeResult{}, err
 		}
 		defaultBranch, err := wt.GetDefaultBranch(ctx, mgr.GitRunner(), mgr.BareDir())
 		if err != nil {
-			return "", fmt.Errorf("detect default branch for existing repo: %w", err)
+			return bootstrapRepoWorktreeResult{}, fmt.Errorf("detect default branch for existing repo: %w", err)
 		}
 		mainPath, err := mgr.GetWorktreePath(defaultBranch)
 		if errors.Is(err, wt.ErrWorktreeNotFound) {
 			mainPath, err = recreateDefaultWorktree(ctx, mgr, defaultBranch)
 		}
 		if err != nil {
-			return "", fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
+			return bootstrapRepoWorktreeResult{}, fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
 		}
 		if err := verifyGitWorktree(mainPath); err != nil {
-			return "", fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
+			return bootstrapRepoWorktreeResult{}, fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
 		}
 		if announceReuse {
 			fmt.Fprintf(out, "reusing existing repo at %s\n", mgr.RepoDir())
 		}
-		return mainPath, nil
+		return bootstrapRepoWorktreeResult{workDir: mainPath, baseBranch: defaultBranch}, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
+		return bootstrapRepoWorktreeResult{}, fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
 	}
 	mainPath, err := mgr.Init(ctx, repoURL)
 	if err != nil {
-		return "", err
+		return bootstrapRepoWorktreeResult{}, err
 	}
-	return mainPath, nil
+	baseBranch, err := branchFromWorktreePath(mgr.RepoDir(), mainPath)
+	if err != nil {
+		return bootstrapRepoWorktreeResult{}, err
+	}
+	return bootstrapRepoWorktreeResult{workDir: mainPath, baseBranch: baseBranch}, nil
+}
+
+func branchFromWorktreePath(repoDir string, workDir string) (string, error) {
+	rel, err := filepath.Rel(repoDir, workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve default branch from %s: %w", workDir, err)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 func verifyGitWorktree(path string) error {

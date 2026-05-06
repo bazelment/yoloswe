@@ -94,6 +94,12 @@ func GetDefaultBranch(ctx context.Context, runner GitRunner, repoPath string) (s
 		branch = strings.TrimPrefix(branch, "refs/remotes/origin/")
 		return branch, nil
 	}
+	result, err = runner.Run(ctx, []string{"symbolic-ref", "HEAD"}, repoPath)
+	if err == nil {
+		branch := strings.TrimSpace(result.Stdout)
+		branch = strings.TrimPrefix(branch, "refs/heads/")
+		return branch, nil
+	}
 
 	// Fall back to checking main/master
 	for _, branch := range []string{"main", "master"} {

@@ -289,6 +289,11 @@ func TestBootstrapWithRepoCreatesWorktreeAndReusesExistingWorktree(t *testing.T)
 	cmd = fixture.newCommand()
 	cmd.SetArgs([]string{"--repo", fixture.remoteDir, "--force"})
 	require.NoError(t, cmd.Execute())
+
+	cfg, err = jiradozer.LoadConfig(fixture.configPath)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
+	assert.Equal(t, "main", cfg.BaseBranch)
 }
 
 func TestBootstrapWithRepoHonorsExplicitConfigPath(t *testing.T) {
@@ -325,8 +330,8 @@ func TestBootstrapWithRepoHonorsOutputPath(t *testing.T) {
 	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
 }
 
-func TestBootstrapWithRepoUsesRemoteDefaultBranchInConfig(t *testing.T) {
-	fixture := newBootstrapRepoFixtureWithDefaultBranch(t, "master")
+func TestBootstrapWithRepoUsesNamespacedRemoteDefaultBranchInConfig(t *testing.T) {
+	fixture := newBootstrapRepoFixtureWithDefaultBranch(t, "release/v1")
 
 	cmd := fixture.newCommand()
 	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
@@ -335,7 +340,7 @@ func TestBootstrapWithRepoUsesRemoteDefaultBranchInConfig(t *testing.T) {
 	cfg, err := jiradozer.LoadConfig(fixture.configPath)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
-	assert.Equal(t, "master", cfg.BaseBranch)
+	assert.Equal(t, "release/v1", cfg.BaseBranch)
 }
 
 func TestBootstrapWithRepoRecreatesMissingDefaultWorktree(t *testing.T) {
