@@ -218,6 +218,45 @@ class TestParseStreamArgs(unittest.TestCase):
             bramble_ops._parse_stream_args(["claude=/a.log"])
 
 
+class TestPrOrSlugConverter(unittest.TestCase):
+    """Argparse `--pr` accepts either a numeric PR or a branch slug, matching
+    the int|str contract on format_monitor_command/parse_round.
+    """
+
+    def test_numeric_returns_int(self) -> None:
+        self.assertEqual(bramble_ops._pr_or_slug("234"), 234)
+
+    def test_slug_returns_string(self) -> None:
+        self.assertEqual(bramble_ops._pr_or_slug("branch-feature-foo"), "branch-feature-foo")
+
+    def test_empty_rejected(self) -> None:
+        import argparse as _ap
+
+        with self.assertRaises(_ap.ArgumentTypeError):
+            bramble_ops._pr_or_slug("")
+
+    def test_parser_accepts_branch_slug_for_format_monitor_command(self) -> None:
+        # End-to-end: argparse round-trips the slug through to the namespace.
+        parser = bramble_ops._build_parser()
+        ns = parser.parse_args(
+            [
+                "format-monitor-command",
+                "codex",
+                "gpt-5.4-mini",
+                "1",
+                "--goal",
+                "g",
+                "--repo",
+                "kernel",
+                "--pr",
+                "branch-feature-foo",
+                "--work-dir",
+                "/tmp",
+            ]
+        )
+        self.assertEqual(ns.pr, "branch-feature-foo")
+
+
 class TestParseEnvelope(unittest.TestCase):
     def test_ok_extracts_issues_with_topic(self) -> None:
         env = {

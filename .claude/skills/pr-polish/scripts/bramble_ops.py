@@ -486,6 +486,18 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
 # ---------------------------------------------------------------------------
 
 
+def _pr_or_slug(value: str) -> int | str:
+    """Argparse converter: numeric strings become ints (PR numbers); other
+    non-empty strings pass through as branch slugs. Matches the int|str
+    contract that ``format_monitor_command`` and ``parse_round`` accept."""
+    if not value:
+        raise argparse.ArgumentTypeError("--pr cannot be empty")
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bramble_ops")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -499,7 +511,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("round_", type=int)
     sp.add_argument("--goal", required=True)
     sp.add_argument("--repo")
-    sp.add_argument("--pr", type=int)
+    sp.add_argument("--pr", type=_pr_or_slug)
     sp.add_argument("--work-dir")
 
     sp = sub.add_parser(
@@ -516,7 +528,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("round_", type=int)
     sp.add_argument("--backend", action="append", choices=BACKENDS)
     sp.add_argument("--repo")
-    sp.add_argument("--pr", type=int)
+    sp.add_argument("--pr", type=_pr_or_slug)
     sp.add_argument(
         "--stream",
         action="append",
@@ -529,7 +541,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("round_", type=int)
     sp.add_argument("prior_state_file", nargs="?")
     sp.add_argument("--repo")
-    sp.add_argument("--pr", type=int)
+    sp.add_argument("--pr", type=_pr_or_slug)
     sp.add_argument(
         "--stream",
         action="append",
