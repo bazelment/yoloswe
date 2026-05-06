@@ -589,3 +589,90 @@ Notes:
 - Cursor was the fastest (76s) and produced a concise, accurate summary, but missed the load-bearing race condition.
 - Codex took 6× longer than cursor (466s vs 76s) but the extra time bought a verified high-severity finding that would have shipped silently otherwise.
 - Codex stderr token counters reported `0 input / 0 output` — token reporting may be broken for this model/backend combo (worth investigating; historically codex did report tokens).
+
+## 2026-05-06 — jiradozer/bazelment/yoloswe#216 (resume support + 3-turn eval)
+
+Diff: 50 files, +1512/-946 lines (resume support across reviewer + agent-cli-wrapper, fixes
+for codex thread/resume readiness and ACP LoadSession id fallback, generic resume integration
+test, plus the SKILL.md update introducing this very 3-turn flow).
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 1 | 0 | accepted | 0.79 | 71s | — |
+| cursor-composer2 | 2 | ok | 1 | 0 | accepted | 0.81 | 64s | — |
+| cursor-composer2 | 3 | ok | 2 | 0 | accepted | 0.83 | 32s | — |
+| codex-5.4-mini | 1 | — | 2 | 0 | rejected | 0.86 | 219s | 0/0 |
+| codex-5.4-mini | 2 | ok | 2 | 0 | rejected | 0.86 | 26s | 0/0 |
+| codex-5.4-mini | 3 | ok | 2 | 0 | rejected | 0.86 | 5s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | 0.70 | 7s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | 0.70 | 2s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | 0.70 | 2s | — |
+
+Resume health: cursor=ok, codex=ok, gemini=ok (all three resumed cleanly across both turn-2
+follow-up and turn-3 fresh-prompt paths after the codex thread-readiness and ACP LoadSession
+id fallback fixes landed earlier in this same branch).
+
+Consensus (all 3, turn 1): none.
+Majority (2 of 3, turn 1): the new generic resume integration test target lacks an explicit
+Bazel `timeout`/`size` override and is `manual`-tagged so `bazel test //...` won't run it
+(codex high + cursor medium). Codex framed it as a 60s default-budget risk; cursor framed it
+as a CI-gap risk. Same root cause, different lens.
+Unique to codex-5.4-mini (turn 1): brittle `time.Sleep(500ms)` between phase 1 and phase 2 of
+the integration test (medium) — works today but is heuristic synchronization rather than a
+real readiness signal.
+Unique to cursor-composer2 (turn 2 + turn 3): cursor backend's `resume_status` only updates
+when `ReadyEvent` produces a non-empty session id (medium) — repeats the round-5 polish
+finding from this same branch. Caught because turn 2/3 had focused context to revisit this
+specific area.
+Unique to gemini-3.1-flash-lite-preview: none — accepted with 0 issues across all three
+turns. Same shallow-but-fast pattern documented in earlier runs.
+Disagreements: verdict — codex rejected on the BUILD-timeout finding; cursor and gemini
+accepted. Codex's confidence in the high-severity classification was steady across all three
+turns (no drift from the resumed context).
+
+Follow-up deltas:
+- cursor-composer2: turn 2 vs turn 1 → 0 new, 0 dropped, 0 severity changes. (Findings
+  refined the same root issue from a different angle: the BUILD `manual` finding in turn 1
+  and the `resume_status` observability finding in turn 2 are different concerns, but both
+  fit under "operability of the resume implementation.") Turn 3 vs turn 1 → +2 new, -1
+  dropped. Notable: turn 3 with `--resume-prompt-style fresh` produced a different finding
+  set than turn 1 (the BUILD `manual` finding only appeared in t1 and t3, not t2). Cursor's
+  initial review and its fresh-prompt-on-resumed-session review converged on similar structure.
+- codex-5.4-mini: turn 2 vs turn 1 → 0 new, 0 dropped, 0 severity changes — identical
+  findings, near-identical messages, just slightly tightened wording (e.g., "the test" →
+  "the new resume scenario"). Turn 3 vs turn 1 → identical to turn 2. Codex is the most
+  consistent across turns.
+- gemini-3.1-flash-lite-preview: 0 findings on every turn, so the delta is degenerate.
+  Notable: gemini's summary did update meaningfully across turns (turn 1 described the
+  branch as introducing resume; turn 2 confirmed delta integrity vs turn 1; turn 3 validated
+  the integration test coverage). Resume context shifted what gemini *looked at*, even
+  though no findings emerged.
+
+Notes:
+- Resume worked end-to-end on every backend after the codex thread/resume readiness fix
+  (e18fdca on agent-cli-wrapper/codex/client.go) and the ACP LoadSession id fallback fix
+  (e18fdca on agent-cli-wrapper/acp/client.go). Without those fixes, the prior eval run
+  showed codex hanging 180s waiting for a `ThreadReadyEvent` that codex CLI never emits
+  for resumed threads, and gemini failing immediately with `"Session not found:"` on a
+  blank session id.
+- Wall-clock numbers tell a clean story about resume cost amortization:
+    codex: 219s (cold) → 26s (follow-up) → 5s (fresh-prompt-on-resumed). 88% drop.
+    cursor: 71s → 64s → 32s. 55% drop on turn 3.
+    gemini: 7s → 2s → 2s.
+  Turn 3's fresh prompt on a resumed session is the hottest path — useful empirical signal
+  for /pr-polish if it ever wants to issue a focused re-prompt without burning context.
+- Codex stderr token counts again reported `0 input / 0 output` — same caveat as the
+  2026-04-29 run; the bramble codex backend's token plumbing seems still broken.
+- Gemini turn 2 finished in 2.1s with 0 issues. That's almost certainly too shallow for a
+  meaningful follow-up review, but it's *consistent* with gemini's behavior in prior runs.
+  Worth a future deeper look at whether the model is actually re-reading the diff or just
+  echoing the prior turn's verdict.
+- The cursor turn-3 finding count went 1 → 1 → 2: the explicit fresh prompt on a resumed
+  session surfaced an additional finding (the BUILD-target `manual` issue), suggesting that
+  resumed-but-fresh-prompted sessions are useful for surfacing *new* angles, not just
+  refining old ones.
+- Self-validating run: this branch added the resume support that the eval used to test
+  itself, and the eval's findings ended up being mostly about the integration test added
+  in the same branch. The resume code under review worked correctly during the eval (3
+  successful resumes on each of 3 backends), so the implementation is at least
+  operationally sound at a single-process level.
