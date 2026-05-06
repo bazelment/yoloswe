@@ -128,7 +128,7 @@ func TestShortPath(t *testing.T) {
 	}
 }
 
-func TestCursorResumeStatusAfterReady(t *testing.T) {
+func TestResumeStatusAfterSessionReady(t *testing.T) {
 	tests := []struct {
 		name      string
 		status    ResumeStatus
@@ -137,25 +137,25 @@ func TestCursorResumeStatusAfterReady(t *testing.T) {
 		want      ResumeStatus
 	}{
 		{
-			name:      "matching resumed session stays ok",
-			status:    ResumeStatusOK,
+			name:      "matching resumed session reports ok",
+			status:    "",
 			requested: "sess-1",
 			actual:    "sess-1",
 			want:      ResumeStatusOK,
 		},
 		{
 			name:      "different ready session reports fallback",
-			status:    ResumeStatusOK,
+			status:    "",
 			requested: "sess-1",
 			actual:    "sess-2",
 			want:      ResumeStatusFallback,
 		},
 		{
 			name:      "missing ready session keeps current status",
-			status:    ResumeStatusOK,
+			status:    "",
 			requested: "sess-1",
 			actual:    "",
-			want:      ResumeStatusOK,
+			want:      "",
 		},
 		{
 			name:      "fresh session keeps empty status",
@@ -164,13 +164,20 @@ func TestCursorResumeStatusAfterReady(t *testing.T) {
 			actual:    "sess-2",
 			want:      "",
 		},
+		{
+			name:      "fresh fallback keeps fallback status",
+			status:    ResumeStatusFallback,
+			requested: "",
+			actual:    "sess-2",
+			want:      ResumeStatusFallback,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := cursorResumeStatusAfterReady(tt.status, tt.requested, tt.actual)
+			got := resumeStatusAfterSessionReady(tt.status, tt.requested, tt.actual)
 			if got != tt.want {
-				t.Fatalf("cursorResumeStatusAfterReady() = %q, want %q", got, tt.want)
+				t.Fatalf("resumeStatusAfterSessionReady() = %q, want %q", got, tt.want)
 			}
 		})
 	}

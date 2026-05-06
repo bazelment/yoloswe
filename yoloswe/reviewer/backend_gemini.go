@@ -87,8 +87,9 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		session, err = b.client.NewSession(ctx, sessionOpts...)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("gemini: failed to create session: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: failed to create session: %w", err))
 	}
+	resumeStatus = resumeStatusAfterSessionReady(resumeStatus, b.config.ResumeSessionID, session.ID())
 	if handler != nil {
 		// ACP does not emit a ReadyEvent equivalent with model info; report
 		// what we configured so callers see a stable session start.

@@ -160,7 +160,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"skip_test_execution", skipTestExecution,
 		"scope_hints_file", scopeHintsFile != "",
 		"resume_session", resumeSessionID != "",
-		"resume_prompt_style", resumePromptStyle,
+		"resume_prompt_style", string(style),
 		"goal_len", len(goal))
 
 	config := reviewer.Config{

@@ -36,7 +36,6 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	var resumeStatus ResumeStatus
 	if b.config.ResumeSessionID != "" {
 		resumeOpts = append(append([]cursor.SessionOption{}, opts...), cursor.WithResume(b.config.ResumeSessionID))
-		resumeStatus = ResumeStatusOK
 	}
 
 	result, err := b.runPromptWithOptions(ctx, prompt, handler, resumeOpts, resumeStatus, b.config.ResumeSessionID)
@@ -96,7 +95,7 @@ func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string,
 	sessionMu.Lock()
 	readySessionID := actualSessionID
 	sessionMu.Unlock()
-	resumeStatus = cursorResumeStatusAfterReady(resumeStatus, requestedResumeID, readySessionID)
+	resumeStatus = resumeStatusAfterSessionReady(resumeStatus, requestedResumeID, readySessionID)
 	if err != nil {
 		return reviewErrorResult(resumeStatus, fmt.Errorf("cursor: %w", err))
 	}
@@ -128,7 +127,7 @@ func isCursorResumeNotFound(err error) bool {
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "session not found") ||
 		strings.Contains(lower, "chat not found") ||
-		strings.Contains(lower, "resume") && isResumeUnavailableMessage(msg)
+		isResumeUnavailableMessage(msg)
 }
 
 // cursorEventAdapter filters cursor events, handling ReadyEvent out-of-band
@@ -177,9 +176,12 @@ func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 	return out
 }
 
-func cursorResumeStatusAfterReady(status ResumeStatus, requestedID, actualID string) ResumeStatus {
-	if status != ResumeStatusOK || requestedID == "" || actualID == "" || actualID == requestedID {
+func resumeStatusAfterSessionReady(status ResumeStatus, requestedID, actualID string) ResumeStatus {
+	if requestedID == "" || actualID == "" {
 		return status
+	}
+	if actualID == requestedID {
+		return ResumeStatusOK
 	}
 	return ResumeStatusFallback
 }

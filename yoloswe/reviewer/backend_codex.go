@@ -79,6 +79,7 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		if err := thread.WaitReady(ctx); err != nil {
 			return reviewErrorResult(resumeStatus, fmt.Errorf("thread not ready: %w", err))
 		}
+		resumeStatus = resumeStatusAfterSessionReady(resumeStatus, b.config.ResumeSessionID, thread.ID())
 		b.thread = thread
 		if handler != nil {
 			handler.OnSessionInfo(thread.ID(), b.config.Model)

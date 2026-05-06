@@ -671,6 +671,9 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 
 	handler := r.newEventHandler()
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
+	if result != nil && result.ResumeStatus != "" {
+		r.resumeStatus = result.ResumeStatus
+	}
 	if err != nil {
 		if result != nil {
 			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
