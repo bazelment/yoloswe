@@ -12,9 +12,11 @@ import (
 
 // geminiBackend wraps the Gemini ACP client as a Backend.
 // The ACP client process is started once in Start() and kept alive across
-// RunPrompt calls to amortize startup cost. Each RunPrompt creates a new ACP
-// session, so there is no shared conversation context between turns — FollowUp
-// calls start fresh conversations, unlike the codex backend which reuses a thread.
+// RunPrompt calls to amortize startup cost. Each RunPrompt uses one ACP
+// session: it loads ResumeSessionID when configured, falls back to a fresh
+// session when resume is unavailable, otherwise starts fresh. FollowUp has no
+// implicit shared conversation unless the caller supplied ResumeSessionID,
+// unlike the codex backend which can reuse its in-memory thread.
 //
 // # Verified model IDs (tested against live Gemini CLI, 2026-04-21)
 //

@@ -475,7 +475,7 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 // used after a prior review round has already established context.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
 	prompt := `Continue reviewing the current diff against the same goal. If this session has previous review context, focus on the changes made since that prior turn; if not, review the current diff normally.
-	` + buildGoalText(goal) + `
+` + buildGoalText(goal) + `
 
 Focus on:
 1. Issues introduced by the new fix commits.
@@ -645,6 +645,7 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	status += ")..."
 	r.renderer.Status(status)
 	handler := r.newEventHandler()
+	r.resumeStatus = ""
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if result != nil && result.ResumeStatus != "" {
 		r.resumeStatus = result.ResumeStatus
@@ -670,6 +671,7 @@ func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, 
 	defer r.renderer.Reset()
 
 	handler := r.newEventHandler()
+	r.resumeStatus = ""
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
 	if result != nil && result.ResumeStatus != "" {
 		r.resumeStatus = result.ResumeStatus

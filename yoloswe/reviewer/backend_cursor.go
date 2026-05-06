@@ -176,16 +176,6 @@ func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 	return out
 }
 
-func resumeStatusAfterSessionReady(status ResumeStatus, requestedID, actualID string) ResumeStatus {
-	if requestedID == "" {
-		return status
-	}
-	if actualID == requestedID {
-		return ResumeStatusOK
-	}
-	return ResumeStatusFallback
-}
-
 // cursorToolDisplay renders Cursor's ToolCall events for terminal output.
 var cursorToolDisplay = toolDisplay{
 	tools: map[string]toolInfo{

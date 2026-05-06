@@ -19,3 +19,13 @@ func reviewErrorResult(resumeStatus ResumeStatus, err error) (*ReviewResult, err
 		ResumeStatus: resumeStatus,
 	}, err
 }
+
+func resumeStatusAfterSessionReady(status ResumeStatus, requestedID, actualID string) ResumeStatus {
+	if requestedID == "" {
+		return status
+	}
+	if actualID == requestedID {
+		return ResumeStatusOK
+	}
+	return ResumeStatusFallback
+}
