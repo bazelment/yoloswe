@@ -256,7 +256,7 @@ type APIRetryEvent struct {
 	ErrorType    string
 	Attempt      int
 	MaxRetries   int
-	RetryDelayMs int
+	RetryDelayMs float64
 	TurnNumber   int
 }
 
