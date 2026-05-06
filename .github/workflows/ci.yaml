@@ -30,12 +30,16 @@ jobs:
           curl -sSfL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C "$(go env GOPATH)/bin" --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-      - name: Install buildifier
-        run: |
-          BUILDIFIER_VERSION="8.0.3"
-          curl -sSL "https://github.com/bazelbuild/buildtools/releases/download/v${BUILDIFIER_VERSION}/buildifier-linux-amd64" -o buildifier
-          chmod +x buildifier
-          sudo mv buildifier /usr/local/bin/
+      # buildifier is provisioned via //tools:buildifier (pinned in MODULE.bazel),
+      # so local devs and CI run identical versions.
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-lint
+          repository-cache: true
+          bazelrc: |
+            common --enable_bzlmod
 
       - name: Run lint checks
         run: ./scripts/lint.sh

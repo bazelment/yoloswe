@@ -65,6 +65,42 @@ func TestSentinelErrors(t *testing.T) {
 	}
 }
 
+func TestTransientError(t *testing.T) {
+	cause := errors.New("error_during_execution")
+	err := &TransientError{
+		Cause:     cause,
+		Message:   "Stream idle timeout - partial response received",
+		RequestID: "req_abc123",
+	}
+
+	if got := err.Error(); got != "transient CLI error (request req_abc123): Stream idle timeout - partial response received" {
+		t.Errorf("Error() = %q", got)
+	}
+	if !errors.Is(err, cause) {
+		t.Error("expected errors.Is to find cause")
+	}
+	var transient *TransientError
+	if !errors.As(err, &transient) {
+		t.Error("expected errors.As to match TransientError")
+	}
+	if !IsTransient(err) {
+		t.Error("expected IsTransient true")
+	}
+	if IsTransient(errors.New("unrelated")) {
+		t.Error("expected IsTransient false for unrelated error")
+	}
+	if !IsRecoverable(err) {
+		t.Error("TransientError should be recoverable")
+	}
+}
+
+func TestTransientError_WithoutRequestID(t *testing.T) {
+	err := &TransientError{Message: "temporary failure"}
+	if got := err.Error(); got != "transient CLI error: temporary failure" {
+		t.Errorf("Error() = %q", got)
+	}
+}
+
 func TestIsRecoverable_CLINotFound(t *testing.T) {
 	err := &CLINotFoundError{
 		Path:  "/usr/bin/claude",

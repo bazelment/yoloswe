@@ -60,6 +60,7 @@ type Session struct {
 	// Pointer / interface / channel fields (all 8-16 bytes, contain pointers).
 	ctx                     context.Context
 	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	pendingTransientErrors  map[int]*TransientError
 	accumulator             *streamAccumulator
 	turnManager             *turnManager
 	permissionManager       *permissionManager
@@ -246,6 +247,11 @@ const controlResponseCancelledSubtype = "__cancelled__"
 // real response arrives.
 var ErrControlRequestCancelled = fmt.Errorf("control request cancelled by CLI")
 
+// ErrPendingTransientResult is returned when a caller tries to start another
+// user-driven turn before the CLI has emitted the result frame for a synthetic
+// transient API error.
+var ErrPendingTransientResult = fmt.Errorf("pending transient API error result")
+
 // Events returns a read-only channel for receiving events.
 func (s *Session) Events() <-chan Event {
 	return s.events
@@ -274,6 +280,10 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 
 	if s.stopping {
 		return 0, ErrStopping
+	}
+
+	if len(s.pendingTransientErrors) > 0 {
+		return 0, ErrPendingTransientResult
 	}
 
 	turn := s.turnManager.StartTurn(content)
@@ -317,6 +327,10 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 
 	if s.stopping {
 		return 0, ErrStopping
+	}
+
+	if len(s.pendingTransientErrors) > 0 {
+		return 0, ErrPendingTransientResult
 	}
 
 	turn := s.turnManager.StartTurn(content)
@@ -953,11 +967,28 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		}}
 	}
 
+	turnNumber := s.turnManager.CurrentTurnNumber()
+	if msg.IsSyntheticAPIError() {
+		text := msg.SyntheticErrorText()
+		if text == "" {
+			text = "synthetic API error"
+		}
+		s.mu.Lock()
+		if s.pendingTransientErrors == nil {
+			s.pendingTransientErrors = make(map[int]*TransientError)
+		}
+		s.pendingTransientErrors[turnNumber] = &TransientError{
+			Message:   text,
+			RequestID: msg.RequestID,
+		}
+		s.mu.Unlock()
+	}
+
 	s.emit(AssistantMessageEvent{
 		Model:         msg.Message.Model,
 		Blocks:        blocks,
 		ParentToolUse: msg.ParentToolUseID,
-		TurnNumber:    s.turnManager.CurrentTurnNumber(),
+		TurnNumber:    turnNumber,
 	})
 
 	// Extract text from complete message
@@ -1063,7 +1094,13 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
 	resultErr := resultMessageError(msg)
-	resultIsError := msg.IsFailure()
+	if t := s.consumePendingTransient(s.turnManager.CurrentTurnNumber()); t != nil {
+		if resultErr != nil {
+			t.Cause = resultErr
+		}
+		resultErr = t
+	}
+	resultIsError := msg.IsFailure() || resultErr != nil
 
 	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
 	// wrapper-level suppression. This is the ground truth policy layers
@@ -1721,6 +1758,15 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 		resp = protocol.ElicitationResponse{Action: "cancel"}
 	}
 	s.sendControlSuccess(requestID, resp)
+}
+
+// consumePendingTransient pops the pending synthetic API error for turnNumber.
+func (s *Session) consumePendingTransient(turnNumber int) *TransientError {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.pendingTransientErrors[turnNumber]
+	delete(s.pendingTransientErrors, turnNumber)
+	return err
 }
 
 // resultMessageError extracts the non-nil error value from a ResultMessage

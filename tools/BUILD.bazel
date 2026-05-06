@@ -1,0 +1,8 @@
+# gazelle:ignore
+# Developer tools exposed via Bazel so local + CI use identical pinned versions.
+
+alias(
+    name = "buildifier",
+    actual = "@buildifier_prebuilt//:buildifier",
+    visibility = ["//visibility:public"],
+)

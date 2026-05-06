@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 )
+
+const syntheticAPIErrorPrefix = "API Error: "
 
 // MessageType discriminates between message kinds.
 type MessageType string
@@ -207,15 +210,43 @@ type MessageContent struct {
 
 // AssistantMessage is a complete message from Claude.
 type AssistantMessage struct {
-	ParentToolUseID *string        `json:"parent_tool_use_id"`
-	Type            MessageType    `json:"type"`
-	SessionID       string         `json:"session_id"`
-	UUID            string         `json:"uuid"`
-	Message         MessageContent `json:"message"`
+	ParentToolUseID   *string        `json:"parent_tool_use_id"`
+	Type              MessageType    `json:"type"`
+	SessionID         string         `json:"session_id"`
+	UUID              string         `json:"uuid"`
+	RequestID         string         `json:"requestId,omitempty"`
+	Message           MessageContent `json:"message"`
+	IsAPIErrorMessage bool           `json:"isApiErrorMessage,omitempty"`
 }
 
 // MsgType returns the message type.
 func (m AssistantMessage) MsgType() MessageType { return MessageTypeAssistant }
+
+// IsSyntheticAPIError reports whether the CLI injected this terminal frame.
+func (m AssistantMessage) IsSyntheticAPIError() bool {
+	return m.IsAPIErrorMessage
+}
+
+// SyntheticErrorText returns normalized text from a synthetic API error frame.
+func (m AssistantMessage) SyntheticErrorText() string {
+	if !m.IsSyntheticAPIError() {
+		return ""
+	}
+	blocks, ok := m.Message.Content.AsBlocks()
+	if !ok {
+		text, ok := m.Message.Content.AsString()
+		if !ok {
+			return ""
+		}
+		return strings.TrimPrefix(text, syntheticAPIErrorPrefix)
+	}
+	for _, b := range blocks {
+		if tb, ok := b.(TextBlock); ok && tb.Text != "" {
+			return strings.TrimPrefix(tb.Text, syntheticAPIErrorPrefix)
+		}
+	}
+	return ""
+}
 
 // UserMessage represents tool results echoed back.
 type UserMessage struct {
