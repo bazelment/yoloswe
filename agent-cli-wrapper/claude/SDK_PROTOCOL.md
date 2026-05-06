@@ -167,7 +167,7 @@ no HTTP response.
 
 ```json
 {"type":"system","subtype":"api_retry","session_id":"abc","uuid":"s5",
- "attempt":1,"max_retries":5,"retry_delay_ms":2000,
+ "attempt":1,"max_retries":5,"retry_delay_ms":2000.5,
  "error":"overloaded_error","error_status":529}
 ```
 

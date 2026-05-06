@@ -177,7 +177,7 @@ func TestSessionDispatchNewEvents(t *testing.T) {
 			line: mkSystem(t, "api_retry", map[string]interface{}{
 				"attempt":        2,
 				"max_retries":    5,
-				"retry_delay_ms": 1000,
+				"retry_delay_ms": 1000.5,
 				"error":          "overloaded",
 			}),
 			check: func(t *testing.T, ev Event) {
@@ -185,6 +185,7 @@ func TestSessionDispatchNewEvents(t *testing.T) {
 				require.True(t, ok, "got %T", ev)
 				require.Equal(t, 2, e.Attempt)
 				require.Equal(t, 5, e.MaxRetries)
+				require.Equal(t, 1000.5, e.RetryDelayMs)
 			},
 		},
 		{

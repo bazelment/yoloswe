@@ -130,13 +130,13 @@ func TestSystemSubtype_PostTurnSummary(t *testing.T) {
 }
 
 func TestSystemSubtype_APIRetry(t *testing.T) {
-	raw := `{"type":"system","subtype":"api_retry","session_id":"s1","uuid":"u1","attempt":2,"max_retries":5,"retry_delay_ms":1000,"error":"overloaded","error_status":529}`
+	raw := `{"type":"system","subtype":"api_retry","session_id":"s1","uuid":"u1","attempt":2,"max_retries":5,"retry_delay_ms":1000.5,"error":"overloaded","error_status":529}`
 	m := parseSystem(t, raw)
 	p, ok := m.AsAPIRetry()
 	if !ok {
 		t.Fatalf("AsAPIRetry failed")
 	}
-	if p.Attempt != 2 || p.MaxRetries != 5 || p.RetryDelayMs != 1000 {
+	if p.Attempt != 2 || p.MaxRetries != 5 || p.RetryDelayMs != 1000.5 {
 		t.Errorf("retry fields: %+v", p)
 	}
 	if p.Error != "overloaded" {

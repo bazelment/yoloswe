@@ -115,13 +115,13 @@ type PostTurnSummaryPayload struct {
 // and will be retried after a delay. ErrorStatus is null for connection errors
 // (e.g. timeouts) that had no HTTP response.
 type APIRetryPayload struct {
-	ErrorStatus  *int   `json:"error_status"`
-	Error        string `json:"error"`
-	UUID         string `json:"uuid"`
-	SessionID    string `json:"session_id"`
-	Attempt      int    `json:"attempt"`
-	MaxRetries   int    `json:"max_retries"`
-	RetryDelayMs int    `json:"retry_delay_ms"`
+	ErrorStatus  *int    `json:"error_status"`
+	Error        string  `json:"error"`
+	UUID         string  `json:"uuid"`
+	SessionID    string  `json:"session_id"`
+	Attempt      int     `json:"attempt"`
+	MaxRetries   int     `json:"max_retries"`
+	RetryDelayMs float64 `json:"retry_delay_ms"`
 }
 
 // LocalCommandOutputPayload carries output from a local slash command
