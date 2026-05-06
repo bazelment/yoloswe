@@ -7,6 +7,7 @@ type SessionConfig struct {
 	Model           string
 	WorkDir         string
 	CLIPath         string // Path to the agent binary (default: "agent")
+	Resume          string // Chat/session ID to resume.
 	ExtraArgs       []string
 	EventBufferSize int
 	Force           bool // --force flag
@@ -56,6 +57,13 @@ func WithTrust() SessionOption {
 func WithSandbox() SessionOption {
 	return func(c *SessionConfig) {
 		c.Sandbox = true
+	}
+}
+
+// WithResume sets a chat/session ID to resume.
+func WithResume(id string) SessionOption {
+	return func(c *SessionConfig) {
+		c.Resume = id
 	}
 }
 

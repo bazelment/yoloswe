@@ -67,12 +67,22 @@ type NewSessionRequest struct {
 	McpServers []McpServerConfig `json:"mcpServers"`
 }
 
+// LoadSessionRequest loads an existing conversation session.
+type LoadSessionRequest struct {
+	SessionID  string            `json:"sessionId"`
+	CWD        string            `json:"cwd,omitempty"`
+	McpServers []McpServerConfig `json:"mcpServers"`
+}
+
 // NewSessionResponse returns the created session info.
 type NewSessionResponse struct {
 	SessionID     string                `json:"sessionId"`
 	Modes         *SessionModes         `json:"modes,omitempty"`
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 }
+
+// LoadSessionResponse returns the loaded session info.
+type LoadSessionResponse = NewSessionResponse
 
 // SessionModes describes available session modes. It supports two JSON shapes:
 //   - Object with currentModeId + availableModes (Gemini CLI v0.32+)

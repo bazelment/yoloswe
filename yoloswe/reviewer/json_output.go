@@ -84,6 +84,7 @@ type ResultEnvelope struct {
 	Backend       string         `json:"backend"`
 	Model         string         `json:"model"`
 	SessionID     string         `json:"session_id,omitempty"`
+	ResumeStatus  ResumeStatus   `json:"resume_status,omitempty"`
 	Error         string         `json:"error,omitempty"`
 	Review        ReviewBody     `json:"review"`
 	SchemaVersion int            `json:"schema_version"`
@@ -110,6 +111,7 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 	env.DurationMs = result.DurationMs
 	env.InputTokens = result.InputTokens
 	env.OutputTokens = result.OutputTokens
+	env.ResumeStatus = result.ResumeStatus
 	if result.ErrorMessage != "" {
 		env.Error = result.ErrorMessage
 	}

@@ -87,6 +87,7 @@ func TestBuildEnvelope_SuccessPath(t *testing.T) {
 		DurationMs:   1234,
 		InputTokens:  100,
 		OutputTokens: 200,
+		ResumeStatus: "ok",
 	}
 	env := BuildEnvelope(result, BackendCodex, "gpt-x", "sess-1")
 	if env.Status != StatusOK {
@@ -104,12 +105,16 @@ func TestBuildEnvelope_SuccessPath(t *testing.T) {
 	if env.DurationMs != 1234 || env.InputTokens != 100 || env.OutputTokens != 200 {
 		t.Errorf("counters wrong: %+v", env)
 	}
+	if env.ResumeStatus != "ok" {
+		t.Errorf("resume_status = %q, want ok", env.ResumeStatus)
+	}
 }
 
 func TestBuildEnvelope_BackendError(t *testing.T) {
 	result := &ReviewResult{
 		ErrorMessage: "backend crashed",
 		Success:      false,
+		ResumeStatus: ResumeStatusFallback,
 	}
 	env := BuildEnvelope(result, BackendCodex, "m", "")
 	if env.Status != StatusError {
@@ -117,6 +122,9 @@ func TestBuildEnvelope_BackendError(t *testing.T) {
 	}
 	if env.Error != "backend crashed" {
 		t.Errorf("error = %q", env.Error)
+	}
+	if env.ResumeStatus != ResumeStatusFallback {
+		t.Errorf("resume_status = %q, want %q", env.ResumeStatus, ResumeStatusFallback)
 	}
 }
 

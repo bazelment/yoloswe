@@ -127,3 +127,58 @@ func TestShortPath(t *testing.T) {
 		})
 	}
 }
+
+func TestResumeStatusAfterSessionReady(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    ResumeStatus
+		requested string
+		actual    string
+		want      ResumeStatus
+	}{
+		{
+			name:      "matching resumed session reports ok",
+			status:    "",
+			requested: "sess-1",
+			actual:    "sess-1",
+			want:      ResumeStatusOK,
+		},
+		{
+			name:      "different ready session reports fallback",
+			status:    "",
+			requested: "sess-1",
+			actual:    "sess-2",
+			want:      ResumeStatusFallback,
+		},
+		{
+			name:      "missing ready session reports fallback when checked",
+			status:    "",
+			requested: "sess-1",
+			actual:    "",
+			want:      ResumeStatusFallback,
+		},
+		{
+			name:      "fresh session keeps empty status",
+			status:    "",
+			requested: "",
+			actual:    "sess-2",
+			want:      "",
+		},
+		{
+			name:      "fresh fallback keeps fallback status",
+			status:    ResumeStatusFallback,
+			requested: "",
+			actual:    "sess-2",
+			want:      ResumeStatusFallback,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resumeStatusAfterSessionReady(tt.status, tt.requested, tt.actual)
+			if got != tt.want {
+				t.Fatalf("resumeStatusAfterSessionReady() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

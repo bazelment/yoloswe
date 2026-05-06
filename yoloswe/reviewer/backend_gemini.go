@@ -2,7 +2,9 @@ package reviewer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
@@ -10,9 +12,11 @@ import (
 
 // geminiBackend wraps the Gemini ACP client as a Backend.
 // The ACP client process is started once in Start() and kept alive across
-// RunPrompt calls to amortize startup cost. Each RunPrompt creates a new ACP
-// session, so there is no shared conversation context between turns — FollowUp
-// calls start fresh conversations, unlike the codex backend which reuses a thread.
+// RunPrompt calls to amortize startup cost. Each RunPrompt uses one ACP
+// session: it loads ResumeSessionID when configured, falls back to a fresh
+// session when resume is unavailable, otherwise starts fresh. FollowUp has no
+// implicit shared conversation unless the caller supplied ResumeSessionID,
+// unlike the codex backend which can reuse its in-memory thread.
 //
 // # Verified model IDs (tested against live Gemini CLI, 2026-04-21)
 //
@@ -69,10 +73,29 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		sessionOpts = append(sessionOpts, acp.WithSessionCWD(b.config.WorkDir))
 	}
 
-	session, err := b.client.NewSession(ctx, sessionOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("gemini: failed to create session: %w", err)
+	var resumeStatus ResumeStatus
+	var session *acp.Session
+	var err error
+	if b.config.ResumeSessionID != "" {
+		// Start at Unverified so a bridge crash or non-recognized error
+		// from LoadSession still surfaces "resume was attempted" in the
+		// envelope, instead of letting omitempty erase the signal.
+		resumeStatus = ResumeStatusUnverified
+		session, err = b.client.LoadSession(ctx, b.config.ResumeSessionID, sessionOpts...)
+		if err != nil && errors.Is(err, acp.ErrSessionNotFound) {
+			slog.Warn("gemini resume unavailable; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
+			resumeStatus = ResumeStatusFallback
+			session, err = b.client.NewSession(ctx, sessionOpts...)
+		} else if err == nil {
+			resumeStatus = ResumeStatusOK
+		}
+	} else {
+		session, err = b.client.NewSession(ctx, sessionOpts...)
 	}
+	if err != nil {
+		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: failed to create session: %w", err))
+	}
+	resumeStatus = resumeStatusAfterSessionReady(resumeStatus, b.config.ResumeSessionID, session.ID())
 	if handler != nil {
 		// ACP does not emit a ReadyEvent equivalent with model info; report
 		// what we configured so callers see a stable session start.
@@ -109,11 +132,11 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	case r = <-bridged:
 	case err := <-bridgeErr:
 		if promptErr != nil {
-			return nil, fmt.Errorf("gemini: prompt failed: %w (bridge: %v)", promptErr, err)
+			return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: prompt failed: %w (bridge: %v)", promptErr, err))
 		}
-		return nil, fmt.Errorf("gemini: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: %w", err))
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return reviewErrorResult(resumeStatus, ctx.Err())
 	}
 
 	if promptErr != nil {
@@ -122,6 +145,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 			Success:      false,
 			DurationMs:   r.durationMs,
 			ErrorMessage: promptErr.Error(),
+			ResumeStatus: resumeStatus,
 		}, fmt.Errorf("gemini: prompt failed: %w", promptErr)
 	}
 
@@ -129,13 +153,20 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		if handler != nil {
 			handler.OnError(tc.Error, "turn_complete")
 		}
-		return nil, fmt.Errorf("gemini turn failed: %w", tc.Error)
+		return &ReviewResult{
+			ResponseText: r.responseText,
+			Success:      false,
+			DurationMs:   r.durationMs,
+			ErrorMessage: tc.Error.Error(),
+			ResumeStatus: resumeStatus,
+		}, fmt.Errorf("gemini turn failed: %w", tc.Error)
 	}
 
 	return &ReviewResult{
 		ResponseText: r.responseText,
 		Success:      r.success,
 		DurationMs:   r.durationMs,
+		ResumeStatus: resumeStatus,
 	}, nil
 }
 

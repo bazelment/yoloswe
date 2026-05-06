@@ -62,6 +62,10 @@ func (pm *processManager) BuildCLIArgs() []string {
 		args = append(args, "--sandbox")
 	}
 
+	if pm.config.Resume != "" {
+		args = append(args, "--resume", pm.config.Resume)
+	}
+
 	// Add extra args (escape hatch)
 	args = append(args, pm.config.ExtraArgs...)
 

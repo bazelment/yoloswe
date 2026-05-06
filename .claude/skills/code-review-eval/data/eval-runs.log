@@ -589,3 +589,313 @@ Notes:
 - Cursor was the fastest (76s) and produced a concise, accurate summary, but missed the load-bearing race condition.
 - Codex took 6× longer than cursor (466s vs 76s) but the extra time bought a verified high-severity finding that would have shipped silently otherwise.
 - Codex stderr token counters reported `0 input / 0 output` — token reporting may be broken for this model/backend combo (worth investigating; historically codex did report tokens).
+
+## 2026-05-06 — jiradozer/bazelment/yoloswe#216 (resume support + 3-turn eval)
+
+Diff: 50 files, +1512/-946 lines (resume support across reviewer + agent-cli-wrapper, fixes
+for codex thread/resume readiness and ACP LoadSession id fallback, generic resume integration
+test, plus the SKILL.md update introducing this very 3-turn flow).
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 1 | 0 | accepted | 0.79 | 71s | — |
+| cursor-composer2 | 2 | ok | 1 | 0 | accepted | 0.81 | 64s | — |
+| cursor-composer2 | 3 | ok | 2 | 0 | accepted | 0.83 | 32s | — |
+| codex-5.4-mini | 1 | — | 2 | 0 | rejected | 0.86 | 219s | 0/0 |
+| codex-5.4-mini | 2 | ok | 2 | 0 | rejected | 0.86 | 26s | 0/0 |
+| codex-5.4-mini | 3 | ok | 2 | 0 | rejected | 0.86 | 5s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | 0.70 | 7s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | 0.70 | 2s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | 0.70 | 2s | — |
+
+Resume health: cursor=ok, codex=ok, gemini=ok (all three resumed cleanly across both turn-2
+follow-up and turn-3 fresh-prompt paths after the codex thread-readiness and ACP LoadSession
+id fallback fixes landed earlier in this same branch).
+
+Consensus (all 3, turn 1): none.
+Majority (2 of 3, turn 1): the new generic resume integration test target lacks an explicit
+Bazel `timeout`/`size` override and is `manual`-tagged so `bazel test //...` won't run it
+(codex high + cursor medium). Codex framed it as a 60s default-budget risk; cursor framed it
+as a CI-gap risk. Same root cause, different lens.
+Unique to codex-5.4-mini (turn 1): brittle `time.Sleep(500ms)` between phase 1 and phase 2 of
+the integration test (medium) — works today but is heuristic synchronization rather than a
+real readiness signal.
+Unique to cursor-composer2 (turn 2 + turn 3): cursor backend's `resume_status` only updates
+when `ReadyEvent` produces a non-empty session id (medium) — repeats the round-5 polish
+finding from this same branch. Caught because turn 2/3 had focused context to revisit this
+specific area.
+Unique to gemini-3.1-flash-lite-preview: none — accepted with 0 issues across all three
+turns. Same shallow-but-fast pattern documented in earlier runs.
+Disagreements: verdict — codex rejected on the BUILD-timeout finding; cursor and gemini
+accepted. Codex's confidence in the high-severity classification was steady across all three
+turns (no drift from the resumed context).
+
+Follow-up deltas:
+- cursor-composer2: turn 2 vs turn 1 → 0 new, 0 dropped, 0 severity changes. (Findings
+  refined the same root issue from a different angle: the BUILD `manual` finding in turn 1
+  and the `resume_status` observability finding in turn 2 are different concerns, but both
+  fit under "operability of the resume implementation.") Turn 3 vs turn 1 → +2 new, -1
+  dropped. Notable: turn 3 with `--resume-prompt-style fresh` produced a different finding
+  set than turn 1 (the BUILD `manual` finding only appeared in t1 and t3, not t2). Cursor's
+  initial review and its fresh-prompt-on-resumed-session review converged on similar structure.
+- codex-5.4-mini: turn 2 vs turn 1 → 0 new, 0 dropped, 0 severity changes — identical
+  findings, near-identical messages, just slightly tightened wording (e.g., "the test" →
+  "the new resume scenario"). Turn 3 vs turn 1 → identical to turn 2. Codex is the most
+  consistent across turns.
+- gemini-3.1-flash-lite-preview: 0 findings on every turn, so the delta is degenerate.
+  Notable: gemini's summary did update meaningfully across turns (turn 1 described the
+  branch as introducing resume; turn 2 confirmed delta integrity vs turn 1; turn 3 validated
+  the integration test coverage). Resume context shifted what gemini *looked at*, even
+  though no findings emerged.
+
+Notes:
+- Resume worked end-to-end on every backend after the codex thread/resume readiness fix
+  (e18fdca on agent-cli-wrapper/codex/client.go) and the ACP LoadSession id fallback fix
+  (e18fdca on agent-cli-wrapper/acp/client.go). Without those fixes, the prior eval run
+  showed codex hanging 180s waiting for a `ThreadReadyEvent` that codex CLI never emits
+  for resumed threads, and gemini failing immediately with `"Session not found:"` on a
+  blank session id.
+- Wall-clock numbers tell a clean story about resume cost amortization:
+    codex: 219s (cold) → 26s (follow-up) → 5s (fresh-prompt-on-resumed). 88% drop.
+    cursor: 71s → 64s → 32s. 55% drop on turn 3.
+    gemini: 7s → 2s → 2s.
+  Turn 3's fresh prompt on a resumed session is the hottest path — useful empirical signal
+  for /pr-polish if it ever wants to issue a focused re-prompt without burning context.
+- Codex stderr token counts again reported `0 input / 0 output` — same caveat as the
+  2026-04-29 run; the bramble codex backend's token plumbing seems still broken.
+- Gemini turn 2 finished in 2.1s with 0 issues. That's almost certainly too shallow for a
+  meaningful follow-up review, but it's *consistent* with gemini's behavior in prior runs.
+  Worth a future deeper look at whether the model is actually re-reading the diff or just
+  echoing the prior turn's verdict.
+- The cursor turn-3 finding count went 1 → 1 → 2: the explicit fresh prompt on a resumed
+  session surfaced an additional finding (the BUILD-target `manual` issue), suggesting that
+  resumed-but-fresh-prompted sessions are useful for surfacing *new* angles, not just
+  refining old ones.
+- Self-validating run: this branch added the resume support that the eval used to test
+  itself, and the eval's findings ended up being mostly about the integration test added
+  in the same branch. The resume code under review worked correctly during the eval (3
+  successful resumes on each of 3 backends), so the implementation is at least
+  operationally sound at a single-process level.
+
+## 2026-05-06 (round 2) — jiradozer/bazelment/yoloswe#216 (resume observability bundle)
+
+Diff: 26 files, +1507/-108 lines (delta vs round-1 eval: the new
+`resume observability` commit + the `record 2026-05-06 history` log
+commit, on top of the prior resume-support + 3-turn eval work).
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 4 | 0 | accepted | 0.78 | 76s | — |
+| cursor-composer2 | 2 | ok | 0 | 0 | accepted | n/a | 34s | — |
+| cursor-composer2 | 3 | ok | 5 | 0 | accepted | 0.80 | 35s | — |
+| codex-5.4-mini | 1 | — | 2 | 0 | accepted | 0.85 | 166s | 0/0 |
+| codex-5.4-mini | 2 | ok | 2 | 0 | accepted | 0.85 | 19s | 0/0 |
+| codex-5.4-mini | 3 | ok | 2 | 0 | accepted | 0.85 | 6s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | 0.70 | 4s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | 0.70 | 2s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | 0.70 | 1s | — |
+
+Resume health: cursor=ok, codex=ok, gemini=ok. Notable: every turn-2 and
+turn-3 stdout summary now carried the new `[resume=ok]` suffix end-to-end —
+the resume-observability commit being eaten by the eval immediately
+revealed itself in the Monitor event stream. That's the change shipped in
+4787d51 working as designed.
+
+Consensus (all 3, turn 1): none.
+Majority (turn 1): codex + cursor agreed that the new `unverified`/resume
+observability work has gaps: codex caught a panic-recovery path that drops
+the new ResumeStatus signal, cursor caught the same issue more broadly
+(reviewer.go ResumeStatus() doc-vs-impl drift, the same panic envelope
+gap, and missing focused tests for emitVerdictLine).
+Unique to codex-5.4-mini (turn 1): brittle `time.Sleep(500ms)` in the
+new integration test (low) — same finding as the prior eval, codex stays
+consistent across runs on this one.
+Unique to cursor-composer2 (turn 1):
+  - reviewer.go:672 — `ResumeStatus()` docstring still says ok/fallback/
+    empty, but the new commit adds `unverified` as a fourth state. Doc
+    drift on the accessor method.
+  - backend_cursor.go:131 — `isCursorResumeNotFound` does substring
+    matching on the raw error string via `isResumeUnavailableMessage`;
+    unrelated errors whose text happens to contain "session not found"
+    would silently route to fallback (existing concern, recurring).
+  - codereview.go:237 — `emitVerdictLine` has no focused unit test even
+    though it drives the new stdout contract. Real test gap.
+  - acp/client.go:242 — `LoadSession` maps RPC failures via plain
+    `err.(*RPCError)`; wrapped errors would bypass the
+    ErrSessionNotFound branch. Real bug, low impact.
+Unique to gemini: 0 findings, all 3 turns. Same shallow-but-fast pattern.
+Disagreements: cursor turn 2 returned 0 findings ("HEAD is unchanged
+since the earlier pass") — cursor's resumed follow-up correctly noticed
+nothing new had been committed mid-eval and short-circuited. Turn 3
+with `--resume-prompt-style fresh` then re-evaluated and produced 5
+findings — interesting evidence that the fresh prompt on a resumed
+session legitimately re-engages the model rather than just regurgitating
+prior context.
+
+Follow-up deltas:
+- cursor-composer2: turn 2 vs turn 1 → -4 dropped, 0 new (cursor
+  noticed there was nothing new to review and de-escalated all 4 t1
+  findings as already-discussed). Turn 3 vs turn 1 → +5 new, -4
+  dropped. Turn 3 surfaced findings cursor t1 missed (reviewer.go doc
+  drift, emitVerdictLine test gap, acp wrapped-error). Resumed +
+  fresh-prompt is genuinely re-engaging the model on a different angle.
+- codex-5.4-mini: turn 2 vs turn 1 → 0 new, 0 dropped, 0 severity
+  changes — same pair of findings, near-identical wording. Turn 3
+  same. Codex remains the most stable across resume turns.
+- gemini-3.1-flash-lite-preview: 0 findings every turn; deltas
+  degenerate. Summary text DID evolve across turns (t1 described what
+  the branch added, t2 confirmed delta integrity, t3 added the bramble
+  fsnotify-removal commentary), so resume context is influencing what
+  gemini *looks at* even when no findings emerge.
+
+Notes:
+- All 6 resumed runs (3 backends × 2 resumed turns) reported
+  `resume_status: "ok"` end-to-end. The codex thread-readiness fix
+  (e18fdca) and ACP LoadSession id-fallback fix (e18fdca) continue to
+  hold; the new `Unverified` enum value (4787d51) was never triggered
+  this run because every backend reached its Ready event cleanly.
+- The new `[resume=ok]` suffix on stdout was visible in every Monitor
+  event for turns 2 and 3, e.g. `verdict: accepted (2 issues)
+  [resume=ok]`. Without this commit the orchestrator would have had
+  to read each envelope file just to learn whether resume worked.
+- Wall-clock amortization curve held up:
+    codex: 166s (cold) → 19s (follow-up) → 6s (fresh-prompt-on-resumed). 96% drop.
+    cursor: 76s → 34s → 35s. 55% drop on turn 2, ~stable on turn 3.
+    gemini: 4s → 2s → 1s.
+  Codex's curve is the most dramatic, consistent with the prior eval.
+- Cursor's "no new commits since prior pass" turn-2 response is novel
+  signal not seen in the prior eval — suggests cursor's follow-up
+  prompt is sensitive to whether HEAD changed, which is useful when
+  pr-polish runs multiple rounds without committing.
+- The high-value finding this round: **panic-recovery path drops
+  ResumeStatus**. Both codex and cursor caught it. The
+  `finalizeEnvelope` path at codereview.go:329 builds a synthetic
+  envelope on panic but doesn't attach `r.ResumeStatus()`. A resumed
+  run that panics would lose the new resume signal entirely. Worth a
+  follow-up commit.
+- Codex stderr token counts still report `0 input / 0 output` — same
+  caveat as prior eval runs. Bramble's codex token plumbing is still
+  broken and remains in the explicit anti-recommendation bucket.
+- BRAMBLE_RUN_TAG ran cleanly: greppable run logs at
+  `~/.bramble/logs/code-review/code-review-*.log` now carry the
+  `code-review-eval:{branch}:{name}:r{turn}` tag so this run is
+  traceable end-to-end.
+
+## 2026-05-06 (round 3) — jiradozer/bazelment/yoloswe#216 (debiased follow-up prompt)
+
+Diff: 26 files, +2056/-112 lines. This run baselines the new debiased
+follow-up prompt (committed in e6da3b8 earlier the same day) against the
+prior eval-runs.log entry, where cursor turn-2 went 4 → 0 with summary
+"HEAD is unchanged since the earlier pass" — the bias mode the new
+prompt was designed to fix.
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 1 | 0 | accepted | 0.80 | 54s | — |
+| cursor-composer2 | 2 | ok | 4 | 0 | accepted | 0.78 | 46s | — |
+| cursor-composer2 | 3 | ok | 4 | 0 | accepted | 0.80 | 25s | — |
+| codex-5.4-mini | 1 | — | 3 | 0 | rejected | 0.85 | 162s | 0/0 |
+| codex-5.4-mini | 2 | ok | 3 | 0 | rejected | 0.85 | 56s | 0/0 |
+| codex-5.4-mini | 3 | ok | 3 | 0 | rejected | 0.85 | 7s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | 0.70 | 2s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | 0.70 | 1s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | 0.70 | 1s | — |
+
+Resume health: cursor=ok, codex=ok, gemini=ok across all 6 resumed turns.
+
+### Headline: bias-guard validation
+
+Cursor turn-1 → turn-2 finding count flipped from -4 (prior eval) to +3
+(this eval). That is the cleanest possible bias-guard validation:
+- Prior eval (biased prompt): 4 → 0, summary "HEAD is unchanged since
+  the earlier pass" — model ratified the prior verdict by narrowing
+  scope.
+- This eval (debiased prompt): 1 → 4, with three NEW findings the
+  turn-1 review missed.
+
+Codex was unaffected (stable 3 → 3 → 3 across all turns); it doesn't
+suffer from the bias mode in the first place. Gemini stayed shallow
+(0 → 0 → 0); the bias wasn't the constraint there. Neither backend
+regressed under the new prompt.
+
+### Real bugs the debiased run caught
+
+**Codex (HIGH × 2, stable across all 3 turns):**
+- `codereview.go:239` — the error envelope path uses `r.ResumeStatus()`
+  directly, but that field is empty when the backend returns an error
+  with a nil result. Same shape as the panic-recovery bug fixed earlier
+  in this branch (commit 9fa9d87) but in a different code path. The
+  Unverified-fallback callback only kicks in for the deferred guard;
+  the explicit error branch at line 209-215 reads r.ResumeStatus()
+  directly without the same fallback.
+- `codereview.go:447` — **bug introduced by the prompt-shrink commit
+  itself.** Auto-promoting to follow-up as soon as --resume-session-id
+  is present assumes resume succeeds. If the backend falls back (now
+  observable via resume_status="fallback"), the short follow-up prompt
+  references "the prior turn" but is being sent to a fresh session
+  with no prior context. The eval caught this on the very first run
+  with the new prompt — exactly what the eval is for.
+
+**Cursor (3 NEW findings on turn 2 alone):**
+- `reviewer.go:519` (medium) — `_ = goal; _ = opts` discards CLI inputs.
+  Documented as deliberate but cursor flagged the silent contract drift.
+- `codereview.go:426` (medium) — `buildPromptForRun` calls
+  `loadPromptOptions` before branching; for `promptStyleFollowUp` the
+  opts never affect prompt text but a malformed scope-hints file could
+  still fail prompt loading. Wasted work + failure mode.
+- `codereview_test.go:643` (medium) — substring tables duplicate the
+  test in reviewer_test.go. Real test smell I introduced; redundant
+  assertions across two files.
+- `SKILL.md:123` (low) — the eval-skill note "unbiased follow-ups
+  ought to yield ≥ turn-1 findings" is overstated statistically.
+
+The cursor turn-2 findings are dominated by code I just shipped in
+e6da3b8 (the prompt-shrink commit). That's exactly the audit pattern
+the bias-guard was supposed to enable: a model on resume now actually
+re-reviews the new code instead of accepting it.
+
+### Follow-up deltas (debiased)
+
+| Config | Turn | Resume | New | Dropped | Severity changes |
+|--------|------|--------|-----|---------|------------------|
+| cursor-composer2 | 2 vs 1 | ok | +3 | -1 | 0 (medium → medium replacements) |
+| cursor-composer2 | 3 vs 1 | ok | +3 | -1 | 0 |
+| codex-5.4-mini | 2 vs 1 | ok | 0 | 0 | 0 (3 stable findings, near-identical wording) |
+| codex-5.4-mini | 3 vs 1 | ok | 0 | 0 | 0 |
+| gemini | n/a | ok | 0 | 0 | 0 (degenerate, 0 findings) |
+
+### Wall-clock
+
+Same amortization curve as the prior eval:
+- codex: 162s → 56s → 7s (96% drop on turn 3)
+- cursor: 54s → 46s → 25s (debiased follow-up costs more compute than
+  biased — model is actually reviewing instead of short-circuiting)
+- gemini: 2s → 1s → 1s
+
+### Notes
+
+- The debiased prompt cost cursor turn-2 ~46s vs the prior eval's 64s,
+  so the prompt is shorter AND faster despite producing more findings.
+  Token-cost reduction (~50% smaller prompt) plus higher signal density
+  (4 findings instead of 0): unambiguously better tradeoff.
+- Codex followed up at 56s vs the prior eval's 19s — codex is taking
+  the "Re-review the full diff with fresh eyes" instruction seriously
+  and burning real compute. Worth the cost given it caught the
+  high-severity codereview.go:447 bug that's directly attributable
+  to the prompt-shrink commit.
+- Gemini turn-2/3 finished in 1s with 0 findings. Gemini's bias mode
+  (if any) is dominated by its general shallowness; the debiased
+  prompt didn't change its output. This matches the deeper-problem
+  scenario from the plan: gemini-flash-lite simply isn't engaging
+  with a serious review at any prompt shape.
+- Codex stderr token counts still report 0/0 — pre-existing issue.
+
+### Eval-skill self-correction
+
+The cursor low-severity finding at SKILL.md:123 is correct: the note's
+guidance that turn-2 ≥ turn-1 in expectation overstates the case.
+Codex's stable t1=t2 result here disproves the universal claim. A
+better framing for that note: "a non-biased follow-up should not
+systematically produce LOWER turn-2 finding counts across all
+backends." The current biased→debiased flip clearly shows what the
+note was trying to capture without overclaiming.

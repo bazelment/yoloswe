@@ -1,6 +1,8 @@
 package acp
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -83,5 +85,18 @@ func TestIsRecoverablePromptError(t *testing.T) {
 				t.Errorf("isRecoverablePromptError() = %v, want %v", got, tt.wantRecover)
 			}
 		})
+	}
+}
+
+func TestLoadSession_UnsupportedCapabilityFallsBackError(t *testing.T) {
+	client := NewClient()
+	client.started = true
+	client.agentInfo = &InitializeResponse{
+		AgentCapabilities: &AgentCapabilities{LoadSession: false},
+	}
+
+	_, err := client.LoadSession(context.Background(), "session-123")
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("LoadSession error = %v, want ErrSessionNotFound", err)
 	}
 }

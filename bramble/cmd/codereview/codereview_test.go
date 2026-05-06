@@ -145,6 +145,130 @@ func TestEmitEarlyFailure_WritesEnvelopeToStdout(t *testing.T) {
 	}
 }
 
+func TestEmitEarlyFailure_AttachesUnverifiedWhenResumeRequested(t *testing.T) {
+	// Round-7 review consensus (codex + cursor): emitEarlyFailure was
+	// updated to attach ResumeStatusUnverified when --resume-session-id is
+	// set, but no test pinned that behavior — so a future refactor that
+	// dropped the resume-status assignment would only be caught by a slow
+	// integration run. This test pins the contract directly.
+	origBackend := backend
+	origResume := resumeSessionID
+	backend = "codex"
+	resumeSessionID = "some-session-id"
+	t.Cleanup(func() {
+		backend = origBackend
+		resumeSessionID = origResume
+	})
+
+	stdout, _ := captureStdStreams(t, func() {
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		_ = emitEarlyFailure(errors.New("backend unreachable"), "gpt-x", emit)
+	})
+
+	var env reviewer.ResultEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+		t.Fatalf("stdout must be a single JSON envelope, got %q: %v", stdout, err)
+	}
+	if env.ResumeStatus != reviewer.ResumeStatusUnverified {
+		t.Errorf("envelope.resume_status = %q, want %q", env.ResumeStatus, reviewer.ResumeStatusUnverified)
+	}
+}
+
+func TestEmitEarlyFailure_OmitsResumeStatusWhenNoneRequested(t *testing.T) {
+	// Symmetry guard: when --resume-session-id was NOT set, emitEarlyFailure
+	// must leave resume_status empty so omitempty drops the field. Without
+	// this case, a regression that always wrote "unverified" would slip
+	// through TestEmitEarlyFailure_AttachesUnverifiedWhenResumeRequested.
+	origBackend := backend
+	origResume := resumeSessionID
+	backend = "codex"
+	resumeSessionID = ""
+	t.Cleanup(func() {
+		backend = origBackend
+		resumeSessionID = origResume
+	})
+
+	stdout, _ := captureStdStreams(t, func() {
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		_ = emitEarlyFailure(errors.New("oops"), "gpt-x", emit)
+	})
+
+	var env reviewer.ResultEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+		t.Fatalf("stdout must be a single JSON envelope, got %q: %v", stdout, err)
+	}
+	if env.ResumeStatus != "" {
+		t.Errorf("envelope.resume_status = %q, want empty when no resume requested", env.ResumeStatus)
+	}
+}
+
+func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
+	// Round-7 review (cursor low-ack): emitVerdictLine drives the new
+	// stdout contract that orchestrators read mid-stream, but had no
+	// focused unit tests so a regression in the success vs error suffix
+	// formatting (or in dropping the suffix when resume_status is empty)
+	// would only surface in a real bramble run.
+	cases := []struct {
+		// Group both string fields together before the heavier ResultEnvelope
+		// to satisfy fieldalignment (govet) — placing strings on either side
+		// of the embedded struct wastes pointer-aligned padding.
+		name     string
+		wantLine string
+		env      reviewer.ResultEnvelope
+	}{
+		{
+			name: "success with resume ok",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusOK,
+				Review:        reviewer.ReviewBody{Verdict: "accepted", Issues: []reviewer.ReviewIssue{}},
+				ResumeStatus:  reviewer.ResumeStatusOK,
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "verdict: accepted (0 issues) [resume=ok]\n",
+		},
+		{
+			name: "success without resume",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusOK,
+				Review:        reviewer.ReviewBody{Verdict: "rejected", Issues: []reviewer.ReviewIssue{{Severity: "high"}, {Severity: "low"}}},
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "verdict: rejected (2 issues)\n",
+		},
+		{
+			name: "error with resume unverified",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusError,
+				Error:         "backend unreachable",
+				ResumeStatus:  reviewer.ResumeStatusUnverified,
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "error: backend unreachable [resume=unverified]\n",
+		},
+		{
+			name: "error without resume",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusError,
+				Error:         "auth denied",
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "error: auth denied\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _ := captureStdStreams(t, func() { emitVerdictLine(tc.env) })
+			if stdout != tc.wantLine {
+				t.Errorf("stdout = %q, want %q", stdout, tc.wantLine)
+			}
+		})
+	}
+}
+
 func TestFinalizeEnvelope_SuccessDoesNotDoubleEmit(t *testing.T) {
 	// When runCodeReview's happy path has already flushed an envelope, the
 	// top-level defer must not synthesize a second one — otherwise automation
@@ -271,6 +395,92 @@ func TestFinalizeEnvelope_ReturnErrorPropagatesToEnvelopeMessage(t *testing.T) {
 	}
 }
 
+func TestFinalizeEnvelope_PanicCarriesResumeStatusFromCallback(t *testing.T) {
+	// Round-2 eval flagged that finalizeEnvelope dropped resume_status on
+	// the panic-recovery path. Verify the new resumeStatus callback feeds
+	// the synthesized envelope so a resumed run that panics still carries
+	// the resume signal automation depends on.
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+
+	defer func() {
+		_ = recover() // we don't care about the re-raise here
+		if !written {
+			t.Fatalf("envelope was not emitted before re-panic")
+		}
+		if got.ResumeStatus != reviewer.ResumeStatusOK {
+			t.Errorf("resume_status = %q, want %q", got.ResumeStatus, reviewer.ResumeStatusOK)
+		}
+	}()
+
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        "kaboom",
+		emit:            emit,
+		resumeStatus:    func() reviewer.ResumeStatus { return reviewer.ResumeStatusOK },
+	})
+}
+
+func TestFinalizeEnvelope_UnwrittenReturnCarriesResumeStatusFromCallback(t *testing.T) {
+	// Same coverage on the non-panic synthesized-envelope path: a resumed
+	// run that exits silently (no envelope, no panic) must still surface
+	// resume_status so the orchestrator can distinguish "unverified resume"
+	// from "no resume requested".
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+		resumeStatus:    func() reviewer.ResumeStatus { return reviewer.ResumeStatusUnverified },
+	})
+	if !written {
+		t.Fatalf("expected emit to have been called")
+	}
+	if got.ResumeStatus != reviewer.ResumeStatusUnverified {
+		t.Errorf("resume_status = %q, want %q", got.ResumeStatus, reviewer.ResumeStatusUnverified)
+	}
+}
+
+func TestFinalizeEnvelope_NilResumeCallbackOmitsField(t *testing.T) {
+	// Callers that don't thread a resume callback (e.g. older test fixtures
+	// or a runCodeReview path that never constructed a reviewer and was
+	// never asked to resume) should still produce a clean envelope — the
+	// resume_status field stays empty and gets dropped by omitempty.
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+		resumeStatus:    nil,
+	})
+	if got.ResumeStatus != "" {
+		t.Errorf("resume_status = %q, want empty when callback nil", got.ResumeStatus)
+	}
+}
+
 func TestLoadPromptOptions_NoFile(t *testing.T) {
 	// Empty path is the legacy/default case: no hints loaded, but
 	// SkipTestExecution must still pass through.
@@ -361,7 +571,7 @@ func TestBuildPromptForRun_WidensWithRealHintsFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("review goal", path, false)
+	got := buildPromptForRun("review goal", path, false, promptStyleFresh)
 	if !strings.Contains(got, "## Test quality") {
 		t.Errorf("prompt missing test-quality clause; got:\n%s", got)
 	}
@@ -394,7 +604,7 @@ func TestBuildPromptForRun_V2HintsThreadCallerCalleeFraming(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("review goal", path, false)
+	got := buildPromptForRun("review goal", path, false, promptStyleFresh)
 	if !strings.Contains(got, "## Cross-service contract sweep") {
 		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
 	}
@@ -413,10 +623,140 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 	// Empty hints path must produce today's narrow prompt, byte-equal to
 	// the legacy BuildJSONPrompt output. This is the no-regressions
 	// guarantee for callers that haven't opted into the wider scope.
-	got := buildPromptForRun("g", "", false)
+	got := buildPromptForRun("g", "", false, promptStyleFresh)
 	want := reviewer.BuildJSONPrompt("g")
 	if got != want {
 		t.Errorf("empty hints path must equal legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestBuildPromptForRun_FollowUpThreadsScopeHintsFile(t *testing.T) {
+	// Round-11 codex flagged that the follow-up resume path is only
+	// tested with empty hints, so a regression that drops scopeHintsFile
+	// or skipTestExecution between buildPromptForRun and
+	// BuildFollowUpJSONPromptWithScope would slip through. End-to-end:
+	// a real hints file + skipTestExecution=true must reach the
+	// follow-up prompt's conditional scope/test-quality/skip-test
+	// clauses (which only fire when opts carries them — see the
+	// docstring on BuildFollowUpJSONPromptWithScope).
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	contents := `{"schema_version":1,"test_paths":["pkg/test_x.py"],"cross_service_packages":["a/","b/"]}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write hints: %v", err)
+	}
+	got := buildPromptForRun("Round 5. Prior fixes: ...", path, true /* skipTestExecution */, promptStyleFollowUp)
+
+	// Bias-guard prose still present.
+	if !strings.Contains(got, "Re-review the full diff with fresh eyes") {
+		t.Errorf("prompt missing bias-guard prose; got:\n%s", got)
+	}
+	// Goal embedded as per-turn metadata (Layer 1 contract).
+	if !strings.Contains(got, "Context for this turn: Round 5. Prior fixes: ...") {
+		t.Errorf("prompt missing per-turn metadata block; got:\n%s", got)
+	}
+	// skipTestExecution suffix DID get appended (conditional fire).
+	if !strings.Contains(got, "Do NOT run tests or build commands") {
+		t.Errorf("prompt missing skipTestExecutionSuffix; got:\n%s", got)
+	}
+	// Scope clauses DID get appended (conditional fire).
+	if !strings.Contains(got, "## Test quality") {
+		t.Errorf("prompt missing test-quality clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Cross-service contract sweep") {
+		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "pkg/test_x.py") {
+		t.Errorf("prompt missing inlined test path; got:\n%s", got)
+	}
+}
+
+func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
+	// The follow-up prompt is intentionally short: rubric, format spec,
+	// and persona block are dropped because the resumed session already
+	// saw them in the fresh prompt that opened turn 1. What MUST stay is
+	// the bias-guard prose — without it, the model will narrow to "what
+	// changed since" and silently ratify the prior verdict (the failure
+	// mode observed in the round-2 eval). The skip-test-execution and
+	// scope clauses are conditional: present when opts carries them so a
+	// silent resume fallback (resume_status="fallback") doesn't read
+	// this prompt cold and miss them.
+	got := buildPromptForRun("g", "", true /* skipTestExecution */, promptStyleFollowUp)
+
+	// Bias-guard prose must remain.
+	for _, want := range []string{
+		"Continue the review on the same diff",
+		"Re-review the full diff with fresh eyes",
+		"DO surface any new issues",
+		"more useful than one that just confirms the prior verdict",
+		"same severity rubric and JSON output format",
+		// Round-8 codex+cursor consensus: pin the no-prior-context
+		// escape hatch so a future edit can't silently drop the
+		// resume-fallback safety net.
+		"silently fell back to a fresh session",
+		"treat this as a first-pass review",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("follow-up prompt missing required phrase %q; got:\n%s", want, got)
+		}
+	}
+
+	// Redundant turn-1 blocks must be absent.
+	for _, no := range []string{
+		"Focus on these areas:",         // fresh-review 6-axis checklist
+		"experienced software engineer", // persona
+		"## Output Format",              // jsonOutputRules
+		"## Severity Levels",            // jsonOutputRules
+	} {
+		if strings.Contains(got, no) {
+			t.Errorf("follow-up prompt unexpectedly re-pastes %q; got:\n%s", no, got)
+		}
+	}
+
+	// skipTestExecution=true was passed, so the suffix MUST appear so a
+	// fallback session reading this cold knows not to spawn test commands.
+	if !strings.Contains(got, "Do NOT run tests or build commands") {
+		t.Errorf("follow-up prompt with skipTestExecution=true must carry the suffix; got:\n%s", got)
+	}
+}
+
+func TestNormalizePromptStyle_DefaultsResumeToFollowUp(t *testing.T) {
+	got, err := normalizePromptStyle("sess-1", "fresh", false)
+	if err != nil {
+		t.Fatalf("normalizePromptStyle failed: %v", err)
+	}
+	if got != promptStyleFollowUp {
+		t.Fatalf("normalizePromptStyle = %q, want %q", got, promptStyleFollowUp)
+	}
+}
+
+func TestNormalizePromptStyle_ExplicitFreshResumeStaysFresh(t *testing.T) {
+	got, err := normalizePromptStyle("sess-1", "fresh", true)
+	if err != nil {
+		t.Fatalf("normalizePromptStyle failed: %v", err)
+	}
+	if got != promptStyleFresh {
+		t.Fatalf("normalizePromptStyle = %q, want %q", got, promptStyleFresh)
+	}
+}
+
+func TestNormalizePromptStyle_RejectsFollowUpWithoutResume(t *testing.T) {
+	_, err := normalizePromptStyle("", "follow-up", true)
+	if err == nil {
+		t.Fatal("normalizePromptStyle succeeded for follow-up without resume session")
+	}
+	if !strings.Contains(err.Error(), "requires --resume-session-id") {
+		t.Fatalf("normalizePromptStyle error = %v", err)
+	}
+}
+
+func TestNormalizePromptStyle_RejectsInvalidBeforeStart(t *testing.T) {
+	_, err := normalizePromptStyle("", "sideways", true)
+	if err == nil {
+		t.Fatal("normalizePromptStyle succeeded for invalid style")
+	}
+	if !strings.Contains(err.Error(), "invalid --resume-prompt-style") {
+		t.Fatalf("normalizePromptStyle error = %v", err)
 	}
 }
 
@@ -430,7 +770,7 @@ func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("g", path, true)
+	got := buildPromptForRun("g", path, true, promptStyleFresh)
 	want := reviewer.BuildJSONPromptWithOptions("g", true)
 	if got != want {
 		t.Errorf("malformed hints must fall back to legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -463,6 +803,27 @@ func TestCmd_ScopeHintsFileFlagIsWired(t *testing.T) {
 	}
 	if scopeHintsFile != "/other/path.json" {
 		t.Errorf("scopeHintsFile global after second parse = %q, want /other/path.json", scopeHintsFile)
+	}
+}
+
+func TestCmd_ResumeFlagsAreWired(t *testing.T) {
+	prevID := resumeSessionID
+	prevStyle := resumePromptStyle
+	t.Cleanup(func() {
+		resumeSessionID = prevID
+		resumePromptStyle = prevStyle
+	})
+	resumeSessionID = ""
+	resumePromptStyle = "fresh"
+
+	if err := Cmd.ParseFlags([]string{"--resume-session-id", "sess-1", "--resume-prompt-style", "follow-up"}); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+	if resumeSessionID != "sess-1" {
+		t.Errorf("resumeSessionID = %q, want sess-1", resumeSessionID)
+	}
+	if resumePromptStyle != "follow-up" {
+		t.Errorf("resumePromptStyle = %q, want follow-up", resumePromptStyle)
 	}
 }
 

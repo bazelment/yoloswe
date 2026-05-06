@@ -30,6 +30,15 @@ var (
 	envelopeFile      string
 	skipTestExecution bool
 	scopeHintsFile    string
+	resumeSessionID   string
+	resumePromptStyle string
+)
+
+type promptStyle string
+
+const (
+	promptStyleFresh    promptStyle = "fresh"
+	promptStyleFollowUp promptStyle = "follow-up"
 )
 
 // Cmd is the cobra command for code review.
@@ -71,6 +80,8 @@ func init() {
 	Cmd.Flags().StringVar(&envelopeFile, "envelope-file", "", "Write the JSON ResultEnvelope to this file instead of stdout (stdout then carries only progress events)")
 	Cmd.Flags().BoolVar(&skipTestExecution, "skip-test-execution", false, "Instruct the reviewer not to run tests/build commands (caller runs them separately)")
 	Cmd.Flags().StringVar(&scopeHintsFile, "scope-hints-file", "", "JSON file with co-located test paths and cross-service packages to widen review scope; see reviewer.ScopeHints. Missing/malformed files log a warning and fall back to today's narrow review.")
+	Cmd.Flags().StringVar(&resumeSessionID, "resume-session-id", "", "Resume an existing backend session/thread id")
+	Cmd.Flags().StringVar(&resumePromptStyle, "resume-prompt-style", "fresh", "Prompt style when resuming: follow-up or fresh. Auto-promotes to follow-up when --resume-session-id is set without an explicit style.")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
@@ -83,16 +94,25 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// produced nothing at all".
 	var envelopeWritten bool
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
-		// Mark as attempted immediately so finalizeEnvelope never retries the
-		// same sink — a partial write followed by a second emit would corrupt
-		// line-by-line consumers more than a single failed write.
-		envelopeWritten = true
 		w, closeW, openErr := openEnvelopeWriter()
 		if openErr != nil {
-			slog.Error("failed to open envelope-file", "error", openErr.Error())
+			// --envelope-file path is unwritable. Don't return empty —
+			// codex round 12 caught that finalizeEnvelope would then call
+			// emitEnvelope a second time for the synthesized fallback,
+			// which would hit the same broken sink and leave automation
+			// with no machine-readable result at all. Last-ditch fallback:
+			// dump the envelope to stdout so the orchestrator at least
+			// has something parseable on the streamed channel.
+			slog.Error("failed to open envelope-file; falling back to stdout", "error", openErr.Error())
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to open envelope-file: %w", openErr)
 			}
+			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
+				reportEnvelopePrintError(printErr)
+				// stdout itself failed — nothing more we can do.
+				return
+			}
+			envelopeWritten = true
 			return
 		}
 		defer closeW()
@@ -101,9 +121,28 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to write JSON envelope: %w", err)
 			}
+			// Mid-write failure leaves the file in an indeterminate state
+			// (partial JSON or empty after O_TRUNC). Same fallback as the
+			// open-failure branch: emit the envelope to stdout so the
+			// orchestrator's stdout-streaming path still gets the result.
+			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
+				reportEnvelopePrintError(printErr)
+				return
+			}
+			envelopeWritten = true
 			return
 		}
+		// Mark written only after a successful flush. A partial write would
+		// be detected by PrintJSONResult and surface above; a clean write
+		// trips the flag so finalizeEnvelope's idempotency guard fires.
+		envelopeWritten = true
 	}
+	// activeReviewer is observed by the deferred guard so the synthesized
+	// panic/error envelope can report the reviewer's authoritative
+	// resume_status. It's nil until r := reviewer.New(...) runs below; the
+	// guard's callback handles that case by falling back to Unverified
+	// whenever --resume-session-id was set.
+	var activeReviewer *reviewer.Reviewer
 	defer func() {
 		finalizeEnvelope(envelopeGuardArgs{
 			backend:         backend,
@@ -111,6 +150,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			retErr:          &retErr,
 			panicVal:        recover(),
 			emit:            emitEnvelope,
+			resumeStatus:    func() reviewer.ResumeStatus { return effectiveResumeStatus(activeReviewer, resumeSessionID) },
 		})
 	}()
 
@@ -131,6 +171,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		return emitEarlyFailure(err, "", emitEnvelope)
 	}
 
+	style, err := normalizePromptStyle(resumeSessionID, resumePromptStyle, cmd.Flags().Changed("resume-prompt-style"))
+	if err != nil {
+		return emitEarlyFailure(err, model, emitEnvelope)
+	}
+
 	slog.Info("code-review run start",
 		"pid", os.Getpid(),
 		"cwd", redactPath(workDir),
@@ -143,6 +188,8 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"envelope_file", envelopeFile != "",
 		"skip_test_execution", skipTestExecution,
 		"scope_hints_file", scopeHintsFile != "",
+		"resume_session", resumeSessionID != "",
+		"resume_prompt_style", string(style),
 		"goal_len", len(goal))
 
 	config := reviewer.Config{
@@ -154,6 +201,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		ReadOnly:          readOnly,
 		Verbose:           verbose,
 		SkipTestExecution: skipTestExecution,
+		ResumeSessionID:   resumeSessionID,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
@@ -163,6 +211,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	config.SessionLogPath = logPath2
 
 	r := reviewer.New(config)
+	// Expose the reviewer to the deferred guard so a panic between here and
+	// the normal envelope emit picks up the latest ResumeStatus instead of
+	// dropping it. Setting it before any work that could panic guarantees the
+	// guard never observes a stale nil.
+	activeReviewer = r
 	// Snapshot before Start for early-failure paths. After the backend
 	// session begins (OnSessionInfo), call r.EffectiveModel() fresh so the
 	// envelope reports the model the backend actually ran (Cursor picks its
@@ -181,35 +234,89 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer r.Stop()
 
-	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution)
+	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution, style)
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
 		// Emit a parseable envelope so the caller can distinguish a
-		// bramble-level failure from a reviewer-level "rejected".
+		// bramble-level failure from a reviewer-level "rejected". Use
+		// effectiveResumeStatus so a turn that errored before
+		// r.resumeStatus was repopulated still surfaces Unverified
+		// when resume was requested — same fallback the deferred
+		// guard applies on the panic/silent-exit path.
 		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 			ErrorMessage: err.Error(),
+			ResumeStatus: effectiveResumeStatus(activeReviewer, resumeSessionID),
 		}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+		emitVerdictLine(env)
 		emitEnvelope(env)
 		return fmt.Errorf("review failed: %w", err)
 	}
 
 	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+	// Log when the auto-promoted follow-up prompt was sent to a fresh
+	// fallback session. The follow-up prompt has an explicit "if no prior
+	// context, treat as first-pass" escape hatch so the model still produces
+	// usable output, but operators should still see the mismatch in logs
+	// because it implies the review's prompt was less specific than intended
+	// (the orchestrator asked to resume, the backend cold-started, and we
+	// went ahead anyway). Triggers only on the production-default path:
+	// follow-up auto-promoted + resume actually fell back.
+	if style == promptStyleFollowUp && env.ResumeStatus == reviewer.ResumeStatusFallback {
+		slog.Warn("follow-up prompt sent to fallback session; review used the prompt's no-prior-context escape hatch",
+			"resume_session", resumeSessionID,
+			"backend", backend)
+	}
 	slog.Info("code-review run exit",
 		"status", string(env.Status),
 		"verdict", env.Review.Verdict,
 		"issue_count", len(env.Review.Issues),
 		"max_severity", maxSeverity(env.Review.Issues),
 		"total_duration_ms", time.Since(runStart).Milliseconds())
-	// Print a plain-text verdict line so the Monitor tool can surface the
-	// outcome to Claude before the envelope is written.
-	if env.Status == reviewer.StatusOK {
-		fmt.Fprintf(os.Stdout, "verdict: %s (%d issues)\n", env.Review.Verdict, len(env.Review.Issues))
-	} else {
-		fmt.Fprintf(os.Stdout, "error: %s\n", env.Error)
-	}
+	emitVerdictLine(env)
 	emitEnvelope(env)
 	return retErr
+}
+
+// effectiveResumeStatus returns the ResumeStatus value the caller should
+// stamp onto a synthesized envelope, falling back to Unverified whenever
+// resume was requested but the reviewer's authoritative status hasn't
+// landed yet. Reviewer.ResumeStatus() is cleared at the top of every turn
+// and only repopulated from the backend's result, so any path that builds
+// an envelope without a fully-completed turn (panic, silent exit, or the
+// explicit ReviewWithResult error branch) needs this fallback or
+// resume_status drops out of the JSON entirely via omitempty. The
+// deferred-guard callback and the explicit error branch share this helper
+// so a single rule covers both.
+func effectiveResumeStatus(r *reviewer.Reviewer, requestedResumeSessionID string) reviewer.ResumeStatus {
+	if r != nil {
+		if status := r.ResumeStatus(); status != "" {
+			return status
+		}
+	}
+	if requestedResumeSessionID != "" {
+		return reviewer.ResumeStatusUnverified
+	}
+	return ""
+}
+
+// emitVerdictLine prints a single human-readable summary to stdout so the
+// Monitor tool can surface the outcome to Claude before the envelope file is
+// flushed. When --resume-session-id was set, the line ends with a
+// [resume=ok|fallback|unverified] suffix so callers streaming stdout can see
+// resume health without parsing the envelope. Both the success path
+// ("verdict: ...") and the bramble-level failure path ("error: ...") share
+// this so resume signal isn't lost on early errors.
+func emitVerdictLine(env reviewer.ResultEnvelope) {
+	resumeSuffix := ""
+	if env.ResumeStatus != "" {
+		resumeSuffix = fmt.Sprintf(" [resume=%s]", env.ResumeStatus)
+	}
+	if env.Status == reviewer.StatusOK {
+		fmt.Fprintf(os.Stdout, "verdict: %s (%d issues)%s\n", env.Review.Verdict, len(env.Review.Issues), resumeSuffix)
+	} else {
+		fmt.Fprintf(os.Stdout, "error: %s%s\n", env.Error, resumeSuffix)
+	}
 }
 
 // maxSeverity returns the highest severity label in issues, using the order
@@ -267,11 +374,23 @@ func openEnvelopeWriter() (w *os.File, close func(), err error) {
 // envelopeGuardArgs is the input to finalizeEnvelope. Extracted so tests can
 // drive the guard without spinning up a real reviewer. All pointer fields are
 // read and mutated — the caller owns the storage.
+//
+// resumeStatus is an optional accessor that the guard invokes lazily so the
+// synthesized panic/error envelope carries the same resume_status the normal
+// exit paths report. Leave it nil when no resume was requested (or when the
+// caller doesn't want to thread one through, e.g. unit tests). When non-nil
+// it must be safe to call from the deferred recovery path — typically a
+// closure over the effectiveResumeStatus helper (see below), which returns
+// r.ResumeStatus() when the reviewer reports a non-empty status, falls back
+// to ResumeStatusUnverified when --resume-session-id was set but the
+// reviewer's status is still empty (e.g. panic mid-turn before the backend
+// repopulated it), and "" otherwise.
 type envelopeGuardArgs struct {
 	panicVal        any
 	envelopeWritten *bool
 	retErr          *error
 	emit            func(reviewer.ResultEnvelope)
+	resumeStatus    func() reviewer.ResumeStatus
 	backend         string
 }
 
@@ -293,7 +412,15 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 		msg = (*a.retErr).Error()
 	}
 	if !*a.envelopeWritten {
-		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{ErrorMessage: msg},
+		result := &reviewer.ReviewResult{ErrorMessage: msg}
+		if a.resumeStatus != nil {
+			// Mirror the resume signal the normal exit paths emit. Without
+			// this, a resumed run that panics or returns silently drops the
+			// new resume_status field — which is exactly the gap the round-2
+			// eval flagged on this very file.
+			result.ResumeStatus = a.resumeStatus()
+		}
+		env := reviewer.BuildEnvelope(result,
 			reviewer.BackendType(a.backend), "", "")
 		a.emit(env)
 	}
@@ -311,10 +438,20 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 // been constructed yet. emit is the envelope emitter from the runCodeReview
 // scope; it flips the envelopeWritten flag so the top-level defer guard does
 // not double-emit.
+//
+// When --resume-session-id was set on this run, the synthesized envelope
+// reports resume_status=unverified so the orchestrator (and the verdict-line
+// suffix) can distinguish "failed before the backend confirmed resume" from
+// "no resume requested". Pre-review failures (backend validation, workdir
+// resolution, prompt-style normalization, reviewer.Start, etc.) all flow
+// through here, so without this every early-failure path would silently
+// drop the resume signal.
 func emitEarlyFailure(err error, effectiveModel string, emit func(reviewer.ResultEnvelope)) error {
-	env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
-		ErrorMessage: err.Error(),
-	}, reviewer.BackendType(backend), effectiveModel, "")
+	result := &reviewer.ReviewResult{ErrorMessage: err.Error()}
+	if resumeSessionID != "" {
+		result.ResumeStatus = reviewer.ResumeStatusUnverified
+	}
+	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), effectiveModel, "")
 	emit(env)
 	return err
 }
@@ -334,9 +471,31 @@ func reportEnvelopePrintError(printErr error) {
 // Without this seam, a regression that quietly stops threading
 // scopeHintsFile into the reviewer would slip through helper-level tests
 // that only exercise loadPromptOptions in isolation.
-func buildPromptForRun(goal, hintsPath string, skipTestExecution bool) string {
+func buildPromptForRun(goal, hintsPath string, skipTestExecution bool, style promptStyle) string {
 	opts := loadPromptOptions(hintsPath, skipTestExecution)
+	if style == promptStyleFollowUp {
+		return reviewer.BuildFollowUpJSONPromptWithScope(goal, opts)
+	}
 	return reviewer.BuildJSONPromptWithScope(goal, opts)
+}
+
+func normalizePromptStyle(resumeSessionID, rawStyle string, styleExplicit bool) (promptStyle, error) {
+	style := promptStyle(rawStyle)
+	switch style {
+	case promptStyleFresh, promptStyleFollowUp:
+	default:
+		return "", fmt.Errorf("invalid --resume-prompt-style %q (want fresh or follow-up)", rawStyle)
+	}
+	if resumeSessionID == "" {
+		if style == promptStyleFollowUp {
+			return "", fmt.Errorf("--resume-prompt-style=follow-up requires --resume-session-id")
+		}
+		return style, nil
+	}
+	if !styleExplicit && style == promptStyleFresh {
+		return promptStyleFollowUp, nil
+	}
+	return style, nil
 }
 
 // loadPromptOptions reads the scope-hints file when set and converts it to

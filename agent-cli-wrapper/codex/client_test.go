@@ -103,6 +103,38 @@ func TestClient_CreateThread_NotStarted(t *testing.T) {
 	}
 }
 
+func TestClient_ResumeThread_NotStarted(t *testing.T) {
+	client := NewClient()
+	ctx := context.Background()
+
+	_, err := client.ResumeThread(ctx, "thread-123")
+	if err != ErrNotStarted {
+		t.Errorf("expected ErrNotStarted, got %v", err)
+	}
+}
+
+func TestThreadResumeParams_JSONShape(t *testing.T) {
+	params := ThreadResumeParams{
+		ThreadStartParams: ThreadStartParams{
+			Model:          "gpt-test",
+			CWD:            "/tmp/work",
+			ApprovalPolicy: "never",
+			Config:         map[string]interface{}{"foo": "bar"},
+		},
+		ThreadID: "thread-123",
+	}
+	data, err := json.Marshal(params)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.Equal(t, "thread-123", got["threadId"])
+	require.Equal(t, "gpt-test", got["model"])
+	require.Equal(t, "/tmp/work", got["cwd"])
+	require.Equal(t, "never", got["approvalPolicy"])
+	require.Contains(t, got, "config")
+}
+
 func TestClient_Ask_NotStarted(t *testing.T) {
 	client := NewClient()
 	ctx := context.Background()

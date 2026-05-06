@@ -86,6 +86,12 @@ type ThreadStartParams struct {
 	ApprovalPolicy string                 `json:"approvalPolicy,omitempty"`
 }
 
+// ThreadResumeParams for loading an existing thread.
+type ThreadResumeParams struct {
+	ThreadStartParams
+	ThreadID string `json:"threadId"`
+}
+
 // SandboxConfig for sandbox settings.
 type SandboxConfig struct {
 	Type          string   `json:"type,omitempty"`
@@ -138,6 +144,9 @@ type ThreadStartResponse struct {
 	} `json:"sandbox"`
 	Thread ThreadInfo `json:"thread"`
 }
+
+// ThreadResumeResponse from thread/resume request.
+type ThreadResumeResponse = ThreadStartResponse
 
 // ThreadInfo contains thread metadata.
 type ThreadInfo struct {

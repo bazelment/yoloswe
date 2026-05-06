@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -200,6 +201,83 @@ func (c *Client) NewSession(ctx context.Context, opts ...SessionOption) (*Sessio
 	c.mu.Unlock()
 
 	c.emit(SessionCreatedEvent{SessionID: sessionResp.SessionID})
+
+	return session, nil
+}
+
+// LoadSession loads an existing ACP session when the agent advertises support.
+func (c *Client) LoadSession(ctx context.Context, sessionID string, opts ...SessionOption) (*Session, error) {
+	c.mu.RLock()
+	if !c.started {
+		c.mu.RUnlock()
+		return nil, ErrNotStarted
+	}
+	if c.stopping {
+		c.mu.RUnlock()
+		return nil, ErrStopping
+	}
+	supportsLoad := c.agentInfo != nil &&
+		c.agentInfo.AgentCapabilities != nil &&
+		c.agentInfo.AgentCapabilities.LoadSession
+	c.mu.RUnlock()
+
+	if !supportsLoad {
+		return nil, ErrSessionNotFound
+	}
+
+	cfg := defaultACPSessionConfig()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	params := LoadSessionRequest{
+		SessionID:  sessionID,
+		CWD:        cfg.CWD,
+		McpServers: cfg.McpServers,
+	}
+	if params.McpServers == nil {
+		params.McpServers = []McpServerConfig{}
+	}
+
+	resp, err := c.sendRequestAndWait(ctx, MethodSessionLoad, params)
+	if err != nil {
+		// Use errors.As, not a plain type assertion, so a wrapped *RPCError
+		// (e.g. one re-wrapped with fmt.Errorf or by a future middleware
+		// layer) still routes to ErrSessionNotFound. Without this, callers
+		// like geminiBackend that branch on errors.Is(err, ErrSessionNotFound)
+		// would silently miss the not-found path and surface the raw RPC
+		// error instead of falling back to a fresh session.
+		var rpcErr *RPCError
+		if errors.As(err, &rpcErr) && (rpcErr.Code == ErrCodeResourceNotFound || rpcErr.Code == ErrCodeCapabilityUnsupported) {
+			return nil, ErrSessionNotFound
+		}
+		return nil, err
+	}
+
+	var sessionResp LoadSessionResponse
+	if err := json.Unmarshal(resp.Result, &sessionResp); err != nil {
+		return nil, &ProtocolError{Message: "failed to parse session/load response", Cause: err}
+	}
+
+	// session/load responses are inconsistent across agents: some echo the
+	// session id back, others (notably Gemini CLI) return an empty object.
+	// The client already knows which id it asked to load, so prefer the
+	// request id and only fall back to the response's id if it disagrees
+	// with the request — that protects against an agent that re-keys the
+	// session on load. Without this guard, an empty response leaves the
+	// Session struct with id="" and the next Prompt asks the agent to
+	// continue an empty-id session, which fails with "Session not found:".
+	resolvedID := sessionResp.SessionID
+	if resolvedID == "" {
+		resolvedID = sessionID
+	}
+	session := newSession(c, resolvedID)
+
+	c.mu.Lock()
+	c.sessions[resolvedID] = session
+	c.mu.Unlock()
+
+	c.emit(SessionCreatedEvent{SessionID: resolvedID})
 
 	return session, nil
 }

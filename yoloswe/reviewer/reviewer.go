@@ -81,22 +81,40 @@ const (
 // ApprovalHandler; without one the codex process blocks indefinitely
 // waiting for approval responses.
 type Config struct {
-	Model          string
-	WorkDir        string
-	Goal           string
-	SessionLogPath string
-	Effort         string               // Reasoning effort level for codex (low, medium, high)
-	Sandbox        string               // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
-	ApprovalPolicy codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
-	BackendType    BackendType
-	ReadOnly       bool // Deny file writes via approval handler (Codex only; CLI entrypoints default this to true)
-	Verbose        bool
-	NoColor        bool
+	ApprovalPolicy  codex.ApprovalPolicy // Codex approval policy; see doc above for constraints
+	WorkDir         string
+	Goal            string
+	SessionLogPath  string
+	Effort          string // Reasoning effort level for codex (low, medium, high)
+	Sandbox         string // Codex sandbox: "read-only", "workspace-write", "danger-full-access"
+	Model           string
+	BackendType     BackendType
+	ResumeSessionID string // Prior reviewer session/thread id to resume when supported.
+	ReadOnly        bool   // Deny file writes via approval handler (Codex only; CLI entrypoints default this to true)
+	Verbose         bool
+	NoColor         bool
 	// SkipTestExecution instructs the reviewer not to run test/build commands
 	// (bazel, go test, etc.). Callers that already run tests in a separate step
 	// (e.g. /pr-polish quality gates) should enable this to avoid duplicate work.
 	SkipTestExecution bool
 }
+
+// ResumeStatus records whether a requested backend resume succeeded.
+//
+// The three values form a finalization order: a backend that was asked to
+// resume starts at Unverified; resumeStatusAfterSessionReady promotes that
+// to OK once a Ready event confirms the backend is on the requested session,
+// or to Fallback when the backend ran fresh because the requested session
+// was unavailable. A run that exits before any Ready event therefore
+// surfaces Unverified — distinguishable from a non-resume run, where the
+// status stays empty and is dropped by omitempty in the envelope.
+type ResumeStatus string
+
+const (
+	ResumeStatusOK         ResumeStatus = "ok"
+	ResumeStatusFallback   ResumeStatus = "fallback"
+	ResumeStatusUnverified ResumeStatus = "unverified"
+)
 
 // buildGoalText formats the goal text for review prompts.
 func buildGoalText(goal string) string {
@@ -459,7 +477,107 @@ func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
 // prompt; the scope clauses (test-quality, cross-service) are inserted
 // between the base prompt and the JSON output rules.
 func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
-	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
+	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + jsonOutputRules()
+}
+
+// BuildFollowUpJSONPromptWithScope creates the shorter resumed-session prompt
+// used after a prior review round has already established context.
+//
+// Design intent: a follow-up prompt sits in tension between two competing
+// goals.
+//
+//   - Dedup-aware: don't have the model re-list every prior finding verbatim;
+//     the orchestrator (e.g. /pr-polish) has already triaged those.
+//   - Bias-guard: don't let the narrowing bias the model into ratifying its
+//     prior verdict by ignoring code it already accepted. A second pass that
+//     finds something the first pass missed is more useful than one that just
+//     re-confirms the prior conclusion.
+//
+// The earlier shape leaned hard on the dedup side ("focus on the changes made
+// since that prior turn", with a strict 3-item focus list and an explicit
+// "do not re-list" rule) and produced visibly biased output in the round-2
+// eval — cursor turn 2 returned 0 issues with the summary "HEAD is unchanged
+// since the earlier pass", which is exactly the failure mode we want to
+// avoid. This rewrite explicitly invites a fresh look at the full diff,
+// rewards finding new issues over confirming the prior verdict, and only
+// uses the (1)/(2)/(3) framing as "pay particular attention to" hints
+// rather than the sole acceptable scope.
+//
+// Token-cost cuts vs the prior shape: the goal re-statement, the persona, the
+// per-issue citation/rubric instructions, and the full JSON output spec are
+// dropped. They were established in the fresh prompt that started the session
+// and are already in the model's context window; restating them adds noise
+// without signal. A single-line "same severity rubric and JSON output format"
+// pointer keeps format compliance anchored without re-pasting the spec.
+//
+// The skip-test-execution suffix and the scope suffix (test-quality +
+// cross-service clauses, derived from opts) ARE conditionally appended,
+// however — round-8 codex+cursor consensus flagged that on a silent resume
+// fallback (resume_status="fallback") the model reads this prompt cold and
+// missing those clauses gives it materially less guidance than a real fresh
+// review. The few extra tokens on a successfully-resumed turn are noise vs
+// the safety net for the fallback case. Skip-test/scope clauses fire only
+// when opts.SkipTestExecution is set or the scope-hint lists are non-empty,
+// so the empty-opts case still produces the minimal prompt.
+//
+// The opts argument is preserved on the signature for symmetry with the
+// fresh prompt and so callers don't need a separate dispatch — but its
+// goal serves two purposes on a follow-up turn, depending on whether it's
+// empty:
+//
+//   - empty goal: the original PR-level goal was established in the fresh
+//     prompt that started the session, and the resumed model already has it
+//     in context. Don't re-state it — that's redundant and was the round-2
+//     eval's bias-amplifier. The no-prior-context escape hatch below handles
+//     the silent-fallback case via the model's first-pass review behavior.
+//
+//   - non-empty goal: the caller is using the goal channel for per-turn
+//     metadata, not PR-level intent. The canonical example is /pr-polish
+//     on rounds 2+: it passes the action history (what prior rounds fixed,
+//     skipped, and why) so the resumed model knows which of its own prior
+//     findings have already been addressed and doesn't waste a turn
+//     re-flagging them. Embed the goal text as "Context for this turn: ..."
+//     so the model treats it as orchestrator-supplied state, not as the
+//     original PR goal restated.
+//
+// opts.SkipTestExecution and the scope-hint fields ARE conditionally
+// rendered (see the design intent above) so a fallback session reads them
+// cold.
+func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
+	prompt := `Continue the review on the same diff against the same goal as the prior turn.`
+	if goal != "" {
+		prompt += "\n\nContext for this turn: " + goal
+	}
+	prompt += `
+
+If you have no prior review context for this diff (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: examine the entire diff and apply the standard severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.
+
+Re-review the full diff with fresh eyes — including code you previously accepted. Pay particular attention to:
+1. Issues introduced by new commits since the prior turn.
+2. Items you flagged before that you now have stronger evidence for — cite the file:line that proves it.
+3. Anything you skipped or dismissed before that, on a second look, warrants flagging.
+
+Avoid restating prior findings verbatim, but DO surface any new issues you spot — including in code you already accepted. A second pass that finds something the first pass missed is more useful than one that just confirms the prior verdict.
+
+Apply the same severity rubric and JSON output format as the prior turn.`
+	// Append the scope suffix and skip-test-execution suffix here, even
+	// though a successfully resumed session already has them in context.
+	// On a silent resume fallback (resume_status="fallback"), the model
+	// is reading this prompt for the first time — without these clauses
+	// the no-prior-context escape hatch would tell it to "treat as a
+	// first-pass review" while withholding the test-quality and
+	// cross-service hints a real fresh review would have. Round-8
+	// codex+cursor consensus flagged that contradiction. The few extra
+	// tokens are noise compared to a fresh review missing structural
+	// findings outside the immediately changed code.
+	if opts.SkipTestExecution {
+		prompt += skipTestExecutionSuffix
+	}
+	return prompt + buildScopeSuffix(opts)
+}
+
+func jsonOutputRules() string {
+	return `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:
@@ -495,12 +613,13 @@ You MUST respond with valid JSON in this exact format:
 
 // ReviewResult contains the result of a review turn.
 type ReviewResult struct {
-	ResponseText string // Full response text
-	ErrorMessage string // Error from the agent backend (empty on success)
-	Success      bool
+	ResponseText string
+	ErrorMessage string
+	ResumeStatus ResumeStatus
 	DurationMs   int64
 	InputTokens  int64
 	OutputTokens int64
+	Success      bool
 }
 
 // Reviewer wraps an agent backend for code review operations.
@@ -509,6 +628,7 @@ type Reviewer struct {
 	backend        Backend
 	renderer       *render.Renderer
 	lastSessionID  string
+	resumeStatus   ResumeStatus
 	effectiveModel string // updated from backend session info when available
 	config         Config
 }
@@ -612,7 +732,11 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	status += ")..."
 	r.renderer.Status(status)
 	handler := r.newEventHandler()
+	r.resumeStatus = ""
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
+	if result != nil && result.ResumeStatus != "" {
+		r.resumeStatus = result.ResumeStatus
+	}
 	if err != nil {
 		if result != nil {
 			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
@@ -623,12 +747,34 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	return result, nil
 }
 
+// ResumeStatus returns the most recently observed resume status from a
+// completed RunPrompt turn:
+//   - ResumeStatusOK       when a requested resume succeeded
+//   - ResumeStatusFallback when the backend cold-started after a failed resume
+//   - ResumeStatusUnverified when resume was requested but the backend
+//     reached an early error before any Ready event could confirm the session id
+//   - "" when no resume was requested
+//
+// Note: the field is cleared at the start of every turn (see ReviewWithResult
+// and FollowUp) and only repopulated from result.ResumeStatus once RunPrompt
+// returns. Callers that need a non-empty answer when a turn panics or aborts
+// mid-flight should fall back to ResumeStatusUnverified themselves when
+// config.ResumeSessionID was set; the panic-recovery guard in
+// bramble/cmd/codereview/codereview.go is the canonical example.
+func (r *Reviewer) ResumeStatus() ResumeStatus {
+	return r.resumeStatus
+}
+
 // FollowUp sends a follow-up message to the existing backend session.
 func (r *Reviewer) FollowUp(ctx context.Context, prompt string) (*ReviewResult, error) {
 	defer r.renderer.Reset()
 
 	handler := r.newEventHandler()
+	r.resumeStatus = ""
 	result, err := r.backend.RunPrompt(ctx, prompt, handler)
+	if result != nil && result.ResumeStatus != "" {
+		r.resumeStatus = result.ResumeStatus
+	}
 	if err != nil {
 		if result != nil {
 			r.renderer.TurnCompleteWithTokens(result.Success, result.DurationMs, result.InputTokens, result.OutputTokens)
