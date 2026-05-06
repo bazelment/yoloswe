@@ -84,7 +84,7 @@ type ResultEnvelope struct {
 	Backend       string         `json:"backend"`
 	Model         string         `json:"model"`
 	SessionID     string         `json:"session_id,omitempty"`
-	ResumeStatus  string         `json:"resume_status,omitempty"`
+	ResumeStatus  ResumeStatus   `json:"resume_status,omitempty"`
 	Error         string         `json:"error,omitempty"`
 	Review        ReviewBody     `json:"review"`
 	SchemaVersion int            `json:"schema_version"`

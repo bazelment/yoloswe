@@ -99,6 +99,14 @@ type Config struct {
 	SkipTestExecution bool
 }
 
+// ResumeStatus records whether a requested backend resume succeeded.
+type ResumeStatus string
+
+const (
+	ResumeStatusOK       ResumeStatus = "ok"
+	ResumeStatusFallback ResumeStatus = "fallback"
+)
+
 // buildGoalText formats the goal text for review prompts.
 func buildGoalText(goal string) string {
 	if goal == "" {
@@ -520,7 +528,7 @@ You MUST respond with valid JSON in this exact format:
 type ReviewResult struct {
 	ResponseText string
 	ErrorMessage string
-	ResumeStatus string
+	ResumeStatus ResumeStatus
 	DurationMs   int64
 	InputTokens  int64
 	OutputTokens int64
@@ -533,7 +541,7 @@ type Reviewer struct {
 	backend        Backend
 	renderer       *render.Renderer
 	lastSessionID  string
-	resumeStatus   string
+	resumeStatus   ResumeStatus
 	effectiveModel string // updated from backend session info when available
 	config         Config
 }
@@ -653,7 +661,7 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 
 // ResumeStatus returns "ok" when a requested resume succeeded, "fallback"
 // when the backend had to cold-start, or "" when no resume was requested.
-func (r *Reviewer) ResumeStatus() string {
+func (r *Reviewer) ResumeStatus() ResumeStatus {
 	return r.resumeStatus
 }
 

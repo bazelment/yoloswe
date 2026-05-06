@@ -197,87 +197,35 @@ func (c *Client) Info() *ConnectionInfo {
 
 // CreateThread creates a new conversation thread.
 func (c *Client) CreateThread(ctx context.Context, opts ...ThreadOption) (*Thread, error) {
-	c.mu.RLock()
-	if !c.started {
-		c.mu.RUnlock()
-		return nil, ErrNotStarted
+	if err := c.ensureReadyForThreadRequest(); err != nil {
+		return nil, err
 	}
-	if c.stopping {
-		c.mu.RUnlock()
-		return nil, ErrStopping
-	}
-	c.mu.RUnlock()
 
-	// Build thread config
 	cfg := defaultCodexThreadConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	// Build params
-	params := ThreadStartParams{
-		Model:         cfg.Model,
-		ModelProvider: cfg.ModelProvider,
-		Profile:       cfg.Profile,
-		CWD:           cfg.WorkDir,
-		Sandbox:       cfg.Sandbox,
-		Config:        cfg.Config,
-	}
+	params := threadStartParamsFromConfig(cfg)
 
-	if cfg.ApprovalPolicy != "" {
-		params.ApprovalPolicy = string(cfg.ApprovalPolicy)
-	}
-
-	// Send thread/start request
 	resp, err := c.sendRequestAndWait(ctx, "thread/start", params)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse response
 	var threadResp ThreadStartResponse
 	if err := unmarshalRaw(resp.Result, &threadResp); err != nil {
 		return nil, &ProtocolError{Message: "failed to parse thread/start response", Cause: err}
 	}
 
-	// Create thread object
-	thread := newThread(c, threadResp.Thread.ID, cfg)
-	thread.setInfo(&threadResp.Thread)
-
-	// Register thread and apply any early MCP startup signal
-	c.mu.Lock()
-	c.threads[thread.id] = thread
-	_, wasReadyBefore := c.readyBefore[thread.id]
-	delete(c.readyBefore, thread.id)
-	c.mu.Unlock()
-
-	if wasReadyBefore {
-		thread.setReady()
-	}
-
-	// Emit thread started event
-	c.emit(ThreadStartedEvent{
-		ThreadID:      threadResp.Thread.ID,
-		Model:         threadResp.Model,
-		ModelProvider: threadResp.ModelProvider,
-		WorkDir:       threadResp.CWD,
-	})
-
-	return thread, nil
+	return c.registerThreadResponse(threadResp, cfg), nil
 }
 
 // ResumeThread loads an existing conversation thread.
 func (c *Client) ResumeThread(ctx context.Context, threadID string, opts ...ThreadOption) (*Thread, error) {
-	c.mu.RLock()
-	if !c.started {
-		c.mu.RUnlock()
-		return nil, ErrNotStarted
+	if err := c.ensureReadyForThreadRequest(); err != nil {
+		return nil, err
 	}
-	if c.stopping {
-		c.mu.RUnlock()
-		return nil, ErrStopping
-	}
-	c.mu.RUnlock()
 
 	cfg := defaultCodexThreadConfig()
 	for _, opt := range opts {
@@ -285,16 +233,8 @@ func (c *Client) ResumeThread(ctx context.Context, threadID string, opts ...Thre
 	}
 
 	params := ThreadResumeParams{
-		ThreadID:      threadID,
-		Model:         cfg.Model,
-		ModelProvider: cfg.ModelProvider,
-		Profile:       cfg.Profile,
-		CWD:           cfg.WorkDir,
-		Sandbox:       cfg.Sandbox,
-		Config:        cfg.Config,
-	}
-	if cfg.ApprovalPolicy != "" {
-		params.ApprovalPolicy = string(cfg.ApprovalPolicy)
+		ThreadStartParams: threadStartParamsFromConfig(cfg),
+		ThreadID:          threadID,
 	}
 
 	resp, err := c.sendRequestAndWait(ctx, "thread/resume", params)
@@ -307,6 +247,37 @@ func (c *Client) ResumeThread(ctx context.Context, threadID string, opts ...Thre
 		return nil, &ProtocolError{Message: "failed to parse thread/resume response", Cause: err}
 	}
 
+	return c.registerThreadResponse(threadResp, cfg), nil
+}
+
+func (c *Client) ensureReadyForThreadRequest() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.started {
+		return ErrNotStarted
+	}
+	if c.stopping {
+		return ErrStopping
+	}
+	return nil
+}
+
+func threadStartParamsFromConfig(cfg ThreadConfig) ThreadStartParams {
+	params := ThreadStartParams{
+		Model:         cfg.Model,
+		ModelProvider: cfg.ModelProvider,
+		Profile:       cfg.Profile,
+		CWD:           cfg.WorkDir,
+		Sandbox:       cfg.Sandbox,
+		Config:        cfg.Config,
+	}
+	if cfg.ApprovalPolicy != "" {
+		params.ApprovalPolicy = string(cfg.ApprovalPolicy)
+	}
+	return params
+}
+
+func (c *Client) registerThreadResponse(threadResp ThreadStartResponse, cfg ThreadConfig) *Thread {
 	thread := newThread(c, threadResp.Thread.ID, cfg)
 	thread.setInfo(&threadResp.Thread)
 
@@ -327,7 +298,7 @@ func (c *Client) ResumeThread(ctx context.Context, threadID string, opts ...Thre
 		WorkDir:       threadResp.CWD,
 	})
 
-	return thread, nil
+	return thread
 }
 
 // GetThread retrieves an existing thread by ID.

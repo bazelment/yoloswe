@@ -30,16 +30,29 @@ func (b *cursorBackend) Stop() error {
 }
 
 func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
+	opts := b.baseSessionOptions()
+	resumeOpts := opts
+	var resumeStatus ResumeStatus
+	if b.config.ResumeSessionID != "" {
+		resumeOpts = append(append([]cursor.SessionOption{}, opts...), cursor.WithResume(b.config.ResumeSessionID))
+		resumeStatus = ResumeStatusOK
+	}
+
+	result, err := b.runPromptWithOptions(ctx, prompt, handler, resumeOpts, resumeStatus)
+	if err != nil && b.config.ResumeSessionID != "" && isCursorResumeNotFound(err) {
+		slog.Warn("cursor resume failed; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
+		return b.runPromptWithOptions(ctx, prompt, handler, opts, ResumeStatusFallback)
+	}
+	return result, err
+}
+
+func (b *cursorBackend) baseSessionOptions() []cursor.SessionOption {
 	var opts []cursor.SessionOption
 	if b.config.Model != "" {
 		opts = append(opts, cursor.WithModel(b.config.Model))
 	}
 	if b.config.WorkDir != "" {
 		opts = append(opts, cursor.WithWorkDir(b.config.WorkDir))
-	}
-	baseOpts := append([]cursor.SessionOption{}, opts...)
-	if b.config.ResumeSessionID != "" {
-		opts = append(opts, cursor.WithResume(b.config.ResumeSessionID))
 	}
 	// Non-interactive flags for automation:
 	// --trust: trust the workspace without prompting
@@ -50,21 +63,10 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	// Codex—see Config doc in reviewer.go). With or without --force, the
 	// session ends without result when --sandbox is enabled.
 	opts = append(opts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(stderrPrefixHandler("cursor")))
-	baseOpts = append(baseOpts, cursor.WithTrust(), cursor.WithForce(), cursor.WithStderrHandler(stderrPrefixHandler("cursor")))
-
-	resumeStatus := ""
-	if b.config.ResumeSessionID != "" {
-		resumeStatus = "ok"
-	}
-	result, err := b.runPromptWithOptions(ctx, prompt, handler, opts, resumeStatus)
-	if err != nil && b.config.ResumeSessionID != "" && isCursorResumeNotFound(err) {
-		slog.Warn("cursor resume failed; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
-		return b.runPromptWithOptions(ctx, prompt, handler, baseOpts, "fallback")
-	}
-	return result, err
+	return opts
 }
 
-func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string, handler EventHandler, opts []cursor.SessionOption, resumeStatus string) (*ReviewResult, error) {
+func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string, handler EventHandler, opts []cursor.SessionOption, resumeStatus ResumeStatus) (*ReviewResult, error) {
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("cursor query failed: %w", err)
@@ -101,10 +103,11 @@ func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string,
 }
 
 func isCursorResumeNotFound(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "session not found") ||
-		strings.Contains(msg, "chat not found") ||
-		strings.Contains(msg, "resume") && (strings.Contains(msg, "not found") || strings.Contains(msg, "missing") || strings.Contains(msg, "expired"))
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "session not found") ||
+		strings.Contains(lower, "chat not found") ||
+		strings.Contains(lower, "resume") && isResumeUnavailableMessage(msg)
 }
 
 // cursorEventAdapter filters cursor events, handling ReadyEvent out-of-band

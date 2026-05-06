@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 )
@@ -52,7 +51,7 @@ func (b *codexBackend) Stop() error {
 
 func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
 	// Create a new thread if none exists, or reuse for follow-ups.
-	resumeStatus := ""
+	var resumeStatus ResumeStatus
 	if b.thread == nil {
 		threadOpts := []codex.ThreadOption{
 			codex.WithModel(b.config.Model),
@@ -66,10 +65,10 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 			thread, err = b.client.ResumeThread(ctx, b.config.ResumeSessionID, threadOpts...)
 			if err != nil && isCodexResumeNotFound(err) {
 				slog.Warn("codex resume failed; falling back to fresh thread", "session_id", b.config.ResumeSessionID, "error", err.Error())
-				resumeStatus = "fallback"
+				resumeStatus = ResumeStatusFallback
 				thread, err = b.client.CreateThread(ctx, threadOpts...)
 			} else if err == nil {
-				resumeStatus = "ok"
+				resumeStatus = ResumeStatusOK
 			}
 		} else {
 			thread, err = b.client.CreateThread(ctx, threadOpts...)
@@ -125,9 +124,7 @@ func isCodexResumeNotFound(err error) bool {
 	}
 	var rpcErr *codex.RPCError
 	if errors.As(err, &rpcErr) {
-		msg := strings.ToLower(rpcErr.Message)
-		return strings.Contains(msg, "not found") || strings.Contains(msg, "missing") || strings.Contains(msg, "expired")
+		return isResumeUnavailableMessage(rpcErr.Message)
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "missing") || strings.Contains(msg, "expired")
+	return isResumeUnavailableMessage(err.Error())
 }

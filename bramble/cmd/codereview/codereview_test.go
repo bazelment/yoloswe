@@ -361,7 +361,7 @@ func TestBuildPromptForRun_WidensWithRealHintsFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("review goal", path, false)
+	got := buildPromptForRun("review goal", path, false, promptStyleFresh)
 	if !strings.Contains(got, "## Test quality") {
 		t.Errorf("prompt missing test-quality clause; got:\n%s", got)
 	}
@@ -394,7 +394,7 @@ func TestBuildPromptForRun_V2HintsThreadCallerCalleeFraming(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("review goal", path, false)
+	got := buildPromptForRun("review goal", path, false, promptStyleFresh)
 	if !strings.Contains(got, "## Cross-service contract sweep") {
 		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
 	}
@@ -413,7 +413,7 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 	// Empty hints path must produce today's narrow prompt, byte-equal to
 	// the legacy BuildJSONPrompt output. This is the no-regressions
 	// guarantee for callers that haven't opted into the wider scope.
-	got := buildPromptForRun("g", "", false)
+	got := buildPromptForRun("g", "", false, promptStyleFresh)
 	want := reviewer.BuildJSONPrompt("g")
 	if got != want {
 		t.Errorf("empty hints path must equal legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -421,7 +421,7 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 }
 
 func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
-	got := buildPromptForRun("g", "", true, "follow-up")
+	got := buildPromptForRun("g", "", true, promptStyleFollowUp)
 	if !strings.Contains(got, "The previous round's findings were addressed") {
 		t.Errorf("follow-up prompt missing opening line; got:\n%s", got)
 	}
@@ -436,6 +436,26 @@ func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 	}
 }
 
+func TestNormalizePromptStyle_DefaultsResumeToFollowUp(t *testing.T) {
+	got, err := normalizePromptStyle("sess-1", "fresh")
+	if err != nil {
+		t.Fatalf("normalizePromptStyle failed: %v", err)
+	}
+	if got != promptStyleFollowUp {
+		t.Fatalf("normalizePromptStyle = %q, want %q", got, promptStyleFollowUp)
+	}
+}
+
+func TestNormalizePromptStyle_RejectsInvalidBeforeStart(t *testing.T) {
+	_, err := normalizePromptStyle("", "sideways")
+	if err == nil {
+		t.Fatal("normalizePromptStyle succeeded for invalid style")
+	}
+	if !strings.Contains(err.Error(), "invalid --resume-prompt-style") {
+		t.Fatalf("normalizePromptStyle error = %v", err)
+	}
+}
+
 func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
 	// A malformed hints file is the same outcome as no hints file: the
 	// legacy narrow prompt. The slog fallback warning is exercised by
@@ -446,7 +466,7 @@ func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("g", path, true)
+	got := buildPromptForRun("g", path, true, promptStyleFresh)
 	want := reviewer.BuildJSONPromptWithOptions("g", true)
 	if got != want {
 		t.Errorf("malformed hints must fall back to legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)

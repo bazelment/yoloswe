@@ -34,6 +34,13 @@ var (
 	resumePromptStyle string
 )
 
+type promptStyle string
+
+const (
+	promptStyleFresh    promptStyle = "fresh"
+	promptStyleFollowUp promptStyle = "follow-up"
+)
+
 // Cmd is the cobra command for code review.
 var Cmd = &cobra.Command{
 	Use:          "code-review",
@@ -135,6 +142,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		return emitEarlyFailure(err, "", emitEnvelope)
 	}
 
+	style, err := normalizePromptStyle(resumeSessionID, resumePromptStyle)
+	if err != nil {
+		return emitEarlyFailure(err, model, emitEnvelope)
+	}
+
 	slog.Info("code-review run start",
 		"pid", os.Getpid(),
 		"cwd", redactPath(workDir),
@@ -188,14 +200,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	defer r.Stop()
 
-	promptStyle := resumePromptStyle
-	if resumeSessionID != "" && promptStyle == "fresh" {
-		promptStyle = "follow-up"
-	}
-	if promptStyle != "fresh" && promptStyle != "follow-up" {
-		return emitEarlyFailure(fmt.Errorf("invalid --resume-prompt-style %q (want fresh or follow-up)", resumePromptStyle), earlyModel, emitEnvelope)
-	}
-	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution, promptStyle)
+	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution, style)
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
@@ -349,12 +354,25 @@ func reportEnvelopePrintError(printErr error) {
 // Without this seam, a regression that quietly stops threading
 // scopeHintsFile into the reviewer would slip through helper-level tests
 // that only exercise loadPromptOptions in isolation.
-func buildPromptForRun(goal, hintsPath string, skipTestExecution bool, promptStyle ...string) string {
+func buildPromptForRun(goal, hintsPath string, skipTestExecution bool, style promptStyle) string {
 	opts := loadPromptOptions(hintsPath, skipTestExecution)
-	if len(promptStyle) > 0 && promptStyle[0] == "follow-up" {
+	if style == promptStyleFollowUp {
 		return reviewer.BuildFollowUpJSONPromptWithScope(goal, opts)
 	}
 	return reviewer.BuildJSONPromptWithScope(goal, opts)
+}
+
+func normalizePromptStyle(resumeSessionID, rawStyle string) (promptStyle, error) {
+	style := promptStyle(rawStyle)
+	if resumeSessionID != "" && style == promptStyleFresh {
+		return promptStyleFollowUp, nil
+	}
+	switch style {
+	case promptStyleFresh, promptStyleFollowUp:
+		return style, nil
+	default:
+		return "", fmt.Errorf("invalid --resume-prompt-style %q (want fresh or follow-up)", rawStyle)
+	}
 }
 
 // loadPromptOptions reads the scope-hints file when set and converts it to

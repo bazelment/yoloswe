@@ -71,17 +71,17 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		sessionOpts = append(sessionOpts, acp.WithSessionCWD(b.config.WorkDir))
 	}
 
-	resumeStatus := ""
+	var resumeStatus ResumeStatus
 	var session *acp.Session
 	var err error
 	if b.config.ResumeSessionID != "" {
 		session, err = b.client.LoadSession(ctx, b.config.ResumeSessionID, sessionOpts...)
 		if err != nil && errors.Is(err, acp.ErrSessionNotFound) {
 			slog.Warn("gemini resume unavailable; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
-			resumeStatus = "fallback"
+			resumeStatus = ResumeStatusFallback
 			session, err = b.client.NewSession(ctx, sessionOpts...)
 		} else if err == nil {
-			resumeStatus = "ok"
+			resumeStatus = ResumeStatusOK
 		}
 	} else {
 		session, err = b.client.NewSession(ctx, sessionOpts...)

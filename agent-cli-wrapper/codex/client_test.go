@@ -115,11 +115,13 @@ func TestClient_ResumeThread_NotStarted(t *testing.T) {
 
 func TestThreadResumeParams_JSONShape(t *testing.T) {
 	params := ThreadResumeParams{
-		ThreadID:       "thread-123",
-		Model:          "gpt-test",
-		CWD:            "/tmp/work",
-		ApprovalPolicy: "never",
-		Config:         map[string]interface{}{"foo": "bar"},
+		ThreadStartParams: ThreadStartParams{
+			Model:          "gpt-test",
+			CWD:            "/tmp/work",
+			ApprovalPolicy: "never",
+			Config:         map[string]interface{}{"foo": "bar"},
+		},
+		ThreadID: "thread-123",
 	}
 	data, err := json.Marshal(params)
 	require.NoError(t, err)
