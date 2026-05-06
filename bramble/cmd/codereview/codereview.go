@@ -96,15 +96,23 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
 		w, closeW, openErr := openEnvelopeWriter()
 		if openErr != nil {
-			slog.Error("failed to open envelope-file", "error", openErr.Error())
+			// --envelope-file path is unwritable. Don't return empty —
+			// codex round 12 caught that finalizeEnvelope would then call
+			// emitEnvelope a second time for the synthesized fallback,
+			// which would hit the same broken sink and leave automation
+			// with no machine-readable result at all. Last-ditch fallback:
+			// dump the envelope to stdout so the orchestrator at least
+			// has something parseable on the streamed channel.
+			slog.Error("failed to open envelope-file; falling back to stdout", "error", openErr.Error())
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to open envelope-file: %w", openErr)
 			}
-			// Leave envelopeWritten=false so finalizeEnvelope can synthesize
-			// an error envelope on the way out. Without that, automation
-			// reading --envelope-file would see an empty/unchanged file
-			// AND no synthesized fallback — the worst-of-both case codex
-			// flagged on round 8.
+			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
+				reportEnvelopePrintError(printErr)
+				// stdout itself failed — nothing more we can do.
+				return
+			}
+			envelopeWritten = true
 			return
 		}
 		defer closeW()
@@ -113,7 +121,15 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to write JSON envelope: %w", err)
 			}
-			// Same rationale as the open-failure branch above.
+			// Mid-write failure leaves the file in an indeterminate state
+			// (partial JSON or empty after O_TRUNC). Same fallback as the
+			// open-failure branch: emit the envelope to stdout so the
+			// orchestrator's stdout-streaming path still gets the result.
+			if printErr := reviewer.PrintJSONResult(os.Stdout, env); printErr != nil {
+				reportEnvelopePrintError(printErr)
+				return
+			}
+			envelopeWritten = true
 			return
 		}
 		// Mark written only after a successful flush. A partial write would
