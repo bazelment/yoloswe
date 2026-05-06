@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/jiradozer"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 // TestBootstrapPromptParity catches prompt drift: a bootstrap → YAML →
@@ -253,4 +255,99 @@ func TestBootstrapDefaultPath(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dir, "jiradozer.yaml"))
 	require.NoError(t, err)
 	assert.Contains(t, string(got), "jiradozer bootstrap")
+}
+
+func TestBootstrapWithRepoCreatesWorktreeAndKeepsConfigOutsideRepo(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+	wtRoot := t.TempDir()
+	t.Setenv("WT_ROOT", wtRoot)
+	outputDir := t.TempDir()
+	t.Chdir(outputDir)
+	remoteDir := newBootstrapRemote(t)
+
+	args := &bootstrapArgs{}
+	configPath := "jiradozer.yaml"
+	cmd := newBootstrapCommand(args, &configPath)
+	cmd.SetArgs([]string{"--repo", remoteDir})
+	require.NoError(t, cmd.Execute())
+
+	repoName := wt.GetRepoNameFromURL(remoteDir)
+	mainPath := filepath.Join(wtRoot, repoName, "main")
+	configPathInRepoContainer := filepath.Join(wtRoot, repoName, "jiradozer.yaml")
+	require.FileExists(t, filepath.Join(wtRoot, repoName, ".bare", "HEAD"))
+	require.DirExists(t, mainPath)
+	require.FileExists(t, configPathInRepoContainer)
+	require.NoFileExists(t, filepath.Join(outputDir, "jiradozer.yaml"))
+	require.NoFileExists(t, filepath.Join(mainPath, "jiradozer.yaml"))
+
+	cfg, err := jiradozer.LoadConfig(configPathInRepoContainer)
+	require.NoError(t, err)
+	assert.Equal(t, mainPath, cfg.WorkDir)
+
+	git := &wt.DefaultGitRunner{}
+	result, err := git.Run(context.Background(), []string{"status", "--porcelain"}, mainPath)
+	require.NoError(t, err)
+	assert.Empty(t, result.Stdout, "bootstrap --repo should leave the cloned worktree clean")
+}
+
+func TestBootstrapWithRepoReusesExistingWorktree(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test")
+	wtRoot := t.TempDir()
+	t.Setenv("WT_ROOT", wtRoot)
+	outputDir := t.TempDir()
+	t.Chdir(outputDir)
+	remoteDir := newBootstrapRemote(t)
+
+	args := &bootstrapArgs{}
+	configPath := "jiradozer.yaml"
+	cmd := newBootstrapCommand(args, &configPath)
+	cmd.SetArgs([]string{"--repo", remoteDir})
+	require.NoError(t, cmd.Execute())
+
+	cmd = newBootstrapCommand(&bootstrapArgs{}, &configPath)
+	cmd.SetArgs([]string{"--repo", remoteDir})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+
+	cmd = newBootstrapCommand(&bootstrapArgs{}, &configPath)
+	cmd.SetArgs([]string{"--repo", remoteDir, "--force"})
+	require.NoError(t, cmd.Execute())
+}
+
+func TestBootstrapWithRepoExpandsOwnerRepoShorthand(t *testing.T) {
+	assert.Equal(t, "https://github.com/owner/repo.git", normalizeRepoURL("owner/repo"))
+	assert.Equal(t, "https://example.com/owner/repo.git", normalizeRepoURL("https://example.com/owner/repo.git"))
+	assert.Equal(t, "git@github.com:owner/repo.git", normalizeRepoURL("git@github.com:owner/repo.git"))
+}
+
+func newBootstrapRemote(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	git := &wt.DefaultGitRunner{}
+
+	remoteDir := filepath.Join(t.TempDir(), "repo.git")
+	require.NoError(t, os.MkdirAll(remoteDir, 0o755))
+	_, err := git.Run(ctx, []string{"init", "--bare"}, remoteDir)
+	require.NoError(t, err)
+
+	setupDir := t.TempDir()
+	_, err = git.Run(ctx, []string{"clone", remoteDir, setupDir}, "")
+	require.NoError(t, err)
+	_, err = git.Run(ctx, []string{"config", "user.email", "test@example.com"}, setupDir)
+	require.NoError(t, err)
+	_, err = git.Run(ctx, []string{"config", "user.name", "Test User"}, setupDir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(setupDir, "README.md"), []byte("# Test Repo\n"), 0o644))
+	_, err = git.Run(ctx, []string{"add", "."}, setupDir)
+	require.NoError(t, err)
+	_, err = git.Run(ctx, []string{"commit", "-m", "initial commit"}, setupDir)
+	require.NoError(t, err)
+	_, err = git.Run(ctx, []string{"branch", "-M", "main"}, setupDir)
+	require.NoError(t, err)
+	_, err = git.Run(ctx, []string{"push", "-u", "origin", "main"}, setupDir)
+	require.NoError(t, err)
+	_, err = git.Run(ctx, []string{"symbolic-ref", "HEAD", "refs/heads/main"}, remoteDir)
+	require.NoError(t, err)
+	return remoteDir
 }

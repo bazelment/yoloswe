@@ -385,13 +385,9 @@ func runMultiIssue(ctx context.Context, app *cliapp.App, issueTracker tracker.Is
 // resolveWTManager detects the wt-managed repository from the current
 // working directory, using the same logic as `wt` CLI.
 func resolveWTManager() (*wt.Manager, error) {
-	wtRoot := os.Getenv("WT_ROOT")
-	if wtRoot == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("cannot determine home directory: %w", err)
-		}
-		wtRoot = filepath.Join(home, "worktrees")
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return nil, err
 	}
 	ctx := context.Background()
 	repoName, err := wt.GetCurrentRepoName(ctx, &wt.DefaultGitRunner{}, wtRoot)
@@ -399,6 +395,18 @@ func resolveWTManager() (*wt.Manager, error) {
 		return nil, fmt.Errorf("not in a wt-managed repository (WT_ROOT=%s): %w", wtRoot, err)
 	}
 	return wt.NewManager(wtRoot, repoName), nil
+}
+
+func resolveWTRoot() (string, error) {
+	wtRoot := os.Getenv("WT_ROOT")
+	if wtRoot != "" {
+		return wtRoot, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return filepath.Join(home, "worktrees"), nil
 }
 
 // buildChildArgs constructs CLI flags to propagate from the parent

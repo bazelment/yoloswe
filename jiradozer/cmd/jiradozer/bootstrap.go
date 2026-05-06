@@ -1,21 +1,27 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/bazelment/yoloswe/jiradozer"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 // bootstrapArgs holds bootstrap-only flags.
 type bootstrapArgs struct {
 	output string
+	repo   string
 	force  bool
 }
 
@@ -28,19 +34,16 @@ comment templates. By default bootstrap writes to --config; use --output
 to write somewhere else. Edit the prompts to taste; the generated file is
 the source of truth for what the agent says.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path := args.output
-			if path == "" {
-				path = *configPath
-			}
-			if path == "" {
-				path = "jiradozer.yaml"
+			path, workDir, err := resolveBootstrapTarget(cmd.Context(), args, *configPath)
+			if err != nil {
+				return err
 			}
 			if _, err := os.Stat(path); err == nil && !args.force {
 				return fmt.Errorf("%s already exists (use --force to overwrite)", path)
 			} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("stat %s: %w", path, err)
 			}
-			content, err := bootstrapYAML()
+			content, err := bootstrapYAML(workDir)
 			if err != nil {
 				return err
 			}
@@ -53,22 +56,86 @@ the source of truth for what the agent says.`,
 	}
 	cmd.SilenceUsage = true
 	cmd.Flags().StringVarP(&args.output, "output", "o", "", "Path to write the starter config; overrides --config")
+	cmd.Flags().StringVar(&args.repo, "repo", "", "Optional GitHub repo URL or owner/repo shorthand. Bootstraps a wt-managed worktree under $WT_ROOT (or ~/worktrees), reusing it if present, and points work_dir at that checkout.")
 	cmd.Flags().BoolVarP(&args.force, "force", "f", false, "Overwrite the output file if it already exists")
 	return cmd
+}
+
+func resolveBootstrapTarget(ctx context.Context, args *bootstrapArgs, configPath string) (configOutputPath string, workDir string, err error) {
+	path := args.output
+	if path == "" {
+		path = configPath
+	}
+	if path == "" {
+		path = "jiradozer.yaml"
+	}
+	if args.repo == "" {
+		return path, "", nil
+	}
+
+	mainPath, err := bootstrapRepoWorktree(ctx, args.repo)
+	if err != nil {
+		return "", "", err
+	}
+	if args.output == "" {
+		path = filepath.Join(filepath.Dir(mainPath), "jiradozer.yaml")
+	}
+	return path, mainPath, nil
+}
+
+func bootstrapRepoWorktree(ctx context.Context, repoArg string) (string, error) {
+	repoURL := normalizeRepoURL(repoArg)
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return "", err
+	}
+	mgr := wt.NewManager(wtRoot, wt.GetRepoNameFromURL(repoURL))
+	if _, err := os.Stat(mgr.BareDir()); err == nil {
+		defaultBranch, err := wt.GetDefaultBranch(ctx, mgr.GitRunner(), mgr.BareDir())
+		if err != nil {
+			return "", fmt.Errorf("detect default branch for existing repo: %w", err)
+		}
+		mainPath := filepath.Join(mgr.RepoDir(), defaultBranch)
+		if _, err := os.Stat(mainPath); err != nil {
+			return "", fmt.Errorf("existing repo worktree %s: %w", mainPath, err)
+		}
+		fmt.Printf("reusing existing repo at %s\n", mgr.RepoDir())
+		return mainPath, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
+	}
+	mainPath, err := mgr.Init(ctx, repoURL)
+	if err != nil {
+		return "", err
+	}
+	return mainPath, nil
+}
+
+var ownerRepoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+func normalizeRepoURL(repoArg string) string {
+	if ownerRepoPattern.MatchString(repoArg) {
+		return "https://github.com/" + repoArg + ".git"
+	}
+	return repoArg
 }
 
 // bootstrapYAML returns the bytes of a starter jiradozer.yaml. The output is
 // hand-laid-out (not produced by yaml.Marshal) so each field carries the
 // doc comment from its struct tag and optional fields can be emitted as
 // commented-out lines that hint at usage without forcing a value.
-func bootstrapYAML() ([]byte, error) {
+func bootstrapYAML(workDirOverride ...string) ([]byte, error) {
+	workDir := ""
+	if len(workDirOverride) > 0 {
+		workDir = workDirOverride[0]
+	}
 	var b strings.Builder
 	b.WriteString(bootstrapHeader)
 	b.WriteString(bootstrapTrackerBlock)
 	b.WriteString(bootstrapSourceBlock)
 	b.WriteString(bootstrapStatesBlock)
 	b.WriteString(bootstrapAgentBlock)
-	b.WriteString(bootstrapWorkDirBlock)
+	b.WriteString(renderWorkDirBlock(workDir))
 
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "plan",
@@ -240,8 +307,11 @@ agent:
 
 `
 
-// bootstrapWorkDirBlock — required scalars at the top level.
-const bootstrapWorkDirBlock = `# Working directory for the agent (where it runs commands and edits files).
+// renderWorkDirBlock renders required scalar config values. Empty workDir
+// preserves the historical bootstrap output exactly.
+func renderWorkDirBlock(workDir string) string {
+	if workDir == "" {
+		return `# Working directory for the agent (where it runs commands and edits files).
 work_dir: .
 
 # Default base branch for PRs.
@@ -255,6 +325,22 @@ base_branch: main
 #skip_phases: [plan]
 
 `
+	}
+	return fmt.Sprintf(`# Working directory for the agent (where it runs commands and edits files).
+work_dir: %s
+
+# Default base branch for PRs.
+base_branch: main
+
+# Optional phases to skip for every run. Skipped phases advance in-memory
+# workflow state and clear stale -inprogress labels, but do not write -done
+# labels; use tracker labels like jiradozer-plan-done for durable completion.
+# Tracker labels like jiradozer-skip-plan are also honored; label editors are
+# trusted to bypass the matching phase.
+#skip_phases: [plan]
+
+`, strconv.Quote(workDir))
+}
 
 // bootstrapTopLevelTail — top-level scalars that come after the step blocks.
 const bootstrapTopLevelTail = `# Total budget cap across all steps in a single workflow run.
