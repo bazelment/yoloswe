@@ -62,6 +62,11 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		var thread *codex.Thread
 		var err error
 		if b.config.ResumeSessionID != "" {
+			// Start at Unverified so a non-recognized error from
+			// ResumeThread (e.g. transport failure before the response
+			// arrives) still surfaces "resume was attempted" in the
+			// envelope, instead of letting omitempty erase the signal.
+			resumeStatus = ResumeStatusUnverified
 			thread, err = b.client.ResumeThread(ctx, b.config.ResumeSessionID, threadOpts...)
 			if err != nil && isCodexResumeNotFound(err) {
 				slog.Warn("codex resume failed; falling back to fresh thread", "session_id", b.config.ResumeSessionID, "error", err.Error())

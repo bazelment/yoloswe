@@ -35,6 +35,10 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	resumeOpts := opts
 	var resumeStatus ResumeStatus
 	if b.config.ResumeSessionID != "" {
+		// Start at Unverified so an early exit (no Ready event) still
+		// surfaces "resume was attempted" in the envelope, instead of
+		// letting omitempty erase the signal entirely.
+		resumeStatus = ResumeStatusUnverified
 		resumeOpts = append(append([]cursor.SessionOption{}, opts...), cursor.WithResume(b.config.ResumeSessionID))
 	}
 

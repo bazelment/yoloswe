@@ -14,6 +14,11 @@ load("@rules_go//go:def.bzl", "go_test")
 #       --test_tag_filters=integration --test_output=streamed
 go_test(
     name = "integration_test",
+    # Each subtest spends 10–60s waiting on a real model; the full suite
+    # sequences four backends, so use the "large" 900s budget rather than
+    # bazel's default 60s. Without this override the test fails with a
+    # timeout under standard `bazel test --test_tag_filters=integration`.
+    size = "large",
     srcs = ["resume_test.go"],
     # The agent CLIs need real user state to authenticate and run:
     #   HOME / USER          — cursor's `agent` launcher uses `set -u` and

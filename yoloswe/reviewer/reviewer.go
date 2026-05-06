@@ -100,11 +100,20 @@ type Config struct {
 }
 
 // ResumeStatus records whether a requested backend resume succeeded.
+//
+// The three values form a finalization order: a backend that was asked to
+// resume starts at Unverified; resumeStatusAfterSessionReady promotes that
+// to OK once a Ready event confirms the backend is on the requested session,
+// or to Fallback when the backend ran fresh because the requested session
+// was unavailable. A run that exits before any Ready event therefore
+// surfaces Unverified — distinguishable from a non-resume run, where the
+// status stays empty and is dropped by omitempty in the envelope.
 type ResumeStatus string
 
 const (
-	ResumeStatusOK       ResumeStatus = "ok"
-	ResumeStatusFallback ResumeStatus = "fallback"
+	ResumeStatusOK         ResumeStatus = "ok"
+	ResumeStatusFallback   ResumeStatus = "fallback"
+	ResumeStatusUnverified ResumeStatus = "unverified"
 )
 
 // buildGoalText formats the goal text for review prompts.

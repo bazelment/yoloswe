@@ -77,6 +77,10 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	var session *acp.Session
 	var err error
 	if b.config.ResumeSessionID != "" {
+		// Start at Unverified so a bridge crash or non-recognized error
+		// from LoadSession still surfaces "resume was attempted" in the
+		// envelope, instead of letting omitempty erase the signal.
+		resumeStatus = ResumeStatusUnverified
 		session, err = b.client.LoadSession(ctx, b.config.ResumeSessionID, sessionOpts...)
 		if err != nil && errors.Is(err, acp.ErrSessionNotFound) {
 			slog.Warn("gemini resume unavailable; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())

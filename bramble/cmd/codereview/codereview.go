@@ -81,7 +81,7 @@ func init() {
 	Cmd.Flags().BoolVar(&skipTestExecution, "skip-test-execution", false, "Instruct the reviewer not to run tests/build commands (caller runs them separately)")
 	Cmd.Flags().StringVar(&scopeHintsFile, "scope-hints-file", "", "JSON file with co-located test paths and cross-service packages to widen review scope; see reviewer.ScopeHints. Missing/malformed files log a warning and fall back to today's narrow review.")
 	Cmd.Flags().StringVar(&resumeSessionID, "resume-session-id", "", "Resume an existing backend session/thread id")
-	Cmd.Flags().StringVar(&resumePromptStyle, "resume-prompt-style", "fresh", "Prompt style when resuming: follow-up or fresh")
+	Cmd.Flags().StringVar(&resumePromptStyle, "resume-prompt-style", "fresh", "Prompt style when resuming: follow-up or fresh. Auto-promotes to follow-up when --resume-session-id is set without an explicit style.")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
@@ -210,6 +210,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			ErrorMessage: err.Error(),
 			ResumeStatus: r.ResumeStatus(),
 		}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+		emitVerdictLine(env)
 		emitEnvelope(env)
 		return fmt.Errorf("review failed: %w", err)
 	}
@@ -221,15 +222,28 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"issue_count", len(env.Review.Issues),
 		"max_severity", maxSeverity(env.Review.Issues),
 		"total_duration_ms", time.Since(runStart).Milliseconds())
-	// Print a plain-text verdict line so the Monitor tool can surface the
-	// outcome to Claude before the envelope is written.
-	if env.Status == reviewer.StatusOK {
-		fmt.Fprintf(os.Stdout, "verdict: %s (%d issues)\n", env.Review.Verdict, len(env.Review.Issues))
-	} else {
-		fmt.Fprintf(os.Stdout, "error: %s\n", env.Error)
-	}
+	emitVerdictLine(env)
 	emitEnvelope(env)
 	return retErr
+}
+
+// emitVerdictLine prints a single human-readable summary to stdout so the
+// Monitor tool can surface the outcome to Claude before the envelope file is
+// flushed. When --resume-session-id was set, the line ends with a
+// [resume=ok|fallback|unverified] suffix so callers streaming stdout can see
+// resume health without parsing the envelope. Both the success path
+// ("verdict: ...") and the bramble-level failure path ("error: ...") share
+// this so resume signal isn't lost on early errors.
+func emitVerdictLine(env reviewer.ResultEnvelope) {
+	resumeSuffix := ""
+	if env.ResumeStatus != "" {
+		resumeSuffix = fmt.Sprintf(" [resume=%s]", env.ResumeStatus)
+	}
+	if env.Status == reviewer.StatusOK {
+		fmt.Fprintf(os.Stdout, "verdict: %s (%d issues)%s\n", env.Review.Verdict, len(env.Review.Issues), resumeSuffix)
+	} else {
+		fmt.Fprintf(os.Stdout, "error: %s%s\n", env.Error, resumeSuffix)
+	}
 }
 
 // maxSeverity returns the highest severity label in issues, using the order

@@ -59,10 +59,16 @@ Create a fresh `$LOG_DIR` under `/tmp/code-review-eval-{timestamp}/`. For each c
 
 ```bash
 ENVELOPE_FILE="$LOG_DIR/{NAME}-envelope-r1.json"
+BRAMBLE_RUN_TAG="code-review-eval:$(git branch --show-current):{NAME}:r1" \
 WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
   {FLAGS} --verbose --timeout 10m --envelope-file "$ENVELOPE_FILE" \
   2>"$LOG_DIR/{NAME}-stderr-r1.txt"
 ```
+
+`BRAMBLE_RUN_TAG` mirrors the convention used by `/pr-polish`
+(`bramble_ops.py launch_env`): it propagates into `~/.bramble/logs/code-review/`
+so eval runs are greppable later. The tag format is
+`code-review-eval:{branch}:{name}:r{turn}`.
 
 Arm all three Monitors in the same turn so configs run in parallel. Set Monitor
 `timeout_ms=600000`. After all Monitors complete, extract each turn's `session_id`
@@ -84,7 +90,16 @@ to the codex SDK and not surfaced. Gemini reports tool calls via ACP.
 
 ## Step 2b: Re-run each config — turn 2 (resumed, follow-up prompt)
 
-Arm three Monitors in the same turn, mirroring Step 2a but with two changes:
+First, defensively rebuild bramble — the `bazel-bin/bramble/bramble_/bramble`
+symlink can be invalidated between turns by unrelated bazel activity in the
+same workspace, and the resulting "No such file or directory" error is silent
+in Monitor stdout:
+
+```bash
+bazel build //bramble:bramble  # cheap when up-to-date
+```
+
+Then arm three Monitors in the same turn, mirroring Step 2a but with two changes:
 
 - add `--resume-session-id "$SESSION_<NAME>"` to each command
 - write to `$LOG_DIR/{NAME}-envelope-r2.json` and `{NAME}-stderr-r2.txt`
@@ -98,6 +113,7 @@ mirror it with backend/model swapped):
 
 ```bash
 ENVELOPE_FILE="$LOG_DIR/codex-5.4-mini-envelope-r2.json"
+BRAMBLE_RUN_TAG="code-review-eval:$(git branch --show-current):codex-5.4-mini:r2" \
 WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
   --backend codex --model gpt-5.4-mini --effort medium \
   --resume-session-id "$SESSION_CODEX" \
@@ -109,10 +125,16 @@ WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
 
 Same as 2b, but also pass `--resume-prompt-style fresh`. Write to
 `$LOG_DIR/{NAME}-envelope-r3.json` and `{NAME}-stderr-r3.txt`. Same skip rule
-(empty session id → `resume_status: missing`).
+(empty session id → `resume_status: missing`). Rebuild bramble first for the
+same invalidation reason as 2b:
+
+```bash
+bazel build //bramble:bramble
+```
 
 ```bash
 ENVELOPE_FILE="$LOG_DIR/codex-5.4-mini-envelope-r3.json"
+BRAMBLE_RUN_TAG="code-review-eval:$(git branch --show-current):codex-5.4-mini:r3" \
 WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
   --backend codex --model gpt-5.4-mini --effort medium \
   --resume-session-id "$SESSION_CODEX" --resume-prompt-style fresh \
@@ -126,13 +148,15 @@ WORK_DIR=$(pwd) bazel-bin/bramble/bramble_/bramble code-review \
 |--------|---------|--------|
 | `ok` | Backend confirmed the resumed session id matches the requested id | envelope `resume_status` |
 | `fallback` | Backend ran fresh after resume failed (session expired / not found) | envelope `resume_status` |
+| `unverified` | Resume was requested but the backend exited before a Ready event could confirm the session id (mid-startup error, killed process, transport failure) | envelope `resume_status` |
 | `missing` | Turn N skipped because turn 1 produced no session id | local — set in eval prose |
-| `missing-envelope` | Turn N envelope file absent on disk | local |
-| `error` | Turn N envelope present but `status: "error"` | local |
+| `no-envelope` | Turn N produced no envelope file on disk (CLI crashed before flushing) | local |
 
 Cursor or codex returning `fallback` is surprising — they're expected to always
 support resume. Flag prominently in Notes if it happens. Gemini reporting
-`fallback` is less surprising but still worth noting.
+`fallback` is less surprising but still worth noting. `unverified` on any
+backend is a stronger signal than `fallback`: it means the backend never
+finished startup, not that the session was unavailable.
 
 ## Step 3: Compare findings
 
