@@ -76,6 +76,9 @@ func (h *sessionEventHandler) OnToolComplete(name, id string, input map[string]i
 	now := time.Now()
 
 	h.updateToolLine(name, id, input, result, isError, now, false)
+	if isMutatingTool(name) {
+		h.manager.notifyWorktreeDirty(h.sessionID)
+	}
 	h.clearToolProgress()
 }
 
@@ -128,6 +131,15 @@ func (h *sessionEventHandler) refreshToolResultProgress() {
 // Delegates to sessionmodel.FormatToolContent to avoid code duplication.
 func formatToolContent(name string, input map[string]interface{}) string {
 	return sessionmodel.FormatToolContent(name, input)
+}
+
+func isMutatingTool(name string) bool {
+	switch name {
+	case "Edit", "Write", "MultiEdit", "Bash", "NotebookEdit":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *sessionEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {

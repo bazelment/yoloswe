@@ -467,11 +467,38 @@ type Manager struct { //nolint:govet // fieldalignment: readability over packing
 	// primary events channel.
 	stateSubscribers   []chan<- SessionStateChangeEvent
 	stateSubscribersMu sync.Mutex
+	worktreeDirtyMu    sync.RWMutex
+	onWorktreeDirty    func(repoName, worktreePath string)
 }
 
 // RepoName returns the repo name this manager is configured for.
 func (m *Manager) RepoName() string {
 	return m.config.RepoName
+}
+
+// SetWorktreeDirtyCallback registers a callback for mutating tool completion.
+func (m *Manager) SetWorktreeDirtyCallback(callback func(repoName, worktreePath string)) {
+	m.worktreeDirtyMu.Lock()
+	defer m.worktreeDirtyMu.Unlock()
+	m.onWorktreeDirty = callback
+}
+
+func (m *Manager) notifyWorktreeDirty(sessionID SessionID) {
+	m.worktreeDirtyMu.RLock()
+	callback := m.onWorktreeDirty
+	m.worktreeDirtyMu.RUnlock()
+	if callback == nil {
+		return
+	}
+	info, ok := m.GetSessionInfo(sessionID)
+	if !ok || info.WorktreePath == "" {
+		return
+	}
+	repoName := info.RepoName
+	if repoName == "" {
+		repoName = m.config.RepoName
+	}
+	callback(repoName, info.WorktreePath)
 }
 
 // NewManager creates a new session manager.
@@ -2231,6 +2258,20 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 	}
 	sortSessionsByTime(result)
 	return result
+}
+
+// ActiveWorktreePaths returns worktree paths with non-terminal sessions.
+func (m *Manager) ActiveWorktreePaths() map[string]struct{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	paths := make(map[string]struct{})
+	for _, s := range m.sessions {
+		if s.WorktreePath != "" && !s.Status.IsTerminal() {
+			paths[s.WorktreePath] = struct{}{}
+		}
+	}
+	return paths
 }
 
 // SetSessionIdle transitions a session to StatusIdle (waiting for user input).

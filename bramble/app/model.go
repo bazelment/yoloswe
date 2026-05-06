@@ -37,68 +37,80 @@ const (
 
 // Model is the root application model.
 type Model struct { //nolint:govet // fieldalignment: readability over packing
-	settings              Settings
-	ctx                   context.Context
-	toasts                *ToastManager
-	confirmHandler        func(string) tea.Cmd
-	confirmPrompt         *ConfirmPrompt
-	worktreeStatuses      map[string]*wt.WorktreeStatus
-	scrollPositions       map[session.SessionID]int
-	viewingHistoryData    *session.StoredSession
-	sessionManager        *session.Manager
-	taskRouter            *taskrouter.Router
-	mdRenderer            *MarkdownRenderer
-	worktreeDropdown      *Dropdown
-	sessionDropdown       *Dropdown
-	allSessionsOverlay    *AllSessionsOverlay
-	commandCenter         *CommandCenter
-	confirmCancelHandler  func() tea.Cmd
-	providerAvailability  *agent.ProviderAvailability
-	taskModal             *TaskModal
-	themePicker           *ThemePicker
-	repoSettingsDialog    *RepoSettingsDialog
-	repos                 map[string]*RepoContext
-	repoDropdown          *Dropdown
-	fileTree              *FileTree
-	splitPane             *SplitPane
-	inputArea             *TextArea
-	modelRegistry         *agent.ModelRegistry
-	sharedEvents          chan repoSessionEvent
-	helpOverlay           *HelpOverlay
-	styles                *Styles
-	inputHandler          func(value, model string, sessionType session.SessionType) tea.Cmd
-	sharedManagerConfig   session.ManagerConfig
-	pendingSessionTarget  sessionTarget
-	pendingModel          string
-	repoName              string
-	historyBranch         string
-	viewingSessionID      session.SessionID
-	pendingPlannerPrompt  string
-	pendingWorktreeSelect string
-	defaultBuildModel     string
-	editor                string
-	inputPrompt           string
-	wtRoot                string
-	pendingSessionType    session.SessionType
-	defaultPlanModel      string
-	defaultCodeTalkModel  string
-	openedRepos           []string
-	resumeRepos           []string
-	cachedHistory         []*session.SessionMeta
-	worktrees             []wt.Worktree
-	sessions              []session.SessionInfo
-	worktreeOpMessages    []string
-	scrollOffset          int
-	selectedSessionIndex  int
-	height                int
-	width                 int
-	focus                 FocusArea
-	inputMode             bool
-	confirmQuit           bool
-	worktreesLoaded       bool
+	settings                  Settings
+	ctx                       context.Context
+	toasts                    *ToastManager
+	confirmHandler            func(string) tea.Cmd
+	confirmPrompt             *ConfirmPrompt
+	worktreeStatuses          map[string]*wt.WorktreeStatus
+	scrollPositions           map[session.SessionID]int
+	viewingHistoryData        *session.StoredSession
+	sessionManager            *session.Manager
+	taskRouter                *taskrouter.Router
+	mdRenderer                *MarkdownRenderer
+	worktreeDropdown          *Dropdown
+	sessionDropdown           *Dropdown
+	allSessionsOverlay        *AllSessionsOverlay
+	commandCenter             *CommandCenter
+	confirmCancelHandler      func() tea.Cmd
+	providerAvailability      *agent.ProviderAvailability
+	taskModal                 *TaskModal
+	themePicker               *ThemePicker
+	repoSettingsDialog        *RepoSettingsDialog
+	repos                     map[string]*RepoContext
+	repoDropdown              *Dropdown
+	fileTree                  *FileTree
+	splitPane                 *SplitPane
+	inputArea                 *TextArea
+	modelRegistry             *agent.ModelRegistry
+	sharedEvents              chan repoSessionEvent
+	sharedGitInvalidates      chan gitWorktreeInvalidation
+	helpOverlay               *HelpOverlay
+	styles                    *Styles
+	inputHandler              func(value, model string, sessionType session.SessionType) tea.Cmd
+	sharedManagerConfig       session.ManagerConfig
+	pendingSessionTarget      sessionTarget
+	pendingModel              string
+	repoName                  string
+	historyBranch             string
+	viewingSessionID          session.SessionID
+	pendingPlannerPrompt      string
+	pendingWorktreeSelect     string
+	defaultBuildModel         string
+	editor                    string
+	inputPrompt               string
+	wtRoot                    string
+	pendingSessionType        session.SessionType
+	defaultPlanModel          string
+	defaultCodeTalkModel      string
+	openedRepos               []string
+	resumeRepos               []string
+	cachedHistory             []*session.SessionMeta
+	worktrees                 []wt.Worktree
+	sessions                  []session.SessionInfo
+	worktreeOpMessages        []string
+	scrollOffset              int
+	selectedSessionIndex      int
+	height                    int
+	width                     int
+	focus                     FocusArea
+	lastUserInputAt           time.Time
+	inputMode                 bool
+	confirmQuit               bool
+	worktreesLoaded           bool
+	gitStatusTickInFlight     bool
+	gitStatusDebounceInFlight bool
 	// Voice reporting.
 	voiceReporter *VoiceReporter
 }
+
+// RefreshScope controls how aggressively git status refreshes are filtered.
+type RefreshScope int
+
+const (
+	RefreshActiveOnly RefreshScope = iota
+	RefreshAll
+)
 
 // NewModel creates a new root model for a specific repo.
 // If initialWorktrees is non-nil, the model is pre-populated so the first
@@ -139,6 +151,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 	}
 
 	sharedEvents := make(chan repoSessionEvent, 64)
+	sharedGitInvalidates := make(chan gitWorktreeInvalidation, 256)
 
 	m := Model{
 		ctx:                  ctx,
@@ -153,9 +166,11 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		openedRepos:          []string{repoName},
 		repoDropdown:         NewDropdown(nil),
 		sharedEvents:         sharedEvents,
+		sharedGitInvalidates: sharedGitInvalidates,
 		sharedManagerConfig:  sharedManagerConfig,
 		styles:               styles,
 		settings:             settings,
+		worktreeStatuses:     make(map[string]*wt.WorktreeStatus),
 		themePicker:          NewThemePicker(),
 		repoSettingsDialog:   NewRepoSettingsDialog(),
 		focus:                FocusOutput,
@@ -176,7 +191,9 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		fileTree:             NewFileTree("", nil),
 		scrollPositions:      make(map[session.SessionID]int),
 		resumeRepos:          resumeRepos,
+		lastUserInputAt:      time.Now(),
 	}
+	sessionManager.SetWorktreeDirtyCallback(makeGitDirtyCallback(sharedGitInvalidates))
 
 	// Sync placeholder colors with the loaded theme (NewTextArea defaults to "245")
 	dimColor := lipgloss.Color(palette.Dim)
@@ -205,6 +222,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		taskRouter:       taskRouter,
 		worktrees:        m.worktrees,
 		worktreesLoaded:  m.worktreesLoaded,
+		worktreeStatuses: m.worktreeStatuses,
 		worktreeDropdown: m.worktreeDropdown,
 		sessionDropdown:  m.sessionDropdown,
 		scrollPositions:  m.scrollPositions,
@@ -212,6 +230,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 
 	// Start fan-in goroutine for the initial manager.
 	go fanInEvents(m.ctx, repoName, sessionManager, sharedEvents)
+	m.syncGitWatcher(repoName)
 
 	return m
 }
@@ -241,6 +260,7 @@ func (m *Model) reportSessionVoice(info session.SessionInfo) {
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.listenForSessionEvents(),
+		m.listenForGitInvalidations(),
 		tickCmd(),
 	}
 
@@ -577,34 +597,50 @@ func (m Model) refreshHistorySessions() tea.Cmd {
 
 // fetchGitStatuses fetches local git status for each worktree (no network).
 // Does NOT schedule the next tick — callers must manage timers separately.
-func (m Model) fetchGitStatuses() tea.Cmd {
-	if m.repoName == "" || len(m.worktrees) == 0 {
+func (m Model) fetchGitStatuses(scope RefreshScope) tea.Cmd {
+	return m.fetchRepoGitStatuses(m.repoName, m.worktrees, scope)
+}
+
+func (m Model) fetchRepoGitStatuses(repoName string, worktrees []wt.Worktree, scope RefreshScope) tea.Cmd {
+	if repoName == "" || len(worktrees) == 0 {
+		return nil
+	}
+	if scope == RefreshActiveOnly && time.Since(m.lastUserInputAt) > 5*time.Minute {
 		return nil
 	}
 	wtRoot := m.wtRoot
-	repoName := m.repoName
 	ctx := m.ctx
-
-	cmds := make([]tea.Cmd, 0, len(m.worktrees))
-	for _, w := range m.worktrees {
-		w := w // capture loop variable
-		// Skip gone worktrees entirely: the directory no longer exists, so git
-		// commands silently fail and produce a zero-valued status that renders
-		// as a misleading green "clean" subtitle next to the "(gone)" badge.
-		if w.IsGone {
+	activeWorktrees := m.activeSessionWorktreePaths(repoName)
+	filtered := make([]wt.Worktree, 0, len(worktrees))
+	for _, w := range worktrees {
+		if !m.shouldRefreshWorktree(repoName, w, scope, activeWorktrees) {
 			continue
 		}
-		cmds = append(cmds, func() tea.Msg {
-			manager := wt.NewManager(wtRoot, repoName)
-			status, err := manager.GetGitStatus(ctx, w)
-			if err != nil {
-				return nil
-			}
-			return singleWorktreeStatusMsg{branch: w.Branch, status: status, repoName: repoName}
-		})
+		filtered = append(filtered, w)
+	}
+	if len(filtered) == 0 {
+		return nil
 	}
 
-	return tea.Batch(cmds...)
+	return func() tea.Msg {
+		manager := wt.NewManager(wtRoot, repoName)
+		statuses, err := manager.GetAllGitStatuses(ctx, filtered)
+		if err != nil && len(statuses) == 0 {
+			return nil
+		}
+		msgs := make([]singleWorktreeStatusMsg, 0, len(filtered))
+		for _, w := range filtered {
+			status := statuses[w.Path]
+			if status == nil {
+				status = statuses[w.Branch]
+			}
+			if status == nil {
+				continue
+			}
+			msgs = append(msgs, singleWorktreeStatusMsg{branch: w.Branch, status: status, repoName: repoName})
+		}
+		return batchWorktreeStatusMsg{statuses: msgs}
+	}
 }
 
 // fetchPRStatuses fetches all open PRs in a single batch API call.
@@ -629,10 +665,16 @@ func (m Model) fetchPRStatuses() tea.Cmd {
 	}
 }
 
-// scheduleGitStatusTick schedules the next periodic git status refresh (30s).
+// scheduleGitStatusTick schedules the next periodic git status refresh.
 func scheduleGitStatusTick() tea.Cmd {
-	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(5*time.Minute, func(t time.Time) tea.Msg {
 		return refreshGitStatusTickMsg{}
+	})
+}
+
+func scheduleGitStatusDebounce() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return refreshGitStatusDebounceMsg{}
 	})
 }
 
@@ -826,6 +868,9 @@ type (
 		branch   string
 		repoName string
 	}
+	batchWorktreeStatusMsg struct {
+		statuses []singleWorktreeStatusMsg
+	}
 	// batchPRInfoMsg carries all open PRs fetched in a single API call.
 	batchPRInfoMsg struct {
 		repoName string
@@ -843,8 +888,13 @@ type (
 		branch   string
 		sessions []*session.SessionMeta
 	}
-	// refreshGitStatusTickMsg triggers a periodic git status refresh (30s)
-	refreshGitStatusTickMsg struct{}
+	// refreshGitStatusTickMsg triggers a periodic git status refresh.
+	refreshGitStatusTickMsg     struct{}
+	refreshGitStatusDebounceMsg struct{}
+	gitWorktreeInvalidation     struct {
+		repoName     string
+		worktreePath string
+	}
 	// refreshPRStatusTickMsg triggers a periodic PR status refresh (5min)
 	refreshPRStatusTickMsg struct{}
 	// deferredRefreshMsg is sent after a short delay so the initial UI
@@ -965,6 +1015,9 @@ func (m *Model) applyTheme(palette ColorPalette) {
 // from secondary repos are properly cleaned up on exit.
 func (m Model) CloseSecondaryManagers(initialRepoName string) {
 	for repoName, rc := range m.repos {
+		if rc.fsWatcher != nil {
+			_ = rc.fsWatcher.Close()
+		}
 		if repoName == initialRepoName {
 			continue
 		}

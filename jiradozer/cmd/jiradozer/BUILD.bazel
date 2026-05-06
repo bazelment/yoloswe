@@ -49,6 +49,7 @@ go_test(
         "//cliapp",
         "//jiradozer",
         "//jiradozer/tracker",
+        "//jiradozer/tracker/local",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

@@ -5,12 +5,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"expvar"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -38,6 +42,7 @@ var (
 	sessionModeFlag string
 	tmuxExitOnQuit  bool
 	protocolLogDir  string
+	debugAddr       string
 	yoloFlag        bool
 	// Voice reporting flags.
 	enableVoiceReports bool
@@ -75,6 +80,7 @@ func init() {
 	rootCmd.Flags().StringVar(&sessionModeFlag, "session-mode", "auto", "Session execution mode: auto (default), tui, or tmux")
 	rootCmd.Flags().BoolVar(&tmuxExitOnQuit, "tmux-exit-on-quit", false, "Kill Bramble-created tmux windows when quitting Bramble")
 	rootCmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for provider protocol/stderr logs (optional; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
+	rootCmd.Flags().StringVar(&debugAddr, "debug-addr", "", "if set, serve pprof + expvar on this addr (e.g. localhost:6060)")
 	rootCmd.Flags().BoolVar(&yoloFlag, "yolo", false, "Skip all permission prompts (dangerous!)")
 	rootCmd.Flags().BoolVar(&enableVoiceReports, "enable-voice-reports", false, "Enable voice reporting on session completion (requires ELEVENLABS_API_KEY)")
 	rootCmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
@@ -95,6 +101,14 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Setup context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if debugAddr != "" {
+		expvar.Publish("goroutines", expvar.Func(func() any { return runtime.NumGoroutine() }))
+		go func() {
+			if err := http.ListenAndServe(debugAddr, nil); err != nil {
+				slog.Warn("debug server stopped", "addr", debugAddr, "err", err)
+			}
+		}()
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

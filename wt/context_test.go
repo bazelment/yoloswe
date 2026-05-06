@@ -43,9 +43,9 @@ func TestGatherContext(t *testing.T) {
 	mockGit.Results["ls-files --others --exclude-standard"] = &CmdResult{Stdout: "newfile.go\n"}
 
 	// Status (for dirty/ahead/behind)
-	mockGit.Results["status --porcelain"] = &CmdResult{Stdout: " M auth.go\n"}
-	mockGit.Results["rev-list --left-right --count origin/feature...HEAD"] = &CmdResult{Stdout: "0\t2\n"}
-	mockGit.Results["log -1 --format=%ct|%s"] = &CmdResult{Stdout: "1700000000|Fix login\n"}
+	mockGit.Results["status --porcelain=v2 --branch"] = &CmdResult{
+		Stdout: "# branch.oid abc123\n# branch.head feature\n# branch.upstream origin/feature\n# branch.ab +2 -0\n1 .M N... 100644 100644 100644 abc abc auth.go\n",
+	}
 
 	// PR info
 	mockGH.Results["pr view --json number,url,state,isDraft,reviewDecision"] = &CmdResult{
