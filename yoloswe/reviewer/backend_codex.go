@@ -66,14 +66,19 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 			// ResumeThread (e.g. transport failure before the response
 			// arrives) still surfaces "resume was attempted" in the
 			// envelope, instead of letting omitempty erase the signal.
+			//
+			// Note: do NOT promote to OK here even when ResumeThread
+			// returns nil. WaitReady below has not run yet, so the thread
+			// is not actually usable; a WaitReady timeout would otherwise
+			// surface as resume_status=ok which is misleading. The
+			// authoritative promotion happens in resumeStatusAfterSessionReady
+			// once thread.ID() is observable via WaitReady.
 			resumeStatus = ResumeStatusUnverified
 			thread, err = b.client.ResumeThread(ctx, b.config.ResumeSessionID, threadOpts...)
 			if err != nil && isCodexResumeNotFound(err) {
 				slog.Warn("codex resume failed; falling back to fresh thread", "session_id", b.config.ResumeSessionID, "error", err.Error())
 				resumeStatus = ResumeStatusFallback
 				thread, err = b.client.CreateThread(ctx, threadOpts...)
-			} else if err == nil {
-				resumeStatus = ResumeStatusOK
 			}
 		} else {
 			thread, err = b.client.CreateThread(ctx, threadOpts...)

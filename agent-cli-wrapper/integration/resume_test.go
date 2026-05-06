@@ -59,8 +59,12 @@ type resumeBackend interface {
 	// Returns the captured session id (for Resume) and the response text.
 	StartFresh(ctx context.Context, t *testing.T, workdir, prompt string) (sessionID, response string, err error)
 	// Resume re-attaches to a prior session by id and runs a single turn
-	// with prompt. Returns the response text.
-	Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (response string, err error)
+	// with prompt. Returns the response text plus the session id the
+	// backend reports for the resumed session — the scenario asserts that
+	// matches the requested id, so a backend that silently re-keys (or
+	// fails to actually resume and falls back fresh) is detected even if
+	// the model happens to echo a matching secret.
+	Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (resumedSessionID, response string, err error)
 }
 
 const (
@@ -129,17 +133,31 @@ func runResumeScenario(t *testing.T, b resumeBackend) {
 	time.Sleep(resumeWindow)
 
 	t.Logf("phase 2: resuming session %s and asking for the secret back", sessionID)
-	phase2Resp, err := b.Resume(ctx, t, workdir, sessionID, phase2Prompt)
+	resumedID, phase2Resp, err := b.Resume(ctx, t, workdir, sessionID, phase2Prompt)
 	if err != nil {
 		t.Fatalf("phase 2 Resume failed: %v", err)
 	}
 	t.Logf("phase 2 response (truncated): %s", truncate(phase2Resp, 200))
 
+	// Assert session identity. Without this, a backend that silently
+	// re-keys the session on resume (or falls back to fresh and gets a
+	// lucky model echo) would pass the secret-recall check but mask a
+	// real resume regression — the exact failure mode that motivated this
+	// test in the first place.
+	if resumedID == "" {
+		t.Fatalf("resumed session id is empty; backend cannot prove it actually resumed")
+	}
+	if resumedID != sessionID {
+		t.Fatalf("resumed session id mismatch: requested %q, got %q (silent fallback?)",
+			sessionID, resumedID)
+	}
+
 	if !containsSecret(phase2Resp, secretToken) {
 		t.Fatalf("resumed session did not recall secret %q; got response: %s",
 			secretToken, truncate(phase2Resp, 500))
 	}
-	t.Logf("resume verified: secret recalled across phase boundary")
+	t.Logf("resume verified: id %q matches and secret recalled across phase boundary",
+		resumedID)
 }
 
 // containsSecret matches the secret with light tolerance for whitespace and
@@ -203,7 +221,7 @@ func (c *claudeResumeBackend) StartFresh(ctx context.Context, t *testing.T, work
 	return sessionID, response, nil
 }
 
-func (c *claudeResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, error) {
+func (c *claudeResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, string, error) {
 	t.Helper()
 	session := claude.NewSession(
 		claude.WithModel("haiku"),
@@ -213,15 +231,15 @@ func (c *claudeResumeBackend) Resume(ctx context.Context, t *testing.T, workdir,
 		claude.WithResume(sessionID),
 	)
 	if err := session.Start(ctx); err != nil {
-		return "", fmt.Errorf("claude resume start: %w", err)
+		return "", "", fmt.Errorf("claude resume start: %w", err)
 	}
 	defer session.Stop()
 
 	if _, err := session.SendMessage(ctx, prompt); err != nil {
-		return "", fmt.Errorf("claude resume SendMessage: %w", err)
+		return "", "", fmt.Errorf("claude resume SendMessage: %w", err)
 	}
-	_, response, err := drainClaudeTurn(ctx, session)
-	return response, err
+	resumedID, response, err := drainClaudeTurn(ctx, session)
+	return resumedID, response, err
 }
 
 func drainClaudeTurn(ctx context.Context, session *claude.Session) (sessionID, response string, err error) {
@@ -299,14 +317,14 @@ func (c *codexResumeBackend) StartFresh(ctx context.Context, t *testing.T, workd
 	return thread.ID(), result.FullText, nil
 }
 
-func (c *codexResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, error) {
+func (c *codexResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, string, error) {
 	t.Helper()
 	client := codex.NewClient(
 		codex.WithClientName("agent-cli-wrapper-resume-test"),
 		codex.WithClientVersion("1.0.0"),
 	)
 	if err := client.Start(ctx); err != nil {
-		return "", fmt.Errorf("codex resume client start: %w", err)
+		return "", "", fmt.Errorf("codex resume client start: %w", err)
 	}
 	defer client.Stop()
 
@@ -315,20 +333,20 @@ func (c *codexResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, 
 		codex.WithApprovalPolicy(codex.ApprovalPolicyFullAuto),
 	)
 	if err != nil {
-		return "", fmt.Errorf("codex ResumeThread: %w", err)
+		return "", "", fmt.Errorf("codex ResumeThread: %w", err)
 	}
 	if err := thread.WaitReady(ctx); err != nil {
-		return "", fmt.Errorf("codex resumed thread WaitReady: %w", err)
+		return "", "", fmt.Errorf("codex resumed thread WaitReady: %w", err)
 	}
 
 	result, err := thread.Ask(ctx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("codex resume Ask: %w", err)
+		return thread.ID(), "", fmt.Errorf("codex resume Ask: %w", err)
 	}
 	if !result.Success {
-		return result.FullText, fmt.Errorf("codex resume turn failed: %v", result.Error)
+		return thread.ID(), result.FullText, fmt.Errorf("codex resume turn failed: %v", result.Error)
 	}
-	return result.FullText, nil
+	return thread.ID(), result.FullText, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -355,14 +373,14 @@ func (c *cursorResumeBackend) StartFresh(ctx context.Context, t *testing.T, work
 	return result.SessionID, result.Text, nil
 }
 
-func (c *cursorResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, error) {
+func (c *cursorResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, string, error) {
 	t.Helper()
 	opts := append(cursorOpts(workdir, t), cursor.WithResume(sessionID))
 	result, err := cursor.Query(ctx, prompt, opts...)
 	if err != nil {
-		return "", fmt.Errorf("cursor resume Query: %w", err)
+		return "", "", fmt.Errorf("cursor resume Query: %w", err)
 	}
-	return result.Text, nil
+	return result.SessionID, result.Text, nil
 }
 
 func cursorOpts(workdir string, t *testing.T) []cursor.SessionOption {
@@ -432,28 +450,28 @@ func (a *acpResumeBackend) StartFresh(ctx context.Context, t *testing.T, workdir
 	return session.ID(), result.FullText, nil
 }
 
-func (a *acpResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, error) {
+func (a *acpResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, string, error) {
 	t.Helper()
 	client := a.newClient()
 	if err := client.Start(ctx); err != nil {
-		return "", fmt.Errorf("%s ACP resume client start: %w", a.name, err)
+		return "", "", fmt.Errorf("%s ACP resume client start: %w", a.name, err)
 	}
 	defer client.Stop()
 
 	session, err := client.LoadSession(ctx, sessionID, acp.WithSessionCWD(workdir))
 	if err != nil {
 		if errors.Is(err, acp.ErrSessionNotFound) {
-			return "", fmt.Errorf("%s does not advertise LoadSession capability or session %s expired: %w",
+			return "", "", fmt.Errorf("%s does not advertise LoadSession capability or session %s expired: %w",
 				a.name, sessionID, err)
 		}
-		return "", fmt.Errorf("%s ACP LoadSession: %w", a.name, err)
+		return "", "", fmt.Errorf("%s ACP LoadSession: %w", a.name, err)
 	}
 	result, err := session.Prompt(ctx, prompt)
 	if err != nil {
-		return "", fmt.Errorf("%s ACP resume Prompt: %w", a.name, err)
+		return session.ID(), "", fmt.Errorf("%s ACP resume Prompt: %w", a.name, err)
 	}
 	if !result.Success {
-		return result.FullText, fmt.Errorf("%s ACP resume turn failed: %v", a.name, result.Error)
+		return session.ID(), result.FullText, fmt.Errorf("%s ACP resume turn failed: %v", a.name, result.Error)
 	}
-	return result.FullText, nil
+	return session.ID(), result.FullText, nil
 }

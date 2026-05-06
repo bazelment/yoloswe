@@ -669,8 +669,20 @@ func (r *Reviewer) ReviewWithResult(ctx context.Context, prompt string) (*Review
 	return result, nil
 }
 
-// ResumeStatus returns "ok" when a requested resume succeeded, "fallback"
-// when the backend had to cold-start, or "" when no resume was requested.
+// ResumeStatus returns the most recently observed resume status from a
+// completed RunPrompt turn:
+//   - ResumeStatusOK       when a requested resume succeeded
+//   - ResumeStatusFallback when the backend cold-started after a failed resume
+//   - ResumeStatusUnverified when resume was requested but the backend
+//     reached an early error before any Ready event could confirm the session id
+//   - "" when no resume was requested
+//
+// Note: the field is cleared at the start of every turn (see ReviewWithResult
+// and FollowUp) and only repopulated from result.ResumeStatus once RunPrompt
+// returns. Callers that need a non-empty answer when a turn panics or aborts
+// mid-flight should fall back to ResumeStatusUnverified themselves when
+// config.ResumeSessionID was set; the panic-recovery guard in
+// bramble/cmd/codereview/codereview.go is the canonical example.
 func (r *Reviewer) ResumeStatus() ResumeStatus {
 	return r.resumeStatus
 }

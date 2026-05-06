@@ -129,8 +129,16 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			panicVal:        recover(),
 			emit:            emitEnvelope,
 			resumeStatus: func() reviewer.ResumeStatus {
+				// ReviewWithResult clears r.resumeStatus at the top of every
+				// turn and only repopulates it from the backend's result. A
+				// panic mid-turn therefore leaves r.ResumeStatus() == ""
+				// even though --resume-session-id was set. Treat any empty
+				// status as Unverified when resume was requested so the
+				// envelope still carries the signal automation depends on.
 				if activeReviewer != nil {
-					return activeReviewer.ResumeStatus()
+					if status := activeReviewer.ResumeStatus(); status != "" {
+						return status
+					}
 				}
 				if resumeSessionID != "" {
 					return reviewer.ResumeStatusUnverified
@@ -382,10 +390,20 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 // been constructed yet. emit is the envelope emitter from the runCodeReview
 // scope; it flips the envelopeWritten flag so the top-level defer guard does
 // not double-emit.
+//
+// When --resume-session-id was set on this run, the synthesized envelope
+// reports resume_status=unverified so the orchestrator (and the verdict-line
+// suffix) can distinguish "failed before the backend confirmed resume" from
+// "no resume requested". Pre-review failures (backend validation, workdir
+// resolution, prompt-style normalization, reviewer.Start, etc.) all flow
+// through here, so without this every early-failure path would silently
+// drop the resume signal.
 func emitEarlyFailure(err error, effectiveModel string, emit func(reviewer.ResultEnvelope)) error {
-	env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
-		ErrorMessage: err.Error(),
-	}, reviewer.BackendType(backend), effectiveModel, "")
+	result := &reviewer.ReviewResult{ErrorMessage: err.Error()}
+	if resumeSessionID != "" {
+		result.ResumeStatus = reviewer.ResumeStatusUnverified
+	}
+	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), effectiveModel, "")
 	emit(env)
 	return err
 }
