@@ -23,6 +23,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		m.lastUserInputAt = time.Now()
 		// Handle help overlay first (highest visual priority)
 		if m.focus == FocusHelp {
 			return m.handleHelpOverlay(msg)
@@ -80,6 +81,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		m.lastUserInputAt = time.Now()
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -105,12 +110,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if rc, ok := m.repos[msg.repoName]; ok {
 				rc.worktrees = msg.worktrees
 				rc.worktreesLoaded = true
+				m.syncGitWatcher(msg.repoName)
 			}
 			return m, nil
 		}
 		m.worktrees = msg.worktrees
 		m.worktreesLoaded = true
 		m.updateWorktreeDropdown()
+		m.syncGitWatcher(m.repoName)
 
 		var pendingCancelCmd tea.Cmd
 		pending := m.pendingSessionTarget
@@ -155,11 +162,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(pendingCancelCmd, deferredRefreshCmd())
 
 	case deferredRefreshMsg:
-		return m, tea.Batch(
-			m.fetchGitStatuses(), scheduleGitStatusTick(),
+		if !m.gitStatusTickInFlight {
+			m.gitStatusTickInFlight = true
+			cmds = append(cmds, scheduleGitStatusTick())
+		}
+		cmds = append(cmds,
+			m.fetchGitStatuses(RefreshAll),
 			m.fetchPRStatuses(), schedulePRStatusTick(),
 			m.refreshFileTree(), m.refreshHistorySessions(),
 		)
+		return m, tea.Batch(cmds...)
 
 	case resumeReposMsg:
 		var cmds []tea.Cmd
@@ -184,44 +196,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case singleWorktreeStatusMsg:
-		// If this response is for a repo that is no longer the active one,
-		// save the data into the correct RepoContext and discard for current view.
-		if msg.repoName != m.repoName {
-			if rc, ok := m.repos[msg.repoName]; ok && msg.status != nil {
-				if rc.worktreeStatuses == nil {
-					rc.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
-				}
-				existing := rc.worktreeStatuses[msg.branch]
-				if existing == nil {
-					rc.worktreeStatuses[msg.branch] = msg.status
-				} else {
-					existing.IsDirty = msg.status.IsDirty
-					existing.Ahead = msg.status.Ahead
-					existing.Behind = msg.status.Behind
-					existing.LastCommitTime = msg.status.LastCommitTime
-					existing.LastCommitMsg = msg.status.LastCommitMsg
-					existing.Worktree = msg.status.Worktree
-				}
-			}
-			return m, nil
-		}
-		if msg.status != nil {
-			if m.worktreeStatuses == nil {
-				m.worktreeStatuses = make(map[string]*wt.WorktreeStatus)
-			}
-			// Merge git-only fields into existing status to preserve PR data
-			existing := m.worktreeStatuses[msg.branch]
-			if existing == nil {
-				m.worktreeStatuses[msg.branch] = msg.status
-			} else {
-				existing.IsDirty = msg.status.IsDirty
-				existing.Ahead = msg.status.Ahead
-				existing.Behind = msg.status.Behind
-				existing.LastCommitTime = msg.status.LastCommitTime
-				existing.LastCommitMsg = msg.status.LastCommitMsg
-				existing.Worktree = msg.status.Worktree
-			}
-			m.updateWorktreeDropdown()
+		m.applySingleWorktreeStatus(msg)
+		return m, tea.Batch(cmds...)
+
+	case batchWorktreeStatusMsg:
+		for _, statusMsg := range msg.statuses {
+			m.applySingleWorktreeStatus(statusMsg)
 		}
 		return m, tea.Batch(cmds...)
 
@@ -310,10 +290,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case refreshGitStatusTickMsg:
-		return m, tea.Batch(m.fetchGitStatuses(), scheduleGitStatusTick())
+		m.gitStatusTickInFlight = false
+		cmds = append(cmds, m.fetchAllOpenedGitStatuses(RefreshActiveOnly))
+		if !m.gitStatusTickInFlight {
+			m.gitStatusTickInFlight = true
+			cmds = append(cmds, scheduleGitStatusTick())
+		}
+		return m, tea.Batch(cmds...)
+
+	case refreshGitStatusDebounceMsg:
+		m.gitStatusDebounceInFlight = false
+		return m, m.fetchDirtyGitStatuses()
 
 	case refreshPRStatusTickMsg:
 		return m, tea.Batch(m.fetchPRStatuses(), schedulePRStatusTick())
+
+	case gitWorktreeInvalidation:
+		m.markWorktreeDirty(msg.repoName, msg.worktreePath)
+		cmds = append(cmds, m.listenForGitInvalidations())
+		if !m.gitStatusDebounceInFlight {
+			m.gitStatusDebounceInFlight = true
+			cmds = append(cmds, scheduleGitStatusDebounce())
+		}
+		return m, tea.Batch(cmds...)
 
 	case repoSessionEventMsg:
 		// Update the correct RepoContext's sessions. If the event is for the
@@ -583,7 +582,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Open worktree dropdown
 		m.worktreeDropdown.Open()
 		m.focus = FocusWorktreeDropdown
-		return m, nil
+		return m, m.fetchGitStatuses(RefreshAll)
 
 	case "alt+s":
 		if m.sessionManager.IsInTmuxMode() {
@@ -921,7 +920,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		// Refresh (worktrees + one-shot PR fetch, no new timer)
-		return m, tea.Batch(m.refreshWorktrees(), m.fetchPRStatuses())
+		return m, tea.Batch(m.refreshWorktrees(), m.fetchGitStatuses(RefreshAll), m.fetchPRStatuses())
 
 	case "g":
 		// Sync current worktree (fetch + rebase)
@@ -2915,6 +2914,12 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	cfg := m.sharedManagerConfig
 	cfg.RepoName = repoName
 	mgr := session.NewManagerWithConfig(cfg)
+	mgr.SetWorktreeDirtyCallback(func(repoName, worktreePath string) {
+		select {
+		case m.sharedGitInvalidates <- gitWorktreeInvalidation{repoName: repoName, worktreePath: worktreePath}:
+		default:
+		}
+	})
 	if cfg.Registry != nil {
 		cfg.Registry.Register(mgr)
 	}
@@ -2934,6 +2939,7 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 		taskRouter:       router,
 		worktreeDropdown: wtDropdown,
 		sessionDropdown:  sessDropdown,
+		worktreeStatuses: make(map[string]*wt.WorktreeStatus),
 		scrollPositions:  make(map[session.SessionID]int),
 	}
 

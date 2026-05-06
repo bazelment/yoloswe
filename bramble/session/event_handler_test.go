@@ -42,6 +42,32 @@ func TestSessionEventHandler_OnToolResultUpdatesCompletedToolLine(t *testing.T) 
 	assert.False(t, line.IsError)
 }
 
+func TestSessionEventHandler_OnToolCompleteInvalidatesMutatedWorktree(t *testing.T) {
+	manager := NewManagerWithConfig(ManagerConfig{RepoName: "repo-a"})
+	t.Cleanup(manager.Close)
+	sessionID := SessionID("test-session")
+	manager.AddSession(&Session{
+		ID:           sessionID,
+		Status:       StatusRunning,
+		WorktreePath: "/tmp/repo-a/feature",
+		RepoName:     "repo-a",
+		Progress:     &SessionProgress{},
+	})
+	manager.InitOutputBuffer(sessionID)
+
+	var gotRepo, gotPath string
+	manager.SetWorktreeDirtyCallback(func(repoName, worktreePath string) {
+		gotRepo = repoName
+		gotPath = worktreePath
+	})
+	handler := newSessionEventHandler(manager, sessionID)
+	handler.OnToolStart("Edit", "tool-1", nil)
+	handler.OnToolComplete("Edit", "tool-1", map[string]interface{}{"file_path": "x"}, nil, false)
+
+	assert.Equal(t, "repo-a", gotRepo)
+	assert.Equal(t, "/tmp/repo-a/feature", gotPath)
+}
+
 func TestSessionEventHandler_OnToolResultMarksError(t *testing.T) {
 	manager, handler, sessionID := newTestSessionEventHandler(t)
 

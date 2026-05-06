@@ -445,6 +445,9 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ChildModel overrides the default model for child sessions spawned by
 	// the delegator. If empty, children default to the delegator's own model.
 	ChildModel string
+	// OnWorktreeDirty is called after mutating tool use completes so the TUI
+	// can refresh git status without polling.
+	OnWorktreeDirty func(repoName, worktreePath string)
 }
 
 // Manager handles multiple concurrent sessions.
@@ -467,11 +470,41 @@ type Manager struct { //nolint:govet // fieldalignment: readability over packing
 	// primary events channel.
 	stateSubscribers   []chan<- SessionStateChangeEvent
 	stateSubscribersMu sync.Mutex
+	worktreeDirtyMu    sync.RWMutex
+	onWorktreeDirty    func(repoName, worktreePath string)
 }
 
 // RepoName returns the repo name this manager is configured for.
 func (m *Manager) RepoName() string {
 	return m.config.RepoName
+}
+
+// SetWorktreeDirtyCallback registers a callback for mutating tool completion.
+func (m *Manager) SetWorktreeDirtyCallback(callback func(repoName, worktreePath string)) {
+	m.worktreeDirtyMu.Lock()
+	defer m.worktreeDirtyMu.Unlock()
+	m.onWorktreeDirty = callback
+}
+
+func (m *Manager) notifyWorktreeDirty(sessionID SessionID) {
+	m.worktreeDirtyMu.RLock()
+	callback := m.onWorktreeDirty
+	m.worktreeDirtyMu.RUnlock()
+	if callback == nil {
+		callback = m.config.OnWorktreeDirty
+	}
+	if callback == nil {
+		return
+	}
+	info, ok := m.GetSessionInfo(sessionID)
+	if !ok || info.WorktreePath == "" {
+		return
+	}
+	repoName := info.RepoName
+	if repoName == "" {
+		repoName = m.config.RepoName
+	}
+	callback(repoName, info.WorktreePath)
 }
 
 // NewManager creates a new session manager.

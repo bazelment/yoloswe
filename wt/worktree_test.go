@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParseWorktreeList(t *testing.T) {
@@ -191,6 +193,109 @@ func TestWorktreeName(t *testing.T) {
 	wt := Worktree{Path: "/home/user/worktrees/repo/feature-branch"}
 	if wt.Name() != "feature-branch" {
 		t.Errorf("Name() = %q, want %q", wt.Name(), "feature-branch")
+	}
+}
+
+func TestParsePorcelainV2Status(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		wantDirty  bool
+		wantAhead  int
+		wantBehind int
+	}{
+		{
+			name:   "clean",
+			output: "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n",
+		},
+		{
+			name:      "dirty",
+			output:    "# branch.oid abc\n# branch.head main\n1 .M N... 100644 100644 100644 abc abc file.go\n",
+			wantDirty: true,
+		},
+		{
+			name:      "untracked is dirty",
+			output:    "# branch.oid abc\n# branch.head main\n? new.txt\n",
+			wantDirty: true,
+		},
+		{
+			name:      "ahead",
+			output:    "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +3 -0\n",
+			wantAhead: 3,
+		},
+		{
+			name:       "behind",
+			output:     "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -2\n",
+			wantBehind: 2,
+		},
+		{
+			name:       "dirty ahead behind",
+			output:     "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +4 -5\n1 M. N... 100644 100644 100644 abc abc file.go\n",
+			wantDirty:  true,
+			wantAhead:  4,
+			wantBehind: 5,
+		},
+		{
+			name:   "detached head",
+			output: "# branch.oid abc\n# branch.head (detached)\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &WorktreeStatus{}
+			parsePorcelainV2Status(tt.output, status)
+			if status.IsDirty != tt.wantDirty {
+				t.Errorf("IsDirty = %v, want %v", status.IsDirty, tt.wantDirty)
+			}
+			if status.Ahead != tt.wantAhead {
+				t.Errorf("Ahead = %d, want %d", status.Ahead, tt.wantAhead)
+			}
+			if status.Behind != tt.wantBehind {
+				t.Errorf("Behind = %d, want %d", status.Behind, tt.wantBehind)
+			}
+		})
+	}
+}
+
+type concurrentGitRunner struct {
+	mu       sync.Mutex
+	inFlight int
+	max      int
+}
+
+func (r *concurrentGitRunner) Run(ctx context.Context, args []string, dir string) (*CmdResult, error) {
+	r.mu.Lock()
+	r.inFlight++
+	if r.inFlight > r.max {
+		r.max = r.inFlight
+	}
+	r.mu.Unlock()
+
+	time.Sleep(20 * time.Millisecond)
+
+	r.mu.Lock()
+	r.inFlight--
+	r.mu.Unlock()
+	return &CmdResult{Stdout: "# branch.oid abc\n# branch.head main\n# branch.ab +0 -0\n"}, nil
+}
+
+func TestGetAllGitStatusesLimitsConcurrency(t *testing.T) {
+	runner := &concurrentGitRunner{}
+	manager := NewManager(t.TempDir(), "test-repo", WithGitRunner(runner))
+	worktrees := make([]Worktree, 12)
+	for i := range worktrees {
+		worktrees[i] = Worktree{Path: fmt.Sprintf("/tmp/wt-%d", i), Branch: fmt.Sprintf("branch-%d", i)}
+	}
+
+	statuses, err := manager.GetAllGitStatuses(context.Background(), worktrees)
+	if err != nil {
+		t.Fatalf("GetAllGitStatuses returned error: %v", err)
+	}
+	if len(statuses) != len(worktrees)*2 {
+		t.Fatalf("status map has %d entries, want %d", len(statuses), len(worktrees)*2)
+	}
+	if runner.max > 4 {
+		t.Fatalf("max concurrent git calls = %d, want <= 4", runner.max)
 	}
 }
 

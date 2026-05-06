@@ -129,7 +129,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Common errors.
@@ -654,43 +657,94 @@ func worktreeFromFields(fields map[string]string) (Worktree, bool) {
 // GetGitStatus returns local git status for a worktree (no network calls).
 // This is fast and suitable for UI that needs immediate feedback.
 func (m *Manager) GetGitStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, error) {
-	status := &WorktreeStatus{Worktree: wt}
-
-	// Check dirty status
-	result, _ := m.git.Run(ctx, []string{"status", "--porcelain"}, wt.Path)
-	status.IsDirty = strings.TrimSpace(result.Stdout) != ""
-
-	// Check ahead/behind
-	if !wt.IsDetached {
-		result, err := m.git.Run(ctx, []string{
-			"rev-list", "--left-right", "--count",
-			"origin/" + wt.Branch + "...HEAD",
-		}, wt.Path)
-		if err == nil {
-			parts := strings.Split(strings.TrimSpace(result.Stdout), "\t")
-			if len(parts) == 2 {
-				status.Behind, _ = strconv.Atoi(parts[0])
-				status.Ahead, _ = strconv.Atoi(parts[1])
-			}
-		}
+	statuses, err := m.GetAllGitStatuses(ctx, []Worktree{wt})
+	if err != nil {
+		return nil, err
 	}
-
-	// Get last commit info
-	result, _ = m.git.Run(ctx, []string{"log", "-1", "--format=%ct|%s"}, wt.Path)
-	if result != nil && result.Stdout != "" {
-		parts := strings.SplitN(strings.TrimSpace(result.Stdout), "|", 2)
-		if len(parts) == 2 {
-			if ts, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
-				status.LastCommitTime = time.Unix(ts, 0)
-			}
-			status.LastCommitMsg = parts[1]
-			if len(status.LastCommitMsg) > 50 {
-				status.LastCommitMsg = status.LastCommitMsg[:50]
-			}
-		}
+	status := statuses[wt.Branch]
+	if status == nil {
+		status = statuses[wt.Path]
 	}
-
+	if status == nil {
+		return &WorktreeStatus{Worktree: wt}, nil
+	}
 	return status, nil
+}
+
+// GetAllGitStatuses returns local git status for worktrees with bounded
+// subprocess concurrency. Each worktree uses a single git status invocation.
+func (m *Manager) GetAllGitStatuses(ctx context.Context, worktrees []Worktree) (map[string]*WorktreeStatus, error) {
+	statuses := make(map[string]*WorktreeStatus, len(worktrees))
+	var mu sync.Mutex
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(4)
+	for _, worktree := range worktrees {
+		worktree := worktree
+		g.Go(func() error {
+			status, err := m.gitStatusFromPorcelainV2(ctx, worktree)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			statuses[worktree.Branch] = status
+			statuses[worktree.Path] = status
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return statuses, err
+	}
+	return statuses, nil
+}
+
+func (m *Manager) gitStatusFromPorcelainV2(ctx context.Context, wt Worktree) (*WorktreeStatus, error) {
+	status := &WorktreeStatus{Worktree: wt}
+	result, err := m.git.Run(ctx, []string{"status", "--porcelain=v2", "--branch"}, wt.Path)
+	if err != nil {
+		return status, err
+	}
+	parsePorcelainV2Status(result.Stdout, status)
+	return status, nil
+}
+
+func parsePorcelainV2Status(output string, status *WorktreeStatus) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "# branch.ab ") {
+			parseBranchAheadBehind(line, status)
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		status.IsDirty = true
+	}
+}
+
+func parseBranchAheadBehind(line string, status *WorktreeStatus) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 {
+		return
+	}
+	for _, field := range fields[2:] {
+		if len(field) < 2 {
+			continue
+		}
+		n, err := strconv.Atoi(field[1:])
+		if err != nil {
+			continue
+		}
+		switch field[0] {
+		case '+':
+			status.Ahead = n
+		case '-':
+			status.Behind = n
+		}
+	}
 }
 
 // FetchPRInfo fetches PR information for a worktree via the GitHub CLI.

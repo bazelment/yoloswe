@@ -14,6 +14,7 @@ require (
 	github.com/bazelment/yoloswe/yoloswe v0.0.0
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/ergochat/readline v0.1.3
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1

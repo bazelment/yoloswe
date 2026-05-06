@@ -1,6 +1,10 @@
 package app
 
 import (
+	"sync"
+
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/wt"
@@ -14,8 +18,11 @@ type RepoContext struct {
 	worktreeDropdown     *Dropdown
 	sessionManager       *session.Manager
 	taskRouter           *taskrouter.Router
+	fsWatcher            *fsnotify.Watcher
 	scrollPositions      map[session.SessionID]int
 	worktreeStatuses     map[string]*wt.WorktreeStatus
+	dirtyWorktrees       map[string]struct{}
+	watchedGitPaths      map[string]string
 	viewingHistoryData   *session.StoredSession
 	sessionDropdown      *Dropdown
 	historyBranch        string
@@ -26,6 +33,33 @@ type RepoContext struct {
 	selectedSessionIndex int
 	scrollOffset         int
 	worktreesLoaded      bool
+	dirtyWorktreesMu     sync.Mutex
+}
+
+func (rc *RepoContext) markDirtyWorktree(worktreePath string) {
+	if worktreePath == "" {
+		return
+	}
+	rc.dirtyWorktreesMu.Lock()
+	defer rc.dirtyWorktreesMu.Unlock()
+	if rc.dirtyWorktrees == nil {
+		rc.dirtyWorktrees = make(map[string]struct{})
+	}
+	rc.dirtyWorktrees[worktreePath] = struct{}{}
+}
+
+func (rc *RepoContext) drainDirtyWorktrees() []string {
+	rc.dirtyWorktreesMu.Lock()
+	defer rc.dirtyWorktreesMu.Unlock()
+	if len(rc.dirtyWorktrees) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(rc.dirtyWorktrees))
+	for path := range rc.dirtyWorktrees {
+		paths = append(paths, path)
+	}
+	rc.dirtyWorktrees = make(map[string]struct{})
+	return paths
 }
 
 // saveActiveContext copies per-repo fields from Model into the active RepoContext.
