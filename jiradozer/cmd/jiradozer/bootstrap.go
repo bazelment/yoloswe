@@ -32,10 +32,12 @@ func newBootstrapCommand(args *bootstrapArgs, configPath *string) *cobra.Command
 		Short: "Generate a starter config file",
 		Long: `Write a starter config file seeded with the canonical step prompts and
 comment templates. By default bootstrap writes to --config; use --output
-to write somewhere else. Edit the prompts to taste; the generated file is
-the source of truth for what the agent says.`,
+to write somewhere else. With --repo, the default config path is next to
+the wt-managed checkout unless --config or --output is explicit. Edit the
+prompts to taste; the generated file is the source of truth for what the
+agent says.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path, err := resolveBootstrapOutputPath(args, *configPath)
+			path, err := resolveBootstrapOutputPath(args, *configPath, cmd.Flags().Changed("config") || cmd.InheritedFlags().Changed("config"))
 			if err != nil {
 				return err
 			}
@@ -64,12 +66,12 @@ the source of truth for what the agent says.`,
 	}
 	cmd.SilenceUsage = true
 	cmd.Flags().StringVarP(&args.output, "output", "o", "", "Path to write the starter config; overrides --config")
-	cmd.Flags().StringVar(&args.repo, "repo", "", "Optional GitHub repo URL or owner/repo shorthand. Bootstraps a wt-managed worktree under $WT_ROOT (or ~/worktrees), reusing it if present, and points work_dir at that checkout.")
+	cmd.Flags().StringVar(&args.repo, "repo", "", "Optional GitHub repo URL or owner/repo shorthand. Bootstraps a wt-managed worktree under $WT_ROOT (or ~/worktrees), reusing it if present, and points work_dir at that checkout. Without explicit --config or --output, writes config beside that checkout.")
 	cmd.Flags().BoolVarP(&args.force, "force", "f", false, "Overwrite the output file if it already exists")
 	return cmd
 }
 
-func resolveBootstrapOutputPath(args *bootstrapArgs, configPath string) (string, error) {
+func resolveBootstrapOutputPath(args *bootstrapArgs, configPath string, configExplicit bool) (string, error) {
 	path := args.output
 	if path == "" {
 		path = configPath
@@ -77,7 +79,7 @@ func resolveBootstrapOutputPath(args *bootstrapArgs, configPath string) (string,
 	if path == "" {
 		path = "jiradozer.yaml"
 	}
-	if args.repo == "" || args.output != "" {
+	if args.repo == "" || args.output != "" || configExplicit {
 		return path, nil
 	}
 	wtRoot, err := resolveWTRoot()
@@ -101,6 +103,9 @@ func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (
 			return "", fmt.Errorf("detect default branch for existing repo: %w", err)
 		}
 		mainPath, err := mgr.GetWorktreePath(defaultBranch)
+		if errors.Is(err, wt.ErrWorktreeNotFound) {
+			mainPath, err = recreateDefaultWorktree(ctx, mgr, defaultBranch)
+		}
 		if err != nil {
 			return "", fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
 		}
@@ -112,6 +117,23 @@ func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (
 	mainPath, err := mgr.Init(ctx, repoURL)
 	if err != nil {
 		return "", err
+	}
+	return mainPath, nil
+}
+
+func recreateDefaultWorktree(ctx context.Context, mgr *wt.Manager, defaultBranch string) (string, error) {
+	mainPath := filepath.Join(mgr.RepoDir(), defaultBranch)
+	if _, err := mgr.GitRunner().Run(ctx, []string{"worktree", "prune"}, mgr.BareDir()); err != nil {
+		return "", fmt.Errorf("prune stale worktree metadata: %w", err)
+	}
+	result, err := mgr.GitRunner().Run(ctx, []string{"worktree", "add", mainPath, defaultBranch}, mgr.BareDir())
+	if err != nil {
+		if result != nil {
+			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+				return "", fmt.Errorf("recreate default worktree: %s: %w", stderr, err)
+			}
+		}
+		return "", fmt.Errorf("recreate default worktree: %w", err)
 	}
 	return mainPath, nil
 }

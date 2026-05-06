@@ -291,6 +291,45 @@ func TestBootstrapWithRepoCreatesWorktreeAndReusesExistingWorktree(t *testing.T)
 	require.NoError(t, cmd.Execute())
 }
 
+func TestBootstrapWithRepoHonorsExplicitConfigPath(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+	configPath := filepath.Join(fixture.outputDir, "custom-jiradozer.yaml")
+
+	var rootConfigPath string
+	root := &cobra.Command{Use: "jiradozer"}
+	root.PersistentFlags().StringVar(&rootConfigPath, "config", "jiradozer.yaml", "Path to config file")
+	root.AddCommand(newBootstrapCommand(&bootstrapArgs{}, &rootConfigPath))
+	root.SetArgs([]string{"--config", configPath, "bootstrap", "--repo", fixture.remoteDir})
+
+	require.NoError(t, root.Execute())
+	require.FileExists(t, configPath)
+	require.NoFileExists(t, fixture.configPath)
+
+	cfg, err := jiradozer.LoadConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
+}
+
+func TestBootstrapWithRepoRecreatesMissingDefaultWorktree(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	require.NoError(t, cmd.Execute())
+	require.DirExists(t, fixture.mainPath)
+	require.NoError(t, os.RemoveAll(fixture.mainPath))
+	require.NoDirExists(t, fixture.mainPath)
+
+	cmd = fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir, "--force"})
+	require.NoError(t, cmd.Execute())
+	require.DirExists(t, fixture.mainPath)
+
+	cfg, err := jiradozer.LoadConfig(fixture.configPath)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
+}
+
 func TestBootstrapWithRepoDoesNotCloneWhenConfigExists(t *testing.T) {
 	fixture := newBootstrapRepoFixture(t)
 	require.NoError(t, os.MkdirAll(filepath.Dir(fixture.configPath), 0o755))
