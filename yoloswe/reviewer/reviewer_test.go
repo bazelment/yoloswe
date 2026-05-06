@@ -216,6 +216,74 @@ func TestBuildJSONPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildFollowUpJSONPromptWithScope_KeepsBiasGuardAndDropsRedundantBlocks(t *testing.T) {
+	// The follow-up prompt has two competing design constraints:
+	//   - shrink: don't re-paste rubric/format/scope text the resumed
+	//     session already saw in turn 1
+	//   - debias: don't bias the model toward ratifying its prior verdict
+	//     by narrowing scope to "only what changed since"
+	// This test pins both invariants. If a future shrink drops the bias-
+	// guard prose (or a future "completeness" pass re-adds the redundant
+	// blocks), the assertions below break.
+	cases := []struct {
+		name string
+		goal string
+		opts PromptOptions
+	}{
+		{name: "with goal", goal: "add user authentication", opts: PromptOptions{}},
+		{name: "empty goal", goal: "", opts: PromptOptions{}},
+		{name: "with skip-test-execution", goal: "x", opts: PromptOptions{SkipTestExecution: true}},
+		{name: "with scope hints", goal: "x", opts: PromptOptions{
+			TestScopeHints:       []string{"foo/foo_test.go"},
+			CrossServicePackages: []string{"foo", "bar"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := BuildFollowUpJSONPromptWithScope(tc.goal, tc.opts)
+
+			// Bias-guard markers MUST be present so the model is invited to
+			// look beyond just-changed code.
+			required := []string{
+				"Re-review the full diff with fresh eyes",
+				"including code you previously accepted",
+				"DO surface any new issues",
+				"more useful than one that just confirms the prior verdict",
+				"same severity rubric and JSON output format",
+			}
+			for _, want := range required {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("follow-up prompt missing bias-guard phrase %q\nfull prompt:\n%s", want, prompt)
+				}
+			}
+
+			// Redundant turn-1 blocks MUST NOT be re-pasted. Each substring
+			// here was emitted by the fresh prompt that established the
+			// resumed session; repeating them wastes tokens without signal.
+			forbidden := []string{
+				"experienced software engineer",      // persona, set in turn 1
+				"## Output Format",                   // jsonOutputRules block
+				"## Severity Levels",                 // jsonOutputRules block
+				"Do NOT run tests or build commands", // skipTestExecutionSuffix
+				"co-located test files",              // scope test-quality clause
+				"caller/callee",                      // scope cross-service clause
+			}
+			for _, no := range forbidden {
+				if strings.Contains(prompt, no) {
+					t.Errorf("follow-up prompt re-pastes turn-1 block %q (waste of tokens)\nfull prompt:\n%s", no, prompt)
+				}
+			}
+
+			// The goal text from buildGoalText must NOT appear: the resumed
+			// session already saw it. (Use a goal-specific marker so we don't
+			// trip on shared substrings.)
+			if tc.goal != "" && strings.Contains(prompt, tc.goal) {
+				t.Errorf("follow-up prompt re-states goal %q (redundant on resume)\nfull prompt:\n%s", tc.goal, prompt)
+			}
+		})
+	}
+}
+
 func TestNew_DefaultValues(t *testing.T) {
 	r := New(Config{})
 

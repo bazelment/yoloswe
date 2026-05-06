@@ -111,6 +111,19 @@ resume id is set, which matches the path `/pr-polish` uses — the production ca
 this eval most needs to characterize. Canonical command (codex; cursor and gemini
 mirror it with backend/model swapped):
 
+> **Prompt shape note (2026-05-06):** the follow-up prompt was rewritten to
+> drop the redundant rubric/format/scope re-paste (the resumed session
+> already saw them in turn 1) and to widen the model's review scope —
+> earlier shapes used a strict "(1)(2)(3) only" framing that biased the
+> model toward ratifying the prior verdict (cursor turn 2 in the round-2
+> eval returned 0 issues with summary "HEAD is unchanged since the earlier
+> pass"). The new shape leads with "Re-review the full diff with fresh
+> eyes — including code you previously accepted" and rewards finding new
+> issues over confirming the prior verdict. Compare turn-2 finding counts
+> before/after this date to baseline the bias-guard effect: a non-biased
+> follow-up should produce turn-2 finding counts ≥ turn-1 in expectation,
+> or at least not systematically lower across all backends.
+
 ```bash
 ENVELOPE_FILE="$LOG_DIR/codex-5.4-mini-envelope-r2.json"
 BRAMBLE_RUN_TAG="code-review-eval:$(git branch --show-current):codex-5.4-mini:r2" \

@@ -631,18 +631,38 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 }
 
 func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
+	// The follow-up prompt is intentionally short: rubric, format spec,
+	// scope clauses, and skip-test-execution clause are all dropped because
+	// the resumed session already saw them in the fresh prompt that opened
+	// turn 1. What MUST stay is the bias-guard prose — without it, the
+	// model will narrow to "what changed since" and silently ratify the
+	// prior verdict (the failure mode observed in the round-2 eval).
 	got := buildPromptForRun("g", "", true, promptStyleFollowUp)
-	if !strings.Contains(got, "If this session has previous review context") {
-		t.Errorf("follow-up prompt missing opening line; got:\n%s", got)
+
+	// Bias-guard prose must remain.
+	for _, want := range []string{
+		"Continue the review on the same diff",
+		"Re-review the full diff with fresh eyes",
+		"DO surface any new issues",
+		"more useful than one that just confirms the prior verdict",
+		"same severity rubric and JSON output format",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("follow-up prompt missing bias-guard phrase %q; got:\n%s", want, got)
+		}
 	}
-	if strings.Contains(got, "Focus on these areas:") {
-		t.Errorf("follow-up prompt should not use full fresh-review checklist; got:\n%s", got)
-	}
-	if !strings.Contains(got, "Do NOT run tests or build commands") {
-		t.Errorf("follow-up prompt must preserve skip-test-execution clause; got:\n%s", got)
-	}
-	if !strings.Contains(got, "## Output Format") {
-		t.Errorf("follow-up prompt missing JSON output rules; got:\n%s", got)
+
+	// Redundant turn-1 blocks must be absent.
+	for _, no := range []string{
+		"Focus on these areas:",              // fresh-review 6-axis checklist
+		"experienced software engineer",      // persona
+		"## Output Format",                   // jsonOutputRules
+		"## Severity Levels",                 // jsonOutputRules
+		"Do NOT run tests or build commands", // skipTestExecutionSuffix
+	} {
+		if strings.Contains(got, no) {
+			t.Errorf("follow-up prompt unexpectedly re-pastes %q; got:\n%s", no, got)
+		}
 	}
 }
 

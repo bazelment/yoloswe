@@ -482,20 +482,53 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 
 // BuildFollowUpJSONPromptWithScope creates the shorter resumed-session prompt
 // used after a prior review round has already established context.
+//
+// Design intent: a follow-up prompt sits in tension between two competing
+// goals.
+//
+//   - Dedup-aware: don't have the model re-list every prior finding verbatim;
+//     the orchestrator (e.g. /pr-polish) has already triaged those.
+//   - Bias-guard: don't let the narrowing bias the model into ratifying its
+//     prior verdict by ignoring code it already accepted. A second pass that
+//     finds something the first pass missed is more useful than one that just
+//     re-confirms the prior conclusion.
+//
+// The earlier shape leaned hard on the dedup side ("focus on the changes made
+// since that prior turn", with a strict 3-item focus list and an explicit
+// "do not re-list" rule) and produced visibly biased output in the round-2
+// eval — cursor turn 2 returned 0 issues with the summary "HEAD is unchanged
+// since the earlier pass", which is exactly the failure mode we want to
+// avoid. This rewrite explicitly invites a fresh look at the full diff,
+// rewards finding new issues over confirming the prior verdict, and only
+// uses the (1)/(2)/(3) framing as "pay particular attention to" hints
+// rather than the sole acceptable scope.
+//
+// Token-cost cuts vs the prior shape: the goal re-statement, the persona, the
+// per-issue citation/rubric instructions, the scope suffix, the
+// skip-test-execution suffix, and the full JSON output spec are all dropped.
+// They were established in the fresh prompt that started the session and are
+// already in the model's context window; restating them adds noise without
+// signal. A single-line "same severity rubric and JSON output format" pointer
+// keeps format compliance anchored without re-pasting the spec.
+//
+// The opts argument is preserved on the signature for symmetry with the
+// fresh prompt and so callers don't need a separate dispatch — but its
+// fields (TestScopeHints, ChangedPackages, SkipTestExecution, etc.) are
+// intentionally not re-rendered here. The same scope state existed when
+// the fresh prompt established the session; the resumed model already has it.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
-	prompt := `Continue reviewing the current diff against the same goal. If this session has previous review context, focus on the changes made since that prior turn; if not, review the current diff normally.
-` + buildGoalText(goal) + `
+	_ = goal // documented above: the goal is in the resumed session's context
+	_ = opts // documented above: scope/skip-test state was established in fresh prompt
+	return `Continue the review on the same diff against the same goal as the prior turn.
 
-Focus on:
-1. Issues introduced by the new fix commits.
+Re-review the full diff with fresh eyes — including code you previously accepted. Pay particular attention to:
+1. Issues introduced by new commits since the prior turn.
 2. Items you flagged before that you now have stronger evidence for — cite the file:line that proves it.
-3. Anything you skipped before that the new code now exposes.
+3. Anything you skipped or dismissed before that, on a second look, warrants flagging.
 
-Do not re-list issues you previously flagged unless one of (1)-(3) applies. For every issue, cite the exact affected file and line, explain the concrete failure mode, and include only findings that would affect correctness, maintainability, security, or operability.`
-	if opts.SkipTestExecution {
-		prompt += skipTestExecutionSuffix
-	}
-	return prompt + buildScopeSuffix(opts) + jsonOutputRules()
+Avoid restating prior findings verbatim, but DO surface any new issues you spot — including in code you already accepted. A second pass that finds something the first pass missed is more useful than one that just confirms the prior verdict.
+
+Apply the same severity rubric and JSON output format as the prior turn.`
 }
 
 func jsonOutputRules() string {
