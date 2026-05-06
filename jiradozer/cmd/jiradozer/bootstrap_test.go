@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -21,7 +22,7 @@ func TestBootstrapPromptParity(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "jiradozer.yaml")
-	content, err := bootstrapYAML()
+	content, err := bootstrapYAML("")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, content, 0o644))
 
@@ -59,7 +60,7 @@ func TestBootstrapRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "jiradozer.yaml")
 
-	content, err := bootstrapYAML()
+	content, err := bootstrapYAML("")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, content, 0o644))
 
@@ -100,7 +101,7 @@ func TestBootstrapRoundTrip(t *testing.T) {
 func TestExampleYAMLMatchesBootstrap(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "test")
 
-	want, err := bootstrapYAML()
+	want, err := bootstrapYAML("")
 	require.NoError(t, err)
 
 	// rundir = "." in BUILD.bazel keeps the test cwd at the workspace
@@ -257,62 +258,83 @@ func TestBootstrapDefaultPath(t *testing.T) {
 	assert.Contains(t, string(got), "jiradozer bootstrap")
 }
 
-func TestBootstrapWithRepoCreatesWorktreeAndKeepsConfigOutsideRepo(t *testing.T) {
-	t.Setenv("LINEAR_API_KEY", "test")
-	wtRoot := t.TempDir()
-	t.Setenv("WT_ROOT", wtRoot)
-	outputDir := t.TempDir()
-	t.Chdir(outputDir)
-	remoteDir := newBootstrapRemote(t)
+func TestBootstrapWithRepoCreatesWorktreeAndReusesExistingWorktree(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
 
-	args := &bootstrapArgs{}
-	configPath := "jiradozer.yaml"
-	cmd := newBootstrapCommand(args, &configPath)
-	cmd.SetArgs([]string{"--repo", remoteDir})
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
 	require.NoError(t, cmd.Execute())
 
-	repoName := wt.GetRepoNameFromURL(remoteDir)
-	mainPath := filepath.Join(wtRoot, repoName, "main")
-	configPathInRepoContainer := filepath.Join(wtRoot, repoName, "jiradozer.yaml")
-	require.FileExists(t, filepath.Join(wtRoot, repoName, ".bare", "HEAD"))
-	require.DirExists(t, mainPath)
-	require.FileExists(t, configPathInRepoContainer)
-	require.NoFileExists(t, filepath.Join(outputDir, "jiradozer.yaml"))
-	require.NoFileExists(t, filepath.Join(mainPath, "jiradozer.yaml"))
+	require.FileExists(t, filepath.Join(fixture.wtRoot, fixture.repoName, ".bare", "HEAD"))
+	require.DirExists(t, fixture.mainPath)
+	require.FileExists(t, fixture.configPath)
+	require.NoFileExists(t, filepath.Join(fixture.outputDir, "jiradozer.yaml"))
+	require.NoFileExists(t, filepath.Join(fixture.mainPath, "jiradozer.yaml"))
 
-	cfg, err := jiradozer.LoadConfig(configPathInRepoContainer)
+	cfg, err := jiradozer.LoadConfig(fixture.configPath)
 	require.NoError(t, err)
-	assert.Equal(t, mainPath, cfg.WorkDir)
+	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
 
 	git := &wt.DefaultGitRunner{}
-	result, err := git.Run(context.Background(), []string{"status", "--porcelain"}, mainPath)
+	result, err := git.Run(context.Background(), []string{"status", "--porcelain"}, fixture.mainPath)
 	require.NoError(t, err)
 	assert.Empty(t, result.Stdout, "bootstrap --repo should leave the cloned worktree clean")
-}
 
-func TestBootstrapWithRepoReusesExistingWorktree(t *testing.T) {
-	t.Setenv("LINEAR_API_KEY", "test")
-	wtRoot := t.TempDir()
-	t.Setenv("WT_ROOT", wtRoot)
-	outputDir := t.TempDir()
-	t.Chdir(outputDir)
-	remoteDir := newBootstrapRemote(t)
-
-	args := &bootstrapArgs{}
-	configPath := "jiradozer.yaml"
-	cmd := newBootstrapCommand(args, &configPath)
-	cmd.SetArgs([]string{"--repo", remoteDir})
-	require.NoError(t, cmd.Execute())
-
-	cmd = newBootstrapCommand(&bootstrapArgs{}, &configPath)
-	cmd.SetArgs([]string{"--repo", remoteDir})
-	err := cmd.Execute()
+	cmd = fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	err = cmd.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 
-	cmd = newBootstrapCommand(&bootstrapArgs{}, &configPath)
-	cmd.SetArgs([]string{"--repo", remoteDir, "--force"})
+	cmd = fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir, "--force"})
 	require.NoError(t, cmd.Execute())
+}
+
+func TestBootstrapWithRepoDoesNotCloneWhenConfigExists(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Dir(fixture.configPath), 0o755))
+	require.NoError(t, os.WriteFile(fixture.configPath, []byte("# existing\n"), 0o644))
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+	require.NoDirExists(t, filepath.Join(fixture.wtRoot, fixture.repoName, ".bare"))
+}
+
+type bootstrapRepoFixture struct {
+	wtRoot     string
+	outputDir  string
+	remoteDir  string
+	repoName   string
+	mainPath   string
+	configPath string
+}
+
+func newBootstrapRepoFixture(t *testing.T) bootstrapRepoFixture {
+	t.Helper()
+	t.Setenv("LINEAR_API_KEY", "test")
+	wtRoot := t.TempDir()
+	t.Setenv("WT_ROOT", wtRoot)
+	outputDir := t.TempDir()
+	t.Chdir(outputDir)
+	remoteDir := newBootstrapRemote(t)
+	repoName := wt.GetRepoNameFromURL(remoteDir)
+	return bootstrapRepoFixture{
+		wtRoot:     wtRoot,
+		outputDir:  outputDir,
+		remoteDir:  remoteDir,
+		repoName:   repoName,
+		mainPath:   filepath.Join(wtRoot, repoName, "main"),
+		configPath: filepath.Join(wtRoot, repoName, "jiradozer.yaml"),
+	}
+}
+
+func (f bootstrapRepoFixture) newCommand() *cobra.Command {
+	configPath := "jiradozer.yaml"
+	return newBootstrapCommand(&bootstrapArgs{}, &configPath)
 }
 
 func TestBootstrapWithRepoExpandsOwnerRepoShorthand(t *testing.T) {
