@@ -282,13 +282,37 @@ func TestBuildFollowUpJSONPromptWithScope_KeepsBiasGuardAndDropsRedundantBlocks(
 					}
 				}
 
-				// The goal text from buildGoalText must NOT appear: the resumed
-				// session already saw it. (Use a goal-specific marker so we don't
-				// trip on shared substrings.)
-				if tc.goal != "" && strings.Contains(prompt, tc.goal) {
-					t.Errorf("follow-up prompt re-states goal %q (redundant on resume)\nfull prompt:\n%s", tc.goal, prompt)
-				}
+				// goal handling is split into two regimes — see the dedicated
+				// "goal as per-turn metadata channel" subtest below.
 			})
+		}
+	})
+
+	t.Run("goal as per-turn metadata channel", func(t *testing.T) {
+		// On a follow-up turn the original PR-level goal lives in the
+		// resumed session's context; restating it would be redundant. So
+		// an empty goal on the follow-up call must NOT inject a goal block.
+		// But callers (canonical: /pr-polish on rounds 2+) repurpose the
+		// channel to feed the resumed model orchestrator-side state — the
+		// action history of what prior rounds fixed/skipped — so the model
+		// knows which of its own prior findings are already handled and
+		// doesn't burn a round re-flagging them. Non-empty goal must be
+		// embedded as "Context for this turn:" so the model reads it as
+		// per-turn metadata, not as a re-statement of the session goal.
+		empty := BuildFollowUpJSONPromptWithScope("", PromptOptions{})
+		if strings.Contains(empty, "Context for this turn:") {
+			t.Errorf("empty goal must not inject a Context block; got:\n%s", empty)
+		}
+		// Use a sentinel value distinctive enough that it can't false-match
+		// on any phrase in the prompt body.
+		sentinel := "PRIOR-FIXES-XYZZY-9182: codereview.go:99 emitVerdictLine"
+		nonEmpty := BuildFollowUpJSONPromptWithScope(sentinel, PromptOptions{})
+		if !strings.Contains(nonEmpty, "Context for this turn: "+sentinel) {
+			t.Errorf("non-empty goal must be embedded as 'Context for this turn:'; got:\n%s", nonEmpty)
+		}
+		// Bias-guard prose still present alongside the metadata.
+		if !strings.Contains(nonEmpty, "Re-review the full diff with fresh eyes") {
+			t.Errorf("non-empty goal must not displace bias-guard prose; got:\n%s", nonEmpty)
 		}
 	})
 

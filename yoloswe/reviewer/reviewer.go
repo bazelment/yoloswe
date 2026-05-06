@@ -522,15 +522,33 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 //
 // The opts argument is preserved on the signature for symmetry with the
 // fresh prompt and so callers don't need a separate dispatch — but its
-// goal is intentionally not re-rendered: it was established in the fresh
-// prompt that started the session, and the no-prior-context escape hatch
-// below handles the silent-fallback case via the model's first-pass review
-// behavior rather than re-stating the goal text. opts.SkipTestExecution and
-// the scope-hint fields ARE conditionally rendered (see the design intent
-// above) so a fallback session reads them cold.
+// goal serves two purposes on a follow-up turn, depending on whether it's
+// empty:
+//
+//   - empty goal: the original PR-level goal was established in the fresh
+//     prompt that started the session, and the resumed model already has it
+//     in context. Don't re-state it — that's redundant and was the round-2
+//     eval's bias-amplifier. The no-prior-context escape hatch below handles
+//     the silent-fallback case via the model's first-pass review behavior.
+//
+//   - non-empty goal: the caller is using the goal channel for per-turn
+//     metadata, not PR-level intent. The canonical example is /pr-polish
+//     on rounds 2+: it passes the action history (what prior rounds fixed,
+//     skipped, and why) so the resumed model knows which of its own prior
+//     findings have already been addressed and doesn't waste a turn
+//     re-flagging them. Embed the goal text as "Context for this turn: ..."
+//     so the model treats it as orchestrator-supplied state, not as the
+//     original PR goal restated.
+//
+// opts.SkipTestExecution and the scope-hint fields ARE conditionally
+// rendered (see the design intent above) so a fallback session reads them
+// cold.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
-	_ = goal // see docstring: deliberate drop, escape hatch handles fallback case
-	prompt := `Continue the review on the same diff against the same goal as the prior turn.
+	prompt := `Continue the review on the same diff against the same goal as the prior turn.`
+	if goal != "" {
+		prompt += "\n\nContext for this turn: " + goal
+	}
+	prompt += `
 
 If you have no prior review context for this diff (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: examine the entire diff and apply the standard severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.
 
