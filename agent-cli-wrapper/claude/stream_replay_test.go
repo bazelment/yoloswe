@@ -308,6 +308,20 @@ func TestStream_Replay_PendingTransientBlocksNextSendMessage(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestStream_Replay_PendingTransientAttributedToProducingTurn(t *testing.T) {
+	s := newTestSession(t)
+	s.turnManager.StartTurn("turn 1")
+
+	s.handleLine([]byte(`{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Stream idle timeout - partial response received"}]},"isApiErrorMessage":true,"requestId":"req_turn_1","session_id":"s1","uuid":"u1"}`))
+	s.turnManager.StartTurn("turn 2")
+
+	require.Nil(t, s.consumePendingTransient(2))
+	te := s.consumePendingTransient(1)
+	require.NotNil(t, te)
+	require.Equal(t, "Stream idle timeout - partial response received", te.Message)
+	require.Equal(t, "req_turn_1", te.RequestID)
+}
+
 // TestStream_Replay_R2_MixedSyncBgTurn (R2 in the plan matrix) — a single CLI
 // turn that runs a sync tool_use, launches a bg Monitor, and emits
 // ResultMessage before the Monitor task completes. The raw stream must contain

@@ -967,13 +967,7 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		}}
 	}
 
-	s.emit(AssistantMessageEvent{
-		Model:         msg.Message.Model,
-		Blocks:        blocks,
-		ParentToolUse: msg.ParentToolUseID,
-		TurnNumber:    s.turnManager.CurrentTurnNumber(),
-	})
-
+	turnNumber := s.turnManager.CurrentTurnNumber()
 	if msg.IsSyntheticAPIError() {
 		text := msg.SyntheticErrorText()
 		if text == "" {
@@ -983,12 +977,19 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		if s.pendingTransientErrors == nil {
 			s.pendingTransientErrors = make(map[int]*TransientError)
 		}
-		s.pendingTransientErrors[s.turnManager.CurrentTurnNumber()] = &TransientError{
+		s.pendingTransientErrors[turnNumber] = &TransientError{
 			Message:   text,
 			RequestID: msg.RequestID,
 		}
 		s.mu.Unlock()
 	}
+
+	s.emit(AssistantMessageEvent{
+		Model:         msg.Message.Model,
+		Blocks:        blocks,
+		ParentToolUse: msg.ParentToolUseID,
+		TurnNumber:    turnNumber,
+	})
 
 	// Extract text from complete message
 	for _, block := range blocks {
@@ -1759,11 +1760,7 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 	s.sendControlSuccess(requestID, resp)
 }
 
-// resultMessageError extracts the non-nil error value from a ResultMessage
-// when the CLI reports a failed turn. Mirrors handleResult's error
-// construction but does not depend on accumulated suppression state, so the
-// raw ResultMessageEvent can surface error detail before the coalescing
-// branches run.
+// consumePendingTransient pops the pending synthetic API error for turnNumber.
 func (s *Session) consumePendingTransient(turnNumber int) *TransientError {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1772,6 +1769,11 @@ func (s *Session) consumePendingTransient(turnNumber int) *TransientError {
 	return err
 }
 
+// resultMessageError extracts the non-nil error value from a ResultMessage
+// when the CLI reports a failed turn. Mirrors handleResult's error
+// construction but does not depend on accumulated suppression state, so the
+// raw ResultMessageEvent can surface error detail before the coalescing
+// branches run.
 func resultMessageError(msg protocol.ResultMessage) error {
 	switch o := msg.Outcome().(type) {
 	case protocol.ResultSuccess:
