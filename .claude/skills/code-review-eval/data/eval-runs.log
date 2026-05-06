@@ -780,3 +780,122 @@ Notes:
   `~/.bramble/logs/code-review/code-review-*.log` now carry the
   `code-review-eval:{branch}:{name}:r{turn}` tag so this run is
   traceable end-to-end.
+
+## 2026-05-06 (round 3) — jiradozer/bazelment/yoloswe#216 (debiased follow-up prompt)
+
+Diff: 26 files, +2056/-112 lines. This run baselines the new debiased
+follow-up prompt (committed in e6da3b8 earlier the same day) against the
+prior eval-runs.log entry, where cursor turn-2 went 4 → 0 with summary
+"HEAD is unchanged since the earlier pass" — the bias mode the new
+prompt was designed to fix.
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 1 | 0 | accepted | 0.80 | 54s | — |
+| cursor-composer2 | 2 | ok | 4 | 0 | accepted | 0.78 | 46s | — |
+| cursor-composer2 | 3 | ok | 4 | 0 | accepted | 0.80 | 25s | — |
+| codex-5.4-mini | 1 | — | 3 | 0 | rejected | 0.85 | 162s | 0/0 |
+| codex-5.4-mini | 2 | ok | 3 | 0 | rejected | 0.85 | 56s | 0/0 |
+| codex-5.4-mini | 3 | ok | 3 | 0 | rejected | 0.85 | 7s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | 0.70 | 2s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | 0.70 | 1s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | 0.70 | 1s | — |
+
+Resume health: cursor=ok, codex=ok, gemini=ok across all 6 resumed turns.
+
+### Headline: bias-guard validation
+
+Cursor turn-1 → turn-2 finding count flipped from -4 (prior eval) to +3
+(this eval). That is the cleanest possible bias-guard validation:
+- Prior eval (biased prompt): 4 → 0, summary "HEAD is unchanged since
+  the earlier pass" — model ratified the prior verdict by narrowing
+  scope.
+- This eval (debiased prompt): 1 → 4, with three NEW findings the
+  turn-1 review missed.
+
+Codex was unaffected (stable 3 → 3 → 3 across all turns); it doesn't
+suffer from the bias mode in the first place. Gemini stayed shallow
+(0 → 0 → 0); the bias wasn't the constraint there. Neither backend
+regressed under the new prompt.
+
+### Real bugs the debiased run caught
+
+**Codex (HIGH × 2, stable across all 3 turns):**
+- `codereview.go:239` — the error envelope path uses `r.ResumeStatus()`
+  directly, but that field is empty when the backend returns an error
+  with a nil result. Same shape as the panic-recovery bug fixed earlier
+  in this branch (commit 9fa9d87) but in a different code path. The
+  Unverified-fallback callback only kicks in for the deferred guard;
+  the explicit error branch at line 209-215 reads r.ResumeStatus()
+  directly without the same fallback.
+- `codereview.go:447` — **bug introduced by the prompt-shrink commit
+  itself.** Auto-promoting to follow-up as soon as --resume-session-id
+  is present assumes resume succeeds. If the backend falls back (now
+  observable via resume_status="fallback"), the short follow-up prompt
+  references "the prior turn" but is being sent to a fresh session
+  with no prior context. The eval caught this on the very first run
+  with the new prompt — exactly what the eval is for.
+
+**Cursor (3 NEW findings on turn 2 alone):**
+- `reviewer.go:519` (medium) — `_ = goal; _ = opts` discards CLI inputs.
+  Documented as deliberate but cursor flagged the silent contract drift.
+- `codereview.go:426` (medium) — `buildPromptForRun` calls
+  `loadPromptOptions` before branching; for `promptStyleFollowUp` the
+  opts never affect prompt text but a malformed scope-hints file could
+  still fail prompt loading. Wasted work + failure mode.
+- `codereview_test.go:643` (medium) — substring tables duplicate the
+  test in reviewer_test.go. Real test smell I introduced; redundant
+  assertions across two files.
+- `SKILL.md:123` (low) — the eval-skill note "unbiased follow-ups
+  ought to yield ≥ turn-1 findings" is overstated statistically.
+
+The cursor turn-2 findings are dominated by code I just shipped in
+e6da3b8 (the prompt-shrink commit). That's exactly the audit pattern
+the bias-guard was supposed to enable: a model on resume now actually
+re-reviews the new code instead of accepting it.
+
+### Follow-up deltas (debiased)
+
+| Config | Turn | Resume | New | Dropped | Severity changes |
+|--------|------|--------|-----|---------|------------------|
+| cursor-composer2 | 2 vs 1 | ok | +3 | -1 | 0 (medium → medium replacements) |
+| cursor-composer2 | 3 vs 1 | ok | +3 | -1 | 0 |
+| codex-5.4-mini | 2 vs 1 | ok | 0 | 0 | 0 (3 stable findings, near-identical wording) |
+| codex-5.4-mini | 3 vs 1 | ok | 0 | 0 | 0 |
+| gemini | n/a | ok | 0 | 0 | 0 (degenerate, 0 findings) |
+
+### Wall-clock
+
+Same amortization curve as the prior eval:
+- codex: 162s → 56s → 7s (96% drop on turn 3)
+- cursor: 54s → 46s → 25s (debiased follow-up costs more compute than
+  biased — model is actually reviewing instead of short-circuiting)
+- gemini: 2s → 1s → 1s
+
+### Notes
+
+- The debiased prompt cost cursor turn-2 ~46s vs the prior eval's 64s,
+  so the prompt is shorter AND faster despite producing more findings.
+  Token-cost reduction (~50% smaller prompt) plus higher signal density
+  (4 findings instead of 0): unambiguously better tradeoff.
+- Codex followed up at 56s vs the prior eval's 19s — codex is taking
+  the "Re-review the full diff with fresh eyes" instruction seriously
+  and burning real compute. Worth the cost given it caught the
+  high-severity codereview.go:447 bug that's directly attributable
+  to the prompt-shrink commit.
+- Gemini turn-2/3 finished in 1s with 0 findings. Gemini's bias mode
+  (if any) is dominated by its general shallowness; the debiased
+  prompt didn't change its output. This matches the deeper-problem
+  scenario from the plan: gemini-flash-lite simply isn't engaging
+  with a serious review at any prompt shape.
+- Codex stderr token counts still report 0/0 — pre-existing issue.
+
+### Eval-skill self-correction
+
+The cursor low-severity finding at SKILL.md:123 is correct: the note's
+guidance that turn-2 ≥ turn-1 in expectation overstates the case.
+Codex's stable t1=t2 result here disproves the universal claim. A
+better framing for that note: "a non-biased follow-up should not
+systematically produce LOWER turn-2 finding counts across all
+backends." The current biased→debiased flip clearly shows what the
+note was trying to capture without overclaiming.
