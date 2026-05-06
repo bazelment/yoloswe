@@ -78,6 +78,27 @@ func (e *TurnError) Unwrap() error {
 	return e.Cause
 }
 
+// TransientError indicates a transient/retryable CLI failure. The wrapper
+// produces it when the CLI emits a synthetic isApiErrorMessage assistant
+// frame, such as a server-side stream-idle timeout.
+type TransientError struct {
+	Cause     error
+	Message   string
+	RequestID string
+	SessionID string
+}
+
+func (e *TransientError) Error() string {
+	if e.RequestID != "" {
+		return fmt.Sprintf("transient CLI error (request %s): %s", e.RequestID, e.Message)
+	}
+	return fmt.Sprintf("transient CLI error: %s", e.Message)
+}
+
+func (e *TransientError) Unwrap() error {
+	return e.Cause
+}
+
 // CLINotFoundError indicates the Claude CLI binary was not found.
 type CLINotFoundError struct {
 	Cause error
@@ -90,6 +111,12 @@ func (e *CLINotFoundError) Error() string {
 
 func (e *CLINotFoundError) Unwrap() error {
 	return e.Cause
+}
+
+// IsTransient reports whether err or any wrapped error is a TransientError.
+func IsTransient(err error) bool {
+	var transient *TransientError
+	return errors.As(err, &transient)
 }
 
 // IsRecoverable returns true if the error is recoverable.

@@ -2,10 +2,15 @@ package claude
 
 import (
 	"bufio"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson"
 )
 
 // drainEvents non-blockingly drains the session's event channel into a slice.
@@ -213,6 +218,97 @@ func replaySessionFromLines(t *testing.T, lines [][]byte) []Event {
 		s.handleLine(line)
 	}
 	return drainEvents(t, s)
+}
+
+func replaySessionFromFixture(t *testing.T, path string) []Event {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	s := newTestSession(t)
+	s.turnManager.StartTurn("replay")
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		s.handleLine(append([]byte(nil), line...))
+	}
+	require.NoError(t, scanner.Err())
+	return drainEvents(t, s)
+}
+
+func TestStream_Replay_SyntheticStreamIdleTimeoutIsTransient(t *testing.T) {
+	events := replaySessionFromFixture(t, "testdata/replay/synthetic_stream_idle_timeout.jsonl")
+
+	require.Equal(t, 1, countEvents[AssistantMessageEvent](events),
+		"synthetic assistant frame still emits through the raw stream")
+
+	var rm *ResultMessageEvent
+	for _, e := range events {
+		if got, ok := e.(ResultMessageEvent); ok {
+			ev := got
+			rm = &ev
+			break
+		}
+	}
+	require.NotNil(t, rm, "ResultMessageEvent must fire for synthetic error turns")
+	require.Error(t, rm.Error)
+	var te *TransientError
+	require.True(t, errors.As(rm.Error, &te))
+	require.Equal(t, "Stream idle timeout - partial response received", te.Message)
+	require.Equal(t, "req_abc123", te.RequestID)
+	require.NotEmpty(t, te.SessionID)
+	require.True(t, IsRecoverable(rm.Error))
+}
+
+func TestStream_Replay_ErrorDuringExecutionWithoutSyntheticIsNotTransient(t *testing.T) {
+	events := replaySessionFromFixture(t, "testdata/replay/error_during_execution_real.jsonl")
+
+	var rm *ResultMessageEvent
+	for _, e := range events {
+		if got, ok := e.(ResultMessageEvent); ok {
+			ev := got
+			rm = &ev
+			break
+		}
+	}
+	require.NotNil(t, rm, "ResultMessageEvent must fire for real error turns")
+	require.Error(t, rm.Error)
+	var te *TransientError
+	require.False(t, errors.As(rm.Error, &te), "real refusal must not classify as transient")
+}
+
+func TestStream_Replay_PendingTransientClearedOnNextSendMessage(t *testing.T) {
+	s := newTestSession(t)
+	s.started = true
+	s.process = &processManager{writer: ndjson.NewWriter(io.Discard)}
+	s.turnManager.StartTurn("turn 1")
+
+	s.handleLine([]byte(`{"type":"system","subtype":"init","session_id":"s1","uuid":"sys1","cwd":"/tmp","model":"claude-opus-4-7","tools":[],"mcp_servers":[],"plugins":[],"skills":[],"slash_commands":[],"permissionMode":"default","apiKeySource":"none","output_style":"default","claude_code_version":"test"}`))
+	s.handleLine([]byte(`{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Stream idle timeout - partial response received"}]},"isApiErrorMessage":true,"requestId":"req_stale","session_id":"s1","uuid":"u1"}`))
+
+	_, err := s.SendMessage(context.Background(), "turn 2")
+	require.NoError(t, err)
+	s.handleLine([]byte(`{"type":"result","subtype":"success","session_id":"s1","uuid":"u2","result":"ok","num_turns":1,"duration_ms":10,"duration_api_ms":5,"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
+
+	events := drainEvents(t, s)
+	var rm *ResultMessageEvent
+	for _, e := range events {
+		if got, ok := e.(ResultMessageEvent); ok {
+			ev := got
+			rm = &ev
+			break
+		}
+	}
+	require.NotNil(t, rm)
+	require.NoError(t, rm.Error)
+	result := s.turnManager.GetCompletedResult(2)
+	require.NotNil(t, result, "turn 2 should complete")
+	require.NoError(t, result.Error)
 }
 
 // TestStream_Replay_R2_MixedSyncBgTurn (R2 in the plan matrix) — a single CLI

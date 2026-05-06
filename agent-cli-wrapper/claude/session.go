@@ -63,6 +63,7 @@ type Session struct {
 	accumulator             *streamAccumulator
 	turnManager             *turnManager
 	permissionManager       *permissionManager
+	pendingTransientError   *TransientError
 	state                   *sessionState
 	process                 *processManager
 	info                    *SessionInfo
@@ -277,6 +278,7 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 	}
 
 	turn := s.turnManager.StartTurn(content)
+	s.pendingTransientError = nil
 	// Clear any stale wakeup suppression state from the previous turn. A
 	// safety timer for Turn N must not fire after Turn N+1 has started, and
 	// the suppressed turn number must not bleed across user-initiated turns.
@@ -320,6 +322,7 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 	}
 
 	turn := s.turnManager.StartTurn(content)
+	s.pendingTransientError = nil
 	// Clear any stale wakeup suppression state from the previous turn.
 	s.wakeupState.reset()
 
@@ -960,6 +963,25 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		TurnNumber:    s.turnManager.CurrentTurnNumber(),
 	})
 
+	if msg.IsSyntheticAPIError() {
+		text := msg.SyntheticErrorText()
+		if text == "" {
+			text = "synthetic API error"
+		}
+		text = strings.TrimPrefix(text, "API Error: ")
+		s.mu.Lock()
+		sessionID := msg.SessionID
+		if s.info != nil && s.info.SessionID != "" {
+			sessionID = s.info.SessionID
+		}
+		s.pendingTransientError = &TransientError{
+			Message:   text,
+			RequestID: msg.RequestID,
+			SessionID: sessionID,
+		}
+		s.mu.Unlock()
+	}
+
 	// Extract text from complete message
 	for _, block := range blocks {
 		if textBlock, ok := block.(protocol.TextBlock); ok {
@@ -1063,6 +1085,12 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
 	resultErr := resultMessageError(msg)
+	if t := s.consumePendingTransient(); t != nil {
+		if resultErr != nil {
+			t.Cause = resultErr
+		}
+		resultErr = t
+	}
 	resultIsError := msg.IsFailure()
 
 	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
@@ -1728,6 +1756,14 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 // construction but does not depend on accumulated suppression state, so the
 // raw ResultMessageEvent can surface error detail before the coalescing
 // branches run.
+func (s *Session) consumePendingTransient() *TransientError {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.pendingTransientError
+	s.pendingTransientError = nil
+	return err
+}
+
 func resultMessageError(msg protocol.ResultMessage) error {
 	switch o := msg.Outcome().(type) {
 	case protocol.ResultSuccess:
