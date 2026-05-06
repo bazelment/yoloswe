@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -240,7 +241,14 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string, opts ...Sess
 
 	resp, err := c.sendRequestAndWait(ctx, MethodSessionLoad, params)
 	if err != nil {
-		if rpcErr, ok := err.(*RPCError); ok && (rpcErr.Code == ErrCodeResourceNotFound || rpcErr.Code == ErrCodeCapabilityUnsupported) {
+		// Use errors.As, not a plain type assertion, so a wrapped *RPCError
+		// (e.g. one re-wrapped with fmt.Errorf or by a future middleware
+		// layer) still routes to ErrSessionNotFound. Without this, callers
+		// like geminiBackend that branch on errors.Is(err, ErrSessionNotFound)
+		// would silently miss the not-found path and surface the raw RPC
+		// error instead of falling back to a fresh session.
+		var rpcErr *RPCError
+		if errors.As(err, &rpcErr) && (rpcErr.Code == ErrCodeResourceNotFound || rpcErr.Code == ErrCodeCapabilityUnsupported) {
 			return nil, ErrSessionNotFound
 		}
 		return nil, err

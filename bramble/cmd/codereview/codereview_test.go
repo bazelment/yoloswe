@@ -145,6 +145,130 @@ func TestEmitEarlyFailure_WritesEnvelopeToStdout(t *testing.T) {
 	}
 }
 
+func TestEmitEarlyFailure_AttachesUnverifiedWhenResumeRequested(t *testing.T) {
+	// Round-7 review consensus (codex + cursor): emitEarlyFailure was
+	// updated to attach ResumeStatusUnverified when --resume-session-id is
+	// set, but no test pinned that behavior — so a future refactor that
+	// dropped the resume-status assignment would only be caught by a slow
+	// integration run. This test pins the contract directly.
+	origBackend := backend
+	origResume := resumeSessionID
+	backend = "codex"
+	resumeSessionID = "some-session-id"
+	t.Cleanup(func() {
+		backend = origBackend
+		resumeSessionID = origResume
+	})
+
+	stdout, _ := captureStdStreams(t, func() {
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		_ = emitEarlyFailure(errors.New("backend unreachable"), "gpt-x", emit)
+	})
+
+	var env reviewer.ResultEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+		t.Fatalf("stdout must be a single JSON envelope, got %q: %v", stdout, err)
+	}
+	if env.ResumeStatus != reviewer.ResumeStatusUnverified {
+		t.Errorf("envelope.resume_status = %q, want %q", env.ResumeStatus, reviewer.ResumeStatusUnverified)
+	}
+}
+
+func TestEmitEarlyFailure_OmitsResumeStatusWhenNoneRequested(t *testing.T) {
+	// Symmetry guard: when --resume-session-id was NOT set, emitEarlyFailure
+	// must leave resume_status empty so omitempty drops the field. Without
+	// this case, a regression that always wrote "unverified" would slip
+	// through TestEmitEarlyFailure_AttachesUnverifiedWhenResumeRequested.
+	origBackend := backend
+	origResume := resumeSessionID
+	backend = "codex"
+	resumeSessionID = ""
+	t.Cleanup(func() {
+		backend = origBackend
+		resumeSessionID = origResume
+	})
+
+	stdout, _ := captureStdStreams(t, func() {
+		emit := func(env reviewer.ResultEnvelope) {
+			_ = reviewer.PrintJSONResult(os.Stdout, env)
+		}
+		_ = emitEarlyFailure(errors.New("oops"), "gpt-x", emit)
+	})
+
+	var env reviewer.ResultEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+		t.Fatalf("stdout must be a single JSON envelope, got %q: %v", stdout, err)
+	}
+	if env.ResumeStatus != "" {
+		t.Errorf("envelope.resume_status = %q, want empty when no resume requested", env.ResumeStatus)
+	}
+}
+
+func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
+	// Round-7 review (cursor low-ack): emitVerdictLine drives the new
+	// stdout contract that orchestrators read mid-stream, but had no
+	// focused unit tests so a regression in the success vs error suffix
+	// formatting (or in dropping the suffix when resume_status is empty)
+	// would only surface in a real bramble run.
+	cases := []struct {
+		// Group both string fields together before the heavier ResultEnvelope
+		// to satisfy fieldalignment (govet) — placing strings on either side
+		// of the embedded struct wastes pointer-aligned padding.
+		name     string
+		wantLine string
+		env      reviewer.ResultEnvelope
+	}{
+		{
+			name: "success with resume ok",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusOK,
+				Review:        reviewer.ReviewBody{Verdict: "accepted", Issues: []reviewer.ReviewIssue{}},
+				ResumeStatus:  reviewer.ResumeStatusOK,
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "verdict: accepted (0 issues) [resume=ok]\n",
+		},
+		{
+			name: "success without resume",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusOK,
+				Review:        reviewer.ReviewBody{Verdict: "rejected", Issues: []reviewer.ReviewIssue{{Severity: "high"}, {Severity: "low"}}},
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "verdict: rejected (2 issues)\n",
+		},
+		{
+			name: "error with resume unverified",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusError,
+				Error:         "backend unreachable",
+				ResumeStatus:  reviewer.ResumeStatusUnverified,
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "error: backend unreachable [resume=unverified]\n",
+		},
+		{
+			name: "error without resume",
+			env: reviewer.ResultEnvelope{
+				Status:        reviewer.StatusError,
+				Error:         "auth denied",
+				SchemaVersion: reviewer.JSONSchemaVersion,
+			},
+			wantLine: "error: auth denied\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _ := captureStdStreams(t, func() { emitVerdictLine(tc.env) })
+			if stdout != tc.wantLine {
+				t.Errorf("stdout = %q, want %q", stdout, tc.wantLine)
+			}
+		})
+	}
+}
+
 func TestFinalizeEnvelope_SuccessDoesNotDoubleEmit(t *testing.T) {
 	// When runCodeReview's happy path has already flushed an envelope, the
 	// top-level defer must not synthesize a second one — otherwise automation
