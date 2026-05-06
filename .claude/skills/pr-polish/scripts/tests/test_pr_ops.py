@@ -955,6 +955,32 @@ class TestRecomputeCountsTreatsPreExistingAsSkipped(unittest.TestCase):
         self.assertEqual(counts["skipped_count"], 3)
 
 
+class TestReplyInlineSafeBody(unittest.TestCase):
+    """Reply bodies must never be passed via `gh api -f body=...`: gh treats
+    `@`-prefixed values as file references, so a body starting with `@` could
+    read a local file or send the wrong payload. The fix pipes JSON via stdin.
+    """
+
+    def test_uses_stdin_input_with_json_payload(self) -> None:
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["input_text"] = kwargs.get("input_text")
+            return _common.RunResult(stdout='{"id": 1}', stderr="", returncode=0)
+
+        body = "@malicious-looking but really just a literal reply"
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            pr_ops.reply_inline("owner/repo", 234, 99, body)
+        self.assertIn("--input", captured["cmd"])
+        self.assertIn("-", captured["cmd"])
+        # Body must not be embedded in argv via -f / -F.
+        self.assertNotIn("-f", captured["cmd"])
+        self.assertNotIn("-F", captured["cmd"])
+        payload = json.loads(captured["input_text"])
+        self.assertEqual(payload, {"body": body})
+
+
 class TestSlugifyAndStatePaths(unittest.TestCase):
     def test_slugify_strips_slashes_and_lowercases(self) -> None:
         self.assertEqual(_common._slugify_branch("feature/Foo BAR"), "feature-foo-bar")

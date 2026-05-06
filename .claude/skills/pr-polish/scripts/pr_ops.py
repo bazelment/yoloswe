@@ -847,9 +847,15 @@ def _utc_now() -> str:
 
 def reply_inline(owner_repo: str, pr: int, comment_id: int, body: str) -> dict[str, Any]:
     path = f"repos/{owner_repo}/pulls/{pr}/comments/{comment_id}/replies"
+    # Pipe JSON via stdin instead of `-f body=...` because gh field
+    # interpolation treats `@`-prefixed values as file references — a reply
+    # body starting with `@` would either read a local file or send the wrong
+    # payload. `--input -` consumes the request body as raw JSON.
+    payload = json.dumps({"body": body})
     res = run(
-        ["gh", "api", "--method", "POST", path, "-f", f"body={body}"],
+        ["gh", "api", "--method", "POST", path, "--input", "-"],
         check=True,
+        input_text=payload,
     )
     return json.loads(res.stdout) if res.stdout.strip() else {}
 

@@ -37,7 +37,7 @@ from _common import (  # noqa: E402
     topic_of,
 )
 
-BACKENDS = ("codex", "cursor")
+BACKENDS = ("codex", "cursor", "gemini")
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ def format_monitor_command(
     goal: str,
     *,
     repo: str | None = None,
-    pr: int | None = None,
+    pr: int | str | None = None,
     work_dir: str | None = None,
 ) -> str:
     """Return the shell command the orchestrator passes as Monitor's `command`.
@@ -111,13 +111,24 @@ def format_monitor_command(
     SKILL.md prose — means the quoting rules for `--goal` (which often
     contains backticks, parentheses, or quotes from a PR summary) are under
     unit test instead of scattered across examples in the skill docs.
+
+    ``pr`` accepts a PR number (int) or a branch slug (str like
+    ``"branch-foo"``) for branch-only runs. Passing 0/empty raises.
     """
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
     repo = repo or repo_slug()
-    pr = pr if pr is not None else int(os.environ.get("PR_NUMBER", "0") or 0)
+    if pr is None:
+        env_pr = os.environ.get("PR_NUMBER", "").strip()
+        if env_pr:
+            try:
+                pr = int(env_pr)
+            except ValueError:
+                pr = env_pr
     if not pr:
-        raise ValueError("pr number is required (pass --pr or set PR_NUMBER env var)")
+        raise ValueError(
+            "pr number or branch slug is required (pass --pr or set PR_NUMBER env var)"
+        )
     work_dir = work_dir or os.getcwd()
 
     tag = f"pr-polish:{repo}:{pr}:{backend}:r{round_}"
@@ -273,16 +284,26 @@ def parse_round(
     streams: dict[str, Path] | None = None,
     backends: list[str] | None = None,
     repo: str | None = None,
-    pr: int | None = None,
+    pr: int | str | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate findings across backends for one pr-polish round.
 
     ``streams`` maps backend name to the path Monitor captured for that
     backend's ``bramble code-review`` invocation. When a backend's stream is
     absent, fall back to the per-backend envelope file (``envelope_path``).
+    ``pr`` accepts a PR number or branch slug; only used by ``envelope_path``
+    when ``streams`` doesn't cover a backend.
     """
     repo = repo or repo_slug()
-    pr = pr if pr is not None else int(os.environ.get("PR_NUMBER", "0") or 0)
+    if pr is None:
+        env_pr = os.environ.get("PR_NUMBER", "").strip()
+        if env_pr:
+            try:
+                pr = int(env_pr)
+            except ValueError:
+                pr = env_pr
+        else:
+            pr = 0
     backends = backends or list(BACKENDS)
     streams = streams or {}
     out: list[dict[str, Any]] = []
@@ -442,7 +463,7 @@ def triage(
             "batch_ack": _without_spiral(low_acks),
             "escalate": spiral_matches,
         },
-        "total": len(findings),
+        "total": len(all_findings),
         "unique": len(by_key),
     }
 

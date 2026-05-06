@@ -106,6 +106,19 @@ class TestFormatMonitorCommand(unittest.TestCase):
                     "codex", "m", 1, "g", repo="kernel", pr=0, work_dir="/tmp"
                 )
 
+    def test_accepts_branch_slug(self) -> None:
+        # Branch-only mode: pass a string slug instead of a PR number.
+        cmd = bramble_ops.format_monitor_command(
+            "codex",
+            "gpt-5.4-mini",
+            1,
+            "review branch X",
+            repo="kernel",
+            pr="branch-feature-foo",
+            work_dir="/tmp/worktree",
+        )
+        self.assertIn("BRAMBLE_RUN_TAG=pr-polish:kernel:branch-feature-foo:codex:r1", cmd)
+
 
 class TestExtractTerminalEnvelope(unittest.TestCase):
     def test_returns_last_envelope_ignoring_progress_lines(self) -> None:
@@ -334,6 +347,26 @@ class TestTriage(unittest.TestCase):
         out = bramble_ops.triage([medium], prior_fixed_keys=set())
         self.assertEqual(len(out["action_plan"]["consider_fix"]), 1)
         self.assertEqual(len(out["action_plan"]["must_fix"]), 0)
+
+    def test_total_counts_all_sources_not_just_bramble(self) -> None:
+        # `total` reports the full triaged finding set including PR comments
+        # and CI failures, so it stays >= `unique` (which dedupes by key).
+        bramble_finding = self._f("codex", "a.py", 10, "high", "Bramble issue")
+        pr_comment = {
+            "id": 1,
+            "source": "github-inline",
+            "path": "b.py",
+            "line": 5,
+            "author": "human",
+            "body": "Please add a comment here.",
+        }
+        out = bramble_ops.triage(
+            [bramble_finding],
+            prior_fixed_keys=set(),
+            pr_comments=[pr_comment],
+        )
+        self.assertEqual(out["total"], 2)
+        self.assertGreaterEqual(out["total"], out["unique"])
 
 
 class TestTriageWithPRComments(unittest.TestCase):
