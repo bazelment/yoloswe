@@ -126,11 +126,11 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	case r = <-bridged:
 	case err := <-bridgeErr:
 		if promptErr != nil {
-			return nil, fmt.Errorf("gemini: prompt failed: %w (bridge: %v)", promptErr, err)
+			return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: prompt failed: %w (bridge: %v)", promptErr, err))
 		}
-		return nil, fmt.Errorf("gemini: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: %w", err))
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return reviewErrorResult(resumeStatus, ctx.Err())
 	}
 
 	if promptErr != nil {

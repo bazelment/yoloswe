@@ -474,15 +474,15 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 // BuildFollowUpJSONPromptWithScope creates the shorter resumed-session prompt
 // used after a prior review round has already established context.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
-	prompt := `The previous round's findings were addressed in the commits since the prior review turn. Re-review the current diff against the same goal.
-` + buildGoalText(goal) + `
+	prompt := `Continue reviewing the current diff against the same goal. If this session has previous review context, focus on the changes made since that prior turn; if not, review the current diff normally.
+	` + buildGoalText(goal) + `
 
 Focus on:
 1. Issues introduced by the new fix commits.
 2. Items you flagged before that you now have stronger evidence for — cite the file:line that proves it.
 3. Anything you skipped before that the new code now exposes.
 
-Do not re-list issues you previously flagged unless one of (1)-(3) applies.`
+Do not re-list issues you previously flagged unless one of (1)-(3) applies. For every issue, cite the exact affected file and line, explain the concrete failure mode, and include only findings that would affect correctness, maintainability, security, or operability.`
 	if opts.SkipTestExecution {
 		prompt += skipTestExecutionSuffix
 	}

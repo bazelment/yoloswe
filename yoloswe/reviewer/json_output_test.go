@@ -114,6 +114,7 @@ func TestBuildEnvelope_BackendError(t *testing.T) {
 	result := &ReviewResult{
 		ErrorMessage: "backend crashed",
 		Success:      false,
+		ResumeStatus: ResumeStatusFallback,
 	}
 	env := BuildEnvelope(result, BackendCodex, "m", "")
 	if env.Status != StatusError {
@@ -121,6 +122,9 @@ func TestBuildEnvelope_BackendError(t *testing.T) {
 	}
 	if env.Error != "backend crashed" {
 		t.Errorf("error = %q", env.Error)
+	}
+	if env.ResumeStatus != ResumeStatusFallback {
+		t.Errorf("resume_status = %q, want %q", env.ResumeStatus, ResumeStatusFallback)
 	}
 }
 

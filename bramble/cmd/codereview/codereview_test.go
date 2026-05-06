@@ -422,7 +422,7 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 
 func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 	got := buildPromptForRun("g", "", true, promptStyleFollowUp)
-	if !strings.Contains(got, "The previous round's findings were addressed") {
+	if !strings.Contains(got, "If this session has previous review context") {
 		t.Errorf("follow-up prompt missing opening line; got:\n%s", got)
 	}
 	if strings.Contains(got, "Focus on these areas:") {

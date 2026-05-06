@@ -177,7 +177,7 @@ func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 }
 
 func resumeStatusAfterSessionReady(status ResumeStatus, requestedID, actualID string) ResumeStatus {
-	if requestedID == "" || actualID == "" {
+	if requestedID == "" {
 		return status
 	}
 	if actualID == requestedID {
