@@ -521,6 +521,8 @@ func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
 	_ = opts // documented above: scope/skip-test state was established in fresh prompt
 	return `Continue the review on the same diff against the same goal as the prior turn.
 
+If you have no prior review context for this diff (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: examine the entire diff and apply the standard severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.
+
 Re-review the full diff with fresh eyes — including code you previously accepted. Pay particular attention to:
 1. Issues introduced by new commits since the prior turn.
 2. Items you flagged before that you now have stronger evidence for — cite the file:line that proves it.

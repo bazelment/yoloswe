@@ -232,8 +232,8 @@ func TestBuildFollowUpJSONPromptWithScope_KeepsBiasGuardAndDropsRedundantBlocks(
 	}{
 		{name: "with goal", goal: "add user authentication", opts: PromptOptions{}},
 		{name: "empty goal", goal: "", opts: PromptOptions{}},
-		{name: "with skip-test-execution", goal: "x", opts: PromptOptions{SkipTestExecution: true}},
-		{name: "with scope hints", goal: "x", opts: PromptOptions{
+		{name: "with skip-test-execution", goal: "implement-zfourier-quantum-shim-42", opts: PromptOptions{SkipTestExecution: true}},
+		{name: "with scope hints", goal: "implement-zfourier-quantum-shim-42", opts: PromptOptions{
 			TestScopeHints:       []string{"foo/foo_test.go"},
 			CrossServicePackages: []string{"foo", "bar"},
 		}},

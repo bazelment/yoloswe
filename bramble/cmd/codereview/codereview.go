@@ -128,23 +128,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			retErr:          &retErr,
 			panicVal:        recover(),
 			emit:            emitEnvelope,
-			resumeStatus: func() reviewer.ResumeStatus {
-				// ReviewWithResult clears r.resumeStatus at the top of every
-				// turn and only repopulates it from the backend's result. A
-				// panic mid-turn therefore leaves r.ResumeStatus() == ""
-				// even though --resume-session-id was set. Treat any empty
-				// status as Unverified when resume was requested so the
-				// envelope still carries the signal automation depends on.
-				if activeReviewer != nil {
-					if status := activeReviewer.ResumeStatus(); status != "" {
-						return status
-					}
-				}
-				if resumeSessionID != "" {
-					return reviewer.ResumeStatusUnverified
-				}
-				return ""
-			},
+			resumeStatus:    func() reviewer.ResumeStatus { return effectiveResumeStatus(activeReviewer, resumeSessionID) },
 		})
 	}()
 
@@ -233,10 +217,14 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
 		// Emit a parseable envelope so the caller can distinguish a
-		// bramble-level failure from a reviewer-level "rejected".
+		// bramble-level failure from a reviewer-level "rejected". Use
+		// effectiveResumeStatus so a turn that errored before
+		// r.resumeStatus was repopulated still surfaces Unverified
+		// when resume was requested — same fallback the deferred
+		// guard applies on the panic/silent-exit path.
 		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 			ErrorMessage: err.Error(),
-			ResumeStatus: r.ResumeStatus(),
+			ResumeStatus: effectiveResumeStatus(activeReviewer, resumeSessionID),
 		}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
 		emitVerdictLine(env)
 		emitEnvelope(env)
@@ -244,6 +232,19 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+	// Log when the auto-promoted follow-up prompt was sent to a fresh
+	// fallback session. The follow-up prompt has an explicit "if no prior
+	// context, treat as first-pass" escape hatch so the model still produces
+	// usable output, but operators should still see the mismatch in logs
+	// because it implies the review's prompt was less specific than intended
+	// (the orchestrator asked to resume, the backend cold-started, and we
+	// went ahead anyway). Triggers only on the production-default path:
+	// follow-up auto-promoted + resume actually fell back.
+	if style == promptStyleFollowUp && env.ResumeStatus == reviewer.ResumeStatusFallback {
+		slog.Warn("follow-up prompt sent to fallback session; review used the prompt's no-prior-context escape hatch",
+			"resume_session", resumeSessionID,
+			"backend", backend)
+	}
 	slog.Info("code-review run exit",
 		"status", string(env.Status),
 		"verdict", env.Review.Verdict,
@@ -253,6 +254,28 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	emitVerdictLine(env)
 	emitEnvelope(env)
 	return retErr
+}
+
+// effectiveResumeStatus returns the ResumeStatus value the caller should
+// stamp onto a synthesized envelope, falling back to Unverified whenever
+// resume was requested but the reviewer's authoritative status hasn't
+// landed yet. Reviewer.ResumeStatus() is cleared at the top of every turn
+// and only repopulated from the backend's result, so any path that builds
+// an envelope without a fully-completed turn (panic, silent exit, or the
+// explicit ReviewWithResult error branch) needs this fallback or
+// resume_status drops out of the JSON entirely via omitempty. The
+// deferred-guard callback and the explicit error branch share this helper
+// so a single rule covers both.
+func effectiveResumeStatus(r *reviewer.Reviewer, requestedResumeSessionID string) reviewer.ResumeStatus {
+	if r != nil {
+		if status := r.ResumeStatus(); status != "" {
+			return status
+		}
+	}
+	if requestedResumeSessionID != "" {
+		return reviewer.ResumeStatusUnverified
+	}
+	return ""
 }
 
 // emitVerdictLine prints a single human-readable summary to stdout so the
