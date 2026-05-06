@@ -1,0 +1,4 @@
+# tool|bazel_target|formula_class|formula_desc|formula_test
+bramble|//bramble|Bramble|TUI for managing worktrees and AI sessions|TUI for managing worktrees
+wt|//wt/cmd/wt|Wt|Git worktree CLI for power users|Git worktree CLI for power users
+jiradozer|//jiradozer/cmd/jiradozer|Jiradozer|Issue-driven development workflow|Issue-driven development workflow

@@ -34,19 +34,17 @@ jobs:
 
       - name: Build all cross-compilation targets
         run: |
-          bazel build \
-            //release:bramble_darwin_amd64 \
-            //release:bramble_darwin_arm64 \
-            //release:bramble_linux_amd64 \
-            //release:bramble_linux_arm64 \
-            //release:wt_darwin_amd64 \
-            //release:wt_darwin_arm64 \
-            //release:wt_linux_amd64 \
-            //release:wt_linux_arm64 \
-            //release:jiradozer_darwin_amd64 \
-            //release:jiradozer_darwin_arm64 \
-            //release:jiradozer_linux_amd64 \
-            //release:jiradozer_linux_arm64
+          platforms=(darwin_amd64 darwin_arm64 linux_amd64 linux_arm64)
+          labels=()
+
+          while IFS='|' read -r tool _; do
+            [[ -z "${tool}" || "${tool}" == \#* ]] && continue
+            for platform in "${platforms[@]}"; do
+              labels+=("//release:${tool}_${platform}")
+            done
+          done < release/tools.tsv
+
+          bazel build "${labels[@]}"
 
       - name: Create release archives
         env:
@@ -54,29 +52,44 @@ jobs:
         run: |
           mkdir -p dist
 
-          declare -A TARGETS=(
-            ["bramble_darwin_amd64"]="bramble darwin amd64"
-            ["bramble_darwin_arm64"]="bramble darwin arm64"
-            ["bramble_linux_amd64"]="bramble linux amd64"
-            ["bramble_linux_arm64"]="bramble linux arm64"
-            ["wt_darwin_amd64"]="wt darwin amd64"
-            ["wt_darwin_arm64"]="wt darwin arm64"
-            ["wt_linux_amd64"]="wt linux amd64"
-            ["wt_linux_arm64"]="wt linux arm64"
-            ["jiradozer_darwin_amd64"]="jiradozer darwin amd64"
-            ["jiradozer_darwin_arm64"]="jiradozer darwin arm64"
-            ["jiradozer_linux_amd64"]="jiradozer linux amd64"
-            ["jiradozer_linux_arm64"]="jiradozer linux arm64"
+          platforms=(
+            "darwin amd64"
+            "darwin arm64"
+            "linux amd64"
+            "linux arm64"
+          )
+
+          labels=()
+          declare -A TARGETS
+          while IFS='|' read -r tool _; do
+            [[ -z "${tool}" || "${tool}" == \#* ]] && continue
+            for platform in "${platforms[@]}"; do
+              read -r os arch <<< "${platform}"
+              target="${tool}_${os}_${arch}"
+              labels+=("//release:${target}")
+              TARGETS["${target}"]="${tool} ${os} ${arch}"
+            done
+          done < release/tools.tsv
+
+          declare -A BINARY_PATHS
+          while IFS=$'\t' read -r target path; do
+            BINARY_PATHS["${target}"]="${path}"
+          done < <(
+            bazel cquery "set(${labels[*]})" \
+              --output=starlark \
+              --starlark:expr 'target.label.name + "\t" + target.files.to_list()[0].path' \
+              2>/dev/null
           )
 
           for target in "${!TARGETS[@]}"; do
             read -r tool os arch <<< "${TARGETS[$target]}"
             archive_name="${tool}-${VERSION}-${os}-${arch}.tar.gz"
+            binary_path="${BINARY_PATHS[$target]}"
+            if [[ -z "${binary_path}" ]]; then
+              echo "No binary output found for //release:${target}" >&2
+              exit 1
+            fi
 
-            # Use bazel cquery to find the actual binary output path
-            binary_path="$(bazel cquery --output=files "//release:${target}" 2>/dev/null)"
-
-            # Create a temp dir and copy the binary with the tool name
             tmp_dir="$(mktemp -d)"
             cp "${binary_path}" "${tmp_dir}/${tool}"
             tar -czf "dist/${archive_name}" -C "${tmp_dir}" "${tool}"
@@ -134,15 +147,19 @@ jobs:
           git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/bazelment/homebrew-tap.git" /tmp/homebrew-tap
           mkdir -p /tmp/homebrew-tap/Formula
 
-          # Generate formulas from templates
-          for tool in bramble wt jiradozer; do
-            sed -e "s/{{.Version}}/${FORMULA_VERSION}/g" \
+          while IFS='|' read -r tool _ formula_class formula_desc formula_test; do
+            [[ -z "${tool}" || "${tool}" == \#* ]] && continue
+            sed -e "s/{{.Tool}}/${tool}/g" \
+                -e "s/{{.Class}}/${formula_class}/g" \
+                -e "s/{{.Description}}/${formula_desc}/g" \
+                -e "s/{{.TestText}}/${formula_test}/g" \
+                -e "s/{{.Version}}/${FORMULA_VERSION}/g" \
                 -e "s/{{.DarwinArm64SHA256}}/${SHAS["${tool}-${VERSION}-darwin-arm64.tar.gz"]}/g" \
                 -e "s/{{.DarwinAmd64SHA256}}/${SHAS["${tool}-${VERSION}-darwin-amd64.tar.gz"]}/g" \
                 -e "s/{{.LinuxArm64SHA256}}/${SHAS["${tool}-${VERSION}-linux-arm64.tar.gz"]}/g" \
                 -e "s/{{.LinuxAmd64SHA256}}/${SHAS["${tool}-${VERSION}-linux-amd64.tar.gz"]}/g" \
-                "packaging/homebrew/${tool}.rb.tmpl" > "/tmp/homebrew-tap/Formula/${tool}.rb"
-          done
+                packaging/homebrew/formula.rb.tmpl > "/tmp/homebrew-tap/Formula/${tool}.rb"
+          done < release/tools.tsv
 
           # Commit and push
           cd /tmp/homebrew-tap
