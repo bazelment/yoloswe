@@ -115,6 +115,12 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			return
 		}
 	}
+	// activeReviewer is observed by the deferred guard so the synthesized
+	// panic/error envelope can report the reviewer's authoritative
+	// resume_status. It's nil until r := reviewer.New(...) runs below; the
+	// guard's callback handles that case by falling back to Unverified
+	// whenever --resume-session-id was set.
+	var activeReviewer *reviewer.Reviewer
 	defer func() {
 		finalizeEnvelope(envelopeGuardArgs{
 			backend:         backend,
@@ -122,6 +128,15 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			retErr:          &retErr,
 			panicVal:        recover(),
 			emit:            emitEnvelope,
+			resumeStatus: func() reviewer.ResumeStatus {
+				if activeReviewer != nil {
+					return activeReviewer.ResumeStatus()
+				}
+				if resumeSessionID != "" {
+					return reviewer.ResumeStatusUnverified
+				}
+				return ""
+			},
 		})
 	}()
 
@@ -182,6 +197,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	config.SessionLogPath = logPath2
 
 	r := reviewer.New(config)
+	// Expose the reviewer to the deferred guard so a panic between here and
+	// the normal envelope emit picks up the latest ResumeStatus instead of
+	// dropping it. Setting it before any work that could panic guarantees the
+	// guard never observes a stale nil.
+	activeReviewer = r
 	// Snapshot before Start for early-failure paths. After the backend
 	// session begins (OnSessionInfo), call r.EffectiveModel() fresh so the
 	// envelope reports the model the backend actually ran (Cursor picks its
@@ -301,11 +321,20 @@ func openEnvelopeWriter() (w *os.File, close func(), err error) {
 // envelopeGuardArgs is the input to finalizeEnvelope. Extracted so tests can
 // drive the guard without spinning up a real reviewer. All pointer fields are
 // read and mutated — the caller owns the storage.
+//
+// resumeStatus is an optional accessor that the guard invokes lazily so the
+// synthesized panic/error envelope carries the same resume_status the normal
+// exit paths report. Leave it nil when no resume was requested (or when the
+// caller doesn't want to thread one through, e.g. unit tests). When non-nil
+// it must be safe to call from the deferred recovery path — typically a
+// closure over a *reviewer.Reviewer that returns r.ResumeStatus() when r is
+// non-nil and ResumeStatusUnverified otherwise.
 type envelopeGuardArgs struct {
 	panicVal        any
 	envelopeWritten *bool
 	retErr          *error
 	emit            func(reviewer.ResultEnvelope)
+	resumeStatus    func() reviewer.ResumeStatus
 	backend         string
 }
 
@@ -327,7 +356,15 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 		msg = (*a.retErr).Error()
 	}
 	if !*a.envelopeWritten {
-		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{ErrorMessage: msg},
+		result := &reviewer.ReviewResult{ErrorMessage: msg}
+		if a.resumeStatus != nil {
+			// Mirror the resume signal the normal exit paths emit. Without
+			// this, a resumed run that panics or returns silently drops the
+			// new resume_status field — which is exactly the gap the round-2
+			// eval flagged on this very file.
+			result.ResumeStatus = a.resumeStatus()
+		}
+		env := reviewer.BuildEnvelope(result,
 			reviewer.BackendType(a.backend), "", "")
 		a.emit(env)
 	}

@@ -271,6 +271,92 @@ func TestFinalizeEnvelope_ReturnErrorPropagatesToEnvelopeMessage(t *testing.T) {
 	}
 }
 
+func TestFinalizeEnvelope_PanicCarriesResumeStatusFromCallback(t *testing.T) {
+	// Round-2 eval flagged that finalizeEnvelope dropped resume_status on
+	// the panic-recovery path. Verify the new resumeStatus callback feeds
+	// the synthesized envelope so a resumed run that panics still carries
+	// the resume signal automation depends on.
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+
+	defer func() {
+		_ = recover() // we don't care about the re-raise here
+		if !written {
+			t.Fatalf("envelope was not emitted before re-panic")
+		}
+		if got.ResumeStatus != reviewer.ResumeStatusOK {
+			t.Errorf("resume_status = %q, want %q", got.ResumeStatus, reviewer.ResumeStatusOK)
+		}
+	}()
+
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        "kaboom",
+		emit:            emit,
+		resumeStatus:    func() reviewer.ResumeStatus { return reviewer.ResumeStatusOK },
+	})
+}
+
+func TestFinalizeEnvelope_UnwrittenReturnCarriesResumeStatusFromCallback(t *testing.T) {
+	// Same coverage on the non-panic synthesized-envelope path: a resumed
+	// run that exits silently (no envelope, no panic) must still surface
+	// resume_status so the orchestrator can distinguish "unverified resume"
+	// from "no resume requested".
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+		resumeStatus:    func() reviewer.ResumeStatus { return reviewer.ResumeStatusUnverified },
+	})
+	if !written {
+		t.Fatalf("expected emit to have been called")
+	}
+	if got.ResumeStatus != reviewer.ResumeStatusUnverified {
+		t.Errorf("resume_status = %q, want %q", got.ResumeStatus, reviewer.ResumeStatusUnverified)
+	}
+}
+
+func TestFinalizeEnvelope_NilResumeCallbackOmitsField(t *testing.T) {
+	// Callers that don't thread a resume callback (e.g. older test fixtures
+	// or a runCodeReview path that never constructed a reviewer and was
+	// never asked to resume) should still produce a clean envelope — the
+	// resume_status field stays empty and gets dropped by omitempty.
+	written := false
+	var retErr error
+	var got reviewer.ResultEnvelope
+	emit := func(env reviewer.ResultEnvelope) {
+		got = env
+		written = true
+	}
+	finalizeEnvelope(envelopeGuardArgs{
+		backend:         "codex",
+		envelopeWritten: &written,
+		retErr:          &retErr,
+		panicVal:        nil,
+		emit:            emit,
+		resumeStatus:    nil,
+	})
+	if got.ResumeStatus != "" {
+		t.Errorf("resume_status = %q, want empty when callback nil", got.ResumeStatus)
+	}
+}
+
 func TestLoadPromptOptions_NoFile(t *testing.T) {
 	// Empty path is the legacy/default case: no hints loaded, but
 	// SkipTestExecution must still pass through.
