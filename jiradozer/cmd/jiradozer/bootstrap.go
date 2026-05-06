@@ -1,22 +1,35 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/bazelment/yoloswe/jiradozer"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 // bootstrapArgs holds bootstrap-only flags.
 type bootstrapArgs struct {
 	output string
+	repo   string
 	force  bool
+}
+
+type bootstrapRepoWorktreeResult struct {
+	workDir    string
+	baseBranch string
 }
 
 func newBootstrapCommand(args *bootstrapArgs, configPath *string) *cobra.Command {
@@ -25,22 +38,34 @@ func newBootstrapCommand(args *bootstrapArgs, configPath *string) *cobra.Command
 		Short: "Generate a starter config file",
 		Long: `Write a starter config file seeded with the canonical step prompts and
 comment templates. By default bootstrap writes to --config; use --output
-to write somewhere else. Edit the prompts to taste; the generated file is
-the source of truth for what the agent says.`,
+to write somewhere else. With --repo, the default config path is next to
+the wt-managed checkout unless --config or --output is explicit. Edit the
+prompts to taste; the generated file is the source of truth for what the
+agent says.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path := args.output
-			if path == "" {
-				path = *configPath
-			}
-			if path == "" {
-				path = "jiradozer.yaml"
+			configExplicit := cmd.Flags().Changed("config") || cmd.InheritedFlags().Changed("config")
+			path, err := resolveBootstrapOutputPath(args, *configPath, configExplicit)
+			if err != nil {
+				return err
 			}
 			if _, err := os.Stat(path); err == nil && !args.force {
+				if args.repo != "" && args.output == "" && !configExplicit {
+					if _, err := recoverExistingRepoWorktree(cmd.Context(), args.repo, cmd.OutOrStdout()); err != nil {
+						return err
+					}
+				}
 				return fmt.Errorf("%s already exists (use --force to overwrite)", path)
 			} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("stat %s: %w", path, err)
 			}
-			content, err := bootstrapYAML()
+			repoResult := bootstrapRepoWorktreeResult{}
+			if args.repo != "" {
+				repoResult, err = bootstrapRepoWorktree(cmd.Context(), args.repo, cmd.OutOrStdout())
+				if err != nil {
+					return err
+				}
+			}
+			content, err := bootstrapYAML(repoResult.workDir, repoResult.baseBranch)
 			if err != nil {
 				return err
 			}
@@ -53,22 +78,194 @@ the source of truth for what the agent says.`,
 	}
 	cmd.SilenceUsage = true
 	cmd.Flags().StringVarP(&args.output, "output", "o", "", "Path to write the starter config; overrides --config")
+	cmd.Flags().StringVar(&args.repo, "repo", "", "Optional GitHub repo URL or owner/repo shorthand. Bootstraps a wt-managed worktree under $WT_ROOT (or ~/worktrees), reusing it if present, and points work_dir at that checkout. Without explicit --config or --output, writes config beside that checkout.")
 	cmd.Flags().BoolVarP(&args.force, "force", "f", false, "Overwrite the output file if it already exists")
 	return cmd
+}
+
+func resolveBootstrapOutputPath(args *bootstrapArgs, configPath string, configExplicit bool) (string, error) {
+	path := args.output
+	if path == "" {
+		path = configPath
+	}
+	if path == "" {
+		path = "jiradozer.yaml"
+	}
+	if args.repo == "" || args.output != "" || configExplicit {
+		return path, nil
+	}
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return "", err
+	}
+	repoURL := normalizeRepoURL(args.repo)
+	return filepath.Join(wtRoot, wt.GetRepoNameFromURL(repoURL), "jiradozer.yaml"), nil
+}
+
+func recoverExistingRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (bootstrapRepoWorktreeResult, error) {
+	repoURL := normalizeRepoURL(repoArg)
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return bootstrapRepoWorktreeResult{}, err
+	}
+	mgr := newBootstrapWTManager(wtRoot, repoURL, out)
+	if _, err := os.Stat(mgr.BareDir()); errors.Is(err, fs.ErrNotExist) {
+		return bootstrapRepoWorktreeResult{}, nil
+	} else if err != nil {
+		return bootstrapRepoWorktreeResult{}, fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
+	}
+	return bootstrapRepoWorktreeInternal(ctx, repoArg, out, false)
+}
+
+func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (bootstrapRepoWorktreeResult, error) {
+	return bootstrapRepoWorktreeInternal(ctx, repoArg, out, true)
+}
+
+func bootstrapRepoWorktreeInternal(ctx context.Context, repoArg string, out io.Writer, announceReuse bool) (bootstrapRepoWorktreeResult, error) {
+	repoURL := normalizeRepoURL(repoArg)
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return bootstrapRepoWorktreeResult{}, err
+	}
+	mgr := newBootstrapWTManager(wtRoot, repoURL, out)
+	if _, err := os.Stat(mgr.BareDir()); err == nil {
+		if err := verifyExistingRepoRemote(ctx, mgr, repoURL); err != nil {
+			return bootstrapRepoWorktreeResult{}, err
+		}
+		defaultBranch, err := wt.GetDefaultBranch(ctx, mgr.GitRunner(), mgr.BareDir())
+		if err != nil {
+			return bootstrapRepoWorktreeResult{}, fmt.Errorf("detect default branch for existing repo: %w", err)
+		}
+		mainPath, err := mgr.GetWorktreePath(defaultBranch)
+		if errors.Is(err, wt.ErrWorktreeNotFound) {
+			mainPath, err = recreateDefaultWorktree(ctx, mgr, defaultBranch)
+		}
+		if err != nil {
+			return bootstrapRepoWorktreeResult{}, fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
+		}
+		if err := verifyGitWorktree(mainPath); err != nil {
+			return bootstrapRepoWorktreeResult{}, fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
+		}
+		if announceReuse {
+			fmt.Fprintf(out, "reusing existing repo at %s\n", mgr.RepoDir())
+		}
+		return bootstrapRepoWorktreeResult{workDir: mainPath, baseBranch: defaultBranch}, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return bootstrapRepoWorktreeResult{}, fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
+	}
+	mainPath, err := mgr.Init(ctx, repoURL)
+	if err != nil {
+		return bootstrapRepoWorktreeResult{}, err
+	}
+	baseBranch, err := branchFromWorktreePath(mgr.RepoDir(), mainPath)
+	if err != nil {
+		return bootstrapRepoWorktreeResult{}, err
+	}
+	return bootstrapRepoWorktreeResult{workDir: mainPath, baseBranch: baseBranch}, nil
+}
+
+func branchFromWorktreePath(repoDir string, workDir string) (string, error) {
+	rel, err := filepath.Rel(repoDir, workDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve default branch from %s: %w", workDir, err)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+func verifyGitWorktree(path string) error {
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%s is not a git worktree", path)
+		}
+		return fmt.Errorf("stat %s: %w", filepath.Join(path, ".git"), err)
+	}
+	return nil
+}
+
+func newBootstrapWTManager(wtRoot, repoURL string, out io.Writer) *wt.Manager {
+	return wt.NewManager(wtRoot, wt.GetRepoNameFromURL(repoURL), wt.WithOutput(wt.NewOutput(out, false)))
+}
+
+func verifyExistingRepoRemote(ctx context.Context, mgr *wt.Manager, repoURL string) error {
+	result, err := mgr.GitRunner().Run(ctx, []string{"config", "--get", "remote.origin.url"}, mgr.BareDir())
+	if err != nil {
+		return fmt.Errorf("read existing repo remote: %w", err)
+	}
+	got := strings.TrimSpace(result.Stdout)
+	if sameRepoRemote(got, repoURL) {
+		return nil
+	}
+	return fmt.Errorf("existing repo at %s uses remote %q, not %q", mgr.RepoDir(), got, repoURL)
+}
+
+func sameRepoRemote(a, b string) bool {
+	return canonicalRepoRemote(a) == canonicalRepoRemote(b)
+}
+
+func canonicalRepoRemote(remote string) string {
+	remote = strings.TrimSuffix(strings.TrimSpace(remote), ".git")
+	if host, path, ok := splitSCPRemote(remote); ok {
+		return strings.ToLower(host + "/" + strings.Trim(path, "/"))
+	}
+	if parsed, err := url.Parse(remote); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host + "/" + strings.Trim(parsed.Path, "/"))
+	}
+	return remote
+}
+
+func splitSCPRemote(remote string) (string, string, bool) {
+	if !strings.Contains(remote, "://") && strings.Contains(remote, "@") && strings.Contains(remote, ":") {
+		parts := strings.SplitN(remote, "@", 2)
+		hostPath := strings.SplitN(parts[1], ":", 2)
+		if len(hostPath) == 2 && hostPath[0] != "" && hostPath[1] != "" {
+			return hostPath[0], hostPath[1], true
+		}
+	}
+	return "", "", false
+}
+
+func recreateDefaultWorktree(ctx context.Context, mgr *wt.Manager, defaultBranch string) (string, error) {
+	mainPath := filepath.Join(mgr.RepoDir(), defaultBranch)
+	if _, err := mgr.GitRunner().Run(ctx, []string{"worktree", "prune"}, mgr.BareDir()); err != nil {
+		return "", fmt.Errorf("prune stale worktree metadata: %w", err)
+	}
+	result, err := mgr.GitRunner().Run(ctx, []string{"worktree", "add", mainPath, defaultBranch}, mgr.BareDir())
+	if err != nil {
+		if result != nil {
+			if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+				return "", fmt.Errorf("recreate default worktree: %s: %w", stderr, err)
+			}
+		}
+		return "", fmt.Errorf("recreate default worktree: %w", err)
+	}
+	return mainPath, nil
+}
+
+var ownerRepoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+func normalizeRepoURL(repoArg string) string {
+	if ownerRepoPattern.MatchString(repoArg) {
+		return "https://github.com/" + strings.TrimSuffix(repoArg, ".git") + ".git"
+	}
+	return repoArg
 }
 
 // bootstrapYAML returns the bytes of a starter jiradozer.yaml. The output is
 // hand-laid-out (not produced by yaml.Marshal) so each field carries the
 // doc comment from its struct tag and optional fields can be emitted as
 // commented-out lines that hint at usage without forcing a value.
-func bootstrapYAML() ([]byte, error) {
+func bootstrapYAML(workDir string, baseBranchOverride ...string) ([]byte, error) {
+	baseBranch := ""
+	if len(baseBranchOverride) > 0 {
+		baseBranch = baseBranchOverride[0]
+	}
 	var b strings.Builder
 	b.WriteString(bootstrapHeader)
 	b.WriteString(bootstrapTrackerBlock)
 	b.WriteString(bootstrapSourceBlock)
 	b.WriteString(bootstrapStatesBlock)
 	b.WriteString(bootstrapAgentBlock)
-	b.WriteString(bootstrapWorkDirBlock)
+	b.WriteString(renderWorkDirBlock(workDir, baseBranch))
 
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "plan",
@@ -240,12 +437,24 @@ agent:
 
 `
 
-// bootstrapWorkDirBlock — required scalars at the top level.
+// renderWorkDirBlock renders required scalar config values.
+func renderWorkDirBlock(workDir string, baseBranch string) string {
+	if workDir == "" {
+		workDir = "."
+	} else {
+		workDir = strconv.Quote(workDir)
+	}
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	return fmt.Sprintf(bootstrapWorkDirBlock, workDir, baseBranch)
+}
+
 const bootstrapWorkDirBlock = `# Working directory for the agent (where it runs commands and edits files).
-work_dir: .
+work_dir: %s
 
 # Default base branch for PRs.
-base_branch: main
+base_branch: %s
 
 # Optional phases to skip for every run. Skipped phases advance in-memory
 # workflow state and clear stale -inprogress labels, but do not write -done

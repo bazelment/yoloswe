@@ -743,7 +743,7 @@ func writeRunConfig(t *testing.T, trackerKind, workDir string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "jiradozer.yaml")
 	t.Setenv("LINEAR_API_KEY", "test-key")
-	content, err := bootstrapYAML()
+	content, err := bootstrapYAML("")
 	require.NoError(t, err)
 	content = bytes.Replace(content, []byte("kind: linear"), []byte("kind: "+trackerKind), 1)
 	content = bytes.Replace(content, []byte("work_dir: ."), []byte("work_dir: "+workDir), 1)
@@ -873,7 +873,7 @@ func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
 		},
 	}
 
-	content, err := bootstrapYAML()
+	content, err := bootstrapYAML("")
 	require.NoError(t, err)
 
 	for _, tt := range tests {
