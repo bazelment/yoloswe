@@ -20,7 +20,7 @@ Usage:
 ``identify`` detects the current branch and probes for a PR. When the
 branch has no PR it still returns branch/base/owner/repo so the
 orchestrator can run in branch-only mode. ``sync-base`` is deliberately
-NOT a subcommand here — invoke ``~/.claude/skills/git:sync-base/git-sync.py``
+NOT a subcommand here — invoke ``.claude/skills/git:sync-base/git-sync.py``
 directly. All subcommands print JSON to stdout and exit non-zero on error.
 """
 

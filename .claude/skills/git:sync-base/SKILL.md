@@ -8,7 +8,7 @@ disable-model-invocation: false
 # Sync Branch to Base
 
 ```bash
-python3 ~/.claude/skills/git:sync-base/git-sync.py --verbose
+python3 .claude/skills/git:sync-base/git-sync.py --verbose
 ```
 
 Override base branch with `--base <branch>` if needed. Auto-detects via `origin/HEAD`. Pass `--no-push` to skip the post-rebase force-push. Pass `--backup` to create a timestamped backup branch before rebasing.
@@ -32,7 +32,7 @@ Resolve each conflicted file based on its type:
 
 Then continue:
 ```bash
-python3 ~/.claude/skills/git:sync-base/git-sync.py --verbose --continue
+python3 .claude/skills/git:sync-base/git-sync.py --verbose --continue
 ```
 
 Repeat until the script exits 0. `--continue` uses the same pinned target SHA saved at the start of the original run, and will also force-push on success (unless `--no-push` is passed).

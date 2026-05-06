@@ -11,13 +11,13 @@ Autonomous orchestrator that brings a branch from "has issues" to "ready to merg
 
 The loop exits when the review has **converged** (see "Ownership and convergence") or when the round cap is hit. On exit the orchestrator force-pushes the accumulated commits so the PR's bot/CI review sees one polished tree instead of N intermediate ones.
 
-All shell plumbing lives in two Python modules bundled with this skill at `scripts` directory. Use `SKILL_DIR=~/.claude/skills/pr-polish` and call them as `python3 $SKILL_DIR/scripts/pr_ops.py ...`.
+All shell plumbing lives in two Python modules bundled with this skill at `scripts` directory. Use `SKILL_DIR=.claude/skills/pr-polish` and call them as `python3 $SKILL_DIR/scripts/pr_ops.py ...`.
 
 - `pr_ops.py` — PR/branch identity, comment fetch/reply, CI failure detail, state I/O.
 - `bramble_ops.py` — Bramble launch, per-round temp files, envelope parse, consensus/triage/N+1 spiral, PR-comment + CI-failure merging.
 
 
-**Base-branch syncing is not this skill's job.** Invoke `~/.claude/skills/git:sync-base/git-sync.py --verbose` directly — that skill owns branch rebasing, precise-lease force-push, and conflict handling.
+**Base-branch syncing is not this skill's job.** Invoke `.claude/skills/git:sync-base/git-sync.py --verbose` directly — that skill owns branch rebasing, precise-lease force-push, and conflict handling.
 
 ## Arguments
 
@@ -184,7 +184,7 @@ Compare against `git rev-parse HEAD`:
 ## Step 1: Sync base via /git:sync-base
 
 ```
-python3 ~/.claude/skills/git:sync-base/git-sync.py --verbose
+python3 .claude/skills/git:sync-base/git-sync.py --verbose
 ```
 
 That script owns rebasing onto `origin/<base>` and (when a PR exists) force-pushing the rebased branch back with precise-lease. Do not reimplement any of it here. On conflict (exit 2) **abort this polish run with `state-mark-complete <ctx> sync-conflict`** and emit the Final Summary pointing at the conflict — do not pause mid-run with `AskUserQuestion`. The user resolves the conflict and re-invokes to pick up.

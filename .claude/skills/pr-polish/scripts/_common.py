@@ -131,9 +131,9 @@ def current_branch() -> str | None:
 def detect_base_branch() -> str:
     """Auto-detect the remote default branch via origin/HEAD.
 
-    Mirrors ``detect_base_branch`` in ~/.claude/skills/git:sync-base/git-sync.py
-    (lines 173-202). We port the logic rather than shell-out so this module
-    stays hermetic for unit tests; keep the two in sync if git-sync.py changes.
+    Mirrors ``detect_base_branch`` in .claude/skills/git:sync-base/git-sync.py.
+    Ported rather than shell-out so this module stays hermetic for unit tests;
+    keep the two in sync if git-sync.py changes.
 
     Falls back to 'main' when detection fails.
     """

@@ -1,7 +1,7 @@
 """Unit tests for pr_ops. Hermetic: no gh/git/network.
 
 Run with:
-    python3 -m unittest discover -v   # from ~/.claude/skills/pr-polish/scripts
+    python3 -m unittest discover -v   # from .claude/skills/pr-polish/scripts
 """
 
 from __future__ import annotations
