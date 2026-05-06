@@ -151,7 +151,7 @@ func TestResumeStatusAfterSessionReady(t *testing.T) {
 			want:      ResumeStatusFallback,
 		},
 		{
-			name:      "missing ready session reports fallback",
+			name:      "missing ready session reports fallback when checked",
 			status:    "",
 			requested: "sess-1",
 			actual:    "",
