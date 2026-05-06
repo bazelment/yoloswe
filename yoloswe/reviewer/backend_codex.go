@@ -13,7 +13,16 @@ import (
 type codexBackend struct {
 	client *codex.Client
 	thread *codex.Thread
-	config Config
+	// threadResumeStatus is set on the same call that creates b.thread
+	// (the first RunPrompt, where the resume contract is observable via
+	// thread.ID() vs config.ResumeSessionID). Subsequent in-process calls
+	// — Reviewer.FollowUp, repeat ReviewWithResult on the cached thread —
+	// reuse the same session, so the resume status that applied when the
+	// thread was created still applies. Without this, follow-up turns
+	// would emit empty resume_status even though the same resumed session
+	// produced their output.
+	threadResumeStatus ResumeStatus
+	config             Config
 }
 
 func newCodexBackend(config Config) *codexBackend {
@@ -51,7 +60,9 @@ func (b *codexBackend) Stop() error {
 
 func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
 	// Create a new thread if none exists, or reuse for follow-ups.
-	var resumeStatus ResumeStatus
+	// resumeStatus on the thread-reuse path comes from the last creation —
+	// the same session is still in play, so the same resume contract applies.
+	resumeStatus := b.threadResumeStatus
 	if b.thread == nil {
 		threadOpts := []codex.ThreadOption{
 			codex.WithModel(b.config.Model),
@@ -91,6 +102,9 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		}
 		resumeStatus = resumeStatusAfterSessionReady(resumeStatus, b.config.ResumeSessionID, thread.ID())
 		b.thread = thread
+		// Persist for reuse on subsequent RunPrompt / FollowUp calls that
+		// hit the b.thread != nil branch above.
+		b.threadResumeStatus = resumeStatus
 		if handler != nil {
 			handler.OnSessionInfo(thread.ID(), b.config.Model)
 		}

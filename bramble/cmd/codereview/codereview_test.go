@@ -630,6 +630,47 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 	}
 }
 
+func TestBuildPromptForRun_FollowUpThreadsScopeHintsFile(t *testing.T) {
+	// Round-11 codex flagged that the follow-up resume path is only
+	// tested with empty hints, so a regression that drops scopeHintsFile
+	// or skipTestExecution between buildPromptForRun and
+	// BuildFollowUpJSONPromptWithScope would slip through. End-to-end:
+	// a real hints file + skipTestExecution=true must reach the
+	// follow-up prompt's conditional scope/test-quality/skip-test
+	// clauses (which only fire when opts carries them — see the
+	// docstring on BuildFollowUpJSONPromptWithScope).
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hints.json")
+	contents := `{"schema_version":1,"test_paths":["pkg/test_x.py"],"cross_service_packages":["a/","b/"]}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write hints: %v", err)
+	}
+	got := buildPromptForRun("Round 5. Prior fixes: ...", path, true /* skipTestExecution */, promptStyleFollowUp)
+
+	// Bias-guard prose still present.
+	if !strings.Contains(got, "Re-review the full diff with fresh eyes") {
+		t.Errorf("prompt missing bias-guard prose; got:\n%s", got)
+	}
+	// Goal embedded as per-turn metadata (Layer 1 contract).
+	if !strings.Contains(got, "Context for this turn: Round 5. Prior fixes: ...") {
+		t.Errorf("prompt missing per-turn metadata block; got:\n%s", got)
+	}
+	// skipTestExecution suffix DID get appended (conditional fire).
+	if !strings.Contains(got, "Do NOT run tests or build commands") {
+		t.Errorf("prompt missing skipTestExecutionSuffix; got:\n%s", got)
+	}
+	// Scope clauses DID get appended (conditional fire).
+	if !strings.Contains(got, "## Test quality") {
+		t.Errorf("prompt missing test-quality clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Cross-service contract sweep") {
+		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
+	}
+	if !strings.Contains(got, "pkg/test_x.py") {
+		t.Errorf("prompt missing inlined test path; got:\n%s", got)
+	}
+}
+
 func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 	// The follow-up prompt is intentionally short: rubric, format spec,
 	// and persona block are dropped because the resumed session already

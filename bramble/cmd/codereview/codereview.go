@@ -364,8 +364,11 @@ func openEnvelopeWriter() (w *os.File, close func(), err error) {
 // exit paths report. Leave it nil when no resume was requested (or when the
 // caller doesn't want to thread one through, e.g. unit tests). When non-nil
 // it must be safe to call from the deferred recovery path — typically a
-// closure over a *reviewer.Reviewer that returns r.ResumeStatus() when r is
-// non-nil and ResumeStatusUnverified otherwise.
+// closure over the effectiveResumeStatus helper (see below), which returns
+// r.ResumeStatus() when the reviewer reports a non-empty status, falls back
+// to ResumeStatusUnverified when --resume-session-id was set but the
+// reviewer's status is still empty (e.g. panic mid-turn before the backend
+// repopulated it), and "" otherwise.
 type envelopeGuardArgs struct {
 	panicVal        any
 	envelopeWritten *bool
