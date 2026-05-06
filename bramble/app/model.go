@@ -193,12 +193,7 @@ func NewModel(ctx context.Context, wtRoot, repoName, editor string, sessionManag
 		resumeRepos:          resumeRepos,
 		lastUserInputAt:      time.Now(),
 	}
-	sessionManager.SetWorktreeDirtyCallback(func(repoName, worktreePath string) {
-		select {
-		case sharedGitInvalidates <- gitWorktreeInvalidation{repoName: repoName, worktreePath: worktreePath}:
-		default:
-		}
-	})
+	sessionManager.SetWorktreeDirtyCallback(makeGitDirtyCallback(sharedGitInvalidates))
 
 	// Sync placeholder colors with the loaded theme (NewTextArea defaults to "245")
 	dimColor := lipgloss.Color(palette.Dim)
@@ -615,9 +610,10 @@ func (m Model) fetchRepoGitStatuses(repoName string, worktrees []wt.Worktree, sc
 	}
 	wtRoot := m.wtRoot
 	ctx := m.ctx
+	activeWorktrees := m.activeSessionWorktreePaths(repoName)
 	filtered := make([]wt.Worktree, 0, len(worktrees))
 	for _, w := range worktrees {
-		if !m.shouldRefreshWorktree(repoName, w, scope) {
+		if !m.shouldRefreshWorktree(repoName, w, scope, activeWorktrees) {
 			continue
 		}
 		filtered = append(filtered, w)
@@ -634,9 +630,9 @@ func (m Model) fetchRepoGitStatuses(repoName string, worktrees []wt.Worktree, sc
 		}
 		msgs := make([]singleWorktreeStatusMsg, 0, len(filtered))
 		for _, w := range filtered {
-			status := statuses[w.Branch]
+			status := statuses[w.Path]
 			if status == nil {
-				status = statuses[w.Path]
+				status = statuses[w.Branch]
 			}
 			if status == nil {
 				continue

@@ -200,9 +200,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case batchWorktreeStatusMsg:
-		for _, statusMsg := range msg.statuses {
-			m.applySingleWorktreeStatus(statusMsg)
-		}
+		m.applyBatchWorktreeStatuses(msg)
 		return m, tea.Batch(cmds...)
 
 	case batchPRInfoMsg:
@@ -2914,12 +2912,7 @@ func (m Model) openRepo(repoName string) (tea.Model, tea.Cmd) {
 	cfg := m.sharedManagerConfig
 	cfg.RepoName = repoName
 	mgr := session.NewManagerWithConfig(cfg)
-	mgr.SetWorktreeDirtyCallback(func(repoName, worktreePath string) {
-		select {
-		case m.sharedGitInvalidates <- gitWorktreeInvalidation{repoName: repoName, worktreePath: worktreePath}:
-		default:
-		}
-	})
+	mgr.SetWorktreeDirtyCallback(makeGitDirtyCallback(m.sharedGitInvalidates))
 	if cfg.Registry != nil {
 		cfg.Registry.Register(mgr)
 	}

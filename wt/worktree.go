@@ -661,9 +661,9 @@ func (m *Manager) GetGitStatus(ctx context.Context, wt Worktree) (*WorktreeStatu
 	if err != nil {
 		return nil, err
 	}
-	status := statuses[wt.Branch]
+	status := statuses[wt.Path]
 	if status == nil {
-		status = statuses[wt.Path]
+		status = statuses[wt.Branch]
 	}
 	if status == nil {
 		return &WorktreeStatus{Worktree: wt}, nil
@@ -686,7 +686,9 @@ func (m *Manager) GetAllGitStatuses(ctx context.Context, worktrees []Worktree) (
 				return err
 			}
 			mu.Lock()
-			statuses[worktree.Branch] = status
+			if worktree.Branch != "" {
+				statuses[worktree.Branch] = status
+			}
 			statuses[worktree.Path] = status
 			mu.Unlock()
 			return nil

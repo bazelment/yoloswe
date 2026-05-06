@@ -299,6 +299,35 @@ func TestGetAllGitStatusesLimitsConcurrency(t *testing.T) {
 	}
 }
 
+func TestGetAllGitStatusesKeysDetachedWorktreesByPath(t *testing.T) {
+	runner := NewMockGitRunner()
+	runner.Results["status --porcelain=v2 --branch"] = &CmdResult{
+		Stdout: "# branch.oid abc\n# branch.head (detached)\n",
+	}
+	manager := NewManager(t.TempDir(), "test-repo", WithGitRunner(runner))
+	worktrees := []Worktree{
+		{Path: "/tmp/wt-a", IsDetached: true},
+		{Path: "/tmp/wt-b", IsDetached: true},
+	}
+
+	statuses, err := manager.GetAllGitStatuses(context.Background(), worktrees)
+	if err != nil {
+		t.Fatalf("GetAllGitStatuses returned error: %v", err)
+	}
+	if _, ok := statuses[""]; ok {
+		t.Fatalf("status map should not use empty branch as a key")
+	}
+	for _, worktree := range worktrees {
+		status := statuses[worktree.Path]
+		if status == nil {
+			t.Fatalf("missing status for %s", worktree.Path)
+		}
+		if status.Worktree.Path != worktree.Path {
+			t.Fatalf("status for %s has worktree path %s", worktree.Path, status.Worktree.Path)
+		}
+	}
+}
+
 // MockGitRunner implements GitRunner for testing Manager.
 type MockGitRunner struct {
 	Results map[string]*CmdResult

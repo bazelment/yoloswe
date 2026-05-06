@@ -8,7 +8,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -30,6 +29,15 @@ func (m *Model) markWorktreeDirty(repoName, worktreePath string) {
 	rc.markDirtyWorktree(worktreePath)
 }
 
+func makeGitDirtyCallback(out chan<- gitWorktreeInvalidation) func(repoName, worktreePath string) {
+	return func(repoName, worktreePath string) {
+		select {
+		case out <- gitWorktreeInvalidation{repoName: repoName, worktreePath: worktreePath}:
+		default:
+		}
+	}
+}
+
 func (m *Model) applySingleWorktreeStatus(msg singleWorktreeStatusMsg) {
 	if msg.status == nil {
 		return
@@ -42,6 +50,26 @@ func (m *Model) applySingleWorktreeStatus(msg singleWorktreeStatusMsg) {
 	}
 	m.worktreeStatuses = mergeGitStatus(m.worktreeStatuses, msg.branch, msg.status)
 	m.updateWorktreeDropdown()
+}
+
+func (m *Model) applyBatchWorktreeStatuses(msg batchWorktreeStatusMsg) {
+	activeChanged := false
+	for _, statusMsg := range msg.statuses {
+		if statusMsg.status == nil {
+			continue
+		}
+		if statusMsg.repoName != m.repoName {
+			if rc, ok := m.repos[statusMsg.repoName]; ok {
+				rc.worktreeStatuses = mergeGitStatus(rc.worktreeStatuses, statusMsg.branch, statusMsg.status)
+			}
+			continue
+		}
+		m.worktreeStatuses = mergeGitStatus(m.worktreeStatuses, statusMsg.branch, statusMsg.status)
+		activeChanged = true
+	}
+	if activeChanged {
+		m.updateWorktreeDropdown()
+	}
 }
 
 func mergeGitStatus(statuses map[string]*wt.WorktreeStatus, branch string, status *wt.WorktreeStatus) map[string]*wt.WorktreeStatus {
@@ -104,7 +132,7 @@ func (m Model) fetchAllOpenedGitStatuses(scope RefreshScope) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) shouldRefreshWorktree(repoName string, worktree wt.Worktree, scope RefreshScope) bool {
+func (m Model) shouldRefreshWorktree(repoName string, worktree wt.Worktree, scope RefreshScope, activeWorktrees map[string]struct{}) bool {
 	if worktree.IsGone {
 		return false
 	}
@@ -114,22 +142,16 @@ func (m Model) shouldRefreshWorktree(repoName string, worktree wt.Worktree, scop
 	if m.repoName == repoName && m.worktreeDropdown != nil && m.worktreeDropdown.IsOpen() {
 		return true
 	}
-	return m.repoHasActiveSessionForWorktree(repoName, worktree.Path)
+	_, ok := activeWorktrees[worktree.Path]
+	return ok
 }
 
-func (m Model) repoHasActiveSessionForWorktree(repoName, worktreePath string) bool {
+func (m Model) activeSessionWorktreePaths(repoName string) map[string]struct{} {
 	rc, ok := m.repos[repoName]
 	if !ok || rc.sessionManager == nil {
-		return false
+		return nil
 	}
-	sessions := rc.sessionManager.GetSessionsForWorktree(worktreePath)
-	for i := range sessions {
-		switch sessions[i].Status {
-		case session.StatusPending, session.StatusRunning, session.StatusIdle:
-			return true
-		}
-	}
-	return false
+	return rc.sessionManager.ActiveWorktreePaths()
 }
 
 func (m *Model) syncGitWatcher(repoName string) {
@@ -137,10 +159,11 @@ func (m *Model) syncGitWatcher(repoName string) {
 	if !ok || m.sharedGitInvalidates == nil {
 		return
 	}
-	_ = rc.syncGitWatcher(repoName, m.sharedGitInvalidates)
+	manager := wt.NewManager(m.wtRoot, repoName)
+	_ = rc.syncGitWatcher(repoName, manager.BareDir(), m.sharedGitInvalidates)
 }
 
-func (rc *RepoContext) syncGitWatcher(repoName string, out chan<- gitWorktreeInvalidation) error {
+func (rc *RepoContext) syncGitWatcher(repoName, bareDir string, out chan<- gitWorktreeInvalidation) error {
 	if rc.fsWatcher == nil {
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
@@ -156,36 +179,45 @@ func (rc *RepoContext) syncGitWatcher(repoName string, out chan<- gitWorktreeInv
 		if worktree.IsGone {
 			continue
 		}
-		for _, path := range gitStatusWatchPaths(worktree) {
+		for _, path := range gitStatusWatchPaths(worktree, bareDir) {
 			next[path] = worktree.Path
-			rc.dirtyWorktreesMu.Lock()
-			_, alreadyWatched := rc.watchedGitPaths[path]
-			rc.dirtyWorktreesMu.Unlock()
-			if alreadyWatched {
-				continue
-			}
-			if err := rc.fsWatcher.Add(path); err == nil {
-				rc.dirtyWorktreesMu.Lock()
-				rc.watchedGitPaths[path] = worktree.Path
-				rc.dirtyWorktreesMu.Unlock()
-			}
 		}
 	}
+
 	rc.dirtyWorktreesMu.Lock()
-	watched := make([]string, 0, len(rc.watchedGitPaths))
-	for path := range rc.watchedGitPaths {
-		watched = append(watched, path)
+	watched := make(map[string]string, len(rc.watchedGitPaths))
+	for path, worktreePath := range rc.watchedGitPaths {
+		watched[path] = worktreePath
 	}
 	rc.dirtyWorktreesMu.Unlock()
-	for _, path := range watched {
-		if _, ok := next[path]; ok {
+
+	added := make(map[string]string)
+	for path, worktreePath := range next {
+		if _, alreadyWatched := watched[path]; alreadyWatched {
+			continue
+		}
+		if err := rc.fsWatcher.Add(path); err == nil {
+			added[path] = worktreePath
+		}
+	}
+
+	var removed []string
+	for path := range watched {
+		if _, stillWatched := next[path]; stillWatched {
 			continue
 		}
 		_ = rc.fsWatcher.Remove(path)
-		rc.dirtyWorktreesMu.Lock()
-		delete(rc.watchedGitPaths, path)
-		rc.dirtyWorktreesMu.Unlock()
+		removed = append(removed, path)
 	}
+
+	rc.dirtyWorktreesMu.Lock()
+	for path, worktreePath := range added {
+		rc.watchedGitPaths[path] = worktreePath
+	}
+	for _, path := range removed {
+		delete(rc.watchedGitPaths, path)
+	}
+	rc.dirtyWorktreesMu.Unlock()
 	return nil
 }
 
@@ -215,7 +247,7 @@ func (rc *RepoContext) forwardGitWatcherEvents(repoName string, out chan<- gitWo
 	}
 }
 
-func gitStatusWatchPaths(worktree wt.Worktree) []string {
+func gitStatusWatchPaths(worktree wt.Worktree, bareDir string) []string {
 	gitDir := filepath.Join(worktree.Path, ".git")
 	if data, err := os.ReadFile(gitDir); err == nil {
 		if path, ok := parseGitDirFile(string(data), worktree.Path); ok {
@@ -228,8 +260,8 @@ func gitStatusWatchPaths(worktree wt.Worktree) []string {
 	}
 	if worktree.Branch != "" && !worktree.IsDetached {
 		paths = append(paths, filepath.Join(gitDir, "refs", "heads", worktree.Branch))
-		if common := filepath.Clean(filepath.Join(gitDir, "..", "..")); filepath.Base(filepath.Dir(gitDir)) == "worktrees" {
-			paths = append(paths, filepath.Join(common, "refs", "heads", worktree.Branch))
+		if bareDir != "" && filepath.Base(filepath.Dir(gitDir)) == "worktrees" {
+			paths = append(paths, filepath.Join(bareDir, "refs", "heads", worktree.Branch))
 		}
 	}
 	out := paths[:0]

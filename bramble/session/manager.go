@@ -445,9 +445,6 @@ type ManagerConfig struct { //nolint:govet // fieldalignment: readability over p
 	// ChildModel overrides the default model for child sessions spawned by
 	// the delegator. If empty, children default to the delegator's own model.
 	ChildModel string
-	// OnWorktreeDirty is called after mutating tool use completes so the TUI
-	// can refresh git status without polling.
-	OnWorktreeDirty func(repoName, worktreePath string)
 }
 
 // Manager handles multiple concurrent sessions.
@@ -490,9 +487,6 @@ func (m *Manager) notifyWorktreeDirty(sessionID SessionID) {
 	m.worktreeDirtyMu.RLock()
 	callback := m.onWorktreeDirty
 	m.worktreeDirtyMu.RUnlock()
-	if callback == nil {
-		callback = m.config.OnWorktreeDirty
-	}
 	if callback == nil {
 		return
 	}
@@ -2264,6 +2258,20 @@ func (m *Manager) GetSessionsForWorktree(worktreePath string) []SessionInfo {
 	}
 	sortSessionsByTime(result)
 	return result
+}
+
+// ActiveWorktreePaths returns worktree paths with non-terminal sessions.
+func (m *Manager) ActiveWorktreePaths() map[string]struct{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	paths := make(map[string]struct{})
+	for _, s := range m.sessions {
+		if s.WorktreePath != "" && !s.Status.IsTerminal() {
+			paths[s.WorktreePath] = struct{}{}
+		}
+	}
+	return paths
 }
 
 // SetSessionIdle transitions a session to StatusIdle (waiting for user input).
