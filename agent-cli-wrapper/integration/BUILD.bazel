@@ -1,0 +1,44 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+# Generic, table-driven session-resume integration test that exercises every
+# agent-CLI backend (claude, codex, cursor, ACP/gemini) with the same
+# secret-recall scenario.
+#
+# "local" disables sandboxing so the test can reach each CLI binary and the
+# user's auth state (~/.claude, ~/.codex, ~/.cursor, ~/.gemini).
+# "manual" excludes the test from `bazel test //...`.
+#
+# Run with:
+#   bazel test //agent-cli-wrapper/integration:integration_test \
+#       --test_tag_filters=integration --test_output=streamed
+go_test(
+    name = "integration_test",
+    srcs = ["resume_test.go"],
+    # The agent CLIs need real user state to authenticate and run:
+    #   HOME / USER          — cursor's `agent` launcher uses `set -u` and
+    #                          dies on unbound HOME; auth state lives under
+    #                          ~/.claude, ~/.codex, ~/.cursor, ~/.gemini.
+    #   PATH                 — the wrappers exec the CLI binary by name.
+    #   XDG_*_HOME           — cursor + node compile cache locations.
+    env_inherit = [
+        "HOME",
+        "PATH",
+        "USER",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    ],
+    gotags = ["integration"],
+    tags = [
+        "integration",
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/claude",
+        "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/cursor",
+    ],
+)

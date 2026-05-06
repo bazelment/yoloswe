@@ -247,7 +247,17 @@ func (c *Client) ResumeThread(ctx context.Context, threadID string, opts ...Thre
 		return nil, &ProtocolError{Message: "failed to parse thread/resume response", Cause: err}
 	}
 
-	return c.registerThreadResponse(threadResp, cfg), nil
+	thread := c.registerThreadResponse(threadResp, cfg)
+	// Resumed threads do not get a follow-up `thread/started` notification
+	// (the thread already started in a prior session) and codex ≥0.115 also
+	// stopped sending `mcp_startup_complete`. The successful thread/resume
+	// JSON-RPC response is itself the readiness signal — the app-server has
+	// loaded the thread by the time it answers. Mark ready here so that
+	// WaitReady and ThreadReadyEvent observers don't hang waiting for a
+	// notification that will never arrive.
+	thread.setReady()
+	c.emit(ThreadReadyEvent{ThreadID: thread.id})
+	return thread, nil
 }
 
 func (c *Client) ensureReadyForThreadRequest() error {

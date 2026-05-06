@@ -251,13 +251,25 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string, opts ...Sess
 		return nil, &ProtocolError{Message: "failed to parse session/load response", Cause: err}
 	}
 
-	session := newSession(c, sessionResp.SessionID)
+	// session/load responses are inconsistent across agents: some echo the
+	// session id back, others (notably Gemini CLI) return an empty object.
+	// The client already knows which id it asked to load, so prefer the
+	// request id and only fall back to the response's id if it disagrees
+	// with the request — that protects against an agent that re-keys the
+	// session on load. Without this guard, an empty response leaves the
+	// Session struct with id="" and the next Prompt asks the agent to
+	// continue an empty-id session, which fails with "Session not found:".
+	resolvedID := sessionResp.SessionID
+	if resolvedID == "" {
+		resolvedID = sessionID
+	}
+	session := newSession(c, resolvedID)
 
 	c.mu.Lock()
-	c.sessions[sessionResp.SessionID] = session
+	c.sessions[resolvedID] = session
 	c.mu.Unlock()
 
-	c.emit(SessionCreatedEvent{SessionID: sessionResp.SessionID})
+	c.emit(SessionCreatedEvent{SessionID: resolvedID})
 
 	return session, nil
 }
