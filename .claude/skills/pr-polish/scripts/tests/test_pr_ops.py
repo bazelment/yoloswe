@@ -387,7 +387,11 @@ class TestIdentifyPR(unittest.TestCase):
             if cmd[:3] == ["gh", "pr", "view"]:
                 return _common.RunResult(stdout=pr_json, stderr="", returncode=0)
             if cmd[:3] == ["gh", "repo", "view"]:
-                return _common.RunResult(stdout='"sycamore-labs/kernel"', stderr="", returncode=0)
+                return _common.RunResult(
+                    stdout=json.dumps({"owner": {"login": "sycamore-labs"}, "name": "kernel"}),
+                    stderr="",
+                    returncode=0,
+                )
             raise AssertionError(f"unexpected cmd: {cmd}")
 
         with (
@@ -409,7 +413,11 @@ class TestIdentifyPR(unittest.TestCase):
                 # gh exits non-zero when the branch has no PR.
                 return _common.RunResult(stdout="", stderr="no pull requests found", returncode=1)
             if cmd[:3] == ["gh", "repo", "view"]:
-                return _common.RunResult(stdout='"sycamore-labs/kernel"', stderr="", returncode=0)
+                return _common.RunResult(
+                    stdout=json.dumps({"owner": {"login": "sycamore-labs"}, "name": "kernel"}),
+                    stderr="",
+                    returncode=0,
+                )
             if cmd[:2] == ["git", "symbolic-ref"]:
                 return _common.RunResult(
                     stdout="refs/remotes/origin/main\n", stderr="", returncode=0
@@ -756,8 +764,7 @@ class TestCICompareBase(unittest.TestCase):
         return fake_run
 
     def test_pre_existing_when_base_fails_same_test(self) -> None:
-        base_list = {"workflow_runs": [{"id": 555}]}
-        base_meta = {"head_sha": "basesha"}
+        base_list = {"workflow_runs": [{"id": 555, "head_sha": "basesha"}]}
         base_jobs = {
             "head_sha": "basesha",
             "jobs": [
@@ -798,7 +805,6 @@ class TestCICompareBase(unittest.TestCase):
                     side_effect=self._run_factory(
                         [
                             json.dumps(base_list),
-                            json.dumps(base_meta),
                             json.dumps(base_jobs),
                             json.dumps(pr_checks),
                         ]

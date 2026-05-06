@@ -177,10 +177,11 @@ def atomic_write_json(path: Path, obj: object) -> None:
 
 def read_json(path: Path, default: object = None) -> object:
     """Read a JSON file, returning ``default`` if missing."""
-    if not path.exists():
+    try:
+        with path.open("r") as f:
+            return json.load(f)
+    except FileNotFoundError:
         return default
-    with path.open("r") as f:
-        return json.load(f)
 
 
 def print_json(obj: object) -> None:
@@ -201,19 +202,16 @@ def topic_of(message: str, *, words: int = 8) -> str:
     return " ".join(t.lower() for t in tokens[:words])
 
 
-def gh_api_paginated(path: str, jq: str | None = None) -> object:
-    """Run ``gh api <path> --paginate`` with an optional jq filter. Returns parsed JSON."""
-    cmd = ["gh", "api", "--paginate", path]
-    if jq is not None:
-        cmd += ["--jq", jq]
-    out = run(cmd, check=True).stdout
-    if not out.strip():
-        return []
-    # When jq filters to a stream of objects, --paginate concatenates them
-    # line-by-line; wrap in an array.
-    stripped = out.strip()
-    if stripped.startswith("["):
-        return json.loads(stripped)
-    # Stream of objects separated by newlines.
-    objs = [json.loads(line) for line in stripped.splitlines() if line.strip()]
-    return objs
+# Source tags shared by pr_ops.classify_comments and bramble_ops triage.
+SOURCE_INLINE = "github-inline"
+SOURCE_ISSUE = "github-issue"
+SOURCE_REVIEW = "github-review"
+
+# Single severity ladder used by pr_ops.recompute_counts and bramble_ops.triage.
+SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "nit": 0}
+
+
+def severity_rank(sev: str | None) -> int:
+    return SEVERITY_ORDER.get(sev or "", -1)
+
+

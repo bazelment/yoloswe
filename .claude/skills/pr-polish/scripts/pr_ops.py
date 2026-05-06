@@ -40,6 +40,10 @@ if str(SCRIPT_DIR) not in sys.path:
 from datetime import UTC
 
 from _common import (  # noqa: E402 — sys.path tweak above
+    SEVERITY_ORDER,
+    SOURCE_INLINE,
+    SOURCE_ISSUE,
+    SOURCE_REVIEW,
     CommandError,
     atomic_write_json,
     current_branch,
@@ -48,6 +52,7 @@ from _common import (  # noqa: E402 — sys.path tweak above
     read_json,
     repo_slug,
     run,
+    severity_rank,
     state_paths,
 )
 
@@ -127,65 +132,36 @@ def identify_pr(pr_number: int | None = None) -> dict[str, Any]:
 
 def _owner_repo() -> tuple[str, str, str]:
     """Return ``(owner, repo, 'owner/repo')`` via ``gh repo view``."""
-    res = run(
-        ["gh", "repo", "view", "--json", "owner,name", "--jq", '"\\(.owner.login)/\\(.name)"'],
-        check=True,
-    )
-    owner_repo = res.stdout.strip().strip('"')
-    owner, repo = owner_repo.split("/", 1)
-    return owner, repo, owner_repo
+    res = run(["gh", "repo", "view", "--json", "owner,name"], check=True)
+    obj = json.loads(res.stdout) if res.stdout.strip() else {}
+    owner = (obj.get("owner") or {}).get("login", "")
+    repo = obj.get("name", "")
+    return owner, repo, f"{owner}/{repo}"
 
 
 # ---------------------------------------------------------------------------
 # Comment fetching + classification
 # ---------------------------------------------------------------------------
 
-# Source tags that flow downstream into state_file.comment_actions[].source.
-SOURCE_INLINE = "github-inline"
-SOURCE_ISSUE = "github-issue"
-SOURCE_REVIEW = "github-review"
+def _gh_paginated_list(path: str) -> list[dict[str, Any]]:
+    """``gh api --paginate <path>`` returning a list (or [] when empty)."""
+    out = run(["gh", "api", "--paginate", path], check=True).stdout.strip()
+    return json.loads(out) if out else []
 
 
 def _fetch_inline_comments(owner_repo: str, pr: int) -> list[dict[str, Any]]:
     """Raw inline review comments (may include replies; caller filters)."""
-    out = run(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            f"repos/{owner_repo}/pulls/{pr}/comments",
-        ],
-        check=True,
-    ).stdout.strip()
-    return json.loads(out) if out else []
+    return _gh_paginated_list(f"repos/{owner_repo}/pulls/{pr}/comments")
 
 
 def _fetch_issue_comments(owner_repo: str, pr: int) -> list[dict[str, Any]]:
     """Top-level PR comments (tracked under the issues endpoint)."""
-    out = run(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            f"repos/{owner_repo}/issues/{pr}/comments",
-        ],
-        check=True,
-    ).stdout.strip()
-    return json.loads(out) if out else []
+    return _gh_paginated_list(f"repos/{owner_repo}/issues/{pr}/comments")
 
 
 def _fetch_reviews(owner_repo: str, pr: int) -> list[dict[str, Any]]:
     """Review-level bodies (excluding APPROVED/DISMISSED and empty bodies)."""
-    out = run(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            f"repos/{owner_repo}/pulls/{pr}/reviews",
-        ],
-        check=True,
-    ).stdout.strip()
-    return json.loads(out) if out else []
+    return _gh_paginated_list(f"repos/{owner_repo}/pulls/{pr}/reviews")
 
 
 def classify_comments(
@@ -489,7 +465,13 @@ def ci_failed_tests(pr_number: int) -> list[dict[str, Any]]:
     real assertion failure.
     """
     pr = identify_pr(pr_number)
+    return _ci_failed_tests_for(pr)
+
+
+def _ci_failed_tests_for(pr: dict[str, Any]) -> list[dict[str, Any]]:
+    """Same as ``ci_failed_tests`` but uses an already-resolved PR dict."""
     owner_repo = pr["owner_repo"]
+    pr_number = pr["pr_number"]
     out: list[dict[str, Any]] = []
     for c in _failing_checks(pr_number):
         job_id = _extract_job_id_from_link(c.get("link") or "")
@@ -509,7 +491,12 @@ def ci_failed_tests(pr_number: int) -> list[dict[str, Any]]:
     return out
 
 
-def _latest_base_run_id(owner_repo: str, base: str) -> int | None:
+def _latest_base_run(owner_repo: str, base: str) -> tuple[int | None, str]:
+    """Return ``(run_id, head_sha)`` for the latest completed push run on ``base``.
+
+    Both fields come from the same response; the caller doesn't need to
+    re-fetch the run record just to read ``head_sha``.
+    """
     res = run(
         [
             "gh",
@@ -521,11 +508,12 @@ def _latest_base_run_id(owner_repo: str, base: str) -> int | None:
     try:
         obj = json.loads(res.stdout or "{}")
     except json.JSONDecodeError:
-        return None
+        return None, ""
     runs = obj.get("workflow_runs") or []
     if not runs:
-        return None
-    return int(runs[0].get("id")) if runs[0].get("id") else None
+        return None, ""
+    rid = runs[0].get("id")
+    return (int(rid) if rid else None), (runs[0].get("head_sha") or "")
 
 
 def _run_failing_tests(owner_repo: str, run_id: int) -> tuple[str, set[str]]:
@@ -565,26 +553,16 @@ def ci_compare_base(pr_number: int) -> dict[str, Any]:
     base = pr["base"]
     state_dir, _ = state_paths(pr_number)
 
-    run_id = _latest_base_run_id(owner_repo, base)
+    run_id, base_sha = _latest_base_run(owner_repo, base)
     base_failures: set[str] = set()
-    base_sha = ""
     if run_id is not None:
-        # Fetch once, resolve sha from the jobs endpoint, then check cache.
-        probe = run(
-            ["gh", "api", f"/repos/{owner_repo}/actions/runs/{run_id}"],
-            check=False,
-        )
-        try:
-            probe_obj = json.loads(probe.stdout or "{}")
-            base_sha = probe_obj.get("head_sha") or ""
-        except json.JSONDecodeError:
-            base_sha = ""
         cache_path = state_dir / f"base-ci-{base_sha}.json" if base_sha else None
-        cached = read_json(cache_path, default=None) if cache_path and cache_path.exists() else None
+        cached = read_json(cache_path, default=None) if cache_path else None
         if cached is not None:
             base_failures = set(cached.get("failed_tests", []))
         else:
-            base_sha, base_failures = _run_failing_tests(owner_repo, run_id)
+            jobs_sha, base_failures = _run_failing_tests(owner_repo, run_id)
+            base_sha = base_sha or jobs_sha
             if cache_path and base_sha:
                 state_dir.mkdir(parents=True, exist_ok=True)
                 atomic_write_json(
@@ -592,7 +570,7 @@ def ci_compare_base(pr_number: int) -> dict[str, Any]:
                     {"run_id": run_id, "head_sha": base_sha, "failed_tests": sorted(base_failures)},
                 )
 
-    current = ci_failed_tests(pr_number)
+    current = _ci_failed_tests_for(pr)
     current_tests: set[str] = set()
     for entry in current:
         if entry.get("is_flake"):
@@ -616,14 +594,16 @@ def ci_compare_base(pr_number: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_ctx(ctx: str) -> tuple[int | None, str | None]:
+def _resolve_ctx(ctx: int | str) -> tuple[int | None, str | None]:
     """Parse a state context token into ``(pr_number, branch)``.
 
-    The token is either a bare integer PR number or ``branch:<name>`` for
-    branches that have no PR yet. Keeping the CLI surface untyped (single
-    positional) lets callers paste whatever ``identify`` emitted without
-    branching on PR vs branch.
+    The token is either an int PR number, a numeric string PR number, or
+    ``branch:<name>`` for branches that have no PR yet. Keeping the CLI
+    surface untyped (single positional) lets callers paste whatever
+    ``identify`` emitted without branching on PR vs branch.
     """
+    if isinstance(ctx, int):
+        return ctx, None
     if ctx.startswith("branch:"):
         return None, ctx[len("branch:") :]
     return int(ctx), None
@@ -633,12 +613,6 @@ def state_load(ctx: int | str) -> dict[str, Any]:
     pr, branch = _resolve_ctx(ctx)
     _, path = state_paths(pr, branch=branch)
     return read_json(path, default={}) or {}
-
-
-def _resolve_ctx(ctx: int | str) -> tuple[int | None, str | None]:
-    if isinstance(ctx, int):
-        return ctx, None
-    return _parse_ctx(ctx)
 
 
 def state_append_round(
@@ -731,7 +705,6 @@ FIXED_ACTIONS = {"fixed"}
 # ``ack`` is a batch-acknowledged low/nit — counts as skipped so summary
 # tables reflect that the orchestrator did look at it.
 SKIPPED_ACTIONS = {"false_positive", "wont_fix", "stale", "pre_existing", "flake", "ack"}
-SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "nit": 0}
 
 
 def _top_severity(actions: list[dict[str, Any]]) -> str | None:
@@ -739,7 +712,7 @@ def _top_severity(actions: list[dict[str, Any]]) -> str | None:
     best_rank = -1
     for a in actions:
         sev = a.get("severity")
-        rank = SEVERITY_ORDER.get(sev or "", -1)
+        rank = severity_rank(sev)
         if rank > best_rank:
             best_rank = rank
             best = sev
@@ -958,68 +931,100 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _cmd_identify(args: argparse.Namespace) -> None:
+    print_json(identify_pr())
+
+
+def _cmd_fetch_comments(args: argparse.Namespace) -> None:
+    pr = identify_pr()
+    if pr.get("pr_number") is None:
+        print_json([])
+    else:
+        print_json(fetch_comments(pr))
+
+
+def _cmd_reply_inline(args: argparse.Namespace) -> None:
+    pr = identify_pr()
+    if pr.get("pr_number") is None:
+        raise RuntimeError("reply-inline requires a PR; current branch has none")
+    print_json(reply_inline(pr["owner_repo"], pr["pr_number"], args.comment_id, args.body))
+
+
+def _cmd_comment_pr(args: argparse.Namespace) -> None:
+    pr = identify_pr()
+    if pr.get("pr_number") is None:
+        raise RuntimeError("comment-pr requires a PR; current branch has none")
+    url = comment_pr(pr["pr_number"], args.body)
+    print_json({"url": url})
+
+
+def _cmd_ci_failed_tests(args: argparse.Namespace) -> None:
+    pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
+    if pr_number is None:
+        print_json([])
+    else:
+        print_json(ci_failed_tests(pr_number))
+
+
+def _cmd_ci_compare_base(args: argparse.Namespace) -> None:
+    pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
+    if pr_number is None:
+        print_json({"pre_existing": [], "pr_caused": [], "current_failures": []})
+    else:
+        print_json(ci_compare_base(pr_number))
+
+
+def _cmd_state_load(args: argparse.Namespace) -> None:
+    print_json(state_load(args.ctx))
+
+
+def _cmd_state_append_round(args: argparse.Namespace) -> None:
+    samples = None
+    if args.noise_samples:
+        samples = json.loads(Path(args.noise_samples).read_text())
+        if not isinstance(samples, list):
+            raise ValueError("--noise-samples must point to a JSON array")
+    print_json(
+        state_append_round(
+            args.ctx,
+            args.n,
+            args.head_before,
+            verify_head=args.verify_head,
+            noise_filtered=args.noise_filtered,
+            noise_samples=samples,
+        )
+    )
+
+
+def _cmd_state_finalize_round(args: argparse.Namespace) -> None:
+    actions = json.loads(Path(args.actions_file).read_text())
+    if not isinstance(actions, list):
+        raise ValueError("actions file must be a JSON array")
+    print_json(state_finalize_round(args.ctx, args.n, args.head_after, actions))
+
+
+def _cmd_state_mark_complete(args: argparse.Namespace) -> None:
+    print_json(state_mark_complete(args.ctx, args.reason))
+
+
+_COMMANDS = {
+    "identify": _cmd_identify,
+    "fetch-comments": _cmd_fetch_comments,
+    "reply-inline": _cmd_reply_inline,
+    "comment-pr": _cmd_comment_pr,
+    "ci-failed-tests": _cmd_ci_failed_tests,
+    "ci-compare-base": _cmd_ci_compare_base,
+    "state-load": _cmd_state_load,
+    "state-append-round": _cmd_state_append_round,
+    "state-finalize-round": _cmd_state_finalize_round,
+    "state-mark-complete": _cmd_state_mark_complete,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        if args.cmd == "identify":
-            print_json(identify_pr())
-        elif args.cmd == "fetch-comments":
-            pr = identify_pr()
-            if pr.get("pr_number") is None:
-                # Branch-only mode has no PR comments to fetch.
-                print_json([])
-            else:
-                print_json(fetch_comments(pr))
-        elif args.cmd == "reply-inline":
-            pr = identify_pr()
-            if pr.get("pr_number") is None:
-                raise RuntimeError("reply-inline requires a PR; current branch has none")
-            print_json(reply_inline(pr["owner_repo"], pr["pr_number"], args.comment_id, args.body))
-        elif args.cmd == "comment-pr":
-            pr = identify_pr()
-            if pr.get("pr_number") is None:
-                raise RuntimeError("comment-pr requires a PR; current branch has none")
-            url = comment_pr(pr["pr_number"], args.body)
-            print_json({"url": url})
-        elif args.cmd == "ci-failed-tests":
-            pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
-            if pr_number is None:
-                print_json([])
-            else:
-                print_json(ci_failed_tests(pr_number))
-        elif args.cmd == "ci-compare-base":
-            pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
-            if pr_number is None:
-                print_json({"pre_existing": [], "pr_caused": [], "current_failures": []})
-            else:
-                print_json(ci_compare_base(pr_number))
-        elif args.cmd == "state-load":
-            print_json(state_load(args.ctx))
-        elif args.cmd == "state-append-round":
-            samples = None
-            if args.noise_samples:
-                samples = json.loads(Path(args.noise_samples).read_text())
-                if not isinstance(samples, list):
-                    raise ValueError("--noise-samples must point to a JSON array")
-            print_json(
-                state_append_round(
-                    args.ctx,
-                    args.n,
-                    args.head_before,
-                    verify_head=args.verify_head,
-                    noise_filtered=args.noise_filtered,
-                    noise_samples=samples,
-                )
-            )
-        elif args.cmd == "state-finalize-round":
-            actions = json.loads(Path(args.actions_file).read_text())
-            if not isinstance(actions, list):
-                raise ValueError("actions file must be a JSON array")
-            print_json(state_finalize_round(args.ctx, args.n, args.head_after, actions))
-        elif args.cmd == "state-mark-complete":
-            print_json(state_mark_complete(args.ctx, args.reason))
-        else:  # pragma: no cover — argparse enforces.
-            raise ValueError(f"unknown cmd: {args.cmd}")
+        _COMMANDS[args.cmd](args)
     except CommandError as e:
         print(str(e), file=sys.stderr)
         return e.returncode or 1

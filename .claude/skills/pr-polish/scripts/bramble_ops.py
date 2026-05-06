@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bramble-side operations for the pr-polish skill.
 
-Formats the `bramble code-review` invocation the orchestrator arms in the
-Claude `Monitor` tool, parses the stream Monitor captures, and shares the
+Formats the ``bramble code-review`` invocation the orchestrator arms in the
+Claude ``Monitor`` tool, parses the stream Monitor captures, and shares the
 cross-backend triage helpers with the rest of the skill.
 
 Usage:
@@ -12,14 +12,6 @@ Usage:
     python3 bramble_ops.py parse-stream <round> --backend <b> <stream_file>
                                                  [--repo <slug>] [--pr <n>]
     python3 bramble_ops.py triage <round> <prior_state_file> --pr <n> [--repo <slug>]
-
-The new model: `bramble code-review --json` is itself the Monitor command.
-Monitor captures its stdout (interleaved NDJSON progress events + a final
-envelope line) into a file; `parse-stream` scans that file for the last
-`"schema_version"` line and feeds it to `parse_envelope`. Bramble's own
-deferred envelope guard (codereview.go) makes the old detach + poll loop
-unnecessary — the stream always terminates with a parseable envelope line,
-even on panic or silent exit.
 """
 
 from __future__ import annotations
@@ -37,9 +29,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _common import (  # noqa: E402
+    SOURCE_INLINE,
     print_json,
     read_json,
     repo_slug,
+    severity_rank,
     topic_of,
 )
 
@@ -215,11 +209,10 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
 
 
 def _envelope_ready(path: Path) -> dict[str, Any] | None:
-    """Legacy helper for test_bramble_ops: returns a parsed envelope or None.
+    """Read a pre-written envelope file. Returns the parsed dict or None.
 
-    Kept so existing tests that pre-write an envelope file and ask "is this
-    recognized?" still work. New code should use ``extract_terminal_envelope``
-    on a stream.
+    Used by ``parse_round`` as the fallback when no Monitor stream is supplied
+    for a backend.
     """
     if not path.exists() or path.stat().st_size == 0:
         return None
@@ -286,10 +279,7 @@ def parse_round(
 
     ``streams`` maps backend name to the path Monitor captured for that
     backend's ``bramble code-review`` invocation. When a backend's stream is
-    absent (not passed, or missing on disk), we fall back to the legacy
-    per-backend envelope file (``envelope_path``) so older rounds that ran
-    before the Monitor-direct rewrite are still parseable. Once all active
-    state files use the stream convention, the fallback can retire.
+    absent, fall back to the per-backend envelope file (``envelope_path``).
     """
     repo = repo or repo_slug()
     pr = pr if pr is not None else int(os.environ.get("PR_NUMBER", "0") or 0)
@@ -338,7 +328,7 @@ def pr_comment_to_finding(c: dict[str, Any]) -> dict[str, Any]:
     if severity is None:
         severity = "high" if any(k in body for k in _HIGH_SEVERITY_KEYWORDS) else "medium"
     return {
-        "source": c.get("source") or "github-inline",
+        "source": c.get("source") or SOURCE_INLINE,
         "severity": severity,
         "file": c.get("path"),
         "line": c.get("line"),
@@ -415,18 +405,18 @@ def triage(
 
     for key, group in by_key.items():
         sources = {g["source"] for g in group}
-        severities = [_severity_rank(g.get("severity")) for g in group]
+        severities = [severity_rank(g.get("severity")) for g in group]
         top = max(severities) if severities else -1
         repr_ = group[0]
         if key in prior_fixed_keys:
             spiral_matches.append({"key": list(key), "findings": group})
         if len(sources) >= 2:
             consensus.append({"key": list(key), "sources": sorted(sources), "findings": group})
-        elif top >= _severity_rank("high"):
+        elif top >= severity_rank("high"):
             single_critical.append({"key": list(key), "finding": repr_})
-        elif top == _severity_rank("medium"):
+        elif top == severity_rank("medium"):
             single_medium.append({"key": list(key), "finding": repr_})
-        elif top <= _severity_rank("low"):
+        elif top <= severity_rank("low"):
             low_acks.append({"key": list(key), "finding": repr_})
 
     # action_plan is a dispatch hint derived from the groupings above. Triage
@@ -455,10 +445,6 @@ def triage(
         "total": len(findings),
         "unique": len(by_key),
     }
-
-
-def _severity_rank(sev: str | None) -> int:
-    return {"critical": 4, "high": 3, "medium": 2, "low": 1, "nit": 0}.get(sev or "", -1)
 
 
 def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
