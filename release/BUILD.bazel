@@ -3,8 +3,17 @@
 
 load("//release:release.bzl", "release_go_binaries")
 
-release_go_binaries("bramble", "//bramble")
+release_go_binaries(
+    name = "bramble",
+    target = "//bramble",
+)
 
-release_go_binaries("wt", "//wt/cmd/wt")
+release_go_binaries(
+    name = "wt",
+    target = "//wt/cmd/wt",
+)
 
-release_go_binaries("jiradozer", "//jiradozer/cmd/jiradozer")
+release_go_binaries(
+    name = "jiradozer",
+    target = "//jiradozer/cmd/jiradozer",
+)

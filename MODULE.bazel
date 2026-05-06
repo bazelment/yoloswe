@@ -23,6 +23,9 @@ bazel_dep(name = "protobuf", version = "29.1")
 # Shell rules for sh_binary
 bazel_dep(name = "rules_shell", version = "0.6.1")
 
+# Buildifier for linting Bazel files (kept in lockstep with CI)
+bazel_dep(name = "buildifier_prebuilt", version = "8.0.3", dev_dependency = True)
+
 # Configure Go SDK
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.26.1")

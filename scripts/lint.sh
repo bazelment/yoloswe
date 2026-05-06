@@ -69,28 +69,38 @@ fi
 echo ""
 echo "=== Linting Bazel files ==="
 
-# Check if buildifier is installed
-if ! command -v buildifier &> /dev/null; then
-    echo "Error: buildifier is not installed."
-    echo "Install it with: brew install buildifier"
-    echo "Or see: https://github.com/bazelbuild/buildtools"
+# Always use the Bazel-pinned buildifier (//tools:buildifier) so local runs match
+# CI exactly. Falls back to a system buildifier only if Bazel is unavailable.
+if command -v bazel &> /dev/null; then
+    BUILDIFIER_CMD=(bazel run --ui_event_filters=-info,-stdout,-stderr --noshow_progress //tools:buildifier --)
+    BUILDIFIER_FIX_HINT="bazel run //tools:buildifier -- -r \"\$(pwd)\""
+elif command -v buildifier &> /dev/null; then
+    echo "Warning: bazel not found; using system buildifier ($(buildifier --version 2>&1 | head -1))." >&2
+    echo "         CI uses the Bazel-pinned buildifier; results may diverge." >&2
+    BUILDIFIER_CMD=(buildifier)
+    BUILDIFIER_FIX_HINT="buildifier -r ."
+else
+    echo "Error: neither bazel nor buildifier is available."
+    echo "Install Bazel (recommended) or buildifier directly."
+    echo "See: https://github.com/bazelbuild/buildtools"
     exit 1
 fi
 
-# Find all BUILD and .bzl files
-BAZEL_FILES=$(find . -type f \( -name "BUILD" -o -name "BUILD.bazel" -o -name "*.bzl" -o -name "WORKSPACE" -o -name "WORKSPACE.bazel" -o -name "MODULE.bazel" \) -not -path "./bazel-*" 2>/dev/null || true)
+# Find all BUILD and .bzl files (absolute paths so `bazel run`'s cwd switch
+# into the runfiles dir doesn't break path resolution).
+BAZEL_FILES=$(find "${WORKSPACE_ROOT}" -type f \( -name "BUILD" -o -name "BUILD.bazel" -o -name "*.bzl" -o -name "WORKSPACE" -o -name "WORKSPACE.bazel" -o -name "MODULE.bazel" \) -not -path "${WORKSPACE_ROOT}/bazel-*" 2>/dev/null || true)
 
 if [[ -z "${BAZEL_FILES}" ]]; then
     echo "No Bazel files found"
 else
     # Check formatting (mode=check returns non-zero if files need formatting)
-    if echo "${BAZEL_FILES}" | xargs buildifier --mode=check --lint=warn; then
+    if echo "${BAZEL_FILES}" | xargs "${BUILDIFIER_CMD[@]}" --mode=check --lint=warn; then
         echo "✓ Bazel lint passed"
     else
         echo "✗ Bazel lint failed"
         echo ""
         echo "To fix formatting issues, run:"
-        echo "  buildifier -r ."
+        echo "  ${BUILDIFIER_FIX_HINT}"
         FAILED=1
     fi
 fi
