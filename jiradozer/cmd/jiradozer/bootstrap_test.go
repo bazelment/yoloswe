@@ -330,6 +330,22 @@ func TestBootstrapWithRepoRecreatesMissingDefaultWorktree(t *testing.T) {
 	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
 }
 
+func TestBootstrapWithRepoRecoversWorktreeBeforeExistingConfigError(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	require.NoError(t, cmd.Execute())
+	require.NoError(t, os.RemoveAll(fixture.mainPath))
+
+	cmd = fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+	require.DirExists(t, fixture.mainPath)
+}
+
 func TestBootstrapWithRepoDoesNotCloneWhenConfigExists(t *testing.T) {
 	fixture := newBootstrapRepoFixture(t)
 	require.NoError(t, os.MkdirAll(filepath.Dir(fixture.configPath), 0o755))
@@ -341,6 +357,21 @@ func TestBootstrapWithRepoDoesNotCloneWhenConfigExists(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 	require.NoDirExists(t, filepath.Join(fixture.wtRoot, fixture.repoName, ".bare"))
+}
+
+func TestBootstrapWithRepoRejectsSameNameDifferentRemote(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	require.NoError(t, cmd.Execute())
+
+	otherRemote := newBootstrapRemote(t)
+	cmd = fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", otherRemote, "--force"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "uses remote")
 }
 
 type bootstrapRepoFixture struct {
@@ -378,6 +409,7 @@ func (f bootstrapRepoFixture) newCommand() *cobra.Command {
 
 func TestBootstrapWithRepoExpandsOwnerRepoShorthand(t *testing.T) {
 	assert.Equal(t, "https://github.com/owner/repo.git", normalizeRepoURL("owner/repo"))
+	assert.Equal(t, "https://github.com/owner/repo.git", normalizeRepoURL("owner/repo.git"))
 	assert.Equal(t, "https://example.com/owner/repo.git", normalizeRepoURL("https://example.com/owner/repo.git"))
 	assert.Equal(t, "git@github.com:owner/repo.git", normalizeRepoURL("git@github.com:owner/repo.git"))
 }

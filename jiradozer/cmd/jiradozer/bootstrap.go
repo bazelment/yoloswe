@@ -42,6 +42,11 @@ agent says.`,
 				return err
 			}
 			if _, err := os.Stat(path); err == nil && !args.force {
+				if args.repo != "" {
+					if _, err := recoverExistingRepoWorktree(cmd.Context(), args.repo, cmd.OutOrStdout()); err != nil {
+						return err
+					}
+				}
 				return fmt.Errorf("%s already exists (use --force to overwrite)", path)
 			} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("stat %s: %w", path, err)
@@ -90,14 +95,32 @@ func resolveBootstrapOutputPath(args *bootstrapArgs, configPath string, configEx
 	return filepath.Join(wtRoot, wt.GetRepoNameFromURL(repoURL), "jiradozer.yaml"), nil
 }
 
+func recoverExistingRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (string, error) {
+	repoURL := normalizeRepoURL(repoArg)
+	wtRoot, err := resolveWTRoot()
+	if err != nil {
+		return "", err
+	}
+	mgr := newBootstrapWTManager(wtRoot, repoURL, out)
+	if _, err := os.Stat(mgr.BareDir()); errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
+	}
+	return bootstrapRepoWorktree(ctx, repoArg, out)
+}
+
 func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (string, error) {
 	repoURL := normalizeRepoURL(repoArg)
 	wtRoot, err := resolveWTRoot()
 	if err != nil {
 		return "", err
 	}
-	mgr := wt.NewManager(wtRoot, wt.GetRepoNameFromURL(repoURL))
+	mgr := newBootstrapWTManager(wtRoot, repoURL, out)
 	if _, err := os.Stat(mgr.BareDir()); err == nil {
+		if err := verifyExistingRepoRemote(ctx, mgr, repoURL); err != nil {
+			return "", err
+		}
 		defaultBranch, err := wt.GetDefaultBranch(ctx, mgr.GitRunner(), mgr.BareDir())
 		if err != nil {
 			return "", fmt.Errorf("detect default branch for existing repo: %w", err)
@@ -121,6 +144,33 @@ func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (
 	return mainPath, nil
 }
 
+func newBootstrapWTManager(wtRoot, repoURL string, out io.Writer) *wt.Manager {
+	return wt.NewManager(wtRoot, wt.GetRepoNameFromURL(repoURL), wt.WithOutput(wt.NewOutput(out, false)))
+}
+
+func verifyExistingRepoRemote(ctx context.Context, mgr *wt.Manager, repoURL string) error {
+	result, err := mgr.GitRunner().Run(ctx, []string{"config", "--get", "remote.origin.url"}, mgr.BareDir())
+	if err != nil {
+		return fmt.Errorf("read existing repo remote: %w", err)
+	}
+	got := strings.TrimSpace(result.Stdout)
+	if sameRepoRemote(got, repoURL) {
+		return nil
+	}
+	return fmt.Errorf("existing repo at %s uses remote %q, not %q", mgr.RepoDir(), got, repoURL)
+}
+
+func sameRepoRemote(a, b string) bool {
+	return canonicalRepoRemote(a) == canonicalRepoRemote(b)
+}
+
+func canonicalRepoRemote(remote string) string {
+	remote = strings.TrimSuffix(strings.TrimSpace(remote), ".git")
+	remote = strings.TrimPrefix(remote, "https://github.com/")
+	remote = strings.TrimPrefix(remote, "git@github.com:")
+	return remote
+}
+
 func recreateDefaultWorktree(ctx context.Context, mgr *wt.Manager, defaultBranch string) (string, error) {
 	mainPath := filepath.Join(mgr.RepoDir(), defaultBranch)
 	if _, err := mgr.GitRunner().Run(ctx, []string{"worktree", "prune"}, mgr.BareDir()); err != nil {
@@ -142,7 +192,7 @@ var ownerRepoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 func normalizeRepoURL(repoArg string) string {
 	if ownerRepoPattern.MatchString(repoArg) {
-		return "https://github.com/" + repoArg + ".git"
+		return "https://github.com/" + strings.TrimSuffix(repoArg, ".git") + ".git"
 	}
 	return repoArg
 }
