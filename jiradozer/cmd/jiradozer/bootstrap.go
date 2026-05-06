@@ -38,12 +38,13 @@ the wt-managed checkout unless --config or --output is explicit. Edit the
 prompts to taste; the generated file is the source of truth for what the
 agent says.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path, err := resolveBootstrapOutputPath(args, *configPath, cmd.Flags().Changed("config") || cmd.InheritedFlags().Changed("config"))
+			configExplicit := cmd.Flags().Changed("config") || cmd.InheritedFlags().Changed("config")
+			path, err := resolveBootstrapOutputPath(args, *configPath, configExplicit)
 			if err != nil {
 				return err
 			}
 			if _, err := os.Stat(path); err == nil && !args.force {
-				if args.repo != "" {
+				if args.repo != "" && args.output == "" && !configExplicit {
 					if _, err := recoverExistingRepoWorktree(cmd.Context(), args.repo, cmd.OutOrStdout()); err != nil {
 						return err
 					}
@@ -59,7 +60,11 @@ agent says.`,
 					return err
 				}
 			}
-			content, err := bootstrapYAML(workDir)
+			baseBranch := ""
+			if workDir != "" {
+				baseBranch = filepath.Base(workDir)
+			}
+			content, err := bootstrapYAML(workDir, baseBranch)
 			if err != nil {
 				return err
 			}
@@ -236,14 +241,18 @@ func normalizeRepoURL(repoArg string) string {
 // hand-laid-out (not produced by yaml.Marshal) so each field carries the
 // doc comment from its struct tag and optional fields can be emitted as
 // commented-out lines that hint at usage without forcing a value.
-func bootstrapYAML(workDir string) ([]byte, error) {
+func bootstrapYAML(workDir string, baseBranchOverride ...string) ([]byte, error) {
+	baseBranch := ""
+	if len(baseBranchOverride) > 0 {
+		baseBranch = baseBranchOverride[0]
+	}
 	var b strings.Builder
 	b.WriteString(bootstrapHeader)
 	b.WriteString(bootstrapTrackerBlock)
 	b.WriteString(bootstrapSourceBlock)
 	b.WriteString(bootstrapStatesBlock)
 	b.WriteString(bootstrapAgentBlock)
-	b.WriteString(renderWorkDirBlock(workDir))
+	b.WriteString(renderWorkDirBlock(workDir, baseBranch))
 
 	b.WriteString(renderStepBlock(stepBlock{
 		Key:                  "plan",
@@ -416,20 +425,23 @@ agent:
 `
 
 // renderWorkDirBlock renders required scalar config values.
-func renderWorkDirBlock(workDir string) string {
+func renderWorkDirBlock(workDir string, baseBranch string) string {
 	if workDir == "" {
 		workDir = "."
 	} else {
 		workDir = strconv.Quote(workDir)
 	}
-	return fmt.Sprintf(bootstrapWorkDirBlock, workDir)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	return fmt.Sprintf(bootstrapWorkDirBlock, workDir, baseBranch)
 }
 
 const bootstrapWorkDirBlock = `# Working directory for the agent (where it runs commands and edits files).
 work_dir: %s
 
 # Default base branch for PRs.
-base_branch: main
+base_branch: %s
 
 # Optional phases to skip for every run. Skipped phases advance in-memory
 # workflow state and clear stale -inprogress labels, but do not write -done

@@ -325,6 +325,19 @@ func TestBootstrapWithRepoHonorsOutputPath(t *testing.T) {
 	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
 }
 
+func TestBootstrapWithRepoUsesRemoteDefaultBranchInConfig(t *testing.T) {
+	fixture := newBootstrapRepoFixtureWithDefaultBranch(t, "master")
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	require.NoError(t, cmd.Execute())
+
+	cfg, err := jiradozer.LoadConfig(fixture.configPath)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
+	assert.Equal(t, "master", cfg.BaseBranch)
+}
+
 func TestBootstrapWithRepoRecreatesMissingDefaultWorktree(t *testing.T) {
 	fixture := newBootstrapRepoFixture(t)
 
@@ -414,20 +427,24 @@ type bootstrapRepoFixture struct {
 }
 
 func newBootstrapRepoFixture(t *testing.T) bootstrapRepoFixture {
+	return newBootstrapRepoFixtureWithDefaultBranch(t, "main")
+}
+
+func newBootstrapRepoFixtureWithDefaultBranch(t *testing.T, defaultBranch string) bootstrapRepoFixture {
 	t.Helper()
 	t.Setenv("LINEAR_API_KEY", "test")
 	wtRoot := t.TempDir()
 	t.Setenv("WT_ROOT", wtRoot)
 	outputDir := t.TempDir()
 	t.Chdir(outputDir)
-	remoteDir := newBootstrapRemote(t)
+	remoteDir := newBootstrapRemoteWithDefaultBranch(t, defaultBranch)
 	repoName := wt.GetRepoNameFromURL(remoteDir)
 	return bootstrapRepoFixture{
 		wtRoot:     wtRoot,
 		outputDir:  outputDir,
 		remoteDir:  remoteDir,
 		repoName:   repoName,
-		mainPath:   filepath.Join(wtRoot, repoName, "main"),
+		mainPath:   filepath.Join(wtRoot, repoName, defaultBranch),
 		configPath: filepath.Join(wtRoot, repoName, "jiradozer.yaml"),
 	}
 }
@@ -451,6 +468,10 @@ func TestSameRepoRemoteAcceptsEquivalentGitHubForms(t *testing.T) {
 }
 
 func newBootstrapRemote(t *testing.T) string {
+	return newBootstrapRemoteWithDefaultBranch(t, "main")
+}
+
+func newBootstrapRemoteWithDefaultBranch(t *testing.T, defaultBranch string) string {
 	t.Helper()
 	ctx := context.Background()
 	git := &wt.DefaultGitRunner{}
@@ -472,11 +493,11 @@ func newBootstrapRemote(t *testing.T) string {
 	require.NoError(t, err)
 	_, err = git.Run(ctx, []string{"commit", "-m", "initial commit"}, setupDir)
 	require.NoError(t, err)
-	_, err = git.Run(ctx, []string{"branch", "-M", "main"}, setupDir)
+	_, err = git.Run(ctx, []string{"branch", "-M", defaultBranch}, setupDir)
 	require.NoError(t, err)
-	_, err = git.Run(ctx, []string{"push", "-u", "origin", "main"}, setupDir)
+	_, err = git.Run(ctx, []string{"push", "-u", "origin", defaultBranch}, setupDir)
 	require.NoError(t, err)
-	_, err = git.Run(ctx, []string{"symbolic-ref", "HEAD", "refs/heads/main"}, remoteDir)
+	_, err = git.Run(ctx, []string{"symbolic-ref", "HEAD", "refs/heads/" + defaultBranch}, remoteDir)
 	require.NoError(t, err)
 	return remoteDir
 }
