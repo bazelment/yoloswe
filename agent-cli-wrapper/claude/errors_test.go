@@ -71,7 +71,6 @@ func TestTransientError(t *testing.T) {
 		Cause:     cause,
 		Message:   "Stream idle timeout - partial response received",
 		RequestID: "req_abc123",
-		SessionID: "session_1",
 	}
 
 	if got := err.Error(); got != "transient CLI error (request req_abc123): Stream idle timeout - partial response received" {
@@ -83,9 +82,6 @@ func TestTransientError(t *testing.T) {
 	var transient *TransientError
 	if !errors.As(err, &transient) {
 		t.Error("expected errors.As to match TransientError")
-	}
-	if transient.SessionID != "session_1" {
-		t.Errorf("session id: %q", transient.SessionID)
 	}
 	if !IsTransient(err) {
 		t.Error("expected IsTransient true")

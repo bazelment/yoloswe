@@ -62,7 +62,7 @@ func TestParseMessage_AssistantSyntheticAPIError(t *testing.T) {
 	if !a.IsSyntheticAPIError() {
 		t.Error("expected synthetic API error")
 	}
-	if got := a.SyntheticErrorText(); got != "API Error: Stream idle timeout - partial response received" {
+	if got := a.SyntheticErrorText(); got != "Stream idle timeout - partial response received" {
 		t.Errorf("synthetic error text: %q", got)
 	}
 }

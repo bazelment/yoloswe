@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 )
+
+const syntheticAPIErrorPrefix = "API Error: "
 
 // MessageType discriminates between message kinds.
 type MessageType string
@@ -207,31 +210,24 @@ type MessageContent struct {
 
 // AssistantMessage is a complete message from Claude.
 type AssistantMessage struct {
-	ParentToolUseID *string     `json:"parent_tool_use_id"`
-	Type            MessageType `json:"type"`
-	SessionID       string      `json:"session_id"`
-	UUID            string      `json:"uuid"`
-	// RequestID is the upstream request id of the in-flight turn that was
-	// aborted; preserved on the synthetic frame for correlation/dedup.
-	RequestID string         `json:"requestId,omitempty"`
-	Message   MessageContent `json:"message"`
-	// IsAPIErrorMessage is set to true on synthetic terminal frames the CLI
-	// injects when its stream-idle watchdog fires or another transient API
-	// error aborts an in-flight turn.
-	IsAPIErrorMessage bool `json:"isApiErrorMessage,omitempty"`
+	ParentToolUseID   *string        `json:"parent_tool_use_id"`
+	Type              MessageType    `json:"type"`
+	SessionID         string         `json:"session_id"`
+	UUID              string         `json:"uuid"`
+	RequestID         string         `json:"requestId,omitempty"`
+	Message           MessageContent `json:"message"`
+	IsAPIErrorMessage bool           `json:"isApiErrorMessage,omitempty"`
 }
 
 // MsgType returns the message type.
 func (m AssistantMessage) MsgType() MessageType { return MessageTypeAssistant }
 
-// IsSyntheticAPIError reports whether this assistant frame is a synthetic
-// terminal error injected by the CLI rather than real model output.
+// IsSyntheticAPIError reports whether the CLI injected this terminal frame.
 func (m AssistantMessage) IsSyntheticAPIError() bool {
 	return m.IsAPIErrorMessage
 }
 
-// SyntheticErrorText returns the first text-block string from a synthetic
-// API error frame, or empty if not applicable.
+// SyntheticErrorText returns normalized text from a synthetic API error frame.
 func (m AssistantMessage) SyntheticErrorText() string {
 	if !m.IsSyntheticAPIError() {
 		return ""
@@ -242,7 +238,7 @@ func (m AssistantMessage) SyntheticErrorText() string {
 	}
 	for _, b := range blocks {
 		if tb, ok := b.(TextBlock); ok && tb.Text != "" {
-			return tb.Text
+			return strings.TrimPrefix(tb.Text, syntheticAPIErrorPrefix)
 		}
 	}
 	return ""

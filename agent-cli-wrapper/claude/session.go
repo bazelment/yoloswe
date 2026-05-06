@@ -73,9 +73,10 @@ type Session struct {
 	cancel                  context.CancelFunc
 
 	// Value / struct fields.
-	config            SessionConfig
-	wakeupState       wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
-	cumulativeCostUSD float64
+	config               SessionConfig
+	wakeupState          wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
+	cumulativeCostUSD    float64
+	pendingTransientTurn int
 
 	// Scalar and sync fields.
 	mu        sync.RWMutex
@@ -279,6 +280,7 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 
 	turn := s.turnManager.StartTurn(content)
 	s.pendingTransientError = nil
+	s.pendingTransientTurn = 0
 	// Clear any stale wakeup suppression state from the previous turn. A
 	// safety timer for Turn N must not fire after Turn N+1 has started, and
 	// the suppressed turn number must not bleed across user-initiated turns.
@@ -323,6 +325,7 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 
 	turn := s.turnManager.StartTurn(content)
 	s.pendingTransientError = nil
+	s.pendingTransientTurn = 0
 	// Clear any stale wakeup suppression state from the previous turn.
 	s.wakeupState.reset()
 
@@ -968,17 +971,12 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 		if text == "" {
 			text = "synthetic API error"
 		}
-		text = strings.TrimPrefix(text, "API Error: ")
 		s.mu.Lock()
-		sessionID := msg.SessionID
-		if s.info != nil && s.info.SessionID != "" {
-			sessionID = s.info.SessionID
-		}
 		s.pendingTransientError = &TransientError{
 			Message:   text,
 			RequestID: msg.RequestID,
-			SessionID: sessionID,
 		}
+		s.pendingTransientTurn = s.turnManager.CurrentTurnNumber()
 		s.mu.Unlock()
 	}
 
@@ -1085,7 +1083,7 @@ func (s *Session) handleUser(msg protocol.UserMessage) {
 
 func (s *Session) handleResult(msg protocol.ResultMessage) {
 	resultErr := resultMessageError(msg)
-	if t := s.consumePendingTransient(); t != nil {
+	if t := s.consumePendingTransient(s.turnManager.CurrentTurnNumber()); t != nil {
 		if resultErr != nil {
 			t.Cause = resultErr
 		}
@@ -1756,11 +1754,16 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 // construction but does not depend on accumulated suppression state, so the
 // raw ResultMessageEvent can surface error detail before the coalescing
 // branches run.
-func (s *Session) consumePendingTransient() *TransientError {
+func (s *Session) consumePendingTransient(turnNumber int) *TransientError {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err := s.pendingTransientError
 	s.pendingTransientError = nil
+	pendingTurn := s.pendingTransientTurn
+	s.pendingTransientTurn = 0
+	if pendingTurn != turnNumber {
+		return nil
+	}
 	return err
 }
 

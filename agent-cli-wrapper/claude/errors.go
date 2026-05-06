@@ -85,7 +85,6 @@ type TransientError struct {
 	Cause     error
 	Message   string
 	RequestID string
-	SessionID string
 }
 
 func (e *TransientError) Error() string {

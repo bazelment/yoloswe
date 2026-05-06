@@ -241,42 +241,36 @@ func replaySessionFromFixture(t *testing.T, path string) []Event {
 	return drainEvents(t, s)
 }
 
+func firstResultMessageEvent(t *testing.T, events []Event) *ResultMessageEvent {
+	t.Helper()
+	for _, e := range events {
+		if got, ok := e.(ResultMessageEvent); ok {
+			return &got
+		}
+	}
+	require.FailNow(t, "ResultMessageEvent must fire")
+	return nil
+}
+
 func TestStream_Replay_SyntheticStreamIdleTimeoutIsTransient(t *testing.T) {
 	events := replaySessionFromFixture(t, "testdata/replay/synthetic_stream_idle_timeout.jsonl")
 
 	require.Equal(t, 1, countEvents[AssistantMessageEvent](events),
 		"synthetic assistant frame still emits through the raw stream")
 
-	var rm *ResultMessageEvent
-	for _, e := range events {
-		if got, ok := e.(ResultMessageEvent); ok {
-			ev := got
-			rm = &ev
-			break
-		}
-	}
-	require.NotNil(t, rm, "ResultMessageEvent must fire for synthetic error turns")
+	rm := firstResultMessageEvent(t, events)
 	require.Error(t, rm.Error)
 	var te *TransientError
 	require.True(t, errors.As(rm.Error, &te))
 	require.Equal(t, "Stream idle timeout - partial response received", te.Message)
 	require.Equal(t, "req_abc123", te.RequestID)
-	require.NotEmpty(t, te.SessionID)
 	require.True(t, IsRecoverable(rm.Error))
 }
 
 func TestStream_Replay_ErrorDuringExecutionWithoutSyntheticIsNotTransient(t *testing.T) {
 	events := replaySessionFromFixture(t, "testdata/replay/error_during_execution_real.jsonl")
 
-	var rm *ResultMessageEvent
-	for _, e := range events {
-		if got, ok := e.(ResultMessageEvent); ok {
-			ev := got
-			rm = &ev
-			break
-		}
-	}
-	require.NotNil(t, rm, "ResultMessageEvent must fire for real error turns")
+	rm := firstResultMessageEvent(t, events)
 	require.Error(t, rm.Error)
 	var te *TransientError
 	require.False(t, errors.As(rm.Error, &te), "real refusal must not classify as transient")
@@ -296,15 +290,7 @@ func TestStream_Replay_PendingTransientClearedOnNextSendMessage(t *testing.T) {
 	s.handleLine([]byte(`{"type":"result","subtype":"success","session_id":"s1","uuid":"u2","result":"ok","num_turns":1,"duration_ms":10,"duration_api_ms":5,"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
 
 	events := drainEvents(t, s)
-	var rm *ResultMessageEvent
-	for _, e := range events {
-		if got, ok := e.(ResultMessageEvent); ok {
-			ev := got
-			rm = &ev
-			break
-		}
-	}
-	require.NotNil(t, rm)
+	rm := firstResultMessageEvent(t, events)
 	require.NoError(t, rm.Error)
 	result := s.turnManager.GetCompletedResult(2)
 	require.NotNil(t, result, "turn 2 should complete")
@@ -594,24 +580,7 @@ func TestStream_Replay_R12_CloseSessionWhileBgLive(t *testing.T) {
 // Both ResultMessageEvents must emit raw so logicalTurnState can wait for
 // the bg tasks to drain before signalling done.
 func TestStream_Replay_R14_INF401_ValidateRound2(t *testing.T) {
-	f, err := os.Open("testdata/replay/inf401_validate_round2.jsonl")
-	require.NoError(t, err, "INF-401 fixture must exist for the regression test")
-	defer f.Close()
-
-	s := newTestSession(t)
-	s.turnManager.StartTurn("inf-401 round 2 replay")
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		// Copy since scanner reuses the underlying slice.
-		s.handleLine(append([]byte(nil), line...))
-	}
-	require.NoError(t, scanner.Err())
-	events := drainEvents(t, s)
+	events := replaySessionFromFixture(t, "testdata/replay/inf401_validate_round2.jsonl")
 
 	// Two CLI turns in the fixture: the end_turn after arming Monitors and
 	// the auto-continuation after both tasks settled.
