@@ -34,6 +34,7 @@ go_test(
         "backend_test.go",
         "bridge_test.go",
         "json_output_test.go",
+        "resume_test.go",
         "reviewer_test.go",
         "runlog_test.go",
         "scope_hints_test.go",

@@ -142,7 +142,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		return emitEarlyFailure(err, "", emitEnvelope)
 	}
 
-	style, err := normalizePromptStyle(resumeSessionID, resumePromptStyle)
+	style, err := normalizePromptStyle(resumeSessionID, resumePromptStyle, cmd.Flags().Changed("resume-prompt-style"))
 	if err != nil {
 		return emitEarlyFailure(err, model, emitEnvelope)
 	}
@@ -362,17 +362,23 @@ func buildPromptForRun(goal, hintsPath string, skipTestExecution bool, style pro
 	return reviewer.BuildJSONPromptWithScope(goal, opts)
 }
 
-func normalizePromptStyle(resumeSessionID, rawStyle string) (promptStyle, error) {
+func normalizePromptStyle(resumeSessionID, rawStyle string, styleExplicit bool) (promptStyle, error) {
 	style := promptStyle(rawStyle)
-	if resumeSessionID != "" && style == promptStyleFresh {
-		return promptStyleFollowUp, nil
-	}
 	switch style {
 	case promptStyleFresh, promptStyleFollowUp:
-		return style, nil
 	default:
 		return "", fmt.Errorf("invalid --resume-prompt-style %q (want fresh or follow-up)", rawStyle)
 	}
+	if resumeSessionID == "" {
+		if style == promptStyleFollowUp {
+			return "", fmt.Errorf("--resume-prompt-style=follow-up requires --resume-session-id")
+		}
+		return style, nil
+	}
+	if !styleExplicit && style == promptStyleFresh {
+		return promptStyleFollowUp, nil
+	}
+	return style, nil
 }
 
 // loadPromptOptions reads the scope-hints file when set and converts it to

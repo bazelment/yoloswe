@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
 )
@@ -38,10 +39,10 @@ func (b *cursorBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		resumeStatus = ResumeStatusOK
 	}
 
-	result, err := b.runPromptWithOptions(ctx, prompt, handler, resumeOpts, resumeStatus)
+	result, err := b.runPromptWithOptions(ctx, prompt, handler, resumeOpts, resumeStatus, b.config.ResumeSessionID)
 	if err != nil && b.config.ResumeSessionID != "" && isCursorResumeNotFound(err) {
 		slog.Warn("cursor resume failed; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
-		return b.runPromptWithOptions(ctx, prompt, handler, opts, ResumeStatusFallback)
+		return b.runPromptWithOptions(ctx, prompt, handler, opts, ResumeStatusFallback, "")
 	}
 	return result, err
 }
@@ -66,10 +67,10 @@ func (b *cursorBackend) baseSessionOptions() []cursor.SessionOption {
 	return opts
 }
 
-func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string, handler EventHandler, opts []cursor.SessionOption, resumeStatus ResumeStatus) (*ReviewResult, error) {
+func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string, handler EventHandler, opts []cursor.SessionOption, resumeStatus ResumeStatus, requestedResumeID string) (*ReviewResult, error) {
 	events, err := cursor.QueryStream(ctx, prompt, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("cursor query failed: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("cursor query failed: %w", err))
 	}
 
 	// Use a derived context so that the adapter goroutine is unblocked
@@ -80,10 +81,24 @@ func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string,
 
 	// Wrap handler to format cursor-specific tool display names and
 	// intercept ReadyEvent (which isn't part of agentstream).
-	adapter := &cursorEventAdapter{handler: handler, events: events}
+	var sessionMu sync.Mutex
+	var actualSessionID string
+	adapter := &cursorEventAdapter{
+		handler: handler,
+		events:  events,
+		onSession: func(id string) {
+			sessionMu.Lock()
+			defer sessionMu.Unlock()
+			actualSessionID = id
+		},
+	}
 	bridged, err := bridgeStreamEvents(adapterCtx, adapter.filtered(adapterCtx), handler, "")
+	sessionMu.Lock()
+	readySessionID := actualSessionID
+	sessionMu.Unlock()
+	resumeStatus = cursorResumeStatusAfterReady(resumeStatus, requestedResumeID, readySessionID)
 	if err != nil {
-		return nil, fmt.Errorf("cursor: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("cursor: %w", err))
 	}
 
 	// Check for turn-level errors (TurnCompleteEvent.Error).
@@ -91,7 +106,13 @@ func (b *cursorBackend) runPromptWithOptions(ctx context.Context, prompt string,
 		if handler != nil {
 			handler.OnError(tc.Error, "turn_complete")
 		}
-		return nil, fmt.Errorf("cursor turn failed: %w", tc.Error)
+		return &ReviewResult{
+			ResponseText: bridged.responseText,
+			Success:      false,
+			DurationMs:   bridged.durationMs,
+			ErrorMessage: tc.Error.Error(),
+			ResumeStatus: resumeStatus,
+		}, fmt.Errorf("cursor turn failed: %w", tc.Error)
 	}
 
 	return &ReviewResult{
@@ -113,8 +134,9 @@ func isCursorResumeNotFound(err error) bool {
 // cursorEventAdapter filters cursor events, handling ReadyEvent out-of-band
 // and formatting tool names before they reach the bridge.
 type cursorEventAdapter struct {
-	handler EventHandler
-	events  <-chan cursor.Event
+	handler   EventHandler
+	events    <-chan cursor.Event
+	onSession func(string)
 }
 
 // filtered returns a channel that re-emits cursor events, handling ReadyEvent
@@ -129,6 +151,9 @@ func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 			switch e := ev.(type) {
 			case cursor.ReadyEvent:
 				// ReadyEvent doesn't implement agentstream.Event; handle directly.
+				if a.onSession != nil {
+					a.onSession(e.SessionID)
+				}
 				if a.handler != nil {
 					a.handler.OnSessionInfo(e.SessionID, e.Model)
 				}
@@ -150,6 +175,13 @@ func (a *cursorEventAdapter) filtered(ctx context.Context) <-chan cursor.Event {
 		}
 	}()
 	return out
+}
+
+func cursorResumeStatusAfterReady(status ResumeStatus, requestedID, actualID string) ResumeStatus {
+	if status != ResumeStatusOK || requestedID == "" || actualID == "" || actualID == requestedID {
+		return status
+	}
+	return ResumeStatusFallback
 }
 
 // cursorToolDisplay renders Cursor's ToolCall events for terminal output.

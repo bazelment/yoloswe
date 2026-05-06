@@ -437,7 +437,7 @@ func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 }
 
 func TestNormalizePromptStyle_DefaultsResumeToFollowUp(t *testing.T) {
-	got, err := normalizePromptStyle("sess-1", "fresh")
+	got, err := normalizePromptStyle("sess-1", "fresh", false)
 	if err != nil {
 		t.Fatalf("normalizePromptStyle failed: %v", err)
 	}
@@ -446,8 +446,28 @@ func TestNormalizePromptStyle_DefaultsResumeToFollowUp(t *testing.T) {
 	}
 }
 
+func TestNormalizePromptStyle_ExplicitFreshResumeStaysFresh(t *testing.T) {
+	got, err := normalizePromptStyle("sess-1", "fresh", true)
+	if err != nil {
+		t.Fatalf("normalizePromptStyle failed: %v", err)
+	}
+	if got != promptStyleFresh {
+		t.Fatalf("normalizePromptStyle = %q, want %q", got, promptStyleFresh)
+	}
+}
+
+func TestNormalizePromptStyle_RejectsFollowUpWithoutResume(t *testing.T) {
+	_, err := normalizePromptStyle("", "follow-up", true)
+	if err == nil {
+		t.Fatal("normalizePromptStyle succeeded for follow-up without resume session")
+	}
+	if !strings.Contains(err.Error(), "requires --resume-session-id") {
+		t.Fatalf("normalizePromptStyle error = %v", err)
+	}
+}
+
 func TestNormalizePromptStyle_RejectsInvalidBeforeStart(t *testing.T) {
-	_, err := normalizePromptStyle("", "sideways")
+	_, err := normalizePromptStyle("", "sideways", true)
 	if err == nil {
 		t.Fatal("normalizePromptStyle succeeded for invalid style")
 	}

@@ -146,7 +146,13 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		if handler != nil {
 			handler.OnError(tc.Error, "turn_complete")
 		}
-		return nil, fmt.Errorf("gemini turn failed: %w", tc.Error)
+		return &ReviewResult{
+			ResponseText: r.responseText,
+			Success:      false,
+			DurationMs:   r.durationMs,
+			ErrorMessage: tc.Error.Error(),
+			ResumeStatus: resumeStatus,
+		}, fmt.Errorf("gemini turn failed: %w", tc.Error)
 	}
 
 	return &ReviewResult{

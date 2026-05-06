@@ -74,10 +74,10 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 			thread, err = b.client.CreateThread(ctx, threadOpts...)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to create thread: %w", err)
+			return reviewErrorResult(resumeStatus, fmt.Errorf("failed to create thread: %w", err))
 		}
 		if err := thread.WaitReady(ctx); err != nil {
-			return nil, fmt.Errorf("thread not ready: %w", err)
+			return reviewErrorResult(resumeStatus, fmt.Errorf("thread not ready: %w", err))
 		}
 		b.thread = thread
 		if handler != nil {
@@ -91,12 +91,12 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 	}
 	_, err := b.thread.SendMessage(ctx, prompt, turnOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("failed to send message: %w", err))
 	}
 
 	bridged, err := bridgeStreamEvents(ctx, b.client.Events(), handler, b.thread.ID())
 	if err != nil {
-		return nil, fmt.Errorf("codex: %w", err)
+		return reviewErrorResult(resumeStatus, fmt.Errorf("codex: %w", err))
 	}
 
 	result := &ReviewResult{
@@ -126,5 +126,5 @@ func isCodexResumeNotFound(err error) bool {
 	if errors.As(err, &rpcErr) {
 		return isResumeUnavailableMessage(rpcErr.Message)
 	}
-	return isResumeUnavailableMessage(err.Error())
+	return false
 }
