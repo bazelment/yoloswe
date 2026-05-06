@@ -67,6 +67,21 @@ func TestParseMessage_AssistantSyntheticAPIError(t *testing.T) {
 	}
 }
 
+func TestParseMessage_AssistantSyntheticAPIErrorStringContent(t *testing.T) {
+	raw := `{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":"API Error: Stream idle timeout - partial response received"},"isApiErrorMessage":true,"requestId":"req_abc123","session_id":"s1","uuid":"u1"}`
+	msg, err := ParseMessage([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	a, ok := msg.(AssistantMessage)
+	if !ok {
+		t.Fatalf("expected AssistantMessage, got %T", msg)
+	}
+	if got := a.SyntheticErrorText(); got != "Stream idle timeout - partial response received" {
+		t.Errorf("synthetic error text: %q", got)
+	}
+}
+
 func TestParseMessage_ToolUseSummary(t *testing.T) {
 	raw := `{"type":"tool_use_summary","preceding_tool_use_ids":["t1","t2"],"summary":"Ran 2 tools","session_id":"s1","uuid":"u1"}`
 	msg, err := ParseMessage([]byte(raw))

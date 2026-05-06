@@ -60,10 +60,10 @@ type Session struct {
 	// Pointer / interface / channel fields (all 8-16 bytes, contain pointers).
 	ctx                     context.Context
 	pendingControlResponses map[string]chan protocol.ControlResponsePayload
+	pendingTransientErrors  map[int]*TransientError
 	accumulator             *streamAccumulator
 	turnManager             *turnManager
 	permissionManager       *permissionManager
-	pendingTransientError   *TransientError
 	state                   *sessionState
 	process                 *processManager
 	info                    *SessionInfo
@@ -73,10 +73,9 @@ type Session struct {
 	cancel                  context.CancelFunc
 
 	// Value / struct fields.
-	config               SessionConfig
-	wakeupState          wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
-	cumulativeCostUSD    float64
-	pendingTransientTurn int
+	config            SessionConfig
+	wakeupState       wakeupSuppressionState // ScheduleWakeup turn-suppression state; protected by mu
+	cumulativeCostUSD float64
 
 	// Scalar and sync fields.
 	mu        sync.RWMutex
@@ -248,6 +247,11 @@ const controlResponseCancelledSubtype = "__cancelled__"
 // real response arrives.
 var ErrControlRequestCancelled = fmt.Errorf("control request cancelled by CLI")
 
+// ErrPendingTransientResult is returned when a caller tries to start another
+// user-driven turn before the CLI has emitted the result frame for a synthetic
+// transient API error.
+var ErrPendingTransientResult = fmt.Errorf("pending transient API error result")
+
 // Events returns a read-only channel for receiving events.
 func (s *Session) Events() <-chan Event {
 	return s.events
@@ -278,9 +282,11 @@ func (s *Session) SendMessage(ctx context.Context, content string) (int, error) 
 		return 0, ErrStopping
 	}
 
+	if len(s.pendingTransientErrors) > 0 {
+		return 0, ErrPendingTransientResult
+	}
+
 	turn := s.turnManager.StartTurn(content)
-	s.pendingTransientError = nil
-	s.pendingTransientTurn = 0
 	// Clear any stale wakeup suppression state from the previous turn. A
 	// safety timer for Turn N must not fire after Turn N+1 has started, and
 	// the suppressed turn number must not bleed across user-initiated turns.
@@ -323,9 +329,11 @@ func (s *Session) SendToolResult(ctx context.Context, toolUseID, content string)
 		return 0, ErrStopping
 	}
 
+	if len(s.pendingTransientErrors) > 0 {
+		return 0, ErrPendingTransientResult
+	}
+
 	turn := s.turnManager.StartTurn(content)
-	s.pendingTransientError = nil
-	s.pendingTransientTurn = 0
 	// Clear any stale wakeup suppression state from the previous turn.
 	s.wakeupState.reset()
 
@@ -972,11 +980,13 @@ func (s *Session) handleAssistant(msg protocol.AssistantMessage) {
 			text = "synthetic API error"
 		}
 		s.mu.Lock()
-		s.pendingTransientError = &TransientError{
+		if s.pendingTransientErrors == nil {
+			s.pendingTransientErrors = make(map[int]*TransientError)
+		}
+		s.pendingTransientErrors[s.turnManager.CurrentTurnNumber()] = &TransientError{
 			Message:   text,
 			RequestID: msg.RequestID,
 		}
-		s.pendingTransientTurn = s.turnManager.CurrentTurnNumber()
 		s.mu.Unlock()
 	}
 
@@ -1089,7 +1099,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		}
 		resultErr = t
 	}
-	resultIsError := msg.IsFailure()
+	resultIsError := msg.IsFailure() || resultErr != nil
 
 	// Emit one raw ResultMessageEvent per CLI ResultMessage, before any
 	// wrapper-level suppression. This is the ground truth policy layers
@@ -1757,13 +1767,8 @@ func (s *Session) handleElicitationControl(ctx context.Context, requestID string
 func (s *Session) consumePendingTransient(turnNumber int) *TransientError {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := s.pendingTransientError
-	s.pendingTransientError = nil
-	pendingTurn := s.pendingTransientTurn
-	s.pendingTransientTurn = 0
-	if pendingTurn != turnNumber {
-		return nil
-	}
+	err := s.pendingTransientErrors[turnNumber]
+	delete(s.pendingTransientErrors, turnNumber)
 	return err
 }
 

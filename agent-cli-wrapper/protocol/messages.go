@@ -234,7 +234,11 @@ func (m AssistantMessage) SyntheticErrorText() string {
 	}
 	blocks, ok := m.Message.Content.AsBlocks()
 	if !ok {
-		return ""
+		text, ok := m.Message.Content.AsString()
+		if !ok {
+			return ""
+		}
+		return strings.TrimPrefix(text, syntheticAPIErrorPrefix)
 	}
 	for _, b := range blocks {
 		if tb, ok := b.(TextBlock); ok && tb.Text != "" {

@@ -260,6 +260,7 @@ func TestStream_Replay_SyntheticStreamIdleTimeoutIsTransient(t *testing.T) {
 
 	rm := firstResultMessageEvent(t, events)
 	require.Error(t, rm.Error)
+	require.True(t, rm.IsError)
 	var te *TransientError
 	require.True(t, errors.As(rm.Error, &te))
 	require.Equal(t, "Stream idle timeout - partial response received", te.Message)
@@ -276,7 +277,7 @@ func TestStream_Replay_ErrorDuringExecutionWithoutSyntheticIsNotTransient(t *tes
 	require.False(t, errors.As(rm.Error, &te), "real refusal must not classify as transient")
 }
 
-func TestStream_Replay_PendingTransientClearedOnNextSendMessage(t *testing.T) {
+func TestStream_Replay_PendingTransientBlocksNextSendMessage(t *testing.T) {
 	s := newTestSession(t)
 	s.started = true
 	s.process = &processManager{writer: ndjson.NewWriter(io.Discard)}
@@ -286,15 +287,25 @@ func TestStream_Replay_PendingTransientClearedOnNextSendMessage(t *testing.T) {
 	s.handleLine([]byte(`{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Stream idle timeout - partial response received"}]},"isApiErrorMessage":true,"requestId":"req_stale","session_id":"s1","uuid":"u1"}`))
 
 	_, err := s.SendMessage(context.Background(), "turn 2")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrPendingTransientResult)
+
 	s.handleLine([]byte(`{"type":"result","subtype":"success","session_id":"s1","uuid":"u2","result":"ok","num_turns":1,"duration_ms":10,"duration_api_ms":5,"total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
 
 	events := drainEvents(t, s)
 	rm := firstResultMessageEvent(t, events)
-	require.NoError(t, rm.Error)
-	result := s.turnManager.GetCompletedResult(2)
-	require.NotNil(t, result, "turn 2 should complete")
-	require.NoError(t, result.Error)
+	require.Error(t, rm.Error)
+	require.True(t, rm.IsError)
+	var te *TransientError
+	require.True(t, errors.As(rm.Error, &te))
+	require.Equal(t, "Stream idle timeout - partial response received", te.Message)
+
+	result := s.turnManager.GetCompletedResult(1)
+	require.NotNil(t, result, "turn 1 should complete")
+	require.Error(t, result.Error)
+	require.False(t, result.Success)
+
+	_, err = s.SendMessage(context.Background(), "turn 2")
+	require.NoError(t, err)
 }
 
 // TestStream_Replay_R2_MixedSyncBgTurn (R2 in the plan matrix) — a single CLI
