@@ -136,15 +136,21 @@ support resume. Flag prominently in Notes if it happens. Gemini reporting
 
 ## Step 3: Compare findings
 
-After all turns complete, read each envelope and extract findings. For each
-(config, turn) list:
+After all turns complete, read each envelope and extract findings. The envelope
+shape is `{status, backend, model, session_id, resume_status, review: {verdict,
+summary, issues: [...]}, schema_version, duration_ms, input_tokens, output_tokens}`.
+Findings live at `.review.issues[]`, not `.issues[]`. For each (config, turn) list:
 
-- Issues found (file, line, severity, description)
-- Verdict (correct/incorrect)
-- Confidence score
-- Wall clock time (token counts are only reported by codex backends, not cursor)
+- Issues found (`.review.issues[].file/.line/.severity/.message`)
+- Verdict (`.review.verdict`: `accepted` / `rejected`)
+- Confidence per issue (`.review.issues[].confidence`)
+- Wall clock time (`.duration_ms`); token counts (`.input_tokens` / `.output_tokens`,
+  often 0 — only codex reports these reliably)
 - Whether the always-emit envelope guard fired (check stderr for "envelope guard" lines)
-- For turns 2 and 3: `resume_status` from the envelope (or local taxonomy value)
+- For turns 2 and 3: `.resume_status` from the envelope (or local taxonomy value)
+
+A non-zero monitor exit code with `status: "error"` (or no envelope at all) means
+the backend failed terminally — record per the taxonomy below.
 
 Then produce two tables.
 
