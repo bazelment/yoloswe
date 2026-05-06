@@ -1,0 +1,35 @@
+class {{.Class}} < Formula
+  desc "{{.Description}}"
+  homepage "https://github.com/bazelment/yoloswe"
+  version "{{.Version}}"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/{{.Tool}}-v{{.Version}}-darwin-arm64.tar.gz"
+      sha256 "{{.DarwinArm64SHA256}}"
+    end
+    on_intel do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/{{.Tool}}-v{{.Version}}-darwin-amd64.tar.gz"
+      sha256 "{{.DarwinAmd64SHA256}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/{{.Tool}}-v{{.Version}}-linux-arm64.tar.gz"
+      sha256 "{{.LinuxArm64SHA256}}"
+    end
+    on_intel do
+      url "https://github.com/bazelment/yoloswe/releases/download/v{{.Version}}/{{.Tool}}-v{{.Version}}-linux-amd64.tar.gz"
+      sha256 "{{.LinuxAmd64SHA256}}"
+    end
+  end
+
+  def install
+    bin.install "{{.Tool}}"
+  end
+
+  test do
+    assert_match "{{.TestText}}", shell_output("#{bin}/{{.Tool}} --help")
+  end
+end

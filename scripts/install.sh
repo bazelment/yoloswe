@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install script for bramble and wt CLI tools
+# Install script for bramble, wt, and jiradozer CLI tools
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/bazelment/yoloswe/main/scripts/install.sh | bash
 #   curl -fsSL ... | bash -s -- --tool bramble
@@ -11,6 +11,27 @@ REPO="bazelment/yoloswe"
 INSTALL_DIR="${HOME}/.local/bin"
 TOOL=""
 VERSION=""
+SUPPORTED_TOOLS=("bramble" "wt" "jiradozer")
+
+supported_tools_text() {
+  local text="${SUPPORTED_TOOLS[0]}"
+  local tool
+  for tool in "${SUPPORTED_TOOLS[@]:1}"; do
+    text+=", ${tool}"
+  done
+  echo "${text}"
+}
+
+is_supported_tool() {
+  local candidate="$1"
+  local tool
+  for tool in "${SUPPORTED_TOOLS[@]}"; do
+    if [[ "${tool}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,7 +51,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: install.sh [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --tool, -t     Tool to install: bramble or wt (default: both)"
+      echo "  --tool, -t     Tool to install: $(supported_tools_text) (default: all)"
       echo "  --version, -v  Version to install (default: latest)"
       echo "  --dir, -d      Installation directory (default: ~/.local/bin)"
       echo "  --help, -h     Show this help"
@@ -96,6 +117,18 @@ main() {
   os="$(detect_os)"
   arch="$(detect_arch)"
 
+  local tools=()
+  if [[ -n "${TOOL}" ]]; then
+    if ! is_supported_tool "${TOOL}"; then
+      echo "Unsupported tool: ${TOOL}" >&2
+      echo "Supported tools: $(supported_tools_text)" >&2
+      exit 1
+    fi
+    tools=("${TOOL}")
+  else
+    tools=("${SUPPORTED_TOOLS[@]}")
+  fi
+
   if [[ -z "${VERSION}" ]]; then
     echo "Fetching latest version..."
     VERSION="$(get_latest_version)"
@@ -103,14 +136,6 @@ main() {
 
   echo "Platform: ${os}/${arch}"
   echo "Version:  ${VERSION}"
-
-  # Determine which tools to install
-  local tools=()
-  if [[ -n "${TOOL}" ]]; then
-    tools=("${TOOL}")
-  else
-    tools=("bramble" "wt")
-  fi
 
   # Download checksums
   local checksums_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
