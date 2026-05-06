@@ -52,3 +52,28 @@ go_cross_binary(
     platform = "@rules_go//go/toolchain:linux_arm64",
     target = "//wt/cmd/wt",
 )
+
+# jiradozer binaries
+go_cross_binary(
+    name = "jiradozer_darwin_amd64",
+    platform = "@rules_go//go/toolchain:darwin_amd64",
+    target = "//jiradozer/cmd/jiradozer",
+)
+
+go_cross_binary(
+    name = "jiradozer_darwin_arm64",
+    platform = "@rules_go//go/toolchain:darwin_arm64",
+    target = "//jiradozer/cmd/jiradozer",
+)
+
+go_cross_binary(
+    name = "jiradozer_linux_amd64",
+    platform = "@rules_go//go/toolchain:linux_amd64",
+    target = "//jiradozer/cmd/jiradozer",
+)
+
+go_cross_binary(
+    name = "jiradozer_linux_arm64",
+    platform = "@rules_go//go/toolchain:linux_arm64",
+    target = "//jiradozer/cmd/jiradozer",
+)

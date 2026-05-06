@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install script for bramble and wt CLI tools
+# Install script for bramble, wt, and jiradozer CLI tools
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/bazelment/yoloswe/main/scripts/install.sh | bash
 #   curl -fsSL ... | bash -s -- --tool bramble
@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: install.sh [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --tool, -t     Tool to install: bramble or wt (default: both)"
+      echo "  --tool, -t     Tool to install: bramble, wt, or jiradozer (default: all)"
       echo "  --version, -v  Version to install (default: latest)"
       echo "  --dir, -d      Installation directory (default: ~/.local/bin)"
       echo "  --help, -h     Show this help"
@@ -109,7 +109,7 @@ main() {
   if [[ -n "${TOOL}" ]]; then
     tools=("${TOOL}")
   else
-    tools=("bramble" "wt")
+    tools=("bramble" "wt" "jiradozer")
   fi
 
   # Download checksums

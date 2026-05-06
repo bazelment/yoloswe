@@ -42,7 +42,11 @@ jobs:
             //release:wt_darwin_amd64 \
             //release:wt_darwin_arm64 \
             //release:wt_linux_amd64 \
-            //release:wt_linux_arm64
+            //release:wt_linux_arm64 \
+            //release:jiradozer_darwin_amd64 \
+            //release:jiradozer_darwin_arm64 \
+            //release:jiradozer_linux_amd64 \
+            //release:jiradozer_linux_arm64
 
       - name: Create release archives
         env:
@@ -59,6 +63,10 @@ jobs:
             ["wt_darwin_arm64"]="wt darwin arm64"
             ["wt_linux_amd64"]="wt linux amd64"
             ["wt_linux_arm64"]="wt linux arm64"
+            ["jiradozer_darwin_amd64"]="jiradozer darwin amd64"
+            ["jiradozer_darwin_arm64"]="jiradozer darwin arm64"
+            ["jiradozer_linux_amd64"]="jiradozer linux amd64"
+            ["jiradozer_linux_arm64"]="jiradozer linux arm64"
           )
 
           for target in "${!TARGETS[@]}"; do
@@ -127,7 +135,7 @@ jobs:
           mkdir -p /tmp/homebrew-tap/Formula
 
           # Generate formulas from templates
-          for tool in bramble wt; do
+          for tool in bramble wt jiradozer; do
             sed -e "s/{{.Version}}/${FORMULA_VERSION}/g" \
                 -e "s/{{.DarwinArm64SHA256}}/${SHAS["${tool}-${VERSION}-darwin-arm64.tar.gz"]}/g" \
                 -e "s/{{.DarwinAmd64SHA256}}/${SHAS["${tool}-${VERSION}-darwin-amd64.tar.gz"]}/g" \
