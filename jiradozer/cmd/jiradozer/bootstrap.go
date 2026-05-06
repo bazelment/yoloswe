@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -107,10 +108,14 @@ func recoverExistingRepoWorktree(ctx context.Context, repoArg string, out io.Wri
 	} else if err != nil {
 		return "", fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
 	}
-	return bootstrapRepoWorktree(ctx, repoArg, out)
+	return bootstrapRepoWorktreeInternal(ctx, repoArg, out, false)
 }
 
 func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (string, error) {
+	return bootstrapRepoWorktreeInternal(ctx, repoArg, out, true)
+}
+
+func bootstrapRepoWorktreeInternal(ctx context.Context, repoArg string, out io.Writer, announceReuse bool) (string, error) {
 	repoURL := normalizeRepoURL(repoArg)
 	wtRoot, err := resolveWTRoot()
 	if err != nil {
@@ -132,7 +137,12 @@ func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (
 		if err != nil {
 			return "", fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
 		}
-		fmt.Fprintf(out, "reusing existing repo at %s\n", mgr.RepoDir())
+		if err := verifyGitWorktree(mainPath); err != nil {
+			return "", fmt.Errorf("existing repo worktree for %s: %w", defaultBranch, err)
+		}
+		if announceReuse {
+			fmt.Fprintf(out, "reusing existing repo at %s\n", mgr.RepoDir())
+		}
 		return mainPath, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("stat %s: %w", mgr.BareDir(), err)
@@ -142,6 +152,16 @@ func bootstrapRepoWorktree(ctx context.Context, repoArg string, out io.Writer) (
 		return "", err
 	}
 	return mainPath, nil
+}
+
+func verifyGitWorktree(path string) error {
+	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%s is not a git worktree", path)
+		}
+		return fmt.Errorf("stat %s: %w", filepath.Join(path, ".git"), err)
+	}
+	return nil
 }
 
 func newBootstrapWTManager(wtRoot, repoURL string, out io.Writer) *wt.Manager {
@@ -166,9 +186,24 @@ func sameRepoRemote(a, b string) bool {
 
 func canonicalRepoRemote(remote string) string {
 	remote = strings.TrimSuffix(strings.TrimSpace(remote), ".git")
-	remote = strings.TrimPrefix(remote, "https://github.com/")
-	remote = strings.TrimPrefix(remote, "git@github.com:")
+	if host, path, ok := splitSCPRemote(remote); ok {
+		return strings.ToLower(host + "/" + strings.Trim(path, "/"))
+	}
+	if parsed, err := url.Parse(remote); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host + "/" + strings.Trim(parsed.Path, "/"))
+	}
 	return remote
+}
+
+func splitSCPRemote(remote string) (string, string, bool) {
+	if !strings.Contains(remote, "://") && strings.Contains(remote, "@") && strings.Contains(remote, ":") {
+		parts := strings.SplitN(remote, "@", 2)
+		hostPath := strings.SplitN(parts[1], ":", 2)
+		if len(hostPath) == 2 && hostPath[0] != "" && hostPath[1] != "" {
+			return hostPath[0], hostPath[1], true
+		}
+	}
+	return "", "", false
 }
 
 func recreateDefaultWorktree(ctx context.Context, mgr *wt.Manager, defaultBranch string) (string, error) {

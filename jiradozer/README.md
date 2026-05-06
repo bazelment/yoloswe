@@ -10,7 +10,7 @@ bazel build //jiradozer/cmd/jiradozer
 
 # Bootstrap a GitHub repo into a wt-managed checkout.
 bazel-bin/jiradozer/cmd/jiradozer/jiradozer bootstrap --repo owner/repo
-cd ~/worktrees/repo/main
+cd "$WT_ROOT/<repo-name>/<default-branch>"
 
 # Run from a tracker issue
 bazel-bin/jiradozer/cmd/jiradozer/jiradozer --issue ENG-123
@@ -38,8 +38,9 @@ jiradozer bootstrap
 To set up a repo and config in one step, pass `--repo`. The repo is cloned
 under `$WT_ROOT` or `~/worktrees`; the generated config is written next to
 the bare repo at `$WT_ROOT/<repo>/jiradozer.yaml` and points `work_dir` at
-the cloned main worktree, so the checkout stays clean. Use `--output` to
-write the config somewhere else.
+the cloned default-branch worktree, so the checkout stays clean. Use the
+`work_dir` in the generated config or the bootstrap output for the exact
+checkout path. Use `--output` to write the config somewhere else.
 
 ```bash
 jiradozer bootstrap --repo owner/repo

@@ -310,6 +310,21 @@ func TestBootstrapWithRepoHonorsExplicitConfigPath(t *testing.T) {
 	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
 }
 
+func TestBootstrapWithRepoHonorsOutputPath(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+	outputPath := filepath.Join(fixture.outputDir, "generated.yaml")
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir, "--output", outputPath})
+	require.NoError(t, cmd.Execute())
+	require.FileExists(t, outputPath)
+	require.NoFileExists(t, fixture.configPath)
+
+	cfg, err := jiradozer.LoadConfig(outputPath)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.mainPath, cfg.WorkDir)
+}
+
 func TestBootstrapWithRepoRecreatesMissingDefaultWorktree(t *testing.T) {
 	fixture := newBootstrapRepoFixture(t)
 
@@ -344,6 +359,21 @@ func TestBootstrapWithRepoRecoversWorktreeBeforeExistingConfigError(t *testing.T
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 	require.DirExists(t, fixture.mainPath)
+}
+
+func TestBootstrapWithRepoRejectsBrokenDefaultWorktreeDirectory(t *testing.T) {
+	fixture := newBootstrapRepoFixture(t)
+
+	cmd := fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir})
+	require.NoError(t, cmd.Execute())
+	require.NoError(t, os.RemoveAll(filepath.Join(fixture.mainPath, ".git")))
+
+	cmd = fixture.newCommand()
+	cmd.SetArgs([]string{"--repo", fixture.remoteDir, "--force"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a git worktree")
 }
 
 func TestBootstrapWithRepoDoesNotCloneWhenConfigExists(t *testing.T) {
@@ -412,6 +442,12 @@ func TestBootstrapWithRepoExpandsOwnerRepoShorthand(t *testing.T) {
 	assert.Equal(t, "https://github.com/owner/repo.git", normalizeRepoURL("owner/repo.git"))
 	assert.Equal(t, "https://example.com/owner/repo.git", normalizeRepoURL("https://example.com/owner/repo.git"))
 	assert.Equal(t, "git@github.com:owner/repo.git", normalizeRepoURL("git@github.com:owner/repo.git"))
+}
+
+func TestSameRepoRemoteAcceptsEquivalentGitHubForms(t *testing.T) {
+	assert.True(t, sameRepoRemote("https://github.com/owner/repo.git", "git@github.com:owner/repo.git"))
+	assert.True(t, sameRepoRemote("ssh://git@github.com/owner/repo.git", "https://github.com/owner/repo.git"))
+	assert.False(t, sameRepoRemote("https://github.com/other/repo.git", "https://github.com/owner/repo.git"))
 }
 
 func newBootstrapRemote(t *testing.T) string {
