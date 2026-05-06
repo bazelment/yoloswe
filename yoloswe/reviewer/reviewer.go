@@ -517,9 +517,9 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 // intentionally not re-rendered here. The same scope state existed when
 // the fresh prompt established the session; the resumed model already has it.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
-	_ = goal // documented above: the goal is in the resumed session's context
-	_ = opts // documented above: scope/skip-test state was established in fresh prompt
-	return `Continue the review on the same diff against the same goal as the prior turn.
+	_ = goal // the goal is in the resumed session's context (and in the
+	// fallback-fresh-review block below if the resume silently fell back)
+	prompt := `Continue the review on the same diff against the same goal as the prior turn.
 
 If you have no prior review context for this diff (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: examine the entire diff and apply the standard severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.
 
@@ -531,6 +531,20 @@ Re-review the full diff with fresh eyes — including code you previously accept
 Avoid restating prior findings verbatim, but DO surface any new issues you spot — including in code you already accepted. A second pass that finds something the first pass missed is more useful than one that just confirms the prior verdict.
 
 Apply the same severity rubric and JSON output format as the prior turn.`
+	// Append the scope suffix and skip-test-execution suffix here, even
+	// though a successfully resumed session already has them in context.
+	// On a silent resume fallback (resume_status="fallback"), the model
+	// is reading this prompt for the first time — without these clauses
+	// the no-prior-context escape hatch would tell it to "treat as a
+	// first-pass review" while withholding the test-quality and
+	// cross-service hints a real fresh review would have. Round-8
+	// codex+cursor consensus flagged that contradiction. The few extra
+	// tokens are noise compared to a fresh review missing structural
+	// findings outside the immediately changed code.
+	if opts.SkipTestExecution {
+		prompt += skipTestExecutionSuffix
+	}
+	return prompt + buildScopeSuffix(opts)
 }
 
 func jsonOutputRules() string {

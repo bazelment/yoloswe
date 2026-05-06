@@ -632,12 +632,15 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 
 func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 	// The follow-up prompt is intentionally short: rubric, format spec,
-	// scope clauses, and skip-test-execution clause are all dropped because
-	// the resumed session already saw them in the fresh prompt that opened
-	// turn 1. What MUST stay is the bias-guard prose — without it, the
-	// model will narrow to "what changed since" and silently ratify the
-	// prior verdict (the failure mode observed in the round-2 eval).
-	got := buildPromptForRun("g", "", true, promptStyleFollowUp)
+	// and persona block are dropped because the resumed session already
+	// saw them in the fresh prompt that opened turn 1. What MUST stay is
+	// the bias-guard prose — without it, the model will narrow to "what
+	// changed since" and silently ratify the prior verdict (the failure
+	// mode observed in the round-2 eval). The skip-test-execution and
+	// scope clauses are conditional: present when opts carries them so a
+	// silent resume fallback (resume_status="fallback") doesn't read
+	// this prompt cold and miss them.
+	got := buildPromptForRun("g", "", true /* skipTestExecution */, promptStyleFollowUp)
 
 	// Bias-guard prose must remain.
 	for _, want := range []string{
@@ -646,23 +649,33 @@ func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 		"DO surface any new issues",
 		"more useful than one that just confirms the prior verdict",
 		"same severity rubric and JSON output format",
+		// Round-8 codex+cursor consensus: pin the no-prior-context
+		// escape hatch so a future edit can't silently drop the
+		// resume-fallback safety net.
+		"silently fell back to a fresh session",
+		"treat this as a first-pass review",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("follow-up prompt missing bias-guard phrase %q; got:\n%s", want, got)
+			t.Errorf("follow-up prompt missing required phrase %q; got:\n%s", want, got)
 		}
 	}
 
 	// Redundant turn-1 blocks must be absent.
 	for _, no := range []string{
-		"Focus on these areas:",              // fresh-review 6-axis checklist
-		"experienced software engineer",      // persona
-		"## Output Format",                   // jsonOutputRules
-		"## Severity Levels",                 // jsonOutputRules
-		"Do NOT run tests or build commands", // skipTestExecutionSuffix
+		"Focus on these areas:",         // fresh-review 6-axis checklist
+		"experienced software engineer", // persona
+		"## Output Format",              // jsonOutputRules
+		"## Severity Levels",            // jsonOutputRules
 	} {
 		if strings.Contains(got, no) {
 			t.Errorf("follow-up prompt unexpectedly re-pastes %q; got:\n%s", no, got)
 		}
+	}
+
+	// skipTestExecution=true was passed, so the suffix MUST appear so a
+	// fallback session reading this cold knows not to spawn test commands.
+	if !strings.Contains(got, "Do NOT run tests or build commands") {
+		t.Errorf("follow-up prompt with skipTestExecution=true must carry the suffix; got:\n%s", got)
 	}
 }
 

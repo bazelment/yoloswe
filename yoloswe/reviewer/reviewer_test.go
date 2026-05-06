@@ -217,71 +217,114 @@ func TestBuildJSONPrompt(t *testing.T) {
 }
 
 func TestBuildFollowUpJSONPromptWithScope_KeepsBiasGuardAndDropsRedundantBlocks(t *testing.T) {
-	// The follow-up prompt has two competing design constraints:
+	// The follow-up prompt has three competing design constraints:
 	//   - shrink: don't re-paste rubric/format/scope text the resumed
 	//     session already saw in turn 1
 	//   - debias: don't bias the model toward ratifying its prior verdict
 	//     by narrowing scope to "only what changed since"
-	// This test pins both invariants. If a future shrink drops the bias-
-	// guard prose (or a future "completeness" pass re-adds the redundant
-	// blocks), the assertions below break.
-	cases := []struct {
-		name string
-		goal string
-		opts PromptOptions
-	}{
-		{name: "with goal", goal: "add user authentication", opts: PromptOptions{}},
-		{name: "empty goal", goal: "", opts: PromptOptions{}},
-		{name: "with skip-test-execution", goal: "implement-zfourier-quantum-shim-42", opts: PromptOptions{SkipTestExecution: true}},
-		{name: "with scope hints", goal: "implement-zfourier-quantum-shim-42", opts: PromptOptions{
+	//   - resume-fallback survivability: when the backend silently falls
+	//     back to a fresh session (resume_status="fallback"), the model
+	//     reads this prompt cold — it must include the scope/skip-test
+	//     clauses that a real fresh review would have, OR the no-prior-
+	//     context escape hatch tells the model to "treat as a first-pass
+	//     review" while withholding hints a real first pass would have.
+	//
+	// The bias-guard/escape-hatch invariants always hold; the
+	// scope/skip-test clauses appear only when opts carries them. This
+	// test pins all three constraints across the relevant input matrix.
+	t.Run("bias-guard and escape-hatch always present", func(t *testing.T) {
+		cases := []struct {
+			name string
+			goal string
+			opts PromptOptions
+		}{
+			{name: "with goal", goal: "add user authentication", opts: PromptOptions{}},
+			{name: "empty goal", goal: "", opts: PromptOptions{}},
+			{name: "with skip-test-execution", goal: "implement-zfourier-quantum-shim-42", opts: PromptOptions{SkipTestExecution: true}},
+			{name: "with scope hints", goal: "implement-zfourier-quantum-shim-42", opts: PromptOptions{
+				TestScopeHints:       []string{"foo/foo_test.go"},
+				CrossServicePackages: []string{"foo", "bar"},
+			}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				prompt := BuildFollowUpJSONPromptWithScope(tc.goal, tc.opts)
+
+				required := []string{
+					"Re-review the full diff with fresh eyes",
+					"including code you previously accepted",
+					"DO surface any new issues",
+					"more useful than one that just confirms the prior verdict",
+					"same severity rubric and JSON output format",
+					// Round-8 codex+cursor consensus added this: pin the
+					// no-prior-context escape hatch so a future edit can't
+					// silently drop the resume-fallback safety net.
+					"silently fell back to a fresh session",
+					"treat this as a first-pass review",
+				}
+				for _, want := range required {
+					if !strings.Contains(prompt, want) {
+						t.Errorf("follow-up prompt missing required phrase %q\nfull prompt:\n%s", want, prompt)
+					}
+				}
+
+				// Redundant turn-1 blocks MUST NOT be re-pasted unconditionally.
+				// (Scope/skip-test clauses are conditional — see the dedicated
+				// subtests below.)
+				forbidden := []string{
+					"experienced software engineer", // persona, set in turn 1
+					"## Output Format",              // jsonOutputRules block
+					"## Severity Levels",            // jsonOutputRules block
+				}
+				for _, no := range forbidden {
+					if strings.Contains(prompt, no) {
+						t.Errorf("follow-up prompt re-pastes turn-1 block %q (waste of tokens)\nfull prompt:\n%s", no, prompt)
+					}
+				}
+
+				// The goal text from buildGoalText must NOT appear: the resumed
+				// session already saw it. (Use a goal-specific marker so we don't
+				// trip on shared substrings.)
+				if tc.goal != "" && strings.Contains(prompt, tc.goal) {
+					t.Errorf("follow-up prompt re-states goal %q (redundant on resume)\nfull prompt:\n%s", tc.goal, prompt)
+				}
+			})
+		}
+	})
+
+	t.Run("skip-test-execution suffix appears only when opted in", func(t *testing.T) {
+		// On a silent resume fallback, the prompt is read cold — the
+		// skipTestExecutionSuffix must be there if the caller passed
+		// SkipTestExecution=true so the cold-read model knows not to
+		// spawn test/build commands. Without this, a fresh-session model
+		// would happily run bazel/go test and tank the round.
+		with := BuildFollowUpJSONPromptWithScope("", PromptOptions{SkipTestExecution: true})
+		if !strings.Contains(with, "Do NOT run tests or build commands") {
+			t.Errorf("SkipTestExecution=true must include the suffix; got:\n%s", with)
+		}
+		without := BuildFollowUpJSONPromptWithScope("", PromptOptions{})
+		if strings.Contains(without, "Do NOT run tests or build commands") {
+			t.Errorf("SkipTestExecution=false must NOT include the suffix; got:\n%s", without)
+		}
+	})
+
+	t.Run("scope clauses appear only when opts carries hints", func(t *testing.T) {
+		// Same rationale as skip-test-execution: a fallback session reads
+		// this prompt cold and needs the scope hints if the caller had
+		// them, otherwise the no-prior-context escape hatch dispatches
+		// the model into a less-informed review than a real fresh one.
+		with := BuildFollowUpJSONPromptWithScope("", PromptOptions{
 			TestScopeHints:       []string{"foo/foo_test.go"},
 			CrossServicePackages: []string{"foo", "bar"},
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			prompt := BuildFollowUpJSONPromptWithScope(tc.goal, tc.opts)
-
-			// Bias-guard markers MUST be present so the model is invited to
-			// look beyond just-changed code.
-			required := []string{
-				"Re-review the full diff with fresh eyes",
-				"including code you previously accepted",
-				"DO surface any new issues",
-				"more useful than one that just confirms the prior verdict",
-				"same severity rubric and JSON output format",
-			}
-			for _, want := range required {
-				if !strings.Contains(prompt, want) {
-					t.Errorf("follow-up prompt missing bias-guard phrase %q\nfull prompt:\n%s", want, prompt)
-				}
-			}
-
-			// Redundant turn-1 blocks MUST NOT be re-pasted. Each substring
-			// here was emitted by the fresh prompt that established the
-			// resumed session; repeating them wastes tokens without signal.
-			forbidden := []string{
-				"experienced software engineer",      // persona, set in turn 1
-				"## Output Format",                   // jsonOutputRules block
-				"## Severity Levels",                 // jsonOutputRules block
-				"Do NOT run tests or build commands", // skipTestExecutionSuffix
-				"co-located test files",              // scope test-quality clause
-				"caller/callee",                      // scope cross-service clause
-			}
-			for _, no := range forbidden {
-				if strings.Contains(prompt, no) {
-					t.Errorf("follow-up prompt re-pastes turn-1 block %q (waste of tokens)\nfull prompt:\n%s", no, prompt)
-				}
-			}
-
-			// The goal text from buildGoalText must NOT appear: the resumed
-			// session already saw it. (Use a goal-specific marker so we don't
-			// trip on shared substrings.)
-			if tc.goal != "" && strings.Contains(prompt, tc.goal) {
-				t.Errorf("follow-up prompt re-states goal %q (redundant on resume)\nfull prompt:\n%s", tc.goal, prompt)
-			}
 		})
-	}
+		if !strings.Contains(with, "co-located test files") {
+			t.Errorf("scope hints must include the test-quality clause; got:\n%s", with)
+		}
+		without := BuildFollowUpJSONPromptWithScope("", PromptOptions{})
+		if strings.Contains(without, "co-located test files") {
+			t.Errorf("no scope hints must NOT include the test-quality clause; got:\n%s", without)
+		}
+	})
 }
 
 func TestNew_DefaultValues(t *testing.T) {

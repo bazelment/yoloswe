@@ -94,16 +94,17 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// produced nothing at all".
 	var envelopeWritten bool
 	emitEnvelope := func(env reviewer.ResultEnvelope) {
-		// Mark as attempted immediately so finalizeEnvelope never retries the
-		// same sink — a partial write followed by a second emit would corrupt
-		// line-by-line consumers more than a single failed write.
-		envelopeWritten = true
 		w, closeW, openErr := openEnvelopeWriter()
 		if openErr != nil {
 			slog.Error("failed to open envelope-file", "error", openErr.Error())
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to open envelope-file: %w", openErr)
 			}
+			// Leave envelopeWritten=false so finalizeEnvelope can synthesize
+			// an error envelope on the way out. Without that, automation
+			// reading --envelope-file would see an empty/unchanged file
+			// AND no synthesized fallback — the worst-of-both case codex
+			// flagged on round 8.
 			return
 		}
 		defer closeW()
@@ -112,8 +113,13 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			if retErr == nil {
 				retErr = fmt.Errorf("failed to write JSON envelope: %w", err)
 			}
+			// Same rationale as the open-failure branch above.
 			return
 		}
+		// Mark written only after a successful flush. A partial write would
+		// be detected by PrintJSONResult and surface above; a clean write
+		// trips the flag so finalizeEnvelope's idempotency guard fires.
+		envelopeWritten = true
 	}
 	// activeReviewer is observed by the deferred guard so the synthesized
 	// panic/error envelope can report the reviewer's authoritative
