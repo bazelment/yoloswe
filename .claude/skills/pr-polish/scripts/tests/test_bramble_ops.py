@@ -256,6 +256,20 @@ class TestPrOrSlugConverter(unittest.TestCase):
         )
         self.assertEqual(ns.pr, "branch-feature-foo")
 
+    def test_parser_accepts_branch_slug_for_parse_subcommand(self) -> None:
+        parser = bramble_ops._build_parser()
+        ns = parser.parse_args(
+            ["parse", "1", "--repo", "kernel", "--pr", "branch-feature-foo"]
+        )
+        self.assertEqual(ns.pr, "branch-feature-foo")
+
+    def test_parser_accepts_branch_slug_for_triage_subcommand(self) -> None:
+        parser = bramble_ops._build_parser()
+        ns = parser.parse_args(
+            ["triage", "1", "--repo", "kernel", "--pr", "branch-feature-foo"]
+        )
+        self.assertEqual(ns.pr, "branch-feature-foo")
+
 
 class TestParseEnvelope(unittest.TestCase):
     def test_ok_extracts_issues_with_topic(self) -> None:

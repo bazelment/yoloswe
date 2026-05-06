@@ -102,8 +102,7 @@ def state_paths(pr_number: int | str | None, branch: str | None = None) -> tuple
     else:
         if not branch:
             raise ValueError("state_paths requires either pr_number or branch")
-        branch_slug = _slugify_branch(branch)
-        slug = f"{repo_slug()}-branch-{branch_slug}"
+        slug = f"{repo_slug()}-{branch_envelope_key(branch)}"
     state_dir = Path.home() / ".bramble" / "projects" / slug
     return state_dir, state_dir / "pr-polish-state.json"
 
@@ -114,6 +113,17 @@ _BRANCH_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 def _slugify_branch(branch: str) -> str:
     """Lowercase + replace filesystem-unfriendly chars (/, spaces, etc.) with '-'."""
     return _BRANCH_SAFE_RE.sub("-", branch.strip()).strip("-").lower() or "unnamed"
+
+
+def branch_envelope_key(branch: str) -> str:
+    """Canonical ``branch-<slug>`` key used in state-dir slugs and bramble
+    envelope filenames. Centralized so launch and finalize agree on the
+    exact filename component for a given branch — otherwise a name like
+    ``feature/foo`` would create a nested ``/tmp/pp-...-branch-feature/foo-...``
+    path on one side and a flat slug on the other, and ``_persist_round_findings``
+    would never find the envelope it was looking for.
+    """
+    return f"branch-{_slugify_branch(branch)}"
 
 
 def current_branch() -> str | None:

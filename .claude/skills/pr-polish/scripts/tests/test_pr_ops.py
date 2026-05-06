@@ -988,6 +988,19 @@ class TestSlugifyAndStatePaths(unittest.TestCase):
     def test_slugify_handles_empty_like_input(self) -> None:
         self.assertEqual(_common._slugify_branch("---"), "unnamed")
 
+    def test_branch_envelope_key_matches_state_paths(self) -> None:
+        # The launch path (which builds /tmp envelope filenames) and the
+        # finalize path (which reads them back) must agree on the slug for
+        # any given branch — otherwise envelopes get lost. Verify both go
+        # through branch_envelope_key/state_paths and produce a flat,
+        # filesystem-safe component.
+        key = _common.branch_envelope_key("feature/Foo BAR")
+        self.assertEqual(key, "branch-feature-foo-bar")
+        with patch.object(_common, "repo_slug", return_value="myrepo"):
+            sd, _ = _common.state_paths(None, branch="feature/Foo BAR")
+        self.assertTrue(str(sd).endswith(f"myrepo-{key}"))
+        self.assertNotIn("/", key)
+
     def test_state_paths_branch_mode(self) -> None:
         with patch.object(_common, "repo_slug", return_value="myrepo"):
             sd, sf = _common.state_paths(None, branch="feature/foo")

@@ -46,6 +46,7 @@ from _common import (  # noqa: E402 — sys.path tweak above
     SOURCE_REVIEW,
     CommandError,
     atomic_write_json,
+    branch_envelope_key,
     current_branch,
     detect_base_branch,
     print_json,
@@ -766,7 +767,7 @@ def _persist_round_findings(
     # pr_ops and bramble_ops.
     import bramble_ops  # noqa: PLC0415
 
-    envelope_key = pr_number if pr_number is not None else f"branch-{branch}"
+    envelope_key = pr_number if pr_number is not None else branch_envelope_key(branch or "")
     reviews_dir = state_dir / "reviews"
     for backend in bramble_ops.BACKENDS:
         src = bramble_ops.envelope_path(repo_slug(), envelope_key, backend, n)
