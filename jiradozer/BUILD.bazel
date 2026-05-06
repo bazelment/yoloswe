@@ -50,6 +50,7 @@ go_test(
     deps = [
         "//agent-cli-wrapper/claude/render",
         "//jiradozer/tracker",
+        "//wt",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

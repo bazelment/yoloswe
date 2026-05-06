@@ -2,6 +2,7 @@ package jiradozer
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/wt"
 )
 
 func TestParseGitWorktreePorcelainFindsBranch(t *testing.T) {
@@ -39,4 +41,61 @@ func TestRefineFeedbackFromIssueCommentUsesLatestRefineComment(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, "address the timeout review", got)
+}
+
+func TestRunRefineUsesExplicitFeedbackBeforePRFetch(t *testing.T) {
+	issue := testIssue()
+	workDir := t.TempDir()
+	cfg := testConfig()
+	cfg.WorkDir = "/original"
+	cfg.Source.BranchPrefix = "jiradozer"
+
+	called := false
+	err := RunRefine(context.Background(), RefineOptions{
+		Issue:    issue,
+		Tracker:  &mockWorkflowTracker{},
+		Config:   cfg,
+		Logger:   discardLogger(),
+		Feedback: "make timeout configurable",
+		WorkDir:  workDir,
+		GH:       panicGHRunner{},
+		RunWorkflow: func(wf *Workflow) error {
+			called = true
+			assert.Equal(t, StepValidating, wf.state.Current())
+			assert.Equal(t, "make timeout configurable", wf.prFeedback)
+			assert.Equal(t, workDir, wf.config.WorkDir)
+			assert.True(t, wf.refineMode)
+			return nil
+		},
+	})
+
+	require.NoError(t, err)
+	assert.True(t, called)
+	assert.Equal(t, "/original", cfg.WorkDir, "RunRefine must not mutate caller config")
+}
+
+func TestRunRefineMissingWorktreeError(t *testing.T) {
+	cfg := testConfig()
+	cfg.Source.BranchPrefix = "definitely-missing-jiradozer-branch"
+	issue := testIssue()
+	issue.Identifier = "NO-SUCH-BRANCH"
+
+	err := RunRefine(context.Background(), RefineOptions{
+		Issue:    issue,
+		Tracker:  &mockWorkflowTracker{},
+		Config:   cfg,
+		Logger:   discardLogger(),
+		Feedback: "manual feedback",
+		GH:       panicGHRunner{},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worktree for branch")
+	assert.Contains(t, err.Error(), "--work-dir")
+}
+
+type panicGHRunner struct{}
+
+func (panicGHRunner) Run(_ context.Context, args []string, _ string) (*wt.CmdResult, error) {
+	return nil, fmt.Errorf("unexpected gh call: %v", args)
 }

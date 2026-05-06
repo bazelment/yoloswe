@@ -137,6 +137,21 @@ func TestUpdateState(t *testing.T) {
 	assert.Equal(t, "Done", fetched.State)
 }
 
+func TestSetBranchNamePersists(t *testing.T) {
+	tr := newTestTracker(t)
+	ctx := context.Background()
+
+	issue, err := tr.CreateIssue("Task", "desc")
+	require.NoError(t, err)
+
+	require.NoError(t, tr.SetBranchName(ctx, issue.ID, "jiradozer/LOCAL-1"))
+
+	fetched, err := tr.FetchIssue(ctx, "LOCAL-1")
+	require.NoError(t, err)
+	require.NotNil(t, fetched.BranchName)
+	assert.Equal(t, "jiradozer/LOCAL-1", *fetched.BranchName)
+}
+
 func TestWorkflowStates(t *testing.T) {
 	tr := newTestTracker(t)
 	ctx := context.Background()

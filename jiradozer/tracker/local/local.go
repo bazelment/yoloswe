@@ -263,6 +263,21 @@ func (t *Tracker) UpdateIssueState(_ context.Context, issueID string, stateID st
 	return t.writeFile(issueID, f)
 }
 
+// SetBranchName persists the branch associated with a local issue. This is
+// used by refine runs so they can find preserved worktrees even if the branch
+// prefix configuration changed since the original run.
+func (t *Tracker) SetBranchName(_ context.Context, issueID string, branchName string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	f, err := t.readFile(issueID)
+	if err != nil {
+		return err
+	}
+	f.Issue.BranchName = branchName
+	return t.writeFile(issueID, f)
+}
+
 // AddLabel adds a label to a local issue. It is idempotent.
 func (t *Tracker) AddLabel(_ context.Context, issueID string, label string) error {
 	t.mu.Lock()

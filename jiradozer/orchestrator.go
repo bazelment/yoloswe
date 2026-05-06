@@ -347,6 +347,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		o.unreserveSlot(issue.ID)
 		return fmt.Errorf("create worktree for %s: %w", issue.Identifier, err)
 	}
+	o.persistIssueBranchName(ctx, issue, branch)
 
 	// Add the lock label as soon as the worktree exists. The label is the
 	// quick part of the distributed claim — it signals intent across
@@ -488,6 +489,22 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 	}()
 
 	return nil
+}
+
+type branchNamePersister interface {
+	SetBranchName(ctx context.Context, issueID string, branchName string) error
+}
+
+func (o *Orchestrator) persistIssueBranchName(ctx context.Context, issue *tracker.Issue, branch string) {
+	p, ok := o.tracker.(branchNamePersister)
+	if !ok {
+		return
+	}
+	if err := p.SetBranchName(ctx, issue.ID, branch); err != nil {
+		o.logger.Warn("failed to persist issue branch name", "issue", issue.Identifier, "branch", branch, "error", err)
+		return
+	}
+	issue.BranchName = &branch
 }
 
 func (o *Orchestrator) tryStartRefineForExistingWorktree(ctx context.Context, issue *tracker.Issue, branch string) (bool, error) {
