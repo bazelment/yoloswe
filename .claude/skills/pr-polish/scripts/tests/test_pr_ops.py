@@ -1024,6 +1024,23 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.assertEqual(rnd["lint_findings"][0]["source"], "lint")
         self.assertTrue((self.state_dir / "reviews" / "r1-lint.json").exists())
 
+    def test_state_finalize_round_cli_rejects_unknown_backend(self) -> None:
+        # Round 27 fix: --envelope curor=/tmp/x typos used to be
+        # silently ignored later; now the CLI parser validates
+        # against bramble_ops.BACKENDS at parse time.
+        cx = self._write_envelope("codex")
+        actions_file = self.state_dir / "actions.json"
+        actions_file.write_text("[]")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        rc = pr_ops.main(
+            [
+                "state-finalize-round", "77", "1", "sha2", str(actions_file),
+                "--envelope", f"codex={cx}",
+                "--envelope", "curor=/tmp/typo.json",  # typo: curor not cursor
+            ]
+        )
+        self.assertNotEqual(rc, 0)
+
 
 class TestCIFailedTests(unittest.TestCase):
     """Parses per-failed-job test details from gh check output + job logs."""

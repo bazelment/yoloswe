@@ -76,6 +76,18 @@ def _have(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
+def _safe_paths(paths: list[str]) -> list[str]:
+    """Drop paths that could be parsed as linter flags.
+
+    A PR can add a file literally named ``--config=evil.toml`` or
+    ``-q.py``; if we splat that straight into argv the linter will
+    treat it as an option, not a path. Bot/lint-gate behavior is
+    then attacker-controlled. Drop anything starting with ``-`` —
+    legitimate code paths never do.
+    """
+    return [p for p in paths if not p.startswith("-")]
+
+
 def _tooling_failure(linter: str, returncode: int, stderr: str) -> dict[str, Any]:
     """Synthetic medium-severity finding for a linter that didn't run cleanly.
 
@@ -105,9 +117,12 @@ def run_ruff(paths: list[str]) -> list[dict[str, Any]]:
       * other ``E`` (pyflakes errors) and ``F`` (logical) → medium
       * everything else (style W, naming N, etc.) → low
     """
+    paths = _safe_paths(paths)
     if not paths or not _have("ruff"):
         return []
-    res = run(["ruff", "check", "--output-format=json", *paths], check=False)
+    # ``--`` separates options from path arguments so a leading-dash
+    # filename can't be reinterpreted as a flag.
+    res = run(["ruff", "check", "--output-format=json", "--", *paths], check=False)
     stderr = (res.stderr or "").strip()
     # ruff returns rc=1 when issues are found (with JSON on stdout) and
     # rc=0 when clean. Blank stdout with non-zero rc or stderr text is
@@ -155,9 +170,12 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
     golangci-lint targets packages, not files; we pass the directories of the
     changed Go files so the linter can resolve imports correctly.
     """
+    paths = _safe_paths(paths)
     if not paths or not _have("golangci-lint"):
         return []
-    pkgs = sorted({str(Path(p).parent) or "." for p in paths})
+    pkgs = _safe_paths(sorted({str(Path(p).parent) or "." for p in paths}))
+    if not pkgs:
+        return []
     res = run(["golangci-lint", "run", "--out-format=json", *pkgs], check=False)
     stderr = (res.stderr or "").strip()
     if not res.stdout.strip():
@@ -212,9 +230,11 @@ def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
     finding rather than dropping silently — otherwise triage records
     "no eslint issues" while eslint never actually inspected the diff.
     """
+    paths = _safe_paths(paths)
     if not paths or not _have("eslint"):
         return []
-    res = run(["eslint", "--format=json", *paths], check=False)
+    # ``--`` separates options from path arguments (eslint supports it).
+    res = run(["eslint", "--format=json", "--", *paths], check=False)
     stderr = (res.stderr or "").strip()
     if not res.stdout.strip():
         if res.returncode != 0 or stderr:

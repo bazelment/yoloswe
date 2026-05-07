@@ -413,6 +413,16 @@ def parse_cross_service_roots(spec: str) -> tuple[tuple[str, int], ...]:
                     file=_sys.stderr,
                 )
                 continue
+            if depth < 1:
+                # `prefix:0` and negative depths produce empty buckets
+                # — wrong scope hints, no error signal. Drop these too.
+                import sys as _sys  # noqa: PLC0415
+                print(
+                    f"scope_gate: ignoring --cross-service-roots entry "
+                    f"with non-positive depth: {entry!r}",
+                    file=_sys.stderr,
+                )
+                continue
         else:
             prefix, depth = entry, 2
         if not prefix.endswith("/"):

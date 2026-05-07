@@ -176,6 +176,19 @@ class TestParseCrossServiceRoots(unittest.TestCase):
         self.assertEqual(roots, (("apps/", 2),))
         self.assertIn("non-numeric depth", buf.getvalue())
 
+    def test_non_positive_depth_dropped_with_warning(self) -> None:
+        # Round 27 fix: depth=0 or negative produces empty buckets;
+        # drop with a stderr warning rather than silently emit wrong
+        # scope hints.
+        import io, contextlib  # noqa: PLC0415
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            roots = scope_gate.parse_cross_service_roots(
+                "services/:0,apps/:2,bad/:-1"
+            )
+        self.assertEqual(roots, (("apps/", 2),))
+        self.assertIn("non-positive depth", buf.getvalue())
+
 
 class TestCollectTestPaths(unittest.TestCase):
     """Walks a real on-disk tree under tmpdir.

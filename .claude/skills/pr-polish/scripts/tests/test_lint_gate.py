@@ -41,6 +41,42 @@ class TestBucket(unittest.TestCase):
         self.assertIsNone(lint_gate._bucket("Cargo.lock"))
 
 
+class TestSafePaths(unittest.TestCase):
+    """Round 27: _safe_paths drops leading-dash filenames so a PR
+    can't add a file named '--config=evil.toml' or '-q.py' that
+    gets reinterpreted as a linter flag.
+    """
+
+    def test_drops_leading_dash_paths(self) -> None:
+        self.assertEqual(
+            lint_gate._safe_paths(["a.py", "--config=x.toml", "b.py", "-q.py"]),
+            ["a.py", "b.py"],
+        )
+
+    def test_keeps_normal_paths(self) -> None:
+        self.assertEqual(
+            lint_gate._safe_paths(["src/a.py", "pkg/b.go", "ui/c.tsx"]),
+            ["src/a.py", "pkg/b.go", "ui/c.tsx"],
+        )
+
+    def test_run_ruff_inserts_dash_dash_separator(self) -> None:
+        # Verify the actual subprocess call gets ``--`` before paths so
+        # leading-dash filenames couldn't be reparsed as flags by ruff.
+        captured = []
+
+        def capture(cmd, **kw):
+            captured.append(cmd)
+            return _stub_run("[]")(cmd, **kw)
+
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=capture):
+                lint_gate.run_ruff(["a.py", "b.py"])
+        self.assertIn("--", captured[0])
+        # Paths come after the --
+        idx = captured[0].index("--")
+        self.assertEqual(captured[0][idx + 1 :], ["a.py", "b.py"])
+
+
 class TestRunRuff(unittest.TestCase):
     def test_skipped_when_binary_missing(self) -> None:
         with patch.object(lint_gate, "_have", return_value=False):
