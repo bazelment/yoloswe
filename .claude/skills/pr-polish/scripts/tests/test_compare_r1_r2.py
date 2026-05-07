@@ -255,6 +255,20 @@ class TestIsSubstantive(unittest.TestCase):
         self.assertTrue(self.mod.is_substantive(c))
 
 
+    def test_null_body_does_not_crash(self) -> None:
+        # r37 finding: some PR-comment exports record body: null for
+        # empty-body comments. Without normalization, the regex search
+        # in _is_review_summary_only / NOISE_BODY_PATTERNS would
+        # TypeError and abort the whole comparison batch.
+        for body in (None, ""):
+            c = {"author": "cursor[bot]", "is_bot": True,
+                 "source": "github-inline", "body": body}
+            # Just ensure no exception; semantics for empty body are
+            # "kept as bot finding" (NOISE_BODY_PATTERNS need text to
+            # filter on, so empty falls through).
+            self.assertEqual(self.mod.is_substantive(c), True)
+
+
 class TestFormatResultsAllPass(unittest.TestCase):
     """``all_pass`` is the gate that ``main`` returns as exit code.
 

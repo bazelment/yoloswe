@@ -1038,7 +1038,8 @@ class TestPersistRoundFindings(unittest.TestCase):
             ],
         )
         cu = self._write_envelope(
-            "cursor", session_id="cursor-1", issues=[
+            "cursor", session_id="cursor-1", resume_status="ok",
+            issues=[
                 {"severity": "low", "file": "b.py", "line": 2, "message": "y", "topic": "u"},
             ],
         )
@@ -1063,9 +1064,55 @@ class TestPersistRoundFindings(unittest.TestCase):
         rnd = state["rounds"][0]
         self.assertEqual(rnd["session_ids"].get("codex"), "codex-2")
         self.assertNotIn("cursor", rnd.get("session_ids") or {})
+        # resume_status[cursor] should also be cleared, not just session_ids.
+        self.assertNotIn("cursor", rnd.get("resume_status") or {})
         # Findings reset to empty (rather than popped) so callers
         # indexing rnd["cursor_findings"] still work.
         self.assertEqual(rnd.get("cursor_findings"), [])
+        # Disk parity: archived envelope file for the dropped backend
+        # is removed so post-loop audits don't see contradictions.
+        self.assertFalse((self.state_dir / "reviews" / "r1-cursor.json").exists())
+        # The retained backend's archive should still be there.
+        self.assertTrue((self.state_dir / "reviews" / "r1-codex.json").exists())
+
+    def test_refinalize_with_zero_envelopes_clears_all_backends(self) -> None:
+        # r37 finding: the prior fix only ran cleanup when the new
+        # envelope set was non-empty, so a re-finalize that passed no
+        # envelopes (or only missing-on-disk paths) silently kept the
+        # earlier round's session_ids/findings. The next round would
+        # then resume a stale session.
+        cx = self._write_envelope(
+            "codex", session_id="codex-x", issues=[
+                {"severity": "high", "file": "a.py", "line": 1, "message": "x", "topic": "t"},
+            ],
+        )
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx}
+        )
+        # Re-finalize with no envelopes: must clear codex too.
+        state = pr_ops.state_finalize_round(77, 1, "sha3", [], envelope_overrides={})
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd.get("codex_findings"), [])
+        self.assertNotIn("codex", rnd.get("session_ids") or {})
+        self.assertFalse((self.state_dir / "reviews" / "r1-codex.json").exists())
+
+    def test_refinalize_treats_missing_envelope_as_absent(self) -> None:
+        # An override path that doesn't exist on disk must not protect
+        # the prior round's per-backend state from cleanup. Otherwise a
+        # caller that points at a stale path silently keeps stale data.
+        cx = self._write_envelope("codex", session_id="codex-y")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx}
+        )
+        ghost = self.envelope_dir / "missing.json"  # never created
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": ghost}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd.get("codex_findings"), [])
+        self.assertNotIn("codex", rnd.get("session_ids") or {})
 
     def test_state_finalize_round_cli_rejects_unknown_backend(self) -> None:
         # Round 27 fix: --envelope curor=/tmp/x typos used to be

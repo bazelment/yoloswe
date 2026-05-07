@@ -66,7 +66,9 @@ def is_substantive(comment: dict) -> bool:
     author = comment.get("author", "")
     if author in NOISE_AUTHORS:
         return False
-    body = comment.get("body", "")
+    # Some exports record a JSON null for empty bodies; normalize so
+    # downstream regex calls don't TypeError mid-batch.
+    body = comment.get("body") or ""
     # Review-summary boilerplate: matches on github-issue / github-review
     # comments whose body is JUST "Cursor Bugbot found N issues" with no
     # actual finding content. We look at the summary regex AND the body's

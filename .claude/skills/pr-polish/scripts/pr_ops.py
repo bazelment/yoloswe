@@ -909,21 +909,37 @@ def _persist_round_findings(
     # in the new envelope set. Without this, a partial re-finalize would
     # mix new findings against the old session_ids and the next round's
     # prior_session_id could resume the wrong session.
-    incoming = {b for b in bramble_ops.BACKENDS if envelope_overrides.get(b) is not None}
-    if incoming:
-        for backend in bramble_ops.BACKENDS:
-            if backend in incoming:
-                continue
-            # Reset findings to empty (matches state_append_round's
-            # initial seed for codex/cursor); don't pop, so consumers
-            # that index into the field unconditionally still work.
-            entry[f"{backend}_findings"] = []
-            for bucket_key in ("session_ids", "resume_status"):
-                bucket = entry.get(bucket_key)
-                if isinstance(bucket, dict):
-                    bucket.pop(backend, None)
-                    if not bucket:
-                        entry.pop(bucket_key, None)
+    # Treat a missing-on-disk override the same as an absent override:
+    # _persist will skip it below, so the in-memory state must be
+    # cleared too or stale findings/session_ids would survive.
+    incoming = {
+        b for b in bramble_ops.BACKENDS
+        if (src := envelope_overrides.get(b)) is not None and src.exists()
+    }
+    # Always run cleanup, even when ``incoming`` is empty. Skipping the
+    # zero-envelope case let prior-round per-backend state survive a
+    # re-finalize that was supposed to overwrite it.
+    for backend in bramble_ops.BACKENDS:
+        if backend in incoming:
+            continue
+        # Reset findings to empty (matches state_append_round's
+        # initial seed for codex/cursor); don't pop, so consumers
+        # that index into the field unconditionally still work.
+        entry[f"{backend}_findings"] = []
+        for bucket_key in ("session_ids", "resume_status"):
+            bucket = entry.get(bucket_key)
+            if isinstance(bucket, dict):
+                bucket.pop(backend, None)
+                if not bucket:
+                    entry.pop(bucket_key, None)
+        # Disk parity: an archived envelope on disk would contradict
+        # the trimmed in-memory state. Drop the file so post-loop
+        # audits see a consistent picture.
+        stale_review = state_dir / "reviews" / f"r{n}-{backend}.json"
+        try:
+            stale_review.unlink(missing_ok=True)
+        except OSError:
+            pass
     for backend in bramble_ops.BACKENDS:
         src = envelope_overrides.get(backend)
         if src is None or not src.exists():
