@@ -254,6 +254,32 @@ class TestPriorSessionIdSeriesBoundary(unittest.TestCase):
         }
         self.assertEqual(bramble_ops.prior_session_id(state, "codex", 2), "abc-123")
 
+    def test_explicit_is_new_series_true_returns_empty_even_when_state_says_otherwise(self) -> None:
+        # The SKILL captures IS_NEW_SERIES at Step 0.5, before
+        # state_append_round mutates state["completed"] to false. The
+        # captured value must remain authoritative for the rest of the
+        # round, even though the state file by then looks "in-progress".
+        state = {
+            "completed": False,  # state_append_round already cleared it
+            "rounds": [{"n": 5, "session_ids": {"codex": "old-abc"}}],
+        }
+        self.assertEqual(
+            bramble_ops.prior_session_id(state, "codex", 6, is_new_series=True),
+            "",
+        )
+
+    def test_explicit_is_new_series_false_overrides_completed_flag(self) -> None:
+        # Symmetric belt-and-braces: caller can also force resume even
+        # when the state says completed=true (e.g., a manual replay).
+        state = {
+            "completed": True,
+            "rounds": [{"n": 5, "session_ids": {"codex": "abc"}}],
+        }
+        self.assertEqual(
+            bramble_ops.prior_session_id(state, "codex", 6, is_new_series=False),
+            "abc",
+        )
+
 
 
 class TestExtractTerminalEnvelope(unittest.TestCase):

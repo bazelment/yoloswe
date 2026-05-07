@@ -691,7 +691,13 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
     return keys
 
 
-def prior_session_id(state: dict[str, Any] | None, backend: str, round_: int) -> str:
+def prior_session_id(
+    state: dict[str, Any] | None,
+    backend: str,
+    round_: int,
+    *,
+    is_new_series: bool | None = None,
+) -> str:
     """Return the newest prior session id for backend before ``round_``.
 
     State files have evolved over time, so accept both explicit round metadata
@@ -701,10 +707,17 @@ def prior_session_id(state: dict[str, Any] | None, backend: str, round_: int) ->
     Returns ``""`` at series boundaries: a new audit (prior loop hit
     completed=true) gets a fresh bramble session rather than dragging the
     prior series' conversation context into a review of different code.
+
+    Series detection is sticky across the round: the SKILL captures the
+    decision at Step 0.5 *before* ``state_append_round`` clears the
+    ``completed`` flag, then passes ``is_new_series`` here. When the
+    caller doesn't pass it, fall back to deriving from the live state
+    (works only when called before ``state_append_round`` runs).
     """
     if not state or round_ < 2:
         return ""
-    if _is_first_round_of_series(state, round_):
+    boundary = is_new_series if is_new_series is not None else _is_first_round_of_series(state, round_)
+    if boundary:
         return ""
     rounds = state.get("rounds") or []
     for rnd in sorted(rounds, key=lambda r: r.get("n") or 0, reverse=True):
@@ -750,6 +763,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("backend", choices=BACKENDS)
     sp.add_argument("round_", type=int)
     sp.add_argument("--state-file", required=True)
+    sp.add_argument(
+        "--is-new-series",
+        choices=["0", "1"],
+        help="Captured at Step 0.5 before state_append_round mutates state; pass 1 to force empty.",
+    )
 
     sp = sub.add_parser(
         "parse-stream",
@@ -811,7 +829,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.cmd == "prior-session-id":
             state = read_json(Path(args.state_file), default=None)
-            print(prior_session_id(state, args.backend, args.round_))
+            is_new = (args.is_new_series == "1") if args.is_new_series is not None else None
+            print(prior_session_id(state, args.backend, args.round_, is_new_series=is_new))
         elif args.cmd == "parse-stream":
             findings = parse_stream(Path(args.stream_file), source=args.backend)
             print_json(findings)

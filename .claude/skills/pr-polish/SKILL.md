@@ -295,8 +295,10 @@ Compute the round's `--goal` text and per-backend resume id from the state file:
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
         --pr-summary "$PR_SUMMARY" --state-file "$STATE_FILE" \
         --head-before "$(git rev-parse HEAD)")
-CODEX_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id codex {ROUND} --state-file "$STATE_FILE")
-CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id cursor {ROUND} --state-file "$STATE_FILE")
+CODEX_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id codex {ROUND} \
+                --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
+CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id cursor {ROUND} \
+                --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
 ```
 
 `--head-before` lets the goal helper compute "Files changed since round N-1" by diffing the prior round's `head_after` against the current HEAD. `prior-session-id` returns empty across series boundaries (when `IS_NEW_SERIES=1`) so a new audit gets a fresh bramble session rather than dragging the prior series' context.
