@@ -146,6 +146,17 @@ func newLogEventHandler(logger *slog.Logger, step string) *logEventHandler {
 	}
 }
 
+// resetPerAttempt clears state that must not leak between retry attempts.
+// Plan-file detection (planFilePath/lastWriteMD) and pending tool-start
+// timestamps belong to a single agent run; carrying them across attempts can
+// surface a stale plan file via resolveOutput when a retry doesn't write one.
+func (h *logEventHandler) resetPerAttempt() {
+	h.planFilePath = ""
+	h.lastWriteMD = ""
+	h.toolStarts = make(map[string]time.Time)
+	h.textBuf.Reset()
+}
+
 func (h *logEventHandler) OnSessionInit(sessionID string) {
 	h.logger.Info("agent session init", "step", h.step, "session_id", sessionID)
 }
@@ -401,6 +412,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	attempt := 0
 	var result *agent.AgentResult
 	for {
+		logHandler.resetPerAttempt()
 		opts, err := buildExecuteOpts(cfg, workDir, handler, currentResume)
 		if err != nil {
 			return StepAgentResult{}, err
@@ -473,6 +485,11 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 			return StepAgentResult{SessionID: currentResume}, ctx.Err()
 		case <-timer.C:
 		}
+	}
+
+	if result == nil {
+		logHandler.flushText()
+		return StepAgentResult{SessionID: currentResume}, fmt.Errorf("agent execution: provider returned no result")
 	}
 
 	if !result.Success {
