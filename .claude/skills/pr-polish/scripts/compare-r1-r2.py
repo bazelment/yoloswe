@@ -241,7 +241,8 @@ def compare_pr(
             print(f"warning: skipping unreadable {comments_path}: {exc}", file=sys.stderr)
             data = None
         if isinstance(data, dict):
-            all_comments = data.get("comments", []) or []
+            raw = data.get("comments", [])
+            all_comments = raw if isinstance(raw, list) else []
         elif isinstance(data, list):
             all_comments = data
 

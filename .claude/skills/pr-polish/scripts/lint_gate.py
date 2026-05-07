@@ -123,6 +123,8 @@ def run_ruff(paths: list[str]) -> list[dict[str, Any]]:
         items = json.loads(res.stdout)
     except json.JSONDecodeError:
         return [_tooling_failure("ruff", res.returncode, stderr or "non-JSON stdout")]
+    if not isinstance(items, list):
+        return [_tooling_failure("ruff", res.returncode, "JSON root not a list")]
     out: list[dict[str, Any]] = []
     for it in items:
         code = (it.get("code") or "").upper()
@@ -167,6 +169,8 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
         report = json.loads(res.stdout)
     except json.JSONDecodeError:
         return [_tooling_failure("golangci-lint", res.returncode, stderr or "non-JSON stdout")]
+    if not isinstance(report, dict):
+        return [_tooling_failure("golangci-lint", res.returncode, "JSON root not a dict")]
     issues = report.get("Issues") or []
     out: list[dict[str, Any]] = []
     # Severity tiers. Security linters surface as high so triage routes them
@@ -221,6 +225,8 @@ def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
         report = json.loads(res.stdout)
     except json.JSONDecodeError:
         return [_tooling_failure("eslint", res.returncode, stderr or "non-JSON stdout")]
+    if not isinstance(report, list):
+        return [_tooling_failure("eslint", res.returncode, "JSON root not a list")]
     out: list[dict[str, Any]] = []
     for fr in report:
         for m in fr.get("messages") or []:

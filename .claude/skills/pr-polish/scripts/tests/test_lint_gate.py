@@ -126,6 +126,22 @@ class TestRunRuff(unittest.TestCase):
         self.assertIn("[ruff] tooling failure", got[0]["message"])
         self.assertIn("no stderr", got[0]["message"])
 
+    def test_wrong_shape_json_emits_tooling_failure(self) -> None:
+        # Round 18 fix: structurally valid but shape-wrong JSON
+        # (ruff expects a list at root) was previously assumed and
+        # would crash on iteration. Surface it as tooling-failure
+        # instead. Same pattern applied to golangci (expects dict)
+        # and eslint (expects list).
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run('{"unexpected": "object"}', returncode=0),
+            ):
+                got = lint_gate.run_ruff(["a.py"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("JSON root not a list", got[0]["message"])
+
 
 class TestRunGolangci(unittest.TestCase):
     def test_passes_packages_not_files(self) -> None:
