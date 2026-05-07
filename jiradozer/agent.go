@@ -407,7 +407,40 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		}
 		result, err = provider.Execute(ctx, prompt, nil, opts...)
 		if err == nil {
-			break
+			if result == nil || result.Success || result.Error == nil {
+				break
+			}
+			if result.SessionID != "" {
+				currentResume = result.SessionID
+			}
+			transient, reason := agent.ClassifyTransient(result.Error)
+			if !transient || attempt >= maxRetries {
+				break
+			}
+			attempt++
+			backoff := r.retryBackoff(attempt)
+			logger.Warn("agent retry on transient result error",
+				"step", stepName,
+				"attempt", attempt,
+				"max", maxRetries,
+				"reason", reason,
+				"session_id", currentResume,
+				"backoff", backoff,
+			)
+			if renderer != nil {
+				renderer.Status(fmt.Sprintf("Transient error (%s); retrying in %s (attempt %d/%d)", reason, backoff, attempt, maxRetries))
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				logHandler.flushText()
+				return StepAgentResult{SessionID: currentResume}, ctx.Err()
+			case <-timer.C:
+			}
+			continue
 		}
 		if result != nil && result.SessionID != "" {
 			currentResume = result.SessionID

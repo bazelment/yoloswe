@@ -74,6 +74,31 @@ func TestRunAgentRetryTransientThenSuccess(t *testing.T) {
 	require.Equal(t, "sess-1", provider.resumeSession[1])
 }
 
+func TestRunAgentRetryTransientResultErrorThenSuccess(t *testing.T) {
+	provider := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{
+			{Success: false, SessionID: "sess-1", Error: &codex.TransientError{Message: "stream idle", Reason: "stream_idle"}},
+			{Success: true, SessionID: "sess-1", Text: "done"},
+		},
+		errs: []error{nil, nil},
+	}
+	runner := agentRunner{
+		newProviderForModel: func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil },
+		retryBackoffs:       []time.Duration{0},
+	}
+
+	got, err := runner.runAgent(context.Background(), "build", "prompt", StepConfig{
+		Model:            "gpt-5.5",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "done", got.Output)
+	require.Equal(t, "sess-1", got.SessionID)
+	require.Len(t, provider.resumeSession, 2)
+	require.Empty(t, provider.resumeSession[0])
+	require.Equal(t, "sess-1", provider.resumeSession[1])
+}
+
 func TestRunAgentRetryTransientExhaustsBudget(t *testing.T) {
 	transient := &claude.TransientError{Message: "stream idle"}
 	provider := &fakeRetryProvider{

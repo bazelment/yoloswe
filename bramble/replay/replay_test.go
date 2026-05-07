@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +293,24 @@ func TestCodexParser_PerTurnUsageNotSubtracted(t *testing.T) {
 	assert.Equal(t, "Tokens: 100 input / 40 output", tokenLines[0])
 	assert.Equal(t, "Tokens: 150 input / 50 output", tokenLines[1],
 		"per-turn usage must render as-is, no cumulative subtraction")
+}
+
+func TestCodexParser_TurnCompletedErrorRendersFailure(t *testing.T) {
+	p := newCodexReplayParser()
+	ts := time.Time{}
+
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:     codex.MappedEventTurnCompleted,
+		ThreadID: "t1",
+		TurnID:   "1",
+		Success:  false,
+		Error:    errors.New("connection reset by peer"),
+	}, ts)
+
+	require.Len(t, p.lines, 1)
+	assert.Equal(t, session.OutputTypeError, p.lines[0].Type)
+	assert.Equal(t, "connection reset by peer", p.lines[0].Content)
+	assert.Equal(t, session.StatusFailed, p.deriveStatus())
 }
 
 func TestCompactLines_MergesTurnAndTokenLines(t *testing.T) {

@@ -329,10 +329,23 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 			p.threadCumulativeBaseline[ev.ThreadID] = usage
 			usage = delta
 		}
+		lineType := session.OutputTypeTurnEnd
+		content := "Turn complete"
+		if !ev.Success || ev.Error != nil {
+			lineType = session.OutputTypeError
+			content = "turn failed"
+			if ev.Error != nil {
+				content = strings.TrimSpace(ev.Error.Error())
+			}
+			if content == "" {
+				content = "turn failed"
+			}
+			p.hadProviderErrors = true
+		}
 		p.lines = append(p.lines, session.OutputLine{
 			Timestamp:  ts,
-			Type:       session.OutputTypeTurnEnd,
-			Content:    "Turn complete",
+			Type:       lineType,
+			Content:    content,
 			TurnNumber: p.turnCount,
 			DurationMs: ev.DurationMs,
 			CostUSD:    0,
