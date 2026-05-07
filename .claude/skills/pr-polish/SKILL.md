@@ -234,7 +234,8 @@ What it carries:
 |---|---|---|
 | 1 | `$PR_SUMMARY` (commit list + diffstat) | First turn: model has nothing yet. Establish PR-level intent and surface area. |
 | 2+, prior round had actions | Per-turn briefing: prior round's fixed/skipped + files changed since then | Tells the resumed model what it actioned last turn (so it doesn't re-flag fixes) and which files moved (so the worktree snapshot doesn't have to surface that on its own). |
-| 2+, prior round empty | Falls back to `$PR_SUMMARY` | Re-anchor rather than send a goal that's just "Round N." |
+| 2+, no prior actions, files changed | `Round N.` + files-changed line | Even with no prior-round actions to replay, a non-empty diff between rounds (e.g. user committed manually) is worth orienting the model around. |
+| 2+, no prior actions, no diff | Falls back to `$PR_SUMMARY` | Re-anchor rather than send a goal that's just "Round N." |
 
 Action-history shape (emitted by `action_history_goal`, only the immediately-prior round):
 
@@ -246,7 +247,7 @@ Files changed since round 5: a.go, b.py.
 
 The `fixed: X — topic; skipped: Y verb: reason` shape stops the resumed model from re-flagging its own prior findings and re-arguing skipped ones. Source labels (`(codex)`/`(cursor)`) are deliberately omitted: the resumed model treats every entry the same once it lands in the prompt. Each entry is capped at `_TOPIC_CHAR_CAP=80` chars; bucket capped at `_ACTION_HISTORY_CAP=20` with a `(N more)` suffix.
 
-The "Files changed since round N-1" line is the diff between the prior round's `head_after` and this round's HEAD — useful when the user manually committed between rounds, when the prior round's fix touched a file the model didn't expect to see in its snapshot, or simply to keep the model oriented. Omitted when the diff is empty.
+The "Files changed since round N-1" line is the diff between the prior round's `head_after` (falling back to `head_before` for an interrupted prior round that never finalized) and this round's HEAD — useful when the user manually committed between rounds, when the prior round's fix touched a file the model didn't expect to see in its snapshot, or simply to keep the model oriented. Omitted when the diff is empty or the caller didn't pass `head_before`.
 
 What the goal channel deliberately does **not** carry:
 
