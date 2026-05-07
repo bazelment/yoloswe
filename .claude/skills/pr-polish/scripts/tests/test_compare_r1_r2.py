@@ -418,6 +418,35 @@ class TestMainExitCode(unittest.TestCase):
             rc = self.mod.main(["--prs", "1234", "--json"])
         self.assertEqual(rc, 0)
 
+    def test_markdown_calls_format_results_exactly_once(self) -> None:
+        # Round 28 fix: format_results was called twice (once for
+        # all_pass, once for the table). Removing the cache and
+        # re-calling would only fail this test.
+        results = {
+            "1234": {
+                "pr": "1234", "total_substantive": 3, "caught": 3, "findings": [],
+                "r1_issue_count": 1, "r2_issue_count": 1, "r1_only_count": 0,
+                "r1_cursor_loaded": True, "r1_codex_loaded": True,
+                "r2_cursor_loaded": True, "r2_codex_loaded": True,
+            }
+        }
+        from unittest.mock import patch  # noqa: PLC0415
+
+        original = self.mod.format_results
+        call_count = [0]
+
+        def counting_format_results(*args, **kwargs):
+            call_count[0] += 1
+            return original(*args, **kwargs)
+
+        with patch.object(self.mod, "compare_pr", self._patch_compare(results)):
+            with patch.object(
+                self.mod, "format_results", side_effect=counting_format_results
+            ):
+                rc = self.mod.main(["--prs", "1234"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(call_count[0], 1, "format_results was called more than once")
+
 
 if __name__ == "__main__":
     unittest.main()

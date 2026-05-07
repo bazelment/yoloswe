@@ -42,9 +42,12 @@ class TestBucket(unittest.TestCase):
 
 
 class TestSafePaths(unittest.TestCase):
-    """Round 27: _safe_paths drops leading-dash filenames so a PR
-    can't add a file named '--config=evil.toml' or '-q.py' that
-    gets reinterpreted as a linter flag.
+    """_safe_paths rewrites leading-dash filenames with a "./" prefix
+    so a PR can't add a file named '--config=evil.toml' or '-q.py'
+    that gets reinterpreted as a linter flag. Round 27 added the
+    helper (then dropping such paths); round 28 switched to
+    rewriting so a PR can't evade lint by choosing a leading-dash
+    filename.
     """
 
     def test_rewrites_leading_dash_paths_with_dot_slash(self) -> None:
@@ -95,6 +98,39 @@ class TestSafePaths(unittest.TestCase):
         self.assertIn("--", captured[0])
         idx = captured[0].index("--")
         self.assertEqual(captured[0][idx + 1 :], ["x/a.ts", "x/b.tsx"])
+
+    def test_run_ruff_applies_safe_paths_to_leading_dash_filenames(self) -> None:
+        # Round 29: existing tests assert _safe_paths in isolation
+        # and the --  separator on normal paths, but neither verifies
+        # that run_ruff actually applies _safe_paths *before* invoking
+        # the subprocess. Removing the call would only fail this test.
+        captured = []
+
+        def capture(cmd, **kw):
+            captured.append(cmd)
+            return _stub_run("[]")(cmd, **kw)
+
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=capture):
+                lint_gate.run_ruff(["a.py", "-evil.py", "--config=x.toml"])
+        # Leading-dash paths must arrive at the subprocess prefixed with "./"
+        idx = captured[0].index("--")
+        self.assertEqual(
+            captured[0][idx + 1 :], ["a.py", "./-evil.py", "./--config=x.toml"]
+        )
+
+    def test_run_eslint_applies_safe_paths_to_leading_dash_filenames(self) -> None:
+        captured = []
+
+        def capture(cmd, **kw):
+            captured.append(cmd)
+            return _stub_run("[]")(cmd, **kw)
+
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=capture):
+                lint_gate.run_eslint(["a.ts", "-evil.ts"])
+        idx = captured[0].index("--")
+        self.assertEqual(captured[0][idx + 1 :], ["a.ts", "./-evil.ts"])
 
 
 class TestRunRuff(unittest.TestCase):
