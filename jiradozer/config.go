@@ -471,10 +471,11 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		systemPrompt = parent.SystemPrompt
 	}
 	resolved := StepConfig{
-		Prompt:         round.Prompt,
-		SystemPrompt:   systemPrompt,
-		PermissionMode: parent.PermissionMode,
-		Effort:         parent.Effort,
+		Prompt:           round.Prompt,
+		SystemPrompt:     systemPrompt,
+		PermissionMode:   parent.PermissionMode,
+		Effort:           parent.Effort,
+		TransientRetries: parent.TransientRetries,
 	}
 	if round.Model != "" {
 		resolved.Model = round.Model

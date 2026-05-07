@@ -3,7 +3,8 @@ package codex
 import (
 	"errors"
 	"fmt"
-	"strings"
+
+	transientmeta "github.com/bazelment/yoloswe/agent-cli-wrapper/transient"
 )
 
 // Sentinel errors for common error conditions.
@@ -113,6 +114,7 @@ func (e *TurnError) Unwrap() error {
 type TransientError struct {
 	Cause    error
 	Message  string
+	Reason   string
 	ThreadID string
 	TurnID   string
 }
@@ -151,11 +153,13 @@ func classifyTurnError(threadID, turnID, msg string) error {
 	if msg == "" {
 		return nil
 	}
-	if matchesTransientMessage(msg) {
+	reason, ok := transientmeta.ClassifyText(msg)
+	if ok {
 		return &TransientError{
 			ThreadID: threadID,
 			TurnID:   turnID,
 			Message:  msg,
+			Reason:   reason,
 		}
 	}
 	return &TurnError{
@@ -163,34 +167,4 @@ func classifyTurnError(threadID, turnID, msg string) error {
 		TurnID:   turnID,
 		Message:  msg,
 	}
-}
-
-func matchesTransientMessage(msg string) bool {
-	s := strings.ToLower(msg)
-	for _, pattern := range []string{
-		"429",
-		"500",
-		"502",
-		"503",
-		"504",
-		"529",
-		"rate limit",
-		"rate limited",
-		"connection reset",
-		"broken pipe",
-		"i/o timeout",
-		"timeout",
-		"timed out",
-		"unexpected eof",
-		"websocket",
-		"stream idle",
-		"stream timeout",
-		"stream disconnected",
-		"stream closed",
-	} {
-		if strings.Contains(s, pattern) {
-			return true
-		}
-	}
-	return false
 }

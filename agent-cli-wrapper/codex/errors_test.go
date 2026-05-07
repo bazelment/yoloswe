@@ -211,6 +211,9 @@ func TestClassifyTurnError(t *testing.T) {
 	if !errors.As(transient, &transientErr) {
 		t.Fatalf("expected TransientError, got %T", transient)
 	}
+	if transientErr.Reason != "connection_reset" {
+		t.Fatalf("transient reason = %q, want connection_reset", transientErr.Reason)
+	}
 
 	permanent := classifyTurnError("thread-1", "turn-1", "invalid request")
 	var turnErr *TurnError

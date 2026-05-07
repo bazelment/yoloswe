@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/wt"
@@ -85,8 +83,6 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 
 	bridgeStop := make(chan struct{})
 	bridgeDone := make(chan struct{})
-	turnDone := make(chan struct{})
-	turnDoneOnce := sync.Once{}
 	go func() {
 		bridgeEvents(
 			p.client.Events(),
@@ -94,7 +90,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 			p.events,
 			bridgeStop,
 			thread.ID(),
-			func() { turnDoneOnce.Do(func() { close(turnDone) }) },
+			func() {},
 		)
 		close(bridgeDone)
 	}()
@@ -112,15 +108,6 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	result, err := thread.Ask(ctx, fullPrompt, turnOpts...)
 	if err != nil {
 		return &AgentResult{SessionID: thread.ID()}, err
-	}
-	select {
-	case <-turnDone:
-	case <-time.After(150 * time.Millisecond):
-		return &AgentResult{SessionID: thread.ID()}, &codex.TransientError{
-			Message:  "turn never reached turn/completed",
-			ThreadID: thread.ID(),
-			TurnID:   thread.CurrentTurnID(),
-		}
 	}
 
 	agentResult := codexResultToAgentResult(result)

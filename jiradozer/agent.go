@@ -44,10 +44,15 @@ type StepAgentResult struct {
 	SessionID string
 }
 
-var (
-	newProviderForModel = agent.NewProviderForModel
-	retryBackoffs       = []time.Duration{30 * time.Second, 90 * time.Second}
-)
+type agentRunner struct {
+	newProviderForModel func(agent.AgentModel) (agent.Provider, error)
+	retryBackoffs       []time.Duration
+}
+
+var defaultAgentRunner = agentRunner{
+	newProviderForModel: agent.NewProviderForModel,
+	retryBackoffs:       []time.Duration{30 * time.Second, 90 * time.Second},
+}
 
 // RunStepAgent runs an agent session for the given workflow step and returns
 // the StepAgentResult.
@@ -59,7 +64,7 @@ func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg Ste
 	if err != nil {
 		return StepAgentResult{}, fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
-	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
+	return defaultAgentRunner.runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
 }
 
 // RunCommand runs a shell command template for the given workflow step.
@@ -357,12 +362,12 @@ func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 // runAgent runs an agent with the given prompt and step configuration.
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
-func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
+func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	model, ok := agent.ModelByID(cfg.Model)
 	if !ok {
 		return StepAgentResult{}, fmt.Errorf("unknown model: %q", cfg.Model)
 	}
-	provider, err := newProviderForModel(model)
+	provider, err := r.newProviderForModel(model)
 	if err != nil {
 		return StepAgentResult{}, fmt.Errorf("create provider: %w", err)
 	}
@@ -407,13 +412,13 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		if result != nil && result.SessionID != "" {
 			currentResume = result.SessionID
 		}
-		if !agent.IsTransient(err) || attempt >= maxRetries {
+		transient, reason := agent.ClassifyTransient(err)
+		if !transient || attempt >= maxRetries {
 			logHandler.flushText()
 			return StepAgentResult{SessionID: currentResume}, fmt.Errorf("agent execution: %w", err)
 		}
 		attempt++
-		backoff := retryBackoff(attempt)
-		reason := agent.TransientReason(err)
+		backoff := r.retryBackoff(attempt)
 		logger.Warn("agent retry on transient error",
 			"step", stepName,
 			"attempt", attempt,
@@ -425,11 +430,15 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		if renderer != nil {
 			renderer.Status(fmt.Sprintf("Transient error (%s); retrying in %s (attempt %d/%d)", reason, backoff, attempt, maxRetries))
 		}
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			logHandler.flushText()
 			return StepAgentResult{SessionID: currentResume}, ctx.Err()
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 	}
 
@@ -505,18 +514,18 @@ func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler
 	return opts, nil
 }
 
-func retryBackoff(attempt int) time.Duration {
+func (r agentRunner) retryBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
 		return 0
 	}
-	if len(retryBackoffs) == 0 {
+	if len(r.retryBackoffs) == 0 {
 		return 0
 	}
 	idx := attempt - 1
-	if idx >= len(retryBackoffs) {
-		idx = len(retryBackoffs) - 1
+	if idx >= len(r.retryBackoffs) {
+		idx = len(r.retryBackoffs) - 1
 	}
-	return retryBackoffs[idx]
+	return r.retryBackoffs[idx]
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.

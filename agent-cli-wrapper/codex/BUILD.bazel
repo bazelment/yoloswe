@@ -22,6 +22,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/internal/procattr",
+        "//agent-cli-wrapper/transient",
     ],
 )
 

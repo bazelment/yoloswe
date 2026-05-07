@@ -7,6 +7,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	transientmeta "github.com/bazelment/yoloswe/agent-cli-wrapper/transient"
 )
 
 func TestIsTransient(t *testing.T) {
@@ -30,5 +31,24 @@ func TestIsTransient(t *testing.T) {
 				t.Fatalf("IsTransient() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClassifyTransientReason(t *testing.T) {
+	requireTransientReason(t,
+		&codex.TransientError{Message: "turn never reached turn/completed", Reason: transientmeta.ReasonCodexIncomplete},
+		true,
+		transientmeta.ReasonCodexIncomplete,
+	)
+	requireTransientReason(t, &claude.TransientError{Message: "stream idle"}, true, transientmeta.ReasonStreamIdle)
+	requireTransientReason(t, errors.New("503 Service Unavailable"), true, transientmeta.ReasonHTTP5xx)
+	requireTransientReason(t, errors.New("syntax error"), false, transientmeta.ReasonUnknown)
+}
+
+func requireTransientReason(t *testing.T, err error, wantOK bool, wantReason string) {
+	t.Helper()
+	gotOK, gotReason := ClassifyTransient(err)
+	if gotOK != wantOK || gotReason != wantReason {
+		t.Fatalf("ClassifyTransient() = (%v, %q), want (%v, %q)", gotOK, gotReason, wantOK, wantReason)
 	}
 }

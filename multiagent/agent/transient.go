@@ -1,57 +1,62 @@
 package agent
 
 import (
-	"strings"
+	"errors"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	transientmeta "github.com/bazelment/yoloswe/agent-cli-wrapper/transient"
 )
 
 // IsTransient reports whether err originates from a known retryable provider
 // failure, such as stream-idle, rate limiting, or a temporary network break.
 func IsTransient(err error) bool {
-	if err == nil {
-		return false
-	}
-	return claude.IsTransient(err) || codex.IsTransient(err) || matchesTransientText(err.Error())
+	ok, _ := ClassifyTransient(err)
+	return ok
 }
 
 // TransientReason returns a stable, low-cardinality reason for retry logs.
 func TransientReason(err error) string {
 	if err == nil {
-		return "unknown_transient"
+		return transientmeta.ReasonUnknown
 	}
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "stream idle"), strings.Contains(msg, "stream timeout"), strings.Contains(msg, "stream disconnected"), strings.Contains(msg, "stream closed"):
-		return "stream_idle"
-	case strings.Contains(msg, "turn never reached turn/completed"):
-		return "codex_incomplete"
-	case strings.Contains(msg, "429"), strings.Contains(msg, "rate limit"):
-		return "http_429"
-	case strings.Contains(msg, "500"), strings.Contains(msg, "502"), strings.Contains(msg, "503"), strings.Contains(msg, "504"), strings.Contains(msg, "529"):
-		return "http_5xx"
-	case strings.Contains(msg, "connection reset"), strings.Contains(msg, "broken pipe"), strings.Contains(msg, "unexpected eof"), strings.Contains(msg, "websocket"):
-		return "connection_reset"
-	default:
-		return "unknown_transient"
-	}
+	_, reason := ClassifyTransient(err)
+	return reason
 }
 
-func matchesTransientText(msg string) bool {
-	s := strings.ToLower(msg)
-	for _, pattern := range []string{
-		"429",
-		"503",
-		"529",
-		"connection reset",
-		"broken pipe",
-		"i/o timeout",
-		"unexpected eof",
-	} {
-		if strings.Contains(s, pattern) {
-			return true
-		}
+// ClassifyTransient reports whether err is retryable and returns a stable
+// reason for logs without reparsing typed provider errors.
+func ClassifyTransient(err error) (bool, string) {
+	if err == nil {
+		return false, transientmeta.ReasonUnknown
 	}
-	return false
+
+	var claudeTransient *claude.TransientError
+	if errors.As(err, &claudeTransient) {
+		if reason, ok := transientmeta.ClassifyText(claudeTransient.Message); ok {
+			return true, reason
+		}
+		return true, transientmeta.ReasonUnknown
+	}
+
+	var codexTransient *codex.TransientError
+	if errors.As(err, &codexTransient) {
+		if codexTransient.Reason != "" {
+			return true, codexTransient.Reason
+		}
+		if reason, ok := transientmeta.ClassifyText(codexTransient.Message); ok {
+			return true, reason
+		}
+		if codexTransient.Cause != nil {
+			if reason, ok := transientmeta.ClassifyText(codexTransient.Cause.Error()); ok {
+				return true, reason
+			}
+		}
+		return true, transientmeta.ReasonUnknown
+	}
+
+	if reason, ok := transientmeta.ClassifyText(err.Error()); ok {
+		return true, reason
+	}
+	return false, transientmeta.ReasonUnknown
 }

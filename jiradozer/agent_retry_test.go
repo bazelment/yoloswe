@@ -57,16 +57,12 @@ func TestRunAgentRetryTransientThenSuccess(t *testing.T) {
 			nil,
 		},
 	}
-	restoreProvider := newProviderForModel
-	restoreBackoffs := retryBackoffs
-	newProviderForModel = func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil }
-	retryBackoffs = []time.Duration{0}
-	t.Cleanup(func() {
-		newProviderForModel = restoreProvider
-		retryBackoffs = restoreBackoffs
-	})
+	runner := agentRunner{
+		newProviderForModel: func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil },
+		retryBackoffs:       []time.Duration{0},
+	}
 
-	got, err := runAgent(context.Background(), "build", "prompt", StepConfig{
+	got, err := runner.runAgent(context.Background(), "build", "prompt", StepConfig{
 		Model:            "gpt-5.5",
 		TransientRetries: 2,
 	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -88,16 +84,12 @@ func TestRunAgentRetryTransientExhaustsBudget(t *testing.T) {
 		},
 		errs: []error{transient, transient, transient},
 	}
-	restoreProvider := newProviderForModel
-	restoreBackoffs := retryBackoffs
-	newProviderForModel = func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil }
-	retryBackoffs = []time.Duration{0}
-	t.Cleanup(func() {
-		newProviderForModel = restoreProvider
-		retryBackoffs = restoreBackoffs
-	})
+	runner := agentRunner{
+		newProviderForModel: func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil },
+		retryBackoffs:       []time.Duration{0},
+	}
 
-	got, err := runAgent(context.Background(), "build", "prompt", StepConfig{
+	got, err := runner.runAgent(context.Background(), "build", "prompt", StepConfig{
 		Model:            "gpt-5.5",
 		TransientRetries: 2,
 	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
