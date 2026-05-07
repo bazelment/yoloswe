@@ -67,25 +67,36 @@ def is_substantive(comment: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def load_envelope(path: Path) -> dict | None:
-    """Load a bramble envelope JSON (whole-file, not NDJSON)."""
+    """Load a bramble envelope JSON.
+
+    Envelopes are usually a whole-file JSON dict (the ``--envelope-file``
+    output). Some captures are NDJSON: zero or more progress lines followed
+    by exactly one terminal envelope identified by the ``schema_version``
+    top-level key. Scan from the end and accept only objects with
+    ``schema_version`` so we never return a progress event by mistake.
+    """
     if not path.exists():
         return None
     try:
         text = path.read_text(encoding="utf-8")
-        # Envelopes may be NDJSON (one JSON object per line) or pretty-printed.
-        # Try whole-file first, then line-by-line.
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            for line in text.splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        return json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-    except Exception:
+    except OSError:
+        return None
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and "schema_version" in obj:
+            return obj
+    except json.JSONDecodeError:
         pass
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "schema_version" in obj:
+            return obj
     return None
 
 
@@ -143,7 +154,7 @@ def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool,
         i_path = issue.get("file", "") or ""
         i_line = issue.get("line")
         i_file = _file_tail(i_path)
-        i_msg = _normalize_body(issue.get("message", "") + " " + issue.get("suggestion", ""))
+        i_msg = _normalize_body((issue.get("message") or "") + " " + (issue.get("suggestion") or ""))
 
         # File match
         file_match = c_file and i_file and c_file == i_file

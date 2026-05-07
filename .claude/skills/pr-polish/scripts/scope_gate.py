@@ -48,6 +48,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from _common import (  # noqa: E402
     CommandError,
     atomic_write_json,
+    changed_files,
     detect_base_branch,
     run,
 )
@@ -73,51 +74,20 @@ MIN_FILES_FOR_SWEEP = 3
 
 
 # ---------------------------------------------------------------------------
-# Diff discovery
-# ---------------------------------------------------------------------------
-
-
-def changed_files(base: str) -> list[str]:
-    """Return paths of files added/modified/renamed since the merge base.
-
-    Uses ``--diff-filter=AMR`` so deletions don't appear (a deleted file
-    can't have a co-located test we'd want to read). Mirrors the helper in
-    ``lint_gate.py`` — the two scripts iterate the same set of files but
-    answer different questions about each.
-
-    Returns an empty list on git failure (fork-of-fork, missing remote
-    base, shallow clone). The caller emits a no-op hints file in that
-    case rather than aborting the review.
-    """
-    res = run(
-        [
-            "git",
-            "diff",
-            "--name-only",
-            "--diff-filter=AMR",
-            f"origin/{base}...HEAD",
-        ],
-        check=False,
-    )
-    if res.returncode != 0:
-        return []
-    return [line for line in res.stdout.splitlines() if line.strip()]
-
-
-# ---------------------------------------------------------------------------
 # Per-language test-path enumeration
 # ---------------------------------------------------------------------------
 
 
 def _is_python_test(name: str) -> bool:
-    """Match Python's de-facto test conventions.
+    """Filename-only test detection.
 
     pytest discovers ``test_*.py`` and ``*_test.py``; both are common. We
-    accept either rather than picking sides. Files inside a directory
-    named ``tests`` are also considered tests regardless of name (the
-    setup-vs-test distinction is invisible from the path).
+    accept either rather than picking sides. Note this does NOT match
+    arbitrary ``.py`` files inside a directory named ``tests`` — directory
+    membership is handled by ``_walk_tests``, which accepts any ``.py``
+    under a ``tests`` tree (conftest.py, fixtures, helpers).
     """
-    return name.startswith("test_") and name.endswith(".py") or name.endswith("_test.py")
+    return (name.startswith("test_") and name.endswith(".py")) or name.endswith("_test.py")
 
 
 def _is_go_test(name: str) -> bool:
@@ -174,17 +144,18 @@ def _walk_tests(repo_root: Path, dir_path: Path,
         dirs[:] = [d for d in dirs if d not in (
             "node_modules", ".git", "vendor", "dist", "build", "__pycache__")]
         cur = Path(current)
+        in_py_tests_dir = lang == "py" and "tests" in cur.parts
         for fname in files:
-            if lang == "py" and _is_python_test(fname):
-                yield cur / fname
+            if lang == "py":
+                # Include any .py inside a tests/ tree (conftest.py, fixtures,
+                # shared helpers) so the reviewer sees the full picture, not
+                # only files whose name matches test_*.py / *_test.py.
+                if _is_python_test(fname) or (in_py_tests_dir and fname.endswith(".py")):
+                    yield cur / fname
             elif lang == "ts" and _is_ts_js_test(fname):
                 yield cur / fname
             elif "__tests__" in cur.parts and lang == "ts":
                 yield cur / fname
-        # For Python, a child ``tests`` dir is a strong signal — but
-        # os.walk already enters it via the unfiltered descent, so we
-        # don't need a special case: every test file inside will match
-        # _is_python_test.
 
 
 def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:

@@ -299,9 +299,9 @@ def format_monitor_command(
         shlex.quote(bramble_bin()),
         "code-review",
         "--backend",
-        backend,
+        shlex.quote(backend),
         "--model",
-        model,
+        shlex.quote(model),
         "--skip-test-execution",
         "--verbose",
         "--timeout",
@@ -582,9 +582,18 @@ def triage(
 
     Pure — used directly in tests.
 
-    Consensus = same `(file, line, topic)` flagged by >=2 distinct sources.
-    Spiral match = a new finding whose `(file, line, topic)` matches a
-    prior-round entry whose action was ``fixed``.
+    Two-level keying:
+    - ``_consensus_key`` = ``(file, line)`` — drives location-based consensus
+      so two reviewers wording the same finding differently still consolidate.
+      For sourceless paths (no file/line) we fall back to the topic-based
+      ``_triage_key`` so cross-cutting findings can still pair up.
+    - ``_triage_key`` = ``(file, line, topic)`` — drives the N+1 spiral guard
+      where exact recurrence (same wording at same site) matters.
+
+    Consensus = ``_consensus_key`` flagged by >=2 distinct sources (or
+    ``_triage_key`` matched for sourceless paths).
+    Spiral match = a new finding whose ``_triage_key`` matches a prior-round
+    entry whose action was ``fixed``.
 
     ``pr_comments`` are classify_comments rows — round 1 only typically.
     ``ci_failures`` are ci_failed_tests rows. Both are converted to findings

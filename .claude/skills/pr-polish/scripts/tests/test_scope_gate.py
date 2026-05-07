@@ -320,14 +320,18 @@ class TestChangedFiles(unittest.TestCase):
     def test_git_failure_returns_empty(self) -> None:
         # Shallow clone / missing remote / fork-of-fork — bramble's
         # malformed-file fallback handles the empty hints file we emit.
-        with patch.object(scope_gate, "run", _stub_run("", returncode=128)):
+        # ``changed_files`` lives in _common.py and calls _common.run, so
+        # patching scope_gate.run alone wouldn't intercept the subprocess.
+        import _common  # noqa: PLC0415
+        with patch.object(_common, "run", _stub_run("", returncode=128)):
             self.assertEqual(scope_gate.changed_files("main"), [])
 
     def test_strips_blank_lines(self) -> None:
         # ``git diff --name-only`` always trails a newline; the helper
         # must drop that and any blank lines between renames.
+        import _common  # noqa: PLC0415
         out = "a/foo.py\nb/bar.go\n\nc/baz.ts\n"
-        with patch.object(scope_gate, "run", _stub_run(out)):
+        with patch.object(_common, "run", _stub_run(out)):
             got = scope_gate.changed_files("main")
         self.assertEqual(got, ["a/foo.py", "b/bar.go", "c/baz.ts"])
 

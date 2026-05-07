@@ -41,39 +41,11 @@ if str(SCRIPT_DIR) not in sys.path:
 from _common import (  # noqa: E402
     CommandError,
     atomic_write_json,
+    changed_files,
     detect_base_branch,
     run,
     topic_of,
 )
-
-
-# ---------------------------------------------------------------------------
-# File-set discovery
-# ---------------------------------------------------------------------------
-
-
-def changed_files(base: str) -> list[str]:
-    """Return paths of files added/modified/renamed since the merge base.
-
-    Uses ``--diff-filter=AMR`` so deletions don't appear (linting a file that
-    no longer exists is wasted work and can confuse linter binaries that
-    require an on-disk target).
-    """
-    res = run(
-        [
-            "git",
-            "diff",
-            "--name-only",
-            "--diff-filter=AMR",
-            f"origin/{base}...HEAD",
-        ],
-        check=False,
-    )
-    if res.returncode != 0:
-        # base might not exist locally; fall back to merge-base of HEAD with
-        # whatever HEAD~ branched from. Conservative: empty list = no findings.
-        return []
-    return [line for line in res.stdout.splitlines() if line.strip()]
 
 
 def _bucket(path: str) -> str | None:
@@ -159,14 +131,18 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
         return []
     issues = report.get("Issues") or []
     out: list[dict[str, Any]] = []
-    # Conservative severity — linters that typically catch bugs map to medium,
-    # style/format linters to low. Anything we don't recognize defaults to low
-    # so noise doesn't cascade into must_fix.
-    high_linters = {"errcheck", "govet", "staticcheck", "gosec"}
+    # Severity tiers. Security linters surface as high so triage routes them
+    # to must_fix; bug-finders surface as medium; style/format linters as
+    # low. Unknown linters default to low so noise doesn't cascade into
+    # must_fix.
+    security_linters = {"gosec"}
+    bug_linters = {"errcheck", "govet", "staticcheck"}
     low_linters = {"lll", "gofmt", "goimports", "whitespace", "wsl"}
     for iss in issues:
         linter = (iss.get("FromLinter") or "").lower()
-        if linter in high_linters:
+        if linter in security_linters:
+            sev = "high"
+        elif linter in bug_linters:
             sev = "medium"
         elif linter in low_linters:
             sev = "low"

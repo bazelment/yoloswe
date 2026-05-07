@@ -186,6 +186,77 @@ class TestResumeContract(unittest.TestCase):
             )
         self.assertNotIn("--resume-session-id", cmd)
 
+    def test_round_two_resume_via_real_state_finalize_round(self) -> None:
+        # Belt-and-braces: rather than fabricate ``rounds[n].session_ids``
+        # by hand, drive a full append/finalize cycle via pr_ops with a
+        # real envelope on disk and assert format_monitor_command picks
+        # up the persisted id. A regression in _persist_round_findings
+        # (e.g. dropping session_id capture) would let the hand-built
+        # tests above keep passing while the live skill does cold starts.
+        import pr_ops  # noqa: PLC0415 — import locally so unit tests don't pay the cost.
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            envelope_dir = tmp_path / "r1"
+            envelope_dir.mkdir()
+            codex_env = envelope_dir / "codex-envelope.json"
+            codex_env.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "ok",
+                        "backend": "codex",
+                        "session_id": "real-codex-session-finalize-1",
+                        "resume_status": "ok",
+                        "review": {"verdict": "rejected", "issues": []},
+                    }
+                )
+            )
+
+            from unittest.mock import patch  # noqa: PLC0415
+
+            fake_home = tmp_path / "home"
+            fake_home.mkdir()
+            with (
+                patch.object(pr_ops, "repo_slug", return_value="kernel"),
+                patch("_common.repo_slug", return_value="kernel"),
+                patch.object(Path, "home", return_value=fake_home),
+            ):
+                pr_ops.state_append_round(9999, 1, "sha-before", verify_head=False)
+                pr_ops.state_finalize_round(
+                    9999,
+                    1,
+                    "sha-after",
+                    [],
+                    envelope_overrides={"codex": codex_env},
+                )
+                _, state_file = pr_ops.state_paths(9999)
+
+                # Sanity: session id landed in the state file.
+                state = json.loads(state_file.read_text())
+                self.assertEqual(
+                    state["rounds"][0]["session_ids"]["codex"],
+                    "real-codex-session-finalize-1",
+                )
+
+                # The contract under test: format_monitor_command threads
+                # the persisted id into round 2's launch string.
+                cmd = bramble_ops.format_monitor_command(
+                    "codex",
+                    "gpt-5.4-mini",
+                    2,
+                    "review",
+                    repo="kernel",
+                    pr=9999,
+                    work_dir=str(tmp_path),
+                    state_file=str(state_file),
+                )
+            self.assertTrue(
+                "real-codex-session-finalize-1" in cmd
+                and "--resume-session-id" in cmd,
+                f"persisted id not threaded into round 2 cmd:\n{cmd}",
+            )
+
 
 def _bramble_binary_with_resume() -> str | None:
     """Locate a bramble binary that actually understands --resume-session-id.

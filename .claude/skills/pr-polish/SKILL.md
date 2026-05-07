@@ -281,37 +281,44 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
   --state-dir "$STATE_DIR" 2>"$LOG_DIR/scope-gate-stderr.txt")
 ```
 
-Then arm Monitors in the same turn — always codex + cursor + lint, plus gemini when `--gemini` was passed. The bramble Monitors all pass `--scope-hints-file "$SCOPE_HINTS"`; the lint Monitor doesn't (lint_gate has its own diff walk). For round >= 2, pass `--resume-session-id <id>` per backend when `bramble_ops.py prior_session_id` can find a prior envelope/session id in the state file. If no prior id exists, or a backend envelope later reports `resume_status: "fallback"`, treat that backend as a best-effort cold-start reviewer for spiral-guard/convergence notes. If `Monitor` is unavailable, use the Codex `exec_command` fallback after the Monitor examples.
+Then arm Monitors in the same turn — always codex + cursor + lint, plus gemini when `--gemini` was passed. The bramble Monitors all pass `--scope-hints-file "$SCOPE_HINTS"`; the lint Monitor doesn't (lint_gate has its own diff walk).
+
+The bramble launch string itself comes from `bramble_ops.py format-monitor-command`. That helper is the single source of truth for round-specific `--goal` semantics (PR_SUMMARY on round 1, action-history string on round 2+) and resume plumbing (it appends `--resume-session-id <id>` when `prior_session_id()` can find one). Treating its stdout as the launch string — rather than hardcoding flags and grepping out only `--resume-session-id` — is what keeps the continuous-review prompt behavior actually wired through.
+
+If a backend envelope later reports `resume_status: "fallback"`, treat that backend as a best-effort cold-start reviewer for spiral-guard/convergence notes. If `Monitor` is unavailable, use the Codex `exec_command` fallback after the Monitor examples.
 
 ```
 ENVELOPE_CODEX="$LOG_DIR/codex-envelope.json"
 ENVELOPE_CURSOR="$LOG_DIR/cursor-envelope.json"
 ENVELOPE_LINT="$LOG_DIR/lint-envelope.json"
 
+# format-monitor-command emits the full `cd ... && bramble code-review ...`
+# string with the round-correct --goal and (when applicable) --resume-session-id
+# already substituted. Append --envelope-file and stderr redirection at the
+# call site since those are per-arm bookkeeping, not part of the canonical
+# launch string.
+CODEX_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command \
+  codex gpt-5.4-mini {ROUND} \
+  --goal "{PR_SUMMARY}" --pr $PR_NUMBER --work-dir "$(pwd)" \
+  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
+
 Monitor({
   description: "bramble codex r{ROUND}",
   timeout_ms: 720000,
   persistent: false,
-  command: "WORK_DIR=$(pwd) $BRAMBLE_BIN code-review \
-    --backend codex \
-    --goal \"{PR_SUMMARY}\" --skip-test-execution \
-    --scope-hints-file \"$SCOPE_HINTS\" \
-    $(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command codex gpt-5.4-mini {ROUND} --goal \"{PR_SUMMARY}\" --pr $PR_NUMBER --work-dir \"$(pwd)\" --state-file \"$STATE_FILE\" --scope-hints-file \"$SCOPE_HINTS\" | grep -o -- '--resume-session-id [^ ]*' || true) \
-    --verbose --timeout 10m --envelope-file \"$ENVELOPE_CODEX\" \
-    2>\"$LOG_DIR/codex-stderr.txt\""
+  command: "$CODEX_CMD --envelope-file \"$ENVELOPE_CODEX\" 2>\"$LOG_DIR/codex-stderr.txt\""
 })
+
+CURSOR_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command \
+  cursor composer-2 {ROUND} \
+  --goal "{PR_SUMMARY}" --pr $PR_NUMBER --work-dir "$(pwd)" \
+  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
 
 Monitor({
   description: "bramble cursor r{ROUND}",
   timeout_ms: 720000,
   persistent: false,
-  command: "WORK_DIR=$(pwd) $BRAMBLE_BIN code-review \
-    --backend cursor \
-    --goal \"{PR_SUMMARY}\" --skip-test-execution \
-    --scope-hints-file \"$SCOPE_HINTS\" \
-    $(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command cursor composer-2 {ROUND} --goal \"{PR_SUMMARY}\" --pr $PR_NUMBER --work-dir \"$(pwd)\" --state-file \"$STATE_FILE\" --scope-hints-file \"$SCOPE_HINTS\" | grep -o -- '--resume-session-id [^ ]*' || true) \
-    --verbose --timeout 10m --envelope-file \"$ENVELOPE_CURSOR\" \
-    2>\"$LOG_DIR/cursor-stderr.txt\""
+  command: "$CURSOR_CMD --envelope-file \"$ENVELOPE_CURSOR\" 2>\"$LOG_DIR/cursor-stderr.txt\""
 })
 
 // Always: lint gate runs deterministic linters on the diff. ~1-2s typical.
@@ -330,17 +337,16 @@ Monitor({
 
 // Only when --gemini flag was passed:
 ENVELOPE_GEMINI="$LOG_DIR/gemini-envelope.json"
+GEMINI_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command \
+  gemini gemini-3-flash-preview {ROUND} \
+  --goal "{PR_SUMMARY}" --pr $PR_NUMBER --work-dir "$(pwd)" \
+  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
+
 Monitor({
   description: "bramble gemini r{ROUND}",
   timeout_ms: 720000,
   persistent: false,
-  command: "WORK_DIR=$(pwd) $BRAMBLE_BIN code-review \
-    --backend gemini --model gemini-3-flash-preview \
-    --goal \"{PR_SUMMARY}\" --skip-test-execution \
-    --scope-hints-file \"$SCOPE_HINTS\" \
-    $(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command gemini gemini-3-flash-preview {ROUND} --goal \"{PR_SUMMARY}\" --pr $PR_NUMBER --work-dir \"$(pwd)\" --state-file \"$STATE_FILE\" --scope-hints-file \"$SCOPE_HINTS\" | grep -o -- '--resume-session-id [^ ]*' || true) \
-    --verbose --timeout 10m --envelope-file \"$ENVELOPE_GEMINI\" \
-    2>\"$LOG_DIR/gemini-stderr.txt\""
+  command: "$GEMINI_CMD --envelope-file \"$ENVELOPE_GEMINI\" 2>\"$LOG_DIR/gemini-stderr.txt\""
 })
 
 // Only when --review-recent-commits was passed AND ROUND >= 2.
@@ -378,13 +384,11 @@ Each Monitor runs independently; a crash in one does not affect the others. `tim
 
 ```bash
 set +e
-WORK_DIR=$(pwd) "$BRAMBLE_BIN" code-review \
-  --backend codex \
-  --goal "$PR_SUMMARY" --skip-test-execution \
-  --scope-hints-file "$SCOPE_HINTS" \
-  $(python3 "$SKILL_DIR/scripts/bramble_ops.py" format-monitor-command codex gpt-5.4-mini "$ROUND" --goal "$PR_SUMMARY" --pr "$PR_NUMBER" --work-dir "$(pwd)" --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS" | grep -o -- '--resume-session-id [^ ]*' || true) \
-  --verbose --timeout 10m --envelope-file "$ENVELOPE_CODEX" \
-  2>"$LOG_DIR/codex-stderr.txt"
+CODEX_CMD=$(python3 "$SKILL_DIR/scripts/bramble_ops.py" format-monitor-command \
+  codex gpt-5.4-mini "$ROUND" \
+  --goal "$PR_SUMMARY" --pr "$PR_NUMBER" --work-dir "$(pwd)" \
+  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
+eval "$CODEX_CMD --envelope-file \"$ENVELOPE_CODEX\" 2>\"$LOG_DIR/codex-stderr.txt\""
 CODE=$?
 printf '__EXIT_CODE=%s\n' "$CODE"
 exit 0

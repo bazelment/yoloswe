@@ -119,6 +119,11 @@ class TestRunGolangci(unittest.TestCase):
             {
                 "Issues": [
                     {
+                        "FromLinter": "gosec",
+                        "Text": "potential file inclusion via variable",
+                        "Pos": {"Filename": "a.go", "Line": 2},
+                    },
+                    {
                         "FromLinter": "errcheck",
                         "Text": "unchecked error",
                         "Pos": {"Filename": "a.go", "Line": 4},
@@ -139,8 +144,9 @@ class TestRunGolangci(unittest.TestCase):
         with patch.object(lint_gate, "_have", return_value=True):
             with patch.object(lint_gate, "run", side_effect=_stub_run(gci_out)):
                 got = lint_gate.run_golangci(["a.go"])
-        # errcheck → medium, gofmt → low, unknown → low (conservative default).
-        self.assertEqual([g["severity"] for g in got], ["medium", "low", "low"])
+        # gosec → high (security scanner), errcheck → medium (bug-finder),
+        # gofmt → low, unknown → low (conservative default).
+        self.assertEqual([g["severity"] for g in got], ["high", "medium", "low", "low"])
 
 
 class TestRunEslint(unittest.TestCase):

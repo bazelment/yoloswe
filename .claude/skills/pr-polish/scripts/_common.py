@@ -162,6 +162,27 @@ def detect_base_branch() -> str:
     return "main"
 
 
+def changed_files(base: str) -> list[str]:
+    """Repo-relative paths added/modified/renamed vs ``origin/<base>``.
+
+    Empty list on git failure (outside a worktree, missing remote, etc.) so
+    callers can degrade gracefully rather than abort.
+    """
+    res = run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=AMR",
+            f"origin/{base}...HEAD",
+        ],
+        check=False,
+    )
+    if res.returncode != 0:
+        return []
+    return [line for line in res.stdout.splitlines() if line.strip()]
+
+
 def atomic_write_json(path: Path, obj: object) -> None:
     """Write JSON atomically: temp file in same dir, then rename.
 
