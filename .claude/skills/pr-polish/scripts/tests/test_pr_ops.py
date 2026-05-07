@@ -1113,6 +1113,31 @@ class TestPersistRoundFindings(unittest.TestCase):
         rnd = state["rounds"][0]
         self.assertEqual(rnd.get("codex_findings"), [])
         self.assertNotIn("codex", rnd.get("session_ids") or {})
+        # Disk parity: archived envelope file unlinked even on the
+        # missing-override path.
+        self.assertFalse((self.state_dir / "reviews" / "r1-codex.json").exists())
+
+    def test_refinalize_clears_session_when_envelope_lacks_id(self) -> None:
+        # r38 finding: an envelope that exists on disk but parses to
+        # non-dict or a dict without session_id/resume_status used to
+        # leave the prior finalize's values in place. Same stale-resume
+        # class. After the fix, processing a backend always clears its
+        # session_ids/resume_status entry first, then re-applies only
+        # what the new envelope provides.
+        cx_with = self._write_envelope("codex", session_id="codex-old", resume_status="ok")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx_with}
+        )
+        # Second envelope: valid JSON dict, no session_id key.
+        cx_no = self.envelope_dir / "codex-no-sid.json"
+        cx_no.write_text(json.dumps({"backend": "codex", "review": {"issues": []}}))
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": cx_no}
+        )
+        rnd = state["rounds"][0]
+        self.assertNotIn("codex", rnd.get("session_ids") or {})
+        self.assertNotIn("codex", rnd.get("resume_status") or {})
 
     def test_state_finalize_round_cli_rejects_unknown_backend(self) -> None:
         # Round 27 fix: --envelope curor=/tmp/x typos used to be

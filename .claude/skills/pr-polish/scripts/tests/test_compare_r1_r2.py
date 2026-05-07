@@ -268,6 +268,19 @@ class TestIsSubstantive(unittest.TestCase):
             # filter on, so empty falls through).
             self.assertEqual(self.mod.is_substantive(c), True)
 
+    def test_comment_caught_in_envelope_null_body(self) -> None:
+        # r38 follow-up: r37 normalized body in is_substantive but
+        # comment_caught_in_envelope still passed body=None into
+        # _normalize_body → str.lower() → TypeError. Guard there too.
+        c = {"author": "cursor[bot]", "is_bot": True,
+             "source": "github-inline", "body": None,
+             "path": "a.py", "line": 10}
+        issues = [{"file": "a.py", "line": 10, "message": "x", "topic": "y"}]
+        caught, _ = self.mod.comment_caught_in_envelope(c, issues)
+        # Match on file+line — body match isn't required when path+line
+        # already line up. The point is no exception.
+        self.assertTrue(caught)
+
 
 class TestFormatResultsAllPass(unittest.TestCase):
     """``all_pass`` is the gate that ``main`` returns as exit code.

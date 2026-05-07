@@ -202,7 +202,10 @@ def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool,
     """
     c_path = comment.get("path") or ""
     c_line = comment.get("line")
-    c_body = _normalize_body(comment.get("body", ""))
+    # Normalize body to '' before any string ops — exports occasionally
+    # carry body=null and _normalize_body / snippet extraction would
+    # raise mid-batch otherwise. Mirrors the is_substantive fix.
+    c_body = _normalize_body(comment.get("body") or "")
     c_file = _file_tail(c_path)
 
     for issue in issues:
@@ -304,7 +307,7 @@ def compare_pr(
         if caught:
             caught_count += 1
 
-        body_snippet = c.get("body", "")[:120].replace("\n", " ")
+        body_snippet = (c.get("body") or "")[:120].replace("\n", " ")
         findings.append({
             "file": c.get("path", ""),
             "line": c.get("line"),

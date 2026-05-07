@@ -949,6 +949,17 @@ def _persist_round_findings(
         except Exception:  # noqa: BLE001 — malformed envelope shouldn't brick finalize
             obj = None
         entry[f"{backend}_findings"] = bramble_ops.parse_envelope(obj, source=backend)
+        # Clear any prior per-backend session_ids/resume_status before
+        # re-hydrating. Without this, an envelope that exists on disk
+        # but parses to non-dict / missing keys would let the previous
+        # finalize's values survive — same resume-stale-session class
+        # of bug as the omitted-backend cleanup above.
+        for bucket_key in ("session_ids", "resume_status"):
+            bucket = entry.get(bucket_key)
+            if isinstance(bucket, dict):
+                bucket.pop(backend, None)
+                if not bucket:
+                    entry.pop(bucket_key, None)
         if isinstance(obj, dict):
             if obj.get("session_id"):
                 entry.setdefault("session_ids", {})[backend] = obj.get("session_id")
