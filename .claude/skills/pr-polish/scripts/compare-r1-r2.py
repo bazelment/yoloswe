@@ -303,9 +303,14 @@ def compare_pr(
     # report zero regressions in the worst case (r2 envelope missing).
     r1_only = 0
     for issue in r1_issues:
+        # Concatenate message + suggestion as the body so the matcher
+        # has the same kw surface area as comment_caught_in_envelope's
+        # i_msg construction; some r1 findings only overlap with r2
+        # via suggestion text (the message bodies were rewritten).
+        body = ((issue.get("message") or "") + " " + (issue.get("suggestion") or "")).strip()
         caught, _ = comment_caught_in_envelope(
             {"path": issue.get("file"), "line": issue.get("line"),
-             "body": issue.get("message", ""), "is_bot": True},
+             "body": body, "is_bot": True},
             r2_issues
         )
         if not caught:
@@ -343,6 +348,14 @@ def format_results(results: list[dict], verbose: bool = False) -> tuple[str, boo
         r1_count = r["r1_issue_count"]
         r2_count = r["r2_issue_count"]
         r1_only = r["r1_only_count"]
+
+        # If both r2 envelopes failed to load the comparison is structurally
+        # invalid — recall metrics computed from no-data look like a clean
+        # pass but really mean "nothing was checked." Fail the whole run.
+        if not r.get("r2_cursor_loaded") and not r.get("r2_codex_loaded"):
+            verdicts.append(f"✗ **kernel-{pr}**: r2 envelopes unloaded — comparison invalid")
+            all_pass = False
+            continue
 
         if pr == "2755":
             regressions = r1_only

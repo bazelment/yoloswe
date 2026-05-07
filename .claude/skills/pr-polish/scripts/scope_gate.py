@@ -46,7 +46,6 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _common import (  # noqa: E402
-    CommandError,
     GO_EXTENSIONS,
     JS_TS_EXTENSIONS,
     PY_EXTENSIONS,
@@ -219,30 +218,37 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
         # with tests at ``pkg/tests/`` or ``pkg/`` also need coverage.
         # Bounded so we don't scan the whole repo tree on a deeply
         # nested file.
-        MAX_ANCESTORS = 3
-        ancestor = abs_path.parent
-        for _ in range(MAX_ANCESTORS):
-            # Stop climbing if we've already reached repo_root — the
-            # canonical repo_root/tests was added (or skipped) before
-            # the loop. Climbing above repo_root would scan every
-            # package in the tree and pull unrelated tests into scope.
-            if ancestor == repo_root:
-                break
-            ancestor = ancestor.parent
-            if ancestor.parent == ancestor:
-                # Filesystem root; defensive belt-and-braces.
-                break
-            at_root = ancestor == repo_root
-            # Bare ancestor is needed for ``pkg/foo_test.py``-style
-            # layouts (test sits next to the package, not in a
-            # tests/ subdir) — but never at repo_root, where it
-            # would scan every package.
-            if not at_root:
-                candidate_dirs.append(ancestor)
-            if lang == "py":
-                candidate_dirs.append(ancestor / "tests")
-            elif lang == "ts":
-                candidate_dirs.append(ancestor / "__tests__")
+        # Go's testing convention is strictly per-package: sibling
+        # _test.go files live next to their source. Climbing ancestors
+        # would pull tests from other packages, violating the contract
+        # documented in _walk_tests. Skip the ancestor walk entirely.
+        if lang == "go":
+            pass
+        else:
+            MAX_ANCESTORS = 3
+            ancestor = abs_path.parent
+            for _ in range(MAX_ANCESTORS):
+                # Stop climbing if we've already reached repo_root — the
+                # canonical repo_root/tests was added (or skipped) before
+                # the loop. Climbing above repo_root would scan every
+                # package in the tree and pull unrelated tests into scope.
+                if ancestor == repo_root:
+                    break
+                ancestor = ancestor.parent
+                if ancestor.parent == ancestor:
+                    # Filesystem root; defensive belt-and-braces.
+                    break
+                at_root = ancestor == repo_root
+                # Bare ancestor is needed for ``pkg/foo_test.py``-style
+                # layouts (test sits next to the package, not in a
+                # tests/ subdir) — but never at repo_root, where it
+                # would scan every package.
+                if not at_root:
+                    candidate_dirs.append(ancestor)
+                if lang == "py":
+                    candidate_dirs.append(ancestor / "tests")
+                elif lang == "ts":
+                    candidate_dirs.append(ancestor / "__tests__")
 
         for d in candidate_dirs:
             key = (d, lang)
@@ -498,11 +504,10 @@ def main(argv: list[str] | None = None) -> int:
     # mismatches would otherwise silently break those checks.
     repo_root = Path(res.stdout.strip()).resolve()
 
-    try:
-        files = changed_files(base)
-    except CommandError as e:
-        print(f"scope_gate: changed_files failed: {e}", file=sys.stderr)
-        files = []
+    # changed_files uses run(check=False) and returns [] on any git
+    # failure — never raises — so no CommandError to catch here.
+    # Mirrors the lint_gate.py cleanup from r12.
+    files = changed_files(base)
 
     if args.cross_service_roots:
         roots = parse_cross_service_roots(args.cross_service_roots)

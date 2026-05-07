@@ -281,6 +281,24 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("cjs/bar.test.cjs", got)
         self.assertIn("cjs/bar.spec.cjs", got)
 
+    def test_go_strictly_per_package_no_ancestor_walk(self) -> None:
+        # Round 23 fix: Go's testing convention is strictly per-package.
+        # The ancestor walk previously included Go too, so a change in
+        # pkg/sub/foo.go would pull _test.go files from pkg/, violating
+        # _walk_tests's documented "sibling only for Go" contract.
+        root = self._make_tree(
+            [
+                "pkg/sub/foo.go",
+                "pkg/sub/foo_test.go",  # canonical sibling — kept
+                "pkg/foo_test.go",  # ancestor leak — must NOT appear
+                "other/_test.go",  # unrelated package — must NOT appear
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["pkg/sub/foo.go"])
+        self.assertIn("pkg/sub/foo_test.go", got)
+        self.assertNotIn("pkg/foo_test.go", got)
+        self.assertNotIn("other/_test.go", got)
+
     def test_root_level_file_finds_sibling_test_at_root(self) -> None:
         # Round 17 fix: repo-root containment guard from r16 had also
         # disabled finding sibling foo_test.py at the repo root. The
