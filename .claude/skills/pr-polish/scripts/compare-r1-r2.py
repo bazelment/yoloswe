@@ -145,10 +145,17 @@ def _kw_overlap(a: str, b: str, threshold: int = 3) -> bool:
 def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool, str]:
     """Check whether any issue in the envelope matches the bot comment.
 
+    File matching prefers full repo-relative path equality when both
+    sides have a path (avoids basename collision in monorepos like
+    pkg/foo.py vs other/foo.py). Falls back to basename comparison
+    when one side is missing a path.
+
     Match strategy (any of):
-    1. Same file basename + line within ±10
-    2. Same file basename + significant keyword overlap in body/message
-    3. No file on comment + significant keyword overlap (cross-file findings)
+    1. File-match (path-or-basename) + line within ±10
+    2. File-match (path-or-basename) + significant keyword overlap
+       in body/message
+    3. No file on comment + significant keyword overlap (cross-file
+       findings)
     """
     c_path = comment.get("path") or ""
     c_line = comment.get("line")
@@ -192,7 +199,12 @@ def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool,
         conf_str = f", conf={conf:.2f}" if conf < 1.0 else ""
         if file_match and (line_match or kw_match):
             return True, f"{i_file}:{i_line} ({issue.get('severity')}{conf_str})"
-        if not c_file and kw_match:
+        # Cross-file kw match: when *either* side lacks a file path,
+        # rely on keyword overlap alone. Without the symmetric branch
+        # for issue-with-no-file vs comment-with-file, a sourceless
+        # envelope finding (cross-cutting reviewer note) could never
+        # match a path-bearing bot comment.
+        if (not c_file or not i_file) and kw_match:
             return True, f"{i_file}:{i_line} ({issue.get('severity')}{conf_str})"
 
     return False, ""

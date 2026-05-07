@@ -130,7 +130,27 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
         return []
     pkgs = sorted({str(Path(p).parent) or "." for p in paths})
     res = run(["golangci-lint", "run", "--out-format=json", *pkgs], check=False)
+    stderr = (res.stderr or "").strip()
+    # Mirrors the run_eslint contract: blank stdout with rc != 0 or
+    # stderr is a tooling failure, not a clean run. Surface it as a
+    # synthetic finding so the round can't proceed thinking golangci
+    # passed cleanly when it never inspected the diff. golangci's
+    # rc=1 means "issues found" (with JSON on stdout) and rc=0 means
+    # "clean"; rc>1 (or rc=1 with no JSON) is genuine breakage.
     if not res.stdout.strip():
+        if res.returncode != 0 or stderr:
+            return [
+                {
+                    "file": None,
+                    "line": None,
+                    "severity": "medium",
+                    "topic": topic_of("golangci tooling failure"),
+                    "message": (
+                        f"[golangci-lint] tooling failure (exit {res.returncode}): "
+                        f"{stderr[:300] if stderr else 'no stderr'}"
+                    ),
+                }
+            ]
         return []
     try:
         report = json.loads(res.stdout)
@@ -182,11 +202,12 @@ def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
         return []
     res = run(["eslint", "--format=json", *paths], check=False)
     stderr = (res.stderr or "").strip()
-    # Any non-zero exit OR non-empty stderr OR blank-stdout-with-rc=0 is
-    # ambiguous-or-broken: emit a synthetic tooling-failure finding so
-    # the round can't proceed thinking eslint passed cleanly when it
-    # didn't actually inspect the diff. A genuinely clean run is
-    # rc=0 with stdout="[]"; that hits the JSON-parse path below.
+    # Blank stdout with non-zero rc OR non-empty stderr is a tooling
+    # failure: emit a synthetic finding so the round can't proceed
+    # thinking eslint passed cleanly when it didn't actually inspect
+    # the diff. Blank stdout with rc=0 and blank stderr falls through
+    # as a (rare-but-valid) clean run; the canonical clean shape is
+    # stdout="[]" which hits the JSON-parse path below.
     if not res.stdout.strip():
         if res.returncode != 0 or stderr:
             return [

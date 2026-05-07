@@ -118,6 +118,28 @@ class TestCommentCaughtInEnvelope(unittest.TestCase):
         caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
         self.assertFalse(caught)
 
+    def test_same_basename_different_paths_does_not_match(self) -> None:
+        # Round 13 fix: monorepos with duplicate filenames
+        # (pkg/foo.py vs other/foo.py) used to falsely match because
+        # the matcher compared basenames only. Now requires full
+        # path equality when both sides have a path.
+        comment = {"path": "pkg/foo.py", "line": 5, "body": "null check missing"}
+        issues = [{"file": "other/foo.py", "line": 5, "message": "null check missing"}]
+        caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertFalse(caught)
+
+    def test_kw_overlap_when_issue_has_no_file(self) -> None:
+        # Round-14 symmetric branch: a reviewer's cross-file finding
+        # (no file on the envelope issue) should still match a path-
+        # bearing comment via keyword overlap. Before the fix only
+        # the comment-with-no-file direction was covered.
+        comment = {"path": "pkg/foo.py", "line": 5,
+                   "body": "session resume threading missing for cursor backend"}
+        issues = [{"file": "", "line": None,
+                   "message": "session resume threading missing for cursor backend wiring"}]
+        caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertTrue(caught)
+
     def test_confidence_none_does_not_crash(self) -> None:
         # Pre-fix bug: issue.get("confidence", 1.0) returns None when the
         # key is present-but-null, then `None < 1.0` raised TypeError and
