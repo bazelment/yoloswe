@@ -109,10 +109,11 @@ def envelope_issues(env: dict | None) -> list[dict]:
     if env is None:
         return []
     # Envelope may nest issues under 'review.issues' or at top level.
-    review = env.get("review", {})
-    if review and "issues" in review:
-        return review["issues"]
-    return env.get("issues", [])
+    # Coerce null/non-list values to [] so a partial envelope with
+    # ``review.issues: null`` doesn't crash compare_pr's list ops.
+    review = env.get("review") or {}
+    raw = review.get("issues") if "issues" in review else env.get("issues")
+    return raw if isinstance(raw, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +381,7 @@ def narrative(results: list[dict]) -> str:
 
         for f in r["findings"]:
             check = "✓" if f["caught_r2"] else "✗"
-            fpath = os.path.basename(f["file"]) if f["file"] else "(no file)"
+            fpath = os.path.basename(f["file"]) if f["file"] else "(issue-level)"
             if f["caught_r2"]:
                 matched = f["match_r2"]
                 was_r1 = " (also in r1)" if f["caught_r1"] else " (new in r2 — wider scope helped)"

@@ -82,6 +82,32 @@ class TestLoadEnvelope(unittest.TestCase):
         self.assertIsNone(self.mod.load_envelope(path))
 
 
+class TestEnvelopeIssues(unittest.TestCase):
+    """envelope_issues tolerates partial/null envelopes without crashing."""
+
+    def setUp(self) -> None:
+        self.mod = _load_module()
+
+    def test_none_envelope_returns_empty(self) -> None:
+        self.assertEqual(self.mod.envelope_issues(None), [])
+
+    def test_review_issues_null_returns_empty(self) -> None:
+        # Pre-fix: review["issues"] = null was returned verbatim and
+        # would crash compare_pr when concatenated with a list.
+        self.assertEqual(
+            self.mod.envelope_issues({"review": {"issues": None}}),
+            [],
+        )
+
+    def test_review_missing_falls_through_to_top_level_issues(self) -> None:
+        env = {"issues": [{"file": "a.py", "line": 1}]}
+        self.assertEqual(self.mod.envelope_issues(env), [{"file": "a.py", "line": 1}])
+
+    def test_canonical_review_issues_returned(self) -> None:
+        env = {"review": {"issues": [{"file": "a.py"}]}}
+        self.assertEqual(self.mod.envelope_issues(env), [{"file": "a.py"}])
+
+
 class TestCommentCaughtInEnvelope(unittest.TestCase):
     """Direct coverage for the matcher heuristic. Without it, regressions in
     file/line/keyword matching would only surface via the higher-level

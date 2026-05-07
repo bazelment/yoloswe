@@ -269,6 +269,24 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("cjs/bar.test.cjs", got)
         self.assertIn("cjs/bar.spec.cjs", got)
 
+    def test_changed_file_at_repo_root_does_not_scan_whole_tree(self) -> None:
+        # Round 16 fix: when the changed file lives at repo_root
+        # itself (foo.py with no package wrapper), abs_path.parent IS
+        # repo_root. The walker must NOT recurse from repo_root or
+        # it would pull unrelated package tests into scope.
+        root = self._make_tree(
+            [
+                "foo.py",  # changed file at repo root
+                "tests/test_foo.py",  # canonical sibling
+                "unrelated/tests/test_x.py",  # MUST NOT leak in
+                "another/tests/test_y.py",  # MUST NOT leak in
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["foo.py"])
+        self.assertIn("tests/test_foo.py", got)
+        self.assertNotIn("unrelated/tests/test_x.py", got)
+        self.assertNotIn("another/tests/test_y.py", got)
+
     def test_finds_tests_at_repo_root(self) -> None:
         # Common layout: src/foo.py with tests/test_foo.py at the repo
         # root. The ancestor walker must include repo_root/tests, not

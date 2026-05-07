@@ -112,6 +112,20 @@ class TestRunRuff(unittest.TestCase):
         self.assertEqual(got[0]["severity"], "medium")
         self.assertIn("parser crashed", got[0]["message"])
 
+    def test_blank_stdout_nonzero_rc_blank_stderr_still_emits(self) -> None:
+        # Parity with run_eslint: a hard crash with no output on
+        # either channel is still a real tooling failure, not a clean run.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run("", returncode=2, stderr=""),
+            ):
+                got = lint_gate.run_ruff(["a.py"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("[ruff] tooling failure", got[0]["message"])
+        self.assertIn("no stderr", got[0]["message"])
+
 
 class TestRunGolangci(unittest.TestCase):
     def test_passes_packages_not_files(self) -> None:

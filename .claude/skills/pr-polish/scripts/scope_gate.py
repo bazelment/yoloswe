@@ -197,8 +197,14 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
             continue
 
         abs_path = (repo_root / rel).resolve()
-        candidate_dirs: list[Path] = [abs_path.parent]
-        # Sibling tests/__tests__ at the same level.
+        # Sibling tests/__tests__ at the same level. Skip the bare
+        # parent when it IS repo_root — recursing from repo_root
+        # would scan every package in the tree and pull unrelated
+        # tests into scope. (Same reason the ancestor walker below
+        # gates the `at_root` case.)
+        candidate_dirs: list[Path] = []
+        if abs_path.parent != repo_root:
+            candidate_dirs.append(abs_path.parent)
         if lang == "py":
             candidate_dirs.append(abs_path.parent / "tests")
         elif lang == "ts":
@@ -212,29 +218,28 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
         # nested file.
         MAX_ANCESTORS = 3
         ancestor = abs_path.parent
-        at_root = False
         for _ in range(MAX_ANCESTORS):
+            # Stop climbing if we've already reached repo_root — the
+            # canonical repo_root/tests was added (or skipped) before
+            # the loop. Climbing above repo_root would scan every
+            # package in the tree and pull unrelated tests into scope.
+            if ancestor == repo_root:
+                break
             ancestor = ancestor.parent
             if ancestor.parent == ancestor:
-                # Filesystem root; stop climbing.
+                # Filesystem root; defensive belt-and-braces.
                 break
             at_root = ancestor == repo_root
-            # Visit only ancestor/tests and ancestor/__tests__ (not the
-            # bare ancestor, which would let _walk_tests descend through
-            # unrelated packages and pull in their tests). The bare
-            # ancestor is needed for layouts like ``pkg/foo_test.py``
-            # where the test sits next to the package, not in a tests/
-            # subdir — but only at non-root levels; recursing from
-            # repo_root would scan every package.
+            # Bare ancestor is needed for ``pkg/foo_test.py``-style
+            # layouts (test sits next to the package, not in a
+            # tests/ subdir) — but never at repo_root, where it
+            # would scan every package.
             if not at_root:
                 candidate_dirs.append(ancestor)
             if lang == "py":
                 candidate_dirs.append(ancestor / "tests")
             elif lang == "ts":
                 candidate_dirs.append(ancestor / "__tests__")
-            if at_root:
-                # repo_root/tests considered; don't climb above the repo.
-                break
 
         for d in candidate_dirs:
             key = (d, lang)
@@ -365,7 +370,13 @@ def parse_cross_service_roots(spec: str) -> tuple[tuple[str, int], ...]:
             continue
         if ":" in entry:
             prefix, depth_s = entry.rsplit(":", 1)
-            depth = int(depth_s)
+            try:
+                depth = int(depth_s)
+            except ValueError:
+                # Malformed "prefix:abc" — fall back to default depth
+                # rather than crash the whole tool. CLI flag misuse
+                # shouldn't take down the review.
+                prefix, depth = entry, 2
         else:
             prefix, depth = entry, 2
         if not prefix.endswith("/"):
