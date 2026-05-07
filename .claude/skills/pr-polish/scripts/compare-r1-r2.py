@@ -68,16 +68,33 @@ def is_substantive(comment: dict) -> bool:
         return False
     body = comment.get("body", "")
     # Review-summary boilerplate: matches on github-issue / github-review
-    # comments whose body is just "Cursor Bugbot found N issues" (no
-    # path/line). The runtime fetcher already strips these but a stale
-    # historical fixture might include them.
+    # comments whose body is JUST "Cursor Bugbot found N issues" with no
+    # actual finding content. We look at the summary regex AND the body's
+    # information density: a comment that opens with the summary phrase
+    # but then lists concrete paths/findings is substantive, not boilerplate.
     source = comment.get("source", "")
-    if source in ("github-issue", "github-review") and _REVIEW_SUMMARY_RE.search(body):
+    if source in ("github-issue", "github-review") and _is_review_summary_only(body):
         return False
     for pat in NOISE_BODY_PATTERNS:
         if pat.search(body):
             return False
     return comment.get("is_bot", False)
+
+
+def _is_review_summary_only(body: str) -> bool:
+    """Return True when ``body`` is essentially just summary boilerplate.
+
+    Strip HTML comments + tags + whitespace, then accept only when the
+    cleaned body is short (<400 chars, matching the runtime
+    ``_is_bot_review_summary`` threshold) AND matches the summary regex.
+    A long body that opens with "found 3 potential issues" then lists
+    concrete paths is substantive — keep it.
+    """
+    if not _REVIEW_SUMMARY_RE.search(body):
+        return False
+    stripped = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    stripped = re.sub(r"<[^>]+>", "", stripped)
+    return len(stripped.strip()) < 400
 
 
 # ---------------------------------------------------------------------------
@@ -359,12 +376,16 @@ def format_results(results: list[dict], verbose: bool = False) -> tuple[str, boo
 
         if pr == "2755":
             regressions = r1_only
-            status = "✓" if regressions == 0 else "✗"
-            line = (f"**kernel-{pr}**: regressions={regressions}  "
+            # 2755 has the same caught/total bar as the other PRs —
+            # the regression count is additive context, not a substitute
+            # for substantive-comment recall. Both must pass.
+            recall_failed = total > 0 and caught != total
+            status = "✓" if regressions == 0 and not recall_failed else "✗"
+            line = (f"**kernel-{pr}**: regressions={regressions} caught={caught}/{total} "
                     f"findings r1={r1_count} r2={r2_count} "
                     f"({'+'  if r2_count >= r1_count else ''}{r2_count - r1_count})")
             verdicts.append(f"{status} {line}")
-            if regressions > 0:
+            if regressions > 0 or recall_failed:
                 all_pass = False
         else:
             # Acceptance bar: every substantive comment must be caught.

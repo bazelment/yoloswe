@@ -233,6 +233,27 @@ class TestIsSubstantive(unittest.TestCase):
         c = {"author": "alice", "is_bot": False, "source": "github-inline", "body": "lgtm"}
         self.assertFalse(self.mod.is_substantive(c))
 
+    def test_summary_phrase_with_concrete_finding_kept(self) -> None:
+        # Round 24 fix: a long bot comment that opens with the summary
+        # phrase but then lists concrete findings is substantive, not
+        # boilerplate. The naive "regex matches anywhere" check
+        # excluded it.
+        body = (
+            "Cursor Bugbot has reviewed your changes and found 3 potential issues.\n\n"
+            "1. **services/python/agent/handlers/provision.py:142** — missing error "
+            "handling for the BUILDER_LITE branch; if the builder is unset, the "
+            "request will silently 500 with no telemetry. Suggested fix: wrap the "
+            "client construction in a try/except and emit a structured log line.\n"
+            "2. **bramble/cmd/codereview/codereview.go:88** — race in deferred "
+            "envelope guard; the goroutine reading the channel may fire after "
+            "the deferred close runs.\n"
+            "3. **scripts/lint.sh:23** — unused arg on the bazel invocation; "
+            "the --keep_going flag was removed in bazel 7 and now triggers a "
+            "deprecation warning that fails strict-warnings-as-errors CI runs.\n"
+        )
+        c = {"author": "cursor[bot]", "is_bot": True, "source": "github-issue", "body": body}
+        self.assertTrue(self.mod.is_substantive(c))
+
 
 class TestFormatResultsAllPass(unittest.TestCase):
     """``all_pass`` is the gate that ``main`` returns as exit code.
@@ -269,6 +290,29 @@ class TestFormatResultsAllPass(unittest.TestCase):
         r = self._result(pr="2755", r1_only_count=2, r1_issue_count=5, r2_issue_count=3)
         _, all_pass = self.mod.format_results([r])
         self.assertFalse(all_pass)
+
+    def test_2755_partial_recall_fails(self) -> None:
+        # Round 24 fix: 2755 verdict path used to consult only
+        # r1_only_count, ignoring caught/total. A run with zero
+        # regressions but partial substantive-comment recall would
+        # still pass. Now both must be clean.
+        r = self._result(
+            pr="2755", r1_only_count=0, r1_issue_count=3, r2_issue_count=3,
+            total_substantive=5, caught=2,
+        )
+        _, all_pass = self.mod.format_results([r])
+        self.assertFalse(all_pass)
+
+    def test_unloaded_r2_envelopes_force_failure(self) -> None:
+        # Round 23 fix: if both r2 envelopes failed to load, the
+        # comparison is structurally invalid — recall metrics from
+        # no-data look clean. Forced failure with explicit verdict.
+        r = self._result(
+            pr="2978", r2_cursor_loaded=False, r2_codex_loaded=False,
+        )
+        out, all_pass = self.mod.format_results([r])
+        self.assertFalse(all_pass)
+        self.assertIn("envelopes unloaded", out)
 
     def test_partial_recall_fails(self) -> None:
         # Pre-fix bug: caught=1/3 used to read as a pass. Lock in full-recall.
