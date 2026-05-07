@@ -341,6 +341,8 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 				content = "turn failed"
 			}
 			p.hadProviderErrors = true
+		} else {
+			p.hadProviderErrors = false
 		}
 		p.lines = append(p.lines, session.OutputLine{
 			Timestamp:  ts,

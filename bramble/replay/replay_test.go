@@ -313,6 +313,27 @@ func TestCodexParser_TurnCompletedErrorRendersFailure(t *testing.T) {
 	assert.Equal(t, session.StatusFailed, p.deriveStatus())
 }
 
+func TestCodexParser_SuccessfulRetryClearsTurnFailureStatus(t *testing.T) {
+	p := newCodexReplayParser()
+	ts := time.Time{}
+
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:     codex.MappedEventTurnCompleted,
+		ThreadID: "t1",
+		TurnID:   "1",
+		Success:  false,
+		Error:    errors.New("connection reset by peer"),
+	}, ts)
+	p.handleMappedEvent(codex.MappedEvent{
+		Kind:     codex.MappedEventTurnCompleted,
+		ThreadID: "t1",
+		TurnID:   "2",
+		Success:  true,
+	}, ts)
+
+	assert.Equal(t, session.StatusCompleted, p.deriveStatus())
+}
+
 func TestCompactLines_MergesTurnAndTokenLines(t *testing.T) {
 	lines := []session.OutputLine{
 		{Type: session.OutputTypeText, Content: "hello"},
