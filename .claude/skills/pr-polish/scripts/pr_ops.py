@@ -40,7 +40,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from datetime import UTC
 
 from _common import (  # noqa: E402 — sys.path tweak above
-    SEVERITY_ORDER,
     SOURCE_INLINE,
     SOURCE_ISSUE,
     SOURCE_REVIEW,
@@ -85,9 +84,10 @@ def identify_pr(pr_number: int | None = None) -> dict[str, Any]:
         pr_view_args.append(str(pr_number))
     pr_view_args += [
         "--json",
-        "number,title,url,baseRefName,headRefName",
+        "number,title,url,baseRefName,headRefName,headRefOid",
         "--jq",
-        "{pr_number: .number, title: .title, url: .url, base: .baseRefName, head: .headRefName}",
+        "{pr_number: .number, title: .title, url: .url, base: .baseRefName, "
+        "head: .headRefName, head_sha: .headRefOid}",
     ]
     pr_res = run(pr_view_args, check=False)
     pr_data: dict[str, Any] | None = None
@@ -122,6 +122,7 @@ def identify_pr(pr_number: int | None = None) -> dict[str, Any]:
         "url": None,
         "base": base,
         "head": branch,
+        "head_sha": None,
         "branch": branch,
         "owner": owner,
         "repo": repo,
@@ -133,36 +134,59 @@ def identify_pr(pr_number: int | None = None) -> dict[str, Any]:
 
 def _owner_repo() -> tuple[str, str, str]:
     """Return ``(owner, repo, 'owner/repo')`` via ``gh repo view``."""
-    res = run(["gh", "repo", "view", "--json", "owner,name"], check=True)
-    obj = json.loads(res.stdout) if res.stdout.strip() else {}
-    owner = (obj.get("owner") or {}).get("login", "")
-    repo = obj.get("name", "")
-    return owner, repo, f"{owner}/{repo}"
+    res = run(
+        ["gh", "repo", "view", "--json", "owner,name", "--jq", '"\\(.owner.login)/\\(.name)"'],
+        check=True,
+    )
+    owner_repo = res.stdout.strip().strip('"')
+    owner, repo = owner_repo.split("/", 1)
+    return owner, repo, owner_repo
 
 
 # ---------------------------------------------------------------------------
 # Comment fetching + classification
 # ---------------------------------------------------------------------------
 
-def _gh_paginated_list(path: str) -> list[dict[str, Any]]:
-    """``gh api --paginate <path>`` returning a list (or [] when empty)."""
-    out = run(["gh", "api", "--paginate", path], check=True).stdout.strip()
-    return json.loads(out) if out else []
-
-
 def _fetch_inline_comments(owner_repo: str, pr: int) -> list[dict[str, Any]]:
     """Raw inline review comments (may include replies; caller filters)."""
-    return _gh_paginated_list(f"repos/{owner_repo}/pulls/{pr}/comments")
+    out = run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{owner_repo}/pulls/{pr}/comments",
+        ],
+        check=True,
+    ).stdout.strip()
+    return json.loads(out) if out else []
 
 
 def _fetch_issue_comments(owner_repo: str, pr: int) -> list[dict[str, Any]]:
     """Top-level PR comments (tracked under the issues endpoint)."""
-    return _gh_paginated_list(f"repos/{owner_repo}/issues/{pr}/comments")
+    out = run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{owner_repo}/issues/{pr}/comments",
+        ],
+        check=True,
+    ).stdout.strip()
+    return json.loads(out) if out else []
 
 
 def _fetch_reviews(owner_repo: str, pr: int) -> list[dict[str, Any]]:
     """Review-level bodies (excluding APPROVED/DISMISSED and empty bodies)."""
-    return _gh_paginated_list(f"repos/{owner_repo}/pulls/{pr}/reviews")
+    out = run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{owner_repo}/pulls/{pr}/reviews",
+        ],
+        check=True,
+    ).stdout.strip()
+    return json.loads(out) if out else []
 
 
 def classify_comments(
@@ -220,6 +244,7 @@ def classify_comments(
                 "body": body,
                 "reply_count": reply_counts.get(cid, 0),
                 "created_at": c.get("created_at"),
+                "original_commit_id": c.get("original_commit_id"),
             }
         )
 
@@ -336,16 +361,28 @@ _NOISE_SAMPLE_CAP = 5
 def fetch_comments(pr: dict[str, Any]) -> dict[str, Any]:
     """Fetch and classify PR comments.
 
-    Returns the wrapped shape ``{"comments": [...], "noise_filtered": int,
-    "noise_samples": [...]}``. ``bramble_ops.triage --pr-comments`` accepts
-    either this wrapped shape or the legacy bare list for backward compat.
+    Returns the wrapped shape ``{"comments": [...], "head_sha": str|None,
+    "noise_filtered": int, "noise_samples": [...]}``. Each kept inline
+    comment carries ``original_commit_id`` and an ``is_stale_prior_commit``
+    flag that's true when the comment was anchored to a SHA that has since
+    been superseded by ``pr["head_sha"]`` — triage routes those into a
+    dedicated bucket so cursor[bot] comments on amended commits don't get
+    re-fixed. ``bramble_ops.triage --pr-comments`` accepts either this
+    wrapped shape or the legacy bare list for backward compat.
     """
     inline = _fetch_inline_comments(pr["owner_repo"], pr["pr_number"])
     issues = _fetch_issue_comments(pr["owner_repo"], pr["pr_number"])
     reviews = _fetch_reviews(pr["owner_repo"], pr["pr_number"])
     kept, noise = classify_comments(inline, issues, reviews)
+    head_sha = pr.get("head_sha")
+    for c in kept:
+        ocid = c.get("original_commit_id")
+        c["is_stale_prior_commit"] = bool(
+            head_sha and ocid and ocid != head_sha
+        )
     return {
         "comments": kept,
+        "head_sha": head_sha,
         "noise_filtered": len(noise),
         "noise_samples": noise[:_NOISE_SAMPLE_CAP],
     }
@@ -466,13 +503,7 @@ def ci_failed_tests(pr_number: int) -> list[dict[str, Any]]:
     real assertion failure.
     """
     pr = identify_pr(pr_number)
-    return _ci_failed_tests_for(pr)
-
-
-def _ci_failed_tests_for(pr: dict[str, Any]) -> list[dict[str, Any]]:
-    """Same as ``ci_failed_tests`` but uses an already-resolved PR dict."""
     owner_repo = pr["owner_repo"]
-    pr_number = pr["pr_number"]
     out: list[dict[str, Any]] = []
     for c in _failing_checks(pr_number):
         job_id = _extract_job_id_from_link(c.get("link") or "")
@@ -492,12 +523,7 @@ def _ci_failed_tests_for(pr: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _latest_base_run(owner_repo: str, base: str) -> tuple[int | None, str]:
-    """Return ``(run_id, head_sha)`` for the latest completed push run on ``base``.
-
-    Both fields come from the same response; the caller doesn't need to
-    re-fetch the run record just to read ``head_sha``.
-    """
+def _latest_base_run_id(owner_repo: str, base: str) -> int | None:
     res = run(
         [
             "gh",
@@ -509,12 +535,11 @@ def _latest_base_run(owner_repo: str, base: str) -> tuple[int | None, str]:
     try:
         obj = json.loads(res.stdout or "{}")
     except json.JSONDecodeError:
-        return None, ""
+        return None
     runs = obj.get("workflow_runs") or []
     if not runs:
-        return None, ""
-    rid = runs[0].get("id")
-    return (int(rid) if rid else None), (runs[0].get("head_sha") or "")
+        return None
+    return int(runs[0].get("id")) if runs[0].get("id") else None
 
 
 def _run_failing_tests(owner_repo: str, run_id: int) -> tuple[str, set[str]]:
@@ -554,16 +579,26 @@ def ci_compare_base(pr_number: int) -> dict[str, Any]:
     base = pr["base"]
     state_dir, _ = state_paths(pr_number)
 
-    run_id, base_sha = _latest_base_run(owner_repo, base)
+    run_id = _latest_base_run_id(owner_repo, base)
     base_failures: set[str] = set()
+    base_sha = ""
     if run_id is not None:
+        # Fetch once, resolve sha from the jobs endpoint, then check cache.
+        probe = run(
+            ["gh", "api", f"/repos/{owner_repo}/actions/runs/{run_id}"],
+            check=False,
+        )
+        try:
+            probe_obj = json.loads(probe.stdout or "{}")
+            base_sha = probe_obj.get("head_sha") or ""
+        except json.JSONDecodeError:
+            base_sha = ""
         cache_path = state_dir / f"base-ci-{base_sha}.json" if base_sha else None
-        cached = read_json(cache_path, default=None) if cache_path else None
+        cached = read_json(cache_path, default=None) if cache_path and cache_path.exists() else None
         if cached is not None:
             base_failures = set(cached.get("failed_tests", []))
         else:
-            jobs_sha, base_failures = _run_failing_tests(owner_repo, run_id)
-            base_sha = base_sha or jobs_sha
+            base_sha, base_failures = _run_failing_tests(owner_repo, run_id)
             if cache_path and base_sha:
                 state_dir.mkdir(parents=True, exist_ok=True)
                 atomic_write_json(
@@ -571,7 +606,7 @@ def ci_compare_base(pr_number: int) -> dict[str, Any]:
                     {"run_id": run_id, "head_sha": base_sha, "failed_tests": sorted(base_failures)},
                 )
 
-    current = _ci_failed_tests_for(pr)
+    current = ci_failed_tests(pr_number)
     current_tests: set[str] = set()
     for entry in current:
         if entry.get("is_flake"):
@@ -595,25 +630,71 @@ def ci_compare_base(pr_number: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_ctx(ctx: int | str) -> tuple[int | None, str | None]:
+def _parse_ctx(ctx: str) -> tuple[int | None, str | None]:
     """Parse a state context token into ``(pr_number, branch)``.
 
-    The token is either an int PR number, a numeric string PR number, or
-    ``branch:<name>`` for branches that have no PR yet. Keeping the CLI
-    surface untyped (single positional) lets callers paste whatever
-    ``identify`` emitted without branching on PR vs branch.
+    The token is either a bare integer PR number or ``branch:<name>`` for
+    branches that have no PR yet. Keeping the CLI surface untyped (single
+    positional) lets callers paste whatever ``identify`` emitted without
+    branching on PR vs branch.
     """
-    if isinstance(ctx, int):
-        return ctx, None
     if ctx.startswith("branch:"):
         return None, ctx[len("branch:") :]
     return int(ctx), None
 
 
 def state_load(ctx: int | str) -> dict[str, Any]:
+    """Read the state file and decorate it with derived signals.
+
+    Returns the persisted state plus ``is_heartbeat_stale``: a boolean
+    computed at read time (never written back) that the orchestrator's
+    Step 0.5 resume check uses to distinguish abandoned runs from
+    interrupted ones. Stale = ``completed: false`` AND
+    ``last_heartbeat_at`` is older than ``HEARTBEAT_STALE_SECONDS`` (or
+    missing entirely on a state file written before the heartbeat field
+    existed).
+    """
     pr, branch = _resolve_ctx(ctx)
     _, path = state_paths(pr, branch=branch)
-    return read_json(path, default={}) or {}
+    state = read_json(path, default={}) or {}
+    if state:
+        state["is_heartbeat_stale"] = _is_heartbeat_stale(state)
+    return state
+
+
+# Two hours covers the common cases (compaction, network blip, user stepped
+# away) without rushing to abandon a legitimate long-running round. Long bramble
+# reviews can run ~10 minutes per backend, so a freshly-written heartbeat covers
+# even a stalled triage round comfortably; anything past 2h is almost certainly
+# a process that won't come back.
+HEARTBEAT_STALE_SECONDS = 2 * 60 * 60
+
+
+def _is_heartbeat_stale(state: dict[str, Any]) -> bool:
+    if state.get("completed"):
+        return False
+    ts = state.get("last_heartbeat_at")
+    if not ts:
+        # No heartbeat field at all on an in-progress run = either a state
+        # file written by a pre-heartbeat orchestrator (treat as stale so we
+        # don't wedge forever) or a brand-new run that crashed before its
+        # first round-start. Either way, fresh-start is safe.
+        return True
+    from datetime import datetime
+
+    try:
+        # _utc_now writes "%Y-%m-%dT%H:%M:%SZ"; parse the same shape.
+        ts_dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return True
+    age = (datetime.now(UTC) - ts_dt).total_seconds()
+    return age > HEARTBEAT_STALE_SECONDS
+
+
+def _resolve_ctx(ctx: int | str) -> tuple[int | None, str | None]:
+    if isinstance(ctx, int):
+        return ctx, None
+    return _parse_ctx(ctx)
 
 
 def state_append_round(
@@ -695,6 +776,21 @@ def state_append_round(
                 existing["noise_samples"] = samples
     state["current_round"] = n
     state["last_commit_at_round_start"] = head_before
+    # When the orchestrator re-invokes pr-polish on a state file that
+    # already converged (or hit the round cap), the prior loop set
+    # completed=true / exit_reason=<reason> / completed_at=<ts>. Adding a
+    # new round number means a new loop is starting; clear those fields
+    # so mid-loop reads of the state file aren't confusingly inconsistent
+    # ("current_round=6 AND completed: converged at <prior timestamp>").
+    # state-mark-complete will set them again at this new loop's exit.
+    if state.get("completed"):
+        state["completed"] = False
+        state["exit_reason"] = None
+        state["completed_at"] = None
+    # Heartbeat pulses on every append — covers fresh starts and resumes.
+    # state_load reads this back via _is_heartbeat_stale to distinguish
+    # legitimate interruptions from runs the user walked away from.
+    state["last_heartbeat_at"] = _utc_now()
     atomic_write_json(path, state)
     return state
 
@@ -731,8 +827,25 @@ def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def state_finalize_round(
-    ctx: int | str, n: int, head_after: str, actions: list[dict[str, Any]]
+    ctx: int | str,
+    n: int,
+    head_after: str,
+    actions: list[dict[str, Any]],
+    *,
+    envelope_overrides: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
+    """Finalize a round and persist its results.
+
+    ``envelope_overrides`` lets the orchestrator hand in explicit per-backend
+    envelope paths (e.g. ``$STATE_DIR/r6/codex-envelope.json``) when the
+    SKILL writes them somewhere other than ``bramble_ops.envelope_path()``'s
+    /tmp convention. Without this, session_ids and resume_status from the
+    envelope never make it into rounds[n].session_ids — and the next
+    round's prior_session_id() lookup returns "", so the resume flag never
+    appears on round N+1's bramble invocation. That's the gap that left
+    pr-polish doing cold-start reviews despite session-resume being the
+    whole reason the feature exists.
+    """
     pr_number, branch = _resolve_ctx(ctx)
     state_dir, path = state_paths(pr_number, branch=branch)
     state = read_json(path, default=None)
@@ -747,13 +860,18 @@ def state_finalize_round(
     entry["comment_actions"] = merged
     entry["head_after"] = head_after
     entry.update(recompute_counts(merged))
-    _persist_round_findings(state_dir, entry, pr_number, branch, n)
+    _persist_round_findings(state_dir, entry, pr_number, branch, n, envelope_overrides or {})
     atomic_write_json(path, state)
     return state
 
 
 def _persist_round_findings(
-    state_dir: Path, entry: dict[str, Any], pr_number: int | None, branch: str | None, n: int
+    state_dir: Path,
+    entry: dict[str, Any],
+    pr_number: int | None,
+    branch: str | None,
+    n: int,
+    envelope_overrides: dict[str, Path],
 ) -> None:
     """Copy per-backend bramble envelopes into ``<state_dir>/reviews/`` and
     hydrate ``codex_findings`` / ``cursor_findings`` from them.
@@ -762,6 +880,12 @@ def _persist_round_findings(
     existing array in place. Keeps the raw review text durable after the
     ``/tmp`` envelope is gone. CI findings only populate when a PR number is
     known — branch-only runs skip the ``gh pr checks`` pull.
+
+    Resolution order for each backend's envelope:
+      1. ``envelope_overrides[backend]`` if the orchestrator passed an
+         explicit path (matches how the SKILL writes envelopes to
+         ``$STATE_DIR/r$ROUND/<backend>-envelope.json``).
+      2. ``bramble_ops.envelope_path()`` /tmp convention (legacy).
     """
     # Imported lazily to avoid a top-level circular import between
     # pr_ops and bramble_ops.
@@ -770,7 +894,9 @@ def _persist_round_findings(
     envelope_key = pr_number if pr_number is not None else branch_envelope_key(branch or "")
     reviews_dir = state_dir / "reviews"
     for backend in bramble_ops.BACKENDS:
-        src = bramble_ops.envelope_path(repo_slug(), envelope_key, backend, n)
+        src = envelope_overrides.get(backend) or bramble_ops.envelope_path(
+            repo_slug(), envelope_key, backend, n
+        )
         if not src.exists():
             continue
         try:
@@ -778,6 +904,11 @@ def _persist_round_findings(
         except Exception:  # noqa: BLE001 — malformed envelope shouldn't brick finalize
             obj = None
         entry[f"{backend}_findings"] = bramble_ops.parse_envelope(obj, source=backend)
+        if isinstance(obj, dict):
+            if obj.get("session_id"):
+                entry.setdefault("session_ids", {})[backend] = obj.get("session_id")
+            if obj.get("resume_status"):
+                entry.setdefault("resume_status", {})[backend] = obj.get("resume_status")
         reviews_dir.mkdir(parents=True, exist_ok=True)
         dest = reviews_dir / f"r{n}-{backend}.json"
         try:
@@ -835,6 +966,30 @@ def state_mark_complete(ctx: int | str, reason: str) -> dict[str, Any]:
     return state
 
 
+def state_mark_abandoned(ctx: int | str) -> dict[str, Any]:
+    """Tombstone an in-progress run whose heartbeat went stale.
+
+    Writes ``completed: true`` with ``exit_reason: "abandoned"`` so the
+    state file's audit trail records that nobody finished it. Distinct from
+    ``state_mark_complete`` because the orchestrator calls this without a
+    user-facing reason — it's a janitorial action triggered by the Step 0.5
+    resume check when ``state_load`` reports ``is_heartbeat_stale: true``.
+    The 50-state-file analysis showed 4/50 runs ended with
+    ``completed: false, exit_reason: null``; this subcommand closes that gap
+    so future analyses can distinguish abandoned from interrupted.
+    """
+    pr_number, branch = _resolve_ctx(ctx)
+    _, path = state_paths(pr_number, branch=branch)
+    state = read_json(path, default=None)
+    if state is None:
+        raise RuntimeError(f"state file not found for ctx {ctx}")
+    state["completed"] = True
+    state["exit_reason"] = "abandoned"
+    state["completed_at"] = _utc_now()
+    atomic_write_json(path, state)
+    return state
+
+
 def _utc_now() -> str:
     from datetime import datetime
 
@@ -847,11 +1002,10 @@ def _utc_now() -> str:
 
 
 def reply_inline(owner_repo: str, pr: int, comment_id: int, body: str) -> dict[str, Any]:
+    # Pipe JSON via stdin rather than `-f body=...`: gh treats values starting
+    # with `@` as file references, so a comment body starting with `@` would
+    # otherwise read a local file or send the wrong payload.
     path = f"repos/{owner_repo}/pulls/{pr}/comments/{comment_id}/replies"
-    # Pipe JSON via stdin instead of `-f body=...` because gh field
-    # interpolation treats `@`-prefixed values as file references — a reply
-    # body starting with `@` would either read a local file or send the wrong
-    # payload. `--input -` consumes the request body as raw JSON.
     payload = json.dumps({"body": body})
     res = run(
         ["gh", "api", "--method", "POST", path, "--input", "-"],
@@ -930,108 +1084,111 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("n", type=int)
     sp.add_argument("head_after")
     sp.add_argument("actions_file", help="Path to JSON file with comment_actions array")
+    sp.add_argument(
+        "--envelope",
+        action="append",
+        default=[],
+        metavar="<backend>=<path>",
+        help=(
+            "Override the per-backend envelope path used to hydrate findings, "
+            "session_ids, and resume_status. Repeatable: --envelope codex=... "
+            "--envelope cursor=.... Without this, finalize falls back to the "
+            "/tmp legacy convention and silently misses session ids written "
+            "elsewhere."
+        ),
+    )
 
     sp = sub.add_parser("state-mark-complete")
     sp.add_argument("ctx", help="PR number or 'branch:<name>'")
     sp.add_argument("reason")
 
-    return p
-
-
-def _cmd_identify(args: argparse.Namespace) -> None:
-    print_json(identify_pr())
-
-
-def _cmd_fetch_comments(args: argparse.Namespace) -> None:
-    pr = identify_pr()
-    if pr.get("pr_number") is None:
-        print_json([])
-    else:
-        print_json(fetch_comments(pr))
-
-
-def _cmd_reply_inline(args: argparse.Namespace) -> None:
-    pr = identify_pr()
-    if pr.get("pr_number") is None:
-        raise RuntimeError("reply-inline requires a PR; current branch has none")
-    print_json(reply_inline(pr["owner_repo"], pr["pr_number"], args.comment_id, args.body))
-
-
-def _cmd_comment_pr(args: argparse.Namespace) -> None:
-    pr = identify_pr()
-    if pr.get("pr_number") is None:
-        raise RuntimeError("comment-pr requires a PR; current branch has none")
-    url = comment_pr(pr["pr_number"], args.body)
-    print_json({"url": url})
-
-
-def _cmd_ci_failed_tests(args: argparse.Namespace) -> None:
-    pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
-    if pr_number is None:
-        print_json([])
-    else:
-        print_json(ci_failed_tests(pr_number))
-
-
-def _cmd_ci_compare_base(args: argparse.Namespace) -> None:
-    pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
-    if pr_number is None:
-        print_json({"pre_existing": [], "pr_caused": [], "current_failures": []})
-    else:
-        print_json(ci_compare_base(pr_number))
-
-
-def _cmd_state_load(args: argparse.Namespace) -> None:
-    print_json(state_load(args.ctx))
-
-
-def _cmd_state_append_round(args: argparse.Namespace) -> None:
-    samples = None
-    if args.noise_samples:
-        samples = json.loads(Path(args.noise_samples).read_text())
-        if not isinstance(samples, list):
-            raise ValueError("--noise-samples must point to a JSON array")
-    print_json(
-        state_append_round(
-            args.ctx,
-            args.n,
-            args.head_before,
-            verify_head=args.verify_head,
-            noise_filtered=args.noise_filtered,
-            noise_samples=samples,
-        )
+    sp = sub.add_parser(
+        "state-mark-abandoned",
+        help="Tombstone a stale-heartbeat run as abandoned (Step 0.5 resume).",
     )
+    sp.add_argument("ctx", help="PR number or 'branch:<name>'")
 
-
-def _cmd_state_finalize_round(args: argparse.Namespace) -> None:
-    actions = json.loads(Path(args.actions_file).read_text())
-    if not isinstance(actions, list):
-        raise ValueError("actions file must be a JSON array")
-    print_json(state_finalize_round(args.ctx, args.n, args.head_after, actions))
-
-
-def _cmd_state_mark_complete(args: argparse.Namespace) -> None:
-    print_json(state_mark_complete(args.ctx, args.reason))
-
-
-_COMMANDS = {
-    "identify": _cmd_identify,
-    "fetch-comments": _cmd_fetch_comments,
-    "reply-inline": _cmd_reply_inline,
-    "comment-pr": _cmd_comment_pr,
-    "ci-failed-tests": _cmd_ci_failed_tests,
-    "ci-compare-base": _cmd_ci_compare_base,
-    "state-load": _cmd_state_load,
-    "state-append-round": _cmd_state_append_round,
-    "state-finalize-round": _cmd_state_finalize_round,
-    "state-mark-complete": _cmd_state_mark_complete,
-}
+    return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        _COMMANDS[args.cmd](args)
+        if args.cmd == "identify":
+            print_json(identify_pr())
+        elif args.cmd == "fetch-comments":
+            pr = identify_pr()
+            if pr.get("pr_number") is None:
+                # Branch-only mode has no PR comments to fetch.
+                print_json([])
+            else:
+                print_json(fetch_comments(pr))
+        elif args.cmd == "reply-inline":
+            pr = identify_pr()
+            if pr.get("pr_number") is None:
+                raise RuntimeError("reply-inline requires a PR; current branch has none")
+            print_json(reply_inline(pr["owner_repo"], pr["pr_number"], args.comment_id, args.body))
+        elif args.cmd == "comment-pr":
+            pr = identify_pr()
+            if pr.get("pr_number") is None:
+                raise RuntimeError("comment-pr requires a PR; current branch has none")
+            url = comment_pr(pr["pr_number"], args.body)
+            print_json({"url": url})
+        elif args.cmd == "ci-failed-tests":
+            pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
+            if pr_number is None:
+                print_json([])
+            else:
+                print_json(ci_failed_tests(pr_number))
+        elif args.cmd == "ci-compare-base":
+            pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
+            if pr_number is None:
+                print_json({"pre_existing": [], "pr_caused": [], "current_failures": []})
+            else:
+                print_json(ci_compare_base(pr_number))
+        elif args.cmd == "state-load":
+            print_json(state_load(args.ctx))
+        elif args.cmd == "state-append-round":
+            samples = None
+            if args.noise_samples:
+                samples = json.loads(Path(args.noise_samples).read_text())
+                if not isinstance(samples, list):
+                    raise ValueError("--noise-samples must point to a JSON array")
+            print_json(
+                state_append_round(
+                    args.ctx,
+                    args.n,
+                    args.head_before,
+                    verify_head=args.verify_head,
+                    noise_filtered=args.noise_filtered,
+                    noise_samples=samples,
+                )
+            )
+        elif args.cmd == "state-finalize-round":
+            actions = json.loads(Path(args.actions_file).read_text())
+            if not isinstance(actions, list):
+                raise ValueError("actions file must be a JSON array")
+            envelope_overrides: dict[str, Path] = {}
+            for spec in args.envelope:
+                if "=" not in spec:
+                    raise ValueError(f"--envelope must be <backend>=<path>, got {spec!r}")
+                backend, _, ep = spec.partition("=")
+                envelope_overrides[backend] = Path(ep)
+            print_json(
+                state_finalize_round(
+                    args.ctx,
+                    args.n,
+                    args.head_after,
+                    actions,
+                    envelope_overrides=envelope_overrides,
+                )
+            )
+        elif args.cmd == "state-mark-complete":
+            print_json(state_mark_complete(args.ctx, args.reason))
+        elif args.cmd == "state-mark-abandoned":
+            print_json(state_mark_abandoned(args.ctx))
+        else:  # pragma: no cover — argparse enforces.
+            raise ValueError(f"unknown cmd: {args.cmd}")
     except CommandError as e:
         print(str(e), file=sys.stderr)
         return e.returncode or 1
