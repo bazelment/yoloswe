@@ -676,6 +676,38 @@ class TestFetchComments(unittest.TestCase):
         self.assertEqual(len(got["comments"]), 1)
         self.assertFalse(got["comments"][0]["is_stale_prior_commit"])
 
+    def test_filters_top_level_bugbot_summary_as_noise(self) -> None:
+        # BUGBOT_REVIEW summary often arrives as a top-level issue comment,
+        # not a review-level one. Without filtering it here, triage would
+        # surface it as a github-review finding and force a hand-classified
+        # false_positive every round.
+        bot_user = {"login": "cursor[bot]", "type": "Bot"}
+        issues = [
+            {
+                "id": 4240504634,
+                "user": bot_user,
+                "body": "<!-- BUGBOT_REVIEW -->\nCursor Bugbot has reviewed your changes "
+                        "and found 3 potential issues.\n\n<!-- BUGBOT_FIX_ALL -->",
+                "created_at": "2026-05-07T00:00:00Z",
+            }
+        ]
+
+        def fake_run(cmd, **kwargs):
+            url = cmd[-1] if cmd[:2] == ["gh", "api"] else ""
+            if "/issues/" in url and url.endswith("/comments"):
+                return _common.RunResult(stdout=json.dumps(issues), stderr="", returncode=0)
+            if "/pulls/" in url and url.endswith("/comments"):
+                return _common.RunResult(stdout="[]", stderr="", returncode=0)
+            if url.endswith("/reviews"):
+                return _common.RunResult(stdout="[]", stderr="", returncode=0)
+            raise AssertionError(f"unexpected cmd: {cmd}")
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            got = pr_ops.fetch_comments({"owner_repo": "x/y", "pr_number": 1})
+        self.assertEqual(got["comments"], [])
+        self.assertEqual(got["noise_filtered"], 1)
+        self.assertEqual(got["noise_samples"][0]["pattern"], "review-summary")
+
 
 class TestIsBotReviewSummary(unittest.TestCase):
     """The filter should drop short bugbot boilerplate but keep real reviews."""

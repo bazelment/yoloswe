@@ -251,6 +251,13 @@ def classify_comments(
     for c in issues:
         user = c.get("user") or {}
         body = c.get("body", "") or ""
+        # BUGBOT and similar bots post their "found N issues" summary as a
+        # top-level issue comment, not a review-level one — so the same
+        # filter must run here too. The actionable inline comments come
+        # through the comments loop above.
+        if _is_bot_review_summary(user, None, body):
+            noise.append(_noise_sample(user, c["id"], body, "review-summary"))
+            continue
         noise_pattern = _bot_process_noise_pattern(user, body)
         if noise_pattern is not None:
             noise.append(_noise_sample(user, c["id"], body, noise_pattern))
