@@ -154,7 +154,14 @@ def action_history_goal(
             label = _action_label(action)
             if label:
                 fixed.append(label)
-        elif verb in ("false_positive", "wont_fix", "stale", "ack"):
+        elif verb in ("false_positive", "wont_fix", "ack"):
+            # Note: ``stale`` is deliberately excluded. Stale entries are
+            # bot comments anchored to superseded code that the resumed
+            # model doesn't see in its worktree snapshot anyway —
+            # surfacing them adds N×80 chars of bot-comment body without
+            # changing model behavior. The orchestrator still records
+            # them in comment_actions for the audit trail and posts
+            # auto-replies; they just don't enter the goal channel.
             label = _skipped_label(action, verb)
             if label:
                 skipped.append(label)
@@ -216,30 +223,26 @@ def _action_label(action: dict[str, Any]) -> str:
 
 
 def _skipped_label(action: dict[str, Any], verb: str) -> str:
-    """Format a skipped action: ``path:line verb (reason): topic``.
+    """Format a skipped action: ``path:line verb: <description>``.
 
-    Verb first because that's the actionable signal — the model needs to
-    know "we decided not to fix this" before it gets the topic. Reason
-    follows in parens when present (e.g. ``wont_fix (design tradeoff)``);
-    trailing topic explains what the original finding was about.
+    Reason takes precedence over topic when both are present — the
+    reason is what the orchestrator decided, and the model needs that
+    decision (and not the original finding's topic) to avoid re-arguing
+    the skip. The whole description is capped at _TOPIC_CHAR_CAP so
+    a long reason can't bloat the goal text.
     """
     path = action.get("path")
     line = action.get("line")
-    topic = (action.get("topic") or "").strip()
-    reason = (action.get("reason") or "").strip()
     if path and line is not None:
         base = f"{path}:{line}"
     elif path:
         base = f"{path}"
     else:
         return ""
-    parts = [base, verb]
-    if reason:
-        parts[-1] = f"{verb} ({_truncate(reason)})"
-    label = " ".join(parts)
-    if topic:
-        label = f"{label}: {_truncate(topic)}"
-    return label
+    description = (action.get("reason") or action.get("topic") or "").strip()
+    if description:
+        return f"{base} {verb}: {_truncate(description)}"
+    return f"{base} {verb}"
 
 
 def goal_for_round(

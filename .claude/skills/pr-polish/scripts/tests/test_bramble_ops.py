@@ -113,9 +113,29 @@ class TestActionHistoryGoal(unittest.TestCase):
         self.assertIn("Prior round fixed:", out)
         self.assertIn("a.go:10 — null check missing", out)
         self.assertIn("Skipped:", out)
-        self.assertIn("b.py:42 wont_fix (design tradeoff): unused param", out)
-        self.assertIn("c.go:5 stale: old null guard", out)
+        # Reason wins when present (the orchestrator's decision is what
+        # the model needs to know to avoid re-arguing the skip).
+        self.assertIn("b.py:42 wont_fix: design tradeoff", out)
+        # Topic-only fallback when no reason was recorded.
         self.assertIn("d.go:8 ack: rename helper", out)
+        # Stale entries are deliberately excluded from the goal channel.
+        self.assertNotIn("c.go:5", out)
+        self.assertNotIn("stale", out)
+
+    def test_stale_actions_excluded_from_goal(self) -> None:
+        # Even a round that's *only* stale acks should not bloat the
+        # goal — the model has nothing actionable from superseded
+        # bot comments. Should fall through to "no skipped" (and if no
+        # fixed either, return "" so caller falls back to PR_SUMMARY).
+        state = self._state([
+            {"n": 1, "comment_actions": [
+                {"action": "stale", "path": f"x{i}.py", "line": i,
+                 "reason": "Superseded by abc; pre-series",
+                 "topic": "### bot body **Medium**"} for i in range(10)
+            ]},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertEqual(out, "")  # no fixed, no non-stale skipped
 
     def test_drops_source_label_from_entries(self) -> None:
         # Source is triage's concern; the resumed model treats every

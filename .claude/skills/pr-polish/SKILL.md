@@ -228,18 +228,18 @@ Action-history shape (emitted by `action_history_goal`, only the immediately-pri
 
 ```
 Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE.
-Skipped: b.py:42 wont_fix (design tradeoff): caller already validates;
-c.go:5 stale (superseded by 891c12e): old null guard.
+Skipped: b.py:42 wont_fix: design tradeoff; d.go:8 ack: rename helper.
 Files changed since round 5: a.go, b.py.
 ```
 
-The `fixed: X; skipped: Y verb (reason): topic` shape stops the resumed model from re-flagging its own prior findings and re-arguing skipped ones — the topic is what disambiguates "you said this already" from a new finding at the same line. Source labels (`(codex)`/`(cursor)`) are deliberately omitted: the resumed model treats every entry the same once it lands in the prompt. Capped at `_ACTION_HISTORY_CAP=20` entries per bucket with a `(N more)` suffix.
+The `fixed: X — topic; skipped: Y verb: reason` shape stops the resumed model from re-flagging its own prior findings and re-arguing skipped ones. Source labels (`(codex)`/`(cursor)`) are deliberately omitted: the resumed model treats every entry the same once it lands in the prompt. Each entry is capped at `_TOPIC_CHAR_CAP=80` chars; bucket capped at `_ACTION_HISTORY_CAP=20` with a `(N more)` suffix.
 
 The "Files changed since round N-1" line is the diff between the prior round's `head_after` and this round's HEAD — useful when the user manually committed between rounds, when the prior round's fix touched a file the model didn't expect to see in its snapshot, or simply to keep the model oriented. Omitted when the diff is empty.
 
 What the goal channel deliberately does **not** carry:
 
 - The actual diff body — bramble re-snapshots the worktree on each turn, so the model sees post-fix code directly. We give it the *list* of moved files, not the patch.
+- `stale` actions — bot comments anchored to superseded code that the worktree snapshot doesn't contain anyway. They're recorded in `comment_actions` for the audit trail and auto-replied on the PR, but never enter the model context. (Without this exclusion a series resume with 10 stale bot comments produced ~3 KB of goal text that taught the model nothing.)
 - Per-finding rationale text the orchestrator wrote into PR replies — that belongs in the inline thread, not the model context.
 - Earlier rounds' actions — only the immediately prior round is replayed; older turns are in the model's session conversation already.
 - Round-1 PR_SUMMARY repeated — the session already has it.
