@@ -261,6 +261,31 @@ class TestActionHistoryGoal(unittest.TestCase):
             out = bramble_ops.action_history_goal(state, 2, head_before="sha-cur")
         self.assertNotIn("Files changed", out)
 
+    def test_emits_files_changed_line_with_empty_prior_actions(self) -> None:
+        # Pins the invariant that the files-changed sentence is
+        # independent of the fixed/skipped buckets. Prior tests all
+        # include at least one comment_action, so a refactor that
+        # accidentally tied the line emission to fixed/skipped content
+        # being non-empty would still pass. With empty prior actions
+        # and a non-empty diff, we still want the files line — and we
+        # want the early-return guard ("only the Round N. stub") to
+        # treat the files line as meaningful content, not skip it.
+        from unittest.mock import patch  # noqa: PLC0415
+
+        state = self._state([
+            {"n": 1, "comment_actions": [],
+             "head_after": "sha-prev"},
+        ])
+        with patch("_common.run") as run_mock:
+            run_mock.return_value = type(
+                "R", (), {"returncode": 0, "stdout": "a.go\nb.py\n"},
+            )()
+            out = bramble_ops.action_history_goal(state, 2, head_before="sha-cur")
+        self.assertIn("Round 2.", out)
+        self.assertIn("Files changed since round 1: a.go, b.py.", out)
+        self.assertNotIn("Prior round fixed", out)
+        self.assertNotIn("Skipped", out)
+
     def test_omits_files_changed_line_when_no_head_before(self) -> None:
         # Caller didn't pass head_before — we don't shell out to git
         # speculatively; just skip the line.
