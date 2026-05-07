@@ -523,10 +523,11 @@ func TestClient_TokenUsageInTurnCompleted(t *testing.T) {
 // Test that handleTurnCompleted propagates error and duration to the emitted event.
 func TestClient_TurnCompletedErrorAndDuration(t *testing.T) {
 	tests := []struct {
-		name    string
-		wantErr string
-		turn    Turn
-		wantOK  bool
+		name          string
+		wantErr       string
+		turn          Turn
+		wantOK        bool
+		wantTransient bool
 	}{
 		{
 			name:    "string error",
@@ -539,6 +540,13 @@ func TestClient_TurnCompletedErrorAndDuration(t *testing.T) {
 			turn:    Turn{ID: "t2", Status: "failed", Error: map[string]interface{}{"message": "rate limited", "code": 429}},
 			wantErr: "rate limited",
 			wantOK:  false,
+		},
+		{
+			name:          "transient error",
+			turn:          Turn{ID: "t4", Status: "failed", Error: "connection reset by peer"},
+			wantErr:       "connection reset by peer",
+			wantOK:        false,
+			wantTransient: true,
 		},
 		{
 			name:    "nil error on success",
@@ -579,6 +587,10 @@ func TestClient_TurnCompletedErrorAndDuration(t *testing.T) {
 				if tt.wantErr != "" {
 					require.NotNil(t, e.Error, "expected non-nil error")
 					require.Contains(t, e.Error.Error(), tt.wantErr)
+					if tt.wantTransient {
+						var transient *TransientError
+						require.ErrorAs(t, e.Error, &transient)
+					}
 				} else {
 					require.Nil(t, e.Error)
 				}

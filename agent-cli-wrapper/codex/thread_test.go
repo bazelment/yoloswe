@@ -215,7 +215,7 @@ func TestThread_HandleTurnCompleted(t *testing.T) {
 	thread.turnWaiters["turn-456"] = []chan *TurnResult{waiterCh}
 
 	// Complete the turn
-	thread.handleTurnCompleted("turn-456", true, "")
+	thread.handleTurnCompleted("turn-456", true, nil)
 
 	// Check state transitioned back to ready
 	if thread.State() != ThreadStateReady {
@@ -253,7 +253,11 @@ func TestThread_HandleTurnCompleted_WithError(t *testing.T) {
 	waiterCh := make(chan *TurnResult, 1)
 	thread.turnWaiters["turn-456"] = []chan *TurnResult{waiterCh}
 
-	thread.handleTurnCompleted("turn-456", false, "Something went wrong")
+	thread.handleTurnCompleted("turn-456", false, &TurnError{
+		ThreadID: "thread-123",
+		TurnID:   "turn-456",
+		Message:  "Something went wrong",
+	})
 
 	select {
 	case result := <-waiterCh:
@@ -348,7 +352,7 @@ func TestThread_MultipleWaiters(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Complete the turn
-	thread.handleTurnCompleted("turn-456", true, "")
+	thread.handleTurnCompleted("turn-456", true, nil)
 
 	wg.Wait()
 

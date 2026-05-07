@@ -169,6 +169,60 @@ func TestTurnError_Unwrap(t *testing.T) {
 	}
 }
 
+func TestTransientError(t *testing.T) {
+	err := &TransientError{
+		ThreadID: "thread-123",
+		TurnID:   "turn-456",
+		Message:  "connection reset by peer",
+	}
+
+	expected := "transient codex error (thread=thread-123, turn=turn-456): connection reset by peer"
+	if err.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, err.Error())
+	}
+}
+
+func TestTransientError_UnwrapAndIsTransient(t *testing.T) {
+	cause := errors.New("underlying error")
+	err := &TransientError{
+		Message: "429 Too Many Requests",
+		Cause:   cause,
+	}
+
+	if err.Unwrap() != cause {
+		t.Error("Unwrap should return the cause")
+	}
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is should match the cause")
+	}
+	if !IsTransient(err) {
+		t.Error("IsTransient should match a transient error")
+	}
+
+	wrapped := errors.Join(errors.New("outer"), err)
+	if !IsTransient(wrapped) {
+		t.Error("IsTransient should match a wrapped transient error")
+	}
+}
+
+func TestClassifyTurnError(t *testing.T) {
+	transient := classifyTurnError("thread-1", "turn-1", "connection reset by peer")
+	var transientErr *TransientError
+	if !errors.As(transient, &transientErr) {
+		t.Fatalf("expected TransientError, got %T", transient)
+	}
+
+	permanent := classifyTurnError("thread-1", "turn-1", "invalid request")
+	var turnErr *TurnError
+	if !errors.As(permanent, &turnErr) {
+		t.Fatalf("expected TurnError, got %T", permanent)
+	}
+
+	if got := classifyTurnError("thread-1", "turn-1", ""); got != nil {
+		t.Fatalf("empty message classified as %v, want nil", got)
+	}
+}
+
 func TestSentinelErrors(t *testing.T) {
 	// Verify sentinel errors are unique
 	errs := []error{

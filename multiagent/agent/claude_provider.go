@@ -271,12 +271,20 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 
 	result, err := streamTurn(ctx, fullPrompt)
 	if err != nil {
-		return nil, err
+		partial := &AgentResult{}
+		if info := session.Info(); info != nil {
+			partial.SessionID = info.SessionID
+		}
+		return partial, err
 	}
 
 	result, attempts, stopReason, err := runRetryLoop(ctx, streamTurnSession{fn: streamTurn}, result, cfg)
 	if err != nil {
-		return nil, err
+		partial := &AgentResult{}
+		if info := session.Info(); info != nil {
+			partial.SessionID = info.SessionID
+		}
+		return partial, err
 	}
 
 	agentResult := claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason)

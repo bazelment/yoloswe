@@ -71,8 +71,14 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		threadOpts = append(threadOpts, codex.WithSandbox("danger-full-access"))
 	}
 
-	// Create thread and execute
-	thread, err := p.client.CreateThread(ctx, threadOpts...)
+	// Create or resume thread and execute.
+	var thread *codex.Thread
+	var err error
+	if cfg.ResumeSessionID != "" {
+		thread, err = p.client.ResumeThread(ctx, cfg.ResumeSessionID, threadOpts...)
+	} else {
+		thread, err = p.client.CreateThread(ctx, threadOpts...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -98,21 +104,30 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	}()
 
 	if err := thread.WaitReady(ctx); err != nil {
-		return nil, err
+		return &AgentResult{SessionID: thread.ID()}, err
 	}
 
 	turnOpts := codexTurnOptions(cfg)
 
 	result, err := thread.Ask(ctx, fullPrompt, turnOpts...)
 	if err != nil {
-		return nil, err
+		return &AgentResult{SessionID: thread.ID()}, err
 	}
 	select {
 	case <-turnDone:
 	case <-time.After(150 * time.Millisecond):
+		return &AgentResult{SessionID: thread.ID()}, &codex.TransientError{
+			Message:  "turn never reached turn/completed",
+			ThreadID: thread.ID(),
+			TurnID:   thread.CurrentTurnID(),
+		}
 	}
 
-	return codexResultToAgentResult(result), nil
+	agentResult := codexResultToAgentResult(result)
+	if agentResult != nil {
+		agentResult.SessionID = thread.ID()
+	}
+	return agentResult, nil
 }
 
 func (p *CodexProvider) Events() <-chan AgentEvent { return p.events }

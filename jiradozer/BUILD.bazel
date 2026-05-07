@@ -30,6 +30,7 @@ go_library(
 go_test(
     name = "jiradozer_test",
     srcs = [
+        "agent_retry_test.go",
         "agent_test.go",
         "config_test.go",
         "discovery_test.go",
@@ -44,8 +45,12 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":jiradozer"],
     deps = [
+        "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/claude/render",
+        "//agent-cli-wrapper/codex",
         "//jiradozer/tracker",
+        "//multiagent/agent",
+        "//wt",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
