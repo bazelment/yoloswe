@@ -449,7 +449,8 @@ class TestStateFirstRoundOfSeries(unittest.TestCase):
         def _run(*argv) -> str:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                pr_ops.main(list(argv))
+                rc = pr_ops.main(list(argv))
+            self.assertEqual(rc, 0, f"main exited non-zero; stdout={buf.getvalue()!r}")
             return buf.getvalue().rstrip("\n")
 
         # Brand new PR (no state) → 1

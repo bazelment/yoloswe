@@ -358,6 +358,10 @@ Monitor({
 })
 
 // Only when --gemini flag was passed:
+ENVELOPE_GEMINI="$LOG_DIR/gemini-envelope.json"
+GEMINI_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id gemini {ROUND} \
+                --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
+
 Monitor({
   description: "bramble gemini r{ROUND}",
   timeout_ms: 720000,
@@ -367,7 +371,7 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${GEMINI_RESUME:+--resume-session-id \"$GEMINI_RESUME\"} \
-    --envelope-file \"$LOG_DIR/gemini-envelope.json\" 2>\"$LOG_DIR/gemini-stderr.txt\""
+    --envelope-file \"$ENVELOPE_GEMINI\" 2>\"$LOG_DIR/gemini-stderr.txt\""
 })
 ```
 

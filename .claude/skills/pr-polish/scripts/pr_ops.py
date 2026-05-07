@@ -13,6 +13,7 @@ Usage:
     python3 pr_ops.py ci-failed-tests [--pr N]
     python3 pr_ops.py ci-compare-base [--pr N]
     python3 pr_ops.py state-load <pr_number>
+    python3 pr_ops.py state-is-new-series <pr_number> <round>
     python3 pr_ops.py state-append-round <pr_number> <n> <head_before>
     python3 pr_ops.py state-finalize-round <pr_number> <n> <head_after> <actions_json_file>
     python3 pr_ops.py state-mark-complete <pr_number> <reason>

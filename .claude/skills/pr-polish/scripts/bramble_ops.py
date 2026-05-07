@@ -11,9 +11,12 @@ Pure helpers the orchestrator composes inline:
   - ``bramble_bin`` returns the binary picked at the top of the run.
 
 Usage:
-    python3 bramble_ops.py goal <round> --state-file <path> --pr-summary <text>
+    python3 bramble_ops.py goal <round> --pr-summary <text> --state-file <path>
+                                        [--head-before <sha>]
+    python3 bramble_ops.py prior-session-id <backend> <round> --state-file <path>
+                                            [--is-new-series 0|1]
     python3 bramble_ops.py parse-stream <stream_file> --backend <b>
-    python3 bramble_ops.py triage <round> <prior_state_file>
+    python3 bramble_ops.py triage [<prior_state_file>]
                                   [--stream BACKEND=PATH ...]
                                   [--pr-comments FILE] [--ci-failures FILE]
 """
@@ -686,6 +689,12 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
             if a.get("action") != "fixed":
                 continue
             path, line, topic = a.get("path"), a.get("line"), a.get("topic")
+            # File-less / line-less fixes (review-summary acks) would
+            # otherwise emit (None, None, ...) which matches every
+            # sourceless review-summary finding ever — way too broad for
+            # spiral detection. Require at least a path before recording.
+            if path is None:
+                continue
             keys.add((path, line, topic))
             keys.add((path, line, None))
     return keys
