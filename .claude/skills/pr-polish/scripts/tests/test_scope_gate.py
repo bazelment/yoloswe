@@ -541,11 +541,27 @@ class TestBuildHints(unittest.TestCase):
         self.assertEqual(h["schema_version"], 2)
 
     def test_keys_present_when_empty(self) -> None:
-        # Empty arrays are a valid "no clause" signal — bramble
-        # specifically accepts them. Don't omit the keys.
+        # Empty arrays are a valid "no clause" signal for the v1 fields
+        # — bramble specifically accepts them. The 2-arg call exercises
+        # the helper's *helper-only* default: v2 split fields are
+        # intentionally omitted (caller didn't pass them). main() uses
+        # the 4-arg form to keep the on-disk envelope shape stable; see
+        # test_keys_present_when_empty_v2 below.
         h = scope_gate.build_hints([], [])
         self.assertEqual(h["test_paths"], [])
         self.assertEqual(h["cross_service_packages"], [])
+        self.assertNotIn("changed_packages", h)
+        self.assertNotIn("dependency_packages", h)
+
+    def test_keys_present_when_empty_v2(self) -> None:
+        # 4-arg form (used by main() in every emit path now): all v2
+        # keys present even when empty so downstream consumers see a
+        # stable envelope shape.
+        h = scope_gate.build_hints([], [], [], [])
+        self.assertEqual(h["test_paths"], [])
+        self.assertEqual(h["cross_service_packages"], [])
+        self.assertEqual(h["changed_packages"], [])
+        self.assertEqual(h["dependency_packages"], [])
 
 
 class TestChangedFiles(unittest.TestCase):

@@ -1024,6 +1024,49 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.assertEqual(rnd["lint_findings"][0]["source"], "lint")
         self.assertTrue((self.state_dir / "reviews" / "r1-lint.json").exists())
 
+    def test_refinalize_drops_stale_backend_data(self) -> None:
+        # r36 finding: re-finalizing a round with a narrower envelope
+        # set previously left stale per-backend findings, session_ids,
+        # and resume_status behind. The next round's prior_session_id
+        # could then resume the wrong backend's session, breaking
+        # continuous-conversation review. After the fix, omitted
+        # backends get their entry data dropped so re-finalize is
+        # genuinely idempotent.
+        cx = self._write_envelope(
+            "codex", session_id="codex-1", issues=[
+                {"severity": "high", "file": "a.py", "line": 1, "message": "x", "topic": "t"},
+            ],
+        )
+        cu = self._write_envelope(
+            "cursor", session_id="cursor-1", issues=[
+                {"severity": "low", "file": "b.py", "line": 2, "message": "y", "topic": "u"},
+            ],
+        )
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        # First pass: both backends.
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx, "cursor": cu}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(len(rnd.get("codex_findings") or []), 1)
+        self.assertEqual(len(rnd.get("cursor_findings") or []), 1)
+        self.assertEqual(rnd["session_ids"]["cursor"], "cursor-1")
+        # Second pass: only codex. cursor's data must be dropped.
+        cx2 = self._write_envelope(
+            "codex", session_id="codex-2", issues=[
+                {"severity": "high", "file": "a.py", "line": 1, "message": "x", "topic": "t"},
+            ],
+        )
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": cx2}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd["session_ids"].get("codex"), "codex-2")
+        self.assertNotIn("cursor", rnd.get("session_ids") or {})
+        # Findings reset to empty (rather than popped) so callers
+        # indexing rnd["cursor_findings"] still work.
+        self.assertEqual(rnd.get("cursor_findings"), [])
+
     def test_state_finalize_round_cli_rejects_unknown_backend(self) -> None:
         # Round 27 fix: --envelope curor=/tmp/x typos used to be
         # silently ignored later; now the CLI parser validates
@@ -1040,6 +1083,26 @@ class TestPersistRoundFindings(unittest.TestCase):
             ]
         )
         self.assertNotEqual(rc, 0)
+
+
+    def test_state_finalize_round_cli_warns_when_no_envelopes(self) -> None:
+        # r36 audit: orchestrator silently dropped --envelope across
+        # several rounds, which lost session_ids and broke the next
+        # round's resume continuity (prior_session_id walked past the
+        # un-hydrated round and resumed a stale earlier session). CLI
+        # warns loudly on stderr so pilot errors don't go silent.
+        actions_file = self.state_dir / "actions.json"
+        actions_file.write_text("[]")
+        pr_ops.state_append_round(78, 1, "sha", verify_head=False)
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = pr_ops.main(
+                ["state-finalize-round", "78", "1", "sha2", str(actions_file)]
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("without --envelope", buf.getvalue())
 
 
 class TestCIFailedTests(unittest.TestCase):

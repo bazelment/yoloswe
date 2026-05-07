@@ -903,6 +903,27 @@ def _persist_round_findings(
     import bramble_ops  # noqa: PLC0415
 
     reviews_dir = state_dir / "reviews"
+    # Re-finalizing a round with a different envelope set must not leave
+    # stale per-backend data behind. Drop any prior `<backend>_findings`,
+    # session_ids[backend], and resume_status[backend] for backends NOT
+    # in the new envelope set. Without this, a partial re-finalize would
+    # mix new findings against the old session_ids and the next round's
+    # prior_session_id could resume the wrong session.
+    incoming = {b for b in bramble_ops.BACKENDS if envelope_overrides.get(b) is not None}
+    if incoming:
+        for backend in bramble_ops.BACKENDS:
+            if backend in incoming:
+                continue
+            # Reset findings to empty (matches state_append_round's
+            # initial seed for codex/cursor); don't pop, so consumers
+            # that index into the field unconditionally still work.
+            entry[f"{backend}_findings"] = []
+            for bucket_key in ("session_ids", "resume_status"):
+                bucket = entry.get(bucket_key)
+                if isinstance(bucket, dict):
+                    bucket.pop(backend, None)
+                    if not bucket:
+                        entry.pop(bucket_key, None)
     for backend in bramble_ops.BACKENDS:
         src = envelope_overrides.get(backend)
         if src is None or not src.exists():
@@ -1202,6 +1223,19 @@ def main(argv: list[str] | None = None) -> int:
                         f"expected one of {sorted(bramble_ops.BACKENDS)}"
                     )
                 envelope_overrides[backend] = Path(ep)
+            if not envelope_overrides:
+                # Without envelopes, finalize records comment_actions but
+                # not per-backend findings, session_ids, or archived
+                # envelopes. Next round's prior_session_id walks past this
+                # round and may resume a stale earlier session, breaking
+                # continuous-conversation review. Loud stderr warning so
+                # orchestrator pilot errors don't go silent.
+                print(
+                    "pr_ops: state-finalize-round called without --envelope; "
+                    "session_ids and per-backend findings will not be "
+                    "persisted for this round.",
+                    file=sys.stderr,
+                )
             print_json(
                 state_finalize_round(
                     args.ctx,
