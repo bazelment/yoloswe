@@ -553,12 +553,14 @@ ship:
 
 func TestResolveRound_InheritsFromStep(t *testing.T) {
 	parent := StepConfig{
-		Model:          "sonnet",
-		Effort:         "high",
-		SystemPrompt:   "parent system prompt",
-		PermissionMode: "bypass",
-		MaxTurns:       10,
-		MaxBudgetUSD:   25.0,
+		Model:               "sonnet",
+		Effort:              "high",
+		SystemPrompt:        "parent system prompt",
+		PermissionMode:      "bypass",
+		MaxTurns:            10,
+		MaxBudgetUSD:        25.0,
+		TransientRetries:    4,
+		MaxToolErrorRetries: 3,
 	}
 
 	// Round with no overrides — inherits everything.
@@ -571,6 +573,8 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	assert.Equal(t, "bypass", resolved.PermissionMode)
 	assert.Equal(t, 10, resolved.MaxTurns)
 	assert.Equal(t, 25.0, resolved.MaxBudgetUSD)
+	assert.Equal(t, 4, resolved.TransientRetries)
+	assert.Equal(t, 3, resolved.MaxToolErrorRetries)
 }
 
 func TestResolveRound_OverridesStep(t *testing.T) {

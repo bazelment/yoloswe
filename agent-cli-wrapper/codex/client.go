@@ -611,15 +611,12 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 
 	success := notif.Turn.Status == "completed"
 	errMsg := extractErrorMessage(notif.Turn.Error)
-	var turnErr error
-	if errMsg != "" {
-		turnErr = fmt.Errorf("%s", errMsg)
-	}
+	turnErr := classifyTurnError(notif.ThreadID, notif.Turn.ID, errMsg)
 	fullText := ""
 	var durationMs int64
 	var usage TurnUsage
 	if ok {
-		durationMs = thread.handleTurnCompleted(notif.Turn.ID, success, errMsg)
+		durationMs = thread.handleTurnCompleted(notif.Turn.ID, success, turnErr)
 		fullText = thread.GetFullText()
 		// Get token usage from the last token_count event
 		if lastUsage := thread.getAndClearLastUsage(); lastUsage != nil {

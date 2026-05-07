@@ -71,8 +71,14 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		threadOpts = append(threadOpts, codex.WithSandbox("danger-full-access"))
 	}
 
-	// Create thread and execute
-	thread, err := p.client.CreateThread(ctx, threadOpts...)
+	// Create or resume thread and execute.
+	var thread *codex.Thread
+	var err error
+	if cfg.ResumeSessionID != "" {
+		thread, err = p.client.ResumeThread(ctx, cfg.ResumeSessionID, threadOpts...)
+	} else {
+		thread, err = p.client.CreateThread(ctx, threadOpts...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +86,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	bridgeStop := make(chan struct{})
 	bridgeDone := make(chan struct{})
 	turnDone := make(chan struct{})
-	turnDoneOnce := sync.Once{}
+	var turnDoneOnce sync.Once
 	go func() {
 		bridgeEvents(
 			p.client.Events(),
@@ -98,21 +104,23 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	}()
 
 	if err := thread.WaitReady(ctx); err != nil {
-		return nil, err
+		return &AgentResult{SessionID: thread.ID()}, err
 	}
 
 	turnOpts := codexTurnOptions(cfg)
 
 	result, err := thread.Ask(ctx, fullPrompt, turnOpts...)
 	if err != nil {
-		return nil, err
+		waitForBridgeTurnComplete(ctx, turnDone)
+		return &AgentResult{SessionID: thread.ID()}, err
 	}
-	select {
-	case <-turnDone:
-	case <-time.After(150 * time.Millisecond):
-	}
+	waitForBridgeTurnComplete(ctx, turnDone)
 
-	return codexResultToAgentResult(result), nil
+	agentResult := codexResultToAgentResult(result)
+	if agentResult != nil {
+		agentResult.SessionID = thread.ID()
+	}
+	return agentResult, nil
 }
 
 func (p *CodexProvider) Events() <-chan AgentEvent { return p.events }
@@ -137,6 +145,14 @@ func codexTurnOptions(cfg ExecuteConfig) []codex.TurnOption {
 		return nil
 	}
 	return []codex.TurnOption{codex.WithEffort(string(cfg.Effort))}
+}
+
+func waitForBridgeTurnComplete(ctx context.Context, turnDone <-chan struct{}) {
+	select {
+	case <-turnDone:
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond):
+	}
 }
 
 // codexResultToAgentResult converts a codex.TurnResult to AgentResult.

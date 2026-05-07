@@ -3,6 +3,8 @@ package codex
 import (
 	"errors"
 	"fmt"
+
+	transientmeta "github.com/bazelment/yoloswe/agent-cli-wrapper/transient"
 )
 
 // Sentinel errors for common error conditions.
@@ -105,4 +107,64 @@ func (e *TurnError) Error() string {
 
 func (e *TurnError) Unwrap() error {
 	return e.Cause
+}
+
+// TransientError represents a retryable Codex failure such as a temporary
+// network break, rate limit, or incomplete turn.
+type TransientError struct {
+	Cause    error
+	Message  string
+	Reason   string
+	ThreadID string
+	TurnID   string
+}
+
+func (e *TransientError) Error() string {
+	msg := e.Message
+	if msg == "" && e.Cause != nil {
+		msg = e.Cause.Error()
+	}
+	if msg == "" {
+		msg = "transient codex error"
+	}
+	if e.ThreadID != "" || e.TurnID != "" {
+		if e.Cause != nil && e.Message != "" {
+			return fmt.Sprintf("transient codex error (thread=%s, turn=%s): %s: %v", e.ThreadID, e.TurnID, msg, e.Cause)
+		}
+		return fmt.Sprintf("transient codex error (thread=%s, turn=%s): %s", e.ThreadID, e.TurnID, msg)
+	}
+	if e.Cause != nil && e.Message != "" {
+		return fmt.Sprintf("transient codex error: %s: %v", msg, e.Cause)
+	}
+	return fmt.Sprintf("transient codex error: %s", msg)
+}
+
+func (e *TransientError) Unwrap() error {
+	return e.Cause
+}
+
+// IsTransient reports whether err wraps a Codex transient error.
+func IsTransient(err error) bool {
+	var transient *TransientError
+	return errors.As(err, &transient)
+}
+
+func classifyTurnError(threadID, turnID, msg string) error {
+	if msg == "" {
+		return nil
+	}
+	reason, ok := transientmeta.ClassifyText(msg)
+	if ok {
+		return &TransientError{
+			ThreadID: threadID,
+			TurnID:   turnID,
+			Message:  msg,
+			Reason:   reason,
+		}
+	}
+	return &TurnError{
+		ThreadID: threadID,
+		TurnID:   turnID,
+		Message:  msg,
+	}
 }

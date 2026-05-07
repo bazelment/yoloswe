@@ -44,6 +44,16 @@ type StepAgentResult struct {
 	SessionID string
 }
 
+type agentRunner struct {
+	newProviderForModel func(agent.AgentModel) (agent.Provider, error)
+	retryBackoffs       []time.Duration
+}
+
+var defaultAgentRunner = agentRunner{
+	newProviderForModel: agent.NewProviderForModel,
+	retryBackoffs:       []time.Duration{30 * time.Second, 90 * time.Second},
+}
+
 // RunStepAgent runs an agent session for the given workflow step and returns
 // the StepAgentResult.
 // On first execution (resumeSessionID == ""), the prompt template is rendered with issue data.
@@ -54,7 +64,7 @@ func RunStepAgent(ctx context.Context, stepName string, data PromptData, cfg Ste
 	if err != nil {
 		return StepAgentResult{}, fmt.Errorf("render %s prompt: %w", stepName, err)
 	}
-	return runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
+	return defaultAgentRunner.runAgent(ctx, stepName, prompt, cfg, workDir, resumeSessionID, renderer, logger)
 }
 
 // RunCommand runs a shell command template for the given workflow step.
@@ -134,6 +144,17 @@ func newLogEventHandler(logger *slog.Logger, step string) *logEventHandler {
 		step:       step,
 		toolStarts: make(map[string]time.Time),
 	}
+}
+
+// resetPerAttempt clears state that must not leak between retry attempts.
+// Plan-file detection (planFilePath/lastWriteMD) and pending tool-start
+// timestamps belong to a single agent run; carrying them across attempts can
+// surface a stale plan file via resolveOutput when a retry doesn't write one.
+func (h *logEventHandler) resetPerAttempt() {
+	h.planFilePath = ""
+	h.lastWriteMD = ""
+	h.toolStarts = make(map[string]time.Time)
+	h.textBuf.Reset()
 }
 
 func (h *logEventHandler) OnSessionInit(sessionID string) {
@@ -352,12 +373,12 @@ func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 // runAgent runs an agent with the given prompt and step configuration.
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
-func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
+func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
 	model, ok := agent.ModelByID(cfg.Model)
 	if !ok {
 		return StepAgentResult{}, fmt.Errorf("unknown model: %q", cfg.Model)
 	}
-	provider, err := agent.NewProviderForModel(model)
+	provider, err := r.newProviderForModel(model)
 	if err != nil {
 		return StepAgentResult{}, fmt.Errorf("create provider: %w", err)
 	}
@@ -382,49 +403,102 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, &rendererEventHandler{r: renderer}}}
 	}
 
-	var opts []agent.ExecuteOption
-	opts = append(opts,
-		agent.WithProviderWorkDir(workDir),
-		agent.WithProviderPermissionMode(cfg.PermissionMode),
-		agent.WithProviderModel(cfg.Model),
-		agent.WithProviderKeepUserSettings(),
-		agent.WithProviderEventHandler(handler),
-	)
-	if cfg.SystemPrompt != "" {
-		opts = append(opts, agent.WithProviderSystemPrompt(cfg.SystemPrompt))
-	}
-	if cfg.MaxTurns > 0 {
-		opts = append(opts, agent.WithProviderMaxTurns(cfg.MaxTurns))
-	}
-	if cfg.MaxToolErrorRetries > 0 {
-		opts = append(opts, agent.WithProviderMaxToolErrorRetries(cfg.MaxToolErrorRetries))
-	}
-	if cfg.MaxBudgetUSD > 0 {
-		opts = append(opts, agent.WithProviderMaxBudgetUSD(cfg.MaxBudgetUSD))
-	}
-	if cfg.Effort != "" {
-		level, err := agent.ParseEffort(cfg.Effort)
-		if err != nil {
-			return StepAgentResult{}, fmt.Errorf("effort: %w", err)
-		}
-		opts = append(opts, agent.WithProviderEffort(level))
-	}
-	if resumeSessionID != "" {
-		opts = append(opts, agent.WithProviderResumeSessionID(resumeSessionID))
+	maxRetries := cfg.TransientRetries
+	if maxRetries == 0 {
+		maxRetries = 2
 	}
 
-	result, err := provider.Execute(ctx, prompt, nil, opts...)
-	if err != nil {
-		logHandler.flushText()
-		return StepAgentResult{}, fmt.Errorf("agent execution: %w", err)
+	currentResume := resumeSessionID
+	attempt := 0
+	var result *agent.AgentResult
+	for {
+		logHandler.resetPerAttempt()
+		opts, err := buildExecuteOpts(cfg, workDir, handler, currentResume)
+		if err != nil {
+			return StepAgentResult{}, err
+		}
+		result, err = provider.Execute(ctx, prompt, nil, opts...)
+		if err == nil {
+			if result == nil || result.Success || result.Error == nil {
+				break
+			}
+			if result.SessionID != "" {
+				currentResume = result.SessionID
+			}
+			transient, reason := agent.ClassifyTransient(result.Error)
+			if !transient || attempt >= maxRetries {
+				break
+			}
+			attempt++
+			backoff := r.retryBackoff(attempt)
+			logger.Warn("agent retry on transient result error",
+				"step", stepName,
+				"attempt", attempt,
+				"max", maxRetries,
+				"reason", reason,
+				"session_id", currentResume,
+				"backoff", backoff,
+			)
+			if renderer != nil {
+				renderer.Status(fmt.Sprintf("Transient error (%s); retrying in %s (attempt %d/%d)", reason, backoff, attempt, maxRetries))
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				logHandler.flushText()
+				return StepAgentResult{SessionID: currentResume}, ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		if result != nil && result.SessionID != "" {
+			currentResume = result.SessionID
+		}
+		transient, reason := agent.ClassifyTransient(err)
+		if !transient || attempt >= maxRetries {
+			logHandler.flushText()
+			return StepAgentResult{SessionID: currentResume}, fmt.Errorf("agent execution: %w", err)
+		}
+		attempt++
+		backoff := r.retryBackoff(attempt)
+		logger.Warn("agent retry on transient error",
+			"step", stepName,
+			"attempt", attempt,
+			"max", maxRetries,
+			"reason", reason,
+			"session_id", currentResume,
+			"backoff", backoff,
+		)
+		if renderer != nil {
+			renderer.Status(fmt.Sprintf("Transient error (%s); retrying in %s (attempt %d/%d)", reason, backoff, attempt, maxRetries))
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			logHandler.flushText()
+			return StepAgentResult{SessionID: currentResume}, ctx.Err()
+		case <-timer.C:
+		}
 	}
+
+	if result == nil {
+		logHandler.flushText()
+		return StepAgentResult{SessionID: currentResume}, fmt.Errorf("agent execution: provider returned no result")
+	}
+
 	if !result.Success {
 		logHandler.flushText()
 		failed := StepAgentResult{
 			SessionID: result.SessionID,
 		}
 		if result.Error != nil {
-			return failed, result.Error
+			return failed, fmt.Errorf("agent execution: %w", result.Error)
 		}
 		return failed, fmt.Errorf("agent failed")
 	}
@@ -454,6 +528,54 @@ func runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, work
 		Output:    output,
 		SessionID: result.SessionID,
 	}, nil
+}
+
+func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler, resumeSessionID string) ([]agent.ExecuteOption, error) {
+	var opts []agent.ExecuteOption
+	opts = append(opts,
+		agent.WithProviderWorkDir(workDir),
+		agent.WithProviderPermissionMode(cfg.PermissionMode),
+		agent.WithProviderModel(cfg.Model),
+		agent.WithProviderKeepUserSettings(),
+		agent.WithProviderEventHandler(handler),
+	)
+	if cfg.SystemPrompt != "" {
+		opts = append(opts, agent.WithProviderSystemPrompt(cfg.SystemPrompt))
+	}
+	if cfg.MaxTurns > 0 {
+		opts = append(opts, agent.WithProviderMaxTurns(cfg.MaxTurns))
+	}
+	if cfg.MaxToolErrorRetries > 0 {
+		opts = append(opts, agent.WithProviderMaxToolErrorRetries(cfg.MaxToolErrorRetries))
+	}
+	if cfg.MaxBudgetUSD > 0 {
+		opts = append(opts, agent.WithProviderMaxBudgetUSD(cfg.MaxBudgetUSD))
+	}
+	if cfg.Effort != "" {
+		level, err := agent.ParseEffort(cfg.Effort)
+		if err != nil {
+			return nil, fmt.Errorf("effort: %w", err)
+		}
+		opts = append(opts, agent.WithProviderEffort(level))
+	}
+	if resumeSessionID != "" {
+		opts = append(opts, agent.WithProviderResumeSessionID(resumeSessionID))
+	}
+	return opts, nil
+}
+
+func (r agentRunner) retryBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	if len(r.retryBackoffs) == 0 {
+		return 0
+	}
+	idx := attempt - 1
+	if idx >= len(r.retryBackoffs) {
+		idx = len(r.retryBackoffs) - 1
+	}
+	return r.retryBackoffs[idx]
 }
 
 // resolveOutput returns the plan file content if one was detected, otherwise the agent's text output.

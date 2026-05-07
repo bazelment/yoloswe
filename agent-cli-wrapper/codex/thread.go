@@ -240,7 +240,7 @@ func (t *Thread) handleTextDelta(turnID, itemID, delta string) string {
 }
 
 // handleTurnCompleted processes a turn completion and returns the calculated duration.
-func (t *Thread) handleTurnCompleted(turnID string, success bool, errMsg string) int64 {
+func (t *Thread) handleTurnCompleted(turnID string, success bool, turnErr error) int64 {
 	t.mu.Lock()
 
 	// Calculate duration
@@ -254,12 +254,8 @@ func (t *Thread) handleTurnCompleted(turnID string, success bool, errMsg string)
 		DurationMs: durationMs,
 	}
 
-	if errMsg != "" {
-		result.Error = &TurnError{
-			ThreadID: t.id,
-			TurnID:   turnID,
-			Message:  errMsg,
-		}
+	if turnErr != nil {
+		result.Error = turnErr
 	}
 
 	// Transition state back to ready

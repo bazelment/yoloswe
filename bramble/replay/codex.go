@@ -30,6 +30,7 @@ type codexReplayParser struct { //nolint:govet // fieldalignment: readability ov
 	threadUsageCumulative map[string]bool
 	threadReasoning       map[string]bool
 	threadText            map[string]*strings.Builder
+	threadFailures        map[string]struct{}
 	pendingApprovals      map[string]map[string]struct{}
 	emittedApprovals      map[string]map[string]struct{}
 	prompt                string
@@ -62,6 +63,7 @@ func newCodexReplayParser() *codexReplayParser {
 		threadUsageCumulative:    make(map[string]bool),
 		threadReasoning:          make(map[string]bool),
 		threadText:               make(map[string]*strings.Builder),
+		threadFailures:           make(map[string]struct{}),
 		pendingApprovals:         make(map[string]map[string]struct{}),
 		emittedApprovals:         make(map[string]map[string]struct{}),
 	}
@@ -329,10 +331,25 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 			p.threadCumulativeBaseline[ev.ThreadID] = usage
 			usage = delta
 		}
+		lineType := session.OutputTypeTurnEnd
+		content := "Turn complete"
+		if !ev.Success || ev.Error != nil {
+			lineType = session.OutputTypeError
+			content = "turn failed"
+			if ev.Error != nil {
+				content = strings.TrimSpace(ev.Error.Error())
+			}
+			if content == "" {
+				content = "turn failed"
+			}
+			p.threadFailures[ev.ThreadID] = struct{}{}
+		} else {
+			delete(p.threadFailures, ev.ThreadID)
+		}
 		p.lines = append(p.lines, session.OutputLine{
 			Timestamp:  ts,
-			Type:       session.OutputTypeTurnEnd,
-			Content:    "Turn complete",
+			Type:       lineType,
+			Content:    content,
 			TurnNumber: p.turnCount,
 			DurationMs: ev.DurationMs,
 			CostUSD:    0,
@@ -366,7 +383,7 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 }
 
 func (p *codexReplayParser) deriveStatus() session.SessionStatus {
-	if p.hadProviderErrors {
+	if p.hadProviderErrors || len(p.threadFailures) > 0 {
 		return session.StatusFailed
 	}
 	for _, byKey := range p.pendingApprovals {

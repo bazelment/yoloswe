@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewThread(t *testing.T) {
@@ -215,7 +217,7 @@ func TestThread_HandleTurnCompleted(t *testing.T) {
 	thread.turnWaiters["turn-456"] = []chan *TurnResult{waiterCh}
 
 	// Complete the turn
-	thread.handleTurnCompleted("turn-456", true, "")
+	thread.handleTurnCompleted("turn-456", true, nil)
 
 	// Check state transitioned back to ready
 	if thread.State() != ThreadStateReady {
@@ -253,7 +255,11 @@ func TestThread_HandleTurnCompleted_WithError(t *testing.T) {
 	waiterCh := make(chan *TurnResult, 1)
 	thread.turnWaiters["turn-456"] = []chan *TurnResult{waiterCh}
 
-	thread.handleTurnCompleted("turn-456", false, "Something went wrong")
+	thread.handleTurnCompleted("turn-456", false, &TurnError{
+		ThreadID: "thread-123",
+		TurnID:   "turn-456",
+		Message:  "Something went wrong",
+	})
 
 	select {
 	case result := <-waiterCh:
@@ -265,6 +271,54 @@ func TestThread_HandleTurnCompleted_WithError(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("waiter did not receive result")
+	}
+}
+
+func TestThread_WaitForTurnReturnsFailedResultWithoutError(t *testing.T) {
+	client := NewClient()
+	thread := newThread(client, "thread-123", ThreadConfig{})
+
+	thread.state.SetReady()
+	thread.state.SetProcessing()
+	thread.handleTurnStarted("turn-456")
+
+	done := make(chan struct{})
+	var result *TurnResult
+	var err error
+	go func() {
+		result, err = thread.WaitForTurn(context.Background())
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		thread.mu.Lock()
+		defer thread.mu.Unlock()
+		return len(thread.turnWaiters["turn-456"]) == 1
+	}, time.Second, time.Millisecond)
+
+	thread.handleTurnCompleted("turn-456", false, &TurnError{
+		ThreadID: "thread-123",
+		TurnID:   "turn-456",
+		Message:  "permanent failure",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("WaitForTurn did not return")
+	}
+
+	if err != nil {
+		t.Fatalf("WaitForTurn error = %v, want nil", err)
+	}
+	if result == nil {
+		t.Fatal("WaitForTurn result is nil")
+	}
+	if result.Success {
+		t.Fatal("result.Success = true, want false")
+	}
+	if result.Error == nil {
+		t.Fatal("result.Error is nil, want turn error")
 	}
 }
 
@@ -348,7 +402,7 @@ func TestThread_MultipleWaiters(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Complete the turn
-	thread.handleTurnCompleted("turn-456", true, "")
+	thread.handleTurnCompleted("turn-456", true, nil)
 
 	wg.Wait()
 

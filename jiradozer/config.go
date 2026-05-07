@@ -90,6 +90,7 @@ type StepConfig struct {
 	MaxBudgetUSD         float64       `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
 	MaxTurns             int           `yaml:"max_turns"`
 	MaxToolErrorRetries  int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
+	TransientRetries     int           `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (2)
 	IdleTimeout          time.Duration `yaml:"idle_timeout"`           // parent watchdog kills the subprocess if it emits no log line for this long while inside this step; 0 disables
 	AutoApprove          bool          `yaml:"auto_approve"`           // skip human review after this step
 }
@@ -470,10 +471,11 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		systemPrompt = parent.SystemPrompt
 	}
 	resolved := StepConfig{
-		Prompt:         round.Prompt,
-		SystemPrompt:   systemPrompt,
-		PermissionMode: parent.PermissionMode,
-		Effort:         parent.Effort,
+		Prompt:           round.Prompt,
+		SystemPrompt:     systemPrompt,
+		PermissionMode:   parent.PermissionMode,
+		Effort:           parent.Effort,
+		TransientRetries: parent.TransientRetries,
 	}
 	if round.Model != "" {
 		resolved.Model = round.Model
