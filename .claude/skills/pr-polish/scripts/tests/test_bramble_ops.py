@@ -72,68 +72,114 @@ class TestGoalForRound(unittest.TestCase):
 
 
 class TestActionHistoryGoal(unittest.TestCase):
-    """Per-turn metadata for the resumed model: what prior rounds actioned.
+    """Per-turn metadata for the resumed model: what the immediately-prior
+    round actioned, plus the diff since that round closed.
 
     Bramble's BuildFollowUpJSONPromptWithScope embeds non-empty goal as
-    "Context for this turn:" so the model reads action history as
-    orchestrator-supplied state, not as a re-statement of the session goal.
+    "Context for this turn:" so the model reads this as orchestrator-
+    supplied state, not as a re-statement of the session goal.
     """
 
-    def _state(self, rounds: list[dict]) -> dict:
-        return {"pr_number": 42, "rounds": rounds}
+    def _state(self, rounds: list[dict], **extra) -> dict:
+        out = {"pr_number": 42, "rounds": rounds}
+        out.update(extra)
+        return out
 
     def test_round_one_returns_empty(self) -> None:
-        # Round 1 uses PR_SUMMARY; action history doesn't apply.
-        state = self._state([{"n": 1, "comment_actions": [{"action": "fixed", "path": "a.go", "line": 5, "source": "codex"}]}])
+        state = self._state([{"n": 1, "comment_actions": [{"action": "fixed", "path": "a.go", "line": 5}]}])
         self.assertEqual(bramble_ops.action_history_goal(state, 1), "")
 
     def test_no_state_returns_empty(self) -> None:
         self.assertEqual(bramble_ops.action_history_goal(None, 2), "")
 
     def test_no_prior_rounds_returns_empty(self) -> None:
-        # State exists but no rounds; round 2 has nothing to summarize.
         self.assertEqual(bramble_ops.action_history_goal(self._state([]), 2), "")
 
     def test_no_prior_actions_returns_empty(self) -> None:
-        # Round 1 ran but produced no actions (e.g. zero findings, all stale).
         state = self._state([{"n": 1, "comment_actions": []}])
         self.assertEqual(bramble_ops.action_history_goal(state, 2), "")
 
     def test_summarizes_fixed_and_skipped(self) -> None:
         state = self._state([
             {"n": 1, "comment_actions": [
-                {"action": "fixed", "path": "a.go", "line": 10, "source": "codex"},
-                {"action": "wont_fix", "path": "b.py", "line": 42, "source": "cursor", "reason": "design tradeoff"},
-                {"action": "stale", "path": "c.go", "line": 5, "source": "codex"},
-                {"action": "ack", "path": "d.go", "line": 8, "source": "cursor"},
+                {"action": "fixed", "path": "a.go", "line": 10, "topic": "null check missing"},
+                {"action": "wont_fix", "path": "b.py", "line": 42, "reason": "design tradeoff", "topic": "unused param"},
+                {"action": "stale", "path": "c.go", "line": 5, "topic": "old null guard"},
+                {"action": "ack", "path": "d.go", "line": 8, "topic": "rename helper"},
             ]},
         ])
         out = bramble_ops.action_history_goal(state, 2)
         self.assertIn("Round 2.", out)
-        self.assertIn("Prior rounds fixed:", out)
-        self.assertIn("a.go:10 (codex)", out)
+        self.assertIn("Prior round fixed:", out)
+        self.assertIn("a.go:10 — null check missing", out)
         self.assertIn("Skipped:", out)
-        self.assertIn("b.py:42 (cursor) (wont_fix)", out)
-        self.assertIn("c.go:5 (codex) (stale)", out)
-        self.assertIn("d.go:8 (cursor) (ack)", out)
+        self.assertIn("b.py:42 wont_fix (design tradeoff): unused param", out)
+        self.assertIn("c.go:5 stale: old null guard", out)
+        self.assertIn("d.go:8 ack: rename helper", out)
 
-    def test_only_includes_actions_from_prior_rounds(self) -> None:
-        # An entry under round 2 must NOT show up in the round-2 goal —
-        # we summarize what was actioned BEFORE the current round.
-        state = self._state([
-            {"n": 1, "comment_actions": [{"action": "fixed", "path": "a.go", "line": 10, "source": "codex"}]},
-            {"n": 2, "comment_actions": [{"action": "fixed", "path": "ZZZ.go", "line": 99, "source": "codex"}]},
-        ])
-        out = bramble_ops.action_history_goal(state, 2)
-        self.assertIn("a.go:10", out)
-        self.assertNotIn("ZZZ.go:99", out)
-
-    def test_handles_actions_without_path(self) -> None:
-        # PR-level / review-level comments have no path/line. Drop them
-        # from the summary rather than emitting "None:None".
+    def test_drops_source_label_from_entries(self) -> None:
+        # Source is triage's concern; the resumed model treats every
+        # finding the same way. Don't burn tokens on (codex)/(cursor).
         state = self._state([
             {"n": 1, "comment_actions": [
-                {"action": "fixed", "path": "a.go", "line": 10, "source": "codex"},
+                {"action": "fixed", "path": "a.go", "line": 10, "source": "codex", "topic": "x"},
+                {"action": "wont_fix", "path": "b.py", "line": 42, "source": "cursor", "topic": "y", "reason": "z"},
+            ]},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertNotIn("(codex)", out)
+        self.assertNotIn("(cursor)", out)
+
+    def test_includes_topic_when_present(self) -> None:
+        state = self._state([
+            {"n": 1, "comment_actions": [
+                {"action": "fixed", "path": "a.go", "line": 10, "topic": "null check missing on builder lite"},
+            ]},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertIn("a.go:10 — null check missing on builder lite", out)
+
+    def test_truncates_long_topics(self) -> None:
+        long_topic = "x" * 200
+        state = self._state([
+            {"n": 1, "comment_actions": [
+                {"action": "fixed", "path": "a.go", "line": 10, "topic": long_topic},
+            ]},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertIn("…", out)
+        # After truncation each entry stays well under the 200-char raw topic.
+        # _TOPIC_CHAR_CAP is 80 so the rendered entry is <120 chars total.
+        # Find the entry slice and bound it.
+        entry = out.split("Prior round fixed: ")[1].split(".")[0]
+        self.assertLess(len(entry), 120)
+
+    def test_handles_action_without_topic(self) -> None:
+        # No em dash when topic is missing — bare path:line.
+        state = self._state([
+            {"n": 1, "comment_actions": [
+                {"action": "fixed", "path": "a.go", "line": 10},
+            ]},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertIn("a.go:10.", out)  # period is the line terminator
+        self.assertNotIn("a.go:10 —", out)
+
+    def test_only_includes_immediately_prior_round(self) -> None:
+        # State has rounds 1, 2, 3. Goal at round 3 references round 2 only;
+        # earlier turns are in the model's session conversation already.
+        state = self._state([
+            {"n": 1, "comment_actions": [{"action": "fixed", "path": "round1.go", "line": 1}]},
+            {"n": 2, "comment_actions": [{"action": "fixed", "path": "round2.go", "line": 2}]},
+        ])
+        out = bramble_ops.action_history_goal(state, 3)
+        self.assertIn("round2.go:2", out)
+        self.assertNotIn("round1.go:1", out)
+
+    def test_handles_actions_without_path(self) -> None:
+        state = self._state([
+            {"n": 1, "comment_actions": [
+                {"action": "fixed", "path": "a.go", "line": 10, "topic": "x"},
                 {"action": "ack", "path": None, "line": None, "source": "github-review"},
             ]},
         ])
@@ -142,15 +188,71 @@ class TestActionHistoryGoal(unittest.TestCase):
         self.assertNotIn("None", out)
 
     def test_caps_long_lists(self) -> None:
-        # Don't blow up the prompt on a verbose round. Cap is _ACTION_HISTORY_CAP.
         actions = [
-            {"action": "fixed", "path": f"f{i}.go", "line": i, "source": "codex"}
+            {"action": "fixed", "path": f"f{i}.go", "line": i, "topic": f"t{i}"}
             for i in range(30)
         ]
         state = self._state([{"n": 1, "comment_actions": actions}])
         out = bramble_ops.action_history_goal(state, 2)
-        # Should mention the truncation count.
         self.assertIn("more)", out)
+        # Cap is 20; suffix mentions the rest.
+        self.assertIn("(10 more)", out)
+
+    def test_emits_files_changed_line(self) -> None:
+        from unittest.mock import patch  # noqa: PLC0415
+
+        state = self._state([
+            {"n": 1, "comment_actions": [{"action": "fixed", "path": "a.go", "line": 1, "topic": "x"}],
+             "head_after": "sha-prev"},
+        ])
+        with patch("_common.run") as run_mock:
+            run_mock.return_value = type("R", (), {"returncode": 0, "stdout": "a.go\nb.py\n"})()
+            out = bramble_ops.action_history_goal(state, 2, head_before="sha-cur")
+        self.assertIn("Files changed since round 1: a.go, b.py.", out)
+
+    def test_omits_files_changed_line_when_diff_empty(self) -> None:
+        from unittest.mock import patch  # noqa: PLC0415
+
+        state = self._state([
+            {"n": 1, "comment_actions": [{"action": "fixed", "path": "a.go", "line": 1}],
+             "head_after": "sha-prev"},
+        ])
+        with patch("_common.run") as run_mock:
+            run_mock.return_value = type("R", (), {"returncode": 0, "stdout": ""})()
+            out = bramble_ops.action_history_goal(state, 2, head_before="sha-cur")
+        self.assertNotIn("Files changed", out)
+
+    def test_omits_files_changed_line_when_no_head_before(self) -> None:
+        # Caller didn't pass head_before — we don't shell out to git
+        # speculatively; just skip the line.
+        state = self._state([
+            {"n": 1, "comment_actions": [{"action": "fixed", "path": "a.go", "line": 1}],
+             "head_after": "sha-prev"},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertNotIn("Files changed", out)
+
+
+class TestPriorSessionIdSeriesBoundary(unittest.TestCase):
+    """At a series boundary (prior loop completed), prior_session_id must
+    return empty so the new audit gets a fresh bramble session."""
+
+    def test_returns_empty_at_series_start(self) -> None:
+        state = {
+            "completed": True,
+            "rounds": [
+                {"n": 5, "session_ids": {"codex": "abc-123"}},
+            ],
+        }
+        self.assertEqual(bramble_ops.prior_session_id(state, "codex", 6), "")
+
+    def test_returns_id_within_same_series(self) -> None:
+        state = {
+            "rounds": [
+                {"n": 1, "session_ids": {"codex": "abc-123"}},
+            ],
+        }
+        self.assertEqual(bramble_ops.prior_session_id(state, "codex", 2), "abc-123")
 
 
 

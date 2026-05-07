@@ -371,6 +371,67 @@ class TestStateLifecycle(unittest.TestCase):
         self.assertEqual(state["current_round"], 2)
 
 
+class TestStateFirstRoundOfSeries(unittest.TestCase):
+    """state_load decorates state with is_first_round_of_series.
+
+    A new "series" starts when there's no state, the prior loop set
+    completed=true (any exit_reason), or this is round 1. The orchestrator
+    uses the field to decide whether to re-fetch PR comments + CI failures
+    and to skip bramble session resume on a fresh audit.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp_root = Path(self.tmp.name)
+
+        def fake_state_paths(pr, branch=None):
+            key = pr if pr is not None else f"branch-{branch}"
+            d = tmp_root / f"proj-{key}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d, d / "pr-polish-state.json"
+
+        patcher = patch.object(pr_ops, "state_paths", side_effect=fake_state_paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_no_state_emits_true(self) -> None:
+        out = pr_ops.state_load(42)
+        # Empty state → no derived field at all (state_load returns {} so
+        # the orchestrator's `state-is-new-series` CLI is the canonical
+        # query). Helper directly:
+        self.assertTrue(pr_ops._is_first_round_of_series(None, 1))
+
+    def test_completed_state_emits_true(self) -> None:
+        # Prior loop converged; round 6 is a new series.
+        pr_ops.state_append_round(42, 1, "sha", verify_head=False)
+        pr_ops.state_mark_complete(42, "converged")
+        loaded = pr_ops.state_load(42)
+        self.assertTrue(loaded["is_first_round_of_series"])
+
+    def test_in_progress_state_emits_false(self) -> None:
+        # Mid-series round 2: completed is false, prior round exists.
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_append_round(42, 2, "sha2", verify_head=False)
+        loaded = pr_ops.state_load(42)
+        self.assertFalse(loaded["is_first_round_of_series"])
+
+    def test_state_is_new_series_helper_three_cases(self) -> None:
+        # Direct unit coverage of the helper, decoupled from state_paths.
+        self.assertTrue(pr_ops._is_first_round_of_series(None, 1))
+        self.assertTrue(pr_ops._is_first_round_of_series({"rounds": []}, 1))
+        self.assertTrue(
+            pr_ops._is_first_round_of_series(
+                {"rounds": [{"n": 5}], "completed": True}, 6
+            )
+        )
+        self.assertFalse(
+            pr_ops._is_first_round_of_series(
+                {"rounds": [{"n": 1}], "completed": False}, 2
+            )
+        )
+
+
 class TestHeartbeatTelemetry(unittest.TestCase):
     """Distinguish abandoned runs from interrupted ones.
 

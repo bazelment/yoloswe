@@ -53,103 +53,213 @@ def bramble_bin() -> str:
     return os.environ.get("BRAMBLE_BIN") or "bramble"
 
 
-# Cap on number of action entries surfaced in the goal text. Long lists
-# don't help the model and inflate token cost. The orchestrator's full
-# state file remains the canonical record for human audit.
-_ACTION_HISTORY_CAP = 10
+# Cap on number of action entries surfaced in the goal text. We emit only
+# the immediately-prior round's actions (not a walk across all rounds), so
+# 20 covers a fairly busy round; pathological rounds get truncated with a
+# "(K more)" suffix. The full audit trail lives in rounds[*].comment_actions.
+_ACTION_HISTORY_CAP = 20
+
+# Per-entry topic length cap. Topics from triage already pass through
+# topic_of() which folds long messages into shorter labels, but reviewer-
+# supplied messages can still run long; truncate so a single noisy entry
+# can't blow the whole prompt.
+_TOPIC_CHAR_CAP = 80
 
 
-def action_history_goal(state: dict[str, Any] | None, round_: int) -> str:
-    """Build the --goal text for round 2+: tell the resumed model what
-    prior rounds already fixed and skipped, so it doesn't waste a round
-    re-flagging things it already raised.
+def _is_first_round_of_series(state: dict[str, Any] | None, n: int) -> bool:
+    """Mirror of pr_ops._is_first_round_of_series.
 
-    On round 1 (or with no state / no prior actions), returns "" — the
-    caller passes the PR_SUMMARY as goal instead, and bramble's follow-up
-    prompt builder treats empty goal as "PR-level intent already in
-    session context, no per-turn metadata to inject".
+    Duplicated to keep bramble_ops free of pr_ops imports (pr_ops already
+    depends on bramble_ops via _persist_round_findings; the inverse import
+    would create a cycle).
+    """
+    if state is None or not state.get("rounds"):
+        return True
+    if state.get("completed"):
+        return True
+    return n == 1
 
-    On round 2+ with prior actions, returns a short summary:
 
-        Round 3. Prior rounds fixed: a.go:10 codex; b.py:42 cursor.
-        Skipped: c.go:8 wont_fix (design tradeoff); d.go:5 stale.
+def _files_changed_between(a: str | None, b: str | None) -> list[str]:
+    """Repo-relative paths changed between two commits.
+
+    Returns ``[]`` when either input is falsy, the SHAs are equal, or
+    git fails (no remote, shallow clone, or the commits aren't reachable
+    from the worktree). The caller treats an empty list as "no signal,
+    omit the line" rather than "definitely no changes".
+    """
+    if not a or not b or a == b:
+        return []
+    # Lazy import: keep _common dependencies aligned with the rest of the
+    # module's import block, but avoid pulling subprocess into helpers that
+    # might be hot-path one day.
+    from _common import run  # noqa: PLC0415
+
+    try:
+        res = run(["git", "diff", "--name-only", f"{a}..{b}"], check=False)
+    except Exception:  # noqa: BLE001 — best-effort git invocation
+        return []
+    if res.returncode != 0:
+        return []
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+
+
+def action_history_goal(
+    state: dict[str, Any] | None,
+    round_: int,
+    *,
+    head_before: str | None = None,
+) -> str:
+    """Build the --goal text for round 2+: a per-turn briefing telling the
+    resumed model what the immediately-prior round actioned plus which
+    files have changed since that round closed.
+
+    Returns "" on round 1, missing state, or when there's nothing to say.
+    Otherwise the shape is:
+
+        Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE;
+        b.py:42 — race in cache invalidation.
+        Skipped: c.go:8 wont_fix (design tradeoff) — caller already validates;
+        d.go:5 stale — superseded by 891c12e.
+        Files changed since round 5: a.go, b.py.
 
     Bramble's BuildFollowUpJSONPromptWithScope embeds this as
-    "Context for this turn: <text>" so the resumed model reads it as
-    orchestrator-supplied per-turn state rather than as a re-statement
-    of the session goal.
+    ``Context for this turn: <text>`` so the resumed model reads it as
+    per-turn metadata, not as a re-statement of the session goal.
 
-    Capped at _ACTION_HISTORY_CAP entries each for fixed and skipped to
-    keep the goal short. The full audit trail lives in the state file's
-    rounds[*].comment_actions; this is just the model-facing prompt.
+    Only the immediately-prior round's actions are surfaced — the model
+    has earlier turns in conversation context, so re-listing them is
+    wasted tokens. The "Files changed since round N-1" line is the diff
+    between the prior round's head_after (or head_before if never
+    finalized) and ``head_before`` (this round's HEAD). Caller passes
+    ``head_before`` explicitly because the SKILL computes the goal text
+    before ``state_append_round`` records this round's head_before.
     """
     if round_ < 2 or not state:
         return ""
     rounds = state.get("rounds") or []
+    prior = [r for r in rounds if (r.get("n") or 0) < round_]
+    if not prior:
+        return ""
+    prev = max(prior, key=lambda r: r.get("n") or 0)
+
     fixed: list[str] = []
     skipped: list[str] = []
-    for rnd in sorted(rounds, key=lambda r: r.get("n") or 0):
-        n = rnd.get("n") or 0
-        if n >= round_:
-            break
-        for action in rnd.get("comment_actions") or []:
+    for action in prev.get("comment_actions") or []:
+        verb = action.get("action")
+        if verb == "fixed":
             label = _action_label(action)
-            if not label:
-                continue
-            verb = action.get("action")
-            if verb == "fixed":
+            if label:
                 fixed.append(label)
-            elif verb in ("false_positive", "wont_fix", "stale", "ack"):
-                skipped.append(f"{label} ({verb})")
-    if not fixed and not skipped:
-        return ""
-    parts = [f"Round {round_}."]
+        elif verb in ("false_positive", "wont_fix", "stale", "ack"):
+            label = _skipped_label(action, verb)
+            if label:
+                skipped.append(label)
+
+    parts: list[str] = [f"Round {round_}."]
     if fixed:
         truncated = fixed[:_ACTION_HISTORY_CAP]
         suffix = f"; ({len(fixed) - len(truncated)} more)" if len(fixed) > len(truncated) else ""
-        parts.append("Prior rounds fixed: " + "; ".join(truncated) + suffix + ".")
+        parts.append("Prior round fixed: " + "; ".join(truncated) + suffix + ".")
     if skipped:
         truncated = skipped[:_ACTION_HISTORY_CAP]
         suffix = f"; ({len(skipped) - len(truncated)} more)" if len(skipped) > len(truncated) else ""
         parts.append("Skipped: " + "; ".join(truncated) + suffix + ".")
+
+    if head_before:
+        prev_anchor = prev.get("head_after") or prev.get("head_before")
+        files = _files_changed_between(prev_anchor, head_before)
+        if files:
+            prev_n = prev.get("n") or "?"
+            # Cap files list at a few entries; pathological churn shouldn't blow the prompt.
+            shown = files[:_ACTION_HISTORY_CAP]
+            tail = f" (and {len(files) - len(shown)} more)" if len(files) > len(shown) else ""
+            parts.append(f"Files changed since round {prev_n}: " + ", ".join(shown) + tail + ".")
+
+    if len(parts) == 1:  # only the "Round N." stub — nothing to say
+        return ""
     return " ".join(parts)
 
 
+def _truncate(s: str) -> str:
+    """Cap a string at _TOPIC_CHAR_CAP chars with an ellipsis tail."""
+    s = (s or "").strip()
+    if len(s) <= _TOPIC_CHAR_CAP:
+        return s
+    return s[: _TOPIC_CHAR_CAP - 1].rstrip() + "…"
+
+
 def _action_label(action: dict[str, Any]) -> str:
-    """Format a single comment_actions entry as a one-line label for the
-    goal-string. Uses path:line plus source for bramble findings; topic
-    when present is dropped from the label since it inflates length and
-    the model can re-derive specifics from session context.
+    """Format a fixed comment_actions entry for the goal text.
+
+    Shape: ``path:line — topic`` when topic is present, bare ``path:line``
+    when absent. Source labels (codex/cursor/etc.) are deliberately
+    omitted: triage routes by source but the resumed model treats every
+    finding identically once it lands in the prompt.
     """
     path = action.get("path")
     line = action.get("line")
-    source = action.get("source") or "?"
+    topic = (action.get("topic") or "").strip()
+    base: str
     if path and line is not None:
-        return f"{path}:{line} ({source})"
-    if path:
-        return f"{path} ({source})"
-    return ""
+        base = f"{path}:{line}"
+    elif path:
+        base = f"{path}"
+    else:
+        return ""
+    if topic:
+        return f"{base} — {_truncate(topic)}"
+    return base
+
+
+def _skipped_label(action: dict[str, Any], verb: str) -> str:
+    """Format a skipped action: ``path:line verb (reason): topic``.
+
+    Verb first because that's the actionable signal — the model needs to
+    know "we decided not to fix this" before it gets the topic. Reason
+    follows in parens when present (e.g. ``wont_fix (design tradeoff)``);
+    trailing topic explains what the original finding was about.
+    """
+    path = action.get("path")
+    line = action.get("line")
+    topic = (action.get("topic") or "").strip()
+    reason = (action.get("reason") or "").strip()
+    if path and line is not None:
+        base = f"{path}:{line}"
+    elif path:
+        base = f"{path}"
+    else:
+        return ""
+    parts = [base, verb]
+    if reason:
+        parts[-1] = f"{verb} ({_truncate(reason)})"
+    label = " ".join(parts)
+    if topic:
+        label = f"{label}: {_truncate(topic)}"
+    return label
 
 
 def goal_for_round(
     round_: int,
     pr_summary: str,
     state: dict[str, Any] | None,
+    *,
+    head_before: str | None = None,
 ) -> str:
     """Return the ``--goal`` text bramble should see for this round.
 
-    Round 1: the PR_SUMMARY (commit list + diffstat). Bramble embeds it as
-    the PR-level intent in the fresh-prompt builder.
+    Round 1: PR_SUMMARY (commit list + diffstat).
 
-    Round 2+: an action-history string telling the resumed model what
-    prior rounds already fixed and skipped. Bramble embeds it as
-    ``Context for this turn: <text>`` so the model doesn't re-flag its
-    own fixes. Falls back to PR_SUMMARY when state has no prior actions
-    (e.g. round 1 produced an empty action plan).
+    Round 2+: per-turn action-history briefing built by
+    ``action_history_goal``. Falls back to PR_SUMMARY when there's
+    nothing to say (e.g. round 1 produced an empty action plan).
+
+    ``head_before`` is this round's HEAD, used to compute the
+    files-changed-since-prior-round line.
     """
     if round_ < 2:
         return pr_summary
-    history = action_history_goal(state, round_)
+    history = action_history_goal(state, round_, head_before=head_before)
     return history or pr_summary
 
 
@@ -587,8 +697,14 @@ def prior_session_id(state: dict[str, Any] | None, backend: str, round_: int) ->
     State files have evolved over time, so accept both explicit round metadata
     (``session_ids`` / ``<backend>_session_id``) and persisted raw envelopes
     under ``reviews`` when present.
+
+    Returns ``""`` at series boundaries: a new audit (prior loop hit
+    completed=true) gets a fresh bramble session rather than dragging the
+    prior series' conversation context into a review of different code.
     """
     if not state or round_ < 2:
+        return ""
+    if _is_first_round_of_series(state, round_):
         return ""
     rounds = state.get("rounds") or []
     for rnd in sorted(rounds, key=lambda r: r.get("n") or 0, reverse=True):
@@ -622,6 +738,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("round_", type=int)
     sp.add_argument("--pr-summary", required=True)
     sp.add_argument("--state-file")
+    sp.add_argument(
+        "--head-before",
+        help="This round's HEAD; used to compute the files-changed-since-prior-round line.",
+    )
 
     sp = sub.add_parser(
         "prior-session-id",
@@ -684,7 +804,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "goal":
             state = read_json(Path(args.state_file), default=None) if args.state_file else None
-            print(goal_for_round(args.round_, args.pr_summary, state))
+            print(
+                goal_for_round(
+                    args.round_, args.pr_summary, state, head_before=args.head_before
+                )
+            )
         elif args.cmd == "prior-session-id":
             state = read_json(Path(args.state_file), default=None)
             print(prior_session_id(state, args.backend, args.round_))

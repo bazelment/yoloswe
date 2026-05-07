@@ -181,7 +181,13 @@ Don't paper over with sed-strip workarounds. An old binary is a real environment
 python3 $SKILL_DIR/scripts/pr_ops.py state-load $CTX
 ```
 
-`state-load` returns the persisted state plus a derived `is_heartbeat_stale` boolean (computed at read time from `last_heartbeat_at`; never persisted). Compare against `git rev-parse HEAD`:
+`state-load` returns the persisted state plus two derived booleans (computed at read time, never persisted): `is_heartbeat_stale` and `is_first_round_of_series`. The second is true when this round either is round 1 with no prior history or follows a `completed: true` state — in both cases the orchestrator must treat it like a real round 1 (re-fetch PR comments + CI failures, skip bramble session resume). Capture it once, before `state-append-round` clears the `completed` flag:
+
+```bash
+IS_NEW_SERIES=$(python3 $SKILL_DIR/scripts/pr_ops.py state-is-new-series $CTX $ROUND)
+```
+
+Then compare against `git rev-parse HEAD`:
 
 - **No state file / empty load**: fresh run. Proceed.
 - **`pr_number` mismatches current PR**: stale state (integrity gate). Show user and `AskUserQuestion` whether to discard. This is one of only three sanctioned pauses — see "Auto-decision rules".
@@ -215,34 +221,39 @@ What it carries:
 | Round | Goal text | Why |
 |---|---|---|
 | 1 | `$PR_SUMMARY` (commit list + diffstat) | First turn: model has nothing yet. Establish PR-level intent and surface area. |
-| 2+, prior actions exist | Action-history sentence built from the state file | Tells the resumed model which of its own findings the orchestrator already actioned, so it doesn't re-raise them. |
-| 2+, no prior actions yet | Falls back to `$PR_SUMMARY` | Round 1 was empty; better to re-anchor than send nothing. |
+| 2+, prior round had actions | Per-turn briefing: prior round's fixed/skipped + files changed since then | Tells the resumed model what it actioned last turn (so it doesn't re-flag fixes) and which files moved (so the worktree snapshot doesn't have to surface that on its own). |
+| 2+, prior round empty | Falls back to `$PR_SUMMARY` | Re-anchor rather than send a goal that's just "Round N." |
 
-Action-history shape (emitted by `action_history_goal`):
+Action-history shape (emitted by `action_history_goal`, only the immediately-prior round):
 
 ```
-Round 3. Prior rounds fixed: a.go:10 codex; b.py:42 cursor.
-Skipped: c.go:8 wont_fix (design tradeoff); d.go:5 stale.
+Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE.
+Skipped: b.py:42 wont_fix (design tradeoff): caller already validates;
+c.go:5 stale (superseded by 891c12e): old null guard.
+Files changed since round 5: a.go, b.py.
 ```
 
-The `fixed: X; skipped: Y (reason)` line is what stops the resumed model from re-flagging its own prior findings and arguing skipped ones. Same reason there's no separate "review the new commits" arm: session resume already biases the new turn toward what's new. Capped at `_ACTION_HISTORY_CAP` per bucket with a `(N more)` suffix — the full audit trail lives in `comment_actions`.
+The `fixed: X; skipped: Y verb (reason): topic` shape stops the resumed model from re-flagging its own prior findings and re-arguing skipped ones — the topic is what disambiguates "you said this already" from a new finding at the same line. Source labels (`(codex)`/`(cursor)`) are deliberately omitted: the resumed model treats every entry the same once it lands in the prompt. Capped at `_ACTION_HISTORY_CAP=20` entries per bucket with a `(N more)` suffix.
+
+The "Files changed since round N-1" line is the diff between the prior round's `head_after` and this round's HEAD — useful when the user manually committed between rounds, when the prior round's fix touched a file the model didn't expect to see in its snapshot, or simply to keep the model oriented. Omitted when the diff is empty.
 
 What the goal channel deliberately does **not** carry:
 
-- The full diff or new commit shas — bramble re-snapshots the worktree on each turn, so the model sees the post-fix code directly.
-- Per-finding rationale text — that belongs in the inline reply on the PR (see Step 3d), not in the model context.
-- Round-1 PR_SUMMARY repeated — the session already has it. Re-stating wastes tokens and dilutes the don't-reflag signal.
+- The actual diff body — bramble re-snapshots the worktree on each turn, so the model sees post-fix code directly. We give it the *list* of moved files, not the patch.
+- Per-finding rationale text the orchestrator wrote into PR replies — that belongs in the inline thread, not the model context.
+- Earlier rounds' actions — only the immediately prior round is replayed; older turns are in the model's session conversation already.
+- Round-1 PR_SUMMARY repeated — the session already has it.
 
 ## Step 2: Fetch existing PR comments + failing CI jobs
 
-**Only when `pr_number` is not null.** These are supplementary round-1 triage input — they do **not** replace the local bramble review. Even if remote bots found nothing or only stale issues, always proceed to the round loop and run bramble.
+**Only when `pr_number` is not null.** These are supplementary triage input for the *first round of a series* — they do **not** replace the local bramble review. Always proceed to the round loop and run bramble even if remote bots found nothing.
 
 ```
 python3 $SKILL_DIR/scripts/pr_ops.py fetch-comments > $STATE_DIR/pp-comments.json
 python3 $SKILL_DIR/scripts/pr_ops.py ci-failed-tests > $STATE_DIR/pp-ci.json
 ```
 
-`fetch-comments` emits the wrapped shape `{"comments": [...], "noise_filtered": N, "noise_samples": [...]}`. Three filters run at intake: replies dropped, bot review-summary boilerplate dropped, and bot process-noise (linear linkbacks, claude-bot "Reviewing PR..." progress posts) dropped into `noise_*`. Only `comments` flows into triage; the orchestrator passes `noise_filtered` / `noise_samples` into `state-append-round --noise-filtered N --noise-samples <file>` on round 1 so the audit trail records what was dropped. `bramble_ops.py triage --pr-comments` accepts both the wrapped shape and the legacy bare-list shape, so older state files keep working. `ci-failed-tests` classifies each failing job as flake vs real (ETXTBSY, bazel-cache, `ci_deadline` → flake; anything else → real). Branch-only mode skips both files; triage reads them only when round == 1.
+`fetch-comments` emits the wrapped shape `{"comments": [...], "noise_filtered": N, "noise_samples": [...]}`. Three filters run at intake: replies dropped, bot review-summary boilerplate dropped, and bot process-noise (linear linkbacks, claude-bot "Reviewing PR..." progress posts) dropped into `noise_*`. Only `comments` flows into triage; the orchestrator passes `noise_filtered` / `noise_samples` into `state-append-round --noise-filtered N --noise-samples <file>` on round 1 so the audit trail records what was dropped. `bramble_ops.py triage --pr-comments` accepts both the wrapped shape and the legacy bare-list shape, so older state files keep working. `ci-failed-tests` classifies each failing job as flake vs real (ETXTBSY, bazel-cache, `ci_deadline` → flake; anything else → real). Branch-only mode skips both files; triage reads them only when `IS_NEW_SERIES=1` (round 1 of a fresh run, or the first round after a prior loop converged/capped — see Step 0.5). The orchestrator re-runs both fetches inside the round loop on every series start so newly-arrived bot comments don't get dropped between series.
 
 ## Step 3: Round loop
 
@@ -282,9 +293,21 @@ Compute the round's `--goal` text and per-backend resume id from the state file:
 
 ```bash
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
-        --pr-summary "$PR_SUMMARY" --state-file "$STATE_FILE")
+        --pr-summary "$PR_SUMMARY" --state-file "$STATE_FILE" \
+        --head-before "$(git rev-parse HEAD)")
 CODEX_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id codex {ROUND} --state-file "$STATE_FILE")
 CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id cursor {ROUND} --state-file "$STATE_FILE")
+```
+
+`--head-before` lets the goal helper compute "Files changed since round N-1" by diffing the prior round's `head_after` against the current HEAD. `prior-session-id` returns empty across series boundaries (when `IS_NEW_SERIES=1`) so a new audit gets a fresh bramble session rather than dragging the prior series' context.
+
+When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures so newly-arrived bot/CI signal isn't dropped — the prior series' fetch is now stale:
+
+```bash
+[ "$IS_NEW_SERIES" = "1" ] && [ "$PR_NUMBER" != "null" ] && {
+  python3 $SKILL_DIR/scripts/pr_ops.py fetch-comments > $STATE_DIR/pp-comments.json
+  python3 $SKILL_DIR/scripts/pr_ops.py ci-failed-tests > $STATE_DIR/pp-ci.json
+}
 ```
 
 Each Monitor runs `bramble code-review` directly with the round's goal and (round 2+) resume flag. Step 0.2 already proved `--resume-session-id` is supported.
@@ -358,11 +381,11 @@ python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
     --stream cursor=$ENVELOPE_CURSOR \
     --stream lint=$ENVELOPE_LINT \
     $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$LOG_DIR/gemini-envelope.json ) \
-    $( [ "$ROUND" = "1" ] && [ "$PR_NUMBER" != "null" ] && \
+    $( [ "$IS_NEW_SERIES" = "1" ] && [ "$PR_NUMBER" != "null" ] && \
        echo --pr-comments $STATE_DIR/pp-comments.json --ci-failures $STATE_DIR/pp-ci.json )
 ```
 
-`triage` reads envelopes, merges the round-1 PR-comment and CI-failure feeds, and emits:
+`triage` reads envelopes, merges the series-start PR-comment and CI-failure feeds (any round where `IS_NEW_SERIES=1` — see Step 0.5), and emits:
 
 - `consensus` — same `(file, line)` flagged by ≥2 distinct sources, or same `(file, line, topic)` for sourceless paths. Route to `must_fix`. The location-only key collapses different phrasings of the same finding so two reviewers wording it differently still consolidate.
 - `single_critical` — single-source high/critical, or CI failure that isn't a flake. Route to `must_fix`.

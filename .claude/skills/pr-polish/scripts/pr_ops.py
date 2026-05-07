@@ -664,6 +664,9 @@ def state_load(ctx: int | str) -> dict[str, Any]:
     state = read_json(path, default={}) or {}
     if state:
         state["is_heartbeat_stale"] = _is_heartbeat_stale(state)
+        state["is_first_round_of_series"] = _is_first_round_of_series(
+            state, state.get("current_round") or 1
+        )
     return state
 
 
@@ -694,6 +697,22 @@ def _is_heartbeat_stale(state: dict[str, Any]) -> bool:
         return True
     age = (datetime.now(UTC) - ts_dt).total_seconds()
     return age > HEARTBEAT_STALE_SECONDS
+
+
+def _is_first_round_of_series(state: dict[str, Any] | None, n: int) -> bool:
+    """True when round ``n`` starts a new review series.
+
+    A new series starts when there is no state at all, the prior loop
+    set ``completed: true`` (any exit_reason — converged, capped-at-max,
+    abandoned, etc.), or this is round 1 with no rounds recorded yet.
+    Must be evaluated before ``state_append_round`` clears the
+    ``completed`` flag.
+    """
+    if state is None or not state.get("rounds"):
+        return True
+    if state.get("completed"):
+        return True
+    return n == 1
 
 
 def _resolve_ctx(ctx: int | str) -> tuple[int | None, str | None]:
@@ -1044,6 +1063,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("state-load")
     sp.add_argument("ctx", help="PR number or 'branch:<name>'")
 
+    sp = sub.add_parser(
+        "state-is-new-series",
+        help="Print 1 if round n starts a new review series, else 0.",
+    )
+    sp.add_argument("ctx", help="PR number or 'branch:<name>'")
+    sp.add_argument("n", type=int)
+
     sp = sub.add_parser("state-append-round")
     sp.add_argument("ctx", help="PR number or 'branch:<name>'")
     sp.add_argument("n", type=int)
@@ -1134,6 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
                 print_json(ci_compare_base(pr_number))
         elif args.cmd == "state-load":
             print_json(state_load(args.ctx))
+        elif args.cmd == "state-is-new-series":
+            pr, branch = _resolve_ctx(args.ctx)
+            _, path = state_paths(pr, branch=branch)
+            state = read_json(path, default=None)
+            print(1 if _is_first_round_of_series(state, args.n) else 0)
         elif args.cmd == "state-append-round":
             samples = None
             if args.noise_samples:
