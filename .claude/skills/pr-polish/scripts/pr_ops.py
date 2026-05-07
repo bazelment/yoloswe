@@ -45,12 +45,10 @@ from _common import (  # noqa: E402 — sys.path tweak above
     SOURCE_REVIEW,
     CommandError,
     atomic_write_json,
-    branch_envelope_key,
     current_branch,
     detect_base_branch,
     print_json,
     read_json,
-    repo_slug,
     run,
     severity_rank,
     state_paths,
@@ -843,15 +841,10 @@ def state_finalize_round(
 ) -> dict[str, Any]:
     """Finalize a round and persist its results.
 
-    ``envelope_overrides`` lets the orchestrator hand in explicit per-backend
-    envelope paths (e.g. ``$STATE_DIR/r6/codex-envelope.json``) when the
-    SKILL writes them somewhere other than ``bramble_ops.envelope_path()``'s
-    /tmp convention. Without this, session_ids and resume_status from the
-    envelope never make it into rounds[n].session_ids — and the next
-    round's prior_session_id() lookup returns "", so the resume flag never
-    appears on round N+1's bramble invocation. That's the gap that left
-    pr-polish doing cold-start reviews despite session-resume being the
-    whole reason the feature exists.
+    ``envelope_overrides`` maps backend name to the on-disk envelope file
+    Monitor captured for that backend (canonically
+    ``$STATE_DIR/r<n>/<backend>-envelope.json``). Backends absent from the
+    mapping are skipped — finalize hydrates only what was actually run.
     """
     pr_number, branch = _resolve_ctx(ctx)
     state_dir, path = state_paths(pr_number, branch=branch)
@@ -881,30 +874,18 @@ def _persist_round_findings(
     envelope_overrides: dict[str, Path],
 ) -> None:
     """Copy per-backend bramble envelopes into ``<state_dir>/reviews/`` and
-    hydrate ``codex_findings`` / ``cursor_findings`` from them.
-
-    Best-effort: missing envelopes (e.g. a backend that never ran) leave the
-    existing array in place. Keeps the raw review text durable after the
-    ``/tmp`` envelope is gone. CI findings only populate when a PR number is
-    known — branch-only runs skip the ``gh pr checks`` pull.
-
-    Resolution order for each backend's envelope:
-      1. ``envelope_overrides[backend]`` if the orchestrator passed an
-         explicit path (matches how the SKILL writes envelopes to
-         ``$STATE_DIR/r$ROUND/<backend>-envelope.json``).
-      2. ``bramble_ops.envelope_path()`` /tmp convention (legacy).
+    hydrate ``codex_findings`` / ``cursor_findings`` / ``gemini_findings`` /
+    ``lint_findings`` from them. Backends absent from ``envelope_overrides``
+    are skipped — finalize only persists what the orchestrator actually ran.
     """
     # Imported lazily to avoid a top-level circular import between
     # pr_ops and bramble_ops.
     import bramble_ops  # noqa: PLC0415
 
-    envelope_key = pr_number if pr_number is not None else branch_envelope_key(branch or "")
     reviews_dir = state_dir / "reviews"
     for backend in bramble_ops.BACKENDS:
-        src = envelope_overrides.get(backend) or bramble_ops.envelope_path(
-            repo_slug(), envelope_key, backend, n
-        )
-        if not src.exists():
+        src = envelope_overrides.get(backend)
+        if src is None or not src.exists():
             continue
         try:
             obj = read_json(src, default=None)
@@ -1097,11 +1078,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="<backend>=<path>",
         help=(
-            "Override the per-backend envelope path used to hydrate findings, "
-            "session_ids, and resume_status. Repeatable: --envelope codex=... "
-            "--envelope cursor=.... Without this, finalize falls back to the "
-            "/tmp legacy convention and silently misses session ids written "
-            "elsewhere."
+            "Per-backend envelope path used to hydrate findings, session_ids, "
+            "and resume_status. Repeatable: --envelope codex=... --envelope cursor=.... "
+            "Backends not passed are skipped."
         ),
     )
 

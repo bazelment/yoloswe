@@ -820,7 +820,8 @@ class TestHeadVerification(unittest.TestCase):
 
 
 class TestPersistRoundFindings(unittest.TestCase):
-    """state_finalize_round must hydrate {backend}_findings and copy envelopes."""
+    """state_finalize_round must hydrate {backend}_findings, copy envelopes,
+    and persist session ids — driven entirely by ``envelope_overrides``."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -839,44 +840,34 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.envelope_dir = self.tmp_root / "envelopes"
         self.envelope_dir.mkdir()
 
-        import bramble_ops  # noqa: PLC0415
-
-        self.bramble_ops = bramble_ops
-
-        def fake_envelope_path(repo: str, pr, backend: str, round_: int) -> Path:
-            return self.envelope_dir / f"{backend}-r{round_}.json"
-
-        p2 = patch.object(bramble_ops, "envelope_path", side_effect=fake_envelope_path)
-        p2.start()
-        self.addCleanup(p2.stop)
-
-        p3 = patch.object(pr_ops, "repo_slug", return_value="demo-repo")
-        p3.start()
-        self.addCleanup(p3.stop)
-
-    def _write_envelope(self, backend: str, issues: list[dict]) -> Path:
+    def _write_envelope(self, backend: str, **kw) -> Path:
         obj = {
             "schema_version": 1,
             "status": "ok",
             "backend": backend,
-            "review": {"verdict": "rejected", "issues": issues},
+            "review": {"verdict": kw.get("verdict", "rejected"), "issues": kw.get("issues", [])},
         }
-        path = self.envelope_dir / f"{backend}-r1.json"
+        if "session_id" in kw:
+            obj["session_id"] = kw["session_id"]
+        if "resume_status" in kw:
+            obj["resume_status"] = kw["resume_status"]
+        path = self.envelope_dir / f"{backend}-envelope.json"
         path.write_text(json.dumps(obj))
         return path
 
     def test_finalize_hydrates_findings_and_copies_envelopes(self) -> None:
-        self._write_envelope(
+        cx = self._write_envelope(
             "codex",
-            [{"severity": "high", "file": "a.go", "line": 5, "message": "oops", "topic": "t1"}],
+            issues=[{"severity": "high", "file": "a.go", "line": 5, "message": "oops", "topic": "t1"}],
         )
-        self._write_envelope(
+        cu = self._write_envelope(
             "cursor",
-            [{"severity": "medium", "file": "b.go", "line": 8, "message": "meh", "topic": "t2"}],
+            issues=[{"severity": "medium", "file": "b.go", "line": 8, "message": "meh", "topic": "t2"}],
         )
-
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)
-        state = pr_ops.state_finalize_round(77, 1, "sha2", [])
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx, "cursor": cu}
+        )
         rnd = state["rounds"][0]
 
         self.assertEqual(len(rnd["codex_findings"]), 1)
@@ -889,75 +880,41 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.assertTrue((reviews / "r1-codex.json").exists())
         self.assertTrue((reviews / "r1-cursor.json").exists())
 
-    def test_finalize_tolerates_missing_envelope(self) -> None:
-        self._write_envelope(
+    def test_finalize_skips_backends_not_in_overrides(self) -> None:
+        cx = self._write_envelope(
             "codex",
-            [{"severity": "low", "file": "c.go", "line": 3, "message": "ok", "topic": "t3"}],
+            issues=[{"severity": "low", "file": "c.go", "line": 3, "message": "ok", "topic": "t3"}],
         )
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)
-        state = pr_ops.state_finalize_round(77, 1, "sha2", [])
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx}
+        )
         rnd = state["rounds"][0]
         self.assertEqual(len(rnd["codex_findings"]), 1)
         self.assertEqual(rnd["cursor_findings"], [])
 
     def test_finalize_tolerates_malformed_envelope(self) -> None:
-        (self.envelope_dir / "codex-r1.json").write_text("not json {{{")
-        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
-        state = pr_ops.state_finalize_round(77, 1, "sha2", [])
-        self.assertEqual(state["rounds"][0]["codex_findings"], [])
-
-    def test_finalize_with_envelope_override_persists_session_ids(self) -> None:
-        # The SKILL writes envelopes to $STATE_DIR/r$ROUND/<backend>-envelope.json,
-        # not to bramble_ops.envelope_path()'s /tmp convention. Without the
-        # envelope_overrides argument, state_finalize_round silently misses the
-        # operator-controlled path — and rounds[n].session_ids stays empty,
-        # which is the bug that left pr-polish doing cold-start reviews
-        # despite session-resume being the whole feature.
-        custom_dir = self.tmp_root / "custom" / "r1"
-        custom_dir.mkdir(parents=True)
-        codex_env = custom_dir / "codex-envelope.json"
-        codex_env.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": "ok",
-                    "backend": "codex",
-                    "session_id": "codex-session-abc",
-                    "resume_status": "ok",
-                    "review": {"verdict": "rejected", "issues": []},
-                }
-            )
-        )
-        cursor_env = custom_dir / "cursor-envelope.json"
-        cursor_env.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "status": "ok",
-                    "backend": "cursor",
-                    "session_id": "cursor-session-xyz",
-                    "review": {"verdict": "accepted", "issues": []},
-                }
-            )
-        )
-
+        bad = self.envelope_dir / "codex-envelope.json"
+        bad.write_text("not json {{{")
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)
         state = pr_ops.state_finalize_round(
-            77,
-            1,
-            "sha2",
-            [],
-            envelope_overrides={"codex": codex_env, "cursor": cursor_env},
+            77, 1, "sha2", [], envelope_overrides={"codex": bad}
+        )
+        self.assertEqual(state["rounds"][0]["codex_findings"], [])
+
+    def test_finalize_persists_session_ids(self) -> None:
+        cx = self._write_envelope(
+            "codex", session_id="codex-session-abc", resume_status="ok"
+        )
+        cu = self._write_envelope("cursor", session_id="cursor-session-xyz")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx, "cursor": cu}
         )
         rnd = state["rounds"][0]
-        # Both session ids must be persisted so prior_session_id() can wire
-        # them into round 2's bramble invocation.
         self.assertEqual(rnd.get("session_ids", {}).get("codex"), "codex-session-abc")
         self.assertEqual(rnd.get("session_ids", {}).get("cursor"), "cursor-session-xyz")
-        # resume_status is also captured per-backend.
         self.assertEqual(rnd.get("resume_status", {}).get("codex"), "ok")
-        # And the envelopes are still copied into <state_dir>/reviews/ so the
-        # post-loop audit trail stays intact.
         self.assertTrue((self.state_dir / "reviews" / "r1-codex.json").exists())
         self.assertTrue((self.state_dir / "reviews" / "r1-cursor.json").exists())
 
@@ -1160,7 +1117,6 @@ class TestStateFinalizeRecordsCIFindings(unittest.TestCase):
 
             with (
                 patch.object(pr_ops, "state_paths", side_effect=fake_state_paths),
-                patch.object(pr_ops, "repo_slug", return_value="demo"),
                 patch.object(pr_ops, "ci_failed_tests", return_value=fake_ci),
             ):
                 pr_ops.state_append_round(77, 1, "sha", verify_head=False)
@@ -1177,7 +1133,6 @@ class TestStateFinalizeRecordsCIFindings(unittest.TestCase):
 
             with (
                 patch.object(pr_ops, "state_paths", side_effect=fake_state_paths),
-                patch.object(pr_ops, "repo_slug", return_value="demo"),
                 patch.object(pr_ops, "ci_failed_tests", side_effect=RuntimeError("gh down")),
             ):
                 pr_ops.state_append_round(77, 1, "sha", verify_head=False)
@@ -1201,7 +1156,6 @@ class TestStateFinalizeRecordsCIFindings(unittest.TestCase):
 
             with (
                 patch.object(pr_ops, "state_paths", side_effect=fake_state_paths),
-                patch.object(pr_ops, "repo_slug", return_value="demo"),
                 patch.object(pr_ops, "ci_failed_tests", side_effect=boom),
             ):
                 pr_ops.state_append_round("branch:foo", 1, "sha", verify_head=False)

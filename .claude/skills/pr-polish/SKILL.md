@@ -29,7 +29,6 @@ All shell plumbing lives in Python helper modules bundled with this skill at `sc
 | `--rounds N` | `5` | The round number this invocation will *stop at* (inclusive). Resuming a state at `current_round=5` with `--rounds 7` runs rounds 6 and 7 — i.e. "two more rounds". `--rounds 5` on the same state is a no-op (already at the cap). |
 | `--fixer-model MODEL` | `sonnet` | Model passed to `Agent(model=…)` spawns when the round's action plan is too large to apply inline. |
 | `--gemini` | off | Also run a third bramble reviewer using `--backend gemini --model gemini-3-flash-preview`. Findings from all three backends are merged and deduplicated; a finding agreed on by ≥2 sources (including Gemini) counts as consensus. |
-| `--review-recent-commits` | off | Add a 4th bramble Monitor per round that runs codex with `--goal "Focus on changes in commits <head_before>...<head_after>"`. The session's evidence is that codex catches "the bug you just shipped" with high reliability when biased toward new commits. Pairs with the existing full-diff codex/cursor streams; doesn't replace them. Skip on round 1 where there are no "prior round commits" to focus on. |
 
 No positional arguments. PR/branch context is auto-detected by `pr_ops.py identify`.
 
@@ -162,6 +161,20 @@ export BRAMBLE_BIN="$([ -x "$(pwd)/bazel-bin/bramble/bramble_/bramble" ] \
 
 Every `bramble code-review` invocation in later steps must reference `$BRAMBLE_BIN`, not the bare `bramble` literal.
 
+### Step 0.2: Bramble must support `--resume-session-id`
+
+Continuous review is the whole reason this skill exists; without resume the loop devolves into N independent cold reviews and the don't-reflag signal in round 2+ goal is wasted. Probe once, fail fast, and tell the user how to upgrade:
+
+```bash
+"$BRAMBLE_BIN" code-review --help 2>&1 | grep -q -- '--resume-session-id' || {
+  echo "error: '$BRAMBLE_BIN' does not support --resume-session-id." >&2
+  echo "Upgrade your bramble (e.g. 'bazel build //bramble:bramble' in this repo, or reinstall) and re-run." >&2
+  exit 1
+}
+```
+
+Don't paper over with sed-strip workarounds. An old binary is a real environment problem the user needs to fix once, not something the skill can compensate for transparently.
+
 ## Step 0.5: Resume check
 
 ```
@@ -191,7 +204,7 @@ python3 .claude/skills/git:sync-base/git-sync.py --verbose
 
 That script owns rebasing onto `origin/<base>` and (when a PR exists) force-pushing the rebased branch back with precise-lease. Do not reimplement any of it here. On conflict (exit 2) **abort this polish run with `state-mark-complete <ctx> sync-conflict`** and emit the Final Summary pointing at the conflict — do not pause mid-run with `AskUserQuestion`. The user resolves the conflict and re-invokes to pick up.
 
-Build a short `$PR_SUMMARY` from `git log --oneline origin/<base>..HEAD` + diff-stat (≤10 lines) to pass to bramble `--goal` on round 1. Keep the same `$PR_SUMMARY` value for every later round — `format_monitor_command` rewrites the goal channel internally, so callers never have to.
+Build a short `$PR_SUMMARY` from `git log --oneline origin/<base>..HEAD` + diff-stat (≤10 lines). Pass it to `bramble_ops.py goal` every round; the helper returns the right text for the round.
 
 ### The goal channel as continuous-conversation context
 
@@ -214,7 +227,7 @@ Skipped: c.go:8 wont_fix (design tradeoff); d.go:5 stale.
 
 Why this beats restating the PR intent every round:
 
-- **Don't-reflag cue.** Resumed models otherwise tend to re-surface their own prior findings, especially after a fix changes neighboring code. A literal "fixed: X; skipped: Y" line costs ~50 tokens and reliably suppresses recurrence-noise.
+- **Don't-reflag cue.** Resumed models otherwise tend to re-surface their own prior findings, especially after a fix changes neighboring code. A literal "fixed: X; skipped: Y" line costs ~50 tokens and reliably suppresses recurrence-noise. This same biasing is also why there's no separate "review the new commits" Monitor: continuous review with session resume already gives the new turn a recency-weighted view; adding another arm just doubles cost.
 - **Skip-reason transparency.** When the orchestrator wrote `wont_fix` or `stale`, the model needs to know *why* — otherwise it will keep arguing the original point. Including the bracketed reason (`(design tradeoff)`, `(stale)`) closes that loop.
 - **Recency anchor.** The round number is a simple turn counter that helps the model frame its response ("on this turn I'll focus on …") rather than re-relitigating round 1.
 - **Bounded length.** Capped at `_ACTION_HISTORY_CAP` per bucket with a `(N more)` suffix; the full audit trail lives in `comment_actions`, not the prompt.
@@ -224,8 +237,6 @@ What the goal channel deliberately does **not** carry:
 - The full diff or new commit shas — bramble re-snapshots the worktree on each turn, so the model sees the post-fix code directly.
 - Per-finding rationale text — that belongs in the inline reply on the PR (see Step 3d), not in the model context.
 - Round-1 PR_SUMMARY repeated — the session already has it. Re-stating wastes tokens and dilutes the don't-reflag signal.
-
-If the installed bramble doesn't support `--resume-session-id` (older binaries), each round runs cold-start anyway and the action-history string still helps: it's plain English the cold-start model can read as a "here's what we've already done" preamble. The skill never fails closed on a missing resume flag — see "Resume preflight" in Step 3b.
 
 ## Step 2: Fetch existing PR comments + failing CI jobs
 
@@ -270,75 +281,47 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
   --state-dir "$STATE_DIR" 2>"$LOG_DIR/scope-gate-stderr.txt")
 ```
 
-**Resume preflight (round 2+ only).** Older `bramble` binaries don't accept `--resume-session-id`; they exit 1 with `Error: unknown flag: --resume-session-id` before any review runs. Probe once per loop, before round 2's first Monitor, and remember the result:
-
-```bash
-if "$BRAMBLE_BIN" code-review --help 2>&1 | grep -q -- '--resume-session-id'; then
-  RESUME_SUPPORTED=1
-else
-  RESUME_SUPPORTED=0
-fi
-```
-
-When `RESUME_SUPPORTED=0`, strip the resume flag from each `format-monitor-command` output before passing it to Monitor:
-
-```bash
-CODEX_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command ...)
-[ "$RESUME_SUPPORTED" = "0" ] && CODEX_CMD=$(printf '%s' "$CODEX_CMD" | sed 's/ --resume-session-id [^ ]*//')
-```
-
-Cold-start rounds still benefit from the action-history goal string (the resumed model uses it as a prompt preamble; the cold-start model reads it as the same English summary). State-finalize still records `session_ids` for the future when bramble is upgraded.
-
 Then arm Monitors in the same turn — always codex + cursor + lint, plus gemini when `--gemini` was passed. The bramble Monitors all pass `--scope-hints-file "$SCOPE_HINTS"`; the lint Monitor doesn't (lint_gate has its own diff walk).
 
-The bramble launch string itself comes from `bramble_ops.py format-monitor-command`. That helper is the single source of truth for round-specific `--goal` semantics and resume plumbing — see the goal-channel section in Step 1. Treat its stdout as the canonical launch string; only append `--envelope-file` and stderr redirection at the call site, since those are per-arm bookkeeping.
+Compute the round's `--goal` text (and the resume id, when there is one) from the state file:
 
-If a backend envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block (cursor occasionally returns malformed JSON that bramble can't unmarshal even though the underlying model output was structured), recover by extracting the inner JSON and synthesizing a clean envelope:
-
-```python
-m = re.search(r"```json\s*(\{.*?\})\s*```", envelope["review"]["raw_text"], re.DOTALL)
-if m:
-    inner = json.loads(m.group(1))  # or a tolerant parser if needed
-    envelope = {"schema_version": 1, "status": "ok", "backend": "cursor",
-                "session_id": envelope.get("session_id"),
-                "review": {"verdict": inner.get("verdict", "rejected"),
-                           "issues": inner.get("issues", [])}}
+```bash
+GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
+        --pr-summary "$PR_SUMMARY" --state-file "$STATE_FILE")
+CODEX_RESUME=$(python3 -c "import sys, json; sys.path.insert(0, '$SKILL_DIR/scripts'); \
+  from bramble_ops import prior_session_id; print(prior_session_id(json.load(open('$STATE_FILE')) if '$STATE_FILE' else None, 'codex', {ROUND}))")
+CURSOR_RESUME=$(python3 -c "...same for cursor...")
 ```
 
-Write the recovered envelope to `<backend>-envelope-recovered.json` and pass that path to `triage --stream`. Don't silently drop the round just because the wrapper failed JSON validation — the findings inside `raw_text` are still the model's review.
+Each Monitor runs `bramble code-review` directly with the round's goal and (round 2+) resume flag. Step 0.2 already proved `--resume-session-id` is supported.
 
 ```
 ENVELOPE_CODEX="$LOG_DIR/codex-envelope.json"
 ENVELOPE_CURSOR="$LOG_DIR/cursor-envelope.json"
 ENVELOPE_LINT="$LOG_DIR/lint-envelope.json"
 
-# format-monitor-command emits the full `cd ... && bramble code-review ...`
-# string with the round-correct --goal and (when applicable) --resume-session-id
-# already substituted. Append --envelope-file and stderr redirection at the
-# call site since those are per-arm bookkeeping, not part of the canonical
-# launch string.
-CODEX_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command \
-  codex gpt-5.4-mini {ROUND} \
-  --goal "{PR_SUMMARY}" --pr $PR_NUMBER --work-dir "$(pwd)" \
-  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
-
 Monitor({
   description: "bramble codex r{ROUND}",
   timeout_ms: 720000,
   persistent: false,
-  command: "$CODEX_CMD --envelope-file \"$ENVELOPE_CODEX\" 2>\"$LOG_DIR/codex-stderr.txt\""
+  command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
+    $BRAMBLE_BIN code-review --backend codex --model gpt-5.4-mini \
+    --skip-test-execution --verbose --timeout 10m \
+    --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
+    ${CODEX_RESUME:+--resume-session-id \"$CODEX_RESUME\"} \
+    --envelope-file \"$ENVELOPE_CODEX\" 2>\"$LOG_DIR/codex-stderr.txt\""
 })
-
-CURSOR_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command \
-  cursor composer-2 {ROUND} \
-  --goal "{PR_SUMMARY}" --pr $PR_NUMBER --work-dir "$(pwd)" \
-  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
 
 Monitor({
   description: "bramble cursor r{ROUND}",
   timeout_ms: 720000,
   persistent: false,
-  command: "$CURSOR_CMD --envelope-file \"$ENVELOPE_CURSOR\" 2>\"$LOG_DIR/cursor-stderr.txt\""
+  command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
+    $BRAMBLE_BIN code-review --backend cursor --model composer-2 \
+    --skip-test-execution --verbose --timeout 10m \
+    --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
+    ${CURSOR_RESUME:+--resume-session-id \"$CURSOR_RESUME\"} \
+    --envelope-file \"$ENVELOPE_CURSOR\" 2>\"$LOG_DIR/cursor-stderr.txt\""
 })
 
 // Always: lint gate runs deterministic linters on the diff. ~1-2s typical.
@@ -356,62 +339,31 @@ Monitor({
 })
 
 // Only when --gemini flag was passed:
-ENVELOPE_GEMINI="$LOG_DIR/gemini-envelope.json"
-GEMINI_CMD=$(python3 $SKILL_DIR/scripts/bramble_ops.py format-monitor-command \
-  gemini gemini-3-flash-preview {ROUND} \
-  --goal "{PR_SUMMARY}" --pr $PR_NUMBER --work-dir "$(pwd)" \
-  --state-file "$STATE_FILE" --scope-hints-file "$SCOPE_HINTS")
-
 Monitor({
   description: "bramble gemini r{ROUND}",
   timeout_ms: 720000,
   persistent: false,
-  command: "$GEMINI_CMD --envelope-file \"$ENVELOPE_GEMINI\" 2>\"$LOG_DIR/gemini-stderr.txt\""
-})
-
-// Only when --review-recent-commits was passed AND ROUND >= 2.
-// Round 1 has no "prior round commits" to focus on.
-// Use bramble_ops.recent_commits_goal to build the --goal text.
-ENVELOPE_RECENT="$LOG_DIR/codex-recent-envelope.json"
-RECENT_GOAL=$(python3 -c "import sys; sys.path.insert(0, '$SKILL_DIR/scripts'); import bramble_ops; print(bramble_ops.recent_commits_goal('$HEAD_BEFORE', '$HEAD_AFTER_WIP'))")
-Monitor({
-  description: "bramble codex recent r{ROUND}",
-  timeout_ms: 720000,
-  persistent: false,
-  command: "WORK_DIR=$(pwd) $BRAMBLE_BIN code-review \
-    --backend codex --model gpt-5.4-mini --effort medium \
-    --goal \"$RECENT_GOAL\" --skip-test-execution \
-    --scope-hints-file \"$SCOPE_HINTS\" \
-    --verbose --timeout 10m --envelope-file \"$ENVELOPE_RECENT\" \
-    2>\"$LOG_DIR/codex-recent-stderr.txt\""
+  command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:gemini:r{ROUND} \
+    $BRAMBLE_BIN code-review --backend gemini --model gemini-3-flash-preview \
+    --skip-test-execution --verbose --timeout 10m \
+    --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
+    ${GEMINI_RESUME:+--resume-session-id \"$GEMINI_RESUME\"} \
+    --envelope-file \"$LOG_DIR/gemini-envelope.json\" 2>\"$LOG_DIR/gemini-stderr.txt\""
 })
 ```
 
-Findings from the `--review-recent-commits` codex stream are wired through `triage` as `source: "codex"` and merged with the full-diff codex envelope (see the `jq` step in Step 3c) so consensus and single-source bucketing both see one codex source.
-
 Each Monitor runs independently; a crash in one does not affect the others. `timeout_ms=720000` is bramble's own 10-minute `--timeout` plus two minutes of slack; the lint Monitor uses a 2-minute timeout because deterministic linters complete in seconds. `--skip-test-execution` tells the reviewer not to run tests — quality gates will.
+
+If a backend envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block (cursor occasionally returns malformed JSON that bramble can't unmarshal even though the underlying model output was structured), recover by extracting the inner JSON and synthesizing a clean envelope, then write the recovered envelope to `<backend>-envelope-recovered.json` and pass that path to `triage --stream`. Don't silently drop the round just because the wrapper failed JSON validation — the findings inside `raw_text` are still the model's review.
 
 ### c) Triage
 
 ```
-# When --review-recent-commits was passed, pre-merge the focused codex
-# stream's findings into the full-diff codex envelope so triage sees one
-# combined codex source. triage stores --stream entries by backend and
-# would otherwise clobber the first codex envelope with the second.
-if [ -f "$ENVELOPE_RECENT" ]; then
-  jq -s '.[0] as $a | .[1] as $b
-        | $a + {review: ($a.review + {issues: (($a.review.issues // []) + ($b.review.issues // []))})}' \
-     "$ENVELOPE_CODEX" "$ENVELOPE_RECENT" > "$LOG_DIR/codex-merged-envelope.json"
-  CODEX_TRIAGE_ENVELOPE="$LOG_DIR/codex-merged-envelope.json"
-else
-  CODEX_TRIAGE_ENVELOPE="$ENVELOPE_CODEX"
-fi
-
 python3 $SKILL_DIR/scripts/bramble_ops.py triage {ROUND} $STATE_FILE \
-    --stream codex=$CODEX_TRIAGE_ENVELOPE \
+    --stream codex=$ENVELOPE_CODEX \
     --stream cursor=$ENVELOPE_CURSOR \
     --stream lint=$ENVELOPE_LINT \
-    $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$ENVELOPE_GEMINI ) \
+    $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$LOG_DIR/gemini-envelope.json ) \
     $( [ "$ROUND" = "1" ] && [ "$PR_NUMBER" != "null" ] && \
        echo --pr-comments $STATE_DIR/pp-comments.json --ci-failures $STATE_DIR/pp-ci.json )
 ```

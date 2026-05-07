@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """Bramble-side operations for the pr-polish skill.
 
-Formats the `bramble code-review` invocation the orchestrator arms in the
-Claude `Monitor` tool, parses the stream Monitor captures, and shares the
-cross-backend triage helpers with the rest of the skill.
+Pure helpers the orchestrator composes inline:
+
+  - ``goal_for_round`` builds the ``--goal`` text (PR_SUMMARY on round 1,
+    action-history string on round 2+).
+  - ``prior_session_id`` looks up the resume id for round N+1.
+  - ``parse_stream`` / ``parse_envelope`` / ``triage`` digest captured
+    Monitor output into the consensus + N+1 spiral pipeline.
+  - ``bramble_bin`` returns the binary picked at the top of the run.
 
 Usage:
-    python3 bramble_ops.py format-monitor-command <backend> <model> <round> \\
-                                                  --goal <text> --pr <n> \\
-                                                  [--repo <slug>] [--work-dir <dir>]
-    python3 bramble_ops.py parse-stream <round> --backend <b> <stream_file>
-                                                 [--repo <slug>] [--pr <n>]
-    python3 bramble_ops.py triage <round> <prior_state_file> --pr <n> [--repo <slug>]
-
-The new model: `bramble code-review` is itself the Monitor command.
-Monitor captures its stdout (interleaved NDJSON progress events + a final
-envelope line) into a file; `parse-stream` scans that file for the last
-`"schema_version"` line and feeds it to `parse_envelope`. Bramble's own
-deferred envelope guard (codereview.go) makes the old detach + poll loop
-unnecessary — the stream always terminates with a parseable envelope line,
-even on panic or silent exit.
+    python3 bramble_ops.py goal <round> --state-file <path> --pr-summary <text>
+    python3 bramble_ops.py parse-stream <stream_file> --backend <b>
+    python3 bramble_ops.py triage <round> <prior_state_file>
+                                  [--stream BACKEND=PATH ...]
+                                  [--pr-comments FILE] [--ci-failures FILE]
 """
 
 from __future__ import annotations
@@ -27,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,111 +34,23 @@ if str(SCRIPT_DIR) not in sys.path:
 from _common import (  # noqa: E402
     print_json,
     read_json,
-    repo_slug,
     severity_rank,
     topic_of,
 )
 
-# LLM_BACKENDS gate ``bramble code-review`` invocations: only these can be
-# arguments to ``build_launch_command`` / ``format_monitor_command``. ``gemini``
-# is here because the SKILL.md ``--gemini`` flag arms a third Monitor against
-# ``bramble code-review --backend gemini …`` (its envelopes appear in
-# ~/.bramble/projects/kernel-2755/r1/gemini-envelope.json and similar).
-#
-# BACKENDS is the broader set of ``source`` strings that flow through the
-# ``--stream`` / parse / triage pipeline. ``lint`` is here but not in
-# LLM_BACKENDS because lint findings come from local linters via
-# ``lint_gate.py``, not from a bramble agent. Keeping the public name
-# ``BACKENDS`` preserves back-compat with pr_ops._persist_round_findings,
-# which iterates this tuple to copy per-source envelopes into <state_dir>/reviews/.
-LLM_BACKENDS = ("codex", "cursor", "gemini")
-BACKENDS = LLM_BACKENDS + ("lint",)
-
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-
-def envelope_path(repo: str, pr: int | str, backend: str, round_: int) -> Path:
-    """Envelope path. ``pr`` is typically the PR number but may also be a
-    branch-scoped slug like ``branch-foo`` for branch-only runs.
-    """
-    return Path("/tmp") / f"pp-{repo}-{pr}-{backend}-r{round_}.json"
-
-
-def stderr_path(repo: str, pr: int | str, backend: str, round_: int) -> Path:
-    return Path("/tmp") / f"pp-{repo}-{pr}-{backend}-r{round_}.stderr.txt"
-
-
-# ---------------------------------------------------------------------------
-# launch: fire-and-forget bramble invocation
-# ---------------------------------------------------------------------------
+# Source labels that flow through parse/triage. ``lint`` is here even though
+# it isn't a bramble backend — lint_gate.py emits findings under the same
+# envelope schema and triage treats them as just another source for
+# consensus/spiral matching.
+BACKENDS = ("codex", "cursor", "gemini", "lint")
 
 
 def bramble_bin() -> str:
-    """Path to the bramble CLI to invoke.
-
-    The orchestrator exports ``BRAMBLE_BIN`` at the top of a /pr-polish run
-    after sniffing the worktree (prefers ``bazel-bin/bramble/bramble_/bramble``
-    when present, else falls back to whatever ``bramble`` is on PATH). All
-    bramble invocations route through this helper so dev-tree builds and
-    installed binaries stay interchangeable.
+    """Path to the bramble CLI. The SKILL exports ``BRAMBLE_BIN`` at the
+    top of a run after sniffing the worktree; all invocations route through
+    here so dev-tree builds and installed binaries stay interchangeable.
     """
     return os.environ.get("BRAMBLE_BIN") or "bramble"
-
-
-def build_launch_command(backend: str, model: str, goal: str) -> list[str]:
-    """Return the canonical bramble CLI invocation. Pure — used in tests."""
-    if backend not in LLM_BACKENDS:
-        raise ValueError(f"unknown backend {backend!r}; expected one of {LLM_BACKENDS}")
-    return [
-        bramble_bin(),
-        "code-review",
-        "--backend",
-        backend,
-        "--model",
-        model,
-        "--skip-test-execution",
-        "--verbose",
-        "--timeout",
-        "10m",
-        "--goal",
-        goal,
-    ]
-
-
-def launch_env(repo: str, pr: int, backend: str, round_: int, work_dir: str) -> dict[str, str]:
-    """Exact env vars bramble expects. Pure — used in tests."""
-    return {
-        "BRAMBLE_RUN_TAG": f"pr-polish:{repo}:{pr}:{backend}:r{round_}",
-        "WORK_DIR": work_dir,
-    }
-
-
-def recent_commits_goal(head_before: str, head_after: str) -> str:
-    """Build the --goal text for a focused review of recent commits.
-
-    The pattern this session surfaced: codex catches "the bug you just
-    shipped" with high reliability when its review is biased toward the
-    new commits rather than the full diff. Pair this with a separate
-    full-diff codex/cursor review per round so breadth isn't lost.
-
-    head_before is the round's starting commit (rounds[n].head_before in
-    the state file); head_after is HEAD right before this round's
-    bramble launch — typically the "round N WIP snapshot" commit. An
-    empty head_before means "no prior round on this branch", in which
-    case the focused review degenerates into a full review and the
-    helper returns an empty string so the caller falls back to default
-    --goal handling.
-    """
-    if not head_before or not head_after:
-        return ""
-    return (
-        f"Focus on changes in commits {head_before[:12]}...{head_after[:12]}. "
-        "Other code on this branch was reviewed in prior rounds; "
-        "concentrate on what's new."
-    )
 
 
 # Cap on number of action entries surfaced in the goal text. Long lists
@@ -224,97 +131,26 @@ def _action_label(action: dict[str, Any]) -> str:
     return ""
 
 
-def format_monitor_command(
-    backend: str,
-    model: str,
+def goal_for_round(
     round_: int,
-    goal: str,
-    *,
-    repo: str | None = None,
-    pr: int | None = None,
-    work_dir: str | None = None,
-    scope_hints_file: str | None = None,
-    state_file: str | None = None,
+    pr_summary: str,
+    state: dict[str, Any] | None,
 ) -> str:
-    """Return the shell command the orchestrator passes as Monitor's `command`.
+    """Return the ``--goal`` text bramble should see for this round.
 
-    Monitor execs this string directly, so it must (a) cd into the worktree
-    (bramble code-review resolves relative paths there), (b) set
-    `BRAMBLE_RUN_TAG` so per-run logs are searchable, and (c) invoke
-    `bramble code-review ...` with the pr-polish canonical flags.
+    Round 1: the PR_SUMMARY (commit list + diffstat). Bramble embeds it as
+    the PR-level intent in the fresh-prompt builder.
 
-    Keeping the formatting in one function — rather than embedding it in the
-    SKILL.md prose — means the quoting rules for `--goal` (which often
-    contains backticks, parentheses, or quotes from a PR summary) are under
-    unit test instead of scattered across examples in the skill docs.
-
-    ``scope_hints_file`` is the per-round path produced by ``scope_gate.py``;
-    when set, ``--scope-hints-file <path>`` is appended so bramble widens
-    review scope (co-located tests + cross-service sweep). When unset, the
-    output is byte-identical to today's so existing exact-string tests
-    against this function don't drift.
-
-    ``goal`` semantics differ by round:
-      - round 1: caller's PR_SUMMARY string (commit list + diffstat).
-        Bramble's fresh-prompt builder embeds it as the PR-level intent.
-      - round 2+: this helper REPLACES the caller's goal with an action-
-        history string built from the state file (see action_history_goal).
-        Bramble's follow-up-prompt builder embeds it as "Context for this
-        turn: <history>" so the resumed model knows which prior findings
-        the orchestrator already actioned. Without this, every resumed
-        round wastes turns re-flagging fixes from the prior round.
-        If the state has no prior actions yet (e.g. round 2 of a state
-        whose round 1 produced an empty action plan), the helper falls
-        back to the caller-supplied goal so we still pass *something*
-        rather than empty.
+    Round 2+: an action-history string telling the resumed model what
+    prior rounds already fixed and skipped. Bramble embeds it as
+    ``Context for this turn: <text>`` so the model doesn't re-flag its
+    own fixes. Falls back to PR_SUMMARY when state has no prior actions
+    (e.g. round 1 produced an empty action plan).
     """
-    if backend not in LLM_BACKENDS:
-        raise ValueError(f"unknown backend {backend!r}; expected one of {LLM_BACKENDS}")
-    repo = repo or repo_slug()
-    pr = pr if pr is not None else int(os.environ.get("PR_NUMBER", "0") or 0)
-    if not pr:
-        raise ValueError("pr number is required (pass --pr or set PR_NUMBER env var)")
-    work_dir = work_dir or os.getcwd()
-
-    state = read_json(Path(state_file), default=None) if state_file else None
-
-    # Round 2+: replace PR_SUMMARY with action history if we have one.
-    # Falls back to the caller-supplied goal when state is empty.
-    effective_goal = goal
-    if round_ >= 2:
-        history = action_history_goal(state, round_)
-        if history:
-            effective_goal = history
-
-    tag = f"pr-polish:{repo}:{pr}:{backend}:r{round_}"
-    # shlex.quote keeps embedded quotes/backticks in the goal intact. The cd
-    # is unconditional and short-circuits the && chain on failure: if
-    # work_dir is missing, the shell exits non-zero before bramble runs,
-    # so Monitor surfaces it instead of silently reviewing the wrong tree.
-    parts = [
-        "cd",
-        shlex.quote(work_dir),
-        "&&",
-        f"BRAMBLE_RUN_TAG={shlex.quote(tag)}",
-        shlex.quote(bramble_bin()),
-        "code-review",
-        "--backend",
-        shlex.quote(backend),
-        "--model",
-        shlex.quote(model),
-        "--skip-test-execution",
-        "--verbose",
-        "--timeout",
-        "10m",
-        "--goal",
-        shlex.quote(effective_goal),
-    ]
-    if scope_hints_file:
-        parts += ["--scope-hints-file", shlex.quote(scope_hints_file)]
-    resume_id = prior_session_id(state, backend, round_)
-    if round_ >= 2 and resume_id:
-        parts += ["--resume-session-id", shlex.quote(resume_id)]
-    return " ".join(parts)
+    if round_ < 2:
+        return pr_summary
+    history = action_history_goal(state, round_)
+    return history or pr_summary
 
 
 # ---------------------------------------------------------------------------
@@ -390,24 +226,6 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
     return parse_envelope(env, source=source)
 
 
-def _envelope_ready(path: Path) -> dict[str, Any] | None:
-    """Legacy helper for test_bramble_ops: returns a parsed envelope or None.
-
-    Kept so existing tests that pre-write an envelope file and ask "is this
-    recognized?" still work. New code should use ``extract_terminal_envelope``
-    on a stream.
-    """
-    if not path.exists() or path.stat().st_size == 0:
-        return None
-    try:
-        obj = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(obj, dict) or "status" not in obj:
-        return None
-    return obj
-
-
 # ---------------------------------------------------------------------------
 # parse: envelope -> findings
 # ---------------------------------------------------------------------------
@@ -451,33 +269,21 @@ def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str,
 
 
 def parse_round(
-    round_: int,
-    *,
-    streams: dict[str, Path] | None = None,
+    streams: dict[str, Path],
     backends: list[str] | None = None,
-    repo: str | None = None,
-    pr: int | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate findings across backends for one pr-polish round.
 
-    ``streams`` maps backend name to the path Monitor captured for that
-    backend's ``bramble code-review`` invocation. When a backend's stream is
-    absent (not passed, or missing on disk), we fall back to the legacy
-    per-backend envelope file (``envelope_path``) so older rounds that ran
-    before the Monitor-direct rewrite are still parseable. Once all active
-    state files use the stream convention, the fallback can retire.
+    ``streams`` maps backend name to the Monitor-captured stream file for
+    that backend. Backends absent from the mapping yield no findings.
     """
-    repo = repo or repo_slug()
-    pr = pr if pr is not None else int(os.environ.get("PR_NUMBER", "0") or 0)
     backends = backends or list(BACKENDS)
-    streams = streams or {}
     out: list[dict[str, Any]] = []
     for b in backends:
-        if b in streams and streams[b] is not None:
-            out.extend(parse_stream(streams[b], source=b))
+        path = streams.get(b)
+        if path is None:
             continue
-        obj = _envelope_ready(envelope_path(repo, pr, b, round_))
-        out.extend(parse_envelope(obj, source=b))
+        out.extend(parse_stream(path, source=b))
     return out
 
 
@@ -787,53 +593,17 @@ def prior_session_id(state: dict[str, Any] | None, backend: str, round_: int) ->
 # ---------------------------------------------------------------------------
 
 
-def _pr_or_slug(value: str) -> int | str:
-    """Argparse converter producing the canonical token used downstream.
-
-    - Numeric strings → ``int`` (a PR number).
-    - ``branch:<name>`` → ``"branch-<slug>"`` (a branch token whose
-      ``branch-`` prefix survives all downstream interpolation —
-      ``BRAMBLE_RUN_TAG``, envelope filenames, state-dir slug — so a
-      numeric-only branch like ``branch:1234`` cannot collapse back to
-      ``1234`` and collide with PR #1234.
-    - Any other non-empty string passes through unchanged. Callers that
-      want the safe form should always go through the ``branch:`` prefix.
-    """
-    if not value:
-        raise argparse.ArgumentTypeError("--pr cannot be empty")
-    if value.startswith("branch:"):
-        name = value[len("branch:") :]
-        if not name:
-            raise argparse.ArgumentTypeError("branch: prefix requires a non-empty name")
-        from _common import branch_envelope_key  # noqa: PLC0415
-
-        return branch_envelope_key(name)
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="bramble_ops")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser(
-        "format-monitor-command",
-        help="Print the bramble code-review invocation the orchestrator arms in Monitor.",
+        "goal",
+        help="Print the --goal text for round N (PR_SUMMARY or action-history).",
     )
-    # format-monitor-command spawns ``bramble code-review --backend …``, so
-    # only LLM_BACKENDS are valid here. lint goes through lint_gate.py and
-    # never produces a Monitor command.
-    sp.add_argument("backend", choices=LLM_BACKENDS)
-    sp.add_argument("model")
     sp.add_argument("round_", type=int)
-    sp.add_argument("--goal", required=True)
-    sp.add_argument("--repo")
-    sp.add_argument("--pr", type=_pr_or_slug)
-    sp.add_argument("--work-dir")
-    sp.add_argument("--state-file", help="pr-polish state file used to find prior reviewer session ids")
-    sp.add_argument("--scope-hints-file")
+    sp.add_argument("--pr-summary", required=True)
+    sp.add_argument("--state-file")
 
     sp = sub.add_parser(
         "parse-stream",
@@ -842,45 +612,25 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("stream_file")
     sp.add_argument("--backend", required=True, choices=BACKENDS)
 
-    sp = sub.add_parser(
-        "parse",
-        help="Aggregate findings across backends for one round; pass --stream per backend for the new Monitor-direct flow.",
-    )
-    sp.add_argument("round_", type=int)
-    sp.add_argument("--backend", action="append", choices=BACKENDS)
-    sp.add_argument("--repo")
-    sp.add_argument("--pr", type=_pr_or_slug)
-    sp.add_argument(
-        "--stream",
-        action="append",
-        default=[],
-        metavar="BACKEND=PATH",
-        help="Use the given Monitor capture as the source for a backend; may be repeated.",
-    )
-
     sp = sub.add_parser("triage")
     sp.add_argument("round_", type=int)
     sp.add_argument("prior_state_file", nargs="?")
-    sp.add_argument("--repo")
-    sp.add_argument("--pr", type=_pr_or_slug)
     sp.add_argument(
         "--stream",
         action="append",
         default=[],
         metavar="BACKEND=PATH",
-        help="Same shape as parse --stream; used when findings live in Monitor captures.",
+        help="Monitor capture per backend; may be repeated.",
     )
     sp.add_argument(
         "--pr-comments",
         metavar="FILE",
-        help="JSON file with classify_comments output (round 1 input). "
-        "Merged into the finding set with source=github-* tags.",
+        help="JSON file with classify_comments output (round 1 input).",
     )
     sp.add_argument(
         "--ci-failures",
         metavar="FILE",
-        help="JSON file with ci_failed_tests output. Merged into the finding "
-        "set with source=ci and flake-aware severity routing.",
+        help="JSON file with ci_failed_tests output.",
     )
 
     return p
@@ -907,45 +657,21 @@ def _parse_stream_args(pairs: list[str]) -> dict[str, Path]:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        if args.cmd == "format-monitor-command":
-            cmd = format_monitor_command(
-                args.backend,
-                args.model,
-                args.round_,
-                args.goal,
-                repo=args.repo,
-                pr=args.pr,
-                work_dir=args.work_dir,
-                scope_hints_file=args.scope_hints_file,
-                state_file=args.state_file,
-            )
-            # Print the raw command string (not JSON) so the orchestrator can
-            # drop it into Monitor's `command` field verbatim.
-            print(cmd)
+        if args.cmd == "goal":
+            state = read_json(Path(args.state_file), default=None) if args.state_file else None
+            print(goal_for_round(args.round_, args.pr_summary, state))
         elif args.cmd == "parse-stream":
             findings = parse_stream(Path(args.stream_file), source=args.backend)
             print_json(findings)
-        elif args.cmd == "parse":
-            streams = _parse_stream_args(args.stream)
-            findings = parse_round(
-                args.round_,
-                streams=streams,
-                backends=args.backend,
-                repo=args.repo,
-                pr=args.pr,
-            )
-            print_json(findings)
         elif args.cmd == "triage":
             streams = _parse_stream_args(args.stream)
-            findings = parse_round(args.round_, streams=streams, repo=args.repo, pr=args.pr)
+            findings = parse_round(streams)
             prior = None
             if args.prior_state_file:
                 prior = read_json(Path(args.prior_state_file), default=None)
             pr_comments = None
             if args.pr_comments:
                 pr_comments = read_json(Path(args.pr_comments), default=[])
-                # pr_ops.py fetch-comments emits {"comments": [...], "noise_filtered": N, "noise_samples": [...]}.
-                # Legacy callers still write a bare list; accept both.
                 if isinstance(pr_comments, dict):
                     pr_comments = pr_comments.get("comments", [])
                 if not isinstance(pr_comments, list):

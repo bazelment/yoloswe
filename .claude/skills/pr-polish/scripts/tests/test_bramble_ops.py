@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -19,82 +20,55 @@ import _common  # noqa: E402
 import bramble_ops  # noqa: E402
 
 
-class TestBuildLaunchCommand(unittest.TestCase):
-    def test_flags_are_exact_and_ordered(self) -> None:
-        cmd = bramble_ops.build_launch_command("codex", "gpt-5.4-mini", "do thing")
+class TestBrambleBin(unittest.TestCase):
+    def test_defaults_to_path_lookup(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("BRAMBLE_BIN", None)
+            self.assertEqual(bramble_ops.bramble_bin(), "bramble")
+
+    def test_honors_env(self) -> None:
+        with patch.dict("os.environ", {"BRAMBLE_BIN": "/tmp/dev/bramble"}):
+            self.assertEqual(bramble_ops.bramble_bin(), "/tmp/dev/bramble")
+
+
+class TestGoalForRound(unittest.TestCase):
+    """Round 1 carries PR_SUMMARY; round 2+ carries action history (or
+    falls back to PR_SUMMARY when state has no actions yet)."""
+
+    def test_round_one_returns_pr_summary(self) -> None:
         self.assertEqual(
-            cmd,
-            [
-                "bramble",
-                "code-review",
-                "--backend",
-                "codex",
-                "--model",
-                "gpt-5.4-mini",
-                "--skip-test-execution",
-                "--verbose",
-                "--timeout",
-                "10m",
-                "--goal",
-                "do thing",
-            ],
+            bramble_ops.goal_for_round(1, "PR #42: refactor", state=None),
+            "PR #42: refactor",
         )
 
-    def test_rejects_unknown_backend(self) -> None:
-        with self.assertRaises(ValueError):
-            bramble_ops.build_launch_command("claude", "m", "g")
+    def test_round_two_with_actions_uses_history(self) -> None:
+        state = {
+            "rounds": [
+                {
+                    "n": 1,
+                    "comment_actions": [
+                        {"action": "fixed", "path": "a.go", "line": 5, "source": "codex"},
+                    ],
+                }
+            ]
+        }
+        goal = bramble_ops.goal_for_round(2, "PR_SUMMARY", state)
+        self.assertIn("Round 2", goal)
+        self.assertIn("a.go:5", goal)
+        self.assertNotIn("PR_SUMMARY", goal)
 
-    def test_rejects_lint_as_llm_backend(self) -> None:
-        # lint is in BACKENDS (it's a valid --stream source) but NOT in
-        # LLM_BACKENDS, because there's no ``bramble code-review --backend
-        # lint`` to invoke. Pin the split so future refactors don't collapse
-        # it back into one tuple and let lint accidentally produce a Monitor
-        # command for a binary that doesn't exist.
-        with self.assertRaises(ValueError):
-            bramble_ops.build_launch_command("lint", "m", "g")
-
-    def test_gemini_is_a_valid_llm_backend(self) -> None:
-        # Regression guard. Old commits had BACKENDS = ("codex", "cursor")
-        # which broke the SKILL.md --gemini flag — kernel-2755/r1/gemini-envelope.json
-        # exists in production but a fresh CLI rejected the matching --stream.
-        # If this test fails, the orchestrator's --gemini path is broken.
-        cmd = bramble_ops.build_launch_command("gemini", "gemini-3-flash-preview", "g")
-        self.assertEqual(cmd[3], "gemini")
-
-    def test_honors_bramble_bin_env(self) -> None:
-        # Orchestrator exports BRAMBLE_BIN at run start (prefers a freshly built
-        # bazel-bin/bramble/bramble_/bramble) so all bramble invocations match
-        # the worktree under review. Helper must pick that up.
-        with patch.dict(
-            "os.environ", {"BRAMBLE_BIN": "/tmp/dev/bazel-bin/bramble/bramble_/bramble"}
-        ):
-            cmd = bramble_ops.build_launch_command("codex", "gpt-5.4-mini", "do thing")
-        self.assertEqual(cmd[0], "/tmp/dev/bazel-bin/bramble/bramble_/bramble")
-
-
-class TestLaunchEnv(unittest.TestCase):
-    def test_sets_run_tag_and_work_dir(self) -> None:
-        env = bramble_ops.launch_env("kernel", 2443, "codex", 1, "/tmp/wd")
-        self.assertEqual(env["BRAMBLE_RUN_TAG"], "pr-polish:kernel:2443:codex:r1")
-        self.assertEqual(env["WORK_DIR"], "/tmp/wd")
-
-
-class TestRecentCommitsGoal(unittest.TestCase):
-    def test_builds_focused_goal_from_sha_range(self) -> None:
-        goal = bramble_ops.recent_commits_goal(
-            "abc123def4567890", "fedcba9876543210"
+    def test_round_two_with_empty_state_falls_back(self) -> None:
+        # Round 1 produced no actions; reanchor on PR_SUMMARY rather than send empty.
+        self.assertEqual(
+            bramble_ops.goal_for_round(2, "PR_SUMMARY", state={"rounds": []}),
+            "PR_SUMMARY",
         )
-        self.assertIn("abc123def456", goal)
-        self.assertIn("fedcba987654", goal)
-        self.assertIn("Focus on changes", goal)
-        self.assertIn("Other code on this branch was reviewed", goal)
 
-    def test_empty_head_before_returns_empty(self) -> None:
-        # No prior round → focused review is degenerate; caller falls back.
-        self.assertEqual(bramble_ops.recent_commits_goal("", "abc"), "")
-
-    def test_empty_head_after_returns_empty(self) -> None:
-        self.assertEqual(bramble_ops.recent_commits_goal("abc", ""), "")
+    def test_round_two_with_no_state_falls_back(self) -> None:
+        self.assertEqual(
+            bramble_ops.goal_for_round(2, "PR_SUMMARY", state=None),
+            "PR_SUMMARY",
+        )
 
 
 class TestActionHistoryGoal(unittest.TestCase):
@@ -178,223 +152,6 @@ class TestActionHistoryGoal(unittest.TestCase):
         # Should mention the truncation count.
         self.assertIn("more)", out)
 
-
-class TestFormatMonitorCommandActionHistory(unittest.TestCase):
-    """Round-2+ format_monitor_command must replace the caller-supplied
-    PR_SUMMARY-shaped goal with the action-history string when the state
-    file has prior actions to summarize. This is the orchestrator-level
-    glue that connects the new goal-as-metadata channel to actual reviewer
-    invocations.
-    """
-
-    def test_round_two_with_state_replaces_goal_with_history(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            state = Path(d) / "state.json"
-            state.write_text(json.dumps({
-                "pr_number": 99,
-                "rounds": [
-                    {"n": 1, "comment_actions": [
-                        {"action": "fixed", "path": "a.go", "line": 10, "source": "codex"},
-                    ]},
-                ],
-            }))
-            cmd = bramble_ops.format_monitor_command(
-                "codex", "gpt-5.4-mini", 2, "ORIGINAL PR SUMMARY",
-                repo="kernel", pr=99, work_dir="/tmp/wd",
-                state_file=str(state),
-            )
-        # The PR_SUMMARY caller-supplied value must NOT make it into the
-        # round-2 invocation; it's been overridden by the history string.
-        self.assertNotIn("ORIGINAL PR SUMMARY", cmd)
-        # The history string IS in the goal.
-        self.assertIn("a.go:10", cmd)
-        self.assertIn("Round 2.", cmd)
-
-    def test_round_two_without_state_keeps_caller_goal(self) -> None:
-        # State file empty (or no prior actions) → fall back to caller's goal.
-        # This preserves back-compat for branches/PRs whose round 1 produced
-        # zero actions.
-        with tempfile.TemporaryDirectory() as d:
-            state = Path(d) / "state.json"
-            state.write_text(json.dumps({"pr_number": 99, "rounds": []}))
-            cmd = bramble_ops.format_monitor_command(
-                "codex", "gpt-5.4-mini", 2, "ORIGINAL PR SUMMARY",
-                repo="kernel", pr=99, work_dir="/tmp/wd",
-                state_file=str(state),
-            )
-        self.assertIn("ORIGINAL PR SUMMARY", cmd)
-
-    def test_round_one_keeps_caller_goal(self) -> None:
-        # Round 1 always uses caller's PR_SUMMARY, regardless of state.
-        with tempfile.TemporaryDirectory() as d:
-            state = Path(d) / "state.json"
-            state.write_text(json.dumps({
-                "pr_number": 99,
-                "rounds": [{"n": 1, "comment_actions": [
-                    {"action": "fixed", "path": "a.go", "line": 10, "source": "codex"},
-                ]}],
-            }))
-            cmd = bramble_ops.format_monitor_command(
-                "codex", "gpt-5.4-mini", 1, "ORIGINAL PR SUMMARY",
-                repo="kernel", pr=99, work_dir="/tmp/wd",
-                state_file=str(state),
-            )
-        self.assertIn("ORIGINAL PR SUMMARY", cmd)
-        self.assertNotIn("Round 1.", cmd)
-
-
-class TestFormatMonitorCommand(unittest.TestCase):
-    """Guards the exact shape of the string the orchestrator drops into Monitor.
-
-    Small changes to quoting or flag order will confuse Monitor (it passes
-    the string straight to the shell) or bramble (which flag-parses
-    positionally), so we assert on the full string.
-    """
-
-    def test_command_has_cd_tag_flags_in_order(self) -> None:
-        cmd = bramble_ops.format_monitor_command(
-            "codex",
-            "gpt-5.4-mini",
-            3,
-            "review branch X",
-            repo="kernel",
-            pr=2443,
-            work_dir="/tmp/worktree",
-        )
-        self.assertEqual(
-            cmd,
-            "cd /tmp/worktree && BRAMBLE_RUN_TAG=pr-polish:kernel:2443:codex:r3 "
-            "bramble code-review --backend codex --model gpt-5.4-mini "
-            "--skip-test-execution --verbose --timeout 10m --goal 'review branch X'",
-        )
-
-    def test_goal_is_shell_quoted(self) -> None:
-        # A realistic PR summary includes backticks, quotes, and parens;
-        # bramble's --goal must receive those literally. shlex.quote is
-        # responsible here — we guard it by asserting the round-tripped shell
-        # split matches the original goal.
-        import shlex
-
-        goal = "fix `foo()` (really this time)"
-        cmd = bramble_ops.format_monitor_command(
-            "cursor", "composer-2", 1, goal, repo="kernel", pr=99, work_dir="/tmp/w"
-        )
-        tokens = shlex.split(cmd)
-        # Last argument of the tokenized command is the goal text verbatim.
-        self.assertEqual(tokens[-1], goal)
-
-    def test_rejects_unknown_backend(self) -> None:
-        with self.assertRaises(ValueError):
-            bramble_ops.format_monitor_command(
-                "claude", "m", 1, "g", repo="kernel", pr=1, work_dir="/tmp"
-            )
-
-    def test_requires_pr(self) -> None:
-        with patch.dict("os.environ", {"PR_NUMBER": "0"}, clear=False):
-            with self.assertRaises(ValueError):
-                bramble_ops.format_monitor_command(
-                    "codex", "m", 1, "g", repo="kernel", pr=0, work_dir="/tmp"
-                )
-
-    def test_scope_hints_file_appended_when_set(self) -> None:
-        # When the orchestrator runs scope_gate.py at the start of a round
-        # and passes the resulting JSON path here, the Monitor command must
-        # carry --scope-hints-file at the end. The flag goes after --goal
-        # so it's the very last thing parsed; bramble doesn't care about
-        # order, but keeping it last makes the rendered command easier to
-        # eyeball.
-        cmd = bramble_ops.format_monitor_command(
-            "codex",
-            "gpt-5.4-mini",
-            3,
-            "review branch X",
-            repo="kernel",
-            pr=2443,
-            work_dir="/tmp/worktree",
-            scope_hints_file="/tmp/state/scope-hints.json",
-        )
-        self.assertTrue(
-            cmd.endswith("--scope-hints-file /tmp/state/scope-hints.json"),
-            f"expected --scope-hints-file at end of command, got:\n{cmd}",
-        )
-
-    def test_scope_hints_file_omitted_when_none(self) -> None:
-        # Backwards-compat: callers that haven't been updated to pass a
-        # scope-hints file get exactly today's command. Any drift here
-        # would silently change every /pr-polish run still on the older
-        # code path.
-        cmd = bramble_ops.format_monitor_command(
-            "codex",
-            "gpt-5.4-mini",
-            3,
-            "review branch X",
-            repo="kernel",
-            pr=2443,
-            work_dir="/tmp/worktree",
-        )
-        self.assertNotIn("--scope-hints-file", cmd)
-
-    def test_resume_session_id_appended_from_prior_state(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            state = Path(d) / "state.json"
-            state.write_text(
-                json.dumps(
-                    {
-                        "rounds": [
-                            {"n": 1, "session_ids": {"codex": "sess-r1"}},
-                        ]
-                    }
-                )
-            )
-            cmd = bramble_ops.format_monitor_command(
-                "codex",
-                "gpt-5.4-mini",
-                2,
-                "review branch X",
-                repo="kernel",
-                pr=2443,
-                work_dir="/tmp/worktree",
-                state_file=str(state),
-            )
-        self.assertIn("--resume-session-id sess-r1", cmd)
-
-    def test_resume_session_id_omitted_for_round_one(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            state = Path(d) / "state.json"
-            state.write_text(json.dumps({"rounds": [{"n": 1, "session_ids": {"codex": "sess-r1"}}]}))
-            cmd = bramble_ops.format_monitor_command(
-                "codex",
-                "gpt-5.4-mini",
-                1,
-                "review branch X",
-                repo="kernel",
-                pr=2443,
-                work_dir="/tmp/worktree",
-                state_file=str(state),
-            )
-        self.assertNotIn("--resume-session-id", cmd)
-
-    def test_command_uses_bramble_bin_env(self) -> None:
-        # When the orchestrator exports BRAMBLE_BIN to the bazel-built path the
-        # Monitor command must invoke that binary instead of bare ``bramble``.
-        bin_path = "/work/bazel-bin/bramble/bramble_/bramble"
-        with patch.dict("os.environ", {"BRAMBLE_BIN": bin_path}, clear=False):
-            cmd = bramble_ops.format_monitor_command(
-                "codex",
-                "gpt-5.4-mini",
-                3,
-                "review branch X",
-                repo="kernel",
-                pr=2443,
-                work_dir="/tmp/worktree",
-            )
-        # The helper shell-quotes the path; assert the quoted form appears
-        # exactly once and bare ``bramble`` does not appear as its own token.
-        import shlex
-
-        tokens = shlex.split(cmd)
-        self.assertIn(bin_path, tokens)
-        self.assertNotIn("bramble", tokens)
 
 
 class TestExtractTerminalEnvelope(unittest.TestCase):
@@ -643,33 +400,6 @@ class TestParseEnvelope(unittest.TestCase):
 
     def test_missing_envelope_yields_empty_list(self) -> None:
         self.assertEqual(bramble_ops.parse_envelope(None, source="codex"), [])
-
-
-class TestEnvelopeReady(unittest.TestCase):
-    def test_rejects_empty_file(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.json"
-            p.write_text("")
-            self.assertIsNone(bramble_ops._envelope_ready(p))
-
-    def test_rejects_non_json(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.json"
-            p.write_text("not json")
-            self.assertIsNone(bramble_ops._envelope_ready(p))
-
-    def test_rejects_dict_without_status(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.json"
-            p.write_text(json.dumps({"review": {}}))
-            self.assertIsNone(bramble_ops._envelope_ready(p))
-
-    def test_accepts_ok(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.json"
-            p.write_text(json.dumps({"status": "ok", "review": {"issues": []}}))
-            out = bramble_ops._envelope_ready(p)
-            self.assertEqual(out["status"], "ok")
 
 
 class TestTriage(unittest.TestCase):
@@ -964,16 +694,19 @@ class TestParseRoundWithStreams(unittest.TestCase):
                 '{"schema_version":1,"status":"ok","backend":"codex",'
                 '"review":{"verdict":"accepted","issues":[]}}\n'
             )
-            # cursor intentionally omitted from streams: should fall back to
-            # legacy envelope path and, finding none, contribute 0 findings.
-            out = bramble_ops.parse_round(
-                1,
-                streams={"codex": cx},
-                repo="kernel",
-                pr=42,
-                backends=["codex"],
-            )
+            out = bramble_ops.parse_round({"codex": cx}, backends=["codex"])
             self.assertEqual(out, [])  # no issues in the happy envelope
+
+    def test_missing_backend_in_streams_yields_nothing(self) -> None:
+        # Backends not present in the streams mapping contribute 0 findings.
+        with tempfile.TemporaryDirectory() as d:
+            cx = Path(d) / "codex.log"
+            cx.write_text(
+                '{"schema_version":1,"status":"ok","backend":"codex",'
+                '"review":{"verdict":"accepted","issues":[]}}\n'
+            )
+            out = bramble_ops.parse_round({"codex": cx}, backends=["codex", "cursor"])
+            self.assertEqual(out, [])
 
 
 class TestTriageCLIShapeCompat(unittest.TestCase):
@@ -1053,78 +786,6 @@ class TestTriageCLIShapeCompat(unittest.TestCase):
             got = self._run(p)
         self.assertEqual(got["single_medium"], [])
 
-
-class TestPrOrSlugConverter(unittest.TestCase):
-    """Argparse `--pr` accepts either a numeric PR or a branch slug, matching
-    the int|str contract on format_monitor_command/parse_round.
-    """
-
-    def test_numeric_returns_int(self) -> None:
-        self.assertEqual(bramble_ops._pr_or_slug("234"), 234)
-
-    def test_slug_returns_string(self) -> None:
-        self.assertEqual(bramble_ops._pr_or_slug("branch-feature-foo"), "branch-feature-foo")
-
-    def test_empty_rejected(self) -> None:
-        import argparse as _ap
-
-        with self.assertRaises(_ap.ArgumentTypeError):
-            bramble_ops._pr_or_slug("")
-
-    def test_branch_prefix_disambiguates_numeric_branch_from_pr(self) -> None:
-        # A branch literally named "1234" must not be indistinguishable from
-        # PR #1234 anywhere downstream. The converter keeps the ``branch-``
-        # marker on the token so BRAMBLE_RUN_TAG, envelope filenames, and
-        # state-dir slugs all remain disjoint from numeric PR ids.
-        self.assertEqual(bramble_ops._pr_or_slug("branch:1234"), "branch-1234")
-        self.assertEqual(bramble_ops._pr_or_slug("branch:feature/foo"), "branch-feature-foo")
-        # The PR int form never collides with the branch form.
-        self.assertEqual(bramble_ops._pr_or_slug("1234"), 1234)
-        self.assertNotEqual(
-            bramble_ops._pr_or_slug("branch:1234"),
-            bramble_ops._pr_or_slug("1234"),
-        )
-
-    def test_branch_prefix_with_empty_name_rejected(self) -> None:
-        import argparse as _ap
-
-        with self.assertRaises(_ap.ArgumentTypeError):
-            bramble_ops._pr_or_slug("branch:")
-
-    def test_parser_accepts_branch_slug_for_format_monitor_command(self) -> None:
-        # End-to-end: argparse round-trips the slug through to the namespace.
-        parser = bramble_ops._build_parser()
-        ns = parser.parse_args(
-            [
-                "format-monitor-command",
-                "codex",
-                "gpt-5.4-mini",
-                "1",
-                "--goal",
-                "g",
-                "--repo",
-                "kernel",
-                "--pr",
-                "branch-feature-foo",
-                "--work-dir",
-                "/tmp",
-            ]
-        )
-        self.assertEqual(ns.pr, "branch-feature-foo")
-
-    def test_parser_accepts_branch_slug_for_parse_subcommand(self) -> None:
-        parser = bramble_ops._build_parser()
-        ns = parser.parse_args(
-            ["parse", "1", "--repo", "kernel", "--pr", "branch-feature-foo"]
-        )
-        self.assertEqual(ns.pr, "branch-feature-foo")
-
-    def test_parser_accepts_branch_slug_for_triage_subcommand(self) -> None:
-        parser = bramble_ops._build_parser()
-        ns = parser.parse_args(
-            ["triage", "1", "--repo", "kernel", "--pr", "branch-feature-foo"]
-        )
-        self.assertEqual(ns.pr, "branch-feature-foo")
 
 
 
