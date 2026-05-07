@@ -73,6 +73,58 @@ class TestLoadEnvelope(unittest.TestCase):
         self.assertIsNone(self.mod.load_envelope(Path("/nonexistent/path.json")))
 
 
+class TestCommentCaughtInEnvelope(unittest.TestCase):
+    """Direct coverage for the matcher heuristic. Without it, regressions in
+    file/line/keyword matching would only surface via the higher-level
+    compare_pr tests, which mock most of the work away.
+    """
+
+    def setUp(self) -> None:
+        self.mod = _load_module()
+
+    def test_same_file_line_within_window(self) -> None:
+        comment = {"path": "pkg/foo.py", "line": 42, "body": "off-by-one in foo"}
+        issues = [{"file": "pkg/foo.py", "line": 38, "message": "off-by-one"}]
+        caught, evidence = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertTrue(caught)
+        self.assertIn("foo.py", evidence)
+
+    def test_same_file_keyword_overlap_no_line(self) -> None:
+        # Cross-package match where the issue lacks a line — must rely on
+        # keyword overlap to bridge the comment to the finding.
+        comment = {
+            "path": "pkg/foo.py", "line": 5,
+            "body": "session resume context not threaded through review wiring",
+        }
+        issues = [{
+            "file": "pkg/foo.py", "line": None,
+            "message": "session resume context wiring threaded review",
+        }]
+        caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertTrue(caught)
+
+    def test_no_match_when_unrelated(self) -> None:
+        comment = {"path": "pkg/foo.py", "line": 5, "body": "foo handler returns wrong type"}
+        issues = [{"file": "pkg/bar.py", "line": 5, "message": "race in cache invalidation"}]
+        caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertFalse(caught)
+
+    def test_confidence_none_does_not_crash(self) -> None:
+        # Pre-fix bug: issue.get("confidence", 1.0) returns None when the
+        # key is present-but-null, then `None < 1.0` raised TypeError and
+        # aborted the batch. Lock in defensive coercion.
+        comment = {"path": "pkg/foo.py", "line": 1, "body": "x"}
+        issues = [{"file": "pkg/foo.py", "line": 1, "message": "x", "confidence": None}]
+        caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertTrue(caught)
+
+    def test_confidence_string_does_not_crash(self) -> None:
+        comment = {"path": "pkg/foo.py", "line": 1, "body": "x"}
+        issues = [{"file": "pkg/foo.py", "line": 1, "message": "x", "confidence": "high"}]
+        caught, _ = self.mod.comment_caught_in_envelope(comment, issues)
+        self.assertTrue(caught)
+
+
 class TestFormatResultsAllPass(unittest.TestCase):
     """``all_pass`` is the gate that ``main`` returns as exit code.
 

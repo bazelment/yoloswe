@@ -368,9 +368,11 @@ def build_hints(
     caps but we apply it pre-write so the file on disk reflects what
     will actually flow into the prompt. Saves an audit-trail surprise.
 
-    When changed_packages/dependency_packages are provided, schema_version
-    is set to 2. Otherwise v1 shape is emitted (for callers that only pass
-    cross_service_packages).
+    Always emits ``schema_version = SCHEMA_VERSION`` (currently 2). Optional
+    ``changed_packages`` / ``dependency_packages`` keys are included only
+    when supplied; their absence does not downgrade the schema. Sync with
+    ``reviewer.ScopeHintsSchemaVersion`` in
+    ``yoloswe/reviewer/scope_hints.go`` when bumping.
     """
     if len(test_paths) > MAX_TEST_PATHS:
         test_paths = test_paths[:MAX_TEST_PATHS]

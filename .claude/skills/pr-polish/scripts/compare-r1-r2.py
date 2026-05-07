@@ -169,7 +169,14 @@ def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool,
 
         kw_match = _kw_overlap(c_body, i_msg)
 
-        conf = issue.get("confidence", 1.0)
+        # ``confidence`` may be missing, JSON null, a string, or any other
+        # non-numeric — coerce defensively so a single malformed field can't
+        # abort the whole batch with TypeError.
+        raw_conf = issue.get("confidence")
+        try:
+            conf = float(raw_conf) if raw_conf is not None else 1.0
+        except (TypeError, ValueError):
+            conf = 1.0
         conf_str = f", conf={conf:.2f}" if conf < 1.0 else ""
         if file_match and (line_match or kw_match):
             return True, f"{i_file}:{i_line} ({issue.get('severity')}{conf_str})"
@@ -272,7 +279,7 @@ def compare_pr(
 # Output formatting
 # ---------------------------------------------------------------------------
 
-def format_results(results: list[dict], verbose: bool = False) -> str:
+def format_results(results: list[dict], verbose: bool = False) -> tuple[str, bool]:
     lines: list[str] = []
     lines.append("## Phase 3 Verification: r1 (narrow) vs r2 (scope-widened)")
     lines.append("")
