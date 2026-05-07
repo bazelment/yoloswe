@@ -912,9 +912,16 @@ class TestPriorFixedKeys(unittest.TestCase):
             ]
         }
         keys = bramble_ops.prior_fixed_keys(state)
+        # Strict (path, line, topic) plus location-only fallback for
+        # rewording-resilient spiral detection.
         self.assertEqual(
             keys,
-            {("a.py", 10, "null check"), ("d.py", 99, "oops")},
+            {
+                ("a.py", 10, "null check"),
+                ("a.py", 10, None),
+                ("d.py", 99, "oops"),
+                ("d.py", 99, None),
+            },
         )
 
     def test_none_state_returns_empty(self) -> None:

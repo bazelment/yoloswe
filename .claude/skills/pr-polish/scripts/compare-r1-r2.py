@@ -298,10 +298,17 @@ def format_results(results: list[dict], verbose: bool = False) -> str:
             if regressions > 0:
                 all_pass = False
         else:
-            status = "✓" if caught >= 1 else "✗"
-            line = f"**kernel-{pr}**: caught={caught}/{total}"
-            if caught == 0:
-                all_pass = False
+            # Acceptance bar: every substantive comment must be caught.
+            # Partial recall (caught < total) and total==0 with caught==0
+            # both used to read as a pass, masking real regressions.
+            if total == 0:
+                status = "·"  # nothing to verify; neither pass nor fail.
+                line = f"**kernel-{pr}**: caught={caught}/{total} (skipped — no substantive comments)"
+            else:
+                status = "✓" if caught == total else "✗"
+                line = f"**kernel-{pr}**: caught={caught}/{total}"
+                if caught != total:
+                    all_pass = False
             for f in r["findings"]:
                 check = "✓" if f["caught_r2"] else "✗"
                 fpath = os.path.basename(f["file"]) if f["file"] else "(issue-level)"
@@ -386,11 +393,17 @@ def main(argv: list[str] | None = None) -> int:
         result = compare_pr(pr, bramble_dir, r2_dir, verbose=args.verbose)
         results.append(result)
 
-    if args.json:
-        print(json.dumps(results, indent=2))
-        return 0
+    # Always compute all_pass so --json shares the same exit-code contract
+    # as Markdown mode. CI gating on Phase-3 outcomes only worked in the
+    # Markdown path before — --json silently returned 0 even on regression.
+    _, all_pass = format_results(results)
 
-    table, all_pass = format_results(results)
+    if args.json:
+        payload = {"results": results, "all_pass": all_pass}
+        print(json.dumps(payload, indent=2))
+        return 0 if all_pass else 1
+
+    table, _ = format_results(results)
     print(table)
     print()
     print(narrative(results))

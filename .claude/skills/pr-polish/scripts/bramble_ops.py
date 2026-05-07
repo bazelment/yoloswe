@@ -655,7 +655,12 @@ def triage(
         severities = [severity_rank(g.get("severity")) for g in group]
         top = max(severities) if severities else -1
         repr_ = group[0]
-        if key in prior_fixed_keys:
+        # Spiral check: strict (path, line, topic) match, or location-only
+        # fallback so a fix-then-rewording regression at the same site
+        # still escalates even when the stored action's topic string and
+        # the new finding's topic_of(message) drift apart.
+        location_key = (key[0], key[1], None)
+        if key in prior_fixed_keys or location_key in prior_fixed_keys:
             spiral_matches.append({"key": list(key), "findings": group})
         if key in consensus_triage_keys:
             # Already routed to consensus by location-based grouping;
@@ -722,7 +727,23 @@ def triage(
 
 
 def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
-    """Collect `(path, line, topic)` keys of every prior-round `fixed` action."""
+    """Collect spiral-match keys for every prior-round ``fixed`` action.
+
+    Returns both the strict ``(path, line, topic)`` triage key and a softer
+    ``(path, line, None)`` fallback. Spiral detection looks for either:
+
+    - The strict form catches exact recurrence (same wording at same site).
+    - The fallback catches "fix at same site, reviewer reworded it"
+      regressions where the persisted ``topic`` string and the new
+      finding's ``topic_of(message)`` happen not to collide. Stored
+      actions whose ``topic`` is missing or got rewritten by a human
+      auditor would otherwise silently disable spiral detection.
+
+    Routing remains unchanged: callers test ``key in prior_fixed_keys``;
+    we now also emit the ``(path, line, None)`` companion so a new
+    finding's ``_triage_key`` of ``(path, line, None)`` (sourceless or
+    different topic) still triggers escalation.
+    """
     keys: set[tuple] = set()
     if not state:
         return keys
@@ -730,7 +751,9 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
         for a in rnd.get("comment_actions") or []:
             if a.get("action") != "fixed":
                 continue
-            keys.add((a.get("path"), a.get("line"), a.get("topic")))
+            path, line, topic = a.get("path"), a.get("line"), a.get("topic")
+            keys.add((path, line, topic))
+            keys.add((path, line, None))
     return keys
 
 
