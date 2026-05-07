@@ -132,6 +132,35 @@ class TestSafePaths(unittest.TestCase):
         idx = captured[0].index("--")
         self.assertEqual(captured[0][idx + 1 :], ["a.ts", "./-evil.ts"])
 
+    def test_run_golangci_applies_safe_paths_to_leading_dash_packages(self) -> None:
+        # Round 30: golangci targets package directories rather than
+        # files. A leading-dash directory name (or a leading-dash
+        # ancestor that becomes the package dir) would still be
+        # reinterpreted by golangci-lint. _safe_paths is applied to
+        # both the input paths AND the resolved package dirs;
+        # neither was covered by an integration test.
+        captured = []
+
+        def capture(cmd, **kw):
+            captured.append(cmd)
+            return _stub_run('{"Issues": []}')(cmd, **kw)
+
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=capture):
+                # File at "-evil/foo.go" → package dir "-evil" must
+                # arrive at the subprocess as "./-evil".
+                lint_gate.run_golangci(["pkg/foo.go", "-evil/bar.go"])
+        # golangci args: golangci-lint run --out-format=json <pkg1> <pkg2>
+        cmd = captured[0]
+        # Package dirs come after --out-format=json.
+        pkg_idx = cmd.index("--out-format=json") + 1
+        pkgs = cmd[pkg_idx:]
+        # The "-evil" package must be rewritten with "./".
+        self.assertIn("./-evil", pkgs)
+        # And no raw leading-dash token can remain.
+        for p in pkgs:
+            self.assertFalse(p.startswith("-") and p != "--", f"unsafe pkg dir: {p}")
+
 
 class TestRunRuff(unittest.TestCase):
     def test_skipped_when_binary_missing(self) -> None:

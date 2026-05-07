@@ -418,6 +418,36 @@ class TestMainExitCode(unittest.TestCase):
             rc = self.mod.main(["--prs", "1234", "--json"])
         self.assertEqual(rc, 0)
 
+    def test_json_payload_includes_all_pass_and_results(self) -> None:
+        # Round 30: prior --json tests asserted only the exit code.
+        # main() could regress the payload shape (e.g. drop all_pass
+        # or wrap results differently) without failing those tests.
+        # Capture stdout and parse the emitted JSON.
+        results = {
+            "1234": {
+                "pr": "1234", "total_substantive": 3, "caught": 3, "findings": [],
+                "r1_issue_count": 1, "r2_issue_count": 1, "r1_only_count": 0,
+                "r1_cursor_loaded": True, "r1_codex_loaded": True,
+                "r2_cursor_loaded": True, "r2_codex_loaded": True,
+            }
+        }
+        import io  # noqa: PLC0415
+        from contextlib import redirect_stdout  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        buf = io.StringIO()
+        with patch.object(self.mod, "compare_pr", self._patch_compare(results)):
+            with redirect_stdout(buf):
+                rc = self.mod.main(["--prs", "1234", "--json"])
+        self.assertEqual(rc, 0)
+        import json as _json  # noqa: PLC0415
+        payload = _json.loads(buf.getvalue())
+        self.assertIn("all_pass", payload)
+        self.assertTrue(payload["all_pass"])
+        self.assertIn("results", payload)
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertEqual(payload["results"][0]["pr"], "1234")
+
     def test_markdown_calls_format_results_exactly_once(self) -> None:
         # Round 28 fix: format_results was called twice (once for
         # all_pass, once for the table). Removing the cache and
