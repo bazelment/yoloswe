@@ -132,10 +132,14 @@ def format_monitor_command(
     work_dir = work_dir or os.getcwd()
 
     tag = f"pr-polish:{repo}:{pr}:{backend}:r{round_}"
-    # shlex.quote keeps embedded quotes/backticks in the goal intact. The cd
-    # is conditional on the dir actually existing so a stale saved command
-    # fails loudly (Monitor reports non-zero exit) rather than silently
-    # running bramble in the wrong working tree.
+    # Monitor execs the returned string via the shell, so every interpolated
+    # value must be shell-quoted. ``backend`` is validated against the closed
+    # BACKENDS tuple above, but ``model`` and ``goal`` come from the caller —
+    # an unquoted model with spaces or shell metacharacters would split the
+    # argv or open a command-injection vector. The cd is conditional on the
+    # dir actually existing so a stale saved command fails loudly (Monitor
+    # reports non-zero exit) rather than silently running bramble in the
+    # wrong working tree.
     parts = [
         "cd",
         shlex.quote(work_dir),
@@ -146,7 +150,7 @@ def format_monitor_command(
         "--backend",
         backend,
         "--model",
-        model,
+        shlex.quote(model),
         "--json",
         "--skip-test-execution",
         "--verbose",
@@ -487,22 +491,31 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
 
 
 def _pr_or_slug(value: str) -> int | str:
-    """Argparse converter: numeric strings become ints (PR numbers); strings
-    prefixed with ``branch:`` become branch slugs (the prefix is stripped);
-    other non-empty strings also pass through as slugs.
+    """Argparse converter producing the canonical token used downstream.
 
-    The ``branch:`` prefix exists so a numeric-only branch name (rare but
-    possible — e.g. a branch literally named ``1234``) can be distinguished
-    from PR #1234. Without the prefix, integer parsing would silently route
-    that branch to the wrong state file and envelope path.
+    - Numeric strings → ``int`` (a PR number).
+    - ``branch:<name>`` → ``"branch-<slug>"`` (a branch token whose
+      ``branch-`` prefix survives all downstream interpolation —
+      ``BRAMBLE_RUN_TAG``, envelope filenames, state-dir slug — so a
+      numeric-only branch like ``branch:1234`` cannot collapse back to
+      ``1234`` and collide with PR #1234.
+    - Any other non-empty string passes through unchanged. Callers that
+      want the safe form should always go through the ``branch:`` prefix.
+
+    The ``branch:`` prefix is also the form SKILL.md documents for the
+    ``ctx`` positional on state subcommands, so this matches the rest of
+    the CLI.
     """
     if not value:
         raise argparse.ArgumentTypeError("--pr cannot be empty")
     if value.startswith("branch:"):
-        slug = value[len("branch:") :]
-        if not slug:
+        name = value[len("branch:") :]
+        if not name:
             raise argparse.ArgumentTypeError("branch: prefix requires a non-empty name")
-        return slug
+        # Defer to _common to keep the slugification rule in one place.
+        from _common import branch_envelope_key  # noqa: PLC0415
+
+        return branch_envelope_key(name)
     try:
         return int(value)
     except ValueError:

@@ -236,11 +236,18 @@ class TestPrOrSlugConverter(unittest.TestCase):
             bramble_ops._pr_or_slug("")
 
     def test_branch_prefix_disambiguates_numeric_branch_from_pr(self) -> None:
-        # A branch literally named "1234" must not be coerced to int(1234)
-        # and indistinguishable from PR #1234. The branch: prefix forces
-        # slug routing.
-        self.assertEqual(bramble_ops._pr_or_slug("branch:1234"), "1234")
-        self.assertEqual(bramble_ops._pr_or_slug("branch:feature/foo"), "feature/foo")
+        # A branch literally named "1234" must not be indistinguishable from
+        # PR #1234 anywhere downstream. The converter keeps the ``branch-``
+        # marker on the token so BRAMBLE_RUN_TAG, envelope filenames, and
+        # state-dir slugs all remain disjoint from numeric PR ids.
+        self.assertEqual(bramble_ops._pr_or_slug("branch:1234"), "branch-1234")
+        self.assertEqual(bramble_ops._pr_or_slug("branch:feature/foo"), "branch-feature-foo")
+        # The PR int form never collides with the branch form.
+        self.assertEqual(bramble_ops._pr_or_slug("1234"), 1234)
+        self.assertNotEqual(
+            bramble_ops._pr_or_slug("branch:1234"),
+            bramble_ops._pr_or_slug("1234"),
+        )
 
     def test_branch_prefix_with_empty_name_rejected(self) -> None:
         import argparse as _ap
