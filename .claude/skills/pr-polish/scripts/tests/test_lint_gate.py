@@ -223,6 +223,20 @@ class TestRunGolangci(unittest.TestCase):
         self.assertEqual(got[0]["severity"], "medium")
         self.assertIn("[golangci-lint] tooling failure", got[0]["message"])
 
+    def test_wrong_shape_json_root_not_dict_emits_tooling_failure(self) -> None:
+        # Round 18: parity with run_ruff. golangci's parsed root must
+        # be a dict (the `.Issues` accessor requires it); a list root
+        # would AttributeError on report.get(...).
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run('["unexpected", "list"]', returncode=0),
+            ):
+                got = lint_gate.run_golangci(["a.go"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("JSON root not a dict", got[0]["message"])
+
 
 class TestRunEslint(unittest.TestCase):
     def test_severity_2_medium_1_low(self) -> None:
@@ -285,6 +299,20 @@ class TestRunEslint(unittest.TestCase):
         self.assertEqual(got[0]["severity"], "medium")
         self.assertIn("tooling failure", got[0]["message"])
         self.assertIn("no stderr", got[0]["message"])
+
+    def test_wrong_shape_json_root_not_list_emits_tooling_failure(self) -> None:
+        # Round 18: parity with run_ruff and run_golangci. eslint's
+        # canonical output is a list of file-result objects; a dict
+        # root would crash the `for fr in report:` iteration.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run('{"unexpected": "object"}', returncode=0),
+            ):
+                got = lint_gate.run_eslint(["/x/foo.ts"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("JSON root not a list", got[0]["message"])
 
 
 class TestBuildEnvelope(unittest.TestCase):
