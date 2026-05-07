@@ -40,6 +40,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _common import (  # noqa: E402
     CommandError,
+    GO_EXTENSIONS,
+    JS_TS_EXTENSIONS,
+    PY_EXTENSIONS,
     atomic_write_json,
     changed_files,
     detect_base_branch,
@@ -49,13 +52,18 @@ from _common import (  # noqa: E402
 
 
 def _bucket(path: str) -> str | None:
-    """Classify a path into a linter bucket. Returns None to skip."""
+    """Classify a path into a linter bucket. Returns None to skip.
+
+    Extension lists live in ``_common`` so lint and scope gates pick up
+    new module formats together — a polyglot PR with .mts files should
+    not surface differently in the two gates.
+    """
     p = path.lower()
-    if p.endswith(".py"):
+    if p.endswith(PY_EXTENSIONS):
         return "py"
-    if p.endswith(".go"):
+    if p.endswith(GO_EXTENSIONS):
         return "go"
-    if p.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+    if p.endswith(JS_TS_EXTENSIONS):
         return "js"
     return None
 

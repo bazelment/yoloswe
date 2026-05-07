@@ -249,6 +249,26 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("ui/__tests__/comp.helper.ts", got)
         self.assertNotIn("ui/sibling.ts", got)
 
+    def test_mjs_cjs_test_suffixes(self) -> None:
+        # ``_bucket`` routes .mjs/.cjs into the JS bucket, so co-located
+        # *.test.mjs / *.spec.cjs must be picked up too. Without this the
+        # JS bucket would silently drop tests for those module formats.
+        root = self._make_tree(
+            [
+                "esm/foo.mjs",
+                "esm/foo.test.mjs",
+                "esm/foo.spec.mjs",
+                "cjs/bar.cjs",
+                "cjs/bar.test.cjs",
+                "cjs/bar.spec.cjs",
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["esm/foo.mjs", "cjs/bar.cjs"])
+        self.assertIn("esm/foo.test.mjs", got)
+        self.assertIn("esm/foo.spec.mjs", got)
+        self.assertIn("cjs/bar.test.cjs", got)
+        self.assertIn("cjs/bar.spec.cjs", got)
+
     def test_dedupe_across_changed_files(self) -> None:
         # Two source files in the same package both pull the same
         # tests/test_foo.py — output must be deduped.

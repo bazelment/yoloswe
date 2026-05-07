@@ -19,11 +19,11 @@ import lint_gate  # noqa: E402
 from _common import RunResult  # noqa: E402
 
 
-def _stub_run(stdout: str, returncode: int = 0):
-    """Build a fake _common.run that always returns the given stdout."""
+def _stub_run(stdout: str, returncode: int = 0, stderr: str = ""):
+    """Build a fake _common.run that always returns the given stdout/stderr."""
 
     def fake(cmd, *, check=True, env=None, cwd=None, input_text=None, timeout=None):
-        return RunResult(stdout=stdout, stderr="", returncode=returncode)
+        return RunResult(stdout=stdout, stderr=stderr, returncode=returncode)
 
     return fake
 
@@ -168,6 +168,31 @@ class TestRunEslint(unittest.TestCase):
         self.assertEqual([g["severity"] for g in got], ["medium", "low"])
         self.assertEqual(got[0]["file"], "/x/foo.ts")
         self.assertEqual(got[0]["line"], 1)
+
+    def test_blank_stdout_with_failure_surfaces_synthetic_finding(self) -> None:
+        # Tooling failure path: eslint exits non-zero with stderr text but
+        # nothing on stdout. Without a synthetic finding, triage would
+        # silently record "no eslint issues" while eslint never inspected
+        # the diff. Lock in the fallback shape so a refactor can't drop it.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate,
+                "run",
+                side_effect=_stub_run("", returncode=2, stderr="config error: eslintrc missing"),
+            ):
+                got = lint_gate.run_eslint(["/x/foo.ts"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("[eslint] tooling failure", got[0]["message"])
+        self.assertIn("eslintrc missing", got[0]["message"])
+
+    def test_blank_stdout_clean_run_returns_empty(self) -> None:
+        # Counter-test: a clean eslint run is rc=0, blank stdout, blank
+        # stderr. Must NOT synthesize a fake finding.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=_stub_run("", returncode=0)):
+                got = lint_gate.run_eslint(["/x/foo.ts"])
+        self.assertEqual(got, [])
 
 
 class TestBuildEnvelope(unittest.TestCase):

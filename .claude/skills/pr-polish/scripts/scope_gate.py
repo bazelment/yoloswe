@@ -47,6 +47,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from _common import (  # noqa: E402
     CommandError,
+    GO_EXTENSIONS,
+    JS_TS_EXTENSIONS,
+    PY_EXTENSIONS,
     atomic_write_json,
     changed_files,
     detect_base_branch,
@@ -113,13 +116,17 @@ def _is_ts_js_test(name: str) -> bool:
 
 
 def _bucket(path: str) -> str | None:
-    """Return ``py``/``go``/``ts`` for a file extension, else None."""
+    """Return ``py``/``go``/``ts`` for a file extension, else None.
+
+    Extension lists are shared with lint_gate via ``_common`` so polyglot
+    diffs route consistently across both gates.
+    """
     p = path.lower()
-    if p.endswith(".py"):
+    if p.endswith(PY_EXTENSIONS):
         return "py"
-    if p.endswith(".go"):
+    if p.endswith(GO_EXTENSIONS):
         return "go"
-    if p.endswith((".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")):
+    if p.endswith(JS_TS_EXTENSIONS):
         return "ts"
     return None
 

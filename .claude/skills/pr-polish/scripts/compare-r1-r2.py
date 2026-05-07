@@ -79,7 +79,7 @@ def load_envelope(path: Path) -> dict | None:
         return None
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     try:
         obj = json.loads(text)
@@ -192,12 +192,21 @@ def compare_pr(
     pr_dir = bramble_dir / f"kernel-{pr}"
     r2_state = r2_dir / f"kernel-{pr}"
 
-    # Load bot comments
+    # Load bot comments. Tolerate corrupt / partially-written JSON: when
+    # comparing across many PRs we'd rather skip one with empty comments
+    # than abort the entire batch.
     comments_path = pr_dir / "pp-comments.json"
     all_comments: list[dict] = []
     if comments_path.exists():
-        data = json.loads(comments_path.read_text())
-        all_comments = data.get("comments", []) if isinstance(data, dict) else data
+        try:
+            data = json.loads(comments_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            print(f"warning: skipping unreadable {comments_path}: {exc}", file=sys.stderr)
+            data = None
+        if isinstance(data, dict):
+            all_comments = data.get("comments", []) or []
+        elif isinstance(data, list):
+            all_comments = data
 
     substantive = [c for c in all_comments if is_substantive(c)]
 

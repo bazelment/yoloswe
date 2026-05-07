@@ -162,6 +162,14 @@ def detect_base_branch() -> str:
     return "main"
 
 
+# Single source of truth for which file extensions belong to which language
+# bucket. Both lint_gate and scope_gate read these — keeping them here means
+# adding a new module format (e.g. .mts) updates both gates at once.
+PY_EXTENSIONS: tuple[str, ...] = (".py",)
+GO_EXTENSIONS: tuple[str, ...] = (".go",)
+JS_TS_EXTENSIONS: tuple[str, ...] = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+
 def changed_files(base: str) -> list[str]:
     """Repo-relative paths added/modified/renamed vs ``origin/<base>``.
 
