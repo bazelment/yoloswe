@@ -356,11 +356,16 @@ def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str,
         return []
     status = obj.get("status")
     if status != "ok":
-        # Emit a synthetic "stale" finding so triage can surface the failure.
+        # A failed bramble run is a real signal — the orchestrator must
+        # surface it, not silently drop it. ``high`` routes through
+        # ``single_critical`` → ``must_fix``; ``severity: None`` here
+        # would land in ``low_acks`` (the routing rule is "missing
+        # severity is treated as low/nit"), letting Monitor failures
+        # masquerade as batch-ackable nits.
         return [
             {
                 "source": source,
-                "severity": None,
+                "severity": "high",
                 "file": None,
                 "line": None,
                 "message": (obj.get("error") or "bramble run failed"),

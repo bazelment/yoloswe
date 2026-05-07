@@ -203,15 +203,24 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
             candidate_dirs.append(abs_path.parent / "tests")
         elif lang == "ts":
             candidate_dirs.append(abs_path.parent / "__tests__")
-        # Package root one level up, plus its tests/__tests__ sibling.
-        # ``src/`` is the most common src/test split signal.
-        if abs_path.parent.name == "src":
-            pkg_root = abs_path.parent.parent
-            candidate_dirs.append(pkg_root)
+        # Walk up to MAX_ANCESTORS levels looking for tests/ or
+        # __tests__ subdirs (and the ancestor directory itself, since
+        # ``pkg/foo_test.py`` is a valid pytest layout). ``src/`` is
+        # the canonical case but layouts like ``pkg/module/foo.py``
+        # with tests at ``pkg/tests/`` or ``pkg/`` also need coverage.
+        # Bounded so we don't scan the whole repo tree on a deeply
+        # nested file.
+        MAX_ANCESTORS = 3
+        ancestor = abs_path.parent
+        for _ in range(MAX_ANCESTORS):
+            ancestor = ancestor.parent
+            if ancestor == repo_root or ancestor.parent == ancestor:
+                break
+            candidate_dirs.append(ancestor)
             if lang == "py":
-                candidate_dirs.append(pkg_root / "tests")
+                candidate_dirs.append(ancestor / "tests")
             elif lang == "ts":
-                candidate_dirs.append(pkg_root / "__tests__")
+                candidate_dirs.append(ancestor / "__tests__")
 
         for d in candidate_dirs:
             key = (d, lang)

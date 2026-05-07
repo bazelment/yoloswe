@@ -39,7 +39,6 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _common import (  # noqa: E402
-    CommandError,
     GO_EXTENSIONS,
     JS_TS_EXTENSIONS,
     PY_EXTENSIONS,
@@ -280,11 +279,9 @@ def main(argv: list[str] | None = None) -> int:
     state_dir = Path(args.state_dir)
     out_path = envelope_path_for(state_dir, args.round_)
 
-    try:
-        files = changed_files(base)
-    except CommandError as e:
-        print(f"lint_gate: changed_files failed: {e}", file=sys.stderr)
-        files = []
+    # changed_files uses run(check=False) and returns [] on any git
+    # failure — never raises — so no CommandError to catch here.
+    files = changed_files(base)
 
     issues = collect_findings(files) if files else []
     atomic_write_json(out_path, build_envelope(issues))

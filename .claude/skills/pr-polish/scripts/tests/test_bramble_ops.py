@@ -520,19 +520,20 @@ class TestLintSource(unittest.TestCase):
         self.assertEqual(out["action_plan"]["batch_ack"][0]["finding"]["source"], "lint")
 
     def test_lint_plus_codex_at_same_key_is_consensus(self) -> None:
-        # When lint and codex agree on (file, line, topic) the finding gets
-        # consensus routing — that's the whole point of treating lint as a
-        # peer source. Pinning this so a future tweak doesn't accidentally
-        # exclude lint from consensus eligibility.
-        common = {
-            "file": "a.py",
-            "line": 5,
-            "topic": "unused import",
-            "message": "unused import",
-            "severity": "low",
+        # When lint and codex agree on (file, line) — regardless of how
+        # each one phrased the topic — the finding gets consensus
+        # routing. The topics here deliberately differ to guard the
+        # location-only consensus contract; identical topics would
+        # consensus-pair under either rule and wouldn't catch a
+        # regression to topic-gated grouping.
+        codex = {
+            "file": "a.py", "line": 5, "topic": "unused import F401",
+            "message": "F401 unused import os", "severity": "low", "source": "codex",
         }
-        codex = {**common, "source": "codex"}
-        lint = {**common, "source": "lint"}
+        lint = {
+            "file": "a.py", "line": 5, "topic": "ruff f401 unused",
+            "message": "[ruff F401] unused import", "severity": "low", "source": "lint",
+        }
         out = bramble_ops.triage([codex, lint], prior_fixed_keys=set())
         self.assertEqual(len(out["consensus"]), 1)
         self.assertEqual(

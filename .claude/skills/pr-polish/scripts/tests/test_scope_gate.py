@@ -269,6 +269,19 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("cjs/bar.test.cjs", got)
         self.assertIn("cjs/bar.spec.cjs", got)
 
+    def test_walks_up_to_find_tests_in_non_src_layout(self) -> None:
+        # Common layout without ``src/``: pkg/module/foo.py with tests
+        # at pkg/tests/. Round 12 broadened the ancestor search beyond
+        # the literal ``src`` parent so these tests get picked up.
+        root = self._make_tree(
+            [
+                "pkg/module/foo.py",
+                "pkg/tests/test_foo.py",
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["pkg/module/foo.py"])
+        self.assertIn("pkg/tests/test_foo.py", got)
+
     def test_dedupe_across_changed_files(self) -> None:
         # Two source files in the same package both pull the same
         # tests/test_foo.py — output must be deduped.
