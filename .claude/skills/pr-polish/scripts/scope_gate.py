@@ -188,7 +188,7 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
     # holding both .py and .ts files — gets walked once per language.
     # Keying by directory alone would let the first language seen suppress
     # the others' test enumeration.
-    seen_dirs: set[tuple[Path, str]] = set()
+    seen_dirs: set[tuple[Path, str, bool]] = set()
 
     for rel in changed:
         lang = _bucket(rel)
@@ -196,21 +196,23 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
             continue
 
         abs_path = (repo_root / rel).resolve()
-        candidate_dirs: list[Path] = []
-        # Sibling tests/__tests__ at the same level. Skip the bare
-        # parent when it IS repo_root — recursing from repo_root
-        # would scan every package in the tree and pull unrelated
-        # tests into scope. For root-level files we still need to
-        # find sibling foo_test.py / foo.test.ts at repo_root, so do
-        # a *shallow* (non-recursive) scan via _walk_root_siblings
-        # below instead of feeding the directory to _walk_tests.
+        # candidate_dirs entries are (dir, recursive) tuples. Recursive
+        # candidates feed _walk_tests (full subtree); shallow ones get
+        # a non-recursive same-level scan to avoid pulling tests from
+        # sibling subpackages. Round 31 fix: bare-ancestor entries
+        # ("pkg/" so we find pkg/foo_test.py at the package root) used
+        # to be recursive, which leaked tests from pkg/other/ into
+        # scope when only pkg/module/foo.py changed.
+        candidate_dirs: list[tuple[Path, bool]] = []
         parent_at_root = abs_path.parent == repo_root
+        # Same-level sibling: scan recursively into the file's own
+        # parent dir is fine (those *are* its co-located tests).
         if not parent_at_root:
-            candidate_dirs.append(abs_path.parent)
+            candidate_dirs.append((abs_path.parent, True))
         if lang == "py":
-            candidate_dirs.append(abs_path.parent / "tests")
+            candidate_dirs.append((abs_path.parent / "tests", True))
         elif lang == "ts":
-            candidate_dirs.append(abs_path.parent / "__tests__")
+            candidate_dirs.append((abs_path.parent / "__tests__", True))
         # Walk up to MAX_ANCESTORS levels looking for tests/ or
         # __tests__ subdirs (and the ancestor directory itself, since
         # ``pkg/foo_test.py`` is a valid pytest layout). ``src/`` is
@@ -239,29 +241,55 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
                     # Filesystem root; defensive belt-and-braces.
                     break
                 at_root = ancestor == repo_root
-                # Bare ancestor is needed for ``pkg/foo_test.py``-style
-                # layouts (test sits next to the package, not in a
-                # tests/ subdir) — but never at repo_root, where it
-                # would scan every package.
+                # Bare ancestor: shallow (non-recursive) scan only.
+                # Recursing would pull tests from sibling subpackages
+                # of the ancestor — e.g. a change in pkg/module/foo.py
+                # should NOT pull pkg/other/test_bar.py into scope.
+                # The bare-ancestor candidate exists for the
+                # `pkg/foo_test.py`-direct-at-package-root layout.
                 if not at_root:
-                    candidate_dirs.append(ancestor)
+                    candidate_dirs.append((ancestor, False))
+                # tests/__tests__ subtrees are explicitly scoped to
+                # tests, so recursive walking is safe there.
                 if lang == "py":
-                    candidate_dirs.append(ancestor / "tests")
+                    candidate_dirs.append((ancestor / "tests", True))
                 elif lang == "ts":
-                    candidate_dirs.append(ancestor / "__tests__")
+                    candidate_dirs.append((ancestor / "__tests__", True))
 
-        for d in candidate_dirs:
-            key = (d, lang)
+        for d, recursive in candidate_dirs:
+            key = (d, lang, recursive)
             if key in seen_dirs:
                 continue
             seen_dirs.add(key)
-            for test_file in _walk_tests(repo_root, d, lang):
-                try:
-                    rel_test = test_file.relative_to(repo_root)
-                except ValueError:
-                    # Symlink or otherwise outside repo_root; skip.
+            if recursive:
+                for test_file in _walk_tests(repo_root, d, lang):
+                    try:
+                        rel_test = test_file.relative_to(repo_root)
+                    except ValueError:
+                        # Symlink or otherwise outside repo_root; skip.
+                        continue
+                    found.add(str(rel_test))
+            else:
+                # Shallow scan: only files directly in this dir, no
+                # descent. Used for bare-ancestor candidates so we
+                # don't pull tests from sibling subpackages.
+                if not d.is_dir():
                     continue
-                found.add(str(rel_test))
+                for entry in d.iterdir():
+                    if not entry.is_file():
+                        continue
+                    fname = entry.name
+                    hit = False
+                    if lang == "py" and _is_python_test(fname):
+                        hit = True
+                    elif lang == "ts" and _is_ts_js_test(fname):
+                        hit = True
+                    if hit:
+                        try:
+                            rel_test = entry.relative_to(repo_root)
+                        except ValueError:
+                            continue
+                        found.add(str(rel_test))
 
         # Root-level file: scan repo_root *non-recursively* for sibling
         # test files (foo_test.py next to foo.py at the repo root).

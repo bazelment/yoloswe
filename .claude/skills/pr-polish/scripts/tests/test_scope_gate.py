@@ -294,6 +294,29 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("cjs/bar.test.cjs", got)
         self.assertIn("cjs/bar.spec.cjs", got)
 
+    def test_ancestor_walk_does_not_recurse_into_sibling_subpackages(self) -> None:
+        # Round 31 fix: bare-ancestor candidates were fed to
+        # _walk_tests recursively, which pulled tests from sibling
+        # subpackages of the ancestor. A change in pkg/module/foo.py
+        # leaked pkg/other/test_bar.py into scope. Now bare ancestors
+        # use a shallow same-level scan; only tests/__tests__ subtrees
+        # are walked recursively.
+        root = self._make_tree(
+            [
+                "pkg/module/foo.py",
+                "pkg/module/test_foo.py",  # canonical sibling — kept
+                "pkg/other/bar.py",
+                "pkg/other/test_bar.py",  # MUST NOT leak in
+                "pkg/foo_test.py",  # bare-ancestor sibling — kept
+                "pkg/tests/test_module.py",  # canonical tests/ subtree — kept
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["pkg/module/foo.py"])
+        self.assertIn("pkg/module/test_foo.py", got)
+        self.assertIn("pkg/foo_test.py", got)
+        self.assertIn("pkg/tests/test_module.py", got)
+        self.assertNotIn("pkg/other/test_bar.py", got)
+
     def test_go_strictly_per_package_no_ancestor_walk(self) -> None:
         # Round 23 fix: Go's testing convention is strictly per-package.
         # The ancestor walk previously included Go too, so a change in
