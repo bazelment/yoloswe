@@ -109,10 +109,14 @@ def envelope_issues(env: dict | None) -> list[dict]:
     if env is None:
         return []
     # Envelope may nest issues under 'review.issues' or at top level.
-    # Coerce null/non-list values to [] so a partial envelope with
-    # ``review.issues: null`` doesn't crash compare_pr's list ops.
-    review = env.get("review") or {}
-    raw = review.get("issues") if "issues" in review else env.get("issues")
+    # Defensively coerce: accept only a dict ``review`` (corrupt JSON
+    # could put a list or a string here, which would AttributeError on
+    # .get) and only a list of issues.
+    review = env.get("review")
+    if isinstance(review, dict) and "issues" in review:
+        raw = review["issues"]
+    else:
+        raw = env.get("issues")
     return raw if isinstance(raw, list) else []
 
 

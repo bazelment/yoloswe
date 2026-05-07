@@ -164,6 +164,18 @@ class TestParseCrossServiceRoots(unittest.TestCase):
         roots = scope_gate.parse_cross_service_roots("services:3")
         self.assertEqual(roots, (("services/", 3),))
 
+    def test_malformed_depth_dropped_with_warning(self) -> None:
+        # Round 17 fix: prior r16 fallback set prefix=entry on a
+        # non-numeric depth like "services:typo", baking the bad
+        # token in as a path prefix. The entry is now dropped
+        # entirely (drop-with-warning).
+        import io, contextlib  # noqa: PLC0415
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            roots = scope_gate.parse_cross_service_roots("services:typo,apps/:2")
+        self.assertEqual(roots, (("apps/", 2),))
+        self.assertIn("non-numeric depth", buf.getvalue())
+
 
 class TestCollectTestPaths(unittest.TestCase):
     """Walks a real on-disk tree under tmpdir.
@@ -268,6 +280,23 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("esm/foo.spec.mjs", got)
         self.assertIn("cjs/bar.test.cjs", got)
         self.assertIn("cjs/bar.spec.cjs", got)
+
+    def test_root_level_file_finds_sibling_test_at_root(self) -> None:
+        # Round 17 fix: repo-root containment guard from r16 had also
+        # disabled finding sibling foo_test.py at the repo root. The
+        # shallow non-recursive scan added in r17 restores that.
+        root = self._make_tree(
+            [
+                "foo.py",
+                "foo_test.py",
+                "tests/test_foo.py",  # also valid; both should appear
+                "unrelated/tests/test_x.py",  # MUST NOT leak
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["foo.py"])
+        self.assertIn("foo_test.py", got)
+        self.assertIn("tests/test_foo.py", got)
+        self.assertNotIn("unrelated/tests/test_x.py", got)
 
     def test_changed_file_at_repo_root_does_not_scan_whole_tree(self) -> None:
         # Round 16 fix: when the changed file lives at repo_root

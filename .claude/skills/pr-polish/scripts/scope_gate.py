@@ -197,13 +197,16 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
             continue
 
         abs_path = (repo_root / rel).resolve()
+        candidate_dirs: list[Path] = []
         # Sibling tests/__tests__ at the same level. Skip the bare
         # parent when it IS repo_root — recursing from repo_root
         # would scan every package in the tree and pull unrelated
-        # tests into scope. (Same reason the ancestor walker below
-        # gates the `at_root` case.)
-        candidate_dirs: list[Path] = []
-        if abs_path.parent != repo_root:
+        # tests into scope. For root-level files we still need to
+        # find sibling foo_test.py / foo.test.ts at repo_root, so do
+        # a *shallow* (non-recursive) scan via _walk_root_siblings
+        # below instead of feeding the directory to _walk_tests.
+        parent_at_root = abs_path.parent == repo_root
+        if not parent_at_root:
             candidate_dirs.append(abs_path.parent)
         if lang == "py":
             candidate_dirs.append(abs_path.parent / "tests")
@@ -253,6 +256,25 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
                     # Symlink or otherwise outside repo_root; skip.
                     continue
                 found.add(str(rel_test))
+
+        # Root-level file: scan repo_root *non-recursively* for sibling
+        # test files (foo_test.py next to foo.py at the repo root).
+        # We can't add repo_root as a candidate_dir because _walk_tests
+        # descends into every subpackage; do the shallow scan directly.
+        if parent_at_root:
+            for entry in repo_root.iterdir():
+                if not entry.is_file():
+                    continue
+                fname = entry.name
+                hit = False
+                if lang == "py" and _is_python_test(fname):
+                    hit = True
+                elif lang == "ts" and _is_ts_js_test(fname):
+                    hit = True
+                elif lang == "go" and _is_go_test(fname):
+                    hit = True
+                if hit:
+                    found.add(fname)
 
     return sorted(found)
 
@@ -373,10 +395,18 @@ def parse_cross_service_roots(spec: str) -> tuple[tuple[str, int], ...]:
             try:
                 depth = int(depth_s)
             except ValueError:
-                # Malformed "prefix:abc" — fall back to default depth
-                # rather than crash the whole tool. CLI flag misuse
-                # shouldn't take down the review.
-                prefix, depth = entry, 2
+                # Malformed "prefix:abc" — drop the entry entirely
+                # rather than silently using "prefix:abc/" as a path
+                # prefix (which never matches anything but pollutes
+                # logs). Prior fix used `prefix=entry` which baked the
+                # bad token into the live config.
+                import sys as _sys  # noqa: PLC0415
+                print(
+                    f"scope_gate: ignoring --cross-service-roots entry "
+                    f"with non-numeric depth: {entry!r}",
+                    file=_sys.stderr,
+                )
+                continue
         else:
             prefix, depth = entry, 2
         if not prefix.endswith("/"):
@@ -462,7 +492,11 @@ def main(argv: list[str] | None = None) -> int:
         atomic_write_json(out_path, build_hints([], []))
         print(out_path)
         return 0
-    repo_root = Path(res.stdout.strip())
+    # ``.resolve()`` so the repo_root containment guards in
+    # collect_test_paths (abs_path.parent == repo_root, ancestor ==
+    # repo_root) compare canonical paths on both sides — symlink
+    # mismatches would otherwise silently break those checks.
+    repo_root = Path(res.stdout.strip()).resolve()
 
     try:
         files = changed_files(base)

@@ -107,6 +107,13 @@ class TestEnvelopeIssues(unittest.TestCase):
         env = {"review": {"issues": [{"file": "a.py"}]}}
         self.assertEqual(self.mod.envelope_issues(env), [{"file": "a.py"}])
 
+    def test_review_as_list_does_not_crash(self) -> None:
+        # Corrupt JSON could put a list or string here; the previous
+        # code used .get() unconditionally, which AttributeError'd.
+        self.assertEqual(self.mod.envelope_issues({"review": []}), [])
+        self.assertEqual(self.mod.envelope_issues({"review": "broken"}), [])
+        self.assertEqual(self.mod.envelope_issues({"review": None}), [])
+
 
 class TestCommentCaughtInEnvelope(unittest.TestCase):
     """Direct coverage for the matcher heuristic. Without it, regressions in
