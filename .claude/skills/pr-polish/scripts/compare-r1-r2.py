@@ -341,6 +341,8 @@ def compare_pr(
         "r1_issue_count": len(r1_issues),
         "r2_issue_count": len(r2_issues),
         "r1_only_count": r1_only,
+        "r1_cursor_loaded": r1_cursor_env is not None,
+        "r1_codex_loaded": r1_codex_env is not None,
         "r2_cursor_loaded": r2_cursor_env is not None,
         "r2_codex_loaded": r2_codex_env is not None,
     }
@@ -366,9 +368,15 @@ def format_results(results: list[dict], verbose: bool = False) -> tuple[str, boo
         r2_count = r["r2_issue_count"]
         r1_only = r["r1_only_count"]
 
-        # If both r2 envelopes failed to load the comparison is structurally
-        # invalid — recall metrics computed from no-data look like a clean
-        # pass but really mean "nothing was checked." Fail the whole run.
+        # If either side's envelopes are entirely unloaded the comparison
+        # is structurally invalid — recall metrics computed from no-data
+        # look clean but mean "nothing was checked." Fail the whole run.
+        # Round 25: also check r1_*_loaded so a missing r1 baseline can't
+        # let r1_only_count=0 vacuously pass kernel-2755.
+        if not r.get("r1_cursor_loaded") and not r.get("r1_codex_loaded"):
+            verdicts.append(f"✗ **kernel-{pr}**: r1 envelopes unloaded — comparison invalid")
+            all_pass = False
+            continue
         if not r.get("r2_cursor_loaded") and not r.get("r2_codex_loaded"):
             verdicts.append(f"✗ **kernel-{pr}**: r2 envelopes unloaded — comparison invalid")
             all_pass = False

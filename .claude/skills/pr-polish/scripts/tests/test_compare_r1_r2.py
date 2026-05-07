@@ -275,14 +275,22 @@ class TestFormatResultsAllPass(unittest.TestCase):
             "r1_issue_count": 0,
             "r2_issue_count": 0,
             "r1_only_count": 0,
+            "r1_cursor_loaded": True,
+            "r1_codex_loaded": True,
             "r2_cursor_loaded": True,
             "r2_codex_loaded": True,
         }
         base.update(overrides)
         return base
 
-    def test_2755_zero_regressions_passes(self) -> None:
-        r = self._result(pr="2755", r1_only_count=0, r1_issue_count=3, r2_issue_count=3)
+    def test_2755_zero_regressions_with_full_recall_passes(self) -> None:
+        # Round 25 tightens this: prior version left total/caught at 0/0
+        # which never actually exercised the caught==total bar added
+        # in r24. Use 5/5 to prove the success path.
+        r = self._result(
+            pr="2755", r1_only_count=0, r1_issue_count=3, r2_issue_count=3,
+            total_substantive=5, caught=5,
+        )
         _, all_pass = self.mod.format_results([r])
         self.assertTrue(all_pass)
 
@@ -313,6 +321,19 @@ class TestFormatResultsAllPass(unittest.TestCase):
         out, all_pass = self.mod.format_results([r])
         self.assertFalse(all_pass)
         self.assertIn("envelopes unloaded", out)
+
+    def test_unloaded_r1_envelopes_force_failure(self) -> None:
+        # Round 25 fix: an r1 baseline that didn't load means
+        # r1_only_count=0 vacuously, which would let kernel-2755 pass
+        # even though we never actually compared anything. Same
+        # invalid-comparison semantics as the r2 branch.
+        r = self._result(
+            pr="2755", r1_only_count=0,
+            r1_cursor_loaded=False, r1_codex_loaded=False,
+        )
+        out, all_pass = self.mod.format_results([r])
+        self.assertFalse(all_pass)
+        self.assertIn("r1 envelopes unloaded", out)
 
     def test_partial_recall_fails(self) -> None:
         # Pre-fix bug: caught=1/3 used to read as a pass. Lock in full-recall.
@@ -351,7 +372,7 @@ class TestMainExitCode(unittest.TestCase):
             "1234": {
                 "pr": "1234", "total_substantive": 3, "caught": 1, "findings": [],
                 "r1_issue_count": 1, "r2_issue_count": 1, "r1_only_count": 0,
-                "r2_cursor_loaded": True, "r2_codex_loaded": True,
+                "r1_cursor_loaded": True, "r1_codex_loaded": True, "r2_cursor_loaded": True, "r2_codex_loaded": True,
             }
         }
         from unittest.mock import patch  # noqa: PLC0415
@@ -366,7 +387,7 @@ class TestMainExitCode(unittest.TestCase):
             "1234": {
                 "pr": "1234", "total_substantive": 3, "caught": 1, "findings": [],
                 "r1_issue_count": 1, "r2_issue_count": 1, "r1_only_count": 0,
-                "r2_cursor_loaded": True, "r2_codex_loaded": True,
+                "r1_cursor_loaded": True, "r1_codex_loaded": True, "r2_cursor_loaded": True, "r2_codex_loaded": True,
             }
         }
         from unittest.mock import patch  # noqa: PLC0415
@@ -379,7 +400,7 @@ class TestMainExitCode(unittest.TestCase):
             "1234": {
                 "pr": "1234", "total_substantive": 3, "caught": 3, "findings": [],
                 "r1_issue_count": 1, "r2_issue_count": 1, "r1_only_count": 0,
-                "r2_cursor_loaded": True, "r2_codex_loaded": True,
+                "r1_cursor_loaded": True, "r1_codex_loaded": True, "r2_cursor_loaded": True, "r2_codex_loaded": True,
             }
         }
         from unittest.mock import patch  # noqa: PLC0415
