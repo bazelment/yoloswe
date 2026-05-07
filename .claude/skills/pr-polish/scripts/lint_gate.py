@@ -77,6 +77,27 @@ def _have(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
+def _tooling_failure(linter: str, returncode: int, stderr: str) -> dict[str, Any]:
+    """Synthetic medium-severity finding for a linter that didn't run cleanly.
+
+    Used by ``run_ruff`` / ``run_eslint`` / ``run_golangci`` to surface
+    rc != 0 + blank stdout (or non-JSON stdout) so triage doesn't treat
+    a crashed/misconfigured linter as a clean pass. Severity is
+    medium: the diff was not lint-checked, but it isn't a hard failure
+    of the PR either — the human reviewer needs to investigate.
+    """
+    return {
+        "file": None,
+        "line": None,
+        "severity": "medium",
+        "topic": topic_of(f"{linter} tooling failure"),
+        "message": (
+            f"[{linter}] tooling failure (exit {returncode}): "
+            f"{(stderr or '').strip()[:300] or 'no stderr'}"
+        ),
+    }
+
+
 def run_ruff(paths: list[str]) -> list[dict[str, Any]]:
     """Run ``ruff check --output-format=json`` and normalize.
 
@@ -88,13 +109,20 @@ def run_ruff(paths: list[str]) -> list[dict[str, Any]]:
     if not paths or not _have("ruff"):
         return []
     res = run(["ruff", "check", "--output-format=json", *paths], check=False)
-    # ruff exits non-zero when issues are found; that's expected, not an error.
+    stderr = (res.stderr or "").strip()
+    # ruff returns rc=1 when issues are found (with JSON on stdout) and
+    # rc=0 when clean. Blank stdout with non-zero rc or stderr text is
+    # a real tooling failure (parser crash, config error). Surface it
+    # so the round can't proceed thinking ruff passed cleanly when it
+    # never inspected the diff. Mirrors run_eslint / run_golangci.
     if not res.stdout.strip():
+        if res.returncode != 0 or stderr:
+            return [_tooling_failure("ruff", res.returncode, stderr)]
         return []
     try:
         items = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return []
+        return [_tooling_failure("ruff", res.returncode, stderr or "non-JSON stdout")]
     out: list[dict[str, Any]] = []
     for it in items:
         code = (it.get("code") or "").upper()
@@ -131,31 +159,14 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
     pkgs = sorted({str(Path(p).parent) or "." for p in paths})
     res = run(["golangci-lint", "run", "--out-format=json", *pkgs], check=False)
     stderr = (res.stderr or "").strip()
-    # Mirrors the run_eslint contract: blank stdout with rc != 0 or
-    # stderr is a tooling failure, not a clean run. Surface it as a
-    # synthetic finding so the round can't proceed thinking golangci
-    # passed cleanly when it never inspected the diff. golangci's
-    # rc=1 means "issues found" (with JSON on stdout) and rc=0 means
-    # "clean"; rc>1 (or rc=1 with no JSON) is genuine breakage.
     if not res.stdout.strip():
         if res.returncode != 0 or stderr:
-            return [
-                {
-                    "file": None,
-                    "line": None,
-                    "severity": "medium",
-                    "topic": topic_of("golangci tooling failure"),
-                    "message": (
-                        f"[golangci-lint] tooling failure (exit {res.returncode}): "
-                        f"{stderr[:300] if stderr else 'no stderr'}"
-                    ),
-                }
-            ]
+            return [_tooling_failure("golangci-lint", res.returncode, stderr)]
         return []
     try:
         report = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return []
+        return [_tooling_failure("golangci-lint", res.returncode, stderr or "non-JSON stdout")]
     issues = report.get("Issues") or []
     out: list[dict[str, Any]] = []
     # Severity tiers. Security linters surface as high so triage routes them
@@ -202,31 +213,14 @@ def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
         return []
     res = run(["eslint", "--format=json", *paths], check=False)
     stderr = (res.stderr or "").strip()
-    # Blank stdout with non-zero rc OR non-empty stderr is a tooling
-    # failure: emit a synthetic finding so the round can't proceed
-    # thinking eslint passed cleanly when it didn't actually inspect
-    # the diff. Blank stdout with rc=0 and blank stderr falls through
-    # as a (rare-but-valid) clean run; the canonical clean shape is
-    # stdout="[]" which hits the JSON-parse path below.
     if not res.stdout.strip():
         if res.returncode != 0 or stderr:
-            return [
-                {
-                    "file": None,
-                    "line": None,
-                    "severity": "medium",
-                    "topic": topic_of("eslint tooling failure"),
-                    "message": (
-                        f"[eslint] tooling failure (exit {res.returncode}): "
-                        f"{stderr[:300] if stderr else 'no stderr'}"
-                    ),
-                }
-            ]
+            return [_tooling_failure("eslint", res.returncode, stderr)]
         return []
     try:
         report = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return []
+        return [_tooling_failure("eslint", res.returncode, stderr or "non-JSON stdout")]
     out: list[dict[str, Any]] = []
     for fr in report:
         for m in fr.get("messages") or []:

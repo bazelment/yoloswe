@@ -154,8 +154,9 @@ def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool,
     1. File-match (path-or-basename) + line within ±10
     2. File-match (path-or-basename) + significant keyword overlap
        in body/message
-    3. No file on comment + significant keyword overlap (cross-file
-       findings)
+    3. Either side missing a file path + significant keyword overlap
+       (cross-file findings: comment-without-path against any issue,
+       or sourceless envelope issue against a path-bearing comment)
     """
     c_path = comment.get("path") or ""
     c_line = comment.get("line")

@@ -88,12 +88,29 @@ class TestRunRuff(unittest.TestCase):
         self.assertIn("e902", got[0]["topic"])
         self.assertIn("w291", got[2]["topic"])
 
-    def test_malformed_output_returns_empty(self) -> None:
-        # ruff is supposed to emit JSON; if it doesn't (e.g. internal error
-        # printed to stdout), return empty rather than crashing the round.
+    def test_malformed_output_emits_tooling_failure(self) -> None:
+        # ruff is supposed to emit JSON; if it doesn't (e.g. internal
+        # error printed to stdout), surface a synthetic tooling-failure
+        # finding so the round can't proceed thinking ruff passed.
+        # Round 15 tightened this from "return []" to match the
+        # golangci/eslint contract.
         with patch.object(lint_gate, "_have", return_value=True):
             with patch.object(lint_gate, "run", side_effect=_stub_run("not json", 1)):
-                self.assertEqual(lint_gate.run_ruff(["a.py"]), [])
+                got = lint_gate.run_ruff(["a.py"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("[ruff] tooling failure", got[0]["message"])
+
+    def test_blank_stdout_nonzero_rc_emits_tooling_failure(self) -> None:
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run("", returncode=2, stderr="parser crashed"),
+            ):
+                got = lint_gate.run_ruff(["a.py"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("parser crashed", got[0]["message"])
 
 
 class TestRunGolangci(unittest.TestCase):
@@ -147,6 +164,34 @@ class TestRunGolangci(unittest.TestCase):
         # gosec → high (security scanner), errcheck → medium (bug-finder),
         # gofmt → low, unknown → low (conservative default).
         self.assertEqual([g["severity"] for g in got], ["high", "medium", "low", "low"])
+
+    def test_blank_stdout_nonzero_rc_emits_tooling_failure(self) -> None:
+        # Mirrors run_eslint's tooling-failure contract: rc != 0 with
+        # blank stdout is a real crash, not a clean run. Emit a
+        # synthetic medium so the round can't proceed thinking
+        # golangci passed cleanly when it never inspected the diff.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run("", returncode=2, stderr="config error: invalid linter"),
+            ):
+                got = lint_gate.run_golangci(["a.go"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("[golangci-lint] tooling failure", got[0]["message"])
+
+    def test_non_json_stdout_emits_tooling_failure(self) -> None:
+        # Round-15 tighten: a non-JSON stdout (golangci spitting plain
+        # text on a config blowup) was previously dropped silently.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate, "run",
+                side_effect=_stub_run("not valid json", returncode=1),
+            ):
+                got = lint_gate.run_golangci(["a.go"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("[golangci-lint] tooling failure", got[0]["message"])
 
 
 class TestRunEslint(unittest.TestCase):

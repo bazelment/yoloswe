@@ -212,15 +212,29 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
         # nested file.
         MAX_ANCESTORS = 3
         ancestor = abs_path.parent
+        at_root = False
         for _ in range(MAX_ANCESTORS):
             ancestor = ancestor.parent
-            if ancestor == repo_root or ancestor.parent == ancestor:
+            if ancestor.parent == ancestor:
+                # Filesystem root; stop climbing.
                 break
-            candidate_dirs.append(ancestor)
+            at_root = ancestor == repo_root
+            # Visit only ancestor/tests and ancestor/__tests__ (not the
+            # bare ancestor, which would let _walk_tests descend through
+            # unrelated packages and pull in their tests). The bare
+            # ancestor is needed for layouts like ``pkg/foo_test.py``
+            # where the test sits next to the package, not in a tests/
+            # subdir — but only at non-root levels; recursing from
+            # repo_root would scan every package.
+            if not at_root:
+                candidate_dirs.append(ancestor)
             if lang == "py":
                 candidate_dirs.append(ancestor / "tests")
             elif lang == "ts":
                 candidate_dirs.append(ancestor / "__tests__")
+            if at_root:
+                # repo_root/tests considered; don't climb above the repo.
+                break
 
         for d in candidate_dirs:
             key = (d, lang)

@@ -269,6 +269,19 @@ class TestCollectTestPaths(unittest.TestCase):
         self.assertIn("cjs/bar.test.cjs", got)
         self.assertIn("cjs/bar.spec.cjs", got)
 
+    def test_finds_tests_at_repo_root(self) -> None:
+        # Common layout: src/foo.py with tests/test_foo.py at the repo
+        # root. The ancestor walker must include repo_root/tests, not
+        # bail out the moment it reaches repo_root.
+        root = self._make_tree(
+            [
+                "src/foo.py",
+                "tests/test_foo.py",
+            ]
+        )
+        got = scope_gate.collect_test_paths(root, ["src/foo.py"])
+        self.assertIn("tests/test_foo.py", got)
+
     def test_walks_up_to_find_tests_in_non_src_layout(self) -> None:
         # Common layout without ``src/``: pkg/module/foo.py with tests
         # at pkg/tests/. Round 12 broadened the ancestor search beyond
