@@ -146,6 +146,91 @@ class TestDetectCrossServicePackages(unittest.TestCase):
         )
 
 
+class TestSplitChangedDependencyPackages(unittest.TestCase):
+    def test_below_file_threshold_returns_empty(self) -> None:
+        # Same MIN_FILES_FOR_SWEEP gate as detect_cross_service_packages.
+        paths = [
+            "services/python/a/src/x.py",
+            "services/python/b/src/y.py",
+        ]
+        self.assertEqual(
+            scope_gate.split_changed_dependency_packages(paths),
+            ([], []),
+        )
+
+    def test_below_package_threshold_returns_empty(self) -> None:
+        # Three files but all in one bucket → not multi-package.
+        paths = [
+            "services/python/a/src/x.py",
+            "services/python/a/src/y.py",
+            "services/python/a/src/z.py",
+        ]
+        self.assertEqual(
+            scope_gate.split_changed_dependency_packages(paths),
+            ([], []),
+        )
+
+    def test_dominant_bucket_split(self) -> None:
+        # b has 2 changed files, a has 1 → b is changed, a is dependency.
+        paths = [
+            "services/python/a/src/x.py",
+            "services/python/b/src/y.py",
+            "services/python/b/src/z.py",
+        ]
+        changed, dep = scope_gate.split_changed_dependency_packages(paths)
+        self.assertEqual(changed, ["services/python/b"])
+        self.assertEqual(dep, ["services/python/a"])
+
+    def test_tie_treated_as_co_changed(self) -> None:
+        # Two packages tied at the max → both are "changed", neither is
+        # a dependency. Models reviewing both as primary is the right
+        # default; we don't have signal to pick one.
+        paths = [
+            "services/python/a/src/x.py",
+            "services/python/a/src/y.py",
+            "services/python/b/src/y.py",
+            "services/python/b/src/z.py",
+        ]
+        changed, dep = scope_gate.split_changed_dependency_packages(paths)
+        self.assertEqual(
+            changed,
+            ["services/python/a", "services/python/b"],
+        )
+        self.assertEqual(dep, [])
+
+    def test_three_buckets_one_dominant(self) -> None:
+        paths = [
+            "services/python/tenant-service/src/x.py",
+            "services/python/tenant-service/src/y.py",
+            "services/python/tenant-service/src/z.py",
+            "services/typescript/forge-v2/src/a.tsx",
+            "services/python/billing/src/b.py",
+        ]
+        changed, dep = scope_gate.split_changed_dependency_packages(paths)
+        self.assertEqual(changed, ["services/python/tenant-service"])
+        self.assertEqual(
+            dep,
+            [
+                "services/python/billing",
+                "services/typescript/forge-v2",
+            ],
+        )
+
+    def test_custom_roots(self) -> None:
+        # Verify the same depth-aware bucketing works under custom roots.
+        paths = [
+            "modules/auth/src/x.go",
+            "modules/auth/src/y.go",
+            "modules/billing/src/z.go",
+        ]
+        roots = scope_gate.parse_cross_service_roots("modules/:2")
+        changed, dep = scope_gate.split_changed_dependency_packages(
+            paths, roots,
+        )
+        self.assertEqual(changed, ["modules/auth"])
+        self.assertEqual(dep, ["modules/billing"])
+
+
 class TestParseCrossServiceRoots(unittest.TestCase):
     def test_csv_with_depths(self) -> None:
         roots = scope_gate.parse_cross_service_roots("services/:3,apps/:2")
@@ -547,6 +632,10 @@ class TestMainCLI(unittest.TestCase):
         # Both co-located tests included; sorted order.
         self.assertIn("services/python/a/tests/test_x.py", data["test_paths"])
         self.assertIn("services/python/b/tests/test_y.py", data["test_paths"])
+        # v2 split: bucket b has 2 changed files, bucket a has 1 → b
+        # is the dominant changed package, a is its dependency.
+        self.assertEqual(data["changed_packages"], ["services/python/b"])
+        self.assertEqual(data["dependency_packages"], ["services/python/a"])
 
     def test_empty_diff_writes_empty_hints(self) -> None:
         # No diff (e.g. branch already merged) → emit a no-op hints

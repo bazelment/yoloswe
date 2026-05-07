@@ -122,6 +122,25 @@ class TestActionHistoryGoal(unittest.TestCase):
         self.assertNotIn("c.go:5", out)
         self.assertNotIn("stale", out)
 
+    def test_ci_skip_actions_included_in_skipped(self) -> None:
+        # ``pre_existing`` and ``flake`` are CI-source skip verbs. A
+        # round that handled only CI failures must still propagate that
+        # context into the next round's goal — otherwise the resumed
+        # model loses the "this failure was already exempted" signal
+        # and the helper falls back to PR_SUMMARY.
+        state = self._state([
+            {"n": 1, "comment_actions": [
+                {"action": "pre_existing", "path": "222", "line": None,
+                 "topic": "TestFoo", "reason": "ci-compare-base: also fails on main"},
+                {"action": "flake", "path": "333", "line": None,
+                 "topic": "TestBar", "reason": "etxtbsy"},
+            ]},
+        ])
+        out = bramble_ops.action_history_goal(state, 2)
+        self.assertIn("Skipped:", out)
+        self.assertIn("222 pre_existing:", out)
+        self.assertIn("333 flake:", out)
+
     def test_stale_actions_excluded_from_goal(self) -> None:
         # Even a round that's *only* stale acks should not bloat the
         # goal — the model has nothing actionable from superseded

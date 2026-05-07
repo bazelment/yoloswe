@@ -157,7 +157,7 @@ def action_history_goal(
             label = _action_label(action)
             if label:
                 fixed.append(label)
-        elif verb in ("false_positive", "wont_fix", "ack"):
+        elif verb in ("false_positive", "wont_fix", "ack", "pre_existing", "flake"):
             # Note: ``stale`` is deliberately excluded. Stale entries are
             # bot comments anchored to superseded code that the resumed
             # model doesn't see in its worktree snapshot anyway —
