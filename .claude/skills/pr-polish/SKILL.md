@@ -462,7 +462,7 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-
     $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
 ```
 
-The `--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids` and `rounds[n].resume_status` get populated for the next round's resume plumbing. Pass `--envelope lint=...` too — the lint backend doesn't carry a session id, but its envelope still feeds `lint_findings` into the persisted reviews directory. Without these, finalize falls back to `bramble_ops.envelope_path()`'s `/tmp` legacy convention and silently misses operator-controlled paths under `$STATE_DIR/r$ROUND/`.
+The `--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids` and `rounds[n].resume_status` get populated for the next round's resume plumbing. Pass `--envelope lint=...` too — the lint backend doesn't carry a session id, but its envelope still feeds `lint_findings` into the persisted reviews directory. Backends not passed via `--envelope` are skipped (no automatic fallback); silently missing one means its findings won't appear in `rounds[n].<backend>_findings` and the envelope copy under `<state_dir>/reviews/` won't exist.
 
 `state-finalize-round` also auto-populates `rounds[n].ci_findings` from `ci_failed_tests` when a PR exists; branch-only runs leave it empty.
 

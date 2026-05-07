@@ -727,6 +727,30 @@ class TestTriage(unittest.TestCase):
 
 
 class TestTriageWithPRComments(unittest.TestCase):
+    def test_total_includes_pr_comments_and_ci_failures(self) -> None:
+        # Regression guard: round 5 fixed `total` to count all merged
+        # findings (bramble + pr_comments + ci_failures), not just bramble.
+        # Without this test, a refactor could regress to len(findings)
+        # and triage's `total` would silently under-count comment-only
+        # or CI-only triage runs.
+        bramble = [{
+            "source": "codex", "severity": "high", "file": "a.py", "line": 1,
+            "message": "boom", "topic": "boom",
+        }]
+        pr_comments = [{
+            "id": 99, "source": "github-inline", "path": "b.py", "line": 5,
+            "body": "rename", "is_bot": True, "author": "cursor[bot]",
+        }]
+        ci_failures = [{
+            "job_id": 222, "job_name": "build", "is_flake": False,
+            "failed_tests": ["TestFoo"], "assertion_snippet": "expected 1 got 2",
+        }]
+        out = bramble_ops.triage(
+            bramble, prior_fixed_keys=set(),
+            pr_comments=pr_comments, ci_failures=ci_failures,
+        )
+        self.assertEqual(out["total"], 3)
+
     def test_pr_comment_routes_to_single_medium_by_default(self) -> None:
         comment = {
             "id": 100,

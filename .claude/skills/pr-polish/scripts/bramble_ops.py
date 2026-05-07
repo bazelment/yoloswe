@@ -118,12 +118,12 @@ def action_history_goal(
     files have changed since that round closed.
 
     Returns "" on round 1, missing state, or when there's nothing to say.
-    Otherwise the shape is:
+    Otherwise the shape is (matches ``_action_label`` / ``_skipped_label``):
 
         Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE;
         b.py:42 — race in cache invalidation.
-        Skipped: c.go:8 wont_fix (design tradeoff) — caller already validates;
-        d.go:5 stale — superseded by 891c12e.
+        Skipped: c.go:8 wont_fix: caller already validates;
+        d.go:5 ack: rename helper.
         Files changed since round 5: a.go, b.py.
 
     Bramble's BuildFollowUpJSONPromptWithScope embeds this as
@@ -132,11 +132,14 @@ def action_history_goal(
 
     Only the immediately-prior round's actions are surfaced — the model
     has earlier turns in conversation context, so re-listing them is
-    wasted tokens. The "Files changed since round N-1" line is the diff
-    between the prior round's head_after (or head_before if never
-    finalized) and ``head_before`` (this round's HEAD). Caller passes
-    ``head_before`` explicitly because the SKILL computes the goal text
-    before ``state_append_round`` records this round's head_before.
+    wasted tokens. ``stale`` actions are excluded entirely: bot comments
+    anchored to superseded code aren't actionable for the resumed model
+    (their cited code isn't in the worktree snapshot). The "Files
+    changed since round N-1" line is the diff between the prior round's
+    head_after (or head_before if never finalized) and ``head_before``
+    (this round's HEAD). Caller passes ``head_before`` explicitly
+    because the SKILL computes the goal text before
+    ``state_append_round`` records this round's head_before.
     """
     if round_ < 2 or not state:
         return ""
