@@ -1186,11 +1186,21 @@ def main(argv: list[str] | None = None) -> int:
             actions = json.loads(Path(args.actions_file).read_text())
             if not isinstance(actions, list):
                 raise ValueError("actions file must be a JSON array")
+            import bramble_ops  # noqa: PLC0415 — lazy to avoid import cost on other subcommands
             envelope_overrides: dict[str, Path] = {}
             for spec in args.envelope:
                 if "=" not in spec:
                     raise ValueError(f"--envelope must be <backend>=<path>, got {spec!r}")
                 backend, _, ep = spec.partition("=")
+                if backend not in bramble_ops.BACKENDS:
+                    # Fail fast on typos like ``--envelope curor=...`` —
+                    # _persist_round_findings would otherwise silently
+                    # ignore the unknown backend and finalize without
+                    # hydrating findings.
+                    raise ValueError(
+                        f"--envelope: unknown backend {backend!r}; "
+                        f"expected one of {sorted(bramble_ops.BACKENDS)}"
+                    )
                 envelope_overrides[backend] = Path(ep)
             print_json(
                 state_finalize_round(

@@ -368,17 +368,21 @@ def format_results(results: list[dict], verbose: bool = False) -> tuple[str, boo
         r2_count = r["r2_issue_count"]
         r1_only = r["r1_only_count"]
 
-        # If either side's envelopes are entirely unloaded the comparison
-        # is structurally invalid — recall metrics computed from no-data
+        # If r2 envelopes are entirely unloaded the comparison is
+        # structurally invalid — recall metrics computed from no-data
         # look clean but mean "nothing was checked." Fail the whole run.
-        # Round 25: also check r1_*_loaded so a missing r1 baseline can't
-        # let r1_only_count=0 vacuously pass kernel-2755.
-        if not r.get("r1_cursor_loaded") and not r.get("r1_codex_loaded"):
-            verdicts.append(f"✗ **kernel-{pr}**: r1 envelopes unloaded — comparison invalid")
-            all_pass = False
-            continue
         if not r.get("r2_cursor_loaded") and not r.get("r2_codex_loaded"):
             verdicts.append(f"✗ **kernel-{pr}**: r2 envelopes unloaded — comparison invalid")
+            all_pass = False
+            continue
+        # The r1 baseline is only meaningful for the 2755 regression
+        # check (r1_only_count > 0 means we lost a finding). Non-2755
+        # kernels verify substantive-comment recall against r2 alone,
+        # so an absent r1 baseline is informational there, not a hard
+        # failure. Restricting the guard avoids hard-failing kernels
+        # that legitimately have no r1 capture.
+        if pr == "2755" and not r.get("r1_cursor_loaded") and not r.get("r1_codex_loaded"):
+            verdicts.append(f"✗ **kernel-{pr}**: r1 envelopes unloaded — comparison invalid")
             all_pass = False
             continue
 

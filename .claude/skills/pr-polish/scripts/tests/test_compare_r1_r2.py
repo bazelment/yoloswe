@@ -322,18 +322,28 @@ class TestFormatResultsAllPass(unittest.TestCase):
         self.assertFalse(all_pass)
         self.assertIn("envelopes unloaded", out)
 
-    def test_unloaded_r1_envelopes_force_failure(self) -> None:
-        # Round 25 fix: an r1 baseline that didn't load means
-        # r1_only_count=0 vacuously, which would let kernel-2755 pass
-        # even though we never actually compared anything. Same
-        # invalid-comparison semantics as the r2 branch.
-        r = self._result(
+    def test_unloaded_r1_envelopes_force_failure_only_for_2755(self) -> None:
+        # Round 25 fix, refined in r26: an r1 baseline that didn't load
+        # means r1_only_count=0 vacuously, which would let kernel-2755
+        # pass even though we never compared anything. Restricted to
+        # 2755 because non-2755 kernels verify recall against r2 alone
+        # (r1 is informational there, not a hard requirement).
+        r_2755 = self._result(
             pr="2755", r1_only_count=0,
             r1_cursor_loaded=False, r1_codex_loaded=False,
         )
-        out, all_pass = self.mod.format_results([r])
+        out, all_pass = self.mod.format_results([r_2755])
         self.assertFalse(all_pass)
         self.assertIn("r1 envelopes unloaded", out)
+
+        # A non-2755 kernel without r1 envelopes but with full r2
+        # recall must still pass — r1 is informational for those.
+        r_other = self._result(
+            pr="2978", total_substantive=3, caught=3,
+            r1_cursor_loaded=False, r1_codex_loaded=False,
+        )
+        _, all_pass = self.mod.format_results([r_other])
+        self.assertTrue(all_pass)
 
     def test_partial_recall_fails(self) -> None:
         # Pre-fix bug: caught=1/3 used to read as a pass. Lock in full-recall.
