@@ -189,6 +189,51 @@ class TestCommentCaughtInEnvelope(unittest.TestCase):
         self.assertTrue(caught)
 
 
+class TestIsSubstantive(unittest.TestCase):
+    """is_substantive must keep substantive bot findings on
+    github-issue / github-review while dropping summary-only noise.
+    """
+
+    def setUp(self) -> None:
+        self.mod = _load_module()
+
+    def test_inline_bot_finding_kept(self) -> None:
+        c = {
+            "author": "cursor[bot]", "is_bot": True,
+            "source": "github-inline",
+            "body": "null check missing on the BUILDER_LITE branch",
+        }
+        self.assertTrue(self.mod.is_substantive(c))
+
+    def test_substantive_finding_on_issue_channel_kept(self) -> None:
+        # Round 21 fix: bots post substantive findings as top-level
+        # issue/review comments too. Pre-fix, blanket-dropping the
+        # source kicked these out — the comparison script then
+        # underreported r2 hits on those channels.
+        c = {
+            "author": "coderabbitai[bot]", "is_bot": True,
+            "source": "github-issue",
+            "body": "There's a race condition in the cache invalidation path "
+                    "around line 42 of pkg/foo.py — the lock is released "
+                    "before the write completes.",
+        }
+        self.assertTrue(self.mod.is_substantive(c))
+
+    def test_review_summary_on_issue_channel_dropped(self) -> None:
+        # The actual noise: BUGBOT_REVIEW summary as a top-level
+        # issue comment.
+        c = {
+            "author": "cursor[bot]", "is_bot": True,
+            "source": "github-issue",
+            "body": "Cursor Bugbot has reviewed your changes and found 3 potential issues.",
+        }
+        self.assertFalse(self.mod.is_substantive(c))
+
+    def test_human_comment_dropped(self) -> None:
+        c = {"author": "alice", "is_bot": False, "source": "github-inline", "body": "lgtm"}
+        self.assertFalse(self.mod.is_substantive(c))
+
+
 class TestFormatResultsAllPass(unittest.TestCase):
     """``all_pass`` is the gate that ``main`` returns as exit code.
 

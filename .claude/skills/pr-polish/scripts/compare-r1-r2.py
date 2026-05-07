@@ -44,18 +44,36 @@ NOISE_BODY_PATTERNS: list[re.Pattern] = [
     re.compile(r"Claude finished @", re.IGNORECASE),
 ]
 
-NOISE_SOURCES: set[str] = {"github-issue", "github-review"}
+# BUGBOT review summaries match this; substantive findings (which
+# carry actual issue text) do not. Used to suppress just the
+# summary-class noise on github-issue/github-review channels rather
+# than blanket-dropping every comment from those sources — which
+# would silently exclude substantive Bugbot/coderabbit findings
+# posted as top-level issue comments.
+_REVIEW_SUMMARY_RE = re.compile(r"found\s+\d+\s+(potential\s+)?issues?", re.IGNORECASE)
 
 
 def is_substantive(comment: dict) -> bool:
-    """Return True if the comment is a substantive bot bug-finding."""
+    """Return True if the comment is a substantive bot bug-finding.
+
+    Filters: known-noise authors (github-actions, code-quality),
+    review-summary boilerplate ("found N issues" with no real body),
+    and CodeQL/lint-gate prose. Inline path-bearing comments from
+    any source are kept — bots like Bugbot do post substantive
+    findings on github-issue / github-review, so the channel itself
+    is not a sufficient noise signal.
+    """
     author = comment.get("author", "")
     if author in NOISE_AUTHORS:
         return False
-    source = comment.get("source", "")
-    if source in NOISE_SOURCES:
-        return False
     body = comment.get("body", "")
+    # Review-summary boilerplate: matches on github-issue / github-review
+    # comments whose body is just "Cursor Bugbot found N issues" (no
+    # path/line). The runtime fetcher already strips these but a stale
+    # historical fixture might include them.
+    source = comment.get("source", "")
+    if source in ("github-issue", "github-review") and _REVIEW_SUMMARY_RE.search(body):
+        return False
     for pat in NOISE_BODY_PATTERNS:
         if pat.search(body):
             return False
