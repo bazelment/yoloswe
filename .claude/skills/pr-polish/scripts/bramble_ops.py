@@ -535,8 +535,10 @@ def triage(
 
     Consensus = ``_consensus_key`` flagged by >=2 distinct sources (or
     ``_triage_key`` matched for sourceless paths).
-    Spiral match = a new finding whose ``_triage_key`` matches a prior-round
-    entry whose action was ``fixed``.
+    Spiral match = a new finding that matches a prior-round ``fixed``
+    action by either ``_triage_key`` (exact recurrence) or
+    ``(file, line, None)`` location-only (fix-then-reword regression at
+    the same site). See ``prior_fixed_keys``.
 
     ``pr_comments`` are classify_comments rows — round 1 only typically.
     ``ci_failures`` are ci_failed_tests rows. Both are converted to findings

@@ -119,7 +119,7 @@ Schema:
 
 **`comment_actions` schema — load-bearing, other tooling depends on exact strings:**
 
-- `source`: one of `github-inline`, `github-issue`, `github-review`, `codex`, `cursor`, `gemini`, `lint`, `ci`. (`lint` rows come from `lint_gate.py`'s deterministic ruff/golangci-lint/eslint pass — see Step 3b. They route through triage like any other source: a `(file, line, topic)` match with codex or cursor counts as consensus.)
+- `source`: one of `github-inline`, `github-issue`, `github-review`, `codex`, `cursor`, `gemini`, `lint`, `ci`. (`lint` rows come from `lint_gate.py`'s deterministic ruff/golangci-lint/eslint pass — see Step 3b. They route through triage like any other source: a `(file, line)` match with codex or cursor counts as consensus, regardless of how each one phrased its topic.)
 - `comment_id`: GitHub id for `github-*`; `null` for bramble and CI findings (bramble dedupes by `(path, line, topic)`; CI dedupes by `(job_id, test_name)` where `path=job_id` and `topic=test_name`).
 - `path` / `line`: `null` for top-level PR + review-level comments.
 - `severity`: `high`, `medium`, `low`, `nit`, or `null`.
