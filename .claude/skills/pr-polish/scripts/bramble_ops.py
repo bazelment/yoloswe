@@ -275,13 +275,31 @@ def parse_round(
     """Aggregate findings across backends for one pr-polish round.
 
     ``streams`` maps backend name to the Monitor-captured stream file for
-    that backend. Backends absent from the mapping yield no findings.
+    that backend. Backends not in the mapping are silently skipped (the
+    backend simply wasn't enabled). Backends in the mapping whose path
+    doesn't exist yield a synthetic high-severity ``stream-missing``
+    finding so a typo'd ``--stream cursor=/typo/path`` surfaces in
+    triage instead of disappearing.
     """
     backends = backends or list(BACKENDS)
     out: list[dict[str, Any]] = []
     for b in backends:
         path = streams.get(b)
         if path is None:
+            continue
+        if not path.exists():
+            out.append(
+                {
+                    "source": b,
+                    "severity": "high",
+                    "file": None,
+                    "line": None,
+                    "message": f"--stream {b}={path} does not exist on disk",
+                    "suggestion": "verify the Monitor capture path; check stderr for the failed bramble run",
+                    "topic": "stream-missing",
+                    "status": "missing",
+                }
+            )
             continue
         out.extend(parse_stream(path, source=b))
     return out
@@ -606,6 +624,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--state-file")
 
     sp = sub.add_parser(
+        "prior-session-id",
+        help="Print the resume session id for a backend at round N (empty if none).",
+    )
+    sp.add_argument("backend", choices=BACKENDS)
+    sp.add_argument("round_", type=int)
+    sp.add_argument("--state-file", required=True)
+
+    sp = sub.add_parser(
         "parse-stream",
         help="Parse a Monitor stdout capture and emit findings for one backend.",
     )
@@ -660,6 +686,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "goal":
             state = read_json(Path(args.state_file), default=None) if args.state_file else None
             print(goal_for_round(args.round_, args.pr_summary, state))
+        elif args.cmd == "prior-session-id":
+            state = read_json(Path(args.state_file), default=None)
+            print(prior_session_id(state, args.backend, args.round_))
         elif args.cmd == "parse-stream":
             findings = parse_stream(Path(args.stream_file), source=args.backend)
             print_json(findings)

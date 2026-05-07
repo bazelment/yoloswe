@@ -708,6 +708,16 @@ class TestParseRoundWithStreams(unittest.TestCase):
             out = bramble_ops.parse_round({"codex": cx}, backends=["codex", "cursor"])
             self.assertEqual(out, [])
 
+    def test_typo_stream_path_surfaces_synthetic_finding(self) -> None:
+        # If the orchestrator passes --stream cursor=/typo/path, parse_round
+        # used to silently drop it. Now it emits a high-severity placeholder
+        # so the missing source is visible in triage.
+        bogus = Path("/nonexistent/cursor.log")
+        out = bramble_ops.parse_round({"cursor": bogus}, backends=["cursor"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["severity"], "high")
+        self.assertEqual(out[0]["topic"], "stream-missing")
+
 
 class TestTriageCLIShapeCompat(unittest.TestCase):
     """The triage CLI's --pr-comments must accept both:

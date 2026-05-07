@@ -918,6 +918,22 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.assertTrue((self.state_dir / "reviews" / "r1-codex.json").exists())
         self.assertTrue((self.state_dir / "reviews" / "r1-cursor.json").exists())
 
+    def test_finalize_hydrates_lint_findings(self) -> None:
+        # lint is a first-class backend; its envelope must hydrate
+        # rounds[n].lint_findings and copy into <state_dir>/reviews/.
+        lint = self._write_envelope(
+            "lint",
+            issues=[{"severity": "low", "file": "x.py", "line": 1, "message": "F401", "topic": "unused-import"}],
+        )
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"lint": lint}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(len(rnd["lint_findings"]), 1)
+        self.assertEqual(rnd["lint_findings"][0]["source"], "lint")
+        self.assertTrue((self.state_dir / "reviews" / "r1-lint.json").exists())
+
 
 class TestCIFailedTests(unittest.TestCase):
     """Parses per-failed-job test details from gh check output + job logs."""

@@ -72,6 +72,15 @@ class TestLoadEnvelope(unittest.TestCase):
     def test_missing_file_returns_none(self) -> None:
         self.assertIsNone(self.mod.load_envelope(Path("/nonexistent/path.json")))
 
+    def test_schema_version_without_status_rejected(self) -> None:
+        # An envelope must carry both schema_version and status — bramble_ops'
+        # extract_terminal_envelope requires both, and accepting a schema_version-
+        # only object here would skew compare metrics by counting partial events
+        # that downstream parsers ignore.
+        partial = json.dumps({"schema_version": 1, "review": {"issues": []}})
+        path = self._write(partial)
+        self.assertIsNone(self.mod.load_envelope(path))
+
 
 class TestCommentCaughtInEnvelope(unittest.TestCase):
     """Direct coverage for the matcher heuristic. Without it, regressions in

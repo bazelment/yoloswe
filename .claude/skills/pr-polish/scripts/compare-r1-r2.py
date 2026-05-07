@@ -72,8 +72,9 @@ def load_envelope(path: Path) -> dict | None:
     Envelopes are usually a whole-file JSON dict (the ``--envelope-file``
     output). Some captures are NDJSON: zero or more progress lines followed
     by exactly one terminal envelope identified by the ``schema_version``
-    top-level key. Scan from the end and accept only objects with
-    ``schema_version`` so we never return a progress event by mistake.
+    top-level key, and require ``status`` too — matches bramble_ops'
+    extract_terminal_envelope contract so an envelope accepted here
+    isn't silently rejected downstream.
     """
     if not path.exists():
         return None
@@ -81,9 +82,13 @@ def load_envelope(path: Path) -> dict | None:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
+    def _is_envelope(o: object) -> bool:
+        return isinstance(o, dict) and "schema_version" in o and "status" in o
+
     try:
         obj = json.loads(text)
-        if isinstance(obj, dict) and "schema_version" in obj:
+        if _is_envelope(obj):
             return obj
     except json.JSONDecodeError:
         pass
@@ -95,7 +100,7 @@ def load_envelope(path: Path) -> dict | None:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and "schema_version" in obj:
+        if _is_envelope(obj):
             return obj
     return None
 

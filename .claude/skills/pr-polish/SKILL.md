@@ -278,14 +278,13 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
 
 Then arm Monitors in the same turn — always codex + cursor + lint, plus gemini when `--gemini` was passed. The bramble Monitors all pass `--scope-hints-file "$SCOPE_HINTS"`; the lint Monitor doesn't (lint_gate has its own diff walk).
 
-Compute the round's `--goal` text (and the resume id, when there is one) from the state file:
+Compute the round's `--goal` text and per-backend resume id from the state file:
 
 ```bash
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
         --pr-summary "$PR_SUMMARY" --state-file "$STATE_FILE")
-CODEX_RESUME=$(python3 -c "import sys, json; sys.path.insert(0, '$SKILL_DIR/scripts'); \
-  from bramble_ops import prior_session_id; print(prior_session_id(json.load(open('$STATE_FILE')) if '$STATE_FILE' else None, 'codex', {ROUND}))")
-CURSOR_RESUME=$(python3 -c "...same for cursor...")
+CODEX_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id codex {ROUND} --state-file "$STATE_FILE")
+CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id cursor {ROUND} --state-file "$STATE_FILE")
 ```
 
 Each Monitor runs `bramble code-review` directly with the round's goal and (round 2+) resume flag. Step 0.2 already proved `--resume-session-id` is supported.
