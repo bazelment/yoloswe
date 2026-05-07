@@ -1,7 +1,7 @@
 """Unit tests for pr_ops. Hermetic: no gh/git/network.
 
 Run with:
-    python3 -m unittest discover -v   # from .claude/skills/pr-polish/scripts
+    python3 -m unittest discover -v   # from ~/.claude/skills/pr-polish/scripts
 """
 
 from __future__ import annotations
@@ -56,6 +56,27 @@ class TestClassifyComments(unittest.TestCase):
         self.assertEqual(kept[0]["reply_count"], 1)
         self.assertTrue(kept[0]["is_bot"])
         self.assertEqual(noise, [])
+
+    def test_inline_comment_carries_original_commit_id(self) -> None:
+        # bramble_ops.triage routes is_stale_prior_commit comments to a
+        # dedicated bucket. classify_comments must surface the original SHA
+        # so fetch_comments can compute the flag against pr["head_sha"].
+        inline = {
+            "id": 100,
+            "user": self._user("cursor[bot]", is_bot=True),
+            "path": "a.py",
+            "line": 5,
+            "body": "fix this",
+            "in_reply_to_id": None,
+            "created_at": "t1",
+            "original_commit_id": "deadbeefcafebabe1234567890abcdef00000000",
+        }
+        kept, _ = pr_ops.classify_comments([inline], [], [])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(
+            kept[0]["original_commit_id"],
+            "deadbeefcafebabe1234567890abcdef00000000",
+        )
 
     def test_issue_and_review_tagging(self) -> None:
         issue = [
@@ -325,6 +346,221 @@ class TestStateLifecycle(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             pr_ops.state_finalize_round(99, 1, "x", [])
 
+    def test_append_new_round_after_completion_resets_completed_flag(self) -> None:
+        # When pr-polish re-runs on a state file from a prior converged
+        # loop, the new state-append-round call must clear completed/
+        # exit_reason/completed_at — otherwise the mid-loop state file
+        # is "current_round=2 AND completed: converged at <prior ts>",
+        # which is contradictory and confused this session's run logs.
+        # state-mark-complete will set them again at the new loop's exit.
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_mark_complete(42, "converged")
+        _, path = pr_ops.state_paths(42)
+        with path.open() as f:
+            state_before = json.load(f)
+        self.assertTrue(state_before["completed"])
+        self.assertEqual(state_before["exit_reason"], "converged")
+        self.assertIsNotNone(state_before.get("completed_at"))
+
+        state = pr_ops.state_append_round(42, 2, "sha2", verify_head=False)
+        self.assertFalse(state["completed"], "new round must clear stale completed flag")
+        self.assertIsNone(state.get("exit_reason"), "new round must clear stale exit_reason")
+        self.assertIsNone(state.get("completed_at"), "new round must clear stale completed_at")
+        # Old round entry preserved; new one appended.
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertEqual(state["current_round"], 2)
+
+
+class TestStateFirstRoundOfSeries(unittest.TestCase):
+    """state_load decorates state with is_first_round_of_series.
+
+    A new "series" starts when there's no state, the prior loop set
+    completed=true (any exit_reason), or this is round 1. The orchestrator
+    uses the field to decide whether to re-fetch PR comments + CI failures
+    and to skip bramble session resume on a fresh audit.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp_root = Path(self.tmp.name)
+
+        def fake_state_paths(pr, branch=None):
+            key = pr if pr is not None else f"branch-{branch}"
+            d = tmp_root / f"proj-{key}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d, d / "pr-polish-state.json"
+
+        patcher = patch.object(pr_ops, "state_paths", side_effect=fake_state_paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_no_state_emits_true(self) -> None:
+        out = pr_ops.state_load(42)
+        # Empty state → no derived field at all (state_load returns {} so
+        # the orchestrator's `state-is-new-series` CLI is the canonical
+        # query). Helper directly:
+        self.assertTrue(pr_ops._is_first_round_of_series(None, 1))
+
+    def test_completed_state_emits_true(self) -> None:
+        # Prior loop converged; round 6 is a new series.
+        pr_ops.state_append_round(42, 1, "sha", verify_head=False)
+        pr_ops.state_mark_complete(42, "converged")
+        loaded = pr_ops.state_load(42)
+        self.assertTrue(loaded["is_first_round_of_series"])
+
+    def test_in_progress_state_emits_false(self) -> None:
+        # Mid-series round 2: completed is false, prior round exists.
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_append_round(42, 2, "sha2", verify_head=False)
+        loaded = pr_ops.state_load(42)
+        self.assertFalse(loaded["is_first_round_of_series"])
+
+    def test_state_is_new_series_helper_three_cases(self) -> None:
+        # Direct unit coverage of the helper, decoupled from state_paths.
+        self.assertTrue(pr_ops._is_first_round_of_series(None, 1))
+        self.assertTrue(pr_ops._is_first_round_of_series({"rounds": []}, 1))
+        self.assertTrue(
+            pr_ops._is_first_round_of_series(
+                {"rounds": [{"n": 5}], "completed": True}, 6
+            )
+        )
+        self.assertFalse(
+            pr_ops._is_first_round_of_series(
+                {"rounds": [{"n": 1}], "completed": False}, 2
+            )
+        )
+
+    def test_state_is_new_series_cli(self) -> None:
+        # SKILL Step 0.5 invokes this CLI directly. Cover the argparse +
+        # dispatch path so a typo in the parser regresses loudly.
+        import io  # noqa: PLC0415
+        from contextlib import redirect_stdout  # noqa: PLC0415
+
+        # Three-case fixture across two PRs to exercise the dispatch.
+        # Mid-series state for PR 42:
+        pr_ops.state_append_round(42, 1, "sha", verify_head=False)
+        pr_ops.state_append_round(42, 2, "sha2", verify_head=False)
+
+        # Completed state for PR 99:
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_mark_complete(99, "converged")
+
+        def _run(*argv) -> str:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = pr_ops.main(list(argv))
+            self.assertEqual(rc, 0, f"main exited non-zero; stdout={buf.getvalue()!r}")
+            return buf.getvalue().rstrip("\n")
+
+        # Brand new PR (no state) → 1
+        self.assertEqual(_run("state-is-new-series", "1234", "1"), "1")
+        # Completed prior series → 1
+        self.assertEqual(_run("state-is-new-series", "99", "2"), "1")
+        # Mid-series → 0
+        self.assertEqual(_run("state-is-new-series", "42", "3"), "0")
+
+
+class TestHeartbeatTelemetry(unittest.TestCase):
+    """Distinguish abandoned runs from interrupted ones.
+
+    The 50-state-file analysis showed 4/50 runs ended with
+    ``completed: false, exit_reason: null`` — we couldn't tell user-paused
+    from crashed. Heartbeat fixes that: every ``state_append_round`` stamps
+    ``last_heartbeat_at``; ``state_load`` returns ``is_heartbeat_stale``;
+    ``state_mark_abandoned`` writes the tombstone.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp_root = Path(self.tmp.name)
+
+        def fake_state_paths(pr, branch=None):
+            key = pr if pr is not None else f"branch-{branch}"
+            d = tmp_root / f"proj-{key}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d, d / "pr-polish-state.json"
+
+        patcher = patch.object(pr_ops, "state_paths", side_effect=fake_state_paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_append_round_stamps_heartbeat(self) -> None:
+        # Pre-heartbeat state files lacked the field entirely; we want every
+        # new state file to carry a heartbeat from round 1, since Step 0.5
+        # uses its presence as the only reliable liveness signal.
+        state = pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        self.assertIn("last_heartbeat_at", state)
+        # Format must round-trip with state_load's parser (UTC ISO).
+        self.assertRegex(
+            state["last_heartbeat_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+        )
+
+    def test_state_load_marks_fresh_heartbeat_not_stale(self) -> None:
+        pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        loaded = pr_ops.state_load(42)
+        self.assertFalse(loaded["is_heartbeat_stale"])
+
+    def test_state_load_marks_old_heartbeat_stale(self) -> None:
+        # Hand-edit the state file to backdate the heartbeat past the
+        # threshold. This is exactly what an abandoned run looks like on
+        # disk: completed=false, heartbeat from 3h ago.
+        pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        _, path = pr_ops.state_paths(42)
+        with path.open() as f:
+            state = json.load(f)
+        # 3 hours ago is well past the 2-hour staleness threshold.
+        from datetime import UTC as _UTC
+        from datetime import datetime, timedelta
+
+        old = (datetime.now(_UTC) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state["last_heartbeat_at"] = old
+        with path.open("w") as f:
+            json.dump(state, f)
+        loaded = pr_ops.state_load(42)
+        self.assertTrue(loaded["is_heartbeat_stale"])
+
+    def test_state_load_completed_run_is_never_stale(self) -> None:
+        # Even if heartbeat is ancient, a completed run is final. Don't
+        # flag historical state files as stale (we'd churn the whole audit
+        # trail directory).
+        pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        pr_ops.state_mark_complete(42, "converged")
+        # Forcibly age the heartbeat to confirm completed wins.
+        _, path = pr_ops.state_paths(42)
+        with path.open() as f:
+            state = json.load(f)
+        state["last_heartbeat_at"] = "2020-01-01T00:00:00Z"
+        with path.open("w") as f:
+            json.dump(state, f)
+        loaded = pr_ops.state_load(42)
+        self.assertFalse(loaded["is_heartbeat_stale"])
+
+    def test_state_load_treats_missing_heartbeat_as_stale(self) -> None:
+        # Old state files (kernel-2755 etc.) predate the heartbeat field.
+        # On resume we must not wedge — a missing heartbeat on an in-progress
+        # run is treated as stale so the orchestrator falls through to a
+        # fresh start instead of pretending to resume forever.
+        _, path = pr_ops.state_paths(42)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            json.dump({"pr_number": 42, "rounds": [], "current_round": 1}, f)
+        loaded = pr_ops.state_load(42)
+        self.assertTrue(loaded["is_heartbeat_stale"])
+
+    def test_mark_abandoned_tombstones_with_exit_reason(self) -> None:
+        # Records the run as completed with exit_reason="abandoned" so future
+        # state-file analyses can distinguish user-paused from abandoned.
+        pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        state = pr_ops.state_mark_abandoned(42)
+        self.assertTrue(state["completed"])
+        self.assertEqual(state["exit_reason"], "abandoned")
+        self.assertIn("completed_at", state)
+        # The heartbeat-stale derivation flips to False once completed=true.
+        loaded = pr_ops.state_load(42)
+        self.assertFalse(loaded["is_heartbeat_stale"])
+
 
 class TestAtomicWrite(unittest.TestCase):
     def test_write_then_read_roundtrip(self) -> None:
@@ -378,6 +614,7 @@ class TestIdentifyPR(unittest.TestCase):
                 "url": "https://github.com/sycamore-labs/kernel/pull/2443",
                 "base": "main",
                 "head": "feature/PLA-287",
+                "head_sha": "abc123def456",
             }
         )
 
@@ -387,11 +624,7 @@ class TestIdentifyPR(unittest.TestCase):
             if cmd[:3] == ["gh", "pr", "view"]:
                 return _common.RunResult(stdout=pr_json, stderr="", returncode=0)
             if cmd[:3] == ["gh", "repo", "view"]:
-                return _common.RunResult(
-                    stdout=json.dumps({"owner": {"login": "sycamore-labs"}, "name": "kernel"}),
-                    stderr="",
-                    returncode=0,
-                )
+                return _common.RunResult(stdout='"sycamore-labs/kernel"', stderr="", returncode=0)
             raise AssertionError(f"unexpected cmd: {cmd}")
 
         with (
@@ -403,6 +636,7 @@ class TestIdentifyPR(unittest.TestCase):
         self.assertEqual(out["owner"], "sycamore-labs")
         self.assertEqual(out["repo"], "kernel")
         self.assertEqual(out["branch"], "feature/PLA-287")
+        self.assertEqual(out["head_sha"], "abc123def456")
         self.assertTrue(out["state_file"].endswith("pr-polish-state.json"))
 
     def test_identify_without_pr_returns_branch_only(self) -> None:
@@ -413,11 +647,7 @@ class TestIdentifyPR(unittest.TestCase):
                 # gh exits non-zero when the branch has no PR.
                 return _common.RunResult(stdout="", stderr="no pull requests found", returncode=1)
             if cmd[:3] == ["gh", "repo", "view"]:
-                return _common.RunResult(
-                    stdout=json.dumps({"owner": {"login": "sycamore-labs"}, "name": "kernel"}),
-                    stderr="",
-                    returncode=0,
-                )
+                return _common.RunResult(stdout='"sycamore-labs/kernel"', stderr="", returncode=0)
             if cmd[:2] == ["git", "symbolic-ref"]:
                 return _common.RunResult(
                     stdout="refs/remotes/origin/main\n", stderr="", returncode=0
@@ -434,6 +664,9 @@ class TestIdentifyPR(unittest.TestCase):
         self.assertEqual(out["base"], "main")
         self.assertEqual(out["owner"], "sycamore-labs")
         self.assertEqual(out["repo"], "kernel")
+        # Branch-only mode: no PR, so no head SHA — downstream consumers
+        # treat None as "cannot prove staleness" and never flag a comment.
+        self.assertIsNone(out["head_sha"])
 
 
 class TestFetchComments(unittest.TestCase):
@@ -482,6 +715,88 @@ class TestFetchComments(unittest.TestCase):
         ids = sorted(c["id"] for c in got["comments"])
         self.assertEqual(ids, [10, 20, 30])
         self.assertEqual(got["noise_filtered"], 0)
+
+    def _stale_tag_fixture(self, original_sha: str, head_sha: str | None) -> dict:
+        inline = [
+            {
+                "id": 42,
+                "user": {"login": "cursor[bot]", "type": "Bot"},
+                "path": "a.py",
+                "line": 5,
+                "body": "fix this on the old commit",
+                "in_reply_to_id": None,
+                "created_at": "t1",
+                "original_commit_id": original_sha,
+            }
+        ]
+
+        def fake_run(cmd, **kwargs):
+            url = cmd[-1] if cmd[:2] == ["gh", "api"] else ""
+            if "/issues/" in url and url.endswith("/comments"):
+                return _common.RunResult(stdout="[]", stderr="", returncode=0)
+            if "/pulls/" in url and url.endswith("/comments"):
+                return _common.RunResult(stdout=json.dumps(inline), stderr="", returncode=0)
+            if url.endswith("/reviews"):
+                return _common.RunResult(stdout="[]", stderr="", returncode=0)
+            raise AssertionError(f"unexpected cmd: {cmd}")
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            return pr_ops.fetch_comments(
+                {"owner_repo": "x/y", "pr_number": 1, "head_sha": head_sha}
+            )
+
+    def test_tags_stale_when_original_commit_id_differs_from_head(self) -> None:
+        # The cursor[bot] regression: comments anchored to a superseded
+        # commit (PR was force-pushed) must be flagged so triage routes them
+        # to stale_prior_commit instead of forming a fresh finding.
+        got = self._stale_tag_fixture("oldsha111", "newsha222")
+        self.assertEqual(len(got["comments"]), 1)
+        self.assertTrue(got["comments"][0]["is_stale_prior_commit"])
+        self.assertEqual(got["head_sha"], "newsha222")
+
+    def test_does_not_tag_stale_when_original_commit_matches_head(self) -> None:
+        got = self._stale_tag_fixture("samesha", "samesha")
+        self.assertEqual(len(got["comments"]), 1)
+        self.assertFalse(got["comments"][0]["is_stale_prior_commit"])
+
+    def test_does_not_tag_stale_when_head_sha_unknown(self) -> None:
+        # Branch-only mode (no PR) leaves head_sha=None. A missing SHA
+        # cannot prove staleness — preserve the bot comment as fresh.
+        got = self._stale_tag_fixture("anysha", None)
+        self.assertEqual(len(got["comments"]), 1)
+        self.assertFalse(got["comments"][0]["is_stale_prior_commit"])
+
+    def test_filters_top_level_bugbot_summary_as_noise(self) -> None:
+        # BUGBOT_REVIEW summary often arrives as a top-level issue comment,
+        # not a review-level one. Without filtering it here, triage would
+        # surface it as a github-review finding and force a hand-classified
+        # false_positive every round.
+        bot_user = {"login": "cursor[bot]", "type": "Bot"}
+        issues = [
+            {
+                "id": 4240504634,
+                "user": bot_user,
+                "body": "<!-- BUGBOT_REVIEW -->\nCursor Bugbot has reviewed your changes "
+                        "and found 3 potential issues.\n\n<!-- BUGBOT_FIX_ALL -->",
+                "created_at": "2026-05-07T00:00:00Z",
+            }
+        ]
+
+        def fake_run(cmd, **kwargs):
+            url = cmd[-1] if cmd[:2] == ["gh", "api"] else ""
+            if "/issues/" in url and url.endswith("/comments"):
+                return _common.RunResult(stdout=json.dumps(issues), stderr="", returncode=0)
+            if "/pulls/" in url and url.endswith("/comments"):
+                return _common.RunResult(stdout="[]", stderr="", returncode=0)
+            if url.endswith("/reviews"):
+                return _common.RunResult(stdout="[]", stderr="", returncode=0)
+            raise AssertionError(f"unexpected cmd: {cmd}")
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            got = pr_ops.fetch_comments({"owner_repo": "x/y", "pr_number": 1})
+        self.assertEqual(got["comments"], [])
+        self.assertEqual(got["noise_filtered"], 1)
+        self.assertEqual(got["noise_samples"][0]["pattern"], "review-summary")
 
 
 class TestIsBotReviewSummary(unittest.TestCase):
@@ -595,7 +910,8 @@ class TestHeadVerification(unittest.TestCase):
 
 
 class TestPersistRoundFindings(unittest.TestCase):
-    """state_finalize_round must hydrate {backend}_findings and copy envelopes."""
+    """state_finalize_round must hydrate {backend}_findings, copy envelopes,
+    and persist session ids — driven entirely by ``envelope_overrides``."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -614,44 +930,34 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.envelope_dir = self.tmp_root / "envelopes"
         self.envelope_dir.mkdir()
 
-        import bramble_ops  # noqa: PLC0415
-
-        self.bramble_ops = bramble_ops
-
-        def fake_envelope_path(repo: str, pr, backend: str, round_: int) -> Path:
-            return self.envelope_dir / f"{backend}-r{round_}.json"
-
-        p2 = patch.object(bramble_ops, "envelope_path", side_effect=fake_envelope_path)
-        p2.start()
-        self.addCleanup(p2.stop)
-
-        p3 = patch.object(pr_ops, "repo_slug", return_value="demo-repo")
-        p3.start()
-        self.addCleanup(p3.stop)
-
-    def _write_envelope(self, backend: str, issues: list[dict]) -> Path:
+    def _write_envelope(self, backend: str, **kw) -> Path:
         obj = {
             "schema_version": 1,
             "status": "ok",
             "backend": backend,
-            "review": {"verdict": "rejected", "issues": issues},
+            "review": {"verdict": kw.get("verdict", "rejected"), "issues": kw.get("issues", [])},
         }
-        path = self.envelope_dir / f"{backend}-r1.json"
+        if "session_id" in kw:
+            obj["session_id"] = kw["session_id"]
+        if "resume_status" in kw:
+            obj["resume_status"] = kw["resume_status"]
+        path = self.envelope_dir / f"{backend}-envelope.json"
         path.write_text(json.dumps(obj))
         return path
 
     def test_finalize_hydrates_findings_and_copies_envelopes(self) -> None:
-        self._write_envelope(
+        cx = self._write_envelope(
             "codex",
-            [{"severity": "high", "file": "a.go", "line": 5, "message": "oops", "topic": "t1"}],
+            issues=[{"severity": "high", "file": "a.go", "line": 5, "message": "oops", "topic": "t1"}],
         )
-        self._write_envelope(
+        cu = self._write_envelope(
             "cursor",
-            [{"severity": "medium", "file": "b.go", "line": 8, "message": "meh", "topic": "t2"}],
+            issues=[{"severity": "medium", "file": "b.go", "line": 8, "message": "meh", "topic": "t2"}],
         )
-
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)
-        state = pr_ops.state_finalize_round(77, 1, "sha2", [])
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx, "cursor": cu}
+        )
         rnd = state["rounds"][0]
 
         self.assertEqual(len(rnd["codex_findings"]), 1)
@@ -664,45 +970,211 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.assertTrue((reviews / "r1-codex.json").exists())
         self.assertTrue((reviews / "r1-cursor.json").exists())
 
-    def test_finalize_tolerates_missing_envelope(self) -> None:
-        self._write_envelope(
+    def test_finalize_skips_backends_not_in_overrides(self) -> None:
+        cx = self._write_envelope(
             "codex",
-            [{"severity": "low", "file": "c.go", "line": 3, "message": "ok", "topic": "t3"}],
+            issues=[{"severity": "low", "file": "c.go", "line": 3, "message": "ok", "topic": "t3"}],
         )
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)
-        state = pr_ops.state_finalize_round(77, 1, "sha2", [])
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx}
+        )
         rnd = state["rounds"][0]
         self.assertEqual(len(rnd["codex_findings"]), 1)
         self.assertEqual(rnd["cursor_findings"], [])
 
     def test_finalize_tolerates_malformed_envelope(self) -> None:
-        (self.envelope_dir / "codex-r1.json").write_text("not json {{{")
+        bad = self.envelope_dir / "codex-envelope.json"
+        bad.write_text("not json {{{")
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)
-        state = pr_ops.state_finalize_round(77, 1, "sha2", [])
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": bad}
+        )
         self.assertEqual(state["rounds"][0]["codex_findings"], [])
 
-    def test_finalize_uses_branch_envelope_key_for_branch_only_runs(self) -> None:
-        # Branch-only finalize must look for envelopes under the slugified
-        # branch key, not the raw branch name. A branch like "feature/foo"
-        # used to produce a nested /tmp path with a literal slash; verify
-        # _persist_round_findings now passes the canonical slug instead.
-        captured: list = []
-        bramble_ops = self.bramble_ops
+    def test_finalize_persists_session_ids(self) -> None:
+        cx = self._write_envelope(
+            "codex", session_id="codex-session-abc", resume_status="ok"
+        )
+        cu = self._write_envelope("cursor", session_id="cursor-session-xyz")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx, "cursor": cu}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd.get("session_ids", {}).get("codex"), "codex-session-abc")
+        self.assertEqual(rnd.get("session_ids", {}).get("cursor"), "cursor-session-xyz")
+        self.assertEqual(rnd.get("resume_status", {}).get("codex"), "ok")
+        self.assertTrue((self.state_dir / "reviews" / "r1-codex.json").exists())
+        self.assertTrue((self.state_dir / "reviews" / "r1-cursor.json").exists())
 
-        def capture_envelope_path(repo: str, pr, backend: str, round_: int) -> Path:
-            captured.append(pr)
-            return self.envelope_dir / f"{backend}-r{round_}.json"
+    def test_finalize_hydrates_lint_findings(self) -> None:
+        # lint is a first-class backend; its envelope must hydrate
+        # rounds[n].lint_findings and copy into <state_dir>/reviews/.
+        lint = self._write_envelope(
+            "lint",
+            issues=[{"severity": "low", "file": "x.py", "line": 1, "message": "F401", "topic": "unused-import"}],
+        )
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"lint": lint}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(len(rnd["lint_findings"]), 1)
+        self.assertEqual(rnd["lint_findings"][0]["source"], "lint")
+        self.assertTrue((self.state_dir / "reviews" / "r1-lint.json").exists())
 
-        with patch.object(bramble_ops, "envelope_path", side_effect=capture_envelope_path):
-            pr_ops.state_append_round(
-                "branch:feature/foo", 1, "sha", verify_head=False
+    def test_refinalize_drops_stale_backend_data(self) -> None:
+        # r36 finding: re-finalizing a round with a narrower envelope
+        # set previously left stale per-backend findings, session_ids,
+        # and resume_status behind. The next round's prior_session_id
+        # could then resume the wrong backend's session, breaking
+        # continuous-conversation review. After the fix, omitted
+        # backends get their entry data dropped so re-finalize is
+        # genuinely idempotent.
+        cx = self._write_envelope(
+            "codex", session_id="codex-1", issues=[
+                {"severity": "high", "file": "a.py", "line": 1, "message": "x", "topic": "t"},
+            ],
+        )
+        cu = self._write_envelope(
+            "cursor", session_id="cursor-1", resume_status="ok",
+            issues=[
+                {"severity": "low", "file": "b.py", "line": 2, "message": "y", "topic": "u"},
+            ],
+        )
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        # First pass: both backends.
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx, "cursor": cu}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(len(rnd.get("codex_findings") or []), 1)
+        self.assertEqual(len(rnd.get("cursor_findings") or []), 1)
+        self.assertEqual(rnd["session_ids"]["cursor"], "cursor-1")
+        # Second pass: only codex. cursor's data must be dropped.
+        cx2 = self._write_envelope(
+            "codex", session_id="codex-2", issues=[
+                {"severity": "high", "file": "a.py", "line": 1, "message": "x", "topic": "t"},
+            ],
+        )
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": cx2}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd["session_ids"].get("codex"), "codex-2")
+        self.assertNotIn("cursor", rnd.get("session_ids") or {})
+        # resume_status[cursor] should also be cleared, not just session_ids.
+        self.assertNotIn("cursor", rnd.get("resume_status") or {})
+        # Findings reset to empty (rather than popped) so callers
+        # indexing rnd["cursor_findings"] still work.
+        self.assertEqual(rnd.get("cursor_findings"), [])
+        # Disk parity: archived envelope file for the dropped backend
+        # is removed so post-loop audits don't see contradictions.
+        self.assertFalse((self.state_dir / "reviews" / "r1-cursor.json").exists())
+        # The retained backend's archive should still be there.
+        self.assertTrue((self.state_dir / "reviews" / "r1-codex.json").exists())
+
+    def test_refinalize_with_zero_envelopes_clears_all_backends(self) -> None:
+        # r37 finding: the prior fix only ran cleanup when the new
+        # envelope set was non-empty, so a re-finalize that passed no
+        # envelopes (or only missing-on-disk paths) silently kept the
+        # earlier round's session_ids/findings. The next round would
+        # then resume a stale session.
+        cx = self._write_envelope(
+            "codex", session_id="codex-x", issues=[
+                {"severity": "high", "file": "a.py", "line": 1, "message": "x", "topic": "t"},
+            ],
+        )
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx}
+        )
+        # Re-finalize with no envelopes: must clear codex too.
+        state = pr_ops.state_finalize_round(77, 1, "sha3", [], envelope_overrides={})
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd.get("codex_findings"), [])
+        self.assertNotIn("codex", rnd.get("session_ids") or {})
+        self.assertFalse((self.state_dir / "reviews" / "r1-codex.json").exists())
+
+    def test_refinalize_treats_missing_envelope_as_absent(self) -> None:
+        # An override path that doesn't exist on disk must not protect
+        # the prior round's per-backend state from cleanup. Otherwise a
+        # caller that points at a stale path silently keeps stale data.
+        cx = self._write_envelope("codex", session_id="codex-y")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx}
+        )
+        ghost = self.envelope_dir / "missing.json"  # never created
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": ghost}
+        )
+        rnd = state["rounds"][0]
+        self.assertEqual(rnd.get("codex_findings"), [])
+        self.assertNotIn("codex", rnd.get("session_ids") or {})
+        # Disk parity: archived envelope file unlinked even on the
+        # missing-override path.
+        self.assertFalse((self.state_dir / "reviews" / "r1-codex.json").exists())
+
+    def test_refinalize_clears_session_when_envelope_lacks_id(self) -> None:
+        # r38 finding: an envelope that exists on disk but parses to
+        # non-dict or a dict without session_id/resume_status used to
+        # leave the prior finalize's values in place. Same stale-resume
+        # class. After the fix, processing a backend always clears its
+        # session_ids/resume_status entry first, then re-applies only
+        # what the new envelope provides.
+        cx_with = self._write_envelope("codex", session_id="codex-old", resume_status="ok")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": cx_with}
+        )
+        # Second envelope: valid JSON dict, no session_id key.
+        cx_no = self.envelope_dir / "codex-no-sid.json"
+        cx_no.write_text(json.dumps({"backend": "codex", "review": {"issues": []}}))
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": cx_no}
+        )
+        rnd = state["rounds"][0]
+        self.assertNotIn("codex", rnd.get("session_ids") or {})
+        self.assertNotIn("codex", rnd.get("resume_status") or {})
+
+    def test_state_finalize_round_cli_rejects_unknown_backend(self) -> None:
+        # Round 27 fix: --envelope curor=/tmp/x typos used to be
+        # silently ignored later; now the CLI parser validates
+        # against bramble_ops.BACKENDS at parse time.
+        cx = self._write_envelope("codex")
+        actions_file = self.state_dir / "actions.json"
+        actions_file.write_text("[]")
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        rc = pr_ops.main(
+            [
+                "state-finalize-round", "77", "1", "sha2", str(actions_file),
+                "--envelope", f"codex={cx}",
+                "--envelope", "curor=/tmp/typo.json",  # typo: curor not cursor
+            ]
+        )
+        self.assertNotEqual(rc, 0)
+
+
+    def test_state_finalize_round_cli_warns_when_no_envelopes(self) -> None:
+        # r36 audit: orchestrator silently dropped --envelope across
+        # several rounds, which lost session_ids and broke the next
+        # round's resume continuity (prior_session_id walked past the
+        # un-hydrated round and resumed a stale earlier session). CLI
+        # warns loudly on stderr so pilot errors don't go silent.
+        actions_file = self.state_dir / "actions.json"
+        actions_file.write_text("[]")
+        pr_ops.state_append_round(78, 1, "sha", verify_head=False)
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            rc = pr_ops.main(
+                ["state-finalize-round", "78", "1", "sha2", str(actions_file)]
             )
-            pr_ops.state_finalize_round("branch:feature/foo", 1, "sha2", [])
-
-        # Every envelope_path call gets the slug-normalized key, not the raw name.
-        self.assertTrue(captured, "envelope_path was never called")
-        for key in captured:
-            self.assertEqual(key, "branch-feature-foo")
+        self.assertEqual(rc, 0)
+        self.assertIn("without --envelope", buf.getvalue())
 
 
 class TestCIFailedTests(unittest.TestCase):
@@ -787,7 +1259,8 @@ class TestCICompareBase(unittest.TestCase):
         return fake_run
 
     def test_pre_existing_when_base_fails_same_test(self) -> None:
-        base_list = {"workflow_runs": [{"id": 555, "head_sha": "basesha"}]}
+        base_list = {"workflow_runs": [{"id": 555}]}
+        base_meta = {"head_sha": "basesha"}
         base_jobs = {
             "head_sha": "basesha",
             "jobs": [
@@ -828,6 +1301,7 @@ class TestCICompareBase(unittest.TestCase):
                     side_effect=self._run_factory(
                         [
                             json.dumps(base_list),
+                            json.dumps(base_meta),
                             json.dumps(base_jobs),
                             json.dumps(pr_checks),
                         ]
@@ -901,7 +1375,6 @@ class TestStateFinalizeRecordsCIFindings(unittest.TestCase):
 
             with (
                 patch.object(pr_ops, "state_paths", side_effect=fake_state_paths),
-                patch.object(pr_ops, "repo_slug", return_value="demo"),
                 patch.object(pr_ops, "ci_failed_tests", return_value=fake_ci),
             ):
                 pr_ops.state_append_round(77, 1, "sha", verify_head=False)
@@ -918,7 +1391,6 @@ class TestStateFinalizeRecordsCIFindings(unittest.TestCase):
 
             with (
                 patch.object(pr_ops, "state_paths", side_effect=fake_state_paths),
-                patch.object(pr_ops, "repo_slug", return_value="demo"),
                 patch.object(pr_ops, "ci_failed_tests", side_effect=RuntimeError("gh down")),
             ):
                 pr_ops.state_append_round(77, 1, "sha", verify_head=False)
@@ -942,7 +1414,6 @@ class TestStateFinalizeRecordsCIFindings(unittest.TestCase):
 
             with (
                 patch.object(pr_ops, "state_paths", side_effect=fake_state_paths),
-                patch.object(pr_ops, "repo_slug", return_value="demo"),
                 patch.object(pr_ops, "ci_failed_tests", side_effect=boom),
             ):
                 pr_ops.state_append_round("branch:foo", 1, "sha", verify_head=False)
@@ -978,6 +1449,24 @@ class TestRecomputeCountsTreatsPreExistingAsSkipped(unittest.TestCase):
         self.assertEqual(counts["skipped_count"], 3)
 
 
+class TestSlugifyAndStatePaths(unittest.TestCase):
+    def test_slugify_strips_slashes_and_lowercases(self) -> None:
+        self.assertEqual(_common._slugify_branch("feature/Foo BAR"), "feature-foo-bar")
+
+    def test_slugify_handles_empty_like_input(self) -> None:
+        self.assertEqual(_common._slugify_branch("---"), "unnamed")
+
+    def test_state_paths_branch_mode(self) -> None:
+        with patch.object(_common, "repo_slug", return_value="myrepo"):
+            sd, sf = _common.state_paths(None, branch="feature/foo")
+        self.assertIn("myrepo-branch-feature-foo", str(sd))
+        self.assertTrue(str(sf).endswith("pr-polish-state.json"))
+
+    def test_state_paths_requires_branch_when_no_pr(self) -> None:
+        with self.assertRaises(ValueError):
+            _common.state_paths(None)
+
+
 class TestReplyInlineSafeBody(unittest.TestCase):
     """Reply bodies must never be passed via `gh api -f body=...`: gh treats
     `@`-prefixed values as file references, so a body starting with `@` could
@@ -1004,35 +1493,6 @@ class TestReplyInlineSafeBody(unittest.TestCase):
         self.assertEqual(payload, {"body": body})
 
 
-class TestSlugifyAndStatePaths(unittest.TestCase):
-    def test_slugify_strips_slashes_and_lowercases(self) -> None:
-        self.assertEqual(_common._slugify_branch("feature/Foo BAR"), "feature-foo-bar")
-
-    def test_slugify_handles_empty_like_input(self) -> None:
-        self.assertEqual(_common._slugify_branch("---"), "unnamed")
-
-    def test_branch_envelope_key_matches_state_paths(self) -> None:
-        # The launch path (which builds /tmp envelope filenames) and the
-        # finalize path (which reads them back) must agree on the slug for
-        # any given branch — otherwise envelopes get lost. Verify both go
-        # through branch_envelope_key/state_paths and produce a flat,
-        # filesystem-safe component.
-        key = _common.branch_envelope_key("feature/Foo BAR")
-        self.assertEqual(key, "branch-feature-foo-bar")
-        with patch.object(_common, "repo_slug", return_value="myrepo"):
-            sd, _ = _common.state_paths(None, branch="feature/Foo BAR")
-        self.assertTrue(str(sd).endswith(f"myrepo-{key}"))
-        self.assertNotIn("/", key)
-
-    def test_state_paths_branch_mode(self) -> None:
-        with patch.object(_common, "repo_slug", return_value="myrepo"):
-            sd, sf = _common.state_paths(None, branch="feature/foo")
-        self.assertIn("myrepo-branch-feature-foo", str(sd))
-        self.assertTrue(str(sf).endswith("pr-polish-state.json"))
-
-    def test_state_paths_requires_branch_when_no_pr(self) -> None:
-        with self.assertRaises(ValueError):
-            _common.state_paths(None)
 
 
 if __name__ == "__main__":
