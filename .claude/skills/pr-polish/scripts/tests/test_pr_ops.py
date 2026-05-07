@@ -431,6 +431,34 @@ class TestStateFirstRoundOfSeries(unittest.TestCase):
             )
         )
 
+    def test_state_is_new_series_cli(self) -> None:
+        # SKILL Step 0.5 invokes this CLI directly. Cover the argparse +
+        # dispatch path so a typo in the parser regresses loudly.
+        import io  # noqa: PLC0415
+        from contextlib import redirect_stdout  # noqa: PLC0415
+
+        # Three-case fixture across two PRs to exercise the dispatch.
+        # Mid-series state for PR 42:
+        pr_ops.state_append_round(42, 1, "sha", verify_head=False)
+        pr_ops.state_append_round(42, 2, "sha2", verify_head=False)
+
+        # Completed state for PR 99:
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_mark_complete(99, "converged")
+
+        def _run(*argv) -> str:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                pr_ops.main(list(argv))
+            return buf.getvalue().rstrip("\n")
+
+        # Brand new PR (no state) → 1
+        self.assertEqual(_run("state-is-new-series", "1234", "1"), "1")
+        # Completed prior series → 1
+        self.assertEqual(_run("state-is-new-series", "99", "2"), "1")
+        # Mid-series → 0
+        self.assertEqual(_run("state-is-new-series", "42", "3"), "0")
+
 
 class TestHeartbeatTelemetry(unittest.TestCase):
     """Distinguish abandoned runs from interrupted ones.

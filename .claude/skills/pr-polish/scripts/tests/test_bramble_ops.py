@@ -233,6 +233,33 @@ class TestActionHistoryGoal(unittest.TestCase):
         self.assertNotIn("Files changed", out)
 
 
+class TestIsFirstRoundOfSeriesAgreement(unittest.TestCase):
+    """The helper is duplicated in pr_ops and bramble_ops to avoid an
+    import cycle (pr_ops already imports bramble_ops via
+    _persist_round_findings). This test asserts the two copies agree on
+    a shared fixture table so they can't drift apart silently.
+    """
+
+    def test_helpers_agree(self) -> None:
+        import pr_ops  # noqa: PLC0415
+
+        cases: list[tuple[dict | None, int]] = [
+            (None, 1),
+            ({"rounds": []}, 1),
+            ({"rounds": []}, 5),
+            ({"rounds": [{"n": 1}], "completed": True}, 2),
+            ({"rounds": [{"n": 5}], "completed": True}, 6),
+            ({"rounds": [{"n": 1}], "completed": False}, 2),
+            ({"rounds": [{"n": 1}, {"n": 2}], "completed": False}, 3),
+        ]
+        for state, n in cases:
+            self.assertEqual(
+                pr_ops._is_first_round_of_series(state, n),
+                bramble_ops._is_first_round_of_series(state, n),
+                f"helpers disagree on (state={state}, n={n})",
+            )
+
+
 class TestPriorSessionIdSeriesBoundary(unittest.TestCase):
     """At a series boundary (prior loop completed), prior_session_id must
     return empty so the new audit gets a fresh bramble session."""
@@ -595,6 +622,24 @@ class TestTriage(unittest.TestCase):
         out = bramble_ops.triage([f], prior_fixed_keys={key})
         self.assertEqual(len(out["spiral_matches"]), 1)
         self.assertEqual(out["spiral_matches"][0]["key"], list(key))
+
+    def test_spiral_match_via_location_only_key(self) -> None:
+        # Rewording-resilient escalation: prior_fixed_keys carries
+        # (path, line, None) alongside the strict (path, line, topic) key
+        # so a fix-then-reword regression at the same site still
+        # escalates even when the new finding's topic differs from what
+        # the orchestrator persisted.
+        f = self._f("codex", "a.py", 10, "high", "Different wording for the same bug")
+        # Prior round had topic "null check missing"; we only keep the
+        # location-only companion in prior_fixed_keys.
+        location_key = (f["file"], f["line"], None)
+        out = bramble_ops.triage([f], prior_fixed_keys={location_key})
+        self.assertEqual(len(out["spiral_matches"]), 1)
+        # The reported key reflects the new finding's full triage key.
+        self.assertEqual(
+            out["spiral_matches"][0]["key"],
+            [f["file"], f["line"], f["topic"]],
+        )
 
     def test_action_plan_dispatch_shape(self) -> None:
         consensus_f1 = self._f("codex", "a.py", 10, "high", "Null check missing foo")
@@ -964,6 +1009,39 @@ class TestGoalCLI(unittest.TestCase):
         self.assertIn("Round 2", out)
         self.assertIn("a.go:5", out)
 
+    def test_head_before_flag_emits_files_changed_line(self) -> None:
+        # SKILL passes --head-before "$(git rev-parse HEAD)"; the CLI must
+        # accept it and thread it into action_history_goal so the model
+        # sees "Files changed since round N-1: ...".
+        from unittest.mock import patch  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "rounds": [
+                            {
+                                "n": 1,
+                                "comment_actions": [
+                                    {"action": "fixed", "path": "a.go", "line": 5},
+                                ],
+                                "head_after": "sha-prev",
+                            }
+                        ]
+                    }
+                )
+            )
+            with patch("_common.run") as run_mock:
+                run_mock.return_value = type("R", (), {"returncode": 0, "stdout": "a.go\nb.py\n"})()
+                out = self._run(
+                    "goal", "2",
+                    "--pr-summary", "PR_SUM",
+                    "--state-file", str(sf),
+                    "--head-before", "sha-cur",
+                )
+        self.assertIn("Files changed since round 1: a.go, b.py.", out)
+
 
 class TestPriorSessionIDCLI(unittest.TestCase):
     """SKILL shells out to `bramble_ops.py prior-session-id <backend> N` per round."""
@@ -992,6 +1070,44 @@ class TestPriorSessionIDCLI(unittest.TestCase):
             sf.write_text(json.dumps({"rounds": []}))
             out = self._run("prior-session-id", "codex", "2", "--state-file", str(sf))
         self.assertEqual(out, "")
+
+    def test_is_new_series_flag_forces_empty(self) -> None:
+        # By the time the SKILL calls this, state_append_round has cleared
+        # `completed: true` to false. The captured IS_NEW_SERIES from
+        # Step 0.5 must override that mutation.
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "completed": False,  # already cleared by state_append_round
+                        "rounds": [{"n": 5, "session_ids": {"codex": "abc"}}],
+                    }
+                )
+            )
+            out = self._run(
+                "prior-session-id", "codex", "6",
+                "--state-file", str(sf),
+                "--is-new-series", "1",
+            )
+        self.assertEqual(out, "")
+
+    def test_is_new_series_zero_resumes_normally(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "rounds": [{"n": 1, "session_ids": {"codex": "abc"}}],
+                    }
+                )
+            )
+            out = self._run(
+                "prior-session-id", "codex", "2",
+                "--state-file", str(sf),
+                "--is-new-series", "0",
+            )
+        self.assertEqual(out, "abc")
 
 
 

@@ -36,7 +36,7 @@ No positional arguments. PR/branch context is auto-detected by `pr_ops.py identi
 
 **Fix, don't dodge.**
 - Pre-existing code in touched files: own it.
-- Consensus findings (two reviewers agree on same `(path, line, topic)`): mandatory fix.
+- Consensus findings (two reviewers agree on same `(file, line)` — same location, regardless of how each one worded it): mandatory fix.
 - High/medium: fix unless provably false positive (cite refuting file:line).
 - Low/nit: fix if trivial, else skip with one-line justification.
 - Only valid skip reasons: `false_positive` (with evidence), `wont_fix` (design tradeoff), `stale` (cited code gone).
@@ -393,7 +393,7 @@ python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
 - `single_critical` — single-source high/critical, or CI failure that isn't a flake. Route to `must_fix`.
 - `single_medium` — single-source medium, or GitHub comment without severity-keyword. Route to `consider_fix`.
 - `low_acks` — single-source low/nit, or flake CI failure. Route to `batch_ack`.
-- `spiral_matches` — new findings whose `(file, line, topic)` matches a prior-round `fixed` action. Route to `escalate`. (Spiral keeps the topic component because exact recurrence matters here — a fix-then-recurrence has identical wording, not just identical location.)
+- `spiral_matches` — new findings that match a prior-round `fixed` action by `(file, line, topic)` (exact recurrence) or by `(file, line)` alone (rewording-resilient: fix-then-reword regression at the same site still escalates). Route to `escalate`.
 
 If `spiral_matches` is non-empty, **don't auto-fix** — call `AskUserQuestion` with the spiralling findings. The prior fix may have regressed or the reviewer is re-flagging something we thought we resolved.
 
