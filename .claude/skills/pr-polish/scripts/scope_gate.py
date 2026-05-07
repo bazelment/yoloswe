@@ -533,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         # Not inside a git repo. Emit an empty hints file and exit 0
         # so the orchestrator's wire-up doesn't have to special-case
         # "git missing"; bramble's malformed-file fallback handles it.
-        atomic_write_json(out_path, build_hints([], []))
+        atomic_write_json(out_path, build_hints([], [], [], []))
         print(out_path)
         return 0
     # ``.resolve()`` so the repo_root containment guards in

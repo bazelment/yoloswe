@@ -698,6 +698,11 @@ class TestMainCLI(unittest.TestCase):
         self.assertEqual(data["schema_version"], 2)
         self.assertEqual(data["test_paths"], [])
         self.assertEqual(data["cross_service_packages"], [])
+        # Shape parity with the empty-diff path: v2 envelope fields
+        # must be present (as empty arrays) even on the no-git fallback,
+        # so downstream consumers don't see a v2 schema with missing keys.
+        self.assertEqual(data["changed_packages"], [])
+        self.assertEqual(data["dependency_packages"], [])
 
     @staticmethod
     def _rmtree(path: Path) -> None:
