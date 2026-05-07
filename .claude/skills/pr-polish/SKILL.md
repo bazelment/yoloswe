@@ -7,68 +7,57 @@ disable-model-invocation: true
 
 # PR Polish Loop
 
-Autonomous orchestrator that brings a branch from "has issues" to "ready to merge." Each round runs code review agents as the authoritative review signal, triages findings against the action-plan rules, applies fixes locally, and commits. **No pushes happen until the loop exits** — this keeps each round's bramble review scoped to local code without triggering repeated GitHub-bot re-reviews that would only add N+1 diff spiral noise.
+Autonomous orchestrator that brings a branch from "has issues" to "ready to merge." Each round runs code review agents as the authoritative review signal, triages findings, applies fixes locally, and commits. **No pushes happen until the loop exits** — batching keeps each round's bramble review scoped to local code without triggering repeated GitHub-bot re-reviews on intermediate commits.
 
-The loop exits when the review has **converged** (see "Ownership and convergence") or when the round cap is hit. On exit the orchestrator force-pushes the accumulated commits so the PR's bot/CI review sees one polished tree instead of N intermediate ones.
+The loop exits when the review has converged (see "Convergence") or when the round cap is hit. On exit the orchestrator force-pushes the accumulated commits so bots and CI see one polished tree.
 
-All shell plumbing lives in Python helper modules bundled with this skill at `scripts` directory. Use `SKILL_DIR=.claude/skills/pr-polish` and call them as `python3 $SKILL_DIR/scripts/pr_ops.py ...`.
+Shell plumbing lives in Python helpers under `scripts/`. Use `SKILL_DIR=.claude/skills/pr-polish` and call them as `python3 $SKILL_DIR/scripts/<helper>.py …`.
 
 - `pr_ops.py` — PR/branch identity, comment fetch/reply, CI failure detail, state I/O.
-- `bramble_ops.py` — `--goal` / action-history text construction (round 1 vs 2+), session-resume id selection with series-boundary detection, bramble stream + envelope parsing, triage (consensus / single-source / spiral / cluster_hint), and PR-comment / CI-failure → finding adapters. The actual `bramble code-review` invocation lives in this skill body, not here.
+- `bramble_ops.py` — `--goal` / action-history text, session-resume id selection with series-boundary detection, envelope parsing, triage, and PR-comment / CI-failure → finding adapters. The `bramble code-review` invocation itself lives in this skill body.
 - `lint_gate.py` — Deterministic ruff/golangci/eslint pass on the diff; closes the CodeQL noise gap.
-- `scope_gate.py` — Computes `scope-hints.json` for `bramble code-review --scope-hints-file`: co-located test paths, multi-package detection, and the v2 `changed_packages` / `dependency_packages` split. Runs once per round, before bramble Monitors.
+- `scope_gate.py` — Computes `scope-hints.json` for `bramble code-review --scope-hints-file`. Runs once per round before bramble Monitors.
 
-**Failed review streams are findings, not silence.** Missing envelopes, non-zero exit codes, or `status: "error"` envelopes must be surfaced in the round summary with the stderr path cited; never silently drop them.
+**Failed review streams are findings, not silence.** Missing envelopes, non-zero exits, or `status: "error"` envelopes must surface in the round summary with the stderr path cited.
 
-**Base-branch syncing is not this skill's job.** Invoke `.claude/skills/git:sync-base/git-sync.py --verbose` directly — that skill owns branch rebasing, precise-lease force-push, and conflict handling.
+**Base-branch syncing is delegated.** Invoke `.claude/skills/git:sync-base/git-sync.py --verbose` directly — that skill owns rebasing, precise-lease force-push, and conflict handling.
 
 ## Arguments
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--rounds N` | `5` | The round number this invocation will *stop at* (inclusive). Resuming a state at `current_round=5` with `--rounds 7` runs rounds 6 and 7 — i.e. "two more rounds". `--rounds 5` on the same state is a no-op (already at the cap). |
-| `--gemini` | off | Also run a third bramble reviewer using `--backend gemini --model gemini-3-flash-preview`. Findings from all three backends are merged and deduplicated; a finding agreed on by ≥2 sources (including Gemini) counts as consensus. |
+| `--rounds N` | `5` | The round number this invocation stops at (inclusive). Resuming at `current_round=5` with `--rounds 7` runs rounds 6 and 7. `--rounds 5` on the same state is a no-op. |
+| `--gemini` | off | Also run a third reviewer with `--backend gemini --model gemini-3-flash-preview`. A finding agreed on by ≥2 sources counts as consensus. |
 
-No positional arguments. PR/branch context is auto-detected by `pr_ops.py identify`.
+PR/branch context is auto-detected by `pr_ops.py identify`.
 
 ## Ownership and convergence
 
 **Fix, don't dodge.**
 - Pre-existing code in touched files: own it.
-- Consensus findings (two reviewers agree on same `(file, line)` — same location, regardless of how each one worded it): mandatory fix.
+- Consensus findings (two reviewers at the same `(file, line)`, regardless of wording): mandatory fix.
 - High/medium: fix unless provably false positive (cite refuting file:line).
 - Low/nit: fix if trivial, else skip with one-line justification.
-- Only valid skip reasons: `false_positive` (with evidence), `wont_fix` (design tradeoff), `stale` (cited code gone).
+- Valid skip reasons: `false_positive` (with evidence), `wont_fix` (design tradeoff), `stale` (cited code gone).
 
-**A finding is a symptom; the fix is the cure.**
+**A finding is a symptom; the fix is the cure.** Each cited finding observes one underlying problem. Before patching, identify the actual invariant being violated, look for sibling sites in the same module, and decide whether the right fix is at the cited line or upstream. A defensive guard at every consumer often signals a producer should normalize once. If docs or tests pin the contract that just changed, they're part of the same fix. A cascade of medium-severity rounds is usually one missed invariant.
 
-Each cited finding is one observation of an underlying problem. The fix is what closes the *problem*, not just the observed instance. Before patching, ask:
+Class-level fixes beyond the cited line are logged in `comment_actions` as `source: "sweep"`, `comment_id: null`, `topic: "<original-topic> — class-level fix"`.
 
-- **What is the actual invariant being violated here?** ("body must be a string" — not "this one line crashes on null.")
-- **Where else does the codebase rely on the same invariant?** Same module first; adjacent modules if the invariant is shared.
-- **Is the right fix at the cited line, or upstream?** A defensive guard at every consumer is often a sign that a producer should normalize once.
-- **Does the fix introduce a new invariant of its own?** New helpers, new shapes, new edge cases — those are next round's findings unless you carry the same rigor through.
-
-When in doubt, prefer the fix that makes the next reviewer's question redundant. A cascade of medium-severity rounds is usually one missed invariant.
-
-Fixes that close sites beyond the cited finding are still logged in `comment_actions`: `action: "fixed"`, `comment_id: null`, `source: "sweep"`, `topic: "<original-topic> — class-level fix"`. Audit trail stays complete; reviewer can see what was extended.
-
-**Stop when converged.** Any one:
+**Convergence — stop when any one holds:**
 - Zero findings, or all remaining are low/nit.
 - Top-rated finding is a documented false positive.
-- Empty action plan after triage (nothing to fix, nothing to skip).
+- Empty action plan after triage.
 
-**Hard stop at `--rounds N`.** When round N completes and the loop has not converged, STOP. Produce Final Summary, then `AskUserQuestion` whether to continue.
+**Hard stop at `--rounds N`.** When round N completes without convergence, produce Final Summary, then `AskUserQuestion` whether to continue.
 
 ## Auto-decision rules
 
-Bias for action and your own judgement with research. Only three things ever pause the loop with `AskUserQuestion`:
+Bias for action and your own judgement with research. Only three things pause the loop with `AskUserQuestion`:
 
-1. **Integrity gate** — stale state file with PR mismatch (see Step 0.5).
+1. **Integrity gate** — stale state file with PR mismatch (Step 0.5).
 2. **Budget gate** — `--rounds N` reached without convergence.
 3. **Regression gate** — `spiral_matches` non-empty (a prior-round `fixed` finding re-surfaced).
-
-Anything else: perform your own research and decide and record.
 
 ## State tracking
 
@@ -102,8 +91,7 @@ Schema:
       "top_was_false_positive": false,
       "noise_filtered": 2,
       "noise_samples": [
-        {"id": 4300306871, "author": "linear[bot]", "pattern": "linear-linkback"},
-        {"id": 4300307985, "author": "claude[bot]", "pattern": "claude-progress"}
+        {"id": 4300306871, "author": "linear[bot]", "pattern": "linear-linkback"}
       ],
       "comment_actions": [
         {
@@ -125,33 +113,33 @@ Schema:
 }
 ```
 
-**`codex_findings` / `cursor_findings` / `gemini_findings`** hold the raw issues list from each backend's bramble envelope for round `n`, hydrated by `state-finalize-round`. The verbatim envelope is copied into `<state_dir>/reviews/r<n>-<backend>.json` so post-loop audits don't depend on the `/tmp` envelope surviving. `gemini_findings` is omitted when `--gemini` was not passed.
+`{codex,cursor,gemini}_findings` hold raw issues from each backend's envelope, hydrated by `state-finalize-round`. The verbatim envelope is copied to `<state_dir>/reviews/r<n>-<backend>.json`. `gemini_findings` is omitted when `--gemini` was not passed.
 
-**`noise_filtered` / `noise_samples`** (int / array, default 0 / `[]`) count bot process-noise dropped at fetch time by `pr_ops.py fetch-comments` — linear linkbacks, claude-bot "Reviewing PR..." progress posts. These never become findings (they aren't review feedback) so they never enter `comment_actions`; keep them as a round-level audit trail instead. Samples are capped at 5 `{id, author, pattern}` entries for post-hoc debugging. Populated by `state-append-round --noise-filtered N --noise-samples file.json` on round 1.
+`noise_filtered` / `noise_samples` count bot process-noise dropped at fetch time (linear linkbacks, claude-bot progress posts). These never enter `comment_actions` — kept as a round-level audit trail. Samples capped at 5 entries.
 
 **`comment_actions` schema — load-bearing, other tooling depends on exact strings:**
 
-- `source`: one of `github-inline`, `github-issue`, `github-review`, `codex`, `cursor`, `gemini`, `lint`, `ci`, `sweep`. (`lint` rows come from `lint_gate.py`'s deterministic ruff/golangci-lint/eslint pass — see Step 3b. They route through triage like any other source: a `(file, line)` match with codex or cursor counts as consensus, regardless of how each one phrased its topic. `sweep` rows are class-level fixes applied beyond a cited finding's exact line — see "A finding is a symptom" up top.)
-- `comment_id`: GitHub id for `github-*`; `null` for bramble and CI findings (bramble dedupes by `(path, line, topic)`; CI dedupes by `(job_id, test_name)` where `path=job_id` and `topic=test_name`).
+- `source`: one of `github-inline`, `github-issue`, `github-review`, `codex`, `cursor`, `gemini`, `lint`, `ci`, `sweep`. `lint` rows route through triage like any other source: a `(file, line)` match with codex or cursor counts as consensus.
+- `comment_id`: GitHub id for `github-*`; `null` for bramble/CI/lint/sweep findings (bramble dedupes by `(path, line, topic)`; CI dedupes by `(job_id, test_name)` where `path=job_id` and `topic=test_name`).
 - `path` / `line`: `null` for top-level PR + review-level comments.
 - `severity`: `high`, `medium`, `low`, `nit`, or `null`.
-- `action`: exactly one of:
+- `action`:
   - `fixed` — code change applied; `commit_sha` required.
-  - `false_positive` — incorrect finding; `reason` required (file:line that refutes it).
-  - `wont_fix` — valid point, deliberate skip; `reason` required (design tradeoff).
-  - `ack` — low/nit batch-acknowledged; `reason` optional. Counts as skipped.
-  - `stale` — cited code no longer exists (see Stale Finding Guard); `reason` optional.
-  - `pre_existing` — `source: "ci"` only. Failure also fails on base branch; `reason` must cite `ci-compare-base` output. Counts as skipped.
-  - `flake` — `source: "ci"` only. Classified as a known flake class (ETXTBSY, bazel cache, `ci_deadline`); `reason` must name the `flake_reason`. Counts as skipped.
+  - `false_positive` — `reason` required (refuting file:line).
+  - `wont_fix` — `reason` required (design tradeoff).
+  - `ack` — low/nit batch-acknowledged. Counts as skipped.
+  - `stale` — cited code no longer exists.
+  - `pre_existing` — `source: "ci"` only. Failure also fails on base branch; `reason` cites `ci-compare-base` output. Counts as skipped.
+  - `flake` — `source: "ci"` only. `reason` names the `flake_reason` (ETXTBSY, bazel cache, `ci_deadline`). Counts as skipped.
 
-**Context token for state subcommands.** All `state-*` subcommands take a single positional `ctx` — the bare PR number (`2318`) when one exists, otherwise `branch:<name>` (`branch:feature-foo`).
+**Context token for state subcommands.** All `state-*` take a single positional `ctx` — the bare PR number when one exists, otherwise `branch:<name>`.
 
-**Writing state goes through the module, not hand-rolled file I/O.** All writes are atomic:
+**State writes go through the module, never hand-rolled file I/O.** All writes are atomic:
 
-- `state-append-round <ctx> <n> <head_before>` at round start. Verifies `git rev-parse HEAD == head_before`; non-zero exit if the orchestrator raced a commit. Pass `--no-verify-head` only when resuming an interrupted round.
+- `state-append-round <ctx> <n> <head_before>` at round start. Verifies `git rev-parse HEAD == head_before`; pass `--no-verify-head` only when resuming an interrupted round.
 - `state-finalize-round <ctx> <n> <head_after> <actions.json>` at round end.
 - `state-mark-complete <ctx> <reason>` on exit.
-- Reading: `state-load <ctx>`.
+- `state-load <ctx>` to read.
 
 ## Step 0: Identify context
 
@@ -159,11 +147,11 @@ Schema:
 python3 $SKILL_DIR/scripts/pr_ops.py identify
 ```
 
-Returns `{pr_number, title, url, base, head, branch, owner, repo, owner_repo, state_dir, state_file}`. `pr_number` is `null` for branches that don't yet have a PR — the rest of the flow still works, just with PR-comment and CI-failure fetches skipped. Pin `$CTX` to either the PR number or `branch:<head>` for later state subcommand calls.
+Returns `{pr_number, title, url, base, head, branch, owner, repo, owner_repo, state_dir, state_file}`. `pr_number` is `null` for branches without a PR — the rest of the flow still works, just with PR-comment and CI-failure fetches skipped. Pin `$CTX` to either the PR number or `branch:<head>`.
 
 ### Step 0.1: Pick the bramble binary
 
-Export `BRAMBLE_BIN` once at the top of the run. Prefer the freshly-built worktree artifact when it exists (matches the code under review); otherwise fall back to `PATH`:
+Prefer the freshly-built worktree artifact (matches the code under review); otherwise fall back to PATH:
 
 ```
 export BRAMBLE_BIN="$([ -x "$(pwd)/bazel-bin/bramble/bramble_/bramble" ] \
@@ -171,21 +159,18 @@ export BRAMBLE_BIN="$([ -x "$(pwd)/bazel-bin/bramble/bramble_/bramble" ] \
     || echo bramble)"
 ```
 
-Every `bramble code-review` invocation in later steps must reference `$BRAMBLE_BIN`, not the bare `bramble` literal.
+Every `bramble code-review` invocation must reference `$BRAMBLE_BIN`.
 
 ### Step 0.2: Bramble must support `--resume-session-id`
 
-Continuous review is the whole reason this skill exists; without resume the loop devolves into N independent cold reviews and the don't-reflag signal in round 2+ goal is wasted. Probe once, fail fast, and tell the user how to upgrade:
+Continuous review is the whole reason this skill exists. Probe once and fail fast:
 
 ```bash
 "$BRAMBLE_BIN" code-review --help 2>&1 | grep -q -- '--resume-session-id' || {
   echo "error: '$BRAMBLE_BIN' does not support --resume-session-id." >&2
-  echo "Upgrade your bramble (e.g. 'bazel build //bramble:bramble' in this repo, or reinstall) and re-run." >&2
   exit 1
 }
 ```
-
-Don't paper over with sed-strip workarounds. An old binary is a real environment problem the user needs to fix once, not something the skill can compensate for transparently.
 
 ## Step 0.5: Resume check
 
@@ -193,26 +178,22 @@ Don't paper over with sed-strip workarounds. An old binary is a real environment
 python3 $SKILL_DIR/scripts/pr_ops.py state-load $CTX
 ```
 
-`state-load` returns the persisted state plus two derived booleans (computed at read time, never persisted): `is_heartbeat_stale` and `is_first_round_of_series`. The second is true when this round either is round 1 with no prior history or follows a `completed: true` state — in both cases the orchestrator must treat it like a real round 1 (re-fetch PR comments + CI failures, skip bramble session resume). Capture it once, before `state-append-round` clears the `completed` flag:
+`state-load` returns the persisted state plus two derived booleans (computed at read time): `is_heartbeat_stale` and `is_first_round_of_series`. The second is true when this round is round 1 with no prior history or follows a `completed: true` state — in both cases treat it as a real round 1 (re-fetch PR comments + CI failures, skip bramble session resume). Capture before `state-append-round` clears `completed`:
 
 ```bash
 IS_NEW_SERIES=$(python3 $SKILL_DIR/scripts/pr_ops.py state-is-new-series $CTX $ROUND)
 ```
 
-Then compare against `git rev-parse HEAD`:
+Compare against `git rev-parse HEAD`:
 
-- **No state file / empty load**: fresh run. Proceed.
-- **`pr_number` mismatches current PR**: stale state (integrity gate). Show user and `AskUserQuestion` whether to discard. This is one of only three sanctioned pauses — see "Auto-decision rules".
-- **`is_heartbeat_stale: true`** AND `completed: false` (heartbeat older than 2h, or missing entirely on a pre-heartbeat state file): the prior run was abandoned, not interrupted. Tombstone it and start fresh:
-  ```
-  python3 $SKILL_DIR/scripts/pr_ops.py state-mark-abandoned $CTX
-  ```
-  Then proceed as a fresh run on current HEAD. Announce the abandonment in one line; do not ask.
-- **HEAD matches `last_commit_at_round_start`** (and heartbeat is fresh): prior round was interrupted (compaction/manual stop). Resume the in-progress round.
-- **HEAD differs from `last_commit_at_round_start`** (and heartbeat is fresh): prior round committed or user made manual changes. Auto-start a new round on current HEAD (round N+1). Announce the decision in one line and proceed — re-invocation is the user's signal that they want another round. The new `state-append-round` call automatically clears any stale `completed: true` / `exit_reason` set by the prior loop's `state-mark-complete`, so mid-loop reads of the state file aren't contradictory.
-- **`current_round` ≥ `--rounds`**: hard-stop (budget gate). `--rounds N` means "round N is the last round this invocation runs"; if `current_round == N`, this invocation has nothing to do and must explicitly authorize more rounds via `AskUserQuestion`. Concretely: a state at `current_round=5` invoked with `/pr-polish --rounds 7` runs rounds 6 and 7. The same state with `/pr-polish --rounds 5` is a no-op pause.
+- **No state file**: fresh run. Proceed.
+- **`pr_number` mismatch**: integrity gate. `AskUserQuestion` whether to discard.
+- **`is_heartbeat_stale: true`** AND `completed: false` (heartbeat older than 2h, or missing): prior run abandoned. Tombstone with `state-mark-abandoned $CTX` and start fresh on current HEAD. Announce in one line; do not ask.
+- **HEAD matches `last_commit_at_round_start`** (heartbeat fresh): prior round interrupted. Resume in-progress round.
+- **HEAD differs from `last_commit_at_round_start`** (heartbeat fresh): prior round committed or user made manual changes. Auto-start next round on current HEAD. Re-invocation is the user's signal that they want another round. The new `state-append-round` clears any stale `completed: true` set by a prior `state-mark-complete`.
+- **`current_round` ≥ `--rounds`**: budget gate hard-stop. `AskUserQuestion` to authorize more rounds.
 
-**Compaction awareness**: with a state file present, trust it and apply the rules above — the state file survives compaction, and the heartbeat distinguishes a recent compaction (resume) from a real abandonment (fresh start). With no state file present, start a fresh run. Do not ask.
+With a state file present, trust it and apply the rules — heartbeat distinguishes recent compaction from real abandonment. With no state file, start fresh. Do not ask.
 
 ## Step 1: Sync base via /git:sync-base
 
@@ -220,24 +201,22 @@ Then compare against `git rev-parse HEAD`:
 python3 .claude/skills/git:sync-base/git-sync.py --verbose
 ```
 
-That script owns rebasing onto `origin/<base>` and (when a PR exists) force-pushing the rebased branch back with precise-lease. Do not reimplement any of it here. On conflict (exit 2) **abort this polish run with `state-mark-complete <ctx> sync-conflict`** and emit the Final Summary pointing at the conflict — do not pause mid-run with `AskUserQuestion`. The user resolves the conflict and re-invokes to pick up.
+That script owns rebasing onto `origin/<base>` and force-pushing the rebased branch with precise-lease. Do not reimplement. On conflict (exit 2) **abort with `state-mark-complete <ctx> sync-conflict`** and emit Final Summary pointing at the conflict — do not pause mid-run.
 
-Build a short `$PR_SUMMARY` from `git log --oneline origin/<base>..HEAD` + diff-stat (≤10 lines). Pass it to `bramble_ops.py goal` every round; the helper returns the right text for the round.
+Build a short `$PR_SUMMARY` from `git log --oneline origin/<base>..HEAD` + diff-stat (≤10 lines). Pass it to `bramble_ops.py goal` every round.
 
 ### The goal channel as continuous-conversation context
 
-Each round resumes the same bramble session, so the model accumulates context across turns. The `--goal` field is the only orchestrator-controlled per-turn message bramble's follow-up prompt builder injects (as `Context for this turn: <text>`). Treat it as a short, structured update — what the human reviewer would say at the top of a follow-up review — not as a restated brief.
-
-What it carries:
+Each round resumes the same bramble session, so the model accumulates context across turns. `--goal` is the only orchestrator-controlled per-turn message bramble injects (as `Context for this turn: …`). Treat it as a short structured update — what a human reviewer would say at the top of a follow-up — not a restated brief.
 
 | Round | Goal text | Why |
 |---|---|---|
-| 1 | `$PR_SUMMARY` (commit list + diffstat) | First turn: model has nothing yet. Establish PR-level intent and surface area. |
-| 2+, prior round had actions | Per-turn briefing: prior round's fixed/skipped + files changed since then | Tells the resumed model what it actioned last turn (so it doesn't re-flag fixes) and which files moved (so the worktree snapshot doesn't have to surface that on its own). |
-| 2+, no prior actions, files changed | `Round N.` + files-changed line | Even with no prior-round actions to replay, a non-empty diff between rounds (e.g. user committed manually) is worth orienting the model around. |
+| 1 | `$PR_SUMMARY` | First turn: establish PR-level intent and surface area. |
+| 2+, prior round had actions | Per-turn briefing: prior round's fixed/skipped + files changed | Tells resumed model what it actioned (so it doesn't re-flag fixes) and which files moved. |
+| 2+, no prior actions, files changed | `Round N.` + files-changed line | Even with no prior-round actions, a non-empty diff between rounds is worth orienting around. |
 | 2+, no prior actions, no diff | Falls back to `$PR_SUMMARY` | Re-anchor rather than send a goal that's just "Round N." |
 
-Action-history shape (emitted by `action_history_goal`, only the immediately-prior round):
+Action-history shape (`action_history_goal`, only the immediately-prior round):
 
 ```
 Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE.
@@ -245,36 +224,30 @@ Skipped: b.py:42 wont_fix: design tradeoff; d.go:8 ack: rename helper.
 Files changed since round 5: a.go, b.py.
 ```
 
-The `fixed: X — topic; skipped: Y verb: reason` shape stops the resumed model from re-flagging its own prior findings and re-arguing skipped ones. Source labels (`(codex)`/`(cursor)`) are deliberately omitted: the resumed model treats every entry the same once it lands in the prompt. Each entry is capped at `_TOPIC_CHAR_CAP=80` chars; bucket capped at `_ACTION_HISTORY_CAP=20` with a `(N more)` suffix.
+The `fixed: X — topic; skipped: Y verb: reason` shape stops the resumed model from re-flagging its own prior findings. Source labels (`(codex)`/`(cursor)`) are deliberately omitted. Each entry capped at `_TOPIC_CHAR_CAP=80`; bucket capped at `_ACTION_HISTORY_CAP=20` with a `(N more)` suffix.
 
-The "Files changed since round N-1" line is the diff between the prior round's `head_after` (falling back to `head_before` for an interrupted prior round that never finalized) and this round's HEAD — useful when the user manually committed between rounds, when the prior round's fix touched a file the model didn't expect to see in its snapshot, or simply to keep the model oriented. Omitted when the diff is empty or the caller didn't pass `head_before`.
+The "Files changed" line is the diff between the prior round's `head_after` (falling back to `head_before` for an interrupted prior round that never finalized) and current HEAD. Omitted when the diff is empty or `head_before` wasn't passed.
 
-What the goal channel deliberately does **not** carry:
-
-- The actual diff body — bramble re-snapshots the worktree on each turn, so the model sees post-fix code directly. We give it the *list* of moved files, not the patch.
-- `stale` actions — bot comments anchored to superseded code that the worktree snapshot doesn't contain anyway. They're recorded in `comment_actions` for the audit trail and auto-replied on the PR, but never enter the model context. (Without this exclusion a series resume with 10 stale bot comments produced ~3 KB of goal text that taught the model nothing.)
-- Per-finding rationale text the orchestrator wrote into PR replies — that belongs in the inline thread, not the model context.
-- Earlier rounds' actions — only the immediately prior round is replayed; older turns are in the model's session conversation already.
-- Round-1 PR_SUMMARY repeated — the session already has it.
+The goal channel deliberately does **not** carry: the diff body (bramble re-snapshots the worktree), `stale` actions (already absent from the snapshot), per-finding rationale text written into PR replies, earlier rounds' actions (already in session history), or repeated round-1 PR_SUMMARY.
 
 ## Step 2: Fetch existing PR comments + failing CI jobs
 
-**Only when `pr_number` is not null.** These are supplementary triage input for the *first round of a series* — they do **not** replace the local bramble review. Always proceed to the round loop and run bramble even if remote bots found nothing.
+**Only when `pr_number` is not null.** Supplementary triage input for the *first round of a series* — they don't replace the local bramble review. Always proceed to the round loop and run bramble even if remote bots found nothing.
 
 ```
 python3 $SKILL_DIR/scripts/pr_ops.py fetch-comments > $STATE_DIR/pp-comments.json
 python3 $SKILL_DIR/scripts/pr_ops.py ci-failed-tests > $STATE_DIR/pp-ci.json
 ```
 
-`fetch-comments` emits the wrapped shape `{"comments": [...], "noise_filtered": N, "noise_samples": [...]}`. Three filters run at intake: replies dropped, bot review-summary boilerplate dropped, and bot process-noise (linear linkbacks, claude-bot "Reviewing PR..." progress posts) dropped into `noise_*`. Only `comments` flows into triage; the orchestrator passes `noise_filtered` / `noise_samples` into `state-append-round --noise-filtered N --noise-samples <file>` on round 1 so the audit trail records what was dropped. `bramble_ops.py triage --pr-comments` accepts both the wrapped shape and the legacy bare-list shape, so older state files keep working. `ci-failed-tests` classifies each failing job as flake vs real (ETXTBSY, bazel-cache, `ci_deadline` → flake; anything else → real). Branch-only mode skips both files; triage reads them only when `IS_NEW_SERIES=1` (round 1 of a fresh run, or the first round after a prior loop converged/capped — see Step 0.5). The orchestrator re-runs both fetches inside the round loop on every series start so newly-arrived bot comments don't get dropped between series.
+`fetch-comments` emits `{"comments": [...], "noise_filtered": N, "noise_samples": [...]}`. Three filters at intake: replies, bot review-summary boilerplate, and bot process-noise (linear linkbacks, claude-bot progress posts). Only `comments` flows into triage; pass `noise_filtered` / `noise_samples` into `state-append-round --noise-filtered N --noise-samples <file>` on round 1. `ci-failed-tests` classifies each failing job as flake vs real (ETXTBSY, bazel-cache, `ci_deadline` → flake; else real). Branch-only mode skips both. Triage reads them only when `IS_NEW_SERIES=1`. Re-fetch on every series start so newly-arrived bot comments aren't dropped.
 
 ## Step 3: Round loop
 
 ```
 for round = 1..ROUNDS:
   a) commit any pending changes (WIP ok)
-  b) launch bramble codex + cursor via Monitor (parallel)
-  c) triage findings (+ pr-comments + ci-failures if round 1)
+  b) launch bramble codex + cursor + lint via Monitor (parallel)
+  c) triage findings (+ pr-comments + ci-failures if new series)
   d) read findings holistically, cross-reference code, apply fixes
   e) if fixes applied: run quality gates, commit locally (NO push)
   f) finalize round state
@@ -285,24 +258,22 @@ Header per round: `## Round N / ROUNDS`.
 
 ### a) Pending-change WIP commit
 
-Bramble snapshots the working tree at launch. Uncommitted changes won't be reviewed. Make a cheap `git add -A && git commit -m "pr-polish: round N snapshot"` if there's anything dirty. Later commits (step e) amend or replace — the summary is rebuilt from the final state file anyway.
+Bramble snapshots the working tree at launch — uncommitted changes won't be reviewed. `git add -A && git commit -m "pr-polish: round N snapshot"` if dirty. Later commits in step e replace this; the summary is rebuilt from the final state file anyway.
 
 ### b) Launch bramble + lint gate
 
 Create a fresh `$LOG_DIR=$STATE_DIR/r$ROUND/`.
 
-**First, compute the scope-hints file for this round.** `scope_gate.py` walks the diff, enumerates co-located test files, and detects multi-package PRs; `bramble code-review --scope-hints-file <path>` then widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. The kernel-PR audit showed ~5/14 of substantive post-push bot comments would have been caught with that wider scope (tautological asserts in tests, broad `Exception` catches, route-table desync).
-
-Run it once per round, **before** arming the bramble Monitors — the scope set grows as new tests/helpers land in earlier rounds. The script overwrites `$STATE_DIR/scope-hints.json` each round and always exits 0 (bramble's malformed-file fallback covers any edge). Cost is ~100ms vs 60–400s per backend turn, so it's noise.
+**First, compute the scope-hints file.** `scope_gate.py` walks the diff, enumerates co-located test files, detects multi-package PRs, and writes `$STATE_DIR/scope-hints.json`. `bramble code-review --scope-hints-file <path>` widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. Run once per round, **before** arming bramble Monitors. Always exits 0.
 
 ```bash
 SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
   --state-dir "$STATE_DIR" 2>"$LOG_DIR/scope-gate-stderr.txt")
 ```
 
-Then arm Monitors in the same turn — always codex + cursor + lint, plus gemini when `--gemini` was passed. The bramble Monitors all pass `--scope-hints-file "$SCOPE_HINTS"`; the lint Monitor doesn't (lint_gate has its own diff walk).
+Then arm Monitors in the same turn — codex + cursor + lint always, plus gemini when `--gemini`. Bramble Monitors pass `--scope-hints-file "$SCOPE_HINTS"`; lint has its own diff walk.
 
-Compute the round's `--goal` text and per-backend resume id from the state file:
+Compute the round's `--goal` text and per-backend resume id:
 
 ```bash
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
@@ -314,9 +285,9 @@ CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id curso
                 --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
 ```
 
-`--head-before` lets the goal helper compute "Files changed since round N-1" by diffing the prior round's `head_after` against the current HEAD. `prior-session-id` returns empty across series boundaries (when `IS_NEW_SERIES=1`) so a new audit gets a fresh bramble session rather than dragging the prior series' context.
+`prior-session-id` returns empty across series boundaries so a new audit gets a fresh session.
 
-When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures so newly-arrived bot/CI signal isn't dropped — the prior series' fetch is now stale:
+When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures (prior series' fetch is now stale):
 
 ```bash
 [ "$IS_NEW_SERIES" = "1" ] && [ "$PR_NUMBER" != "null" ] && {
@@ -324,8 +295,6 @@ When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures so newly-arrived bo
   python3 $SKILL_DIR/scripts/pr_ops.py ci-failed-tests > $STATE_DIR/pp-ci.json
 }
 ```
-
-Each Monitor runs `bramble code-review` directly with the round's goal and (round 2+) resume flag. Step 0.2 already proved `--resume-session-id` is supported.
 
 ```
 ENVELOPE_CODEX="$LOG_DIR/codex-envelope.json"
@@ -356,11 +325,6 @@ Monitor({
     --envelope-file \"$ENVELOPE_CURSOR\" 2>\"$LOG_DIR/cursor-stderr.txt\""
 })
 
-// Always: lint gate runs deterministic linters on the diff. ~1-2s typical.
-// Closes the post-push CodeQL gap (empty except, unused imports, etc.) that
-// kernel-PR analysis showed accounts for ~40% of substantive bot comments
-// arriving after we converged. lint_gate.py auto-skips any linter whose
-// binary is not on PATH, so this never fails the round.
 Monitor({
   description: "lint gate r{ROUND}",
   timeout_ms: 120000,
@@ -370,7 +334,7 @@ Monitor({
     2>\"$LOG_DIR/lint-stderr.txt\""
 })
 
-// Only when --gemini flag was passed:
+// Only when --gemini was passed:
 ENVELOPE_GEMINI="$LOG_DIR/gemini-envelope.json"
 GEMINI_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id gemini {ROUND} \
                 --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
@@ -388,9 +352,9 @@ Monitor({
 })
 ```
 
-Each Monitor runs independently; a crash in one does not affect the others. `timeout_ms=720000` is bramble's own 10-minute `--timeout` plus two minutes of slack; the lint Monitor uses a 2-minute timeout because deterministic linters complete in seconds. `--skip-test-execution` tells the reviewer not to run tests — quality gates will.
+Each Monitor runs independently; a crash in one doesn't affect the others. `timeout_ms=720000` is bramble's 10-minute `--timeout` plus two minutes of slack. `--skip-test-execution` defers tests to quality gates.
 
-If a backend envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block (cursor occasionally returns malformed JSON that bramble can't unmarshal even though the underlying model output was structured), recover by extracting the inner JSON and synthesizing a clean envelope, then write the recovered envelope to `<backend>-envelope-recovered.json` and pass that path to `triage --stream`. Don't silently drop the round just because the wrapper failed JSON validation — the findings inside `raw_text` are still the model's review.
+If a backend envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block (cursor occasionally returns malformed JSON the wrapper can't unmarshal), recover by extracting the inner JSON, synthesizing a clean envelope, writing it to `<backend>-envelope-recovered.json`, and passing that path to `triage --stream`. Don't drop the round — the findings inside are still the model's review.
 
 ### c) Triage
 
@@ -404,56 +368,55 @@ python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
        echo --pr-comments $STATE_DIR/pp-comments.json --ci-failures $STATE_DIR/pp-ci.json )
 ```
 
-`triage` reads envelopes, merges the series-start PR-comment and CI-failure feeds (any round where `IS_NEW_SERIES=1` — see Step 0.5), and emits:
+`triage` reads envelopes, merges series-start PR-comment and CI-failure feeds, and emits:
 
-- `consensus` — same `(file, line)` flagged by ≥2 distinct sources, or same `(file, line, topic)` for sourceless paths. Route to `must_fix`. The location-only key collapses different phrasings of the same finding so two reviewers wording it differently still consolidate.
-- `single_critical` — single-source high/critical, or CI failure that isn't a flake. Route to `must_fix`.
+- `consensus` — same `(file, line)` from ≥2 sources, or same `(file, line, topic)` for sourceless paths. Route to `must_fix`. Location-only key collapses different phrasings.
+- `single_critical` — single-source high/critical, or non-flake CI failure. Route to `must_fix`.
 - `single_medium` — single-source medium, or GitHub comment without severity-keyword. Route to `consider_fix`.
 - `low_acks` — single-source low/nit, or flake CI failure. Route to `batch_ack`.
-- `spiral_matches` — new findings that match a prior-round `fixed` action by `(file, line, topic)` (exact recurrence) or by `(file, line)` alone (rewording-resilient: fix-then-reword regression at the same site still escalates). Route to `escalate`.
+- `spiral_matches` — new findings matching a prior-round `fixed` action by `(file, line, topic)` (exact recurrence) or `(file, line)` alone (rewording-resilient). Route to `escalate`.
 
-If `spiral_matches` is non-empty, **don't auto-fix** — call `AskUserQuestion` with the spiralling findings. The prior fix may have regressed or the reviewer is re-flagging something we thought we resolved.
+If `spiral_matches` is non-empty, **don't auto-fix** — `AskUserQuestion` with the spiralling findings.
 
-If the empty action-plan case fires (nothing in `must_fix`/`consider_fix`, and `batch_ack` is all we have), exit the loop without touching files further.
+If the action plan is empty (nothing in `must_fix`/`consider_fix`, only `batch_ack`), exit the loop.
 
 ### d) Apply fixes
 
-You apply the fixes yourself. No subagent — your continuity from triage and prior rounds is more valuable than parallelism on a plan this size.
+You apply fixes yourself — your continuity from triage and prior rounds is more valuable than parallelism on a plan this size.
 
-The single most important thing in this step is what happens *before* you touch any file: read the review report holistically and cross-reference it with the code.
+The single most important thing in this step happens *before* you touch any file: read the review report holistically and cross-reference with the code.
 
-The findings are evidence, not a checklist. Two reviewers wording the same problem differently are pointing at one problem. A cited line is a symptom; the underlying invariant may live elsewhere, and the cure often belongs at a producer or shared helper rather than at every consumer the reviewer happened to notice. The action plan (`action_plan.cluster_hint` in particular) shows you where findings concentrate, but it's the codebase that tells you where the fix belongs. Reviewers who see one site of a class-level problem will keep finding the next site round after round if you only patch what they cited — that's the defensive cascade we're trying to avoid (see "A finding is a symptom" up top).
+The findings are evidence, not a checklist. Two reviewers wording the same problem differently are pointing at one problem. A cited line is a symptom; the underlying invariant may live elsewhere, and the cure often belongs at a producer or shared helper rather than at every consumer the reviewer happened to notice. `action_plan.cluster_hint` shows where findings concentrate, but the codebase tells you where the fix belongs. Reviewers who see one site of a class-level problem will keep finding the next site round after round if you only patch what they cited.
 
 What good looks like by the end of this step:
 
-- You've read every finding across all backends as one body of evidence and grouped them by underlying problem, not by source.
-- You've opened the cited files and looked for sibling sites of each problem in the same module (and in obviously-related modules).
-- You've decided on the durable fix — possibly upstream of the cited line, possibly broader than any single finding — and applied it.
-- Every triaged finding has a `comment_actions` entry. Sites you fixed beyond a cited line are logged as `source: "sweep"` so the audit trail makes the broader fix visible.
-- Stale buckets and stale-finding guards are honored: `batch_stale` entries are auto-acked with the templated reason; bramble findings whose cited code no longer matches the file are recorded as `action: "stale"` rather than silently dropped (silent drops blind the spiral guard next round).
-- Inline PR comments closed by this round have an auto-reply posted via `pr_ops.py reply-inline`. Reply bodies:
+- Every finding read across all backends as one body of evidence, grouped by underlying problem.
+- Cited files opened, sibling sites of each problem checked in the same module (and obviously-related modules).
+- Durable fix applied — possibly upstream of the cited line, possibly broader than any single finding.
+- When the fix changes behavior, vocabulary, or an invariant, docs and tests that pin it are updated in the same commit.
+- Every triaged finding has a `comment_actions` entry. Sites fixed beyond a cited line are logged as `source: "sweep"`.
+- Stale buckets honored: `batch_stale` entries auto-acked; bramble findings whose cited code no longer matches are recorded as `action: "stale"` rather than silently dropped (silent drops blind the spiral guard).
+- Inline PR comments closed by this round have an auto-reply via `pr_ops.py reply-inline`. Reply bodies:
   - `fixed`: `Fixed in <short_sha>.`
   - `stale`: `Superseded by <short_sha> — the cited code was changed/removed in a later commit. (Auto-reply from /pr-polish.)`
   - `false_positive`: `Marked false positive: <reason>. (Auto-reply from /pr-polish.)`
   - `wont_fix`: `Won't fix: <reason>. (Auto-reply from /pr-polish.)`
 
-  Skip replies for `ack` and for non-inline rows.
+  Skip replies for `ack` and non-inline rows.
 
-`comment_actions` field shapes by source: bramble (`codex` / `cursor` / `gemini` / `lint`) → `comment_id: null`; CI → `source: "ci"`, `path: <job_id>`, `topic: <test_name>`; PR comments → `source: "github-inline"` / `-issue` / `-review` with `comment_id` from the fetch; sweep → `source: "sweep"`, `comment_id: null`, `topic: "<original-topic> — class-level fix"`.
+`comment_actions` field shapes by source: bramble (`codex` / `cursor` / `gemini` / `lint`) → `comment_id: null`; CI → `source: "ci"`, `path: <job_id>`, `topic: <test_name>`; PR comments → `source: "github-inline"` / `-issue` / `-review` with `comment_id` from fetch; sweep → `source: "sweep"`, `comment_id: null`, `topic: "<original-topic> — class-level fix"`.
 
 ### e) Quality gates + commit (only if fixes applied)
 
-Skip this whole step if step d produced zero file changes. No point running lint/tests again if nothing moved.
+Skip if step d produced zero file changes.
 
-Follow project quality gates (separate turn from any Monitor arm).
+Follow project quality gates (separate turn from any Monitor arm). On pass, commit locally with subject `pr-polish round {ROUND}: <summary>` and a body listing fixed/skipped findings. **Do NOT push.**
 
-On pass, commit locally with subject `pr-polish round {ROUND}: <summary>` and a body listing fixed/skipped findings. **Do NOT push.**
-
-**Before committing, ask whether the fix is durable.** For each finding you addressed, consider: would a reviewer running the same review on the new tree raise the same finding at a different site? If yes, that's a missed sibling — extend the fix before committing. If you deliberately left a sibling site unfixed (different semantics, different invariant), record it as `action: "ack"` with a one-line reason explaining the divergence. Making intentional non-uniformity visible in the audit trail beats having it surface as next round's finding.
+**Before committing, ask whether the fix is durable.** For each finding addressed: would a reviewer running the same review on the new tree raise the same finding at a different site? If yes, that's a missed sibling — extend the fix. If you deliberately left a sibling unfixed (different semantics, different invariant), record it as `action: "ack"` with a one-line reason. Visible intentional non-uniformity beats next round's finding.
 
 ### f) Finalize round state
 
-Write accumulated `comment_actions` to a temp JSON file, then:
+Write accumulated `comment_actions` to a temp JSON, then:
 
 ```
 python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-parse HEAD) \
@@ -464,15 +427,16 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-
     $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
 ```
 
-The `--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids` and `rounds[n].resume_status` get populated for the next round's resume plumbing. Pass `--envelope lint=...` too — the lint backend doesn't carry a session id, but its envelope still feeds `lint_findings` into the persisted reviews directory. Backends not passed via `--envelope` are skipped (no automatic fallback); silently missing one means its findings won't appear in `rounds[n].<backend>_findings` and the envelope copy under `<state_dir>/reviews/` won't exist.
+`--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids` and `resume_status` populate for next round's resume plumbing. Pass `--envelope lint=...` too — it has no session id, but its envelope feeds `lint_findings` into the persisted reviews directory. Backends not passed are skipped (no automatic fallback).
 
-`state-finalize-round` also auto-populates `rounds[n].ci_findings` from `ci_failed_tests` when a PR exists; branch-only runs leave it empty.
+`state-finalize-round` auto-populates `rounds[n].ci_findings` from `ci_failed_tests` when a PR exists; branch-only runs leave it empty.
 
 ### g) Convergence check
 
-Apply the "Stop when converged" rules from the top. If converged, break out of the loop. If `round == ROUNDS` and not converged, produce Final Summary and `AskUserQuestion` for explicit approval to continue.
+Apply the convergence rules from the top. If converged, break. If `round == ROUNDS` and not converged, produce Final Summary and `AskUserQuestion`.
 
 Track progress concisely:
+
 ```
 Round 1: codex=3 (2h,1m), cursor=4 (1h,3m), pr_comments=2, ci=0 -> fixed 7, skipped 1 -> continue
 Round 2: codex=1 (1m), cursor=1 (1m, same) -> consensus, fixed 1 -> continue
@@ -481,13 +445,13 @@ Round 3: codex=0, cursor=0 -> EXIT (converged)
 
 ## Step 4: Push once on loop exit
 
-**Why defer push.** Every push to a PR's branch triggers whatever GitHub bots are configured (CodeRabbit, Cursor Bugbot, coderabbit, etc.) to re-review. If we pushed after every round the bots would spend their budget scanning intermediate commits — review N+1 sees the round-N-fix diff and reliably generates new comments on it, even when the round-N fix was correct. By batching all commits and pushing once at loop exit, the bots see the polished tree. CI likewise runs once on the final state. This is the single most important reason this skill doesn't push mid-loop.
+**Why defer push.** Every push to a PR's branch triggers configured GitHub bots (CodeRabbit, Cursor Bugbot, etc.) to re-review. Mid-loop pushes burn bot budget on intermediate commits and reliably generate new comments on round-N-fix diffs — even when the fix was correct. Batching means bots see the polished tree; CI runs once on the final state.
 
 ```
 git push --force-with-lease --force-if-includes origin HEAD
 ```
 
-Branch-only mode on first push: `git push -u origin <branch>` (no prior remote to protect with `--force-with-lease`).
+Branch-only first push: `git push -u origin <branch>` (no prior remote to protect).
 
 ## Step 5: Final summary + mark complete
 
@@ -495,12 +459,12 @@ Branch-only mode on first push: `git push -u origin <branch>` (no prior remote t
 python3 $SKILL_DIR/scripts/pr_ops.py state-mark-complete $CTX <reason>
 ```
 
-**Reason values**: `converged`, `all-low`, `false-positive-top`, `trend-down`, `capped-at-max`, `user-paused`, `spiral-escalated`, `sync-conflict`, `abandoned` (set by `state-mark-abandoned` from Step 0.5 when the prior heartbeat went stale; never passed to `state-mark-complete` directly).
+**Reason values**: `converged`, `all-low`, `false-positive-top`, `trend-down`, `capped-at-max`, `user-paused`, `spiral-escalated`, `sync-conflict`, `abandoned` (set by `state-mark-abandoned`; never passed to `state-mark-complete` directly).
 
-Print a Markdown summary with these sections:
+Print a Markdown summary:
 
 - Top metrics — rounds completed, comments addressed, commits pushed, convergence signal, verdict (Ready / Not ready).
 - Round-by-round table — codex/cursor findings, fixed counts, one-line note per round.
 - Comment Actions table — every `comment_actions` row across rounds, sorted by round then severity desc; columns `Round | Source | Path:Line | Severity | Action | Notes`. Use `-` for null path/line.
 
-Tell the user the state file path so they can read the raw per-finding decisions, and that it is preserved, not deleted. If converged, say the PR is ready to merge; otherwise list the remaining issues.
+Tell the user the state file path (preserved, not deleted). If converged, say the PR is ready to merge; otherwise list remaining issues.
