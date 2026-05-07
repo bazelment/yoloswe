@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -228,6 +229,23 @@ func TestResolvePromptForExecution_FeedbackWithoutSession(t *testing.T) {
 	assert.Contains(t, prompt, "ENG-1")
 	assert.Contains(t, prompt, "Previous feedback to incorporate")
 	assert.Contains(t, prompt, "Consider edge cases")
+}
+
+func TestResolvePromptForExecution_PRFeedbackWithoutTemplateBlock(t *testing.T) {
+	data := PromptData{Identifier: "ENG-1", Title: "Test", PRFeedback: `foo.go:7 by @alice: "tighten this"`}
+
+	prompt, err := resolvePromptForExecution("validate", "Issue {{.Identifier}}", data, "", "")
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Reviewer feedback on the PR:\nfoo.go:7 by @alice")
+	assert.Contains(t, prompt, "Update the PR by committing and pushing to the same branch")
+}
+
+func TestResolvePromptForExecution_PRFeedbackTemplateBlockNotDuplicated(t *testing.T) {
+	data := PromptData{Identifier: "ENG-1", Title: "Test", PRFeedback: "make timeout configurable"}
+
+	prompt, err := resolvePromptForExecution("validate", "Issue {{.Identifier}}\n{{.PRFeedback}}", data, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(prompt, "make timeout configurable"))
 }
 
 func TestResolvePromptForExecution_ResumeWithoutFeedback(t *testing.T) {

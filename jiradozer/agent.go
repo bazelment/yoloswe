@@ -109,6 +109,10 @@ func resolvePromptForExecution(stepName, configPrompt string, data PromptData, f
 	if err != nil {
 		return "", err
 	}
+	if data.PRFeedback != "" && !strings.Contains(prompt, data.PRFeedback) {
+		prompt += "\n\nReviewer feedback on the PR:\n" + data.PRFeedback +
+			"\n\nPlease address each point. Update the PR by committing and pushing to the same branch."
+	}
 
 	// Fallback: no session to resume but have feedback — append it.
 	if feedback != "" {
