@@ -666,6 +666,11 @@ class TestMainCLI(unittest.TestCase):
         data = json.loads((state_dir / "scope-hints.json").read_text())
         self.assertEqual(data["test_paths"], [])
         self.assertEqual(data["cross_service_packages"], [])
+        # v2 split fields should also be empty when there's no diff —
+        # otherwise a regression that drops the empty-paths short-circuit
+        # in scope_gate.main would silently change envelope shape.
+        self.assertEqual(data["changed_packages"], [])
+        self.assertEqual(data["dependency_packages"], [])
 
     def test_outside_git_repo(self) -> None:
         # ``git rev-parse --show-toplevel`` fails outside a repo. We
