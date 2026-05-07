@@ -14,9 +14,9 @@ The loop exits when the review has **converged** (see "Ownership and convergence
 All shell plumbing lives in Python helper modules bundled with this skill at `scripts` directory. Use `SKILL_DIR=.claude/skills/pr-polish` and call them as `python3 $SKILL_DIR/scripts/pr_ops.py ...`.
 
 - `pr_ops.py` — PR/branch identity, comment fetch/reply, CI failure detail, state I/O.
-- `bramble_ops.py` — Bramble launch, per-round temp files, envelope parse, consensus/triage/N+1 spiral, PR-comment + CI-failure merging.
+- `bramble_ops.py` — `--goal` / action-history text construction (round 1 vs 2+), session-resume id selection with series-boundary detection, bramble stream + envelope parsing, triage (consensus / single-source / spiral / cluster_hint), and PR-comment / CI-failure → finding adapters. The actual `bramble code-review` invocation lives in this skill body, not here.
 - `lint_gate.py` — Deterministic ruff/golangci/eslint pass on the diff; closes the CodeQL noise gap.
-- `scope_gate.py` — Computes `scope-hints.json` for `bramble code-review --scope-hints-file`: co-located test paths + multi-package detection. Runs once per round, before bramble Monitors.
+- `scope_gate.py` — Computes `scope-hints.json` for `bramble code-review --scope-hints-file`: co-located test paths, multi-package detection, and the v2 `changed_packages` / `dependency_packages` split. Runs once per round, before bramble Monitors.
 
 **Failed review streams are findings, not silence.** Missing envelopes, non-zero exit codes, or `status: "error"` envelopes must be surfaced in the round summary with the stderr path cited; never silently drop them.
 
