@@ -225,12 +225,7 @@ Round 3. Prior rounds fixed: a.go:10 codex; b.py:42 cursor.
 Skipped: c.go:8 wont_fix (design tradeoff); d.go:5 stale.
 ```
 
-Why this beats restating the PR intent every round:
-
-- **Don't-reflag cue.** Resumed models otherwise tend to re-surface their own prior findings, especially after a fix changes neighboring code. A literal "fixed: X; skipped: Y" line costs ~50 tokens and reliably suppresses recurrence-noise. This same biasing is also why there's no separate "review the new commits" Monitor: continuous review with session resume already gives the new turn a recency-weighted view; adding another arm just doubles cost.
-- **Skip-reason transparency.** When the orchestrator wrote `wont_fix` or `stale`, the model needs to know *why* — otherwise it will keep arguing the original point. Including the bracketed reason (`(design tradeoff)`, `(stale)`) closes that loop.
-- **Recency anchor.** The round number is a simple turn counter that helps the model frame its response ("on this turn I'll focus on …") rather than re-relitigating round 1.
-- **Bounded length.** Capped at `_ACTION_HISTORY_CAP` per bucket with a `(N more)` suffix; the full audit trail lives in `comment_actions`, not the prompt.
+The `fixed: X; skipped: Y (reason)` line is what stops the resumed model from re-flagging its own prior findings and arguing skipped ones. Same reason there's no separate "review the new commits" arm: session resume already biases the new turn toward what's new. Capped at `_ACTION_HISTORY_CAP` per bucket with a `(N more)` suffix — the full audit trail lives in `comment_actions`.
 
 What the goal channel deliberately does **not** carry:
 
