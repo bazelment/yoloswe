@@ -703,11 +703,59 @@ class TestTriage(unittest.TestCase):
         self.assertEqual(len(plan["escalate"]), 1)
         self.assertEqual(len(plan["batch_ack"]), 1)
         self.assertEqual(len(plan["consider_fix"]), 0)
-        # must_fix/consider_fix/batch_ack/batch_stale/escalate must all be present.
+        # must_fix/consider_fix/batch_ack/batch_stale/escalate/cluster_hint
+        # must all be present.
         self.assertEqual(
             set(plan.keys()),
-            {"must_fix", "consider_fix", "batch_ack", "batch_stale", "escalate"},
+            {"must_fix", "consider_fix", "batch_ack", "batch_stale",
+             "escalate", "cluster_hint"},
         )
+
+    def test_cluster_hint_groups_actionable_findings_by_file(self) -> None:
+        # cluster_hint surfaces files concentrating >=2 actionable
+        # findings so the fixer plans co-located edits as one task.
+        # Without it, defensive cascades arise from minimal patches at
+        # cited lines while sibling sites in the same file get found
+        # one round at a time.
+        a1 = self._f("codex", "a.py", 10, "high", "null body in foo")
+        a2 = self._f("cursor", "a.py", 10, "high", "null body in foo")  # consensus
+        a3 = self._f("codex", "a.py", 50, "medium", "null body in bar")
+        b1 = self._f("cursor", "b.py", 1, "medium", "unrelated single-site issue")
+        out = bramble_ops.triage([a1, a2, a3, b1], prior_fixed_keys=set())
+        clusters = out["action_plan"]["cluster_hint"]
+        # a.py has 2 actionable entries (one consensus pair + one single
+        # medium); b.py has 1 → only a.py becomes a cluster candidate.
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["file"], "a.py")
+        self.assertEqual(clusters[0]["count"], 2)
+        self.assertIn("null body in foo", clusters[0]["topics"])
+        self.assertIn(50, clusters[0]["lines"])
+
+    def test_cluster_hint_excludes_spirals(self) -> None:
+        # Spiral matches go to ``escalate`` (not auto-fixed); they
+        # shouldn't drive the cluster_hint either, since the fixer
+        # isn't supposed to act on them without human input.
+        spiral = self._f("codex", "a.py", 10, "high", "regression at foo")
+        spiral_key = (spiral["file"], spiral["line"], spiral["topic"])
+        sibling = self._f("codex", "a.py", 50, "medium", "different issue")
+        out = bramble_ops.triage([spiral, sibling], prior_fixed_keys={spiral_key})
+        # Only one actionable finding on a.py → no cluster.
+        self.assertEqual(out["action_plan"]["cluster_hint"], [])
+
+    def test_cluster_hint_unit_orders_by_count_desc(self) -> None:
+        findings = [
+            {"file": "a.py", "line": 10, "topic": "t1"},
+            {"file": "a.py", "line": 50, "topic": "t2"},
+            {"file": "a.py", "line": 90, "topic": "t3"},
+            {"file": "b.py", "line": 1, "topic": "u1"},
+            {"file": "b.py", "line": 2, "topic": "u2"},
+            {"file": "c.py", "line": 1, "topic": "v1"},  # singleton, dropped
+            {"file": None, "line": 1, "topic": "no-path"},  # dropped
+        ]
+        clusters = bramble_ops._cluster_hint(findings)
+        self.assertEqual([c["file"] for c in clusters], ["a.py", "b.py"])
+        self.assertEqual(clusters[0]["count"], 3)
+        self.assertEqual(clusters[1]["count"], 2)
 
     def test_action_plan_routes_single_medium_to_consider_fix(self) -> None:
         medium = self._f("cursor", "x.py", 1, "medium", "Missing error handling path")

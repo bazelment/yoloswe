@@ -1,7 +1,7 @@
 ---
 name: pr-polish
 description: Fully autonomous PR polish loop. Runs N rounds of local bramble review (codex + cursor, optionally + gemini), folds in any existing PR comments and CI failures as round-1 input, fixes findings locally, pushes once at the end.
-argument-hint: "[--rounds N] [--fixer-model MODEL] [--gemini]"
+argument-hint: "[--rounds N] [--gemini]"
 disable-model-invocation: true
 ---
 
@@ -27,7 +27,6 @@ All shell plumbing lives in Python helper modules bundled with this skill at `sc
 | Flag | Default | Meaning |
 |---|---|---|
 | `--rounds N` | `5` | The round number this invocation will *stop at* (inclusive). Resuming a state at `current_round=5` with `--rounds 7` runs rounds 6 and 7 — i.e. "two more rounds". `--rounds 5` on the same state is a no-op (already at the cap). |
-| `--fixer-model MODEL` | `sonnet` | Model passed to `Agent(model=…)` spawns when the round's action plan is too large to apply inline. |
 | `--gemini` | off | Also run a third bramble reviewer using `--backend gemini --model gemini-3-flash-preview`. Findings from all three backends are merged and deduplicated; a finding agreed on by ≥2 sources (including Gemini) counts as consensus. |
 
 No positional arguments. PR/branch context is auto-detected by `pr_ops.py identify`.
@@ -40,6 +39,19 @@ No positional arguments. PR/branch context is auto-detected by `pr_ops.py identi
 - High/medium: fix unless provably false positive (cite refuting file:line).
 - Low/nit: fix if trivial, else skip with one-line justification.
 - Only valid skip reasons: `false_positive` (with evidence), `wont_fix` (design tradeoff), `stale` (cited code gone).
+
+**A finding is a symptom; the fix is the cure.**
+
+Each cited finding is one observation of an underlying problem. The fix is what closes the *problem*, not just the observed instance. Before patching, ask:
+
+- **What is the actual invariant being violated here?** ("body must be a string" — not "this one line crashes on null.")
+- **Where else does the codebase rely on the same invariant?** Same module first; adjacent modules if the invariant is shared.
+- **Is the right fix at the cited line, or upstream?** A defensive guard at every consumer is often a sign that a producer should normalize once.
+- **Does the fix introduce a new invariant of its own?** New helpers, new shapes, new edge cases — those are next round's findings unless you carry the same rigor through.
+
+When in doubt, prefer the fix that makes the next reviewer's question redundant. A cascade of medium-severity rounds is usually one missed invariant.
+
+Fixes that close sites beyond the cited finding are still logged in `comment_actions`: `action: "fixed"`, `comment_id: null`, `source: "sweep"`, `topic: "<original-topic> — class-level fix"`. Audit trail stays complete; reviewer can see what was extended.
 
 **Stop when converged.** Any one:
 - Zero findings, or all remaining are low/nit.
@@ -119,7 +131,7 @@ Schema:
 
 **`comment_actions` schema — load-bearing, other tooling depends on exact strings:**
 
-- `source`: one of `github-inline`, `github-issue`, `github-review`, `codex`, `cursor`, `gemini`, `lint`, `ci`. (`lint` rows come from `lint_gate.py`'s deterministic ruff/golangci-lint/eslint pass — see Step 3b. They route through triage like any other source: a `(file, line)` match with codex or cursor counts as consensus, regardless of how each one phrased its topic.)
+- `source`: one of `github-inline`, `github-issue`, `github-review`, `codex`, `cursor`, `gemini`, `lint`, `ci`, `sweep`. (`lint` rows come from `lint_gate.py`'s deterministic ruff/golangci-lint/eslint pass — see Step 3b. They route through triage like any other source: a `(file, line)` match with codex or cursor counts as consensus, regardless of how each one phrased its topic. `sweep` rows are class-level fixes applied beyond a cited finding's exact line — see "A finding is a symptom" up top.)
 - `comment_id`: GitHub id for `github-*`; `null` for bramble and CI findings (bramble dedupes by `(path, line, topic)`; CI dedupes by `(job_id, test_name)` where `path=job_id` and `topic=test_name`).
 - `path` / `line`: `null` for top-level PR + review-level comments.
 - `severity`: `high`, `medium`, `low`, `nit`, or `null`.
@@ -262,7 +274,7 @@ for round = 1..ROUNDS:
   a) commit any pending changes (WIP ok)
   b) launch bramble codex + cursor via Monitor (parallel)
   c) triage findings (+ pr-comments + ci-failures if round 1)
-  d) apply fixes — spawn fixer Agent if >8 findings or many files
+  d) read findings holistically, cross-reference code, apply fixes
   e) if fixes applied: run quality gates, commit locally (NO push)
   f) finalize round state
   g) check convergence; exit if met
@@ -405,41 +417,28 @@ If the empty action-plan case fires (nothing in `must_fix`/`consider_fix`, and `
 
 ### d) Apply fixes
 
-Apply the rules from "Ownership and convergence" up top. Two cases need extra rigor:
+You apply the fixes yourself. No subagent — your continuity from triage and prior rounds is more valuable than parallelism on a plan this size.
 
-- **Stale-on-prior-commit PR comments.** Triage's `batch_stale` bucket holds inline comments whose `original_commit_id` no longer matches `pr["head_sha"]` (cursor[bot] / coderabbit comments superseded by amended commits). Auto-acknowledge each as `action: "stale"` with `reason: "Superseded by <short_sha>; comment was anchored to <short_old_sha>."` — no fix attempt, no further triage. Auto-reply per the templates below.
-- **Stale finding guard.** Before fixing any bramble finding, verify the cited code still matches the current file; if you made changes between launching bramble and reading results the finding may reference code that no longer exists. When the guard fires, record the finding with `action: "stale"` — silently dropping it blinds the N+1 spiral guard.
+The single most important thing in this step is what happens *before* you touch any file: read the review report holistically and cross-reference it with the code.
 
-Log every triaged finding to `comment_actions`. For bramble findings: `source` is `"codex"` / `"cursor"` / `"gemini"` / `"lint"`, `comment_id: null`. For CI: `source: "ci"`, `path: job_id`, `topic: test_name`. For PR comments: `source: "github-inline"` etc. with `comment_id` from the fetch.
+The findings are evidence, not a checklist. Two reviewers wording the same problem differently are pointing at one problem. A cited line is a symptom; the underlying invariant may live elsewhere, and the cure often belongs at a producer or shared helper rather than at every consumer the reviewer happened to notice. The action plan (`action_plan.cluster_hint` in particular) shows you where findings concentrate, but it's the codebase that tells you where the fix belongs. Reviewers who see one site of a class-level problem will keep finding the next site round after round if you only patch what they cited — that's the defensive cascade we're trying to avoid (see "A finding is a symptom" up top).
 
-**Who applies the fixes.** Orchestrator applies fixes directly for small action plans. Spawn a fixer `Agent` when:
-- More than 5 actionable findings AND they span many files, OR
-- Findings require reading large amounts of unfamiliar code.
+What good looks like by the end of this step:
 
-Fixer agent call:
+- You've read every finding across all backends as one body of evidence and grouped them by underlying problem, not by source.
+- You've opened the cited files and looked for sibling sites of each problem in the same module (and in obviously-related modules).
+- You've decided on the durable fix — possibly upstream of the cited line, possibly broader than any single finding — and applied it.
+- Every triaged finding has a `comment_actions` entry. Sites you fixed beyond a cited line are logged as `source: "sweep"` so the audit trail makes the broader fix visible.
+- Stale buckets and stale-finding guards are honored: `batch_stale` entries are auto-acked with the templated reason; bramble findings whose cited code no longer matches the file are recorded as `action: "stale"` rather than silently dropped (silent drops blind the spiral guard next round).
+- Inline PR comments closed by this round have an auto-reply posted via `pr_ops.py reply-inline`. Reply bodies:
+  - `fixed`: `Fixed in <short_sha>.`
+  - `stale`: `Superseded by <short_sha> — the cited code was changed/removed in a later commit. (Auto-reply from /pr-polish.)`
+  - `false_positive`: `Marked false positive: <reason>. (Auto-reply from /pr-polish.)`
+  - `wont_fix`: `Won't fix: <reason>. (Auto-reply from /pr-polish.)`
 
-```
-Agent({
-  description: "pr-polish fix round {ROUND}",
-  subagent_type: "general-purpose",
-  model: "{FIXER_MODEL}",  // from --fixer-model, default "sonnet"
-  prompt: `<ownership rules> <action plan JSON> <envelope + stderr paths>
-           Round 1 also includes unresolved PR comments — post inline replies
-           via pr_ops.py reply-inline after fixing.
-           Return a fenced ```json``` block of comment_actions as last content.`,
-})
-```
+  Skip replies for `ack` and for non-inline rows.
 
-The `--fixer-model` flag threads straight through to `Agent(model=...)`. Default is `sonnet`; try `opus` for gnarly architectural fixes.
-
-**Auto-reply to PR comments.** For every inline `comment_actions` row whose `comment_id` is non-null AND `action` is one of `fixed`, `stale`, `false_positive`, `wont_fix`, post a reply via `pr_ops.py reply-inline <comment_id> "<body>"` so the bot/human author sees a closure signal in the thread. Templates (one short paragraph each — bots don't need prose, humans skim):
-
-- `fixed`: `Fixed in <short_sha>.`
-- `stale`: `Superseded by <short_sha> — the cited code was changed/removed in a later commit. (Auto-reply from /pr-polish.)`
-- `false_positive`: `Marked false positive: <reason>. (Auto-reply from /pr-polish.)`
-- `wont_fix`: `Won't fix: <reason>. (Auto-reply from /pr-polish.)`
-
-Skip replies for `ack` (low/nit batch acks would spam the thread) and for non-inline rows (`comment_id` null — no thread to reply to). Batch-reply nits at the top level if you must — don't fan out one reply per trivial finding.
+`comment_actions` field shapes by source: bramble (`codex` / `cursor` / `gemini` / `lint`) → `comment_id: null`; CI → `source: "ci"`, `path: <job_id>`, `topic: <test_name>`; PR comments → `source: "github-inline"` / `-issue` / `-review` with `comment_id` from the fetch; sweep → `source: "sweep"`, `comment_id: null`, `topic: "<original-topic> — class-level fix"`.
 
 ### e) Quality gates + commit (only if fixes applied)
 
@@ -448,6 +447,8 @@ Skip this whole step if step d produced zero file changes. No point running lint
 Follow project quality gates (separate turn from any Monitor arm).
 
 On pass, commit locally with subject `pr-polish round {ROUND}: <summary>` and a body listing fixed/skipped findings. **Do NOT push.**
+
+**Before committing, ask whether the fix is durable.** For each finding you addressed, consider: would a reviewer running the same review on the new tree raise the same finding at a different site? If yes, that's a missed sibling — extend the fix before committing. If you deliberately left a sibling site unfixed (different semantics, different invariant), record it as `action: "ack"` with a one-line reason explaining the divergence. Making intentional non-uniformity visible in the audit trail beats having it surface as next round's finding.
 
 ### f) Finalize round state
 

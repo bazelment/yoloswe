@@ -519,6 +519,49 @@ def ci_failure_to_finding(f: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cluster_hint(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group action-plan items by file. Files with >=2 actionable items
+    become sweep candidates the fixer should treat as one task — most
+    defensive cascades come from finding only the first site of a
+    class-level bug and missing the rest in the same module.
+
+    Accepts a heterogeneous list mixing raw findings (``{file, line,
+    topic}``), single-finding wrappers (``{finding: ...}``), and
+    consensus wrappers (``{findings: [...]}``). One consensus entry
+    counts as one item — both reviewers spotted the same location.
+
+    Returns ``{file, count, lines, topics}`` entries sorted by count
+    desc, file asc. Single-finding files are omitted. Items without a
+    file path are dropped.
+    """
+    def _unwrap(it: dict[str, Any]) -> dict[str, Any]:
+        if "finding" in it and isinstance(it["finding"], dict):
+            return it["finding"]
+        if "findings" in it and isinstance(it["findings"], list) and it["findings"]:
+            return it["findings"][0]
+        return it
+
+    by_file: dict[str, dict[str, Any]] = {}
+    for raw in items:
+        f = _unwrap(raw)
+        path = f.get("file")
+        if not path:
+            continue
+        bucket = by_file.setdefault(
+            path, {"file": path, "count": 0, "lines": [], "topics": []},
+        )
+        bucket["count"] += 1
+        line = f.get("line")
+        if line is not None:
+            bucket["lines"].append(line)
+        topic = f.get("topic")
+        if topic:
+            bucket["topics"].append(topic)
+    clusters = [b for b in by_file.values() if b["count"] >= 2]
+    clusters.sort(key=lambda b: (-b["count"], b["file"]))
+    return clusters
+
+
 def triage(
     findings: list[dict[str, Any]],
     prior_fixed_keys: set[tuple],
@@ -667,6 +710,13 @@ def triage(
             "batch_ack": _without_spiral(low_acks),
             "batch_stale": stale_prior_commit,
             "escalate": spiral_matches,
+            # Sweep candidates: files concentrating >=2 actionable
+            # findings. Read by the fixer prompt so co-located issues
+            # are planned holistically rather than as N independent
+            # line-level patches. See SKILL.md "A finding is a symptom".
+            "cluster_hint": _cluster_hint(
+                _without_spiral(consensus + single_critical + single_medium),
+            ),
         },
         # ``total`` covers all post-merge findings (bramble + pr_comments +
         # ci_failures). Reporting only ``len(findings)`` would undercount
