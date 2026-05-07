@@ -194,6 +194,23 @@ class TestRunEslint(unittest.TestCase):
                 got = lint_gate.run_eslint(["/x/foo.ts"])
         self.assertEqual(got, [])
 
+    def test_blank_stdout_nonzero_rc_blank_stderr_still_emits_finding(self) -> None:
+        # Edge case caught in r13: rc != 0 with blank stderr is a real
+        # tooling failure (process killed, segfault on some configs).
+        # Without the synthetic finding, the round would proceed thinking
+        # eslint passed cleanly when it never actually ran.
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(
+                lint_gate,
+                "run",
+                side_effect=_stub_run("", returncode=2, stderr=""),
+            ):
+                got = lint_gate.run_eslint(["/x/foo.ts"])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertIn("tooling failure", got[0]["message"])
+        self.assertIn("no stderr", got[0]["message"])
+
 
 class TestBuildEnvelope(unittest.TestCase):
     def test_envelope_shape_matches_bramble_parse_envelope(self) -> None:

@@ -566,12 +566,18 @@ class TestParseEnvelope(unittest.TestCase):
             got[0]["topic"].split(), ["null", "check", "on", "line", "10", "foo", "may", "be"]
         )
 
-    def test_error_yields_synthetic_stale(self) -> None:
+    def test_error_envelope_yields_high_severity_finding(self) -> None:
+        # The whole point of synthesizing this finding is to surface a
+        # failed bramble run loudly. severity must be "high" so triage
+        # routes it through single_critical → must_fix; severity:None
+        # would land it in low_acks (low-severity catch-all) and let
+        # Monitor failures masquerade as batch-ackable nits.
         env = {"status": "error", "error": "backend crashed"}
         got = bramble_ops.parse_envelope(env, source="cursor")
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["source"], "cursor")
         self.assertEqual(got[0]["status"], "error")
+        self.assertEqual(got[0]["severity"], "high")
         self.assertIn("backend crashed", got[0]["message"])
 
     def test_missing_envelope_yields_empty_list(self) -> None:

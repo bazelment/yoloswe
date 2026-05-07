@@ -161,8 +161,15 @@ def comment_caught_in_envelope(comment: dict, issues: list[dict]) -> tuple[bool,
         i_file = _file_tail(i_path)
         i_msg = _normalize_body((issue.get("message") or "") + " " + (issue.get("suggestion") or ""))
 
-        # File match
-        file_match = c_file and i_file and c_file == i_file
+        # File match. Prefer the full repo-relative path when both
+        # sides have one — basename collision (pkg/foo.py vs
+        # other/foo.py) would otherwise overcount r2 hits in
+        # monorepos with duplicate filenames. Fall back to basename
+        # only when one or both paths are missing.
+        if c_path and i_path:
+            file_match = c_path == i_path
+        else:
+            file_match = bool(c_file and i_file and c_file == i_file)
 
         # Line proximity
         line_match = False

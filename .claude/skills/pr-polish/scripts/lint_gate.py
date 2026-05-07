@@ -181,8 +181,14 @@ def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
     if not paths or not _have("eslint"):
         return []
     res = run(["eslint", "--format=json", *paths], check=False)
+    stderr = (res.stderr or "").strip()
+    # Any non-zero exit OR non-empty stderr OR blank-stdout-with-rc=0 is
+    # ambiguous-or-broken: emit a synthetic tooling-failure finding so
+    # the round can't proceed thinking eslint passed cleanly when it
+    # didn't actually inspect the diff. A genuinely clean run is
+    # rc=0 with stdout="[]"; that hits the JSON-parse path below.
     if not res.stdout.strip():
-        if res.returncode != 0 or (res.stderr or "").strip():
+        if res.returncode != 0 or stderr:
             return [
                 {
                     "file": None,
@@ -191,7 +197,7 @@ def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
                     "topic": topic_of("eslint tooling failure"),
                     "message": (
                         f"[eslint] tooling failure (exit {res.returncode}): "
-                        f"{(res.stderr or '').strip()[:300]}"
+                        f"{stderr[:300] if stderr else 'no stderr'}"
                     ),
                 }
             ]
