@@ -8,6 +8,10 @@ bazel-*
 # Claude Code per-project state
 .claude/scheduled_tasks.lock
 
+# Python
+__pycache__/
+*.pyc
+
 # Go
 *.exe
 *.exe~
