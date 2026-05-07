@@ -47,10 +47,13 @@ class TestSafePaths(unittest.TestCase):
     gets reinterpreted as a linter flag.
     """
 
-    def test_drops_leading_dash_paths(self) -> None:
+    def test_rewrites_leading_dash_paths_with_dot_slash(self) -> None:
+        # Round 28 fix: dropping these paths let a PR evade linting
+        # by choosing a leading-dash filename. Prepending "./" keeps
+        # the file in the lint set but breaks argv-flag interpretation.
         self.assertEqual(
             lint_gate._safe_paths(["a.py", "--config=x.toml", "b.py", "-q.py"]),
-            ["a.py", "b.py"],
+            ["a.py", "./--config=x.toml", "b.py", "./-q.py"],
         )
 
     def test_keeps_normal_paths(self) -> None:
@@ -75,6 +78,23 @@ class TestSafePaths(unittest.TestCase):
         # Paths come after the --
         idx = captured[0].index("--")
         self.assertEqual(captured[0][idx + 1 :], ["a.py", "b.py"])
+
+    def test_run_eslint_inserts_dash_dash_separator(self) -> None:
+        # Parity with run_ruff: removing the "--" before *paths in
+        # run_eslint must fail this test. Caught in r28 cursor review
+        # as a coverage gap.
+        captured = []
+
+        def capture(cmd, **kw):
+            captured.append(cmd)
+            return _stub_run("[]")(cmd, **kw)
+
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=capture):
+                lint_gate.run_eslint(["x/a.ts", "x/b.tsx"])
+        self.assertIn("--", captured[0])
+        idx = captured[0].index("--")
+        self.assertEqual(captured[0][idx + 1 :], ["x/a.ts", "x/b.tsx"])
 
 
 class TestRunRuff(unittest.TestCase):

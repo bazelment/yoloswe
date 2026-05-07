@@ -77,15 +77,17 @@ def _have(binary: str) -> bool:
 
 
 def _safe_paths(paths: list[str]) -> list[str]:
-    """Drop paths that could be parsed as linter flags.
+    """Make leading-dash filenames safe to pass to lint subprocesses.
 
     A PR can add a file literally named ``--config=evil.toml`` or
     ``-q.py``; if we splat that straight into argv the linter will
     treat it as an option, not a path. Bot/lint-gate behavior is
-    then attacker-controlled. Drop anything starting with ``-`` —
-    legitimate code paths never do.
+    then attacker-controlled. Prepending ``./`` produces a path
+    that's still the same file but cannot be reinterpreted as a
+    flag. Dropping these paths instead would let a PR evade
+    linting entirely by choosing a leading-dash filename.
     """
-    return [p for p in paths if not p.startswith("-")]
+    return [f"./{p}" if p.startswith("-") else p for p in paths]
 
 
 def _tooling_failure(linter: str, returncode: int, stderr: str) -> dict[str, Any]:

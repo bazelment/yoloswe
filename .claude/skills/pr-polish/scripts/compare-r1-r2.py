@@ -495,17 +495,16 @@ def main(argv: list[str] | None = None) -> int:
         result = compare_pr(pr, bramble_dir, r2_dir, verbose=args.verbose)
         results.append(result)
 
-    # Always compute all_pass so --json shares the same exit-code contract
-    # as Markdown mode. CI gating on Phase-3 outcomes only worked in the
-    # Markdown path before — --json silently returned 0 even on regression.
-    _, all_pass = format_results(results)
+    # Always compute (table, all_pass) once so --json shares the same
+    # exit-code contract as Markdown mode and we don't redo the table
+    # rendering work.
+    table, all_pass = format_results(results)
 
     if args.json:
         payload = {"results": results, "all_pass": all_pass}
         print(json.dumps(payload, indent=2))
         return 0 if all_pass else 1
 
-    table, _ = format_results(results)
     print(table)
     print()
     print(narrative(results))
