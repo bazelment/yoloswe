@@ -235,6 +235,19 @@ class TestPrOrSlugConverter(unittest.TestCase):
         with self.assertRaises(_ap.ArgumentTypeError):
             bramble_ops._pr_or_slug("")
 
+    def test_branch_prefix_disambiguates_numeric_branch_from_pr(self) -> None:
+        # A branch literally named "1234" must not be coerced to int(1234)
+        # and indistinguishable from PR #1234. The branch: prefix forces
+        # slug routing.
+        self.assertEqual(bramble_ops._pr_or_slug("branch:1234"), "1234")
+        self.assertEqual(bramble_ops._pr_or_slug("branch:feature/foo"), "feature/foo")
+
+    def test_branch_prefix_with_empty_name_rejected(self) -> None:
+        import argparse as _ap
+
+        with self.assertRaises(_ap.ArgumentTypeError):
+            bramble_ops._pr_or_slug("branch:")
+
     def test_parser_accepts_branch_slug_for_format_monitor_command(self) -> None:
         # End-to-end: argparse round-trips the slug through to the namespace.
         parser = bramble_ops._build_parser()

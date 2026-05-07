@@ -487,11 +487,22 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
 
 
 def _pr_or_slug(value: str) -> int | str:
-    """Argparse converter: numeric strings become ints (PR numbers); other
-    non-empty strings pass through as branch slugs. Matches the int|str
-    contract that ``format_monitor_command`` and ``parse_round`` accept."""
+    """Argparse converter: numeric strings become ints (PR numbers); strings
+    prefixed with ``branch:`` become branch slugs (the prefix is stripped);
+    other non-empty strings also pass through as slugs.
+
+    The ``branch:`` prefix exists so a numeric-only branch name (rare but
+    possible — e.g. a branch literally named ``1234``) can be distinguished
+    from PR #1234. Without the prefix, integer parsing would silently route
+    that branch to the wrong state file and envelope path.
+    """
     if not value:
         raise argparse.ArgumentTypeError("--pr cannot be empty")
+    if value.startswith("branch:"):
+        slug = value[len("branch:") :]
+        if not slug:
+            raise argparse.ArgumentTypeError("branch: prefix requires a non-empty name")
+        return slug
     try:
         return int(value)
     except ValueError:

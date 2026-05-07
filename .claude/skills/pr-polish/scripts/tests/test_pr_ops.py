@@ -681,6 +681,29 @@ class TestPersistRoundFindings(unittest.TestCase):
         state = pr_ops.state_finalize_round(77, 1, "sha2", [])
         self.assertEqual(state["rounds"][0]["codex_findings"], [])
 
+    def test_finalize_uses_branch_envelope_key_for_branch_only_runs(self) -> None:
+        # Branch-only finalize must look for envelopes under the slugified
+        # branch key, not the raw branch name. A branch like "feature/foo"
+        # used to produce a nested /tmp path with a literal slash; verify
+        # _persist_round_findings now passes the canonical slug instead.
+        captured: list = []
+        bramble_ops = self.bramble_ops
+
+        def capture_envelope_path(repo: str, pr, backend: str, round_: int) -> Path:
+            captured.append(pr)
+            return self.envelope_dir / f"{backend}-r{round_}.json"
+
+        with patch.object(bramble_ops, "envelope_path", side_effect=capture_envelope_path):
+            pr_ops.state_append_round(
+                "branch:feature/foo", 1, "sha", verify_head=False
+            )
+            pr_ops.state_finalize_round("branch:feature/foo", 1, "sha2", [])
+
+        # Every envelope_path call gets the slug-normalized key, not the raw name.
+        self.assertTrue(captured, "envelope_path was never called")
+        for key in captured:
+            self.assertEqual(key, "branch-feature-foo")
+
 
 class TestCIFailedTests(unittest.TestCase):
     """Parses per-failed-job test details from gh check output + job logs."""
