@@ -100,8 +100,13 @@ def _is_ts_js_test(name: str) -> bool:
     rather than only ``*.test.{ext}`` keeps fixtures and shared helpers
     in scope, which is usually what the reviewer wants.
     """
+    # Cover the same module formats _bucket() recognizes; otherwise a
+    # changed source file with extension .mjs/.cjs would route into the JS
+    # bucket but its co-located *.test.mjs / *.spec.cjs would never match.
     for suffix in (".test.ts", ".test.tsx", ".test.js", ".test.jsx",
-                   ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"):
+                   ".test.mjs", ".test.cjs",
+                   ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
+                   ".spec.mjs", ".spec.cjs"):
         if name.endswith(suffix):
             return True
     return False
@@ -173,7 +178,11 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
     happens once, after the union across all changed files.
     """
     found: set[str] = set()
-    seen_dirs: set[Path] = set()
+    # Key by (directory, language) so a polyglot package — e.g. a folder
+    # holding both .py and .ts files — gets walked once per language.
+    # Keying by directory alone would let the first language seen suppress
+    # the others' test enumeration.
+    seen_dirs: set[tuple[Path, str]] = set()
 
     for rel in changed:
         lang = _bucket(rel)
@@ -198,9 +207,10 @@ def collect_test_paths(repo_root: Path, changed: list[str]) -> list[str]:
                 candidate_dirs.append(pkg_root / "__tests__")
 
         for d in candidate_dirs:
-            if d in seen_dirs:
+            key = (d, lang)
+            if key in seen_dirs:
                 continue
-            seen_dirs.add(d)
+            seen_dirs.add(key)
             for test_file in _walk_tests(repo_root, d, lang):
                 try:
                     rel_test = test_file.relative_to(repo_root)

@@ -163,11 +163,31 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
 
 
 def run_eslint(paths: list[str]) -> list[dict[str, Any]]:
-    """Run ``eslint --format=json`` and normalize. Severity 2→medium, 1→low."""
+    """Run ``eslint --format=json`` and normalize. Severity 2→medium, 1→low.
+
+    eslint's clean-run contract is rc=0 with stdout ``[]``. A blank stdout
+    plus non-zero rc or stderr usually means a config/tooling failure (no
+    config file found, parser crash). Surface that as a single lint
+    finding rather than dropping silently — otherwise triage records
+    "no eslint issues" while eslint never actually inspected the diff.
+    """
     if not paths or not _have("eslint"):
         return []
     res = run(["eslint", "--format=json", *paths], check=False)
     if not res.stdout.strip():
+        if res.returncode != 0 or (res.stderr or "").strip():
+            return [
+                {
+                    "file": None,
+                    "line": None,
+                    "severity": "medium",
+                    "topic": topic_of("eslint tooling failure"),
+                    "message": (
+                        f"[eslint] tooling failure (exit {res.returncode}): "
+                        f"{(res.stderr or '').strip()[:300]}"
+                    ),
+                }
+            ]
         return []
     try:
         report = json.loads(res.stdout)

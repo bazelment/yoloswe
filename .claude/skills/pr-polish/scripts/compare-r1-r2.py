@@ -233,16 +233,18 @@ def compare_pr(
         })
 
     # Regression check for 2755: any r1 finding missing in r2?
+    # Run the loop unconditionally — when r2 is empty, every r1 finding is
+    # by definition r1-only. Guarding on `if r2_issues` would silently
+    # report zero regressions in the worst case (r2 envelope missing).
     r1_only = 0
-    if r2_issues:
-        for issue in r1_issues:
-            caught, _ = comment_caught_in_envelope(
-                {"path": issue.get("file"), "line": issue.get("line"),
-                 "body": issue.get("message", ""), "is_bot": True},
-                r2_issues
-            )
-            if not caught:
-                r1_only += 1
+    for issue in r1_issues:
+        caught, _ = comment_caught_in_envelope(
+            {"path": issue.get("file"), "line": issue.get("line"),
+             "body": issue.get("message", ""), "is_bot": True},
+            r2_issues
+        )
+        if not caught:
+            r1_only += 1
 
     return {
         "pr": pr,

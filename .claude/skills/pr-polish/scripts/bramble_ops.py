@@ -288,9 +288,9 @@ def format_monitor_command(
 
     tag = f"pr-polish:{repo}:{pr}:{backend}:r{round_}"
     # shlex.quote keeps embedded quotes/backticks in the goal intact. The cd
-    # is conditional on the dir actually existing so a stale saved command
-    # fails loudly (Monitor reports non-zero exit) rather than silently
-    # running bramble in the wrong working tree.
+    # is unconditional and short-circuits the && chain on failure: if
+    # work_dir is missing, the shell exits non-zero before bramble runs,
+    # so Monitor surfaces it instead of silently reviewing the wrong tree.
     parts = [
         "cd",
         shlex.quote(work_dir),
@@ -713,7 +713,10 @@ def triage(
             "batch_stale": stale_prior_commit,
             "escalate": spiral_matches,
         },
-        "total": len(findings),
+        # ``total`` covers all post-merge findings (bramble + pr_comments +
+        # ci_failures). Reporting only ``len(findings)`` would undercount
+        # comment/CI-only triage runs (zero bramble issues, populated buckets).
+        "total": len(all_findings),
         "unique": len(by_triage_key),
     }
 
