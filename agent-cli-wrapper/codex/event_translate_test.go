@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -22,6 +23,24 @@ func TestParseMappedNotification_TurnCompleted(t *testing.T) {
 	}
 	if !ev.Success {
 		t.Fatal("Success = false, want true")
+	}
+}
+
+func TestParseMappedNotification_TurnCompletedMapsError(t *testing.T) {
+	params := json.RawMessage(`{"threadId":"t1","turn":{"id":"turn-2","status":"failed","error":{"message":"connection reset by peer"},"items":[]}}`)
+	ev, ok := ParseMappedNotification(NotifyTurnCompleted, params)
+	if !ok {
+		t.Fatal("expected mapped event")
+	}
+	if ev.Success {
+		t.Fatal("Success = true, want false")
+	}
+	var transientErr *TransientError
+	if !errors.As(ev.Error, &transientErr) {
+		t.Fatalf("Error = %T %v, want *TransientError", ev.Error, ev.Error)
+	}
+	if transientErr.Reason != "connection_reset" {
+		t.Fatalf("Reason = %q, want connection_reset", transientErr.Reason)
 	}
 }
 

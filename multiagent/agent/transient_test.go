@@ -45,6 +45,15 @@ func TestClassifyTransientReason(t *testing.T) {
 	requireTransientReason(t, errors.New("syntax error"), false, transientmeta.ReasonUnknown)
 }
 
+func TestClassifyTransientDoesNotMatchEmbeddedHTTPStatusDigits(t *testing.T) {
+	t.Parallel()
+
+	_, ok := transientmeta.ClassifyText("processed 1500 records on port :5004")
+	if ok {
+		t.Fatal("ClassifyText matched embedded status-like digits")
+	}
+}
+
 func requireTransientReason(t *testing.T, err error, wantOK bool, wantReason string) {
 	t.Helper()
 	gotOK, gotReason := ClassifyTransient(err)

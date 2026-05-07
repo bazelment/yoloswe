@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewThread(t *testing.T) {
@@ -269,6 +271,54 @@ func TestThread_HandleTurnCompleted_WithError(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("waiter did not receive result")
+	}
+}
+
+func TestThread_WaitForTurnReturnsFailedResultWithoutError(t *testing.T) {
+	client := NewClient()
+	thread := newThread(client, "thread-123", ThreadConfig{})
+
+	thread.state.SetReady()
+	thread.state.SetProcessing()
+	thread.handleTurnStarted("turn-456")
+
+	done := make(chan struct{})
+	var result *TurnResult
+	var err error
+	go func() {
+		result, err = thread.WaitForTurn(context.Background())
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		thread.mu.Lock()
+		defer thread.mu.Unlock()
+		return len(thread.turnWaiters["turn-456"]) == 1
+	}, time.Second, time.Millisecond)
+
+	thread.handleTurnCompleted("turn-456", false, &TurnError{
+		ThreadID: "thread-123",
+		TurnID:   "turn-456",
+		Message:  "permanent failure",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("WaitForTurn did not return")
+	}
+
+	if err != nil {
+		t.Fatalf("WaitForTurn error = %v, want nil", err)
+	}
+	if result == nil {
+		t.Fatal("WaitForTurn result is nil")
+	}
+	if result.Success {
+		t.Fatal("result.Success = true, want false")
+	}
+	if result.Error == nil {
+		t.Fatal("result.Error is nil, want turn error")
 	}
 }
 

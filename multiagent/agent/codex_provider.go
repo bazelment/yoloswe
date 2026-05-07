@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/wt"
@@ -83,6 +85,8 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 
 	bridgeStop := make(chan struct{})
 	bridgeDone := make(chan struct{})
+	turnDone := make(chan struct{})
+	var turnDoneOnce sync.Once
 	go func() {
 		bridgeEvents(
 			p.client.Events(),
@@ -90,7 +94,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 			p.events,
 			bridgeStop,
 			thread.ID(),
-			func() {},
+			func() { turnDoneOnce.Do(func() { close(turnDone) }) },
 		)
 		close(bridgeDone)
 	}()
@@ -109,6 +113,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	if err != nil {
 		return &AgentResult{SessionID: thread.ID()}, err
 	}
+	waitForBridgeTurnComplete(ctx, turnDone)
 
 	agentResult := codexResultToAgentResult(result)
 	if agentResult != nil {
@@ -139,6 +144,14 @@ func codexTurnOptions(cfg ExecuteConfig) []codex.TurnOption {
 		return nil
 	}
 	return []codex.TurnOption{codex.WithEffort(string(cfg.Effort))}
+}
+
+func waitForBridgeTurnComplete(ctx context.Context, turnDone <-chan struct{}) {
+	select {
+	case <-turnDone:
+	case <-ctx.Done():
+	case <-time.After(500 * time.Millisecond):
+	}
 }
 
 // codexResultToAgentResult converts a codex.TurnResult to AgentResult.

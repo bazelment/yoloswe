@@ -125,11 +125,13 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 		if err := json.Unmarshal(params, &notif); err != nil {
 			return MappedEvent{}, false
 		}
+		errMsg := extractErrorMessage(notif.Turn.Error)
 		return MappedEvent{
 			Kind:     MappedEventTurnCompleted,
 			ThreadID: notif.ThreadID,
 			TurnID:   notif.Turn.ID,
 			Success:  notif.Turn.Status == "completed",
+			Error:    classifyTurnError(notif.ThreadID, notif.Turn.ID, errMsg),
 		}, true
 
 	case NotifyCodexEventError:

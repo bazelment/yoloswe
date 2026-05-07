@@ -151,9 +151,6 @@ func (t *Thread) WaitForTurn(ctx context.Context) (*TurnResult, error) {
 	// Wait for completion or context cancellation
 	select {
 	case result := <-ch:
-		if result != nil && result.Error != nil {
-			return result, result.Error
-		}
 		return result, nil
 	case <-ctx.Done():
 		// Remove waiter
