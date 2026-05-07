@@ -30,6 +30,7 @@ type codexReplayParser struct { //nolint:govet // fieldalignment: readability ov
 	threadUsageCumulative map[string]bool
 	threadReasoning       map[string]bool
 	threadText            map[string]*strings.Builder
+	threadFailures        map[string]struct{}
 	pendingApprovals      map[string]map[string]struct{}
 	emittedApprovals      map[string]map[string]struct{}
 	prompt                string
@@ -62,6 +63,7 @@ func newCodexReplayParser() *codexReplayParser {
 		threadUsageCumulative:    make(map[string]bool),
 		threadReasoning:          make(map[string]bool),
 		threadText:               make(map[string]*strings.Builder),
+		threadFailures:           make(map[string]struct{}),
 		pendingApprovals:         make(map[string]map[string]struct{}),
 		emittedApprovals:         make(map[string]map[string]struct{}),
 	}
@@ -340,9 +342,9 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 			if content == "" {
 				content = "turn failed"
 			}
-			p.hadProviderErrors = true
+			p.threadFailures[ev.ThreadID] = struct{}{}
 		} else {
-			p.hadProviderErrors = false
+			delete(p.threadFailures, ev.ThreadID)
 		}
 		p.lines = append(p.lines, session.OutputLine{
 			Timestamp:  ts,
@@ -381,7 +383,7 @@ func (p *codexReplayParser) handleMappedEvent(ev codex.MappedEvent, ts time.Time
 }
 
 func (p *codexReplayParser) deriveStatus() session.SessionStatus {
-	if p.hadProviderErrors {
+	if p.hadProviderErrors || len(p.threadFailures) > 0 {
 		return session.StatusFailed
 	}
 	for _, byKey := range p.pendingApprovals {

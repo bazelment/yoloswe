@@ -481,7 +481,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 			SessionID: result.SessionID,
 		}
 		if result.Error != nil {
-			return failed, result.Error
+			return failed, fmt.Errorf("agent execution: %w", result.Error)
 		}
 		return failed, fmt.Errorf("agent failed")
 	}

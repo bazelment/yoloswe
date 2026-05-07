@@ -119,6 +119,7 @@ func TestRunAgentRetryTransientExhaustsBudget(t *testing.T) {
 		TransientRetries: 2,
 	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "agent execution:")
 	require.Equal(t, "sess-1", got.SessionID)
 	require.Len(t, provider.resumeSession, 3)
 
@@ -146,6 +147,7 @@ func TestRunAgentRetryTransientResultErrorExhaustsBudget(t *testing.T) {
 		TransientRetries: 2,
 	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "agent execution:")
 	require.Equal(t, "sess-1", got.SessionID)
 	require.Len(t, provider.resumeSession, 3)
 

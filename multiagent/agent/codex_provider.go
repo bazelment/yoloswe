@@ -111,6 +111,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 
 	result, err := thread.Ask(ctx, fullPrompt, turnOpts...)
 	if err != nil {
+		waitForBridgeTurnComplete(ctx, turnDone)
 		return &AgentResult{SessionID: thread.ID()}, err
 	}
 	waitForBridgeTurnComplete(ctx, turnDone)
