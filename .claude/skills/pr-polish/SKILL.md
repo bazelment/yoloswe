@@ -353,7 +353,7 @@ If a backend envelope reports `status: "error"` but `review.raw_text` contains a
 ### c) Triage
 
 ```
-python3 $SKILL_DIR/scripts/bramble_ops.py triage {ROUND} $STATE_FILE \
+python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
     --stream codex=$ENVELOPE_CODEX \
     --stream cursor=$ENVELOPE_CURSOR \
     --stream lint=$ENVELOPE_LINT \

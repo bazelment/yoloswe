@@ -639,7 +639,6 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--backend", required=True, choices=BACKENDS)
 
     sp = sub.add_parser("triage")
-    sp.add_argument("round_", type=int)
     sp.add_argument("prior_state_file", nargs="?")
     sp.add_argument(
         "--stream",

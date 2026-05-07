@@ -743,7 +743,6 @@ class TestTriageCLIShapeCompat(unittest.TestCase):
                 rc = bramble_ops.main(
                     [
                         "triage",
-                        "1",
                         str(findings_stub),
                         "--pr-comments",
                         str(pr_comments_path),
@@ -795,6 +794,76 @@ class TestTriageCLIShapeCompat(unittest.TestCase):
             p.write_text(json.dumps({"comments": [], "noise_filtered": 5, "noise_samples": []}))
             got = self._run(p)
         self.assertEqual(got["single_medium"], [])
+
+
+class TestGoalCLI(unittest.TestCase):
+    """SKILL invokes `bramble_ops.py goal {ROUND} ...` every round."""
+
+    def _run(self, *argv) -> str:
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = bramble_ops.main(list(argv))
+        assert rc == 0, buf.getvalue()
+        return buf.getvalue().rstrip("\n")
+
+    def test_round_one_prints_pr_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(json.dumps({"rounds": []}))
+            out = self._run("goal", "1", "--pr-summary", "PR #99: refactor", "--state-file", str(sf))
+        self.assertEqual(out, "PR #99: refactor")
+
+    def test_round_two_with_actions_prints_history(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "rounds": [
+                            {
+                                "n": 1,
+                                "comment_actions": [
+                                    {"action": "fixed", "path": "a.go", "line": 5, "source": "codex"},
+                                ],
+                            }
+                        ]
+                    }
+                )
+            )
+            out = self._run("goal", "2", "--pr-summary", "PR_SUM", "--state-file", str(sf))
+        self.assertIn("Round 2", out)
+        self.assertIn("a.go:5", out)
+
+
+class TestPriorSessionIDCLI(unittest.TestCase):
+    """SKILL shells out to `bramble_ops.py prior-session-id <backend> N` per round."""
+
+    def _run(self, *argv) -> str:
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = bramble_ops.main(list(argv))
+        assert rc == 0, buf.getvalue()
+        return buf.getvalue().rstrip("\n")
+
+    def test_returns_session_id_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(
+                json.dumps({"rounds": [{"n": 1, "session_ids": {"codex": "abc-123"}}]})
+            )
+            out = self._run("prior-session-id", "codex", "2", "--state-file", str(sf))
+        self.assertEqual(out, "abc-123")
+
+    def test_returns_empty_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(json.dumps({"rounds": []}))
+            out = self._run("prior-session-id", "codex", "2", "--state-file", str(sf))
+        self.assertEqual(out, "")
 
 
 
