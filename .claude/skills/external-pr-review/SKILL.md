@@ -213,7 +213,6 @@ Keep `$ENVELOPE` and `$LOG_DIR` on cleanup failure and tell the user where they 
 
 ## Edge cases
 
-- **>500 lines or >20 files**: review will be partial; say so in the summary.
 - **Generated code** (lockfiles, `*.pb.go`, snapshots): skip findings on these.
 - **Revert PR**: confirm revert target matches the description; approve unless the revert itself introduces a bug.
 - **Docs-only PR**: read for accuracy and broken links; default APPROVE.
