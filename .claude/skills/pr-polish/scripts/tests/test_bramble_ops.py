@@ -1607,6 +1607,45 @@ class TestSyntheticFindingFallbackMode(unittest.TestCase):
         self.assertIsNone(f["dimension"])
         self.assertNotIn("file", f)
 
+    def test_triage_cli_explicit_mode_overrides_all_synthetic_fallback(self):
+        # When EVERY backend fails before producing an envelope, the
+        # auto-detect path has no real envelopes to inspect and would
+        # default to code mode — contradicting a design-doc orchestrator's
+        # contract. The /design-doc-polish skill works around this by
+        # always passing --mode design-doc; this test pins that the
+        # explicit mode survives even when the only findings are
+        # synthetic stream-missing rows.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            missing_a = d / "missing-a.json"  # never written
+            missing_b = d / "missing-b.json"
+
+            import contextlib
+            import io
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = bramble_ops.main([
+                    "triage",
+                    "--mode", "design-doc",
+                    "--stream", f"codex={missing_a}",
+                    "--stream", f"cursor={missing_b}",
+                ])
+            self.assertEqual(rc, 0)
+            result = json.loads(buf.getvalue())
+        # Mode honours the explicit flag even though no real envelope
+        # was available to vote on it. The two synthetic findings share
+        # the same (None, None, "stream-missing") triage key so they
+        # collapse into one consensus entry routed to must_fix.
+        self.assertEqual(result["review_mode"], "design-doc")
+        self.assertEqual(len(result["consensus"]), 1)
+        consensus_entry = result["consensus"][0]
+        self.assertEqual(sorted(consensus_entry["sources"]), ["codex", "cursor"])
+        for f in consensus_entry["findings"]:
+            self.assertEqual(f["review_mode"], "design-doc")
+            self.assertEqual(f["topic"], "stream-missing")
+        self.assertEqual(len(result["action_plan"]["must_fix"]), 1)
+
     def test_triage_cli_auto_detects_design_doc_from_real_envelopes(self):
         # End-to-end: a design-doc envelope from cursor + a missing
         # codex stream must triage cleanly when --mode is omitted. The

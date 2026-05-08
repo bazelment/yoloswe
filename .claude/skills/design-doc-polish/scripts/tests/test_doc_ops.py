@@ -517,6 +517,12 @@ class TestPersistRoundFindingsCleansBackends(unittest.TestCase):
         self.assertIn("session_ids", rnd)
         self.assertIn("cursor", rnd["session_ids"])
         self.assertNotIn("codex", rnd["session_ids"])
+        # resume_status dict mirrors session_ids: a stale codex
+        # resume_status would let next round's resume target the wrong
+        # session even though the codex envelope is gone. Pin both.
+        self.assertIn("resume_status", rnd)
+        self.assertIn("cursor", rnd["resume_status"])
+        self.assertNotIn("codex", rnd["resume_status"])
 
 
 if __name__ == "__main__":

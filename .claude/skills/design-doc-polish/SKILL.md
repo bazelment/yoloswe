@@ -339,12 +339,13 @@ Differences from pr-polish: no `--scope-hints-file` (diff-derived, useless on a 
 
 ```
 python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
+    --mode design-doc \
     --stream codex=$ENVELOPE_CODEX \
     --stream cursor=$ENVELOPE_CURSOR \
     $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$ENVELOPE_GEMINI )
 ```
 
-`--mode` is omitted; the triage CLI reads the `review_mode` field off each envelope and dispatches automatically. The result envelope's `review_mode` field will be `"design-doc"`. Do not pass `--pr-comments` or `--ci-failures` — they're rejected in design-doc mode.
+`--mode design-doc` is explicit: when every backend fails before producing an envelope (e.g. both Monitor arms timed out), the triage CLI's auto-detect has only synthetic stream-missing findings to inspect and would otherwise default to code mode — which contradicts this skill's contract. Always pass `--mode design-doc` so an all-synthetic round still produces `review_mode: "design-doc"` triage output. Do not pass `--pr-comments` or `--ci-failures` — they're rejected in design-doc mode.
 
 Triage emits the same buckets as pr-polish, but consensus and spiral keys are `(section, dimension)` instead of `(file, line)`:
 
