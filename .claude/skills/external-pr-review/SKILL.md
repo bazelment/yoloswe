@@ -1,19 +1,19 @@
 ---
 name: external-pr-review
-description: One-shot review of an external GitHub PR. Checks out the PR into an isolated worktree (or temp clone), runs `bramble code-review` against the diff, and produces an approval-biased verdict — APPROVE unless there is a blocking correctness issue, with optional improvements listed separately. Read-only on the remote PR, never pushes. User-invoked only via `/external-pr-review`.
+description: One-shot review of an external GitHub PR. Checks out the PR into an isolated worktree (or temp clone), runs `bramble code-review` against the diff, and produces a calibrated verdict — APPROVE unless there is a blocking correctness issue, with optional improvements listed separately. Read-only on the remote PR, never pushes. User-invoked only via `/external-pr-review`.
 argument-hint: "<pr-url-or-number> [--backend codex|cursor|gemini] [--model NAME] [--effort low|medium|high]"
 disable-model-invocation: true
 ---
 
 # External PR Review
 
-Read-only review of someone else's PR. One `bramble code-review` pass against the diff, approval-biased verdict, optionally posted to GitHub.
+Read-only review of someone else's PR. One `bramble code-review` pass against the diff, calibrated verdict, optionally posted to GitHub.
 
 Companion to `/pr-polish` (which iterates fixes on your *own* branch). This one never edits the PR's files, never pushes.
 
-## Approval bias
+## Calibrating findings
 
-Default verdict is **APPROVE**. Downgrade only on a blocking correctness issue:
+A finding is **blocking** only when merging the diff as-is would cause something observable to break or regress:
 
 - Real bug introduced by the diff (wrong condition, off-by-one, missing await).
 - Security regression introduced by the diff.
@@ -21,7 +21,7 @@ Default verdict is **APPROVE**. Downgrade only on a blocking correctness issue:
 - Obvious perf regression (N+1 on a hot path, sync I/O in async hot loop).
 - Change to a documented contract without a matching doc/test update.
 
-Everything else — naming, structure, style, optional refactors, pre-existing issues — is **Optional**.
+Everything else — naming, structure, style, optional refactors, pre-existing issues — is **Optional**, and doesn't gate the verdict.
 
 The blocking test: *if this merges as-is, will something observable break or regress?* Code-smell answers no. Wrong SQL predicate answers yes.
 
@@ -90,13 +90,14 @@ Author: <login>
 <git diff --stat origin/<base>..HEAD, capped at 10 lines>
 
 ## Review brief
-Bias toward APPROVE. Flag a finding as blocking only if merging this diff
-as-is would cause something OBSERVABLE to break or regress: real bug,
-security regression, missing/broken test for changed behavior, obvious
-perf regression, or a change to a documented contract without matching
-doc/test update.
+Calibrate findings against real impact. Mark a finding as blocking only if
+merging this diff as-is would cause something OBSERVABLE to break or
+regress: real bug, security regression, missing/broken test for changed
+behavior, obvious perf regression, or a change to a documented contract
+without matching doc/test update.
 
-Style nits and pre-existing issues are OPTIONAL — do NOT downgrade verdict.
+Style notes, structural preferences, and pre-existing issues belong
+under optional improvements, not blockers.
 
 Stay inside the diff. Do not audit Pulumi/infra, lockfiles, generated
 code, or cross-repo prompts unless this PR explicitly changes them. If
@@ -176,12 +177,6 @@ Each envelope finding has a `severity` (`high`/`medium`/`low`/`nit`), `path`/`li
 
 - **`path:line`** — <one-liner>
   <1–2 sentences, phrased as a suggestion>
-
-## What I looked at
-- <terse list>
-
----
-Reviewed with bramble (`<backend>`/`<model>`) at SHA `<short-sha>`. Worktree: `<path>`.
 ```
 
 Verdict:
@@ -219,7 +214,7 @@ Keep `$ENVELOPE` and `$LOG_DIR` on cleanup failure and tell the user where they 
 ## Edge cases
 
 - **>500 lines or >20 files**: review will be partial; say so in the summary.
-- **Generated code** (lockfiles, `*.pb.go`, snapshots): skip findings on these; note in "What I looked at".
+- **Generated code** (lockfiles, `*.pb.go`, snapshots): skip findings on these.
 - **Revert PR**: confirm revert target matches the description; approve unless the revert itself introduces a bug.
 - **Docs-only PR**: read for accuracy and broken links; default APPROVE.
 - **Stacked PR**: verdict is on this diff in isolation; note the dependency.
