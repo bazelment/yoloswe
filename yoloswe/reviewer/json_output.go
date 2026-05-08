@@ -237,6 +237,16 @@ func ValidateReviewJSON(raw []byte, mode ReviewMode) error {
 //   - "needs-revision" or "major-revision" carries at least one issue
 //   - "ready" carries no high/critical issues
 //   - top-level confidence ∈ [0.0, 1.0]; per-issue confidence ∈ (0.0, 1.0] when present
+//
+// Note: the design-doc prompt (designDocJSONOutputRules) describes
+// finer verdict-vs-severity calibration bands (e.g. "needs-revision is
+// for low/medium issues only; major-revision for high/critical").
+// Those are guidance to the model, NOT structural schema rules — the
+// validator only enforces the "ready ⇔ no high/critical" symmetry, so
+// the model can pick "major-revision" with only medium issues if it
+// thinks the doc's premise needs reconsideration. Don't tighten this
+// without also updating the prompt; otherwise valid model output will
+// trip the validator.
 func validateReviewBody(body ReviewBody, mode ReviewMode) error {
 	if mode == "" {
 		mode = ReviewModeCode

@@ -173,13 +173,22 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Fprintf(os.Stderr, "[code-review] logging run to %s\n", logPath)
 	}
 
+	// requestedMode echoes the operator's --review-mode literal back into
+	// every pre-validation early-failure envelope, so an orchestrator
+	// triaging with --mode design-doc doesn't reject a backend-validation
+	// or workdir-resolution failure as "explicit mode doesn't match
+	// envelope". When the literal is not one of the known modes,
+	// fall through to ReviewModeCode — the envelope's `error` field
+	// will already name the actual problem.
+	requestedMode := requestedModeOrCode(reviewMode)
+
 	if err := reviewer.ValidateBackend(backend); err != nil {
-		return emitEarlyFailure(err, "", reviewer.ReviewModeCode, emitEnvelope)
+		return emitEarlyFailure(err, "", requestedMode, emitEnvelope)
 	}
 
 	workDir, err := reviewer.ResolveWorkDir()
 	if err != nil {
-		return emitEarlyFailure(err, "", reviewer.ReviewModeCode, emitEnvelope)
+		return emitEarlyFailure(err, "", requestedMode, emitEnvelope)
 	}
 
 	mode, err := validateModeFlags(reviewMode, scopeHintsFile, rubricFile, skipTestExecution)
@@ -190,16 +199,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		// failure as "explicit mode doesn't match envelope" — surfacing
 		// a misleading error instead of the actual flag-validation
 		// problem (e.g. "design-doc requires --review-rubric-file").
-		// Fall through to ReviewModeCode for unknown values; the
-		// envelope's `error` field already names the mismatch.
-		failureMode := reviewer.ReviewMode(reviewMode)
-		switch failureMode {
-		case reviewer.ReviewModeCode, reviewer.ReviewModeDesignDoc:
-			// Use the requested literal.
-		default:
-			failureMode = reviewer.ReviewModeCode
-		}
-		return emitEarlyFailure(err, model, failureMode, emitEnvelope)
+		return emitEarlyFailure(err, model, requestedMode, emitEnvelope)
 	}
 	resolvedMode = mode
 
@@ -650,6 +650,25 @@ func loadRubricFile(path string) ([]string, error) {
 // signals that don't apply to a single doc; the operator probably copied a
 // pr-polish-style invocation. Warning-not-error keeps existing automation
 // scripts from breaking when they tack the flags on unconditionally.
+// requestedModeOrCode parses a --review-mode flag literal into a
+// ReviewMode for use in pre-validation early-failure envelopes. It does
+// not validate combinations (that's validateModeFlags' job); it just
+// echoes the user's intent back into the envelope so an orchestrator's
+// auto-detect logic doesn't misroute a code-default failure when the
+// user actually invoked design-doc mode.
+//
+// Unknown literals fall through to ReviewModeCode — the envelope's
+// `error` field will already name the problem (e.g.
+// "unknown --review-mode 'security-review'") so the wrong mode tag is
+// not the load-bearing signal in that case.
+func requestedModeOrCode(modeStr string) reviewer.ReviewMode {
+	switch reviewer.ReviewMode(modeStr) {
+	case reviewer.ReviewModeCode, reviewer.ReviewModeDesignDoc:
+		return reviewer.ReviewMode(modeStr)
+	}
+	return reviewer.ReviewModeCode
+}
+
 func validateModeFlags(modeStr, hintsPath, rubricPath string, skipTestExec bool) (reviewer.ReviewMode, error) {
 	switch reviewer.ReviewMode(modeStr) {
 	case reviewer.ReviewModeCode, "":

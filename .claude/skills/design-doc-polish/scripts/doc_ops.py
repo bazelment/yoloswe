@@ -620,6 +620,16 @@ def _sanitize_prompt_hint(s: str) -> bool:
     same shapes the Go side does: empty, leading/trailing whitespace,
     embedded newlines, leading markdown control chars, leading
     ordered-list markers (``1.`` / ``42)``).
+
+    LOAD-BEARING: this must stay in lock-step with
+    ``yoloswe/reviewer/reviewer.go`` ``SanitizePromptHint``. There is
+    no compile-time link between the two — drift would re-introduce
+    the doc_ops-accepts/bramble-rejects rubric class of bug we just
+    fixed. When you change the Go rules, update this function in the
+    same commit, mirror the test in ``test_doc_ops.py``, and run both
+    test suites. The
+    ``test_sanitize_prompt_hint_unit`` test covers the current rules;
+    new cases there are the safety net.
     """
     if not s:
         return False
@@ -660,9 +670,15 @@ def _read_rubric_file(path: str) -> list[str]:
         trimmed = line.strip()
         if not trimmed or trimmed.startswith("#"):
             continue
-        if len(trimmed) > _RUBRIC_LINE_MAX_LEN:
+        # Match bramble's loadRubricFile (codereview.go:627), which uses
+        # Go's ``len()`` and counts UTF-8 bytes. Python's ``len()``
+        # counts codepoints, so a rubric with multi-byte characters
+        # (curly quotes, em-dashes, non-Latin scripts) could pass here
+        # and then be rejected by bramble every round. Encode to UTF-8
+        # to count bytes the same way Go does.
+        if len(trimmed.encode("utf-8")) > _RUBRIC_LINE_MAX_LEN:
             raise ValueError(
-                f"rubric line {i} exceeds {_RUBRIC_LINE_MAX_LEN} chars"
+                f"rubric line {i} exceeds {_RUBRIC_LINE_MAX_LEN} bytes (UTF-8)"
             )
         if not _sanitize_prompt_hint(trimmed):
             raise ValueError(

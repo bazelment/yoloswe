@@ -365,14 +365,34 @@ class TestReadRubricFile(unittest.TestCase):
             os.unlink(path)
 
     def test_overlong_line_rejected(self):
-        # Mirrors bramble's loadRubricFile cap (500 chars per line). A
-        # rubric that doc_ops accepts but bramble rejects every round
-        # would silently brick the loop's first turn.
+        # Mirrors bramble's loadRubricFile cap (500 BYTES per line in
+        # UTF-8 — Go's len()). A rubric that doc_ops accepts but
+        # bramble rejects every round would silently brick the loop's
+        # first turn.
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
             long = "x" * (doc_ops._RUBRIC_LINE_MAX_LEN + 1)
             f.write(long + "\n")
             path = f.name
         try:
+            with self.assertRaises(ValueError) as ctx:
+                doc_ops._read_rubric_file(path)
+            self.assertIn("exceeds", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_overlong_line_uses_utf8_bytes_not_codepoints(self):
+        # A line just under the codepoint cap but over the byte cap (with
+        # multi-byte characters) must still be rejected, mirroring Go's
+        # byte-counting len(). Without this, a rubric like 250 em-dashes
+        # (3 bytes each = 750 bytes) would pass Python (250 codepoints)
+        # but bramble would reject it every round.
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as f:
+            line = "—" * 200  # 200 codepoints, 600 UTF-8 bytes (>500)
+            f.write(line + "\n")
+            path = f.name
+        try:
+            self.assertEqual(len(line), 200)  # codepoints
+            self.assertEqual(len(line.encode("utf-8")), 600)
             with self.assertRaises(ValueError) as ctx:
                 doc_ops._read_rubric_file(path)
             self.assertIn("exceeds", str(ctx.exception))

@@ -37,7 +37,7 @@ Shell plumbing lives in Python helpers under `scripts/`. Use `SKILL_DIR=.claude/
 
 **A finding is a symptom; the fix is the cure.** Each cited finding observes one underlying problem. Before patching, identify the systemic issue the rubric question is pointing at, look for sibling sites in the same doc, and decide whether the right fix is at the cited section or at the doc's overall framing. Two reviewers wording the same milestone-strategy concern differently are pointing at one design problem. A finding that says "milestone 2 doesn't frontload risk" usually implies milestone 1 should be re-scoped, not just milestone 2 caveated.
 
-Class-level fixes beyond the cited section are logged in `comment_actions` as `source: "sweep"` with `topic: "<original-topic> — class-level fix"`.
+Class-level fixes beyond the cited section are logged in `comment_actions` as one row per *swept site* — `source: "sweep"`, `topic: "<original-topic> — class-level fix"`, `section: <swept site's section>` (NOT the original cited section), `dimension: <swept site's dimension>`. Recording each swept site separately keeps the spiral guard accurate: a round-N+1 finding at a section the orchestrator already touched in a sweep would otherwise look like a fresh issue rather than a regression.
 
 **Convergence — stop when any one holds:**
 - Zero findings, or all remaining are low/nit.
@@ -373,12 +373,12 @@ What good looks like by the end of this step:
 - Every finding read across all backends as one body of evidence, grouped by underlying systemic problem.
 - The doc edited at the systemic level — milestone restructure, scope cut, alternative considered, risk reframed — not a list of inline footnotes.
 - For findings the user must answer (genuine open questions, undocumented context only the author has): drop a `> **TODO**: <question>` blockquote in the relevant section. Log as `wont_fix` with `reason: "needs author input"`. **Do not invent author intent.**
-- Every triaged finding has a `comment_actions` entry. Sites fixed beyond a cited section are logged as `source: "sweep"` with `topic: "<original-topic> — class-level fix"`.
+- Every triaged finding has a `comment_actions` entry. Each *swept site* fixed beyond a cited section is logged as its own `source: "sweep"` row with that site's `section`/`dimension` and `topic: "<original-topic> — class-level fix"` — one row per swept site, not one row per sweep operation. This keeps the spiral guard's view of "what's already been fixed" accurate per-section.
 
 `comment_actions` field shapes for design-doc mode:
 - All entries: `comment_id: null` (no PR comments).
 - Bramble findings (`codex` / `cursor` / `gemini`) carry `section`, `dimension`, `severity`, `topic`, `action`, `reason` (when not fixed), `commit_sha` (when fixed).
-- Sweep entries: `source: "sweep"`, `topic: "<original-topic> — class-level fix"`, original `section` from the cited finding.
+- Sweep entries: `source: "sweep"`, `topic: "<original-topic> — class-level fix"`, `section`/`dimension` of the *swept site* (one row per site, not the original cited finding's section).
 
 ### e) Quality gates + commit (only if doc changed)
 
