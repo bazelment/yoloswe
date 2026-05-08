@@ -54,26 +54,30 @@ export BRAMBLE_BIN="$([ -x "$(pwd)/bazel-bin/bramble/bramble_/bramble" ] \
 
 ## Step 1: Rubric
 
-The rubric is what makes this skill different from a code review. The orchestrator (you, running this skill) reads the doc itself, classifies it, proposes 3–7 grilling questions appropriate to its kind, and asks the user to confirm before round 1.
+The rubric is what makes this skill different from a code review — it directs the model at the systemic axes that matter for *this kind* of doc. A tailored rubric produces sharper findings than a generic one; the questions become the `dimension` field on every issue, so the rubric structure flows through to the audit table.
 
-### Path A — `--rubric-file <path>` was passed
+**Default path: orchestrator proposes.** You (the model running this skill) read the doc, classify it, and propose 3–7 questions tailored to its kind. Different doc kinds want different questions:
 
-Read it with `python3 $SKILL_DIR/scripts/doc_ops.py read-rubric-file <path>` (validates the same caps bramble does: ≤20 entries, ≤500 UTF-8 bytes per line, no leading markdown control chars). Show the rubric to the user and `AskUserQuestion` to confirm or edit.
+- **architecture** — long-term fit, system boundaries, scalability, alternatives considered
+- **detailed-design** — decisions vs alternatives, contract consistency, test strategy realism, silent-success paths, rollout risk frontloading, API/vocabulary evolution
+- **migration** — rollback, blast radius, mid-flight failure modes, observability of the cutover
+- **API contract** — versioning, client/server compatibility, error surface, deprecation paths
+- **RFC** — premise, what's *not* being decided, exit criteria for the experiment
 
-Set `RUBRIC_SOURCE="--rubric-file <path>"`.
+Read the doc with the `Read` tool, classify, and `AskUserQuestion` showing the proposed rubric. Two options: `Accept` or `Use 4 starter questions` (the generic fallback below). The user can answer "Other" to supply a different rubric verbatim.
 
-### Path B — Orchestrator proposes
+Set `RUBRIC_SOURCE="orchestrator-proposed"`.
 
-1. Read the doc directly (`Read` tool).
-2. Classify it roughly: architecture / detailed-design / migration / API-contract / RFC / one-pager / other.
-3. Propose 3–7 short grilling questions tailored to that kind. Defaults if you can't classify confidently:
-   - "Is this the best long-term choice?"
-   - "Can we make it simpler?"
-   - "Does the milestone plan create clear boundaries?"
-   - "Does the milestone plan frontload risk discovery?"
-4. `AskUserQuestion` showing the proposed rubric, with options to accept / edit / use the 4 starter questions verbatim.
+**Override path: `--rubric-file <path>`.** The user supplies the rubric directly. Validate it with `python3 $SKILL_DIR/scripts/doc_ops.py read-rubric-file <path>` (≤20 entries, ≤500 UTF-8 bytes per line, no leading markdown control chars). Show it to the user and `AskUserQuestion` to confirm before round 1. Set `RUBRIC_SOURCE="--rubric-file <path>"`.
 
-Set `RUBRIC_SOURCE="orchestrator-proposed"` or `"user-edited"` depending on what the user picked.
+**Fallback:** if classification fails or the user picks the starter set, use these 4 questions verbatim:
+
+- "Is this the best long-term choice?"
+- "Can we make it simpler?"
+- "Does the milestone plan create clear boundaries?"
+- "Does the milestone plan frontload risk discovery?"
+
+These bias toward architecture / strategic questions. They work but produce coarser findings than a tailored set, especially on detailed-design or migration docs. Set `RUBRIC_SOURCE="default-4-questions"`.
 
 ### Persist the rubric
 
@@ -238,7 +242,7 @@ python3 $SKILL_DIR/scripts/doc_ops.py state-mark-complete $CTX <reason>
 
 Print a Markdown summary:
 
-- Top metrics: rounds completed, findings addressed, commits made, verdict (Ready / Needs revision / Major revision based on the last round's worst severity).
+- Top metrics: rounds completed, findings addressed, commits made, verdict (Ready / Revise / Rethink — the imperative for the doc author based on the last round's worst severity).
 - Round-by-round table: codex/cursor finding counts, fixed counts, dominant dimension per round.
 - Comment Actions table: every `comment_actions` row across rounds, sorted by round then severity desc; columns `Round | Source | Section | Dimension | Severity | Action | Notes`.
 

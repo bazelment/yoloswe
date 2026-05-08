@@ -1018,10 +1018,10 @@ func TestBuildJSONPromptWithScope_GenericFallbackWhenChangedPackagesAllSanitized
 }
 
 // TestBuildJSONPromptDesignDocMode verifies the design-doc persona, inlined
-// rubric, section-citation rules, and ready/needs-revision/major-revision
-// verdicts. The intent is that the code-review-flavoured clauses (file:line
-// citation, focus-area checklist, accepted/rejected verdicts) are absent —
-// otherwise the model would receive contradictory instructions.
+// rubric, section-citation rules, and ready/revise/rethink verdicts. The
+// intent is that the code-review-flavoured clauses (file:line citation,
+// focus-area checklist, accepted/rejected verdicts) are absent — otherwise
+// the model would receive contradictory instructions.
 func TestBuildJSONPromptDesignDocMode(t *testing.T) {
 	rubric := []string{
 		"Is this the best long-term choice?",
@@ -1051,8 +1051,8 @@ func TestBuildJSONPromptDesignDocMode(t *testing.T) {
 		"Do not modify the document",
 		`"verdict"`,
 		"ready",
-		"needs-revision",
-		"major-revision",
+		"revise",
+		"rethink",
 		`"confidence"`,
 	}
 	for _, s := range mustContain {

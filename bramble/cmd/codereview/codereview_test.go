@@ -1209,8 +1209,8 @@ func TestBuildPromptForRun_DesignDocEndToEnd(t *testing.T) {
 		`"section"`,
 		`"dimension"`,
 		"ready",
-		"needs-revision",
-		"major-revision",
+		"revise",
+		"rethink",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("design-doc prompt missing %q\nprompt:\n%s", want, got)

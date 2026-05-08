@@ -462,7 +462,7 @@ func TestStripJSONFence_Variants(t *testing.T) {
 }
 
 // TestValidateReviewJSONDesignDoc covers the design-doc validator. It
-// asserts both the positive shape (section + dimension + ready/needs/major
+// asserts both the positive shape (section + dimension + ready/revise/rethink
 // + top-level confidence) and the cross-mode rejection rules: code-mode
 // fields (file/line) must NOT appear in design-doc envelopes, and code-mode
 // verdict values must be rejected for design-doc mode.
@@ -476,7 +476,7 @@ func TestValidateReviewJSONDesignDoc(t *testing.T) {
 		{
 			name: "valid design-doc body",
 			json: `{
-				"verdict": "needs-revision",
+				"verdict": "revise",
 				"summary": "milestone risk",
 				"confidence": 0.8,
 				"issues": [{
@@ -533,7 +533,7 @@ func TestValidateReviewJSONDesignDoc(t *testing.T) {
 		{
 			name: "issue with file/line rejected",
 			json: `{
-				"verdict": "needs-revision",
+				"verdict": "revise",
 				"summary": "x",
 				"confidence": 0.7,
 				"issues": [{
@@ -551,7 +551,7 @@ func TestValidateReviewJSONDesignDoc(t *testing.T) {
 		{
 			name: "issue missing section rejected",
 			json: `{
-				"verdict": "needs-revision",
+				"verdict": "revise",
 				"summary": "x",
 				"confidence": 0.7,
 				"issues": [{
@@ -566,7 +566,7 @@ func TestValidateReviewJSONDesignDoc(t *testing.T) {
 		{
 			name: "issue missing dimension rejected",
 			json: `{
-				"verdict": "needs-revision",
+				"verdict": "revise",
 				"summary": "x",
 				"confidence": 0.7,
 				"issues": [{
@@ -595,9 +595,9 @@ func TestValidateReviewJSONDesignDoc(t *testing.T) {
 			errSub:    `verdict "ready" inconsistent`,
 		},
 		{
-			name: "needs-revision verdict with no issues rejected",
+			name: "revise verdict with no issues rejected",
 			json: `{
-				"verdict": "needs-revision",
+				"verdict": "revise",
 				"summary": "x",
 				"confidence": 0.6,
 				"issues": []

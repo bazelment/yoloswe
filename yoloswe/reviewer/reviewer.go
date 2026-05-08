@@ -39,7 +39,7 @@ const (
 	ReviewModeCode ReviewMode = "code"
 	// ReviewModeDesignDoc grills a markdown design document against a
 	// caller-supplied rubric, cites section headings (not file/line), and
-	// emits ready/needs-revision/major-revision verdicts with a confidence
+	// emits ready/revise/rethink verdicts with a confidence
 	// score.
 	ReviewModeDesignDoc ReviewMode = "design-doc"
 )
@@ -598,12 +598,12 @@ func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
 // For ReviewModeDesignDoc the scope clauses (test-quality, cross-service)
 // are skipped — they are diff-derived signals that don't apply to a
 // single markdown file — and the verdict footer is replaced with the
-// doc-flavoured ready/needs-revision/major-revision values.
+// doc-flavoured ready/revise/rethink values.
 func BuildPromptWithScope(goal string, opts PromptOptions) string {
 	if opts.effectiveMode() == ReviewModeDesignDoc {
 		return buildBasePrompt(goal, opts) + `
 
-After listing findings, produce an overall verdict ("ready", "needs-revision", or "major-revision") with a concise justification and an overall confidence score in [0.0, 1.0]. This overall score is distinct from the optional per-issue confidence in the JSON output format; it summarizes confidence in the verdict itself.`
+After listing findings, produce an overall verdict ("ready", "revise", or "rethink") with a concise justification and an overall confidence score in [0.0, 1.0]. This overall score is distinct from the optional per-issue confidence in the JSON output format; it summarizes confidence in the verdict itself.`
 	}
 	return buildBasePrompt(goal, opts) + buildScopeSuffix(opts) + `
 
@@ -628,8 +628,8 @@ func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
 //
 // For ReviewModeDesignDoc the scope clauses are skipped (irrelevant for a
 // single-file doc review) and jsonOutputRules emits the design-doc schema
-// (section/dimension instead of file/line; ready/needs-revision/
-// major-revision verdict; per-issue confidence carried up to the
+// (section/dimension instead of file/line; ready/revise/rethink
+// verdict; per-issue confidence carried up to the
 // review-level confidence too).
 func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 	if opts.effectiveMode() == ReviewModeDesignDoc {
@@ -799,7 +799,7 @@ func buildRubricRecap(rubric []string) string {
 // jsonOutputRules returns the per-mode output-format spec appended to every
 // JSON-output prompt. Code mode keeps the legacy schema (file/line,
 // accepted/rejected) byte-for-byte. Design-doc mode swaps file/line for
-// section/dimension and uses ready/needs-revision/major-revision verdicts.
+// section/dimension and uses ready/revise/rethink verdicts.
 //
 // The two specs deliberately share severity vocabulary so the orchestrator's
 // triage layer can rank findings the same way across modes. They diverge
@@ -850,7 +850,7 @@ const designDocJSONOutputRules = `
 ## Output Format
 You MUST respond with valid JSON in this exact format:
 {
-  "verdict": "ready" or "needs-revision" or "major-revision",
+  "verdict": "ready" or "revise" or "rethink",
   "summary": "Brief overall assessment of the document",
   "confidence": 0.7,
   "issues": [
@@ -872,10 +872,10 @@ You MUST respond with valid JSON in this exact format:
 - low: A minor clarification or improvement that doesn't block the design.
 
 ## Rules
-- verdict MUST be exactly one of "ready", "needs-revision", or "major-revision".
-- "ready": no high/critical issues; the design is implementation-ready.
-- "needs-revision": low/medium issues only, but the doc needs author revisions before it ships. Prefer this band when the issues are fixable in-place.
-- "major-revision": at least one high or critical issue, OR a cluster of medium issues that together challenge the design's premise. Use sparingly — pick this when the doc needs more than copy-edits.
+- verdict MUST be exactly one of "ready", "revise", or "rethink". The verdict is an imperative — what should the author do with this doc?
+- "ready": ship as-is. No high/critical issues; the design is implementation-ready.
+- "revise": address issues, the doc shape is right. Prefer this band when issues are fixable in-place.
+- "rethink": premise needs reconsideration. Use sparingly — pick this when the doc needs more than copy-edits, e.g. at least one high/critical issue or a cluster of mediums that together challenge the design's premise.
 - These bands are guidance, not a hard rule. The validator only enforces the "ready ⇔ no high/critical issues" symmetry; verdict-vs-severity calibration beyond that is your judgement call.
 - Top-level "confidence" is a float in [0.0, 1.0] reporting confidence in the verdict itself.
 - Each issue MUST include severity, section (a heading from the doc, or "(whole document)" for doc-wide issues), dimension (the rubric question it answers, e.g. "q1"), and message; suggestion is optional.

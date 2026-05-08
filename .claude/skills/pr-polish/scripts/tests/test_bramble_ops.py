@@ -1491,7 +1491,7 @@ class TestParseEnvelopeReviewMode(unittest.TestCase):
             "status": "ok",
             "review_mode": "design-doc",
             "review": {
-                "verdict": "needs-revision",
+                "verdict": "revise",
                 "issues": [
                     {
                         "severity": "high",
@@ -1662,7 +1662,7 @@ class TestSyntheticFindingFallbackMode(unittest.TestCase):
                 "status": "ok",
                 "review_mode": "design-doc",
                 "review": {
-                    "verdict": "needs-revision",
+                    "verdict": "revise",
                     "confidence": 0.7,
                     "issues": [{
                         "severity": "high",

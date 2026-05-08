@@ -60,15 +60,21 @@ type ReviewBody struct {
 // validVerdicts enumerates per-mode verdict strings the reviewer prompt
 // requires. Anything outside the matching set for a given mode is treated as
 // a schema violation in validateReviewBody.
+//
+// Verdicts are deliberately single words — multi-word verdicts force a
+// hyphen-vs-underscore choice that LLMs reliably get wrong (snake_case
+// vs kebab-case is a coin flip in their training corpus). Pick imperative
+// single-word verbs for design-doc mode that say what the author should
+// do with the doc, not what state it's in.
 var validVerdicts = map[ReviewMode]map[string]struct{}{
 	ReviewModeCode: {
 		"accepted": {},
 		"rejected": {},
 	},
 	ReviewModeDesignDoc: {
-		"ready":          {},
-		"needs-revision": {},
-		"major-revision": {},
+		"ready":   {}, // ship as-is; no high/critical issues
+		"revise":  {}, // address issues, doc shape is right
+		"rethink": {}, // premise needs reconsideration
 	},
 }
 
@@ -231,22 +237,23 @@ func ValidateReviewJSON(raw []byte, mode ReviewMode) error {
 //   - confidence, when present, is in (0.0, 1.0] and finite (no NaN/Inf)
 //
 // Design-doc mode (ReviewModeDesignDoc) requires:
-//   - verdict ∈ {ready, needs-revision, major-revision}
+//   - verdict ∈ {ready, revise, rethink} (single-word imperative verbs;
+//     see validVerdicts for the rationale on avoiding hyphens)
 //   - each issue has severity, message, section (heading or "(whole document)"),
 //     dimension (rubric question id, e.g. "q1"); file/line MUST NOT be present
-//   - "needs-revision" or "major-revision" carries at least one issue
+//   - "revise" or "rethink" carries at least one issue
 //   - "ready" carries no high/critical issues
 //   - top-level confidence ∈ [0.0, 1.0]; per-issue confidence ∈ (0.0, 1.0] when present
 //
 // Note: the design-doc prompt (designDocJSONOutputRules) describes
-// finer verdict-vs-severity calibration bands (e.g. "needs-revision is
-// for low/medium issues only; major-revision for high/critical").
-// Those are guidance to the model, NOT structural schema rules — the
+// finer verdict-vs-severity calibration bands (e.g. "revise is for
+// low/medium issues only; rethink for high/critical clusters"). Those
+// are guidance to the model, NOT structural schema rules — the
 // validator only enforces the "ready ⇔ no high/critical" symmetry, so
-// the model can pick "major-revision" with only medium issues if it
-// thinks the doc's premise needs reconsideration. Don't tighten this
-// without also updating the prompt; otherwise valid model output will
-// trip the validator.
+// the model can pick "rethink" with only medium issues if it thinks
+// the doc's premise needs reconsideration. Don't tighten this without
+// also updating the prompt; otherwise valid model output will trip the
+// validator.
 func validateReviewBody(body ReviewBody, mode ReviewMode) error {
 	if mode == "" {
 		mode = ReviewModeCode
