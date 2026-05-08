@@ -184,7 +184,22 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 
 	mode, err := validateModeFlags(reviewMode, scopeHintsFile, rubricFile, skipTestExecution)
 	if err != nil {
-		return emitEarlyFailure(err, model, reviewer.ReviewModeCode, emitEnvelope)
+		// Tag the failure envelope with the operator's *requested*
+		// mode when it's a known literal. Without this, an orchestrator
+		// triaging with --mode design-doc rejects a code-mode-tagged
+		// failure as "explicit mode doesn't match envelope" — surfacing
+		// a misleading error instead of the actual flag-validation
+		// problem (e.g. "design-doc requires --review-rubric-file").
+		// Fall through to ReviewModeCode for unknown values; the
+		// envelope's `error` field already names the mismatch.
+		failureMode := reviewer.ReviewMode(reviewMode)
+		switch failureMode {
+		case reviewer.ReviewModeCode, reviewer.ReviewModeDesignDoc:
+			// Use the requested literal.
+		default:
+			failureMode = reviewer.ReviewModeCode
+		}
+		return emitEarlyFailure(err, model, failureMode, emitEnvelope)
 	}
 	resolvedMode = mode
 

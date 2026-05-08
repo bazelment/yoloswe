@@ -602,20 +602,80 @@ def _parse_envelope_args(pairs: list[str]) -> dict[str, Path]:
     return out
 
 
+_RUBRIC_LINE_MAX_LEN = 500
+_RUBRIC_MAX_ENTRIES = 20
+
+# Markdown control characters that ``SanitizePromptHint`` rejects at the
+# start of a line. Mirrored from
+# yoloswe/reviewer/reviewer.go SanitizePromptHint so doc_ops fails fast
+# with the same rules bramble's loadRubricFile applies — otherwise a
+# rubric the user persisted into state.json would error out every
+# round when bramble re-read it.
+_MARKDOWN_CONTROL_PREFIXES = ("#", "-", "*", "+", ">", "=")
+
+
+def _sanitize_prompt_hint(s: str) -> bool:
+    """Python port of yoloswe/reviewer.SanitizePromptHint. Returns True
+    when ``s`` is safe to inline into a prompt clause. Rejects the
+    same shapes the Go side does: empty, leading/trailing whitespace,
+    embedded newlines, leading markdown control chars, leading
+    ordered-list markers (``1.`` / ``42)``).
+    """
+    if not s:
+        return False
+    if "\r" in s or "\n" in s:
+        return False
+    if s != s.strip():
+        return False
+    if s[0] in _MARKDOWN_CONTROL_PREFIXES:
+        return False
+    if s[0].isdigit():
+        i = 0
+        while i < len(s) and s[i].isdigit():
+            i += 1
+        if i < len(s) and s[i] in ".)":
+            return False
+    return True
+
+
 def _read_rubric_file(path: str) -> list[str]:
-    """Read a rubric file the same way bramble's loadRubricFile does:
-    one question per non-blank, non-comment line. Sanitisation is
-    enforced by the bramble side at runtime; here we just collect.
+    """Read a rubric file with the same validation rules bramble's
+    loadRubricFile applies (yoloswe/reviewer.SanitizePromptHint;
+    cap of ``_RUBRIC_MAX_ENTRIES`` lines; cap of
+    ``_RUBRIC_LINE_MAX_LEN`` chars per line).
+
+    Failing fast here matches the user's "Workaround = design smell"
+    rule: a rubric that doc_ops accepts but bramble rejects every
+    round would otherwise corrupt the loop's first turn and require
+    a manual restart with a hand-edited rubric. Better to surface
+    the same error at ingest.
+
+    ``#`` lines are treated as authoring comments and skipped (unlike
+    bramble's loadRubricFile which is the same — both drop them at
+    intake).
     """
     raw = Path(path).read_text()
     out = []
-    for line in raw.split("\n"):
+    for i, line in enumerate(raw.split("\n"), start=1):
         trimmed = line.strip()
         if not trimmed or trimmed.startswith("#"):
             continue
+        if len(trimmed) > _RUBRIC_LINE_MAX_LEN:
+            raise ValueError(
+                f"rubric line {i} exceeds {_RUBRIC_LINE_MAX_LEN} chars"
+            )
+        if not _sanitize_prompt_hint(trimmed):
+            raise ValueError(
+                f"rubric line {i} failed sanitization "
+                f"(no leading markdown control chars, no newlines): {trimmed!r}"
+            )
         out.append(trimmed)
     if not out:
         raise ValueError(f"rubric file {path!r} has no non-blank, non-comment lines")
+    if len(out) > _RUBRIC_MAX_ENTRIES:
+        raise ValueError(
+            f"rubric file {path!r} has {len(out)} entries; cap is {_RUBRIC_MAX_ENTRIES}"
+        )
     return out
 
 

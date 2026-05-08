@@ -1122,24 +1122,32 @@ func TestBuildJSONPromptDesignDocMode_SkipsScopeSuffix(t *testing.T) {
 
 // TestBuildFollowUpJSONPromptDesignDocMode pins the design-doc follow-up
 // shape: same fresh-eyes / bias-guard intent as the code follow-up, but
-// keyed off section/dimension citations and the rubric-loaded-via-flag
-// resume contract. Code-mode follow-up clauses (file:line, scope suffix)
-// must not leak.
+// keyed off section/dimension citations and the rubric-recap safety net.
+// Code-mode follow-up clauses (file:line, scope suffix) must not leak.
 func TestBuildFollowUpJSONPromptDesignDocMode(t *testing.T) {
 	prompt := BuildFollowUpJSONPromptWithScope(
 		"Round 2. Prior fixed: Milestone 2 — risk frontload.",
-		PromptOptions{Mode: ReviewModeDesignDoc, Rubric: []string{"q1"}},
+		PromptOptions{
+			Mode:   ReviewModeDesignDoc,
+			Rubric: []string{"Is this the best long-term choice?", "Can we make it simpler?"},
+		},
 	)
 	mustContain := []string{
 		"Continue grilling the same design document",
 		"Context for this turn: Round 2. Prior fixed: Milestone 2",
 		"silently fell back to a fresh session",
 		"first-pass review",
-		"--review-rubric-file",
 		"Re-grill the document with fresh eyes",
 		"section",
 		"dimension",
 		"qN",
+		// Rubric recap is the design-doc analogue of the code-mode
+		// scope suffix: it survives a silent resume fallback so the
+		// model still sees the grilling axes even when bramble cold-
+		// started despite --resume-session-id.
+		"Rubric (recap):",
+		"1. Is this the best long-term choice?",
+		"2. Can we make it simpler?",
 	}
 	for _, s := range mustContain {
 		if !strings.Contains(prompt, s) {
@@ -1156,6 +1164,21 @@ func TestBuildFollowUpJSONPromptDesignDocMode(t *testing.T) {
 		if strings.Contains(prompt, s) {
 			t.Errorf("design-doc follow-up prompt leaked code-mode phrase %q\nprompt:\n%s", s, prompt)
 		}
+	}
+}
+
+// TestBuildFollowUpJSONPromptDesignDoc_EmptyRubricSkipsRecap defends
+// against a recap that emits an empty "Rubric (recap):" header when the
+// caller (somehow) passes an empty rubric. buildDesignDocBasePrompt
+// would already have returned a MISCONFIGURED sentinel for the fresh
+// turn, but the follow-up path is independent — pin it here.
+func TestBuildFollowUpJSONPromptDesignDoc_EmptyRubricSkipsRecap(t *testing.T) {
+	prompt := BuildFollowUpJSONPromptWithScope(
+		"some context",
+		PromptOptions{Mode: ReviewModeDesignDoc, Rubric: nil},
+	)
+	if strings.Contains(prompt, "Rubric (recap):") {
+		t.Errorf("empty rubric should not emit recap header\nprompt:\n%s", prompt)
 	}
 }
 

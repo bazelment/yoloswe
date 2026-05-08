@@ -364,6 +364,71 @@ class TestReadRubricFile(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_overlong_line_rejected(self):
+        # Mirrors bramble's loadRubricFile cap (500 chars per line). A
+        # rubric that doc_ops accepts but bramble rejects every round
+        # would silently brick the loop's first turn.
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            long = "x" * (doc_ops._RUBRIC_LINE_MAX_LEN + 1)
+            f.write(long + "\n")
+            path = f.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                doc_ops._read_rubric_file(path)
+            self.assertIn("exceeds", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_too_many_entries_rejected(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            for i in range(doc_ops._RUBRIC_MAX_ENTRIES + 5):
+                f.write(f"Question {i+1}?\n")
+            path = f.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                doc_ops._read_rubric_file(path)
+            self.assertIn("cap is", str(ctx.exception))
+        finally:
+            os.unlink(path)
+
+    def test_markdown_control_prefix_rejected(self):
+        # Lines that would corrupt the surrounding numbered-list
+        # rendering inside the prompt (leading '-', '*', '>', etc.)
+        # are rejected at ingest. Same rule as
+        # SanitizePromptHint on the Go side.
+        cases = [
+            ("- bullet?", "leading hyphen"),
+            ("* asterisk?", "leading asterisk"),
+            ("> blockquote?", "leading blockquote"),
+            ("1. ordered list?", "leading ordered list"),
+            ("42) closing paren?", "leading ordered list"),
+        ]
+        for content, label in cases:
+            with self.subTest(label=label):
+                with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+                    f.write("Valid first line?\n")
+                    f.write(content + "\n")
+                    path = f.name
+                try:
+                    with self.assertRaises(ValueError) as ctx:
+                        doc_ops._read_rubric_file(path)
+                    self.assertIn("sanitization", str(ctx.exception))
+                finally:
+                    os.unlink(path)
+
+    def test_sanitize_prompt_hint_unit(self):
+        # Direct unit-test of the helper so the Python port stays
+        # aligned with yoloswe/reviewer.SanitizePromptHint.
+        self.assertTrue(doc_ops._sanitize_prompt_hint("Is this clear?"))
+        self.assertTrue(doc_ops._sanitize_prompt_hint("_underscore_starts_ok"))
+        self.assertFalse(doc_ops._sanitize_prompt_hint(""))
+        self.assertFalse(doc_ops._sanitize_prompt_hint("- dash"))
+        self.assertFalse(doc_ops._sanitize_prompt_hint("# hash"))
+        self.assertFalse(doc_ops._sanitize_prompt_hint("> blockquote"))
+        self.assertFalse(doc_ops._sanitize_prompt_hint("1. ordered"))
+        self.assertFalse(doc_ops._sanitize_prompt_hint("text\nwith newline"))
+        self.assertFalse(doc_ops._sanitize_prompt_hint("  leading whitespace"))
+
 
 class TestPersistRoundFindingsCleansBackends(unittest.TestCase):
     """A re-finalize that omits a backend must clear its findings,

@@ -47,6 +47,16 @@ from _common import (  # noqa: E402
 # consensus/spiral matching.
 BACKENDS = ("codex", "cursor", "gemini", "lint")
 
+# Review mode constants. Defined up here (rather than down by the
+# per-mode key constructors) so they're available as default-argument
+# values for parse_stream / parse_round below — those callers need a
+# default well before _normalize_mode lands. The two strings must match
+# yoloswe/reviewer.ReviewMode so the wire format stays stable across
+# the Python triage layer and the Go envelope writer.
+REVIEW_MODE_CODE = "code"
+REVIEW_MODE_DESIGN_DOC = "design-doc"
+REVIEW_MODES = (REVIEW_MODE_CODE, REVIEW_MODE_DESIGN_DOC)
+
 
 def bramble_bin() -> str:
     """Path to the bramble CLI. The SKILL exports ``BRAMBLE_BIN`` at the
@@ -202,45 +212,57 @@ def _truncate(s: str) -> str:
     return s[: _TOPIC_CHAR_CAP - 1].rstrip() + "…"
 
 
-def _action_label(action: dict[str, Any]) -> str:
-    """Format a fixed comment_actions entry for the goal text.
+def _action_address(action: dict[str, Any]) -> str:
+    """Mode-agnostic address string for an action.
 
-    Shape: ``path:line — topic`` when topic is present, bare ``path:line``
-    when absent. Source labels (codex/cursor/etc.) are deliberately
-    omitted: triage routes by source but the resumed model treats every
-    finding identically once it lands in the prompt.
+    Code-mode actions carry ``path``/``line``; design-doc-mode actions
+    carry ``section``/``dimension``. Pick whichever pair the row has.
+    Returns empty when neither is populated (top-level findings,
+    misformed rows). Centralising this here keeps the goal-text
+    label functions agnostic of the source-of-truth field name.
     """
     path = action.get("path")
     line = action.get("line")
-    topic = (action.get("topic") or "").strip()
-    base: str
-    if path and line is not None:
-        base = f"{path}:{line}"
-    elif path:
-        base = f"{path}"
-    else:
+    if path:
+        return f"{path}:{line}" if line is not None else f"{path}"
+    section = action.get("section")
+    dimension = action.get("dimension")
+    if section:
+        return f"{section} ({dimension})" if dimension else f"{section}"
+    return ""
+
+
+def _action_label(action: dict[str, Any]) -> str:
+    """Format a fixed comment_actions entry for the goal text.
+
+    Shape: ``<address> — topic`` when topic is present, bare ``<address>``
+    when absent. The address is ``path:line`` for code-mode actions or
+    ``section (dimension)`` for design-doc actions — see
+    ``_action_address``. Source labels (codex/cursor/etc.) are
+    deliberately omitted: triage routes by source but the resumed
+    model treats every finding identically once it lands in the prompt.
+    """
+    base = _action_address(action)
+    if not base:
         return ""
+    topic = (action.get("topic") or "").strip()
     if topic:
         return f"{base} — {_truncate(topic)}"
     return base
 
 
 def _skipped_label(action: dict[str, Any], verb: str) -> str:
-    """Format a skipped action: ``path:line verb: <description>``.
+    """Format a skipped action: ``<address> verb: <description>``.
 
     Reason takes precedence over topic when both are present — the
     reason is what the orchestrator decided, and the model needs that
     decision (and not the original finding's topic) to avoid re-arguing
     the skip. The whole description is capped at _TOPIC_CHAR_CAP so
-    a long reason can't bloat the goal text.
+    a long reason can't bloat the goal text. Address shape matches
+    ``_action_label``.
     """
-    path = action.get("path")
-    line = action.get("line")
-    if path and line is not None:
-        base = f"{path}:{line}"
-    elif path:
-        base = f"{path}"
-    else:
+    base = _action_address(action)
+    if not base:
         return ""
     description = (action.get("reason") or action.get("topic") or "").strip()
     if description:
@@ -301,7 +323,7 @@ def extract_terminal_envelope(stream_text: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
+def parse_stream(stream_path: Path, *, source: str, fallback_mode: str = REVIEW_MODE_CODE) -> list[dict[str, Any]]:
     """Read Monitor's captured stdout (or a standalone envelope file) and return findings.
 
     Tries whole-file ``json.loads`` first so producers that write a single
@@ -311,6 +333,12 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
     yields an envelope, synthesize a high-severity ``bramble-empty-envelope``
     finding so triage surfaces the failure instead of treating it as
     "converged to zero".
+
+    ``fallback_mode`` tags the synthetic empty-envelope finding with the
+    review mode the caller's other backends are running. Without this, a
+    crashed design-doc backend would emit a code-mode synthetic finding
+    that triage rejects as "mixed review_mode". The orchestrator passes
+    ``--mode design-doc`` (CLI) which threads through here.
     """
     if not stream_path.exists():
         return []
@@ -330,26 +358,27 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
     if env is None:
         env = extract_terminal_envelope(text)
     if env is None:
-        # No envelope means we don't know the mode either; default to
-        # code so the addressing fields match the legacy (file, line)
-        # shape every existing triage caller expects. A design-doc
-        # orchestrator with no envelope is still going to land here —
-        # the dummy finding's purpose is to surface the failure; key
-        # collisions with real findings can't happen because the mode
-        # is consistent within one triage call.
-        return [
-            {
-                "source": source,
-                "severity": "high",
-                "file": None,
-                "line": None,
-                "message": "bramble stream ended without producing an envelope",
-                "suggestion": "re-launch the Monitor arm; see bramble logs under ~/.bramble/logs/code-review/",
-                "topic": "bramble-empty-envelope",
-                "status": "exited-empty",
-                "review_mode": REVIEW_MODE_CODE,
-            }
-        ]
+        # No envelope means we don't know the mode either, so we trust
+        # the caller's ``fallback_mode``. Without this, a crashed
+        # design-doc backend would synthesize a code-mode high finding
+        # that triage rejects as "mixed review_mode" — silently turning
+        # a Monitor failure into "all envelopes mismatched, abort."
+        finding: dict[str, Any] = {
+            "source": source,
+            "severity": "high",
+            "message": "bramble stream ended without producing an envelope",
+            "suggestion": "re-launch the Monitor arm; see bramble logs under ~/.bramble/logs/code-review/",
+            "topic": "bramble-empty-envelope",
+            "status": "exited-empty",
+            "review_mode": fallback_mode,
+        }
+        if fallback_mode == REVIEW_MODE_DESIGN_DOC:
+            finding["section"] = None
+            finding["dimension"] = None
+        else:
+            finding["file"] = None
+            finding["line"] = None
+        return [finding]
     return parse_envelope(env, source=source)
 
 
@@ -430,6 +459,8 @@ def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str,
 def parse_round(
     streams: dict[str, Path],
     backends: list[str] | None = None,
+    *,
+    fallback_mode: str = REVIEW_MODE_CODE,
 ) -> list[dict[str, Any]]:
     """Aggregate findings across backends for one pr-polish round.
 
@@ -439,6 +470,12 @@ def parse_round(
     doesn't exist yield a synthetic high-severity ``stream-missing``
     finding so a typo'd ``--stream cursor=/typo/path`` surfaces in
     triage instead of disappearing.
+
+    ``fallback_mode`` tags the synthetic stream-missing and empty-
+    envelope findings (the latter via ``parse_stream``) with the review
+    mode the caller's other envelopes are running. Mixing a code-mode
+    synthetic into a design-doc batch (or vice versa) would otherwise
+    trip triage's mixed-mode guard.
     """
     backends = backends or list(BACKENDS)
     out: list[dict[str, Any]] = []
@@ -447,21 +484,24 @@ def parse_round(
         if path is None:
             continue
         if not path.exists():
-            out.append(
-                {
-                    "source": b,
-                    "severity": "high",
-                    "file": None,
-                    "line": None,
-                    "message": f"--stream {b}={path} does not exist on disk",
-                    "suggestion": "verify the Monitor capture path; check stderr for the failed bramble run",
-                    "topic": "stream-missing",
-                    "status": "missing",
-                    "review_mode": REVIEW_MODE_CODE,
-                }
-            )
+            finding: dict[str, Any] = {
+                "source": b,
+                "severity": "high",
+                "message": f"--stream {b}={path} does not exist on disk",
+                "suggestion": "verify the Monitor capture path; check stderr for the failed bramble run",
+                "topic": "stream-missing",
+                "status": "missing",
+                "review_mode": fallback_mode,
+            }
+            if fallback_mode == REVIEW_MODE_DESIGN_DOC:
+                finding["section"] = None
+                finding["dimension"] = None
+            else:
+                finding["file"] = None
+                finding["line"] = None
+            out.append(finding)
             continue
-        out.extend(parse_stream(path, source=b))
+        out.extend(parse_stream(path, source=b, fallback_mode=fallback_mode))
     return out
 
 
@@ -487,11 +527,6 @@ def parse_round(
 # Adding a future mode (e.g. security-review) becomes one new entry in
 # this map plus matching adapter wiring, without touching the triage
 # pipeline itself.
-
-REVIEW_MODE_CODE = "code"
-REVIEW_MODE_DESIGN_DOC = "design-doc"
-REVIEW_MODES = (REVIEW_MODE_CODE, REVIEW_MODE_DESIGN_DOC)
-
 
 def _normalize_mode(mode: str | None) -> str:
     if not mode:
@@ -1073,7 +1108,6 @@ def main(argv: list[str] | None = None) -> int:
             print_json(findings)
         elif args.cmd == "triage":
             streams = _parse_stream_args(args.stream)
-            findings = parse_round(streams)
             prior = None
             if args.prior_state_file:
                 prior = read_json(Path(args.prior_state_file), default=None)
@@ -1092,23 +1126,33 @@ def main(argv: list[str] | None = None) -> int:
                 ci_failures = read_json(Path(args.ci_failures), default=[])
                 if not isinstance(ci_failures, list):
                     raise ValueError("--ci-failures must point to a JSON array")
-            # When --mode is explicit, use it for prior_fixed_keys too so
-            # the spiral guard reads addressing fields from the right
-            # comment_actions columns. When --mode is omitted, read it off
-            # the findings (parse_envelope already tagged them) and fall
-            # back to code.
+            # Mode resolution decides which addressing fields synthetic
+            # findings (stream-missing, empty-envelope) carry. Order of
+            # preference:
+            #   1. Explicit --mode flag.
+            #   2. Mode read off real envelopes (do a code-default parse
+            #      first, then look at the non-synthetic findings).
+            #   3. Code default.
+            # Without #2, a design-doc orchestrator that omits --mode
+            # would get code-mode synthetics that triage rejects as
+            # "mixed review_mode" any time a backend produces a real
+            # design-doc envelope.
             if args.mode is not None:
                 resolved_mode = args.mode
             else:
-                finding_modes = {
-                    f.get("review_mode") for f in findings if f.get("review_mode")
+                preliminary = parse_round(streams, fallback_mode=REVIEW_MODE_CODE)
+                real_modes = {
+                    f.get("review_mode")
+                    for f in preliminary
+                    if f.get("review_mode") and f.get("status") not in ("missing", "exited-empty")
                 }
-                if len(finding_modes) > 1:
+                if len(real_modes) > 1:
                     raise ValueError(
-                        f"findings carry mixed review_mode values: {sorted(finding_modes)!r}; "
+                        f"findings carry mixed review_mode values: {sorted(real_modes)!r}; "
                         "pass --mode explicitly to disambiguate"
                     )
-                resolved_mode = next(iter(finding_modes), None) or REVIEW_MODE_CODE
+                resolved_mode = next(iter(real_modes), None) or REVIEW_MODE_CODE
+            findings = parse_round(streams, fallback_mode=resolved_mode)
             result = triage(
                 findings,
                 prior_fixed_keys(prior, resolved_mode),

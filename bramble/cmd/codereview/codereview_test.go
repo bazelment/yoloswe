@@ -207,6 +207,45 @@ func TestEmitEarlyFailure_OmitsResumeStatusWhenNoneRequested(t *testing.T) {
 	}
 }
 
+func TestEmitEarlyFailure_TagsEnvelopeWithReviewMode(t *testing.T) {
+	// When --review-mode design-doc is set but rubric-file is missing,
+	// runCodeReview must emit a failure envelope tagged with the
+	// requested mode (not code). Without this, an orchestrator that
+	// triages with --mode design-doc rejects the failure as "explicit
+	// mode doesn't match envelope" — surfacing a misleading error
+	// instead of the actual flag-validation problem. Pins the contract
+	// emitEarlyFailure callers rely on for both code and design-doc
+	// failures.
+	origBackend := backend
+	backend = "codex"
+	t.Cleanup(func() { backend = origBackend })
+
+	for _, tc := range []struct {
+		name string
+		mode reviewer.ReviewMode
+	}{
+		{"code mode", reviewer.ReviewModeCode},
+		{"design-doc mode", reviewer.ReviewModeDesignDoc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			boom := errors.New("flag validation failed")
+			stdout, _ := captureStdStreams(t, func() {
+				emit := func(env reviewer.ResultEnvelope) {
+					_ = reviewer.PrintJSONResult(os.Stdout, env)
+				}
+				_ = emitEarlyFailure(boom, "gpt-x", tc.mode, emit)
+			})
+			var env reviewer.ResultEnvelope
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+				t.Fatalf("envelope decode failed: %v", err)
+			}
+			if env.ReviewMode != tc.mode {
+				t.Errorf("ReviewMode = %q, want %q", env.ReviewMode, tc.mode)
+			}
+		})
+	}
+}
+
 func TestEmitVerdictLine_ResumeSuffixOnSuccessAndError(t *testing.T) {
 	// Round-7 review (cursor low-ack): emitVerdictLine drives the new
 	// stdout contract that orchestrators read mid-stream, but had no
@@ -834,6 +873,36 @@ func TestCmd_ScopeHintsFileFlagIsWired(t *testing.T) {
 	}
 	if scopeHintsFile != "/other/path.json" {
 		t.Errorf("scopeHintsFile global after second parse = %q, want /other/path.json", scopeHintsFile)
+	}
+}
+
+func TestCmd_ReviewModeFlagsAreWired(t *testing.T) {
+	// Cobra-level proof that --review-mode and --review-rubric-file are
+	// registered, parse, and bind to the globals validateModeFlags +
+	// loadPromptOptions read. Defends against the same regression class
+	// as TestCmd_ScopeHintsFileFlagIsWired: a flag typo or unhooked
+	// StringVar would still pass the lower-level validateModeFlags and
+	// buildPromptForRun tests because those bypass Cobra entirely.
+	prevMode := reviewMode
+	prevRubric := rubricFile
+	t.Cleanup(func() {
+		reviewMode = prevMode
+		rubricFile = prevRubric
+	})
+	reviewMode = "code"
+	rubricFile = ""
+
+	if err := Cmd.ParseFlags([]string{
+		"--review-mode", "design-doc",
+		"--review-rubric-file", "/tmp/rubric.txt",
+	}); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+	if reviewMode != "design-doc" {
+		t.Errorf("reviewMode = %q, want design-doc", reviewMode)
+	}
+	if rubricFile != "/tmp/rubric.txt" {
+		t.Errorf("rubricFile = %q, want /tmp/rubric.txt", rubricFile)
 	}
 }
 

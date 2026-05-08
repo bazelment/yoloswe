@@ -1559,5 +1559,160 @@ class TestParseEnvelopeReviewMode(unittest.TestCase):
         self.assertNotIn("file", f)
 
 
+class TestSyntheticFindingFallbackMode(unittest.TestCase):
+    """parse_stream's empty-envelope fallback and parse_round's
+    stream-missing fallback must adopt the caller's fallback_mode so a
+    crashed design-doc backend produces a design-doc-tagged synthetic
+    finding (otherwise triage rejects the batch as 'mixed review_mode')."""
+
+    def test_parse_stream_empty_envelope_uses_fallback_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            empty = Path(d) / "empty.txt"
+            empty.write_text("[Status] Running review with codex (model: x)...\n")
+            findings = bramble_ops.parse_stream(
+                empty, source="codex", fallback_mode="design-doc"
+            )
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["review_mode"], "design-doc")
+        self.assertEqual(f["topic"], "bramble-empty-envelope")
+        # Design-doc shape: section/dimension, no file/line.
+        self.assertIsNone(f["section"])
+        self.assertIsNone(f["dimension"])
+        self.assertNotIn("file", f)
+        self.assertNotIn("line", f)
+
+    def test_parse_stream_default_fallback_is_code(self):
+        # Backward-compat: callers that don't pass fallback_mode still
+        # get code-mode synthetics (same shape as before this change).
+        with tempfile.TemporaryDirectory() as d:
+            empty = Path(d) / "empty.txt"
+            empty.write_text("garbage no envelope\n")
+            findings = bramble_ops.parse_stream(empty, source="codex")
+        self.assertEqual(findings[0]["review_mode"], "code")
+        self.assertIsNone(findings[0]["file"])
+        self.assertIsNone(findings[0]["line"])
+
+    def test_parse_round_missing_stream_uses_fallback_mode(self):
+        findings = bramble_ops.parse_round(
+            {"codex": Path("/nonexistent/path.json")},
+            backends=["codex"],
+            fallback_mode="design-doc",
+        )
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["review_mode"], "design-doc")
+        self.assertEqual(f["topic"], "stream-missing")
+        self.assertIsNone(f["section"])
+        self.assertIsNone(f["dimension"])
+        self.assertNotIn("file", f)
+
+    def test_triage_cli_auto_detects_design_doc_from_real_envelopes(self):
+        # End-to-end: a design-doc envelope from cursor + a missing
+        # codex stream must triage cleanly when --mode is omitted. The
+        # triage CLI does an initial parse to detect the mode from the
+        # real envelopes (skipping synthetic stream-missing findings),
+        # then re-parses with the resolved mode. Without this, the
+        # synthetic codex finding would default to code-mode and triage
+        # would reject the batch as mixed review_mode.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            cursor_env = d / "cursor.json"
+            cursor_env.write_text(json.dumps({
+                "schema_version": 1,
+                "status": "ok",
+                "review_mode": "design-doc",
+                "review": {
+                    "verdict": "needs-revision",
+                    "confidence": 0.7,
+                    "issues": [{
+                        "severity": "high",
+                        "section": "Milestone 2",
+                        "dimension": "q4",
+                        "message": "doesn't frontload risk",
+                    }],
+                },
+            }))
+            # codex envelope path that doesn't exist on disk —
+            # parse_round emits a stream-missing synthetic.
+            codex_env = d / "codex.json"
+
+            # Drive the CLI in-process via main(argv) so we exercise
+            # the same code path the orchestrator hits.
+            import contextlib
+            import io
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = bramble_ops.main([
+                    "triage",
+                    "--stream", f"cursor={cursor_env}",
+                    "--stream", f"codex={codex_env}",
+                ])
+            self.assertEqual(rc, 0)
+            result = json.loads(buf.getvalue())
+        # Mode auto-detected as design-doc; the synthetic codex
+        # stream-missing finding is tagged design-doc and routes to
+        # single_critical (it has severity=high). The cursor finding
+        # also routes to single_critical at (Milestone 2, q4, ...).
+        self.assertEqual(result["review_mode"], "design-doc")
+        self.assertGreaterEqual(len(result["single_critical"]), 1)
+
+
+class TestActionLabelsModeAware(unittest.TestCase):
+    """_action_label and _skipped_label format addresses for both code-
+    mode (path:line) and design-doc-mode (section (dimension)) actions.
+    Without mode-awareness, design-doc round-2+ goal text would be
+    truncated to topic-only (no address) — losing the load-bearing
+    'fixed at the same place last round' signal that prevents the
+    resumed model from re-flagging its own prior fixes."""
+
+    def test_action_label_code_mode(self):
+        action = {
+            "path": "x.go", "line": 42, "topic": "missing nil check",
+        }
+        got = bramble_ops._action_label(action)
+        self.assertIn("x.go:42", got)
+        self.assertIn("missing nil check", got)
+
+    def test_action_label_design_doc_mode(self):
+        action = {
+            "section": "Milestone 2",
+            "dimension": "q4",
+            "topic": "milestone 2 doesn't frontload risk",
+        }
+        got = bramble_ops._action_label(action)
+        self.assertIn("Milestone 2", got)
+        self.assertIn("q4", got)
+        self.assertIn("doesn't frontload risk", got)
+
+    def test_action_label_returns_empty_when_no_address(self):
+        # Top-level / addressless actions still produce no label so
+        # the goal-text builder can elide them cleanly.
+        self.assertEqual(bramble_ops._action_label({"topic": "x"}), "")
+
+    def test_skipped_label_design_doc_mode(self):
+        action = {
+            "section": "Intro",
+            "dimension": "q1",
+            "reason": "design tradeoff: one-pager not arch doc",
+        }
+        got = bramble_ops._skipped_label(action, "wont_fix")
+        self.assertIn("Intro", got)
+        self.assertIn("q1", got)
+        self.assertIn("wont_fix", got)
+        self.assertIn("design tradeoff", got)
+
+    def test_skipped_label_section_only_no_dimension(self):
+        # Sections alone (no dimension) still produce a usable label.
+        action = {
+            "section": "(whole document)",
+            "reason": "needs author input",
+        }
+        got = bramble_ops._skipped_label(action, "wont_fix")
+        self.assertIn("(whole document)", got)
+        self.assertIn("needs author input", got)
+
+
 if __name__ == "__main__":
     unittest.main()

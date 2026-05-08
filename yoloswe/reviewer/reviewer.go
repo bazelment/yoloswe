@@ -294,10 +294,12 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 //
 // SkipTestExecution and the scope-hint clauses are irrelevant for a
 // single-doc review, so they are not consumed here. The caller layer in
-// cmd/codereview rejects scope-hints-file + design-doc at flag-parse time;
-// SkipTestExecution arriving here is silently ignored, mirroring the
+// cmd/codereview warns-and-ignores both --scope-hints-file and
+// --skip-test-execution in design-doc mode (validateModeFlags), so a
+// stray flag won't error out — it just produces a warning in the run log
+// while the prompt builder drops the clauses cleanly. Mirrors the
 // general principle that a mode change shouldn't require unrelated flags
-// to be dropped.
+// to be dropped from existing automation invocations.
 func buildDesignDocBasePrompt(goal string, opts PromptOptions) string {
 	rubric := filterPromptHints(opts.Rubric)
 	if len(rubric) > rubricCap {
@@ -738,12 +740,13 @@ Apply the same severity rubric and JSON output format as the prior turn.`
 // buildDesignDocFollowUpPrompt is the design-doc analogue of the code
 // follow-up prompt. Two differences from the code path:
 //
-//   - No scope-suffix safety net. Scope hints are diff-derived; in
-//     design-doc mode they are silently ignored at flag-parse time, so a
-//     fallback session has nothing to recover. The fresh-review escape
-//     hatch instead points at the rubric, which the orchestrator must
-//     re-supply on every resume turn (the rubric file path is round-N's
-//     --review-rubric-file flag).
+//   - No scope-suffix safety net (scope hints are diff-derived and don't
+//     apply to a single doc), but the rubric IS the review for design-doc
+//     mode, so we inline a compact recap in the follow-up prompt — the
+//     same "survive a silent resume fallback" reasoning as the code-mode
+//     scope-suffix appendage. Without this, a backend that silently
+//     cold-starts despite --resume-session-id reads this prompt with no
+//     idea what rubric questions the orchestrator wanted grilled.
 //   - The "fresh eyes" framing keeps the same anti-bias intent but
 //     swaps file/line cues for section/dimension cues so the resumed
 //     model doesn't drift back to code-review citation shape.
@@ -754,7 +757,7 @@ func buildDesignDocFollowUpPrompt(goal string, opts PromptOptions) string {
 	}
 	prompt += `
 
-If you have no prior review context for this document (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: re-read the document, re-read the rubric, and apply the design-doc severity rubric and JSON output format. The rubric is loaded via --review-rubric-file on every turn, so a fresh session still has it. Otherwise, proceed with the resume protocol below.
+If you have no prior review context for this document (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: re-read the document and apply the design-doc severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.
 
 Re-grill the document with fresh eyes — including sections you previously accepted. Pay particular attention to:
 1. Issues introduced by edits the orchestrator made since the prior turn.
@@ -764,7 +767,33 @@ Re-grill the document with fresh eyes — including sections you previously acce
 Avoid restating prior findings verbatim, but DO surface any new systemic issues — including in sections you already accepted. A second pass that finds something the first pass missed is more useful than one that just confirms the prior verdict.
 
 Cite section headings (not line numbers). Tag each issue with the rubric question it answers ("dimension": "qN"). Apply the same severity rubric and JSON output format as the prior turn.`
+	prompt += buildRubricRecap(opts.Rubric)
 	return prompt
+}
+
+// buildRubricRecap appends a short numbered list of the rubric questions
+// to a follow-up prompt so a silent-resume fallback session has the
+// rubric in hand without depending on the orchestrator threading
+// --review-rubric-file (which it does, but the model still has to read
+// the file). Mirrors the code-mode follow-up's scope-suffix safety net.
+// Returns empty when the rubric is empty (defence-in-depth — the call
+// site that produced this prompt would have already returned a
+// MISCONFIGURED sentinel from buildDesignDocBasePrompt; this is just a
+// belt-and-suspenders no-op).
+func buildRubricRecap(rubric []string) string {
+	rubric = filterPromptHints(rubric)
+	if len(rubric) > rubricCap {
+		rubric = rubric[:rubricCap]
+	}
+	if len(rubric) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nRubric (recap):\n")
+	for i, q := range rubric {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, q)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // jsonOutputRules returns the per-mode output-format spec appended to every
@@ -845,8 +874,9 @@ You MUST respond with valid JSON in this exact format:
 ## Rules
 - verdict MUST be exactly one of "ready", "needs-revision", or "major-revision".
 - "ready": no high/critical issues; the design is implementation-ready.
-- "needs-revision": at least one high issue; the doc needs author revisions before it ships.
-- "major-revision": at least one critical issue, or three+ high issues clustered on the same dimension; the design's premise needs reconsideration.
+- "needs-revision": low/medium issues only, but the doc needs author revisions before it ships. Prefer this band when the issues are fixable in-place.
+- "major-revision": at least one high or critical issue, OR a cluster of medium issues that together challenge the design's premise. Use sparingly — pick this when the doc needs more than copy-edits.
+- These bands are guidance, not a hard rule. The validator only enforces the "ready ⇔ no high/critical issues" symmetry; verdict-vs-severity calibration beyond that is your judgement call.
 - Top-level "confidence" is a float in [0.0, 1.0] reporting confidence in the verdict itself.
 - Each issue MUST include severity, section (a heading from the doc, or "(whole document)" for doc-wide issues), dimension (the rubric question it answers, e.g. "q1"), and message; suggestion is optional.
 - Per-issue "confidence" is an optional float in (0.0, 1.0]; omit when you cannot assess.
