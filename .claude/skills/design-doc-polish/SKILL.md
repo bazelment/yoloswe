@@ -15,7 +15,7 @@ Loop exits on convergence (zero findings, or all low/nit) or `--rounds N` (defau
 |---|---|---|
 | `<doc-path>` | required | Markdown design doc, must live under the repo worktree. |
 | `--rounds N` | `5` | Round cap. |
-| `--gemini` | off | Add a third reviewer. |
+| `--gemini` | off | Add gemini as a third reviewer. Three reviewers produce materially more consensus findings than two; pass when the doc warrants extra scrutiny. |
 | `--rubric-file <path>` | off | Use this rubric verbatim instead of orchestrator-proposed. User still confirms. |
 
 ## Triage rules
@@ -42,7 +42,7 @@ export BRAMBLE_BIN="$([ -x "$(pwd)/bazel-bin/bramble/bramble_/bramble" ] \
 
 ## Step 1: Rubric
 
-The rubric questions become the `dimension` field on every issue, so they need to match the doc's actual axes. Default path: read the doc, classify it, propose 3–7 tailored questions.
+The rubric questions become the `dimension` field on every issue, so they need to match the doc's actual axes. Default path: read the doc, classify it (record `$DOC_KIND` — used in the round-1 goal), propose 3–7 tailored questions.
 
 Suggested axes per doc kind:
 
@@ -54,7 +54,7 @@ Suggested axes per doc kind:
 
 `AskUserQuestion` showing the proposal. Two options: `Accept` or `Use 4 starter questions`. Set `RUBRIC_SOURCE="orchestrator-proposed"` (or `user-edited` if they answer Other).
 
-If `--rubric-file <path>` was passed: validate with `python3 $SKILL_DIR/scripts/doc_ops.py read-rubric-file <path>`, show, confirm. Set `RUBRIC_SOURCE="--rubric-file <path>"`.
+If `--rubric-file <path>` was passed: validate with `python3 $SKILL_DIR/scripts/doc_ops.py read-rubric-file <path>`, show, confirm. Set `RUBRIC_SOURCE="--rubric-file <path>"` and `DOC_KIND="user-supplied"` (no orchestrator classification when the rubric is given verbatim).
 
 Starter questions (fallback, biased toward architecture):
 
@@ -84,7 +84,7 @@ fi
 
 ### b) Launch reviewers
 
-`$GOAL` round 1: `"Reviewing design doc <path>"`. Round 2+: brief summary of last round's fixed/skipped, ≤500 chars.
+`$GOAL` round 1: `"Reviewing $DOC_KIND doc at $DOC_PATH; rubric tailored for this kind."` — gives the model the one bit of context the rubric alone doesn't carry (which framing the questions came from). Round 2+: brief summary of last round's fixed/skipped, ≤500 chars.
 
 Launch codex + cursor (+ gemini with `--gemini`) as parallel `Monitor` calls:
 
@@ -126,6 +126,8 @@ Output buckets:
 Empty action plan → converged, jump to Step 3.
 
 ### d) Apply fixes
+
+Read `triage.action_plan.cluster_hint` first — it lists sections with ≥2 actionable findings, often across different rubric dimensions. Those are systemic-issue candidates: fix the section's framing once instead of patching each finding in isolation. Empty cluster_hint → fix findings as listed.
 
 Edit the doc. For each triaged finding, append to `$STATE_DIR/actions-r$ROUND.json`:
 
