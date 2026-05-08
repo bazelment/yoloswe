@@ -1,48 +1,31 @@
 #!/usr/bin/env python3
 """State and identity helpers for /design-doc-polish.
 
-This module is the design-doc analogue of /pr-polish's pr_ops.py — it
-owns:
+Doc review is short (2-3 rounds typical) and edits a single file. We
+keep just enough state for the user to read an audit trail after the
+loop ends; everything else (heartbeats, series detection, head-
+verification) belongs to /pr-polish where multi-round runs across hours
+need real recovery semantics.
 
-  - Identity: resolve ``<doc-path>`` to an absolute path, derive a
-    collision-resistant ``doc_slug``, and return canonical state paths.
-  - State I/O: state-load / state-append-round / state-finalize-round /
-    state-mark-complete / state-mark-abandoned, all atomic.
-  - The narrow set of ``recompute_counts`` / ``_merge_actions``
-    helpers needed for finalize.
+State path: ``~/.bramble/projects/<repo>-doc-<slug>/design-doc-polish-state.json``
+where ``<slug>`` = ``<basename-no-ext>-<sha256(abs_path)[:12]>``. Hash
+prefix avoids cross-directory basename collisions; basename keeps the
+directory human-readable.
 
-It deliberately does NOT fork the triage/envelope/session-id machinery
-(those live in pr-polish/scripts/bramble_ops.py and are mode-aware as of
-the same change that introduced this skill — see the plan in
-/home/ubuntu/.claude/plans/create-a-skill-similar-wondrous-hollerith.md).
-We import bramble_ops + _common via sys.path so a triage / consensus
-bug-fix lands once, not twice.
-
-State path: ``~/.bramble/projects/<repo>-doc-<doc-slug>/design-doc-polish-state.json``
-where ``doc_slug`` = ``<basename-no-ext>-<sha256(abs_path)[:12]>``. The
-SHA prefix avoids cross-directory basename collisions; the basename
-keeps the directory name human-readable.
-
-Context token: ``doc:<doc-slug>``, mirroring pr_ops's ``branch:<name>``.
+Imports ``_common`` and ``bramble_ops`` from /pr-polish so triage /
+envelope parsing stays shared.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
-import os
 import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# Import _common and bramble_ops from the sibling pr-polish skill. The two
-# modules are stable triage/state primitives — forking would mean every
-# bug fix lands twice and consensus/spiral semantics drift over time. The
-# path resolution is anchored on this file's location so worktree moves
-# don't break the import.
 _HERE = Path(__file__).resolve().parent
 _PR_POLISH_SCRIPTS = _HERE.parent.parent / "pr-polish" / "scripts"
 for _p in (str(_HERE), str(_PR_POLISH_SCRIPTS)):
@@ -52,12 +35,11 @@ for _p in (str(_HERE), str(_PR_POLISH_SCRIPTS)):
 import _common  # noqa: E402
 import bramble_ops  # noqa: E402
 
+
 # ---------------------------------------------------------------------------
 # Identity
 # ---------------------------------------------------------------------------
 
-# Doc slugs combine basename and a SHA prefix; the regex sanitises the
-# basename half so the directory name stays filesystem-friendly.
 _BASENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -67,33 +49,15 @@ def _sanitize_basename(name: str) -> str:
 
 
 def doc_slug(abs_path: str | Path) -> str:
-    """Compute the canonical slug for a doc path.
-
-    Format: ``<sanitized-basename-no-ext>-<sha256(abs_path)[:12]>``.
-
-    Examples:
-        ``/repo/docs/design/sessionmodel-architecture.md``
-        → ``sessionmodel-architecture-3a7f2c1b9d4e``
-
-    Stable: re-running on the same absolute path returns the same slug.
-    Collision-safe: two docs with the same basename in different
-    directories produce different slugs because the SHA includes the
-    full absolute path.
+    """``<basename-no-ext>-<sha256(abs_path)[:12]>``. Stable per
+    absolute path; collision-safe across directories.
     """
     abs_str = str(Path(abs_path).resolve())
     digest = hashlib.sha256(abs_str.encode("utf-8")).hexdigest()[:12]
-    base = Path(abs_str).stem  # filename without extension
-    return f"{_sanitize_basename(base)}-{digest}"
+    return f"{_sanitize_basename(Path(abs_str).stem)}-{digest}"
 
 
 def state_paths_for_doc(slug: str) -> tuple[Path, Path]:
-    """Return ``(state_dir, state_file)`` for a given doc slug.
-
-    Mirrors ``_common.state_paths`` but routes to a separate
-    ``<repo>-doc-<slug>/`` directory and the
-    ``design-doc-polish-state.json`` filename so the two skills don't
-    collide on the same filesystem path.
-    """
     repo = _common.repo_slug()
     state_dir = Path.home() / ".bramble" / "projects" / f"{repo}-doc-{slug}"
     return state_dir, state_dir / "design-doc-polish-state.json"
@@ -102,26 +66,8 @@ def state_paths_for_doc(slug: str) -> tuple[Path, Path]:
 def identify(doc_path: str | Path, *, repo_root: Path | None = None) -> dict[str, Any]:
     """Resolve a user-supplied doc path to canonical identity info.
 
-    Validates that the path:
-      - exists,
-      - is a regular file (not a directory or symlink to nothing),
-      - lives under the repo worktree (otherwise commits won't land
-        in the right place; we'd rather fail loud than commit on the
-        wrong branch).
-
-    Returns the full identity record:
-        {
-          "doc_path": "<repo-relative path>",
-          "doc_path_abs": "<absolute path>",
-          "doc_slug": "<basename-sha>",
-          "state_dir": "<state dir>",
-          "state_file": "<state file>",
-          "ctx": "doc:<slug>",
-        }
-
-    Non-``.md`` extensions are warned-only on the CLI (handled by the
-    caller); this function accepts any regular file so design-doc workflow
-    works with ``.txt`` and extensionless drafts too.
+    Validates that the path exists, is a regular file, and lives under
+    the repo worktree (so commits land in the right place).
     """
     p = Path(doc_path).resolve()
     if not p.exists():
@@ -133,8 +79,7 @@ def identify(doc_path: str | Path, *, repo_root: Path | None = None) -> dict[str
         rel = p.relative_to(repo_root)
     except ValueError as e:
         raise ValueError(
-            f"design doc {doc_path} is not under the current repo worktree {repo_root}; "
-            "commits would land in the wrong place"
+            f"design doc {doc_path} is not under the current repo worktree {repo_root}"
         ) from e
     slug = doc_slug(p)
     state_dir, state_file = state_paths_for_doc(slug)
@@ -149,10 +94,6 @@ def identify(doc_path: str | Path, *, repo_root: Path | None = None) -> dict[str
 
 
 def _parse_ctx(ctx: str) -> str:
-    """Parse ``doc:<slug>`` into the bare slug. Errors on any other shape
-    so a copy-paste from a pr-polish run (PR number, ``branch:<name>``)
-    fails loud instead of writing to the wrong directory.
-    """
     if not isinstance(ctx, str) or not ctx.startswith("doc:"):
         raise ValueError(f"design-doc ctx must be 'doc:<slug>', got {ctx!r}")
     slug = ctx[len("doc:"):]
@@ -162,111 +103,39 @@ def _parse_ctx(ctx: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Heartbeat / series detection (mirrors pr_ops semantics, reused via
-# constants from there so the timeout stays in lock-step).
+# State I/O
 # ---------------------------------------------------------------------------
-
-# Same 2-hour staleness window as pr-polish. Long bramble reviews can
-# easily run 10+ minutes per backend; anything past 2h is almost
-# certainly an abandoned process.
-HEARTBEAT_STALE_SECONDS = 2 * 60 * 60
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _is_heartbeat_stale(state: dict[str, Any]) -> bool:
-    if state.get("completed"):
-        return False
-    ts = state.get("last_heartbeat_at")
-    if not ts:
-        return True
-    try:
-        ts_dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    except (TypeError, ValueError):
-        return True
-    age = (datetime.now(UTC) - ts_dt).total_seconds()
-    return age > HEARTBEAT_STALE_SECONDS
-
-
-def _is_first_round_of_series(state: dict[str, Any] | None, n: int) -> bool:
-    """True when round ``n`` starts a new review series. Same rule as
-    pr-polish: no state, prior loop ``completed: true``, or round 1 with
-    no rounds yet.
-    """
-    if state is None or not state.get("rounds"):
-        return True
-    if state.get("completed"):
-        return True
-    return n == 1
-
-
-# ---------------------------------------------------------------------------
-# State I/O
-# ---------------------------------------------------------------------------
-
-
 def state_load(ctx: str) -> dict[str, Any]:
-    """Read the state file and decorate with derived signals."""
+    """Read the state file. Returns ``{}`` when absent."""
     slug = _parse_ctx(ctx)
     _, path = state_paths_for_doc(slug)
-    state = _common.read_json(path, default={}) or {}
-    if state:
-        state["is_heartbeat_stale"] = _is_heartbeat_stale(state)
-        state["is_first_round_of_series"] = _is_first_round_of_series(
-            state, state.get("current_round") or 1
-        )
-    return state
+    return _common.read_json(path, default={}) or {}
 
 
-def state_is_new_series(ctx: str, n: int) -> bool:
-    """Standalone CLI helper used by SKILL.md's Step 0.5 to capture the
-    series-boundary decision *before* state_append_round clears the
-    completed flag. Returns True/False as a literal so the orchestrator
-    can shell-substitute it directly into ``IS_NEW_SERIES=…``.
-    """
-    slug = _parse_ctx(ctx)
-    _, path = state_paths_for_doc(slug)
-    state = _common.read_json(path, default=None)
-    return _is_first_round_of_series(state, n)
-
-
-def state_append_round(
+def state_finalize_round(
     ctx: str,
     n: int,
-    head_before: str,
+    actions: list[dict[str, Any]],
     *,
     doc_path: str,
     doc_path_abs: str,
     rubric: list[str],
     rubric_source: str,
-    verify_head: bool = True,
+    envelope_overrides: dict[str, Path] | None = None,
 ) -> dict[str, Any]:
-    """Start a new round (or refresh ``head_before`` on an in-progress one).
+    """Write a round's results. Seeds the state file on round 1.
 
-    The first call (no state file) seeds the persisted record with
-    ``doc_path``, ``doc_slug``, ``rubric``, ``rubric_source``. Subsequent
-    rounds reuse those — the rubric is locked at round 1 (per the user's
-    "keep it consistent" choice). A subsequent call with a different doc
-    path raises (integrity gate; same doc-slug across two different docs
-    would be a hash collision and worth surfacing loudly).
-
-    ``verify_head`` matches pr-polish: compares ``git rev-parse HEAD``
-    against ``head_before`` and refuses on mismatch. Pass
-    ``verify_head=False`` only when resuming an interrupted round.
+    Doc review never amends a round mid-flight, so this single-shot
+    write replaces both the pr-polish ``state-append-round`` +
+    ``state-finalize-round`` pair. The state file is the audit trail,
+    not a recovery mechanism.
     """
-    if verify_head:
-        try:
-            current = _common.run(["git", "rev-parse", "HEAD"], check=True).stdout.strip()
-        except (_common.CommandError, FileNotFoundError) as e:
-            raise RuntimeError(f"could not read git HEAD for verification: {e}") from e
-        if current != head_before:
-            raise RuntimeError(
-                f"HEAD {current[:7]} != declared head_before {head_before[:7]}; "
-                "refuse to append round (orchestrator raced a commit — "
-                "rerun with the current HEAD)"
-            )
     slug = _parse_ctx(ctx)
     state_dir, path = state_paths_for_doc(slug)
     state = _common.read_json(path, default=None)
@@ -278,154 +147,60 @@ def state_append_round(
             "rubric": list(rubric),
             "rubric_source": rubric_source,
             "started_at": _utc_now(),
-            "current_round": n,
-            "last_commit_at_round_start": head_before,
+            "completed": False,
+            "exit_reason": None,
             "rounds": [],
         }
-    else:
-        # Integrity gate: same slug, different doc path is a hash
-        # collision (or worse, the user resolved a relative path under
-        # a different worktree). Refuse rather than silently overwrite.
-        existing_path = state.get("doc_path_abs")
-        if existing_path and existing_path != doc_path_abs:
-            raise RuntimeError(
-                f"state file for slug {slug!r} was created for "
-                f"{existing_path!r}, not {doc_path_abs!r}; "
-                "refuse to append (slug collision — pick a different doc)"
-            )
-        # Round 1 of a fresh series re-pins the rubric (the orchestrator
-        # may have re-inferred it after a previous series completed).
-        # Mid-series, the rubric is immutable.
-        prior_completed = bool(state.get("completed"))
-        if prior_completed and n == 1:
-            state["rubric"] = list(rubric)
-            state["rubric_source"] = rubric_source
+    elif state.get("doc_path_abs") and state["doc_path_abs"] != doc_path_abs:
+        raise RuntimeError(
+            f"state file for slug {slug!r} was created for "
+            f"{state['doc_path_abs']!r}, not {doc_path_abs!r} (slug collision)"
+        )
+
     rounds = state.setdefault("rounds", [])
     existing = next((r for r in rounds if r.get("n") == n), None)
+    counts = recompute_counts(actions)
     if existing is None:
-        rounds.append(
-            {
-                "n": n,
-                "head_before": head_before,
-                "head_after": None,
-                "codex_findings": [],
-                "cursor_findings": [],
-                "fixed_count": 0,
-                "skipped_count": 0,
-                "top_severity": None,
-                "comment_actions": [],
-            }
-        )
+        rounds.append({
+            "n": n,
+            "comment_actions": list(actions),
+            **counts,
+            "codex_findings": [],
+            "cursor_findings": [],
+        })
     else:
-        existing["head_before"] = head_before
+        existing["comment_actions"] = list(actions)
+        existing.update(counts)
+
     state["current_round"] = n
-    state["last_commit_at_round_start"] = head_before
     if state.get("completed"):
         state["completed"] = False
         state["exit_reason"] = None
-        state["completed_at"] = None
-    state["last_heartbeat_at"] = _utc_now()
+
+    _persist_round_findings(state_dir, rounds[-1] if existing is None else existing,
+                            n, envelope_overrides or {})
     _common.atomic_write_json(path, state)
     return state
 
 
-# Action-verb sets for recompute_counts. design-doc mode drops the
-# code-mode `pre_existing` / `flake` (CI-only) and `ack` (pr-polish
-# batch-acknowledge — per user choice we use `wont_fix` with an
-# explicit reason instead). Fewer states, simpler audit trail.
 FIXED_ACTIONS = {"fixed"}
 SKIPPED_ACTIONS = {"false_positive", "wont_fix", "stale"}
 
 
-def _top_severity(actions: list[dict[str, Any]]) -> str | None:
-    best = None
+def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    fixed = sum(1 for a in actions if a.get("action") in FIXED_ACTIONS)
+    skipped = sum(1 for a in actions if a.get("action") in SKIPPED_ACTIONS)
+    best_sev = None
     best_rank = -1
     for a in actions:
         sev = a.get("severity")
         rank = _common.severity_rank(sev)
         if rank > best_rank:
             best_rank = rank
-            best = sev
-    return best
+            best_sev = sev
+    return {"fixed_count": fixed, "skipped_count": skipped, "top_severity": best_sev}
 
 
-def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
-    fixed = sum(1 for a in actions if a.get("action") in FIXED_ACTIONS)
-    skipped = sum(1 for a in actions if a.get("action") in SKIPPED_ACTIONS)
-    return {
-        "fixed_count": fixed,
-        "skipped_count": skipped,
-        "top_severity": _top_severity(actions),
-    }
-
-
-def _action_key(action: dict[str, Any]) -> tuple:
-    """Dedup key for design-doc actions. Source + section + dimension +
-    topic uniquely identifies the finding the action addresses (no
-    comment_id since there are no PR comments in this skill).
-    """
-    return (
-        action.get("source"),
-        action.get("section"),
-        action.get("dimension"),
-        action.get("topic"),
-    )
-
-
-def _merge_actions(
-    existing: list[dict[str, Any]], new: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Append new actions; dedupe on the action key. New wins on conflict
-    so a re-finalize with updated severities/reasons overwrites the
-    in-progress entry."""
-    by_key: dict[tuple, dict[str, Any]] = {}
-    for a in existing:
-        by_key[_action_key(a)] = a
-    for a in new:
-        by_key[_action_key(a)] = a
-    return list(by_key.values())
-
-
-def state_finalize_round(
-    ctx: str,
-    n: int,
-    head_after: str,
-    actions: list[dict[str, Any]],
-    *,
-    envelope_overrides: dict[str, Path] | None = None,
-) -> dict[str, Any]:
-    """Finalize a round and persist its results.
-
-    ``envelope_overrides`` maps backend name (``codex`` / ``cursor`` /
-    ``gemini``) to the on-disk envelope file Monitor captured for that
-    backend. Backends absent from the mapping have their per-backend
-    state cleared (so a partial re-finalize doesn't leave stale
-    session_ids around — same correctness rule as pr-polish).
-    """
-    slug = _parse_ctx(ctx)
-    state_dir, path = state_paths_for_doc(slug)
-    state = _common.read_json(path, default=None)
-    if state is None:
-        raise RuntimeError(
-            f"state file not found for ctx {ctx}; call state-append-round first"
-        )
-    rounds = state.get("rounds") or []
-    entry = next((r for r in rounds if r.get("n") == n), None)
-    if entry is None:
-        raise RuntimeError(f"round {n} not found in state")
-    existing = entry.get("comment_actions") or []
-    merged = _merge_actions(existing, actions)
-    entry["comment_actions"] = merged
-    entry["head_after"] = head_after
-    entry.update(recompute_counts(merged))
-    _persist_round_findings(state_dir, entry, n, envelope_overrides or {})
-    state["last_heartbeat_at"] = _utc_now()
-    _common.atomic_write_json(path, state)
-    return state
-
-
-# Backends are the same list as pr-polish, minus ``lint`` (lint gate
-# doesn't apply to docs). We keep ``gemini`` so ``--gemini`` works.
 DESIGN_DOC_BACKENDS = ("codex", "cursor", "gemini")
 
 
@@ -435,61 +210,34 @@ def _persist_round_findings(
     n: int,
     envelope_overrides: dict[str, Path],
 ) -> None:
-    """Hydrate ``codex_findings`` / ``cursor_findings`` / ``gemini_findings``
-    from envelopes; copy each envelope into ``<state_dir>/reviews/`` for
-    post-loop audit. Mirrors pr_ops._persist_round_findings minus the CI
-    finding hydration (no CI in design-doc mode).
+    """Hydrate ``<backend>_findings`` from envelopes and copy each
+    envelope into ``<state_dir>/reviews/`` for audit. Backends absent
+    from the override map are reset to empty so a partial re-finalize
+    doesn't leave stale findings around.
     """
     reviews_dir = state_dir / "reviews"
     incoming = {
         b for b in DESIGN_DOC_BACKENDS
         if (src := envelope_overrides.get(b)) is not None and src.exists()
     }
-    # Cleanup pass: drop per-backend state for backends not in the
-    # incoming set, so a partial re-finalize doesn't keep stale
-    # session_ids that would cause the next round's resume to land
-    # on the wrong session.
     for backend in DESIGN_DOC_BACKENDS:
-        if backend in incoming:
+        if backend not in incoming:
+            entry[f"{backend}_findings"] = []
+            stale = reviews_dir / f"r{n}-{backend}.json"
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
             continue
-        entry[f"{backend}_findings"] = []
-        for bucket_key in ("session_ids", "resume_status"):
-            bucket = entry.get(bucket_key)
-            if isinstance(bucket, dict):
-                bucket.pop(backend, None)
-                if not bucket:
-                    entry.pop(bucket_key, None)
-        stale_review = state_dir / "reviews" / f"r{n}-{backend}.json"
-        try:
-            stale_review.unlink(missing_ok=True)
-        except OSError:
-            pass
-    # Hydration pass: read each envelope, parse its findings, copy the
-    # raw envelope to reviews_dir for archival.
-    for backend in DESIGN_DOC_BACKENDS:
-        src = envelope_overrides.get(backend)
-        if src is None or not src.exists():
-            continue
+        src = envelope_overrides[backend]
         try:
             obj = _common.read_json(src, default=None)
-        except Exception:  # noqa: BLE001 — malformed envelope must not brick finalize
+        except Exception:  # noqa: BLE001
             obj = None
         entry[f"{backend}_findings"] = bramble_ops.parse_envelope(obj, source=backend)
-        for bucket_key in ("session_ids", "resume_status"):
-            bucket = entry.get(bucket_key)
-            if isinstance(bucket, dict):
-                bucket.pop(backend, None)
-                if not bucket:
-                    entry.pop(bucket_key, None)
-        if isinstance(obj, dict):
-            if obj.get("session_id"):
-                entry.setdefault("session_ids", {})[backend] = obj.get("session_id")
-            if obj.get("resume_status"):
-                entry.setdefault("resume_status", {})[backend] = obj.get("resume_status")
         reviews_dir.mkdir(parents=True, exist_ok=True)
-        dest = reviews_dir / f"r{n}-{backend}.json"
         try:
-            dest.write_text(src.read_text())
+            (reviews_dir / f"r{n}-{backend}.json").write_text(src.read_text())
         except OSError:
             pass
 
@@ -507,17 +255,58 @@ def state_mark_complete(ctx: str, reason: str) -> dict[str, Any]:
     return state
 
 
-def state_mark_abandoned(ctx: str) -> dict[str, Any]:
-    slug = _parse_ctx(ctx)
-    _, path = state_paths_for_doc(slug)
-    state = _common.read_json(path, default=None)
-    if state is None:
-        raise RuntimeError(f"state file not found for ctx {ctx}")
-    state["completed"] = True
-    state["exit_reason"] = "abandoned"
-    state["completed_at"] = _utc_now()
-    _common.atomic_write_json(path, state)
-    return state
+# ---------------------------------------------------------------------------
+# Rubric reader
+# ---------------------------------------------------------------------------
+
+# Mirrors yoloswe/reviewer/reviewer.go ``rubricCap`` and bramble's
+# loadRubricFile (codereview.go). LOAD-BEARING: when the Go side
+# changes, update both. Counted in UTF-8 bytes to match Go's len().
+_RUBRIC_LINE_MAX_BYTES = 500
+_RUBRIC_MAX_ENTRIES = 20
+_MARKDOWN_CONTROL_PREFIXES = ("#", "-", "*", "+", ">", "=")
+
+
+def _sanitize_prompt_hint(s: str) -> bool:
+    """Python port of yoloswe/reviewer.SanitizePromptHint. Keep in
+    lock-step with the Go side; the matching test in test_doc_ops.py
+    is the safety net.
+    """
+    if not s or "\r" in s or "\n" in s or s != s.strip():
+        return False
+    if s[0] in _MARKDOWN_CONTROL_PREFIXES:
+        return False
+    if s[0].isdigit():
+        i = 0
+        while i < len(s) and s[i].isdigit():
+            i += 1
+        if i < len(s) and s[i] in ".)":
+            return False
+    return True
+
+
+def read_rubric_file(path: str) -> list[str]:
+    """Read a rubric file with the same validation rules as bramble's
+    loadRubricFile. Skips ``#`` comments and blank lines; rejects
+    overlong lines (UTF-8 bytes), leading markdown control chars,
+    and >20 entries. Failing fast here matches the rule the Go side
+    enforces every round.
+    """
+    out = []
+    for i, line in enumerate(Path(path).read_text().split("\n"), start=1):
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#"):
+            continue
+        if len(trimmed.encode("utf-8")) > _RUBRIC_LINE_MAX_BYTES:
+            raise ValueError(f"rubric line {i} exceeds {_RUBRIC_LINE_MAX_BYTES} bytes (UTF-8)")
+        if not _sanitize_prompt_hint(trimmed):
+            raise ValueError(f"rubric line {i} failed sanitization: {trimmed!r}")
+        out.append(trimmed)
+    if not out:
+        raise ValueError(f"rubric file {path!r} has no non-blank, non-comment lines")
+    if len(out) > _RUBRIC_MAX_ENTRIES:
+        raise ValueError(f"rubric file {path!r} has {len(out)} entries; cap is {_RUBRIC_MAX_ENTRIES}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -532,57 +321,31 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("identify", help="Resolve doc path → identity record (JSON).")
     sp.add_argument("doc_path")
 
-    sp = sub.add_parser("state-load", help="Read state file (decorated with derived signals).")
+    sp = sub.add_parser("state-load", help="Read state file (returns {} when absent).")
     sp.add_argument("ctx")
 
     sp = sub.add_parser(
-        "state-is-new-series",
-        help="Print 1 if round n starts a new series, else 0.",
+        "state-finalize-round",
+        help="Write a round's findings + actions, seeding state on round 1.",
     )
     sp.add_argument("ctx")
     sp.add_argument("round_", type=int)
-
-    sp = sub.add_parser("state-append-round")
-    sp.add_argument("ctx")
-    sp.add_argument("round_", type=int)
-    sp.add_argument("head_before")
-    sp.add_argument("--doc-path", required=True, help="Repo-relative doc path.")
-    sp.add_argument("--doc-path-abs", required=True, help="Absolute doc path.")
-    sp.add_argument(
-        "--rubric-file",
-        required=True,
-        help="Text file holding the rubric (one question per line).",
-    )
-    sp.add_argument(
-        "--rubric-source",
-        required=True,
-        help="Where the rubric came from: 'inferred', 'user-edited', or '--rubric-file <path>'.",
-    )
-    sp.add_argument(
-        "--no-verify-head",
-        action="store_true",
-        help="Skip git HEAD verification (only when resuming an interrupted round).",
-    )
-
-    sp = sub.add_parser("state-finalize-round")
-    sp.add_argument("ctx")
-    sp.add_argument("round_", type=int)
-    sp.add_argument("head_after")
-    sp.add_argument("actions_file", help="JSON array of comment_actions for this round.")
-    sp.add_argument(
-        "--envelope",
-        action="append",
-        default=[],
-        metavar="BACKEND=PATH",
-        help="Per-backend envelope file path; may be repeated.",
-    )
+    sp.add_argument("actions_file")
+    sp.add_argument("--doc-path", required=True)
+    sp.add_argument("--doc-path-abs", required=True)
+    sp.add_argument("--rubric-file", required=True)
+    sp.add_argument("--rubric-source", required=True)
+    sp.add_argument("--envelope", action="append", default=[],
+                    metavar="BACKEND=PATH",
+                    help="Per-backend envelope path; may be repeated.")
 
     sp = sub.add_parser("state-mark-complete")
     sp.add_argument("ctx")
     sp.add_argument("reason")
 
-    sp = sub.add_parser("state-mark-abandoned")
-    sp.add_argument("ctx")
+    sp = sub.add_parser("read-rubric-file",
+                        help="Validate a rubric file and emit JSON list of questions.")
+    sp.add_argument("path")
 
     return p
 
@@ -594,104 +357,8 @@ def _parse_envelope_args(pairs: list[str]) -> dict[str, Path]:
             raise ValueError(f"--envelope must be BACKEND=PATH, got {entry!r}")
         backend, path = entry.split("=", 1)
         if backend not in DESIGN_DOC_BACKENDS:
-            raise ValueError(
-                f"unknown backend in --envelope: {backend!r} "
-                f"(want one of {DESIGN_DOC_BACKENDS})"
-            )
+            raise ValueError(f"unknown backend in --envelope: {backend!r}")
         out[backend] = Path(path)
-    return out
-
-
-_RUBRIC_LINE_MAX_LEN = 500
-_RUBRIC_MAX_ENTRIES = 20
-
-# Markdown control characters that ``SanitizePromptHint`` rejects at the
-# start of a line. Mirrored from
-# yoloswe/reviewer/reviewer.go SanitizePromptHint so doc_ops fails fast
-# with the same rules bramble's loadRubricFile applies — otherwise a
-# rubric the user persisted into state.json would error out every
-# round when bramble re-read it.
-_MARKDOWN_CONTROL_PREFIXES = ("#", "-", "*", "+", ">", "=")
-
-
-def _sanitize_prompt_hint(s: str) -> bool:
-    """Python port of yoloswe/reviewer.SanitizePromptHint. Returns True
-    when ``s`` is safe to inline into a prompt clause. Rejects the
-    same shapes the Go side does: empty, leading/trailing whitespace,
-    embedded newlines, leading markdown control chars, leading
-    ordered-list markers (``1.`` / ``42)``).
-
-    LOAD-BEARING: this must stay in lock-step with
-    ``yoloswe/reviewer/reviewer.go`` ``SanitizePromptHint``. There is
-    no compile-time link between the two — drift would re-introduce
-    the doc_ops-accepts/bramble-rejects rubric class of bug we just
-    fixed. When you change the Go rules, update this function in the
-    same commit, mirror the test in ``test_doc_ops.py``, and run both
-    test suites. The
-    ``test_sanitize_prompt_hint_unit`` test covers the current rules;
-    new cases there are the safety net.
-    """
-    if not s:
-        return False
-    if "\r" in s or "\n" in s:
-        return False
-    if s != s.strip():
-        return False
-    if s[0] in _MARKDOWN_CONTROL_PREFIXES:
-        return False
-    if s[0].isdigit():
-        i = 0
-        while i < len(s) and s[i].isdigit():
-            i += 1
-        if i < len(s) and s[i] in ".)":
-            return False
-    return True
-
-
-def _read_rubric_file(path: str) -> list[str]:
-    """Read a rubric file with the same validation rules bramble's
-    loadRubricFile applies (yoloswe/reviewer.SanitizePromptHint;
-    cap of ``_RUBRIC_MAX_ENTRIES`` lines; cap of
-    ``_RUBRIC_LINE_MAX_LEN`` chars per line).
-
-    Failing fast here matches the user's "Workaround = design smell"
-    rule: a rubric that doc_ops accepts but bramble rejects every
-    round would otherwise corrupt the loop's first turn and require
-    a manual restart with a hand-edited rubric. Better to surface
-    the same error at ingest.
-
-    ``#`` lines are treated as authoring comments and skipped (unlike
-    bramble's loadRubricFile which is the same — both drop them at
-    intake).
-    """
-    raw = Path(path).read_text()
-    out = []
-    for i, line in enumerate(raw.split("\n"), start=1):
-        trimmed = line.strip()
-        if not trimmed or trimmed.startswith("#"):
-            continue
-        # Match bramble's loadRubricFile (codereview.go:627), which uses
-        # Go's ``len()`` and counts UTF-8 bytes. Python's ``len()``
-        # counts codepoints, so a rubric with multi-byte characters
-        # (curly quotes, em-dashes, non-Latin scripts) could pass here
-        # and then be rejected by bramble every round. Encode to UTF-8
-        # to count bytes the same way Go does.
-        if len(trimmed.encode("utf-8")) > _RUBRIC_LINE_MAX_LEN:
-            raise ValueError(
-                f"rubric line {i} exceeds {_RUBRIC_LINE_MAX_LEN} bytes (UTF-8)"
-            )
-        if not _sanitize_prompt_hint(trimmed):
-            raise ValueError(
-                f"rubric line {i} failed sanitization "
-                f"(no leading markdown control chars, no newlines): {trimmed!r}"
-            )
-        out.append(trimmed)
-    if not out:
-        raise ValueError(f"rubric file {path!r} has no non-blank, non-comment lines")
-    if len(out) > _RUBRIC_MAX_ENTRIES:
-        raise ValueError(
-            f"rubric file {path!r} has {len(out)} entries; cap is {_RUBRIC_MAX_ENTRIES}"
-        )
     return out
 
 
@@ -702,38 +369,24 @@ def main(argv: list[str] | None = None) -> int:
             _common.print_json(identify(args.doc_path))
         elif args.cmd == "state-load":
             _common.print_json(state_load(args.ctx))
-        elif args.cmd == "state-is-new-series":
-            print("1" if state_is_new_series(args.ctx, args.round_) else "0")
-        elif args.cmd == "state-append-round":
-            rubric = _read_rubric_file(args.rubric_file)
-            state = state_append_round(
-                args.ctx,
-                args.round_,
-                args.head_before,
+        elif args.cmd == "state-finalize-round":
+            actions = _common.read_json(Path(args.actions_file), default=[])
+            if not isinstance(actions, list):
+                raise ValueError("actions_file must be a JSON array")
+            rubric = read_rubric_file(args.rubric_file)
+            state = state_finalize_round(
+                args.ctx, args.round_, actions,
                 doc_path=args.doc_path,
                 doc_path_abs=args.doc_path_abs,
                 rubric=rubric,
                 rubric_source=args.rubric_source,
-                verify_head=not args.no_verify_head,
-            )
-            _common.print_json(state)
-        elif args.cmd == "state-finalize-round":
-            actions_blob = _common.read_json(Path(args.actions_file), default=[])
-            if not isinstance(actions_blob, list):
-                raise ValueError("actions_file must be a JSON array")
-            envelopes = _parse_envelope_args(args.envelope)
-            state = state_finalize_round(
-                args.ctx,
-                args.round_,
-                args.head_after,
-                actions_blob,
-                envelope_overrides=envelopes,
+                envelope_overrides=_parse_envelope_args(args.envelope),
             )
             _common.print_json(state)
         elif args.cmd == "state-mark-complete":
             _common.print_json(state_mark_complete(args.ctx, args.reason))
-        elif args.cmd == "state-mark-abandoned":
-            _common.print_json(state_mark_abandoned(args.ctx))
+        elif args.cmd == "read-rubric-file":
+            _common.print_json(read_rubric_file(args.path))
         else:  # pragma: no cover
             raise ValueError(f"unknown cmd: {args.cmd}")
     except Exception as e:  # noqa: BLE001
