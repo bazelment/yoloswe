@@ -18,6 +18,32 @@ import (
 // BackendType identifies which agent backend to use.
 type BackendType string
 
+// ReviewMode selects which review persona, focus areas, and output schema the
+// reviewer prompt builders should produce. It exists so the same code-review
+// command can drive multiple kinds of review (today: code diffs and design
+// docs; tomorrow potentially security audits, API-contract reviews, etc.)
+// without conflating persona/rubric (which the model reads) with the output
+// schema (which the orchestrator's triage layer keys on).
+//
+// New modes should be added as new constants here, paired with a new branch
+// in buildBasePrompt and jsonOutputRules and a matching schema in
+// validateReviewBody. Keeping the enumeration in Go (vs. a YAML registry)
+// preserves compile-time checking — the JSON validator and the prompt
+// builder must move in lock-step or the envelope contract breaks.
+type ReviewMode string
+
+const (
+	// ReviewModeCode is the legacy mode: code-review persona, file/line
+	// citations, accepted/rejected verdict. The empty string is treated as
+	// ReviewModeCode for backward compatibility with existing callers.
+	ReviewModeCode ReviewMode = "code"
+	// ReviewModeDesignDoc grills a markdown design document against a
+	// caller-supplied rubric, cites section headings (not file/line), and
+	// emits ready/revise/rethink verdicts with a confidence
+	// score.
+	ReviewModeDesignDoc ReviewMode = "design-doc"
+)
+
 const (
 	BackendCodex  BackendType = "codex"
 	BackendCursor BackendType = "cursor"
@@ -147,6 +173,20 @@ Do NOT run tests or build commands. The caller runs tests separately. Read test 
 // This collapses the (boolean, list) cartesian product into a single source
 // of truth — the caller controls everything by what they put in the lists.
 type PromptOptions struct {
+	// Mode picks the review persona and output schema. The empty string
+	// behaves as ReviewModeCode to keep legacy callers byte-equal.
+	// ReviewModeDesignDoc requires Rubric to be non-empty; the prompt
+	// builders return an error-shaped placeholder when that contract is
+	// violated rather than silently emitting a doc-review with no rubric.
+	Mode ReviewMode
+
+	// Rubric carries the grilling questions inlined into the design-doc
+	// prompt. One entry per question. Ignored unless Mode is
+	// ReviewModeDesignDoc. Validated and capped by the caller (typically
+	// loadPromptOptions in cmd/codereview); each entry is fed through
+	// SanitizePromptHint to keep markdown structure intact.
+	Rubric []string
+
 	// TestScopeHints lists co-located test paths the agent should read. When
 	// non-empty, the test-quality clause is appended to the prompt and the
 	// paths are inlined under it (capped at testScopeHintsCap entries).
@@ -172,6 +212,24 @@ type PromptOptions struct {
 	SkipTestExecution bool
 }
 
+// effectiveMode returns Mode with the empty-string-defaults-to-code
+// behaviour applied. Centralised so the rest of the reviewer package never
+// has to repeat the conditional.
+func (o PromptOptions) effectiveMode() ReviewMode {
+	if o.Mode == "" {
+		return ReviewModeCode
+	}
+	return o.Mode
+}
+
+// rubricCap bounds the number of rubric questions inlined into the
+// design-doc prompt. Callers that load rubrics from a file should enforce a
+// matching cap before constructing PromptOptions; this cap is the
+// defence-in-depth at the prompt-builder boundary, mirroring
+// testScopeHintsCap. Twenty questions is more than any real grilling rubric
+// needs and well below any prompt-token concern.
+const rubricCap = 20
+
 // testScopeHintsCap bounds the number of test paths inlined into the prompt
 // so token spend stays predictable on very large multi-package PRs.
 const testScopeHintsCap = 50
@@ -185,8 +243,24 @@ const testScopeHintsCap = 50
 // testScopeHintsCap.
 const crossServicePackagesCap = 50
 
-// buildBasePrompt creates the common review prompt content.
-func buildBasePrompt(goal string, skipTestExecution bool) string {
+// buildBasePrompt dispatches on review mode to produce the persona +
+// focus-areas portion of the prompt. ReviewModeCode is the default and
+// produces today's prompt byte-for-byte; ReviewModeDesignDoc swaps to a
+// staff-engineer-reviewing-a-doc persona and inlines the caller-supplied
+// rubric.
+func buildBasePrompt(goal string, opts PromptOptions) string {
+	switch opts.effectiveMode() {
+	case ReviewModeDesignDoc:
+		return buildDesignDocBasePrompt(goal, opts)
+	default:
+		return buildCodeBasePrompt(goal, opts.SkipTestExecution)
+	}
+}
+
+// buildCodeBasePrompt is the legacy code-review persona + focus list. The
+// body must stay byte-equivalent to the prior buildBasePrompt output so
+// existing snapshot tests and prompt-shape callers see no change.
+func buildCodeBasePrompt(goal string, skipTestExecution bool) string {
 	base := fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
 %s
 
@@ -205,6 +279,71 @@ Ensure that file citations and line numbers are exactly correct using the tools 
 		base += skipTestExecutionSuffix
 	}
 	return base
+}
+
+// buildDesignDocBasePrompt produces the design-doc persona + rubric. The
+// rubric is inlined as a numbered list — same shape as the four-question
+// starting rubric the user supplied — so the model can refer to questions
+// by number (`dimension: q1`, `dimension: q2`) without the orchestrator
+// pre-computing slugs.
+//
+// The persona is deliberately blunt: design docs ship better when the
+// reviewer is asked to grill systemic issues rather than triage details.
+// The "do not modify the document" line keeps the model in advice-only
+// mode — the orchestrator (e.g. /design-doc-polish) owns mutations.
+//
+// SkipTestExecution and the scope-hint clauses are irrelevant for a
+// single-doc review, so they are not consumed here. The caller layer in
+// cmd/codereview warns-and-ignores both --scope-hints-file and
+// --skip-test-execution in design-doc mode (validateModeFlags), so a
+// stray flag won't error out — it just produces a warning in the run log
+// while the prompt builder drops the clauses cleanly. Mirrors the
+// general principle that a mode change shouldn't require unrelated flags
+// to be dropped from existing automation invocations.
+func buildDesignDocBasePrompt(goal string, opts PromptOptions) string {
+	rubric := filterPromptHints(opts.Rubric)
+	if len(rubric) > rubricCap {
+		rubric = rubric[:rubricCap]
+	}
+	if len(rubric) == 0 {
+		// Defence-in-depth: cmd/codereview is supposed to reject
+		// design-doc mode without a rubric at flag-parse time, so the
+		// only way we land here is a direct PromptOptions caller that
+		// bypassed that gate. Falling through to an empty rubric would
+		// produce a doc-grilling prompt with nothing to grill on.
+		// Surface the misconfiguration as an error-shaped sentinel
+		// inside the prompt so the reviewer's response (and the
+		// validator) trips loudly instead of returning bland output.
+		return fmt.Sprintf(`MISCONFIGURED: design-doc review mode requires a non-empty rubric. The orchestrator must pass a rubric file via --review-rubric-file. Goal supplied: %q. Refuse this turn.`, goal)
+	}
+	var rubricLines strings.Builder
+	for i, q := range rubric {
+		fmt.Fprintf(&rubricLines, "%d. %s\n", i+1, q)
+	}
+	return fmt.Sprintf(`You are a staff engineer reviewing a software design document. The author wants the doc grilled — your job is to surface systemic issues, not nits. Focus on the substance of the design, not on prose style or markdown formatting.
+
+%s
+
+Grill the document on the following questions. Each issue you raise must be tagged with the question it answers (e.g. "dimension": "q1") so the orchestrator can group findings by axis:
+
+%s
+When you flag an issue, cite the section heading the issue lives under (e.g. "section": "Milestone 2: Multi-tenant rollout"). Do not invent line numbers — the doc may be edited between rounds and section headings are the durable address. If the issue is doc-wide rather than section-specific, set "section" to "(whole document)".
+
+Prioritize systemic problems over local ones. A finding that says "the milestone strategy doesn't frontload risk" is more useful than five findings flagging individual late-milestone risks. Bundle related observations into one finding tagged with the rubric question they jointly point at.
+
+Do not modify the document. The orchestrator applies fixes between rounds — your job is feedback only.`, buildDesignDocGoalText(goal), strings.TrimRight(rubricLines.String(), "\n"))
+}
+
+// buildDesignDocGoalText is the design-doc analogue of buildGoalText. Empty
+// goals are common in design-doc reviews because the rubric carries the
+// review intent (the goal channel is the per-turn context — round 1 names
+// the doc, round 2+ carries action history). Keep the no-goal default
+// minimal so the model doesn't anchor on a stale "review the changes" line.
+func buildDesignDocGoalText(goal string) string {
+	if goal == "" {
+		return "Review the design document below."
+	}
+	return goal
 }
 
 // SanitizePromptHint returns true when s is safe to inline verbatim into a
@@ -455,8 +594,18 @@ func BuildPromptWithOptions(goal string, skipTestExecution bool) string {
 
 // BuildPromptWithScope creates the free-form review prompt with scope clauses
 // gated by opts. Empty PromptOptions{} produces today's legacy prompt.
+//
+// For ReviewModeDesignDoc the scope clauses (test-quality, cross-service)
+// are skipped — they are diff-derived signals that don't apply to a
+// single markdown file — and the verdict footer is replaced with the
+// doc-flavoured ready/revise/rethink values.
 func BuildPromptWithScope(goal string, opts PromptOptions) string {
-	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + `
+	if opts.effectiveMode() == ReviewModeDesignDoc {
+		return buildBasePrompt(goal, opts) + `
+
+After listing findings, produce an overall verdict ("ready", "revise", or "rethink") with a concise justification and an overall confidence score in [0.0, 1.0]. This overall score is distinct from the optional per-issue confidence in the JSON output format; it summarizes confidence in the verdict itself.`
+	}
+	return buildBasePrompt(goal, opts) + buildScopeSuffix(opts) + `
 
 After listing findings, produce an overall correctness verdict ("patch is correct" or "patch is incorrect") with a concise justification and an overall confidence score in [0.0, 1.0]. This overall score is distinct from the optional per-issue confidence in the JSON output format (which is in (0.0, 1.0]); it summarizes confidence in the verdict itself.`
 }
@@ -476,8 +625,17 @@ func BuildJSONPromptWithOptions(goal string, skipTestExecution bool) string {
 // clauses gated by opts. Empty PromptOptions{} produces today's legacy
 // prompt; the scope clauses (test-quality, cross-service) are inserted
 // between the base prompt and the JSON output rules.
+//
+// For ReviewModeDesignDoc the scope clauses are skipped (irrelevant for a
+// single-file doc review) and jsonOutputRules emits the design-doc schema
+// (section/dimension instead of file/line; ready/revise/rethink
+// verdict; per-issue confidence carried up to the
+// review-level confidence too).
 func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
-	return buildBasePrompt(goal, opts.SkipTestExecution) + buildScopeSuffix(opts) + jsonOutputRules()
+	if opts.effectiveMode() == ReviewModeDesignDoc {
+		return buildBasePrompt(goal, opts) + jsonOutputRules(ReviewModeDesignDoc)
+	}
+	return buildBasePrompt(goal, opts) + buildScopeSuffix(opts) + jsonOutputRules(ReviewModeCode)
 }
 
 // BuildFollowUpJSONPromptWithScope creates the shorter resumed-session prompt
@@ -544,6 +702,9 @@ func BuildJSONPromptWithScope(goal string, opts PromptOptions) string {
 // rendered (see the design intent above) so a fallback session reads them
 // cold.
 func BuildFollowUpJSONPromptWithScope(goal string, opts PromptOptions) string {
+	if opts.effectiveMode() == ReviewModeDesignDoc {
+		return buildDesignDocFollowUpPrompt(goal, opts)
+	}
 	prompt := `Continue the review on the same diff against the same goal as the prior turn.`
 	if goal != "" {
 		prompt += "\n\nContext for this turn: " + goal
@@ -576,8 +737,82 @@ Apply the same severity rubric and JSON output format as the prior turn.`
 	return prompt + buildScopeSuffix(opts)
 }
 
-func jsonOutputRules() string {
-	return `
+// buildDesignDocFollowUpPrompt is the design-doc analogue of the code
+// follow-up prompt. Two differences from the code path:
+//
+//   - No scope-suffix safety net (scope hints are diff-derived and don't
+//     apply to a single doc), but the rubric IS the review for design-doc
+//     mode, so we inline a compact recap in the follow-up prompt — the
+//     same "survive a silent resume fallback" reasoning as the code-mode
+//     scope-suffix appendage. Without this, a backend that silently
+//     cold-starts despite --resume-session-id reads this prompt with no
+//     idea what rubric questions the orchestrator wanted grilled.
+//   - The "fresh eyes" framing keeps the same anti-bias intent but
+//     swaps file/line cues for section/dimension cues so the resumed
+//     model doesn't drift back to code-review citation shape.
+func buildDesignDocFollowUpPrompt(goal string, opts PromptOptions) string {
+	prompt := `Continue grilling the same design document against the same rubric as the prior turn.`
+	if goal != "" {
+		prompt += "\n\nContext for this turn: " + goal
+	}
+	prompt += `
+
+If you have no prior review context for this document (because the backend silently fell back to a fresh session despite the resume request), treat this as a first-pass review: re-read the document and apply the design-doc severity rubric and JSON output format. Otherwise, proceed with the resume protocol below.
+
+Re-grill the document with fresh eyes — including sections you previously accepted. Pay particular attention to:
+1. Issues introduced by edits the orchestrator made since the prior turn.
+2. Items you flagged before that you now have stronger evidence for — cite the section that proves it.
+3. Systemic issues you skipped or dismissed before that, on a second look, warrant flagging.
+
+Avoid restating prior findings verbatim, but DO surface any new systemic issues — including in sections you already accepted. A second pass that finds something the first pass missed is more useful than one that just confirms the prior verdict.
+
+Cite section headings (not line numbers). Tag each issue with the rubric question it answers ("dimension": "qN"). Apply the same severity rubric and JSON output format as the prior turn.`
+	prompt += buildRubricRecap(opts.Rubric)
+	return prompt
+}
+
+// buildRubricRecap appends a short numbered list of the rubric questions
+// to a follow-up prompt so a silent-resume fallback session has the
+// rubric in hand without depending on the orchestrator threading
+// --review-rubric-file (which it does, but the model still has to read
+// the file). Mirrors the code-mode follow-up's scope-suffix safety net.
+// Returns empty when the rubric is empty (defence-in-depth — the call
+// site that produced this prompt would have already returned a
+// MISCONFIGURED sentinel from buildDesignDocBasePrompt; this is just a
+// belt-and-suspenders no-op).
+func buildRubricRecap(rubric []string) string {
+	rubric = filterPromptHints(rubric)
+	if len(rubric) > rubricCap {
+		rubric = rubric[:rubricCap]
+	}
+	if len(rubric) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nRubric (recap):\n")
+	for i, q := range rubric {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, q)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// jsonOutputRules returns the per-mode output-format spec appended to every
+// JSON-output prompt. Code mode keeps the legacy schema (file/line,
+// accepted/rejected) byte-for-byte. Design-doc mode swaps file/line for
+// section/dimension and uses ready/revise/rethink verdicts.
+//
+// The two specs deliberately share severity vocabulary so the orchestrator's
+// triage layer can rank findings the same way across modes. They diverge
+// only on the addressing fields (file/line vs section/dimension) and the
+// verdict enum, which is what validateReviewBody dispatches on.
+func jsonOutputRules(mode ReviewMode) string {
+	if mode == ReviewModeDesignDoc {
+		return designDocJSONOutputRules
+	}
+	return codeJSONOutputRules
+}
+
+const codeJSONOutputRules = `
 
 ## Output Format
 You MUST respond with valid JSON in this exact format:
@@ -609,7 +844,45 @@ You MUST respond with valid JSON in this exact format:
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
 - confidence is an optional float in (0.0, 1.0]: 1.0 = certain, 0.5 = plausible but unverified; omit only when you cannot assess (the field is treated as "no signal", not as a default value)
 - Output ONLY the JSON object, no other text`
+
+const designDocJSONOutputRules = `
+
+## Output Format
+You MUST respond with valid JSON in this exact format:
+{
+  "verdict": "ready" or "revise" or "rethink",
+  "summary": "Brief overall assessment of the document",
+  "confidence": 0.7,
+  "issues": [
+    {
+      "severity": "critical|high|medium|low",
+      "section": "Milestone 2: Multi-tenant rollout",
+      "dimension": "q2",
+      "message": "Description of the systemic issue",
+      "suggestion": "What to change in the doc",
+      "confidence": 0.9
+    }
+  ]
 }
+
+## Severity Levels
+- critical: The design as written will not work or will cause irreversible harm.
+- high: A core question (long-term fit, milestone boundary, simplicity) the doc fails to answer convincingly.
+- medium: A meaningful systemic gap or ambiguity that a careful reader would catch.
+- low: A minor clarification or improvement that doesn't block the design.
+
+## Rules
+- verdict MUST be exactly one of "ready", "revise", or "rethink". The verdict is an imperative — what should the author do with this doc?
+- "ready": ship as-is. No high/critical issues; the design is implementation-ready.
+- "revise": address issues, the doc shape is right. Prefer this band when issues are fixable in-place.
+- "rethink": premise needs reconsideration. Use sparingly — pick this when the doc needs more than copy-edits, e.g. at least one high/critical issue or a cluster of mediums that together challenge the design's premise.
+- These bands are guidance, not a hard rule. The validator only enforces the "ready ⇔ no high/critical issues" symmetry; verdict-vs-severity calibration beyond that is your judgement call.
+- Top-level "confidence" is a float in [0.0, 1.0] reporting confidence in the verdict itself.
+- Each issue MUST include severity, section (a heading from the doc, or "(whole document)" for doc-wide issues), dimension (the rubric question it answers, e.g. "q1"), and message; suggestion is optional.
+- Per-issue "confidence" is an optional float in (0.0, 1.0]; omit when you cannot assess.
+- Do NOT include "file" or "line" — section is the durable address for a doc.
+- issues array can be empty only if verdict is "ready".
+- Output ONLY the JSON object, no other text`
 
 // ReviewResult contains the result of a review turn.
 type ReviewResult struct {

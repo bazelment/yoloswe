@@ -89,7 +89,7 @@ func TestBuildEnvelope_SuccessPath(t *testing.T) {
 		OutputTokens: 200,
 		ResumeStatus: "ok",
 	}
-	env := BuildEnvelope(result, BackendCodex, "gpt-x", "sess-1")
+	env := BuildEnvelope(result, BackendCodex, "gpt-x", "sess-1", "")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok", env.Status)
 	}
@@ -116,7 +116,7 @@ func TestBuildEnvelope_BackendError(t *testing.T) {
 		Success:      false,
 		ResumeStatus: ResumeStatusFallback,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error", env.Status)
 	}
@@ -136,7 +136,7 @@ func TestBuildEnvelope_MissingVerdict(t *testing.T) {
 		ResponseText: `{"summary":"looks fine","issues":[]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for missing verdict", env.Status)
 	}
@@ -150,7 +150,7 @@ func TestBuildEnvelope_UnknownVerdict(t *testing.T) {
 		ResponseText: `{"verdict":"maybe","summary":"unclear"}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for unknown verdict", env.Status)
 	}
@@ -161,7 +161,7 @@ func TestBuildEnvelope_IssueMissingFields(t *testing.T) {
 		ResponseText: `{"verdict":"rejected","issues":[{"file":"a.go"}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for issue missing severity/message", env.Status)
 	}
@@ -174,7 +174,7 @@ func TestBuildEnvelope_IssueMissingFile(t *testing.T) {
 		ResponseText: `{"verdict":"rejected","issues":[{"severity":"high","message":"bug","line":1}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for issue missing file", env.Status)
 	}
@@ -187,7 +187,7 @@ func TestBuildEnvelope_IssueMissingLine(t *testing.T) {
 		ResponseText: `{"verdict":"rejected","issues":[{"severity":"high","file":"a.go","message":"bug"}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for issue missing line", env.Status)
 	}
@@ -198,7 +198,7 @@ func TestBuildEnvelope_UnknownSeverity(t *testing.T) {
 		ResponseText: `{"verdict":"rejected","issues":[{"severity":"blocker","file":"a.go","line":1,"message":"bug"}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for unknown severity", env.Status)
 	}
@@ -211,7 +211,7 @@ func TestBuildEnvelope_RejectedWithoutIssues(t *testing.T) {
 		ResponseText: `{"verdict":"rejected","summary":"bad","issues":[]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for rejected with no issues", env.Status)
 	}
@@ -224,7 +224,7 @@ func TestBuildEnvelope_AcceptedWithBlockingIssue(t *testing.T) {
 		ResponseText: `{"verdict":"accepted","issues":[{"severity":"high","file":"a.go","line":1,"message":"bug"}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error for accepted with blocking issue", env.Status)
 	}
@@ -237,7 +237,7 @@ func TestBuildEnvelope_AcceptedWithLowIssue(t *testing.T) {
 		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":3,"message":"nit"}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok for accepted with only low issues", env.Status)
 	}
@@ -250,7 +250,7 @@ func TestBuildEnvelope_ConfidenceValid(t *testing.T) {
 		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit","confidence":0.7}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok for valid confidence", env.Status)
 	}
@@ -269,7 +269,7 @@ func TestBuildEnvelope_ConfidenceOmitted(t *testing.T) {
 		ResponseText: `{"verdict":"accepted","issues":[{"severity":"low","file":"a.go","line":1,"message":"nit"}]}`,
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCodex, "m", "")
+	env := BuildEnvelope(result, BackendCodex, "m", "", "")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok when confidence is omitted", env.Status)
 	}
@@ -295,7 +295,7 @@ func TestBuildEnvelope_ConfidenceOutOfRange(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := BuildEnvelope(&ReviewResult{ResponseText: tc.json, Success: true}, BackendCodex, "m", "")
+			env := BuildEnvelope(&ReviewResult{ResponseText: tc.json, Success: true}, BackendCodex, "m", "", "")
 			if env.Status != StatusError {
 				t.Errorf("status = %s, want error for confidence=%s", env.Status, tc.name)
 			}
@@ -321,7 +321,7 @@ func TestValidateReviewJSON(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateReviewJSON([]byte(tc.json))
+			err := ValidateReviewJSON([]byte(tc.json), ReviewModeCode)
 			if tc.expectErr && err == nil {
 				t.Errorf("expected error, got nil")
 			}
@@ -337,7 +337,7 @@ func TestBuildEnvelope_UnparseableText(t *testing.T) {
 		ResponseText: "the reviewer refused to produce JSON",
 		Success:      true,
 	}
-	env := BuildEnvelope(result, BackendCursor, "composer-2", "")
+	env := BuildEnvelope(result, BackendCursor, "composer-2", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error on parse failure", env.Status)
 	}
@@ -347,7 +347,7 @@ func TestBuildEnvelope_UnparseableText(t *testing.T) {
 }
 
 func TestBuildEnvelope_NilResult(t *testing.T) {
-	env := BuildEnvelope(nil, BackendCodex, "m", "")
+	env := BuildEnvelope(nil, BackendCodex, "m", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error", env.Status)
 	}
@@ -362,7 +362,7 @@ func TestBuildEnvelope_GeminiBackend(t *testing.T) {
 		Success:      true,
 		DurationMs:   5000,
 	}
-	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "sess-gemini-1")
+	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "sess-gemini-1", "")
 	if env.Status != StatusOK {
 		t.Errorf("status = %s, want ok", env.Status)
 	}
@@ -388,7 +388,7 @@ func TestBuildEnvelope_GeminiBackendError(t *testing.T) {
 		ErrorMessage: "gemini: ACP client failed to start",
 		Success:      false,
 	}
-	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "")
+	env := BuildEnvelope(result, BackendGemini, "gemini-3.1-flash-lite-preview", "", "")
 	if env.Status != StatusError {
 		t.Errorf("status = %s, want error", env.Status)
 	}
@@ -458,5 +458,210 @@ func TestStripJSONFence_Variants(t *testing.T) {
 		if got != want {
 			t.Errorf("stripJSONFence(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+// TestValidateReviewJSONDesignDoc covers the design-doc validator. It
+// asserts both the positive shape (section + dimension + ready/revise/rethink
+// + top-level confidence) and the cross-mode rejection rules: code-mode
+// fields (file/line) must NOT appear in design-doc envelopes, and code-mode
+// verdict values must be rejected for design-doc mode.
+func TestValidateReviewJSONDesignDoc(t *testing.T) {
+	cases := []struct {
+		name      string
+		json      string
+		errSub    string
+		expectErr bool
+	}{
+		{
+			name: "valid design-doc body",
+			json: `{
+				"verdict": "revise",
+				"summary": "milestone risk",
+				"confidence": 0.8,
+				"issues": [{
+					"severity": "high",
+					"section": "Milestone 2",
+					"dimension": "q4",
+					"message": "doesn't frontload risk"
+				}]
+			}`,
+			expectErr: false,
+		},
+		{
+			name: "verdict ready with no issues is allowed",
+			json: `{
+				"verdict": "ready",
+				"summary": "looks good",
+				"confidence": 0.95,
+				"issues": []
+			}`,
+			expectErr: false,
+		},
+		{
+			name: "code-mode verdict rejected in design-doc mode",
+			json: `{
+				"verdict": "accepted",
+				"summary": "x",
+				"confidence": 0.5,
+				"issues": []
+			}`,
+			expectErr: true,
+			errSub:    `verdict "accepted"`,
+		},
+		{
+			name: "missing top-level confidence rejected",
+			json: `{
+				"verdict": "ready",
+				"summary": "x",
+				"issues": []
+			}`,
+			expectErr: true,
+			errSub:    "top-level confidence",
+		},
+		{
+			name: "out-of-range confidence rejected",
+			json: `{
+				"verdict": "ready",
+				"summary": "x",
+				"confidence": 1.5,
+				"issues": []
+			}`,
+			expectErr: true,
+			errSub:    "[0.0, 1.0]",
+		},
+		{
+			name: "issue with file/line rejected",
+			json: `{
+				"verdict": "revise",
+				"summary": "x",
+				"confidence": 0.7,
+				"issues": [{
+					"severity": "medium",
+					"section": "Intro",
+					"dimension": "q1",
+					"file": "intro.md",
+					"line": 4,
+					"message": "x"
+				}]
+			}`,
+			expectErr: true,
+			errSub:    "must not carry file/line",
+		},
+		{
+			name: "issue missing section rejected",
+			json: `{
+				"verdict": "revise",
+				"summary": "x",
+				"confidence": 0.7,
+				"issues": [{
+					"severity": "medium",
+					"dimension": "q1",
+					"message": "x"
+				}]
+			}`,
+			expectErr: true,
+			errSub:    "missing section",
+		},
+		{
+			name: "issue missing dimension rejected",
+			json: `{
+				"verdict": "revise",
+				"summary": "x",
+				"confidence": 0.7,
+				"issues": [{
+					"severity": "medium",
+					"section": "Intro",
+					"message": "x"
+				}]
+			}`,
+			expectErr: true,
+			errSub:    "missing dimension",
+		},
+		{
+			name: "ready verdict with high-severity issue rejected",
+			json: `{
+				"verdict": "ready",
+				"summary": "x",
+				"confidence": 0.5,
+				"issues": [{
+					"severity": "high",
+					"section": "Intro",
+					"dimension": "q1",
+					"message": "x"
+				}]
+			}`,
+			expectErr: true,
+			errSub:    `verdict "ready" inconsistent`,
+		},
+		{
+			name: "revise verdict with no issues rejected",
+			json: `{
+				"verdict": "revise",
+				"summary": "x",
+				"confidence": 0.6,
+				"issues": []
+			}`,
+			expectErr: true,
+			errSub:    "requires at least one issue",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateReviewJSON([]byte(tc.json), ReviewModeDesignDoc)
+			if tc.expectErr && err == nil {
+				t.Errorf("expected error containing %q, got nil", tc.errSub)
+			}
+			if !tc.expectErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if err != nil && tc.errSub != "" && !strings.Contains(err.Error(), tc.errSub) {
+				t.Errorf("error %q missing substring %q", err.Error(), tc.errSub)
+			}
+		})
+	}
+}
+
+// TestValidateReviewJSONCodeRejectsDesignDocFields ensures code-mode
+// validation rejects bodies that look like design-doc output. The
+// existing TestValidateReviewJSON covers the happy path; this guards
+// against a misrouted envelope (e.g. the orchestrator passing the wrong
+// mode to ValidateReviewJSON) silently passing.
+func TestValidateReviewJSONCodeRejectsDesignDocFields(t *testing.T) {
+	body := `{
+		"verdict": "ready",
+		"summary": "x",
+		"confidence": 0.5,
+		"issues": []
+	}`
+	err := ValidateReviewJSON([]byte(body), ReviewModeCode)
+	if err == nil {
+		t.Fatal("expected error for design-doc verdict in code mode")
+	}
+	if !strings.Contains(err.Error(), `verdict "ready"`) {
+		t.Errorf("error %q should mention rejected verdict", err.Error())
+	}
+}
+
+// TestBuildEnvelopeReviewModePropagated asserts the new top-level
+// review_mode field rides on every emitted envelope. Triage layers depend
+// on this to dispatch consensus key construction without having to read
+// the original CLI flags.
+func TestBuildEnvelopeReviewModePropagated(t *testing.T) {
+	cases := []struct {
+		input ReviewMode
+		want  ReviewMode
+	}{
+		{ReviewModeCode, ReviewModeCode},
+		{ReviewModeDesignDoc, ReviewModeDesignDoc},
+		{"", ReviewModeCode}, // empty defaults to code
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.input), func(t *testing.T) {
+			env := BuildEnvelope(&ReviewResult{ErrorMessage: "x"}, BackendCodex, "m", "", tc.input)
+			if env.ReviewMode != tc.want {
+				t.Errorf("ReviewMode = %q, want %q", env.ReviewMode, tc.want)
+			}
+		})
 	}
 }

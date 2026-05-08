@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,8 @@ var (
 	scopeHintsFile    string
 	resumeSessionID   string
 	resumePromptStyle string
+	reviewMode        string
+	rubricFile        string
 )
 
 type promptStyle string
@@ -82,6 +85,8 @@ func init() {
 	Cmd.Flags().StringVar(&scopeHintsFile, "scope-hints-file", "", "JSON file with co-located test paths and cross-service packages to widen review scope; see reviewer.ScopeHints. Missing/malformed files log a warning and fall back to today's narrow review.")
 	Cmd.Flags().StringVar(&resumeSessionID, "resume-session-id", "", "Resume an existing backend session/thread id")
 	Cmd.Flags().StringVar(&resumePromptStyle, "resume-prompt-style", "fresh", "Prompt style when resuming: follow-up or fresh. Auto-promotes to follow-up when --resume-session-id is set without an explicit style.")
+	Cmd.Flags().StringVar(&reviewMode, "review-mode", "code", "Review mode: code (default; reviewer.ReviewModeCode) or design-doc (reviewer.ReviewModeDesignDoc).")
+	Cmd.Flags().StringVar(&rubricFile, "review-rubric-file", "", "Path to a rubric file (one grilling question per non-blank line). Required for --review-mode design-doc; rejected for --review-mode code.")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
@@ -143,6 +148,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// guard's callback handles that case by falling back to Unverified
 	// whenever --resume-session-id was set.
 	var activeReviewer *reviewer.Reviewer
+	// resolvedMode is updated once validateModeFlags returns. Captured by
+	// reference into the deferred guard so a panic before mode resolution
+	// labels its synthesized envelope with the empty (i.e. code-default)
+	// mode, while a panic afterwards correctly carries the resolved mode.
+	var resolvedMode reviewer.ReviewMode
 	defer func() {
 		finalizeEnvelope(envelopeGuardArgs{
 			backend:         backend,
@@ -150,6 +160,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 			retErr:          &retErr,
 			panicVal:        recover(),
 			emit:            emitEnvelope,
+			mode:            resolvedMode,
 			resumeStatus:    func() reviewer.ResumeStatus { return effectiveResumeStatus(activeReviewer, resumeSessionID) },
 		})
 	}()
@@ -162,18 +173,39 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Fprintf(os.Stderr, "[code-review] logging run to %s\n", logPath)
 	}
 
+	// requestedMode echoes the operator's --review-mode literal back into
+	// every pre-validation early-failure envelope, so an orchestrator
+	// triaging with --mode design-doc doesn't reject a backend-validation
+	// or workdir-resolution failure as "explicit mode doesn't match
+	// envelope". When the literal is not one of the known modes,
+	// fall through to ReviewModeCode — the envelope's `error` field
+	// will already name the actual problem.
+	requestedMode := requestedModeOrCode(reviewMode)
+
 	if err := reviewer.ValidateBackend(backend); err != nil {
-		return emitEarlyFailure(err, "", emitEnvelope)
+		return emitEarlyFailure(err, "", requestedMode, emitEnvelope)
 	}
 
 	workDir, err := reviewer.ResolveWorkDir()
 	if err != nil {
-		return emitEarlyFailure(err, "", emitEnvelope)
+		return emitEarlyFailure(err, "", requestedMode, emitEnvelope)
 	}
+
+	mode, err := validateModeFlags(reviewMode, scopeHintsFile, rubricFile, skipTestExecution)
+	if err != nil {
+		// Tag the failure envelope with the operator's *requested*
+		// mode when it's a known literal. Without this, an orchestrator
+		// triaging with --mode design-doc rejects a code-mode-tagged
+		// failure as "explicit mode doesn't match envelope" — surfacing
+		// a misleading error instead of the actual flag-validation
+		// problem (e.g. "design-doc requires --review-rubric-file").
+		return emitEarlyFailure(err, model, requestedMode, emitEnvelope)
+	}
+	resolvedMode = mode
 
 	style, err := normalizePromptStyle(resumeSessionID, resumePromptStyle, cmd.Flags().Changed("resume-prompt-style"))
 	if err != nil {
-		return emitEarlyFailure(err, model, emitEnvelope)
+		return emitEarlyFailure(err, model, mode, emitEnvelope)
 	}
 
 	slog.Info("code-review run start",
@@ -190,6 +222,8 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		"scope_hints_file", scopeHintsFile != "",
 		"resume_session", resumeSessionID != "",
 		"resume_prompt_style", string(style),
+		"review_mode", string(mode),
+		"rubric_file", rubricFile != "",
 		"goal_len", len(goal))
 
 	config := reviewer.Config{
@@ -206,7 +240,7 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
 	if err != nil {
-		return emitEarlyFailure(err, "", emitEnvelope)
+		return emitEarlyFailure(err, "", mode, emitEnvelope)
 	}
 	config.SessionLogPath = logPath2
 
@@ -230,11 +264,14 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 
 	if err := r.Start(ctx); err != nil {
 		slog.Error("reviewer start failed", "error", err.Error())
-		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), earlyModel, emitEnvelope)
+		return emitEarlyFailure(fmt.Errorf("failed to start reviewer: %w", err), earlyModel, mode, emitEnvelope)
 	}
 	defer r.Stop()
 
-	prompt := buildPromptForRun(goal, scopeHintsFile, skipTestExecution, style)
+	prompt, err := buildPromptForRun(mode, goal, scopeHintsFile, rubricFile, skipTestExecution, style)
+	if err != nil {
+		return emitEarlyFailure(err, r.EffectiveModel(), mode, emitEnvelope)
+	}
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
@@ -247,13 +284,13 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		env := reviewer.BuildEnvelope(&reviewer.ReviewResult{
 			ErrorMessage: err.Error(),
 			ResumeStatus: effectiveResumeStatus(activeReviewer, resumeSessionID),
-		}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+		}, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID(), mode)
 		emitVerdictLine(env)
 		emitEnvelope(env)
 		return fmt.Errorf("review failed: %w", err)
 	}
 
-	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID())
+	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), r.EffectiveModel(), r.LastSessionID(), mode)
 	// Log when the auto-promoted follow-up prompt was sent to a fresh
 	// fallback session. The follow-up prompt has an explicit "if no prior
 	// context, treat as first-pass" escape hatch so the model still produces
@@ -392,6 +429,7 @@ type envelopeGuardArgs struct {
 	emit            func(reviewer.ResultEnvelope)
 	resumeStatus    func() reviewer.ResumeStatus
 	backend         string
+	mode            reviewer.ReviewMode
 }
 
 // finalizeEnvelope is the body of the top-level defer in runCodeReview. It
@@ -421,7 +459,7 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 			result.ResumeStatus = a.resumeStatus()
 		}
 		env := reviewer.BuildEnvelope(result,
-			reviewer.BackendType(a.backend), "", "")
+			reviewer.BackendType(a.backend), "", "", a.mode)
 		a.emit(env)
 	}
 	if a.panicVal != nil {
@@ -435,9 +473,11 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 // writes a minimal error envelope so automation sees a single stable output
 // shape regardless of where the failure occurred. effectiveModel is the model
 // after reviewer.New defaults were applied; pass "" when the reviewer hasn't
-// been constructed yet. emit is the envelope emitter from the runCodeReview
-// scope; it flips the envelopeWritten flag so the top-level defer guard does
-// not double-emit.
+// been constructed yet. mode is the resolved review mode (or
+// reviewer.ReviewModeCode when the failure happened before mode resolution);
+// it labels the envelope so triage layers can dispatch correctly. emit is
+// the envelope emitter from the runCodeReview scope; it flips the
+// envelopeWritten flag so the top-level defer guard does not double-emit.
 //
 // When --resume-session-id was set on this run, the synthesized envelope
 // reports resume_status=unverified so the orchestrator (and the verdict-line
@@ -446,12 +486,12 @@ func finalizeEnvelope(a envelopeGuardArgs) {
 // resolution, prompt-style normalization, reviewer.Start, etc.) all flow
 // through here, so without this every early-failure path would silently
 // drop the resume signal.
-func emitEarlyFailure(err error, effectiveModel string, emit func(reviewer.ResultEnvelope)) error {
+func emitEarlyFailure(err error, effectiveModel string, mode reviewer.ReviewMode, emit func(reviewer.ResultEnvelope)) error {
 	result := &reviewer.ReviewResult{ErrorMessage: err.Error()}
 	if resumeSessionID != "" {
 		result.ResumeStatus = reviewer.ResumeStatusUnverified
 	}
-	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), effectiveModel, "")
+	env := reviewer.BuildEnvelope(result, reviewer.BackendType(backend), effectiveModel, "", mode)
 	emit(env)
 	return err
 }
@@ -469,14 +509,22 @@ func reportEnvelopePrintError(printErr error) {
 // tests a single seam to drive end-to-end: they pass a real hints file
 // path and assert the resulting prompt carries the expected scope clauses.
 // Without this seam, a regression that quietly stops threading
-// scopeHintsFile into the reviewer would slip through helper-level tests
-// that only exercise loadPromptOptions in isolation.
-func buildPromptForRun(goal, hintsPath string, skipTestExecution bool, style promptStyle) string {
-	opts := loadPromptOptions(hintsPath, skipTestExecution)
-	if style == promptStyleFollowUp {
-		return reviewer.BuildFollowUpJSONPromptWithScope(goal, opts)
+// scopeHintsFile or rubricPath into the reviewer would slip through
+// helper-level tests that only exercise loadPromptOptions in isolation.
+//
+// Returning an error (rather than logging-and-falling-back like the
+// scope-hints path does) matters for design-doc mode: the rubric IS the
+// review for that mode, so a missing/malformed rubric file must abort,
+// not silently degrade.
+func buildPromptForRun(mode reviewer.ReviewMode, goal, hintsPath, rubricPath string, skipTestExecution bool, style promptStyle) (string, error) {
+	opts, err := loadPromptOptions(mode, hintsPath, rubricPath, skipTestExecution)
+	if err != nil {
+		return "", err
 	}
-	return reviewer.BuildJSONPromptWithScope(goal, opts)
+	if style == promptStyleFollowUp {
+		return reviewer.BuildFollowUpJSONPromptWithScope(goal, opts), nil
+	}
+	return reviewer.BuildJSONPromptWithScope(goal, opts), nil
 }
 
 func normalizePromptStyle(resumeSessionID, rawStyle string, styleExplicit bool) (promptStyle, error) {
@@ -498,11 +546,20 @@ func normalizePromptStyle(resumeSessionID, rawStyle string, styleExplicit bool) 
 	return style, nil
 }
 
-// loadPromptOptions reads the scope-hints file when set and converts it to
-// PromptOptions. A missing or malformed file logs a warning and falls back
-// to PromptOptions{SkipTestExecution: ...} — the legacy narrow-review path.
-// This is split out so tests can drive the fallback behavior without a real
-// reviewer session.
+// loadPromptOptions builds the PromptOptions for one runCodeReview turn.
+// It dispatches on mode:
+//
+//   - ReviewModeCode (or empty): reads the scope-hints file when set and
+//     converts it to PromptOptions; a missing or malformed file logs a
+//     warning and falls back to PromptOptions{SkipTestExecution: ...} —
+//     the legacy narrow-review path. SkipTestExecution is honoured.
+//
+//   - ReviewModeDesignDoc: reads the rubric file (one question per
+//     non-blank line, sanitized via SanitizePromptHint, capped at 20
+//     entries / 500 chars per line) and builds PromptOptions{Mode,
+//     Rubric}. Scope-hints/skip-test-execution are silently dropped at
+//     the validation gate (validateModeFlags below) before this is even
+//     reached, so we don't have to re-check them here.
 //
 // The fallback warning records only the basename of the hints file. The
 // full path is the operator's own input and run logs are routinely shared
@@ -511,16 +568,127 @@ func normalizePromptStyle(resumeSessionID, rawStyle string, styleExplicit bool) 
 // (see redactPath). LoadScopeHints itself also identifies the file by
 // basename in its error text, so the slog "error" attribute is
 // already path-clean.
-func loadPromptOptions(hintsPath string, skipTestExecution bool) reviewer.PromptOptions {
-	if hintsPath == "" {
-		return reviewer.PromptOptions{SkipTestExecution: skipTestExecution}
+func loadPromptOptions(mode reviewer.ReviewMode, hintsPath, rubricPath string, skipTestExecution bool) (reviewer.PromptOptions, error) {
+	switch mode {
+	case reviewer.ReviewModeDesignDoc:
+		rubric, err := loadRubricFile(rubricPath)
+		if err != nil {
+			return reviewer.PromptOptions{}, err
+		}
+		return reviewer.PromptOptions{
+			Mode:   reviewer.ReviewModeDesignDoc,
+			Rubric: rubric,
+		}, nil
+	default:
+		if hintsPath == "" {
+			return reviewer.PromptOptions{SkipTestExecution: skipTestExecution}, nil
+		}
+		hints, err := reviewer.LoadScopeHints(hintsPath)
+		if err != nil {
+			slog.Warn("scope-hints file ignored, using narrow review",
+				"file", filepath.Base(hintsPath),
+				"error", err.Error())
+			return reviewer.PromptOptions{SkipTestExecution: skipTestExecution}, nil
+		}
+		return hints.ToPromptOptions(skipTestExecution), nil
 	}
-	hints, err := reviewer.LoadScopeHints(hintsPath)
+}
+
+// rubricLineMaxLen bounds the length of one rubric entry. 500 chars is
+// enough for a multi-clause grilling question without risking a runaway
+// prompt-token bill from a malformed file. Defence-in-depth: the prompt
+// builder also caps the list length (rubricCap = 20).
+const rubricLineMaxLen = 500
+
+// loadRubricFile reads the rubric file and returns its non-blank lines as a
+// list of grilling questions. Each line is trimmed; lines starting with
+// '#' (markdown-comment convention) are skipped so authors can leave
+// in-file notes. Empty result, an unreadable file, or a sanitization
+// rejection all surface as an explicit error — design-doc mode without
+// a rubric is unambiguously a misconfiguration, not a "fall back to
+// defaults" situation.
+func loadRubricFile(path string) ([]string, error) {
+	if path == "" {
+		return nil, fmt.Errorf("--review-mode design-doc requires --review-rubric-file")
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		slog.Warn("scope-hints file ignored, using narrow review",
-			"file", filepath.Base(hintsPath),
-			"error", err.Error())
-		return reviewer.PromptOptions{SkipTestExecution: skipTestExecution}
+		return nil, fmt.Errorf("read rubric file: %w", err)
 	}
-	return hints.ToPromptOptions(skipTestExecution)
+	var rubric []string
+	for i, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if len(trimmed) > rubricLineMaxLen {
+			return nil, fmt.Errorf("rubric line %d exceeds %d chars", i+1, rubricLineMaxLen)
+		}
+		if !reviewer.SanitizePromptHint(trimmed) {
+			return nil, fmt.Errorf("rubric line %d failed sanitization (no leading markdown control chars, no newlines): %q", i+1, trimmed)
+		}
+		rubric = append(rubric, trimmed)
+	}
+	if len(rubric) == 0 {
+		return nil, fmt.Errorf("rubric file %q has no non-blank, non-comment lines", filepath.Base(path))
+	}
+	if len(rubric) > 20 {
+		return nil, fmt.Errorf("rubric file %q has %d entries; cap is 20", filepath.Base(path), len(rubric))
+	}
+	return rubric, nil
+}
+
+// validateModeFlags checks the --review-mode/--review-rubric-file flag pair
+// and emits a warning when ignored flags are passed alongside design-doc
+// mode. Returns (mode, error). An unknown --review-mode value is rejected.
+//
+// Ignored-flag warnings (not errors): --scope-hints-file in design-doc
+// mode, --skip-test-execution in design-doc mode. Both are diff-derived
+// signals that don't apply to a single doc; the operator probably copied a
+// pr-polish-style invocation. Warning-not-error keeps existing automation
+// scripts from breaking when they tack the flags on unconditionally.
+// requestedModeOrCode parses a --review-mode flag literal into a
+// ReviewMode for use in pre-validation early-failure envelopes. It does
+// not validate combinations (that's validateModeFlags' job); it just
+// echoes the user's intent back into the envelope so an orchestrator's
+// auto-detect logic doesn't misroute a code-default failure when the
+// user actually invoked design-doc mode.
+//
+// Unknown literals fall through to ReviewModeCode — the envelope's
+// `error` field will already name the problem (e.g.
+// "unknown --review-mode 'security-review'") so the wrong mode tag is
+// not the load-bearing signal in that case.
+func requestedModeOrCode(modeStr string) reviewer.ReviewMode {
+	switch reviewer.ReviewMode(modeStr) {
+	case reviewer.ReviewModeCode, reviewer.ReviewModeDesignDoc:
+		return reviewer.ReviewMode(modeStr)
+	}
+	return reviewer.ReviewModeCode
+}
+
+func validateModeFlags(modeStr, hintsPath, rubricPath string, skipTestExec bool) (reviewer.ReviewMode, error) {
+	switch reviewer.ReviewMode(modeStr) {
+	case reviewer.ReviewModeCode, "":
+		if rubricPath != "" {
+			return "", fmt.Errorf("--review-rubric-file requires --review-mode design-doc")
+		}
+		return reviewer.ReviewModeCode, nil
+	case reviewer.ReviewModeDesignDoc:
+		if rubricPath == "" {
+			return "", fmt.Errorf("--review-mode design-doc requires --review-rubric-file")
+		}
+		if hintsPath != "" {
+			slog.Warn("--scope-hints-file ignored in design-doc mode",
+				"file", filepath.Base(hintsPath))
+		}
+		if skipTestExec {
+			slog.Warn("--skip-test-execution ignored in design-doc mode")
+		}
+		return reviewer.ReviewModeDesignDoc, nil
+	default:
+		return "", fmt.Errorf("unknown --review-mode %q (want code or design-doc)", modeStr)
+	}
 }

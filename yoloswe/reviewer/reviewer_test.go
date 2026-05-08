@@ -1017,6 +1017,185 @@ func TestBuildJSONPromptWithScope_GenericFallbackWhenChangedPackagesAllSanitized
 	}
 }
 
+// TestBuildJSONPromptDesignDocMode verifies the design-doc persona, inlined
+// rubric, section-citation rules, and ready/revise/rethink verdicts. The
+// intent is that the code-review-flavoured clauses (file:line citation,
+// focus-area checklist, accepted/rejected verdicts) are absent — otherwise
+// the model would receive contradictory instructions.
+func TestBuildJSONPromptDesignDocMode(t *testing.T) {
+	rubric := []string{
+		"Is this the best long-term choice?",
+		"Can we make it simpler?",
+		"Does milestone create clear boundary?",
+		"Does milestone frontload risk discovery in the early phase?",
+	}
+	prompt := BuildJSONPromptWithScope("Reviewing design doc foo.md", PromptOptions{
+		Mode:   ReviewModeDesignDoc,
+		Rubric: rubric,
+	})
+
+	// Required: design-doc persona, rubric inlined as a numbered list,
+	// section-citation rules, doc-flavoured verdict enum.
+	mustContain := []string{
+		"staff engineer reviewing a software design document",
+		"grilled",
+		"Reviewing design doc foo.md",
+		"1. Is this the best long-term choice?",
+		"2. Can we make it simpler?",
+		"3. Does milestone create clear boundary?",
+		"4. Does milestone frontload risk discovery in the early phase?",
+		`"dimension"`,
+		`"section"`,
+		"section heading",
+		"(whole document)",
+		"Do not modify the document",
+		`"verdict"`,
+		"ready",
+		"revise",
+		"rethink",
+		`"confidence"`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("design-doc prompt missing required phrase %q\nprompt:\n%s", s, prompt)
+		}
+	}
+
+	// Forbidden: anything that would make the model think it's reviewing
+	// a code diff. Note: literal `"file"` and `"line"` substrings DO
+	// appear in the design-doc output rules (in the line that says "Do
+	// NOT include file/line"); we can't blacklist the substring without
+	// also rejecting the prohibition. The validator (
+	// validateReviewBody for ReviewModeDesignDoc) is the load-bearing
+	// guard against the model emitting those fields.
+	mustNotContain := []string{
+		"experienced software engineer",
+		"Focus on these areas",
+		"Is the implementation correct",
+		"sufficient test coverage",
+		"cite the affected file and line range",
+		"verdict MUST be exactly \"accepted\"",
+	}
+	for _, s := range mustNotContain {
+		if strings.Contains(prompt, s) {
+			t.Errorf("design-doc prompt unexpectedly contains code-mode phrase %q\nprompt:\n%s", s, prompt)
+		}
+	}
+}
+
+// TestBuildJSONPromptDesignDocMode_RubricMissing verifies the
+// defence-in-depth path inside buildDesignDocBasePrompt: a direct caller
+// that bypassed the cmd/codereview flag-validation gate gets an explicit
+// MISCONFIGURED sentinel instead of a silently-empty rubric prompt.
+func TestBuildJSONPromptDesignDocMode_RubricMissing(t *testing.T) {
+	prompt := BuildJSONPromptWithScope("any goal", PromptOptions{Mode: ReviewModeDesignDoc})
+	if !strings.Contains(prompt, "MISCONFIGURED") {
+		t.Errorf("expected MISCONFIGURED sentinel; got:\n%s", prompt)
+	}
+}
+
+// TestBuildJSONPromptDesignDocMode_SkipsScopeSuffix asserts that the
+// test-quality and cross-service clauses (which are diff-derived) do not
+// leak into a design-doc prompt even when a hostile/buggy caller stuffs
+// the scope-hint fields. cmd/codereview rejects the combination at flag-
+// parse time, but the prompt builder is the last line of defence.
+func TestBuildJSONPromptDesignDocMode_SkipsScopeSuffix(t *testing.T) {
+	prompt := BuildJSONPromptWithScope("g", PromptOptions{
+		Mode:                 ReviewModeDesignDoc,
+		Rubric:               []string{"q1", "q2"},
+		TestScopeHints:       []string{"pkg/test_x.py"},
+		CrossServicePackages: []string{"a/", "b/"},
+		ChangedPackages:      []string{"a/"},
+	})
+	for _, s := range []string{
+		"## Test quality",
+		"## Cross-service contract sweep",
+		"pkg/test_x.py",
+		"primarily modifies",
+		"touches multiple top-level packages",
+	} {
+		if strings.Contains(prompt, s) {
+			t.Errorf("design-doc prompt unexpectedly contains scope clause %q\nprompt:\n%s", s, prompt)
+		}
+	}
+}
+
+// TestBuildFollowUpJSONPromptDesignDocMode pins the design-doc follow-up
+// shape: same fresh-eyes / bias-guard intent as the code follow-up, but
+// keyed off section/dimension citations and the rubric-recap safety net.
+// Code-mode follow-up clauses (file:line, scope suffix) must not leak.
+func TestBuildFollowUpJSONPromptDesignDocMode(t *testing.T) {
+	prompt := BuildFollowUpJSONPromptWithScope(
+		"Round 2. Prior fixed: Milestone 2 — risk frontload.",
+		PromptOptions{
+			Mode:   ReviewModeDesignDoc,
+			Rubric: []string{"Is this the best long-term choice?", "Can we make it simpler?"},
+		},
+	)
+	mustContain := []string{
+		"Continue grilling the same design document",
+		"Context for this turn: Round 2. Prior fixed: Milestone 2",
+		"silently fell back to a fresh session",
+		"first-pass review",
+		"Re-grill the document with fresh eyes",
+		"section",
+		"dimension",
+		"qN",
+		// Rubric recap is the design-doc analogue of the code-mode
+		// scope suffix: it survives a silent resume fallback so the
+		// model still sees the grilling axes even when bramble cold-
+		// started despite --resume-session-id.
+		"Rubric (recap):",
+		"1. Is this the best long-term choice?",
+		"2. Can we make it simpler?",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("design-doc follow-up prompt missing %q\nprompt:\n%s", s, prompt)
+		}
+	}
+	mustNotContain := []string{
+		"Continue the review on the same diff",
+		"## Test quality",
+		"## Cross-service contract sweep",
+		"file:line",
+	}
+	for _, s := range mustNotContain {
+		if strings.Contains(prompt, s) {
+			t.Errorf("design-doc follow-up prompt leaked code-mode phrase %q\nprompt:\n%s", s, prompt)
+		}
+	}
+}
+
+// TestBuildFollowUpJSONPromptDesignDoc_EmptyRubricSkipsRecap defends
+// against a recap that emits an empty "Rubric (recap):" header when the
+// caller (somehow) passes an empty rubric. buildDesignDocBasePrompt
+// would already have returned a MISCONFIGURED sentinel for the fresh
+// turn, but the follow-up path is independent — pin it here.
+func TestBuildFollowUpJSONPromptDesignDoc_EmptyRubricSkipsRecap(t *testing.T) {
+	prompt := BuildFollowUpJSONPromptWithScope(
+		"some context",
+		PromptOptions{Mode: ReviewModeDesignDoc, Rubric: nil},
+	)
+	if strings.Contains(prompt, "Rubric (recap):") {
+		t.Errorf("empty rubric should not emit recap header\nprompt:\n%s", prompt)
+	}
+}
+
+// TestPromptOptionsEffectiveMode_EmptyDefaultsToCode pins the backward-compat
+// contract: PromptOptions{} (zero value) must continue to behave exactly as
+// it did before ReviewMode existed, so legacy callers (yoloswe/swe.go,
+// existing prompt-shape tests, anyone passing PromptOptions{
+// SkipTestExecution: true}) keep working unchanged.
+func TestPromptOptionsEffectiveMode_EmptyDefaultsToCode(t *testing.T) {
+	if got := (PromptOptions{}).effectiveMode(); got != ReviewModeCode {
+		t.Errorf("empty Mode = %q, want %q", got, ReviewModeCode)
+	}
+	if got := (PromptOptions{Mode: ReviewModeDesignDoc}).effectiveMode(); got != ReviewModeDesignDoc {
+		t.Errorf("explicit design-doc Mode = %q, want %q", got, ReviewModeDesignDoc)
+	}
+}
+
 // TestLegacyJSONPromptGolden pins today's BuildJSONPrompt output byte-for-
 // byte. Drift is most likely to creep in when someone edits the base prompt
 // or the JSON output rules without realizing yoloswe/swe.go and any

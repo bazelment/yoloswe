@@ -899,3 +899,50 @@ better framing for that note: "a non-biased follow-up should not
 systematically produce LOWER turn-2 finding counts across all
 backends." The current biased→debiased flip clearly shows what the
 note was trying to capture without overclaiming.
+
+## 2026-05-08 — feature/design-review
+
+Diff: 13 files, +3192 / -271 lines (design-doc review mode end-to-end:
+SKILL, doc_ops.py + tests, bramble_ops.py rewrite + tests, codereview.go
++ tests, json_output.go + tests, reviewer.go + tests)
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 2 | 0 | accepted | 0.65–0.85 | 111s | — |
+| cursor-composer2 | 2 | ok | 2 | 0 | accepted | 0.85–1.00 | 47s | — |
+| cursor-composer2 | 3 | ok | 2 | 0 | accepted | 0.85–1.00 | 21s | — |
+| codex-5.4-mini | 1 | — | 0 | 0 | accepted | — | 120s | 0/0 |
+| codex-5.4-mini | 2 | ok | 1 | 0 | accepted | 0.74 | 148s | 0/0 |
+| codex-5.4-mini | 3 | ok | 1 | 0 | accepted | 0.74 | 12s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | — | 31s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | — | 2s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | — | 8s | — |
+
+Consensus (all 3, turn 1): none — codex and gemini found 0, only cursor flagged anything
+Majority (2 of 3, turn 1): none
+Unique to cursor (turn 1):
+  - .claude/skills/pr-polish/scripts/tests/test_bramble_ops.py:1 (medium, 0.85) — new Python tests not wired into Bazel/scripts/lint.sh; regressions rely on manual runs
+  - .claude/skills/design-doc-polish/SKILL.md:106 (low, 0.65) — backend/model quick reference says `gemini-3-flash-preview` while the reviewer default for BackendGemini is `gemini-3.1-flash-lite-preview`; copied IDs can drift
+Unique to codex-5.4-mini (turn 1): none
+Unique to gemini-3.1-flash-lite-preview (turn 1): none
+Disagreements: cursor consistently surfaces 2 findings across all 3 turns; codex moves 0→1 between turn 1 and turn 2 (validator gap below); gemini is flat at 0 across all turns
+
+Follow-up deltas:
+- cursor-composer2: turn 2 finds 2 NEW issues (json_output.go:288 medium — code-mode validator never forbids populated section/dimension; json_output_test.go:642 medium — failure message mismatches assertion text) and DROPS both turn-1 findings. Turn 3 keeps the same 2 findings as turn 2 with refined wording. Net: turns 2+3 found different (and arguably more code-relevant) issues than turn 1; the bias-guard prompt update is doing its job — turn-2 isn't just ratifying turn-1.
+- codex-5.4-mini: turn 1 found 0; turn 2 surfaced json_output.go:302 (low, 0.74) — design-doc validation rejects only non-empty file or non-zero line, so explicit `"file": ""` / `"line": 0` still passes, weakening the no-file/no-line contract. Turn 3 found the identical issue with near-identical wording (12s — minimal new compute, mostly recall from session state).
+- gemini-3.1-flash-lite-preview: 0/0/0 across all turns. Turn 2's 2s and turn 3's 8s suggest the model is barely engaging the diff. Notably, gemini's r1 summary describes the diff as "trimming filler documentation" and refining verdict semantics — that's the *prior* commit on this branch (`Trim SKILL.md filler` / `Single-word design-doc verdicts`), NOT the actual diff which adds 3192 lines of design-doc review mode + bramble_ops rewrite. Gemini appears to be reviewing the wrong scope (likely just the most recent commit message rather than the merge-base diff). Worth investigating whether gemini backend is invoking the diff correctly.
+
+Resume health: cursor=ok, codex=ok, gemini=ok — all three turn-2 envelopes confirmed `resume_status=ok`. No fallback or unverified incidents.
+
+Notes:
+- Cursor was the most useful reviewer this round: turn 1 caught two real "process" issues (test wiring, doc/default drift) the others missed; turn 2/3 caught two real code issues (validator asymmetry, misleading test failure message). Different shape across turns suggests cursor is doing genuine independent review rather than restating.
+- Codex's turn 2 catch (json_output.go:302) is a real validator hole: `if iss.File != "" || iss.Line != 0` doesn't reject the explicit-empty-but-present case. This is a genuine bug surfaced only on the second pass — the bias-guard prompt is working as intended for codex too.
+- Codex turn 3 ran in 12s and found the identical issue — the "fresh prompt" on a resumed session is mostly recalling the prior turn's reasoning rather than re-deriving it. Compare to turn 2 at 148s of real compute.
+- Gemini's apparent scope error (reviewing only the trim-filler commit) is a possible bug worth filing — the gemini backend may be passing only HEAD vs HEAD~1 rather than merge-base vs HEAD. If confirmed, this would explain why gemini consistently finds nothing on multi-commit branches.
+
+### Cross-eval observations
+
+- Cursor's strength on this branch (process/wiring + code) compared to its turn-1 emptiness on prior eval-skill branches (where it ran on a 3-file docs-only diff) suggests cursor scales with diff complexity better than the others on this codebase.
+- The bias-guard prompt update (2026-05-06) continues to perform well: cursor swapped its 2 findings completely between turn 1 and turn 2 rather than just ratifying. Codex moved 0→1, also a sign the resumed pass is doing real work.
+- Gemini's 0/0/0 with apparent scope confusion is the most actionable signal here. File a follow-up to verify gemini backend's diff-range argument.
+

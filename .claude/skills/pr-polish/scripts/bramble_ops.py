@@ -47,6 +47,16 @@ from _common import (  # noqa: E402
 # consensus/spiral matching.
 BACKENDS = ("codex", "cursor", "gemini", "lint")
 
+# Review mode constants. Defined up here (rather than down by the
+# per-mode key constructors) so they're available as default-argument
+# values for parse_stream / parse_round below — those callers need a
+# default well before _normalize_mode lands. The two strings must match
+# yoloswe/reviewer.ReviewMode so the wire format stays stable across
+# the Python triage layer and the Go envelope writer.
+REVIEW_MODE_CODE = "code"
+REVIEW_MODE_DESIGN_DOC = "design-doc"
+REVIEW_MODES = (REVIEW_MODE_CODE, REVIEW_MODE_DESIGN_DOC)
+
 
 def bramble_bin() -> str:
     """Path to the bramble CLI. The SKILL exports ``BRAMBLE_BIN`` at the
@@ -202,45 +212,57 @@ def _truncate(s: str) -> str:
     return s[: _TOPIC_CHAR_CAP - 1].rstrip() + "…"
 
 
-def _action_label(action: dict[str, Any]) -> str:
-    """Format a fixed comment_actions entry for the goal text.
+def _action_address(action: dict[str, Any]) -> str:
+    """Mode-agnostic address string for an action.
 
-    Shape: ``path:line — topic`` when topic is present, bare ``path:line``
-    when absent. Source labels (codex/cursor/etc.) are deliberately
-    omitted: triage routes by source but the resumed model treats every
-    finding identically once it lands in the prompt.
+    Code-mode actions carry ``path``/``line``; design-doc-mode actions
+    carry ``section``/``dimension``. Pick whichever pair the row has.
+    Returns empty when neither is populated (top-level findings,
+    misformed rows). Centralising this here keeps the goal-text
+    label functions agnostic of the source-of-truth field name.
     """
     path = action.get("path")
     line = action.get("line")
-    topic = (action.get("topic") or "").strip()
-    base: str
-    if path and line is not None:
-        base = f"{path}:{line}"
-    elif path:
-        base = f"{path}"
-    else:
+    if path:
+        return f"{path}:{line}" if line is not None else f"{path}"
+    section = action.get("section")
+    dimension = action.get("dimension")
+    if section:
+        return f"{section} ({dimension})" if dimension else f"{section}"
+    return ""
+
+
+def _action_label(action: dict[str, Any]) -> str:
+    """Format a fixed comment_actions entry for the goal text.
+
+    Shape: ``<address> — topic`` when topic is present, bare ``<address>``
+    when absent. The address is ``path:line`` for code-mode actions or
+    ``section (dimension)`` for design-doc actions — see
+    ``_action_address``. Source labels (codex/cursor/etc.) are
+    deliberately omitted: triage routes by source but the resumed
+    model treats every finding identically once it lands in the prompt.
+    """
+    base = _action_address(action)
+    if not base:
         return ""
+    topic = (action.get("topic") or "").strip()
     if topic:
         return f"{base} — {_truncate(topic)}"
     return base
 
 
 def _skipped_label(action: dict[str, Any], verb: str) -> str:
-    """Format a skipped action: ``path:line verb: <description>``.
+    """Format a skipped action: ``<address> verb: <description>``.
 
     Reason takes precedence over topic when both are present — the
     reason is what the orchestrator decided, and the model needs that
     decision (and not the original finding's topic) to avoid re-arguing
     the skip. The whole description is capped at _TOPIC_CHAR_CAP so
-    a long reason can't bloat the goal text.
+    a long reason can't bloat the goal text. Address shape matches
+    ``_action_label``.
     """
-    path = action.get("path")
-    line = action.get("line")
-    if path and line is not None:
-        base = f"{path}:{line}"
-    elif path:
-        base = f"{path}"
-    else:
+    base = _action_address(action)
+    if not base:
         return ""
     description = (action.get("reason") or action.get("topic") or "").strip()
     if description:
@@ -301,7 +323,7 @@ def extract_terminal_envelope(stream_text: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
+def parse_stream(stream_path: Path, *, source: str, fallback_mode: str = REVIEW_MODE_CODE) -> list[dict[str, Any]]:
     """Read Monitor's captured stdout (or a standalone envelope file) and return findings.
 
     Tries whole-file ``json.loads`` first so producers that write a single
@@ -311,6 +333,12 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
     yields an envelope, synthesize a high-severity ``bramble-empty-envelope``
     finding so triage surfaces the failure instead of treating it as
     "converged to zero".
+
+    ``fallback_mode`` tags the synthetic empty-envelope finding with the
+    review mode the caller's other backends are running. Without this, a
+    crashed design-doc backend would emit a code-mode synthetic finding
+    that triage rejects as "mixed review_mode". The orchestrator passes
+    ``--mode design-doc`` (CLI) which threads through here.
     """
     if not stream_path.exists():
         return []
@@ -330,18 +358,27 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
     if env is None:
         env = extract_terminal_envelope(text)
     if env is None:
-        return [
-            {
-                "source": source,
-                "severity": "high",
-                "file": None,
-                "line": None,
-                "message": "bramble stream ended without producing an envelope",
-                "suggestion": "re-launch the Monitor arm; see bramble logs under ~/.bramble/logs/code-review/",
-                "topic": "bramble-empty-envelope",
-                "status": "exited-empty",
-            }
-        ]
+        # No envelope means we don't know the mode either, so we trust
+        # the caller's ``fallback_mode``. Without this, a crashed
+        # design-doc backend would synthesize a code-mode high finding
+        # that triage rejects as "mixed review_mode" — silently turning
+        # a Monitor failure into "all envelopes mismatched, abort."
+        finding: dict[str, Any] = {
+            "source": source,
+            "severity": "high",
+            "message": "bramble stream ended without producing an envelope",
+            "suggestion": "re-launch the Monitor arm; see bramble logs under ~/.bramble/logs/code-review/",
+            "topic": "bramble-empty-envelope",
+            "status": "exited-empty",
+            "review_mode": fallback_mode,
+        }
+        if fallback_mode == REVIEW_MODE_DESIGN_DOC:
+            finding["section"] = None
+            finding["dimension"] = None
+        else:
+            finding["file"] = None
+            finding["line"] = None
+        return [finding]
     return parse_envelope(env, source=source)
 
 
@@ -351,9 +388,24 @@ def parse_stream(stream_path: Path, *, source: str) -> list[dict[str, Any]]:
 
 
 def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str, Any]]:
-    """Extract findings from one bramble envelope dict. Pure — used in tests."""
+    """Extract findings from one bramble envelope dict. Pure — used in tests.
+
+    The returned findings carry a ``review_mode`` field (``"code"`` or
+    ``"design-doc"``) read from the envelope's top-level
+    ``review_mode``. Pre-mode envelopes have no such field and are
+    treated as code mode. The mode propagates to ``triage`` via the
+    findings themselves so a single triage call can mix-and-match
+    backends as long as they all reported the same mode (the CLI
+    ``--mode`` flag below enforces consistency or auto-detects).
+
+    Mode-specific addressing: code mode emits ``file``/``line``;
+    design-doc mode emits ``section``/``dimension``. Both shapes share
+    ``severity``/``message``/``suggestion``/``topic``/``source``, which
+    is what every triage code path actually keys on.
+    """
     if obj is None:
         return []
+    mode = obj.get("review_mode") or REVIEW_MODE_CODE
     status = obj.get("status")
     if status != "ok":
         # A failed bramble run is a real signal — the orchestrator must
@@ -362,39 +414,53 @@ def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str,
         # would land in ``low_acks`` (the routing rule is "missing
         # severity is treated as low/nit"), letting Monitor failures
         # masquerade as batch-ackable nits.
-        return [
-            {
-                "source": source,
-                "severity": "high",
-                "file": None,
-                "line": None,
-                "message": (obj.get("error") or "bramble run failed"),
-                "suggestion": None,
-                "topic": topic_of(obj.get("error") or "bramble run failed"),
-                "status": status,
-            }
-        ]
+        msg = obj.get("error") or "bramble run failed"
+        finding: dict[str, Any] = {
+            "source": source,
+            "severity": "high",
+            "message": msg,
+            "suggestion": None,
+            "topic": topic_of(msg),
+            "status": status,
+            "review_mode": mode,
+        }
+        # Tag with the addressing-field shape the mode expects so later
+        # triage's _consensus_key/_triage_key returns a stable
+        # (None, None, ...) tuple rather than KeyError-shaped output.
+        if mode == REVIEW_MODE_DESIGN_DOC:
+            finding["section"] = None
+            finding["dimension"] = None
+        else:
+            finding["file"] = None
+            finding["line"] = None
+        return [finding]
     issues = (obj.get("review") or {}).get("issues") or []
     out = []
     for i in issues:
         msg = i.get("message") or ""
-        out.append(
-            {
-                "source": source,
-                "severity": i.get("severity"),
-                "file": i.get("file"),
-                "line": i.get("line"),
-                "message": msg,
-                "suggestion": i.get("suggestion"),
-                "topic": topic_of(msg),
-            }
-        )
+        finding = {
+            "source": source,
+            "severity": i.get("severity"),
+            "message": msg,
+            "suggestion": i.get("suggestion"),
+            "topic": topic_of(msg),
+            "review_mode": mode,
+        }
+        if mode == REVIEW_MODE_DESIGN_DOC:
+            finding["section"] = i.get("section")
+            finding["dimension"] = i.get("dimension")
+        else:
+            finding["file"] = i.get("file")
+            finding["line"] = i.get("line")
+        out.append(finding)
     return out
 
 
 def parse_round(
     streams: dict[str, Path],
     backends: list[str] | None = None,
+    *,
+    fallback_mode: str = REVIEW_MODE_CODE,
 ) -> list[dict[str, Any]]:
     """Aggregate findings across backends for one pr-polish round.
 
@@ -404,6 +470,12 @@ def parse_round(
     doesn't exist yield a synthetic high-severity ``stream-missing``
     finding so a typo'd ``--stream cursor=/typo/path`` surfaces in
     triage instead of disappearing.
+
+    ``fallback_mode`` tags the synthetic stream-missing and empty-
+    envelope findings (the latter via ``parse_stream``) with the review
+    mode the caller's other envelopes are running. Mixing a code-mode
+    synthetic into a design-doc batch (or vice versa) would otherwise
+    trip triage's mixed-mode guard.
     """
     backends = backends or list(BACKENDS)
     out: list[dict[str, Any]] = []
@@ -412,20 +484,24 @@ def parse_round(
         if path is None:
             continue
         if not path.exists():
-            out.append(
-                {
-                    "source": b,
-                    "severity": "high",
-                    "file": None,
-                    "line": None,
-                    "message": f"--stream {b}={path} does not exist on disk",
-                    "suggestion": "verify the Monitor capture path; check stderr for the failed bramble run",
-                    "topic": "stream-missing",
-                    "status": "missing",
-                }
-            )
+            finding: dict[str, Any] = {
+                "source": b,
+                "severity": "high",
+                "message": f"--stream {b}={path} does not exist on disk",
+                "suggestion": "verify the Monitor capture path; check stderr for the failed bramble run",
+                "topic": "stream-missing",
+                "status": "missing",
+                "review_mode": fallback_mode,
+            }
+            if fallback_mode == REVIEW_MODE_DESIGN_DOC:
+                finding["section"] = None
+                finding["dimension"] = None
+            else:
+                finding["file"] = None
+                finding["line"] = None
+            out.append(finding)
             continue
-        out.extend(parse_stream(path, source=b))
+        out.extend(parse_stream(path, source=b, fallback_mode=fallback_mode))
     return out
 
 
@@ -434,25 +510,86 @@ def parse_round(
 # ---------------------------------------------------------------------------
 
 
-def _triage_key(f: dict[str, Any]) -> tuple:
+# ---------------------------------------------------------------------------
+# Per-mode key construction
+# ---------------------------------------------------------------------------
+#
+# Code review and design-doc review use different *addressing* schemes for
+# findings: code review keys off (file, line) — a precise textual address
+# the model was asked to cite — while design-doc review keys off
+# (section, dimension) — a heading + the rubric question the issue
+# answers. The triage logic (consensus, spiral guard, single-source
+# bucketing, cluster_hint) is otherwise mode-agnostic, so we abstract the
+# key construction into a per-mode dispatch table and parameterise the
+# triage internals on a ``mode`` argument with a code-default for
+# backward compat.
+#
+# Adding a future mode (e.g. security-review) becomes one new entry in
+# this map plus matching adapter wiring, without touching the triage
+# pipeline itself.
+
+def _normalize_mode(mode: str | None) -> str:
+    if not mode:
+        return REVIEW_MODE_CODE
+    if mode not in REVIEW_MODES:
+        raise ValueError(f"unknown review mode {mode!r}; want one of {REVIEW_MODES}")
+    return mode
+
+
+def _triage_key(f: dict[str, Any], mode: str = REVIEW_MODE_CODE) -> tuple:
     """Spiral-detection key. Includes topic so a finding that was fixed and
     later re-flagged with the same wording matches the prior-round entry,
-    while a different topic on the same line is treated as a new issue.
+    while a different topic on the same site is treated as a new issue.
+
+    Code mode keys on ``(file, line, topic)``. Design-doc mode keys on
+    ``(section, dimension, topic)`` — the section heading is the durable
+    address of a doc finding and the rubric dimension distinguishes
+    "milestone 2 is wrong on long-term fit" from "milestone 2 is wrong
+    on risk frontloading".
     """
+    if mode == REVIEW_MODE_DESIGN_DOC:
+        return (f.get("section"), f.get("dimension"), f.get("topic"))
     return (f.get("file"), f.get("line"), f.get("topic"))
 
 
-def _consensus_key(f: dict[str, Any]) -> tuple:
+def _consensus_key(f: dict[str, Any], mode: str = REVIEW_MODE_CODE) -> tuple:
     """Consensus-grouping key. Drops topic so two reviewers wording the same
     issue differently still collapse into one consensus entry. Two unrelated
-    findings that happen to land on the same line will also collapse — but
+    findings that happen to land on the same site will also collapse — but
     that's much rarer than the false-negative case (codex says
     "TestEmitEarlyFailure does not assert resume_status=unverified", cursor
     says "TestEmitEarlyFailure does not set resumeSessionID", same finding,
     same line, prior code keyed on topic and routed both to single_medium
     instead of must_fix consensus).
+
+    Code mode: ``(file, line)``.
+    Design-doc mode: ``(section, dimension)`` — same insight, the rubric
+    dimension partitions two unrelated systemic issues that landed on the
+    same heading.
     """
+    if mode == REVIEW_MODE_DESIGN_DOC:
+        return (f.get("section"), f.get("dimension"))
     return (f.get("file"), f.get("line"))
+
+
+def _has_address(ckey: tuple, mode: str) -> bool:
+    """Return True when the consensus key carries an actual address (not
+    all-Nones). Used to skip top-level / sourceless findings during
+    location-based consensus grouping; those still pair up via
+    ``_triage_key`` in the second pass.
+    """
+    if mode == REVIEW_MODE_DESIGN_DOC:
+        return ckey[0] is not None
+    return ckey[0] is not None
+
+
+def _cluster_field(mode: str) -> str:
+    """Return the field name used to bucket findings in cluster_hint.
+    Code mode buckets by file (the "this module has six findings" hint);
+    design-doc mode buckets by section (the "this milestone has six
+    findings" hint).
+    """
+    return "section" if mode == REVIEW_MODE_DESIGN_DOC else "file"
 
 
 _HIGH_SEVERITY_KEYWORDS = (
@@ -519,20 +656,24 @@ def ci_failure_to_finding(f: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _cluster_hint(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group action-plan items by file. Files with >=2 actionable items
-    become sweep candidates the fixer should treat as one task — most
-    defensive cascades come from finding only the first site of a
-    class-level bug and missing the rest in the same module.
+def _cluster_hint(items: list[dict[str, Any]], mode: str = REVIEW_MODE_CODE) -> list[dict[str, Any]]:
+    """Group action-plan items by location bucket. Buckets with >=2
+    actionable items become sweep candidates the fixer should treat as
+    one task — most defensive cascades come from finding only the first
+    site of a class-level issue and missing the rest in the same area.
 
-    Accepts a heterogeneous list mixing raw findings (``{file, line,
-    topic}``), single-finding wrappers (``{finding: ...}``), and
-    consensus wrappers (``{findings: [...]}``). One consensus entry
-    counts as one item — both reviewers spotted the same location.
+    Code mode buckets by file (".../module.go has six findings"); design-
+    doc mode buckets by section (the milestone heading concentrates the
+    issue). The bucket field name is dictated by ``_cluster_field(mode)``.
 
-    Returns ``{file, count, lines, topics}`` entries sorted by count
-    desc, file asc. Single-finding files are omitted. Items without a
-    file path are dropped.
+    Accepts a heterogeneous list mixing raw findings, single-finding
+    wrappers (``{finding: ...}``), and consensus wrappers
+    (``{findings: [...]}``). One consensus entry counts as one item —
+    both reviewers spotted the same site.
+
+    Returns ``{<bucket-field>, count, lines, topics}`` entries sorted by
+    count desc, bucket name asc. Single-item buckets are omitted. Items
+    without a bucket address are dropped.
     """
     def _unwrap(it: dict[str, Any]) -> dict[str, Any]:
         if "finding" in it and isinstance(it["finding"], dict):
@@ -541,24 +682,32 @@ def _cluster_hint(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return it["findings"][0]
         return it
 
-    by_file: dict[str, dict[str, Any]] = {}
+    bucket_field = _cluster_field(mode)
+    by_bucket: dict[str, dict[str, Any]] = {}
     for raw in items:
         f = _unwrap(raw)
-        path = f.get("file")
+        path = f.get(bucket_field)
         if not path:
             continue
-        bucket = by_file.setdefault(
-            path, {"file": path, "count": 0, "lines": [], "topics": []},
+        bucket = by_bucket.setdefault(
+            path, {bucket_field: path, "count": 0, "lines": [], "topics": []},
         )
         bucket["count"] += 1
-        line = f.get("line")
-        if line is not None:
-            bucket["lines"].append(line)
+        # Code mode tracks line numbers; design-doc mode tracks
+        # dimensions (which rubric question concentrated here).
+        if mode == REVIEW_MODE_DESIGN_DOC:
+            dim = f.get("dimension")
+            if dim is not None:
+                bucket["lines"].append(dim)
+        else:
+            line = f.get("line")
+            if line is not None:
+                bucket["lines"].append(line)
         topic = f.get("topic")
         if topic:
             bucket["topics"].append(topic)
-    clusters = [b for b in by_file.values() if b["count"] >= 2]
-    clusters.sort(key=lambda b: (-b["count"], b["file"]))
+    clusters = [b for b in by_bucket.values() if b["count"] >= 2]
+    clusters.sort(key=lambda b: (-b["count"], b[bucket_field]))
     return clusters
 
 
@@ -568,31 +717,35 @@ def triage(
     *,
     pr_comments: list[dict[str, Any]] | None = None,
     ci_failures: list[dict[str, Any]] | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     """Group findings, surface consensus, detect N+1 spiral matches.
 
     Pure — used directly in tests.
 
-    Two-level keying:
-    - ``_consensus_key`` = ``(file, line)`` — drives location-based consensus
-      so two reviewers wording the same finding differently still consolidate.
-      For sourceless paths (no file/line) we fall back to the topic-based
-      ``_triage_key`` so cross-cutting findings can still pair up.
-    - ``_triage_key`` = ``(file, line, topic)`` — drives the N+1 spiral guard
-      where exact recurrence (same wording at same site) matters.
+    Two-level keying (per-mode addressing fields, see _consensus_key /
+    _triage_key):
 
-    Consensus = ``_consensus_key`` flagged by >=2 distinct sources (or
-    ``_triage_key`` matched for sourceless paths).
-    Spiral match = a new finding that matches a prior-round ``fixed``
-    action by either ``_triage_key`` (exact recurrence) or
-    ``(file, line, None)`` location-only (fix-then-reword regression at
-    the same site). See ``prior_fixed_keys``.
+    - Code mode: ``_consensus_key`` = ``(file, line)``; ``_triage_key``
+      = ``(file, line, topic)``.
+    - Design-doc mode: ``_consensus_key`` = ``(section, dimension)``;
+      ``_triage_key`` = ``(section, dimension, topic)``.
 
-    ``pr_comments`` are classify_comments rows — round 1 only typically.
-    ``ci_failures`` are ci_failed_tests rows. Both are converted to findings
-    via ``pr_comment_to_finding`` / ``ci_failure_to_finding`` and merged into
-    the same grouping pipeline so bramble-only consensus and cross-source
-    consensus (e.g. codex + CI agreeing on a broken test) both surface.
+    The grouping logic itself is mode-agnostic: ``_consensus_key`` drives
+    cross-source consensus so two reviewers wording the same finding
+    differently still consolidate; ``_triage_key`` drives the N+1
+    spiral guard where exact recurrence matters.
+
+    ``pr_comments`` and ``ci_failures`` are code-mode-only inputs; they
+    are converted via ``pr_comment_to_finding`` / ``ci_failure_to_finding``
+    (which always produce code-shaped findings). Passing them in
+    design-doc mode is rejected — those signals don't apply to a doc.
+
+    ``mode`` defaults to whatever the findings themselves carry in
+    ``review_mode``. When the findings are a mix (e.g. a PR with one
+    code-mode and one design-doc envelope, which shouldn't happen but
+    might), the code-mode default wins and a ValueError is raised so
+    the caller doesn't silently key one half on the wrong fields.
     """
     all_findings = list(findings)
     if pr_comments:
@@ -600,36 +753,63 @@ def triage(
     if ci_failures:
         all_findings.extend(ci_failure_to_finding(f) for f in ci_failures)
 
+    # Mode resolution. Three sources of truth in priority order:
+    #   1. Explicit ``mode`` argument (CLI flag, test override).
+    #   2. ``review_mode`` carried on the findings themselves.
+    #   3. Default to code mode for backward-compat.
+    # Mismatch between sources is a hard error so misrouted envelopes
+    # fail loud.
+    finding_modes = {f.get("review_mode") for f in all_findings if f.get("review_mode")}
+    if mode is not None:
+        resolved_mode = _normalize_mode(mode)
+        if finding_modes and resolved_mode not in finding_modes:
+            raise ValueError(
+                f"explicit mode {resolved_mode!r} doesn't match envelope modes {sorted(finding_modes)!r}"
+            )
+    elif len(finding_modes) > 1:
+        raise ValueError(f"findings carry mixed review_mode values: {sorted(finding_modes)!r}")
+    elif finding_modes:
+        resolved_mode = _normalize_mode(next(iter(finding_modes)))
+    else:
+        resolved_mode = REVIEW_MODE_CODE
+    if resolved_mode == REVIEW_MODE_DESIGN_DOC and (pr_comments or ci_failures):
+        raise ValueError(
+            "pr_comments / ci_failures are not supported in design-doc mode"
+        )
+
     # Partition off stale-on-prior-commit PR comments before key grouping. They
     # were posted against superseded code, so they must not pair with a fresh
     # codex/cursor finding to form spurious consensus, and they must skip the
     # severity buckets entirely — the orchestrator records them as `stale` and
-    # auto-replies with a "Superseded by …" note.
+    # auto-replies with a "Superseded by …" note. (Code-mode only.)
     stale_prior_commit: list[dict[str, Any]] = []
     fresh_findings: list[dict[str, Any]] = []
     for f in all_findings:
         if f.get("is_stale_prior_commit"):
-            stale_prior_commit.append({"key": list(_triage_key(f)), "finding": f})
+            stale_prior_commit.append({"key": list(_triage_key(f, resolved_mode)), "finding": f})
         else:
             fresh_findings.append(f)
 
-    # Two-level keying: triage_key (file, line, topic) drives spiral
-    # detection and single-source bucketing; consensus_key (file, line)
-    # drives cross-source consensus so two reviewers wording the same
-    # location differently still collapse into one must_fix entry.
+    # Two-level keying: triage_key drives spiral detection and
+    # single-source bucketing; consensus_key drives cross-source
+    # consensus so two reviewers wording the same site differently
+    # still collapse into one must_fix entry.
     by_triage_key: dict[tuple, list[dict[str, Any]]] = {}
     by_consensus_key: dict[tuple, list[dict[str, Any]]] = {}
     for f in fresh_findings:
-        by_triage_key.setdefault(_triage_key(f), []).append(f)
-        by_consensus_key.setdefault(_consensus_key(f), []).append(f)
+        by_triage_key.setdefault(_triage_key(f, resolved_mode), []).append(f)
+        by_consensus_key.setdefault(_consensus_key(f, resolved_mode), []).append(f)
 
-    # First pass: identify (file, line) groups with >=2 distinct sources.
+    # First pass: identify groups with >=2 distinct sources at the same
+    # consensus key.
     consensus: list[dict[str, Any]] = []
     consensus_triage_keys: set[tuple] = set()
     for ckey, group in by_consensus_key.items():
-        if ckey == (None, None) or ckey[0] is None:
-            # Top-level / file-less findings (PR-level comments) can't form
-            # location-based consensus. Leave them to the triage_key pipeline.
+        if not _has_address(ckey, resolved_mode):
+            # Top-level / addressless findings (PR-level comments,
+            # whole-document doc findings without a section heading)
+            # can't form location-based consensus. Leave them to the
+            # triage_key pipeline.
             continue
         sources = {g["source"] for g in group}
         if len(sources) >= 2:
@@ -637,7 +817,7 @@ def triage(
                 {"key": list(ckey), "sources": sorted(sources), "findings": group}
             )
             for g in group:
-                consensus_triage_keys.add(_triage_key(g))
+                consensus_triage_keys.add(_triage_key(g, resolved_mode))
 
     single_critical: list[dict[str, Any]] = []
     single_medium: list[dict[str, Any]] = []
@@ -648,10 +828,11 @@ def triage(
         severities = [severity_rank(g.get("severity")) for g in group]
         top = max(severities) if severities else -1
         repr_ = group[0]
-        # Spiral check: strict (path, line, topic) match, or location-only
-        # fallback so a fix-then-rewording regression at the same site
-        # still escalates even when the stored action's topic string and
-        # the new finding's topic_of(message) drift apart.
+        # Spiral check: strict (addr0, addr1, topic) match, or
+        # location-only fallback so a fix-then-rewording regression at
+        # the same site still escalates even when the stored action's
+        # topic string and the new finding's topic_of(message) drift
+        # apart.
         location_key = (key[0], key[1], None)
         if key in prior_fixed_keys or location_key in prior_fixed_keys:
             spiral_matches.append({"key": list(key), "findings": group})
@@ -663,7 +844,7 @@ def triage(
         if len(sources) >= 2:
             # Same triage key (incl. topic) flagged by >=2 sources — also
             # consensus, even when location-based grouping didn't catch it
-            # (e.g. file-less PR-level comments).
+            # (e.g. addressless PR-level comments).
             consensus.append({"key": list(key), "sources": sorted(sources), "findings": group})
         elif top >= severity_rank("high"):
             single_critical.append({"key": list(key), "finding": repr_})
@@ -678,11 +859,10 @@ def triage(
     # regressed, or reviewer is re-flagging something we thought resolved).
     # A spiral match wins over its severity bucket — escalate and stop, so the
     # orchestrator doesn't auto-fix something that already round-tripped.
-    # spiral_matches use triage keys (file, line, topic); consensus entries
-    # may use either consensus keys (file, line, two-element) or triage keys
-    # (file, line, topic, three-element) depending on which path created them.
-    # Match a consensus entry as "in spiral" if any spiral key shares its
-    # location prefix (file, line) — the same shape as the consensus key.
+    # spiral_matches use triage keys; consensus entries may use either
+    # consensus keys (two-element) or triage keys (three-element)
+    # depending on which path created them. Match a consensus entry as
+    # "in spiral" if any spiral key shares its location prefix.
     spiral_triage_keys = {tuple(sm["key"]) for sm in spiral_matches}
     spiral_locations = {(k[0], k[1]) for k in spiral_triage_keys}
 
@@ -704,18 +884,20 @@ def triage(
         "low_acks": low_acks,
         "spiral_matches": spiral_matches,
         "stale_prior_commit": stale_prior_commit,
+        "review_mode": resolved_mode,
         "action_plan": {
             "must_fix": _without_spiral(consensus + single_critical),
             "consider_fix": _without_spiral(single_medium),
             "batch_ack": _without_spiral(low_acks),
             "batch_stale": stale_prior_commit,
             "escalate": spiral_matches,
-            # Sweep candidates: files concentrating >=2 actionable
+            # Sweep candidates: locations concentrating >=2 actionable
             # findings. Read by the fixer prompt so co-located issues
             # are planned holistically rather than as N independent
             # line-level patches. See SKILL.md "A finding is a symptom".
             "cluster_hint": _cluster_hint(
                 _without_spiral(consensus + single_critical + single_medium),
+                resolved_mode,
             ),
         },
         # ``total`` covers all post-merge findings (bramble + pr_comments +
@@ -726,11 +908,11 @@ def triage(
     }
 
 
-def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
+def prior_fixed_keys(state: dict[str, Any] | None, mode: str = REVIEW_MODE_CODE) -> set[tuple]:
     """Collect spiral-match keys for every prior-round ``fixed`` action.
 
-    Returns both the strict ``(path, line, topic)`` triage key and a softer
-    ``(path, line, None)`` fallback. Spiral detection looks for either:
+    Returns both the strict triage key and a softer location-only
+    fallback. Spiral detection looks for either:
 
     - The strict form catches exact recurrence (same wording at same site).
     - The fallback catches "fix at same site, reviewer reworded it"
@@ -739,27 +921,38 @@ def prior_fixed_keys(state: dict[str, Any] | None) -> set[tuple]:
       actions whose ``topic`` is missing or got rewritten by a human
       auditor would otherwise silently disable spiral detection.
 
+    Mode dispatches the addressing fields read from each
+    ``comment_actions`` row:
+    - Code mode: ``(path, line, topic)``.
+    - Design-doc mode: ``(section, dimension, topic)``.
+
     Routing remains unchanged: callers test ``key in prior_fixed_keys``;
-    we now also emit the ``(path, line, None)`` companion so a new
-    finding's ``_triage_key`` of ``(path, line, None)`` (sourceless or
-    different topic) still triggers escalation.
+    we also emit the location-only companion so a new finding whose
+    ``_triage_key`` of ``(addr0, addr1, None)`` (sourceless or different
+    topic) still triggers escalation.
     """
     keys: set[tuple] = set()
     if not state:
         return keys
+    mode = _normalize_mode(mode)
     for rnd in state.get("rounds") or []:
         for a in rnd.get("comment_actions") or []:
             if a.get("action") != "fixed":
                 continue
-            path, line, topic = a.get("path"), a.get("line"), a.get("topic")
-            # File-less / line-less fixes (review-summary acks) would
-            # otherwise emit (None, None, ...) which matches every
-            # sourceless review-summary finding ever — way too broad for
-            # spiral detection. Require at least a path before recording.
-            if path is None:
+            if mode == REVIEW_MODE_DESIGN_DOC:
+                addr0, addr1 = a.get("section"), a.get("dimension")
+            else:
+                addr0, addr1 = a.get("path"), a.get("line")
+            topic = a.get("topic")
+            # Address-less fixes (review-summary acks, doc-wide
+            # findings without a section) would otherwise emit
+            # (None, None, ...) which matches every sourceless finding
+            # ever — too broad for spiral detection. Require at least
+            # the first addressing field before recording.
+            if addr0 is None:
                 continue
-            keys.add((path, line, topic))
-            keys.add((path, line, None))
+            keys.add((addr0, addr1, topic))
+            keys.add((addr0, addr1, None))
     return keys
 
 
@@ -860,12 +1053,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--pr-comments",
         metavar="FILE",
-        help="JSON file with classify_comments output (round 1 input).",
+        help="JSON file with classify_comments output (round 1 input). Code mode only.",
     )
     sp.add_argument(
         "--ci-failures",
         metavar="FILE",
-        help="JSON file with ci_failed_tests output.",
+        help="JSON file with ci_failed_tests output. Code mode only.",
+    )
+    sp.add_argument(
+        "--mode",
+        choices=REVIEW_MODES,
+        help="Review mode override. Default: read from envelopes (each "
+             "envelope's review_mode field), falling back to code. Pass "
+             "explicitly to assert a mode and reject mismatched envelopes.",
     )
 
     return p
@@ -908,7 +1108,6 @@ def main(argv: list[str] | None = None) -> int:
             print_json(findings)
         elif args.cmd == "triage":
             streams = _parse_stream_args(args.stream)
-            findings = parse_round(streams)
             prior = None
             if args.prior_state_file:
                 prior = read_json(Path(args.prior_state_file), default=None)
@@ -927,11 +1126,39 @@ def main(argv: list[str] | None = None) -> int:
                 ci_failures = read_json(Path(args.ci_failures), default=[])
                 if not isinstance(ci_failures, list):
                     raise ValueError("--ci-failures must point to a JSON array")
+            # Mode resolution decides which addressing fields synthetic
+            # findings (stream-missing, empty-envelope) carry. Order of
+            # preference:
+            #   1. Explicit --mode flag.
+            #   2. Mode read off real envelopes (do a code-default parse
+            #      first, then look at the non-synthetic findings).
+            #   3. Code default.
+            # Without #2, a design-doc orchestrator that omits --mode
+            # would get code-mode synthetics that triage rejects as
+            # "mixed review_mode" any time a backend produces a real
+            # design-doc envelope.
+            if args.mode is not None:
+                resolved_mode = args.mode
+            else:
+                preliminary = parse_round(streams, fallback_mode=REVIEW_MODE_CODE)
+                real_modes = {
+                    f.get("review_mode")
+                    for f in preliminary
+                    if f.get("review_mode") and f.get("status") not in ("missing", "exited-empty")
+                }
+                if len(real_modes) > 1:
+                    raise ValueError(
+                        f"findings carry mixed review_mode values: {sorted(real_modes)!r}; "
+                        "pass --mode explicitly to disambiguate"
+                    )
+                resolved_mode = next(iter(real_modes), None) or REVIEW_MODE_CODE
+            findings = parse_round(streams, fallback_mode=resolved_mode)
             result = triage(
                 findings,
-                prior_fixed_keys(prior),
+                prior_fixed_keys(prior, resolved_mode),
                 pr_comments=pr_comments,
                 ci_failures=ci_failures,
+                mode=resolved_mode,
             )
             print_json(result)
         else:  # pragma: no cover

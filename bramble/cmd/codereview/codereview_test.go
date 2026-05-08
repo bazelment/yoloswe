@@ -3,6 +3,7 @@ package codereview
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -121,7 +122,7 @@ func TestEmitEarlyFailure_WritesEnvelopeToStdout(t *testing.T) {
 		emit := func(env reviewer.ResultEnvelope) {
 			_ = reviewer.PrintJSONResult(os.Stdout, env)
 		}
-		returned = emitEarlyFailure(boom, "gpt-x", emit)
+		returned = emitEarlyFailure(boom, "gpt-x", reviewer.ReviewModeCode, emit)
 	})
 
 	if returned == nil || !strings.Contains(returned.Error(), "backend unreachable") {
@@ -164,7 +165,7 @@ func TestEmitEarlyFailure_AttachesUnverifiedWhenResumeRequested(t *testing.T) {
 		emit := func(env reviewer.ResultEnvelope) {
 			_ = reviewer.PrintJSONResult(os.Stdout, env)
 		}
-		_ = emitEarlyFailure(errors.New("backend unreachable"), "gpt-x", emit)
+		_ = emitEarlyFailure(errors.New("backend unreachable"), "gpt-x", reviewer.ReviewModeCode, emit)
 	})
 
 	var env reviewer.ResultEnvelope
@@ -194,7 +195,7 @@ func TestEmitEarlyFailure_OmitsResumeStatusWhenNoneRequested(t *testing.T) {
 		emit := func(env reviewer.ResultEnvelope) {
 			_ = reviewer.PrintJSONResult(os.Stdout, env)
 		}
-		_ = emitEarlyFailure(errors.New("oops"), "gpt-x", emit)
+		_ = emitEarlyFailure(errors.New("oops"), "gpt-x", reviewer.ReviewModeCode, emit)
 	})
 
 	var env reviewer.ResultEnvelope
@@ -203,6 +204,45 @@ func TestEmitEarlyFailure_OmitsResumeStatusWhenNoneRequested(t *testing.T) {
 	}
 	if env.ResumeStatus != "" {
 		t.Errorf("envelope.resume_status = %q, want empty when no resume requested", env.ResumeStatus)
+	}
+}
+
+func TestEmitEarlyFailure_TagsEnvelopeWithReviewMode(t *testing.T) {
+	// When --review-mode design-doc is set but rubric-file is missing,
+	// runCodeReview must emit a failure envelope tagged with the
+	// requested mode (not code). Without this, an orchestrator that
+	// triages with --mode design-doc rejects the failure as "explicit
+	// mode doesn't match envelope" — surfacing a misleading error
+	// instead of the actual flag-validation problem. Pins the contract
+	// emitEarlyFailure callers rely on for both code and design-doc
+	// failures.
+	origBackend := backend
+	backend = "codex"
+	t.Cleanup(func() { backend = origBackend })
+
+	for _, tc := range []struct {
+		name string
+		mode reviewer.ReviewMode
+	}{
+		{"code mode", reviewer.ReviewModeCode},
+		{"design-doc mode", reviewer.ReviewModeDesignDoc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			boom := errors.New("flag validation failed")
+			stdout, _ := captureStdStreams(t, func() {
+				emit := func(env reviewer.ResultEnvelope) {
+					_ = reviewer.PrintJSONResult(os.Stdout, env)
+				}
+				_ = emitEarlyFailure(boom, "gpt-x", tc.mode, emit)
+			})
+			var env reviewer.ResultEnvelope
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &env); err != nil {
+				t.Fatalf("envelope decode failed: %v", err)
+			}
+			if env.ReviewMode != tc.mode {
+				t.Errorf("ReviewMode = %q, want %q", env.ReviewMode, tc.mode)
+			}
+		})
 	}
 }
 
@@ -484,7 +524,10 @@ func TestFinalizeEnvelope_NilResumeCallbackOmitsField(t *testing.T) {
 func TestLoadPromptOptions_NoFile(t *testing.T) {
 	// Empty path is the legacy/default case: no hints loaded, but
 	// SkipTestExecution must still pass through.
-	opts := loadPromptOptions("", true)
+	opts, err := loadPromptOptions(reviewer.ReviewModeCode, "", "", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !opts.SkipTestExecution {
 		t.Error("SkipTestExecution should be passed through with empty path")
 	}
@@ -500,7 +543,10 @@ func TestLoadPromptOptions_ValidFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints file: %v", err)
 	}
-	opts := loadPromptOptions(path, false)
+	opts, err := loadPromptOptions(reviewer.ReviewModeCode, path, "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(opts.TestScopeHints) != 1 || opts.TestScopeHints[0] != "x/test_y.py" {
 		t.Errorf("TestScopeHints = %v", opts.TestScopeHints)
 	}
@@ -525,7 +571,10 @@ func TestLoadPromptOptions_MalformedFallsBack(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
 		t.Fatalf("write hints file: %v", err)
 	}
-	opts := loadPromptOptions(path, true)
+	opts, err := loadPromptOptions(reviewer.ReviewModeCode, path, "", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !opts.SkipTestExecution {
 		t.Error("SkipTestExecution should pass through even on fallback")
 	}
@@ -548,7 +597,10 @@ func TestLoadPromptOptions_MissingFileFallsBack(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	opts := loadPromptOptions(filepath.Join(t.TempDir(), "nonexistent.json"), false)
+	opts, err := loadPromptOptions(reviewer.ReviewModeCode, filepath.Join(t.TempDir(), "nonexistent.json"), "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(opts.TestScopeHints) != 0 {
 		t.Errorf("expected empty TestScopeHints on missing-file fallback, got %v", opts.TestScopeHints)
 	}
@@ -571,7 +623,10 @@ func TestBuildPromptForRun_WidensWithRealHintsFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("review goal", path, false, promptStyleFresh)
+	got, err := buildPromptForRun(reviewer.ReviewModeCode, "review goal", path, "", false, promptStyleFresh)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
 	if !strings.Contains(got, "## Test quality") {
 		t.Errorf("prompt missing test-quality clause; got:\n%s", got)
 	}
@@ -604,7 +659,10 @@ func TestBuildPromptForRun_V2HintsThreadCallerCalleeFraming(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("review goal", path, false, promptStyleFresh)
+	got, err := buildPromptForRun(reviewer.ReviewModeCode, "review goal", path, "", false, promptStyleFresh)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
 	if !strings.Contains(got, "## Cross-service contract sweep") {
 		t.Errorf("prompt missing cross-service clause; got:\n%s", got)
 	}
@@ -623,7 +681,10 @@ func TestBuildPromptForRun_NoHintsMatchesLegacy(t *testing.T) {
 	// Empty hints path must produce today's narrow prompt, byte-equal to
 	// the legacy BuildJSONPrompt output. This is the no-regressions
 	// guarantee for callers that haven't opted into the wider scope.
-	got := buildPromptForRun("g", "", false, promptStyleFresh)
+	got, err := buildPromptForRun(reviewer.ReviewModeCode, "g", "", "", false, promptStyleFresh)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
 	want := reviewer.BuildJSONPrompt("g")
 	if got != want {
 		t.Errorf("empty hints path must equal legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -645,7 +706,10 @@ func TestBuildPromptForRun_FollowUpThreadsScopeHintsFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("Round 5. Prior fixes: ...", path, true /* skipTestExecution */, promptStyleFollowUp)
+	got, err := buildPromptForRun(reviewer.ReviewModeCode, "Round 5. Prior fixes: ...", path, "", true /* skipTestExecution */, promptStyleFollowUp)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
 
 	// Bias-guard prose still present.
 	if !strings.Contains(got, "Re-review the full diff with fresh eyes") {
@@ -681,7 +745,10 @@ func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 	// scope clauses are conditional: present when opts carries them so a
 	// silent resume fallback (resume_status="fallback") doesn't read
 	// this prompt cold and miss them.
-	got := buildPromptForRun("g", "", true /* skipTestExecution */, promptStyleFollowUp)
+	got, err := buildPromptForRun(reviewer.ReviewModeCode, "g", "", "", true /* skipTestExecution */, promptStyleFollowUp)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
 
 	// Bias-guard prose must remain.
 	for _, want := range []string{
@@ -770,7 +837,10 @@ func TestBuildPromptForRun_MalformedHintsFallsBackToLegacy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("write hints: %v", err)
 	}
-	got := buildPromptForRun("g", path, true, promptStyleFresh)
+	got, err := buildPromptForRun(reviewer.ReviewModeCode, "g", path, "", true, promptStyleFresh)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
 	want := reviewer.BuildJSONPromptWithOptions("g", true)
 	if got != want {
 		t.Errorf("malformed hints must fall back to legacy prompt\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -803,6 +873,36 @@ func TestCmd_ScopeHintsFileFlagIsWired(t *testing.T) {
 	}
 	if scopeHintsFile != "/other/path.json" {
 		t.Errorf("scopeHintsFile global after second parse = %q, want /other/path.json", scopeHintsFile)
+	}
+}
+
+func TestCmd_ReviewModeFlagsAreWired(t *testing.T) {
+	// Cobra-level proof that --review-mode and --review-rubric-file are
+	// registered, parse, and bind to the globals validateModeFlags +
+	// loadPromptOptions read. Defends against the same regression class
+	// as TestCmd_ScopeHintsFileFlagIsWired: a flag typo or unhooked
+	// StringVar would still pass the lower-level validateModeFlags and
+	// buildPromptForRun tests because those bypass Cobra entirely.
+	prevMode := reviewMode
+	prevRubric := rubricFile
+	t.Cleanup(func() {
+		reviewMode = prevMode
+		rubricFile = prevRubric
+	})
+	reviewMode = "code"
+	rubricFile = ""
+
+	if err := Cmd.ParseFlags([]string{
+		"--review-mode", "design-doc",
+		"--review-rubric-file", "/tmp/rubric.txt",
+	}); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+	if reviewMode != "design-doc" {
+		t.Errorf("reviewMode = %q, want design-doc", reviewMode)
+	}
+	if rubricFile != "/tmp/rubric.txt" {
+		t.Errorf("rubricFile = %q, want /tmp/rubric.txt", rubricFile)
 	}
 }
 
@@ -887,5 +987,233 @@ func TestMaxSeverity(t *testing.T) {
 				t.Errorf("maxSeverity(%+v) = %q, want %q", tt.issues, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestValidateModeFlags_DefaultIsCode(t *testing.T) {
+	mode, err := validateModeFlags("", "", "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != reviewer.ReviewModeCode {
+		t.Errorf("default mode = %q, want %q", mode, reviewer.ReviewModeCode)
+	}
+}
+
+func TestValidateModeFlags_RubricFileWithoutDesignDocMode(t *testing.T) {
+	_, err := validateModeFlags("code", "", "/tmp/rubric.txt", false)
+	if err == nil {
+		t.Fatal("expected error: rubric-file requires design-doc mode")
+	}
+	if !strings.Contains(err.Error(), "design-doc") {
+		t.Errorf("error %q should mention design-doc requirement", err.Error())
+	}
+}
+
+func TestValidateModeFlags_DesignDocRequiresRubricFile(t *testing.T) {
+	_, err := validateModeFlags("design-doc", "", "", false)
+	if err == nil {
+		t.Fatal("expected error: design-doc mode requires rubric-file")
+	}
+	if !strings.Contains(err.Error(), "review-rubric-file") {
+		t.Errorf("error %q should mention rubric-file requirement", err.Error())
+	}
+}
+
+func TestValidateModeFlags_DesignDocWarnsOnIgnoredFlags(t *testing.T) {
+	// --scope-hints-file and --skip-test-execution are diff-derived
+	// signals that don't apply to a single-doc review. Operator probably
+	// copied a pr-polish-shaped invocation. Warn-not-error keeps existing
+	// automation scripts from breaking.
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mode, err := validateModeFlags("design-doc", "/tmp/hints.json", "/tmp/rubric.txt", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != reviewer.ReviewModeDesignDoc {
+		t.Errorf("mode = %q, want design-doc", mode)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "--scope-hints-file ignored") {
+		t.Errorf("expected scope-hints warning, got: %q", logged)
+	}
+	if !strings.Contains(logged, "--skip-test-execution ignored") {
+		t.Errorf("expected skip-test-execution warning, got: %q", logged)
+	}
+}
+
+func TestValidateModeFlags_UnknownModeRejected(t *testing.T) {
+	_, err := validateModeFlags("security-review", "", "", false)
+	if err == nil {
+		t.Fatal("expected error for unknown mode")
+	}
+	if !strings.Contains(err.Error(), "unknown --review-mode") {
+		t.Errorf("error %q should mention unknown mode", err.Error())
+	}
+}
+
+func TestLoadRubricFile_ValidContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	contents := `
+Is this the best long-term choice?
+
+# this is a comment line, skipped
+Can we make it simpler?
+Does milestone create clear boundary?
+Does milestone frontload risk discovery in the early phase?
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	rubric, err := loadRubricFile(path)
+	if err != nil {
+		t.Fatalf("loadRubricFile: %v", err)
+	}
+	want := []string{
+		"Is this the best long-term choice?",
+		"Can we make it simpler?",
+		"Does milestone create clear boundary?",
+		"Does milestone frontload risk discovery in the early phase?",
+	}
+	if len(rubric) != len(want) {
+		t.Fatalf("rubric len = %d, want %d", len(rubric), len(want))
+	}
+	for i, q := range want {
+		if rubric[i] != q {
+			t.Errorf("rubric[%d] = %q, want %q", i, rubric[i], q)
+		}
+	}
+}
+
+func TestLoadRubricFile_EmptyRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	if err := os.WriteFile(path, []byte("# only comments\n# nothing else\n"), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	_, err := loadRubricFile(path)
+	if err == nil {
+		t.Fatal("expected error for empty rubric")
+	}
+	if !strings.Contains(err.Error(), "no non-blank") {
+		t.Errorf("error %q should mention empty content", err.Error())
+	}
+}
+
+func TestLoadRubricFile_OverlongLineRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	long := strings.Repeat("x", rubricLineMaxLen+1)
+	if err := os.WriteFile(path, []byte(long+"\n"), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	_, err := loadRubricFile(path)
+	if err == nil {
+		t.Fatal("expected error for overlong line")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error %q should mention length cap", err.Error())
+	}
+}
+
+func TestLoadRubricFile_TooManyEntriesRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	var b strings.Builder
+	for i := 0; i < 25; i++ {
+		fmt.Fprintf(&b, "Question %d?\n", i+1)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	_, err := loadRubricFile(path)
+	if err == nil {
+		t.Fatal("expected error for too-many entries")
+	}
+	if !strings.Contains(err.Error(), "cap is 20") {
+		t.Errorf("error %q should mention cap", err.Error())
+	}
+}
+
+func TestLoadRubricFile_SanitizationRejection(t *testing.T) {
+	// Lines starting with markdown control chars (-, *, >) corrupt the
+	// surrounding numbered-list rendering inside the prompt. Leading-#
+	// is treated as a comment and skipped (covered by valid-content
+	// test); leading-- is not a comment, it's bad input.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	contents := "Is this simple?\n- Should this be a bullet?\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	_, err := loadRubricFile(path)
+	if err == nil {
+		t.Fatal("expected sanitization error")
+	}
+	if !strings.Contains(err.Error(), "sanitization") {
+		t.Errorf("error %q should mention sanitization", err.Error())
+	}
+}
+
+func TestLoadRubricFile_MissingFileRejected(t *testing.T) {
+	_, err := loadRubricFile(filepath.Join(t.TempDir(), "nonexistent.txt"))
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestLoadPromptOptions_DesignDocRubric(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	if err := os.WriteFile(path, []byte("q1?\nq2?\nq3?\n"), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	opts, err := loadPromptOptions(reviewer.ReviewModeDesignDoc, "", path, false)
+	if err != nil {
+		t.Fatalf("loadPromptOptions: %v", err)
+	}
+	if opts.Mode != reviewer.ReviewModeDesignDoc {
+		t.Errorf("Mode = %q, want design-doc", opts.Mode)
+	}
+	if len(opts.Rubric) != 3 {
+		t.Errorf("Rubric len = %d, want 3", len(opts.Rubric))
+	}
+	if opts.Rubric[0] != "q1?" {
+		t.Errorf("Rubric[0] = %q, want q1?", opts.Rubric[0])
+	}
+}
+
+// TestBuildPromptForRun_DesignDocEndToEnd is the equivalent of
+// TestBuildPromptForRun_WidensWithRealHintsFile but for design-doc mode:
+// a rubric file on disk should produce a prompt carrying the design-doc
+// persona, the inlined rubric, and the section/dimension citation rules.
+func TestBuildPromptForRun_DesignDocEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rubric.txt")
+	if err := os.WriteFile(path, []byte("Is this the best long-term choice?\nCan we make it simpler?\n"), 0o644); err != nil {
+		t.Fatalf("write rubric: %v", err)
+	}
+	got, err := buildPromptForRun(reviewer.ReviewModeDesignDoc, "Reviewing design doc bramble-jsonl-practices.md", "", path, false, promptStyleFresh)
+	if err != nil {
+		t.Fatalf("buildPromptForRun: %v", err)
+	}
+	for _, want := range []string{
+		"staff engineer reviewing a software design document",
+		"1. Is this the best long-term choice?",
+		"2. Can we make it simpler?",
+		`"section"`,
+		`"dimension"`,
+		"ready",
+		"revise",
+		"rethink",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("design-doc prompt missing %q\nprompt:\n%s", want, got)
+		}
 	}
 }
