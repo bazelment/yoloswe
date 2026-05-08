@@ -19,29 +19,57 @@ const JSONSchemaVersion = 1
 // the boundary value 0 as missing and leave the validator unable to reject
 // out-of-range values. Consumers should treat nil as "no signal" rather
 // than synthesizing a default.
+//
+// The struct carries fields for both review modes; per-mode validation
+// (validateReviewBody, dispatched by ReviewMode) decides which fields are
+// required vs forbidden. omitempty on every mode-specific field keeps the
+// wire format clean: a code-mode issue serializes without section/dimension
+// and a design-doc-mode issue serializes without file/line.
 type ReviewIssue struct {
 	Confidence *float64 `json:"confidence,omitempty"`
 	Severity   string   `json:"severity"`
-	File       string   `json:"file"`
 	Message    string   `json:"message"`
 	Suggestion string   `json:"suggestion,omitempty"`
-	Line       int      `json:"line,omitempty"`
+
+	// Code-mode addressing fields.
+	File string `json:"file,omitempty"`
+
+	// Design-doc-mode addressing fields. Section is the heading text the
+	// reviewer cited (or "(whole document)" for doc-wide issues).
+	// Dimension is the rubric question id, e.g. "q1".
+	Section   string `json:"section,omitempty"`
+	Dimension string `json:"dimension,omitempty"`
+	Line      int    `json:"line,omitempty"`
 }
 
 // ReviewBody is the parsed reviewer-level JSON. When the reviewer's response
 // could not be parsed, Verdict is empty and RawText holds the original text.
+//
+// Confidence is the design-doc verdict-level confidence (0.0..1.0). It is
+// *float64 so the field can be distinguished between "not provided" and
+// "explicitly zero", same as ReviewIssue.Confidence. Code-mode envelopes
+// don't emit it; design-doc-mode envelopes require it.
 type ReviewBody struct {
-	Verdict string        `json:"verdict,omitempty"`
-	Summary string        `json:"summary,omitempty"`
-	RawText string        `json:"raw_text,omitempty"`
-	Issues  []ReviewIssue `json:"issues,omitempty"`
+	Confidence *float64      `json:"confidence,omitempty"`
+	Verdict    string        `json:"verdict,omitempty"`
+	Summary    string        `json:"summary,omitempty"`
+	RawText    string        `json:"raw_text,omitempty"`
+	Issues     []ReviewIssue `json:"issues,omitempty"`
 }
 
-// validVerdicts enumerates the verdict strings the reviewer prompt requires.
-// Anything else is treated as a schema violation in BuildEnvelope.
-var validVerdicts = map[string]struct{}{
-	"accepted": {},
-	"rejected": {},
+// validVerdicts enumerates per-mode verdict strings the reviewer prompt
+// requires. Anything outside the matching set for a given mode is treated as
+// a schema violation in validateReviewBody.
+var validVerdicts = map[ReviewMode]map[string]struct{}{
+	ReviewModeCode: {
+		"accepted": {},
+		"rejected": {},
+	},
+	ReviewModeDesignDoc: {
+		"ready":          {},
+		"needs-revision": {},
+		"major-revision": {},
+	},
 }
 
 // validSeverities enumerates the severity labels the reviewer prompt requires.
@@ -55,12 +83,22 @@ var validSeverities = map[string]struct{}{
 	"critical": {},
 }
 
-// blockingSeverities are the severities that contradict an "accepted" verdict.
-// Anything at high or critical means the reviewer surfaced something that
-// blocks merge, so the verdict must be "rejected" for the envelope to be ok.
+// blockingSeverities are the severities that contradict an "accepted"
+// verdict in code mode (or "ready" verdict in design-doc mode). Anything at
+// high or critical means the reviewer surfaced something that blocks merge
+// (or shipping), so the verdict must move out of the no-blockers slot for
+// the envelope to be ok.
 var blockingSeverities = map[string]struct{}{
 	"high":     {},
 	"critical": {},
+}
+
+// noBlockerVerdicts names the "no blockers" verdict for each mode — the
+// verdict the reviewer must not pick when at least one high/critical issue
+// is present. Code mode: "accepted". Design-doc mode: "ready".
+var noBlockerVerdicts = map[ReviewMode]string{
+	ReviewModeCode:      "accepted",
+	ReviewModeDesignDoc: "ready",
 }
 
 // EnvelopeStatus values distinguish bramble-level outcomes from reviewer
@@ -79,12 +117,20 @@ const (
 // ResultEnvelope is the structured result written on every exit path. It goes
 // to --envelope-file when set, otherwise to stdout. The schema_version field
 // lets consumers reject incompatible payloads cleanly.
+//
+// ReviewMode is emitted at the top level so downstream consumers (e.g. the
+// /pr-polish or /design-doc-polish triage layer) can pick the right
+// consensus key without re-reading the original CLI flags. Empty
+// ("review_mode" omitted) is treated as ReviewModeCode by consumers — the
+// pre-mode envelopes shipped without this field, and we want their
+// behaviour preserved.
 type ResultEnvelope struct {
 	Status        EnvelopeStatus `json:"status"`
 	Backend       string         `json:"backend"`
 	Model         string         `json:"model"`
 	SessionID     string         `json:"session_id,omitempty"`
 	ResumeStatus  ResumeStatus   `json:"resume_status,omitempty"`
+	ReviewMode    ReviewMode     `json:"review_mode,omitempty"`
 	Error         string         `json:"error,omitempty"`
 	Review        ReviewBody     `json:"review"`
 	SchemaVersion int            `json:"schema_version"`
@@ -95,13 +141,19 @@ type ResultEnvelope struct {
 
 // BuildEnvelope assembles a stable envelope from a review result. It extracts
 // the JSON body from result.ResponseText when possible, falling back to
-// RawText on parse failure.
-func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID string) ResultEnvelope {
+// RawText on parse failure. mode dispatches schema validation; the empty
+// string is treated as ReviewModeCode for backward-compat with callers that
+// pre-date the mode field.
+func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID string, mode ReviewMode) ResultEnvelope {
+	if mode == "" {
+		mode = ReviewModeCode
+	}
 	env := ResultEnvelope{
 		SchemaVersion: JSONSchemaVersion,
 		Backend:       string(backend),
 		Model:         model,
 		SessionID:     sessionID,
+		ReviewMode:    mode,
 	}
 	if result == nil {
 		env.Status = StatusError
@@ -119,7 +171,7 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 	body, parseErr := extractReviewBody(result.ResponseText)
 	env.Review = body
 
-	schemaErr := validateReviewBody(body)
+	schemaErr := validateReviewBody(body, mode)
 
 	switch {
 	case result.ErrorMessage != "":
@@ -149,42 +201,61 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 // same schema validation that BuildEnvelope applies to ResultEnvelope.Review.
 // Returns nil on a well-formed, schema-compliant body.
 //
+// mode dispatches the per-mode schema. Empty defaults to ReviewModeCode so
+// pre-mode callers (e.g. yoloswe/swe.go) keep working unchanged.
+//
 // Input contract: raw must be the bare JSON object the reviewer emitted,
 // without any narration prefix or fenced code block — same shape that
 // extractReviewBody returns. Feeding it raw model response text (which may
 // be wrapped in ``` fences or follow narration) will fail to unmarshal.
 // Callers wanting a one-shot "extract + validate" should go through
 // BuildEnvelope, which composes both steps.
-//
-// Use case: callers outside this package (e.g. yoloswe/swe.go's parseVerdict)
-// that already have the JSON blob in hand and want strict schema semantics
-// — confidence ∈ (0.0, 1.0], line ≥ 1, valid severity/verdict — without
-// constructing a full ResultEnvelope.
-func ValidateReviewJSON(raw []byte) error {
+func ValidateReviewJSON(raw []byte, mode ReviewMode) error {
 	var body ReviewBody
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return fmt.Errorf("unmarshal reviewer JSON: %w", err)
 	}
-	return validateReviewBody(body)
+	return validateReviewBody(body, mode)
 }
 
 // validateReviewBody checks the parsed body against the required reviewer
-// schema. A non-nil error means the envelope must report status="error" so
-// downstream automation never acts on malformed reviewer output.
+// schema for the given mode. A non-nil error means the envelope must report
+// status="error" so downstream automation never acts on malformed reviewer
+// output.
 //
-// Required:
+// Code mode (ReviewModeCode, the default) requires:
 //   - verdict ∈ {accepted, rejected}
 //   - each issue has severity ∈ {low, medium, high, critical}, message, file, line ≥ 1
 //   - "rejected" carries at least one issue (otherwise nothing was rejected)
 //   - "accepted" carries no high/critical issues (those block merge by definition)
 //   - confidence, when present, is in (0.0, 1.0] and finite (no NaN/Inf)
 //
-// The line requirement matches the prompt contract in buildBasePrompt, which
-// instructs the reviewer to "cite the affected file and line range" — without
-// a line, downstream automation cannot place the comment at the right spot.
-func validateReviewBody(body ReviewBody) error {
-	if _, ok := validVerdicts[body.Verdict]; !ok {
-		return fmt.Errorf("verdict %q not in {accepted,rejected}", body.Verdict)
+// Design-doc mode (ReviewModeDesignDoc) requires:
+//   - verdict ∈ {ready, needs-revision, major-revision}
+//   - each issue has severity, message, section (heading or "(whole document)"),
+//     dimension (rubric question id, e.g. "q1"); file/line MUST NOT be present
+//   - "needs-revision" or "major-revision" carries at least one issue
+//   - "ready" carries no high/critical issues
+//   - top-level confidence ∈ [0.0, 1.0]; per-issue confidence ∈ (0.0, 1.0] when present
+func validateReviewBody(body ReviewBody, mode ReviewMode) error {
+	if mode == "" {
+		mode = ReviewModeCode
+	}
+	verdicts, ok := validVerdicts[mode]
+	if !ok {
+		return fmt.Errorf("unknown review mode %q", mode)
+	}
+	if _, ok := verdicts[body.Verdict]; !ok {
+		return fmt.Errorf("verdict %q not valid for mode %q", body.Verdict, mode)
+	}
+	if mode == ReviewModeDesignDoc {
+		if body.Confidence == nil {
+			return fmt.Errorf("design-doc verdict requires top-level confidence")
+		}
+		c := *body.Confidence
+		if math.IsNaN(c) || math.IsInf(c, 0) || c < 0 || c > 1 {
+			return fmt.Errorf("top-level confidence %v not in [0.0, 1.0]", c)
+		}
 	}
 	hasBlocking := false
 	for i, issue := range body.Issues {
@@ -197,11 +268,23 @@ func validateReviewBody(body ReviewBody) error {
 		if issue.Message == "" {
 			return fmt.Errorf("issue[%d] missing message", i)
 		}
-		if issue.File == "" {
-			return fmt.Errorf("issue[%d] missing file", i)
-		}
-		if issue.Line < 1 {
-			return fmt.Errorf("issue[%d] missing line", i)
+		if mode == ReviewModeCode {
+			if issue.File == "" {
+				return fmt.Errorf("issue[%d] missing file", i)
+			}
+			if issue.Line < 1 {
+				return fmt.Errorf("issue[%d] missing line", i)
+			}
+		} else { // ReviewModeDesignDoc
+			if issue.Section == "" {
+				return fmt.Errorf("issue[%d] missing section", i)
+			}
+			if issue.Dimension == "" {
+				return fmt.Errorf("issue[%d] missing dimension", i)
+			}
+			if issue.File != "" || issue.Line != 0 {
+				return fmt.Errorf("issue[%d] design-doc mode must not carry file/line", i)
+			}
 		}
 		if issue.Confidence != nil {
 			c := *issue.Confidence
@@ -216,10 +299,11 @@ func validateReviewBody(body ReviewBody) error {
 			hasBlocking = true
 		}
 	}
-	if body.Verdict == "rejected" && len(body.Issues) == 0 {
+	noBlocker := noBlockerVerdicts[mode]
+	if body.Verdict != noBlocker && len(body.Issues) == 0 {
 		return fmt.Errorf("verdict %q requires at least one issue", body.Verdict)
 	}
-	if body.Verdict == "accepted" && hasBlocking {
+	if body.Verdict == noBlocker && hasBlocking {
 		return fmt.Errorf("verdict %q inconsistent with high/critical issues", body.Verdict)
 	}
 	return nil
