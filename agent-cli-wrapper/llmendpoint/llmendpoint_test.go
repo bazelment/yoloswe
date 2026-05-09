@@ -273,6 +273,31 @@ func TestEndpoint_String_HeadersListed(t *testing.T) {
 	}
 }
 
+// TestEndpoint_String_FingerprintIsCanonical pins the encoding so a value
+// containing the row delimiter ("\n") or the kv separator ("=") can't fool
+// the hash into colliding with a different key/value split. The header-name
+// validator already restricts keys to [A-Za-z0-9_-], but values are
+// unrestricted, so this is the value-side defense.
+func TestEndpoint_String_FingerprintIsCanonical(t *testing.T) {
+	t.Parallel()
+	a := Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+		// One header whose value embeds a fake "key=value\n" sequence.
+		Headers: map[string]string{"X-A": "v1\nX-B=v2"},
+	}
+	b := Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+		// Two headers that would have collided with `key=value\n` framing.
+		Headers: map[string]string{"X-A": "v1", "X-B": "v2"},
+	}
+	if a.String() == b.String() {
+		t.Errorf("non-canonical fingerprint: header maps that differ in shape produced equal String():\n  a=%q\n  b=%q",
+			a.String(), b.String())
+	}
+}
+
 func TestEndpoint_Defaults(t *testing.T) {
 	t.Parallel()
 	ep := Endpoint{}

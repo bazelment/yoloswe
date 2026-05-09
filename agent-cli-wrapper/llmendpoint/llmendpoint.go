@@ -91,13 +91,16 @@ func (e Endpoint) hasOnlyDecorations() bool {
 // emit invalid `--config` args.
 var providerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// headerNameRE matches header names that are safe to interpolate into codex's
-// `model_providers.<name>.http_headers.<key>=...` config-path segments without
-// quoting. RFC 7230 allows a much wider token set, but codex's TOML parser
-// would reject any of the punctuation (`!#$%&'*+.^|~`) that's legal under
-// RFC 7230 in a bare path segment, so accepting them here would just turn
-// into a runtime arg error. Hyphens and underscores are the standard HTTP
-// header chars after letters/digits and survive bare TOML keys.
+// headerNameRE is an intentional product constraint on header keys: they
+// must match codex's bare TOML-key alphabet so we can interpolate them into
+// `model_providers.<name>.http_headers.<key>=...` config-path segments
+// without quoting. RFC 7230 allows a wider token set (`!#$%&'*+.^|~`) but
+// those chars would fail at codex --config arg time, and we apply the same
+// regex globally because the whole point of this validator is to reject at
+// config-load. Operators targeting only claude/cursor/gemini still inherit
+// this restriction; it's preferable to a Validate that varies per-backend
+// since the same Endpoint flows through a single LoadConfig path before
+// the orchestrator even knows which provider will run it.
 var headerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Validate reports configuration errors. A zero Endpoint validates as nil.
@@ -141,12 +144,18 @@ func (e Endpoint) Validate() error {
 	return nil
 }
 
-// Redacted returns a copy with secret-bearing fields cleared: APIKey is
-// dropped and Headers are dropped entirely (keys remain non-secret in
-// String() via the fingerprint, but in Redacted-then-logged contexts we
-// can't make that distinction safely — operators may have stuffed auth
-// tokens into header values). APIKeyEnv is preserved so logs still
-// indicate where the key came from.
+// Redacted returns a copy with secret-bearing fields cleared. APIKey is
+// dropped; Headers are dropped entirely.
+//
+// On String(): plaintext omits header values, but the trailing fingerprint
+// is derived FROM those values (truncated SHA-256). It's collision-safe
+// for normal config but is still secret-derived metadata; treat it as
+// opaque credential-tagged data, not non-sensitive. Redacted-then-logged
+// contexts that can't tolerate even hashed traces should use Redacted()
+// (which drops Headers entirely) rather than relying on String()'s
+// privacy posture.
+//
+// APIKeyEnv is preserved so logs still indicate where the key came from.
 func (e Endpoint) Redacted() Endpoint {
 	out := e.Clone()
 	out.APIKey = ""
@@ -220,9 +229,16 @@ func (e Endpoint) String() string {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		// Length-prefixed encoding (key-len|key|value-len|value, repeated)
+		// gives an unambiguous serialization: a value containing "=" or "\n"
+		// can no longer collide with a different key/value split, since
+		// every field's byte count is encoded explicitly. Header keys are
+		// already validated to [A-Za-z0-9_-] so they can't carry length
+		// markers, but values are unrestricted — hence the explicit framing.
 		h := sha256.New()
 		for _, k := range keys {
-			fmt.Fprintf(h, "%s=%s\n", k, e.Headers[k])
+			v := e.Headers[k]
+			fmt.Fprintf(h, "%d:%s%d:%s", len(k), k, len(v), v)
 		}
 		fp := hex.EncodeToString(h.Sum(nil))[:8]
 		hdrs = fmt.Sprintf(" headers=[%s]/%s", strings.Join(keys, ","), fp)
