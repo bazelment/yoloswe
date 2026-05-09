@@ -235,11 +235,13 @@ func TestEndpoint_String_NoLeak(t *testing.T) {
 func TestEndpoint_String_HeadersListed(t *testing.T) {
 	t.Parallel()
 	// String() prints header KEYS in sorted plaintext (so operators can see
-	// what shape the endpoint carries) and a SHA-256 fingerprint of the
-	// canonical sorted "key=value\n" rows (so divergence diagnostics can
+	// what shape the endpoint carries) and a length-prefixed SHA-256
+	// fingerprint of the sorted entries (so divergence diagnostics can
 	// distinguish endpoints that differ only on header VALUES). Raw values
 	// are deliberately omitted from the plaintext so operators don't leak
-	// secrets they may have stuffed into auth-style headers.
+	// secrets they may have stuffed into auth-style headers; the
+	// fingerprint encoding lives next to the implementation in
+	// llmendpoint.go's String().
 	ep := Endpoint{
 		BaseURL:   "https://x",
 		APIKeyEnv: "K",

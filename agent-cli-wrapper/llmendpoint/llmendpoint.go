@@ -65,7 +65,12 @@ type Endpoint struct {
 	Wire WireAPI
 
 	// Headers carries optional extra HTTP headers to inject on each request.
-	// Not every wrapper supports this; unsupported wrappers ignore the field.
+	// Wrapper support is partial today — only codex consumes them via
+	// `--config model_providers.<n>.http_headers.*`. claude/cursor/gemini
+	// wrappers ignore Headers, so switching providers on a config that
+	// relies on Headers silently drops them. Validate still runs the same
+	// header-name regex globally, so this map is shape-checked at
+	// config-load regardless of which wrapper the orchestrator routes to.
 	Headers map[string]string
 }
 
@@ -205,12 +210,14 @@ func (e Endpoint) WireAPI() WireAPI {
 }
 
 // String renders the endpoint without leaking the literal API key. Header
-// keys are listed (sorted, no values) and a short hash of the full key+value
-// bag is appended so divergence diagnostics that include String() can also
-// distinguish endpoints that differ only on header *values*. Raw values would
-// risk leaking secrets operators may have shoved into headers, so the hash is
-// the privacy-safe equivalent — equal headers produce equal fingerprints,
-// any change flips them.
+// keys are listed (sorted, no values) and a short SHA-256 fingerprint of the
+// length-prefixed key+value bag is appended so divergence diagnostics can
+// distinguish endpoints that differ only on header *values*.
+//
+// Privacy posture: plaintext omits raw secrets, but the fingerprint suffix
+// is *derived from* header values — it's opaque to callers but still
+// credential-tagged metadata, not safe-by-default. Use Redacted() instead
+// when even hashed traces are too sensitive (e.g. logs that ship off-host).
 func (e Endpoint) String() string {
 	if e.IsZero() {
 		return "llmendpoint{}"
