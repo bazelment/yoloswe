@@ -64,8 +64,17 @@ const (
 // TestLLMEndpoint_Baseten runs WithLLMEndpoint smoke against Baseten's
 // Kimi-K2.6 deployment for the wrappers whose CLIs currently honor a
 // custom endpoint at runtime. Today that's claude and codex; gemini and
-// cursor have compile-time guards (below) but no runtime subtests because
-// their CLIs ignore endpoint env vars when targeting non-native models.
+// cursor have compile-time guards (below) but no runtime subtests:
+//
+//   - gemini-cli has no OpenAI/Anthropic passthrough on any released 0.x
+//     build (issue google-gemini/gemini-cli#1605, closed "wontfix"). It
+//     only speaks GenerateContent, so hitting Baseten requires a
+//     translating proxy in front of GOOGLE_GEMINI_BASE_URL. The smoke
+//     against such a proxy is project-specific; add it when the proxy
+//     ships.
+//   - cursor-agent ignores OPENAI_BASE_URL when its model id is not a
+//     recognized third-party model.
+//
 // Each subtest skips (not fails) when its prerequisites aren't met.
 func TestLLMEndpoint_Baseten(t *testing.T) {
 	apiKey := os.Getenv(basetenAPIKeyEnv)

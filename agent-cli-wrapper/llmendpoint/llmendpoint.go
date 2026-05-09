@@ -8,7 +8,11 @@
 //
 //   - claude: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (Anthropic-shaped only)
 //   - codex:  --config model_providers.<name>.{base_url,wire_api,env_key}
-//   - acp:    GEMINI_API_KEY/GOOGLE_GEMINI_BASE_URL or OPENAI_BASE_URL+--openai-base-url
+//     (supports both OpenAI Chat Completions and OpenAI Responses wires)
+//   - acp:    GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL only. The official
+//     gemini-cli has no OpenAI/Anthropic passthrough (issue
+//     google-gemini/gemini-cli#1605, closed wontfix), so a Google-shaped
+//     translating proxy is required to hit OpenAI/Anthropic endpoints.
 //   - cursor: best-effort OPENAI_BASE_URL/OPENAI_API_KEY (cursor-agent ignores
 //     these for non-Cursor models; the option exists for symmetry)
 package llmendpoint

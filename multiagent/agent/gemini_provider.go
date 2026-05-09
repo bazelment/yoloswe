@@ -67,13 +67,18 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	// than silently routing to the originally-bound endpoint.
 	p.mu.Lock()
 	if p.client == nil {
-		// Apply WithLLMEndpoint first so caller-supplied clientOpts can
-		// override its defaults via later args.
-		var clientOpts []acp.ClientOption
+		// Apply WithLLMEndpoint AFTER caller clientOpts. acp.WithEnv
+		// replaces the env map wholesale, so a caller passing
+		// WithEnv(...) before our LLMEndpoint creds (GEMINI_API_KEY,
+		// GOOGLE_GEMINI_BASE_URL) would otherwise drop them. Putting
+		// LLMEndpoint last makes it merge into whatever map the caller
+		// supplied — at the cost of letting LLMEndpoint silently
+		// overwrite a same-named caller env var, which is the right
+		// trade-off (the LLM creds are load-bearing for routing).
+		clientOpts := append([]acp.ClientOption{}, p.clientOpts...)
 		if !cfg.LLMEndpoint.IsZero() {
 			clientOpts = append(clientOpts, acp.WithLLMEndpoint(cfg.LLMEndpoint))
 		}
-		clientOpts = append(clientOpts, p.clientOpts...)
 		client := acp.NewClient(clientOpts...)
 		// Use context.Background() to decouple the ACP subprocess lifetime
 		// from any single request's context. The subprocess should live as long

@@ -92,15 +92,28 @@ func WithEnv(env map[string]string) ClientOption {
 	return func(c *ClientConfig) { c.Env = env }
 }
 
-// WithLLMEndpoint points the gemini CLI at a third-party LLM endpoint.
+// WithLLMEndpoint points the gemini CLI at a third-party LLM endpoint by
+// setting GEMINI_API_KEY and GOOGLE_GEMINI_BASE_URL in the subprocess env.
 //
-// For an OpenAI-compatible endpoint (Wire == "chat"), this sets
-// OPENAI_API_KEY/OPENAI_BASE_URL in the subprocess env and appends
-// --openai-api-key/--openai-base-url to BinaryArgs so newer gemini-cli
-// builds that support the OpenAI passthrough route inference through it.
+// Important: the upstream @google/gemini-cli (verified through 0.41.2 and
+// current `main`) only speaks Google's GenerateContent protocol. It has no
+// OpenAI/Anthropic passthrough — issue google-gemini/gemini-cli#1605 was
+// closed "won't fix" — and `GOOGLE_GEMINI_BASE_URL` is purely a host-swap
+// knob that still serializes Google-shaped requests to
+// `${baseUrl}/v1beta/models/${model}:generateContent`.
 //
-// For an Anthropic/Gemini-shaped endpoint, this only sets GEMINI_API_KEY and
-// GOOGLE_GEMINI_BASE_URL.
+// What this means in practice:
+//   - To target Vertex AI or a Google-shaped reverse proxy, set BaseURL to
+//     the proxy host and this option works as expected.
+//   - To target an OpenAI-compatible (Baseten, vLLM, OpenAI) or
+//     Anthropic-compatible endpoint, you must run a translating proxy in
+//     front that accepts `:generateContent` and converts it to the target
+//     wire format. Pointing this option directly at such an endpoint will
+//     fail (the gemini binary will POST GenerateContent JSON the endpoint
+//     can't parse).
+//
+// The Endpoint.WireAPI field is therefore informational only on this
+// wrapper — gemini-cli has no equivalent of codex's `wire_api` switch.
 //
 // Existing Env/BinaryArgs entries are preserved.
 func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
@@ -109,26 +122,13 @@ func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
 			return
 		}
 		if c.Env == nil {
-			c.Env = make(map[string]string, 4)
+			c.Env = make(map[string]string, 2)
 		}
-		key := ep.ResolvedKey()
 		if ep.BaseURL != "" {
 			c.Env["GOOGLE_GEMINI_BASE_URL"] = ep.BaseURL
 		}
-		if key != "" {
+		if key := ep.ResolvedKey(); key != "" {
 			c.Env["GEMINI_API_KEY"] = key
-		}
-		if ep.WireAPI() == llmendpoint.WireAPIChat {
-			if ep.BaseURL != "" {
-				c.Env["OPENAI_BASE_URL"] = ep.BaseURL
-				c.BinaryArgs = append(c.BinaryArgs, "--openai-base-url", ep.BaseURL)
-			}
-			if key != "" {
-				c.Env["OPENAI_API_KEY"] = key
-				// Pass the key via env to avoid landing it in process args.
-				// gemini-cli reads OPENAI_API_KEY from the env when
-				// --openai-api-key is omitted.
-			}
 		}
 	}
 }
