@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
+	"strings"
 )
 
 // WireAPI identifies the request/response shape spoken by the endpoint.
@@ -183,7 +185,10 @@ func (e Endpoint) WireAPI() WireAPI {
 	return e.Wire
 }
 
-// String renders the endpoint without leaking the literal API key.
+// String renders the endpoint without leaking the literal API key. Header
+// keys are listed (sorted, no values) so divergence diagnostics that include
+// String() can distinguish endpoints that differ only on Headers; values
+// would risk leaking secrets that operators may have shoved into headers.
 func (e Endpoint) String() string {
 	if e.IsZero() {
 		return "llmendpoint{}"
@@ -195,6 +200,15 @@ func (e Endpoint) String() string {
 	case e.APIKey != "":
 		keySrc = "<inline>"
 	}
-	return fmt.Sprintf("llmendpoint{base=%s provider=%s wire=%s key=%s}",
-		e.BaseURL, e.Provider(), e.WireAPI(), keySrc)
+	hdrs := ""
+	if len(e.Headers) > 0 {
+		keys := make([]string, 0, len(e.Headers))
+		for k := range e.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		hdrs = fmt.Sprintf(" headers=[%s]", strings.Join(keys, ","))
+	}
+	return fmt.Sprintf("llmendpoint{base=%s provider=%s wire=%s key=%s%s}",
+		e.BaseURL, e.Provider(), e.WireAPI(), keySrc, hdrs)
 }

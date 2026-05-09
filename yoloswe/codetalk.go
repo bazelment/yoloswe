@@ -109,10 +109,10 @@ func (ct *CodeTalkSession) Start(ctx context.Context) error {
 		opts = append(opts, claude.WithResume(ct.config.ResumeSessionID))
 	}
 
-	// Always validate: a partial endpoint (decorations only) is IsZero=true
-	// at the wrapper gate but Validate() rejects it, so embedded callers see
-	// the same error surface as YAML/CLI users instead of silently dropping
-	// provider_name/wire/headers.
+	// codetalk runs the claude wrapper directly (not via multiagent.Provider),
+	// so it owns the Validate gate that the multiagent providers run in
+	// applyOptions().validate(). Without this a partially-decorated endpoint
+	// would silently route to the default upstream.
 	if err := ct.config.LLMEndpoint.Validate(); err != nil {
 		return err
 	}

@@ -207,6 +207,35 @@ func TestEndpoint_String_NoLeak(t *testing.T) {
 	}
 }
 
+func TestEndpoint_String_HeadersListed(t *testing.T) {
+	t.Parallel()
+	// Header keys must surface so the divergence error in CodexProvider /
+	// GeminiProvider can distinguish endpoints that differ only on Headers.
+	// Header values are deliberately omitted to avoid leaking secrets that
+	// operators may have stuffed into auth-style headers.
+	ep := Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+		Headers: map[string]string{
+			"X-B": "secretvalue",
+			"X-A": "alpha",
+		},
+	}
+	got := ep.String()
+	// Sorted, joined with comma — guarantees deterministic output for diff'ing.
+	if !strings.Contains(got, "headers=[X-A,X-B]") {
+		t.Errorf("expected sorted headers in output, got %q", got)
+	}
+	if strings.Contains(got, "secretvalue") || strings.Contains(got, "alpha") {
+		t.Errorf("header values must not appear in String(): %q", got)
+	}
+
+	noHeaders := Endpoint{BaseURL: "https://x", APIKeyEnv: "K"}
+	if strings.Contains(noHeaders.String(), "headers=") {
+		t.Errorf("empty Headers should not produce a headers= section, got %q", noHeaders.String())
+	}
+}
+
 func TestEndpoint_Defaults(t *testing.T) {
 	t.Parallel()
 	ep := Endpoint{}

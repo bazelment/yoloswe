@@ -35,6 +35,9 @@ func (p *CodexProvider) Name() string { return "codex" }
 
 func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	// Build full prompt with worktree context
 	fullPrompt := prompt

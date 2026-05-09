@@ -42,6 +42,9 @@ func (p *GeminiProvider) Name() string { return "gemini" }
 
 func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	// ACP has no reasoning-effort knob — fail fast before spawning the
 	// subprocess. EffortAuto is the explicit "use the provider default"
