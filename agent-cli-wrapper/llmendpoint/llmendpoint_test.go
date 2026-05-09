@@ -222,12 +222,22 @@ func TestEndpoint_String_HeadersListed(t *testing.T) {
 		},
 	}
 	got := ep.String()
-	// Sorted, joined with comma — guarantees deterministic output for diff'ing.
-	if !strings.Contains(got, "headers=[X-A,X-B]") {
-		t.Errorf("expected sorted headers in output, got %q", got)
+	// Sorted, joined with comma, followed by a short value-fingerprint —
+	// guarantees deterministic output for diff'ing.
+	if !strings.Contains(got, "headers=[X-A,X-B]/") {
+		t.Errorf("expected sorted headers + fingerprint in output, got %q", got)
 	}
 	if strings.Contains(got, "secretvalue") || strings.Contains(got, "alpha") {
 		t.Errorf("header values must not appear in String(): %q", got)
+	}
+
+	// Two endpoints that differ only on header values must produce different
+	// String() outputs (otherwise divergence error messages can't distinguish
+	// value-only changes — the regression cursor flagged in r6).
+	ep2 := ep
+	ep2.Headers = map[string]string{"X-B": "different", "X-A": "alpha"}
+	if ep.String() == ep2.String() {
+		t.Errorf("value-only divergence must change String(): %q", ep.String())
 	}
 
 	noHeaders := Endpoint{BaseURL: "https://x", APIKeyEnv: "K"}

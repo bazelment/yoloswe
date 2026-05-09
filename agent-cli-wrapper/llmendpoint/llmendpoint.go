@@ -14,6 +14,8 @@
 package llmendpoint
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -186,9 +188,12 @@ func (e Endpoint) WireAPI() WireAPI {
 }
 
 // String renders the endpoint without leaking the literal API key. Header
-// keys are listed (sorted, no values) so divergence diagnostics that include
-// String() can distinguish endpoints that differ only on Headers; values
-// would risk leaking secrets that operators may have shoved into headers.
+// keys are listed (sorted, no values) and a short hash of the full key+value
+// bag is appended so divergence diagnostics that include String() can also
+// distinguish endpoints that differ only on header *values*. Raw values would
+// risk leaking secrets operators may have shoved into headers, so the hash is
+// the privacy-safe equivalent — equal headers produce equal fingerprints,
+// any change flips them.
 func (e Endpoint) String() string {
 	if e.IsZero() {
 		return "llmendpoint{}"
@@ -207,7 +212,12 @@ func (e Endpoint) String() string {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		hdrs = fmt.Sprintf(" headers=[%s]", strings.Join(keys, ","))
+		h := sha256.New()
+		for _, k := range keys {
+			fmt.Fprintf(h, "%s=%s\n", k, e.Headers[k])
+		}
+		fp := hex.EncodeToString(h.Sum(nil))[:8]
+		hdrs = fmt.Sprintf(" headers=[%s]/%s", strings.Join(keys, ","), fp)
 	}
 	return fmt.Sprintf("llmendpoint{base=%s provider=%s wire=%s key=%s%s}",
 		e.BaseURL, e.Provider(), e.WireAPI(), keySrc, hdrs)
