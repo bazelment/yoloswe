@@ -26,7 +26,7 @@ Shell plumbing lives in Python helpers under `scripts/`. Use `SKILL_DIR=.claude/
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--rounds N` | `5` | The round number this invocation stops at (inclusive). Resuming at `current_round=5` with `--rounds 7` runs rounds 6 and 7. `--rounds 5` on the same state is a no-op. |
+| `--rounds N` | `5` | Run up to N additional rounds from current state. Resuming at `current_round=5` with `--rounds 2` runs rounds 6 and 7. `--rounds 0` is a no-op. The budget is per-invocation: re-invoking with the same `--rounds` after a converged or capped exit gives N fresh rounds. |
 | `--gemini` | off | Also run a third reviewer with `--backend gemini --model gemini-3-flash-preview`. A finding agreed on by ≥2 sources counts as consensus. |
 
 PR/branch context is auto-detected by `pr_ops.py identify`.
@@ -49,7 +49,7 @@ Class-level fixes beyond the cited line are logged in `comment_actions` as `sour
 - Top-rated finding is a documented false positive.
 - Empty action plan after triage.
 
-**Hard stop at `--rounds N`.** When round N completes without convergence, produce Final Summary, then `AskUserQuestion` whether to continue.
+**Hard stop after N additional rounds.** When `additional_rounds_run` reaches `--rounds` without convergence, produce Final Summary, then `AskUserQuestion` whether to continue.
 
 ## Auto-decision rules
 
@@ -57,7 +57,7 @@ Bias for action and your own judgement with research. Only three things pause th
 
 1. **Integrity gate** — stale state file with PR mismatch (Step 0.5).
 2. **Budget gate** — `--rounds N` reached without convergence.
-3. **Regression gate** — `spiral_matches` non-empty (a prior-round `fixed` finding re-surfaced).
+3. **Regression gate** — **unverified** `spiral_matches` non-empty. Single-source spirals whose cited evidence is no longer at HEAD (within ±10 lines of the cited line) are auto-demoted to `batch_stale` with a `stale_reason` of `"spiral candidate auto-demoted: cited evidence absent at HEAD"` — the prior round fixed it and the resumed model is re-flagging stale context. Multi-source spirals (≥2 backends agree on the regression) always escalate. The audit row records `action: "stale"` with the demote reason. Cost of being wrong: a real regression that gets mis-demoted will likely re-surface next round — and if it does, the heuristic's evidence-at-HEAD check will find the cited code, so the second occurrence escalates correctly.
 
 ## State tracking
 
@@ -191,9 +191,12 @@ Compare against `git rev-parse HEAD`:
 - **`is_heartbeat_stale: true`** AND `completed: false` (heartbeat older than 2h, or missing): prior run abandoned. Tombstone with `state-mark-abandoned $CTX` and start fresh on current HEAD. Announce in one line; do not ask.
 - **HEAD matches `last_commit_at_round_start`** (heartbeat fresh): prior round interrupted. Resume in-progress round.
 - **HEAD differs from `last_commit_at_round_start`** (heartbeat fresh): prior round committed or user made manual changes. Auto-start next round on current HEAD. Re-invocation is the user's signal that they want another round. The new `state-append-round` clears any stale `completed: true` set by a prior `state-mark-complete`.
-- **`current_round` ≥ `--rounds`**: budget gate hard-stop. `AskUserQuestion` to authorize more rounds.
+
+Budget tracking is **per-invocation**, not derived from `current_round`. Initialize `additional_rounds_run = 0` at the top of this invocation; increment after every finalized round. The budget gate hard-stops when `additional_rounds_run >= --rounds` and `AskUserQuestion`s to authorize more rounds. State persistence does not record this counter — re-invoking after a converged or capped exit gives a fresh `--rounds` budget by definition.
 
 With a state file present, trust it and apply the rules — heartbeat distinguishes recent compaction from real abandonment. With no state file, start fresh. Do not ask.
+
+When you need to know whether the local branch and remote are in sync (e.g. surfacing "git-sync already pushed; nothing to push at end" in the round summary), use `pr_ops.py remote-head <branch>` — it routes through `git ls-remote`, not `git rev-parse origin/<branch>` (which lags in worktrees).
 
 ## Step 1: Sync base via /git:sync-base
 
@@ -244,7 +247,9 @@ python3 $SKILL_DIR/scripts/pr_ops.py ci-failed-tests > $STATE_DIR/pp-ci.json
 ## Step 3: Round loop
 
 ```
-for round = 1..ROUNDS:
+additional_rounds_run = 0
+while additional_rounds_run < --rounds:
+  ROUND = current_round_from_state + 1   # absolute round number for state
   a) commit any pending changes (WIP ok)
   b) launch bramble codex + cursor + lint via Monitor (parallel)
   c) triage findings (+ pr-comments + ci-failures if new series)
@@ -252,9 +257,10 @@ for round = 1..ROUNDS:
   e) if fixes applied: run quality gates, commit locally (NO push)
   f) finalize round state
   g) check convergence; exit if met
+  additional_rounds_run += 1
 ```
 
-Header per round: `## Round N / ROUNDS`.
+Header per round: `## Round N (M / --rounds in this invocation)` where N is the absolute round number persisted in state and M is `additional_rounds_run + 1`.
 
 ### a) Pending-change WIP commit
 
@@ -278,7 +284,8 @@ Compute the round's `--goal` text and per-backend resume id:
 ```bash
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
         --pr-summary "$PR_SUMMARY" --state-file "$STATE_FILE" \
-        --head-before "$(git rev-parse HEAD)")
+        --head-before "$(git rev-parse HEAD)" \
+        --is-new-series "$IS_NEW_SERIES")
 CODEX_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id codex {ROUND} \
                 --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
 CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id cursor {ROUND} \
@@ -396,13 +403,7 @@ What good looks like by the end of this step:
 - When the fix changes behavior, vocabulary, or an invariant, docs and tests that pin it are updated in the same commit.
 - Every triaged finding has a `comment_actions` entry. Sites fixed beyond a cited line are logged as `source: "sweep"`.
 - Stale buckets honored: `batch_stale` entries auto-acked; bramble findings whose cited code no longer matches are recorded as `action: "stale"` rather than silently dropped (silent drops blind the spiral guard).
-- Inline PR comments closed by this round have an auto-reply via `pr_ops.py reply-inline`. Reply bodies:
-  - `fixed`: `Fixed in <short_sha>.`
-  - `stale`: `Superseded by <short_sha> — the cited code was changed/removed in a later commit. (Auto-reply from /pr-polish.)`
-  - `false_positive`: `Marked false positive: <reason>. (Auto-reply from /pr-polish.)`
-  - `wont_fix`: `Won't fix: <reason>. (Auto-reply from /pr-polish.)`
-
-  Skip replies for `ack` and non-inline rows.
+- Inline-reply posting on github-inline rows whose action ∈ {`fixed`, `stale`, `false_positive`, `wont_fix`} is handled inside `state-finalize-round`. The orchestrator does not call `reply-inline` directly. `ack` and non-inline rows are intentionally not replied to (notification spam vs signal).
 
 `comment_actions` field shapes by source: bramble (`codex` / `cursor` / `gemini` / `lint`) → `comment_id: null`; CI → `source: "ci"`, `path: <job_id>`, `topic: <test_name>`; PR comments → `source: "github-inline"` / `-issue` / `-review` with `comment_id` from fetch; sweep → `source: "sweep"`, `comment_id: null`, `topic: "<original-topic> — class-level fix"`.
 
@@ -433,7 +434,7 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-
 
 ### g) Convergence check
 
-Apply the convergence rules from the top. If converged, break. If `round == ROUNDS` and not converged, produce Final Summary and `AskUserQuestion`.
+Apply the convergence rules from the top. If converged, break. If `additional_rounds_run + 1 == --rounds` and not converged, produce Final Summary and `AskUserQuestion`.
 
 Track progress concisely:
 
@@ -447,11 +448,19 @@ Round 3: codex=0, cursor=0 -> EXIT (converged)
 
 **Why defer push.** Every push to a PR's branch triggers configured GitHub bots (CodeRabbit, Cursor Bugbot, etc.) to re-review. Mid-loop pushes burn bot budget on intermediate commits and reliably generate new comments on round-N-fix diffs — even when the fix was correct. Batching means bots see the polished tree; CI runs once on the final state.
 
-```
-git push --force-with-lease --force-if-includes origin HEAD
+Before pushing, check whether the remote already holds local HEAD — git-sync may have pushed during the run, and `origin/<branch>` can lag in worktrees. Use `pr_ops.py remote-head <branch>` (which routes through `git ls-remote`, not `git rev-parse origin/<branch>`) so the diagnostic reflects what the remote actually holds:
+
+```bash
+SYNC=$(python3 $SKILL_DIR/scripts/pr_ops.py remote-head "$BRANCH")
+echo "$SYNC" | jq -r '"local=\(.local_head[0:7])  remote=\(.remote_head[0:7])  in_sync=\(.in_sync)"'
+if [ "$(echo "$SYNC" | jq -r .in_sync)" = "true" ]; then
+  echo "remote already has local HEAD — skip push"
+else
+  git push --force-with-lease --force-if-includes origin HEAD
+fi
 ```
 
-Branch-only first push: `git push -u origin <branch>` (no prior remote to protect).
+Branch-only first push: `git push -u origin <branch>` (no prior remote to protect; `remote_present: false` from `remote-head` is the signal).
 
 ## Step 5: Final summary + mark complete
 

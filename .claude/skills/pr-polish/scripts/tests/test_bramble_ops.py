@@ -70,6 +70,85 @@ class TestGoalForRound(unittest.TestCase):
             "PR_SUMMARY",
         )
 
+    def test_is_new_series_returns_pr_summary_at_round_n(self) -> None:
+        """Re-invocation after a converged series with the orchestrator's
+        IS_NEW_SERIES=1 must return PR_SUMMARY, not walk the prior round's
+        head_after to build a 200-file 'Files changed' line."""
+        state = {
+            "completed": True,  # prior series finished
+            "rounds": [
+                {
+                    "n": 10,
+                    "head_after": "deadbeef",  # may be unreachable after rebase
+                    "comment_actions": [
+                        {"action": "fixed", "path": "a.go", "line": 5, "source": "codex"},
+                    ],
+                }
+            ],
+        }
+        out = bramble_ops.goal_for_round(
+            11, "PR #42: refactor", state, head_before="cafef00d", is_new_series=True
+        )
+        self.assertEqual(out, "PR #42: refactor")
+
+    def test_is_new_series_false_still_walks_history(self) -> None:
+        """Continuation rounds (is_new_series=False) keep the prior behavior."""
+        state = {
+            "rounds": [
+                {
+                    "n": 1,
+                    "comment_actions": [
+                        {"action": "fixed", "path": "a.go", "line": 5, "source": "codex"},
+                    ],
+                }
+            ]
+        }
+        out = bramble_ops.goal_for_round(2, "PR_SUMMARY", state, is_new_series=False)
+        self.assertIn("Round 2", out)
+        self.assertIn("a.go:5", out)
+
+
+class TestFilesChangedBetweenWarnings(unittest.TestCase):
+    """Stderr warning when git diff rejects the cited range — the noisy
+    new-series goal blob symptom comes from the unreachable SHA being
+    silently swallowed."""
+
+    def test_unreachable_sha_warns_to_stderr(self) -> None:
+        import io
+        from contextlib import redirect_stderr  # noqa: PLC0415
+
+        buf = io.StringIO()
+        with patch("_common.run") as run_mock, redirect_stderr(buf):
+            run_mock.return_value = type(
+                "R",
+                (),
+                {
+                    "returncode": 128,
+                    "stdout": "",
+                    "stderr": "fatal: bad revision 'deadbeef..cafef00d'",
+                },
+            )()
+            result = bramble_ops._files_changed_between("deadbeef0000", "cafef00d0000")
+        self.assertEqual(result, [])
+        stderr = buf.getvalue()
+        self.assertIn("git diff", stderr)
+        self.assertIn("deadbee", stderr)  # short sha included
+        self.assertIn("cafef00", stderr)
+        self.assertIn("128", stderr)
+
+    def test_success_does_not_warn(self) -> None:
+        import io
+        from contextlib import redirect_stderr  # noqa: PLC0415
+
+        buf = io.StringIO()
+        with patch("_common.run") as run_mock, redirect_stderr(buf):
+            run_mock.return_value = type(
+                "R", (), {"returncode": 0, "stdout": "a.go\nb.py\n", "stderr": ""}
+            )()
+            result = bramble_ops._files_changed_between("aaa", "bbb")
+        self.assertEqual(result, ["a.go", "b.py"])
+        self.assertEqual(buf.getvalue(), "")
+
 
 class TestActionHistoryGoal(unittest.TestCase):
     """Per-turn metadata for the resumed model: what the immediately-prior
@@ -825,6 +904,221 @@ class TestTriage(unittest.TestCase):
         self.assertEqual(len(out["single_medium"]), 1)
 
 
+class TestSpiralEvidencePresent(unittest.TestCase):
+    """The spiral auto-demote heuristic depends on this helper. Round 13 of
+    pr-polish saw codex re-flag a finding on a line whose code was rewritten
+    in round 12 — the resumed model was reading stale context, but the
+    spiral guard couldn't tell. We grep ±10 lines around the cited line for
+    distinctive tokens from the finding's message; absent → not a spiral.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _write(self, rel: str, body: str) -> None:
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+
+    def test_returns_true_when_quoted_phrase_at_cited_line(self) -> None:
+        self._write(
+            "a.go",
+            "\n".join([f"line {i}" for i in range(1, 30)] + ["return ctx.Err()"]),
+        )
+        finding = {
+            "file": "a.go",
+            "line": 30,
+            "message": "still returns `ctx.Err()` instead of context-aware error",
+            "suggestion": None,
+        }
+        self.assertTrue(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+    def test_returns_false_when_token_absent(self) -> None:
+        self._write(
+            "a.go",
+            "\n".join(
+                [f"line {i}" for i in range(1, 30)]
+                + ["return fmt.Errorf(\"waitForObject timed out\")"]
+            ),
+        )
+        finding = {
+            "file": "a.go",
+            "line": 30,
+            "message": "still returns `ctx.Err()` instead of a typed error",
+            "suggestion": None,
+        }
+        self.assertFalse(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+    def test_window_extends_above_and_below(self) -> None:
+        self._write(
+            "a.go",
+            "\n".join([f"line {i}" for i in range(1, 50)] + ["return ctx.Err()"] + [f"line {i}" for i in range(51, 70)]),
+        )
+        # cited line is 60, evidence is at line 50 — within ±10.
+        finding = {
+            "file": "a.go",
+            "line": 60,
+            "message": "still returns `ctx.Err()`",
+        }
+        self.assertTrue(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+    def test_token_outside_window_is_absent(self) -> None:
+        self._write(
+            "a.go",
+            "\n".join(["return ctx.Err()"] + [f"line {i}" for i in range(2, 200)]),
+        )
+        finding = {
+            "file": "a.go",
+            "line": 150,  # window 140..160; evidence at line 1
+            "message": "still returns `ctx.Err()`",
+        }
+        self.assertFalse(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+    def test_unreadable_file_returns_true_conservatively(self) -> None:
+        finding = {
+            "file": "missing.go",
+            "line": 1,
+            "message": "still returns `ctx.Err()` instead of a typed error",
+        }
+        self.assertTrue(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+    def test_no_extractable_tokens_returns_true(self) -> None:
+        self._write("a.go", "return\n")
+        finding = {
+            "file": "a.go",
+            "line": 1,
+            "message": "this code is bad",  # all words below the 8-char floor
+        }
+        self.assertTrue(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+    def test_no_address_returns_true(self) -> None:
+        # PR-level / sourceless findings can't have evidence checked.
+        self.assertTrue(
+            bramble_ops._spiral_evidence_present(
+                {"file": None, "line": None, "message": "topical foo"}, head=self.root
+            )
+        )
+
+    def test_identifier_token_picks_up(self) -> None:
+        # A bare identifier ≥ _SPIRAL_EVIDENCE_MIN_LEN chars must match
+        # even when the message has no quotes/backticks.
+        self._write(
+            "h.py",
+            "\n".join(
+                [f"line {i}" for i in range(1, 10)]
+                + ["def waitForObjectReady(client):"]
+                + [f"line {i}" for i in range(11, 20)]
+            ),
+        )
+        finding = {
+            "file": "h.py",
+            "line": 10,
+            "message": "waitForObjectReady should respect timeout",
+        }
+        self.assertTrue(bramble_ops._spiral_evidence_present(finding, head=self.root))
+
+
+class TestTriageSpiralAutoDemote(unittest.TestCase):
+    """Single-source spirals whose cited evidence isn't at HEAD are auto-
+    demoted to batch_stale; multi-source spirals always escalate; the
+    behavior gates on resolved review_mode (design-doc spirals don't have
+    addressable file/line, so the heuristic short-circuits to "escalate")."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _f(self, source: str, file: str, line: int, severity: str, message: str) -> dict:
+        return {
+            "source": source,
+            "severity": severity,
+            "file": file,
+            "line": line,
+            "message": message,
+            "suggestion": None,
+            "topic": _common.topic_of(message),
+        }
+
+    def _write_file(self, rel: str, body: str) -> None:
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+
+    def test_single_source_spiral_with_evidence_absent_demotes_to_stale(self) -> None:
+        # File at HEAD has the *fix*, not the prior buggy code.
+        self._write_file(
+            "a.go",
+            "\n".join(
+                [f"line {i}" for i in range(1, 50)]
+                + ["return fmt.Errorf(\"waitForObject timed out\")"]
+                + [f"line {i}" for i in range(51, 100)]
+            ),
+        )
+        # codex re-flags ctx.Err(), but it isn't at HEAD anymore.
+        f = self._f("codex", "a.go", 50, "high", "still returns `ctx.Err()` instead of a typed error")
+        prior = {(f["file"], f["line"], f["topic"]), (f["file"], f["line"], None)}
+        out = bramble_ops.triage([f], prior_fixed_keys=prior, head_path=self.root)
+        self.assertEqual(out["spiral_matches"], [])
+        self.assertEqual(len(out["stale_prior_commit"]), 1)
+        demoted = out["stale_prior_commit"][0]["finding"]
+        self.assertIn("auto-demoted", demoted.get("stale_reason", ""))
+        # The auto-demoted finding must not also surface in single_critical.
+        self.assertEqual(out["single_critical"], [])
+        # action_plan reflects the demote: nothing in escalate, the finding
+        # in batch_stale.
+        self.assertEqual(out["action_plan"]["escalate"], [])
+        self.assertEqual(len(out["action_plan"]["batch_stale"]), 1)
+
+    def test_single_source_spiral_with_evidence_present_still_escalates(self) -> None:
+        # File at HEAD still has the cited code — keep the spiral.
+        self._write_file(
+            "a.go",
+            "\n".join(
+                [f"line {i}" for i in range(1, 50)]
+                + ["return ctx.Err()"]
+                + [f"line {i}" for i in range(51, 100)]
+            ),
+        )
+        f = self._f("codex", "a.go", 50, "high", "still returns `ctx.Err()` instead of a typed error")
+        prior = {(f["file"], f["line"], f["topic"])}
+        out = bramble_ops.triage([f], prior_fixed_keys=prior, head_path=self.root)
+        self.assertEqual(len(out["spiral_matches"]), 1)
+        self.assertEqual(out["stale_prior_commit"], [])
+
+    def test_multi_source_spiral_always_escalates_even_with_evidence_absent(self) -> None:
+        # Even with a "real" file that doesn't have ctx.Err(), two
+        # backends agreeing on the spiral is a stronger signal than the
+        # heuristic. Don't demote.
+        self._write_file("a.go", "return fmt.Errorf(\"timed out\")\n")
+        f1 = self._f("codex", "a.go", 1, "high", "still returns `ctx.Err()`")
+        f2 = self._f("cursor", "a.go", 1, "high", "still returns `ctx.Err()`")
+        prior = {(f1["file"], f1["line"], None)}
+        out = bramble_ops.triage([f1, f2], prior_fixed_keys=prior, head_path=self.root)
+        self.assertEqual(len(out["spiral_matches"]), 1)
+        self.assertEqual(out["stale_prior_commit"], [])
+        # Multi-source spiral must NOT also land in batch_stale.
+        self.assertEqual(out["action_plan"]["batch_stale"], [])
+        self.assertEqual(len(out["action_plan"]["escalate"]), 1)
+
+    def test_demoted_spiral_does_not_double_appear_in_severity_buckets(self) -> None:
+        """An auto-demoted spiral lives only in batch_stale — never in
+        single_critical/single_medium/low_acks (those would re-route it
+        to a fix and undo the demote)."""
+        self._write_file("a.go", "return fmt.Errorf(\"timed out\")\n")
+        f = self._f("codex", "a.go", 1, "high", "still returns `ctx.Err()`")
+        prior = {(f["file"], f["line"], None)}
+        out = bramble_ops.triage([f], prior_fixed_keys=prior, head_path=self.root)
+        # Not in any of the active severity buckets.
+        self.assertEqual(out["single_critical"], [])
+        self.assertEqual(out["single_medium"], [])
+        self.assertEqual(out["low_acks"], [])
+        # Only in batch_stale.
+        self.assertEqual(len(out["stale_prior_commit"]), 1)
+
+
 class TestTriageWithPRComments(unittest.TestCase):
     def test_total_includes_pr_comments_and_ci_failures(self) -> None:
         # Regression guard: round 5 fixed `total` to count all merged
@@ -1151,6 +1445,36 @@ class TestGoalCLI(unittest.TestCase):
             out = self._run("goal", "2", "--pr-summary", "PR_SUM", "--state-file", str(sf))
         self.assertIn("Round 2", out)
         self.assertIn("a.go:5", out)
+
+    def test_is_new_series_flag_returns_pr_summary(self) -> None:
+        """--is-new-series 1 must short-circuit to PR_SUMMARY even when the
+        state file has a converged prior round whose head_after is set."""
+        with tempfile.TemporaryDirectory() as d:
+            sf = Path(d) / "state.json"
+            sf.write_text(
+                json.dumps(
+                    {
+                        "completed": True,
+                        "rounds": [
+                            {
+                                "n": 10,
+                                "head_after": "deadbeef",
+                                "comment_actions": [
+                                    {"action": "fixed", "path": "a.go", "line": 5},
+                                ],
+                            }
+                        ],
+                    }
+                )
+            )
+            out = self._run(
+                "goal", "11",
+                "--pr-summary", "PR #99: refactor",
+                "--state-file", str(sf),
+                "--head-before", "cafef00d",
+                "--is-new-series", "1",
+            )
+        self.assertEqual(out, "PR #99: refactor")
 
     def test_head_before_flag_emits_files_changed_line(self) -> None:
         # SKILL passes --head-before "$(git rev-parse HEAD)"; the CLI must

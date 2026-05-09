@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,11 @@ def _files_changed_between(a: str | None, b: str | None) -> list[str]:
     git fails (no remote, shallow clone, or the commits aren't reachable
     from the worktree). The caller treats an empty list as "no signal,
     omit the line" rather than "definitely no changes".
+
+    Writes a one-line stderr warning when git rejects the range: a
+    silently-empty result on a 200-file diff was the symptom that
+    surfaced the new-series goal-text bug, and the caller can't see
+    the unreachable SHA without it.
     """
     if not a or not b or a == b:
         return []
@@ -110,9 +116,19 @@ def _files_changed_between(a: str | None, b: str | None) -> list[str]:
 
     try:
         res = run(["git", "diff", "--name-only", f"{a}..{b}"], check=False)
-    except Exception:  # noqa: BLE001 — best-effort git invocation
+    except Exception as e:  # noqa: BLE001 — best-effort git invocation
+        print(
+            f"bramble_ops: git diff --name-only {a[:7]}..{b[:7]} failed: {e}",
+            file=sys.stderr,
+        )
         return []
     if res.returncode != 0:
+        print(
+            f"bramble_ops: git diff --name-only {a[:7]}..{b[:7]} returned "
+            f"{res.returncode}; cited SHA may be unreachable. stderr: "
+            f"{res.stderr.strip() or '(empty)'}",
+            file=sys.stderr,
+        )
         return []
     return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
@@ -276,6 +292,7 @@ def goal_for_round(
     state: dict[str, Any] | None,
     *,
     head_before: str | None = None,
+    is_new_series: bool | None = None,
 ) -> str:
     """Return the ``--goal`` text bramble should see for this round.
 
@@ -287,8 +304,15 @@ def goal_for_round(
 
     ``head_before`` is this round's HEAD, used to compute the
     files-changed-since-prior-round line.
+
+    ``is_new_series`` is the orchestrator's series-boundary decision
+    captured at Step 0.5 (before ``state_append_round`` clears
+    ``completed: true``). When true, the round is a real round 1 from
+    the model's perspective even when ``round_`` is high — the prior
+    series' state is unreachable and walking it produces a noisy
+    goal blob. PR_SUMMARY is the right anchor for a fresh series.
     """
-    if round_ < 2:
+    if round_ < 2 or is_new_series:
         return pr_summary
     history = action_history_goal(state, round_, head_before=head_before)
     return history or pr_summary
@@ -603,6 +627,118 @@ _HIGH_SEVERITY_KEYWORDS = (
 )
 
 
+# Window around the cited line searched for evidence of a spiral candidate.
+# ±10 lines tolerates small drift from a fix that nudged surrounding lines
+# without removing the cited code; bigger windows would risk false positives
+# on long files where another instance of the same identifier is unrelated.
+_SPIRAL_EVIDENCE_WINDOW = 10
+
+# Minimum length of a quoted phrase or identifier extracted from the
+# finding's message before we accept it as evidence. 8 chars rules out
+# common stop-words (like "function", "missing") that appear everywhere.
+_SPIRAL_EVIDENCE_MIN_LEN = 8
+
+
+def _evidence_tokens(text: str) -> list[str]:
+    """Extract candidate substrings from a finding's message that, if
+    present near the cited line, count as the cited evidence still being
+    at HEAD.
+
+    Returns a deduplicated list of: any backtick/quote-quoted phrase ≥
+    _SPIRAL_EVIDENCE_MIN_LEN chars, plus any bare identifier-like token
+    (Letters / digits / underscore / dot, ≥ _SPIRAL_EVIDENCE_MIN_LEN
+    chars). Conservative — we'd rather miss a token and let the
+    multi-source spiral fallback escalate than coin a false-evidence
+    match from a generic English word.
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(tok: str) -> None:
+        s = (tok or "").strip().lower()
+        if len(s) < _SPIRAL_EVIDENCE_MIN_LEN:
+            return
+        if s in seen:
+            return
+        seen.add(s)
+        out.append(s)
+
+    # Quoted/back-ticked phrases first — reviewers typically quote the
+    # specific code they want changed, so these are the strongest signal.
+    for m in re.findall(r"`([^`]{%d,})`" % _SPIRAL_EVIDENCE_MIN_LEN, text):
+        _add(m)
+    for m in re.findall(r'"([^"]{%d,})"' % _SPIRAL_EVIDENCE_MIN_LEN, text):
+        _add(m)
+    for m in re.findall(r"'([^']{%d,})'" % _SPIRAL_EVIDENCE_MIN_LEN, text):
+        _add(m)
+    # Identifier-shaped tokens (camelCase, snake_case, dotted names).
+    for m in re.findall(r"[A-Za-z_][A-Za-z0-9_.]{%d,}" % (_SPIRAL_EVIDENCE_MIN_LEN - 1), text):
+        _add(m)
+    return out
+
+
+def _spiral_evidence_present(
+    finding: dict[str, Any],
+    head: Path | None = None,
+    *,
+    window: int = _SPIRAL_EVIDENCE_WINDOW,
+) -> bool:
+    """True when the finding's cited evidence is still at HEAD.
+
+    ``head`` is the worktree root (defaults to CWD). The check is:
+
+        for each token derived from finding.message + finding.suggestion,
+            if any token (lowercased, whitespace-collapsed) appears in
+            <path> at lines [line-window .. line+window] (inclusive),
+            the evidence is present.
+
+    Returns True (conservative — keep the spiral escalation) when the
+    file can't be read, the finding has no addressable file/line, or
+    no tokens of sufficient length could be extracted. Callers
+    interpret False as "definitely-absent enough to demote", and a
+    permissive default protects against silently auto-demoting real
+    regressions when the heuristic can't say either way.
+    """
+    path = finding.get("file") or finding.get("path")
+    line = finding.get("line")
+    if not path or line is None:
+        return True
+    try:
+        line = int(line)
+    except (TypeError, ValueError):
+        return True
+    root = head or Path(".")
+    file_path = root / path
+    try:
+        text = file_path.read_text(errors="replace")
+    except (OSError, UnicodeDecodeError):
+        return True
+    lines = text.splitlines()
+    if not lines:
+        return True
+    # Convert to 0-based and clamp to file extent.
+    start = max(0, line - 1 - window)
+    end = min(len(lines), line + window)  # exclusive
+    window_text = "\n".join(lines[start:end]).lower()
+    # Collapse whitespace so a multi-line quoted phrase still matches when
+    # the file's wrapping changed.
+    window_norm = re.sub(r"\s+", " ", window_text)
+    tokens = _evidence_tokens(
+        " ".join(
+            s for s in (finding.get("message"), finding.get("suggestion")) if s
+        )
+    )
+    if not tokens:
+        return True
+    for tok in tokens:
+        norm = re.sub(r"\s+", " ", tok)
+        if norm in window_norm:
+            return True
+    return False
+
+
 def pr_comment_to_finding(c: dict[str, Any]) -> dict[str, Any]:
     """Convert a classify_comments output row into a triage-ready finding.
 
@@ -718,6 +854,7 @@ def triage(
     pr_comments: list[dict[str, Any]] | None = None,
     ci_failures: list[dict[str, Any]] | None = None,
     mode: str | None = None,
+    head_path: Path | None = None,
 ) -> dict[str, Any]:
     """Group findings, surface consensus, detect N+1 spiral matches.
 
@@ -834,7 +971,37 @@ def triage(
         # topic string and the new finding's topic_of(message) drift
         # apart.
         location_key = (key[0], key[1], None)
-        if key in prior_fixed_keys or location_key in prior_fixed_keys:
+        is_spiral = key in prior_fixed_keys or location_key in prior_fixed_keys
+        if is_spiral:
+            sources_in_group = {g.get("source") for g in group if g.get("source")}
+            is_multi_source = len(sources_in_group) >= 2
+            # Single-source spirals whose cited evidence isn't at HEAD
+            # anymore are auto-demoted to stale_prior_commit: the prior
+            # round fixed it and the resumed model is re-flagging stale
+            # context. Multi-source spirals always escalate — two
+            # backends agreeing the regression is real is a stronger
+            # signal than a heuristic file read.
+            #
+            # Code mode only: design-doc spirals don't have a file/line
+            # to grep, so the evidence check would always be conservative-
+            # True and the demote would never fire anyway. Keep the
+            # branch explicit so the heuristic doesn't quietly leak.
+            if (
+                resolved_mode == REVIEW_MODE_CODE
+                and not is_multi_source
+                and not _spiral_evidence_present(repr_, head=head_path)
+            ):
+                demoted = dict(repr_)
+                demoted["stale_reason"] = (
+                    "spiral candidate auto-demoted: cited evidence absent at HEAD"
+                )
+                stale_prior_commit.append(
+                    {"key": list(_triage_key(repr_, resolved_mode)), "finding": demoted}
+                )
+                # Skip the rest of the per-key dispatch — this finding
+                # is now in batch_stale and must not also land in any
+                # severity bucket.
+                continue
             spiral_matches.append({"key": list(key), "findings": group})
         if key in consensus_triage_keys:
             # Already routed to consensus by location-based grouping;
@@ -1020,6 +1187,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--head-before",
         help="This round's HEAD; used to compute the files-changed-since-prior-round line.",
     )
+    sp.add_argument(
+        "--is-new-series",
+        choices=["0", "1"],
+        help=(
+            "Captured at Step 0.5 before state_append_round clears "
+            "completed=true. When 1, return PR_SUMMARY regardless of "
+            "round number — round N of a fresh series is a real round 1 "
+            "from the model's perspective, and walking the prior series' "
+            "head_after produces a noisy goal blob (the SHA may be unreachable)."
+        ),
+    )
 
     sp = sub.add_parser(
         "prior-session-id",
@@ -1067,6 +1245,15 @@ def _build_parser() -> argparse.ArgumentParser:
              "envelope's review_mode field), falling back to code. Pass "
              "explicitly to assert a mode and reject mismatched envelopes.",
     )
+    sp.add_argument(
+        "--head-path",
+        help=(
+            "Worktree root used to grep for spiral-candidate evidence at HEAD. "
+            "Defaults to CWD. Single-source spirals whose cited evidence is "
+            "absent within ±10 lines of the cited line auto-demote to "
+            "batch_stale; multi-source spirals always escalate."
+        ),
+    )
 
     return p
 
@@ -1094,9 +1281,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "goal":
             state = read_json(Path(args.state_file), default=None) if args.state_file else None
+            is_new = (args.is_new_series == "1") if args.is_new_series is not None else None
             print(
                 goal_for_round(
-                    args.round_, args.pr_summary, state, head_before=args.head_before
+                    args.round_,
+                    args.pr_summary,
+                    state,
+                    head_before=args.head_before,
+                    is_new_series=is_new,
                 )
             )
         elif args.cmd == "prior-session-id":
@@ -1153,12 +1345,14 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 resolved_mode = next(iter(real_modes), None) or REVIEW_MODE_CODE
             findings = parse_round(streams, fallback_mode=resolved_mode)
+            head_path = Path(args.head_path) if args.head_path else None
             result = triage(
                 findings,
                 prior_fixed_keys(prior, resolved_mode),
                 pr_comments=pr_comments,
                 ci_failures=ci_failures,
                 mode=resolved_mode,
+                head_path=head_path,
             )
             print_json(result)
         else:  # pragma: no cover
