@@ -1093,15 +1093,32 @@ def _persist_round_findings(
         entry.setdefault("ci_findings", [])
 
 
+_REPLY_PERSIST_KEYS = ("reply_url", "reply_error")
+
+
 def _merge_actions(
     existing: list[dict[str, Any]], new: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Append new actions; dedupe on (comment_id) or (source, path, line, topic)."""
+    """Append new actions; dedupe on (comment_id) or (source, path, line, topic).
+
+    On key collision the incoming row wins, but reply-persistence fields
+    (``reply_url`` / ``reply_error``) carry forward from the existing row
+    when the incoming one omits them. Without this, re-finalizing a round
+    from a freshly recomputed action list would drop the reply_url written
+    by a prior finalize pass and ``_post_inline_replies`` would repost the
+    same inline comment.
+    """
     by_key: dict[tuple, dict[str, Any]] = {}
     for a in existing:
         by_key[_action_key(a)] = a
     for a in new:
-        by_key[_action_key(a)] = a  # new wins on conflict
+        key = _action_key(a)
+        prior = by_key.get(key)
+        if prior is not None:
+            for k in _REPLY_PERSIST_KEYS:
+                if k in prior and k not in a:
+                    a[k] = prior[k]
+        by_key[key] = a
     return list(by_key.values())
 
 

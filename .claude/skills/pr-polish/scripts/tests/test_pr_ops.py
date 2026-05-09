@@ -1651,6 +1651,37 @@ class TestAutoReplyInFinalize(unittest.TestCase):
             pr_ops.state_finalize_round(77, 1, "sha2", actions)
         self.assertEqual(calls, [])
 
+    def test_replay_with_fresh_action_list_does_not_repost(self) -> None:
+        """Re-finalize from a freshly recomputed action list (no reply_url
+        carried forward in the caller) must still skip already-replied rows.
+
+        This is the cross-process replay path: round 1 finalizes and persists
+        reply_url; later, finalize is called again with `actions` rebuilt
+        from comments — it does not carry reply_url. ``_merge_actions`` must
+        preserve the persisted reply_url so ``_post_inline_replies`` skips
+        the row.
+        """
+        calls = []
+
+        def fake_reply(owner_repo, pr, cid, body):
+            calls.append((owner_repo, pr, cid, body))
+            return {"html_url": f"https://github.com/owner/repo/pull/{pr}#discussion_r{cid}"}
+
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        with patch.object(pr_ops, "reply_inline", side_effect=fake_reply):
+            pr_ops.state_finalize_round(
+                77, 1, "abc123fdeadbeef", [self._action(comment_id=2099, action="fixed")]
+            )
+        self.assertEqual(len(calls), 1)
+
+        with patch.object(pr_ops, "reply_inline", side_effect=fake_reply):
+            state = pr_ops.state_finalize_round(
+                77, 1, "abc123fdeadbeef", [self._action(comment_id=2099, action="fixed")]
+            )
+        self.assertEqual(len(calls), 1)
+        row = state["rounds"][0]["comment_actions"][0]
+        self.assertTrue(row.get("reply_url", "").startswith("https://"))
+
     def test_skips_ack_and_non_inline_rows(self) -> None:
         calls = []
         pr_ops.state_append_round(77, 1, "sha", verify_head=False)

@@ -946,3 +946,109 @@ Notes:
 - The bias-guard prompt update (2026-05-06) continues to perform well: cursor swapped its 2 findings completely between turn 1 and turn 2 rather than just ratifying. Codex moved 0→1, also a sign the resumed pass is doing real work.
 - Gemini's 0/0/0 with apparent scope confusion is the most actionable signal here. File a follow-up to verify gemini backend's diff-range argument.
 
+## 2026-05-09 — feature/improve-skill
+
+Diff: 5 files, +958 / -22 lines (pr-polish skill: SKILL.md tweaks, big
+bramble_ops.py extension, big pr_ops.py extension with inline-reply
+auto-post + _merge_actions, two new test files for bramble_ops and
+pr_ops)
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | error | — | error | — | 12s | — |
+| cursor-composer2 | 2 | ok | error | — | error | — | 4s | — |
+| cursor-composer2 | 3 | ok | error | — | error | — | 5s | — |
+| codex-5.4-mini | 1 | — | 1 | 0 | rejected | 0.97 | 166s | 0/0 |
+| codex-5.4-mini | 2 | ok | 1 | 0 | rejected | 0.98 | 67s | 0/0 |
+| codex-5.4-mini | 3 | ok | 1 | 0 | rejected | 0.98 | 11s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | 0 | accepted | — | 11s | — |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | 0 | accepted | — | 4s | — |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | 0 | accepted | — | 1s | — |
+
+Resume incidents: cursor returned `cursor: session ended without result`
+on every turn. Stderr shows `Increase limits for faster responses You're
+out of usage. Switch to Auto, or ask your admin to increase your limit
+to continue.` — Cursor account quota is exhausted, not a transport or
+session-store fault. Cursor still emitted a session id on turn 1, so
+turns 2 and 3 dispatched as resume-with-fresh-start; the backend
+faithfully reported `resume_status=ok` (resume succeeded; the *review*
+failed for an unrelated quota reason).
+
+Consensus (all 3, turn 1): none — cursor errored, gemini found 0
+Majority (2 of 3, turn 1): none
+Unique to cursor (turn 1): n/a (errored before reviewing)
+Unique to codex-5.4-mini (turn 1):
+  - .claude/skills/pr-polish/scripts/pr_ops.py:1104 (medium, 0.97) —
+    `_merge_actions` does `by_key[_action_key(a)] = a` (new wins on
+    conflict), so a re-finalize from a freshly computed action list
+    drops `reply_url`/`reply_error` written by a prior finalize pass,
+    making `_post_inline_replies` non-idempotent across replays
+Unique to gemini-3.1-flash-lite-preview (turn 1): none
+Disagreements: codex flagged a real replay-safety bug; gemini accepted
+0 issues in 11s — clearly not engaging with the diff (verdict is a
+summary-rubber-stamp, not a code review). Cursor signal unavailable.
+
+Follow-up deltas:
+- cursor-composer2: errored on all 3 turns. Resume mechanics worked
+  (`resume_status=ok` on turn 2 and 3); the underlying review failed
+  identically each time due to the account quota cap. No findings to
+  diff.
+- codex-5.4-mini: turn 1 → turn 2 same finding, slightly tightened
+  wording, confidence 0.97 → 0.98. Turn 2 → turn 3 identical message
+  and suggestion. Turn 3 ran in 11s vs turn 2's 67s and turn 1's 166s,
+  matching the prior eval's pattern: a "fresh prompt" on a resumed
+  session mostly recalls prior reasoning rather than re-deriving it.
+  No new findings on either resume turn — the bias-guard prompt
+  worked (no ratifying-only behavior) but there genuinely wasn't more
+  to find at this depth.
+- gemini-3.1-flash-lite-preview: 0/0/0 across all three turns. Turn 1
+  ran in 10.5s after a quota retry and produced a verdict with no
+  evident file inspection (`{"verdict": "accepted", "summary": "...",
+  "issues": []}`); turn 2 ran in 4s and turn 3 in 1s — consistent with
+  recall, not analysis. Same pattern as 2026-05-08 entry: gemini-flash-
+  lite is not engaging with the actual diff. Codex's medium finding
+  matches cursor-style review territory and gemini missing it
+  reinforces the prior conclusion that this model is unfit for the
+  reviewer role at any prompt shape.
+
+Resume health: cursor=ok (resume worked, review failed for quota),
+codex=ok, gemini=ok.
+
+Notes:
+- Verified codex's finding by reading `_merge_actions` and
+  `finalize_round`. The bug is real: `existing` carries `reply_url`
+  from a prior persist; the new `actions` list is freshly computed
+  from comments and won't carry it. On re-finalize across processes,
+  the merged dict loses `reply_url` and `_post_inline_replies` will
+  re-post. Within a single process the in-memory mutation is preserved
+  before the next merge so the bug is latent, but the replay-safety
+  hazard is genuine. Codex's suggested fix (preserve
+  `reply_url`/`reply_error` when the incoming row lacks them) is the
+  right one. Severity medium is reasonable.
+- Cursor quota exhaustion masks the most useful single signal in this
+  eval — cursor is typically the strongest reviewer for the pr-polish
+  surface area. Without it, we have a single voice (codex) flagging
+  the real bug and a silent voice (gemini) that's not engaging. The
+  comparison loses cross-validation power; rerun once cursor quota
+  resets to confirm whether cursor independently flags the same
+  `_merge_actions` issue.
+- Codex stderr token counts still 0/0 — pre-existing issue, see prior
+  entries.
+
+### Cross-eval observations
+
+- Gemini's "fast verdict from summary" pattern is now stable across
+  three branches in a row (2026-05-08 design-doc PR, 2026-05-08
+  trim/verdict commits, this branch). The 1–11s turn times and the
+  zero-issue verdicts even on diffs with known real bugs make
+  gemini-3.1-flash-lite-preview not viable as the sole reviewer in
+  pr-polish at any prompt shape.
+- The "turn 3 fresh prompt mostly recalls turn 2" pattern is now seen
+  on three consecutive evals for codex (12s recall, 11s recall here).
+  The current taxonomy treats `--resume-prompt-style fresh` as a
+  separate eval signal, but in practice on codex it's degenerating
+  into a cache-of-turn-2. Worth a future change to either prepend a
+  short "ignore your prior conclusions" cue to the fresh-prompt path
+  on resumed sessions, or accept that turn 3's value here is mostly
+  the resume-fault detector, not a re-derivation.
+
