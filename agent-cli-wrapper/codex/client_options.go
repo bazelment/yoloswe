@@ -131,8 +131,14 @@ func WithAppServerArgs(args ...string) ClientOption {
 // outgoing request fails Baseten's strict tool-schema validation with HTTP
 // 400 "unknown variant `namespace`".
 //
-// Adjust this list as upstream codex evolves. If a third-party endpoint
-// supports a feature, callers can re-enable it via WithAppServerArgs.
+// This is a hand-curated denylist — when codex adds a new stable feature
+// whose tool variants don't pass third-party validation, the symptom is
+// HTTP 400 with "unknown variant <name>" and the fix is to append the
+// feature here. Tracked in https://github.com/bazelment/yoloswe/issues/241
+// with notes on long-term replacements (allowlist, capability probe).
+//
+// If a third-party endpoint supports a feature we've disabled, callers can
+// re-enable it via WithAppServerArgs after WithLLMEndpoint.
 var thirdPartyIncompatibleFeatures = []string{
 	"apps",
 	"browser_use",
