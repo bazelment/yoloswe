@@ -53,6 +53,35 @@ func TestWithLLMEndpoint_zeroIsNoop(t *testing.T) {
 	}
 }
 
+func TestWithLLMEndpoint_pinsModelDefaultsWhenModelSet(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.Model = "moonshotai/Kimi-K2.6"
+	WithLLMEndpoint(llmendpoint.Endpoint{BaseURL: "https://x", APIKey: "k"})(&cfg)
+
+	for _, name := range []string{
+		"ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_SMALL_FAST_MODEL",
+	} {
+		if got := cfg.Env[name]; got != "moonshotai/Kimi-K2.6" {
+			t.Errorf("%s = %q, want moonshotai/Kimi-K2.6", name, got)
+		}
+	}
+}
+
+func TestWithLLMEndpoint_skipsModelPinWhenModelEmpty(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.Model = ""
+	WithLLMEndpoint(llmendpoint.Endpoint{BaseURL: "https://x", APIKey: "k"})(&cfg)
+	if _, set := cfg.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]; set {
+		t.Errorf("model-pin should be skipped when c.Model is empty")
+	}
+}
+
 func TestWithLLMEndpoint_stripsTrailingV1(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

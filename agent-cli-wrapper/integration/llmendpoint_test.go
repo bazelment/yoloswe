@@ -41,7 +41,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -130,7 +129,7 @@ func runClaudeBaseten(t *testing.T, ep llmendpoint.Endpoint) {
 	}
 	t.Logf("claude→baseten response: %s", truncate(response, 200))
 
-	if !containsSentinel(response, llmSentinel) {
+	if !containsSecret(response, llmSentinel) {
 		t.Fatalf("claude→baseten did not echo sentinel %q; got %s",
 			llmSentinel, truncate(response, 500))
 	}
@@ -206,22 +205,10 @@ func runCodexBaseten(t *testing.T, ep llmendpoint.Endpoint) {
 	}
 	t.Logf("codex→baseten response: %s", truncate(result.FullText, 200))
 
-	if !containsSentinel(result.FullText, llmSentinel) {
+	if !containsSecret(result.FullText, llmSentinel) {
 		t.Fatalf("codex→baseten did not echo sentinel %q; got %s",
 			llmSentinel, truncate(result.FullText, 500))
 	}
-}
-
-// containsSentinel matches with the same tolerance as the resume-test secret
-// matcher: case-fold + strip whitespace/punctuation. Models occasionally
-// rewrite "PURPLE-RHINO-42" as "Purple Rhino 42" or "purple_rhino_42".
-func containsSentinel(resp, sentinel string) bool {
-	normalize := func(s string) string {
-		s = strings.ToUpper(s)
-		s = strings.NewReplacer(" ", "", "-", "", "_", "", ".", "", ",", "").Replace(s)
-		return s
-	}
-	return strings.Contains(normalize(resp), normalize(sentinel))
 }
 
 // Compile-time guards that the wrappers we're testing still expose the

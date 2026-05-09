@@ -320,9 +320,12 @@ func WithExtraArgs(args ...string) SessionOption {
 //     itself. Passing https://x/v1 as-is yields /v1/v1/messages → 404.
 //   - Claude CLI makes side calls (preflight + post-turn summary) using a
 //     hardcoded haiku model id. We override ANTHROPIC_DEFAULT_{HAIKU,SONNET,
-//     OPUS}_MODEL and ANTHROPIC_SMALL_FAST_MODEL to the user-selected model
-//     so those side calls don't 404 against an endpoint that only serves a
-//     single model.
+//     OPUS}_MODEL and ANTHROPIC_SMALL_FAST_MODEL to SessionConfig.Model so
+//     those side calls don't 404 against an endpoint that only serves a
+//     single model. Apply WithModel before WithLLMEndpoint for this to take
+//     effect; if Model is unset at apply time, the model-default pin is
+//     skipped (claude-cli will then surface the side-call 404 as a
+//     misleading "model may not exist" error on the user's actual model).
 //   - We set both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY: some proxies
 //     expect Bearer, others x-api-key.
 //
@@ -347,10 +350,19 @@ func WithLLMEndpoint(ep llmendpoint.Endpoint) SessionOption {
 			c.Env["ANTHROPIC_AUTH_TOKEN"] = key
 			c.Env["ANTHROPIC_API_KEY"] = key
 		}
-		// process.go (Start()) auto-pins ANTHROPIC_*_MODEL defaults to
-		// SessionConfig.Model when a third-party endpoint is configured, so
-		// claude-cli's preflight + post-turn side calls don't 404 against an
-		// endpoint that only serves the user-selected model.
+		if c.Model != "" {
+			for _, name := range []string{
+				"ANTHROPIC_MODEL",
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+				"ANTHROPIC_DEFAULT_SONNET_MODEL",
+				"ANTHROPIC_DEFAULT_OPUS_MODEL",
+				"ANTHROPIC_SMALL_FAST_MODEL",
+			} {
+				if _, set := c.Env[name]; !set {
+					c.Env[name] = c.Model
+				}
+			}
+		}
 	}
 }
 

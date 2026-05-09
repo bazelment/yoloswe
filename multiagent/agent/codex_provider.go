@@ -15,6 +15,7 @@ type CodexProvider struct {
 	client     *codex.Client
 	events     chan AgentEvent
 	clientOpts []codex.ClientOption
+	mu         sync.Mutex
 }
 
 // NewCodexProvider creates a new Codex provider.
@@ -40,6 +41,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	// LLMEndpoint must be applied at client construction since codex
 	// `--config` overrides are passed to `app-server` at boot. Subsequent
 	// Execute calls reuse the existing client and cannot change the endpoint.
+	p.mu.Lock()
 	if p.client == nil {
 		clientOpts := p.clientOpts
 		if !cfg.LLMEndpoint.IsZero() {
@@ -47,10 +49,12 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		}
 		client := codex.NewClient(clientOpts...)
 		if err := client.Start(ctx); err != nil {
+			p.mu.Unlock()
 			return nil, err
 		}
 		p.client = client
 	}
+	p.mu.Unlock()
 
 	// Build thread options.
 	// Only pass an explicit model if the caller overrode the default;

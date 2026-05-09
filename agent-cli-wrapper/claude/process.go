@@ -174,36 +174,8 @@ func (pm *processManager) Start(ctx context.Context) error {
 	// subprocess invocations are safe since they use --input-format stream-json.
 	pm.cmd.Env = buildSubprocessEnv(os.Environ())
 
-	// When pointing at a third-party LLM endpoint (signaled by
-	// ANTHROPIC_BASE_URL in config.Env), pin every Claude CLI default-model
-	// env var to the user-selected model. The CLI's preflight + post-turn
-	// side calls otherwise use hardcoded "claude-haiku-4-5-..." model ids
-	// that most third-party endpoints don't serve, surfacing as a misleading
-	// "model may not exist" error on the user's actual model.
-	envOverrides := pm.config.Env
-	if _, hasBase := envOverrides["ANTHROPIC_BASE_URL"]; hasBase && pm.config.Model != "" {
-		modelDefaults := []string{
-			"ANTHROPIC_MODEL",
-			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
-			"ANTHROPIC_DEFAULT_SONNET_MODEL",
-			"ANTHROPIC_DEFAULT_OPUS_MODEL",
-			"ANTHROPIC_SMALL_FAST_MODEL",
-		}
-		// Copy so we don't mutate the caller's map.
-		merged := make(map[string]string, len(envOverrides)+len(modelDefaults))
-		for k, v := range envOverrides {
-			merged[k] = v
-		}
-		for _, name := range modelDefaults {
-			if _, ok := merged[name]; !ok {
-				merged[name] = pm.config.Model
-			}
-		}
-		envOverrides = merged
-	}
-
 	// Add custom environment variables
-	for k, v := range envOverrides {
+	for k, v := range pm.config.Env {
 		pm.cmd.Env = append(pm.cmd.Env, k+"="+v)
 	}
 

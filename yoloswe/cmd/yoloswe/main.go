@@ -101,13 +101,9 @@ func runPlan(cmd *cobra.Command, args []string, flags *planFlags) error {
 		return fmt.Errorf("no prompt provided")
 	}
 
-	workDir := flags.workDir
-	if workDir == "" {
-		var err error
-		workDir, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
+	workDir, err := resolveWorkDir(flags.workDir)
+	if err != nil {
+		return err
 	}
 
 	buildMode := planner.BuildMode(flags.build)
@@ -203,13 +199,9 @@ func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) error {
 	app := cliapp.FromContext(cmd.Context())
 	prompt := strings.Join(args, " ")
 
-	workDir := flags.dir
-	if workDir == "" {
-		var err error
-		workDir, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
+	workDir, err := resolveWorkDir(flags.dir)
+	if err != nil {
+		return err
 	}
 
 	recordingDir := flags.record
@@ -297,7 +289,7 @@ endpoints.`,
 			return runCodeTalk(cmd, args, flags)
 		},
 	}
-	cmd.Flags().StringVar(&flags.backend, "backend", "claude", "Backend CLI: claude, codex, gemini, cursor")
+	cmd.Flags().StringVar(&flags.backend, "backend", agent.ProviderClaude, "Backend CLI: "+strings.Join(agent.AllProviders, ", "))
 	cmd.Flags().StringVar(&flags.model, "model", "", "Model to use (defaults: claude=opus, codex=gpt-5.5, gemini=gemini-2.5-pro)")
 	cmd.Flags().StringVar(&flags.workDir, "dir", "", "Working directory (default: current)")
 	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Recording directory (default: ~/.yoloswe)")
@@ -314,13 +306,9 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 	app := cliapp.FromContext(cmd.Context())
 	prompt := strings.Join(args, " ")
 
-	workDir := flags.workDir
-	if workDir == "" {
-		var err error
-		workDir, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get working directory: %w", err)
-		}
+	workDir, err := resolveWorkDir(flags.workDir)
+	if err != nil {
+		return err
 	}
 
 	ep := llmendpoint.Endpoint{
@@ -337,14 +325,19 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 	}
 	app.Logger.Info("codetalk", "backend", flags.backend, "model", flags.model, "endpoint", ep.String())
 
-	switch strings.ToLower(flags.backend) {
-	case "", "claude":
-		return runCodeTalkClaude(cmd.Context(), flags, ep, workDir, prompt)
-	case "codex", "gemini", "cursor":
-		return runCodeTalkProvider(cmd.Context(), flags, ep, workDir, prompt)
-	default:
-		return fmt.Errorf("unknown backend %q (valid: claude, codex, gemini, cursor)", flags.backend)
+	backend := strings.ToLower(flags.backend)
+	if backend == "" {
+		backend = agent.ProviderClaude
 	}
+	if backend == agent.ProviderClaude {
+		return runCodeTalkClaude(cmd.Context(), flags, ep, workDir, prompt)
+	}
+	for _, p := range agent.AllProviders {
+		if backend == p {
+			return runCodeTalkProvider(cmd.Context(), backend, flags, ep, workDir, prompt)
+		}
+	}
+	return fmt.Errorf("unknown backend %q (valid: %s)", flags.backend, strings.Join(agent.AllProviders, ", "))
 }
 
 func runCodeTalkClaude(ctx context.Context, flags *codeTalkFlags, ep llmendpoint.Endpoint, workDir, prompt string) error {
@@ -371,27 +364,27 @@ func runCodeTalkClaude(ctx context.Context, flags *codeTalkFlags, ep llmendpoint
 	return nil
 }
 
-func runCodeTalkProvider(ctx context.Context, flags *codeTalkFlags, ep llmendpoint.Endpoint, workDir, prompt string) error {
+func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFlags, ep llmendpoint.Endpoint, workDir, prompt string) error {
 	model := flags.model
-	if model == "" {
-		switch strings.ToLower(flags.backend) {
-		case "codex":
+	var prov agent.Provider
+	switch backend {
+	case agent.ProviderCodex:
+		if model == "" {
 			model = "gpt-5.5"
-		case "gemini":
+		}
+		prov = agent.NewCodexProvider()
+	case agent.ProviderGemini:
+		if model == "" {
 			model = "gemini-2.5-pro"
-		case "cursor":
+		}
+		prov = agent.NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp"))
+	case agent.ProviderCursor:
+		if model == "" {
 			model = "cursor-default"
 		}
-	}
-
-	var prov agent.Provider
-	switch strings.ToLower(flags.backend) {
-	case "codex":
-		prov = agent.NewCodexProvider()
-	case "gemini":
-		prov = agent.NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp"))
-	case "cursor":
 		prov = agent.NewCursorProvider()
+	default:
+		return fmt.Errorf("backend %q not supported by codetalk provider path", backend)
 	}
 	defer prov.Close()
 
@@ -421,6 +414,19 @@ func runCodeTalkProvider(ctx context.Context, flags *codeTalkFlags, ep llmendpoi
 		return res.Error
 	}
 	return nil
+}
+
+// resolveWorkDir returns flagDir, or the current working directory when
+// flagDir is empty.
+func resolveWorkDir(flagDir string) (string, error) {
+	if flagDir != "" {
+		return flagDir, nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get working directory: %w", err)
+	}
+	return wd, nil
 }
 
 // readFromStdin reads input from stdin if available.
