@@ -2,25 +2,30 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
 )
 
 // GeminiProvider wraps an ACP client (Gemini CLI) behind the Provider interface.
+//
+//nolint:govet // fieldalignment: keep boundEndpt grouped with clientOpts; extra inline padding from nesting llmendpoint.Endpoint isn't worth obscuring the order.
 type GeminiProvider struct {
+	boundEndpt llmendpoint.Endpoint
+	clientOpts []acp.ClientOption
 	client     *acp.Client
 	events     chan AgentEvent
 	bridgeDone chan struct{} // signals bridge goroutine to exit
 	// handlerCh is set during an Execute call. The bridge goroutine sends
 	// copies of AgentEvents here for the handler. It is protected by handlerMu.
-	handlerCh  chan AgentEvent
-	clientOpts []acp.ClientOption
-	handlerMu  sync.RWMutex
-	mu         sync.Mutex
-	bridgeWg   sync.WaitGroup // tracks bridge goroutine
+	handlerCh chan AgentEvent
+	handlerMu sync.RWMutex
+	bridgeWg  sync.WaitGroup // tracks bridge goroutine
+	mu        sync.Mutex
 }
 
 // NewGeminiProvider creates a new Gemini provider.
@@ -55,13 +60,17 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	// Ensure client is started (lazy init with mutex protection).
 	// LLMEndpoint must be applied at client construction since acp BinaryArgs
 	// and Env are passed to the subprocess at boot. Subsequent Execute calls
-	// reuse the existing client.
+	// reuse the existing client; reject divergent endpoints loudly rather
+	// than silently routing to the originally-bound endpoint.
 	p.mu.Lock()
 	if p.client == nil {
-		clientOpts := p.clientOpts
+		// Apply WithLLMEndpoint first so caller-supplied clientOpts can
+		// override its defaults via later args.
+		var clientOpts []acp.ClientOption
 		if !cfg.LLMEndpoint.IsZero() {
-			clientOpts = append(append([]acp.ClientOption{}, clientOpts...), acp.WithLLMEndpoint(cfg.LLMEndpoint))
+			clientOpts = append(clientOpts, acp.WithLLMEndpoint(cfg.LLMEndpoint))
 		}
+		clientOpts = append(clientOpts, p.clientOpts...)
 		client := acp.NewClient(clientOpts...)
 		// Use context.Background() to decouple the ACP subprocess lifetime
 		// from any single request's context. The subprocess should live as long
@@ -71,6 +80,7 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			return nil, err
 		}
 		p.client = client
+		p.boundEndpt = cfg.LLMEndpoint
 		p.bridgeDone = make(chan struct{})
 
 		// Start a single persistent bridge goroutine for the client's events.
@@ -81,6 +91,10 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			defer p.bridgeWg.Done()
 			p.bridgeEventsWithHandler(client.Events())
 		}()
+	} else if !endpointsEqual(p.boundEndpt, cfg.LLMEndpoint) {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("gemini: LLMEndpoint changed across Execute calls (bound=%q, requested=%q); recreate the provider to switch endpoints",
+			p.boundEndpt.BaseURL, cfg.LLMEndpoint.BaseURL)
 	}
 	client := p.client
 	p.mu.Unlock()
@@ -122,7 +136,7 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return nil, promptErr
 	}
 
-	return acpResultToAgentResult(result), nil
+	return nonNilAgentResult(acpResultToAgentResult(result)), nil
 }
 
 // drainHandlerEvents waits for the TurnComplete event (or a short timeout),
@@ -285,7 +299,7 @@ func (p *GeminiLongRunningProvider) SendMessage(ctx context.Context, message str
 		return nil, err
 	}
 
-	return acpResultToAgentResult(result), nil
+	return nonNilAgentResult(acpResultToAgentResult(result)), nil
 }
 
 func (p *GeminiLongRunningProvider) Stop() error {

@@ -290,7 +290,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return partial, err
 	}
 
-	agentResult := claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason)
+	agentResult := nonNilAgentResult(claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason))
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
 	}
@@ -338,7 +338,7 @@ func (p *ClaudeLongRunningProvider) SendMessage(ctx context.Context, message str
 	if err != nil {
 		return nil, err
 	}
-	return ClaudeResultToAgentResult(result), nil
+	return nonNilAgentResult(ClaudeResultToAgentResult(result)), nil
 }
 
 func (p *ClaudeLongRunningProvider) Stop() error {

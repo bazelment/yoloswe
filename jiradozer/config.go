@@ -69,11 +69,12 @@ type AgentConfig struct {
 // Prefer api_key_env over api_key so the literal key never lands in the
 // config file.
 type LLMEndpointConfig struct {
-	BaseURL      string `yaml:"base_url"`      // e.g. "https://inference.baseten.co/v1"
-	APIKey       string `yaml:"api_key"`       // resolved literal (avoid; use api_key_env)
-	APIKeyEnv    string `yaml:"api_key_env"`   // env var holding the key (e.g. "BASETEN_API_KEY")
-	ProviderName string `yaml:"provider_name"` // codex model_providers.<name>; default "custom"
-	WireAPI      string `yaml:"wire_api"`      // "chat" (default, OpenAI-compat) | "responses"
+	Headers      map[string]string `yaml:"headers"`       // optional extra HTTP headers (only honored where the wrapper supports them, e.g. codex http_headers)
+	BaseURL      string            `yaml:"base_url"`      // e.g. "https://inference.baseten.co/v1"
+	APIKey       string            `yaml:"api_key"`       // resolved literal (avoid; use api_key_env)
+	APIKeyEnv    string            `yaml:"api_key_env"`   // env var holding the key (e.g. "BASETEN_API_KEY")
+	ProviderName string            `yaml:"provider_name"` // codex model_providers.<name>; default "custom"
+	WireAPI      string            `yaml:"wire_api"`      // "chat" (default, OpenAI-compat) | "responses"
 }
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
@@ -228,6 +229,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent.effort: %w", err)
 		}
 	}
+	if err := c.Agent.LLMEndpoint.ToEndpoint().Validate(); err != nil {
+		return fmt.Errorf("agent.llm_endpoint: %w", err)
+	}
 	skipPhases, err := NormalizeSkipPhases(c.SkipPhases)
 	if err != nil {
 		return fmt.Errorf("skip_phases: %w", err)
@@ -329,6 +333,9 @@ func validateStep(name string, step *StepConfig) error {
 		if _, err := agent.ParseEffort(step.Effort); err != nil {
 			return fmt.Errorf("%s.effort: %w", name, err)
 		}
+	}
+	if err := step.LLMEndpoint.ToEndpoint().Validate(); err != nil {
+		return fmt.Errorf("%s.llm_endpoint: %w", name, err)
 	}
 	// IdleTimeout treats 0 as "watchdog disabled by config"; negative
 	// values would silently get the same behavior at runWatchdog,
@@ -496,6 +503,7 @@ func (l *LLMEndpointConfig) ToEndpoint() llmendpoint.Endpoint {
 		APIKeyEnv:    l.APIKeyEnv,
 		ProviderName: l.ProviderName,
 		Wire:         llmendpoint.WireAPI(l.WireAPI),
+		Headers:      l.Headers,
 	}
 }
 
@@ -512,6 +520,7 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		PermissionMode:   parent.PermissionMode,
 		Effort:           parent.Effort,
 		TransientRetries: parent.TransientRetries,
+		LLMEndpoint:      parent.LLMEndpoint,
 	}
 	if round.Model != "" {
 		resolved.Model = round.Model

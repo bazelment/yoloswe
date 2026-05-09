@@ -62,7 +62,10 @@ const (
 )
 
 // TestLLMEndpoint_Baseten runs WithLLMEndpoint smoke against Baseten's
-// Kimi-K2.6 deployment for every wrapper that supports a custom endpoint.
+// Kimi-K2.6 deployment for the wrappers whose CLIs currently honor a
+// custom endpoint at runtime. Today that's claude and codex; gemini and
+// cursor have compile-time guards (below) but no runtime subtests because
+// their CLIs ignore endpoint env vars when targeting non-native models.
 // Each subtest skips (not fails) when its prerequisites aren't met.
 func TestLLMEndpoint_Baseten(t *testing.T) {
 	apiKey := os.Getenv(basetenAPIKeyEnv)

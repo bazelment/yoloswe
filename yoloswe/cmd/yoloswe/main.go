@@ -323,6 +323,11 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 			return err
 		}
 	}
+	if flags.llmAPIKey != "" {
+		fmt.Fprintln(os.Stderr,
+			"warning: --llm-api-key passes the secret via argv (visible in shell history "+
+				"and `ps` listings); prefer --llm-api-key-env for shared/CI environments.")
+	}
 	app.Logger.Info("codetalk", "backend", flags.backend, "model", flags.model, "endpoint", ep.String())
 
 	backend := strings.ToLower(flags.backend)

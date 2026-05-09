@@ -274,6 +274,18 @@ func WithProviderLLMEndpoint(ep llmendpoint.Endpoint) ExecuteOption {
 	return func(c *ExecuteConfig) { c.LLMEndpoint = ep }
 }
 
+// nonNilAgentResult coerces a possibly-nil AgentResult into a non-nil one so
+// Provider.Execute / SendMessage callers can rely on (result, err==nil) →
+// result != nil. Provider-specific result conversion helpers return nil when
+// the underlying SDK returned a nil turn result; without this coercion the
+// (nil, nil) tuple would panic any caller that dereferences the result.
+func nonNilAgentResult(r *AgentResult) *AgentResult {
+	if r != nil {
+		return r
+	}
+	return &AgentResult{}
+}
+
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.
 func applyOptions(opts []ExecuteOption) ExecuteConfig {
 	cfg := ExecuteConfig{

@@ -190,8 +190,10 @@ func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
 		}
 
 		// Disable features whose tool schemas third-party Responses
-		// providers reject. Must precede `app-server` (these are global
-		// codex flags, not subcommand flags).
+		// providers reject. `--disable` is an `app-server` subcommand
+		// option (see `codex app-server --help`), so appending here is
+		// correct: process.go assembles the command as
+		// `codex app-server <AppServerArgs...>`.
 		for _, f := range thirdPartyIncompatibleFeatures {
 			c.AppServerArgs = append(c.AppServerArgs, "--disable", f)
 		}

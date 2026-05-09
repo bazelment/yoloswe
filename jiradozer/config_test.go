@@ -577,6 +577,21 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	assert.Equal(t, 3, resolved.MaxToolErrorRetries)
 }
 
+func TestResolveRound_InheritsLLMEndpoint(t *testing.T) {
+	parent := StepConfig{
+		Model: "sonnet",
+		LLMEndpoint: &LLMEndpointConfig{
+			BaseURL:   "https://inference.baseten.co/v1",
+			APIKeyEnv: "BASETEN_API_KEY",
+		},
+	}
+	round := RoundConfig{Prompt: "do stuff"}
+	resolved := ResolveRound(round, parent)
+	require.NotNil(t, resolved.LLMEndpoint, "expected LLMEndpoint to be inherited from parent step")
+	assert.Equal(t, "https://inference.baseten.co/v1", resolved.LLMEndpoint.BaseURL)
+	assert.Equal(t, "BASETEN_API_KEY", resolved.LLMEndpoint.APIKeyEnv)
+}
+
 func TestResolveRound_OverridesStep(t *testing.T) {
 	parent := StepConfig{
 		Model:          "sonnet",
