@@ -858,6 +858,7 @@ def state_finalize_round(
     actions: list[dict[str, Any]],
     *,
     envelope_overrides: dict[str, Path] | None = None,
+    auto_reply: bool = True,
 ) -> dict[str, Any]:
     """Finalize a round and persist its results.
 
@@ -865,6 +866,12 @@ def state_finalize_round(
     Monitor captured for that backend (canonically
     ``$STATE_DIR/r<n>/<backend>-envelope.json``). Backends absent from the
     mapping are skipped — finalize hydrates only what was actually run.
+
+    ``auto_reply`` posts a GitHub inline reply on every github-inline row
+    whose action ∈ {fixed, stale, false_positive, wont_fix} and which
+    doesn't already carry a ``reply_url``. The resulting URL (or per-row
+    ``reply_error`` on failure) is written back into the persisted action
+    entry. Idempotent across re-runs. Disable for tests / dry-run flows.
     """
     pr_number, branch = _resolve_ctx(ctx)
     state_dir, path = state_paths(pr_number, branch=branch)
@@ -877,12 +884,114 @@ def state_finalize_round(
         raise RuntimeError(f"round {n} not found in state")
     existing = entry.get("comment_actions") or []
     merged = _merge_actions(existing, actions)
+    if auto_reply and pr_number is not None:
+        _post_inline_replies(merged, pr_number, head_after)
     entry["comment_actions"] = merged
     entry["head_after"] = head_after
     entry.update(recompute_counts(merged))
     _persist_round_findings(state_dir, entry, pr_number, branch, n, envelope_overrides or {})
     atomic_write_json(path, state)
     return state
+
+
+# Action verbs eligible for an auto-reply on the inline comment they
+# triaged. ``ack`` is intentionally omitted: low/nit batch acks would
+# generate notification spam without giving the bot useful signal.
+_AUTO_REPLY_ACTIONS = ("fixed", "stale", "false_positive", "wont_fix")
+
+
+def _reply_body(action: dict[str, Any], head_after: str) -> str:
+    """Render the auto-reply body for one comment_actions row.
+
+    Bodies match the contract in SKILL.md Step 3.d so consumers (bots,
+    humans skimming a PR thread) can grep for the marker phrase. The
+    short SHA is the round's head_after — the commit that the round's
+    fixes actually landed in.
+    """
+    short_sha = (head_after or "")[:7]
+    verb = action.get("action")
+    reason = (action.get("reason") or "").strip()
+    if verb == "fixed":
+        return f"Fixed in {short_sha}." if short_sha else "Fixed."
+    if verb == "stale":
+        if short_sha:
+            return (
+                f"Superseded by {short_sha} — the cited code was changed/removed "
+                "in a later commit. (Auto-reply from /pr-polish.)"
+            )
+        return (
+            "Superseded — the cited code was changed/removed in a later commit. "
+            "(Auto-reply from /pr-polish.)"
+        )
+    if verb == "false_positive":
+        tail = f": {reason}" if reason else ""
+        return f"Marked false positive{tail}. (Auto-reply from /pr-polish.)"
+    if verb == "wont_fix":
+        tail = f": {reason}" if reason else ""
+        return f"Won't fix{tail}. (Auto-reply from /pr-polish.)"
+    return ""
+
+
+def _post_inline_replies(
+    actions: list[dict[str, Any]], pr_number: int, head_after: str
+) -> None:
+    """Post auto-replies on github-inline rows; mutate ``actions`` in place.
+
+    Side-effect: every row that gets a successful reply gains a
+    ``reply_url`` key; rows whose POST fails gain a ``reply_error`` key
+    (the next finalize attempt retries). Rows already carrying a
+    ``reply_url`` are skipped — idempotent across replays. Failures
+    are stderr-warned but never raised: the loss of one bot reply must
+    not block finalize for the rest of the round.
+    """
+    eligible = [
+        a
+        for a in actions
+        if a.get("source") == "github-inline"
+        and a.get("action") in _AUTO_REPLY_ACTIONS
+        and not a.get("reply_url")
+        and a.get("comment_id") is not None
+    ]
+    if not eligible:
+        return
+    # Resolve owner/repo once. If gh isn't usable here, mark each row's
+    # reply_error and bail rather than crashing finalize.
+    try:
+        _, _, owner_repo = _owner_repo()
+    except Exception as e:  # noqa: BLE001 — gh failure must not brick finalize
+        msg = f"_owner_repo failed: {e}"
+        print(f"pr_ops: auto-reply skipped — {msg}", file=sys.stderr)
+        for a in eligible:
+            a["reply_error"] = msg
+        return
+    for a in eligible:
+        body = _reply_body(a, head_after)
+        if not body:
+            continue
+        try:
+            res = reply_inline(owner_repo, pr_number, int(a["comment_id"]), body)
+        except Exception as e:  # noqa: BLE001 — rate limits / deleted comments / network
+            msg = str(e)
+            a["reply_error"] = msg
+            print(
+                f"pr_ops: reply-inline comment_id={a.get('comment_id')} failed: {msg}",
+                file=sys.stderr,
+            )
+            continue
+        url = (
+            res.get("html_url")
+            or res.get("url")
+            or (
+                f"https://github.com/{owner_repo}/pull/{pr_number}#discussion_r{a['comment_id']}"
+                if res
+                else None
+            )
+        )
+        if url:
+            a["reply_url"] = url
+            # Clear any prior reply_error left by an earlier failed
+            # finalize attempt — the retry succeeded.
+            a.pop("reply_error", None)
 
 
 def _persist_round_findings(
@@ -1057,6 +1166,57 @@ def _utc_now() -> str:
 # ---------------------------------------------------------------------------
 
 
+def remote_head(branch: str) -> dict[str, Any]:
+    """Return the current ``HEAD`` SHA of ``origin/<branch>`` from the remote.
+
+    Uses ``git ls-remote`` rather than ``git rev-parse origin/<branch>``:
+    in bare-repo / worktree setups, the local ``origin/<branch>`` ref can
+    lag the remote even after a successful push (memory:
+    ``feedback_force_with_lease_in_worktrees``). ``ls-remote`` is the
+    only reliable way to ask "what does the remote currently hold?"
+    without a prior fetch.
+
+    Returns a dict with::
+        {
+            "branch": "<branch>",
+            "local_head": "<sha-or-empty>",     # git rev-parse HEAD
+            "remote_head": "<sha-or-empty>",    # git ls-remote origin refs/heads/<branch>
+            "in_sync": <bool>,                  # local == remote (both non-empty)
+            "remote_present": <bool>,           # remote has the branch at all
+        }
+    """
+    try:
+        local = run(["git", "rev-parse", "HEAD"], check=True).stdout.strip()
+    except (CommandError, FileNotFoundError):
+        local = ""
+    try:
+        ls = run(
+            ["git", "ls-remote", "origin", f"refs/heads/{branch}"], check=False
+        )
+    except FileNotFoundError:
+        return {
+            "branch": branch,
+            "local_head": local,
+            "remote_head": "",
+            "in_sync": False,
+            "remote_present": False,
+        }
+    remote = ""
+    if ls.returncode == 0:
+        # ls-remote output: "<sha>\trefs/heads/<branch>\n" or empty when
+        # the branch doesn't exist on the remote.
+        first = ls.stdout.splitlines()[:1]
+        if first:
+            remote = first[0].split()[0].strip()
+    return {
+        "branch": branch,
+        "local_head": local,
+        "remote_head": remote,
+        "in_sync": bool(local) and bool(remote) and local == remote,
+        "remote_present": bool(remote),
+    }
+
+
 def reply_inline(owner_repo: str, pr: int, comment_id: int, body: str) -> dict[str, Any]:
     # Pipe JSON via stdin rather than `-f body=...`: gh treats values starting
     # with `@` as file references, so a comment body starting with `@` would
@@ -1099,6 +1259,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("comment-pr")
     sp.add_argument("body")
+
+    sp = sub.add_parser(
+        "remote-head",
+        help=(
+            "Compare local HEAD to origin/<branch> via git ls-remote (not "
+            "rev-parse origin/<branch>, which lags in worktrees). Emits "
+            "{local_head, remote_head, in_sync, remote_present}."
+        ),
+    )
+    sp.add_argument("branch")
 
     sp = sub.add_parser("ci-failed-tests")
     sp.add_argument("--pr", type=int)
@@ -1195,6 +1365,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("comment-pr requires a PR; current branch has none")
             url = comment_pr(pr["pr_number"], args.body)
             print_json({"url": url})
+        elif args.cmd == "remote-head":
+            print_json(remote_head(args.branch))
         elif args.cmd == "ci-failed-tests":
             pr_number = args.pr if args.pr is not None else identify_pr().get("pr_number")
             if pr_number is None:

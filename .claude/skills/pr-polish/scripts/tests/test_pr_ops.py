@@ -1495,5 +1495,242 @@ class TestReplyInlineSafeBody(unittest.TestCase):
 
 
 
+class TestRemoteHead(unittest.TestCase):
+    """Series-boundary detection prefers `git ls-remote refs/heads/<branch>`
+    over `git rev-parse origin/<branch>` because the latter lags in
+    worktrees (existing memory: feedback_force_with_lease_in_worktrees).
+    Round 13 of pr-polish surfaced this when git-sync had pushed during
+    the run but origin/<branch> still pointed at the pre-push SHA,
+    confusing the operator about whether to push again."""
+
+    def test_in_sync_when_remote_matches_local(self) -> None:
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="abc123\n", stderr="", returncode=0)
+            if cmd[:2] == ["git", "ls-remote"]:
+                return _common.RunResult(
+                    stdout="abc123\trefs/heads/feature/foo\n",
+                    stderr="",
+                    returncode=0,
+                )
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            out = pr_ops.remote_head("feature/foo")
+        self.assertEqual(out["local_head"], "abc123")
+        self.assertEqual(out["remote_head"], "abc123")
+        self.assertTrue(out["in_sync"])
+        self.assertTrue(out["remote_present"])
+
+    def test_remote_absent_yields_remote_present_false(self) -> None:
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="abc123\n", stderr="", returncode=0)
+            return _common.RunResult(stdout="", stderr="", returncode=0)
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            out = pr_ops.remote_head("feature/foo")
+        self.assertFalse(out["remote_present"])
+        self.assertFalse(out["in_sync"])
+        self.assertEqual(out["remote_head"], "")
+
+    def test_diverged_branch_is_not_in_sync(self) -> None:
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="local-sha\n", stderr="", returncode=0)
+            return _common.RunResult(
+                stdout="remote-sha\trefs/heads/feature/foo\n",
+                stderr="",
+                returncode=0,
+            )
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            out = pr_ops.remote_head("feature/foo")
+        self.assertEqual(out["local_head"], "local-sha")
+        self.assertEqual(out["remote_head"], "remote-sha")
+        self.assertFalse(out["in_sync"])
+        self.assertTrue(out["remote_present"])
+
+    def test_uses_ls_remote_not_rev_parse_origin(self) -> None:
+        # Regression guard: rev-parse origin/<branch> would silently lag in
+        # worktrees. The helper must call ls-remote.
+        called_cmds = []
+
+        def fake_run(cmd, **kwargs):
+            called_cmds.append(list(cmd))
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="abc\n", stderr="", returncode=0)
+            return _common.RunResult(
+                stdout="abc\trefs/heads/main\n", stderr="", returncode=0
+            )
+
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            pr_ops.remote_head("main")
+        kinds = [tuple(c[:2]) for c in called_cmds]
+        self.assertIn(("git", "ls-remote"), kinds)
+        # Must NOT use rev-parse on origin/<branch> — that's the buggy path.
+        for c in called_cmds:
+            if c[:2] == ["git", "rev-parse"]:
+                self.assertNotIn("origin/main", c)
+
+
+class TestAutoReplyInFinalize(unittest.TestCase):
+    """state-finalize-round must post auto-replies on github-inline rows
+    whose action ∈ {fixed, stale, false_positive, wont_fix} that don't
+    already carry a reply_url. Idempotent across replays. Failures are
+    captured as reply_error and never block finalize.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tmp_root = Path(self.tmp.name)
+        self.state_dir = self.tmp_root / "proj-77"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+        def fake_state_paths(pr, branch=None):
+            return self.state_dir, self.state_dir / "pr-polish-state.json"
+
+        p = patch.object(pr_ops, "state_paths", side_effect=fake_state_paths)
+        p.start()
+        self.addCleanup(p.stop)
+
+        # Stub _owner_repo so finalize doesn't shell out to gh.
+        p2 = patch.object(
+            pr_ops, "_owner_repo", return_value=("owner", "repo", "owner/repo")
+        )
+        p2.start()
+        self.addCleanup(p2.stop)
+
+    def _action(self, **kw):
+        base = {
+            "comment_id": kw.get("comment_id", 1001),
+            "source": kw.get("source", "github-inline"),
+            "author": "coderabbitai[bot]",
+            "path": "a.py",
+            "line": 42,
+            "severity": "high",
+            "topic": "missing null check",
+            "action": kw.get("action", "fixed"),
+            "reason": kw.get("reason"),
+            "commit_sha": "abc123f",
+        }
+        base.update(kw)
+        return base
+
+    def test_posts_replies_for_fixed_inline_rows(self) -> None:
+        calls = []
+
+        def fake_reply(owner_repo, pr, cid, body):
+            calls.append((owner_repo, pr, cid, body))
+            return {"html_url": f"https://github.com/owner/repo/pull/{pr}#discussion_r{cid}"}
+
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        actions = [self._action(comment_id=2001, action="fixed")]
+        with patch.object(pr_ops, "reply_inline", side_effect=fake_reply):
+            state = pr_ops.state_finalize_round(77, 1, "abc123fdeadbeef", actions)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], 2001)
+        self.assertIn("Fixed in abc123f", calls[0][3])
+        rnd = state["rounds"][0]
+        row = rnd["comment_actions"][0]
+        self.assertTrue(row.get("reply_url", "").startswith("https://github.com/"))
+
+    def test_skips_rows_already_carrying_reply_url(self) -> None:
+        """Replays must not double-post."""
+        calls = []
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        actions = [
+            self._action(
+                comment_id=2002,
+                action="fixed",
+                reply_url="https://github.com/owner/repo/pull/77#discussion_r2002",
+            )
+        ]
+        with patch.object(pr_ops, "reply_inline", side_effect=lambda *a: calls.append(a) or {}):
+            pr_ops.state_finalize_round(77, 1, "sha2", actions)
+        self.assertEqual(calls, [])
+
+    def test_skips_ack_and_non_inline_rows(self) -> None:
+        calls = []
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        actions = [
+            self._action(comment_id=2003, action="ack"),
+            self._action(source="codex", comment_id=None, action="fixed"),
+            self._action(source="github-issue", comment_id=2004, action="fixed"),
+        ]
+        with patch.object(pr_ops, "reply_inline", side_effect=lambda *a: calls.append(a) or {}):
+            pr_ops.state_finalize_round(77, 1, "sha2", actions)
+        # github-issue rows still skipped: only inline review threads
+        # support the /comments/<id>/replies endpoint.
+        self.assertEqual(calls, [])
+
+    def test_records_reply_error_on_failure_without_blocking_finalize(self) -> None:
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        actions = [
+            self._action(comment_id=2005, action="fixed"),
+            self._action(comment_id=2006, action="stale"),
+        ]
+
+        def fake_reply(owner_repo, pr, cid, body):
+            if cid == 2005:
+                raise RuntimeError("rate limit exceeded")
+            return {"html_url": f"https://github.com/owner/repo/pull/{pr}#discussion_r{cid}"}
+
+        with patch.object(pr_ops, "reply_inline", side_effect=fake_reply):
+            state = pr_ops.state_finalize_round(77, 1, "sha2", actions)
+        rows = {r["comment_id"]: r for r in state["rounds"][0]["comment_actions"]}
+        self.assertIn("rate limit", rows[2005].get("reply_error", ""))
+        self.assertNotIn("reply_url", rows[2005])  # failed row left without URL
+        # Other row in same finalize call still posts.
+        self.assertTrue(rows[2006].get("reply_url", "").startswith("https://"))
+
+    def test_retry_on_next_finalize_clears_prior_error(self) -> None:
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        actions_initial = [self._action(comment_id=2007, action="fixed")]
+
+        def fake_fail(*a, **kw):
+            raise RuntimeError("transient")
+
+        with patch.object(pr_ops, "reply_inline", side_effect=fake_fail):
+            pr_ops.state_finalize_round(77, 1, "sha2", actions_initial)
+
+        def fake_ok(owner_repo, pr, cid, body):
+            return {"html_url": f"https://github.com/owner/repo/pull/{pr}#discussion_r{cid}"}
+
+        with patch.object(pr_ops, "reply_inline", side_effect=fake_ok):
+            state = pr_ops.state_finalize_round(77, 1, "sha3", actions_initial)
+        row = state["rounds"][0]["comment_actions"][0]
+        self.assertTrue(row.get("reply_url"))
+        self.assertNotIn("reply_error", row)
+
+    def test_branch_mode_skips_auto_reply(self) -> None:
+        # Branch-only mode (no PR number) has no inline-comment endpoint.
+        # _owner_repo would still resolve, but there's no PR to post to.
+        calls = []
+        pr_ops.state_append_round("branch:foo", 1, "sha", verify_head=False)
+        actions = [self._action(comment_id=2008, action="fixed")]
+        with patch.object(pr_ops, "reply_inline", side_effect=lambda *a: calls.append(a) or {}):
+            pr_ops.state_finalize_round("branch:foo", 1, "sha2", actions)
+        self.assertEqual(calls, [])
+
+    def test_reply_body_shapes(self) -> None:
+        # Direct exercise of the body renderer — golden-shape contract
+        # documented in SKILL.md Step 3.d.
+        body_fixed = pr_ops._reply_body({"action": "fixed"}, "abc123fdeadbeef")
+        self.assertEqual(body_fixed, "Fixed in abc123f.")
+        body_stale = pr_ops._reply_body({"action": "stale"}, "abc123fdeadbeef")
+        self.assertIn("Superseded by abc123f", body_stale)
+        self.assertIn("/pr-polish.", body_stale)
+        body_fp = pr_ops._reply_body(
+            {"action": "false_positive", "reason": "see foo.py:10"}, "abc123fdeadbeef"
+        )
+        self.assertIn("Marked false positive: see foo.py:10", body_fp)
+        body_wf = pr_ops._reply_body(
+            {"action": "wont_fix", "reason": "design tradeoff"}, "abc123fdeadbeef"
+        )
+        self.assertIn("Won't fix: design tradeoff", body_wf)
+
+
 if __name__ == "__main__":
     unittest.main()
