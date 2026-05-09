@@ -107,47 +107,12 @@ ssh remote "cat ~/.bramble/voice-reports/voice-report-latest.txt" | bramble spea
 
 ## Manual Integration Tests Against Third-Party Endpoints
 
-When verifying that a wrapper actually drives a real CLI against a real
-endpoint (rather than just shaping the right env vars / args), follow this
-pattern so the test is reproducible without flake or accidental CI cost:
-
-1. **Gate on a key env var, skip when unset.** Use
-   `if os.Getenv("BASETEN_API_KEY") == "" { t.Skip(...) }` so the test
-   self-disables on machines without credentials. Don't fail-open with a
-   stub key; that masks real outages.
-
-2. **Add the env var to BUILD.bazel `env_inherit`** so it survives the
-   bazel test sandbox. Example: `agent-cli-wrapper/integration/BUILD.bazel`
-   inherits `BASETEN_API_KEY` alongside `HOME` / `PATH`. Pass it explicitly
-   per-invocation: `bazel test ... --test_env=BASETEN_API_KEY`.
-
-3. **Round-trip a unique sentinel token.** Have the model echo a string
-   like `PURPLE-RHINO-42` and assert with case-fold + punctuation-strip
-   tolerance (some models rewrite hyphens as spaces). Sentinel match
-   proves a real round-trip; an empty-string check or a "did it not error"
-   check passes against a stubbed-out CLI.
-
-4. **Compile-time guards on wrapper signatures.** End the test file with
-   `var _ claude.SessionOption = claude.WithLLMEndpoint(...)` etc. so a
-   wrapper signature change fails the build instead of silently degrading
-   the test to a no-op.
-
-5. **Tag `integration` + `manual`** (see "Integration Tests and Gazelle"
-   below) and add a per-subtest `exec.LookPath` skip so the suite still
-   runs cleanly when only some CLIs are installed.
-
-Reference implementation:
-`agent-cli-wrapper/integration/llmendpoint_test.go` (`TestLLMEndpoint_Baseten`).
-
-Run example:
-```
-BASETEN_API_KEY=... bazel test \
-    //agent-cli-wrapper/integration:integration_test \
-    --test_filter=TestLLMEndpoint_Baseten \
-    --test_tag_filters=integration \
-    --test_env=BASETEN_API_KEY \
-    --test_output=streamed
-```
+Pattern for tests that drive a real CLI against a real third-party endpoint:
+gate on a credential env var (skip-not-fail when unset), inherit it via
+`env_inherit` in BUILD.bazel, round-trip a unique sentinel and assert with
+normalized matching, and add `var _ claude.SessionOption = claude.WithLLMEndpoint(...)`
+guards so wrapper signature drift fails the build. Reference:
+`agent-cli-wrapper/integration/llmendpoint_test.go`.
 
 ## Integration Tests and Gazelle
 
