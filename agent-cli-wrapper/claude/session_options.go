@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
@@ -306,14 +307,24 @@ func WithExtraArgs(args ...string) SessionOption {
 }
 
 // WithLLMEndpoint points the Claude CLI at a third-party LLM endpoint by
-// setting ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY in the
-// subprocess environment.
+// setting ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY, and
+// the model-default overrides in the subprocess environment.
 //
 // The Claude CLI expects an Anthropic Messages API shape on the other end of
-// ANTHROPIC_BASE_URL. Pointing it at a raw OpenAI-shaped endpoint (e.g.
-// Baseten, OpenRouter) requires an Anthropic-compatible translation layer
-// (LiteLLM proxy, internal gateway, AWS Bedrock front, etc.). For raw
-// OpenAI-shaped endpoints, use the codex or acp wrappers instead.
+// ANTHROPIC_BASE_URL. Some third-party endpoints expose this (e.g. Baseten
+// at /v1/messages); raw OpenAI-shaped endpoints need an Anthropic-compatible
+// translation layer (LiteLLM, AWS Bedrock front, etc.).
+//
+// Conventions and gotchas:
+//   - Trailing /v1 is stripped from BaseURL: Claude CLI appends /v1/messages
+//     itself. Passing https://x/v1 as-is yields /v1/v1/messages → 404.
+//   - Claude CLI makes side calls (preflight + post-turn summary) using a
+//     hardcoded haiku model id. We override ANTHROPIC_DEFAULT_{HAIKU,SONNET,
+//     OPUS}_MODEL and ANTHROPIC_SMALL_FAST_MODEL to the user-selected model
+//     so those side calls don't 404 against an endpoint that only serves a
+//     single model.
+//   - We set both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY: some proxies
+//     expect Bearer, others x-api-key.
 //
 // Existing entries in SessionConfig.Env are preserved; this option only sets
 // keys it owns. Passing a zero Endpoint is a no-op.
@@ -323,18 +334,23 @@ func WithLLMEndpoint(ep llmendpoint.Endpoint) SessionOption {
 			return
 		}
 		if c.Env == nil {
-			c.Env = make(map[string]string, 3)
+			c.Env = make(map[string]string, 8)
 		}
 		if ep.BaseURL != "" {
-			c.Env["ANTHROPIC_BASE_URL"] = ep.BaseURL
+			// Claude CLI auto-appends /v1/messages; strip a trailing /v1 to
+			// avoid /v1/v1/messages 404s.
+			base := strings.TrimRight(ep.BaseURL, "/")
+			base = strings.TrimSuffix(base, "/v1")
+			c.Env["ANTHROPIC_BASE_URL"] = base
 		}
 		if key := ep.ResolvedKey(); key != "" {
-			// Set both: Claude CLI honors AUTH_TOKEN for OAuth-style proxies
-			// and API_KEY for direct API access. Some proxies expect one,
-			// some the other; setting both maximizes compatibility.
 			c.Env["ANTHROPIC_AUTH_TOKEN"] = key
 			c.Env["ANTHROPIC_API_KEY"] = key
 		}
+		// process.go (Start()) auto-pins ANTHROPIC_*_MODEL defaults to
+		// SessionConfig.Model when a third-party endpoint is configured, so
+		// claude-cli's preflight + post-turn side calls don't 404 against an
+		// endpoint that only serves the user-selected model.
 	}
 }
 
