@@ -295,7 +295,7 @@ endpoints.`,
 	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Recording directory (default: ~/.yoloswe)")
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
 	cmd.Flags().StringVar(&flags.llmBaseURL, "llm-base-url", "", "Custom LLM endpoint base URL")
-	cmd.Flags().StringVar(&flags.llmAPIKey, "llm-api-key", "", "Custom LLM API key (prefer --llm-api-key-env)")
+	cmd.Flags().StringVar(&flags.llmAPIKey, "llm-api-key", "", "Custom LLM API key — UNSAFE on shared/CI hosts (visible in shell history and `ps`); prefer --llm-api-key-env")
 	cmd.Flags().StringVar(&flags.llmAPIKeyEnv, "llm-api-key-env", "", "Env var name holding the LLM API key (e.g. BASETEN_API_KEY)")
 	cmd.Flags().StringVar(&flags.llmProviderName, "llm-provider-name", "", "Provider name label (codex model_providers.<name>)")
 	cmd.Flags().StringVar(&flags.llmWireAPI, "llm-wire-api", "chat", "Wire API: chat (OpenAI-compatible) or responses")

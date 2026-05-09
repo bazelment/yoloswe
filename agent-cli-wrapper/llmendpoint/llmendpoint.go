@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strings"
+	"regexp"
 )
 
 // WireAPI identifies the request/response shape spoken by the endpoint.
@@ -70,6 +70,19 @@ func (e Endpoint) IsZero() bool {
 	return e.BaseURL == "" && e.APIKey == "" && e.APIKeyEnv == ""
 }
 
+// providerNameRE accepts identifiers safe to interpolate into codex's
+// `model_providers.<name>.*` config-path segments without quoting: ASCII
+// letters/digits plus '_' and '-'. Anything else (spaces, dots, slashes,
+// quotes, shell metachars) is rejected at config-load time so we never
+// emit invalid `--config` args.
+var providerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// headerNameRE is the RFC 7230 token grammar: visible ASCII minus separators.
+// Codex interpolates header keys into `http_headers.<key>=...` config paths,
+// and downstream HTTP clients reject CR/LF-laden names anyway, so it's safer
+// to fail loudly at config-load than to discover the malformed arg later.
+var headerNameRE = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]+$`)
+
 // Validate reports configuration errors. A zero Endpoint validates as nil.
 func (e Endpoint) Validate() error {
 	if e.IsZero() {
@@ -85,14 +98,22 @@ func (e Endpoint) Validate() error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("llmendpoint: BaseURL must be http(s), got %q", u.Scheme)
 	}
+	if u.Host == "" {
+		return fmt.Errorf("llmendpoint: BaseURL %q is missing a host", e.BaseURL)
+	}
 	if e.APIKey == "" && e.APIKeyEnv == "" {
 		return errors.New("llmendpoint: either APIKey or APIKeyEnv must be set")
 	}
 	if e.Wire != "" && e.Wire != WireAPIChat && e.Wire != WireAPIResponses {
 		return fmt.Errorf("llmendpoint: unknown wire api %q", e.Wire)
 	}
-	if e.ProviderName != "" && strings.ContainsAny(e.ProviderName, ` "'.\`) {
-		return fmt.Errorf("llmendpoint: invalid ProviderName %q", e.ProviderName)
+	if e.ProviderName != "" && !providerNameRE.MatchString(e.ProviderName) {
+		return fmt.Errorf("llmendpoint: invalid ProviderName %q (allowed: A-Za-z0-9_-)", e.ProviderName)
+	}
+	for k := range e.Headers {
+		if !headerNameRE.MatchString(k) {
+			return fmt.Errorf("llmendpoint: invalid header name %q", k)
+		}
 	}
 	return nil
 }

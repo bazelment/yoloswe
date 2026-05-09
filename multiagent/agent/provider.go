@@ -266,10 +266,13 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 }
 
 // WithProviderLLMEndpoint points the underlying CLI at a third-party LLM API
-// endpoint. Claude/cursor/gemini providers apply the endpoint per-execution.
-// The codex provider applies it at client construction time (the first
-// Execute call), since `--config` overrides are passed to `app-server` at
-// boot — subsequent Execute calls reuse the same client and ignore changes.
+// endpoint. Claude and cursor apply the endpoint per-execution. Codex and
+// gemini bind it at client construction time (the first Execute call), since
+// `--config` overrides / acp BinaryArgs are passed to the subprocess at boot
+// — subsequent Execute calls reuse the same client and reject divergent
+// endpoints with an explicit error rather than silently routing to the
+// originally-bound endpoint. To switch endpoints on a codex/gemini provider,
+// construct a fresh provider.
 func WithProviderLLMEndpoint(ep llmendpoint.Endpoint) ExecuteOption {
 	return func(c *ExecuteConfig) { c.LLMEndpoint = ep }
 }

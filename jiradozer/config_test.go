@@ -577,6 +577,146 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	assert.Equal(t, 3, resolved.MaxToolErrorRetries)
 }
 
+// loadConfigFromYAML writes a YAML body to a temp file and loads it. Used by
+// the LLM-endpoint negative tests below; keeping the bytes inline avoids a
+// proliferation of one-off testdata fixtures for each malformed shape.
+func loadConfigFromYAML(t *testing.T, body string) (*Config, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0644))
+	return LoadConfig(path)
+}
+
+const validBaseSteps = `
+plan:
+  prompt: "Plan"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+create_pr:
+  prompt: "Open PR"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+validate:
+  prompt: "Test"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+ship:
+  prompt: "Ship"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+`
+
+func TestLoadConfig_RejectsMalformedAgentLLMEndpoint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name: "missing base url",
+			body: `
+tracker: {kind: linear, api_key: x}
+agent:
+  model: sonnet
+  llm_endpoint:
+    api_key_env: BASETEN_API_KEY
+` + validBaseSteps,
+			wantErr: "agent.llm_endpoint",
+		},
+		{
+			name: "bad scheme",
+			body: `
+tracker: {kind: linear, api_key: x}
+agent:
+  model: sonnet
+  llm_endpoint:
+    base_url: ftp://example.com
+    api_key_env: BASETEN_API_KEY
+` + validBaseSteps,
+			wantErr: "must be http(s)",
+		},
+		{
+			name: "hostless url",
+			body: `
+tracker: {kind: linear, api_key: x}
+agent:
+  model: sonnet
+  llm_endpoint:
+    base_url: "https:///v1"
+    api_key_env: BASETEN_API_KEY
+` + validBaseSteps,
+			wantErr: "missing a host",
+		},
+		{
+			name: "bad provider name",
+			body: `
+tracker: {kind: linear, api_key: x}
+agent:
+  model: sonnet
+  llm_endpoint:
+    base_url: https://example.com
+    api_key_env: BASETEN_API_KEY
+    provider_name: "has space"
+` + validBaseSteps,
+			wantErr: "invalid ProviderName",
+		},
+		{
+			name: "bad header name",
+			body: `
+tracker: {kind: linear, api_key: x}
+agent:
+  model: sonnet
+  llm_endpoint:
+    base_url: https://example.com
+    api_key_env: BASETEN_API_KEY
+    headers:
+      "X Custom Header": value
+` + validBaseSteps,
+			wantErr: "invalid header name",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := loadConfigFromYAML(t, tc.body)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestLoadConfig_RejectsMalformedStepLLMEndpoint(t *testing.T) {
+	t.Parallel()
+	body := `
+tracker: {kind: linear, api_key: x}
+agent:
+  model: sonnet
+plan:
+  prompt: "Plan"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+  llm_endpoint:
+    base_url: ftp://example.com
+    api_key_env: X
+build:
+  prompt: "Build"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+create_pr:
+  prompt: "PR"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+validate:
+  prompt: "T"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+ship:
+  prompt: "S"
+  comment_template: "## {{.Heading}}\n\n{{.Output}}"
+`
+	_, err := loadConfigFromYAML(t, body)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.llm_endpoint")
+	assert.Contains(t, err.Error(), "must be http(s)")
+}
+
 func TestResolveRound_InheritsLLMEndpoint(t *testing.T) {
 	parent := StepConfig{
 		Model: "sonnet",

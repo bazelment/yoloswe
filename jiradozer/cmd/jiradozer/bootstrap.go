@@ -442,6 +442,8 @@ agent:
     #    api_key_env: BASETEN_API_KEY    # prefer over api_key
     #    provider_name: baseten
     #    wire_api: chat                  # "chat" (OpenAI-compat) or "responses"
+    #    headers:                        # optional extra HTTP headers (codex only)
+    #        X-Custom-Header: value
 
 `
 

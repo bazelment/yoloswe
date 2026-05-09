@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
 type recordingHandler struct { //nolint:govet // fieldalignment: test fixture readability
@@ -267,6 +268,76 @@ func TestCodexTurnOptions_WiresAllValidLevels(t *testing.T) {
 			assert.Equal(t, string(level), cfg.Effort)
 		})
 	}
+}
+
+func TestEndpointsEqual_CanonicalizesDefaults(t *testing.T) {
+	t.Parallel()
+	// Empty Wire and empty ProviderName resolve to "chat" / "custom" via the
+	// canonical accessors, so they must compare equal to their explicit-default
+	// counterparts. Otherwise the divergence guard in CodexProvider.Execute would
+	// spuriously reject a second Execute call that re-uses the same endpoint
+	// shape but happens to spell out the defaults.
+	a := llmendpoint.Endpoint{BaseURL: "https://x", APIKeyEnv: "K"}
+	b := llmendpoint.Endpoint{
+		BaseURL:      "https://x",
+		APIKeyEnv:    "K",
+		ProviderName: llmendpoint.DefaultProviderName,
+		Wire:         llmendpoint.WireAPIChat,
+	}
+	assert.True(t, endpointsEqual(a, b), "implicit defaults must equal explicit defaults")
+}
+
+func TestEndpointsEqual_DivergentFieldsAreUnequal(t *testing.T) {
+	t.Parallel()
+	base := llmendpoint.Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+	}
+	cases := []struct {
+		mut  func(*llmendpoint.Endpoint)
+		name string
+	}{
+		{func(e *llmendpoint.Endpoint) { e.BaseURL = "https://y" }, "different base url"},
+		{func(e *llmendpoint.Endpoint) { e.APIKey = "k1" }, "different api key"},
+		{func(e *llmendpoint.Endpoint) { e.APIKeyEnv = "K2" }, "different api key env"},
+		{func(e *llmendpoint.Endpoint) { e.ProviderName = "baseten" }, "different provider name"},
+		{func(e *llmendpoint.Endpoint) { e.Wire = llmendpoint.WireAPIResponses }, "different wire"},
+		{func(e *llmendpoint.Endpoint) { e.Headers = map[string]string{"X-A": "1"} }, "extra header"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mutated := base
+			tc.mut(&mutated)
+			assert.False(t, endpointsEqual(base, mutated), "expected unequal after %s", tc.name)
+		})
+	}
+}
+
+func TestEndpointsEqual_HeaderEqualityIsOrderIndependent(t *testing.T) {
+	t.Parallel()
+	a := llmendpoint.Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+		Headers:   map[string]string{"X-A": "1", "X-B": "2"},
+	}
+	b := llmendpoint.Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+		Headers:   map[string]string{"X-B": "2", "X-A": "1"},
+	}
+	assert.True(t, endpointsEqual(a, b))
+}
+
+func TestNonNilAgentResult_CoercesNil(t *testing.T) {
+	t.Parallel()
+	got := nonNilAgentResult(nil)
+	require.NotNil(t, got, "nonNilAgentResult must never return nil")
+	assert.Equal(t, &AgentResult{}, got)
+
+	in := &AgentResult{Text: "hello", Success: true}
+	assert.Same(t, in, nonNilAgentResult(in), "non-nil input should pass through unchanged")
 }
 
 func TestCodexApprovalPolicyForPermissionMode(t *testing.T) {

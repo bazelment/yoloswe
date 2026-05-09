@@ -206,10 +206,14 @@ func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 }
 
 // endpointsEqual reports whether two endpoints would produce the same codex
-// client configuration. Headers are order-independent.
+// client configuration. ProviderName and Wire are compared via the canonical
+// accessors so an empty Wire ("" → "chat") and an empty ProviderName ("" →
+// "custom") compare equal to their explicit-default counterparts; the codex
+// args this method gates on are derived from the same accessors, so raw-field
+// comparison would over-trigger the divergence error.
 func endpointsEqual(a, b llmendpoint.Endpoint) bool {
 	if a.BaseURL != b.BaseURL || a.APIKey != b.APIKey || a.APIKeyEnv != b.APIKeyEnv ||
-		a.ProviderName != b.ProviderName || a.Wire != b.Wire {
+		a.Provider() != b.Provider() || a.WireAPI() != b.WireAPI() {
 		return false
 	}
 	if len(a.Headers) != len(b.Headers) {

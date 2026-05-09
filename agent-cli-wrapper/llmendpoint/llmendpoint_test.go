@@ -49,9 +49,45 @@ func TestEndpoint_Validate(t *testing.T) {
 			wantErr: "unknown wire api",
 		},
 		{
-			name:    "bad provider name",
+			name:    "bad provider name (space)",
 			ep:      Endpoint{BaseURL: "https://example.com", APIKeyEnv: "X", ProviderName: "has space"},
 			wantErr: "invalid ProviderName",
+		},
+		{
+			name:    "bad provider name (dot would unquote into nested config segment)",
+			ep:      Endpoint{BaseURL: "https://example.com", APIKeyEnv: "X", ProviderName: "a.b"},
+			wantErr: "invalid ProviderName",
+		},
+		{
+			name:    "hostless URL",
+			ep:      Endpoint{BaseURL: "https:///v1", APIKeyEnv: "X"},
+			wantErr: "missing a host",
+		},
+		{
+			name: "ok with simple headers",
+			ep: Endpoint{
+				BaseURL:   "https://example.com",
+				APIKeyEnv: "X",
+				Headers:   map[string]string{"X-Org": "acme"},
+			},
+		},
+		{
+			name: "bad header name (space)",
+			ep: Endpoint{
+				BaseURL:   "https://example.com",
+				APIKeyEnv: "X",
+				Headers:   map[string]string{"X Org": "acme"},
+			},
+			wantErr: "invalid header name",
+		},
+		{
+			name: "bad header name (CRLF injection)",
+			ep: Endpoint{
+				BaseURL:   "https://example.com",
+				APIKeyEnv: "X",
+				Headers:   map[string]string{"X-Org\r\nInjected": "acme"},
+			},
+			wantErr: "invalid header name",
 		},
 	}
 	for _, tc := range cases {
