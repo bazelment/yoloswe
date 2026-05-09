@@ -91,11 +91,14 @@ func (e Endpoint) hasOnlyDecorations() bool {
 // emit invalid `--config` args.
 var providerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// headerNameRE is the RFC 7230 token grammar: visible ASCII minus separators.
-// Codex interpolates header keys into `http_headers.<key>=...` config paths,
-// and downstream HTTP clients reject CR/LF-laden names anyway, so it's safer
-// to fail loudly at config-load than to discover the malformed arg later.
-var headerNameRE = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]+$`)
+// headerNameRE matches header names that are safe to interpolate into codex's
+// `model_providers.<name>.http_headers.<key>=...` config-path segments without
+// quoting. RFC 7230 allows a much wider token set, but codex's TOML parser
+// would reject any of the punctuation (`!#$%&'*+.^|~`) that's legal under
+// RFC 7230 in a bare path segment, so accepting them here would just turn
+// into a runtime arg error. Hyphens and underscores are the standard HTTP
+// header chars after letters/digits and survive bare TOML keys.
+var headerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Validate reports configuration errors. A zero Endpoint validates as nil.
 // Partial endpoints — e.g. provider_name set without base_url — fail loudly
@@ -138,11 +141,16 @@ func (e Endpoint) Validate() error {
 	return nil
 }
 
-// Redacted returns a copy with APIKey cleared. APIKeyEnv is preserved so logs
-// still indicate where the key came from.
+// Redacted returns a copy with secret-bearing fields cleared: APIKey is
+// dropped and Headers are dropped entirely (keys remain non-secret in
+// String() via the fingerprint, but in Redacted-then-logged contexts we
+// can't make that distinction safely — operators may have stuffed auth
+// tokens into header values). APIKeyEnv is preserved so logs still
+// indicate where the key came from.
 func (e Endpoint) Redacted() Endpoint {
 	out := e.Clone()
 	out.APIKey = ""
+	out.Headers = nil
 	return out
 }
 

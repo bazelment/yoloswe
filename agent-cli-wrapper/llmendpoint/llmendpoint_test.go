@@ -90,6 +90,27 @@ func TestEndpoint_Validate(t *testing.T) {
 			wantErr: "invalid header name",
 		},
 		{
+			// RFC 7230 allows these chars in tokens, but codex's TOML config-path
+			// parser doesn't, so we reject them at Validate to fail at config-load
+			// instead of at codex --config arg time.
+			name: "bad header name (RFC token but unsafe in codex config path)",
+			ep: Endpoint{
+				BaseURL:   "https://example.com",
+				APIKeyEnv: "X",
+				Headers:   map[string]string{"X!Trace": "acme"},
+			},
+			wantErr: "invalid header name",
+		},
+		{
+			name: "bad header name (dot would create a nested config segment)",
+			ep: Endpoint{
+				BaseURL:   "https://example.com",
+				APIKeyEnv: "X",
+				Headers:   map[string]string{"X.Org": "acme"},
+			},
+			wantErr: "invalid header name",
+		},
+		{
 			name:    "partial: only provider name",
 			ep:      Endpoint{ProviderName: "baseten"},
 			wantErr: "partially configured",
@@ -155,6 +176,7 @@ func TestEndpoint_Redacted(t *testing.T) {
 		BaseURL:   "https://inference.baseten.co/v1",
 		APIKey:    "sk-secret",
 		APIKeyEnv: "BASETEN_API_KEY",
+		Headers:   map[string]string{"Authorization": "bearer xyz", "X-Org": "acme"},
 	}
 	out := in.Redacted()
 	if out.APIKey != "" {
@@ -163,7 +185,10 @@ func TestEndpoint_Redacted(t *testing.T) {
 	if out.APIKeyEnv != "BASETEN_API_KEY" {
 		t.Errorf("APIKeyEnv lost: %q", out.APIKeyEnv)
 	}
-	if in.APIKey != "sk-secret" {
+	if out.Headers != nil {
+		t.Errorf("Headers must be cleared (operators may stash secrets in values), got %v", out.Headers)
+	}
+	if in.APIKey != "sk-secret" || in.Headers["Authorization"] != "bearer xyz" {
 		t.Error("Redacted mutated receiver")
 	}
 }

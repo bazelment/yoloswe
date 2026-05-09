@@ -403,20 +403,25 @@ func TestNonNilAgentResult_CoercesNil(t *testing.T) {
 }
 
 // TestProvider_ValidateGate enforces the convention that every Provider.Execute
-// call runs ExecuteConfig.validate() at the top, so a partial endpoint produces
-// a "partially configured" error before any subprocess starts. If a future edit
-// drops `cfg.validate()` from a provider, this test fails for that provider —
-// catching the silent drift cursor flagged on provider.go:319.
+// call runs ExecuteConfig.validate() at the top, so a malformed endpoint
+// produces an error before any subprocess starts. If a future edit drops
+// `cfg.validate()` from a provider, this test fails for that provider.
 //
-// Three partial shapes are covered (provider-only, wire-only, headers-only)
-// to guard against a regression that special-cases one decoration field but
-// not the others.
+// Three partial shapes plus one missing-auth shape are covered. The partial
+// shapes (provider-only, wire-only, headers-only) hit hasOnlyDecorations and
+// must surface "partially configured". The missing-auth shape covers the
+// non-zero / non-decoration validation path so a future regression can't
+// narrow validate() to only the partial branch and still pass this table.
 func TestProvider_ValidateGate(t *testing.T) {
 	t.Parallel()
-	partials := map[string]llmendpoint.Endpoint{
-		"provider-only": {ProviderName: "baseten"},
-		"wire-only":     {Wire: llmendpoint.WireAPIResponses},
-		"headers-only":  {Headers: map[string]string{"X-Org": "acme"}},
+	cases := map[string]struct {
+		ep      llmendpoint.Endpoint
+		wantErr string
+	}{
+		"provider-only":        {llmendpoint.Endpoint{ProviderName: "baseten"}, "partially configured"},
+		"wire-only":            {llmendpoint.Endpoint{Wire: llmendpoint.WireAPIResponses}, "partially configured"},
+		"headers-only":         {llmendpoint.Endpoint{Headers: map[string]string{"X-Org": "acme"}}, "partially configured"},
+		"base-url-without-key": {llmendpoint.Endpoint{BaseURL: "https://example.com/v1"}, "APIKey or APIKeyEnv"},
 	}
 	providerCtors := map[string]func() Provider{
 		"claude": func() Provider { return NewClaudeProvider() },
@@ -424,9 +429,8 @@ func TestProvider_ValidateGate(t *testing.T) {
 		"codex":  func() Provider { return NewCodexProvider() },
 		"gemini": func() Provider { return NewGeminiProvider() },
 	}
-	for shape, ep := range partials {
-		ep := ep
-		shape := shape
+	for shape, tc := range cases {
+		shape, tc := shape, tc
 		t.Run(shape, func(t *testing.T) {
 			t.Parallel()
 			for name, ctor := range providerCtors {
@@ -436,10 +440,10 @@ func TestProvider_ValidateGate(t *testing.T) {
 					p := ctor()
 					defer func() { _ = p.Close() }()
 					_, err := p.Execute(t.Context(), "irrelevant", nil,
-						WithProviderLLMEndpoint(ep))
-					require.Error(t, err, "%s.Execute must reject %s partial endpoint", name, shape)
-					assert.Contains(t, err.Error(), "partially configured",
-						"%s.Execute (%s) error should bubble up Validate's partial-config error", name, shape)
+						WithProviderLLMEndpoint(tc.ep))
+					require.Error(t, err, "%s.Execute must reject %s endpoint", name, shape)
+					assert.Contains(t, err.Error(), tc.wantErr,
+						"%s.Execute (%s) error should contain %q", name, shape, tc.wantErr)
 				})
 			}
 		})
