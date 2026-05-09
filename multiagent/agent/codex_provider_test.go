@@ -407,24 +407,41 @@ func TestNonNilAgentResult_CoercesNil(t *testing.T) {
 // a "partially configured" error before any subprocess starts. If a future edit
 // drops `cfg.validate()` from a provider, this test fails for that provider —
 // catching the silent drift cursor flagged on provider.go:319.
+//
+// Three partial shapes are covered (provider-only, wire-only, headers-only)
+// to guard against a regression that special-cases one decoration field but
+// not the others.
 func TestProvider_ValidateGate(t *testing.T) {
 	t.Parallel()
-	partial := WithProviderLLMEndpoint(llmendpoint.Endpoint{ProviderName: "baseten"})
-	providers := map[string]Provider{
-		"claude": NewClaudeProvider(),
-		"cursor": NewCursorProvider(),
-		"codex":  NewCodexProvider(),
-		"gemini": NewGeminiProvider(),
+	partials := map[string]llmendpoint.Endpoint{
+		"provider-only": {ProviderName: "baseten"},
+		"wire-only":     {Wire: llmendpoint.WireAPIResponses},
+		"headers-only":  {Headers: map[string]string{"X-Org": "acme"}},
 	}
-	for name, p := range providers {
-		name, p := name, p
-		t.Run(name, func(t *testing.T) {
+	providerCtors := map[string]func() Provider{
+		"claude": func() Provider { return NewClaudeProvider() },
+		"cursor": func() Provider { return NewCursorProvider() },
+		"codex":  func() Provider { return NewCodexProvider() },
+		"gemini": func() Provider { return NewGeminiProvider() },
+	}
+	for shape, ep := range partials {
+		ep := ep
+		shape := shape
+		t.Run(shape, func(t *testing.T) {
 			t.Parallel()
-			defer func() { _ = p.Close() }()
-			_, err := p.Execute(t.Context(), "irrelevant", nil, partial)
-			require.Error(t, err, "%s.Execute must reject partial endpoint", name)
-			assert.Contains(t, err.Error(), "partially configured",
-				"%s.Execute error should bubble up Validate's partial-config error", name)
+			for name, ctor := range providerCtors {
+				name, ctor := name, ctor
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					p := ctor()
+					defer func() { _ = p.Close() }()
+					_, err := p.Execute(t.Context(), "irrelevant", nil,
+						WithProviderLLMEndpoint(ep))
+					require.Error(t, err, "%s.Execute must reject %s partial endpoint", name, shape)
+					assert.Contains(t, err.Error(), "partially configured",
+						"%s.Execute (%s) error should bubble up Validate's partial-config error", name, shape)
+				})
+			}
 		})
 	}
 }

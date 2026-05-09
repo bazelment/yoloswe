@@ -209,10 +209,12 @@ func TestEndpoint_String_NoLeak(t *testing.T) {
 
 func TestEndpoint_String_HeadersListed(t *testing.T) {
 	t.Parallel()
-	// Header keys must surface so the divergence error in CodexProvider /
-	// GeminiProvider can distinguish endpoints that differ only on Headers.
-	// Header values are deliberately omitted to avoid leaking secrets that
-	// operators may have stuffed into auth-style headers.
+	// String() prints header KEYS in sorted plaintext (so operators can see
+	// what shape the endpoint carries) and a SHA-256 fingerprint of the
+	// canonical sorted "key=value\n" rows (so divergence diagnostics can
+	// distinguish endpoints that differ only on header VALUES). Raw values
+	// are deliberately omitted from the plaintext so operators don't leak
+	// secrets they may have stuffed into auth-style headers.
 	ep := Endpoint{
 		BaseURL:   "https://x",
 		APIKeyEnv: "K",
