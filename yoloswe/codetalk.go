@@ -109,6 +109,13 @@ func (ct *CodeTalkSession) Start(ctx context.Context) error {
 		opts = append(opts, claude.WithResume(ct.config.ResumeSessionID))
 	}
 
+	// Always validate: a partial endpoint (decorations only) is IsZero=true
+	// at the wrapper gate but Validate() rejects it, so embedded callers see
+	// the same error surface as YAML/CLI users instead of silently dropping
+	// provider_name/wire/headers.
+	if err := ct.config.LLMEndpoint.Validate(); err != nil {
+		return err
+	}
 	if !ct.config.LLMEndpoint.IsZero() {
 		opts = append(opts, claude.WithLLMEndpoint(ct.config.LLMEndpoint))
 	}

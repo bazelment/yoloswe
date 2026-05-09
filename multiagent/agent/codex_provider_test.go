@@ -373,6 +373,23 @@ func TestCodexProvider_CheckEndpointDivergence(t *testing.T) {
 		// a rejection, not silently route header-only changes to the bound endpoint.
 		assert.Contains(t, err.Error(), "LLMEndpoint changed")
 	})
+
+	t.Run("Headers map aliasing does not fool the divergence check", func(t *testing.T) {
+		t.Parallel()
+		// Simulate the production binding path: provider stores a Clone of the
+		// caller's endpoint. If the caller later mutates the original's Headers
+		// map, the divergence check must still see the divergence rather than
+		// silently routing to the originally-bound endpoint.
+		caller := llmendpoint.Endpoint{
+			BaseURL:   "https://x",
+			APIKeyEnv: "K",
+			Headers:   map[string]string{"X-Org": "v1"},
+		}
+		p := &CodexProvider{client: &codex.Client{}, boundEndpt: caller.Clone()}
+		caller.Headers["X-Org"] = "v2"
+		err := p.checkEndpointDivergence(caller)
+		require.Error(t, err, "post-bind mutation of caller Headers must not alias bound snapshot")
+	})
 }
 
 func TestNonNilAgentResult_CoercesNil(t *testing.T) {

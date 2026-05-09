@@ -89,6 +89,21 @@ func TestEndpoint_Validate(t *testing.T) {
 			},
 			wantErr: "invalid header name",
 		},
+		{
+			name:    "partial: only provider name",
+			ep:      Endpoint{ProviderName: "baseten"},
+			wantErr: "partially configured",
+		},
+		{
+			name:    "partial: only wire",
+			ep:      Endpoint{Wire: WireAPIResponses},
+			wantErr: "partially configured",
+		},
+		{
+			name:    "partial: only headers",
+			ep:      Endpoint{Headers: map[string]string{"X-Org": "acme"}},
+			wantErr: "partially configured",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +119,33 @@ func TestEndpoint_Validate(t *testing.T) {
 				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestEndpoint_Clone_HeadersAreIndependent(t *testing.T) {
+	t.Parallel()
+	in := Endpoint{
+		BaseURL:   "https://x",
+		APIKeyEnv: "K",
+		Headers:   map[string]string{"X-Org": "acme"},
+	}
+	out := in.Clone()
+	out.Headers["X-Org"] = "evil"
+	out.Headers["X-Extra"] = "added"
+	if in.Headers["X-Org"] != "acme" {
+		t.Errorf("Clone aliased Headers; original mutated to %q", in.Headers["X-Org"])
+	}
+	if _, ok := in.Headers["X-Extra"]; ok {
+		t.Error("Clone aliased Headers; original gained an entry")
+	}
+}
+
+func TestEndpoint_Clone_NilHeadersStayNil(t *testing.T) {
+	t.Parallel()
+	in := Endpoint{BaseURL: "https://x", APIKeyEnv: "K"}
+	out := in.Clone()
+	if out.Headers != nil {
+		t.Errorf("nil Headers should clone to nil, got %v", out.Headers)
 	}
 }
 

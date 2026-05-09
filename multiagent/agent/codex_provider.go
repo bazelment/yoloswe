@@ -69,7 +69,9 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 			return nil, err
 		}
 		p.client = client
-		p.boundEndpt = cfg.LLMEndpoint
+		// Clone so a caller mutating cfg.LLMEndpoint.Headers after this Execute
+		// returns can't fool the next divergence check by aliasing the same map.
+		p.boundEndpt = cfg.LLMEndpoint.Clone()
 	}
 	p.mu.Unlock()
 

@@ -80,7 +80,9 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			return nil, err
 		}
 		p.client = client
-		p.boundEndpt = cfg.LLMEndpoint
+		// Clone so a caller mutating cfg.LLMEndpoint.Headers after this Execute
+		// returns can't fool the next divergence check by aliasing the same map.
+		p.boundEndpt = cfg.LLMEndpoint.Clone()
 		p.bridgeDone = make(chan struct{})
 
 		// Start a single persistent bridge goroutine for the client's events.

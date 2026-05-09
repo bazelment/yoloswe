@@ -320,12 +320,22 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 		return err
 	}
 
-	// Build the endpoint only when the user actually opted in (any of the
-	// routing/auth flags non-empty). The wire flag defaults to "chat" so we
-	// can't include it in the gate; a bare `yoloswe codetalk "..."` invocation
-	// must produce a zero Endpoint that wrappers skip.
+	// Build the endpoint when the user touched any LLM flag. We rely on
+	// cobra's Changed() rather than non-empty checks so decoration-only flags
+	// (--llm-provider-name, --llm-wire-api, --llm-api-key) are routed through
+	// Validate() and surface as "partially configured" instead of silently
+	// dropping. A bare `yoloswe codetalk "..."` invocation never enters this
+	// branch and produces a zero Endpoint that wrappers skip.
 	var ep llmendpoint.Endpoint
-	if flags.llmBaseURL != "" || flags.llmAPIKey != "" || flags.llmAPIKeyEnv != "" {
+	llmFlags := []string{"llm-base-url", "llm-api-key", "llm-api-key-env", "llm-provider-name", "llm-wire-api"}
+	llmFlagSet := false
+	for _, f := range llmFlags {
+		if cmd.Flags().Changed(f) {
+			llmFlagSet = true
+			break
+		}
+	}
+	if llmFlagSet {
 		ep = llmendpoint.Endpoint{
 			BaseURL:      flags.llmBaseURL,
 			APIKey:       flags.llmAPIKey,

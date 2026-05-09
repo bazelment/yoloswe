@@ -137,8 +137,22 @@ func (e Endpoint) Validate() error {
 // Redacted returns a copy with APIKey cleared. APIKeyEnv is preserved so logs
 // still indicate where the key came from.
 func (e Endpoint) Redacted() Endpoint {
-	out := e
+	out := e.Clone()
 	out.APIKey = ""
+	return out
+}
+
+// Clone returns a deep copy. The Headers map is duplicated so callers that
+// mutate the original after passing the endpoint to a provider can't fool
+// equality checks against a previously-bound snapshot.
+func (e Endpoint) Clone() Endpoint {
+	out := e
+	if e.Headers != nil {
+		out.Headers = make(map[string]string, len(e.Headers))
+		for k, v := range e.Headers {
+			out.Headers[k] = v
+		}
+	}
 	return out
 }
 
