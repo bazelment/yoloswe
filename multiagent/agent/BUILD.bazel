@@ -27,6 +27,7 @@ go_library(
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/cursor",
+        "//agent-cli-wrapper/llmendpoint",
         "//agent-cli-wrapper/protocol",
         "//agent-cli-wrapper/transient",
         "//wt",

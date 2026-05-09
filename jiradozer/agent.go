@@ -561,6 +561,15 @@ func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler
 	if resumeSessionID != "" {
 		opts = append(opts, agent.WithProviderResumeSessionID(resumeSessionID))
 	}
+	if cfg.LLMEndpoint != nil {
+		ep := cfg.LLMEndpoint.ToEndpoint()
+		if !ep.IsZero() {
+			if err := ep.Validate(); err != nil {
+				return nil, fmt.Errorf("llm_endpoint: %w", err)
+			}
+			opts = append(opts, agent.WithProviderLLMEndpoint(ep))
+		}
+	}
 	return opts, nil
 }
 

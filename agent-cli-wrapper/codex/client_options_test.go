@@ -3,6 +3,8 @@ package codex
 import (
 	"context"
 	"testing"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
 func TestDefaultClientConfig(t *testing.T) {
@@ -303,5 +305,122 @@ func TestNewClient_WithOptions(t *testing.T) {
 	}
 	if client.config.EventBufferSize != 50 {
 		t.Errorf("unexpected EventBufferSize: %d", client.config.EventBufferSize)
+	}
+}
+
+// LLMEndpoint test helpers.
+func appServerArgsContainConfig(args []string, want string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--config" && args[i+1] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestClientOption_WithLLMEndpoint_buildsAppServerArgs(t *testing.T) {
+	cfg := defaultCodexClientConfig()
+	WithLLMEndpoint(llmendpoint.Endpoint{
+		BaseURL:      "https://inference.baseten.co/v1",
+		APIKeyEnv:    "BASETEN_API_KEY",
+		ProviderName: "baseten",
+		Wire:         llmendpoint.WireAPIChat,
+	})(&cfg)
+
+	want := []string{
+		`model_providers.baseten.name="baseten"`,
+		`model_providers.baseten.base_url="https://inference.baseten.co/v1"`,
+		`model_providers.baseten.wire_api="chat"`,
+		`model_providers.baseten.env_key="BASETEN_API_KEY"`,
+		`model_provider="baseten"`,
+	}
+	for _, w := range want {
+		if !appServerArgsContainConfig(cfg.AppServerArgs, w) {
+			t.Errorf("AppServerArgs missing %q\nfull: %v", w, cfg.AppServerArgs)
+		}
+	}
+	// model_provider="..." must be the LAST --config so it overrides defaults.
+	last := ""
+	for i := 0; i < len(cfg.AppServerArgs)-1; i++ {
+		if cfg.AppServerArgs[i] == "--config" {
+			last = cfg.AppServerArgs[i+1]
+		}
+	}
+	if last != `model_provider="baseten"` {
+		t.Errorf("model_provider must be last --config, got %q", last)
+	}
+	// API key never lands in args.
+	for _, a := range cfg.AppServerArgs {
+		if a == "key-secret" {
+			t.Fatalf("API key leaked to AppServerArgs: %v", cfg.AppServerArgs)
+		}
+	}
+}
+
+func TestClientOption_WithLLMEndpoint_setsEnv(t *testing.T) {
+	t.Setenv("BASETEN_API_KEY", "key-secret")
+	cfg := defaultCodexClientConfig()
+	WithLLMEndpoint(llmendpoint.Endpoint{
+		BaseURL:      "https://inference.baseten.co/v1",
+		APIKeyEnv:    "BASETEN_API_KEY",
+		ProviderName: "baseten",
+		Wire:         llmendpoint.WireAPIChat,
+	})(&cfg)
+	if cfg.Env["BASETEN_API_KEY"] != "key-secret" {
+		t.Errorf("Env[BASETEN_API_KEY] = %q", cfg.Env["BASETEN_API_KEY"])
+	}
+}
+
+func TestClientOption_WithLLMEndpoint_disablesThirdPartyIncompatibleFeatures(t *testing.T) {
+	cfg := defaultCodexClientConfig()
+	WithLLMEndpoint(llmendpoint.Endpoint{
+		BaseURL:   "https://inference.baseten.co/v1",
+		APIKeyEnv: "BASETEN_API_KEY",
+		Wire:      llmendpoint.WireAPIResponses,
+	})(&cfg)
+
+	for _, want := range thirdPartyIncompatibleFeatures {
+		found := false
+		for i := 0; i < len(cfg.AppServerArgs)-1; i++ {
+			if cfg.AppServerArgs[i] == "--disable" && cfg.AppServerArgs[i+1] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("AppServerArgs missing --disable %s\nfull: %v", want, cfg.AppServerArgs)
+		}
+	}
+}
+
+func TestClientOption_WithLLMEndpoint_emitsHeaders(t *testing.T) {
+	cfg := defaultCodexClientConfig()
+	WithLLMEndpoint(llmendpoint.Endpoint{
+		BaseURL:      "https://inference.baseten.co/v1",
+		APIKeyEnv:    "BASETEN_API_KEY",
+		ProviderName: "baseten",
+		Wire:         llmendpoint.WireAPIChat,
+		Headers: map[string]string{
+			"X-Org":   "acme",
+			"X-Trace": "deadbeef",
+		},
+	})(&cfg)
+	wantHeaderArgs := []string{
+		`model_providers.baseten.http_headers.X-Org="acme"`,
+		`model_providers.baseten.http_headers.X-Trace="deadbeef"`,
+	}
+	for _, w := range wantHeaderArgs {
+		if !appServerArgsContainConfig(cfg.AppServerArgs, w) {
+			t.Errorf("AppServerArgs missing %q\nfull: %v", w, cfg.AppServerArgs)
+		}
+	}
+}
+
+func TestClientOption_WithAppServerArgs_accumulates(t *testing.T) {
+	cfg := defaultCodexClientConfig()
+	WithAppServerArgs("--config", "a=1")(&cfg)
+	WithAppServerArgs("--config", "b=2")(&cfg)
+	if len(cfg.AppServerArgs) != 4 {
+		t.Errorf("expected 4 args, got %v", cfg.AppServerArgs)
 	}
 }

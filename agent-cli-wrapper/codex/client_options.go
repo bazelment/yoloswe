@@ -1,12 +1,29 @@
 package codex
 
+import (
+	"fmt"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
+)
+
 // ClientConfig holds client configuration.
+//
+//nolint:govet // fieldalignment: keep handlers/env grouped before scalars.
 type ClientConfig struct {
 	// ApprovalHandler handles tool execution approval requests.
 	ApprovalHandler ApprovalHandler
 
 	// StderrHandler is an optional handler for app-server stderr output.
 	StderrHandler func([]byte)
+
+	// Env carries additional environment variables to set on the app-server
+	// subprocess (appended to os.Environ).
+	Env map[string]string
+
+	// AppServerArgs is appended to the codex command line after "app-server".
+	// Used to inject `--config 'model_providers.<name>.base_url=...'` style
+	// overrides without writing to ~/.codex/config.toml.
+	AppServerArgs []string
 
 	// CodexPath is the path to the Codex CLI binary (uses "codex" in PATH if empty).
 	CodexPath string
@@ -83,6 +100,127 @@ func WithApprovalHandler(h ApprovalHandler) ClientOption {
 func WithSessionLogPath(path string) ClientOption {
 	return func(c *ClientConfig) {
 		c.SessionLogPath = path
+	}
+}
+
+// WithEnv sets additional environment variables for the codex app-server
+// subprocess. Existing entries are preserved.
+func WithEnv(env map[string]string) ClientOption {
+	return func(c *ClientConfig) {
+		if c.Env == nil {
+			c.Env = make(map[string]string, len(env))
+		}
+		for k, v := range env {
+			c.Env[k] = v
+		}
+	}
+}
+
+// WithAppServerArgs appends additional arguments to the codex app-server
+// command line (escape hatch). Multiple calls accumulate.
+func WithAppServerArgs(args ...string) ClientOption {
+	return func(c *ClientConfig) {
+		c.AppServerArgs = append(c.AppServerArgs, args...)
+	}
+}
+
+// thirdPartyIncompatibleFeatures lists codex feature flags whose tools use
+// `type: "namespace"` or other variants that third-party Responses-API
+// implementations (Baseten, vLLM, etc.) reject as "unknown variant". Codex
+// 0.130 enables most of these by default; without disabling them, the
+// outgoing request fails Baseten's strict tool-schema validation with HTTP
+// 400 "unknown variant `namespace`".
+//
+// This is a hand-curated denylist — when codex adds a new stable feature
+// whose tool variants don't pass third-party validation, the symptom is
+// HTTP 400 with "unknown variant <name>" and the fix is to append the
+// feature here. Tracked in https://github.com/bazelment/yoloswe/issues/241
+// with notes on long-term replacements (allowlist, capability probe).
+//
+// If a third-party endpoint supports a feature we've disabled, callers can
+// re-enable it via WithAppServerArgs after WithLLMEndpoint.
+var thirdPartyIncompatibleFeatures = []string{
+	"apps",
+	"browser_use",
+	"browser_use_external",
+	"computer_use",
+	"enable_request_compression",
+	"fast_mode",
+	"guardian_approval",
+	"hooks",
+	"image_generation",
+	"in_app_browser",
+	"multi_agent",
+	"personality",
+	"plugins",
+	"shell_snapshot",
+	"skill_mcp_dependency_install",
+	"tool_call_mcp_elicitation",
+	"tool_search",
+	"tool_suggest",
+	"unavailable_dummy_tools",
+}
+
+// WithLLMEndpoint configures the codex app-server to route inference through
+// a third-party LLM endpoint by injecting `--config model_providers.<name>.*`
+// overrides at app-server boot. The API key is exposed via env var
+// (named by ep.APIKeyEnv) so it never lands in process args.
+//
+// The final `--config model_provider="<name>"` ensures the new provider
+// becomes the default, overriding any value in ~/.codex/config.toml.
+//
+// Wire defaults to "chat" (OpenAI-compatible). Use "responses" for OpenAI's
+// Responses API. Codex 0.130+ requires "responses".
+//
+// Side effect: appends `--disable <feature>` for each feature whose tool
+// schema uses variants third-party Responses providers reject. To keep a
+// disabled feature, re-enable it after this option via WithAppServerArgs.
+func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
+	return func(c *ClientConfig) {
+		if ep.IsZero() {
+			return
+		}
+		name := ep.Provider()
+		wire := string(ep.WireAPI())
+		envKey := ep.APIKeyEnv
+		if envKey == "" {
+			// Synthesize a stable env var name when only an inline key was
+			// provided; codex resolves the key via env_key.
+			envKey = "CODEX_LLMENDPOINT_API_KEY"
+		}
+
+		// Disable features whose tool schemas third-party Responses
+		// providers reject. `--disable` is an `app-server` subcommand
+		// option (see `codex app-server --help`), so appending here is
+		// correct: process.go assembles the command as
+		// `codex app-server <AppServerArgs...>`.
+		for _, f := range thirdPartyIncompatibleFeatures {
+			c.AppServerArgs = append(c.AppServerArgs, "--disable", f)
+		}
+
+		c.AppServerArgs = append(c.AppServerArgs,
+			"--config", fmt.Sprintf("model_providers.%s.name=%q", name, name),
+			"--config", fmt.Sprintf("model_providers.%s.base_url=%q", name, ep.BaseURL),
+			"--config", fmt.Sprintf("model_providers.%s.wire_api=%q", name, wire),
+			"--config", fmt.Sprintf("model_providers.%s.env_key=%q", name, envKey),
+		)
+		// Optional headers: codex supports http_headers as a TOML table.
+		for hk, hv := range ep.Headers {
+			c.AppServerArgs = append(c.AppServerArgs,
+				"--config", fmt.Sprintf("model_providers.%s.http_headers.%s=%q", name, hk, hv),
+			)
+		}
+		// Last so it overrides any default in ~/.codex/config.toml.
+		c.AppServerArgs = append(c.AppServerArgs,
+			"--config", fmt.Sprintf("model_provider=%q", name),
+		)
+
+		if c.Env == nil {
+			c.Env = make(map[string]string, 1)
+		}
+		if key := ep.ResolvedKey(); key != "" {
+			c.Env[envKey] = key
+		}
 	}
 }
 

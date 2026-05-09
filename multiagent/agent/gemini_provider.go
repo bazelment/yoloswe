@@ -2,25 +2,30 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
 )
 
 // GeminiProvider wraps an ACP client (Gemini CLI) behind the Provider interface.
+//
+//nolint:govet // fieldalignment: keep boundEndpt grouped with clientOpts; extra inline padding from nesting llmendpoint.Endpoint isn't worth obscuring the order.
 type GeminiProvider struct {
+	boundEndpt llmendpoint.Endpoint
+	clientOpts []acp.ClientOption
 	client     *acp.Client
 	events     chan AgentEvent
 	bridgeDone chan struct{} // signals bridge goroutine to exit
 	// handlerCh is set during an Execute call. The bridge goroutine sends
 	// copies of AgentEvents here for the handler. It is protected by handlerMu.
-	handlerCh  chan AgentEvent
-	clientOpts []acp.ClientOption
-	handlerMu  sync.RWMutex
-	mu         sync.Mutex
-	bridgeWg   sync.WaitGroup // tracks bridge goroutine
+	handlerCh chan AgentEvent
+	handlerMu sync.RWMutex
+	bridgeWg  sync.WaitGroup // tracks bridge goroutine
+	mu        sync.Mutex
 }
 
 // NewGeminiProvider creates a new Gemini provider.
@@ -37,6 +42,9 @@ func (p *GeminiProvider) Name() string { return "gemini" }
 
 func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	// ACP has no reasoning-effort knob — fail fast before spawning the
 	// subprocess. EffortAuto is the explicit "use the provider default"
@@ -52,10 +60,26 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	// Ensure client is started (lazy init with mutex protection)
+	// Ensure client is started (lazy init with mutex protection).
+	// LLMEndpoint must be applied at client construction since acp BinaryArgs
+	// and Env are passed to the subprocess at boot. Subsequent Execute calls
+	// reuse the existing client; reject divergent endpoints loudly rather
+	// than silently routing to the originally-bound endpoint.
 	p.mu.Lock()
 	if p.client == nil {
-		client := acp.NewClient(p.clientOpts...)
+		// Apply WithLLMEndpoint AFTER caller clientOpts. acp.WithEnv
+		// replaces the env map wholesale, so a caller passing
+		// WithEnv(...) before our LLMEndpoint creds (GEMINI_API_KEY,
+		// GOOGLE_GEMINI_BASE_URL) would otherwise drop them. Putting
+		// LLMEndpoint last makes it merge into whatever map the caller
+		// supplied — at the cost of letting LLMEndpoint silently
+		// overwrite a same-named caller env var, which is the right
+		// trade-off (the LLM creds are load-bearing for routing).
+		clientOpts := append([]acp.ClientOption{}, p.clientOpts...)
+		if !cfg.LLMEndpoint.IsZero() {
+			clientOpts = append(clientOpts, acp.WithLLMEndpoint(cfg.LLMEndpoint))
+		}
+		client := acp.NewClient(clientOpts...)
 		// Use context.Background() to decouple the ACP subprocess lifetime
 		// from any single request's context. The subprocess should live as long
 		// as the provider, not just the first request.
@@ -64,6 +88,9 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			return nil, err
 		}
 		p.client = client
+		// Clone so a caller mutating cfg.LLMEndpoint.Headers after this Execute
+		// returns can't fool the next divergence check by aliasing the same map.
+		p.boundEndpt = cfg.LLMEndpoint.Clone()
 		p.bridgeDone = make(chan struct{})
 
 		// Start a single persistent bridge goroutine for the client's events.
@@ -74,6 +101,13 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 			defer p.bridgeWg.Done()
 			p.bridgeEventsWithHandler(client.Events())
 		}()
+	} else if !endpointsEqual(p.boundEndpt, cfg.LLMEndpoint) {
+		p.mu.Unlock()
+		// Use Endpoint.String() so divergences confined to headers/auth/wire
+		// surface in the message; comparing only BaseURL would mislead callers
+		// when both endpoints share a base URL but disagree on other fields.
+		return nil, fmt.Errorf("gemini: LLMEndpoint changed across Execute calls (bound=%s, requested=%s); recreate the provider to switch endpoints",
+			p.boundEndpt.String(), cfg.LLMEndpoint.String())
 	}
 	client := p.client
 	p.mu.Unlock()
@@ -115,7 +149,7 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return nil, promptErr
 	}
 
-	return acpResultToAgentResult(result), nil
+	return nonNilAgentResult(acpResultToAgentResult(result)), nil
 }
 
 // drainHandlerEvents waits for the TurnComplete event (or a short timeout),
@@ -278,7 +312,7 @@ func (p *GeminiLongRunningProvider) SendMessage(ctx context.Context, message str
 		return nil, err
 	}
 
-	return acpResultToAgentResult(result), nil
+	return nonNilAgentResult(acpResultToAgentResult(result)), nil
 }
 
 func (p *GeminiLongRunningProvider) Stop() error {

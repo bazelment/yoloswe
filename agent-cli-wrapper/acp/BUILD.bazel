@@ -20,14 +20,17 @@ go_library(
     deps = [
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/internal/procattr",
+        "//agent-cli-wrapper/llmendpoint",
     ],
 )
 
 go_test(
     name = "acp_test",
     srcs = [
+        "client_options_test.go",
         "handlers_test.go",
         "session_test.go",
     ],
     embed = [":acp"],
+    deps = ["//agent-cli-wrapper/llmendpoint"],
 )

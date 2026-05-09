@@ -25,6 +25,9 @@ func (p *CursorProvider) Name() string { return "cursor" }
 
 func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	// Cursor has no reasoning-effort knob — fail fast rather than silently
 	// dropping the requested level. EffortAuto is the explicit "use the
@@ -53,6 +56,9 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	}
 	// Cursor requires --trust for non-interactive use
 	sessionOpts = append(sessionOpts, cursor.WithTrust())
+	if !cfg.LLMEndpoint.IsZero() {
+		sessionOpts = append(sessionOpts, cursor.WithLLMEndpoint(cfg.LLMEndpoint))
+	}
 
 	// Create session
 	session := cursor.NewSession(fullPrompt, sessionOpts...)

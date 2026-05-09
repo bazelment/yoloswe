@@ -2,19 +2,25 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
 )
 
 // CodexProvider wraps the Codex SDK behind the Provider interface.
+//
+//nolint:govet // fieldalignment: keep boundEndpt grouped with clientOpts; extra inline padding from nesting llmendpoint.Endpoint isn't worth obscuring the order.
 type CodexProvider struct {
+	boundEndpt llmendpoint.Endpoint
+	clientOpts []codex.ClientOption
 	client     *codex.Client
 	events     chan AgentEvent
-	clientOpts []codex.ClientOption
+	mu         sync.Mutex
 }
 
 // NewCodexProvider creates a new Codex provider.
@@ -29,6 +35,9 @@ func (p *CodexProvider) Name() string { return "codex" }
 
 func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	// Build full prompt with worktree context
 	fullPrompt := prompt
@@ -36,14 +45,38 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	// Ensure client is started
+	// Ensure client is started.
+	// LLMEndpoint must be applied at client construction since codex
+	// `--config` overrides are passed to `app-server` at boot. Subsequent
+	// Execute calls reuse the existing client and cannot change the endpoint;
+	// reject divergent endpoints loudly rather than silently routing to the
+	// originally-bound endpoint.
+	p.mu.Lock()
+	if err := p.checkEndpointDivergence(cfg.LLMEndpoint); err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
 	if p.client == nil {
-		client := codex.NewClient(p.clientOpts...)
+		// Apply WithLLMEndpoint first so caller-supplied clientOpts can
+		// override its defaults (e.g. WithAppServerArgs to re-enable a
+		// feature WithLLMEndpoint disabled). codex applies repeated
+		// flags in order, so later args win.
+		var clientOpts []codex.ClientOption
+		if !cfg.LLMEndpoint.IsZero() {
+			clientOpts = append(clientOpts, codex.WithLLMEndpoint(cfg.LLMEndpoint))
+		}
+		clientOpts = append(clientOpts, p.clientOpts...)
+		client := codex.NewClient(clientOpts...)
 		if err := client.Start(ctx); err != nil {
+			p.mu.Unlock()
 			return nil, err
 		}
 		p.client = client
+		// Clone so a caller mutating cfg.LLMEndpoint.Headers after this Execute
+		// returns can't fool the next divergence check by aliasing the same map.
+		p.boundEndpt = cfg.LLMEndpoint.Clone()
 	}
+	p.mu.Unlock()
 
 	// Build thread options.
 	// Only pass an explicit model if the caller overrode the default;
@@ -116,10 +149,8 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	}
 	waitForBridgeTurnComplete(ctx, turnDone)
 
-	agentResult := codexResultToAgentResult(result)
-	if agentResult != nil {
-		agentResult.SessionID = thread.ID()
-	}
+	agentResult := nonNilAgentResult(codexResultToAgentResult(result))
+	agentResult.SessionID = thread.ID()
 	return agentResult, nil
 }
 
@@ -177,6 +208,47 @@ func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 			CacheReadTokens: int(r.Usage.CachedInputTokens),
 		},
 	}
+}
+
+// checkEndpointDivergence enforces the contract that, once a codex client is
+// running, the LLMEndpoint configured for subsequent Execute calls must match
+// the endpoint the running client was bound to. Returns nil when no client is
+// running yet (caller starts one and records the binding) or when the
+// endpoints are equal. Pulled out of Execute so the guard can be unit-tested
+// without spawning the codex subprocess.
+//
+// Caller must hold p.mu.
+func (p *CodexProvider) checkEndpointDivergence(req llmendpoint.Endpoint) error {
+	if p.client == nil {
+		return nil
+	}
+	if endpointsEqual(p.boundEndpt, req) {
+		return nil
+	}
+	return fmt.Errorf("codex: LLMEndpoint changed across Execute calls (bound=%s, requested=%s); recreate the provider to switch endpoints",
+		p.boundEndpt.String(), req.String())
+}
+
+// endpointsEqual reports whether two endpoints would produce the same codex
+// client configuration. ProviderName and Wire are compared via the canonical
+// accessors so an empty Wire ("" → "chat") and an empty ProviderName ("" →
+// "custom") compare equal to their explicit-default counterparts; the codex
+// args this method gates on are derived from the same accessors, so raw-field
+// comparison would over-trigger the divergence error.
+func endpointsEqual(a, b llmendpoint.Endpoint) bool {
+	if a.BaseURL != b.BaseURL || a.APIKey != b.APIKey || a.APIKeyEnv != b.APIKeyEnv ||
+		a.Provider() != b.Provider() || a.WireAPI() != b.WireAPI() {
+		return false
+	}
+	if len(a.Headers) != len(b.Headers) {
+		return false
+	}
+	for k, v := range a.Headers {
+		if b.Headers[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // isClaudeModelAlias returns true for model names that are Claude-specific

@@ -21,6 +21,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agent-cli-wrapper/claude/render",
+        "//agent-cli-wrapper/llmendpoint",
         "//jiradozer/tracker",
         "//multiagent/agent",
         "@in_gopkg_yaml_v3//:yaml_v3",

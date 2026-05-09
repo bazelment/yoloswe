@@ -19,7 +19,10 @@ go_test(
     # bazel's default 60s. Without this override the test fails with a
     # timeout under standard `bazel test --test_tag_filters=integration`.
     size = "large",
-    srcs = ["resume_test.go"],
+    srcs = [
+        "llmendpoint_test.go",
+        "resume_test.go",
+    ],
     # The agent CLIs need real user state to authenticate and run:
     #   HOME / USER          — cursor's `agent` launcher uses `set -u` and
     #                          dies on unbound HOME; auth state lives under
@@ -27,6 +30,9 @@ go_test(
     #   PATH                 — the wrappers exec the CLI binary by name.
     #   XDG_*_HOME           — cursor + node compile cache locations.
     env_inherit = [
+        # BASETEN_API_KEY: gates TestLLMEndpoint_Baseten; the test skips
+        # cleanly when unset so the rest of the suite still runs.
+        "BASETEN_API_KEY",
         "HOME",
         "PATH",
         "USER",
@@ -45,5 +51,6 @@ go_test(
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/cursor",
+        "//agent-cli-wrapper/llmendpoint",
     ],
 )

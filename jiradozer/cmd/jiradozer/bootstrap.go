@@ -434,6 +434,16 @@ agent:
     model: sonnet
     # Reasoning effort: low, medium, high, max, auto. Empty = provider default.
     #effort: ""
+    # Optional: route inference through a third-party LLM API endpoint
+    # (Baseten, OpenRouter, LiteLLM, etc.). The claude backend requires an
+    # Anthropic-shaped endpoint; codex/gemini accept OpenAI-compatible.
+    #llm_endpoint:
+    #    base_url: https://inference.baseten.co/v1
+    #    api_key_env: BASETEN_API_KEY    # prefer over api_key
+    #    provider_name: baseten
+    #    wire_api: chat                  # "chat" (OpenAI-compat) or "responses"
+    #    headers:                        # optional extra HTTP headers (codex only)
+    #        X-Custom-Header: value
 
 `
 

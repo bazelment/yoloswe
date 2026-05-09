@@ -6,8 +6,12 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/yoloswe/cmd/yoloswe",
     visibility = ["//visibility:private"],
     deps = [
+        "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/claude/render",
+        "//agent-cli-wrapper/llmendpoint",
         "//cliapp",
+        "//multiagent/agent",
+        "//wt",
         "//yoloswe",
         "//yoloswe/planner",
         "@com_github_spf13_cobra//:cobra",

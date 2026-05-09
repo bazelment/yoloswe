@@ -18,6 +18,7 @@ go_library(
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/internal/ndjson",
         "//agent-cli-wrapper/internal/procattr",
+        "//agent-cli-wrapper/llmendpoint",
     ],
 )
 
@@ -27,12 +28,14 @@ go_test(
         "events_test.go",
         "process_test.go",
         "protocol_test.go",
+        "session_options_test.go",
         "session_test.go",
     ],
     embed = [":cursor"],
     deps = [
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/internal/ndjson",
+        "//agent-cli-wrapper/llmendpoint",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

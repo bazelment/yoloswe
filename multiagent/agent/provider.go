@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -190,6 +191,7 @@ type ExecuteOption func(*ExecuteConfig)
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
 	EventHandler        EventHandler
+	LLMEndpoint         llmendpoint.Endpoint
 	Model               string
 	Effort              EffortLevel
 	WorkDir             string
@@ -263,6 +265,40 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 	return func(c *ExecuteConfig) { c.MaxToolErrorRetries = n }
 }
 
+// WithProviderLLMEndpoint points the underlying CLI at a third-party LLM API
+// endpoint.
+//
+// Behavior is intentionally asymmetric across providers, mirroring how each
+// upstream CLI honors endpoint config:
+//
+//   - claude / cursor: rebuild the underlying session per Execute, so each
+//     call may pass a different endpoint.
+//   - codex / gemini:  bind the endpoint at client construction time (the
+//     first Execute call), since `--config` overrides / acp BinaryArgs are
+//     passed to the subprocess at boot. Subsequent Execute calls must pass
+//     an equal endpoint; divergent endpoints fail with an explicit error
+//     rather than silently routing to the originally-bound endpoint. To
+//     switch endpoints on a codex/gemini provider, construct a fresh one.
+//
+// All four providers validate the endpoint at the start of Execute (see
+// ExecuteConfig.validate), so partial-but-non-zero endpoints fail loudly
+// regardless of which provider you target.
+func WithProviderLLMEndpoint(ep llmendpoint.Endpoint) ExecuteOption {
+	return func(c *ExecuteConfig) { c.LLMEndpoint = ep }
+}
+
+// nonNilAgentResult coerces a possibly-nil AgentResult into a non-nil one so
+// Provider.Execute / SendMessage callers can rely on (result, err==nil) →
+// result != nil. Provider-specific result conversion helpers return nil when
+// the underlying SDK returned a nil turn result; without this coercion the
+// (nil, nil) tuple would panic any caller that dereferences the result.
+func nonNilAgentResult(r *AgentResult) *AgentResult {
+	if r != nil {
+		return r
+	}
+	return &AgentResult{}
+}
+
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.
 func applyOptions(opts []ExecuteOption) ExecuteConfig {
 	cfg := ExecuteConfig{
@@ -273,4 +309,13 @@ func applyOptions(opts []ExecuteOption) ExecuteConfig {
 		opt(&cfg)
 	}
 	return cfg
+}
+
+// validate enforces invariants that every Provider.Execute call relies on,
+// regardless of whether the provider rebuilds the underlying session per
+// call (claude/cursor) or binds the endpoint at first Execute (codex/gemini).
+// Currently it only gates on LLMEndpoint, but the seam is intentional: any
+// future cross-provider invariant lands here once instead of in four places.
+func (c ExecuteConfig) validate() error {
+	return c.LLMEndpoint.Validate()
 }

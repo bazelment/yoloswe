@@ -51,7 +51,17 @@ func (pm *processManager) Start(ctx context.Context) error {
 	}
 
 	// Build command
-	pm.cmd = exec.CommandContext(ctx, codexPath, "app-server")
+	args := append([]string{"app-server"}, pm.config.AppServerArgs...)
+	pm.cmd = exec.CommandContext(ctx, codexPath, args...)
+
+	// Inherit parent env, then apply config-supplied overrides.
+	if len(pm.config.Env) > 0 {
+		env := os.Environ()
+		for k, v := range pm.config.Env {
+			env = append(env, k+"="+v)
+		}
+		pm.cmd.Env = env
+	}
 
 	// Configure process group for orphan prevention.
 	procattr.Set(pm.cmd)

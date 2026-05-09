@@ -196,6 +196,9 @@ func runRetryLoop(ctx context.Context, session retrySession, initial *claude.Tur
 
 func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.WorktreeContext, opts ...ExecuteOption) (*AgentResult, error) {
 	cfg := applyOptions(opts)
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 
 	// Build full prompt with worktree context
 	fullPrompt := prompt
@@ -234,6 +237,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	}
 	if cfg.ResumeSessionID != "" {
 		sessionOpts = append(sessionOpts, claude.WithResume(cfg.ResumeSessionID))
+	}
+	if !cfg.LLMEndpoint.IsZero() {
+		sessionOpts = append(sessionOpts, claude.WithLLMEndpoint(cfg.LLMEndpoint))
 	}
 
 	// Create ephemeral session
@@ -287,7 +293,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		return partial, err
 	}
 
-	agentResult := claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason)
+	agentResult := nonNilAgentResult(claudeResultToAgentResultWithRetryAbort(result, cfg, attempts, stopReason))
 	if info := session.Info(); info != nil {
 		agentResult.SessionID = info.SessionID
 	}
@@ -335,7 +341,7 @@ func (p *ClaudeLongRunningProvider) SendMessage(ctx context.Context, message str
 	if err != nil {
 		return nil, err
 	}
-	return ClaudeResultToAgentResult(result), nil
+	return nonNilAgentResult(ClaudeResultToAgentResult(result)), nil
 }
 
 func (p *ClaudeLongRunningProvider) Stop() error {

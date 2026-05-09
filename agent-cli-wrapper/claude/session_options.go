@@ -2,7 +2,9 @@ package claude
 
 import (
 	"context"
+	"strings"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
@@ -301,6 +303,66 @@ func WithTools(tools string) SessionOption {
 func WithExtraArgs(args ...string) SessionOption {
 	return func(c *SessionConfig) {
 		c.ExtraArgs = args
+	}
+}
+
+// WithLLMEndpoint points the Claude CLI at a third-party LLM endpoint by
+// setting ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY, and
+// the model-default overrides in the subprocess environment.
+//
+// The Claude CLI expects an Anthropic Messages API shape on the other end of
+// ANTHROPIC_BASE_URL. Some third-party endpoints expose this (e.g. Baseten
+// at /v1/messages); raw OpenAI-shaped endpoints need an Anthropic-compatible
+// translation layer (LiteLLM, AWS Bedrock front, etc.).
+//
+// Conventions and gotchas:
+//   - Trailing /v1 is stripped from BaseURL: Claude CLI appends /v1/messages
+//     itself. Passing https://x/v1 as-is yields /v1/v1/messages → 404.
+//   - Claude CLI makes side calls (preflight + post-turn summary) using a
+//     hardcoded haiku model id. We override ANTHROPIC_DEFAULT_{HAIKU,SONNET,
+//     OPUS}_MODEL and ANTHROPIC_SMALL_FAST_MODEL to SessionConfig.Model so
+//     those side calls don't 404 against an endpoint that only serves a
+//     single model. Apply WithModel before WithLLMEndpoint for this to take
+//     effect; if Model is unset at apply time, the model-default pin is
+//     skipped (claude-cli will then surface the side-call 404 as a
+//     misleading "model may not exist" error on the user's actual model).
+//   - We set both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY: some proxies
+//     expect Bearer, others x-api-key.
+//
+// Existing entries in SessionConfig.Env are preserved; this option only sets
+// keys it owns. Passing a zero Endpoint is a no-op.
+func WithLLMEndpoint(ep llmendpoint.Endpoint) SessionOption {
+	return func(c *SessionConfig) {
+		if ep.IsZero() {
+			return
+		}
+		if c.Env == nil {
+			c.Env = make(map[string]string, 8)
+		}
+		if ep.BaseURL != "" {
+			// Claude CLI auto-appends /v1/messages; strip a trailing /v1 to
+			// avoid /v1/v1/messages 404s.
+			base := strings.TrimRight(ep.BaseURL, "/")
+			base = strings.TrimSuffix(base, "/v1")
+			c.Env["ANTHROPIC_BASE_URL"] = base
+		}
+		if key := ep.ResolvedKey(); key != "" {
+			c.Env["ANTHROPIC_AUTH_TOKEN"] = key
+			c.Env["ANTHROPIC_API_KEY"] = key
+		}
+		if c.Model != "" {
+			for _, name := range []string{
+				"ANTHROPIC_MODEL",
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+				"ANTHROPIC_DEFAULT_SONNET_MODEL",
+				"ANTHROPIC_DEFAULT_OPUS_MODEL",
+				"ANTHROPIC_SMALL_FAST_MODEL",
+			} {
+				if _, set := c.Env[name]; !set {
+					c.Env[name] = c.Model
+				}
+			}
+		}
 	}
 }
 

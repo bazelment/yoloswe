@@ -105,6 +105,15 @@ Bramble supports optional voice reporting: when a session completes, fails, or i
 ssh remote "cat ~/.bramble/voice-reports/voice-report-latest.txt" | bramble speak
 ```
 
+## Manual Integration Tests Against Third-Party Endpoints
+
+Pattern for tests that drive a real CLI against a real third-party endpoint:
+gate on a credential env var (skip-not-fail when unset), inherit it via
+`env_inherit` in BUILD.bazel, round-trip a unique sentinel and assert with
+normalized matching, and add `var _ claude.SessionOption = claude.WithLLMEndpoint(...)`
+guards so wrapper signature drift fails the build. Reference:
+`agent-cli-wrapper/integration/llmendpoint_test.go`.
+
 ## Integration Tests and Gazelle
 
 Integration test `BUILD.bazel` files are hand-maintained and must include `# gazelle:ignore` as the first line. Gazelle cannot generate these correctly because:
