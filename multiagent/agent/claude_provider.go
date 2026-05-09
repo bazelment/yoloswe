@@ -235,6 +235,9 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	if cfg.ResumeSessionID != "" {
 		sessionOpts = append(sessionOpts, claude.WithResume(cfg.ResumeSessionID))
 	}
+	if !cfg.LLMEndpoint.IsZero() {
+		sessionOpts = append(sessionOpts, claude.WithLLMEndpoint(cfg.LLMEndpoint))
+	}
 
 	// Create ephemeral session
 	session := claude.NewSession(sessionOpts...)

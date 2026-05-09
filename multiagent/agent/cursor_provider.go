@@ -53,6 +53,9 @@ func (p *CursorProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 	}
 	// Cursor requires --trust for non-interactive use
 	sessionOpts = append(sessionOpts, cursor.WithTrust())
+	if !cfg.LLMEndpoint.IsZero() {
+		sessionOpts = append(sessionOpts, cursor.WithLLMEndpoint(cfg.LLMEndpoint))
+	}
 
 	// Create session
 	session := cursor.NewSession(fullPrompt, sessionOpts...)

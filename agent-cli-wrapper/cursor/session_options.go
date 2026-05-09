@@ -1,5 +1,7 @@
 package cursor
 
+import "github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
+
 // SessionConfig holds session configuration for the Cursor Agent CLI.
 type SessionConfig struct {
 	StderrHandler   func([]byte)
@@ -92,6 +94,33 @@ func WithEventBufferSize(size int) SessionOption {
 func WithStderrHandler(h func([]byte)) SessionOption {
 	return func(c *SessionConfig) {
 		c.StderrHandler = h
+	}
+}
+
+// WithLLMEndpoint points the cursor-agent CLI at a third-party LLM endpoint
+// by setting OPENAI_BASE_URL and OPENAI_API_KEY in the subprocess env.
+//
+// Note: cursor-agent routes inference through Cursor's own backend by default.
+// These env vars only affect cursor-agent builds that respect the OpenAI
+// envvar convention for arbitrary models; for Cursor-managed models the
+// option is a no-op as far as the upstream CLI is concerned. The option is
+// provided for symmetry with the other wrappers.
+//
+// Existing entries in SessionConfig.Env are preserved.
+func WithLLMEndpoint(ep llmendpoint.Endpoint) SessionOption {
+	return func(c *SessionConfig) {
+		if ep.IsZero() {
+			return
+		}
+		if c.Env == nil {
+			c.Env = make(map[string]string, 2)
+		}
+		if ep.BaseURL != "" {
+			c.Env["OPENAI_BASE_URL"] = ep.BaseURL
+		}
+		if key := ep.ResolvedKey(); key != "" {
+			c.Env["OPENAI_API_KEY"] = key
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/protocol"
 )
 
@@ -301,6 +302,39 @@ func WithTools(tools string) SessionOption {
 func WithExtraArgs(args ...string) SessionOption {
 	return func(c *SessionConfig) {
 		c.ExtraArgs = args
+	}
+}
+
+// WithLLMEndpoint points the Claude CLI at a third-party LLM endpoint by
+// setting ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY in the
+// subprocess environment.
+//
+// The Claude CLI expects an Anthropic Messages API shape on the other end of
+// ANTHROPIC_BASE_URL. Pointing it at a raw OpenAI-shaped endpoint (e.g.
+// Baseten, OpenRouter) requires an Anthropic-compatible translation layer
+// (LiteLLM proxy, internal gateway, AWS Bedrock front, etc.). For raw
+// OpenAI-shaped endpoints, use the codex or acp wrappers instead.
+//
+// Existing entries in SessionConfig.Env are preserved; this option only sets
+// keys it owns. Passing a zero Endpoint is a no-op.
+func WithLLMEndpoint(ep llmendpoint.Endpoint) SessionOption {
+	return func(c *SessionConfig) {
+		if ep.IsZero() {
+			return
+		}
+		if c.Env == nil {
+			c.Env = make(map[string]string, 3)
+		}
+		if ep.BaseURL != "" {
+			c.Env["ANTHROPIC_BASE_URL"] = ep.BaseURL
+		}
+		if key := ep.ResolvedKey(); key != "" {
+			// Set both: Claude CLI honors AUTH_TOKEN for OAuth-style proxies
+			// and API_KEY for direct API access. Some proxies expect one,
+			// some the other; setting both maximizes compatibility.
+			c.Env["ANTHROPIC_AUTH_TOKEN"] = key
+			c.Env["ANTHROPIC_API_KEY"] = key
+		}
 	}
 }
 

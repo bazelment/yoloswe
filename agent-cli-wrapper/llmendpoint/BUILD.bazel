@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "llmendpoint",
+    srcs = ["llmendpoint.go"],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "llmendpoint_test",
+    srcs = ["llmendpoint_test.go"],
+    embed = [":llmendpoint"],
+)

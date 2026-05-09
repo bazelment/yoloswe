@@ -15,8 +15,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/cliapp"
+	"github.com/bazelment/yoloswe/multiagent/agent"
+	"github.com/bazelment/yoloswe/wt"
 	"github.com/bazelment/yoloswe/yoloswe"
 	"github.com/bazelment/yoloswe/yoloswe/planner"
 )
@@ -36,6 +40,7 @@ Use 'build' to run a builder-reviewer loop for autonomous task execution.`,
 	cliapp.RegisterStandardFlags(rootCmd, &rootOpts)
 	rootCmd.AddCommand(newPlanCmd())
 	rootCmd.AddCommand(newBuildCmd())
+	rootCmd.AddCommand(newCodeTalkCmd())
 
 	os.Exit(cliapp.Run(&rootOpts, func(ctx context.Context, app *cliapp.App) error {
 		return rootCmd.ExecuteContext(cliapp.WithApp(ctx, app))
@@ -250,6 +255,170 @@ func runBuild(cmd *cobra.Command, args []string, flags *buildFlags) error {
 	}
 	if swe.Stats().ExitReason != yoloswe.ExitReasonAccepted {
 		return fmt.Errorf("build did not complete successfully (reason: %v)", swe.Stats().ExitReason)
+	}
+	return nil
+}
+
+// codetalk command flags
+type codeTalkFlags struct {
+	backend         string
+	model           string
+	workDir         string
+	recordDir       string
+	systemPrompt    string
+	llmBaseURL      string
+	llmAPIKey       string
+	llmAPIKeyEnv    string
+	llmProviderName string
+	llmWireAPI      string
+}
+
+func newCodeTalkCmd() *cobra.Command {
+	flags := &codeTalkFlags{}
+	cmd := &cobra.Command{
+		Use:   "codetalk [flags] <prompt>",
+		Short: "One-shot code understanding session",
+		Long: `Codetalk runs a single read-only code-understanding turn against the chosen
+backend. The agent has Read/Grep/Glob and read-only Bash; it cannot modify files.
+
+Pass --backend=claude (default), codex, gemini, or cursor to pick the underlying
+CLI. The --llm-* flags route inference through a third-party LLM API endpoint
+(e.g. Baseten, OpenRouter, LiteLLM). Note: the claude backend requires an
+Anthropic-shaped endpoint — use codex or gemini for raw OpenAI-compatible
+endpoints.`,
+		Example: `  yoloswe codetalk "explain agent-cli-wrapper"
+  yoloswe codetalk --backend codex --model moonshotai/Kimi-K2.6 \
+    --llm-base-url https://inference.baseten.co/v1 \
+    --llm-api-key-env BASETEN_API_KEY --llm-provider-name baseten \
+    --llm-wire-api chat \
+    "explain the agent-cli-wrapper structure"`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCodeTalk(cmd, args, flags)
+		},
+	}
+	cmd.Flags().StringVar(&flags.backend, "backend", "claude", "Backend CLI: claude, codex, gemini, cursor")
+	cmd.Flags().StringVar(&flags.model, "model", "", "Model to use (defaults: claude=opus, codex=gpt-5.5, gemini=gemini-2.5-pro)")
+	cmd.Flags().StringVar(&flags.workDir, "dir", "", "Working directory (default: current)")
+	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Recording directory (default: ~/.yoloswe)")
+	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
+	cmd.Flags().StringVar(&flags.llmBaseURL, "llm-base-url", "", "Custom LLM endpoint base URL")
+	cmd.Flags().StringVar(&flags.llmAPIKey, "llm-api-key", "", "Custom LLM API key (prefer --llm-api-key-env)")
+	cmd.Flags().StringVar(&flags.llmAPIKeyEnv, "llm-api-key-env", "", "Env var name holding the LLM API key (e.g. BASETEN_API_KEY)")
+	cmd.Flags().StringVar(&flags.llmProviderName, "llm-provider-name", "", "Provider name label (codex model_providers.<name>)")
+	cmd.Flags().StringVar(&flags.llmWireAPI, "llm-wire-api", "chat", "Wire API: chat (OpenAI-compatible) or responses")
+	return cmd
+}
+
+func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error {
+	app := cliapp.FromContext(cmd.Context())
+	prompt := strings.Join(args, " ")
+
+	workDir := flags.workDir
+	if workDir == "" {
+		var err error
+		workDir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
+	}
+
+	ep := llmendpoint.Endpoint{
+		BaseURL:      flags.llmBaseURL,
+		APIKey:       flags.llmAPIKey,
+		APIKeyEnv:    flags.llmAPIKeyEnv,
+		ProviderName: flags.llmProviderName,
+		Wire:         llmendpoint.WireAPI(flags.llmWireAPI),
+	}
+	if !ep.IsZero() {
+		if err := ep.Validate(); err != nil {
+			return err
+		}
+	}
+	app.Logger.Info("codetalk", "backend", flags.backend, "model", flags.model, "endpoint", ep.String())
+
+	switch strings.ToLower(flags.backend) {
+	case "", "claude":
+		return runCodeTalkClaude(cmd.Context(), flags, ep, workDir, prompt)
+	case "codex", "gemini", "cursor":
+		return runCodeTalkProvider(cmd.Context(), flags, ep, workDir, prompt)
+	default:
+		return fmt.Errorf("unknown backend %q (valid: claude, codex, gemini, cursor)", flags.backend)
+	}
+}
+
+func runCodeTalkClaude(ctx context.Context, flags *codeTalkFlags, ep llmendpoint.Endpoint, workDir, prompt string) error {
+	model := flags.model
+	if model == "" {
+		model = "opus"
+	}
+	cfg := yoloswe.CodeTalkConfig{
+		Model:        model,
+		WorkDir:      workDir,
+		RecordingDir: flags.recordDir,
+		SystemPrompt: flags.systemPrompt,
+		LLMEndpoint:  ep,
+	}
+	session := yoloswe.NewCodeTalkSession(cfg, os.Stdout)
+	if err := session.Start(ctx); err != nil {
+		return fmt.Errorf("start codetalk session: %w", err)
+	}
+	defer session.Stop()
+
+	if _, err := session.RunTurn(ctx, prompt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runCodeTalkProvider(ctx context.Context, flags *codeTalkFlags, ep llmendpoint.Endpoint, workDir, prompt string) error {
+	model := flags.model
+	if model == "" {
+		switch strings.ToLower(flags.backend) {
+		case "codex":
+			model = "gpt-5.5"
+		case "gemini":
+			model = "gemini-2.5-pro"
+		case "cursor":
+			model = "cursor-default"
+		}
+	}
+
+	var prov agent.Provider
+	switch strings.ToLower(flags.backend) {
+	case "codex":
+		prov = agent.NewCodexProvider()
+	case "gemini":
+		prov = agent.NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp"))
+	case "cursor":
+		prov = agent.NewCursorProvider()
+	}
+	defer prov.Close()
+
+	systemPrompt := flags.systemPrompt
+	if systemPrompt == "" {
+		systemPrompt = yoloswe.CodeTalkSystemPrompt
+	}
+
+	opts := []agent.ExecuteOption{
+		agent.WithProviderModel(model),
+		agent.WithProviderWorkDir(workDir),
+		agent.WithProviderSystemPrompt(systemPrompt),
+		agent.WithProviderPermissionMode("bypass"),
+	}
+	if !ep.IsZero() {
+		opts = append(opts, agent.WithProviderLLMEndpoint(ep))
+	}
+
+	res, err := prov.Execute(ctx, prompt, (*wt.WorktreeContext)(nil), opts...)
+	if err != nil {
+		return err
+	}
+	if res.Text != "" {
+		fmt.Println(res.Text)
+	}
+	if !res.Success && res.Error != nil {
+		return res.Error
 	}
 	return nil
 }

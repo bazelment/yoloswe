@@ -28,6 +28,7 @@ go_library(
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/internal/ndjson",
         "//agent-cli-wrapper/internal/procattr",
+        "//agent-cli-wrapper/llmendpoint",
         "//agent-cli-wrapper/protocol",
         "@com_github_invopop_jsonschema//:jsonschema",
     ],
@@ -46,6 +47,7 @@ go_test(
         "sdk_mcp_test.go",
         "sdk_mcp_typed_test.go",
         "session_dispatch_test.go",
+        "session_options_test.go",
         "session_test_helpers_test.go",
         "special_commands_test.go",
         "stream_replay_test.go",
@@ -56,6 +58,7 @@ go_test(
     embed = [":claude"],
     deps = [
         "//agent-cli-wrapper/internal/ndjson",
+        "//agent-cli-wrapper/llmendpoint",
         "//agent-cli-wrapper/protocol",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

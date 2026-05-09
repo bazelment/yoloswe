@@ -52,10 +52,17 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	// Ensure client is started (lazy init with mutex protection)
+	// Ensure client is started (lazy init with mutex protection).
+	// LLMEndpoint must be applied at client construction since acp BinaryArgs
+	// and Env are passed to the subprocess at boot. Subsequent Execute calls
+	// reuse the existing client.
 	p.mu.Lock()
 	if p.client == nil {
-		client := acp.NewClient(p.clientOpts...)
+		clientOpts := p.clientOpts
+		if !cfg.LLMEndpoint.IsZero() {
+			clientOpts = append(append([]acp.ClientOption{}, clientOpts...), acp.WithLLMEndpoint(cfg.LLMEndpoint))
+		}
+		client := acp.NewClient(clientOpts...)
 		// Use context.Background() to decouple the ACP subprocess lifetime
 		// from any single request's context. The subprocess should live as long
 		// as the provider, not just the first request.

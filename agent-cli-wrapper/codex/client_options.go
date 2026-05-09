@@ -1,12 +1,29 @@
 package codex
 
+import (
+	"fmt"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
+)
+
 // ClientConfig holds client configuration.
+//
+//nolint:govet // fieldalignment: keep handlers/env grouped before scalars.
 type ClientConfig struct {
 	// ApprovalHandler handles tool execution approval requests.
 	ApprovalHandler ApprovalHandler
 
 	// StderrHandler is an optional handler for app-server stderr output.
 	StderrHandler func([]byte)
+
+	// Env carries additional environment variables to set on the app-server
+	// subprocess (appended to os.Environ).
+	Env map[string]string
+
+	// AppServerArgs is appended to the codex command line after "app-server".
+	// Used to inject `--config 'model_providers.<name>.base_url=...'` style
+	// overrides without writing to ~/.codex/config.toml.
+	AppServerArgs []string
 
 	// CodexPath is the path to the Codex CLI binary (uses "codex" in PATH if empty).
 	CodexPath string
@@ -83,6 +100,77 @@ func WithApprovalHandler(h ApprovalHandler) ClientOption {
 func WithSessionLogPath(path string) ClientOption {
 	return func(c *ClientConfig) {
 		c.SessionLogPath = path
+	}
+}
+
+// WithEnv sets additional environment variables for the codex app-server
+// subprocess. Existing entries are preserved.
+func WithEnv(env map[string]string) ClientOption {
+	return func(c *ClientConfig) {
+		if c.Env == nil {
+			c.Env = make(map[string]string, len(env))
+		}
+		for k, v := range env {
+			c.Env[k] = v
+		}
+	}
+}
+
+// WithAppServerArgs appends additional arguments to the codex app-server
+// command line (escape hatch). Multiple calls accumulate.
+func WithAppServerArgs(args ...string) ClientOption {
+	return func(c *ClientConfig) {
+		c.AppServerArgs = append(c.AppServerArgs, args...)
+	}
+}
+
+// WithLLMEndpoint configures the codex app-server to route inference through
+// a third-party LLM endpoint by injecting `--config model_providers.<name>.*`
+// overrides at app-server boot. The API key is exposed via env var
+// (named by ep.APIKeyEnv) so it never lands in process args.
+//
+// The final `--config model_provider="<name>"` ensures the new provider
+// becomes the default, overriding any value in ~/.codex/config.toml.
+//
+// Wire defaults to "chat" (OpenAI-compatible). Use "responses" for OpenAI's
+// Responses API.
+func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
+	return func(c *ClientConfig) {
+		if ep.IsZero() {
+			return
+		}
+		name := ep.Provider()
+		wire := string(ep.WireAPI())
+		envKey := ep.APIKeyEnv
+		if envKey == "" {
+			// Synthesize a stable env var name when only an inline key was
+			// provided; codex resolves the key via env_key.
+			envKey = "CODEX_LLMENDPOINT_API_KEY"
+		}
+
+		c.AppServerArgs = append(c.AppServerArgs,
+			"--config", fmt.Sprintf("model_providers.%s.name=%q", name, name),
+			"--config", fmt.Sprintf("model_providers.%s.base_url=%q", name, ep.BaseURL),
+			"--config", fmt.Sprintf("model_providers.%s.wire_api=%q", name, wire),
+			"--config", fmt.Sprintf("model_providers.%s.env_key=%q", name, envKey),
+		)
+		// Optional headers: codex supports http_headers as a TOML table.
+		for hk, hv := range ep.Headers {
+			c.AppServerArgs = append(c.AppServerArgs,
+				"--config", fmt.Sprintf("model_providers.%s.http_headers.%s=%q", name, hk, hv),
+			)
+		}
+		// Last so it overrides any default in ~/.codex/config.toml.
+		c.AppServerArgs = append(c.AppServerArgs,
+			"--config", fmt.Sprintf("model_provider=%q", name),
+		)
+
+		if c.Env == nil {
+			c.Env = make(map[string]string, 1)
+		}
+		if key := ep.ResolvedKey(); key != "" {
+			c.Env[envKey] = key
+		}
 	}
 }
 

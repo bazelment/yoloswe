@@ -1,6 +1,10 @@
 package acp
 
-import "io"
+import (
+	"io"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
+)
 
 // ClientConfig holds ACP client configuration.
 type ClientConfig struct {
@@ -86,6 +90,47 @@ func WithProtocolLogger(w io.Writer) ClientOption {
 // WithEnv sets additional environment variables for the agent subprocess.
 func WithEnv(env map[string]string) ClientOption {
 	return func(c *ClientConfig) { c.Env = env }
+}
+
+// WithLLMEndpoint points the gemini CLI at a third-party LLM endpoint.
+//
+// For an OpenAI-compatible endpoint (Wire == "chat"), this sets
+// OPENAI_API_KEY/OPENAI_BASE_URL in the subprocess env and appends
+// --openai-api-key/--openai-base-url to BinaryArgs so newer gemini-cli
+// builds that support the OpenAI passthrough route inference through it.
+//
+// For an Anthropic/Gemini-shaped endpoint, this only sets GEMINI_API_KEY and
+// GOOGLE_GEMINI_BASE_URL.
+//
+// Existing Env/BinaryArgs entries are preserved.
+func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
+	return func(c *ClientConfig) {
+		if ep.IsZero() {
+			return
+		}
+		if c.Env == nil {
+			c.Env = make(map[string]string, 4)
+		}
+		key := ep.ResolvedKey()
+		if ep.BaseURL != "" {
+			c.Env["GOOGLE_GEMINI_BASE_URL"] = ep.BaseURL
+		}
+		if key != "" {
+			c.Env["GEMINI_API_KEY"] = key
+		}
+		if ep.WireAPI() == llmendpoint.WireAPIChat {
+			if ep.BaseURL != "" {
+				c.Env["OPENAI_BASE_URL"] = ep.BaseURL
+				c.BinaryArgs = append(c.BinaryArgs, "--openai-base-url", ep.BaseURL)
+			}
+			if key != "" {
+				c.Env["OPENAI_API_KEY"] = key
+				// Pass the key via env to avoid landing it in process args.
+				// gemini-cli reads OPENAI_API_KEY from the env when
+				// --openai-api-key is omitted.
+			}
+		}
+	}
 }
 
 // SessionConfig holds session-specific configuration.

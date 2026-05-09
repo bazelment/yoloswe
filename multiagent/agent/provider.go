@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
 )
 
@@ -190,6 +191,7 @@ type ExecuteOption func(*ExecuteConfig)
 // ExecuteConfig holds execution configuration.
 type ExecuteConfig struct {
 	EventHandler        EventHandler
+	LLMEndpoint         llmendpoint.Endpoint
 	Model               string
 	Effort              EffortLevel
 	WorkDir             string
@@ -261,6 +263,15 @@ func WithProviderResumeSessionID(id string) ExecuteOption {
 // the feature (the provider returns the errored result without retrying).
 func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 	return func(c *ExecuteConfig) { c.MaxToolErrorRetries = n }
+}
+
+// WithProviderLLMEndpoint points the underlying CLI at a third-party LLM API
+// endpoint. Claude/cursor/gemini providers apply the endpoint per-execution.
+// The codex provider applies it at client construction time (the first
+// Execute call), since `--config` overrides are passed to `app-server` at
+// boot — subsequent Execute calls reuse the same client and ignore changes.
+func WithProviderLLMEndpoint(ep llmendpoint.Endpoint) ExecuteOption {
+	return func(c *ExecuteConfig) { c.LLMEndpoint = ep }
 }
 
 // applyOptions applies ExecuteOptions to a config, returning defaults for unset fields.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
 // CodeTalkSystemPrompt is the default system prompt for code understanding sessions.
@@ -30,6 +31,7 @@ When the user asks follow-up questions, explore further if your current understa
 
 // CodeTalkConfig holds configuration for a code understanding session.
 type CodeTalkConfig struct {
+	LLMEndpoint     llmendpoint.Endpoint
 	Model           string
 	WorkDir         string
 	RecordingDir    string
@@ -105,6 +107,10 @@ func (ct *CodeTalkSession) Start(ctx context.Context) error {
 
 	if ct.config.ResumeSessionID != "" {
 		opts = append(opts, claude.WithResume(ct.config.ResumeSessionID))
+	}
+
+	if !ct.config.LLMEndpoint.IsZero() {
+		opts = append(opts, claude.WithLLMEndpoint(ct.config.LLMEndpoint))
 	}
 
 	ct.session = claude.NewSession(opts...)

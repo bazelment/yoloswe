@@ -22,6 +22,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/agentstream",
         "//agent-cli-wrapper/internal/procattr",
+        "//agent-cli-wrapper/llmendpoint",
         "//agent-cli-wrapper/transient",
     ],
 )
@@ -41,5 +42,8 @@ go_test(
         "thread_test.go",
     ],
     embed = [":codex"],
-    deps = ["@com_github_stretchr_testify//require"],
+    deps = [
+        "//agent-cli-wrapper/llmendpoint",
+        "@com_github_stretchr_testify//require",
+    ],
 )

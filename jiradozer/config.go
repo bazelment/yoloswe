@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
@@ -53,9 +54,26 @@ type TrackerConfig struct {
 }
 
 // AgentConfig specifies the agent backend.
+//
+//nolint:govet // fieldalignment: keep YAML fields in config-file order.
 type AgentConfig struct {
-	Model  string `yaml:"model"`  // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
-	Effort string `yaml:"effort"` // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
+	Model       string             `yaml:"model"`        // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
+	Effort      string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
+	LLMEndpoint *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
+}
+
+// LLMEndpointConfig points the underlying CLI at a third-party LLM endpoint
+// (e.g. Baseten, OpenRouter, LiteLLM). All fields are optional; when set,
+// the endpoint is applied via agent.WithProviderLLMEndpoint.
+//
+// Prefer api_key_env over api_key so the literal key never lands in the
+// config file.
+type LLMEndpointConfig struct {
+	BaseURL      string `yaml:"base_url"`      // e.g. "https://inference.baseten.co/v1"
+	APIKey       string `yaml:"api_key"`       // resolved literal (avoid; use api_key_env)
+	APIKeyEnv    string `yaml:"api_key_env"`   // env var holding the key (e.g. "BASETEN_API_KEY")
+	ProviderName string `yaml:"provider_name"` // codex model_providers.<name>; default "custom"
+	WireAPI      string `yaml:"wire_api"`      // "chat" (default, OpenAI-compat) | "responses"
 }
 
 // SourceConfig specifies how to discover issues for multi-issue mode.
@@ -79,20 +97,21 @@ func (s SourceConfig) HasSource() bool {
 
 // StepConfig configures a single workflow step (plan or build).
 type StepConfig struct {
-	Prompt               string        `yaml:"prompt"`                 // Go text/template; required unless rounds is set. No built-in default — run `jiradozer bootstrap` to scaffold.
-	SystemPrompt         string        `yaml:"system_prompt"`          // optional system prompt passed to the agent
-	Model                string        `yaml:"model"`                  // override agent.model; empty = inherit
-	Effort               string        `yaml:"effort"`                 // override agent.effort; empty = inherit
-	PermissionMode       string        `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
-	CommentTemplate      string        `yaml:"comment_template"`       // text/template rendered with CommentData; required for single-shot steps (rounds-only steps may omit it)
-	RoundCommentTemplate string        `yaml:"round_comment_template"` // text/template rendered with CommentData per round; required when rounds is non-empty
-	Rounds               []RoundConfig `yaml:"rounds"`                 // multi-round execution; mutually exclusive with Prompt
-	MaxBudgetUSD         float64       `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
-	MaxTurns             int           `yaml:"max_turns"`
-	MaxToolErrorRetries  int           `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
-	TransientRetries     int           `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (2)
-	IdleTimeout          time.Duration `yaml:"idle_timeout"`           // parent watchdog kills the subprocess if it emits no log line for this long while inside this step; 0 disables
-	AutoApprove          bool          `yaml:"auto_approve"`           // skip human review after this step
+	Prompt               string             `yaml:"prompt"`                 // Go text/template; required unless rounds is set. No built-in default — run `jiradozer bootstrap` to scaffold.
+	SystemPrompt         string             `yaml:"system_prompt"`          // optional system prompt passed to the agent
+	Model                string             `yaml:"model"`                  // override agent.model; empty = inherit
+	Effort               string             `yaml:"effort"`                 // override agent.effort; empty = inherit
+	PermissionMode       string             `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
+	CommentTemplate      string             `yaml:"comment_template"`       // text/template rendered with CommentData; required for single-shot steps (rounds-only steps may omit it)
+	RoundCommentTemplate string             `yaml:"round_comment_template"` // text/template rendered with CommentData per round; required when rounds is non-empty
+	LLMEndpoint          *LLMEndpointConfig `yaml:"llm_endpoint"`           // override agent.llm_endpoint; nil = inherit
+	Rounds               []RoundConfig      `yaml:"rounds"`                 // multi-round execution; mutually exclusive with Prompt
+	MaxBudgetUSD         float64            `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
+	MaxTurns             int                `yaml:"max_turns"`
+	MaxToolErrorRetries  int                `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
+	TransientRetries     int                `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (2)
+	IdleTimeout          time.Duration      `yaml:"idle_timeout"`           // parent watchdog kills the subprocess if it emits no log line for this long while inside this step; 0 disables
+	AutoApprove          bool               `yaml:"auto_approve"`           // skip human review after this step
 }
 
 // RoundConfig configures a single round within a multi-round step.
@@ -460,7 +479,24 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 	if step.MaxBudgetUSD == 0 {
 		step.MaxBudgetUSD = c.MaxBudgetUSD
 	}
+	if step.LLMEndpoint == nil {
+		step.LLMEndpoint = c.Agent.LLMEndpoint
+	}
 	return step
+}
+
+// ToEndpoint converts the YAML config into a runtime llmendpoint.Endpoint.
+func (l *LLMEndpointConfig) ToEndpoint() llmendpoint.Endpoint {
+	if l == nil {
+		return llmendpoint.Endpoint{}
+	}
+	return llmendpoint.Endpoint{
+		BaseURL:      l.BaseURL,
+		APIKey:       l.APIKey,
+		APIKeyEnv:    l.APIKeyEnv,
+		ProviderName: l.ProviderName,
+		Wire:         llmendpoint.WireAPI(l.WireAPI),
+	}
 }
 
 // ResolveRound converts a RoundConfig into a fully-resolved StepConfig,

@@ -36,9 +36,16 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		fullPrompt = wtCtx.FormatForPrompt() + "\n\n" + prompt
 	}
 
-	// Ensure client is started
+	// Ensure client is started.
+	// LLMEndpoint must be applied at client construction since codex
+	// `--config` overrides are passed to `app-server` at boot. Subsequent
+	// Execute calls reuse the existing client and cannot change the endpoint.
 	if p.client == nil {
-		client := codex.NewClient(p.clientOpts...)
+		clientOpts := p.clientOpts
+		if !cfg.LLMEndpoint.IsZero() {
+			clientOpts = append(append([]codex.ClientOption{}, clientOpts...), codex.WithLLMEndpoint(cfg.LLMEndpoint))
+		}
+		client := codex.NewClient(clientOpts...)
 		if err := client.Start(ctx); err != nil {
 			return nil, err
 		}
