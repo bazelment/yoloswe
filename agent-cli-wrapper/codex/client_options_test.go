@@ -371,6 +371,28 @@ func TestClientOption_WithLLMEndpoint_setsEnv(t *testing.T) {
 	}
 }
 
+func TestClientOption_WithLLMEndpoint_disablesThirdPartyIncompatibleFeatures(t *testing.T) {
+	cfg := defaultCodexClientConfig()
+	WithLLMEndpoint(llmendpoint.Endpoint{
+		BaseURL:   "https://inference.baseten.co/v1",
+		APIKeyEnv: "BASETEN_API_KEY",
+		Wire:      llmendpoint.WireAPIResponses,
+	})(&cfg)
+
+	for _, want := range thirdPartyIncompatibleFeatures {
+		found := false
+		for i := 0; i < len(cfg.AppServerArgs)-1; i++ {
+			if cfg.AppServerArgs[i] == "--disable" && cfg.AppServerArgs[i+1] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("AppServerArgs missing --disable %s\nfull: %v", want, cfg.AppServerArgs)
+		}
+	}
+}
+
 func TestClientOption_WithAppServerArgs_accumulates(t *testing.T) {
 	cfg := defaultCodexClientConfig()
 	WithAppServerArgs("--config", "a=1")(&cfg)

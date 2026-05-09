@@ -124,6 +124,37 @@ func WithAppServerArgs(args ...string) ClientOption {
 	}
 }
 
+// thirdPartyIncompatibleFeatures lists codex feature flags whose tools use
+// `type: "namespace"` or other variants that third-party Responses-API
+// implementations (Baseten, vLLM, etc.) reject as "unknown variant". Codex
+// 0.130 enables most of these by default; without disabling them, the
+// outgoing request fails Baseten's strict tool-schema validation with HTTP
+// 400 "unknown variant `namespace`".
+//
+// Adjust this list as upstream codex evolves. If a third-party endpoint
+// supports a feature, callers can re-enable it via WithAppServerArgs.
+var thirdPartyIncompatibleFeatures = []string{
+	"apps",
+	"browser_use",
+	"browser_use_external",
+	"computer_use",
+	"enable_request_compression",
+	"fast_mode",
+	"guardian_approval",
+	"hooks",
+	"image_generation",
+	"in_app_browser",
+	"multi_agent",
+	"personality",
+	"plugins",
+	"shell_snapshot",
+	"skill_mcp_dependency_install",
+	"tool_call_mcp_elicitation",
+	"tool_search",
+	"tool_suggest",
+	"unavailable_dummy_tools",
+}
+
 // WithLLMEndpoint configures the codex app-server to route inference through
 // a third-party LLM endpoint by injecting `--config model_providers.<name>.*`
 // overrides at app-server boot. The API key is exposed via env var
@@ -133,7 +164,11 @@ func WithAppServerArgs(args ...string) ClientOption {
 // becomes the default, overriding any value in ~/.codex/config.toml.
 //
 // Wire defaults to "chat" (OpenAI-compatible). Use "responses" for OpenAI's
-// Responses API.
+// Responses API. Codex 0.130+ requires "responses".
+//
+// Side effect: appends `--disable <feature>` for each feature whose tool
+// schema uses variants third-party Responses providers reject. To keep a
+// disabled feature, re-enable it after this option via WithAppServerArgs.
 func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
 	return func(c *ClientConfig) {
 		if ep.IsZero() {
@@ -146,6 +181,13 @@ func WithLLMEndpoint(ep llmendpoint.Endpoint) ClientOption {
 			// Synthesize a stable env var name when only an inline key was
 			// provided; codex resolves the key via env_key.
 			envKey = "CODEX_LLMENDPOINT_API_KEY"
+		}
+
+		// Disable features whose tool schemas third-party Responses
+		// providers reject. Must precede `app-server` (these are global
+		// codex flags, not subcommand flags).
+		for _, f := range thirdPartyIncompatibleFeatures {
+			c.AppServerArgs = append(c.AppServerArgs, "--disable", f)
 		}
 
 		c.AppServerArgs = append(c.AppServerArgs,
