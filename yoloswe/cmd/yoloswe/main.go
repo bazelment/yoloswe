@@ -296,6 +296,15 @@ endpoints.`,
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
 	cmd.Flags().StringVar(&flags.llmBaseURL, "llm-base-url", "", "Custom LLM endpoint base URL")
 	cmd.Flags().StringVar(&flags.llmAPIKey, "llm-api-key", "", "Custom LLM API key — UNSAFE on shared/CI hosts (visible in shell history and `ps`); prefer --llm-api-key-env")
+	// Hide --llm-api-key from --help so the env-var path is the path of
+	// least resistance. The flag still works for local dev convenience but
+	// shouldn't show up in help output where operators discover defaults.
+	if err := cmd.Flags().MarkHidden("llm-api-key"); err != nil {
+		// Cobra only errors here when the flag was never registered; the
+		// preceding StringVar guarantees it was, so a non-nil err is a
+		// programming bug worth surfacing.
+		panic(fmt.Errorf("MarkHidden(llm-api-key): %w", err))
+	}
 	cmd.Flags().StringVar(&flags.llmAPIKeyEnv, "llm-api-key-env", "", "Env var name holding the LLM API key (e.g. BASETEN_API_KEY)")
 	cmd.Flags().StringVar(&flags.llmProviderName, "llm-provider-name", "", "Provider name label (codex model_providers.<name>)")
 	cmd.Flags().StringVar(&flags.llmWireAPI, "llm-wire-api", "chat", "Wire API: chat (OpenAI-compatible) or responses")
@@ -311,14 +320,19 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 		return err
 	}
 
-	ep := llmendpoint.Endpoint{
-		BaseURL:      flags.llmBaseURL,
-		APIKey:       flags.llmAPIKey,
-		APIKeyEnv:    flags.llmAPIKeyEnv,
-		ProviderName: flags.llmProviderName,
-		Wire:         llmendpoint.WireAPI(flags.llmWireAPI),
-	}
-	if !ep.IsZero() {
+	// Build the endpoint only when the user actually opted in (any of the
+	// routing/auth flags non-empty). The wire flag defaults to "chat" so we
+	// can't include it in the gate; a bare `yoloswe codetalk "..."` invocation
+	// must produce a zero Endpoint that wrappers skip.
+	var ep llmendpoint.Endpoint
+	if flags.llmBaseURL != "" || flags.llmAPIKey != "" || flags.llmAPIKeyEnv != "" {
+		ep = llmendpoint.Endpoint{
+			BaseURL:      flags.llmBaseURL,
+			APIKey:       flags.llmAPIKey,
+			APIKeyEnv:    flags.llmAPIKeyEnv,
+			ProviderName: flags.llmProviderName,
+			Wire:         llmendpoint.WireAPI(flags.llmWireAPI),
+		}
 		if err := ep.Validate(); err != nil {
 			return err
 		}

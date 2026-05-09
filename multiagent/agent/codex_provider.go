@@ -49,6 +49,10 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 	// reject divergent endpoints loudly rather than silently routing to the
 	// originally-bound endpoint.
 	p.mu.Lock()
+	if err := p.checkEndpointDivergence(cfg.LLMEndpoint); err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
 	if p.client == nil {
 		// Apply WithLLMEndpoint first so caller-supplied clientOpts can
 		// override its defaults (e.g. WithAppServerArgs to re-enable a
@@ -66,10 +70,6 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 		}
 		p.client = client
 		p.boundEndpt = cfg.LLMEndpoint
-	} else if !endpointsEqual(p.boundEndpt, cfg.LLMEndpoint) {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("codex: LLMEndpoint changed across Execute calls (bound=%q, requested=%q); recreate the provider to switch endpoints",
-			p.boundEndpt.BaseURL, cfg.LLMEndpoint.BaseURL)
 	}
 	p.mu.Unlock()
 
@@ -203,6 +203,25 @@ func codexResultToAgentResult(r *codex.TurnResult) *AgentResult {
 			CacheReadTokens: int(r.Usage.CachedInputTokens),
 		},
 	}
+}
+
+// checkEndpointDivergence enforces the contract that, once a codex client is
+// running, the LLMEndpoint configured for subsequent Execute calls must match
+// the endpoint the running client was bound to. Returns nil when no client is
+// running yet (caller starts one and records the binding) or when the
+// endpoints are equal. Pulled out of Execute so the guard can be unit-tested
+// without spawning the codex subprocess.
+//
+// Caller must hold p.mu.
+func (p *CodexProvider) checkEndpointDivergence(req llmendpoint.Endpoint) error {
+	if p.client == nil {
+		return nil
+	}
+	if endpointsEqual(p.boundEndpt, req) {
+		return nil
+	}
+	return fmt.Errorf("codex: LLMEndpoint changed across Execute calls (bound=%s, requested=%s); recreate the provider to switch endpoints",
+		p.boundEndpt.String(), req.String())
 }
 
 // endpointsEqual reports whether two endpoints would produce the same codex

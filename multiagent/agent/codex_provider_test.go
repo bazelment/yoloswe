@@ -330,6 +330,51 @@ func TestEndpointsEqual_HeaderEqualityIsOrderIndependent(t *testing.T) {
 	assert.True(t, endpointsEqual(a, b))
 }
 
+func TestCodexProvider_CheckEndpointDivergence(t *testing.T) {
+	t.Parallel()
+	bound := llmendpoint.Endpoint{
+		BaseURL:      "https://inference.baseten.co/v1",
+		APIKeyEnv:    "BASETEN_API_KEY",
+		ProviderName: "baseten",
+	}
+
+	t.Run("no client yet returns nil", func(t *testing.T) {
+		t.Parallel()
+		p := &CodexProvider{}
+		// boundEndpt is zero; with no client, divergence is moot.
+		require.NoError(t, p.checkEndpointDivergence(bound))
+	})
+
+	t.Run("matching endpoint returns nil", func(t *testing.T) {
+		t.Parallel()
+		p := &CodexProvider{client: &codex.Client{}, boundEndpt: bound}
+		require.NoError(t, p.checkEndpointDivergence(bound))
+	})
+
+	t.Run("base url divergence reports both endpoints", func(t *testing.T) {
+		t.Parallel()
+		p := &CodexProvider{client: &codex.Client{}, boundEndpt: bound}
+		other := bound
+		other.BaseURL = "https://example.com/v1"
+		err := p.checkEndpointDivergence(other)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "https://inference.baseten.co/v1")
+		assert.Contains(t, err.Error(), "https://example.com/v1")
+	})
+
+	t.Run("header-only divergence still rejected and surfaced", func(t *testing.T) {
+		t.Parallel()
+		p := &CodexProvider{client: &codex.Client{}, boundEndpt: bound}
+		other := bound
+		other.Headers = map[string]string{"X-Org": "acme"}
+		err := p.checkEndpointDivergence(other)
+		require.Error(t, err, "header divergence must reject — wrappers can't reapply headers post-boot")
+		// Both endpoints' base URL is identical here; the error must still be
+		// a rejection, not silently route header-only changes to the bound endpoint.
+		assert.Contains(t, err.Error(), "LLMEndpoint changed")
+	})
+}
+
 func TestNonNilAgentResult_CoercesNil(t *testing.T) {
 	t.Parallel()
 	got := nonNilAgentResult(nil)

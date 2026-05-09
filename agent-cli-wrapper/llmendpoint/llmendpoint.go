@@ -65,9 +65,19 @@ type Endpoint struct {
 	Headers map[string]string
 }
 
-// IsZero reports whether the endpoint is unset (no BaseURL).
+// IsZero reports whether the endpoint carries no routing or auth signal —
+// BaseURL, APIKey, and APIKeyEnv all empty. ProviderName/Wire/Headers alone
+// don't disable IsZero because they're decorations on a routing+auth pair;
+// a config that sets only those is partial and Validate will reject it.
 func (e Endpoint) IsZero() bool {
 	return e.BaseURL == "" && e.APIKey == "" && e.APIKeyEnv == ""
+}
+
+// hasOnlyDecorations reports whether the endpoint has ProviderName, Wire, or
+// Headers set without a BaseURL/auth pair. Used to surface partial configs
+// at Validate-time instead of silently treating them as disabled.
+func (e Endpoint) hasOnlyDecorations() bool {
+	return e.IsZero() && (e.ProviderName != "" || e.Wire != "" || len(e.Headers) > 0)
 }
 
 // providerNameRE accepts identifiers safe to interpolate into codex's
@@ -84,7 +94,13 @@ var providerNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 var headerNameRE = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]+$`)
 
 // Validate reports configuration errors. A zero Endpoint validates as nil.
+// Partial endpoints — e.g. provider_name set without base_url — fail loudly
+// rather than being treated as disabled, since they signal user intent that
+// the wrapper would otherwise silently drop.
 func (e Endpoint) Validate() error {
+	if e.hasOnlyDecorations() {
+		return errors.New("llmendpoint: endpoint is partially configured (provider_name/wire/headers set without base_url + api_key/api_key_env)")
+	}
 	if e.IsZero() {
 		return nil
 	}

@@ -93,8 +93,11 @@ func (p *GeminiProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		}()
 	} else if !endpointsEqual(p.boundEndpt, cfg.LLMEndpoint) {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("gemini: LLMEndpoint changed across Execute calls (bound=%q, requested=%q); recreate the provider to switch endpoints",
-			p.boundEndpt.BaseURL, cfg.LLMEndpoint.BaseURL)
+		// Use Endpoint.String() so divergences confined to headers/auth/wire
+		// surface in the message; comparing only BaseURL would mislead callers
+		// when both endpoints share a base URL but disagree on other fields.
+		return nil, fmt.Errorf("gemini: LLMEndpoint changed across Execute calls (bound=%s, requested=%s); recreate the provider to switch endpoints",
+			p.boundEndpt.String(), cfg.LLMEndpoint.String())
 	}
 	client := p.client
 	p.mu.Unlock()

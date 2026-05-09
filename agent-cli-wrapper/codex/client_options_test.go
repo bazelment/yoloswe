@@ -393,6 +393,29 @@ func TestClientOption_WithLLMEndpoint_disablesThirdPartyIncompatibleFeatures(t *
 	}
 }
 
+func TestClientOption_WithLLMEndpoint_emitsHeaders(t *testing.T) {
+	cfg := defaultCodexClientConfig()
+	WithLLMEndpoint(llmendpoint.Endpoint{
+		BaseURL:      "https://inference.baseten.co/v1",
+		APIKeyEnv:    "BASETEN_API_KEY",
+		ProviderName: "baseten",
+		Wire:         llmendpoint.WireAPIChat,
+		Headers: map[string]string{
+			"X-Org":   "acme",
+			"X-Trace": "deadbeef",
+		},
+	})(&cfg)
+	wantHeaderArgs := []string{
+		`model_providers.baseten.http_headers.X-Org="acme"`,
+		`model_providers.baseten.http_headers.X-Trace="deadbeef"`,
+	}
+	for _, w := range wantHeaderArgs {
+		if !appServerArgsContainConfig(cfg.AppServerArgs, w) {
+			t.Errorf("AppServerArgs missing %q\nfull: %v", w, cfg.AppServerArgs)
+		}
+	}
+}
+
 func TestClientOption_WithAppServerArgs_accumulates(t *testing.T) {
 	cfg := defaultCodexClientConfig()
 	WithAppServerArgs("--config", "a=1")(&cfg)
