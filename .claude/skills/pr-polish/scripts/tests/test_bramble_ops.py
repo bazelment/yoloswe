@@ -2077,5 +2077,446 @@ class TestActionLabelsModeAware(unittest.TestCase):
         self.assertIn("needs author input", got)
 
 
+class TestRecoverEnvelope(unittest.TestCase):
+    """Mechanical recovery for the ``approve_with_notes`` family. Cursor
+    occasionally returns verdicts the wrapper doesn't recognize; if the
+    inner ``review.issues`` is populated, salvage the envelope so the
+    round's actual signal isn't lost.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _write(self, name: str, obj: dict) -> Path:
+        p = self.root / name
+        p.write_text(json.dumps(obj))
+        return p
+
+    def test_approve_with_notes_remaps_to_accepted(self) -> None:
+        env = {
+            "schema_version": 1,
+            "status": "error",
+            "error": "unrecognized verdict 'approve_with_notes'",
+            "review": {
+                "issues": [
+                    {"severity": "low", "file": "a.go", "line": 3,
+                     "message": "trailing whitespace"},
+                ],
+            },
+        }
+        path = self._write("cursor.json", env)
+        out = bramble_ops.recover_envelope(path)
+        self.assertNotEqual(out, path, "expected a recovered sibling path")
+        recovered = json.loads(out.read_text())
+        self.assertEqual(recovered["status"], "ok")
+        self.assertEqual(recovered["review"]["verdict"], "accepted")
+        self.assertEqual(len(recovered["review"]["issues"]), 1)
+
+    def test_request_changes_remaps_to_rejected(self) -> None:
+        env = {
+            "schema_version": 1,
+            "status": "error",
+            "error": "verdict 'request_changes' not in allowed set",
+            "review": {
+                "issues": [{"severity": "high", "file": "x.go", "line": 1,
+                            "message": "missing nil check"}],
+            },
+        }
+        path = self._write("cursor.json", env)
+        out = bramble_ops.recover_envelope(path)
+        recovered = json.loads(out.read_text())
+        self.assertEqual(recovered["status"], "ok")
+        self.assertEqual(recovered["review"]["verdict"], "rejected")
+
+    def test_status_ok_envelope_returned_unchanged(self) -> None:
+        env = {"schema_version": 1, "status": "ok", "review": {"issues": []}}
+        path = self._write("codex.json", env)
+        out = bramble_ops.recover_envelope(path)
+        self.assertEqual(out, path)
+
+    def test_error_envelope_with_no_verdict_returns_unchanged(self) -> None:
+        env = {
+            "schema_version": 1,
+            "status": "error",
+            "error": "bramble timed out after 10m",
+            "review": {"issues": []},
+        }
+        path = self._write("codex.json", env)
+        out = bramble_ops.recover_envelope(path)
+        self.assertEqual(out, path)
+
+    def test_verdict_error_with_empty_issues_returns_unchanged(self) -> None:
+        # Vocabulary problem + no issues = nothing to salvage.
+        env = {
+            "schema_version": 1,
+            "status": "error",
+            "error": "unrecognized verdict 'approve_with_notes'",
+            "review": {"issues": []},
+        }
+        path = self._write("cursor.json", env)
+        out = bramble_ops.recover_envelope(path)
+        self.assertEqual(out, path)
+
+    def test_idempotent_on_recovered_envelope(self) -> None:
+        env = {
+            "schema_version": 1,
+            "status": "error",
+            "error": "unrecognized verdict 'approve_with_notes'",
+            "review": {"issues": [{"severity": "low", "file": "a", "line": 1,
+                                   "message": "x"}]},
+        }
+        path = self._write("cursor.json", env)
+        first = bramble_ops.recover_envelope(path)
+        # second pass on the recovered file (status ok) should no-op.
+        second = bramble_ops.recover_envelope(first)
+        self.assertEqual(first, second)
+
+    def test_missing_file_returned_unchanged(self) -> None:
+        path = self.root / "does-not-exist.json"
+        out = bramble_ops.recover_envelope(path)
+        self.assertEqual(out, path)
+
+
+class TestRoundDiff(unittest.TestCase):
+    """`round_diff` shells out to ``git diff prior_head_after..head_before``
+    and truncates. Test with a real tmp git repo so the helper exercises
+    the same plumbing the orchestrator runs through.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+        # Run the helper as if the orchestrator launched it inside the
+        # tmp repo. ``_common.run`` honours `cwd`, so we just cd. Saves
+        # us monkey-patching subprocess plumbing per call.
+        self._old_cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, self._old_cwd)
+
+    def _git(self, *args: str) -> str:
+        import subprocess
+
+        res = subprocess.run(
+            ["git", *args], cwd=str(self.root),
+            capture_output=True, text=True, check=False,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"git {args}: {res.stderr}")
+        return res.stdout
+
+    def _commit(self, name: str, body: str) -> str:
+        (self.root / name).write_text(body)
+        self._git("add", name)
+        self._git("commit", "-q", "-m", f"add {name}")
+        return self._git("rev-parse", "HEAD").strip()
+
+    def test_returns_diff_between_prior_head_after_and_head_before(self) -> None:
+        sha1 = self._commit("a.txt", "hello\n")
+        sha2 = self._commit("a.txt", "hello\nworld\n")
+        state = {"rounds": [{"n": 1, "head_before": "x", "head_after": sha1}]}
+        text = bramble_ops.round_diff(state, 2, head_before=sha2)
+        self.assertIn("+world", text)
+        self.assertIn("a.txt", text)
+
+    def test_empty_when_round_one(self) -> None:
+        self.assertEqual(bramble_ops.round_diff({}, 1, head_before="abc"), "")
+
+    def test_empty_when_no_prior_round(self) -> None:
+        self.assertEqual(bramble_ops.round_diff({"rounds": []}, 2, head_before="abc"), "")
+
+    def test_empty_when_prior_round_never_finalized(self) -> None:
+        state = {"rounds": [{"n": 1, "head_before": "x", "head_after": None}]}
+        self.assertEqual(bramble_ops.round_diff(state, 2, head_before="abc"), "")
+
+    def test_empty_when_head_before_missing(self) -> None:
+        state = {"rounds": [{"n": 1, "head_before": "x", "head_after": "y"}]}
+        self.assertEqual(bramble_ops.round_diff(state, 2, head_before=None), "")
+
+    def test_empty_when_shas_equal(self) -> None:
+        state = {"rounds": [{"n": 1, "head_before": "x", "head_after": "abc"}]}
+        self.assertEqual(bramble_ops.round_diff(state, 2, head_before="abc"), "")
+
+    def test_truncates_long_diffs_with_elision_footer(self) -> None:
+        sha1 = self._commit("a.txt", "x\n")
+        # 50 lines added to a.txt
+        big = "\n".join(f"line {i}" for i in range(50)) + "\n"
+        (self.root / "a.txt").write_text(big)
+        self._git("add", "a.txt")
+        self._git("commit", "-q", "-m", "big")
+        sha2 = self._git("rev-parse", "HEAD").strip()
+        state = {"rounds": [{"n": 1, "head_after": sha1}]}
+        text = bramble_ops.round_diff(state, 2, head_before=sha2, max_lines=10)
+        self.assertIn("...elided", text)
+        # Exactly 11 lines: 10 + footer
+        self.assertEqual(len(text.splitlines()), 11)
+
+    def test_unreachable_sha_returns_empty(self) -> None:
+        state = {
+            "rounds": [{"n": 1, "head_after": "0" * 40}],
+        }
+        text = bramble_ops.round_diff(state, 2, head_before="1" * 40)
+        self.assertEqual(text, "")
+
+
+class TestPriorRoundModifiedHunks(unittest.TestCase):
+    """E1: spiral demote when cited line falls inside a hunk a prior round
+    modified. Validates hunk-header parsing and the boundary semantics.
+    """
+
+    def test_parse_hunk_ranges_basic(self) -> None:
+        diff = """@@ -10,3 +12,5 @@
+ ctx
+-old
++new1
++new2
+@@ -100 +150,2 @@
+-old
++new
++new
+"""
+        ranges = bramble_ops._parse_hunk_ranges(diff)
+        self.assertEqual(ranges, [(12, 16), (150, 151)])
+
+    def test_parse_hunk_default_count_one(self) -> None:
+        diff = "@@ -1 +5 @@\n+x\n"
+        self.assertEqual(bramble_ops._parse_hunk_ranges(diff), [(5, 5)])
+
+    def test_parse_hunk_pure_deletion_skipped(self) -> None:
+        # +c,0 — no lines on the + side
+        diff = "@@ -10,3 +10,0 @@\n-a\n-b\n-c\n"
+        self.assertEqual(bramble_ops._parse_hunk_ranges(diff), [])
+
+    def test_line_in_modified_hunk(self) -> None:
+        hunks = {"a.go": [(10, 15), (50, 55)]}
+        # Inside both ranges
+        self.assertTrue(bramble_ops._line_in_modified_hunk(
+            {"file": "a.go", "line": 10}, hunks))
+        self.assertTrue(bramble_ops._line_in_modified_hunk(
+            {"file": "a.go", "line": 15}, hunks))
+        self.assertTrue(bramble_ops._line_in_modified_hunk(
+            {"file": "a.go", "line": 52}, hunks))
+        # Outside
+        self.assertFalse(bramble_ops._line_in_modified_hunk(
+            {"file": "a.go", "line": 9}, hunks))
+        self.assertFalse(bramble_ops._line_in_modified_hunk(
+            {"file": "a.go", "line": 100}, hunks))
+        # Different file
+        self.assertFalse(bramble_ops._line_in_modified_hunk(
+            {"file": "b.go", "line": 12}, hunks))
+        # No address
+        self.assertFalse(bramble_ops._line_in_modified_hunk(
+            {"file": None, "line": None}, hunks))
+
+
+class TestTriageSpiralModifiedHunkDemote(unittest.TestCase):
+    """When a single-source spiral lands on a line a prior round
+    modified, demote to batch_stale even when the evidence-at-HEAD
+    heuristic would have kept it. Multi-source spirals still escalate.
+    """
+
+    def test_single_source_in_modified_hunk_demoted(self) -> None:
+        # Codex re-flagging a finding at a.go:42; prior round modified
+        # lines 40-50 of a.go.
+        finding = {
+            "source": "codex",
+            "severity": "high",
+            "file": "a.go",
+            "line": 42,
+            "message": "still has `ctx.Err()` here",
+            "topic": "ctx-err",
+            "review_mode": "code",
+        }
+        prior_keys = {("a.go", 42, "ctx-err")}
+        modified_hunks = {"a.go": [(40, 50)]}
+        out = bramble_ops.triage(
+            [finding],
+            prior_keys,
+            prior_modified_hunks=modified_hunks,
+        )
+        self.assertEqual(len(out["spiral_matches"]), 0)
+        self.assertEqual(len(out["stale_prior_commit"]), 1)
+        stale = out["stale_prior_commit"][0]["finding"]
+        self.assertIn("modified by a prior round", stale["stale_reason"])
+
+    def test_single_source_outside_modified_hunk_still_escalates(self) -> None:
+        finding = {
+            "source": "codex",
+            "severity": "high",
+            "file": "a.go",
+            "line": 5,
+            "message": "still has `ctx.Err()` here",
+            "topic": "ctx-err",
+            "review_mode": "code",
+        }
+        prior_keys = {("a.go", 5, "ctx-err")}
+        # The cited line is outside the prior round's modified hunks; with
+        # head_path unset the evidence-at-HEAD check returns conservative-
+        # True (file unreadable), so spiral escalates.
+        modified_hunks = {"a.go": [(40, 50)]}
+        out = bramble_ops.triage(
+            [finding],
+            prior_keys,
+            prior_modified_hunks=modified_hunks,
+        )
+        self.assertEqual(len(out["spiral_matches"]), 1)
+        self.assertEqual(len(out["stale_prior_commit"]), 0)
+
+    def test_multi_source_in_modified_hunk_still_escalates(self) -> None:
+        # Two backends agreeing on a regression overrides the
+        # modified-hunk demote — that's a stronger signal than file plumbing.
+        f_codex = {
+            "source": "codex",
+            "severity": "high",
+            "file": "a.go",
+            "line": 42,
+            "message": "still has ctxErrSentinel here",
+            "topic": "ctx-err",
+            "review_mode": "code",
+        }
+        f_cursor = {
+            "source": "cursor",
+            "severity": "high",
+            "file": "a.go",
+            "line": 42,
+            "message": "ctxErrSentinel still returned",
+            "topic": "ctx-err",
+            "review_mode": "code",
+        }
+        prior_keys = {("a.go", 42, "ctx-err")}
+        modified_hunks = {"a.go": [(40, 50)]}
+        out = bramble_ops.triage(
+            [f_codex, f_cursor],
+            prior_keys,
+            prior_modified_hunks=modified_hunks,
+        )
+        # Multi-source spirals escalate regardless of modified-hunk
+        # signal. (They also collapse under consensus, which is fine —
+        # what matters is that the spiral isn't silently demoted.)
+        self.assertEqual(len(out["stale_prior_commit"]), 0)
+        self.assertEqual(len(out["spiral_matches"]), 1)
+
+
+class TestSessionResetEveryKRounds(unittest.TestCase):
+    """E2: forcing a fresh bramble session every K rounds clears stale
+    accumulated context. The reset gate triggers on round-distance, so
+    an interrupted-and-resumed loop still gets the same cadence.
+    """
+
+    def _state_with_session_at(self, rounds: list[tuple[int, str | None]]) -> dict:
+        return {
+            "completed": False,
+            "current_round": rounds[-1][0],
+            "rounds": [
+                {
+                    "n": n,
+                    "session_ids": ({"codex": sid} if sid else {}),
+                }
+                for n, sid in rounds
+            ],
+        }
+
+    def test_returns_empty_when_session_k_rounds_back(self) -> None:
+        # Last codex session id was at round 1; current is round 5; K=4.
+        # 5 - 1 = 4 >= 4 -> reset.
+        state = self._state_with_session_at([(1, "sid-1"), (2, None), (3, None), (4, None)])
+        out = bramble_ops.prior_session_id(
+            state, "codex", 5, is_new_series=False, session_reset_k=4
+        )
+        self.assertEqual(out, "")
+
+    def test_returns_id_when_session_within_window(self) -> None:
+        # Last id at round 2; current 4; 4-2 = 2 < 4 -> keep.
+        state = self._state_with_session_at([(1, None), (2, "sid-2"), (3, None)])
+        out = bramble_ops.prior_session_id(
+            state, "codex", 4, is_new_series=False, session_reset_k=4
+        )
+        self.assertEqual(out, "sid-2")
+
+    def test_zero_disables_reset(self) -> None:
+        state = self._state_with_session_at([(1, "sid-1")])
+        out = bramble_ops.prior_session_id(
+            state, "codex", 99, is_new_series=False, session_reset_k=0
+        )
+        self.assertEqual(out, "sid-1")
+
+    def test_default_k_is_four(self) -> None:
+        # SESSION_RESET_K_DEFAULT = 4; ensure round 5 with id at round 1 resets.
+        state = self._state_with_session_at([(1, "sid-1"), (2, None), (3, None), (4, None)])
+        out = bramble_ops.prior_session_id(state, "codex", 5, is_new_series=False)
+        self.assertEqual(out, "")
+
+
+class TestGoalLowStreakSentence(unittest.TestCase):
+    """B1: when the prior round's low_only_streak >= 2, append a single
+    sentence to the goal text stating the fact and the cost frame. The
+    sentence is appended; it does not replace the action-history
+    briefing.
+    """
+
+    def _state(self, streak: int) -> dict:
+        return {
+            "rounds": [
+                {
+                    "n": 1,
+                    "head_before": "a",
+                    "head_after": "b",
+                    "low_only_streak": streak,
+                    "comment_actions": [
+                        {"action": "fixed", "path": "a.go", "line": 5,
+                         "topic": "stub fix"},
+                    ],
+                }
+            ]
+        }
+
+    def test_streak_two_appends_sentence(self) -> None:
+        state = self._state(2)
+        out = bramble_ops.goal_for_round(
+            2, "PR_SUMMARY", state, head_before="b", include_round_diff=False
+        )
+        self.assertIn("last 2 rounds returned only low-severity findings", out)
+        self.assertIn("returning zero findings is the right call", out)
+        # action-history still present
+        self.assertIn("Round 2.", out)
+
+    def test_streak_one_no_sentence(self) -> None:
+        state = self._state(1)
+        out = bramble_ops.goal_for_round(
+            2, "PR_SUMMARY", state, head_before="b", include_round_diff=False
+        )
+        self.assertNotIn("low-severity findings", out)
+
+    def test_streak_three_uses_actual_count(self) -> None:
+        state = self._state(3)
+        out = bramble_ops.goal_for_round(
+            2, "PR_SUMMARY", state, head_before="b", include_round_diff=False
+        )
+        self.assertIn("last 3 rounds", out)
+
+    def test_is_new_series_skips_sentence(self) -> None:
+        state = self._state(2)
+        out = bramble_ops.goal_for_round(
+            2, "PR_SUMMARY", state, head_before="b",
+            is_new_series=True, include_round_diff=False,
+        )
+        self.assertEqual(out, "PR_SUMMARY")
+        self.assertNotIn("low-severity findings", out)
+
+    def test_round_one_skips_sentence(self) -> None:
+        # Round 1 always returns PR_SUMMARY; no streak logic applies.
+        state = self._state(2)
+        out = bramble_ops.goal_for_round(
+            1, "PR_SUMMARY", state, head_before="b", include_round_diff=False
+        )
+        self.assertEqual(out, "PR_SUMMARY")
+
+
 if __name__ == "__main__":
     unittest.main()

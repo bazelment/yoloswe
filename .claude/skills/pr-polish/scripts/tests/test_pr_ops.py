@@ -371,6 +371,97 @@ class TestStateLifecycle(unittest.TestCase):
         self.assertEqual(state["current_round"], 2)
 
 
+class TestLowOnlyStreak(unittest.TestCase):
+    """`low_only_streak` powers the streak-based convergence rule and the
+    reviewer-pressure goal sentence (B1). Test the increment/reset shape
+    directly through the unit helper plus the live finalize path so a
+    state-shape regression surfaces here instead of leaking into a real run.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp_root = Path(self.tmp.name)
+
+        def fake_state_paths(pr, branch=None):
+            key = pr if pr is not None else f"branch-{branch}"
+            d = tmp_root / f"proj-{key}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d, d / "pr-polish-state.json"
+
+        patcher = patch.object(pr_ops, "state_paths", side_effect=fake_state_paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_unit_increments_when_top_severity_low(self) -> None:
+        prior = [{"n": 1, "low_only_streak": 1, "top_severity": "low"}]
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "low"), 2)
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "nit"), 2)
+        # ``None`` top_severity (zero findings) counts as low-only too.
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, None), 2)
+
+    def test_unit_resets_when_medium_or_higher(self) -> None:
+        prior = [{"n": 1, "low_only_streak": 5, "top_severity": "low"}]
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "medium"), 0)
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "high"), 0)
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "critical"), 0)
+
+    def test_unit_round_one_low_only_starts_at_one(self) -> None:
+        self.assertEqual(pr_ops._compute_low_only_streak([], "low"), 1)
+        self.assertEqual(pr_ops._compute_low_only_streak([], None), 1)
+
+    def test_unit_round_one_high_starts_at_zero(self) -> None:
+        self.assertEqual(pr_ops._compute_low_only_streak([], "high"), 0)
+
+    def test_finalize_persists_low_only_streak(self) -> None:
+        pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            42,
+            1,
+            "def",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(state["rounds"][0]["low_only_streak"], 1)
+
+    def test_finalize_increments_across_consecutive_low_rounds(self) -> None:
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(
+            42, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(42, 2, "sha1f", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            42, 2, "sha2f",
+            [{"comment_id": 2, "action": "ack", "severity": "nit"}],
+        )
+        self.assertEqual(state["rounds"][0]["low_only_streak"], 1)
+        self.assertEqual(state["rounds"][1]["low_only_streak"], 2)
+
+    def test_finalize_resets_when_medium_lands(self) -> None:
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(
+            42, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(42, 2, "sha1f", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            42, 2, "sha2f",
+            [{"comment_id": 2, "action": "fixed", "severity": "medium",
+              "commit_sha": "sha2f"}],
+        )
+        self.assertEqual(state["rounds"][1]["low_only_streak"], 0)
+
+    def test_finalize_zero_findings_counts_as_low_only(self) -> None:
+        # Zero findings -> top_severity is None -> still counts as low-only,
+        # so the streak increments. A single zero-finding round is what
+        # "converged" feels like; the convergence rule treats two of these
+        # in a row as definite.
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        state = pr_ops.state_finalize_round(42, 1, "sha1f", [])
+        self.assertIsNone(state["rounds"][0]["top_severity"])
+        self.assertEqual(state["rounds"][0]["low_only_streak"], 1)
+
+
 class TestStateFirstRoundOfSeries(unittest.TestCase):
     """state_load decorates state with is_first_round_of_series.
 

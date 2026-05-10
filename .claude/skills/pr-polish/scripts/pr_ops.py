@@ -784,6 +784,7 @@ def state_append_round(
                 "skipped_count": 0,
                 "top_severity": None,
                 "top_was_false_positive": False,
+                "low_only_streak": 0,
                 "comment_actions": [],
                 "noise_filtered": noise_filtered,
                 "noise_samples": samples,
@@ -851,6 +852,30 @@ def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _compute_low_only_streak(
+    prior_rounds: list[dict[str, Any]], this_top_severity: str | None
+) -> int:
+    """Increment the prior round's streak when this round's top severity is
+    low/nit/None (zero findings counts as low-only); reset to 0 otherwise.
+
+    Walks one round back rather than the whole history — the recurrence is
+    streak[N] = streak[N-1] + 1 when this round is low-only, else 0, so we
+    only need the most recent value. Round 1 starts the counter at 1 if
+    low-only.
+
+    The convergence rule reads streak >= 2 to trigger early exit; B1 reads
+    it to inject reviewer-pressure text. Any caller can derive its own
+    threshold from the same field.
+    """
+    is_low_only = severity_rank(this_top_severity) <= severity_rank("low")
+    if not is_low_only:
+        return 0
+    if not prior_rounds:
+        return 1
+    prev = max(prior_rounds, key=lambda r: r.get("n") or 0)
+    return (prev.get("low_only_streak") or 0) + 1
+
+
 def state_finalize_round(
     ctx: int | str,
     n: int,
@@ -889,6 +914,11 @@ def state_finalize_round(
     entry["comment_actions"] = merged
     entry["head_after"] = head_after
     entry.update(recompute_counts(merged))
+    # ``low_only_streak`` reflects the streak *after* this round closes, so
+    # it must be computed from rounds prior to this one (`r.n < n`) plus
+    # the freshly recomputed ``top_severity`` for this round.
+    prior_rounds = [r for r in rounds if (r.get("n") or 0) < n]
+    entry["low_only_streak"] = _compute_low_only_streak(prior_rounds, entry.get("top_severity"))
     _persist_round_findings(state_dir, entry, pr_number, branch, n, envelope_overrides or {})
     atomic_write_json(path, state)
     return state
