@@ -2178,6 +2178,61 @@ class TestRecoverEnvelope(unittest.TestCase):
         out = bramble_ops.recover_envelope(path)
         self.assertEqual(out, path)
 
+    def test_substring_collisions_do_not_trigger_recovery(self) -> None:
+        """Bare substring match on verdict tokens classified `disapprove`
+        as `accepted` (because `approve` is a substring) and `exchanges`
+        as `rejected` (because `changes` is a substring). The fix is
+        word-boundary-aware matching. These should all stay unrecovered.
+        """
+        cases = [
+            "verdict error: disapprove not allowed",
+            "verdict error: exchanges field invalid",
+            "verdict error: blocking validation",
+            "verdict ownership question",
+            "verdict error: unblock route returned 500",
+        ]
+        for error_text in cases:
+            env = {
+                "schema_version": 1,
+                "status": "error",
+                "error": error_text,
+                "review": {
+                    "issues": [{"severity": "low", "file": "a", "line": 1,
+                                "message": "x"}],
+                },
+            }
+            path = self._write(f"env-{abs(hash(error_text))}.json", env)
+            out = bramble_ops.recover_envelope(path)
+            self.assertEqual(
+                out, path,
+                f"unrelated error text should not trigger recovery: {error_text!r}",
+            )
+
+    def test_classify_recovery_verdict_substring_safe(self) -> None:
+        """Direct unit coverage of the classifier: substring collisions
+        return None, real verdict tokens still classify correctly.
+        """
+        # False-positives that bare `token in t` would match
+        self.assertIsNone(bramble_ops._classify_recovery_verdict(
+            "verdict error: disapprove not allowed"))
+        self.assertIsNone(bramble_ops._classify_recovery_verdict(
+            "verdict error: exchanges field invalid"))
+        self.assertIsNone(bramble_ops._classify_recovery_verdict(
+            "verdict error: blocking validation"))
+        self.assertIsNone(bramble_ops._classify_recovery_verdict(
+            "verdict ownership question"))
+        # True-positives still match
+        self.assertEqual(bramble_ops._classify_recovery_verdict(
+            "verdict 'approve' not in allowed set"), "accepted")
+        self.assertEqual(bramble_ops._classify_recovery_verdict(
+            "unrecognized verdict 'approve_with_notes'"), "accepted")
+        self.assertEqual(bramble_ops._classify_recovery_verdict(
+            "verdict 'request_changes' not in allowed set"), "rejected")
+        self.assertEqual(bramble_ops._classify_recovery_verdict(
+            "unrecognized verdict 'needs-changes'"), "rejected")
+        self.assertEqual(bramble_ops._classify_recovery_verdict(
+            "verdict 'lgtm' not allowed"), "accepted")
+
 
 class TestRoundDiff(unittest.TestCase):
     """`round_diff` shells out to ``git diff prior_head_after..head_before``
@@ -2292,6 +2347,58 @@ class TestPriorRoundModifiedHunks(unittest.TestCase):
         # +c,0 — no lines on the + side
         diff = "@@ -10,3 +10,0 @@\n-a\n-b\n-c\n"
         self.assertEqual(bramble_ops._parse_hunk_ranges(diff), [])
+
+    def test_prior_round_modified_hunks_only_round_filters(self) -> None:
+        """only_round=N must restrict the diff walk to that round, so the
+        spiral demote heuristic doesn't accumulate touched ranges across
+        a long audit. Without this, an early round's edits to file X
+        would suppress real regressions on file X reported by every
+        subsequent round.
+        """
+        # Build a real tmp git repo with two commits ("rounds")
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            def g(*args):
+                res = subprocess.run(
+                    ["git", *args], cwd=str(root),
+                    capture_output=True, text=True, check=False,
+                )
+                if res.returncode != 0:
+                    raise RuntimeError(f"git {args}: {res.stderr}")
+                return res.stdout.strip()
+            g("init", "-q"); g("config", "user.email", "t@t")
+            g("config", "user.name", "t"); g("config", "commit.gpgsign", "false")
+            (root / "a.txt").write_text("\n".join(f"a{i}" for i in range(20)) + "\n")
+            g("add", "a.txt"); g("commit", "-q", "-m", "init")
+            sha0 = g("rev-parse", "HEAD")
+            # round 1 modifies a.txt lines 1-3
+            (root / "a.txt").write_text("\n".join(["X", "Y", "Z"] + [f"a{i}" for i in range(3, 20)]) + "\n")
+            g("add", "a.txt"); g("commit", "-q", "-m", "r1")
+            sha1 = g("rev-parse", "HEAD")
+            # round 2 modifies b.txt only
+            (root / "b.txt").write_text("hi\n")
+            g("add", "b.txt"); g("commit", "-q", "-m", "r2")
+            sha2 = g("rev-parse", "HEAD")
+            state = {
+                "rounds": [
+                    {"n": 1, "head_before": sha0, "head_after": sha1},
+                    {"n": 2, "head_before": sha1, "head_after": sha2},
+                ],
+            }
+            old_cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                # Default: union across all rounds — both files appear.
+                all_hunks = bramble_ops.prior_round_modified_hunks(state)
+                self.assertIn("a.txt", all_hunks)
+                self.assertIn("b.txt", all_hunks)
+                # only_round=2: only b.txt appears (a.txt was round 1).
+                last_only = bramble_ops.prior_round_modified_hunks(state, only_round=2)
+                self.assertNotIn("a.txt", last_only)
+                self.assertIn("b.txt", last_only)
+            finally:
+                os.chdir(old_cwd)
 
     def test_line_in_modified_hunk(self) -> None:
         hunks = {"a.go": [(10, 15), (50, 55)]}

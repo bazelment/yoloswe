@@ -852,6 +852,24 @@ def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _backfill_low_only_streak(prior_rounds: list[dict[str, Any]]) -> int:
+    """Reconstruct the streak ending at the most recent prior round when
+    its ``low_only_streak`` field is missing (state file from before the
+    field existed). Walks rounds in reverse, counting consecutive low-
+    only ``top_severity`` values from the most recent backwards. A
+    medium-or-higher round resets the count to 0.
+
+    Pure derived-from-history; no I/O.
+    """
+    streak = 0
+    for rnd in sorted(prior_rounds, key=lambda r: r.get("n") or 0, reverse=True):
+        if severity_rank(rnd.get("top_severity")) <= severity_rank("low"):
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def _compute_low_only_streak(
     prior_rounds: list[dict[str, Any]], this_top_severity: str | None
 ) -> int:
@@ -863,6 +881,13 @@ def _compute_low_only_streak(
     only need the most recent value. Round 1 starts the counter at 1 if
     low-only.
 
+    Backwards-compat: when the prior round was finalized by an
+    older orchestrator that didn't write ``low_only_streak``, we
+    reconstruct it from the persisted ``top_severity`` history. Without
+    this, an in-progress audit upgraded mid-loop would lose its streak
+    continuity and the new convergence shortcut would not trigger until
+    two fresh low rounds accumulated post-upgrade.
+
     The convergence rule reads streak >= 2 to trigger early exit; B1 reads
     it to inject reviewer-pressure text. Any caller can derive its own
     threshold from the same field.
@@ -873,7 +898,10 @@ def _compute_low_only_streak(
     if not prior_rounds:
         return 1
     prev = max(prior_rounds, key=lambda r: r.get("n") or 0)
-    return (prev.get("low_only_streak") or 0) + 1
+    prev_streak = prev.get("low_only_streak")
+    if prev_streak is None:
+        prev_streak = _backfill_low_only_streak(prior_rounds)
+    return prev_streak + 1
 
 
 def state_finalize_round(

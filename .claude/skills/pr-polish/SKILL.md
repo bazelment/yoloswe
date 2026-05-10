@@ -60,7 +60,7 @@ Bias for action and your own judgement with research. Only three things pause th
 
 1. **Integrity gate** — stale state file with PR mismatch (Step 0.5).
 2. **Budget gate** — `--rounds N` reached without convergence.
-3. **Regression gate** — **unverified** `spiral_matches` non-empty. Single-source spirals auto-demote to `batch_stale` when *either* of two heuristics fires: (a) the cited evidence is no longer at HEAD within ±10 lines of the cited line, or (b) the cited file:line falls inside a hunk that any prior round of this series modified (read from `head_before..head_after` of each prior round in state). Both are pure git/state lookups, no judgment. Multi-source spirals (≥2 backends agree) always escalate. The audit row records `action: "stale"` with the demote reason. Cost of being wrong: a real regression that gets mis-demoted will resurface next round, and the heuristic catches it on the second occurrence.
+3. **Regression gate** — **unverified** `spiral_matches` non-empty. Single-source spirals auto-demote to `batch_stale` when *either* of two heuristics fires: (a) the cited evidence is no longer at HEAD within ±10 lines of the cited line, or (b) the cited file:line falls inside a hunk that the **immediately-prior** round modified (read from `head_before..head_after` of round N-1 only — not any ancestor round, which would let a long audit suppress real regressions on any file an early round happened to touch). Both are pure git/state lookups, no judgment. Multi-source spirals (≥2 backends agree) always escalate. The audit row records `action: "stale"` with the demote reason. Cost of being wrong: a real regression that gets mis-demoted will resurface next round, and the heuristic catches it on the second occurrence.
 
 ## State tracking
 

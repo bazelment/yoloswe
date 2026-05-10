@@ -451,6 +451,57 @@ class TestLowOnlyStreak(unittest.TestCase):
         )
         self.assertEqual(state["rounds"][1]["low_only_streak"], 0)
 
+    def test_backfills_streak_from_top_severity_when_field_missing(self) -> None:
+        """An in-progress state file written by a pre-streak orchestrator
+        won't have ``low_only_streak`` on its rounds. The next finalize
+        must reconstruct the streak from ``top_severity`` history so the
+        new convergence shortcut and pressure note trigger correctly
+        instead of waiting for two fresh low rounds to accumulate.
+        """
+        # Two prior low-only rounds with no streak field — simulates state
+        # written by the pre-this-feature orchestrator.
+        prior = [
+            {"n": 1, "top_severity": "low"},
+            {"n": 2, "top_severity": "nit"},
+        ]
+        # This round is also low — streak should be 3 (2 + 1), not 1.
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "low"), 3)
+
+    def test_backfill_resets_at_first_non_low_walking_back(self) -> None:
+        """Backfill walks the top_severity ladder backwards and stops at
+        the first medium/high. A history of [high, low, low] ending in
+        low-only continues at streak=2, not 3.
+        """
+        prior = [
+            {"n": 1, "top_severity": "high"},
+            {"n": 2, "top_severity": "low"},
+            {"n": 3, "top_severity": "low"},
+        ]
+        # Most recent is low; walking back: low (n=3), low (n=2), high
+        # (n=1 — stop). prev_streak from backfill = 2; this round adds 1.
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "low"), 3)
+
+    def test_backfill_unit(self) -> None:
+        # Empty -> 0
+        self.assertEqual(pr_ops._backfill_low_only_streak([]), 0)
+        # All low -> count all
+        self.assertEqual(
+            pr_ops._backfill_low_only_streak(
+                [{"n": 1, "top_severity": "low"},
+                 {"n": 2, "top_severity": "nit"},
+                 {"n": 3, "top_severity": None}],
+            ),
+            3,
+        )
+        # Most recent is medium -> 0 (the streak ended at the most recent round)
+        self.assertEqual(
+            pr_ops._backfill_low_only_streak(
+                [{"n": 1, "top_severity": "low"},
+                 {"n": 2, "top_severity": "medium"}],
+            ),
+            0,
+        )
+
     def test_finalize_zero_findings_counts_as_low_only(self) -> None:
         # Zero findings -> top_severity is None -> still counts as low-only,
         # so the streak increments. A single zero-finding round is what

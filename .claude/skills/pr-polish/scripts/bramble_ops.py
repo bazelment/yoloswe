@@ -303,12 +303,15 @@ _LOW_STREAK_PRESSURE_THRESHOLD = 2
 
 
 def _low_only_streak_pressure(state: dict[str, Any] | None, round_: int) -> str:
-    """Return the convergence-pressure sentence when streak >= 2, else ""
+    """Return the convergence-pressure sentence when streak >= 2, else "".
 
     Reads the immediately-prior round's ``low_only_streak`` rather than
-    walking history — the counter is finalize-time persistent. The
-    sentence is appended to whatever ``goal_for_round`` produces, so
-    triage routing and action-history are unaffected.
+    walking history — the counter is finalize-time persistent. Falls back
+    to reconstructing the streak from ``top_severity`` history when the
+    field is missing (state file from before low_only_streak existed) so
+    upgraded mid-loop runs don't lose streak continuity. The sentence is
+    appended to whatever ``goal_for_round`` produces, so triage routing
+    and action-history are unaffected.
 
     Wording is fixed: it states a fact ("the last N rounds returned only
     low-severity findings") and a frame ("every finding costs a round")
@@ -322,7 +325,14 @@ def _low_only_streak_pressure(state: dict[str, Any] | None, round_: int) -> str:
     if not prior:
         return ""
     prev = max(prior, key=lambda r: r.get("n") or 0)
-    streak = prev.get("low_only_streak") or 0
+    streak = prev.get("low_only_streak")
+    if streak is None:
+        # Lazy import to avoid pulling pr_ops at module load (pr_ops
+        # already lazy-imports bramble_ops; the inverse is fine when
+        # gated to one fallback path).
+        from pr_ops import _backfill_low_only_streak  # noqa: PLC0415
+
+        streak = _backfill_low_only_streak(prior)
     if streak < _LOW_STREAK_PRESSURE_THRESHOLD:
         return ""
     return (
@@ -1340,17 +1350,26 @@ def _classify_recovery_verdict(error_text: str) -> str | None:
     Looks for verdict-validation language. Anything ambiguous (no verdict
     keyword, or a recognized non-merge verdict like ``comment``) returns
     None so the caller treats it as "no recovery applicable".
+
+    Token matching is word-boundary aware (``\\b`` regex), not raw
+    substring: bare ``token in t`` would classify ``disapprove`` →
+    ``accepted`` (because ``approve`` is a substring) and ``exchanges``
+    → ``rejected`` (because ``changes`` is a substring), silently
+    salvaging envelopes that should stay rejected. Word boundaries
+    treat both ``-`` and ``_`` as separators (so ``approve_with_notes``
+    and ``needs-changes`` still match), which is what we want for
+    verdict tokens that come in either spelling.
     """
     if not error_text:
         return None
     t = error_text.lower()
-    if "verdict" not in t:
+    if not re.search(r"\bverdict\b", t):
         return None
     for token in _RECOVERY_ACCEPTED_TOKENS:
-        if token in t:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", t):
             return "accepted"
     for token in _RECOVERY_REJECTED_TOKENS:
-        if token in t:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", t):
             return "rejected"
     return None
 
@@ -1518,18 +1537,26 @@ def _parse_hunk_ranges(diff_text: str) -> list[tuple[int, int]]:
 
 def prior_round_modified_hunks(
     state: dict[str, Any] | None,
+    *,
+    only_round: int | None = None,
 ) -> dict[str, list[tuple[int, int]]]:
     """Map each file path to ``[(start, end), ...]`` line ranges modified by
-    any prior round's commit (``head_before..head_after``).
+    a prior round's commit (``head_before..head_after``).
 
-    Returns ``{}`` when state is missing or no prior round has both SHAs.
-    Pure git plumbing — runs ``git diff -U0 <head_before>..<head_after>``
-    once per prior round, parses hunk headers, unions ranges per file.
+    With ``only_round=N``, only that round's hunks are returned. Default
+    behavior unions across all prior rounds. Triage passes the
+    immediately-prior round (current_round - 1) so the demote heuristic
+    only fires on findings that landed inside the most recent fix's
+    edited region — older rounds' edits are part of the stable
+    background and a finding there is more likely a real lingering bug
+    than stale session context. Without this narrowing, a long audit
+    accumulates touched ranges and starts demoting real regressions
+    just because a long-ago round happened to edit the same file.
 
-    The SKILL feeds this into ``triage`` so a single-source spiral whose
-    cited line falls inside a prior-round-modified hunk auto-demotes to
-    ``batch_stale`` — the reviewer is replaying cached context against
-    code we already moved.
+    Returns ``{}`` when state is missing, or no matching round has both
+    head_before and head_after. Pure git plumbing — runs
+    ``git diff -U0 <head_before>..<head_after>`` once per matching
+    round, parses hunk headers, unions ranges per file.
     """
     if not state:
         return {}
@@ -1538,6 +1565,8 @@ def prior_round_modified_hunks(
     out: dict[str, list[tuple[int, int]]] = {}
     rounds = state.get("rounds") or []
     for rnd in rounds:
+        if only_round is not None and (rnd.get("n") or 0) != only_round:
+            continue
         head_before = rnd.get("head_before")
         head_after = rnd.get("head_after")
         if not head_before or not head_after or head_before == head_after:
@@ -1877,7 +1906,21 @@ def main(argv: list[str] | None = None) -> int:
             # doesn't spam stderr with "unreachable SHA" warnings.
             modified_hunks: dict[str, list[tuple[int, int]]] | None = None
             if resolved_mode == REVIEW_MODE_CODE:
-                modified_hunks = prior_round_modified_hunks(prior)
+                # Narrow to the immediately-prior round so the demote
+                # heuristic doesn't accumulate touched ranges across a
+                # long audit (which would suppress real regressions on
+                # any file an early round happened to touch). The
+                # use case it's designed for — doc-comment fix shifts
+                # words within the same function — is N→N+1, not "any
+                # ancestor round".
+                last_round = max(
+                    (r.get("n") or 0 for r in (prior.get("rounds") or [])),
+                    default=0,
+                ) if prior else 0
+                if last_round > 0:
+                    modified_hunks = prior_round_modified_hunks(
+                        prior, only_round=last_round
+                    )
             result = triage(
                 findings,
                 prior_fixed_keys(prior, resolved_mode),
