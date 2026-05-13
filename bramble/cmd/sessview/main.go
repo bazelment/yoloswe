@@ -101,5 +101,8 @@ func truncateStr(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
+	if max < 3 {
+		return "..."
+	}
 	return s[:max-3] + "..."
 }
