@@ -9,6 +9,9 @@ import (
 	"github.com/bazelment/yoloswe/symphony/tracker/linear"
 )
 
+// KindLinear is the tracker kind identifier for the Linear adapter.
+const KindLinear = "linear"
+
 // Tracker is the read-only issue-tracker adapter contract.
 // Symphony is a scheduler/runner and tracker reader; ticket writes
 // are handled by the coding agent (Spec Section 11.5).
@@ -30,7 +33,7 @@ type Tracker interface {
 // Supported kinds: "linear".
 func New(kind, endpoint, apiKey string) (Tracker, error) {
 	switch kind {
-	case "linear":
+	case KindLinear:
 		if apiKey == "" {
 			return nil, &linear.Error{
 				Category: linear.ErrMissingTrackerAPIKey,
