@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "swarm_lib",
@@ -27,4 +27,10 @@ go_binary(
     name = "swarm",
     embed = [":swarm_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "swarm_test",
+    srcs = ["main_test.go"],
+    embed = [":swarm_lib"],
 )
