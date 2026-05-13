@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "voicetest_lib",
@@ -18,4 +18,11 @@ go_binary(
     name = "voicetest",
     embed = [":voicetest_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "voicetest_test",
+    srcs = ["main_test.go"],
+    embed = [":voicetest_lib"],
+    deps = ["//voice/stt"],
 )

@@ -26,6 +26,7 @@ import (
 )
 
 type config struct { //nolint:govet // fieldalignment: readability over packing
+	paths            []string
 	summaryWordLimit int
 	sinceStr         string
 	untilStr         string
@@ -97,14 +98,14 @@ func main() {
 		return
 	}
 
-	if flags.NArg() == 0 {
+	if len(cfg.paths) == 0 {
 		listProjects()
 		return
 	}
 
 	exitCode := 0
 	var allSessions []*sessionanalysis.Session
-	for _, path := range flags.Args() {
+	for _, path := range cfg.paths {
 		sessions, err := parsePath(path, analysisCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
@@ -121,31 +122,31 @@ func main() {
 	os.Exit(exitCode)
 }
 
-var flags = flag.NewFlagSet("sessanalyze", flag.ExitOnError)
-
 func parseFlags(args []string) config {
 	cfg := config{
 		summaryWordLimit: 100,
 		statsMaxRows:     25,
 	}
-	flags.IntVar(&cfg.summaryWordLimit, "summary-limit", 100,
+	fs := flag.NewFlagSet("sessanalyze", flag.ExitOnError)
+	fs.IntVar(&cfg.summaryWordLimit, "summary-limit", 100,
 		"word limit before summarizing agent responses with Haiku (0=no summarization)")
-	flags.BoolVar(&cfg.jsonOutput, "json", false, "output as JSON")
-	flags.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
-	flags.BoolVar(&cfg.listProjects, "list", false, "list available projects")
-	flags.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
-	flags.StringVar(&cfg.untilStr, "until", "", "filter sessions up to and including this time (e.g. '2026-04-23T12:00:00Z'); stats mode only")
-	flags.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
-	flags.BoolVar(&cfg.summarize, "summarize", false, "use an LLM to generate session summaries")
-	flags.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
-	flags.StringVar(&cfg.pricingFile, "pricing-file", "", "JSON file with model pricing table for estimated cost")
-	flags.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
-	flags.IntVar(&cfg.statsMaxRows, "max-rows", 25, "max rows per stats breakdown table")
-	flags.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
-	flags.IntVar(&cfg.concurrency, "j", 10, "number of concurrent LLM summarization workers")
-	flags.BoolVar(&cfg.stats, "stats", false, "show usage/cost stats instead of per-session transcripts")
-	flags.BoolVar(&cfg.topLevelOnly, "top-level-only", false, "in --stats mode, exclude subagent logs")
-	flags.Parse(args) //nolint:errcheck // ExitOnError mode handles errors
+	fs.BoolVar(&cfg.jsonOutput, "json", false, "output as JSON")
+	fs.BoolVar(&cfg.verbose, "v", false, "show full agent responses (no truncation in display)")
+	fs.BoolVar(&cfg.listProjects, "list", false, "list available projects")
+	fs.StringVar(&cfg.sinceStr, "since", "", "filter sessions after this time (e.g. '2d', '24h', '2026-03-04')")
+	fs.StringVar(&cfg.untilStr, "until", "", "filter sessions up to and including this time (e.g. '2026-04-23T12:00:00Z'); stats mode only")
+	fs.BoolVar(&cfg.allProjects, "all", false, "scan all projects under ~/.claude/projects/")
+	fs.BoolVar(&cfg.summarize, "summarize", false, "use an LLM to generate session summaries")
+	fs.StringVar(&cfg.modelStr, "model", "haiku", "model for summarization: haiku (default) or gemini")
+	fs.StringVar(&cfg.pricingFile, "pricing-file", "", "JSON file with model pricing table for estimated cost")
+	fs.IntVar(&cfg.limit, "n", 0, "limit to the N most recent sessions (0=no limit)")
+	fs.IntVar(&cfg.statsMaxRows, "max-rows", 25, "max rows per stats breakdown table")
+	fs.IntVar(&cfg.minTurns, "min-turns", 0, "exclude sessions with fewer than N turns")
+	fs.IntVar(&cfg.concurrency, "j", 10, "number of concurrent LLM summarization workers")
+	fs.BoolVar(&cfg.stats, "stats", false, "show usage/cost stats instead of per-session transcripts")
+	fs.BoolVar(&cfg.topLevelOnly, "top-level-only", false, "in --stats mode, exclude subagent logs")
+	fs.Parse(args) //nolint:errcheck // ExitOnError mode handles errors
+	cfg.paths = fs.Args()
 	return cfg
 }
 
@@ -203,11 +204,11 @@ func runStats(cfg config) error {
 			paths = append(paths, projects[i].Path)
 		}
 	} else {
-		if flags.NArg() == 0 {
+		if len(cfg.paths) == 0 {
 			listProjects()
 			return nil
 		}
-		paths = append(paths, flags.Args()...)
+		paths = append(paths, cfg.paths...)
 	}
 
 	report, err := sessionanalysis.AnalyzeUsageStats(paths, statsCfg)

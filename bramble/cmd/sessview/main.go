@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/displaytext"
 	"github.com/bazelment/yoloswe/logging/klogfmt"
 
 	"github.com/bazelment/yoloswe/bramble/app"
@@ -91,15 +92,8 @@ func processSessionFile(filePath string, width, height int) error {
 	for i := range result.Lines {
 		line := result.Lines[i]
 		fmt.Printf("[%3d] %s: %s\n", i, line.Type,
-			strings.ReplaceAll(truncateStr(line.Content, 80), "\n", "\\n"))
+			strings.ReplaceAll(displaytext.Truncate(line.Content, 80), "\n", "\\n"))
 	}
 
 	return nil
-}
-
-func truncateStr(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
 }

@@ -564,9 +564,7 @@ func TestClient_TurnCompletedErrorAndDuration(t *testing.T) {
 
 			// Start a turn so duration is nonzero.
 			thread.handleTurnStarted(tt.turn.ID)
-
-			// Small sleep to ensure measurable duration.
-			time.Sleep(5 * time.Millisecond)
+			thread.turnStartTime = time.Now().Add(-5 * time.Millisecond)
 
 			notif := TurnCompletedNotification{
 				ThreadID: "thread-1",

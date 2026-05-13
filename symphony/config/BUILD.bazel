@@ -13,6 +13,7 @@ go_library(
     deps = [
         "//symphony/agent",
         "//symphony/model",
+        "//symphony/tracker",
         "@com_github_fsnotify_fsnotify//:fsnotify",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],

@@ -35,6 +35,26 @@ Useful for remote playback of bramble voice reports:
 	RunE: runSpeak,
 }
 
+type (
+	audioPlayer interface {
+		PlayMP3(context.Context, []byte) error
+		Close() error
+	}
+
+	speakConfig struct {
+		apiKey  string
+		voice   string
+		timeout time.Duration
+		speed   float64
+	}
+
+	speakDeps struct {
+		input       io.Reader
+		newPlayer   func() audioPlayer
+		newProvider func(string) (tts.TextToSpeech, error)
+	}
+)
+
 func init() {
 	Cmd.Flags().StringVar(&elevenLabsAPIKey, "elevenlabs-api-key", "", "ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
 	Cmd.Flags().StringVar(&ttsVoice, "tts-voice", "", "ElevenLabs voice ID for TTS synthesis")
@@ -42,37 +62,56 @@ func init() {
 }
 
 func runSpeak(cmd *cobra.Command, args []string) error {
-	// Read all text from stdin.
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return fmt.Errorf("read stdin: %w", err)
-	}
+	return runSpeakWithDeps(cmd.Context(), defaultSpeakConfig(), defaultSpeakDeps())
+}
 
-	text := strings.TrimSpace(string(data))
+func defaultSpeakConfig() speakConfig {
+	return speakConfig{
+		apiKey:  elevenLabsAPIKey,
+		voice:   ttsVoice,
+		timeout: 60 * time.Second,
+		speed:   speed,
+	}
+}
+
+func defaultSpeakDeps() speakDeps {
+	return speakDeps{
+		input: os.Stdin,
+		newPlayer: func() audioPlayer {
+			return playback.NewPlayer()
+		},
+		newProvider: func(apiKey string) (tts.TextToSpeech, error) {
+			return elevenlabs.NewProvider(apiKey)
+		},
+	}
+}
+
+func runSpeakWithDeps(parent context.Context, cfg speakConfig, deps speakDeps) error {
+	text, err := readSpeakText(deps.input)
+	if err != nil {
+		return err
+	}
 	if text == "" {
 		return nil // nothing to speak
 	}
 
-	// Create ElevenLabs provider.
-	provider, err := elevenlabs.NewProvider(elevenLabsAPIKey)
+	provider, err := deps.newProvider(cfg.apiKey)
 	if err != nil {
 		return fmt.Errorf("create TTS provider: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, cfg.timeout)
 	defer cancel()
 
-	// Synthesize.
 	audio, err := provider.Synthesize(ctx, text, tts.SynthOpts{
-		Voice: ttsVoice,
-		Speed: speed,
+		Voice: cfg.voice,
+		Speed: cfg.speed,
 	})
 	if err != nil {
 		return fmt.Errorf("synthesize: %w", err)
 	}
 
-	// Play.
-	player := playback.NewPlayer()
+	player := deps.newPlayer()
 	defer player.Close()
 
 	if err := player.PlayMP3(ctx, audio.Data); err != nil {
@@ -80,4 +119,12 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func readSpeakText(input io.Reader) (string, error) {
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }

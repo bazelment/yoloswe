@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/bazelment/yoloswe/symphony/agent"
+	"github.com/bazelment/yoloswe/symphony/tracker"
 )
 
 // ValidationError represents a dispatch preflight validation failure.
@@ -22,7 +23,7 @@ func ValidateForDispatch(cfg *ServiceConfig) error {
 
 	if cfg.TrackerKind == "" {
 		checks = append(checks, "tracker.kind is required")
-	} else if cfg.TrackerKind != "linear" {
+	} else if cfg.TrackerKind != tracker.KindLinear {
 		checks = append(checks, fmt.Sprintf("unsupported tracker.kind: %q", cfg.TrackerKind))
 	}
 
@@ -30,7 +31,7 @@ func ValidateForDispatch(cfg *ServiceConfig) error {
 		checks = append(checks, "tracker.api_key is required (after $ resolution)")
 	}
 
-	if cfg.TrackerKind == "linear" && cfg.TrackerProjectSlug == "" {
+	if cfg.TrackerKind == tracker.KindLinear && cfg.TrackerProjectSlug == "" {
 		checks = append(checks, "tracker.project_slug is required for linear tracker")
 	}
 

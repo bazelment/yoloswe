@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"github.com/bazelbuild/rules_go/go/tools/bazel"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/symphony/config"
 	symphttp "github.com/bazelment/yoloswe/symphony/http"
@@ -117,10 +117,10 @@ func makeTestConfig(codexBin, workspaceRoot string) func() *config.ServiceConfig
 		return config.NewServiceConfig(&model.WorkflowDefinition{
 			Config: map[string]any{
 				"tracker": map[string]any{
-					"kind":           "linear",
-					"api_key":        "test-api-key",
-					"project_slug":   "TEST",
-					"active_states":  []any{"Todo", "In Progress"},
+					"kind":            "linear",
+					"api_key":         "test-api-key",
+					"project_slug":    "TEST",
+					"active_states":   []any{"Todo", "In Progress"},
 					"terminal_states": []any{"Done", "Cancelled"},
 				},
 				"polling": map[string]any{
@@ -147,14 +147,7 @@ func makeTestConfig(codexBin, workspaceRoot string) func() *config.ServiceConfig
 
 func waitForCondition(t *testing.T, timeout time.Duration, msg string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for: %s", msg)
+	require.Eventually(t, cond, timeout, 50*time.Millisecond, "timed out waiting for: %s", msg)
 }
 
 // ---- Tests ----
@@ -283,10 +276,17 @@ func TestConcurrencyLimit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
 		for i := 0; i < 40; i++ {
 			snap, err := orch.RequestSnapshot(ctx)
 			if err != nil {
-				continue
+				select {
+				case <-ticker.C:
+					continue
+				case <-ctx.Done():
+					return
+				}
 			}
 			running := int64(len(snap.Running))
 			for {
@@ -295,7 +295,11 @@ func TestConcurrencyLimit(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	<-done
@@ -480,4 +484,3 @@ func TestIssueEndpoint(t *testing.T) {
 	cancel()
 	<-orchDone
 }
-

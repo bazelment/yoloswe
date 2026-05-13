@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
@@ -22,108 +23,150 @@ type rpcMessage struct {
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	Result  any             `json:"result,omitempty"`
+	Error   any             `json:"error,omitempty"`
 }
 
-func writeMsg(msg rpcMessage) {
-	data, _ := json.Marshal(msg)
-	fmt.Fprintf(os.Stdout, "%s\n", data)
+type fakeCodexServer struct {
+	out       io.Writer
+	sleep     func(time.Duration)
+	slow      bool
+	turnCount int
 }
 
-func writeResponse(id any, result any) {
-	writeMsg(rpcMessage{JSONRPC: "2.0", ID: id, Result: result})
+func writeMsg(w io.Writer, msg rpcMessage) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "%s\n", data)
+	return err
 }
 
-func writeNotification(method string, params any) {
-	raw, _ := json.Marshal(params)
-	writeMsg(rpcMessage{JSONRPC: "2.0", Method: method, Params: raw})
+func writeResponse(w io.Writer, id any, result any) error {
+	return writeMsg(w, rpcMessage{JSONRPC: "2.0", ID: id, Result: result})
 }
 
-func main() {
-	slow := os.Getenv("FAKE_CODEX_SLOW") == "true"
-	scanner := bufio.NewScanner(os.Stdin)
+func writeNotification(w io.Writer, method string, params any) error {
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	return writeMsg(w, rpcMessage{JSONRPC: "2.0", Method: method, Params: raw})
+}
+
+func serveFakeCodex(in io.Reader, out io.Writer, slow bool, sleep func(time.Duration)) error {
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+
+	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	turnCount := 0
+	server := &fakeCodexServer{
+		out:   out,
+		sleep: sleep,
+		slow:  slow,
+	}
 
 	for scanner.Scan() {
 		var msg rpcMessage
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue
 		}
+		if err := server.handle(msg); err != nil {
+			return err
+		}
+	}
 
-		switch {
-		case msg.ID != nil && msg.Method == "":
-			// This is a response to a request we sent (e.g., approval response).
-			// Ignore.
-			continue
+	return scanner.Err()
+}
 
-		case msg.Method == "initialize":
-			writeResponse(msg.ID, map[string]any{
-				"capabilities": map[string]any{},
-			})
+func (s *fakeCodexServer) handle(msg rpcMessage) error {
+	switch {
+	case msg.ID != nil && msg.Method == "":
+		// This is a response to a request we sent (e.g., approval response).
+		return nil
 
-		case msg.Method == "initialized":
-			// Notification, no response.
+	case msg.Method == "initialize":
+		return writeResponse(s.out, msg.ID, map[string]any{
+			"capabilities": map[string]any{},
+		})
 
-		case msg.Method == "thread/start":
-			writeResponse(msg.ID, map[string]any{
-				"thread": map[string]any{
-					"id": "thread-fake-001",
-				},
-			})
+	case msg.Method == "initialized":
+		// Notification, no response.
+		return nil
 
-		case msg.Method == "turn/start":
-			turnCount++
-			turnID := fmt.Sprintf("turn-fake-%03d", turnCount)
-			writeResponse(msg.ID, map[string]any{
-				"turn": map[string]any{
-					"id": turnID,
-				},
-			})
+	case msg.Method == "thread/start":
+		return writeResponse(s.out, msg.ID, map[string]any{
+			"thread": map[string]any{
+				"id": "thread-fake-001",
+			},
+		})
 
-			if slow {
-				time.Sleep(2 * time.Second)
-			} else {
-				time.Sleep(100 * time.Millisecond)
-			}
+	case msg.Method == "turn/start":
+		return s.handleTurnStart(msg)
 
-			// Emit token usage.
-			inputToks := int64(100 * turnCount)
-			outputToks := int64(50 * turnCount)
-			writeNotification("thread/tokenUsage/updated", map[string]any{
+	default:
+		if msg.ID == nil {
+			return nil
+		}
+		return writeMsg(s.out, rpcMessage{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error: map[string]any{
+				"code":    -32601,
+				"message": "method not found: " + msg.Method,
+			},
+		})
+	}
+}
+
+func (s *fakeCodexServer) handleTurnStart(msg rpcMessage) error {
+	s.turnCount++
+	turnID := fmt.Sprintf("turn-fake-%03d", s.turnCount)
+	if err := writeResponse(s.out, msg.ID, map[string]any{
+		"turn": map[string]any{
+			"id": turnID,
+		},
+	}); err != nil {
+		return err
+	}
+
+	if s.slow {
+		s.sleep(2 * time.Second)
+	} else {
+		s.sleep(100 * time.Millisecond)
+	}
+
+	inputToks := int64(100 * s.turnCount)
+	outputToks := int64(50 * s.turnCount)
+	if err := writeNotification(s.out, "thread/tokenUsage/updated", map[string]any{
+		"input_tokens":  inputToks,
+		"output_tokens": outputToks,
+		"total_tokens":  inputToks + outputToks,
+	}); err != nil {
+		return err
+	}
+
+	if s.slow {
+		s.sleep(500 * time.Millisecond)
+	}
+
+	return writeNotification(s.out, "turn/completed", map[string]any{
+		"usage": map[string]any{
+			"total_token_usage": map[string]any{
 				"input_tokens":  inputToks,
 				"output_tokens": outputToks,
 				"total_tokens":  inputToks + outputToks,
-			})
+			},
+		},
+	})
+}
 
-			if slow {
-				time.Sleep(500 * time.Millisecond)
-			}
-
-			// Complete the turn.
-			writeNotification("turn/completed", map[string]any{
-				"usage": map[string]any{
-					"total_token_usage": map[string]any{
-						"input_tokens":  inputToks,
-						"output_tokens": outputToks,
-						"total_tokens":  inputToks + outputToks,
-					},
-				},
-			})
-
-		default:
-			// Unknown method, respond with error if it has an ID.
-			if msg.ID != nil {
-				data, _ := json.Marshal(map[string]any{
-					"jsonrpc": "2.0",
-					"id":      msg.ID,
-					"error": map[string]any{
-						"code":    -32601,
-						"message": "method not found: " + msg.Method,
-					},
-				})
-				fmt.Fprintf(os.Stdout, "%s\n", data)
-			}
-		}
+func main() {
+	slow := os.Getenv("FAKE_CODEX_SLOW") == "true"
+	if err := serveFakeCodex(os.Stdin, os.Stdout, slow, time.Sleep); err != nil {
+		fmt.Fprintf(os.Stderr, "fake_codex: %v\n", err)
+		os.Exit(1)
 	}
 }

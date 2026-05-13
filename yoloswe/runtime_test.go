@@ -44,10 +44,8 @@ func TestContextCancellationBehavior(t *testing.T) {
 
 	t.Run("timeout context", func(t *testing.T) {
 		swe := New(Config{})
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Nanosecond))
 		defer cancel()
-
-		time.Sleep(1 * time.Millisecond) // Ensure timeout
 
 		err := swe.Run(ctx, "test prompt")
 		if err == nil {

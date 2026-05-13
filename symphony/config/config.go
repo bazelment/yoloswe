@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bazelment/yoloswe/symphony/model"
+	"github.com/bazelment/yoloswe/symphony/tracker"
 )
 
 // ServiceConfig is an immutable snapshot of typed runtime config derived from
@@ -96,7 +97,7 @@ func NewServiceConfig(wf *model.WorkflowDefinition) *ServiceConfig {
 	}
 
 	// Default tracker endpoint for linear (Spec Section 5.3.1).
-	if cfg.TrackerKind == "linear" && cfg.TrackerEndpoint == "" {
+	if cfg.TrackerKind == tracker.KindLinear && cfg.TrackerEndpoint == "" {
 		cfg.TrackerEndpoint = "https://api.linear.app/graphql"
 	}
 

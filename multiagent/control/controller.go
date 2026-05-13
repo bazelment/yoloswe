@@ -74,11 +74,12 @@ func (c *Controller) Cancel() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.state == StateCancelled || c.state == StateCompleted || c.state == StateFailed {
+	if c.isTerminalLocked() {
 		return false
 	}
 
 	c.state = StateCancelled
+	c.pauseRequested = false
 	if c.cancelFunc != nil {
 		c.cancelFunc()
 	}
@@ -117,7 +118,7 @@ func (c *Controller) ShouldPause() bool {
 func (c *Controller) MarkPaused() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.pauseRequested {
+	if c.state == StateRunning && c.pauseRequested {
 		c.state = StatePaused
 		c.pauseRequested = false
 	}
@@ -127,14 +128,22 @@ func (c *Controller) MarkPaused() {
 func (c *Controller) MarkCompleted() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.isTerminalLocked() {
+		return
+	}
 	c.state = StateCompleted
+	c.pauseRequested = false
 }
 
 // MarkFailed marks the mission as failed.
 func (c *Controller) MarkFailed() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.isTerminalLocked() {
+		return
+	}
 	c.state = StateFailed
+	c.pauseRequested = false
 }
 
 // State returns the current state.
@@ -178,4 +187,8 @@ func (c *Controller) IsActive() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.state == StateRunning || c.state == StatePaused
+}
+
+func (c *Controller) isTerminalLocked() bool {
+	return c.state == StateCancelled || c.state == StateCompleted || c.state == StateFailed
 }

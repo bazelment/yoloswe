@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "sessionplayer",
@@ -14,4 +14,10 @@ go_library(
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/protocol",
     ],
+)
+
+go_test(
+    name = "sessionplayer_test",
+    srcs = ["codex_test.go"],
+    embed = [":sessionplayer"],
 )

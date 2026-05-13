@@ -8,6 +8,8 @@ import (
 	"sync"
 )
 
+const maxTokenSize = 1024 * 1024 // 1MB
+
 // Reader reads newline-delimited JSON from an io.Reader.
 type Reader struct {
 	scanner *bufio.Scanner
@@ -17,7 +19,6 @@ type Reader struct {
 func NewReader(r io.Reader) *Reader {
 	scanner := bufio.NewScanner(r)
 	// Set a larger buffer for potentially large JSON messages
-	const maxTokenSize = 1024 * 1024 // 1MB
 	scanner.Buffer(make([]byte, 64*1024), maxTokenSize)
 	return &Reader{scanner: scanner}
 }
@@ -59,15 +60,7 @@ func (w *Writer) Write(v interface{}) error {
 		return err
 	}
 
-	// Write JSON followed by newline
-	if _, err := w.w.Write(data); err != nil {
-		return err
-	}
-	if _, err := w.w.Write([]byte("\n")); err != nil {
-		return err
-	}
-
-	return nil
+	return w.writeLineLocked(append(data, '\n'))
 }
 
 // WriteRaw writes raw bytes as a line.
@@ -75,12 +68,13 @@ func (w *Writer) WriteRaw(data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if _, err := w.w.Write(data); err != nil {
-		return err
-	}
-	if _, err := w.w.Write([]byte("\n")); err != nil {
-		return err
-	}
+	line := make([]byte, 0, len(data)+1)
+	line = append(line, data...)
+	line = append(line, '\n')
+	return w.writeLineLocked(line)
+}
 
-	return nil
+func (w *Writer) writeLineLocked(data []byte) error {
+	_, err := w.w.Write(data)
+	return err
 }

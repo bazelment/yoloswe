@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -315,17 +316,35 @@ func TestE2E_HumanFeedback(t *testing.T) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	planReviewCount := 0
+	injectErrs := make(chan error, 8)
 
-	// injectAfterDelay spawns a goroutine that waits briefly then injects a
-	// human comment. The delay ensures lastCommentAt is set before the
-	// injected comment's CreatedAt (the workflow sets lastCommentAt
-	// synchronously after the OnTransition callback returns).
-	injectAfterDelay := func(body string) {
+	// injectAfterFeedbackPoll waits until the workflow has entered
+	// PollForFeedback, then injects a human comment whose CreatedAt is after
+	// the workflow's since timestamp.
+	injectAfterFeedbackPoll := func(body string) {
+		startFetches := len(ft.CallsFor("FetchComments"))
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			time.Sleep(200 * time.Millisecond)
-			ft.InjectHumanComment(issue.ID, body)
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			timeout := time.NewTimer(5 * time.Second)
+			defer timeout.Stop()
+			for {
+				if len(ft.CallsFor("FetchComments")) > startFetches {
+					ft.InjectHumanComment(issue.ID, body)
+					return
+				}
+				select {
+				case <-ctx.Done():
+					injectErrs <- ctx.Err()
+					return
+				case <-timeout.C:
+					injectErrs <- fmt.Errorf("timed out waiting to inject feedback %q", body)
+					return
+				case <-ticker.C:
+				}
+			}
 		}()
 	}
 
@@ -342,21 +361,25 @@ func TestE2E_HumanFeedback(t *testing.T) {
 			visit := planReviewCount
 			mu.Unlock()
 			if visit == 1 {
-				injectAfterDelay("Please also consider edge cases and error handling in the plan")
+				injectAfterFeedbackPoll("Please also consider edge cases and error handling in the plan")
 			} else {
-				injectAfterDelay("lgtm")
+				injectAfterFeedbackPoll("lgtm")
 			}
 		case jiradozer.StepBuildReview:
-			injectAfterDelay("approve")
+			injectAfterFeedbackPoll("approve")
 		case jiradozer.StepValidateReview:
-			injectAfterDelay("ship it")
+			injectAfterFeedbackPoll("ship it")
 		case jiradozer.StepShipReview:
-			injectAfterDelay("approved")
+			injectAfterFeedbackPoll("approved")
 		}
 	}
 
 	err := wf.Run(ctx)
 	wg.Wait() // Ensure all inject goroutines finish before test returns.
+	close(injectErrs)
+	for injectErr := range injectErrs {
+		require.NoError(t, injectErr)
+	}
 	require.NoError(t, err, "workflow should complete successfully")
 
 	assert.Equal(t, "state-done", ft.IssueStateID(issue.ID), "final tracker state should be done")

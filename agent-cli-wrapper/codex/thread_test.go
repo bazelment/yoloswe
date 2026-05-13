@@ -342,23 +342,9 @@ func TestThread_WaitForTurn_ContextCancellation(t *testing.T) {
 	thread.currentTurnID = "turn-456"
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	var wg sync.WaitGroup
-	var err error
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, err = thread.WaitForTurn(ctx)
-	}()
-
-	// Give goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
-
-	// Cancel context
 	cancel()
 
-	wg.Wait()
+	_, err := thread.WaitForTurn(ctx)
 
 	if err != context.Canceled {
 		t.Errorf("expected context.Canceled, got %v", err)
@@ -373,42 +359,30 @@ func TestThread_MultipleWaiters(t *testing.T) {
 	thread.state.SetProcessing()
 	thread.handleTurnStarted("turn-456")
 
-	// Add multiple waiters
-	var wg sync.WaitGroup
 	results := make([]*TurnResult, 3)
-	errors := make([]error, 3)
-
-	for i := 0; i < 3; i++ {
-		i := i
+	errs := make([]error, 3)
+	var wg sync.WaitGroup
+	for i := range results {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			// Directly add waiter channel
-			ch := make(chan *TurnResult, 1)
-			thread.mu.Lock()
-			thread.turnWaiters["turn-456"] = append(thread.turnWaiters["turn-456"], ch)
-			thread.mu.Unlock()
-
-			select {
-			case r := <-ch:
-				results[i] = r
-			case <-time.After(time.Second):
-				errors[i] = ErrTimeout
-			}
-		}()
+			results[i], errs[i] = thread.WaitForTurn(context.Background())
+		}(i)
 	}
 
-	// Give waiters time to register
-	time.Sleep(20 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		thread.mu.RLock()
+		defer thread.mu.RUnlock()
+		return len(thread.turnWaiters["turn-456"]) == len(results)
+	}, time.Second, time.Millisecond)
 
-	// Complete the turn
 	thread.handleTurnCompleted("turn-456", true, nil)
-
 	wg.Wait()
 
-	for i := 0; i < 3; i++ {
-		if errors[i] != nil {
-			t.Errorf("waiter %d got error: %v", i, errors[i])
+	for i := range results {
+		if errs[i] != nil {
+			t.Errorf("waiter %d got error: %v", i, errs[i])
+			continue
 		}
 		if results[i] == nil {
 			t.Errorf("waiter %d got nil result", i)

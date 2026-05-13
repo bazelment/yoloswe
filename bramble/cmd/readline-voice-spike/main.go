@@ -15,6 +15,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -112,7 +113,7 @@ type voiceRenderer struct {
 func (vr *voiceRenderer) renderPartial(text string) {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "\0337\n\033[K\033[2m[voice] %s\033[0m\0338", text)
+	writeVoicePartial(os.Stderr, text)
 	vr.has = true
 }
 
@@ -121,7 +122,7 @@ func (vr *voiceRenderer) clearPartial() {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 	if vr.has {
-		fmt.Fprintf(os.Stderr, "\0337\n\033[K\0338")
+		writeVoiceClear(os.Stderr)
 		vr.has = false
 	}
 	vr.rl.Refresh()
@@ -134,7 +135,7 @@ func (vr *voiceRenderer) run(events []timedEvent) {
 		switch te.typ {
 		case evSpeechStart:
 			vr.mu.Lock()
-			fmt.Fprintf(os.Stderr, "\0337\n\033[K\033[2m[voice] ...\033[0m\0338")
+			writeVoicePartial(os.Stderr, "...")
 			vr.has = true
 			vr.mu.Unlock()
 		case evPartial:
@@ -150,6 +151,14 @@ func (vr *voiceRenderer) run(events []timedEvent) {
 			vr.clearPartial()
 		}
 	}
+}
+
+func writeVoicePartial(w io.Writer, text string) {
+	fmt.Fprintf(w, "\0337\n\033[K\033[2m[voice] %s\033[0m\0338", text)
+}
+
+func writeVoiceClear(w io.Writer) {
+	fmt.Fprint(w, "\0337\n\033[K\0338")
 }
 
 type eventKind int

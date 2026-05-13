@@ -455,12 +455,26 @@ loop:
 		t.Fatal("Stop() hung with a live bg task — goroutine leak probable")
 	}
 
-	time.Sleep(500 * time.Millisecond)
-	runtime.GC()
-	afterG := runtime.NumGoroutine()
-	if afterG-beforeG > 5 {
-		t.Errorf("goroutine delta too large: before=%d after=%d diff=%d",
-			beforeG, afterG, afterG-beforeG)
+	var afterG int
+	deadline := time.NewTimer(500 * time.Millisecond)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		runtime.GC()
+		afterG = runtime.NumGoroutine()
+		if afterG-beforeG <= 5 {
+			break
+		}
+		select {
+		case <-deadline.C:
+			if afterG-beforeG > 5 {
+				t.Errorf("goroutine delta too large: before=%d after=%d diff=%d",
+					beforeG, afterG, afterG-beforeG)
+			}
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

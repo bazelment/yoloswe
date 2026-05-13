@@ -67,32 +67,6 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 	return r.pw.RunTurn(ctx, message)
 }
 
-// builderRunner adapts BuilderSession to the sessionRunner interface.
-type builderRunner struct {
-	builder *yoloswe.BuilderSession
-}
-
-func (r *builderRunner) Start(ctx context.Context) error { return r.builder.Start(ctx) }
-func (r *builderRunner) Stop() error                     { return r.builder.Stop() }
-func (r *builderRunner) CLISessionID() string            { return r.builder.CLISessionID() }
-
-func (r *builderRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
-	return r.builder.RunTurn(ctx, message)
-}
-
-// codetalkRunner adapts CodeTalkSession to the sessionRunner interface.
-type codetalkRunner struct {
-	ct *yoloswe.CodeTalkSession
-}
-
-func (r *codetalkRunner) Start(ctx context.Context) error { return r.ct.Start(ctx) }
-func (r *codetalkRunner) Stop() error                     { return r.ct.Stop() }
-func (r *codetalkRunner) CLISessionID() string            { return r.ct.CLISessionID() }
-
-func (r *codetalkRunner) RunTurn(ctx context.Context, message string) (*claude.TurnUsage, error) {
-	return r.ct.RunTurn(ctx, message)
-}
-
 // providerRunner adapts agent.Provider to the sessionRunner interface.
 // This allows plugging in any provider backend (Claude, Codex, Gemini)
 // via the ManagerConfig.Provider field.
@@ -1293,14 +1267,13 @@ func (m *Manager) monitorTrackedTmuxWindow(session *Session) {
 						m.updateSessionStatus(session, StatusCompleted)
 					} else {
 						// Non-zero exit or couldn't read status — mark failed
-						m.updateSessionStatus(session, StatusFailed)
-						session.mu.Lock()
+						var err error
 						if gotStatus {
-							session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, windowName)
+							err = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, windowName)
 						} else {
-							session.Error = fmt.Errorf("claude process exited with unknown status (window %q still open — check it for error details)", windowName)
+							err = fmt.Errorf("claude process exited with unknown status (window %q still open — check it for error details)", windowName)
 						}
-						session.mu.Unlock()
+						m.failSession(session, err)
 						m.addOutput(sessionID, OutputLine{
 							Timestamp: time.Now(),
 							Type:      OutputTypeError,
@@ -1376,10 +1349,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	// Prefer the filtered registry if available, fall back to the full list.
 	agentModel, resolveErr := resolveAgentModel(session.Model, m.config.ModelRegistry)
 	if resolveErr != nil {
-		m.updateSessionStatus(session, StatusFailed)
-		session.mu.Lock()
-		session.Error = resolveErr
-		session.mu.Unlock()
+		m.failSession(session, resolveErr)
 		m.addOutput(session.ID, OutputLine{
 			Timestamp: time.Now(),
 			Type:      OutputTypeError,
@@ -1392,10 +1362,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	// If a registry is configured and the model's provider is not available,
 	// fail early with a clear message.
 	if m.config.ModelRegistry != nil && !m.config.ModelRegistry.HasProvider(agentModel.Provider) {
-		m.updateSessionStatus(session, StatusFailed)
-		session.mu.Lock()
-		session.Error = fmt.Errorf("provider %q is not available (not installed or disabled in settings)", agentModel.Provider)
-		session.mu.Unlock()
+		err := fmt.Errorf("provider %q is not available (not installed or disabled in settings)", agentModel.Provider)
+		m.failSession(session, err)
 		m.addOutput(session.ID, OutputLine{
 			Timestamp: time.Now(),
 			Type:      OutputTypeError,
@@ -1420,10 +1388,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			unsupported = fmt.Sprintf("provider %q (only Claude is supported for delegator sessions)", agentModel.Provider)
 		}
 		if unsupported != "" {
-			m.updateSessionStatus(session, StatusFailed)
-			session.mu.Lock()
-			session.Error = fmt.Errorf("delegator sessions are not supported with %s", unsupported)
-			session.mu.Unlock()
+			err := fmt.Errorf("delegator sessions are not supported with %s", unsupported)
+			m.failSession(session, err)
 			m.addOutput(session.ID, OutputLine{
 				Timestamp: time.Now(),
 				Type:      OutputTypeError,
@@ -1576,7 +1542,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					ResumeSessionID: session.CLISessionID,
 					RecordingDir:    m.config.RecordingDir,
 				}, nil, builderHandler)
-				runner = &builderRunner{builder: builder}
+				runner = builder
 			case SessionTypeDelegator:
 				childModel := session.Model
 				if m.config.ChildModel != "" {
@@ -1598,13 +1564,10 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					ResumeSessionID: session.CLISessionID,
 					RecordingDir:    m.config.RecordingDir,
 				}, nil, codetalkHandler)
-				runner = &codetalkRunner{ct: ct}
+				runner = ct
 			default:
-				m.updateSessionStatus(session, StatusFailed)
 				err := fmt.Errorf("unknown session type: %s", session.Type)
-				session.mu.Lock()
-				session.Error = err
-				session.mu.Unlock()
+				m.failSession(session, err)
 				m.addOutput(session.ID, OutputLine{
 					Timestamp: time.Now(),
 					Type:      OutputTypeError,
@@ -1617,10 +1580,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 	}
 
 	if err := runner.Start(session.ctx); err != nil {
-		m.updateSessionStatus(session, StatusFailed)
-		session.mu.Lock()
-		session.Error = err
-		session.mu.Unlock()
+		m.failSession(session, err)
 		m.addOutput(session.ID, OutputLine{
 			Timestamp: time.Now(),
 			Type:      OutputTypeError,
@@ -1760,14 +1720,13 @@ func (m *Manager) runSession(session *Session, prompt string) {
 					}
 
 					// Non-zero exit or couldn't read status — failure
-					m.updateSessionStatus(session, StatusFailed)
-					session.mu.Lock()
+					var err error
 					if gotStatus {
-						session.Error = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, tmuxName)
+						err = fmt.Errorf("claude process exited with code %d (window %q still open — check it for error details)", exitCode, tmuxName)
 					} else {
-						session.Error = fmt.Errorf("claude process exited unexpectedly (window %q still open with remain-on-exit — check it for error details)", tmuxName)
+						err = fmt.Errorf("claude process exited unexpectedly (window %q still open with remain-on-exit — check it for error details)", tmuxName)
 					}
-					session.mu.Unlock()
+					m.failSession(session, err)
 					m.addOutput(session.ID, OutputLine{
 						Timestamp: time.Now(),
 						Type:      OutputTypeError,
@@ -1782,10 +1741,8 @@ func (m *Manager) runSession(session *Session, prompt string) {
 						// Window disappeared very quickly — likely a startup failure.
 						// With remain-on-exit this shouldn't happen, but handle it
 						// defensively in case the option wasn't set.
-						m.updateSessionStatus(session, StatusFailed)
-						session.mu.Lock()
-						session.Error = fmt.Errorf("tmux window %q disappeared shortly after creation — claude may have failed to start", tmuxName)
-						session.mu.Unlock()
+						err := fmt.Errorf("tmux window %q disappeared shortly after creation — claude may have failed to start", tmuxName)
+						m.failSession(session, err)
 						m.addOutput(session.ID, OutputLine{
 							Timestamp: time.Now(),
 							Type:      OutputTypeError,
@@ -1844,10 +1801,7 @@ func (m *Manager) runSession(session *Session, prompt string) {
 			if session.ctx.Err() != nil {
 				m.updateSessionStatus(session, StatusStopped)
 			} else {
-				m.updateSessionStatus(session, StatusFailed)
-				session.mu.Lock()
-				session.Error = err
-				session.mu.Unlock()
+				m.failSession(session, err)
 				m.addOutput(session.ID, OutputLine{
 					Timestamp: time.Now(),
 					Type:      OutputTypeError,
@@ -2021,6 +1975,20 @@ func (m *Manager) updateSessionStatus(session *Session, newStatus SessionStatus)
 		SessionID: session.ID,
 		OldStatus: oldStatus,
 		NewStatus: newStatus,
+	})
+}
+
+func (m *Manager) failSession(session *Session, err error) {
+	session.mu.Lock()
+	oldStatus := session.Status
+	session.Error = err
+	applySessionStatusLocked(session, oldStatus, StatusFailed)
+	session.mu.Unlock()
+
+	m.emitSessionStateChange(SessionStateChangeEvent{
+		SessionID: session.ID,
+		OldStatus: oldStatus,
+		NewStatus: StatusFailed,
 	})
 }
 

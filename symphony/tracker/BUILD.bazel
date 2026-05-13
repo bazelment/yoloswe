@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "tracker",
@@ -7,6 +7,15 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//symphony/model",
+        "//symphony/tracker/linear",
+    ],
+)
+
+go_test(
+    name = "tracker_test",
+    srcs = ["tracker_test.go"],
+    deps = [
+        ":tracker",
         "//symphony/tracker/linear",
     ],
 )

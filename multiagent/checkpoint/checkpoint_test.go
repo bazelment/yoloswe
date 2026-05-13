@@ -353,8 +353,9 @@ func TestManager_LastUpdated(t *testing.T) {
 
 	mgr := NewManager(tempDir, sessionID)
 	initialTime := mgr.Current().LastUpdated
-
-	time.Sleep(10 * time.Millisecond)
+	mgr.now = func() time.Time {
+		return initialTime.Add(time.Second)
+	}
 
 	_ = mgr.StartDesign()
 	afterDesign := mgr.Current().LastUpdated

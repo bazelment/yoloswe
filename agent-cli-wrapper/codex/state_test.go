@@ -245,9 +245,6 @@ func TestThreadStateManager_WaitForReady_BecomesReady(t *testing.T) {
 		done <- m.WaitForReady(ctx)
 	}()
 
-	// Give the goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
-
 	// Transition to ready
 	m.SetReady()
 
@@ -269,9 +266,6 @@ func TestThreadStateManager_WaitForReady_Closed(t *testing.T) {
 		ctx := context.Background()
 		done <- m.WaitForReady(ctx)
 	}()
-
-	// Give the goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
 
 	// Close the thread
 	m.SetClosed()
@@ -295,9 +289,6 @@ func TestThreadStateManager_WaitForReady_ContextCancelled(t *testing.T) {
 	go func() {
 		done <- m.WaitForReady(ctx)
 	}()
-
-	// Give the goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
 
 	// Cancel context
 	cancel()
@@ -333,9 +324,6 @@ func TestThreadStateManager_WaitForReady_Error(t *testing.T) {
 		ctx := context.Background()
 		done <- m.WaitForReady(ctx)
 	}()
-
-	// Give the goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
 
 	// Set error
 	m.SetError(testErr)
@@ -374,6 +362,7 @@ func TestThreadStateManager_WaitForReady_ConcurrentCancellation(t *testing.T) {
 	const numWaiters = 50
 	var wg sync.WaitGroup
 	errs := make(chan error, numWaiters)
+	releaseDelayedCancels := make(chan struct{})
 
 	// Launch many concurrent waiters
 	for i := 0; i < numWaiters; i++ {
@@ -388,7 +377,7 @@ func TestThreadStateManager_WaitForReady_ConcurrentCancellation(t *testing.T) {
 				cancel()
 			} else {
 				go func() {
-					time.Sleep(time.Millisecond)
+					<-releaseDelayedCancels
 					cancel()
 				}()
 			}
@@ -397,6 +386,7 @@ func TestThreadStateManager_WaitForReady_ConcurrentCancellation(t *testing.T) {
 			errs <- err
 		}(i)
 	}
+	close(releaseDelayedCancels)
 
 	// Complete all waiters
 	done := make(chan struct{})
@@ -493,6 +483,8 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 	successCount := 0
 	cancelCount := 0
 	var mu sync.Mutex
+	started := make(chan struct{}, numWaiters)
+	cancelReady := make(chan context.CancelFunc, numWaiters)
 
 	// Launch waiters with different behaviors
 	for i := 0; i < numWaiters; i++ {
@@ -506,10 +498,7 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 			if idx%3 == 0 {
 				// This waiter will be cancelled
 				ctx, cancel = context.WithCancel(context.Background())
-				go func() {
-					time.Sleep(5 * time.Millisecond)
-					cancel()
-				}()
+				cancelReady <- cancel
 			} else {
 				// This waiter will complete successfully
 				ctx = context.Background()
@@ -517,6 +506,7 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 			}
 			defer cancel()
 
+			started <- struct{}{}
 			err := m.WaitForReady(ctx)
 
 			mu.Lock()
@@ -531,8 +521,18 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 		}(i)
 	}
 
-	// Let waiters start
-	time.Sleep(10 * time.Millisecond)
+	for i := 0; i < numWaiters; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for WaitForReady goroutines to start")
+		}
+	}
+
+	close(cancelReady)
+	for cancel := range cancelReady {
+		cancel()
+	}
 
 	// Set ready to wake successful waiters
 	m.SetReady()

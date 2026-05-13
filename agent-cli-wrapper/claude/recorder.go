@@ -1,14 +1,16 @@
 package claude
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson"
 )
 
 // RecordingMetadata contains metadata about a recording.
@@ -101,11 +103,13 @@ func (r *RecordedMessage) UnmarshalJSON(data []byte) error {
 // sessionRecorder records session messages to disk.
 type sessionRecorder struct {
 	messagesFile    *os.File
+	messagesWriter  *ndjson.Writer
 	baseDir         string
 	sessionID       string
 	dirPath         string
 	turns           []TurnSummary
 	pendingMessages []RecordedMessage
+	now             func() time.Time
 	metadata        RecordingMetadata
 	mu              sync.Mutex
 	initialized     bool
@@ -120,7 +124,15 @@ func newSessionRecorder(baseDir string) *sessionRecorder {
 		baseDir:         baseDir,
 		turns:           make([]TurnSummary, 0),
 		pendingMessages: make([]RecordedMessage, 0),
+		now:             time.Now,
 	}
+}
+
+func (sr *sessionRecorder) currentTime() time.Time {
+	if sr.now == nil {
+		return time.Now()
+	}
+	return sr.now()
 }
 
 // Initialize initializes the recorder with session metadata.
@@ -134,10 +146,11 @@ func (sr *sessionRecorder) Initialize(meta RecordingMetadata) error {
 
 	sr.sessionID = meta.SessionID
 	sr.metadata = meta
-	sr.metadata.StartTime = time.Now().Format(time.RFC3339)
+	now := sr.currentTime()
+	sr.metadata.StartTime = now.Format(time.RFC3339)
 
 	// Create session directory
-	sr.dirPath = filepath.Join(sr.baseDir, fmt.Sprintf("session-%s-%d", sr.sessionID, time.Now().Unix()))
+	sr.dirPath = filepath.Join(sr.baseDir, fmt.Sprintf("session-%s-%d", sr.sessionID, now.Unix()))
 	if err := os.MkdirAll(sr.dirPath, 0755); err != nil {
 		return err
 	}
@@ -148,6 +161,7 @@ func (sr *sessionRecorder) Initialize(meta RecordingMetadata) error {
 	if err != nil {
 		return err
 	}
+	sr.messagesWriter = ndjson.NewWriter(sr.messagesFile)
 
 	sr.initialized = true
 
@@ -167,17 +181,11 @@ func (sr *sessionRecorder) Initialize(meta RecordingMetadata) error {
 // writeRecord writes a single record to the messages file.
 // Must be called with lock held.
 func (sr *sessionRecorder) writeRecord(record RecordedMessage) {
-	if sr.messagesFile == nil {
+	if sr.messagesWriter == nil {
 		return
 	}
 
-	data, err := json.Marshal(record)
-	if err != nil {
-		return
-	}
-
-	sr.messagesFile.Write(data)
-	sr.messagesFile.Write([]byte("\n"))
+	_ = sr.messagesWriter.Write(record)
 }
 
 // RecordSent records a message sent to the CLI.
@@ -186,7 +194,7 @@ func (sr *sessionRecorder) RecordSent(msg interface{}) {
 	defer sr.mu.Unlock()
 
 	record := RecordedMessage{
-		Timestamp: time.Now(),
+		Timestamp: sr.currentTime(),
 		Direction: "sent",
 		Message:   msg,
 	}
@@ -211,7 +219,7 @@ func (sr *sessionRecorder) RecordReceived(raw []byte) {
 	copy(copied, raw)
 
 	record := RecordedMessage{
-		Timestamp: time.Now(),
+		Timestamp: sr.currentTime(),
 		Direction: "received",
 		Message:   copied,
 	}
@@ -237,7 +245,7 @@ func (sr *sessionRecorder) StartTurn(turnNumber int, userMessage interface{}) {
 	summary := TurnSummary{
 		Number:      turnNumber,
 		UserMessage: msgStr,
-		StartTime:   time.Now(),
+		StartTime:   sr.currentTime(),
 	}
 
 	sr.turns = append(sr.turns, summary)
@@ -250,7 +258,7 @@ func (sr *sessionRecorder) CompleteTurn(turnNumber int, result TurnResult) {
 
 	for i := range sr.turns {
 		if sr.turns[i].Number == turnNumber {
-			sr.turns[i].EndTime = time.Now()
+			sr.turns[i].EndTime = sr.currentTime()
 			sr.turns[i].DurationMs = result.DurationMs
 			sr.turns[i].CostUSD = result.Usage.CostUSD
 			sr.turns[i].Success = result.Success
@@ -317,6 +325,8 @@ func (sr *sessionRecorder) Close() error {
 
 	if sr.messagesFile != nil {
 		sr.messagesFile.Close()
+		sr.messagesFile = nil
+		sr.messagesWriter = nil
 	}
 
 	return nil
@@ -349,13 +359,20 @@ func LoadMessages(dirPath string) ([]RecordedMessage, error) {
 	defer file.Close()
 
 	var messages []RecordedMessage
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
+	reader := ndjson.NewReader(file)
+	for {
+		line, err := reader.ReadLine()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return messages, err
+		}
 		var record RecordedMessage
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+		if err := json.Unmarshal(line, &record); err != nil {
 			continue // skip malformed lines
 		}
 		messages = append(messages, record)
 	}
-	return messages, scanner.Err()
+	return messages, nil
 }

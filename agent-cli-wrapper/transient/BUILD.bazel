@@ -1,8 +1,14 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "transient",
     srcs = ["transient.go"],
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/transient",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "transient_test",
+    srcs = ["transient_test.go"],
+    embed = [":transient"],
 )

@@ -117,13 +117,8 @@ func TestIntegrationContextCancellation(t *testing.T) {
 	}
 
 	swe := yoloswe.New(config)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Cancel after 2 seconds
-	go func() {
-		time.Sleep(2 * time.Second)
-		cancel()
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
 	prompt := "Create a simple function"
 

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -116,6 +117,9 @@ type Orchestrator struct {
 
 // New creates a new Orchestrator.
 func New(cfgFn func() *config.ServiceConfig, t tracker.Tracker, clock Clock, logger *slog.Logger) *Orchestrator {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Orchestrator{
 		cfg:           cfgFn,
 		tracker:       t,

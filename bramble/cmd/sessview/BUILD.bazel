@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/sessview",
     visibility = ["//visibility:private"],
     deps = [
+        "//agent-cli-wrapper/displaytext",
         "//bramble/app",
         "//bramble/replay",
         "//bramble/session",

@@ -89,8 +89,8 @@ func createProgressReporter(app *cliapp.App) (*progress.ConsoleReporter, *progre
 	return consoleReporter, progressReporter
 }
 
-// createSwarmConfig creates the swarm configuration from flags
-func createSwarmConfig(progressReporter *progress.AgentReporter) agent.SwarmConfig {
+// createSwarmConfig creates the swarm configuration from flags.
+func createSwarmConfig(progressReporter agent.ProgressReporter) agent.SwarmConfig {
 	return agent.SwarmConfig{
 		WorkDir:             workDir,
 		SessionDir:          resolveSessionDir(),

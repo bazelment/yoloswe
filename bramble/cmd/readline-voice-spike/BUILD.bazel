@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "readline-voice-spike_lib",
@@ -16,4 +16,11 @@ go_binary(
     embed = [":readline-voice-spike_lib"],
     tags = ["manual"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "readline-voice-spike_test",
+    srcs = ["main_test.go"],
+    embed = [":readline-voice-spike_lib"],
+    deps = ["@com_github_stretchr_testify//require"],
 )

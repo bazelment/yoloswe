@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
@@ -135,7 +136,7 @@ func TestProviderEffortMatrix(t *testing.T) {
 			name: "gemini",
 			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
-				p := NewGeminiProvider()
+				p := NewGeminiProvider(acp.WithBinaryPath("missing-gemini-effort-test-binary"))
 				defer p.Close()
 				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
 				return err
