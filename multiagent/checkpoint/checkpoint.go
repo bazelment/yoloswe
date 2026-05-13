@@ -46,22 +46,32 @@ const CheckpointFileName = "checkpoint.json"
 // Manager handles checkpoint persistence.
 type Manager struct {
 	current    *Checkpoint
+	now        func() time.Time
 	sessionDir string
 	filePath   string
 }
 
 // NewManager creates a new checkpoint manager.
 func NewManager(sessionDir, sessionID string) *Manager {
+	now := time.Now
 	return &Manager{
 		sessionDir: sessionDir,
 		filePath:   filepath.Join(sessionDir, sessionID, CheckpointFileName),
+		now:        now,
 		current: &Checkpoint{
 			Version:     "1.0",
 			SessionID:   sessionID,
 			Phase:       PhaseNotStarted,
-			LastUpdated: time.Now(),
+			LastUpdated: now(),
 		},
 	}
+}
+
+func (m *Manager) currentTime() time.Time {
+	if m.now == nil {
+		return time.Now()
+	}
+	return m.now()
 }
 
 // SetMission sets the mission for the checkpoint.
@@ -72,7 +82,7 @@ func (m *Manager) SetMission(mission string) {
 // StartDesign marks the beginning of the design phase.
 func (m *Manager) StartDesign() error {
 	m.current.Phase = PhaseDesigning
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
@@ -80,14 +90,14 @@ func (m *Manager) StartDesign() error {
 func (m *Manager) CompleteDesign(response *protocol.DesignResponse, cost float64) error {
 	m.current.DesignResponse = response
 	m.current.TotalCost += cost
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
 // StartBuild marks the beginning of the build phase.
 func (m *Manager) StartBuild() error {
 	m.current.Phase = PhaseBuilding
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
@@ -98,14 +108,14 @@ func (m *Manager) CompleteBuild(response *protocol.BuildResponse, cost float64) 
 	// Accumulate file lists
 	m.current.FilesCreated = append(m.current.FilesCreated, response.FilesCreated...)
 	m.current.FilesModified = append(m.current.FilesModified, response.FilesModified...)
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
 // StartReview marks the beginning of the review phase.
 func (m *Manager) StartReview() error {
 	m.current.Phase = PhaseReviewing
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
@@ -113,7 +123,7 @@ func (m *Manager) StartReview() error {
 func (m *Manager) CompleteReview(response *protocol.ReviewResponse, cost float64) error {
 	m.current.ReviewResponse = response
 	m.current.TotalCost += cost
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
@@ -124,14 +134,14 @@ func (m *Manager) StartIteration() error {
 	// Clear build/review responses for new iteration
 	m.current.BuildResponse = nil
 	m.current.ReviewResponse = nil
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
 // Complete marks the mission as successfully completed.
 func (m *Manager) Complete() error {
 	m.current.Phase = PhaseCompleted
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 
@@ -141,7 +151,7 @@ func (m *Manager) Fail(err error) error {
 	if err != nil {
 		m.current.LastError = err.Error()
 	}
-	m.current.LastUpdated = time.Now()
+	m.current.LastUpdated = m.currentTime()
 	return m.save()
 }
 

@@ -72,6 +72,31 @@ func (m *mockLongRunningProvider) emitEvent(ev agent.AgentEvent) {
 	m.events <- ev
 }
 
+func requireSessionOutputEventually(
+	t *testing.T,
+	manager *Manager,
+	sessionID SessionID,
+	matches func([]OutputLine) bool,
+) []OutputLine {
+	t.Helper()
+
+	var output []OutputLine
+	require.Eventually(t, func() bool {
+		output = manager.GetSessionOutput(sessionID)
+		return matches(output)
+	}, time.Second, 5*time.Millisecond)
+	return output
+}
+
+func outputContainsText(output []OutputLine, content string) bool {
+	for _, line := range output {
+		if line.Type == OutputTypeText && line.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
 // Test that providerRunner starts the event bridge for long-running providers.
 func TestProviderRunner_EventBridge(t *testing.T) {
 	mockProvider := newMockLongRunningProvider()
@@ -111,11 +136,10 @@ func TestProviderRunner_EventBridge(t *testing.T) {
 	mockProvider.emitEvent(agent.TextAgentEvent{Text: " world"})
 	mockProvider.emitEvent(agent.ToolStartAgentEvent{Name: "read_file", ID: "tool-1"})
 
-	// Give bridge time to process events
-	time.Sleep(100 * time.Millisecond)
-
 	// Verify events were forwarded to session output
-	output := manager.GetSessionOutput(sessionID)
+	output := requireSessionOutputEventually(t, manager, sessionID, func(output []OutputLine) bool {
+		return outputContainsText(output, "hello world")
+	})
 	require.NotEmpty(t, output)
 
 	// Find text output
@@ -205,14 +229,13 @@ func TestProviderRunner_EventChannelClose(t *testing.T) {
 
 	// Emit an event
 	mockProvider.emitEvent(agent.TextAgentEvent{Text: "before close"})
-	time.Sleep(50 * time.Millisecond)
+	requireSessionOutputEventually(t, manager, sessionID, func(output []OutputLine) bool {
+		return outputContainsText(output, "before close")
+	})
 
 	// Close the provider's event channel
 	err = mockProvider.Close()
 	require.NoError(t, err)
-
-	// Give bridge time to detect channel close
-	time.Sleep(50 * time.Millisecond)
 
 	// Stop should not panic even though events channel is closed
 	err = runner.Stop()
@@ -314,9 +337,14 @@ func TestProviderRunner_ToolCompleteWithResult(t *testing.T) {
 		ID:    "tool-1",
 		Input: map[string]interface{}{"path": "/test/file.txt"},
 	})
-
-	// Give bridge time to process
-	time.Sleep(50 * time.Millisecond)
+	requireSessionOutputEventually(t, manager, sessionID, func(output []OutputLine) bool {
+		for _, line := range output {
+			if line.ToolID == "tool-1" {
+				return true
+			}
+		}
+		return false
+	})
 
 	// Emit a tool complete event with a result
 	testResult := map[string]interface{}{"content": "file contents here"}
@@ -328,11 +356,15 @@ func TestProviderRunner_ToolCompleteWithResult(t *testing.T) {
 		IsError: false,
 	})
 
-	// Give bridge time to process
-	time.Sleep(50 * time.Millisecond)
-
 	// Verify the tool complete event was recorded with the result
-	output := manager.GetSessionOutput(sessionID)
+	output := requireSessionOutputEventually(t, manager, sessionID, func(output []OutputLine) bool {
+		for _, line := range output {
+			if line.ToolID == "tool-1" && line.ToolResult != nil {
+				return true
+			}
+		}
+		return false
+	})
 	require.NotEmpty(t, output)
 
 	// Find tool output with the result
@@ -391,9 +423,10 @@ func TestProviderRunner_TurnCompleteNotDuplicated(t *testing.T) {
 		DurationMs: 5000,
 		CostUSD:    0.00123,
 	})
-
-	// Give bridge time to process
-	time.Sleep(100 * time.Millisecond)
+	mockProvider.emitEvent(agent.TextAgentEvent{Text: "after turn complete"})
+	requireSessionOutputEventually(t, manager, sessionID, func(output []OutputLine) bool {
+		return outputContainsText(output, "after turn complete")
+	})
 
 	// Verify no TurnEnd output was created by the bridge.
 	output := manager.GetSessionOutput(sessionID)
@@ -435,7 +468,9 @@ func TestProviderRunner_EventBridgeGracefulShutdown(t *testing.T) {
 
 	// Emit an event to ensure bridge is actively running
 	mockProvider.emitEvent(agent.TextAgentEvent{Text: "test"})
-	time.Sleep(50 * time.Millisecond)
+	requireSessionOutputEventually(t, manager, sessionID, func(output []OutputLine) bool {
+		return outputContainsText(output, "test")
+	})
 
 	// Stop should wait for the bridge goroutine to exit
 	// If the fix is not applied, the goroutine could leak
