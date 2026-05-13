@@ -32,7 +32,6 @@ type ConsoleReporter struct {
 	currentPhase checkpoint.Phase
 	currentAgent agent.AgentRole
 	mode         OutputMode
-	toolsActive  int
 	mu           sync.Mutex
 }
 
@@ -149,10 +148,8 @@ func (r *ConsoleReporter) handleToolActivity(e ToolActivityEvent) {
 	}
 
 	if e.Started {
-		r.toolsActive++
 		fmt.Fprintf(r.out, "    [%s] starting...\n", e.ToolName)
 	} else {
-		r.toolsActive--
 		fmt.Fprintf(r.out, "    [%s] %s\n", e.ToolName, r.formatToolInput(e.ToolName, e.Input))
 	}
 }

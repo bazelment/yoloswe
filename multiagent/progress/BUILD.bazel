@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "progress",
@@ -9,6 +9,16 @@ go_library(
     ],
     importpath = "github.com/bazelment/yoloswe/multiagent/progress",
     visibility = ["//visibility:public"],
+    deps = [
+        "//multiagent/agent",
+        "//multiagent/checkpoint",
+    ],
+)
+
+go_test(
+    name = "progress_test",
+    srcs = ["progress_test.go"],
+    embed = [":progress"],
     deps = [
         "//multiagent/agent",
         "//multiagent/checkpoint",
