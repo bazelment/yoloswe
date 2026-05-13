@@ -56,6 +56,7 @@ go_test(
         "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
+        "//agent-cli-wrapper/llmendpoint",
         "//agent-cli-wrapper/transient",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
