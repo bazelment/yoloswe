@@ -315,11 +315,7 @@ func TestInputReader_CloseUnblocksGoroutine(t *testing.T) {
 	// pr, and we write to pw to simulate a line of input.
 	pr, pw := io.Pipe()
 
-	ir := &InputReader{
-		lines: make(chan string),
-		quit:  make(chan struct{}),
-	}
-	ir.startScanner(pr, "")
+	ir := newScannerInputReader(pr, "")
 
 	// Write a line into the pipe so the scanner unblocks and tries to send on
 	// ir.lines. Since nobody is reading ir.lines, the goroutine will block on
@@ -340,18 +336,18 @@ func TestInputReader_CloseUnblocksGoroutine(t *testing.T) {
 	// Close should unblock the goroutine via the quit channel.
 	ir.Close()
 
-	// After Close(), the goroutine must exit and close ir.lines. Drain any
-	// pending values and then confirm the channel is closed.
-	goroutineExited := false
-	for !goroutineExited {
-		select {
-		case _, ok := <-ir.lines:
-			if !ok {
-				goroutineExited = true
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("InputReader goroutine did not exit after Close()")
-		}
+	// After Close(), the goroutine must exit without needing a consumer to
+	// receive from Lines().
+	select {
+	case <-ir.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("InputReader goroutine did not exit after Close()")
+	}
+	select {
+	case _, ok := <-ir.lines:
+		require.False(t, ok, "Lines should close without delivering the blocked line")
+	default:
+		t.Fatal("Lines was not closed after InputReader goroutine exited")
 	}
 
 	// Close the pipe to clean up.

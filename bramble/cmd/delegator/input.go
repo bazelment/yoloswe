@@ -19,6 +19,7 @@ type InputReader struct {
 	rl        *readline.Instance // nil when falling back to scanner
 	lines     chan string
 	quit      chan struct{} // closed by Close() to unblock goroutines stuck on channel send
+	done      chan struct{}
 	closeOnce sync.Once
 }
 
@@ -28,10 +29,7 @@ type InputReader struct {
 // NewInputReader always succeeds: readline initialization errors cause a
 // silent fallback to the scanner path.
 func NewInputReader(prompt string) *InputReader {
-	ir := &InputReader{
-		lines: make(chan string),
-		quit:  make(chan struct{}),
-	}
+	ir := newInputReader()
 
 	if render.IsTerminal(os.Stdin) {
 		historyFile := defaultHistoryFile()
@@ -53,6 +51,20 @@ func NewInputReader(prompt string) *InputReader {
 	} else {
 		ir.startScanner(os.Stdin, "")
 	}
+	return ir
+}
+
+func newInputReader() *InputReader {
+	return &InputReader{
+		lines: make(chan string),
+		quit:  make(chan struct{}),
+		done:  make(chan struct{}),
+	}
+}
+
+func newScannerInputReader(r io.Reader, prompt string) *InputReader {
+	ir := newInputReader()
+	ir.startScanner(r, prompt)
 	return ir
 }
 
@@ -94,6 +106,7 @@ func (ir *InputReader) Close() {
 
 func (ir *InputReader) startReadline() {
 	go func() {
+		defer close(ir.done)
 		defer close(ir.lines)
 		for {
 			line, err := ir.rl.Readline()
@@ -112,6 +125,7 @@ func (ir *InputReader) startReadline() {
 
 func (ir *InputReader) startScanner(r io.Reader, prompt string) {
 	go func() {
+		defer close(ir.done)
 		defer close(ir.lines)
 		scanner := bufio.NewScanner(r)
 		// Print prompt before the first read and before each subsequent read,

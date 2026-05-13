@@ -123,14 +123,14 @@ func TestManager_PrefixModelRoutesToCorrectProvider(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Eventually(t, func() bool {
-				s, ok := mgr.GetSession(sid)
-				return ok && s.Status == StatusFailed
+				info, ok := mgr.GetSessionInfo(sid)
+				return ok && info.Status == StatusFailed && info.ErrorMsg != ""
 			}, 5*time.Second, 10*time.Millisecond)
 
-			s, ok := mgr.GetSession(sid)
+			info, ok := mgr.GetSessionInfo(sid)
 			require.True(t, ok)
-			require.NotNil(t, s.Error)
-			assert.Contains(t, s.Error.Error(), tc.unavailProvider,
+			require.NotEmpty(t, info.ErrorMsg)
+			assert.Contains(t, info.ErrorMsg, tc.unavailProvider,
 				"error should name the resolved provider, not the Claude fallback")
 		})
 	}
@@ -160,15 +160,15 @@ func TestManager_UnknownModelLandsInStatusFailed(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		s, ok := mgr.GetSession(sid)
-		return ok && s.Status == StatusFailed
+		info, ok := mgr.GetSessionInfo(sid)
+		return ok && info.Status == StatusFailed && info.ErrorMsg != ""
 	}, 5*time.Second, 10*time.Millisecond)
 
-	s, ok := mgr.GetSession(sid)
+	info, ok := mgr.GetSessionInfo(sid)
 	require.True(t, ok)
-	require.NotNil(t, s.Error)
-	assert.Contains(t, s.Error.Error(), "foo-bar")
-	assert.Contains(t, s.Error.Error(), "gpt-")
+	require.NotEmpty(t, info.ErrorMsg)
+	assert.Contains(t, info.ErrorMsg, "foo-bar")
+	assert.Contains(t, info.ErrorMsg, "gpt-")
 
 	lines := mgr.GetSessionOutput(sid)
 	var hasError bool
