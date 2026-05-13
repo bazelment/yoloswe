@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "tmuxwatch_lib",
@@ -15,4 +15,11 @@ go_binary(
     name = "tmuxwatch",
     embed = [":tmuxwatch_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "tmuxwatch_test",
+    srcs = ["main_test.go"],
+    embed = [":tmuxwatch_lib"],
+    deps = ["//bramble/session"],
 )
