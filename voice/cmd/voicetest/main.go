@@ -12,6 +12,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -172,16 +173,20 @@ func streamFile(ctx context.Context, sess stt.Session, path string, cfg stt.Audi
 }
 
 func printEvent(evt stt.Event) {
+	renderEvent(os.Stdout, os.Stderr, evt)
+}
+
+func renderEvent(stdout, stderr io.Writer, evt stt.Event) {
 	switch evt.Type {
 	case stt.EventSpeechStart:
-		fmt.Println("[speech-start]")
+		fmt.Fprintln(stdout, "[speech-start]")
 	case stt.EventPartialText:
-		fmt.Printf("[partial] %q\n", evt.Text)
+		fmt.Fprintf(stdout, "[partial] %q\n", evt.Text)
 	case stt.EventFinalText:
-		fmt.Printf("[final] %q (confidence: %.2f)\n", evt.Text, evt.Confidence)
+		fmt.Fprintf(stdout, "[final] %q (confidence: %.2f)\n", evt.Text, evt.Confidence)
 	case stt.EventSpeechEnd:
-		fmt.Println("[speech-end]")
+		fmt.Fprintln(stdout, "[speech-end]")
 	case stt.EventError:
-		fmt.Fprintf(os.Stderr, "[error] %v\n", evt.Error)
+		fmt.Fprintf(stderr, "[error] %v\n", evt.Error)
 	}
 }
