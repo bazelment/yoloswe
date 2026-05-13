@@ -106,6 +106,7 @@ type sessionRecorder struct {
 	dirPath         string
 	turns           []TurnSummary
 	pendingMessages []RecordedMessage
+	now             func() time.Time
 	metadata        RecordingMetadata
 	mu              sync.Mutex
 	initialized     bool
@@ -120,7 +121,15 @@ func newSessionRecorder(baseDir string) *sessionRecorder {
 		baseDir:         baseDir,
 		turns:           make([]TurnSummary, 0),
 		pendingMessages: make([]RecordedMessage, 0),
+		now:             time.Now,
 	}
+}
+
+func (sr *sessionRecorder) currentTime() time.Time {
+	if sr.now == nil {
+		return time.Now()
+	}
+	return sr.now()
 }
 
 // Initialize initializes the recorder with session metadata.
@@ -134,10 +143,11 @@ func (sr *sessionRecorder) Initialize(meta RecordingMetadata) error {
 
 	sr.sessionID = meta.SessionID
 	sr.metadata = meta
-	sr.metadata.StartTime = time.Now().Format(time.RFC3339)
+	now := sr.currentTime()
+	sr.metadata.StartTime = now.Format(time.RFC3339)
 
 	// Create session directory
-	sr.dirPath = filepath.Join(sr.baseDir, fmt.Sprintf("session-%s-%d", sr.sessionID, time.Now().Unix()))
+	sr.dirPath = filepath.Join(sr.baseDir, fmt.Sprintf("session-%s-%d", sr.sessionID, now.Unix()))
 	if err := os.MkdirAll(sr.dirPath, 0755); err != nil {
 		return err
 	}
@@ -186,7 +196,7 @@ func (sr *sessionRecorder) RecordSent(msg interface{}) {
 	defer sr.mu.Unlock()
 
 	record := RecordedMessage{
-		Timestamp: time.Now(),
+		Timestamp: sr.currentTime(),
 		Direction: "sent",
 		Message:   msg,
 	}
@@ -211,7 +221,7 @@ func (sr *sessionRecorder) RecordReceived(raw []byte) {
 	copy(copied, raw)
 
 	record := RecordedMessage{
-		Timestamp: time.Now(),
+		Timestamp: sr.currentTime(),
 		Direction: "received",
 		Message:   copied,
 	}
@@ -237,7 +247,7 @@ func (sr *sessionRecorder) StartTurn(turnNumber int, userMessage interface{}) {
 	summary := TurnSummary{
 		Number:      turnNumber,
 		UserMessage: msgStr,
-		StartTime:   time.Now(),
+		StartTime:   sr.currentTime(),
 	}
 
 	sr.turns = append(sr.turns, summary)
@@ -250,7 +260,7 @@ func (sr *sessionRecorder) CompleteTurn(turnNumber int, result TurnResult) {
 
 	for i := range sr.turns {
 		if sr.turns[i].Number == turnNumber {
-			sr.turns[i].EndTime = time.Now()
+			sr.turns[i].EndTime = sr.currentTime()
 			sr.turns[i].DurationMs = result.DurationMs
 			sr.turns[i].CostUSD = result.Usage.CostUSD
 			sr.turns[i].Success = result.Success

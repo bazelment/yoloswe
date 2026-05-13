@@ -163,13 +163,16 @@ func TestRecorder_TimestampOrder(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	recorder := newSessionRecorder(tmpDir)
+	clock := stepClock{
+		next: time.Date(2024, 1, 27, 10, 30, 45, 0, time.UTC),
+		step: time.Millisecond,
+	}
+	recorder.now = clock.Now
 
-	// Record messages before initialization with slight delays
+	// Record messages before initialization with deterministic timestamps.
 	recorder.RecordSent(map[string]int{"seq": 1})
-	time.Sleep(time.Millisecond)
 	seq2Raw, _ := json.Marshal(map[string]int{"seq": 2})
 	recorder.RecordReceived(seq2Raw)
-	time.Sleep(time.Millisecond)
 	recorder.RecordSent(map[string]int{"seq": 3})
 
 	err = recorder.Initialize(RecordingMetadata{
@@ -193,6 +196,17 @@ func TestRecorder_TimestampOrder(t *testing.T) {
 				messages[i].Timestamp, messages[i-1].Timestamp)
 		}
 	}
+}
+
+type stepClock struct {
+	next time.Time
+	step time.Duration
+}
+
+func (c *stepClock) Now() time.Time {
+	now := c.next
+	c.next = c.next.Add(c.step)
+	return now
 }
 
 func TestRecordedMessage_MarshalJSON(t *testing.T) {
