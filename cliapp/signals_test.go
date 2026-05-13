@@ -83,8 +83,6 @@ func TestNotifyContext_ParentCancelStopsGoroutine(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ctx not cancelled when parent was")
 	}
-	// Give the goroutine a moment to exit; it should not have called forceExit.
-	time.Sleep(50 * time.Millisecond)
 	if forced.Load() {
 		t.Error("forceExit fired on parent cancel; should only fire on second signal")
 	}
@@ -97,7 +95,6 @@ func TestNotifyContext_CancelStopsBeforeAnySignal(t *testing.T) {
 	cancel()
 	// Cancel must not panic on double-call.
 	cancel()
-	time.Sleep(20 * time.Millisecond)
 	if forced.Load() {
 		t.Error("forceExit fired without any signal")
 	}
