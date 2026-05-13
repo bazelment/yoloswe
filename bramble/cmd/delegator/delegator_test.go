@@ -324,12 +324,18 @@ func TestInputReader_CloseUnblocksGoroutine(t *testing.T) {
 	// Write a line into the pipe so the scanner unblocks and tries to send on
 	// ir.lines. Since nobody is reading ir.lines, the goroutine will block on
 	// the channel send — exactly the leak scenario.
+	writeDone := make(chan error, 1)
 	go func() {
-		pw.Write([]byte("hello\n")) //nolint:errcheck
+		_, err := pw.Write([]byte("hello\n"))
+		writeDone <- err
 	}()
 
-	// Give the goroutine a moment to reach the blocked channel send, then close.
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanner did not read from pipe")
+	}
 
 	// Close should unblock the goroutine via the quit channel.
 	ir.Close()

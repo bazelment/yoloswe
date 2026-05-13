@@ -181,7 +181,8 @@ func TestTailSubprocessLog_StreamsAndUpdatesLastOutput(t *testing.T) {
 	first := mw.lastOutputAt.Load()
 	require.NotZero(t, first)
 
-	time.Sleep(15 * time.Millisecond)
+	mw.lastOutputAt.Store(1)
+	first = mw.lastOutputAt.Load()
 	_, err = f.WriteString("I0504 22:02:11.817171 1350798 workflow.go:353] step completed step=plan issue=ENG-1 duration=1m17s\n")
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
@@ -263,7 +264,7 @@ func TestRunWatchdog_DoesNotCancelDuringReviewWait(t *testing.T) {
 	}()
 
 	// Many ticks pass; cancel must remain false because we're in review.
-	time.Sleep(80 * time.Millisecond)
+	require.Never(t, cancelled.Load, 80*time.Millisecond, 5*time.Millisecond)
 	close(stop)
 	select {
 	case <-done:
@@ -507,7 +508,7 @@ func TestRunWatchdog_DoesNotCancelWhenTailerDead(t *testing.T) {
 	}()
 
 	// Give the watchdog many ticks; it must NOT cancel.
-	time.Sleep(80 * time.Millisecond)
+	require.Never(t, cancelled.Load, 80*time.Millisecond, 5*time.Millisecond)
 	close(stop)
 	select {
 	case <-done:
@@ -543,7 +544,7 @@ func TestRunWatchdog_DoesNotCancelWhenNoTimeout(t *testing.T) {
 	}()
 
 	// Let the ticker fire many times; cancel must remain false.
-	time.Sleep(80 * time.Millisecond)
+	require.Never(t, cancelled.Load, 80*time.Millisecond, 5*time.Millisecond)
 	close(stop)
 	select {
 	case <-done:

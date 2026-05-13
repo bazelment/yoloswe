@@ -2,7 +2,6 @@ package codex
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -342,23 +341,9 @@ func TestThread_WaitForTurn_ContextCancellation(t *testing.T) {
 	thread.currentTurnID = "turn-456"
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	var wg sync.WaitGroup
-	var err error
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, err = thread.WaitForTurn(ctx)
-	}()
-
-	// Give goroutine time to start waiting
-	time.Sleep(10 * time.Millisecond)
-
-	// Cancel context
 	cancel()
 
-	wg.Wait()
+	_, err := thread.WaitForTurn(ctx)
 
 	if err != context.Canceled {
 		t.Errorf("expected context.Canceled, got %v", err)
@@ -374,46 +359,29 @@ func TestThread_MultipleWaiters(t *testing.T) {
 	thread.handleTurnStarted("turn-456")
 
 	// Add multiple waiters
-	var wg sync.WaitGroup
-	results := make([]*TurnResult, 3)
-	errors := make([]error, 3)
+	waiters := make([]chan *TurnResult, 3)
 
 	for i := 0; i < 3; i++ {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Directly add waiter channel
-			ch := make(chan *TurnResult, 1)
-			thread.mu.Lock()
-			thread.turnWaiters["turn-456"] = append(thread.turnWaiters["turn-456"], ch)
-			thread.mu.Unlock()
-
-			select {
-			case r := <-ch:
-				results[i] = r
-			case <-time.After(time.Second):
-				errors[i] = ErrTimeout
-			}
-		}()
+		ch := make(chan *TurnResult, 1)
+		waiters[i] = ch
+		thread.mu.Lock()
+		thread.turnWaiters["turn-456"] = append(thread.turnWaiters["turn-456"], ch)
+		thread.mu.Unlock()
 	}
-
-	// Give waiters time to register
-	time.Sleep(20 * time.Millisecond)
 
 	// Complete the turn
 	thread.handleTurnCompleted("turn-456", true, nil)
 
-	wg.Wait()
-
-	for i := 0; i < 3; i++ {
-		if errors[i] != nil {
-			t.Errorf("waiter %d got error: %v", i, errors[i])
-		}
-		if results[i] == nil {
+	for i, ch := range waiters {
+		select {
+		case result := <-ch:
+			if result == nil {
+				t.Errorf("waiter %d got nil result", i)
+			} else if !result.Success {
+				t.Errorf("waiter %d got unsuccessful result", i)
+			}
+		case <-time.After(time.Second):
 			t.Errorf("waiter %d got nil result", i)
-		} else if !results[i].Success {
-			t.Errorf("waiter %d got unsuccessful result", i)
 		}
 	}
 }
