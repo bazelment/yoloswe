@@ -25,21 +25,32 @@ const (
 func DetectFormat(path string) (SessionFormat, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("stat session path %q: %w", path, err)
 	}
 
 	if info.IsDir() {
-		// Directory with messages.jsonl = Claude format
-		if _, err := os.Stat(filepath.Join(path, "messages.jsonl")); err == nil {
-			return FormatClaude, nil
-		}
-		return "", fmt.Errorf("directory missing messages.jsonl")
+		return detectDirectoryFormat(path)
 	}
 
-	// Single file - check header for format
+	return detectFileFormat(path)
+}
+
+func detectDirectoryFormat(path string) (SessionFormat, error) {
+	messagesPath := filepath.Join(path, "messages.jsonl")
+	_, err := os.Stat(messagesPath)
+	if err == nil {
+		return FormatClaude, nil
+	}
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("claude session directory %q missing messages.jsonl", path)
+	}
+	return "", fmt.Errorf("stat claude messages file %q: %w", messagesPath, err)
+}
+
+func detectFileFormat(path string) (SessionFormat, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("open session log %q: %w", path, err)
 	}
 	defer f.Close()
 
@@ -53,6 +64,9 @@ func DetectFormat(path string) (SessionFormat, error) {
 				return FormatCodex, nil
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan session log header %q: %w", path, err)
 	}
 
 	// Default to Codex for JSONL files without header (legacy format)
