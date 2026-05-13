@@ -33,6 +33,7 @@ go_test(
         "agent_factory_test.go",
         "dispatch_test.go",
         "retry_test.go",
+        "state_test.go",
     ],
     embed = [":orchestrator"],
     deps = [

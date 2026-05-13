@@ -2,10 +2,8 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"github.com/bazelment/yoloswe/symphony/agent"
 	"github.com/bazelment/yoloswe/symphony/config"
 	"github.com/bazelment/yoloswe/symphony/model"
 	"github.com/bazelment/yoloswe/symphony/workspace"
@@ -191,51 +189,7 @@ func (o *Orchestrator) handleAgentUpdate(update AgentUpdate) {
 		return
 	}
 
-	now := o.clock.Now()
-	entry.Session.LastAgentTimestamp = &now
-	if string(update.Event.Type) != "" {
-		eventStr := string(update.Event.Type)
-		entry.Session.LastAgentEvent = &eventStr
-	}
-	if update.Event.Message != "" {
-		entry.Session.LastAgentMessage = update.Event.Message
-	}
-
-	// Propagate session identity from the session_started event.
-	// EventSessionStarted carries SessionID/ThreadID/TurnID set in session.go.
-	if update.Event.Type == agent.EventSessionStarted {
-		if update.Event.SessionID != "" {
-			entry.Session.SessionID = update.Event.SessionID
-		}
-		if update.Event.ThreadID != "" {
-			entry.Session.ThreadID = update.Event.ThreadID
-		}
-		if update.Event.TurnID != "" {
-			entry.Session.TurnID = update.Event.TurnID
-		}
-		if update.Event.PID != nil {
-			pidStr := fmt.Sprintf("%d", *update.Event.PID)
-			entry.Session.AgentPID = &pidStr
-		}
-		entry.Session.TurnCount++
-	}
-
-	// Update token totals using delta-based accounting. Spec Section 13.5.
-	if update.Event.TotalTokens > 0 {
-		inputDelta := update.Event.InputTokens - entry.Session.LastReportedInputToks
-		outputDelta := update.Event.OutputTokens - entry.Session.LastReportedOutputToks
-
-		if inputDelta > 0 {
-			entry.Session.InputTokens += inputDelta
-			entry.Session.LastReportedInputToks = update.Event.InputTokens
-		}
-		if outputDelta > 0 {
-			entry.Session.OutputTokens += outputDelta
-			entry.Session.LastReportedOutputToks = update.Event.OutputTokens
-		}
-		entry.Session.TotalTokens = entry.Session.InputTokens + entry.Session.OutputTokens
-		entry.Session.LastReportedTotalToks = update.Event.TotalTokens
-	}
+	recordLiveSessionEvent(&entry.Session, update.Event, o.clock.Now())
 
 	// Update rate limits.
 	if update.Event.RateLimits != nil {
