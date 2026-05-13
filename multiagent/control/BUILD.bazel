@@ -1,8 +1,14 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "control",
     srcs = ["controller.go"],
     importpath = "github.com/bazelment/yoloswe/multiagent/control",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "control_test",
+    srcs = ["controller_test.go"],
+    embed = [":control"],
 )
