@@ -81,55 +81,42 @@ func TestBridgeACPEventsToChannel(t *testing.T) {
 		Input:      map[string]interface{}{"arg": "value"},
 	}
 
-	// Give bridge time to process
-	time.Sleep(50 * time.Millisecond)
-
 	// Close the bridge
-	close(done)
+	close(acpEvents)
 	wg.Wait()
 
 	// Verify events were forwarded
-	select {
-	case ev := <-agentEvents:
-		textEv, ok := ev.(TextAgentEvent)
-		if !ok {
-			t.Errorf("expected TextAgentEvent, got %T", ev)
-		}
-		if textEv.Text != "hello" {
-			t.Errorf("expected text 'hello', got '%s'", textEv.Text)
-		}
-	default:
-		t.Error("expected to receive TextAgentEvent")
+	ev := receiveAgentEvent(t, agentEvents)
+	textEv, ok := ev.(TextAgentEvent)
+	if !ok {
+		t.Errorf("expected TextAgentEvent, got %T", ev)
+	}
+	if textEv.Text != "hello" {
+		t.Errorf("expected text 'hello', got '%s'", textEv.Text)
 	}
 
-	select {
-	case ev := <-agentEvents:
-		thinkingEv, ok := ev.(ThinkingAgentEvent)
-		if !ok {
-			t.Errorf("expected ThinkingAgentEvent, got %T", ev)
-		}
-		if thinkingEv.Thinking != "thinking" {
-			t.Errorf("expected thinking 'thinking', got '%s'", thinkingEv.Thinking)
-		}
-	default:
-		t.Error("expected to receive ThinkingAgentEvent")
+	ev = receiveAgentEvent(t, agentEvents)
+	thinkingEv, ok := ev.(ThinkingAgentEvent)
+	if !ok {
+		t.Errorf("expected ThinkingAgentEvent, got %T", ev)
+	}
+	if thinkingEv.Thinking != "thinking" {
+		t.Errorf("expected thinking 'thinking', got '%s'", thinkingEv.Thinking)
 	}
 
-	select {
-	case ev := <-agentEvents:
-		toolEv, ok := ev.(ToolStartAgentEvent)
-		if !ok {
-			t.Errorf("expected ToolStartAgentEvent, got %T", ev)
-		}
-		if toolEv.Name != "test_tool" {
-			t.Errorf("expected tool name 'test_tool', got '%s'", toolEv.Name)
-		}
-		if toolEv.ID != "test-1" {
-			t.Errorf("expected tool ID 'test-1', got '%s'", toolEv.ID)
-		}
-	default:
-		t.Error("expected to receive ToolStartAgentEvent")
+	ev = receiveAgentEvent(t, agentEvents)
+	toolEv, ok := ev.(ToolStartAgentEvent)
+	if !ok {
+		t.Errorf("expected ToolStartAgentEvent, got %T", ev)
 	}
+	if toolEv.Name != "test_tool" {
+		t.Errorf("expected tool name 'test_tool', got '%s'", toolEv.Name)
+	}
+	if toolEv.ID != "test-1" {
+		t.Errorf("expected tool ID 'test-1', got '%s'", toolEv.ID)
+	}
+
+	close(done)
 }
 
 // TestBridgeACPEventsToChannel_StopsOnDone verifies the bridge stops when done is closed.
@@ -202,31 +189,29 @@ func TestBridgeACPEventsToHandler(t *testing.T) {
 	done := make(chan struct{})
 
 	// Create a mock handler
-	var receivedText []string
-	var receivedThinking []string
-	var receivedToolStarts []string
-	var mu sync.Mutex
+	receivedText := make(chan string, 2)
+	receivedThinking := make(chan string, 1)
+	receivedToolStarts := make(chan string, 1)
 
 	handler := &testEventHandler{
 		onText: func(text string) {
-			mu.Lock()
-			receivedText = append(receivedText, text)
-			mu.Unlock()
+			receivedText <- text
 		},
 		onThinking: func(thinking string) {
-			mu.Lock()
-			receivedThinking = append(receivedThinking, thinking)
-			mu.Unlock()
+			receivedThinking <- thinking
 		},
 		onToolStart: func(name, id string, input map[string]interface{}) {
-			mu.Lock()
-			receivedToolStarts = append(receivedToolStarts, name)
-			mu.Unlock()
+			receivedToolStarts <- name
 		},
 	}
 
 	// Start bridge
-	go bridgeEvents(acpEvents, handler, nil, done, "", nil)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bridgeEvents(acpEvents, handler, nil, done, "", nil)
+	}()
 
 	// Send events
 	acpEvents <- acp.TextDeltaEvent{Delta: "test1"}
@@ -234,30 +219,62 @@ func TestBridgeACPEventsToHandler(t *testing.T) {
 	acpEvents <- acp.ThinkingDeltaEvent{Delta: "thinking1"}
 	acpEvents <- acp.ToolCallStartEvent{ToolName: "tool1", ToolCallID: "id1"}
 
-	// Give handler time to process
-	time.Sleep(50 * time.Millisecond)
+	// Verify events were forwarded
+	if got := receiveString(t, receivedText); got != "test1" {
+		t.Errorf("expected first text 'test1', got '%s'", got)
+	}
+	if got := receiveString(t, receivedText); got != "test2" {
+		t.Errorf("expected second text 'test2', got '%s'", got)
+	}
+	if got := receiveString(t, receivedThinking); got != "thinking1" {
+		t.Errorf("expected thinking event 'thinking1', got '%s'", got)
+	}
+	if got := receiveString(t, receivedToolStarts); got != "tool1" {
+		t.Errorf("expected tool start event 'tool1', got '%s'", got)
+	}
 
 	// Close bridge
 	close(done)
-	time.Sleep(50 * time.Millisecond)
+	waitForBridgeExit(t, &wg, "handler bridge")
+}
 
-	// Verify events were forwarded
-	mu.Lock()
-	defer mu.Unlock()
+func receiveAgentEvent(t *testing.T, events <-chan AgentEvent) AgentEvent {
+	t.Helper()
 
-	if len(receivedText) != 2 {
-		t.Errorf("expected 2 text events, got %d", len(receivedText))
+	select {
+	case ev := <-events:
+		return ev
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for agent event")
+		return nil
 	}
-	if len(receivedText) > 0 && receivedText[0] != "test1" {
-		t.Errorf("expected first text 'test1', got '%s'", receivedText[0])
-	}
+}
 
-	if len(receivedThinking) != 1 {
-		t.Errorf("expected 1 thinking event, got %d", len(receivedThinking))
-	}
+func receiveString(t *testing.T, values <-chan string) string {
+	t.Helper()
 
-	if len(receivedToolStarts) != 1 {
-		t.Errorf("expected 1 tool start event, got %d", len(receivedToolStarts))
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for forwarded event")
+		return ""
+	}
+}
+
+func waitForBridgeExit(t *testing.T, wg *sync.WaitGroup, name string) {
+	t.Helper()
+
+	waitCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+	case <-time.After(time.Second):
+		t.Fatalf("%s did not exit", name)
 	}
 }
 
