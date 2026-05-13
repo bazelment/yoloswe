@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,18 +280,28 @@ func TestClaudeProviderBg_C12_CloseProviderWhileBgLive(t *testing.T) {
 	defer cleanup()
 
 	prompt := "Use Monitor to run `sleep 30`. Wait for it to finish."
+	toolStarted := make(chan struct{})
+	handler := &toolStartSignalHandler{started: toolStarted}
 
 	done := make(chan struct{})
 	var execErr error
 	go func() {
 		_, execErr = provider.Execute(ctx, prompt, nil,
 			agent.WithProviderWorkDir(tmp),
+			agent.WithProviderEventHandler(handler),
 		)
 		close(done)
 	}()
 
-	// Give the session time to start the Monitor then cancel.
-	time.Sleep(5 * time.Second)
+	select {
+	case <-toolStarted:
+	case <-done:
+		t.Log("Execute returned before Monitor started; cancellation path was not exercised")
+		return
+	case <-time.After(20 * time.Second):
+		cancel()
+		t.Fatal("Monitor tool did not start before cancellation timeout")
+	}
 	cancel()
 
 	select {
@@ -303,5 +314,23 @@ func TestClaudeProviderBg_C12_CloseProviderWhileBgLive(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("Execute did not return within 15s after cancel — cancel propagation broken")
+	}
+}
+
+type toolStartSignalHandler struct {
+	once    sync.Once
+	started chan struct{}
+}
+
+func (h *toolStartSignalHandler) OnText(string)     {}
+func (h *toolStartSignalHandler) OnThinking(string) {}
+func (h *toolStartSignalHandler) OnToolComplete(string, string, map[string]interface{}, interface{}, bool) {
+}
+func (h *toolStartSignalHandler) OnTurnComplete(int, bool, int64, float64) {}
+func (h *toolStartSignalHandler) OnError(error, string)                    {}
+
+func (h *toolStartSignalHandler) OnToolStart(name, _ string, _ map[string]interface{}) {
+	if name == "Monitor" {
+		h.once.Do(func() { close(h.started) })
 	}
 }

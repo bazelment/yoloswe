@@ -88,9 +88,6 @@ func TestSession_Integration_Resume(t *testing.T) {
 	}
 	t.Log("Session 1 stopped")
 
-	// Small delay to ensure session is fully stopped
-	time.Sleep(500 * time.Millisecond)
-
 	// === Phase 2: Resume the session ===
 	t.Log("Phase 2: Resuming session...")
 

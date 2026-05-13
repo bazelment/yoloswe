@@ -130,10 +130,8 @@ func runResumeScenario(t *testing.T, b resumeBackend) {
 	t.Logf("phase 1 session id: %s", sessionID)
 	t.Logf("phase 1 response (truncated): %s", truncate(phase1Resp, 200))
 
-	time.Sleep(resumeWindow)
-
 	t.Logf("phase 2: resuming session %s and asking for the secret back", sessionID)
-	resumedID, phase2Resp, err := b.Resume(ctx, t, workdir, sessionID, phase2Prompt)
+	resumedID, phase2Resp, err := resumeWithRetry(ctx, t, b, workdir, sessionID, phase2Prompt)
 	if err != nil {
 		t.Fatalf("phase 2 Resume failed: %v", err)
 	}
@@ -158,6 +156,36 @@ func runResumeScenario(t *testing.T, b resumeBackend) {
 	}
 	t.Logf("resume verified: id %q matches and secret recalled across phase boundary",
 		resumedID)
+}
+
+func resumeWithRetry(
+	ctx context.Context,
+	t *testing.T,
+	b resumeBackend,
+	workdir string,
+	sessionID string,
+	prompt string,
+) (string, string, error) {
+	t.Helper()
+
+	deadline := time.NewTimer(resumeWindow)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		resumedID, resp, err := b.Resume(ctx, t, workdir, sessionID, prompt)
+		if err == nil {
+			return resumedID, resp, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-deadline.C:
+			return "", "", err
+		case <-ticker.C:
+		}
+	}
 }
 
 // containsSecret matches the secret with light tolerance for whitespace and
