@@ -64,16 +64,7 @@ func run(ctx context.Context, app *cliapp.App, workflowPath string, port int) er
 	// Create orchestrator.
 	orch := orchestrator.New(reloader.Config, t, orchestrator.RealClock{}, logger)
 
-	// Determine effective port: CLI --port overrides config server.port.
-	effectivePort := 0
-	hasPort := false
-	if port != 0 {
-		effectivePort = port
-		hasPort = true
-	} else if cfg.ServerPort != nil {
-		effectivePort = *cfg.ServerPort
-		hasPort = true
-	}
+	effectivePort, hasPort := selectHTTPPort(port, cfg)
 
 	// Start HTTP server if configured.
 	var httpSrv *symphttp.Server
@@ -101,4 +92,14 @@ func run(ctx context.Context, app *cliapp.App, workflowPath string, port int) er
 
 	fmt.Fprintln(os.Stderr, "symphony stopped")
 	return nil
+}
+
+func selectHTTPPort(cliPort int, cfg *config.ServiceConfig) (int, bool) {
+	if cliPort != 0 {
+		return cliPort, true
+	}
+	if cfg.ServerPort != nil {
+		return *cfg.ServerPort, true
+	}
+	return 0, false
 }

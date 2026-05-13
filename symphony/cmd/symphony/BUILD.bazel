@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "symphony_lib",
@@ -19,4 +19,11 @@ go_binary(
     name = "symphony",
     embed = [":symphony_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "symphony_test",
+    srcs = ["main_test.go"],
+    embed = [":symphony_lib"],
+    deps = ["//symphony/config"],
 )
