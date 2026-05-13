@@ -1,5 +1,5 @@
 # gazelle:ignore
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "testdata_lib",
@@ -12,4 +12,11 @@ go_binary(
     name = "fake_codex",
     embed = [":testdata_lib"],
     visibility = ["//symphony:__subpackages__"],
+)
+
+go_test(
+    name = "testdata_test",
+    srcs = ["fake_codex_test.go"],
+    embed = [":testdata_lib"],
+    deps = ["@com_github_stretchr_testify//require"],
 )
