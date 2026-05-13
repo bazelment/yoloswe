@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "agentstream",
@@ -8,4 +8,10 @@ go_library(
     ],
     importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "agentstream_test",
+    srcs = ["events_test.go"],
+    embed = [":agentstream"],
 )
