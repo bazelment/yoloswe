@@ -89,13 +89,8 @@ func createProgressReporter(app *cliapp.App) (*progress.ConsoleReporter, *progre
 	return consoleReporter, progressReporter
 }
 
-// createSwarmConfig creates the swarm configuration from flags
-func createSwarmConfig(progressReporter *progress.AgentReporter) agent.SwarmConfig {
-	var reporter agent.ProgressReporter
-	if progressReporter != nil {
-		reporter = progressReporter
-	}
-
+// createSwarmConfig creates the swarm configuration from flags.
+func createSwarmConfig(progressReporter agent.ProgressReporter) agent.SwarmConfig {
 	return agent.SwarmConfig{
 		WorkDir:             workDir,
 		SessionDir:          resolveSessionDir(),
@@ -107,7 +102,7 @@ func createSwarmConfig(progressReporter *progress.AgentReporter) agent.SwarmConf
 		TotalBudgetUSD:      budget,
 		MaxIterations:       maxIterations,
 		EnableCheckpointing: enableCheckpoint,
-		Progress:            reporter,
+		Progress:            progressReporter,
 	}
 }
 

@@ -94,6 +94,23 @@ func TestWriterWriteRaw(t *testing.T) {
 	}
 }
 
+func TestWriterUsesSingleWritePerLine(t *testing.T) {
+	t.Parallel()
+
+	writer := NewWriter(&countingWriter{})
+	if err := writer.WriteRaw([]byte(`{"raw":true}`)); err != nil {
+		t.Fatalf("WriteRaw() error = %v", err)
+	}
+
+	cw := writer.w.(*countingWriter)
+	if cw.writes != 1 {
+		t.Fatalf("write count = %d, want 1", cw.writes)
+	}
+	if got, want := cw.buf.String(), "{\"raw\":true}\n"; got != want {
+		t.Fatalf("WriteRaw() output = %q, want %q", got, want)
+	}
+}
+
 func TestWriterErrors(t *testing.T) {
 	t.Parallel()
 
@@ -127,4 +144,14 @@ type errorWriter struct {
 
 func (w errorWriter) Write([]byte) (int, error) {
 	return 0, w.err
+}
+
+type countingWriter struct {
+	buf    bytes.Buffer
+	writes int
+}
+
+func (w *countingWriter) Write(data []byte) (int, error) {
+	w.writes++
+	return w.buf.Write(data)
 }

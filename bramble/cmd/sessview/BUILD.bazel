@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
 go_library(
     name = "sessview_lib",
@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/sessview",
     visibility = ["//visibility:private"],
     deps = [
+        "//agent-cli-wrapper/displaytext",
         "//bramble/app",
         "//bramble/replay",
         "//bramble/session",
@@ -17,10 +18,4 @@ go_binary(
     name = "sessview",
     embed = [":sessview_lib"],
     visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "sessview_test",
-    srcs = ["main_test.go"],
-    embed = [":sessview_lib"],
 )

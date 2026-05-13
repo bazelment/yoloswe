@@ -52,12 +52,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	if len(cfg.paths) < 1 {
-		fmt.Fprintln(os.Stderr, "Error: no session path provided")
-		fs.Usage()
-		os.Exit(1)
-	}
-
 	var player *sessionplayer.Player
 	if cfg.noColor() {
 		player = sessionplayer.NewPlayerWithOptions(os.Stdout, cfg.verboseEffective(), true)
@@ -80,7 +74,7 @@ func main() {
 			fmt.Fprintf(os.Stdout, "=== Playing (%s): %s ===\n\n", format, path)
 		}
 
-		if err := player.Play(path); err != nil {
+		if err := player.PlayFormat(path, format); err != nil {
 			fmt.Fprintf(os.Stderr, "Error playing %s: %v\n", path, err)
 			os.Exit(1)
 		}

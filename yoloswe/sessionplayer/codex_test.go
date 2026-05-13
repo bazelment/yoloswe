@@ -1,6 +1,7 @@
 package sessionplayer
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,7 @@ func TestDetectFormatErrors(t *testing.T) {
 	t.Run("oversized header", func(t *testing.T) {
 		t.Parallel()
 
-		path := writeTempFile(t, strings.Repeat("x", bufioMaxScanTokenSize()+1))
+		path := writeTempFile(t, strings.Repeat("x", bufio.MaxScanTokenSize+1))
 		_, err := DetectFormat(path)
 		requireErrorContains(t, err, "scan session log header")
 	})
@@ -100,8 +101,4 @@ func writeTempFile(t *testing.T, contents string) string {
 		t.Fatalf("write temp session log: %v", err)
 	}
 	return path
-}
-
-func bufioMaxScanTokenSize() int {
-	return 64 * 1024
 }

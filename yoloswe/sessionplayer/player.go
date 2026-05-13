@@ -57,6 +57,11 @@ func (p *Player) Play(path string) error {
 		return fmt.Errorf("failed to detect format: %w", err)
 	}
 
+	return p.PlayFormat(path, format)
+}
+
+// PlayFormat plays a session path using a format detected by the caller.
+func (p *Player) PlayFormat(path string, format SessionFormat) error {
 	switch format {
 	case FormatClaude:
 		return p.playClaude(path)

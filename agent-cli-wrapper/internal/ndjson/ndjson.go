@@ -10,8 +10,6 @@ import (
 
 const maxTokenSize = 1024 * 1024 // 1MB
 
-var lineDelimiter = []byte("\n")
-
 // Reader reads newline-delimited JSON from an io.Reader.
 type Reader struct {
 	scanner *bufio.Scanner
@@ -62,7 +60,7 @@ func (w *Writer) Write(v interface{}) error {
 		return err
 	}
 
-	return w.writeLineLocked(data)
+	return w.writeLineLocked(append(data, '\n'))
 }
 
 // WriteRaw writes raw bytes as a line.
@@ -70,16 +68,13 @@ func (w *Writer) WriteRaw(data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.writeLineLocked(data)
+	line := make([]byte, 0, len(data)+1)
+	line = append(line, data...)
+	line = append(line, '\n')
+	return w.writeLineLocked(line)
 }
 
 func (w *Writer) writeLineLocked(data []byte) error {
-	if _, err := w.w.Write(data); err != nil {
-		return err
-	}
-	if _, err := w.w.Write(lineDelimiter); err != nil {
-		return err
-	}
-
-	return nil
+	_, err := w.w.Write(data)
+	return err
 }

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -358,30 +359,35 @@ func TestThread_MultipleWaiters(t *testing.T) {
 	thread.state.SetProcessing()
 	thread.handleTurnStarted("turn-456")
 
-	// Add multiple waiters
-	waiters := make([]chan *TurnResult, 3)
-
-	for i := 0; i < 3; i++ {
-		ch := make(chan *TurnResult, 1)
-		waiters[i] = ch
-		thread.mu.Lock()
-		thread.turnWaiters["turn-456"] = append(thread.turnWaiters["turn-456"], ch)
-		thread.mu.Unlock()
+	results := make([]*TurnResult, 3)
+	errs := make([]error, 3)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = thread.WaitForTurn(context.Background())
+		}(i)
 	}
 
-	// Complete the turn
-	thread.handleTurnCompleted("turn-456", true, nil)
+	require.Eventually(t, func() bool {
+		thread.mu.RLock()
+		defer thread.mu.RUnlock()
+		return len(thread.turnWaiters["turn-456"]) == len(results)
+	}, time.Second, time.Millisecond)
 
-	for i, ch := range waiters {
-		select {
-		case result := <-ch:
-			if result == nil {
-				t.Errorf("waiter %d got nil result", i)
-			} else if !result.Success {
-				t.Errorf("waiter %d got unsuccessful result", i)
-			}
-		case <-time.After(time.Second):
+	thread.handleTurnCompleted("turn-456", true, nil)
+	wg.Wait()
+
+	for i := range results {
+		if errs[i] != nil {
+			t.Errorf("waiter %d got error: %v", i, errs[i])
+			continue
+		}
+		if results[i] == nil {
 			t.Errorf("waiter %d got nil result", i)
+		} else if !results[i].Success {
+			t.Errorf("waiter %d got unsuccessful result", i)
 		}
 	}
 }
