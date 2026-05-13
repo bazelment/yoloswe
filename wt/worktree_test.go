@@ -258,6 +258,8 @@ func TestParsePorcelainV2Status(t *testing.T) {
 }
 
 type concurrentGitRunner struct {
+	started  chan struct{}
+	release  chan struct{}
 	mu       sync.Mutex
 	inFlight int
 	max      int
@@ -271,7 +273,8 @@ func (r *concurrentGitRunner) Run(ctx context.Context, args []string, dir string
 	}
 	r.mu.Unlock()
 
-	time.Sleep(20 * time.Millisecond)
+	r.started <- struct{}{}
+	<-r.release
 
 	r.mu.Lock()
 	r.inFlight--
@@ -280,22 +283,52 @@ func (r *concurrentGitRunner) Run(ctx context.Context, args []string, dir string
 }
 
 func TestGetAllGitStatusesLimitsConcurrency(t *testing.T) {
-	runner := &concurrentGitRunner{}
+	runner := &concurrentGitRunner{
+		started: make(chan struct{}, 12),
+		release: make(chan struct{}),
+	}
 	manager := NewManager(t.TempDir(), "test-repo", WithGitRunner(runner))
 	worktrees := make([]Worktree, 12)
 	for i := range worktrees {
 		worktrees[i] = Worktree{Path: fmt.Sprintf("/tmp/wt-%d", i), Branch: fmt.Sprintf("branch-%d", i)}
 	}
 
-	statuses, err := manager.GetAllGitStatuses(context.Background(), worktrees)
-	if err != nil {
-		t.Fatalf("GetAllGitStatuses returned error: %v", err)
+	type result struct {
+		statuses map[string]*WorktreeStatus
+		err      error
 	}
-	if len(statuses) != len(worktrees)*2 {
-		t.Fatalf("status map has %d entries, want %d", len(statuses), len(worktrees)*2)
+	resultCh := make(chan result, 1)
+	go func() {
+		statuses, err := manager.GetAllGitStatuses(context.Background(), worktrees)
+		resultCh <- result{statuses: statuses, err: err}
+	}()
+
+	for i := 0; i < 4; i++ {
+		select {
+		case <-runner.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for git status workers to start")
+		}
 	}
+
+	runner.mu.Lock()
 	if runner.max > 4 {
 		t.Fatalf("max concurrent git calls = %d, want <= 4", runner.max)
+	}
+	runner.mu.Unlock()
+
+	close(runner.release)
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("GetAllGitStatuses returned error: %v", result.err)
+		}
+		if len(result.statuses) != len(worktrees)*2 {
+			t.Fatalf("status map has %d entries, want %d", len(result.statuses), len(worktrees)*2)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for git statuses")
 	}
 }
 
