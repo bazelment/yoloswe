@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "wt_lib",
@@ -17,4 +17,14 @@ go_binary(
     name = "wt",
     embed = [":wt_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "wt_test",
+    srcs = ["main_test.go"],
+    embed = [":wt_lib"],
+    deps = [
+        "//agent-cli-wrapper/claude/render",
+        "//wt",
+    ],
 )
