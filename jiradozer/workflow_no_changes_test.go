@@ -90,6 +90,52 @@ func TestWorkflow_BuildNoChangesSkipsRemainingSteps(t *testing.T) {
 	assert.Equal(t, "Build produced no changes; nothing to ship. Marking issue done.", postCalls[len(postCalls)-1].args[1])
 }
 
+func TestWorkflow_BuildRoundsNoChangesSkipsRemainingSteps(t *testing.T) {
+	workDir := newGitRepoAtOriginMain(t)
+	PersistPlan(workDir, "persisted plan", discardLogger())
+	gitTest(t, workDir, "add", ".jiradozer/plan.md")
+	gitTest(t, workDir, "commit", "-m", "persist plan")
+	gitTest(t, workDir, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	issue := testIssue()
+	issue.Labels = []string{"jiradozer-plan-done"}
+	mt := &mockWorkflowTracker{
+		fetchIssueReply: &tracker.Issue{Labels: issue.Labels},
+		workflowStates:  testWorkflowStates(),
+	}
+	cfg := testConfig()
+	cfg.WorkDir = workDir
+	cfg.Build.Rounds = []RoundConfig{
+		{Prompt: "build round one"},
+		{Prompt: "build round two"},
+	}
+	wf := NewWorkflow(mt, issue, cfg, discardLogger())
+
+	var steps []string
+	wf.runStepAgent = func(_ context.Context, stepName string, _ PromptData, _ StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (StepAgentResult, error) {
+		steps = append(steps, stepName)
+		return StepAgentResult{Output: stepName + " output"}, nil
+	}
+
+	require.NoError(t, wf.Run(context.Background()))
+
+	assert.Equal(t, StepDone, wf.state.Current())
+	assert.Equal(t, []string{"build", "build"}, steps)
+	assert.Equal(t, phaseDone, wf.phases[PhaseBuild])
+	assert.Equal(t, phaseDone, wf.phases[PhaseValidate])
+	assert.Equal(t, phaseDone, wf.phases[PhaseShip])
+	seq := labelSequence(mt)
+	assert.Contains(t, seq, "AddLabel:jiradozer-build-done")
+	assert.Contains(t, seq, "AddLabel:jiradozer-validate-done")
+	assert.Contains(t, seq, "AddLabel:jiradozer-ship-done")
+
+	postCalls := mt.getCalls("PostComment")
+	require.Len(t, postCalls, 3)
+	assert.Equal(t, "## Build Round 1/2\n\nbuild output", postCalls[0].args[1])
+	assert.Equal(t, "## Build Round 2/2\n\nbuild output", postCalls[1].args[1])
+	assert.Equal(t, "Build produced no changes; nothing to ship. Marking issue done.", postCalls[2].args[1])
+}
+
 func TestWorkflow_BuildDirtyTreeProceedsToCreatePR(t *testing.T) {
 	workDir := newGitRepoAtOriginMain(t)
 	mt := &mockWorkflowTracker{workflowStates: testWorkflowStates()}

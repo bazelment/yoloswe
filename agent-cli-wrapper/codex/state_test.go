@@ -485,9 +485,14 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 	var mu sync.Mutex
 	started := make(chan struct{}, numWaiters)
 	cancelReady := make(chan context.CancelFunc, numWaiters)
+	cancelledDone := make(chan struct{}, numWaiters)
+	expectedCancelled := 0
 
 	// Launch waiters with different behaviors
 	for i := 0; i < numWaiters; i++ {
+		if i%3 == 0 {
+			expectedCancelled++
+		}
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -514,6 +519,7 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 				successCount++
 			} else if errors.Is(err, context.Canceled) {
 				cancelCount++
+				cancelledDone <- struct{}{}
 			} else {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -532,6 +538,14 @@ func TestThreadStateManager_WaitForReady_MixedCompletion(t *testing.T) {
 	close(cancelReady)
 	for cancel := range cancelReady {
 		cancel()
+	}
+
+	for i := 0; i < expectedCancelled; i++ {
+		select {
+		case <-cancelledDone:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for cancelled WaitForReady goroutines")
+		}
 	}
 
 	// Set ready to wake successful waiters
