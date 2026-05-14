@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -348,6 +347,7 @@ func (w *Workflow) runStepOrRounds(ctx context.Context, stepName string, stepCfg
 // either a shell command or an agent session (no resume). On redo, all rounds
 // re-run from the start; feedback is injected into the first agent round only.
 func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg StepConfig, reviewStep WorkflowStep, trigger string) {
+	currentStep := w.state.Current()
 	resolved := w.config.ResolveStep(stepCfg)
 	totalRounds := len(stepCfg.Rounds)
 
@@ -436,7 +436,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "session_ids", roundSessionIDs, "duration", stepDuration)
 	w.status(fmt.Sprintf("Step %s complete (%s)", stepName, stepDuration.Truncate(time.Second)))
 	w.captureOutput(stepName, JoinRoundOutputs(allOutputs))
-	if w.maybeSkipAfterNoChangeBuild(ctx, stepName) {
+	if w.maybeSkipAfterNoChangeBuild(ctx, currentStep) {
 		return
 	}
 	w.transitionToReview(ctx, reviewStep, trigger)
@@ -474,6 +474,10 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 	w.sessionIDs[currentStep] = newSessionID
 	w.captureOutput(stepName, output)
 
+	if w.maybeSkipAfterNoChangeBuild(ctx, currentStep) {
+		return
+	}
+
 	resultComment, err := PostStepComment(ctx, w.tracker, w.issue.ID, stepName, stepCfg, output)
 	if err != nil {
 		if errors.Is(err, errRenderComment) {
@@ -490,14 +494,11 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 		}
 	}
 
-	if w.maybeSkipAfterNoChangeBuild(ctx, stepName) {
-		return
-	}
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
-func (w *Workflow) maybeSkipAfterNoChangeBuild(ctx context.Context, stepName string) bool {
-	if stepName != "build" {
+func (w *Workflow) maybeSkipAfterNoChangeBuild(ctx context.Context, step WorkflowStep) bool {
+	if step != StepBuilding {
 		return false
 	}
 	if !w.buildProducedNoChanges(ctx) {
@@ -517,26 +518,22 @@ func (w *Workflow) maybeSkipAfterNoChangeBuild(ctx context.Context, stepName str
 // and HEAD has no diff against origin/<base>. Git errors fail open so the
 // workflow proceeds to create_pr rather than incorrectly skipping work.
 func (w *Workflow) buildProducedNoChanges(ctx context.Context) bool {
-	status, err := runGit(ctx, w.config.WorkDir, "status", "--porcelain")
+	dirty, err := worktreeIsDirty(ctx, w.config.WorkDir)
 	if err != nil {
 		w.logger.Warn("could not check git status; assuming changes exist", "error", err)
 		return false
 	}
-	if strings.TrimSpace(status) != "" {
+	if dirty {
 		return false
 	}
 
 	base := "origin/" + w.config.BaseBranch
-	err = runGitQuiet(ctx, w.config.WorkDir, "diff", "--quiet", base+"...HEAD")
-	if err == nil {
-		return true
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+	hasChanges, err := gitDiffHasChanges(ctx, w.config.WorkDir, base)
+	if err != nil {
+		w.logger.Warn("could not diff against base; assuming changes exist", "base", base, "error", err)
 		return false
 	}
-	w.logger.Warn("could not diff against base; assuming changes exist", "base", base, "error", err)
-	return false
+	return !hasChanges
 }
 
 // promptData builds the template context for agent prompts.

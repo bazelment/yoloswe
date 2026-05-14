@@ -13,6 +13,7 @@ import (
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/yoloswe/testutil"
 )
 
 func TestWorkflow_BuildProducedNoChanges(t *testing.T) {
@@ -85,8 +86,8 @@ func TestWorkflow_BuildNoChangesSkipsRemainingSteps(t *testing.T) {
 	assert.Contains(t, seq, "AddLabel:jiradozer-ship-done")
 
 	postCalls := mt.getCalls("PostComment")
-	require.GreaterOrEqual(t, len(postCalls), 2)
-	assert.Equal(t, "Build produced no changes; nothing to ship. Marking issue done.", postCalls[1].args[1])
+	require.NotEmpty(t, postCalls)
+	assert.Equal(t, "Build produced no changes; nothing to ship. Marking issue done.", postCalls[len(postCalls)-1].args[1])
 }
 
 func TestWorkflow_BuildDirtyTreeProceedsToCreatePR(t *testing.T) {
@@ -122,12 +123,7 @@ func newGitRepoAtOriginMain(t *testing.T) string {
 func newGitRepo(t *testing.T) string {
 	t.Helper()
 	workDir := t.TempDir()
-	gitTest(t, workDir, "init")
-	gitTest(t, workDir, "config", "user.email", "test@example.com")
-	gitTest(t, workDir, "config", "user.name", "Test User")
-	require.NoError(t, os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# test\n"), 0o644))
-	gitTest(t, workDir, "add", "README.md")
-	gitTest(t, workDir, "commit", "-m", "initial")
+	testutil.InitGitRepo(t, workDir)
 	gitTest(t, workDir, "branch", "-M", "main")
 	return workDir
 }

@@ -1,39 +1,38 @@
 package jiradozer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
+
+	"github.com/bazelment/yoloswe/wt"
 )
 
-func runGit(ctx context.Context, workDir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = workDir
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return stdout.String(), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-		}
-		return stdout.String(), err
+var workflowGitRunner wt.GitRunner = &wt.DefaultGitRunner{}
+
+func worktreeIsDirty(ctx context.Context, workDir string) (bool, error) {
+	manager := wt.NewManager("", "", wt.WithGitRunner(workflowGitRunner))
+	status, err := manager.GetGitStatus(ctx, wt.Worktree{Path: workDir})
+	if err != nil {
+		return false, err
 	}
-	return stdout.String(), nil
+	return status.IsDirty, nil
 }
 
-func runGitQuiet(ctx context.Context, workDir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = workDir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-		}
+func gitDiffHasChanges(ctx context.Context, workDir string, base string) (bool, error) {
+	result, err := workflowGitRunner.Run(ctx, []string{"diff", "--quiet", base + "...HEAD"}, workDir)
+	if err == nil {
+		return false, nil
+	}
+	if result != nil && result.ExitCode == 1 {
+		return true, nil
+	}
+	return false, gitError(err, result)
+}
+
+func gitError(err error, result *wt.CmdResult) error {
+	if result == nil || strings.TrimSpace(result.Stderr) == "" {
 		return err
 	}
-	return nil
+	return fmt.Errorf("%w: %s", err, strings.TrimSpace(result.Stderr))
 }

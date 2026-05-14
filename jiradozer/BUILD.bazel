@@ -25,6 +25,7 @@ go_library(
         "//agent-cli-wrapper/llmendpoint",
         "//jiradozer/tracker",
         "//multiagent/agent",
+        "//wt",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -54,6 +55,7 @@ go_test(
         "//jiradozer/tracker",
         "//multiagent/agent",
         "//wt",
+        "//yoloswe/testutil",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
