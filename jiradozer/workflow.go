@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -435,6 +436,9 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	w.logger.Info("step completed", "step", stepName, "issue", w.issue.Identifier, "rounds", totalRounds, "session_ids", roundSessionIDs, "duration", stepDuration)
 	w.status(fmt.Sprintf("Step %s complete (%s)", stepName, stepDuration.Truncate(time.Second)))
 	w.captureOutput(stepName, JoinRoundOutputs(allOutputs))
+	if w.maybeSkipAfterNoChangeBuild(ctx, stepName) {
+		return
+	}
 	w.transitionToReview(ctx, reviewStep, trigger)
 }
 
@@ -486,7 +490,53 @@ func (w *Workflow) runStep(ctx context.Context, stepName string, stepCfg StepCon
 		}
 	}
 
+	if w.maybeSkipAfterNoChangeBuild(ctx, stepName) {
+		return
+	}
 	w.transitionToReview(ctx, reviewStep, trigger)
+}
+
+func (w *Workflow) maybeSkipAfterNoChangeBuild(ctx context.Context, stepName string) bool {
+	if stepName != "build" {
+		return false
+	}
+	if !w.buildProducedNoChanges(ctx) {
+		return false
+	}
+	w.logger.Info("build produced no changes; skipping create_pr and remaining phases", "issue", w.issue.Identifier)
+	w.status("Build produced no changes; skipping to done")
+	if _, err := w.tracker.PostComment(ctx, w.issue.ID, "Build produced no changes; nothing to ship. Marking issue done."); err != nil {
+		w.logger.Warn("failed to post no-change build comment", "error", err)
+	}
+	w.forceTransition(StepDone)
+	w.handlePhaseBoundary(ctx)
+	return true
+}
+
+// buildProducedNoChanges returns true when the build left a clean working tree
+// and HEAD has no diff against origin/<base>. Git errors fail open so the
+// workflow proceeds to create_pr rather than incorrectly skipping work.
+func (w *Workflow) buildProducedNoChanges(ctx context.Context) bool {
+	status, err := runGit(ctx, w.config.WorkDir, "status", "--porcelain")
+	if err != nil {
+		w.logger.Warn("could not check git status; assuming changes exist", "error", err)
+		return false
+	}
+	if strings.TrimSpace(status) != "" {
+		return false
+	}
+
+	base := "origin/" + w.config.BaseBranch
+	err = runGitQuiet(ctx, w.config.WorkDir, "diff", "--quiet", base+"...HEAD")
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false
+	}
+	w.logger.Warn("could not diff against base; assuming changes exist", "base", base, "error", err)
+	return false
 }
 
 // promptData builds the template context for agent prompts.
