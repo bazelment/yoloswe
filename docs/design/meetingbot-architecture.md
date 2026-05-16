@@ -57,6 +57,16 @@ Subpackage split trigger:
 Until then, durability is enforced by code review, package-level tests, and the
 invariant list above, not by the Go compiler.
 
+Production milestone: before any live production phase, add either real
+subpackages or an architecture test that enforces the same import rules. The
+minimum hard boundary is:
+
+- transcript code cannot import provider, config, or prompt-building symbols
+- provider code cannot import bot orchestration or transcript file loading
+- CLI/evaluation code cannot be imported by core runtime code
+- queued research code crosses the bot boundary only through a scheduler
+  interface, not by sharing private bot helpers
+
 Internal ownership inside `bramble/meetingbot/` is deliberately narrower than
 the package boundary:
 
@@ -179,6 +189,40 @@ Synchronous `AutoResearch` is an opt-in replay convenience, not the safe live
 transport default. A live transport that declares low-latency intake should
 refuse to run with synchronous `AutoResearch` enabled.
 
+Profiles should be typed constructors or an explicit `Profile` field, not a
+bag of independent knobs:
+
+| Constructor | Guarantees |
+|-------------|------------|
+| `DefaultConfig` | development/evaluation defaults only; not a production profile |
+| `ReplayConfig` | deterministic replay defaults, optional synchronous `AutoResearch` |
+| `LiveSafeConfig` | `AutoResearch=false`, no web scope, queue-ready research settings |
+| `LiveWebConfig` | starts from `LiveSafeConfig`, enables web only after admission checks |
+
+Live entrypoints should accept only `LiveSafeConfig` or `LiveWebConfig`-shaped
+profiles, so callers cannot accidentally inherit replay defaults.
+
+Queued research boundary:
+
+```go
+type ResearchJob struct {
+    Topic           string
+    Scopes          []ResearchScope
+    TranscriptStart int
+    TranscriptEnd   int
+}
+
+type ResearchScheduler interface {
+    Enqueue(ctx context.Context, job ResearchJob) error
+}
+```
+
+The scheduler owns deduplication, idempotency, ordering by transcript index
+range, and queue backpressure. It calls `BuildBackground` or an equivalent
+topic-scoped helper without mutating events. Context cancellation before enqueue
+returns an error to the transport; provider failures after enqueue become miss
+evidence, not ingestion failures.
+
 ### Background Understanding
 
 `BuildBackground` extracts candidate topics from the observed meeting and runs
@@ -294,6 +338,15 @@ requests for that bot instance. Evidence should record whether a scope was
 blocked by admission, disabled by drift, or failed after a permitted read-only
 tool call.
 
+Web telemetry keeps fail-closed behavior distinguishable from provider flakiness:
+
+| Counter | Meaning |
+|---------|---------|
+| `web_admission_blocked` | provider was not allowed before request start |
+| `web_capability_drift_blocked` | provider lost or failed read-only capability at request time |
+| `web_provenance_blocked` | provider returned text but lacked usable source anchors |
+| `web_provider_failed` | allowed provider errored or timed out |
+
 `ProviderAgentClient` is stateless and creates one provider instance per
 request. Concurrent bot calls therefore do not share a provider object. The
 underlying `multiagent/agent` provider must support independent instances; if a
@@ -371,6 +424,21 @@ The transport contract is that only `Answer.Opening` may be emitted before the
 refined answer is ready. Refined content is buffered until validation passes or
 the fallback/degraded path is selected.
 
+The live transport API should make that boundary explicit:
+
+```go
+type AnswerStream interface {
+    OnOpening(ctx context.Context, opening string, t time.Time) error
+    OnFinal(ctx context.Context, answer Answer, t time.Time) error
+}
+```
+
+`OnOpening` is the write boundary for `FirstVisibleTextLatency`; the timer starts
+when the question is received and stops after `OnOpening` returns. Rendering and
+transport buffering count. `OnFinal` records time-to-final-validated-answer,
+which is reported separately from the first-visible-text SLO and must not be
+used to declare the live opening healthy.
+
 ### Summary Path
 
 `SummarizeMeeting` sends representative transcript excerpts plus cached
@@ -429,6 +497,20 @@ In offline evaluation, validator failures are quality failures even when the
 provider call succeeds. In real-mode smoke tests, uncited material claims should
 block promotion to production behavior.
 
+Rejected outputs are never shown as normal answers. The user-visible degraded
+shape is:
+
+```text
+Status: degraded
+Reason: <validation failure or provider failure>
+Grounded fallback: <locally generated answer from cited snippets/evidence>
+Missing evidence: <what could not be validated>
+```
+
+Before the validator exists, real-mode provider output remains evaluation-only;
+production transports may show only local fallback/degraded responses generated
+from selected snippets and cached evidence.
+
 MVP enforcement profile:
 
 | Claim class | V1 representation | V1 enforcement | Production gate |
@@ -472,6 +554,19 @@ Streaming policy:
   not user-visible in v1
 - if validation fails after the retry budget is exhausted, the UI receives an
   explicit degraded result with the validation reason and grounded fallback text
+
+Validator roadmap:
+
+| Stage | Enforcement | Use |
+|-------|-------------|-----|
+| deterministic v1 | timestamp/reference/uncertainty matchers | local replay and CI |
+| shadow semantic | semantic scorer runs but cannot block output | eval-only calibration |
+| production gate | semantic claim-to-evidence validator blocks output | real-mode promotion |
+
+Borderline semantic cases are adjudicated in the golden suite. False positives
+consume retry budget and may degrade the answer; false negatives are treated as
+release blockers when they involve decisions, owners, deadlines, root causes, or
+external facts.
 
 ## Error Handling
 
@@ -526,6 +621,12 @@ ready:
   including attempts to override system prompts, exfiltrate repo context, force
   writes, or poison topic selection; expected behavior is fail-closed evidence
   with the blocked reason recorded
+- transport-level tests with a fake `AnswerStream` that assert `OnOpening`
+  happens before refinement, measures `FirstVisibleTextLatency` at the write
+  boundary, and buffers final text until validation passes
+- queue integration tests for `ResearchScheduler` covering dropped/reordered
+  jobs, duplicate topic scheduling, cancellation before enqueue, provider
+  failure after enqueue, and summaries that start before research drains
 
 Deterministic streaming harness:
 
@@ -619,6 +720,9 @@ Extension points:
   `Bot.Observe`.
 - New research corpora add a `ResearchScope`, `AgentRole`, prompt, and
   permission row without changing answer or summary contracts.
+- Research executors can be synchronous in-process replay, asynchronous
+  in-process queues, or external workers, but all live-safe executors must
+  implement `ResearchScheduler` semantics and queue integration tests.
 - Provider swaps belong behind `AgentClient`; command flags and bot logic should
   stay provider-neutral.
 
