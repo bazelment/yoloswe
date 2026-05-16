@@ -161,6 +161,7 @@ type Answer struct { //nolint:govet // fieldalignment: user-facing fields stay g
 	Opening             string
 	Text                string
 	Model               string
+	Error               string
 	Evidence            []Evidence
 	ResearchRefs        []string
 }
@@ -170,6 +171,7 @@ type Summary struct { //nolint:govet // fieldalignment: user-facing fields stay 
 	Latency  time.Duration
 	Text     string
 	Model    string
+	Error    string
 	Evidence []Evidence
 }
 

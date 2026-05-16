@@ -184,7 +184,11 @@ func (b *Bot) AnswerQuestion(ctx context.Context, question string) (Answer, erro
 	}
 	resp, err := b.client.Run(ctx, req)
 	text := strings.TrimSpace(resp.Text)
+	errorText := ""
 	if err != nil || text == "" {
+		if err != nil {
+			errorText = err.Error()
+		}
 		text = fallbackAnswer(question, opening, snippets, evidence)
 	}
 	if !startsWithNormalized(text, opening) {
@@ -195,10 +199,11 @@ func (b *Bot) AnswerQuestion(ctx context.Context, question string) (Answer, erro
 		Opening:             opening,
 		Text:                text,
 		Model:               firstNonEmpty(resp.Model, b.cfg.FastAnswerModel),
+		Error:               errorText,
 		First10WordsLatency: first10,
 		Evidence:            evidence,
 		ResearchRefs:        evidenceRefList(evidence),
-	}, err
+	}, nil
 }
 
 // SummarizeMeeting produces a post-meeting synthesis cross-referenced with
@@ -219,15 +224,20 @@ func (b *Bot) SummarizeMeeting(ctx context.Context) (Summary, error) {
 	}
 	resp, err := b.client.Run(ctx, req)
 	text := strings.TrimSpace(resp.Text)
+	errorText := ""
 	if err != nil || text == "" {
+		if err != nil {
+			errorText = err.Error()
+		}
 		text = fallbackSummary(events, evidence)
 	}
 	return Summary{
 		Text:     text,
 		Model:    firstNonEmpty(resp.Model, b.cfg.SummaryModel),
 		Latency:  time.Since(start),
+		Error:    errorText,
 		Evidence: evidence,
-	}, err
+	}, nil
 }
 
 func (b *Bot) matchEvidence(question string) []Evidence {

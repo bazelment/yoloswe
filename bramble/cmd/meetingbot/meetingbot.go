@@ -16,20 +16,23 @@ import (
 )
 
 var (
-	notesGlob     string
-	notePaths     []string
-	questions     []string
-	agentMode     string
-	workDir       string
-	fastModel     string
-	researchModel string
-	codeModel     string
-	webModel      string
-	summaryModel  string
-	latencyBudget time.Duration
-	maxTopics     int
-	maxSnippets   int
-	evaluate      bool
+	notesGlob       string
+	notePaths       []string
+	questions       []string
+	agentMode       string
+	workDir         string
+	fastModel       string
+	researchModel   string
+	codeModel       string
+	webModel        string
+	summaryModel    string
+	latencyBudget   time.Duration
+	answerTimeout   time.Duration
+	researchTimeout time.Duration
+	summaryTimeout  time.Duration
+	maxTopics       int
+	maxSnippets     int
+	evaluate        bool
 )
 
 // Cmd is the meeting bot command.
@@ -54,6 +57,9 @@ func init() {
 	Cmd.Flags().StringVar(&webModel, "web-model", "gpt-5.3-codex", "Model for public web research")
 	Cmd.Flags().StringVar(&summaryModel, "summary-model", "gpt-5.5", "Model for final summaries")
 	Cmd.Flags().DurationVar(&latencyBudget, "latency-budget", 10*time.Second, "Target latency for first 10 words")
+	Cmd.Flags().DurationVar(&answerTimeout, "answer-timeout", 45*time.Second, "Timeout for full fast-answer model synthesis")
+	Cmd.Flags().DurationVar(&researchTimeout, "research-timeout", 90*time.Second, "Timeout for each background research model call")
+	Cmd.Flags().DurationVar(&summaryTimeout, "summary-timeout", 2*time.Minute, "Timeout for final summary model synthesis")
 	Cmd.Flags().IntVar(&maxTopics, "max-topics", 4, "Maximum background topics per note")
 	Cmd.Flags().IntVar(&maxSnippets, "max-snippets", 18, "Maximum transcript snippets per agent prompt")
 	Cmd.Flags().BoolVar(&evaluate, "evaluate", false, "Run the default interaction evaluation set")
@@ -87,10 +93,9 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg.SummaryModel = summaryModel
 	cfg.MaxResearchTopics = maxTopics
 	cfg.MaxSnippetsPerPrompt = maxSnippets
-	cfg.FastAnswerTimeout = latencyBudget - 2*time.Second
-	if cfg.FastAnswerTimeout <= 0 {
-		cfg.FastAnswerTimeout = latencyBudget
-	}
+	cfg.FastAnswerTimeout = answerTimeout
+	cfg.ResearchTimeout = researchTimeout
+	cfg.SummaryTimeout = summaryTimeout
 	cfg.FastAnswerEffort = agent.EffortLow
 	cfg.ResearchEffort = agent.EffortMedium
 	cfg.SummaryEffort = agent.EffortHigh
@@ -146,9 +151,16 @@ func printEvaluation(result botpkg.FileEvaluation, budget time.Duration) {
 			status = "slow"
 		}
 		fmt.Fprintf(os.Stdout, "\n## Interaction %d [%s first10=%s total=%s]\n", i+1, status, r.Answer.First10WordsLatency.Round(time.Millisecond), r.TotalLatency.Round(time.Millisecond))
+		if r.Answer.Error != "" {
+			fmt.Fprintf(os.Stdout, "model_error: %s\n", r.Answer.Error)
+		}
 		fmt.Fprintf(os.Stdout, "Q: %s\n\n%s\n", r.Answer.Question, r.Answer.Text)
 	}
-	fmt.Fprintf(os.Stdout, "\n## Summary [%s]\n%s\n", result.Summary.Latency.Round(time.Millisecond), result.Summary.Text)
+	fmt.Fprintf(os.Stdout, "\n## Summary [%s]\n", result.Summary.Latency.Round(time.Millisecond))
+	if result.Summary.Error != "" {
+		fmt.Fprintf(os.Stdout, "model_error: %s\n", result.Summary.Error)
+	}
+	fmt.Fprintf(os.Stdout, "%s\n", result.Summary.Text)
 }
 
 func dedupePaths(paths []string) []string {
