@@ -21,7 +21,7 @@ Evaluate the meeting bot against the two required transcript notes under
 | `/home/ubuntu/voice-tui-2026-05-13-elevenlabs-final.txt` | 235 | `sandbox`, `staging`, `tickets`, `agent os` |
 | `/home/ubuntu/voice-tui-2026-05-14-elevenlabs-final.txt` | 196 | `preview`, `workflows`, `workflow`, `deployment` |
 
-## Evaluation Mode
+## Deterministic Evaluation Mode
 
 The recorded evaluation used deterministic local mode:
 
@@ -136,6 +136,17 @@ The May 13 summary included the CA feedback endpoint and staging/prod drift.
 The May 14 summary included deployment/secrets drift, preview investigation,
 Builder Lite smoke/judge work, and customer workflow direction.
 
+## Real-Model Evaluation
+
+A real-model evaluation was later run and recorded in
+`docs/design/meetingbot-real-evaluation-2026-05-16.md`.
+
+That run used `--agent=real` across both required notes, with one research topic
+per note and the default four-question interaction set. It validated the main
+latency goal with real providers: first-10-words latency stayed between 1ms and
+3ms for all eight interactions, while full model answer synthesis took about
+12-19 seconds.
+
 ## Quality Gates
 
 The implementation passed:
@@ -161,8 +172,7 @@ The implementation satisfies the requested evaluation criteria:
 
 Remaining follow-up for production validation:
 
-- Run `--agent=real` with available credentials and network access to measure
-  actual model-backed answer latency and public-web research quality.
-- Capture a real-provider transcript alongside the deterministic local
-  evaluation for comparison.
-
+- Repeat real-provider evaluation periodically because model latency and public
+  internet/tool availability are external variables.
+- Capture a longer live meeting session, not only replayed notes, once the bot
+  is wired into a real-time transcript stream.

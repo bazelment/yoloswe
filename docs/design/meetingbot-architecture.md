@@ -36,6 +36,9 @@ Key CLI knobs:
 | `--web-model` | `gpt-5.3-codex` | Public-web research |
 | `--summary-model` | `gpt-5.5` | Final summary synthesis |
 | `--latency-budget` | `10s` | Target first-10-words latency |
+| `--answer-timeout` | `45s` | Timeout for full fast-answer model synthesis |
+| `--research-timeout` | `90s` | Timeout for each background research model call |
+| `--summary-timeout` | `2m` | Timeout for final summary model synthesis |
 
 ## Data Flow
 
@@ -124,6 +127,12 @@ time for the downstream model to finish. This is the layer that makes the live
 answer path fit a sub-10-second first-response target even when deeper model
 synthesis takes longer.
 
+The latency budget and model completion timeout are separate. The default
+latency budget remains 10 seconds, while `--answer-timeout` gives the real model
+up to 45 seconds to refine the answer. If the model times out, the bot records
+the model error and returns the transcript/evidence-grounded fallback rather
+than aborting the whole evaluation.
+
 ### Summary Path
 
 `SummarizeMeeting` sends representative transcript excerpts plus cached
@@ -157,4 +166,3 @@ Full-repo validation is still via:
 scripts/lint.sh
 bazel test //... --test_timeout=60
 ```
-
