@@ -46,7 +46,14 @@ bazel run //bramble:bramble -- meetingbot \
   --work-dir /home/ubuntu/worktrees/yoloswe/feature/meeting-bot
 ```
 
-Raw terminal capture was written during the run to:
+The full real interaction transcript, including every agent answer and both
+generated summaries, is checked in at:
+
+```text
+docs/design/meetingbot-real-evaluation-full-transcript-2026-05-16.txt
+```
+
+The original terminal capture was also written during the run to:
 
 ```text
 /tmp/meetingbot-real-eval/full-real-2026-05-16.txt
@@ -226,4 +233,3 @@ and ranged from about 12 to 19 seconds. That is acceptable for the stated goal
 because the user sees the first answer sentence immediately, but future UX work
 should stream the refined model answer as it arrives rather than waiting for
 the complete answer object.
-

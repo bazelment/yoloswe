@@ -1,0 +1,289 @@
+INFO: Invocation ID: a1332feb-7144-44f1-9a8e-5e3c662591ef
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //bramble:bramble (0 packages loaded, 0 targets configured)
+Analyzing: target //bramble:bramble (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //bramble:bramble (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+Target //bramble:bramble up-to-date:
+  bazel-bin/bramble/bramble_/bramble
+INFO: Elapsed time: 0.135s, Critical Path: 0.00s
+INFO: 1 process: 1 internal.
+INFO: Build completed successfully, 1 total action
+INFO: Running command line: bazel-bin/bramble/bramble_/bramble <args omitted>
+
+# /home/ubuntu/voice-tui-2026-05-13-elevenlabs-final.txt
+events=235 topics=sandbox(71)
+
+## Interaction 1 [ok first10=1ms total=11.949s]
+Q: What is the most likely root cause pattern behind the sandbox or preview failures?
+
+The preview issue appears split between auth preview and app availability.  
+Most likely, the dominant root-cause pattern is **cross-system state inconsistency** (not one isolated bug): sandbox lifecycle state is being mutated through multiple paths, and `worker` / `sandbox` / `project_session` records drift out of sync, so frontend/API lookup sometimes can’t resolve what to load ([07:55–08:58], [09:04–09:37], [10:47–10:53]).
+
+Secondary contributing pattern is **auth/config scope mismatch during sandbox boot**: 401/403s were tied to GitHub app install scope + secrets rollout timing, then improved after enterprise-level install + secrets propagation ([06:39–08:58]). That aligns with GitHub’s enterprise install model where enterprise install alone doesn’t automatically grant org/repo resource access: https://docs.github.com/en/enterprise-cloud%40latest/apps/using-github-apps/installing-a-github-app-on-your-enterprise
+
+So in priority order:
+1. **Primary:** Data-model / state-machine desync across tables and flows.  
+2. **Secondary:** Auth/install/secrets mis-scoping causing startup failures.  
+3. **Meta-pattern:** Repeated patching on many code paths (“fix coming… another fix”) increasing regression surface instead of reducing lifecycle delta ([02:45–03:17], [04:09–04:24]).
+
+## Interaction 2 [ok first10=1ms total=15.883s]
+Q: What should we tell the team about staging versus production for demos and testing?
+
+Based on the meeting, staging is useful but not the source of truth yet.  
+For now, tell the team:
+
+- **Use production for customer-facing demos and go/no-go confidence.** This was an explicit decision: Sri will demo from prod, and staging apps were considered effectively abandoned/not urgent to fix ([03:17-04:07]).
+- **Use staging as a stabilization lab, not a release signal.** Keep it for reproductions, instrumentation checks, and validating fixes before prod rollout ([02:45-03:17], [04:24-04:47], [07:55-08:58]).
+- **Expect staging-only failures while sandbox hardening continues.** Recurring preview/startup failures and table/session desync were called out as ongoing ([07:55-08:58], cached `internal/sandbox`).
+- **Track auth/install parity carefully across environments.** 401/403 startup issues were tied to GitHub app install scope + secrets movement, now propagated to dev/staging/prod, but still hybrid in places ([06:39-08:58]; [GitHub docs](https://docs.github.com/en/enterprise-cloud%40latest/apps/using-github-apps/installing-a-github-app-on-your-enterprise)).
+- **Policy for this week:** if staging and prod disagree, **trust prod for demos** and file staging gaps as stabilization work, not launch blockers, unless they indicate likely prod risk.
+
+Suggested one-liner to share:  
+“Until sandbox stabilization lands, production is our demo source of truth; staging is for debugging and hardening, not for final readiness decisions.”
+
+## Interaction 3 [ok first10=2ms total=14.054s]
+Q: What changed for customer workflow priorities, and what should we do next?
+
+This note does not clearly establish a workflow priority change.  
+Refined: there *is* a meaningful shift in **customer workflow priority**, but it is narrow and time-bound.
+
+**What changed (priority signal):**
+1. **Move from staging demos to production demos**: staging apps are effectively deprioritized/abandoned for urgency; Sri will demo from production going forward ([03:17–04:07]).
+2. **CA engagement shifts into testing next week**: team is now prioritizing gap-closing work before that starts ([04:57–05:12]).
+3. **Feedback loop + customer-prod readiness became near-term top work**: feedback endpoint this week, plus monitoring/CI-CD setup intended to generalize to all customer-prod apps ([05:13–05:47]).
+4. **Sandbox stabilization remains a blocking reliability track**: repeated auth/startup issues and ongoing fixes indicate stabilization is still operationally critical ([06:39–07:55], cached `internal/sandbox`, `web/sandbox`).
+
+**What to do next (concrete):**
+1. **Re-rank work for the week around CA testing readiness**  
+   - Must-have before next week: SSO path validated, feedback endpoint live, critical extraction issues triaged ([04:57–05:47]).
+2. **Adopt “production-first demo” policy explicitly**  
+   - Stop spending urgent cycles on staging-only quality unless it impacts prod parity ([03:17–04:07]).
+3. **Treat sandbox reliability as a cross-cutting blocker, not ad-hoc bugfixing**  
+   - Run a short stabilization plan focused on auth/install scope + state consistency checks (matches cached sandbox findings and GitHub enterprise install behavior: https://docs.github.com/en/enterprise-cloud%40latest/apps/using-github-apps/installing-a-github-app-on-your-enterprise).
+4. **Define exit criteria for current customer engagement wind-down**  
+   - Customer feedback delivered this week and wind-down signal noted; align on “done” criteria and ownership to avoid open-ended support ([06:05–06:14]).
+
+## Interaction 4 [ok first10=1ms total=19.348s]
+Q: What are the highest priority follow-up actions and risks?
+
+The highest-value follow-ups are deployment confidence, preview fixes, and customer-readiness work.
+
+1. **Staging deployment + verification pass today (highest priority)**
+- Why: team says secrets/install changes are done but staging has **not** been redeployed yet ([11:08–11:16], [06:39–08:58]).
+- Action: deploy current code to staging, run a startup/auth smoke test for sandbox creation and GitHub operations, and confirm no 401/403 regressions.
+- Risk if skipped: false sense of readiness; issues only surface during customer-facing use.
+
+2. **Stabilize sandbox state consistency (root reliability risk)**
+- Why: recurring preview/sandbox failures persisted after prior fixes, with likely drift across `worker`, `sandbox`, and `project_session` state ([07:55–08:58], cached `[internal/sandbox]`).
+- Action: add/finish consistency enforcement on all code paths (especially project entry paths), plus detection/repair tooling for desynced records.
+- Risk if skipped: “fixes” keep regressing because underlying architectural drift remains.
+
+3. **Instrument + validate failure signals on staging**
+- Why: instrumentation was added but not yet checked for triggering ([04:24–04:32]).
+- Action: review telemetry for reproduced sandbox failures, define 2–3 alert conditions (auth failure, missing session mapping, preview load miss), and verify dashboards/alerts.
+- Risk if skipped: repeated incidents without fast diagnosis; longer MTTR.
+
+4. **Customer feedback loop and engagement closeout readiness**
+- Why: customer feedback is expected this week and engagement is winding down ([06:05–06:14]); feedback endpoint is in design and needs coordination ([05:13–05:47]).
+- Action: finalize minimal feedback endpoint + triage owner/SLA before feedback arrives.
+- Risk if skipped: missed defect capture during highest-signal period and weaker handoff.
+
+5. **Prioritize prod demo path, de-prioritize abandoned staging demo apps**
+- Why: decision was to demo from production; old staging demo apps are effectively abandoned/not urgent ([03:17–04:07]).
+- Action: explicitly mark those apps as low priority and avoid consuming stabilization bandwidth there.
+- Risk if not enforced: team distraction and capacity loss on low-value fixes.
+
+**Top risks to track**
+- **Hidden auth scope complexity** in GitHub App model (enterprise install alone may still require org-level access grants) ([web/sandbox], GitHub docs: https://docs.github.com/en/enterprise-cloud%40latest/apps/using-github-apps/installing-a-github-app-on-your-enterprise).
+- **Architectural state-desync debt** causing recurring preview failures despite patch fixes ([07:55–09:37], cached `[internal/sandbox]`).
+- **Unverified “ready” assumptions** until a fresh staging deploy and smoke test are completed ([11:08–11:16]).
+
+## Summary [26.427s]
+**Executive Summary**
+
+The meeting centered on ongoing stabilization work, especially sandbox reliability and staging/demo readiness. The main interpretation shift from the research is that sandbox failures look less like isolated bugs and more like an architectural consistency issue: multiple tables and pathways can drift out of sync across `worker`, `sandbox`, and `project_session` state [internal/sandbox]. GitHub auth issues also appear connected to installation/secrets scope, with enterprise-level GitHub App setup and secret propagation now addressed but still partly hybrid because PAT usage remains for tenant template cloning [web/sandbox].
+
+Customer-facing work continues for CA, including security architecture sharing, feedback endpoint design, monitoring/CI/CD setup, and preparation for customer testing next week. Several agent/eval initiatives are also active: judge infrastructure, Builder Lite smoke tests, pre-PR optimization, Agent OS planning, and UX/spec experimentation.
+
+**Decisions**
+
+- Staging demo apps are considered abandoned for urgent support purposes. Sri will demo from production going forward.
+- The team does not need to urgently react to staging apps being in poor shape, though they may still be fixed later.
+- YB eval labels should not be used to ground or optimize the judge because inter-annotator agreement was close to random.
+- Judge V1 will use the eval work to inform metric design, but not train or optimize directly against those labels.
+- GitHub App installation/secrets were moved toward the enterprise-level model, with secrets now present in dev, staging, and prod.
+- PAT-based cloning is still accepted for tenant template cloning for now.
+
+**Action Items**
+
+- Jian: Continue fixing and wrapping up app upgrade service/ticket flow bugs.
+- Jian: Continue sandbox environment stabilization discussion with Jane.
+- Igor: Continue investigating reproducible Beam app sandbox failure, unless new sandbox work makes the current issue obsolete.
+- Ashudeep: Continue sandbox preview stabilization, especially around `worker`, `sandbox`, and `project_session` state consistency.
+- Ashudeep: Plan medium-term Agent OS / Builder Lite / Tua refactor direction.
+- Pranava: Design feedback endpoint for CA document extraction issues and coordinate requirements with CA.
+- Pranava: Continue monitoring and CI/CD setup for the CA app, then generalize learnings into app templates/deployment.
+- Abhinav: Continue judge optimization and quality analysis.
+- Abhinav: Optimize pre-PR testing behavior to avoid overly conservative reruns.
+- Abhinav: Re-run Builder Lite smoke test before merging.
+- Parth: Continue extracting common components for Evidence/Verify and add more testing.
+- Parth: Continue experimentation around UX mockup versions, annotations, and spec-phase editing.
+
+**Risks/Blockers**
+
+- Sandbox failures remain the largest operational risk. Research suggests this is likely state divergence across services/tables, not a single localized bug [internal/sandbox].
+- Recent sandbox fixes may introduce new bugs; Jian explicitly called out “less delta” as the goal.
+- GitHub auth is improved, but the model remains hybrid because PATs are still needed for tenant template cloning [web/sandbox].
+- Staging apps are unreliable enough that demos are moving to production, which reduces immediate demo risk but leaves staging quality unresolved.
+- Beam app failure is reproducible but not yet understood.
+- CA feedback endpoint depends on customer coordination.
+- Judge evaluation is blocked from using YB labels as ground truth due to low annotator agreement.
+
+**Background/Context**
+
+- The meeting opened informally with setup/camera issues and discussion about agents writing code.
+- Jian framed agent-written code as something the team should treat carefully, with Igor comparing it to assembly.
+- Jian spent time helping Jane understand system behavior and is continuing fixes around app upgrade/tickets.
+- Igor investigated staging/demo app issues and found the staging apps had been moved/improved by Parth but were still not acceptable for Sri’s demos.
+- Ashudeep handled GitHub auth failures caused by pending secrets and GitHub App installation scope, then investigated recurring sandbox preview failures.
+- Pranava is focused on CA readiness: architecture document, feedback loop, monitoring, and deployment process.
+- Abhinav is building judge infrastructure and smoke tests while rethinking use of noisy eval labels.
+- Parth is improving production workspace cloning, experimenting with UX/spec workflows, and working on Evidence/Verify common components.
+
+# /home/ubuntu/voice-tui-2026-05-14-elevenlabs-final.txt
+events=196 topics=preview(101)
+
+## Interaction 1 [ok first10=2ms total=15.247s]
+Q: What is the most likely root cause pattern behind the sandbox or preview failures?
+
+The preview issue appears split between auth preview and app availability.
+
+Most likely root-cause **pattern** is an **environment/config drift after recent service changes**, not a single UI bug.
+
+Evidence points to a repeated chain:
+1. **Staging/preview infra was incomplete or out of sync** for newly introduced services, causing timeouts/blocking and failed dependencies ([01:21–03:00], Ming).
+2. **Secrets/config propagation mismatches** (SQL secret, Helm inconsistency, secrets not reaching env) created environment-specific failures ([01:21–03:00], Ming; [04:10–05:16], Ashudeep).
+3. **Preview UI remained visible while backend preview app registration/discovery failed** in auth-preview/vendor lens (button exists, click does nothing, app card missing despite creation logs) ([09:28–10:10], [12:29–12:53], [13:32–13:47]).
+
+So the dominant pattern is: **control-plane says “created/enabled,” data-plane in preview env is missing/broken due to auth/secret/config drift**, yielding “preview visible but non-functional.”  
+That also explains why the team discussed immediate mitigations like disabling preview auth/fullscreen viewer ([13:32–13:47]).
+
+## Interaction 2 [ok first10=3ms total=15.76s]
+Q: What should we tell the team about staging versus production for demos and testing?
+
+Based on the meeting, staging is useful but not the source of truth yet.  
+For team guidance: use **staging for integration debugging and config validation**, and use **production for demo readiness/sign-off** until staging parity improves.
+
+What to communicate clearly:
+
+1. `Staging = shakeout environment, not demo gate`
+- Multiple failures were staging-specific (timeouts from newly introduced services, missing/incorrect secrets, helm inconsistencies) [01:21–03:00], [04:10–05:16].
+- That means staging is currently good for catching deployment/config drift, but not reliable enough to represent customer experience.
+
+2. `Production = current demo confidence path`
+- Team already validated critical flows in prod (Lite LLM/custom app path fixed and tested end-to-end, prod deployment completed with follow-up testing) [01:21–03:00], [04:10–05:16].
+- Production workspace setup and UI-based workspace creation were working after fixes [05:38–05:59].
+
+3. `Practical policy for next few days of demos`
+- Run feature validation in staging first.
+- If staging-only issues appear, do not block demo prep; verify in prod and use prod for demo.
+- Keep a short “staging parity gap” list (services/secrets/helm) and close those before switching demos back to staging as primary.
+
+4. `Risk callout to mention`
+- Preview visibility/functionality may still be inconsistent in some contexts (button visible but non-functional; app not always available in preview) [cached research: web/preview transcript anchors].  
+So demo plans should include a prod-validated fallback path, not preview-only flows.
+
+## Interaction 3 [ok first10=1ms total=15.089s]
+Q: What changed for customer workflow priorities, and what should we do next?
+
+The customer ask is multi-department approval workflows with human review points.  
+
+What changed in priorities is that this moved from a nice-to-have to a repeated **cross-customer demand signal**:
+- Adam said the same “agentic workflows + human-in-the-loop” gap is showing up across Verizon, Coca-Cola, and Dell, and that we should keep investing there ([08:35-09:28]).
+- Sri and Ashudeep made it concrete as **multi-department approval workflows** and “AI intake” style flows ([10:57-11:16], [11:09-11:10]).
+- Axis Bank is next week, so timeline pressure increased ([10:13-10:17]).
+
+What we should do next:
+1. Define a single reference workflow spec this week: requester, approvers by department, escalation rules, SLA timers, audit trail, and explicit human review checkpoints (derived from [10:57-11:16], [11:11-11:16]).
+2. Ship 1-2 “gold” workflow templates for demos (Sri already started this) and align engineering support with Jiaming post-meeting ([09:36-09:53]).
+3. Stabilize staging reliability as a blocker for credible demos: new services/config, SQL secret hardening, and another end-to-end LiteLLM validation pass ([01:21-03:00]).
+4. Fix preview reliability before customer-facing demos, since preview is visible but sometimes non-functional and env/app availability appears inconsistent (cached `web/preview` and `internal/preview`, plus [10:29-10:31]).
+5. Prepare customer-specific demo narratives (Verizon/Coke/Dell/Axis) mapped to the same approval-workflow core, so GTM + product stay focused ([08:35-09:28], [10:13-10:17]).
+
+## Interaction 4 [ok first10=1ms total=14.963s]
+Q: What are the highest priority follow-up actions and risks?
+
+The highest-value follow-ups are deployment confidence, preview fixes, and customer-readiness work.
+
+1. Lock staging/prod secrets and service config reliability this week.  
+Evidence: repeated staging failures from missing setup for new services, SQL secret issues, helm/secrets drift, and “mostly secrets” summary ([01:21-03:00], [04:10-05:16], [07:00-07:01]).  
+Risk if delayed: recurring blocked deploys, cross-service timeouts, and fragile rollouts.
+
+2. Triage and hotfix the Preview button incident as a P0 user-facing bug.  
+Evidence: users can click Preview but nothing happens, while UI control is still present ([09:28-09:33], [10:07-10:10]); research also indicates visible-but-nonfunctional preview and possible env/app-availability mismatch ([web/preview], [internal/preview]).  
+Risk if delayed: customer trust erosion during demos and perceived product unreliability.
+
+3. Add/finish smoke-test coverage for Builder + Builder Lite in CI path.  
+Evidence: smoke test PR in progress and broader Builder smoke-test work still underway ([07:17-07:34]).  
+Risk if delayed: regressions reaching staging/prod without early detection.
+
+4. Close the partially done SSC/progress-card issues with a concrete owner and deadline.  
+Evidence: “partially done, partially left” on agent progress rendering/cards ([04:10-05:16]).  
+Risk if delayed: operator confusion and poor observability during incidents.
+
+5. Convert customer signal into a scoped near-term deliverable (agentic + human-in-loop).  
+Evidence: strong pull from Coca-Cola/Verizon/Dell around this exact workflow gap ([08:35-09:28]).  
+Risk if delayed: momentum loss in active deals and unclear product narrative.
+
+Highest risks to track explicitly:
+1. Secrets/config drift across environments (staging/prod) causing repeated deployment incidents.  
+2. Visible-but-broken preview UX creating high-severity external perception risk.  
+3. Incomplete automated verification (smoke tests) allowing regressions to escape.
+
+## Summary [25.186s]
+**Executive summary**
+
+The meeting focused on deployment stabilization after a series of staging and production issues. Ming and Ashudeep described fixes for failing staging deployments, missing or inconsistent secrets, LiteLLM setup, Helm drift, and production rollout validation. The highest-priority live issue was the broken in-product Preview flow: the Preview button is visible, but clicking it does not produce the expected app preview. Research clarifies that this is likely not just a UI bug; it appears tied to the app not being available in the auth preview environment/vendor lens, even though chat history shows the app was created.
+
+Customer work also surfaced a product direction signal: Verizon, Coca-Cola, and Dell are converging around agentic workflows with human-in-the-loop approval, especially multi-department approval workflows and AI intake.
+
+**Decisions**
+
+- Disable preview auth immediately as a mitigation for the broken Preview experience.
+- Treat the Preview issue as an auth-preview/app-availability problem, not merely a frontend button issue, based on Ashudeep’s and Anand’s comments plus cached research.
+- Continue validating LiteLLM custom app support in dev and prod after the merged PR.
+- Keep investing in human-in-the-loop agentic workflows as a likely high-value enterprise use case.
+
+**Action items**
+
+- Ming: Do another round of end-to-end testing for LiteLLM/custom app support in dev and prod.
+- Ming: Investigate the SQL secret issue more deeply to prevent recurrence.
+- Ashudeep: Continue fixing staging/prod deployment bugs, especially secret and Helm inconsistencies.
+- Ashudeep / Igor / Anand / Parth: Resolve the Preview/auth incident, starting with disabling preview auth.
+- Ashudeep: Continue SSC-related fixes for how builder/agent progress cards are shown.
+- CJ/Jian: Continue microVM architecture experiment and prepare a demo in the next few days.
+- Abhinav: Continue pre-PR testing and Builder Lite smoke test work.
+- Abhinav: Build the Builder Lite judge, likely with more dedicated focus next week.
+- Sri: Work on gold apps for workflows and follow up with Jiaming for help.
+- Adam: Continue customer follow-ups and finalize commercial documents/forms.
+
+**Risks/blockers**
+
+- Staging deployments were blocked by newly introduced services lacking proper staging configuration.
+- Secret propagation or SQL secret handling remains a recurrence risk until root cause is understood.
+- Preview is visibly exposed to users but non-functional, creating product confusion. Cached research strengthens this: the issue appears to involve missing app availability in the auth preview/vendor lens path, not simply the Preview button handler.
+- Production deployment happened recently and still needs additional validation.
+- Builder/Builder Lite validation is still incomplete: smoke tests and judge work are in progress.
+- Some workflow-related merges may be blocked by an unspecified issue Sri mentioned.
+
+**Background/context**
+
+The team had a deployment-heavy previous day. Ming fixed staging configuration problems for new services, disabled some Spike Lite staging deployment behavior after confirming with Anant, investigated SQL secret issues, and merged a PR fixing LiteLLM setup in production. Ashudeep also debugged staging deployment issues, fixed secret and Helm inconsistencies, and supported a production deployment with Jian.
+
+The Preview discussion was the clearest incident thread. Transcript evidence says the Preview button is visible but does nothing; research adds that the Preview feature is an in-product app preview surface next to sandbox, and that the missing app card in the auth preview/vendor lens environment likely explains the failure. This changes the interpretation from “button broken” to “preview environment/app availability/auth path broken.”
+
+On the customer side, Adam reported productive conversations with Coca-Cola and Verizon. The recurring customer need is agentic workflows combined with human review and approval, especially across multiple departments.
