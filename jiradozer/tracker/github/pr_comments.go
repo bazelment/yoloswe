@@ -77,43 +77,75 @@ func parsePRNumber(prRef string) (int, error) {
 }
 
 func fetchPRLineComments(ctx context.Context, gh wt.GHRunner, dir string, number int) ([]ReviewComment, error) {
+	repo, err := fetchCurrentRepo(ctx, gh, dir)
+	if err != nil {
+		return nil, err
+	}
+
 	result, err := gh.Run(ctx, []string{
-		"api",
-		fmt.Sprintf("repos/{owner}/{repo}/pulls/%d/comments", number),
+		"api", "graphql",
+		"-f", "query=" + prReviewThreadsQuery,
+		"-F", "owner=" + repo.Owner.Login,
+		"-F", "name=" + repo.Name,
+		"-F", "number=" + strconv.Itoa(number),
 	}, dir)
 	if err != nil {
-		return nil, fmt.Errorf("fetch PR review comments: %w", err)
+		return nil, fmt.Errorf("fetch PR review threads: %w", err)
 	}
 
-	var raw []ghPRReviewComment
+	var raw ghPRReviewThreadsResponse
 	if err := json.Unmarshal([]byte(result.Stdout), &raw); err != nil {
-		return nil, fmt.Errorf("parse PR review comments: %w", err)
+		return nil, fmt.Errorf("parse PR review threads: %w", err)
 	}
-	return normalizePRReviewComments(raw)
+	return normalizePRReviewThreads(raw.Data.Repository.PullRequest.ReviewThreads.Nodes)
 }
 
-func normalizePRReviewComments(raw []ghPRReviewComment) ([]ReviewComment, error) {
+func fetchCurrentRepo(ctx context.Context, gh wt.GHRunner, dir string) (*ghRepoView, error) {
+	result, err := gh.Run(ctx, []string{"repo", "view", "--json", "owner,name"}, dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve current GitHub repository: %w", err)
+	}
+	var repo ghRepoView
+	if err := json.Unmarshal([]byte(result.Stdout), &repo); err != nil {
+		return nil, fmt.Errorf("parse current GitHub repository: %w", err)
+	}
+	if repo.Owner.Login == "" || repo.Name == "" {
+		return nil, fmt.Errorf("current GitHub repository is missing owner or name")
+	}
+	return &repo, nil
+}
+
+func normalizePRReviewThreads(raw []ghPRReviewThread) ([]ReviewComment, error) {
 	var out []ReviewComment
-	for _, c := range raw {
-		if skipGitHubAuthor(c.User) || strings.TrimSpace(c.Body) == "" || c.Resolved || c.IsResolved {
+	for _, thread := range raw {
+		if thread.IsResolved {
 			continue
 		}
-		createdAt, err := parseGitHubTime(c.CreatedAt)
-		if err != nil {
-			return nil, err
+		for i := range thread.Comments.Nodes {
+			c := &thread.Comments.Nodes[i]
+			if skipGitHubAuthor(c.Author) || strings.TrimSpace(c.Body) == "" {
+				continue
+			}
+			createdAt, err := parseGitHubTime(c.CreatedAt)
+			if err != nil {
+				return nil, err
+			}
+			line := 0
+			if c.Line != nil {
+				line = *c.Line
+			}
+			if line == 0 && c.OriginalLine != nil {
+				line = *c.OriginalLine
+			}
+			out = append(out, ReviewComment{
+				Path:      c.Path,
+				Line:      line,
+				Body:      strings.TrimSpace(c.Body),
+				Author:    c.Author.Login,
+				URL:       c.URL,
+				CreatedAt: createdAt,
+			})
 		}
-		line := c.Line
-		if line == 0 {
-			line = c.OriginalLine
-		}
-		out = append(out, ReviewComment{
-			Path:      c.Path,
-			Line:      line,
-			Body:      strings.TrimSpace(c.Body),
-			Author:    c.User.Login,
-			URL:       c.HTMLURL,
-			CreatedAt: createdAt,
-		})
 	}
 	return out, nil
 }
@@ -181,7 +213,7 @@ func FormatPRReviewFeedback(comments []ReviewComment) string {
 
 func skipGitHubAuthor(user ghReviewUser) bool {
 	login := strings.ToLower(user.Login)
-	return user.Type == "Bot" || strings.HasSuffix(login, "[bot]") || strings.Contains(login, "jiradozer")
+	return user.Type == "Bot" || user.Typename == "Bot" || strings.HasSuffix(login, "[bot]") || strings.Contains(login, "jiradozer")
 }
 
 func parseGitHubTime(value string) (time.Time, error) {
@@ -195,18 +227,6 @@ func parseGitHubTime(value string) (time.Time, error) {
 	return t, nil
 }
 
-type ghPRReviewComment struct {
-	User         ghReviewUser `json:"user"`
-	Body         string       `json:"body"`
-	Path         string       `json:"path"`
-	HTMLURL      string       `json:"html_url"`
-	CreatedAt    string       `json:"created_at"`
-	Line         int          `json:"line"`
-	OriginalLine int          `json:"original_line"`
-	Resolved     bool         `json:"resolved"`
-	IsResolved   bool         `json:"is_resolved"`
-}
-
 type ghPRReview struct {
 	User        ghReviewUser `json:"user"`
 	Body        string       `json:"body"`
@@ -216,6 +236,68 @@ type ghPRReview struct {
 }
 
 type ghReviewUser struct {
-	Login string `json:"login"`
-	Type  string `json:"type"`
+	Login    string `json:"login"`
+	Type     string `json:"type"`
+	Typename string `json:"__typename"`
 }
+
+type ghRepoView struct {
+	Owner ghReviewUser `json:"owner"`
+	Name  string       `json:"name"`
+}
+
+type ghPRReviewThreadsResponse struct {
+	Data struct {
+		Repository struct {
+			PullRequest struct {
+				ReviewThreads struct {
+					Nodes []ghPRReviewThread `json:"nodes"`
+				} `json:"reviewThreads"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
+type ghPRReviewThread struct {
+	Comments struct {
+		Nodes []ghPRThreadComment `json:"nodes"`
+	} `json:"comments"`
+	IsResolved bool `json:"isResolved"`
+}
+
+//nolint:govet // fieldalignment: mirrors the GitHub GraphQL response shape.
+type ghPRThreadComment struct {
+	Author       ghReviewUser `json:"author"`
+	Body         string       `json:"body"`
+	Path         string       `json:"path"`
+	URL          string       `json:"url"`
+	CreatedAt    string       `json:"createdAt"`
+	Line         *int         `json:"line"`
+	OriginalLine *int         `json:"originalLine"`
+}
+
+const prReviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 100) {
+            nodes {
+              body
+              path
+              line
+              originalLine
+              url
+              createdAt
+              author {
+                login
+                __typename
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`

@@ -89,10 +89,9 @@ func refine(ctx context.Context, app *cliapp.App, args refineArgs) error {
 		if !ok {
 			return fmt.Errorf("--description-file requires local tracker (got %T)", issueTracker)
 		}
-		title := jiradozer.GenerateTitle(args.description)
-		issue, err = lt.CreateIssue(title, args.description)
+		issue, err = findExistingLocalIssueByDescription(ctx, lt, args.description)
 		if err != nil {
-			return fmt.Errorf("create local issue: %w", err)
+			return err
 		}
 	} else {
 		app.Logger.Info("fetching issue", "identifier", args.issueID)
@@ -125,4 +124,21 @@ func refine(ctx context.Context, app *cliapp.App, args refineArgs) error {
 		NoPoll:   args.noPoll,
 	}
 	return jiradozer.RunRefine(ctx, wfOpts)
+}
+
+func findExistingLocalIssueByDescription(ctx context.Context, lt *local.Tracker, description string) (*tracker.Issue, error) {
+	issues, err := lt.ListIssues(ctx, tracker.IssueFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("list local issues: %w", err)
+	}
+	description = strings.TrimSpace(description)
+	for _, issue := range issues {
+		if issue.Description == nil {
+			continue
+		}
+		if strings.TrimSpace(*issue.Description) == description {
+			return issue, nil
+		}
+	}
+	return nil, fmt.Errorf("no existing local issue found for --description-file; run jiradozer run --description-file first or use --issue LOCAL-N")
 }

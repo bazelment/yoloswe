@@ -19,6 +19,7 @@ import (
 	"github.com/bazelment/yoloswe/cliapp"
 	"github.com/bazelment/yoloswe/jiradozer"
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/jiradozer/tracker/local"
 )
 
 func testMainLogger(_ testing.TB) *slog.Logger {
@@ -175,6 +176,26 @@ func TestResolveRepoName(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestFindExistingLocalIssueByDescription(t *testing.T) {
+	lt, err := local.NewTracker(t.TempDir())
+	require.NoError(t, err)
+	created, err := lt.CreateIssue("local task", "make timeout configurable\n")
+	require.NoError(t, err)
+
+	got, err := findExistingLocalIssueByDescription(context.Background(), lt, "make timeout configurable")
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, got.ID)
+	assert.Equal(t, created.Identifier, got.Identifier)
+}
+
+func TestFindExistingLocalIssueByDescriptionMissing(t *testing.T) {
+	lt, err := local.NewTracker(t.TempDir())
+	require.NoError(t, err)
+
+	_, err = findExistingLocalIssueByDescription(context.Background(), lt, "missing")
+	require.ErrorContains(t, err, "no existing local issue found")
 }
 
 func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {

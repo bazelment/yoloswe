@@ -7,33 +7,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNormalizePRReviewCommentsFiltersBotsAndResolved(t *testing.T) {
-	raw := []ghPRReviewComment{
+func TestNormalizePRReviewThreadsFiltersBotsAndResolved(t *testing.T) {
+	line42 := 42
+	line1 := 1
+	line3 := 3
+	raw := []ghPRReviewThread{
 		{
-			User:      ghReviewUser{Login: "alice", Type: "User"},
-			Body:      "fix the nil case",
-			Path:      "foo.go",
-			Line:      42,
-			CreatedAt: "2026-05-05T12:00:00Z",
+			Comments: struct {
+				Nodes []ghPRThreadComment `json:"nodes"`
+			}{Nodes: []ghPRThreadComment{{
+				Author:    ghReviewUser{Login: "alice", Typename: "User"},
+				Body:      "fix the nil case",
+				Path:      "foo.go",
+				Line:      &line42,
+				CreatedAt: "2026-05-05T12:00:00Z",
+			}}},
 		},
 		{
-			User:      ghReviewUser{Login: "dependabot[bot]", Type: "Bot"},
-			Body:      "bot noise",
-			Path:      "go.mod",
-			Line:      1,
-			CreatedAt: "2026-05-05T12:01:00Z",
+			Comments: struct {
+				Nodes []ghPRThreadComment `json:"nodes"`
+			}{Nodes: []ghPRThreadComment{{
+				Author:    ghReviewUser{Login: "dependabot[bot]", Typename: "Bot"},
+				Body:      "bot noise",
+				Path:      "go.mod",
+				Line:      &line1,
+				CreatedAt: "2026-05-05T12:01:00Z",
+			}}},
 		},
 		{
-			User:       ghReviewUser{Login: "bob", Type: "User"},
-			Body:       "already resolved",
-			Path:       "bar.go",
-			Line:       3,
-			CreatedAt:  "2026-05-05T12:02:00Z",
 			IsResolved: true,
+			Comments: struct {
+				Nodes []ghPRThreadComment `json:"nodes"`
+			}{Nodes: []ghPRThreadComment{{
+				Author:    ghReviewUser{Login: "bob", Typename: "User"},
+				Body:      "already resolved",
+				Path:      "bar.go",
+				Line:      &line3,
+				CreatedAt: "2026-05-05T12:02:00Z",
+			}}},
 		},
 	}
 
-	got, err := normalizePRReviewComments(raw)
+	got, err := normalizePRReviewThreads(raw)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "foo.go", got[0].Path)
