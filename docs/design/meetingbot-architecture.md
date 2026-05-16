@@ -44,6 +44,19 @@ If those boundaries start failing in review, the next step is to split provider
 adaptation and transcript ingestion into subpackages behind the same exported
 facades.
 
+Subpackage split trigger:
+
+- split `transcript` when parsing needs live transport state, external
+  dependencies, or anything beyond `MeetingEvent` normalization
+- split `provider` when more than one adapter exists, when provider capability
+  validation grows beyond `AgentRequest`, or when provider code needs tests that
+  should not import bot orchestration
+- split `runtime`/`bot` when answer, summary, and research orchestration need
+  independent build targets or import-cycle pressure appears
+
+Until then, durability is enforced by code review, package-level tests, and the
+invariant list above, not by the Go compiler.
+
 Internal ownership inside `bramble/meetingbot/` is deliberately narrower than
 the package boundary:
 
@@ -150,8 +163,21 @@ for deterministic CLI replay, but a true live transport has to treat it as
 backpressure. If provider latency cannot block transcript intake, the caller
 should disable `AutoResearch` and run background research from an external queue
 or worker. Cancellation is inherited from the `Observe` context; if research is
-cancelled or fails, the event remains observed and the caller receives the
-research error.
+cancelled or fails, the event remains observed. Provider failures become miss
+evidence and do not escape as ingestion errors; only caller cancellation or local
+orchestration errors should cause `Observe` to return an error.
+
+Default profiles:
+
+| Profile | Intended use | `AutoResearch` | Scopes |
+|---------|--------------|----------------|--------|
+| replay/evaluation | deterministic CLI playback and fixture generation | enabled or explicit batch `BuildBackground` | configured test scopes |
+| live-safe | microphone, websocket, or note-tailer transport | disabled; queue research externally | `internal`, `codebase` by default |
+| live-web | production web research after admission checks | disabled; queue research externally | explicit opt-in `web` |
+
+Synchronous `AutoResearch` is an opt-in replay convenience, not the safe live
+transport default. A live transport that declares low-latency intake should
+refuse to run with synchronous `AutoResearch` enabled.
 
 ### Background Understanding
 
@@ -182,6 +208,12 @@ outcome:
 Partial success is acceptable. One unavailable scope must not erase other
 scopes for the same topic, and summaries must be able to distinguish "not
 searched", "searched and empty", and "searched but failed".
+
+Repeated topics should refresh only when new transcript evidence changes the
+topic's transcript index range. A final summary path should either run a final
+bounded `BuildBackground` pass or explicitly mark the summary as based on the
+last published evidence snapshot. Long meetings should track skipped refreshes
+and stale evidence so the evaluator can tell whether a summary is current.
 
 ### Provider Architecture
 
@@ -251,6 +283,16 @@ Production admission is fail-closed:
 
 Until provider capability metadata exists in `multiagent/agent`, real-mode web
 research remains experimental and should be disabled in production configs.
+`DefaultConfig` is the development/evaluation baseline; production construction
+must choose a named profile and should not inherit web scope by accident.
+
+Web capability checks run at startup and before each web request until provider
+metadata is stable. A startup failure rejects the real-mode run or removes
+`ScopeWeb`, depending on the selected profile. A per-request drift failure
+caches miss evidence with a tool-permission reason and disables further web
+requests for that bot instance. Evidence should record whether a scope was
+blocked by admission, disabled by drift, or failed after a permitted read-only
+tool call.
 
 `ProviderAgentClient` is stateless and creates one provider instance per
 request. Concurrent bot calls therefore do not share a provider object. The
@@ -313,12 +355,21 @@ latency or transcript lag is unacceptable for a transport, that transport must
 disable synchronous `AutoResearch` and run research from a queue.
 
 `First10WordsLatency` remains the internal opening-readiness measurement in the
-current API. An interactive transport must additionally measure
-`FirstVisibleTextLatency` at the write boundary. For transcript lag, the clock
-basis is receiver monotonic time: each source event is stamped when received,
-and lag is the worst outstanding receive-to-observe delay. Static replay files
-and batch-delivered events report lag as not applicable; non-monotonic speaker
-timestamps do not affect this metric.
+current API, but the doc treats it as a deprecated name for
+`OpeningReadinessLatency`. An interactive transport must additionally measure
+`FirstVisibleTextLatency` at the write boundary. The reference recipe is:
+receive question, build `Answer.Opening`, write opening bytes to the transport,
+then start or await refinement. Serialization, batching, terminal rendering, and
+network flush time count toward `FirstVisibleTextLatency`; model refinement does
+not. For transcript lag, the clock basis is receiver monotonic time: each source
+event is stamped when received, and lag is the worst outstanding
+receive-to-observe delay. Static replay files and batch-delivered events report
+lag as not applicable; non-monotonic speaker timestamps do not affect this
+metric.
+
+The transport contract is that only `Answer.Opening` may be emitted before the
+refined answer is ready. Refined content is buffered until validation passes or
+the fallback/degraded path is selected.
 
 ### Summary Path
 
@@ -393,14 +444,34 @@ exists, real-mode output is evaluation-only. Once the structured validator
 exists, both provider output and fallback output use the same promotion path:
 validate, try at most one regeneration within the original timeout budget, then
 return an explicit degraded result rather than uncited normal prose.
+Validation and regeneration share the same parent deadline as the original
+answer or summary call. `TotalLatency` includes opening construction, provider
+generation, validation, any single retry, and fallback/degraded result
+construction.
 
 A material claim is any sentence or bullet that states a decision, action item,
 owner, deadline, risk, blocker, status, root cause, external fact, or
-recommendation. V1 claim extraction can be sentence/bullet based with deterministic
-matchers for those classes; production enforcement needs a golden transcript set
-with human-labeled material claims and citations. Promotion requires no known
-high-risk uncited claims in the golden set and reviewer sign-off on false
-positive/false negative behavior before the gate is enabled by default.
+recommendation. V1 claim extraction can be sentence/bullet based with
+deterministic matchers for those classes; production enforcement needs a golden
+transcript set with human-labeled material claims and citations.
+
+Claim-to-evidence acceptance means the cited transcript turn, file path, URL, or
+internal evidence text semantically supports the claim, not merely that the text
+contains a citation-shaped label. Calibration should include at least 100
+labeled material claims across internal-only, codebase, web, contradiction, and
+missing-evidence examples. Promotion requires zero accepted high-risk unsupported
+claims in the fixed suite, reviewer sign-off on borderline cases, and a recurring
+regression run when prompts or validator rules change. If the gate cannot meet
+that bar, production scopes stay disabled rather than shipping under a waiver.
+
+Streaming policy:
+
+- only the local `Answer.Opening` may be streamed before validation
+- provider refinement is buffered as complete text, then validated
+- partial refinement tokens, speculative bullets, and mid-stream corrections are
+  not user-visible in v1
+- if validation fails after the retry budget is exhausted, the UI receives an
+  explicit degraded result with the validation reason and grounded fallback text
 
 ## Error Handling
 
@@ -449,6 +520,12 @@ ready:
   matrix when credentials are present
 - long-meeting tests for noisy topic growth, repeated failures for the same
   topic, and memory retention across a worst-case transcript
+- finalization tests that run a final research drain or explicitly verify a
+  stale-evidence summary marker
+- prompt-injection and tool-abuse tests at the transcript-to-research boundary,
+  including attempts to override system prompts, exfiltrate repo context, force
+  writes, or poison topic selection; expected behavior is fail-closed evidence
+  with the blocked reason recorded
 
 Deterministic streaming harness:
 
@@ -490,6 +567,9 @@ Operational limits for v1:
   `MaxResearchTopics`, `MaxSnippetsPerPrompt`, and `ResearchScopes` explicitly
 - repeated failures for the same `scope/topic` should produce one explicit miss,
   not unbounded duplicate evidence
+- sensitive meetings may use only local replay, internal research, or codebase
+  research until web admission, citation validation, retention, and deletion
+  policies are defined
 
 Full-repo validation is still via:
 
@@ -529,6 +609,10 @@ Capability rollout ladder:
 | web research | add `web` only after admission checks | read-only provider capability and citation validation | disable `ScopeWeb` on any admission or citation failure |
 | live transport | queued research unless backpressure is acceptable | `FirstVisibleTextLatency`, `ObserveLatency`, and `TranscriptLag` targets hold | disable `AutoResearch` or fall back to queued research |
 
+Web remains default-off for production profiles until its phase is explicitly
+enabled. A global kill switch should remove `ScopeWeb` from every bot instance
+without changing transcript ingestion, answer fallback, or summary generation.
+
 Extension points:
 
 - New ingestion sources convert external events into `MeetingEvent` and call
@@ -551,3 +635,14 @@ Evidence evolution:
 The staged path is single-process memory cache first. Persisted evidence and
 multi-session reuse are deferred until citation schema and invalidation semantics
 are stable.
+
+Deferred non-goals:
+
+- cross-meeting evidence reuse
+- multi-tenant retention policy
+- long-term storage or deletion workflows for sensitive transcript-derived
+  evidence
+- persisted evidence TTLs or migrations
+
+Those require a separate design before any rollout phase handles sensitive
+meetings with persisted or cross-session evidence.
