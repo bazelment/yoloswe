@@ -31,10 +31,18 @@ importing command code or reaching into `Bot` internals.
 The single `bramble/meetingbot` package is intentional for v1. The supported
 cross-package API is limited to the exported contract types above plus `New`,
 `LoadTranscriptFile`, `ParseTranscript`, `EvaluateFile`, and `DefaultConfig`.
-The file-group ownership below is a maintainability rule, not a compile-time
-sub-package split. If those boundaries start failing in review, the next step is
-to split provider adaptation and transcript ingestion into subpackages behind
-the same exported facades.
+The file-group ownership below is convention-based until a subpackage split; it
+is not enforced by the Go import graph. Reviewers should block changes that
+violate these invariants:
+
+- transcript parsing must not call providers or inspect `Config`
+- provider adaptation must not mutate `Bot` state or parse transcript files
+- CLI code may configure the bot, but core bot policy must not import command
+  packages or cobra types
+
+If those boundaries start failing in review, the next step is to split provider
+adaptation and transcript ingestion into subpackages behind the same exported
+facades.
 
 Internal ownership inside `bramble/meetingbot/` is deliberately narrower than
 the package boundary:
@@ -232,6 +240,18 @@ web behavior is documented as read-only search/browsing. Providers that cannot
 make that guarantee are rejected for `RoleWebResearch` or run with `ScopeWeb`
 disabled.
 
+Production admission is fail-closed:
+
+| Check | Enforcement point | Failure behavior |
+|-------|-------------------|------------------|
+| role/model family is allowed | config validation before first request | reject real-mode run |
+| role permission mode is supported | `ProviderAgentClient` request validation | return role-specific error/fallback |
+| web provider is read-only search/browse | provider capability metadata or startup probe | remove `ScopeWeb` or reject real-mode run |
+| web output has source names or URLs | provenance validator | cache explicit miss evidence |
+
+Until provider capability metadata exists in `multiagent/agent`, real-mode web
+research remains experimental and should be disabled in production configs.
+
 `ProviderAgentClient` is stateless and creates one provider instance per
 request. Concurrent bot calls therefore do not share a provider object. The
 underlying `multiagent/agent` provider must support independent instances; if a
@@ -283,13 +303,22 @@ Live transports must also track observe-path health:
 
 | Metric | Meaning | Interpretation |
 |--------|---------|----------------|
-| `ObserveLatency` | wall-clock time for one `Observe` call | includes synchronous `AutoResearch` backpressure |
+| `ObserveLatency` | wall-clock time for one `Observe` call | initial live target p95 <= 1s when `AutoResearch` is disabled |
 | `AutoResearchLatency` | time spent in a triggered `BuildBackground` call | provider slowness on the ingestion path |
-| `TranscriptLag` | age of the newest observed event relative to transcript source time | freshness of the meeting context |
+| `TranscriptLag` | receiver wall-clock age of the newest unobserved source event | initial live target p95 <= 5s |
+| `FirstVisibleTextLatency` | time from question receipt to first bytes written to the UI/transport | user-visible live answer SLO, target <= `--latency-budget` |
 
 A healthy answer path does not imply a healthy live system. If observe-path
 latency or transcript lag is unacceptable for a transport, that transport must
 disable synchronous `AutoResearch` and run research from a queue.
+
+`First10WordsLatency` remains the internal opening-readiness measurement in the
+current API. An interactive transport must additionally measure
+`FirstVisibleTextLatency` at the write boundary. For transcript lag, the clock
+basis is receiver monotonic time: each source event is stamped when received,
+and lag is the worst outstanding receive-to-observe delay. Static replay files
+and batch-delivered events report lag as not applicable; non-monotonic speaker
+timestamps do not affect this metric.
 
 ### Summary Path
 
@@ -298,6 +327,12 @@ research to the summary agent. The system prompt requires decisions, action
 items, risks/blockers, and background/context. If the agent fails or returns an
 empty response, a deterministic fallback summary is generated from transcript
 signals and cached evidence.
+
+Summary generation has the same two-phase shape as live answers, without the
+streaming SLO. Core bot policy selects and budgets representative events plus
+evidence; provider execution only synthesizes from that bounded prompt. The
+fallback path uses the same selected inputs, so summary policy remains testable
+without a provider call.
 
 ## Evidence and Provenance
 
@@ -353,10 +388,19 @@ MVP enforcement profile:
 
 Fallback answers and summaries are not exempt from validation. In v1, local
 fallbacks are allowed because they are generated only from selected snippets and
-cached evidence. Once the structured validator exists, both provider output and
-fallback output use the same promotion path: validate, try at most one
-regeneration for provider output, then return an explicit degraded result rather
-than uncited normal prose.
+cached evidence. Real-mode production promotion requires the validator; until it
+exists, real-mode output is evaluation-only. Once the structured validator
+exists, both provider output and fallback output use the same promotion path:
+validate, try at most one regeneration within the original timeout budget, then
+return an explicit degraded result rather than uncited normal prose.
+
+A material claim is any sentence or bullet that states a decision, action item,
+owner, deadline, risk, blocker, status, root cause, external fact, or
+recommendation. V1 claim extraction can be sentence/bullet based with deterministic
+matchers for those classes; production enforcement needs a golden transcript set
+with human-labeled material claims and citations. Promotion requires no known
+high-risk uncited claims in the golden set and reviewer sign-off on false
+positive/false negative behavior before the gate is enabled by default.
 
 ## Error Handling
 
@@ -399,6 +443,12 @@ ready:
 - a manual, credential-gated real-provider smoke test that verifies model
   routing, permission modes, max-turn limits, timeout behavior, and citation
   validation
+- an integration target such as
+  `//bramble/meetingbot/integration:meetingbot_real_provider_test`, tagged
+  `manual`/`local` with `gotags = ["integration"]`, for the real role/provider
+  matrix when credentials are present
+- long-meeting tests for noisy topic growth, repeated failures for the same
+  topic, and memory retention across a worst-case transcript
 
 Deterministic streaming harness:
 
@@ -421,6 +471,8 @@ Monorepo integration checklist:
   meetingbot replay contract
 - Bazel targets and Gazelle output keep the command and library targets visible
   to `bazel test //...`
+- the release checklist includes the role/provider matrix, web admission status,
+  and validator calibration status even when real-provider tests are skipped
 
 CI posture:
 
@@ -429,6 +481,15 @@ CI posture:
   when credentials are absent
 - long-running live-mode soak tests are not part of default CI until their
   provider dependencies are stable enough to avoid flakes
+
+Operational limits for v1:
+
+- evidence is unbounded within one bot session except for deduplication by
+  `scope/topic`
+- production use should cap one bot to one meeting transcript and set
+  `MaxResearchTopics`, `MaxSnippetsPerPrompt`, and `ResearchScopes` explicitly
+- repeated failures for the same `scope/topic` should produce one explicit miss,
+  not unbounded duplicate evidence
 
 Full-repo validation is still via:
 
@@ -457,6 +518,16 @@ Rollout boundaries:
   failure-injection coverage are in place.
 - The first interactive UI must stream `Answer.Opening` before refinement if it
   reports live latency.
+
+Capability rollout ladder:
+
+| Phase | Enabled scopes | Exit criteria | Rollback trigger |
+|-------|----------------|---------------|------------------|
+| local replay | local agent only | deterministic tests pass | any parsing or fallback regression |
+| internal research | `internal` | provenance checks pass on transcripts | uncited material claims |
+| codebase research | `internal`, `codebase` | permission/timeout matrix passes | provider errors or stale context above threshold |
+| web research | add `web` only after admission checks | read-only provider capability and citation validation | disable `ScopeWeb` on any admission or citation failure |
+| live transport | queued research unless backpressure is acceptable | `FirstVisibleTextLatency`, `ObserveLatency`, and `TranscriptLag` targets hold | disable `AutoResearch` or fall back to queued research |
 
 Extension points:
 
