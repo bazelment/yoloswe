@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "meetingbot",
+    srcs = ["meetingbot.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/cmd/meetingbot",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bramble/meetingbot",
+        "//multiagent/agent",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

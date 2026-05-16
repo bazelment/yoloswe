@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "meetingbot",
+    srcs = [
+        "agent_client.go",
+        "bot.go",
+        "eval.go",
+        "fallback.go",
+        "local_client.go",
+        "transcript.go",
+        "types.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/meetingbot",
+    visibility = ["//visibility:public"],
+    deps = ["//multiagent/agent"],
+)
+
+go_test(
+    name = "meetingbot_test",
+    srcs = ["meetingbot_test.go"],
+    embed = [":meetingbot"],
+    deps = [
+        "//multiagent/agent",
+        "@com_github_stretchr_testify//require",
+    ],
+)
