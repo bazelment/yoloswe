@@ -28,6 +28,21 @@ The stable package contract is `MeetingEvent`, `Evidence`, `Answer`,
 scopes, and provider families should extend those contracts instead of
 importing command code or reaching into `Bot` internals.
 
+Internal ownership inside `bramble/meetingbot/` is deliberately narrower than
+the package boundary:
+
+| File group | Owns | Crosses boundary through |
+|------------|------|--------------------------|
+| `transcript.go` | parsing and formatting transcript turns | `MeetingEvent` |
+| `bot.go` | bot state, topic selection, research, answer, summary orchestration | `Bot`, `Config`, `Evidence`, `Answer`, `Summary` |
+| `agent_client.go` | provider-neutral request execution | `AgentClient`, `AgentRequest`, `AgentResponse` |
+| `fallback.go` | deterministic local answer and summary fallbacks | `MeetingEvent`, `Evidence` |
+| `eval.go` | replay evaluation and metrics aggregation | `InteractionResult`, `FileEvaluation` |
+
+Opening construction is core bot policy; refinement scheduling is the provider
+adapter boundary. Metrics may attach to `Answer` and `InteractionResult`, but
+CLI printing and UI streaming policy must stay outside `bramble/meetingbot`.
+
 ## Command
 
 ```bash
@@ -100,6 +115,15 @@ normalize input into `MeetingEvent` values and call `Bot.Observe`; it should not
 duplicate topic selection, evidence caching, or answer policy. This keeps live
 transport failures isolated from the research and synthesis layers.
 
+V1 `AutoResearch` is synchronous: the triggering `Observe` call appends the
+event, then runs `BuildBackground` before returning. This behavior is acceptable
+for deterministic CLI replay, but a true live transport has to treat it as
+backpressure. If provider latency cannot block transcript intake, the caller
+should disable `AutoResearch` and run background research from an external queue
+or worker. Cancellation is inherited from the `Observe` context; if research is
+cancelled or fails, the event remains observed and the caller receives the
+research error.
+
 ### Background Understanding
 
 `BuildBackground` extracts candidate topics from the observed meeting and runs
@@ -164,6 +188,25 @@ partial text in `AgentResponse.Text` and return the error separately, so callers
 can decide whether partial content is usable or should be replaced by a local
 fallback.
 
+Role-specific partial-output policy:
+
+| Role | Error or timeout policy | Partial text policy |
+|------|-------------------------|---------------------|
+| Fast answer | return fallback answer and set `Answer.Error` | discard in v1; future acceptance requires the local opening and provenance checks |
+| Summary | return fallback summary and set `Summary.Error` | discard in v1; future acceptance requires section and provenance checks |
+| Research | cache explicit miss evidence for the scope/topic | do not promote partial text in v1; keep adapter behavior available for future evaluators |
+
+The parent context and the per-request timeout are composed so whichever cancels
+first stops the provider request. `ProviderAgentClient` closes the provider after
+execution; any in-flight provider or tool work after cancellation is treated as a
+provider error and routed through the role policy above.
+
+Web research uses provider-default permissions because public-web tools vary by
+backend and may require capabilities that do not map cleanly to `plan`. The
+compensating control is that web findings must cite durable source names or URLs;
+uncited web output is treated as unusable evidence. If a web-capable provider
+supports a read-only or plan permission mode, that should replace the default.
+
 ### Live Answer Path
 
 `AnswerQuestion` is intentionally split into two phases:
@@ -198,6 +241,13 @@ Evaluation reports two SLOs:
 refinement is reported as high `TotalLatency`; timeout or provider failure is
 reported through `Answer.Error` and the fallback text.
 
+The opening must be useful enough to stream: it should include either a
+timestamped transcript anchor, a cached evidence reference, or an explicit
+statement that no supporting evidence is available yet. Background research and
+summary generation are bounded by `--research-timeout` and `--summary-timeout`,
+but they are not live-response SLOs in v1. Evaluation reports their wall-clock
+latency and failure rate separately from answer latency.
+
 ### Summary Path
 
 `SummarizeMeeting` sends representative transcript excerpts plus cached
@@ -224,6 +274,31 @@ inputs used for post-hoc inspection. Happy-path model output and fallback output
 are held to the same provenance rules; a model response that cannot preserve the
 opening or cite available anchors should be treated as lower quality even if the
 provider call succeeds.
+
+Current v1 evidence anchors are strings. Before production use, the design
+should upgrade them to structured citations:
+
+```go
+type Citation struct {
+    Kind   string // transcript, code, web, internal
+    Label  string // timestamp, file path, URL, or source name
+    Detail string // optional speaker, line, title, or note
+}
+```
+
+Prompt construction must pass citation labels alongside each transcript snippet
+and evidence item. A post-generation validator owns enforcement:
+
+| Failure | Validator action |
+|---------|------------------|
+| material claim without citation | mark output invalid; regenerate or fall back |
+| hypothesis presented as fact | require uncertainty language or drop claim |
+| contradiction collapsed into one conclusion | mark output invalid and surface both sides |
+| missing required summary section | regenerate or fall back |
+
+In offline evaluation, validator failures are quality failures even when the
+provider call succeeds. In real-mode smoke tests, uncited material claims should
+block promotion to production behavior.
 
 ## Error Handling
 
@@ -256,10 +331,24 @@ ready:
   partial text with error, unknown model, and unavailable web tools
 - concurrency tests for `Observe`, `BuildBackground`, `AnswerQuestion`, and
   `SummarizeMeeting` running against the same bot state
+- `AutoResearch=true` tests with a controllable fake client that prove the
+  blocking/backpressure behavior, context cancellation, and event-retention
+  invariant
 - provenance checks that final answers and summaries preserve timestamps, file
   paths, URLs, or uncertainty labels for material claims
+- provider-adapter contract tests for permission mode, timeout propagation,
+  partial-output handling, max-turn limits, and provider close behavior
 - a manual, credential-gated real-provider smoke test that verifies model
-  routing, permission modes, max-turn limits, and timeout behavior
+  routing, permission modes, max-turn limits, timeout behavior, and citation
+  validation
+
+CI posture:
+
+- deterministic local tests run in `bazel test //...`
+- credential-gated provider tests are manual or explicitly skipped with a reason
+  when credentials are absent
+- long-running live-mode soak tests are not part of default CI until their
+  provider dependencies are stable enough to avoid flakes
 
 Full-repo validation is still via:
 
@@ -295,6 +384,20 @@ Extension points:
   `Bot.Observe`.
 - New research corpora add a `ResearchScope`, `AgentRole`, prompt, and
   permission row without changing answer or summary contracts.
-- Evidence schema changes should be additive until a persisted store exists.
 - Provider swaps belong behind `AgentClient`; command flags and bot logic should
   stay provider-neutral.
+
+Evidence evolution:
+
+- in-memory v1 cache keys are normalized `scope/topic` pairs plus the transcript
+  index range that produced the evidence
+- persisted evidence should carry a schema version, source citations, created-at
+  time, topic key, and transcript index watermark
+- readers should accept older evidence versions until a migration tool exists;
+  writers should emit only the latest version
+- cache invalidation is based on topic key plus transcript watermark, not model
+  text, so provider swaps do not rewrite orchestration contracts
+
+The staged path is single-process memory cache, then optional persisted evidence
+with the same `AgentClient` and `Evidence` contracts, then multi-session reuse
+once citation schema and invalidation are stable.
