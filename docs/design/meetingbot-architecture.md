@@ -66,6 +66,9 @@ minimum hard boundary is:
 - CLI/evaluation code cannot be imported by core runtime code
 - queued research code crosses the bot boundary only through a scheduler
   interface, not by sharing private bot helpers
+- `Observe` must not synchronously call provider-facing research code in any
+  live profile; synchronous research is restricted to replay/evaluation
+  construction
 
 Internal ownership inside `bramble/meetingbot/` is deliberately narrower than
 the package boundary:
@@ -223,6 +226,33 @@ topic-scoped helper without mutating events. Context cancellation before enqueue
 returns an error to the transport; provider failures after enqueue become miss
 evidence, not ingestion failures.
 
+The production queue boundary needs an executor contract, not a shared bot
+pointer:
+
+```go
+type ResearchSnapshot struct {
+    Events   []MeetingEvent
+    Evidence []Evidence
+}
+
+type ResearchExecutor interface {
+    RunResearch(ctx context.Context, job ResearchJob, snapshot ResearchSnapshot) ([]Evidence, error)
+}
+```
+
+`ResearchScheduler` may depend on `ResearchExecutor`, `AgentClient`, and
+research prompt builders. It must not import CLI command code, live transport
+adapters, or private `Bot` mutation helpers. `ResearchExecutor` receives an
+immutable transcript/evidence snapshot and returns evidence rows, including miss
+rows for provider failures. Publishing returned evidence is the only mutation
+allowed after enqueue, and it happens through the bot's evidence-publish
+boundary.
+
+Live constructors validate this boundary at startup: `LiveSafeConfig` and
+`LiveWebConfig` reject `AutoResearch=true` unless the caller explicitly chooses
+a replay/evaluation harness. This makes any synchronous `Observe` to provider
+path a configuration error before transcript intake starts.
+
 ### Background Understanding
 
 `BuildBackground` extracts candidate topics from the observed meeting and runs
@@ -284,7 +314,7 @@ Provider safety is part of the `AgentRequest` contract:
 | `RoleFastAnswer` | `plan` | low | `--answer-timeout` | 4 | fallback answer plus `Answer.Error` |
 | `RoleInternalResearch` | `plan` | medium | `--research-timeout` | 4 | explicit miss evidence |
 | `RoleCodebaseResearch` | `plan` | medium | `--research-timeout` | 4 | explicit miss evidence |
-| `RoleWebResearch` | provider default | medium | `--research-timeout` | 4 | explicit miss evidence |
+| `RoleWebResearch` | read-only web, or disabled | medium | `--research-timeout` | 4 | explicit miss evidence |
 | `RoleSummary` | `plan` | high | `--summary-timeout` | 4 | fallback summary plus `Summary.Error` |
 
 Unknown model IDs fail before execution unless the model prefix maps to a known
@@ -306,15 +336,12 @@ first stops the provider request. `ProviderAgentClient` closes the provider afte
 execution; any in-flight provider or tool work after cancellation is treated as a
 provider error and routed through the role policy above.
 
-Web research uses provider-default permissions because public-web tools vary by
-backend and may require capabilities that do not map cleanly to `plan`. The
-compensating control is that web findings must cite durable source names or URLs;
-uncited web output is treated as unusable evidence. If a web-capable provider
-supports a read-only or plan permission mode, that should replace the default.
-For production use, `ScopeWeb` is admitted only for providers whose effective
-web behavior is documented as read-only search/browsing. Providers that cannot
-make that guarantee are rejected for `RoleWebResearch` or run with `ScopeWeb`
-disabled.
+Web research is disabled unless the provider exposes a documented read-only
+search/browse capability. Provider-default permissions are acceptable only for
+local experimentation and must not be used by production profiles. The
+compensating controls are still required after admission: web findings must cite
+durable source names or URLs, and uncited web output is treated as unusable
+evidence.
 
 Production admission is fail-closed:
 
@@ -337,6 +364,21 @@ caches miss evidence with a tool-permission reason and disables further web
 requests for that bot instance. Evidence should record whether a scope was
 blocked by admission, disabled by drift, or failed after a permitted read-only
 tool call.
+
+Web gating is a per-bot state machine guarded by the provider adapter:
+
+| State | New web requests | In-flight requests | Evidence outcome |
+|-------|------------------|--------------------|------------------|
+| admitted | allowed after preflight | may complete if their preflight still matches the admitted capability generation | success or normal provider miss |
+| admission-blocked | rejected before provider call | none | miss evidence with admission reason |
+| drift-disabled | rejected after the first drift signal | requests that detect drift are converted to miss rows; requests that already completed still require provenance validation | miss evidence with drift reason |
+
+Each web request records the capability generation it was admitted under. Drift
+increments the generation, blocks new web work, and prevents stale in-flight
+results from being promoted unless the adapter can prove the same read-only
+capability remained active for that request. Counters are emitted once per
+`scope/topic` job so concurrent failures do not double-count one blocked
+research outcome.
 
 Web telemetry keeps fail-closed behavior distinguishable from provider flakiness:
 
@@ -375,12 +417,14 @@ up to 45 seconds to refine the answer. If the model times out, the bot records
 the model error and returns the transcript/evidence-grounded fallback rather
 than aborting the whole evaluation.
 
-Evaluation reports two SLOs:
+Evaluation reports four SLOs:
 
 | Metric | Includes | Excludes | Failure meaning |
 |--------|----------|----------|-----------------|
-| `First10WordsLatency` | local snippet/evidence selection and opening construction | provider execution | opening was not ready quickly enough to stream |
+| `OpeningReadinessLatency` | local snippet/evidence selection and construction of a streamable opening that meets the minimum opening contract | provider execution | a grounded opening was not ready quickly enough to stream |
+| `FirstVisibleTextLatency` | question receipt through the transport-visible opening write/flush/ack boundary | provider refinement after the opening | the user did not see grounded text quickly enough |
 | `TotalLatency` | complete `AnswerQuestion` wall-clock time | post-meeting summary | final answer or fallback arrived too slowly |
+| `TimeToFinalValidatedAnswer` | provider generation, validation, one allowed retry, and fallback/degraded construction | post-meeting summary | the complete validated answer was too slow or never reached normal quality |
 
 `--latency-budget` is an evaluation threshold for opening readiness.
 `--answer-timeout` is the hard stop for provider refinement. Slow successful
@@ -393,6 +437,12 @@ statement that no supporting evidence is available yet. Background research and
 summary generation are bounded by `--research-timeout` and `--summary-timeout`,
 but they are not live-response SLOs in v1. Evaluation reports their wall-clock
 latency and failure rate separately from answer latency.
+
+The opening metric cannot be satisfied by arbitrary first words. The minimum
+opening contract is one complete sentence or bullet with a transcript timestamp,
+evidence reference, or explicit no-evidence marker. An opening that starts with
+generic filler, omits grounding, or defers the answer entirely is a quality
+failure even if it arrives within budget.
 
 Live transports must also track observe-path health:
 
@@ -434,8 +484,13 @@ type AnswerStream interface {
 ```
 
 `OnOpening` is the write boundary for `FirstVisibleTextLatency`; the timer starts
-when the question is received and stops after `OnOpening` returns. Rendering and
-transport buffering count. `OnFinal` records time-to-final-validated-answer,
+when the question is received and stops after `OnOpening` returns. `OnOpening`
+must block until the transport has accepted the bytes at its real visibility
+boundary: terminal write returned, websocket send acknowledged or flushed, HTTP
+stream flushed, or UI event queued to the renderer with a synchronous ack.
+Asynchronous transports must not stop the timer at an internal enqueue that can
+still wait behind batching or backpressure. Rendering and transport buffering
+count. `OnFinal` records `TimeToFinalValidatedAnswer`,
 which is reported separately from the first-visible-text SLO and must not be
 used to declare the live opening healthy.
 
@@ -452,6 +507,23 @@ streaming SLO. Core bot policy selects and budgets representative events plus
 evidence; provider execution only synthesizes from that bounded prompt. The
 fallback path uses the same selected inputs, so summary policy remains testable
 without a provider call.
+
+The summary result must expose research coverage, not only prose. For every
+selected topic/scope pair, the summary path records one of:
+
+| Coverage state | Meaning |
+|----------------|---------|
+| `not_searched` | no research job was scheduled for the selected topic/scope |
+| `fresh` | evidence covers the latest transcript index range used by the summary |
+| `stale` | evidence exists but predates later transcript turns for that topic |
+| `empty` | the scope was searched and returned no findings |
+| `failed` | provider, timeout, validation, or web-admission failure produced miss evidence |
+
+Before final synthesis, `SummarizeMeeting` either drains a bounded final
+research pass or marks the summary with stale/not-searched coverage. A summary
+with failed, stale, or missing coverage can still be useful, but it is not a
+normal result; it should carry degraded status plus the coverage reasons so the
+UI and evaluator do not mistake "no evidence available" for "no issue exists."
 
 ## Evidence and Provenance
 
@@ -496,6 +568,31 @@ and evidence item. A post-generation validator owns enforcement:
 In offline evaluation, validator failures are quality failures even when the
 provider call succeeds. In real-mode smoke tests, uncited material claims should
 block promotion to production behavior.
+
+Validation status is first-class result data, not only fallback text:
+
+```go
+type OutputStatus string
+
+const (
+    OutputStatusNormal   OutputStatus = "normal"
+    OutputStatusDegraded OutputStatus = "degraded"
+    OutputStatusInvalid  OutputStatus = "invalid"
+)
+
+type ValidationResult struct {
+    Status        OutputStatus
+    Reason        string
+    FailedClaims  []string
+    MissingInputs []string
+}
+```
+
+`Answer` and `Summary` carry `Status`, `Validation`, and the evidence/coverage
+metadata used to decide that status. `normal` means the output passed the active
+validator for its profile. `degraded` means the user sees a grounded fallback or
+partial local result with explicit reasons. `invalid` is internal-only and must
+not be rendered as a normal answer or summary.
 
 Rejected outputs are never shown as normal answers. The user-visible degraded
 shape is:
@@ -639,6 +736,27 @@ Deterministic streaming harness:
 - run the same harness with `AutoResearch=true` and `AutoResearch=false` so both
   backpressure and queued-research modes stay covered
 
+The harness must include at least one composed end-to-end scenario: transcript
+ingestion, queued research, answer streaming, validation, summary generation,
+and evidence coverage reporting all run against the same bot instance. Unit
+tests can prove individual contracts, but rollout gates should fail on broken
+composition even when the isolated tests still pass.
+
+Test tiers:
+
+| Tier | Runs in | Required before |
+|------|---------|-----------------|
+| deterministic unit/contract tests | `bazel test //...` | every commit and PR |
+| local composed streaming harness | `bazel test //...` with fake providers | live transport phase |
+| provider adapter contract matrix | scheduled/manual credential-gated target | real-provider phase and recurring provider upgrades |
+| real-provider smoke | manual/local integration target with credentials | promotion of any real-mode profile |
+| soak/performance | manual or scheduled environment | production live rollout |
+
+Every test item above should be tagged to one of those tiers when implemented.
+Provider contract tests are recurring release gates, not one-time launch tests:
+run them when model IDs, provider families, permission modes, max-turn handling,
+or timeout behavior change.
+
 Monorepo integration checklist:
 
 - `bramble/main.go` command registration still exposes `meetingbot`
@@ -710,6 +828,16 @@ Capability rollout ladder:
 | web research | add `web` only after admission checks | read-only provider capability and citation validation | disable `ScopeWeb` on any admission or citation failure |
 | live transport | queued research unless backpressure is acceptable | `FirstVisibleTextLatency`, `ObserveLatency`, and `TranscriptLag` targets hold | disable `AutoResearch` or fall back to queued research |
 
+Phase-to-test gates:
+
+| Phase | Minimum gate |
+|-------|--------------|
+| local replay | deterministic unit tests and local fallback/provenance checks |
+| internal research | failure-injection tests plus transcript-backed citation checks |
+| codebase research | provider-adapter contract matrix for permission, timeout, max turns, and close behavior |
+| web research | read-only admission probe, drift handling tests, citation validation, and web kill-switch test |
+| live transport | composed streaming harness with fake `AnswerStream`, queued research, and summary coverage assertions |
+
 Web remains default-off for production profiles until its phase is explicitly
 enabled. A global kill switch should remove `ScopeWeb` from every bot instance
 without changing transcript ingestion, answer fallback, or summary generation.
@@ -725,6 +853,21 @@ Extension points:
   implement `ResearchScheduler` semantics and queue integration tests.
 - Provider swaps belong behind `AgentClient`; command flags and bot logic should
   stay provider-neutral.
+
+Extension checklist:
+
+| Extension | Required additions |
+|-----------|--------------------|
+| new research scope | `ResearchScope`, `AgentRole`, prompt, permission row, evidence/citation rule, failure-injection test |
+| new executor | `ResearchExecutor` implementation, queue semantics test, snapshot immutability test, provider-failure-to-miss mapping |
+| external worker | serialized `ResearchJob`/`ResearchSnapshot` schema, idempotency key, result publication API, version compatibility test |
+| new live transport | `MeetingEvent` normalizer, `AnswerStream` implementation, observe-lag metric, first-visible-text flush/ack test |
+| new provider family | capability metadata, role permission mapping, timeout/max-turn/close contract test, web admission behavior |
+
+External workers are cross-process adapters. They must not receive a `Bot`
+reference or private in-process closures; they receive serialized jobs and
+snapshots, return evidence rows with status and citations, and publish through a
+single idempotent result boundary keyed by job ID plus transcript index range.
 
 Evidence evolution:
 
