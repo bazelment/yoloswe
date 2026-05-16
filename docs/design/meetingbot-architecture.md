@@ -28,6 +28,14 @@ The stable package contract is `MeetingEvent`, `Evidence`, `Answer`,
 scopes, and provider families should extend those contracts instead of
 importing command code or reaching into `Bot` internals.
 
+The single `bramble/meetingbot` package is intentional for v1. The supported
+cross-package API is limited to the exported contract types above plus `New`,
+`LoadTranscriptFile`, `ParseTranscript`, `EvaluateFile`, and `DefaultConfig`.
+The file-group ownership below is a maintainability rule, not a compile-time
+sub-package split. If those boundaries start failing in review, the next step is
+to split provider adaptation and transcript ingestion into subpackages behind
+the same exported facades.
+
 Internal ownership inside `bramble/meetingbot/` is deliberately narrower than
 the package boundary:
 
@@ -42,6 +50,19 @@ the package boundary:
 Opening construction is core bot policy; refinement scheduling is the provider
 adapter boundary. Metrics may attach to `Answer` and `InteractionResult`, but
 CLI printing and UI streaming policy must stay outside `bramble/meetingbot`.
+
+Concurrency contract:
+
+- `Bot` methods are safe for concurrent callers through its internal mutex.
+- `Observe` is the only writer for transcript events. It appends the event under
+  lock, releases the lock, and only then runs any synchronous `BuildBackground`
+  work triggered by `AutoResearch`.
+- `BuildBackground` snapshots events, performs provider work without holding the
+  bot lock, and publishes evidence under lock one row at a time.
+- `AnswerQuestion` and `SummarizeMeeting` read snapshots. They see evidence that
+  was published before their snapshot; they do not wait for in-flight research.
+- Agent clients must not call back into the same `Bot` while a request is in
+  flight. Re-entrant bot calls belong in an external orchestrator.
 
 ## Command
 
@@ -206,6 +227,16 @@ backend and may require capabilities that do not map cleanly to `plan`. The
 compensating control is that web findings must cite durable source names or URLs;
 uncited web output is treated as unusable evidence. If a web-capable provider
 supports a read-only or plan permission mode, that should replace the default.
+For production use, `ScopeWeb` is admitted only for providers whose effective
+web behavior is documented as read-only search/browsing. Providers that cannot
+make that guarantee are rejected for `RoleWebResearch` or run with `ScopeWeb`
+disabled.
+
+`ProviderAgentClient` is stateless and creates one provider instance per
+request. Concurrent bot calls therefore do not share a provider object. The
+underlying `multiagent/agent` provider must support independent instances; if a
+provider family requires serialized execution, that serialization belongs in the
+provider adapter and must be covered by provider-adapter contract tests.
 
 ### Live Answer Path
 
@@ -247,6 +278,18 @@ statement that no supporting evidence is available yet. Background research and
 summary generation are bounded by `--research-timeout` and `--summary-timeout`,
 but they are not live-response SLOs in v1. Evaluation reports their wall-clock
 latency and failure rate separately from answer latency.
+
+Live transports must also track observe-path health:
+
+| Metric | Meaning | Interpretation |
+|--------|---------|----------------|
+| `ObserveLatency` | wall-clock time for one `Observe` call | includes synchronous `AutoResearch` backpressure |
+| `AutoResearchLatency` | time spent in a triggered `BuildBackground` call | provider slowness on the ingestion path |
+| `TranscriptLag` | age of the newest observed event relative to transcript source time | freshness of the meeting context |
+
+A healthy answer path does not imply a healthy live system. If observe-path
+latency or transcript lag is unacceptable for a transport, that transport must
+disable synchronous `AutoResearch` and run research from a queue.
 
 ### Summary Path
 
@@ -300,6 +343,21 @@ In offline evaluation, validator failures are quality failures even when the
 provider call succeeds. In real-mode smoke tests, uncited material claims should
 block promotion to production behavior.
 
+MVP enforcement profile:
+
+| Claim class | V1 representation | V1 enforcement | Production gate |
+|-------------|-------------------|----------------|-----------------|
+| transcript fact | formatted timestamp in snippet text | deterministic check for timestamp or explicit no-evidence language | structured transcript citation |
+| research fact | `scope/topic` reference plus evidence text | deterministic check for `ResearchRefs` or uncertainty language | structured internal/code/web citation |
+| hypothesis | prose marked uncertain | deterministic check for uncertainty wording | validator requires verification step |
+
+Fallback answers and summaries are not exempt from validation. In v1, local
+fallbacks are allowed because they are generated only from selected snippets and
+cached evidence. Once the structured validator exists, both provider output and
+fallback output use the same promotion path: validate, try at most one
+regeneration for provider output, then return an explicit degraded result rather
+than uncited normal prose.
+
 ## Error Handling
 
 - Empty or unavailable research becomes explicit evidence such as
@@ -341,6 +399,28 @@ ready:
 - a manual, credential-gated real-provider smoke test that verifies model
   routing, permission modes, max-turn limits, timeout behavior, and citation
   validation
+
+Deterministic streaming harness:
+
+- create one shared `Bot` with a channel-controlled fake `AgentClient`
+- append transcript events in one goroutine while another asks questions and a
+  third cancels a context mid-research
+- assert no deadlock, no duplicate `scope/topic` evidence, stable event indexes,
+  and documented stale-snapshot behavior for answers issued before research
+  publishes evidence
+- run the same harness with `AutoResearch=true` and `AutoResearch=false` so both
+  backpressure and queued-research modes stay covered
+
+Monorepo integration checklist:
+
+- `bramble/main.go` command registration still exposes `meetingbot`
+- cobra flags map to `meetingbot.Config` without hidden provider defaults
+- `multiagent/agent` model registry and permission options keep the role table
+  valid
+- recording/logging paths used by other bramble commands do not change the
+  meetingbot replay contract
+- Bazel targets and Gazelle output keep the command and library targets visible
+  to `bazel test //...`
 
 CI posture:
 
@@ -389,15 +469,14 @@ Extension points:
 
 Evidence evolution:
 
+- persistence is out of scope for v1; the only storage boundary is the in-memory
+  evidence slice owned by one `Bot`
 - in-memory v1 cache keys are normalized `scope/topic` pairs plus the transcript
   index range that produced the evidence
-- persisted evidence should carry a schema version, source citations, created-at
-  time, topic key, and transcript index watermark
-- readers should accept older evidence versions until a migration tool exists;
-  writers should emit only the latest version
-- cache invalidation is based on topic key plus transcript watermark, not model
-  text, so provider swaps do not rewrite orchestration contracts
+- persisted evidence requires a separate design before implementation, including
+  store ownership, schema versioning, migration/rollback, stale-reader behavior,
+  and cache invalidation rules
 
-The staged path is single-process memory cache, then optional persisted evidence
-with the same `AgentClient` and `Evidence` contracts, then multi-session reuse
-once citation schema and invalidation are stable.
+The staged path is single-process memory cache first. Persisted evidence and
+multi-session reuse are deferred until citation schema and invalidation semantics
+are stable.
