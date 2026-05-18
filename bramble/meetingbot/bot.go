@@ -90,10 +90,16 @@ func (b *Bot) BuildBackground(ctx context.Context) error {
 	topics := candidateTopics(snapshot.Events, b.cfg.MaxResearchTopics)
 	jobs := b.researchJobs(snapshot.Events, topics)
 	rows, err := b.runResearchJobs(ctx, jobs, snapshot)
-	b.publishEvidence(rows)
 	if err != nil {
+		// A cancelled or errored batch only ever produced a partial set of
+		// rows. Publishing them would mark their keys researched, causing a
+		// later retry to skip them and summaryCoverage to treat an incomplete
+		// pass as fresh. Provider misses are not errors here — they are
+		// recorded as failed/empty status rows inside researchTopicRows — so a
+		// normal pass with misses still publishes through the success path.
 		return err
 	}
+	b.publishEvidence(rows)
 	return nil
 }
 
@@ -268,8 +274,12 @@ func (b *Bot) researchTopicRows(ctx context.Context, topic string, scopes []Rese
 		errorText := ""
 		if err != nil {
 			// Public-web research may be unavailable in some local runs. Cache
-			// the miss as evidence so downstream summaries know not to invent it.
-			resp.Text = fmt.Sprintf("Research unavailable for %s/%s: %v", scope, topic, err)
+			// the miss as evidence so downstream summaries know not to invent
+			// it. Evidence.Text is embedded into prompts and printed output, so
+			// it must stay a stable, user-safe message — the raw provider error
+			// (which may carry model or API exception detail) is retained only
+			// in Evidence.Error for diagnostics.
+			resp.Text = fmt.Sprintf("Research unavailable for %s/%s.", scope, topic)
 			status = EvidenceStatusFailed
 			errorText = err.Error()
 		}
@@ -997,7 +1007,13 @@ func bestEvidenceForTopicScope(evidence []Evidence, topic string, scope Research
 		if ev.Scope != scope || strings.ToLower(strings.TrimSpace(ev.Topic)) != topic {
 			continue
 		}
-		if !found || ev.EndIndex > best.EndIndex || ev.CreatedAt.After(best.CreatedAt) {
+		// "Best" is the row with the most transcript coverage (highest
+		// EndIndex), tie-broken by recency. The staleness check in
+		// summaryCoverage compares best.EndIndex against the latest matched
+		// transcript turn, so an OR on CreatedAt could let a newer row with
+		// lower coverage win and be misclassified as stale.
+		if !found || ev.EndIndex > best.EndIndex ||
+			(ev.EndIndex == best.EndIndex && ev.CreatedAt.After(best.CreatedAt)) {
 			best = ev
 			found = true
 		}

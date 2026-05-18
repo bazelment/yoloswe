@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // LocalAgentClient is a deterministic, no-network client for tests and offline
@@ -156,12 +157,28 @@ func lineMatchesKeyword(line, keyword string) bool {
 	if strings.Contains(keyword, " ") {
 		return strings.Contains(line, keyword)
 	}
-	for _, token := range significantWords(line) {
+	// Tokenize without significantWords' length/stop-word filter: that filter
+	// drops words shorter than 4 chars, which would make short keywords like
+	// "app" or "sso" silently dead. Whole-token equality still avoids the
+	// substring false positives a plain strings.Contains would introduce.
+	for _, token := range lineTokens(line) {
 		if token == keyword {
 			return true
 		}
 	}
 	return false
+}
+
+// lineTokens splits text into lowercase word tokens on the same rune classes
+// significantWords uses, but without its length or stop-word filtering.
+func lineTokens(text string) []string {
+	normalized := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' {
+			return unicode.ToLower(r)
+		}
+		return ' '
+	}, text)
+	return strings.Fields(normalized)
 }
 
 func bulletLines(lines []string) string {

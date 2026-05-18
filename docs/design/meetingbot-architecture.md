@@ -89,8 +89,9 @@ Concurrency contract:
 
 - `Bot` methods are safe for concurrent callers through its internal mutex.
 - `Observe` is the only writer for transcript events. It appends the event under
-  lock, releases the lock, and only then runs any synchronous `BuildBackground`
-  work triggered by `AutoResearch`.
+  lock, releases the lock, and — when `AutoResearch` is enabled — enqueues
+  research work to the configured `ResearchScheduler`. It never runs
+  `BuildBackground` itself; that remains a separate explicit batch call.
 - `BuildBackground` snapshots events, performs provider work without holding the
   bot lock, and publishes evidence under lock one row at a time.
 - `AnswerQuestion` and `SummarizeMeeting` read snapshots. They see evidence that
@@ -170,15 +171,19 @@ normalize input into `MeetingEvent` values and call `Bot.Observe`; it should not
 duplicate topic selection, evidence caching, or answer policy. This keeps live
 transport failures isolated from the research and synthesis layers.
 
-V1 `AutoResearch` is synchronous: the triggering `Observe` call appends the
-event, then runs `BuildBackground` before returning. This behavior is acceptable
-for deterministic CLI replay, but a true live transport has to treat it as
-backpressure. If provider latency cannot block transcript intake, the caller
-should disable `AutoResearch` and run background research from an external queue
-or worker. Cancellation is inherited from the `Observe` context; if research is
-cancelled or fails, the event remains observed. Provider failures become miss
-evidence and do not escape as ingestion errors; only caller cancellation or local
-orchestration errors should cause `Observe` to return an error.
+V1 `AutoResearch` is enqueue-only: when enabled, the triggering `Observe` call
+appends the event and then enqueues bounded research jobs to the configured
+`ResearchScheduler` before returning. It never runs `BuildBackground` inline, so
+`Observe` does not block on provider latency. `AutoResearch=true` therefore
+*requires* a `ResearchScheduler`; without one `Observe` fails closed with
+`errAutoResearchScheduler` rather than degrading to synchronous provider calls
+on the transcript hot path. The scheduler (an external queue or worker) owns
+running the work via `RunResearch` and publishing the resulting evidence.
+Cancellation is inherited from the `Observe` context; if enqueue is cancelled or
+fails, the event remains observed. Provider failures during scheduled research
+become miss evidence and do not escape as ingestion errors; only caller
+cancellation or a scheduler `Enqueue` error should cause `Observe` to return an
+error.
 
 Default profiles:
 
@@ -252,10 +257,14 @@ immutable transcript snapshot and returns evidence rows, including miss rows for
 provider failures. Publishing returned evidence is the only mutation allowed
 after enqueue, and it happens through the bot's evidence-publish boundary.
 
-Constructors validate this boundary at startup: live profiles reject
-`AutoResearch=true`, and replay/default profiles only allow `AutoResearch` when a
-`ResearchScheduler` is configured. This makes any synchronous `Observe` to
-provider path a configuration error before transcript intake starts.
+`NewValidated` enforces this boundary at startup: it normalizes the config and
+then runs `Config.Validate`, so live profiles reject `AutoResearch=true` and
+replay/default profiles only accept `AutoResearch` when a `ResearchScheduler` is
+configured. `New` only normalizes the config (it has no error return and is the
+infallible constructor); callers that need the boundary enforced before
+transcript intake must use `NewValidated`. Either way `Observe` itself fails
+closed with `errAutoResearchScheduler` if `AutoResearch=true` and no scheduler is
+configured, so an unvalidated `New` cannot reach a synchronous provider path.
 
 ### Background Understanding
 

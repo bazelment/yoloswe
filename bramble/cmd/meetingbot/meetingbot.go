@@ -148,10 +148,14 @@ func run(cmd *cobra.Command, args []string) error {
 
 func buildClient(mode string) (botpkg.AgentClient, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "real", "":
-		return botpkg.ProviderAgentClient{}, nil
-	case "local", "offline":
+	case "local", "offline", "":
+		// Fail closed: an absent or empty mode resolves to the local client,
+		// matching the --agent flag default. Selecting the real provider only
+		// happens on an explicit "real" so a blank value cannot silently
+		// trigger network calls or require credentials.
 		return botpkg.LocalAgentClient{}, nil
+	case "real":
+		return botpkg.ProviderAgentClient{}, nil
 	default:
 		return nil, fmt.Errorf("unknown --agent %q: use real or local", mode)
 	}

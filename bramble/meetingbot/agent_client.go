@@ -62,16 +62,29 @@ func (ProviderAgentClient) Run(ctx context.Context, req AgentRequest) (AgentResp
 		return AgentResponse{Latency: time.Since(start), Model: modelID, Provider: m.Provider}, err
 	}
 	if result == nil {
-		return AgentResponse{Latency: time.Since(start), Model: modelID, Provider: m.Provider}, nil
+		return AgentResponse{Latency: time.Since(start), Model: modelID, Provider: m.Provider}, fmt.Errorf("provider returned no result for %s", req.Role)
 	}
-	if !result.Success && result.Error != nil {
+	if !result.Success {
+		// A failed turn must surface as an error even when the provider left
+		// result.Error nil (e.g. an unresolved tool loop that stopped without a
+		// terminal error). Treating it as success would let downstream answer
+		// and summary paths skip fallbacks and emit a partial turn as final.
+		failErr := result.Error
+		if failErr == nil {
+			if result.UnresolvedToolError != nil {
+				ute := result.UnresolvedToolError
+				failErr = fmt.Errorf("provider turn unsuccessful for %s: unresolved tool %q (%s)", req.Role, ute.Tool, ute.Reason)
+			} else {
+				failErr = fmt.Errorf("provider turn unsuccessful for %s", req.Role)
+			}
+		}
 		return AgentResponse{
 			Latency:  time.Since(start),
 			Text:     result.Text,
 			Model:    modelID,
 			Provider: m.Provider,
 			Usage:    result.Usage,
-		}, result.Error
+		}, failErr
 	}
 	return AgentResponse{
 		Latency:  time.Since(start),

@@ -2,6 +2,7 @@ package meetingbot
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -252,6 +253,137 @@ func TestEvaluateQualityGateFailsSlowOpening(t *testing.T) {
 	require.False(t, gate.Passed)
 }
 
+func TestBuildBackgroundCachesProviderFailureWithoutLeakingError(t *testing.T) {
+	client := &recordingClient{failRoles: map[AgentRole]struct{}{RoleWebResearch: {}}}
+	cfg := DefaultConfig()
+	cfg.AutoResearch = false
+	cfg.MaxResearchTopics = 1
+	cfg.ResearchScopes = []ResearchScope{ScopeInternal, ScopeWeb}
+
+	bot := New(client, cfg)
+	require.NoError(t, bot.IngestTranscript(context.Background(), sampleEvents()))
+	// A provider miss is not a batch error: BuildBackground still returns nil
+	// and publishes a failed-status row so downstream summaries know the gap.
+	require.NoError(t, bot.BuildBackground(context.Background()))
+
+	var failed, ok bool
+	for _, ev := range bot.Evidence() {
+		switch ev.Scope {
+		case ScopeWeb:
+			failed = true
+			require.Equal(t, EvidenceStatusFailed, ev.Status)
+			// Text is embedded into prompts/output and must not carry the raw
+			// provider error; the diagnostic stays in Error only.
+			require.NotContains(t, ev.Text, "secret-token-xyz")
+			require.Contains(t, ev.Error, "secret-token-xyz")
+		case ScopeInternal:
+			ok = true
+			require.Equal(t, EvidenceStatusSuccess, ev.Status)
+		}
+	}
+	require.True(t, failed, "expected a failed web evidence row")
+	require.True(t, ok, "expected a successful internal evidence row")
+}
+
+func TestBuildBackgroundDoesNotPublishPartialOnCancel(t *testing.T) {
+	client := &recordingClient{delay: 50 * time.Millisecond}
+	cfg := DefaultConfig()
+	cfg.AutoResearch = false
+	cfg.MaxResearchTopics = 1
+	cfg.ResearchScopes = []ResearchScope{ScopeInternal, ScopeCodebase, ScopeWeb}
+	cfg.ResearchConcurrency = 1
+
+	bot := New(client, cfg)
+	require.NoError(t, bot.IngestTranscript(context.Background(), sampleEvents()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := bot.BuildBackground(ctx)
+	require.Error(t, err)
+	// An aborted batch must not cache partial rows: doing so would mark their
+	// keys researched and let summaryCoverage treat an incomplete pass as
+	// fresh, and block a later retry.
+	require.Empty(t, bot.Evidence())
+}
+
+func TestBestEvidencePrefersHigherCoverageOverRecency(t *testing.T) {
+	base := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	evidence := []Evidence{
+		{Scope: ScopeInternal, Topic: "preview", Status: EvidenceStatusSuccess, EndIndex: 10, CreatedAt: base},
+		// Newer but covers fewer transcript turns; must not become "best".
+		{Scope: ScopeInternal, Topic: "preview", Status: EvidenceStatusSuccess, EndIndex: 4, CreatedAt: base.Add(time.Minute)},
+	}
+	best, ok := bestEvidenceForTopicScope(evidence, "preview", ScopeInternal)
+	require.True(t, ok)
+	require.Equal(t, 10, best.EndIndex)
+
+	// summaryCoverage must therefore classify it Fresh, not Stale, when the
+	// latest matched transcript turn is within the high-coverage row's range.
+	events := []MeetingEvent{{Index: 9, Speaker: "A", Text: "preview is broken"}}
+	cov := summaryCoverage(events, []Topic{{Name: "preview"}}, []ResearchScope{ScopeInternal}, evidence)
+	require.Len(t, cov, 1)
+	require.Equal(t, CoverageFresh, cov[0].State)
+}
+
+func TestEvaluateQualityGateFailsOnModelErrorAndStatus(t *testing.T) {
+	// Synthetic FileEvaluation independent of LocalAgentClient templates so the
+	// gate's error/status logic is asserted directly.
+	result := FileEvaluation{
+		Path:   "broken.txt",
+		Events: 1,
+		Interactions: []InteractionResult{{
+			TotalLatency: 10 * time.Millisecond,
+			Answer: Answer{
+				OpeningReadinessLatency: time.Millisecond,
+				Opening:                 "Based on [00:01], grounded.",
+				Text:                    "Based on [00:01], grounded.",
+				Status:                  OutputStatusInvalid,
+				Error:                   "provider turn unsuccessful for fast_answer",
+			},
+		}},
+		Summary: Summary{
+			Latency: time.Millisecond,
+			Text:    "Executive summary\n\nDecisions\n\nAction items\n\nRisks/blockers\n\nBackground/context\n",
+			Status:  OutputStatusNormal,
+		},
+	}
+	gate := EvaluateQualityGate([]FileEvaluation{result}, QualityGateConfig{
+		OpeningLatencyBudget: time.Second,
+		MaxAnswerLatency:     5 * time.Second,
+		MaxSummaryLatency:    time.Second,
+		MinEvents:            1,
+		MinInteractions:      1,
+		RequireNoErrors:      true,
+		RequireNormalStatus:  true,
+	})
+	require.False(t, gate.Passed)
+	var sawModelError, sawStatus bool
+	for _, c := range gate.Checks {
+		if strings.Contains(c.Name, "model error") && c.Status == "fail" {
+			sawModelError = true
+		}
+		if strings.HasSuffix(c.Name, "status") && c.Status == "fail" {
+			sawStatus = true
+		}
+	}
+	require.True(t, sawModelError, "expected the model-error check to fail: %v", gate.Checks)
+	require.True(t, sawStatus, "expected the status check to fail: %v", gate.Checks)
+}
+
+func TestRelevantPromptLinesMatchesShortKeywords(t *testing.T) {
+	// "app" and "sso" are 3 chars; the prior significantWords-based matcher
+	// dropped them, making those keywords dead. They must now match.
+	prompt := "We discussed the app rollout.\nSSO login is flaky for the customer."
+	lines := relevantPromptLines(prompt, 8)
+	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "app rollout")
+	require.Contains(t, joined, "SSO login")
+	require.True(t, lineMatchesKeyword("the app rollout", "app"))
+	require.True(t, lineMatchesKeyword("sso login flow", "sso"))
+	// Whole-token match still avoids substring false positives.
+	require.False(t, lineMatchesKeyword("happiness apprised", "app"))
+}
+
 func sampleEvents() []MeetingEvent {
 	input := strings.NewReader(`[00:02-00:05] Speaker A: You can start.
 [00:54-01:13] Speaker B: There were deployment-related issues because new services did not have proper setup in staging.
@@ -283,7 +415,12 @@ type recordingClient struct { //nolint:govet // fieldalignment: test fixture rea
 	mu       sync.Mutex
 	requests []AgentRequest
 	delay    time.Duration
+	// failRoles, when set, makes Run return errResearchProvider for matching
+	// roles so failure paths can be exercised without a real provider.
+	failRoles map[AgentRole]struct{}
 }
+
+var errResearchProvider = errors.New("research provider boom: secret-token-xyz")
 
 type recordingScheduler struct { //nolint:govet // fieldalignment: test fixture readability.
 	mu   sync.Mutex
@@ -343,6 +480,12 @@ func (c *recordingClient) Run(ctx context.Context, req AgentRequest) (AgentRespo
 	c.mu.Lock()
 	c.requests = append(c.requests, req)
 	c.mu.Unlock()
+
+	if c.failRoles != nil {
+		if _, fail := c.failRoles[req.Role]; fail {
+			return AgentResponse{Model: req.Model, Provider: "test"}, errResearchProvider
+		}
+	}
 
 	text := "summary response"
 	if req.Role == RoleFastAnswer {
