@@ -89,7 +89,10 @@ text, summary text, and meeting-specific interpretation.
 The automated meeting-bot quality gate checks:
 
 - at least one transcript file was evaluated
-- each file parsed events and ran the default interaction count
+- each file parsed events and ran at least the gate's `MinInteractions` (the
+  number of interactions actually passed to `EvaluateFile` — after the CLI
+  optionally prepends the default set when `--evaluate` is set or no
+  `--question` is given — not a fixed default of four)
 - every answer produced a non-empty grounded opening and final answer
 - opening readiness stayed under the configured budget
 - total answer and summary latency stayed within configured budgets

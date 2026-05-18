@@ -32,8 +32,10 @@ func LoadTranscriptFile(path string) ([]MeetingEvent, error) {
 	return events, nil
 }
 
-// ParseTranscript parses lines like "[00:02-00:05] Speaker: text". Non-matching
-// continuation lines are appended to the prior event.
+// ParseTranscript parses lines like "[MM:SS-MM:SS] Speaker: text". Each side of
+// the range may also be hour-qualified ("[H:MM:SS-HH:MM:SS]") and the minutes
+// field accepts up to three digits, so long meetings parse correctly.
+// Non-matching continuation lines are appended to the prior event.
 func ParseTranscript(r io.Reader) ([]MeetingEvent, error) {
 	return parseTranscriptScanner(bufio.NewScanner(r))
 }

@@ -29,6 +29,30 @@ continuation line
 	require.Equal(t, 50*time.Second, events[1].End)
 }
 
+func TestParseTranscriptHandlesLongMeetingTimestamps(t *testing.T) {
+	// Hour-qualified and >99-minute timestamps must parse into structured
+	// events instead of folding into continuation text and disappearing from
+	// grounding/research indexing.
+	input := strings.NewReader(`[1:05:30-1:06:00] Speaker A: hour qualified line
+[105:10-105:40] Speaker B: long minute line`)
+	events, err := ParseTranscript(input)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	require.Equal(t, time.Hour+5*time.Minute+30*time.Second, events[0].Start)
+	require.Equal(t, time.Hour+6*time.Minute, events[0].End)
+	require.Equal(t, "Speaker B", events[1].Speaker)
+	require.Equal(t, 105*time.Minute+10*time.Second, events[1].Start)
+
+	// formatStamp must round-trip: >=1h emits HH:MM:SS, parseable again.
+	require.Equal(t, "01:05:30", formatStamp(events[0].Start))
+	require.Equal(t, "00:05", formatStamp(5*time.Second))
+	reparsed, err := ParseTranscript(strings.NewReader(formatEvent(events[0])))
+	require.NoError(t, err)
+	require.Len(t, reparsed, 1)
+	require.Equal(t, events[0].Start, reparsed[0].Start)
+	require.Equal(t, events[0].End, reparsed[0].End)
+}
+
 func TestBuildBackgroundUsesLayeredResearchAgents(t *testing.T) {
 	client := &recordingClient{}
 	cfg := DefaultConfig()

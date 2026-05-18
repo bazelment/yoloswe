@@ -193,12 +193,11 @@ Default profiles:
 | live-safe | microphone, websocket, or note-tailer transport | disabled; queue research externally | `internal`, `codebase` by default |
 | live-web | production web research after admission checks | disabled; queue research externally | explicit opt-in `web` |
 
-`AutoResearch` is enqueue-only: it requires a `ResearchScheduler` and never
-blocks transcript intake on provider work. It is an opt-in replay convenience
-that still keeps `Observe` non-blocking; the scheduler owns running and
-publishing the research. A live transport that cannot supply a scheduler should
-leave `AutoResearch` disabled and drive `BuildBackground` (or the scheduler)
-externally.
+The `AutoResearch` column above follows the enqueue-only contract described in
+the "V1 `AutoResearch` is enqueue-only" paragraph: replay/evaluation may enable
+it (with a scheduler) or just call `BuildBackground` explicitly, while live
+profiles leave it disabled and queue research externally. The contract is stated
+once there; this table only records the per-profile default.
 
 Profiles should be typed constructors or an explicit `Profile` field, not a
 bag of independent knobs:
