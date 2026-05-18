@@ -219,7 +219,8 @@ func TestEvaluateQualityGatePassesLocalEvaluation(t *testing.T) {
 
 	result, err := EvaluateFile(context.Background(), path, LocalAgentClient{}, cfg, nil)
 	require.NoError(t, err)
-	gate := EvaluateQualityGate([]FileEvaluation{result}, DefaultQualityGateConfig(cfg, 10*time.Second))
+	// nil interactions => EvaluateFile runs the default set.
+	gate := EvaluateQualityGate([]FileEvaluation{result}, DefaultQualityGateConfig(cfg, 10*time.Second, len(DefaultInteractions())))
 	require.True(t, gate.Passed, gate.Checks)
 }
 

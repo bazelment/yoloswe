@@ -132,7 +132,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	var gate botpkg.QualityGateResult
 	if qualityGate || evalReport != "" {
-		gate = botpkg.EvaluateQualityGate(results, botpkg.DefaultQualityGateConfig(cfg, latencyBudget))
+		gate = botpkg.EvaluateQualityGate(results, botpkg.DefaultQualityGateConfig(cfg, latencyBudget, len(interactions)))
 		printQualityGate(gate)
 	}
 	if evalReport != "" {

@@ -11,7 +11,11 @@ import (
 	"time"
 )
 
-var transcriptLineRE = regexp.MustCompile(`^\[(\d{2}):(\d{2})-(\d{2}):(\d{2})\]\s+([^:]+):\s*(.*)$`)
+// Each side of the range is either MM:SS or HH:MM:SS, with one or more digits
+// per field, so long meetings (past 99:59 or hour-qualified timestamps) are
+// parsed into structured events instead of silently folding into continuation
+// text and disappearing from grounding/research indexing.
+var transcriptLineRE = regexp.MustCompile(`^\[(\d{1,2}:)?(\d{1,3}):(\d{2})-(\d{1,2}:)?(\d{1,3}):(\d{2})\]\s+([^:]+):\s*(.*)$`)
 
 // LoadTranscriptFile reads a timestamped speaker transcript from disk.
 func LoadTranscriptFile(path string) ([]MeetingEvent, error) {
@@ -51,19 +55,19 @@ func parseTranscriptScanner(scanner *bufio.Scanner) ([]MeetingEvent, error) {
 			}
 			continue
 		}
-		start, err := parseStamp(m[1], m[2])
+		start, err := parseStamp(m[1], m[2], m[3])
 		if err != nil {
 			return nil, err
 		}
-		end, err := parseStamp(m[3], m[4])
+		end, err := parseStamp(m[4], m[5], m[6])
 		if err != nil {
 			return nil, err
 		}
 		events = append(events, MeetingEvent{
 			Start:   start,
 			End:     end,
-			Speaker: strings.TrimSpace(m[5]),
-			Text:    strings.TrimSpace(m[6]),
+			Speaker: strings.TrimSpace(m[7]),
+			Text:    strings.TrimSpace(m[8]),
 			Raw:     line,
 			Index:   len(events),
 		})
@@ -74,7 +78,17 @@ func parseTranscriptScanner(scanner *bufio.Scanner) ([]MeetingEvent, error) {
 	return events, nil
 }
 
-func parseStamp(minText, secText string) (time.Duration, error) {
+// parseStamp converts an optional "HH:" prefix plus minutes and seconds fields
+// into a duration. hourText is "" for the MM:SS form and "HH:" for HH:MM:SS.
+func parseStamp(hourText, minText, secText string) (time.Duration, error) {
+	var hours int
+	if hourText != "" {
+		h, err := strconv.Atoi(strings.TrimSuffix(hourText, ":"))
+		if err != nil {
+			return 0, err
+		}
+		hours = h
+	}
 	minutes, err := strconv.Atoi(minText)
 	if err != nil {
 		return 0, err
@@ -83,7 +97,7 @@ func parseStamp(minText, secText string) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	return time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second, nil
+	return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second, nil
 }
 
 func formatEvent(e MeetingEvent) string {
@@ -92,5 +106,15 @@ func formatEvent(e MeetingEvent) string {
 
 func formatStamp(d time.Duration) string {
 	total := int(d.Seconds())
-	return fmt.Sprintf("%02d:%02d", total/60, total%60)
+	if total < 0 {
+		total = 0
+	}
+	hours := total / 3600
+	minutes := (total % 3600) / 60
+	seconds := total % 60
+	if hours > 0 {
+		// Round-trips through transcriptLineRE's optional HH: group.
+		return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }

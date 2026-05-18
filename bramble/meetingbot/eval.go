@@ -63,16 +63,23 @@ func DefaultInteractions() []Interaction {
 }
 
 // DefaultQualityGateConfig returns the deterministic local/real smoke gate.
-func DefaultQualityGateConfig(cfg Config, openingBudget time.Duration) QualityGateConfig {
+// minInteractions must be the number of interactions the evaluation actually
+// runs (the count passed to EvaluateFile). Hard-coding the default set's size
+// here would spuriously FAIL the interaction-count check whenever a caller runs
+// a smaller custom --question list.
+func DefaultQualityGateConfig(cfg Config, openingBudget time.Duration, minInteractions int) QualityGateConfig {
 	if openingBudget == 0 {
 		openingBudget = 10 * time.Second
+	}
+	if minInteractions < 1 {
+		minInteractions = 1
 	}
 	return QualityGateConfig{
 		OpeningLatencyBudget: openingBudget,
 		MaxAnswerLatency:     cfg.FastAnswerTimeout + openingBudget,
 		MaxSummaryLatency:    cfg.SummaryTimeout,
 		MinEvents:            1,
-		MinInteractions:      len(DefaultInteractions()),
+		MinInteractions:      minInteractions,
 		RequireNoErrors:      true,
 		RequireNormalStatus:  true,
 	}
