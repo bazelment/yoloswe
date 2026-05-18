@@ -103,9 +103,9 @@ Concurrency contract:
 ```bash
 bazel run //bramble:bramble -- meetingbot \
   --agent=real \
-  --notes-glob '/home/ubuntu/voice-tui-2026*' \
+  --notes-glob '<private-transcripts-glob>' \
   --evaluate \
-  --work-dir /home/ubuntu/worktrees/yoloswe/feature/meeting-bot
+  --work-dir /path/to/repo
 ```
 
 The same command supports `--agent=local` for deterministic offline evaluation.
@@ -198,7 +198,7 @@ bag of independent knobs:
 | Constructor | Guarantees |
 |-------------|------------|
 | `DefaultConfig` | development/evaluation defaults only; not a production profile |
-| `ReplayConfig` | deterministic replay defaults, optional synchronous `AutoResearch` |
+| `ReplayConfig` | deterministic replay defaults with explicit `BuildBackground` calls |
 | `LiveSafeConfig` | `AutoResearch=false`, no web scope, queue-ready research settings |
 | `LiveWebConfig` | starts from `LiveSafeConfig`, enables web only after admission checks |
 
@@ -216,42 +216,46 @@ type ResearchJob struct {
 }
 
 type ResearchScheduler interface {
-    Enqueue(ctx context.Context, job ResearchJob) error
+    Enqueue(ctx context.Context, work ResearchWork) error
 }
 ```
 
-The scheduler owns deduplication, idempotency, ordering by transcript index
-range, and queue backpressure. It calls `BuildBackground` or an equivalent
-topic-scoped helper without mutating events. Context cancellation before enqueue
-returns an error to the transport; provider failures after enqueue become miss
-evidence, not ingestion failures.
+The bot creates one work item per new `topic/scope` transcript range and tracks
+topic/scope high-water marks so chunked intake does not repeatedly enqueue the
+same prefix. The scheduler owns durable idempotency, ordering by transcript
+index range, and queue backpressure. Context cancellation before enqueue returns
+an error to the transport; provider failures after enqueue become miss evidence,
+not ingestion failures.
 
 The production queue boundary needs an executor contract, not a shared bot
 pointer:
 
 ```go
 type ResearchSnapshot struct {
-    Events   []MeetingEvent
-    Evidence []Evidence
+    Events []MeetingEvent
+}
+
+type ResearchWork struct {
+    Job      ResearchJob
+    Snapshot ResearchSnapshot
 }
 
 type ResearchExecutor interface {
-    RunResearch(ctx context.Context, job ResearchJob, snapshot ResearchSnapshot) ([]Evidence, error)
+    RunResearch(ctx context.Context, work ResearchWork) ([]Evidence, error)
 }
 ```
 
 `ResearchScheduler` may depend on `ResearchExecutor`, `AgentClient`, and
 research prompt builders. It must not import CLI command code, live transport
 adapters, or private `Bot` mutation helpers. `ResearchExecutor` receives an
-immutable transcript/evidence snapshot and returns evidence rows, including miss
-rows for provider failures. Publishing returned evidence is the only mutation
-allowed after enqueue, and it happens through the bot's evidence-publish
-boundary.
+immutable transcript snapshot and returns evidence rows, including miss rows for
+provider failures. Publishing returned evidence is the only mutation allowed
+after enqueue, and it happens through the bot's evidence-publish boundary.
 
-Live constructors validate this boundary at startup: `LiveSafeConfig` and
-`LiveWebConfig` reject `AutoResearch=true` unless the caller explicitly chooses
-a replay/evaluation harness. This makes any synchronous `Observe` to provider
-path a configuration error before transcript intake starts.
+Constructors validate this boundary at startup: live profiles reject
+`AutoResearch=true`, and replay/default profiles only allow `AutoResearch` when a
+`ResearchScheduler` is configured. This makes any synchronous `Observe` to
+provider path a configuration error before transcript intake starts.
 
 ### Background Understanding
 
@@ -404,12 +408,12 @@ provider adapter and must be covered by provider-adapter contract tests.
 2. Send the question, opening, snippets, and research evidence to the
    fast-answer agent for refinement.
 
-The measured `First10WordsLatency` is the time to produce the opening, not the
-time for the downstream model to finish. It is an opening-readiness metric. An
-interactive UI that promises live response latency must emit `Answer.Opening`
-before waiting for the refinement call; the current CLI evaluation prints after
-`AnswerQuestion` returns, so `First10WordsLatency` is not by itself the
-CLI-visible response latency.
+The measured `OpeningReadinessLatency` is the time to produce the opening, not
+the time for the downstream model to finish. An interactive UI that promises
+live response latency must emit `Answer.Opening` before waiting for the
+refinement call; the current CLI evaluation prints after `AnswerQuestion`
+returns, so `OpeningReadinessLatency` is not by itself the CLI-visible response
+latency.
 
 The latency budget and model completion timeout are separate. The default
 latency budget remains 10 seconds, while `--answer-timeout` gives the real model
@@ -449,23 +453,22 @@ Live transports must also track observe-path health:
 | Metric | Meaning | Interpretation |
 |--------|---------|----------------|
 | `ObserveLatency` | wall-clock time for one `Observe` call | initial live target p95 <= 1s when `AutoResearch` is disabled |
-| `AutoResearchLatency` | time spent in a triggered `BuildBackground` call | provider slowness on the ingestion path |
+| `AutoResearchEnqueueLatency` | time spent creating and enqueueing research work | queue/backpressure on the ingestion path |
 | `TranscriptLag` | receiver wall-clock age of the newest unobserved source event | initial live target p95 <= 5s |
 | `FirstVisibleTextLatency` | time from question receipt to first bytes written to the UI/transport | user-visible live answer SLO, target <= `--latency-budget` |
 
 A healthy answer path does not imply a healthy live system. If observe-path
 latency or transcript lag is unacceptable for a transport, that transport must
-disable synchronous `AutoResearch` and run research from a queue.
+tune queue backpressure and transcript batching; provider calls must stay off the
+`Observe` path.
 
-`First10WordsLatency` remains the internal opening-readiness measurement in the
-current API, but the doc treats it as a deprecated name for
-`OpeningReadinessLatency`. An interactive transport must additionally measure
-`FirstVisibleTextLatency` at the write boundary. The reference recipe is:
-receive question, build `Answer.Opening`, write opening bytes to the transport,
-then start or await refinement. Serialization, batching, terminal rendering, and
-network flush time count toward `FirstVisibleTextLatency`; model refinement does
-not. For transcript lag, the clock basis is receiver monotonic time: each source
-event is stamped when received, and lag is the worst outstanding
+An interactive transport must additionally measure `FirstVisibleTextLatency` at
+the write boundary. The reference recipe is: receive question, build
+`Answer.Opening`, write opening bytes to the transport, then start or await
+refinement. Serialization, batching, terminal rendering, and network flush time
+count toward `FirstVisibleTextLatency`; model refinement does not. For transcript
+lag, the clock basis is receiver monotonic time: each source event is stamped
+when received, and lag is the worst outstanding
 receive-to-observe delay. Static replay files and batch-delivered events report
 lag as not applicable; non-monotonic speaker timestamps do not affect this
 metric.
@@ -583,7 +586,6 @@ const (
 type ValidationResult struct {
     Status        OutputStatus
     Reason        string
-    FailedClaims  []string
     MissingInputs []string
 }
 ```

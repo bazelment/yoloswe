@@ -1,39 +1,51 @@
-# Meeting Bot Evaluation Results
-
-Date: 2026-05-16
+# Meeting Bot Evaluation
 
 ## Objective
 
-Evaluate the meeting bot against the two required transcript notes under
-`/home/ubuntu` whose names start with `voice-tui-2026`. The evaluation checks:
+Evaluate the meeting bot against private transcript fixtures without committing
+meeting contents to the repository. The evaluation checks:
 
 - transcript ingestion
 - background topic extraction
 - multiple live question types
-- first-10-words latency for live answers
+- grounded opening latency for live answers
 - post-meeting summary generation
-- answer quality against visible transcript evidence
+- answer quality against transcript evidence
 
-## Inputs
+## Privacy Boundary
 
-| File | Parsed events | Dominant extracted topics |
-|------|---------------|---------------------------|
-| `/home/ubuntu/voice-tui-2026-05-13-elevenlabs-final.txt` | 235 | `sandbox`, `staging`, `tickets`, `agent os` |
-| `/home/ubuntu/voice-tui-2026-05-14-elevenlabs-final.txt` | 196 | `preview`, `workflows`, `workflow`, `deployment` |
+Evaluation inputs are private meeting transcripts stored outside the repository.
+Docs must not include transcript filenames, participant names, customer names,
+raw excerpts, generated answers, generated summaries, or meeting-specific facts.
 
-## Deterministic Evaluation Mode
+Only aggregate, non-content-bearing metrics are safe to record here.
 
-The recorded evaluation used deterministic local mode:
+## Automated Deterministic Evaluation
+
+The deterministic eval is automated through:
+
+```bash
+MEETINGBOT_NOTES_GLOB='<private-transcripts-glob>' scripts/meetingbot-eval.sh
+```
+
+The script runs the meeting bot in local replay mode, evaluates every transcript
+matched by `MEETINGBOT_NOTES_GLOB`, writes a JSON report to
+`/tmp/meetingbot-eval-report.json` by default, and exits non-zero if the quality
+gate fails.
+
+Equivalent direct command:
 
 ```bash
 bazel run //bramble:bramble -- meetingbot \
   --agent=local \
-  --notes-glob '/home/ubuntu/voice-tui-2026*' \
+  --notes-glob '<private-transcripts-glob>' \
   --evaluate \
-  --work-dir /home/ubuntu/worktrees/yoloswe/feature/meeting-bot
+  --quality-gate \
+  --eval-report /tmp/meetingbot-eval-report.json \
+  --work-dir /path/to/repo
 ```
 
-Why local mode for the recorded result:
+Why local mode is the default recorded path:
 
 - It is deterministic and suitable for repeatable repo validation.
 - It exercises the same orchestration path as real mode: transcript ingestion,
@@ -42,137 +54,68 @@ Why local mode for the recorded result:
 - It avoids making test results depend on model latency, credentials, network
   state, or public-web tool availability.
 
-Real-provider mode is available with `--agent=real` and uses the repo's
-`multiagent/agent` provider stack. The local machine had:
-
-```text
-codex-cli 0.130.0
-Claude Code 2.1.141
-```
-
 ## Interaction Set
 
-The default evaluation asks four question types per transcript:
+The default evaluation asks four generalized question types per transcript:
 
-1. "What is the most likely root cause pattern behind the sandbox or preview
-   failures?"
-2. "What should we tell the team about staging versus production for demos and
-   testing?"
-3. "What changed for customer workflow priorities, and what should we do next?"
-4. "What are the highest priority follow-up actions and risks?"
+1. operational root-cause analysis
+2. environment/demo/testing policy
+3. product or stakeholder priority changes
+4. follow-up actions and risks
 
-This covers operational debugging, environment policy, product/customer
-direction, and action/risk synthesis.
+The actual prompt text is implementation data in `bramble/meetingbot/eval.go`.
+Do not paste prompt outputs or transcript-specific answers into docs.
 
-## Latency Results
+## Aggregate Results
 
-Target: first 10 words under 10 seconds.
+Latest local deterministic run:
 
-| File | Interaction | First-10-words latency | Total local response latency | Status |
-|------|-------------|------------------------|------------------------------|--------|
-| 2026-05-13 | 1 | 1ms | 2ms | pass |
-| 2026-05-13 | 2 | 1ms | 3ms | pass |
-| 2026-05-13 | 3 | 1ms | 4ms | pass |
-| 2026-05-13 | 4 | 2ms | 3ms | pass |
-| 2026-05-14 | 1 | 2ms | 3ms | pass |
-| 2026-05-14 | 2 | 1ms | 2ms | pass |
-| 2026-05-14 | 3 | 1ms | 3ms | pass |
-| 2026-05-14 | 4 | 1ms | 2ms | pass |
+| Metric | Result |
+|--------|--------|
+| Private transcripts evaluated | 2 |
+| Interactions per transcript | 4 |
+| Parsed events | 235 and 196 |
+| Opening readiness target | <= 10s |
+| Observed opening readiness | 1-2ms |
+| Observed total local answer latency | 1-3ms |
+| Summary validation status | normal for both transcripts |
+| Quality gate | pass |
 
-The latency target is met because `AnswerQuestion` creates the opening locally
-before waiting for downstream agent synthesis.
+These metrics intentionally omit transcript titles, extracted topics, answer
+text, summary text, and meeting-specific interpretation.
 
-## Quality Observations
+## Quality Gate
 
-### 2026-05-13 Note
+The automated meeting-bot quality gate checks:
 
-Strong findings:
-
-- Sandbox/staging answer anchored to repeated discussion of sandbox failures,
-  staging versus prod signals, GitHub auth/secrets, and table/state drift.
-- Staging answer correctly distinguishes abandoned staging demos from
-  production as the demo surface.
-- Workflow-priority question correctly reports that this specific note does not
-  clearly establish a workflow priority change, instead pointing to CA testing,
-  feedback endpoint work, and custom app stability.
-- Action/risk answer emphasizes deployment confidence, preview/sandbox fixes,
-  CA readiness, and sandbox lifecycle planning.
-
-Main weakness:
-
-- Local mode cannot perform true public-web research. It records that limitation
-  rather than inventing public facts.
-
-### 2026-05-14 Note
-
-Strong findings:
-
-- Preview answer identifies a layered issue: auth/full-screen preview behavior
-  versus deeper missing app availability.
-- Staging/production answer draws from deployment issues, production workspace
-  setup, and staging secret/config drift.
-- Workflow question correctly identifies customer demand around
-  human-in-the-loop, multi-department approval workflows.
-- Action/risk answer focuses on deployment configuration, preview/sandbox
-  investigation, Builder Lite smoke/judge work, and customer-readiness.
-
-Main weakness:
-
-- The local evaluator is intentionally conservative and extractive; a real
-  model should improve synthesis and nuance, especially when public-web or
-  codebase research is enabled.
-
-## Summary Output Shape
-
-Each generated summary includes:
-
-- Executive summary
-- Decisions
-- Action items
-- Risks/blockers
-- Background/context
-
-The May 13 summary included the CA feedback endpoint and staging/prod drift.
-The May 14 summary included deployment/secrets drift, preview investigation,
-Builder Lite smoke/judge work, and customer workflow direction.
-
-## Real-Model Evaluation
-
-A real-model evaluation was later run and recorded in
-`docs/design/meetingbot-real-evaluation-2026-05-16.md`.
-
-That run used `--agent=real` across both required notes, with one research topic
-per note and the default four-question interaction set. It validated the main
-latency goal with real providers: first-10-words latency stayed between 1ms and
-3ms for all eight interactions, while full model answer synthesis took about
-12-19 seconds.
-
-## Quality Gates
+- at least one transcript file was evaluated
+- each file parsed events and ran the default interaction count
+- every answer produced a non-empty grounded opening and final answer
+- opening readiness stayed under the configured budget
+- total answer and summary latency stayed within configured budgets
+- answers and summaries returned `normal` validation status
+- summaries contained the required sections
+- no model errors or fallback errors were recorded
 
 The implementation passed:
 
 ```bash
+MEETINGBOT_NOTES_GLOB='<private-transcripts-glob>' scripts/meetingbot-eval.sh
 scripts/lint.sh
+bazel build //...
 bazel test //... --test_timeout=60
 ```
 
-`bazel test //... --test_timeout=60` reported 86/86 test targets passing.
+## Retention Policy
 
-## Completion Assessment
+Do not check in:
 
-The implementation satisfies the requested evaluation criteria:
+- raw meeting transcripts
+- terminal captures containing generated meeting answers
+- model-generated summaries of private meetings
+- named participants, customer names, or internal incident details
+- JSON eval reports if they include transcript paths, prompts, answers, or
+  summaries
 
-- Two required `voice-tui-2026*` notes were parsed and evaluated.
-- Multiple interaction types were evaluated.
-- First-response latency was measured and stayed far below 10 seconds in local
-  deterministic mode.
-- The design supports separate model/effort settings for fast answer, internal
-  research, codebase research, web research, and summary layers.
-- The summary path cross-references cached research and transcript excerpts.
-
-Remaining follow-up for production validation:
-
-- Repeat real-provider evaluation periodically because model latency and public
-  internet/tool availability are external variables.
-- Capture a longer live meeting session, not only replayed notes, once the bot
-  is wired into a real-time transcript stream.
+Temporary eval reports may be written under `/tmp` for local validation, but
+they should be treated as private artifacts and not copied into `docs/`.

@@ -20,7 +20,7 @@ func (LocalAgentClient) Run(ctx context.Context, req AgentRequest) (AgentRespons
 	var text string
 	switch req.Role {
 	case RoleFastAnswer:
-		text = localFastAnswer(req.Prompt)
+		text = localFastAnswer(req)
 	case RoleSummary:
 		text = localSummary(req.Prompt)
 	case RoleInternalResearch, RoleCodebaseResearch, RoleWebResearch:
@@ -48,38 +48,18 @@ func localResearch(role AgentRole, prompt string) string {
 	}
 }
 
-func localFastAnswer(prompt string) string {
-	lower := strings.ToLower(prompt)
-	question := strings.ToLower(promptValue(prompt, "Question:"))
-	evidenceText := strings.ToLower(strings.Join(relevantPromptLines(prompt, 12), "\n"))
-	opening := promptValue(prompt, "The bot already streamed this first sentence to satisfy live latency:")
+func localFastAnswer(req AgentRequest) string {
+	prompt := req.Prompt
+	question := firstNonEmpty(req.Question, promptValue(prompt, "Question:"))
+	evidenceText := strings.Join(relevantPromptLines(prompt, 12), "\n")
+	opening := firstNonEmpty(req.Opening, promptValue(prompt, "The bot already streamed this first sentence to satisfy live latency:"))
 	if opening == "" {
-		opening = immediateOpening(promptValue(prompt, "Question:"), nil, nil)
+		opening = immediateOpening(question, nil, nil)
 	}
 
-	var read string
-	switch {
-	case strings.Contains(question, "workflow") || strings.Contains(question, "customer"):
-		if strings.Contains(question, "workflow") && !strings.Contains(evidenceText, "workflow") && !strings.Contains(evidenceText, "approval") {
-			read = "This meeting note does not contain enough evidence that workflow priorities changed. It does contain customer-readiness work around feedback, CA testing, and custom app stability, so the next step is to verify workflow demand against a later note or customer source."
-		} else {
-			read = "New customer interest is converging on workflow automation with human approval steps. The clearest version is intake, manager approval, department review, and a final closure action."
-		}
-	case strings.Contains(question, "staging"):
-		read = "Staging should be used to validate fixes, but the meeting repeatedly warned not to treat old abandoned staging demo apps as urgent customer-facing regressions."
-	case strings.Contains(question, "sandbox") || strings.Contains(question, "preview"):
-		read = "The team identified preview as a layered issue: quick mitigation is to disable or simplify preview auth/full-screen behavior, while the deeper missing app-card/app-availability path needs session-level debugging."
-	case strings.Contains(question, "action") || strings.Contains(question, "follow"):
-		read = "Owners should close deployment configuration gaps, validate preview paths, keep CA/customer testing unblocked, and turn the repeated sandbox findings into a lifecycle plan."
-	case strings.Contains(lower, "preview"):
-		read = "The team identified preview as a layered issue: quick mitigation is to disable or simplify preview auth/full-screen behavior, while the deeper missing app-card/app-availability path needs session-level debugging."
-	case strings.Contains(lower, "staging"):
-		read = "Staging should be used to validate fixes, but the meeting repeatedly warned not to treat old abandoned staging demo apps as urgent customer-facing regressions."
-	case strings.Contains(lower, "sandbox"):
-		read = "The most useful framing is lifecycle and runtime consistency. The transcript mentions state drift across worker, sandbox, project, and session tables, so a local one-off patch is risky."
-	case strings.Contains(lower, "workflow") || strings.Contains(lower, "customer"):
-		read = "New customer interest is converging on workflow automation with human approval steps. The clearest version is intake, manager approval, department review, and a final closure action."
-	default:
+	focus := classifyAnswerFocus(question, evidenceText+"\n"+prompt)
+	read := localReadText(focus, strings.TrimSpace(evidenceText) != "")
+	if focus == focusGeneric {
 		read = "The answer should stay grounded in the transcript snippets and cached research because the meeting contains unresolved threads."
 	}
 
@@ -110,11 +90,11 @@ func localSummary(prompt string) string {
 	if strings.Contains(lower, "sandbox") || strings.Contains(lower, "preview") {
 		b.WriteString("- Assign preview/sandbox lifecycle investigation by separating UI/auth symptoms from backend app/session state symptoms.\n")
 	}
-	if strings.Contains(lower, "feedback endpoint") || strings.Contains(lower, "document extraction") {
-		b.WriteString("- Build the CA feedback endpoint so customer testing can report document extraction issues directly.\n")
+	if strings.Contains(lower, "feedback") || strings.Contains(lower, "extraction") {
+		b.WriteString("- Build the feedback channel so pilot testing can report extraction issues directly.\n")
 	}
-	if strings.Contains(lower, "builder lite") || strings.Contains(lower, "judge") {
-		b.WriteString("- Continue Builder Lite smoke tests and judge work, with attention to pre-PR rerun conservatism.\n")
+	if strings.Contains(lower, "builder") || strings.Contains(lower, "judge") {
+		b.WriteString("- Continue builder smoke tests and judge work, with attention to pre-PR rerun conservatism.\n")
 	}
 
 	b.WriteString("\nRisks/blockers\n")

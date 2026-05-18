@@ -27,7 +27,7 @@ func (ProviderAgentClient) Run(ctx context.Context, req AgentRequest) (AgentResp
 	}
 	m, ok := agent.ModelByID(modelID)
 	if !ok {
-		provider, found := agent.ProviderForModelID(modelID)
+		provider, found := agent.ProviderByModelPrefix(modelID)
 		if !found {
 			return AgentResponse{}, fmt.Errorf("unknown model %q; expected one of registered models or prefixes %s", modelID, agent.KnownModelPrefixes())
 		}
