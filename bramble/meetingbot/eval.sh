@@ -4,7 +4,7 @@ set -euo pipefail
 if [[ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]]; then
     WORKSPACE_ROOT="${BUILD_WORKSPACE_DIRECTORY}"
 else
-    WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 
 cd "${WORKSPACE_ROOT}"

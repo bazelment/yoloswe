@@ -25,7 +25,7 @@ Only aggregate, non-content-bearing metrics are safe to record here.
 The deterministic eval is automated through:
 
 ```bash
-MEETINGBOT_NOTES_GLOB='<private-transcripts-glob>' scripts/meetingbot-eval.sh
+MEETINGBOT_NOTES_GLOB='<private-transcripts-glob>' bramble/meetingbot/eval.sh
 ```
 
 The script runs the meeting bot in local replay mode, evaluates every transcript
@@ -100,7 +100,7 @@ The automated meeting-bot quality gate checks:
 The implementation passed:
 
 ```bash
-MEETINGBOT_NOTES_GLOB='<private-transcripts-glob>' scripts/meetingbot-eval.sh
+MEETINGBOT_NOTES_GLOB='<private-transcripts-glob>' bramble/meetingbot/eval.sh
 scripts/lint.sh
 bazel build //...
 bazel test //... --test_timeout=60
