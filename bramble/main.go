@@ -27,6 +27,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/app"
 	"github.com/bazelment/yoloswe/bramble/cmd/codereview"
 	"github.com/bazelment/yoloswe/bramble/cmd/delegator"
+	"github.com/bazelment/yoloswe/bramble/cmd/meetingbot"
 	"github.com/bazelment/yoloswe/bramble/cmd/speak"
 	"github.com/bazelment/yoloswe/bramble/ipc"
 	"github.com/bazelment/yoloswe/bramble/session"
@@ -75,6 +76,8 @@ Environment:
 }
 
 func init() {
+	rootCmd.AddCommand(meetingbot.Cmd)
+
 	rootCmd.Flags().StringVar(&repoFlag, "repo", "", "Repository name to open directly")
 	rootCmd.Flags().StringVar(&editorFlag, "editor", "", "Editor command for [e]dit (default: $EDITOR or 'code')")
 	rootCmd.Flags().StringVar(&sessionModeFlag, "session-mode", "auto", "Session execution mode: auto (default), tui, or tmux")
