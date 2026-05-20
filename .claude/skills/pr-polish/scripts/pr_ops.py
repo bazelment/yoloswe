@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -1116,12 +1118,12 @@ def _persist_round_findings(
         except Exception:  # noqa: BLE001 — malformed envelope shouldn't brick finalize
             obj = None
         entry[f"{backend}_findings"] = bramble_ops.parse_envelope(obj, source=backend)
-        # Clear any prior per-backend session_ids/resume_status before
-        # re-hydrating. Without this, an envelope that exists on disk
-        # but parses to non-dict / missing keys would let the previous
+        # Clear any prior per-backend session_ids/resume_status/sufficiency
+        # before re-hydrating. Without this, an envelope that exists on
+        # disk but parses to non-dict / missing keys would let the previous
         # finalize's values survive — same resume-stale-session class
         # of bug as the omitted-backend cleanup above.
-        for bucket_key in ("session_ids", "resume_status"):
+        for bucket_key in ("session_ids", "resume_status", "sufficiency_claims"):
             bucket = entry.get(bucket_key)
             if isinstance(bucket, dict):
                 bucket.pop(backend, None)
@@ -1132,6 +1134,13 @@ def _persist_round_findings(
                 entry.setdefault("session_ids", {})[backend] = obj.get("session_id")
             if obj.get("resume_status"):
                 entry.setdefault("resume_status", {})[backend] = obj.get("resume_status")
+            # v2 schema: the reviewer may emit a per-turn sufficiency
+            # claim. Persist it so the round summary and final report
+            # can surface it as audit-trail context. Absence is fine —
+            # parse_sufficiency returns None when the field isn't there.
+            suff = bramble_ops.parse_sufficiency(obj)
+            if suff is not None:
+                entry.setdefault("sufficiency_claims", {})[backend] = suff
         reviews_dir.mkdir(parents=True, exist_ok=True)
         dest = reviews_dir / f"r{n}-{backend}.json"
         try:
@@ -1234,6 +1243,256 @@ def _utc_now() -> str:
     from datetime import datetime
 
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Orchestration glue: preflight / round-bundle / finalize-and-report
+# ---------------------------------------------------------------------------
+#
+# These three subcommands compress the mechanical path/state plumbing the
+# orchestrator would otherwise rebuild inline each round. They are
+# deliberately thin — each returns a JSON dict the agent reads with one
+# ``jq -r`` call. Decision points (apply this fix? exit the loop?) stay
+# with the agent.
+
+
+def preflight() -> dict[str, Any]:
+    """Resolve the binaries + helper paths the round loop depends on.
+
+    Returns ``{bramble_bin, bramble_resume_supported, git_sync_path,
+    git_sync_supports_no_push, skill_dir}``. The orchestrator reads this
+    once at session start; missing-but-required pieces produce a
+    non-empty ``errors`` list so the agent can fail loudly before the
+    first round burns a Monitor budget.
+
+    Each probe is a small subprocess; this is the only place that
+    pattern lives now, instead of being copied into the SKILL.md
+    template as inline bash that the agent rebuilds verbatim.
+    """
+    out: dict[str, Any] = {
+        "bramble_bin": None,
+        "bramble_resume_supported": False,
+        "git_sync_path": None,
+        "git_sync_supports_no_push": False,
+        "skill_dir": str(Path(__file__).resolve().parent.parent),
+        "errors": [],
+    }
+    bin_candidate = Path.cwd() / "bazel-bin/bramble/bramble_/bramble"
+    if bin_candidate.is_file() and os.access(bin_candidate, os.X_OK):
+        out["bramble_bin"] = str(bin_candidate)
+    else:
+        out["bramble_bin"] = "bramble"
+    try:
+        help_res = subprocess.run(
+            [out["bramble_bin"], "code-review", "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        out["bramble_resume_supported"] = "--resume-session-id" in (
+            (help_res.stdout or "") + (help_res.stderr or "")
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        out["errors"].append(f"bramble code-review --help failed: {e}")
+    if not out["bramble_resume_supported"]:
+        out["errors"].append(
+            f"{out['bramble_bin']!r} does not support --resume-session-id; "
+            "the round loop requires continuous-conversation review"
+        )
+
+    # git:sync-base — prefer the repo-local install (matches the code
+    # under review); fall back to the user-installed copy in ~/.claude.
+    sync_candidates = [
+        Path.cwd() / ".claude/skills/git:sync-base/git-sync.py",
+        Path.home() / ".claude/skills/git:sync-base/git-sync.py",
+    ]
+    for cand in sync_candidates:
+        if cand.is_file():
+            out["git_sync_path"] = str(cand)
+            break
+    if out["git_sync_path"]:
+        try:
+            help_res = subprocess.run(
+                ["python3", out["git_sync_path"], "--help"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            out["git_sync_supports_no_push"] = "--no-push" in (help_res.stdout or "")
+        except subprocess.TimeoutExpired as e:
+            out["errors"].append(f"git-sync --help timed out: {e}")
+    else:
+        out["errors"].append("git:sync-base not found on disk")
+    return out
+
+
+def round_bundle(ctx: int | str, n: int) -> dict[str, Any]:
+    """Return everything the orchestrator needs to arm Monitors for round ``n``.
+
+    Wraps four existing helpers into one call:
+      - ``state_load`` for the state + derived booleans (heartbeat,
+        is_first_round_of_series).
+      - bramble_ops's ``goal_for_round`` + ``prior_session_id`` per
+        backend (codex, cursor, gemini).
+      - ``state_paths`` for the per-round log directory.
+
+    The bash that arms Monitors becomes one ``round-bundle`` call + a
+    ``jq -r`` of the result. Backends without prior session ids return
+    empty strings (same shape ``bramble_ops.py prior-session-id``
+    prints) so the orchestrator's ``${VAR:+--resume-session-id "$VAR"}``
+    expansion keeps working.
+
+    ``head_before`` defaults to ``git rev-parse HEAD`` — the orchestrator
+    can override by post-processing the bundle, but the common path
+    doesn't need to.
+    """
+    import bramble_ops  # noqa: PLC0415
+
+    pr_number, branch = _resolve_ctx(ctx)
+    state_dir, state_file = state_paths(pr_number, branch=branch)
+    log_dir = state_dir / f"r{n}"
+    state = read_json(state_file, default=None)
+    is_new_series = 1 if _is_first_round_of_series(state, n) else 0
+
+    head_res = run(["git", "rev-parse", "HEAD"], check=False)
+    head_before = head_res.stdout.strip() if head_res.returncode == 0 else ""
+
+    # PR_SUMMARY: leave empty here — building it requires a base-branch
+    # diff that the orchestrator already computes once at Step 1. The
+    # agent threads it into goal_for_round via a separate arg. Keep this
+    # helper bramble-agnostic at the PR_SUMMARY boundary.
+    goal_text = ""
+    if state is not None:
+        try:
+            goal_text = bramble_ops.goal_for_round(
+                n,
+                pr_summary="",
+                state=state,
+                head_before=head_before or None,
+                is_new_series=bool(is_new_series),
+            )
+        except Exception as e:  # noqa: BLE001 — diagnostic, not fatal
+            goal_text = f"# goal_for_round failed: {e}"
+
+    resume_ids: dict[str, str] = {}
+    for backend in bramble_ops.BACKENDS:
+        try:
+            sid = bramble_ops.prior_session_id(
+                state,
+                backend,
+                n,
+                is_new_series=bool(is_new_series),
+            )
+        except Exception:  # noqa: BLE001 — empty resume is the safe fallback
+            sid = ""
+        resume_ids[backend] = sid or ""
+
+    return {
+        "state_dir": str(state_dir),
+        "state_file": str(state_file),
+        "log_dir": str(log_dir),
+        "envelope_paths": {
+            backend: str(log_dir / f"{backend}-envelope.json")
+            for backend in bramble_ops.BACKENDS
+        },
+        "head_before": head_before,
+        "is_new_series": is_new_series,
+        "goal_text": goal_text,
+        "resume_ids": resume_ids,
+    }
+
+
+def finalize_and_report(
+    ctx: int | str,
+    n: int,
+    head_after: str,
+    actions: list[dict[str, Any]],
+    *,
+    envelope_overrides: dict[str, Path] | None = None,
+) -> dict[str, Any]:
+    """Finalize a round and return a one-shot orchestrator-readable report.
+
+    Wraps ``state_finalize_round`` and then computes the audit-trail
+    digest the orchestrator displays per-round: top severity, sufficiency
+    consensus, low_only_streak, and a short round_summary line. The
+    convergence decision stays with the agent — this only surfaces the
+    signals consistently so the agent doesn't grep state JSON per field.
+
+    Returns: ``{converged_signal: bool|null, exit_reason_hint: str|null,
+    low_only_streak: int, top_severity: str|null, sufficiency_consensus:
+    bool|null, sufficiency_claims: dict, next_round_n: int,
+    round_summary: str}``.
+
+    ``converged_signal`` is True when the existing rules would fire
+    (``low_only_streak >= 2`` OR ``len(action_plan.must_fix) == 0 and
+    top_severity ∈ {low, nit, null}``). It's a *hint*, not a gate —
+    SKILL.md's convergence prose is still the authoritative reference.
+    ``exit_reason_hint`` mirrors the same hint as a string the agent can
+    pass to ``state-mark-complete`` if it decides to exit.
+    """
+    state = state_finalize_round(
+        ctx, n, head_after, actions, envelope_overrides=envelope_overrides,
+    )
+    rounds = state.get("rounds") or []
+    entry = next((r for r in rounds if r.get("n") == n), None)
+    if entry is None:
+        return {"error": f"round {n} missing after finalize"}
+
+    fixed = entry.get("fixed_count") or 0
+    skipped = entry.get("skipped_count") or 0
+    top_sev = entry.get("top_severity")
+    streak = entry.get("low_only_streak") or 0
+
+    claims = entry.get("sufficiency_claims") or {}
+    backends_complete = [b for b, c in claims.items() if c.get("is_confident_complete")]
+    backends_incomplete = [b for b, c in claims.items() if not c.get("is_confident_complete")]
+    # Consensus: ≥2 backends claiming complete with no backend claiming
+    # incomplete. None when fewer than 2 backends emitted a claim either
+    # way (silent backends count as "no signal").
+    if len(claims) < 2:
+        consensus: bool | None = None
+    elif len(backends_complete) >= 2 and not backends_incomplete:
+        consensus = True
+    elif backends_incomplete:
+        consensus = False
+    else:
+        consensus = None
+
+    converged: bool | None
+    exit_reason_hint: str | None
+    low_top = top_sev in (None, "low", "nit")
+    if streak >= 2 and low_top:
+        converged = True
+        exit_reason_hint = "converged"
+    elif top_sev in (None, "low", "nit") and fixed == 0 and skipped == 0:
+        converged = True
+        exit_reason_hint = "all-low"
+    else:
+        converged = None
+        exit_reason_hint = None
+
+    suffix = ""
+    if consensus is True:
+        suffix = " (both backends signalled sufficiency)"
+    elif consensus is False:
+        suffix = " (one backend signalled more sites remain)"
+    round_summary = (
+        f"Round {n}: top={top_sev or 'none'}, fixed {fixed}, skipped {skipped}, "
+        f"low_only_streak={streak}{suffix}"
+    )
+
+    return {
+        "converged_signal": converged,
+        "exit_reason_hint": exit_reason_hint,
+        "low_only_streak": streak,
+        "top_severity": top_sev,
+        "sufficiency_consensus": consensus,
+        "sufficiency_claims": claims,
+        "next_round_n": n + 1,
+        "round_summary": round_summary,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1414,6 +1673,50 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("ctx", help="PR number or 'branch:<name>'")
 
+    sub.add_parser(
+        "preflight",
+        help=(
+            "Resolve bramble binary, git-sync path, and probe for "
+            "--resume-session-id / --no-push support. Returns one JSON "
+            "dict; non-empty errors[] means the round loop should fail "
+            "fast before launching Monitors."
+        ),
+    )
+
+    sp = sub.add_parser(
+        "round-bundle",
+        help=(
+            "Return everything the orchestrator needs to arm Monitors "
+            "for round N: log/state paths, envelope paths, head_before, "
+            "is_new_series, goal_text, and per-backend resume ids. "
+            "Replaces ~6 separate helper invocations."
+        ),
+    )
+    sp.add_argument("ctx", help="PR number or 'branch:<name>'")
+    sp.add_argument("n", type=int, help="round number")
+
+    sp = sub.add_parser(
+        "finalize-and-report",
+        help=(
+            "Finalize round N and emit a one-shot audit report "
+            "(converged_signal, exit_reason_hint, sufficiency_consensus, "
+            "round_summary). Same finalize semantics as "
+            "state-finalize-round; the convergence decision stays with "
+            "the agent — this only surfaces signals consistently."
+        ),
+    )
+    sp.add_argument("ctx", help="PR number or 'branch:<name>'")
+    sp.add_argument("n", type=int, help="round number")
+    sp.add_argument("head_after", help="HEAD SHA after this round's commits")
+    sp.add_argument("actions_file", help="Path to JSON file with comment_actions array")
+    sp.add_argument(
+        "--envelope",
+        action="append",
+        default=[],
+        metavar="BACKEND=PATH",
+        help="Same shape as state-finalize-round; repeat per backend.",
+    )
+
     return p
 
 
@@ -1523,6 +1826,35 @@ def main(argv: list[str] | None = None) -> int:
             print_json(state_mark_complete(args.ctx, args.reason))
         elif args.cmd == "state-mark-abandoned":
             print_json(state_mark_abandoned(args.ctx))
+        elif args.cmd == "preflight":
+            print_json(preflight())
+        elif args.cmd == "round-bundle":
+            print_json(round_bundle(args.ctx, args.n))
+        elif args.cmd == "finalize-and-report":
+            actions = json.loads(Path(args.actions_file).read_text())
+            if not isinstance(actions, list):
+                raise ValueError("actions file must be a JSON array")
+            import bramble_ops  # noqa: PLC0415
+            envelope_overrides: dict[str, Path] = {}
+            for spec in args.envelope:
+                if "=" not in spec:
+                    raise ValueError(f"--envelope must be <backend>=<path>, got {spec!r}")
+                backend, _, ep = spec.partition("=")
+                if backend not in bramble_ops.BACKENDS:
+                    raise ValueError(
+                        f"--envelope: unknown backend {backend!r}; "
+                        f"expected one of {sorted(bramble_ops.BACKENDS)}"
+                    )
+                envelope_overrides[backend] = Path(ep)
+            print_json(
+                finalize_and_report(
+                    args.ctx,
+                    args.n,
+                    args.head_after,
+                    actions,
+                    envelope_overrides=envelope_overrides,
+                )
+            )
         else:  # pragma: no cover — argparse enforces.
             raise ValueError(f"unknown cmd: {args.cmd}")
     except CommandError as e:

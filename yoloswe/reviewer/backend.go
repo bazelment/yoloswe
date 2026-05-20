@@ -272,7 +272,7 @@ func summarizeToolInput(input map[string]interface{}) string {
 		b.WriteString(k)
 		b.WriteString("=")
 		if sensitiveToolInputKeys[k] {
-			b.WriteString(fmt.Sprintf("<redacted:%d>", redactedLen(v)))
+			fmt.Fprintf(&b, "<redacted:%d>", redactedLen(v))
 			continue
 		}
 		s := fmt.Sprintf("%v", v)

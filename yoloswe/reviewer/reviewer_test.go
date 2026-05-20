@@ -252,15 +252,24 @@ func TestBuildFollowUpJSONPromptWithScope_KeepsBiasGuardAndDropsRedundantBlocks(
 
 				required := []string{
 					"Re-review the full diff with fresh eyes",
-					"including code you previously accepted",
-					"DO surface any new issues",
-					"more useful than one that just confirms the prior verdict",
+					// pr-polish round-reduction work: the follow-up prompt
+					// now incentivizes a clean second pass and an
+					// invariant-aware fold of new sites into existing
+					// findings, rather than rewarding "find something new"
+					// per turn. Pin both phrases so a future edit can't
+					// silently revert the framing.
+					"clean second pass is a legitimate outcome",
+					"New sites of an invariant you already named in a prior turn",
+					"Do NOT re-flag the same invariant as separate per-site findings",
 					"same severity rubric and JSON output format",
 					// Round-8 codex+cursor consensus added this: pin the
 					// no-prior-context escape hatch so a future edit can't
 					// silently drop the resume-fallback safety net.
 					"silently fell back to a fresh session",
 					"treat this as a first-pass review",
+					// Sufficiency is the v2 audit-trail channel; the model
+					// must be told it MAY emit it on resumed sessions.
+					"sufficiency",
 				}
 				for _, want := range required {
 					if !strings.Contains(prompt, want) {

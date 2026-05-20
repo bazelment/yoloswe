@@ -107,6 +107,68 @@ class TestGoalForRound(unittest.TestCase):
         self.assertIn("Round 2", out)
         self.assertIn("a.go:5", out)
 
+    def test_prior_invariants_mirrored_into_goal(self) -> None:
+        # v2 goal channel: when the prior round's comment_actions carry
+        # invariant names, the goal appends a one-section signal listing
+        # them so the resumed reviewer folds new sites into the existing
+        # finding rather than re-flagging per-site.
+        state = {
+            "rounds": [
+                {
+                    "n": 1,
+                    "comment_actions": [
+                        {
+                            "action": "fixed",
+                            "path": "a.go",
+                            "line": 5,
+                            "source": "codex",
+                            "invariant": "ambient env vars shadow explicit proxy keys",
+                        },
+                        {
+                            "action": "fixed",
+                            "path": "b.go",
+                            "line": 10,
+                            "source": "codex",
+                            "invariant": "ambient env vars shadow explicit proxy keys",
+                        },
+                        {
+                            "action": "ack",
+                            "path": "c.go",
+                            "line": 1,
+                            "source": "cursor",
+                            "invariant": "missing nil-check in builder",
+                        },
+                    ],
+                }
+            ]
+        }
+        goal = bramble_ops.goal_for_round(2, "PR_SUMMARY", state)
+        # Both distinct invariants surface; the duplicate from a.go/b.go
+        # collapses (deduped list).
+        self.assertIn("ambient env vars shadow explicit proxy keys", goal)
+        self.assertIn("missing nil-check in builder", goal)
+        # Only two bullets (the dedup), not three.
+        self.assertEqual(goal.count("\n- "), 2)
+        # The signal tells the model to fold sites, not re-flag.
+        self.assertIn("fold new sites", goal)
+
+    def test_no_prior_invariants_no_section(self) -> None:
+        # Legacy comment_actions without an invariant field don't
+        # trigger the signal — the goal stays as before.
+        state = {
+            "rounds": [
+                {
+                    "n": 1,
+                    "comment_actions": [
+                        {"action": "fixed", "path": "a.go", "line": 5, "source": "codex"},
+                    ],
+                }
+            ]
+        }
+        goal = bramble_ops.goal_for_round(2, "PR_SUMMARY", state)
+        self.assertNotIn("Invariants named in the prior round", goal)
+        self.assertNotIn("fold new sites", goal)
+
 
 class TestFilesChangedBetweenWarnings(unittest.TestCase):
     """Stderr warning when git diff rejects the cited range — the noisy
@@ -706,6 +768,107 @@ class TestParseEnvelope(unittest.TestCase):
     def test_missing_envelope_yields_empty_list(self) -> None:
         self.assertEqual(bramble_ops.parse_envelope(None, source="codex"), [])
 
+    def test_v2_class_level_issue_expands_sites_to_findings(self) -> None:
+        # v2 schema: an issue with invariant+sites[] expands into N
+        # findings that share the invariant name + topic, so the
+        # existing (file, line) consensus / per-site fix dispatch works
+        # unchanged. The representative-site row (issue.file/line) is
+        # NOT separately emitted — it's already covered by the sites
+        # loop because the validator guarantees the top-level file/line
+        # matches one of the entries.
+        env = {
+            "status": "ok",
+            "review": {
+                "issues": [
+                    {
+                        "severity": "high",
+                        "file": "a.go",
+                        "line": 10,
+                        "message": "ambient env vars shadow explicit proxy keys",
+                        "invariant": "ambient env vars shadow explicit proxy keys",
+                        "sites": [
+                            {"file": "a.go", "line": 10},
+                            {"file": "b.go", "line": 20},
+                            {"file": "c.go", "line": 30, "note": "test-only path"},
+                        ],
+                    }
+                ]
+            },
+        }
+        got = bramble_ops.parse_envelope(env, source="codex")
+        self.assertEqual(len(got), 3)
+        for f in got:
+            self.assertEqual(f["source"], "codex")
+            self.assertEqual(f["severity"], "high")
+            self.assertEqual(f["invariant"], "ambient env vars shadow explicit proxy keys")
+        files = sorted((f["file"], f["line"]) for f in got)
+        self.assertEqual(files, [("a.go", 10), ("b.go", 20), ("c.go", 30)])
+        # Per-site note threads through when present.
+        c_finding = next(f for f in got if f["file"] == "c.go")
+        self.assertEqual(c_finding["site_note"], "test-only path")
+        a_finding = next(f for f in got if f["file"] == "a.go")
+        self.assertNotIn("site_note", a_finding)
+
+    def test_v2_single_site_issue_legacy_shape(self) -> None:
+        # No invariant + no sites = legacy single-site finding. Exactly
+        # one finding per issue, no expansion.
+        env = {
+            "status": "ok",
+            "review": {
+                "issues": [
+                    {"severity": "high", "file": "a.go", "line": 10, "message": "bug"},
+                ]
+            },
+        }
+        got = bramble_ops.parse_envelope(env, source="codex")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["file"], "a.go")
+        self.assertNotIn("invariant", got[0])
+
+
+class TestParseSufficiency(unittest.TestCase):
+    def test_returns_dict_when_present(self) -> None:
+        env = {
+            "status": "ok",
+            "review": {
+                "sufficiency": {
+                    "is_confident_complete": True,
+                    "evidence": "all named invariants addressed",
+                },
+                "issues": [],
+            },
+        }
+        got = bramble_ops.parse_sufficiency(env)
+        self.assertEqual(got, {
+            "is_confident_complete": True,
+            "evidence": "all named invariants addressed",
+        })
+
+    def test_returns_none_when_absent(self) -> None:
+        env = {"status": "ok", "review": {"issues": []}}
+        self.assertIsNone(bramble_ops.parse_sufficiency(env))
+
+    def test_returns_none_when_error_status(self) -> None:
+        # A failed run's "sufficiency" claim (if any) is not trustworthy.
+        env = {
+            "status": "error",
+            "review": {"sufficiency": {"is_confident_complete": True}},
+        }
+        self.assertIsNone(bramble_ops.parse_sufficiency(env))
+
+    def test_returns_none_for_missing_required_field(self) -> None:
+        # is_confident_complete is the only required field; without it
+        # we treat the claim as malformed and ignore.
+        env = {"status": "ok", "review": {"sufficiency": {"evidence": "x"}}}
+        self.assertIsNone(bramble_ops.parse_sufficiency(env))
+
+    def test_evidence_defaults_to_empty_string(self) -> None:
+        # Bool-only claim is legal; evidence stays empty.
+        env = {"status": "ok", "review": {"sufficiency": {"is_confident_complete": False}}}
+        got = bramble_ops.parse_sufficiency(env)
+        self.assertEqual(got["evidence"], "")
+        self.assertFalse(got["is_confident_complete"])
+
 
 class TestTriage(unittest.TestCase):
     def _f(self, source: str, file: str, line: int, severity: str, message: str) -> dict:
@@ -902,6 +1065,61 @@ class TestTriage(unittest.TestCase):
         self.assertEqual(len(out["stale_prior_commit"]), 1)
         # Fresh one still routes by its own severity — single_medium.
         self.assertEqual(len(out["single_medium"]), 1)
+
+    def test_invariant_tier_consensus_across_different_sites(self) -> None:
+        # v2 schema: two reviewers naming the same invariant — even at
+        # different (file, line) sites — should count as consensus. The
+        # kernel-3964 spiral pattern is "codex finds invariant X at site
+        # A, cursor finds invariant X at site B, neither shares an
+        # address." Pre-v2 this never formed consensus and routed every
+        # site to single_medium. Now they fold into one must_fix row.
+        def _f(source: str, file: str, line: int, invariant: str) -> dict:
+            return {
+                "source": source,
+                "severity": "high",
+                "file": file,
+                "line": line,
+                "message": invariant,
+                "topic": _common.topic_of(invariant),
+                "invariant": invariant,
+            }
+        findings = [
+            _f("codex", "a.py", 10, "ambient env vars shadow explicit proxy keys"),
+            _f("cursor", "b.py", 20, "ambient env vars shadow explicit proxy keys"),
+        ]
+        out = bramble_ops.triage(findings, prior_fixed_keys=set())
+        self.assertEqual(
+            len(out["consensus"]), 1,
+            f"expected invariant-tier consensus, got {out['consensus']!r}",
+        )
+        self.assertEqual(out["consensus"][0]["sources"], ["codex", "cursor"])
+        self.assertEqual(
+            out["consensus"][0]["invariant"],
+            "ambient env vars shadow explicit proxy keys",
+        )
+        # No single-source rows should remain — invariant consensus
+        # consumed both findings.
+        self.assertEqual(len(out["single_critical"]), 0)
+        self.assertEqual(len(out["single_medium"]), 0)
+
+    def test_invariant_single_source_does_not_force_consensus(self) -> None:
+        # One reviewer naming an invariant alone is just a single-source
+        # finding (per site). Each site routes individually to its
+        # severity bucket; the invariant name still surfaces on each
+        # finding's dict for the goal-builder to mirror back next round.
+        f = {
+            "source": "codex",
+            "severity": "high",
+            "file": "a.py",
+            "line": 10,
+            "message": "ambient env vars shadow keys",
+            "topic": _common.topic_of("ambient env vars shadow keys"),
+            "invariant": "ambient env vars shadow keys",
+        }
+        out = bramble_ops.triage([f], prior_fixed_keys=set())
+        self.assertEqual(len(out["consensus"]), 0)
+        self.assertEqual(len(out["single_critical"]), 1)
+        self.assertEqual(out["single_critical"][0]["finding"]["invariant"], "ambient env vars shadow keys")
 
 
 class TestSpiralEvidencePresent(unittest.TestCase):

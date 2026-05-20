@@ -302,6 +302,42 @@ def _skipped_label(action: dict[str, Any], verb: str) -> str:
 _LOW_STREAK_PRESSURE_THRESHOLD = 2
 
 
+def _prior_invariants_note(state: dict[str, Any] | None, round_: int) -> str:
+    """Return a one-line "prior invariants" signal for the goal, or "".
+
+    Walks the immediately-prior round's ``comment_actions`` for entries
+    that carry an ``invariant`` field. Emits a single line listing each
+    distinct invariant name so the resumed reviewer sees them as
+    structured data, not free-form action history. The reviewer is then
+    told (by the wrapper's follow-up prompt) to fold new sites into the
+    existing invariant's sites[] array rather than re-flagging.
+
+    Reads from prior round only — same scoping as the spiral guard's
+    modified-hunk heuristic. A long audit shouldn't drag every old
+    invariant into every turn's goal.
+    """
+    if not state or round_ < 2:
+        return ""
+    rounds = state.get("rounds") or []
+    prior = [r for r in rounds if (r.get("n") or 0) < round_]
+    if not prior:
+        return ""
+    prev = max(prior, key=lambda r: r.get("n") or 0)
+    seen: list[str] = []
+    for action in prev.get("comment_actions") or []:
+        inv = action.get("invariant")
+        if inv and inv not in seen:
+            seen.append(inv)
+    if not seen:
+        return ""
+    bulleted = "".join(f"\n- {inv}" for inv in seen)
+    return (
+        "Invariants named in the prior round (fold new sites into the "
+        "existing finding's sites[] array, do not re-flag as separate "
+        f"issues):{bulleted}"
+    )
+
+
 def _low_only_streak_pressure(state: dict[str, Any] | None, round_: int) -> str:
     """Return the convergence-pressure sentence when streak >= 2, else "".
 
@@ -385,6 +421,9 @@ def goal_for_round(
     history = action_history_goal(state, round_, head_before=head_before)
     body = history or pr_summary
     parts = [body]
+    invariants = _prior_invariants_note(state, round_)
+    if invariants:
+        parts.append(invariants)
     pressure = _low_only_streak_pressure(state, round_)
     if pressure:
         parts.append(pressure)
@@ -546,22 +585,82 @@ def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str,
     out = []
     for i in issues:
         msg = i.get("message") or ""
-        finding = {
-            "source": source,
-            "severity": i.get("severity"),
-            "message": msg,
-            "suggestion": i.get("suggestion"),
-            "topic": topic_of(msg),
-            "review_mode": mode,
-        }
+        # v2 schema: a code-mode issue may carry an "invariant" + "sites"
+        # array when the reviewer found N sibling sites of one class-level
+        # rule. We expand to N findings sharing the same invariant and
+        # topic so the existing (file, line) consensus and per-site fix
+        # routing keeps working unchanged — the orchestrator sees N
+        # actionable rows, each labeled with the invariant they belong to.
+        # File/line at the top of the issue is the representative site
+        # (validated to match one entry in sites[]); we don't double-emit
+        # it. Design-doc mode doesn't carry sites[].
+        invariant = i.get("invariant") or None
+        sites = i.get("sites") or []
+        topic = topic_of(msg)
+
+        def _build_base() -> dict[str, Any]:
+            base: dict[str, Any] = {
+                "source": source,
+                "severity": i.get("severity"),
+                "message": msg,
+                "suggestion": i.get("suggestion"),
+                "topic": topic,
+                "review_mode": mode,
+            }
+            if invariant:
+                base["invariant"] = invariant
+            return base
+
         if mode == REVIEW_MODE_DESIGN_DOC:
+            finding = _build_base()
             finding["section"] = i.get("section")
             finding["dimension"] = i.get("dimension")
+            out.append(finding)
+            continue
+
+        if sites:
+            # Expand sites[] to one finding per site. The validator
+            # guarantees file/line at the top matches one entry, so the
+            # representative-site row is already covered by the loop.
+            for site in sites:
+                finding = _build_base()
+                finding["file"] = site.get("file")
+                finding["line"] = site.get("line")
+                note = site.get("note")
+                if note:
+                    finding["site_note"] = note
+                out.append(finding)
         else:
+            finding = _build_base()
             finding["file"] = i.get("file")
             finding["line"] = i.get("line")
-        out.append(finding)
+            out.append(finding)
     return out
+
+
+def parse_sufficiency(obj: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the reviewer's per-turn sufficiency claim, or None.
+
+    Reviewer schema v2 lets the model emit a top-level
+    ``review.sufficiency`` object with ``is_confident_complete`` (bool)
+    and ``evidence`` (string). It's an audit-trail signal — the
+    orchestrator surfaces it in round summaries and the final report but
+    does NOT use it as a new exit gate. Absence means no signal; do not
+    synthesize a default.
+    """
+    if obj is None:
+        return None
+    if (obj.get("status") or "") != "ok":
+        return None
+    suff = (obj.get("review") or {}).get("sufficiency")
+    if not isinstance(suff, dict):
+        return None
+    if "is_confident_complete" not in suff:
+        return None
+    return {
+        "is_confident_complete": bool(suff.get("is_confident_complete")),
+        "evidence": suff.get("evidence") or "",
+    }
 
 
 def parse_round(
@@ -1040,6 +1139,54 @@ def triage(
             )
             for g in group:
                 consensus_triage_keys.add(_triage_key(g, resolved_mode))
+
+    # Invariant-tier consensus (v2 schema, code mode only). Two reviewers
+    # naming the same invariant — even at different sites — are claiming
+    # the same class-level rule. Reward that: route every finding sharing
+    # the invariant to must_fix as one consensus row, even when no two
+    # findings shared a (file, line). Codex saying "ambient env vars
+    # shadow explicit proxy keys" at site A and cursor saying the same
+    # invariant at site B is exactly the signal we want to fold.
+    #
+    # Skipped in design-doc mode: the rubric dimension already partitions
+    # class-level claims there, and the invariant field is reserved for
+    # code mode in the wrapper schema.
+    if resolved_mode == REVIEW_MODE_CODE:
+        by_invariant: dict[str, list[dict[str, Any]]] = {}
+        for f in fresh_findings:
+            inv = f.get("invariant")
+            if not inv:
+                continue
+            by_invariant.setdefault(inv, []).append(f)
+        for inv, group in by_invariant.items():
+            sources = {g["source"] for g in group}
+            if len(sources) < 2:
+                # Single-source named invariant: leave it to per-site
+                # dispatch. Each site already routes individually, so the
+                # invariant name surfaces in the action_plan via the
+                # finding's invariant field without a forced consensus
+                # row.
+                continue
+            # Mark every site-finding's triage_key as handled so the
+            # per-key loop below doesn't double-list these under
+            # single_critical/medium when they have N sites.
+            already_consensus = False
+            for g in group:
+                tk = _triage_key(g, resolved_mode)
+                if tk in consensus_triage_keys:
+                    already_consensus = True
+                consensus_triage_keys.add(tk)
+            if already_consensus:
+                # Location-based pass already counted this; don't double-
+                # list, but the triage_key set is now wider so per-key
+                # dispatch won't re-route the additional sites.
+                continue
+            consensus.append({
+                "key": ["invariant", inv],
+                "sources": sorted(sources),
+                "invariant": inv,
+                "findings": group,
+            })
 
     single_critical: list[dict[str, Any]] = []
     single_medium: list[dict[str, Any]] = []

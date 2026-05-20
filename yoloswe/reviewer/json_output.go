@@ -9,7 +9,12 @@ import (
 )
 
 // JSONSchemaVersion is the envelope schema version. Bump on breaking changes.
-const JSONSchemaVersion = 1
+//
+// v2 adds optional code-mode fields for class-level findings (Issue.Invariant,
+// Issue.Sites) and reviewer self-assessment (ReviewBody.Sufficiency). Older
+// readers that don't know v2 ignore the new fields and continue to parse
+// v2 envelopes — the additions are strictly additive on the consumer side.
+const JSONSchemaVersion = 2
 
 // ReviewIssue mirrors the per-issue shape requested by BuildJSONPrompt.
 //
@@ -25,21 +30,32 @@ const JSONSchemaVersion = 1
 // required vs forbidden. omitempty on every mode-specific field keeps the
 // wire format clean: a code-mode issue serializes without section/dimension
 // and a design-doc-mode issue serializes without file/line.
+// Field order is dictated by govet/fieldalignment: pointer + slice
+// (large-alignment) fields first, then strings, then int. The JSON wire
+// shape is unaffected — json.Marshal honors the struct fields, not the
+// source order.
 type ReviewIssue struct {
-	Confidence *float64 `json:"confidence,omitempty"`
-	Severity   string   `json:"severity"`
-	Message    string   `json:"message"`
-	Suggestion string   `json:"suggestion,omitempty"`
+	Confidence *float64    `json:"confidence,omitempty"`
+	Severity   string      `json:"severity"`
+	Message    string      `json:"message"`
+	Suggestion string      `json:"suggestion,omitempty"`
+	File       string      `json:"file,omitempty"`
+	Section    string      `json:"section,omitempty"`
+	Dimension  string      `json:"dimension,omitempty"`
+	Invariant  string      `json:"invariant,omitempty"`
+	Sites      []IssueSite `json:"sites,omitempty"`
+	Line       int         `json:"line,omitempty"`
+}
 
-	// Code-mode addressing fields.
-	File string `json:"file,omitempty"`
-
-	// Design-doc-mode addressing fields. Section is the heading text the
-	// reviewer cited (or "(whole document)" for doc-wide issues).
-	// Dimension is the rubric question id, e.g. "q1".
-	Section   string `json:"section,omitempty"`
-	Dimension string `json:"dimension,omitempty"`
-	Line      int    `json:"line,omitempty"`
+// IssueSite is one location of a class-level finding's Sites array. Note
+// is optional per-site context the reviewer may add when the same rule
+// manifests differently at different sites (e.g. one site reads stale env,
+// another writes through it). Field order: strings before int per
+// fieldalignment.
+type IssueSite struct {
+	File string `json:"file"`
+	Note string `json:"note,omitempty"`
+	Line int    `json:"line"`
 }
 
 // ReviewBody is the parsed reviewer-level JSON. When the reviewer's response
@@ -49,12 +65,23 @@ type ReviewIssue struct {
 // *float64 so the field can be distinguished between "not provided" and
 // "explicitly zero", same as ReviewIssue.Confidence. Code-mode envelopes
 // don't emit it; design-doc-mode envelopes require it.
+// Field order: pointers + slices first, then strings, per fieldalignment.
 type ReviewBody struct {
-	Confidence *float64      `json:"confidence,omitempty"`
-	Verdict    string        `json:"verdict,omitempty"`
-	Summary    string        `json:"summary,omitempty"`
-	RawText    string        `json:"raw_text,omitempty"`
-	Issues     []ReviewIssue `json:"issues,omitempty"`
+	Confidence  *float64      `json:"confidence,omitempty"`
+	Sufficiency *Sufficiency  `json:"sufficiency,omitempty"`
+	Verdict     string        `json:"verdict,omitempty"`
+	Summary     string        `json:"summary,omitempty"`
+	RawText     string        `json:"raw_text,omitempty"`
+	Issues      []ReviewIssue `json:"issues,omitempty"`
+}
+
+// Sufficiency lets the reviewer claim "I think I've found all sites of
+// every invariant I named this turn." Evidence is a 1-2 sentence
+// rationale; the orchestrator displays it but does not parse it. Field
+// order: string before bool per fieldalignment.
+type Sufficiency struct {
+	Evidence            string `json:"evidence,omitempty"`
+	IsConfidentComplete bool   `json:"is_confident_complete"`
 }
 
 // validVerdicts enumerates per-mode verdict strings the reviewer prompt
@@ -76,6 +103,60 @@ var validVerdicts = map[ReviewMode]map[string]struct{}{
 		"revise":  {}, // address issues, doc shape is right
 		"rethink": {}, // premise needs reconsideration
 	},
+}
+
+// verdictAliases maps common reviewer-emitted variants to the canonical
+// verdict token for the corresponding mode. The reviewer prompt asks for
+// the canonical token explicitly, but cursor (in particular) occasionally
+// emits PR-review-style verdicts like "approve_with_notes" or
+// "request_changes". Rather than failing validation and forcing the skill's
+// recover-envelope shim to re-map these, normalize at the validator
+// boundary so the wrapper itself converges on the canonical set.
+//
+// Keys are lowercased; lookup is case-insensitive (the validator lowercases
+// the input). Hyphen-vs-underscore variants are both keyed because models
+// pick one or the other at random.
+var verdictAliases = map[ReviewMode]map[string]string{
+	ReviewModeCode: {
+		"approve":            "accepted",
+		"approve_with_notes": "accepted",
+		"approve-with-notes": "accepted",
+		"approved":           "accepted",
+		"lgtm":               "accepted",
+		"ship":               "accepted",
+		"request_changes":    "rejected",
+		"request-changes":    "rejected",
+		"needs_changes":      "rejected",
+		"needs-changes":      "rejected",
+		"changes_requested":  "rejected",
+		"changes-requested":  "rejected",
+		"reject":             "rejected",
+		"block":              "rejected",
+	},
+	ReviewModeDesignDoc: {
+		// Design-doc verdicts (ready/revise/rethink) rarely confuse the
+		// model — the rubric framing keeps them top of mind. Leaving this
+		// empty makes adding aliases trivial later without changing the
+		// validator shape.
+	},
+}
+
+// normalizeVerdict canonicalizes verdict aliases at the validator
+// boundary. Returns the original input unchanged when it's already
+// canonical or has no alias mapping; the validator's existing
+// validVerdicts check still catches genuinely unknown verdicts.
+func normalizeVerdict(verdict string, mode ReviewMode) string {
+	if verdict == "" {
+		return verdict
+	}
+	aliases, ok := verdictAliases[mode]
+	if !ok {
+		return verdict
+	}
+	if canonical, hit := aliases[strings.ToLower(verdict)]; hit {
+		return canonical
+	}
+	return verdict
 }
 
 // validSeverities enumerates the severity labels the reviewer prompt requires.
@@ -130,6 +211,8 @@ const (
 // ("review_mode" omitted) is treated as ReviewModeCode by consumers — the
 // pre-mode envelopes shipped without this field, and we want their
 // behaviour preserved.
+// Field order: large nested struct (Review) first so its inner pointer
+// fields align cleanly, then strings, then ints. Wire format unchanged.
 type ResultEnvelope struct {
 	Status        EnvelopeStatus `json:"status"`
 	Backend       string         `json:"backend"`
@@ -177,7 +260,13 @@ func BuildEnvelope(result *ReviewResult, backend BackendType, model, sessionID s
 	body, parseErr := extractReviewBody(result.ResponseText)
 	env.Review = body
 
-	schemaErr := validateReviewBody(body, mode)
+	// validateReviewBody normalizes the verdict in place so downstream
+	// envelope readers see the canonical token — the alias map turns
+	// "approve_with_notes" into "accepted" before the validVerdicts gate
+	// fires, which means the skill's recover-envelope shim becomes a
+	// no-op on v2 envelopes. Pass &env.Review (not the local body)
+	// because the normalization must land on the envelope we emit.
+	schemaErr := validateReviewBody(&env.Review, mode)
 
 	switch {
 	case result.ErrorMessage != "":
@@ -221,7 +310,7 @@ func ValidateReviewJSON(raw []byte, mode ReviewMode) error {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return fmt.Errorf("unmarshal reviewer JSON: %w", err)
 	}
-	return validateReviewBody(body, mode)
+	return validateReviewBody(&body, mode)
 }
 
 // validateReviewBody checks the parsed body against the required reviewer
@@ -245,6 +334,49 @@ func ValidateReviewJSON(raw []byte, mode ReviewMode) error {
 //   - "ready" carries no high/critical issues
 //   - top-level confidence ∈ [0.0, 1.0]; per-issue confidence ∈ (0.0, 1.0] when present
 //
+// validateInvariantSites enforces the code-mode contract for class-level
+// findings:
+//
+//   - Issue.Invariant non-empty implies len(Sites) ≥ 1 (an invariant must
+//     point at evidence).
+//   - When Sites has ≥2 entries, Issue.File/Line must match one of them —
+//     the representative site stays in sync with the array so single-site
+//     triage and consensus matching see a coherent address.
+//   - Each Site has a non-empty File and Line ≥ 1.
+//
+// A single-site issue with no invariant has Sites empty; that's the legacy
+// shape and stays valid. A single-site issue MAY carry Invariant with one
+// Site (e.g. the reviewer found one sibling but expects more on the next
+// turn) — we accept that without forcing it.
+//
+// Takes *ReviewIssue (not a copy) because ReviewIssue is ~152 bytes once
+// Sites + Invariant landed; the validator runs per-issue in a tight loop.
+func validateInvariantSites(idx int, issue *ReviewIssue) error {
+	if issue.Invariant != "" && len(issue.Sites) == 0 {
+		return fmt.Errorf("issue[%d] invariant requires at least one site", idx)
+	}
+	if len(issue.Sites) == 0 {
+		return nil
+	}
+	matched := false
+	for j := range issue.Sites {
+		site := &issue.Sites[j]
+		if site.File == "" {
+			return fmt.Errorf("issue[%d].sites[%d] missing file", idx, j)
+		}
+		if site.Line < 1 {
+			return fmt.Errorf("issue[%d].sites[%d] missing line", idx, j)
+		}
+		if site.File == issue.File && site.Line == issue.Line {
+			matched = true
+		}
+	}
+	if !matched {
+		return fmt.Errorf("issue[%d] file/line must match one of sites[]", idx)
+	}
+	return nil
+}
+
 // Note: the design-doc prompt (designDocJSONOutputRules) describes
 // finer verdict-vs-severity calibration bands (e.g. "revise is for
 // low/medium issues only; rethink for high/critical clusters"). Those
@@ -254,7 +386,12 @@ func ValidateReviewJSON(raw []byte, mode ReviewMode) error {
 // the doc's premise needs reconsideration. Don't tighten this without
 // also updating the prompt; otherwise valid model output will trip the
 // validator.
-func validateReviewBody(body ReviewBody, mode ReviewMode) error {
+//
+// The body is mutated in place: verdict aliases (e.g. "approve_with_notes")
+// are normalized to the canonical token before the validVerdicts gate,
+// and the canonical verdict is the one downstream consumers see on the
+// emitted envelope.
+func validateReviewBody(body *ReviewBody, mode ReviewMode) error {
 	if mode == "" {
 		mode = ReviewModeCode
 	}
@@ -262,6 +399,7 @@ func validateReviewBody(body ReviewBody, mode ReviewMode) error {
 	if !ok {
 		return fmt.Errorf("unknown review mode %q", mode)
 	}
+	body.Verdict = normalizeVerdict(body.Verdict, mode)
 	if _, ok := verdicts[body.Verdict]; !ok {
 		return fmt.Errorf("verdict %q not valid for mode %q", body.Verdict, mode)
 	}
@@ -275,7 +413,11 @@ func validateReviewBody(body ReviewBody, mode ReviewMode) error {
 		}
 	}
 	hasBlocking := false
-	for i, issue := range body.Issues {
+	// Index loop avoids the per-iteration value-copy lint (each
+	// ReviewIssue is ~152 bytes once Sites/Invariant landed); see
+	// gocritic.rangeValCopy.
+	for i := range body.Issues {
+		issue := &body.Issues[i]
 		if issue.Severity == "" {
 			return fmt.Errorf("issue[%d] missing severity", i)
 		}
@@ -292,6 +434,9 @@ func validateReviewBody(body ReviewBody, mode ReviewMode) error {
 			if issue.Line < 1 {
 				return fmt.Errorf("issue[%d] missing line", i)
 			}
+			if err := validateInvariantSites(i, issue); err != nil {
+				return err
+			}
 		} else { // ReviewModeDesignDoc
 			if issue.Section == "" {
 				return fmt.Errorf("issue[%d] missing section", i)
@@ -301,6 +446,9 @@ func validateReviewBody(body ReviewBody, mode ReviewMode) error {
 			}
 			if issue.File != "" || issue.Line != 0 {
 				return fmt.Errorf("issue[%d] design-doc mode must not carry file/line", i)
+			}
+			if issue.Invariant != "" || len(issue.Sites) > 0 {
+				return fmt.Errorf("issue[%d] design-doc mode must not carry invariant/sites", i)
 			}
 		}
 		if issue.Confidence != nil {
