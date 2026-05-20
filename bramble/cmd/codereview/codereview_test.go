@@ -750,12 +750,18 @@ func TestBuildPromptForRun_FollowUpUsesShortPrompt(t *testing.T) {
 		t.Fatalf("buildPromptForRun: %v", err)
 	}
 
-	// Bias-guard prose must remain.
+	// Bias-guard prose must remain. The pr-polish round-reduction
+	// work flipped the framing from "find more is more useful" to "a
+	// clean second pass is a legitimate outcome" and added the
+	// invariant-fold-not-reflag rule + sufficiency channel. Pin both
+	// the new phrases and the no-prior-context safety net.
 	for _, want := range []string{
 		"Continue the review on the same diff",
 		"Re-review the full diff with fresh eyes",
-		"DO surface any new issues",
-		"more useful than one that just confirms the prior verdict",
+		"clean second pass is a legitimate outcome",
+		"New sites of an invariant you already named in a prior turn",
+		"Do NOT re-flag the same invariant as separate per-site findings",
+		"sufficiency",
 		"same severity rubric and JSON output format",
 		// Round-8 codex+cursor consensus: pin the no-prior-context
 		// escape hatch so a future edit can't silently drop the

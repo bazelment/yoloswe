@@ -9,6 +9,10 @@ Focus on these areas:
 - performance.
 - security.
 
+When you find N >= 2 sibling sites of the same underlying rule violation (same invariant, different lines), emit ONE issue with a named "invariant" and a "sites" array. Do NOT emit N separate single-site issues. The invariant name describes the rule being violated (e.g. "ambient env vars shadow explicit proxy keys"), not the symptom. A single finding that names the producer-side invariant beats N findings that patch consumer sites — see the Class-level findings section of the output format for the exact shape.
+
+Prioritize systemic problems over local ones. If after scanning the diff and adjacent code you find no structural issues, return an empty issues array with verdict "accepted". Finding nothing on a clean diff is the right call; do not strain to find something to flag.
+
 When you flag an issue, provide a short, direct explanation and cite the affected file and line range.
 Prioritize severe issues and avoid nit-level comments unless they block understanding of the diff.
 Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected.
@@ -25,9 +29,12 @@ You MUST respond with valid JSON in this exact format:
       "line": 42,
       "message": "Description of the issue",
       "suggestion": "How to fix it",
-      "confidence": 0.9
+      "confidence": 0.9,
+      "invariant": "short name of the rule (optional, see Class-level findings)",
+      "sites": [{"file": "path/to/file.go", "line": 42}, {"file": "path/to/other.go", "line": 17}]
     }
-  ]
+  ],
+  "sufficiency": {"is_confident_complete": true, "evidence": "..."}
 }
 
 ## Severity Levels
@@ -36,10 +43,39 @@ You MUST respond with valid JSON in this exact format:
 - medium: Code style issues, minor inefficiencies, missing edge cases
 - low: Naming preferences, formatting, optional improvements
 
+## Class-level findings (invariant + sites)
+When you find N >= 2 sibling sites of the same rule violation, emit ONE
+issue with:
+- "invariant": a short name for the rule (3-8 words; e.g. "ambient env
+  vars shadow explicit proxy keys"). Name the rule being violated, not
+  the symptom.
+- "sites": [{"file": "...", "line": ...}, ...] listing every site.
+- "file" and "line" at the top of the issue: the most representative
+  site (pick one entry from "sites"). Required for back-compat with
+  single-site triage.
+- "message": describe the invariant once, then list the sites by reference.
+  Do not repeat the same wording per site.
+Do NOT emit N separate single-site issues for one invariant. A single
+finding that names the producer-side invariant beats N findings that
+patch consumer sites.
+
+## Sufficiency (optional, resume sessions only)
+On round 2+, you MAY emit a top-level "sufficiency" object:
+- "is_confident_complete": true if you believe the prior turn's fixes
+  addressed every invariant you can find at this scope. false if you
+  suspect more sites or a different class of issue remain.
+- "evidence": 1-2 sentences explaining why. Optional.
+This is a hint to the orchestrator, not a new gate — the verdict +
+issues array remain authoritative. Omit on first-pass reviews.
+
 ## Rules
-- verdict MUST be exactly "accepted" or "rejected"
+- verdict MUST be exactly "accepted" or "rejected". Aliases like
+  "approve_with_notes", "request_changes", "lgtm", or "needs-changes"
+  are normalized but you should pick the canonical token.
 - If there are any critical or high severity issues, verdict MUST be "rejected"
-- issues array can be empty if verdict is "accepted"
+- issues array can be empty if verdict is "accepted". A clean diff is a
+  legitimate outcome; do not strain to find something to flag.
 - Each issue MUST include severity, file, line (>= 1), and message; suggestion is optional
 - confidence is an optional float in (0.0, 1.0]: 1.0 = certain, 0.5 = plausible but unverified; omit only when you cannot assess (the field is treated as "no signal", not as a default value)
+- When "invariant" is set, "sites" MUST list >=1 entries and "file"/"line" MUST match one of them.
 - Output ONLY the JSON object, no other text

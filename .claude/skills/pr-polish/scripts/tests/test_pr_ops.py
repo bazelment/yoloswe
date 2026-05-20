@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -369,6 +370,148 @@ class TestStateLifecycle(unittest.TestCase):
         # Old round entry preserved; new one appended.
         self.assertEqual(len(state["rounds"]), 2)
         self.assertEqual(state["current_round"], 2)
+
+
+class TestLowOnlyStreak(unittest.TestCase):
+    """`low_only_streak` powers the streak-based convergence rule and the
+    reviewer-pressure goal sentence (B1). Test the increment/reset shape
+    directly through the unit helper plus the live finalize path so a
+    state-shape regression surfaces here instead of leaking into a real run.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp_root = Path(self.tmp.name)
+
+        def fake_state_paths(pr, branch=None):
+            key = pr if pr is not None else f"branch-{branch}"
+            d = tmp_root / f"proj-{key}"
+            d.mkdir(parents=True, exist_ok=True)
+            return d, d / "pr-polish-state.json"
+
+        patcher = patch.object(pr_ops, "state_paths", side_effect=fake_state_paths)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_unit_increments_when_top_severity_low(self) -> None:
+        prior = [{"n": 1, "low_only_streak": 1, "top_severity": "low"}]
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "low"), 2)
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "nit"), 2)
+        # ``None`` top_severity (zero findings) counts as low-only too.
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, None), 2)
+
+    def test_unit_resets_when_medium_or_higher(self) -> None:
+        prior = [{"n": 1, "low_only_streak": 5, "top_severity": "low"}]
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "medium"), 0)
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "high"), 0)
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "critical"), 0)
+
+    def test_unit_round_one_low_only_starts_at_one(self) -> None:
+        self.assertEqual(pr_ops._compute_low_only_streak([], "low"), 1)
+        self.assertEqual(pr_ops._compute_low_only_streak([], None), 1)
+
+    def test_unit_round_one_high_starts_at_zero(self) -> None:
+        self.assertEqual(pr_ops._compute_low_only_streak([], "high"), 0)
+
+    def test_finalize_persists_low_only_streak(self) -> None:
+        pr_ops.state_append_round(42, 1, "abc", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            42,
+            1,
+            "def",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(state["rounds"][0]["low_only_streak"], 1)
+
+    def test_finalize_increments_across_consecutive_low_rounds(self) -> None:
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(
+            42, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(42, 2, "sha1f", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            42, 2, "sha2f",
+            [{"comment_id": 2, "action": "ack", "severity": "nit"}],
+        )
+        self.assertEqual(state["rounds"][0]["low_only_streak"], 1)
+        self.assertEqual(state["rounds"][1]["low_only_streak"], 2)
+
+    def test_finalize_resets_when_medium_lands(self) -> None:
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(
+            42, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(42, 2, "sha1f", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            42, 2, "sha2f",
+            [{"comment_id": 2, "action": "fixed", "severity": "medium",
+              "commit_sha": "sha2f"}],
+        )
+        self.assertEqual(state["rounds"][1]["low_only_streak"], 0)
+
+    def test_backfills_streak_from_top_severity_when_field_missing(self) -> None:
+        """An in-progress state file written by a pre-streak orchestrator
+        won't have ``low_only_streak`` on its rounds. The next finalize
+        must reconstruct the streak from ``top_severity`` history so the
+        new convergence shortcut and pressure note trigger correctly
+        instead of waiting for two fresh low rounds to accumulate.
+        """
+        # Two prior low-only rounds with no streak field — simulates state
+        # written by the pre-this-feature orchestrator.
+        prior = [
+            {"n": 1, "top_severity": "low"},
+            {"n": 2, "top_severity": "nit"},
+        ]
+        # This round is also low — streak should be 3 (2 + 1), not 1.
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "low"), 3)
+
+    def test_backfill_resets_at_first_non_low_walking_back(self) -> None:
+        """Backfill walks the top_severity ladder backwards and stops at
+        the first medium/high. A history of [high, low, low] ending in
+        low-only continues at streak=2, not 3.
+        """
+        prior = [
+            {"n": 1, "top_severity": "high"},
+            {"n": 2, "top_severity": "low"},
+            {"n": 3, "top_severity": "low"},
+        ]
+        # Most recent is low; walking back: low (n=3), low (n=2), high
+        # (n=1 — stop). prev_streak from backfill = 2; this round adds 1.
+        self.assertEqual(pr_ops._compute_low_only_streak(prior, "low"), 3)
+
+    def test_backfill_unit(self) -> None:
+        # Empty -> 0
+        self.assertEqual(pr_ops._backfill_low_only_streak([]), 0)
+        # All low -> count all
+        self.assertEqual(
+            pr_ops._backfill_low_only_streak(
+                [{"n": 1, "top_severity": "low"},
+                 {"n": 2, "top_severity": "nit"},
+                 {"n": 3, "top_severity": None}],
+            ),
+            3,
+        )
+        # Most recent is medium -> 0 (the streak ended at the most recent round)
+        self.assertEqual(
+            pr_ops._backfill_low_only_streak(
+                [{"n": 1, "top_severity": "low"},
+                 {"n": 2, "top_severity": "medium"}],
+            ),
+            0,
+        )
+
+    def test_finalize_zero_findings_counts_as_low_only(self) -> None:
+        # Zero findings -> top_severity is None -> still counts as low-only,
+        # so the streak increments. A single zero-finding round is what
+        # "converged" feels like; the convergence rule treats two of these
+        # in a row as definite.
+        pr_ops.state_append_round(42, 1, "sha1", verify_head=False)
+        state = pr_ops.state_finalize_round(42, 1, "sha1f", [])
+        self.assertIsNone(state["rounds"][0]["top_severity"])
+        self.assertEqual(state["rounds"][0]["low_only_streak"], 1)
 
 
 class TestStateFirstRoundOfSeries(unittest.TestCase):
@@ -1176,6 +1319,77 @@ class TestPersistRoundFindings(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("without --envelope", buf.getvalue())
 
+    def test_finalize_persists_sufficiency_claim_when_present(self) -> None:
+        # v2 schema: a reviewer that emits a top-level sufficiency
+        # object has its claim persisted at rounds[n].sufficiency_claims
+        # under the backend's key. Absence stays absent — no synthesis.
+        cx_path = self.envelope_dir / "codex-envelope.json"
+        cx_path.write_text(json.dumps({
+            "status": "ok",
+            "backend": "codex",
+            "session_id": "s1",
+            "review": {
+                "verdict": "accepted",
+                "issues": [],
+                "sufficiency": {
+                    "is_confident_complete": True,
+                    "evidence": "all named invariants addressed",
+                },
+            },
+            "schema_version": 2,
+        }))
+        cu_path = self.envelope_dir / "cursor-envelope.json"
+        cu_path.write_text(json.dumps({
+            "status": "ok",
+            "backend": "cursor",
+            "session_id": "s2",
+            "review": {"verdict": "accepted", "issues": []},
+            "schema_version": 2,
+        }))
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha2", [],
+            envelope_overrides={"codex": cx_path, "cursor": cu_path},
+        )
+        claims = state["rounds"][0].get("sufficiency_claims")
+        self.assertIsNotNone(claims)
+        self.assertEqual(claims["codex"]["is_confident_complete"], True)
+        self.assertEqual(claims["codex"]["evidence"], "all named invariants addressed")
+        # Cursor's envelope had no sufficiency — no entry.
+        self.assertNotIn("cursor", claims)
+
+    def test_finalize_clears_stale_sufficiency_on_re_finalize(self) -> None:
+        # Re-finalize must not let the previous turn's sufficiency
+        # claim survive when the new envelope omits the field. Same
+        # cleanup pattern as session_ids/resume_status.
+        env_path = self.envelope_dir / "codex-envelope.json"
+        env_path.write_text(json.dumps({
+            "status": "ok",
+            "backend": "codex",
+            "review": {
+                "verdict": "accepted",
+                "issues": [],
+                "sufficiency": {"is_confident_complete": True},
+            },
+        }))
+        pr_ops.state_append_round(77, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            77, 1, "sha2", [], envelope_overrides={"codex": env_path}
+        )
+        # Re-finalize with an envelope that has NO sufficiency.
+        env_path.write_text(json.dumps({
+            "status": "ok",
+            "backend": "codex",
+            "review": {"verdict": "accepted", "issues": []},
+        }))
+        state = pr_ops.state_finalize_round(
+            77, 1, "sha3", [], envelope_overrides={"codex": env_path}
+        )
+        claims = state["rounds"][0].get("sufficiency_claims")
+        # Either absent entirely or codex key removed — both are fine.
+        if claims is not None:
+            self.assertNotIn("codex", claims)
+
 
 class TestCIFailedTests(unittest.TestCase):
     """Parses per-failed-job test details from gh check output + job logs."""
@@ -1761,6 +1975,206 @@ class TestAutoReplyInFinalize(unittest.TestCase):
             {"action": "wont_fix", "reason": "design tradeoff"}, "abc123fdeadbeef"
         )
         self.assertIn("Won't fix: design tradeoff", body_wf)
+
+
+class TestPreflight(unittest.TestCase):
+    """preflight resolves the binaries + helper paths the round loop
+    needs in one JSON dict. The errors[] list signals fail-fast cases
+    (missing --resume-session-id support, git-sync not on disk)."""
+
+    def test_returns_dict_with_required_keys(self) -> None:
+        out = pr_ops.preflight()
+        for key in (
+            "bramble_bin",
+            "bramble_resume_supported",
+            "git_sync_path",
+            "git_sync_supports_no_push",
+            "skill_dir",
+            "errors",
+        ):
+            self.assertIn(key, out)
+        self.assertIsInstance(out["errors"], list)
+
+    def test_reports_missing_resume_support_in_errors(self) -> None:
+        def fake_subprocess_run(cmd, **kwargs):
+            # Simulate an old bramble that doesn't print --resume-session-id.
+            return subprocess.CompletedProcess(args=cmd, returncode=0,
+                                               stdout="usage: bramble code-review", stderr="")
+        with patch("subprocess.run", side_effect=fake_subprocess_run):
+            out = pr_ops.preflight()
+        self.assertFalse(out["bramble_resume_supported"])
+        self.assertTrue(any("--resume-session-id" in e for e in out["errors"]))
+
+
+class TestRoundBundle(unittest.TestCase):
+    """round-bundle wraps state_load + goal_for_round + prior_session_id
+    into one JSON dict the orchestrator reads with one jq call."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self._patch_home = patch.dict(os.environ, {"HOME": str(self.tmp)})
+        self._patch_home.start()
+        # Reset the cached state dir module-level path.
+        import importlib
+        importlib.reload(pr_ops)
+
+    def tearDown(self) -> None:
+        self._patch_home.stop()
+        self._tmp.cleanup()
+        import importlib
+        importlib.reload(pr_ops)
+
+    def test_emits_paths_and_resume_ids_for_fresh_run(self) -> None:
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="head-sha\n", stderr="", returncode=0)
+            return _common.RunResult(stdout="", stderr="", returncode=1)
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            out = pr_ops.round_bundle(99, 1)
+        self.assertIn("state_dir", out)
+        self.assertIn("log_dir", out)
+        self.assertTrue(out["log_dir"].endswith("/r1"))
+        self.assertEqual(out["head_before"], "head-sha")
+        self.assertIn("envelope_paths", out)
+        for backend in ("codex", "cursor", "gemini", "lint"):
+            self.assertIn(backend, out["envelope_paths"])
+            # All resume ids empty on a fresh run (no prior state).
+            self.assertEqual(out["resume_ids"].get(backend, ""), "")
+
+    def test_returns_goal_text_on_round_two_with_prior_actions(self) -> None:
+        pr_ops.state_append_round(99, 1, "sha1", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "fixed", "severity": "high",
+              "path": "a.go", "line": 5, "source": "codex", "topic": "bug"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="sha1f\n", stderr="", returncode=0)
+            return _common.RunResult(stdout="", stderr="", returncode=1)
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            out = pr_ops.round_bundle(99, 2)
+        # Round 2 with prior actions: goal_text references the prior round.
+        self.assertIn("Round 2", out["goal_text"])
+        self.assertIn("a.go:5", out["goal_text"])
+
+
+class TestFinalizeAndReport(unittest.TestCase):
+    """finalize-and-report wraps state_finalize_round and emits the
+    one-shot audit-trail digest the orchestrator displays per-round."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self._patch_home = patch.dict(os.environ, {"HOME": str(self.tmp)})
+        self._patch_home.start()
+        import importlib
+        importlib.reload(pr_ops)
+        self.envelope_dir = self.tmp / "envelopes"
+        self.envelope_dir.mkdir()
+
+    def tearDown(self) -> None:
+        self._patch_home.stop()
+        self._tmp.cleanup()
+        import importlib
+        importlib.reload(pr_ops)
+
+    def _write_envelope(self, backend: str, **kw) -> Path:
+        obj = {
+            "status": "ok",
+            "backend": backend,
+            "review": {
+                "verdict": kw.get("verdict", "rejected"),
+                "issues": kw.get("issues", []),
+            },
+        }
+        if "sufficiency" in kw:
+            obj["review"]["sufficiency"] = kw["sufficiency"]
+        path = self.envelope_dir / f"{backend}-envelope.json"
+        path.write_text(json.dumps(obj))
+        return path
+
+    def test_low_only_streak_two_signals_converged(self) -> None:
+        # Two consecutive low-only rounds: existing low_only_streak rule
+        # fires. converged_signal == True so the orchestrator can mark
+        # complete without grepping state.
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 2, "sha2f",
+            [{"comment_id": 2, "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertEqual(out["converged_signal"], True)
+        self.assertEqual(out["exit_reason_hint"], "converged")
+
+    def test_high_severity_round_does_not_signal_converged(self) -> None:
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "fixed", "severity": "high",
+              "commit_sha": "sha1f"}],
+        )
+        self.assertIsNone(out["converged_signal"])
+        self.assertIsNone(out["exit_reason_hint"])
+
+    def test_sufficiency_consensus_when_both_backends_agree(self) -> None:
+        cx = self._write_envelope(
+            "codex",
+            verdict="accepted",
+            sufficiency={"is_confident_complete": True, "evidence": "ok"},
+        )
+        cu = self._write_envelope(
+            "cursor",
+            verdict="accepted",
+            sufficiency={"is_confident_complete": True, "evidence": "lgtm"},
+        )
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 1, "sha1f", [],
+            envelope_overrides={"codex": cx, "cursor": cu},
+        )
+        self.assertEqual(out["sufficiency_consensus"], True)
+        self.assertIn("both backends signalled sufficiency", out["round_summary"])
+
+    def test_sufficiency_consensus_false_when_one_dissents(self) -> None:
+        cx = self._write_envelope(
+            "codex",
+            verdict="accepted",
+            sufficiency={"is_confident_complete": True},
+        )
+        cu = self._write_envelope(
+            "cursor",
+            verdict="rejected",
+            issues=[{"severity": "medium", "file": "a.go", "line": 1, "message": "m"}],
+            sufficiency={"is_confident_complete": False, "evidence": "more sites"},
+        )
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 1, "sha1f", [],
+            envelope_overrides={"codex": cx, "cursor": cu},
+        )
+        self.assertEqual(out["sufficiency_consensus"], False)
+        self.assertIn("one backend signalled more sites remain", out["round_summary"])
+
+    def test_round_summary_shape(self) -> None:
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "fixed", "severity": "medium",
+              "commit_sha": "sha1f"}],
+        )
+        self.assertIn("Round 1", out["round_summary"])
+        self.assertIn("top=medium", out["round_summary"])
+        self.assertIn("fixed 1", out["round_summary"])
+        self.assertEqual(out["next_round_n"], 2)
 
 
 if __name__ == "__main__":

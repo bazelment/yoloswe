@@ -1052,3 +1052,38 @@ Notes:
   on resumed sessions, or accept that turn 3's value here is mostly
   the resume-fault detector, not a re-derivation.
 
+
+## 2026-05-10 — pr-polish-improvements
+
+Diff: 6 files, +1158/-31 lines (round-reduction work for /pr-polish: low_only_streak convergence, inter-round goal diff, modified-hunk spiral demote, session-reset-K, recover_envelope helper, A1 pre-commit checklist).
+
+| Config | Turn | Resume | Findings | FPs | Verdict | Confidence | Time | Tokens (in/out) |
+|--------|------|--------|----------|-----|---------|------------|------|-----------------|
+| cursor-composer2 | 1 | — | 2 (1H/1M) | 0 | rejected | 0.95/0.85 | 142s | — |
+| cursor-composer2 | 2 | ok | 3 (1H/2M) | 0 | rejected | 0.96/0.92/0.82 | 34s | — |
+| cursor-composer2 | 3 | ok | 3 (1H/2M) | 0 | rejected | 0.96/0.91/0.84 | 23s | — |
+| codex-5.4-mini | 1 | — | 2 (1H/1M) | 0 | rejected | 0.87/0.92 | 150s | 0/0 |
+| codex-5.4-mini | 2 | ok | 3 (1H/2M) | 0 | rejected | 0.95/0.92/0.83 | 119s | 0/0 |
+| codex-5.4-mini | 3 | ok | 3 (1H/2M) | 0 | rejected | 0.95/0.92/0.83 | 21s | 0/0 |
+| gemini-3.1-flash-lite-preview | 1 | — | 0 | — | accepted | — | 531s | 0/0 |
+| gemini-3.1-flash-lite-preview | 2 | ok | 0 | — | accepted | — | 1s | 0/0 |
+| gemini-3.1-flash-lite-preview | 3 | ok | 0 | — | accepted | — | 1s | 0/0 |
+
+Consensus (all 3, turn 1): none.
+Majority (2 of 3, turn 1): none. Becomes 2-of-3 by turn 2 on the recovery-substring bug (cursor turn 1 + codex turn 2).
+Unique to cursor (turn 1): _classify_recovery_verdict substring matching (high; `approve` matches `disapprove`, `changes` matches `exchanges`, etc., with empirical repro — verified post-hoc by directly calling the helper); parse-stream CLI fails to thread --mode (medium).
+Unique to codex (turn 1): modified-hunk spiral demote uses OR with evidence-absent rather than AND, can suppress real regressions on touched lines (high); low_only_streak missing-field default=0 breaks streak continuity on existing in-progress state files (medium).
+Unique to gemini (turn 1): nothing.
+Disagreements: gemini accepts (0 issues) while both other backends reject with at least one high finding apiece. This is a competence gap, not a phrasing disagreement.
+
+Both real bugs are confirmed: cursor's recovery-substring bug is a real correctness defect (running the helper on `"verdict error: disapprove not allowed"` returns `"accepted"`, silently salvaging an envelope that should stay rejected); codex's spiral-demote OR is a real false-negative risk (a single-source spiral whose cited line is inside any prior-round hunk gets demoted even when the cited code still exists at HEAD).
+
+Follow-up deltas:
+- cursor-composer2: turn 2 +1 new (negative-test gap for the substring fix at test_bramble_ops:2179, medium 0.92), tightens turn-1 high with explicit `disapprove`/`exchanges`/`ownership`/`blocking` repro, and adds a perf observation about parse_round being decoded twice. Turn 3 mirrors turn 2 with the negative-test entry rewritten to a different line anchor (2080 vs 2179) — same finding shape, same severities. Cursor's resume cadence is the most useful in this eval: the headline became sharper across turns.
+- codex-5.4-mini: turn 2 +1 new (independently flags the recovery substring bug at bramble_ops:1337, medium 0.83 — three turns later than cursor saw it); same two prior issues unchanged. Turn 3 is identical to turn 2 (same 3 issues, same line numbers, same suggestions), in 21s vs 118s — classic fresh-prompt-on-resumed-session degenerating to a cache of turn 2.
+- gemini-3.1-flash-lite-preview: 0 findings all three turns. Turn 1 took 531s of actual reading; turns 2 and 3 returned in 1s with "secondary/comprehensive review confirms initial assessment" summaries. Same fast-recall-from-summary pattern as prior runs.
+
+Notes:
+- Cross-backend complementarity is unusually clean here: each non-gemini backend caught one critical bug the other missed in turn 1. Running cursor + codex in parallel (the production /pr-polish setup) catches both highs in round 1, which is the relevant practical signal.
+- Codex turn 3 = turn 2 cache pattern is now consistent across four consecutive evals.
+- Gemini's "fast verdict from summary" on resume is now consistent across four consecutive evals; combined with the turn-1 0-issue verdict on a diff with two confirmed bugs, gemini-3.1-flash-lite-preview remains not viable as a sole reviewer.

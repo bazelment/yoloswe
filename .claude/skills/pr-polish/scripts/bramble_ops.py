@@ -79,6 +79,14 @@ _ACTION_HISTORY_CAP = 20
 # can't blow the whole prompt.
 _TOPIC_CHAR_CAP = 80
 
+# Default truncation cap for the inter-round diff appended to the goal
+# channel (D1). 200 lines is roughly the same order of magnitude as a
+# typical round's commit; bigger diffs almost always indicate a rebase
+# or tooling-generated change that the reviewer doesn't need to re-read
+# inline. Defined here at module top because ``goal_for_round`` (defined
+# above ``round_diff``) consumes it as a default-argument value.
+_ROUND_DIFF_DEFAULT_MAX_LINES = 200
+
 
 def _is_first_round_of_series(state: dict[str, Any] | None, n: int) -> bool:
     """Mirror of pr_ops._is_first_round_of_series.
@@ -286,6 +294,91 @@ def _skipped_label(action: dict[str, Any], verb: str) -> str:
     return f"{base} {verb}"
 
 
+# Streak threshold above which the goal channel injects a one-sentence
+# convergence-pressure note. Two consecutive low-only rounds is the
+# earliest point at which "every finding costs a round, returning zero
+# is a real option" stops sounding presumptuous; at one low-only round
+# it's normal noise floor, at three+ the streak rule itself fires.
+_LOW_STREAK_PRESSURE_THRESHOLD = 2
+
+
+def _prior_invariants_note(state: dict[str, Any] | None, round_: int) -> str:
+    """Return a one-line "prior invariants" signal for the goal, or "".
+
+    Walks the immediately-prior round's ``comment_actions`` for entries
+    that carry an ``invariant`` field. Emits a single line listing each
+    distinct invariant name so the resumed reviewer sees them as
+    structured data, not free-form action history. The reviewer is then
+    told (by the wrapper's follow-up prompt) to fold new sites into the
+    existing invariant's sites[] array rather than re-flagging.
+
+    Reads from prior round only — same scoping as the spiral guard's
+    modified-hunk heuristic. A long audit shouldn't drag every old
+    invariant into every turn's goal.
+    """
+    if not state or round_ < 2:
+        return ""
+    rounds = state.get("rounds") or []
+    prior = [r for r in rounds if (r.get("n") or 0) < round_]
+    if not prior:
+        return ""
+    prev = max(prior, key=lambda r: r.get("n") or 0)
+    seen: list[str] = []
+    for action in prev.get("comment_actions") or []:
+        inv = action.get("invariant")
+        if inv and inv not in seen:
+            seen.append(inv)
+    if not seen:
+        return ""
+    bulleted = "".join(f"\n- {inv}" for inv in seen)
+    return (
+        "Invariants named in the prior round (fold new sites into the "
+        "existing finding's sites[] array, do not re-flag as separate "
+        f"issues):{bulleted}"
+    )
+
+
+def _low_only_streak_pressure(state: dict[str, Any] | None, round_: int) -> str:
+    """Return the convergence-pressure sentence when streak >= 2, else "".
+
+    Reads the immediately-prior round's ``low_only_streak`` rather than
+    walking history — the counter is finalize-time persistent. Falls back
+    to reconstructing the streak from ``top_severity`` history when the
+    field is missing (state file from before low_only_streak existed) so
+    upgraded mid-loop runs don't lose streak continuity. The sentence is
+    appended to whatever ``goal_for_round`` produces, so triage routing
+    and action-history are unaffected.
+
+    Wording is fixed: it states a fact ("the last N rounds returned only
+    low-severity findings") and a frame ("every finding costs a round")
+    rather than prescribing a verdict. Per the skill's framing: don't
+    encode a table of phrasings keyed to streak length.
+    """
+    if not state or round_ < 2:
+        return ""
+    rounds = state.get("rounds") or []
+    prior = [r for r in rounds if (r.get("n") or 0) < round_]
+    if not prior:
+        return ""
+    prev = max(prior, key=lambda r: r.get("n") or 0)
+    streak = prev.get("low_only_streak")
+    if streak is None:
+        # Lazy import to avoid pulling pr_ops at module load (pr_ops
+        # already lazy-imports bramble_ops; the inverse is fine when
+        # gated to one fallback path).
+        from pr_ops import _backfill_low_only_streak  # noqa: PLC0415
+
+        streak = _backfill_low_only_streak(prior)
+    if streak < _LOW_STREAK_PRESSURE_THRESHOLD:
+        return ""
+    return (
+        f"The last {streak} rounds returned only low-severity findings. "
+        "The fixer treats your output as authoritative, and every finding "
+        "costs a round; if the diff has no structural issue, returning "
+        "zero findings is the right call."
+    )
+
+
 def goal_for_round(
     round_: int,
     pr_summary: str,
@@ -293,6 +386,8 @@ def goal_for_round(
     *,
     head_before: str | None = None,
     is_new_series: bool | None = None,
+    include_round_diff: bool = True,
+    round_diff_max_lines: int = _ROUND_DIFF_DEFAULT_MAX_LINES,
 ) -> str:
     """Return the ``--goal`` text bramble should see for this round.
 
@@ -302,20 +397,48 @@ def goal_for_round(
     ``action_history_goal``. Falls back to PR_SUMMARY when there's
     nothing to say (e.g. round 1 produced an empty action plan).
 
+    Round 2+ also gets:
+      - When the prior round's ``low_only_streak`` is >= 2, a one-line
+        convergence-pressure sentence appended (B1).
+      - When ``include_round_diff`` is True and the prior round's
+        ``head_after`` is reachable, the diff between the prior round's
+        HEAD and this round's HEAD is appended under a "Diff since
+        round N-1" header (D1). Truncated at ``round_diff_max_lines``.
+
     ``head_before`` is this round's HEAD, used to compute the
-    files-changed-since-prior-round line.
+    files-changed-since-prior-round line and the round diff.
 
     ``is_new_series`` is the orchestrator's series-boundary decision
     captured at Step 0.5 (before ``state_append_round`` clears
     ``completed: true``). When true, the round is a real round 1 from
     the model's perspective even when ``round_`` is high — the prior
     series' state is unreachable and walking it produces a noisy
-    goal blob. PR_SUMMARY is the right anchor for a fresh series.
+    goal blob. PR_SUMMARY is the right anchor for a fresh series, and
+    the streak / diff additions are skipped.
     """
     if round_ < 2 or is_new_series:
         return pr_summary
     history = action_history_goal(state, round_, head_before=head_before)
-    return history or pr_summary
+    body = history or pr_summary
+    parts = [body]
+    invariants = _prior_invariants_note(state, round_)
+    if invariants:
+        parts.append(invariants)
+    pressure = _low_only_streak_pressure(state, round_)
+    if pressure:
+        parts.append(pressure)
+    if include_round_diff:
+        diff_text = round_diff(
+            state, round_, head_before=head_before, max_lines=round_diff_max_lines
+        )
+        if diff_text:
+            rounds = state.get("rounds") or []
+            prior = [r for r in rounds if (r.get("n") or 0) < round_]
+            prev_n = max((r.get("n") or 0) for r in prior) if prior else round_ - 1
+            parts.append(
+                f"Diff since round {prev_n} (truncated at {round_diff_max_lines} lines):\n{diff_text}"
+            )
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -462,22 +585,82 @@ def parse_envelope(obj: dict[str, Any] | None, *, source: str) -> list[dict[str,
     out = []
     for i in issues:
         msg = i.get("message") or ""
-        finding = {
-            "source": source,
-            "severity": i.get("severity"),
-            "message": msg,
-            "suggestion": i.get("suggestion"),
-            "topic": topic_of(msg),
-            "review_mode": mode,
-        }
+        # v2 schema: a code-mode issue may carry an "invariant" + "sites"
+        # array when the reviewer found N sibling sites of one class-level
+        # rule. We expand to N findings sharing the same invariant and
+        # topic so the existing (file, line) consensus and per-site fix
+        # routing keeps working unchanged — the orchestrator sees N
+        # actionable rows, each labeled with the invariant they belong to.
+        # File/line at the top of the issue is the representative site
+        # (validated to match one entry in sites[]); we don't double-emit
+        # it. Design-doc mode doesn't carry sites[].
+        invariant = i.get("invariant") or None
+        sites = i.get("sites") or []
+        topic = topic_of(msg)
+
+        def _build_base() -> dict[str, Any]:
+            base: dict[str, Any] = {
+                "source": source,
+                "severity": i.get("severity"),
+                "message": msg,
+                "suggestion": i.get("suggestion"),
+                "topic": topic,
+                "review_mode": mode,
+            }
+            if invariant:
+                base["invariant"] = invariant
+            return base
+
         if mode == REVIEW_MODE_DESIGN_DOC:
+            finding = _build_base()
             finding["section"] = i.get("section")
             finding["dimension"] = i.get("dimension")
+            out.append(finding)
+            continue
+
+        if sites:
+            # Expand sites[] to one finding per site. The validator
+            # guarantees file/line at the top matches one entry, so the
+            # representative-site row is already covered by the loop.
+            for site in sites:
+                finding = _build_base()
+                finding["file"] = site.get("file")
+                finding["line"] = site.get("line")
+                note = site.get("note")
+                if note:
+                    finding["site_note"] = note
+                out.append(finding)
         else:
+            finding = _build_base()
             finding["file"] = i.get("file")
             finding["line"] = i.get("line")
-        out.append(finding)
+            out.append(finding)
     return out
+
+
+def parse_sufficiency(obj: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the reviewer's per-turn sufficiency claim, or None.
+
+    Reviewer schema v2 lets the model emit a top-level
+    ``review.sufficiency`` object with ``is_confident_complete`` (bool)
+    and ``evidence`` (string). It's an audit-trail signal — the
+    orchestrator surfaces it in round summaries and the final report but
+    does NOT use it as a new exit gate. Absence means no signal; do not
+    synthesize a default.
+    """
+    if obj is None:
+        return None
+    if (obj.get("status") or "") != "ok":
+        return None
+    suff = (obj.get("review") or {}).get("sufficiency")
+    if not isinstance(suff, dict):
+        return None
+    if "is_confident_complete" not in suff:
+        return None
+    return {
+        "is_confident_complete": bool(suff.get("is_confident_complete")),
+        "evidence": suff.get("evidence") or "",
+    }
 
 
 def parse_round(
@@ -855,6 +1038,7 @@ def triage(
     ci_failures: list[dict[str, Any]] | None = None,
     mode: str | None = None,
     head_path: Path | None = None,
+    prior_modified_hunks: dict[str, list[tuple[int, int]]] | None = None,
 ) -> dict[str, Any]:
     """Group findings, surface consensus, detect N+1 spiral matches.
 
@@ -956,6 +1140,54 @@ def triage(
             for g in group:
                 consensus_triage_keys.add(_triage_key(g, resolved_mode))
 
+    # Invariant-tier consensus (v2 schema, code mode only). Two reviewers
+    # naming the same invariant — even at different sites — are claiming
+    # the same class-level rule. Reward that: route every finding sharing
+    # the invariant to must_fix as one consensus row, even when no two
+    # findings shared a (file, line). Codex saying "ambient env vars
+    # shadow explicit proxy keys" at site A and cursor saying the same
+    # invariant at site B is exactly the signal we want to fold.
+    #
+    # Skipped in design-doc mode: the rubric dimension already partitions
+    # class-level claims there, and the invariant field is reserved for
+    # code mode in the wrapper schema.
+    if resolved_mode == REVIEW_MODE_CODE:
+        by_invariant: dict[str, list[dict[str, Any]]] = {}
+        for f in fresh_findings:
+            inv = f.get("invariant")
+            if not inv:
+                continue
+            by_invariant.setdefault(inv, []).append(f)
+        for inv, group in by_invariant.items():
+            sources = {g["source"] for g in group}
+            if len(sources) < 2:
+                # Single-source named invariant: leave it to per-site
+                # dispatch. Each site already routes individually, so the
+                # invariant name surfaces in the action_plan via the
+                # finding's invariant field without a forced consensus
+                # row.
+                continue
+            # Mark every site-finding's triage_key as handled so the
+            # per-key loop below doesn't double-list these under
+            # single_critical/medium when they have N sites.
+            already_consensus = False
+            for g in group:
+                tk = _triage_key(g, resolved_mode)
+                if tk in consensus_triage_keys:
+                    already_consensus = True
+                consensus_triage_keys.add(tk)
+            if already_consensus:
+                # Location-based pass already counted this; don't double-
+                # list, but the triage_key set is now wider so per-key
+                # dispatch won't re-route the additional sites.
+                continue
+            consensus.append({
+                "key": ["invariant", inv],
+                "sources": sorted(sources),
+                "invariant": inv,
+                "findings": group,
+            })
+
     single_critical: list[dict[str, Any]] = []
     single_medium: list[dict[str, Any]] = []
     low_acks: list[dict[str, Any]] = []
@@ -989,19 +1221,43 @@ def triage(
             if (
                 resolved_mode == REVIEW_MODE_CODE
                 and not is_multi_source
-                and not _spiral_evidence_present(repr_, head=head_path)
             ):
-                demoted = dict(repr_)
-                demoted["stale_reason"] = (
-                    "spiral candidate auto-demoted: cited evidence absent at HEAD"
+                # Two demote heuristics, both safe to run when the
+                # finding has a (file, line):
+                #   1) Evidence-at-HEAD: distinctive tokens from the
+                #      finding's message no longer appear within ±10
+                #      lines of the cited line.
+                #   2) Modified-hunk: the cited line lies inside a hunk
+                #      that any prior round of this series modified —
+                #      reviewer is reading cached context against code
+                #      we already moved (e.g. doc-comment fix shifted
+                #      words within the same function).
+                # Either signal alone is enough to demote; both are
+                # noisier on multi-source spirals (real regressions
+                # often coincide with prior fixes), so multi-source
+                # spirals always escalate.
+                evidence_absent = not _spiral_evidence_present(repr_, head=head_path)
+                in_modified_hunk = bool(prior_modified_hunks) and _line_in_modified_hunk(
+                    repr_, prior_modified_hunks
                 )
-                stale_prior_commit.append(
-                    {"key": list(_triage_key(repr_, resolved_mode)), "finding": demoted}
-                )
-                # Skip the rest of the per-key dispatch — this finding
-                # is now in batch_stale and must not also land in any
-                # severity bucket.
-                continue
+                if evidence_absent or in_modified_hunk:
+                    demoted = dict(repr_)
+                    if in_modified_hunk:
+                        demoted["stale_reason"] = (
+                            "spiral candidate auto-demoted: cited line inside a "
+                            "hunk modified by a prior round"
+                        )
+                    else:
+                        demoted["stale_reason"] = (
+                            "spiral candidate auto-demoted: cited evidence absent at HEAD"
+                        )
+                    stale_prior_commit.append(
+                        {"key": list(_triage_key(repr_, resolved_mode)), "finding": demoted}
+                    )
+                    # Skip the rest of the per-key dispatch — this finding
+                    # is now in batch_stale and must not also land in any
+                    # severity bucket.
+                    continue
             spiral_matches.append({"key": list(key), "findings": group})
         if key in consensus_triage_keys:
             # Already routed to consensus by location-based grouping;
@@ -1123,12 +1379,23 @@ def prior_fixed_keys(state: dict[str, Any] | None, mode: str = REVIEW_MODE_CODE)
     return keys
 
 
+# Default: force a fresh bramble session every K rounds so accumulated
+# session context can't compound staleness across a long audit. Each
+# resume keeps the reviewer reading the same conversation history;
+# after ~4 rounds the older turns describe code that no longer exists,
+# and the model starts re-flagging stale context. K=4 is the
+# round-budget cliff PR #240's session showed: r5–r10 were mostly
+# chasing consequences of r1–r4 fixes. Override with --session-reset-k.
+SESSION_RESET_K_DEFAULT = 4
+
+
 def prior_session_id(
     state: dict[str, Any] | None,
     backend: str,
     round_: int,
     *,
     is_new_series: bool | None = None,
+    session_reset_k: int = SESSION_RESET_K_DEFAULT,
 ) -> str:
     """Return the newest prior session id for backend before ``round_``.
 
@@ -1145,6 +1412,12 @@ def prior_session_id(
     ``completed`` flag, then passes ``is_new_series`` here. When the
     caller doesn't pass it, fall back to deriving from the live state
     (works only when called before ``state_append_round`` runs).
+
+    Also returns ``""`` when the candidate session id was last written
+    ``session_reset_k`` rounds ago or more — long-running audits drift
+    further from current code with every resume, and forcing a fresh
+    session every K rounds clears accumulated stale context. Set
+    ``session_reset_k=0`` to disable the periodic reset.
     """
     if not state or round_ < 2:
         return ""
@@ -1158,13 +1431,358 @@ def prior_session_id(
             continue
         session_ids = rnd.get("session_ids") or {}
         sid = session_ids.get(backend) or rnd.get(f"{backend}_session_id")
+        if not sid:
+            reviews = rnd.get("reviews") or {}
+            env = reviews.get(backend) if isinstance(reviews, dict) else None
+            if isinstance(env, dict) and env.get("session_id"):
+                sid = env["session_id"]
         if sid:
+            # Periodic-reset gate: forcing a fresh session every K
+            # rounds clears accumulated stale context. The check is
+            # round-distance, not wall-clock, so an interrupted-and-
+            # resumed loop still gets the same reset cadence.
+            if session_reset_k > 0 and (round_ - n) >= session_reset_k:
+                return ""
             return str(sid)
-        reviews = rnd.get("reviews") or {}
-        env = reviews.get(backend) if isinstance(reviews, dict) else None
-        if isinstance(env, dict) and env.get("session_id"):
-            return str(env["session_id"])
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Envelope recovery: salvage envelopes whose verdict the wrapper rejected
+# ---------------------------------------------------------------------------
+#
+# Cursor (and occasionally codex) sometimes return verdicts the bramble
+# wrapper doesn't recognize — most commonly ``approve_with_notes``,
+# ``approve``, ``request_changes``, ``comment``. The wrapper writes
+# ``status: "error"`` with a verdict-validation message and refuses to
+# expose the issues, but ``review.issues`` is fully populated underneath.
+# Throwing the round away over a vocabulary mismatch wastes a review
+# cycle, so we map the variant verdicts onto the canonical ``accepted`` /
+# ``rejected`` pair and re-emit a clean envelope.
+#
+# Recovery vocabulary (case-insensitive, substring match on the verdict
+# token extracted from the error message):
+#
+#   approve, approve_with_notes, accept, lgtm, ship           -> accepted
+#   request_changes, reject, block, needs_changes, changes    -> rejected
+#
+# ``comment`` is intentionally NOT mapped: a "just commenting" verdict
+# carries no merge signal, and triage routes the issues regardless of
+# verdict. We surface unknown verdicts as a no-op (return original path)
+# so the orchestrator's existing error-envelope handling kicks in.
+
+_RECOVERY_ACCEPTED_TOKENS = (
+    "approve_with_notes",
+    "approve",
+    "accept",
+    "lgtm",
+    "ship",
+)
+_RECOVERY_REJECTED_TOKENS = (
+    "request_changes",
+    "needs_changes",
+    "needs-changes",
+    "reject",
+    "block",
+    "changes",
+)
+# Order matters when matching: longer/more-specific tokens must come
+# first so ``approve_with_notes`` doesn't get demoted to ``approve``
+# and ``request_changes`` doesn't get demoted to ``changes``.
+
+
+def _classify_recovery_verdict(error_text: str) -> str | None:
+    """Return ``"accepted"`` / ``"rejected"`` / ``None`` for an error message.
+
+    Looks for verdict-validation language. Anything ambiguous (no verdict
+    keyword, or a recognized non-merge verdict like ``comment``) returns
+    None so the caller treats it as "no recovery applicable".
+
+    Token matching is word-boundary aware (``\\b`` regex), not raw
+    substring: bare ``token in t`` would classify ``disapprove`` →
+    ``accepted`` (because ``approve`` is a substring) and ``exchanges``
+    → ``rejected`` (because ``changes`` is a substring), silently
+    salvaging envelopes that should stay rejected. Word boundaries
+    treat both ``-`` and ``_`` as separators (so ``approve_with_notes``
+    and ``needs-changes`` still match), which is what we want for
+    verdict tokens that come in either spelling.
+    """
+    if not error_text:
+        return None
+    t = error_text.lower()
+    if not re.search(r"\bverdict\b", t):
+        return None
+    for token in _RECOVERY_ACCEPTED_TOKENS:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", t):
+            return "accepted"
+    for token in _RECOVERY_REJECTED_TOKENS:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", t):
+            return "rejected"
+    return None
+
+
+def recover_envelope(path: Path, *, suffix: str = "-recovered") -> Path:
+    """Salvage an error envelope whose only problem was an unrecognized verdict.
+
+    Returns the path of an envelope ready to feed into ``triage --stream``:
+
+    - When the input envelope is already ``status: "ok"``, returns ``path``
+      unchanged. Idempotent: re-running on a recovered envelope is a no-op.
+    - When the input is ``status: "error"`` but the error message indicates
+      a verdict-validation problem AND ``review.issues`` is populated,
+      writes a sibling file ``<stem><suffix>.json`` with ``status: "ok"``
+      and verdict remapped per ``_classify_recovery_verdict``. Returns the
+      sibling path.
+    - When the input is an error envelope with no recognizable verdict
+      keyword, or with empty issues, returns ``path`` unchanged so the
+      orchestrator falls through to the existing high-severity synthetic
+      finding path.
+
+    Pure mechanical recovery — no judgment calls about whether the issues
+    "are good." If the inner JSON has issues, we trust them; if it doesn't,
+    we don't synthesize anything.
+    """
+    if not path.exists():
+        return path
+    obj = read_json(path, default=None)
+    if not isinstance(obj, dict):
+        return path
+    if obj.get("status") == "ok":
+        return path
+    error_text = obj.get("error") or ""
+    verdict = _classify_recovery_verdict(error_text)
+    if verdict is None:
+        return path
+    issues = ((obj.get("review") or {}).get("issues")) or []
+    if not issues:
+        # Vocabulary problem on an empty review = no salvageable signal.
+        return path
+    recovered = dict(obj)
+    recovered["status"] = "ok"
+    recovered["error"] = None
+    review = dict(recovered.get("review") or {})
+    review["verdict"] = verdict
+    recovered["review"] = review
+    recovered.setdefault("recovery", {})["original_error"] = error_text
+    recovered["recovery"]["mapped_verdict"] = verdict
+    out_path = path.with_name(f"{path.stem}{suffix}.json")
+    # Atomic write — same shape as state writes; readers tolerate either
+    # the original or recovered file showing up first if a concurrent
+    # process is watching the directory.
+    from _common import atomic_write_json  # noqa: PLC0415
+
+    atomic_write_json(out_path, recovered)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Round diff: prior_round.head_after .. this_round.HEAD
+# ---------------------------------------------------------------------------
+
+
+def round_diff(
+    state: dict[str, Any] | None,
+    round_: int,
+    *,
+    head_before: str | None = None,
+    max_lines: int = _ROUND_DIFF_DEFAULT_MAX_LINES,
+) -> str:
+    """Return ``git diff <prior_head_after>..<head_before>`` text, truncated.
+
+    Returns ``""`` when:
+      - ``round_`` < 2 (no prior round to diff against),
+      - state has no rounds before ``round_``,
+      - the prior round's ``head_after`` is None (interrupted prior round
+        that never finalized),
+      - ``head_before`` is None or equals the prior anchor,
+      - git rejects the range (unreachable SHAs in shallow clones / worktrees).
+
+    Truncation appends a ``...elided N lines`` footer when the diff exceeds
+    ``max_lines``. The footer is on its own line so callers can grep for
+    "elided" to detect truncation.
+
+    Pure git plumbing. Used by the goal-builder to feed the resumed
+    reviewer the diff between rounds rather than re-snapshotting the
+    whole PR.
+    """
+    if round_ < 2 or not state:
+        return ""
+    rounds = state.get("rounds") or []
+    prior = [r for r in rounds if (r.get("n") or 0) < round_]
+    if not prior:
+        return ""
+    prev = max(prior, key=lambda r: r.get("n") or 0)
+    prev_anchor = prev.get("head_after")
+    if not prev_anchor or not head_before or prev_anchor == head_before:
+        return ""
+    from _common import run  # noqa: PLC0415
+
+    try:
+        res = run(
+            ["git", "diff", f"{prev_anchor}..{head_before}"],
+            check=False,
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort
+        print(
+            f"bramble_ops: round-diff git diff {prev_anchor[:7]}..{head_before[:7]} "
+            f"failed: {e}",
+            file=sys.stderr,
+        )
+        return ""
+    if res.returncode != 0:
+        print(
+            f"bramble_ops: round-diff git diff {prev_anchor[:7]}..{head_before[:7]} "
+            f"returned {res.returncode}; cited SHA may be unreachable. "
+            f"stderr: {res.stderr.strip() or '(empty)'}",
+            file=sys.stderr,
+        )
+        return ""
+    text = res.stdout
+    if not text.strip():
+        return ""
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        elided = len(lines) - max_lines
+        return "\n".join(lines[:max_lines]) + f"\n...elided {elided} lines"
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Modified-hunk lookup for spiral-stale demote (E1)
+# ---------------------------------------------------------------------------
+
+
+_HUNK_HEADER_RE = re.compile(
+    r"^@@\s+-\d+(?:,\d+)?\s+\+(?P<start>\d+)(?:,(?P<count>\d+))?\s+@@"
+)
+
+
+def _parse_hunk_ranges(diff_text: str) -> list[tuple[int, int]]:
+    """Extract ``(start, end)`` line ranges (inclusive, 1-based, on the +
+    side) from a unified-diff body. Used to test whether a cited line
+    falls inside a hunk a prior round modified.
+
+    A hunk header ``@@ -a,b +c,d @@`` covers lines ``[c, c+d-1]``. When the
+    count is omitted (``@@ -a +c @@``), it defaults to 1 per unified-diff
+    spec. A pure deletion (``+c,0``) yields no covered lines on the +
+    side; we drop those (caller can't have a spiral on a line that
+    doesn't exist post-fix).
+    """
+    ranges: list[tuple[int, int]] = []
+    for line in diff_text.splitlines():
+        m = _HUNK_HEADER_RE.match(line)
+        if not m:
+            continue
+        start = int(m.group("start"))
+        count_str = m.group("count")
+        count = int(count_str) if count_str is not None else 1
+        if count <= 0:
+            continue
+        ranges.append((start, start + count - 1))
+    return ranges
+
+
+def prior_round_modified_hunks(
+    state: dict[str, Any] | None,
+    *,
+    only_round: int | None = None,
+) -> dict[str, list[tuple[int, int]]]:
+    """Map each file path to ``[(start, end), ...]`` line ranges modified by
+    a prior round's commit (``head_before..head_after``).
+
+    With ``only_round=N``, only that round's hunks are returned. Default
+    behavior unions across all prior rounds. Triage passes the
+    immediately-prior round (current_round - 1) so the demote heuristic
+    only fires on findings that landed inside the most recent fix's
+    edited region — older rounds' edits are part of the stable
+    background and a finding there is more likely a real lingering bug
+    than stale session context. Without this narrowing, a long audit
+    accumulates touched ranges and starts demoting real regressions
+    just because a long-ago round happened to edit the same file.
+
+    Returns ``{}`` when state is missing, or no matching round has both
+    head_before and head_after. Pure git plumbing — runs
+    ``git diff -U0 <head_before>..<head_after>`` once per matching
+    round, parses hunk headers, unions ranges per file.
+    """
+    if not state:
+        return {}
+    from _common import run  # noqa: PLC0415
+
+    out: dict[str, list[tuple[int, int]]] = {}
+    rounds = state.get("rounds") or []
+    for rnd in rounds:
+        if only_round is not None and (rnd.get("n") or 0) != only_round:
+            continue
+        head_before = rnd.get("head_before")
+        head_after = rnd.get("head_after")
+        if not head_before or not head_after or head_before == head_after:
+            continue
+        try:
+            res = run(
+                ["git", "diff", "-U0", f"{head_before}..{head_after}"],
+                check=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"bramble_ops: prior-round-modified-hunks git diff "
+                f"{head_before[:7]}..{head_after[:7]} failed: {e}",
+                file=sys.stderr,
+            )
+            continue
+        if res.returncode != 0:
+            # Unreachable SHAs (shallow clone / pruned worktree) — skip,
+            # don't mask other prior rounds.
+            continue
+        # Walk the diff splitting on file headers. A unified diff lists
+        # each file with ``diff --git`` then ``+++ b/<path>`` then hunk
+        # headers; the ``+++`` line gives us the post-fix path which is
+        # what triage's findings are addressed against.
+        current_path: str | None = None
+        for line in res.stdout.splitlines():
+            if line.startswith("+++ "):
+                # ``+++ b/path/to/file`` or ``+++ /dev/null`` for deletions
+                addr = line[len("+++ ") :].strip()
+                if addr == "/dev/null":
+                    current_path = None
+                elif addr.startswith("b/"):
+                    current_path = addr[2:]
+                else:
+                    current_path = addr
+                continue
+            m = _HUNK_HEADER_RE.match(line)
+            if not m or not current_path:
+                continue
+            start = int(m.group("start"))
+            count_str = m.group("count")
+            count = int(count_str) if count_str is not None else 1
+            if count <= 0:
+                continue
+            out.setdefault(current_path, []).append((start, start + count - 1))
+    return out
+
+
+def _line_in_modified_hunk(
+    finding: dict[str, Any],
+    modified_hunks: dict[str, list[tuple[int, int]]],
+) -> bool:
+    """Return True when finding's cited (file, line) falls inside any range
+    in ``modified_hunks``. Returns False for findings with no addressable
+    line (top-level / sourceless) — those don't qualify for the
+    modified-hunk demote heuristic.
+    """
+    path = finding.get("file") or finding.get("path")
+    line = finding.get("line")
+    if not path or line is None:
+        return False
+    try:
+        line = int(line)
+    except (TypeError, ValueError):
+        return False
+    ranges = modified_hunks.get(path)
+    if not ranges:
+        return False
+    return any(start <= line <= end for start, end in ranges)
 
 
 # ---------------------------------------------------------------------------
@@ -1198,6 +1816,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "head_after produces a noisy goal blob (the SHA may be unreachable)."
         ),
     )
+    sp.add_argument(
+        "--no-round-diff",
+        dest="include_round_diff",
+        action="store_false",
+        default=True,
+        help="Skip the inter-round diff append (default: include).",
+    )
+    sp.add_argument(
+        "--round-diff-max-lines",
+        type=int,
+        default=_ROUND_DIFF_DEFAULT_MAX_LINES,
+    )
 
     sp = sub.add_parser(
         "prior-session-id",
@@ -1210,6 +1840,47 @@ def _build_parser() -> argparse.ArgumentParser:
         "--is-new-series",
         choices=["0", "1"],
         help="Captured at Step 0.5 before state_append_round mutates state; pass 1 to force empty.",
+    )
+    sp.add_argument(
+        "--session-reset-k",
+        type=int,
+        default=SESSION_RESET_K_DEFAULT,
+        help=(
+            "Force a fresh session every K rounds to clear accumulated stale "
+            f"context (default {SESSION_RESET_K_DEFAULT}). Set to 0 to disable."
+        ),
+    )
+
+    sp = sub.add_parser(
+        "recover-envelope",
+        help=(
+            "Salvage a status:error envelope whose only problem was an "
+            "unrecognized verdict (approve_with_notes, request_changes, etc). "
+            "Prints the recovered path on stdout, or the original path if no "
+            "recovery applied (idempotent — safe to wrap every --stream)."
+        ),
+    )
+    sp.add_argument("envelope_path")
+
+    sp = sub.add_parser(
+        "round-diff",
+        help=(
+            "Print git diff <prior_round.head_after>..<head_before> for "
+            "round N, truncated at --max-lines. Empty when no prior round "
+            "or SHAs are unreachable. Pure git plumbing — used by the "
+            "goal builder to feed the resumed reviewer the inter-round diff."
+        ),
+    )
+    sp.add_argument("state_file")
+    sp.add_argument("round_", type=int)
+    sp.add_argument(
+        "--head-before",
+        help="This round's HEAD; if omitted, falls back to git rev-parse HEAD.",
+    )
+    sp.add_argument(
+        "--max-lines",
+        type=int,
+        default=_ROUND_DIFF_DEFAULT_MAX_LINES,
     )
 
     sp = sub.add_parser(
@@ -1289,12 +1960,41 @@ def main(argv: list[str] | None = None) -> int:
                     state,
                     head_before=args.head_before,
                     is_new_series=is_new,
+                    include_round_diff=args.include_round_diff,
+                    round_diff_max_lines=args.round_diff_max_lines,
                 )
             )
         elif args.cmd == "prior-session-id":
             state = read_json(Path(args.state_file), default=None)
             is_new = (args.is_new_series == "1") if args.is_new_series is not None else None
-            print(prior_session_id(state, args.backend, args.round_, is_new_series=is_new))
+            print(
+                prior_session_id(
+                    state,
+                    args.backend,
+                    args.round_,
+                    is_new_series=is_new,
+                    session_reset_k=args.session_reset_k,
+                )
+            )
+        elif args.cmd == "recover-envelope":
+            print(str(recover_envelope(Path(args.envelope_path))))
+        elif args.cmd == "round-diff":
+            state = read_json(Path(args.state_file), default=None)
+            head_before = args.head_before
+            if head_before is None:
+                from _common import run as _run  # noqa: PLC0415
+
+                res = _run(["git", "rev-parse", "HEAD"], check=False)
+                if res.returncode == 0:
+                    head_before = res.stdout.strip() or None
+            print(
+                round_diff(
+                    state,
+                    args.round_,
+                    head_before=head_before,
+                    max_lines=args.max_lines,
+                )
+            )
         elif args.cmd == "parse-stream":
             findings = parse_stream(Path(args.stream_file), source=args.backend)
             print_json(findings)
@@ -1346,6 +2046,28 @@ def main(argv: list[str] | None = None) -> int:
                 resolved_mode = next(iter(real_modes), None) or REVIEW_MODE_CODE
             findings = parse_round(streams, fallback_mode=resolved_mode)
             head_path = Path(args.head_path) if args.head_path else None
+            # Modified-hunk demote (E1) is code-mode-only: design-doc
+            # findings address sections, not file lines, so a hunk lookup
+            # would be a no-op. Skip the git work outright in that case
+            # so a doc-mode triage on a worktree without remote SHAs
+            # doesn't spam stderr with "unreachable SHA" warnings.
+            modified_hunks: dict[str, list[tuple[int, int]]] | None = None
+            if resolved_mode == REVIEW_MODE_CODE:
+                # Narrow to the immediately-prior round so the demote
+                # heuristic doesn't accumulate touched ranges across a
+                # long audit (which would suppress real regressions on
+                # any file an early round happened to touch). The
+                # use case it's designed for — doc-comment fix shifts
+                # words within the same function — is N→N+1, not "any
+                # ancestor round".
+                last_round = max(
+                    (r.get("n") or 0 for r in (prior.get("rounds") or [])),
+                    default=0,
+                ) if prior else 0
+                if last_round > 0:
+                    modified_hunks = prior_round_modified_hunks(
+                        prior, only_round=last_round
+                    )
             result = triage(
                 findings,
                 prior_fixed_keys(prior, resolved_mode),
@@ -1353,6 +2075,7 @@ def main(argv: list[str] | None = None) -> int:
                 ci_failures=ci_failures,
                 mode=resolved_mode,
                 head_path=head_path,
+                prior_modified_hunks=modified_hunks,
             )
             print_json(result)
         else:  # pragma: no cover

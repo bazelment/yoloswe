@@ -42,12 +42,17 @@ PR/branch context is auto-detected by `pr_ops.py identify`.
 
 **A finding is a symptom; the fix is the cure.** Each cited finding observes one underlying problem. Before patching, identify the actual invariant being violated, look for sibling sites in the same module, and decide whether the right fix is at the cited line or upstream. A defensive guard at every consumer often signals a producer should normalize once. If docs or tests pin the contract that just changed, they're part of the same fix. A cascade of medium-severity rounds is usually one missed invariant.
 
+**The reviewer now names invariants for you.** Bramble code-review v2 lets the model emit `issues[].invariant` + `issues[].sites[]` when it finds N ≥ 2 sibling sites of one rule. When a finding carries `invariant`, the goal-builder mirrors the name into next round's prompt so the resumed reviewer folds new sites into the same finding rather than re-flagging per-site. Two reviewers naming the same invariant — even at different sites — also form consensus, routing every site to `must_fix` in one triage pass. Read `comment_actions[].invariant` when triaging: if it's set, the producer-side fix is usually the right move; record any consumer site you intentionally leave alone as `ack` with the reason.
+
 Class-level fixes beyond the cited line are logged in `comment_actions` as `source: "sweep"`, `comment_id: null`, `topic: "<original-topic> — class-level fix"`.
 
 **Convergence — stop when any one holds:**
-- Zero findings, or all remaining are low/nit.
-- Top-rated finding is a documented false positive.
+- Zero findings.
+- 2 consecutive rounds where top severity is low across all sources, AND every low has been fixed or recorded as `ack`/`wont_fix` with a written reason. The streak is persisted in `rounds[n].low_only_streak` (incremented when this round's `top_severity ∈ {low, nit, null}`, reset to 0 otherwise). Read it via `state-load`.
+- Top finding is a documented false positive AND the prior round had no `must_fix`.
 - Empty action plan after triage.
+
+If the last 2 rounds were low-only, treat as converged regardless of remaining `--rounds` budget — the streak rule wins over the budget. The motivation: the reviewer is incentivized to find *something* every round, and one persistent low keeps the loop alive forever otherwise. After two rounds where everything triaged was low/nit, the next round of fixes is rounding error.
 
 **Hard stop after N additional rounds.** When `additional_rounds_run` reaches `--rounds` without convergence, produce Final Summary, then `AskUserQuestion` whether to continue.
 
@@ -57,7 +62,7 @@ Bias for action and your own judgement with research. Only three things pause th
 
 1. **Integrity gate** — stale state file with PR mismatch (Step 0.5).
 2. **Budget gate** — `--rounds N` reached without convergence.
-3. **Regression gate** — **unverified** `spiral_matches` non-empty. Single-source spirals whose cited evidence is no longer at HEAD (within ±10 lines of the cited line) are auto-demoted to `batch_stale` with a `stale_reason` of `"spiral candidate auto-demoted: cited evidence absent at HEAD"` — the prior round fixed it and the resumed model is re-flagging stale context. Multi-source spirals (≥2 backends agree on the regression) always escalate. The audit row records `action: "stale"` with the demote reason. Cost of being wrong: a real regression that gets mis-demoted will likely re-surface next round — and if it does, the heuristic's evidence-at-HEAD check will find the cited code, so the second occurrence escalates correctly.
+3. **Regression gate** — **unverified** `spiral_matches` non-empty. Single-source spirals auto-demote to `batch_stale` when *either* of two heuristics fires: (a) the cited evidence is no longer at HEAD within ±10 lines of the cited line, or (b) the cited file:line falls inside a hunk that the **immediately-prior** round modified (read from `head_before..head_after` of round N-1 only — not any ancestor round, which would let a long audit suppress real regressions on any file an early round happened to touch). Both are pure git/state lookups, no judgment. Multi-source spirals (≥2 backends agree) always escalate. The audit row records `action: "stale"` with the demote reason. Cost of being wrong: a real regression that gets mis-demoted will resurface next round, and the heuristic catches it on the second occurrence.
 
 ## State tracking
 
@@ -89,6 +94,7 @@ Schema:
       "skipped_count": 1,
       "top_severity": "high",
       "top_was_false_positive": false,
+      "low_only_streak": 0,
       "noise_filtered": 2,
       "noise_samples": [
         {"id": 4300306871, "author": "linear[bot]", "pattern": "linear-linkback"}
@@ -102,12 +108,17 @@ Schema:
           "line": 142,
           "severity": "high",
           "topic": "missing error handling for BUILDER_LITE",
+          "invariant": "ambient env vars shadow explicit proxy keys",
           "action": "fixed",
           "reason": null,
           "commit_sha": "abc123f",
           "reply_url": "https://github.com/owner/repo/pull/2318#discussion_r2034881234"
         }
-      ]
+      ],
+      "sufficiency_claims": {
+        "codex": {"is_confident_complete": true, "evidence": "all named invariants addressed; remaining medium issues are doc-only"},
+        "cursor": {"is_confident_complete": false, "evidence": "suspect more sites in src/streaming/"}
+      }
     }
   ]
 }
@@ -116,6 +127,8 @@ Schema:
 `{codex,cursor,gemini}_findings` hold raw issues from each backend's envelope, hydrated by `state-finalize-round`. The verbatim envelope is copied to `<state_dir>/reviews/r<n>-<backend>.json`. `gemini_findings` is omitted when `--gemini` was not passed.
 
 `noise_filtered` / `noise_samples` count bot process-noise dropped at fetch time (linear linkbacks, claude-bot progress posts). These never enter `comment_actions` — kept as a round-level audit trail. Samples capped at 5 entries.
+
+`low_only_streak` is incremented at finalize time when this round's `top_severity` is `low`, `nit`, or `null` (zero findings counts), reset to 0 otherwise. The convergence rule reads `>= 2` to trigger early exit; the goal-builder reads `>= 2` to inject a one-sentence pressure note (see "The goal channel" below).
 
 **`comment_actions` schema — load-bearing, other tooling depends on exact strings:**
 
@@ -131,6 +144,9 @@ Schema:
   - `stale` — cited code no longer exists.
   - `pre_existing` — `source: "ci"` only. Failure also fails on base branch; `reason` cites `ci-compare-base` output. Counts as skipped.
   - `flake` — `source: "ci"` only. `reason` names the `flake_reason` (ETXTBSY, bazel cache, `ci_deadline`). Counts as skipped.
+- `invariant` (optional, v2): name of the class-level rule the reviewer claimed when it emitted an `invariant + sites[]` finding. Surfaced verbatim from the envelope. Reviewer-emitted; the orchestrator does not synthesize. Used by the next round's goal-builder to remind the resumed reviewer to fold new sites into the same finding rather than re-flag.
+
+**`sufficiency_claims` (optional, v2)**: per-backend dict capturing each reviewer's self-assessment for this round. Each entry: `{"is_confident_complete": bool, "evidence": "..."}`. Populated by `state-finalize-round` when the envelope's `review.sufficiency` is present. Absence means the reviewer didn't claim either way — do not infer. The orchestrator surfaces consensus claims in round summaries and final reports as audit-trail context; this is NOT a new exit gate, the existing convergence rules still decide.
 
 **Context token for state subcommands.** All `state-*` take a single positional `ctx` — the bare PR number when one exists, otherwise `branch:<name>`.
 
@@ -149,28 +165,23 @@ python3 $SKILL_DIR/scripts/pr_ops.py identify
 
 Returns `{pr_number, title, url, base, head, branch, owner, repo, owner_repo, state_dir, state_file}`. `pr_number` is `null` for branches without a PR — the rest of the flow still works, just with PR-comment and CI-failure fetches skipped. Pin `$CTX` to either the PR number or `branch:<head>`.
 
-### Step 0.1: Pick the bramble binary
-
-Prefer the freshly-built worktree artifact (matches the code under review); otherwise fall back to PATH:
-
-```
-export BRAMBLE_BIN="$([ -x "$(pwd)/bazel-bin/bramble/bramble_/bramble" ] \
-    && echo "$(pwd)/bazel-bin/bramble/bramble_/bramble" \
-    || echo bramble)"
-```
-
-Every `bramble code-review` invocation must reference `$BRAMBLE_BIN`.
-
-### Step 0.2: Bramble must support `--resume-session-id`
-
-Continuous review is the whole reason this skill exists. Probe once and fail fast:
+### Step 0.1: Preflight — resolve binaries + helpers in one call
 
 ```bash
-"$BRAMBLE_BIN" code-review --help 2>&1 | grep -q -- '--resume-session-id' || {
-  echo "error: '$BRAMBLE_BIN' does not support --resume-session-id." >&2
+PREFLIGHT=$(python3 $SKILL_DIR/scripts/pr_ops.py preflight)
+export BRAMBLE_BIN=$(echo "$PREFLIGHT" | jq -r .bramble_bin)
+GIT_SYNC=$(echo "$PREFLIGHT" | jq -r .git_sync_path)
+# Non-empty errors[] means a hard precondition failed (bramble missing
+# --resume-session-id support, git-sync not on disk). Surface the list
+# and exit before launching any Monitor.
+if [ "$(echo "$PREFLIGHT" | jq -r '.errors | length')" != "0" ]; then
+  echo "preflight errors:" >&2
+  echo "$PREFLIGHT" | jq -r '.errors[]' >&2
   exit 1
-}
+fi
 ```
+
+`preflight` resolves the bramble binary (preferring the worktree-local `bazel-bin/` artifact over `$PATH`), probes for `--resume-session-id` support, locates `git:sync-base/git-sync.py` (skill-local → installed fallback), and probes for `--no-push` support. Every `bramble code-review` invocation references `$BRAMBLE_BIN`.
 
 ## Step 0.5: Resume check
 
@@ -201,10 +212,14 @@ When you need to know whether the local branch and remote are in sync (e.g. surf
 ## Step 1: Sync base via /git:sync-base
 
 ```
-python3 .claude/skills/git:sync-base/git-sync.py --verbose
+python3 .claude/skills/git:sync-base/git-sync.py --verbose --no-push
 ```
 
-That script owns rebasing onto `origin/<base>` and force-pushing the rebased branch with precise-lease. Do not reimplement. On conflict (exit 2) **abort with `state-mark-complete <ctx> sync-conflict`** and emit Final Summary pointing at the conflict — do not pause mid-run.
+That script owns rebasing onto `origin/<base>`. Pass `--no-push` so the rebase stays local — the loop accumulates commits and pushes once at Step 4, matching the "no mid-loop push" promise at the top of this file. Without `--no-push` the script force-pushes the rebased branch immediately and triggers GitHub bots before round 1's review even starts.
+
+**Clean-tree preflight.** Before invoking git-sync, if `git status --porcelain` is non-empty AND state has no in-progress round to resume, print one line ("uncommitted changes — commit, stash, or rebase manually before /pr-polish") and call `state-mark-complete <ctx> dirty-tree-preflight`. Do NOT `AskUserQuestion`. Snapshot-commit-before-push races (codex-feedback 2026-05-19, item #2) come from skipping this gate; the local snapshot + base-sync push showed bots an intermediate tree.
+
+On conflict (exit 2) **abort with `state-mark-complete <ctx> sync-conflict`** and emit Final Summary pointing at the conflict — do not pause mid-run.
 
 Build a short `$PR_SUMMARY` from `git log --oneline origin/<base>..HEAD` + diff-stat (≤10 lines). Pass it to `bramble_ops.py goal` every round.
 
@@ -215,9 +230,9 @@ Each round resumes the same bramble session, so the model accumulates context ac
 | Round | Goal text | Why |
 |---|---|---|
 | 1 | `$PR_SUMMARY` | First turn: establish PR-level intent and surface area. |
-| 2+, prior round had actions | Per-turn briefing: prior round's fixed/skipped + files changed | Tells resumed model what it actioned (so it doesn't re-flag fixes) and which files moved. |
-| 2+, no prior actions, files changed | `Round N.` + files-changed line | Even with no prior-round actions, a non-empty diff between rounds is worth orienting around. |
-| 2+, no prior actions, no diff | Falls back to `$PR_SUMMARY` | Re-anchor rather than send a goal that's just "Round N." |
+| 2+ | Per-turn briefing: prior round's fixed/skipped + files changed; falls back to `$PR_SUMMARY` when there's nothing to say | Tells the resumed model what was actioned (so it doesn't re-flag fixes) and which files moved. |
+
+Edge cases: when round 2+ has no prior-round actions but files did change, the goal opens with `Round N.` plus the files-changed line; when both are empty (pristine round, no diff since prior), we re-anchor to `$PR_SUMMARY` rather than send a goal that's just "Round N."
 
 Action-history shape (`action_history_goal`, only the immediately-prior round):
 
@@ -227,11 +242,13 @@ Skipped: b.py:42 wont_fix: design tradeoff; d.go:8 ack: rename helper.
 Files changed since round 5: a.go, b.py.
 ```
 
-The `fixed: X — topic; skipped: Y verb: reason` shape stops the resumed model from re-flagging its own prior findings. Source labels (`(codex)`/`(cursor)`) are deliberately omitted. Each entry capped at `_TOPIC_CHAR_CAP=80`; bucket capped at `_ACTION_HISTORY_CAP=20` with a `(N more)` suffix.
+The `fixed: X — topic; skipped: Y verb: reason` shape stops the resumed model from re-flagging its own prior findings. Source labels (`(codex)`/`(cursor)`) are deliberately omitted. Each entry capped at `_TOPIC_CHAR_CAP=80`; bucket capped at `_ACTION_HISTORY_CAP=20` with a `(N more)` suffix. The "Files changed" line is the diff between the prior round's `head_after` (falling back to `head_before` for an interrupted prior round) and current HEAD; omitted when empty.
 
-The "Files changed" line is the diff between the prior round's `head_after` (falling back to `head_before` for an interrupted prior round that never finalized) and current HEAD. Omitted when the diff is empty or `head_before` wasn't passed.
+**Inter-round diff (D1).** `bramble_ops.py goal` also appends `git diff <prior_head_after>..<HEAD>` (truncated at 200 lines with `...elided N lines` footer when over) under a `Diff since round N-1:` header. Skipped when the prior round never finalized or the SHAs are unreachable. The reviewer is resuming the same session and re-reading the worktree at launch; the diff between rounds is the actual delta worth scanning.
 
-The goal channel deliberately does **not** carry: the diff body (bramble re-snapshots the worktree), `stale` actions (already absent from the snapshot), per-finding rationale text written into PR replies, earlier rounds' actions (already in session history), or repeated round-1 PR_SUMMARY.
+**Convergence pressure when low-only streak ≥ 2 (B1).** When the prior round's `low_only_streak >= 2`, the goal-builder appends one sentence: "The last N rounds returned only low-severity findings. The fixer treats your output as authoritative, and every finding costs a round; if the diff has no structural issue, returning zero findings is the right call." One sentence, one trigger — not a table of phrasings. The reviewer is incentivized to find *something* every round and one persistent low keeps the loop alive forever otherwise; this just states the cost frame.
+
+The goal channel deliberately does **not** carry: `stale` actions (already absent from the snapshot), per-finding rationale text written into PR replies, earlier rounds' actions (already in session history), or repeated round-1 PR_SUMMARY.
 
 ## Step 2: Fetch existing PR comments + failing CI jobs
 
@@ -279,7 +296,19 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
 
 Then arm Monitors in the same turn — codex + cursor + lint always, plus gemini when `--gemini`. Bramble Monitors pass `--scope-hints-file "$SCOPE_HINTS"`; lint has its own diff walk.
 
-Compute the round's `--goal` text and per-backend resume id:
+Compute the round's `--goal` text and per-backend resume id. Either run the helpers individually, or pull everything in one call via `round-bundle` and split with `jq`:
+
+```bash
+BUNDLE=$(python3 $SKILL_DIR/scripts/pr_ops.py round-bundle "$CTX" {ROUND})
+GOAL=$(echo "$BUNDLE" | jq -r .goal_text)
+CODEX_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.codex')
+CURSOR_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.cursor')
+# round-bundle threads its own PR_SUMMARY-free goal; on round 1 you still
+# want `$PR_SUMMARY` as the goal, so override:
+[ "{ROUND}" = "1" ] && GOAL="$PR_SUMMARY"
+```
+
+Or the long form, one helper per piece:
 
 ```bash
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
@@ -292,7 +321,7 @@ CURSOR_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id curso
                 --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
 ```
 
-`prior-session-id` returns empty across series boundaries so a new audit gets a fresh session.
+`prior-session-id` returns empty across series boundaries so a new audit gets a fresh session, and every K=4 rounds within a series (E2) — accumulated session context compounds staleness across long audits. Override with `--session-reset-k N`; pass 0 to disable. Spiral demote also fires (E1) when the cited file:line falls inside a hunk any prior round modified — see "Auto-decision rules → Regression gate". Both are pure git+state lookups; no judgment.
 
 When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures (prior series' fetch is now stale):
 
@@ -361,7 +390,9 @@ Monitor({
 
 Each Monitor runs independently; a crash in one doesn't affect the others. `timeout_ms=720000` is bramble's 10-minute `--timeout` plus two minutes of slack. `--skip-test-execution` defers tests to quality gates.
 
-If a backend envelope reports `status: "error"` but `review.raw_text` contains a fenced ```json``` block (cursor occasionally returns malformed JSON the wrapper can't unmarshal), recover by extracting the inner JSON, synthesizing a clean envelope, writing it to `<backend>-envelope-recovered.json`, and passing that path to `triage --stream`. Don't drop the round — the findings inside are still the model's review.
+If a backend envelope reports a verdict-validation `status: "error"` (cursor returning `approve_with_notes`, `request_changes`, etc.) with populated `review.issues` underneath, run `python3 $SKILL_DIR/scripts/bramble_ops.py recover-envelope <path>` and pass the printed path to `triage --stream`. The helper is idempotent — it returns the original path unchanged when no recovery applies, so it's safe to wrap every `--stream` argument unconditionally. Recovery vocabulary is documented in the helper's docstring.
+
+**Back-compat note (v2 envelopes).** The bramble code-review wrapper now normalizes common verdict aliases (`approve_with_notes`/`approve`/`lgtm`/`request_changes`/etc.) inside `validateReviewBody` so envelopes emitted by an up-to-date bramble already carry the canonical `accepted`/`rejected` token — `recover-envelope` becomes a no-op there. Keep wrapping `--stream` arguments unconditionally so older envelopes (e.g. when an operator runs an unbuilt bramble) still recover; the cost is one stat() per stream.
 
 ### c) Triage
 
@@ -411,6 +442,18 @@ What good looks like by the end of this step:
 
 Skip if step d produced zero file changes.
 
+#### Pre-commit fix-completeness checklist
+
+Reviewers who see one site of a class-level problem will keep finding the next site round after round. Before running quality gates, read the diff against your fixes and answer five questions:
+
+1. **Sibling sites** — are there other call sites of the same producer / consumers of the same invariant? If yes, extend the fix or record the asymmetry below.
+2. **Tests** — will a reviewer ask for a regression test for this fix? If yes, add it now in the same commit.
+3. **Docs** — did this fix change a contract described in a godoc, README, or example file? Update those too.
+4. **Type contract** — did you add a new exported helper / method? Document its semantics in a godoc.
+5. **Symmetry** — did you fix this in N of M places (e.g. codex but not gemini)? List the M places explicitly and either fix all or record the asymmetry as `ack` with reasoning.
+
+These are questions, not MUSTs — the codebase decides. Recording an intentional asymmetry as `ack` with a one-line reason is fine and beats next round's finding. Silent partial fixes are the failure mode.
+
 Follow project quality gates (separate turn from any Monitor arm). On pass, commit locally with subject `pr-polish round {ROUND}: <summary>` and a body listing fixed/skipped findings. **Do NOT push.**
 
 **Before committing, ask whether the fix is durable.** For each finding addressed: would a reviewer running the same review on the new tree raise the same finding at a different site? If yes, that's a missed sibling — extend the fix. If you deliberately left a sibling unfixed (different semantics, different invariant), record it as `action: "ack"` with a one-line reason. Visible intentional non-uniformity beats next round's finding.
@@ -428,9 +471,21 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-
     $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
 ```
 
-`--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids` and `resume_status` populate for next round's resume plumbing. Pass `--envelope lint=...` too — it has no session id, but its envelope feeds `lint_findings` into the persisted reviews directory. Backends not passed are skipped (no automatic fallback).
+`--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids`, `resume_status`, and `sufficiency_claims` populate for next round's resume plumbing and the final report. Pass `--envelope lint=...` too — it has no session id, but its envelope feeds `lint_findings` into the persisted reviews directory. Backends not passed are skipped (no automatic fallback).
 
 `state-finalize-round` auto-populates `rounds[n].ci_findings` from `ci_failed_tests` when a PR exists; branch-only runs leave it empty.
+
+**One-shot variant for the round-summary line.** When you want the orchestrator-visible audit-trail digest in the same call, use `finalize-and-report` instead. Same finalize semantics; emits `{converged_signal, exit_reason_hint, low_only_streak, top_severity, sufficiency_consensus, next_round_n, round_summary}` so the loop printout in Step 3.g doesn't need separate `jq` calls into the state file:
+
+```bash
+python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-parse HEAD) \
+    $STATE_DIR/actions-r$ROUND.json \
+    --envelope codex=$ENVELOPE_CODEX --envelope cursor=$ENVELOPE_CURSOR \
+    --envelope lint=$ENVELOPE_LINT \
+    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
+```
+
+`converged_signal` mirrors the existing convergence rules (low_only_streak ≥ 2, or top_severity ∈ {low, nit, null} with no fix/skip activity). It's a *hint*, not a gate — convergence prose at the top of this file is still authoritative. Sufficiency consensus is purely audit-trail context; do NOT treat it as a new exit rule.
 
 ### g) Convergence check
 
@@ -446,7 +501,7 @@ Round 3: codex=0, cursor=0 -> EXIT (converged)
 
 ## Step 4: Push once on loop exit
 
-**Why defer push.** Every push to a PR's branch triggers configured GitHub bots (CodeRabbit, Cursor Bugbot, etc.) to re-review. Mid-loop pushes burn bot budget on intermediate commits and reliably generate new comments on round-N-fix diffs — even when the fix was correct. Batching means bots see the polished tree; CI runs once on the final state.
+The loop accumulates commits locally and pushes once at the end so GitHub bots see the polished tree, not intermediate fix diffs. Full rationale lives at `references/why-defer-push.md`.
 
 Before pushing, check whether the remote already holds local HEAD — git-sync may have pushed during the run, and `origin/<branch>` can lag in worktrees. Use `pr_ops.py remote-head <branch>` (which routes through `git ls-remote`, not `git rev-parse origin/<branch>`) so the diagnostic reflects what the remote actually holds:
 

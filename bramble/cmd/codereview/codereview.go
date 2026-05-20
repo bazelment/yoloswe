@@ -365,16 +365,19 @@ func maxSeverity(issues []reviewer.ReviewIssue) string {
 	const unknownRank = 2 // above "low" so non-standard labels stay visible
 	best := ""
 	bestRank := 0
-	for _, issue := range issues {
-		if issue.Severity == "" {
+	// Index loop avoids the per-iteration value-copy lint (ReviewIssue
+	// is ~152 bytes once Sites/Invariant landed).
+	for i := range issues {
+		sev := issues[i].Severity
+		if sev == "" {
 			continue
 		}
-		r, known := rank[issue.Severity]
+		r, known := rank[sev]
 		if !known {
 			r = unknownRank
 		}
 		if r > bestRank {
-			best = issue.Severity
+			best = sev
 			bestRank = r
 		}
 	}

@@ -665,3 +665,185 @@ func TestBuildEnvelopeReviewModePropagated(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateVerdictAliases pins the v2 alias-normalization contract: a
+// reviewer emitting a PR-review-style verdict (approve_with_notes, etc.)
+// gets canonicalized to accepted/rejected at the envelope boundary, the
+// validator accepts it, and the emitted envelope shows the canonical
+// token so downstream consumers don't see the alias.
+func TestValidateVerdictAliases(t *testing.T) {
+	cases := []struct {
+		raw           string
+		expectVerdict string
+		needsIssue    bool // "rejected" requires at least one issue
+	}{
+		{"approve_with_notes", "accepted", false},
+		{"approve-with-notes", "accepted", false},
+		{"approve", "accepted", false},
+		{"approved", "accepted", false},
+		{"LGTM", "accepted", false}, // case-insensitive
+		{"ship", "accepted", false},
+		{"request_changes", "rejected", true},
+		{"request-changes", "rejected", true},
+		{"needs_changes", "rejected", true},
+		{"needs-changes", "rejected", true},
+		{"changes_requested", "rejected", true},
+		{"reject", "rejected", true},
+		{"block", "rejected", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			body := `{"verdict":"` + tc.raw + `","summary":"x","issues":[]}`
+			if tc.needsIssue {
+				body = `{"verdict":"` + tc.raw + `","summary":"x","issues":[{"severity":"medium","file":"a.go","line":1,"message":"m"}]}`
+			}
+			env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+			if env.Status != StatusOK {
+				t.Fatalf("status = %s (err=%q), want ok after alias normalization", env.Status, env.Error)
+			}
+			if env.Review.Verdict != tc.expectVerdict {
+				t.Errorf("normalized verdict = %q, want %q", env.Review.Verdict, tc.expectVerdict)
+			}
+		})
+	}
+}
+
+// TestValidateVerdict_UnknownStillFails guards against the alias map
+// accidentally swallowing genuinely-unknown verdicts. "maybe" must still
+// produce status=error rather than silently passing.
+func TestValidateVerdict_UnknownStillFails(t *testing.T) {
+	env := BuildEnvelope(&ReviewResult{ResponseText: `{"verdict":"maybe","issues":[]}`, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for unknown verdict", env.Status)
+	}
+}
+
+// TestValidateInvariantSites_SingleSiteAccepted: a single-site finding
+// with no invariant is the legacy shape and continues to validate.
+func TestValidateInvariantSites_SingleSiteAccepted(t *testing.T) {
+	body := `{"verdict":"rejected","issues":[{"severity":"high","file":"a.go","line":1,"message":"bug"}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusOK {
+		t.Errorf("status = %s (err=%q), want ok for single-site issue", env.Status, env.Error)
+	}
+}
+
+// TestValidateInvariantSites_ClassLevelAccepted: an invariant with N
+// sites, where file/line points at one of them, validates.
+func TestValidateInvariantSites_ClassLevelAccepted(t *testing.T) {
+	body := `{"verdict":"rejected","issues":[{
+		"severity":"high","file":"a.go","line":10,
+		"message":"sibling sites of one rule",
+		"invariant":"ambient env vars shadow explicit proxy keys",
+		"sites":[{"file":"a.go","line":10},{"file":"b.go","line":20}]
+	}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusOK {
+		t.Fatalf("status = %s (err=%q), want ok for invariant+sites", env.Status, env.Error)
+	}
+	if len(env.Review.Issues) != 1 || env.Review.Issues[0].Invariant == "" || len(env.Review.Issues[0].Sites) != 2 {
+		t.Errorf("invariant/sites not parsed: %+v", env.Review.Issues)
+	}
+}
+
+// TestValidateInvariantSites_FileLineMustMatchOneSite enforces back-compat
+// with single-site triage: when sites is non-empty, file/line at the top
+// must match one entry so a consumer that ignores sites still sees a
+// representative address.
+func TestValidateInvariantSites_FileLineMustMatchOneSite(t *testing.T) {
+	body := `{"verdict":"rejected","issues":[{
+		"severity":"high","file":"z.go","line":99,
+		"message":"mismatched representative site",
+		"invariant":"rule x",
+		"sites":[{"file":"a.go","line":10},{"file":"b.go","line":20}]
+	}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error when file/line doesn't match any site", env.Status)
+	}
+}
+
+// TestValidateInvariantSites_InvariantWithoutSitesRejected: naming an
+// invariant without listing sites is meaningless — there's nothing for
+// the orchestrator to act on.
+func TestValidateInvariantSites_InvariantWithoutSitesRejected(t *testing.T) {
+	body := `{"verdict":"rejected","issues":[{
+		"severity":"high","file":"a.go","line":1,
+		"message":"named invariant with no sites",
+		"invariant":"some rule"
+	}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for invariant without sites", env.Status)
+	}
+}
+
+// TestValidateInvariantSites_SiteMissingFile guards the per-site shape.
+func TestValidateInvariantSites_SiteMissingFile(t *testing.T) {
+	body := `{"verdict":"rejected","issues":[{
+		"severity":"high","file":"a.go","line":10,
+		"message":"sites entry missing file",
+		"invariant":"r",
+		"sites":[{"file":"a.go","line":10},{"line":20}]
+	}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for site without file", env.Status)
+	}
+}
+
+// TestValidateInvariantSites_DesignDocRejectsClassFields: invariant/sites
+// are code-mode-only; design-doc envelopes that carry them are malformed.
+func TestValidateInvariantSites_DesignDocRejectsClassFields(t *testing.T) {
+	body := `{"verdict":"revise","confidence":0.8,"issues":[{
+		"severity":"medium","section":"M1","dimension":"q1","message":"x",
+		"invariant":"r","sites":[]
+	}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", ReviewModeDesignDoc)
+	if env.Status != StatusError {
+		t.Errorf("status = %s, want error for invariant in design-doc mode", env.Status)
+	}
+}
+
+// TestSufficiency_AcceptedAndPropagated: a top-level sufficiency object
+// parses into the envelope. Surfaces in v2 envelopes only; the field is
+// optional, so omitting it remains valid.
+func TestSufficiency_AcceptedAndPropagated(t *testing.T) {
+	body := `{"verdict":"accepted","summary":"clean","issues":[],
+		"sufficiency":{"is_confident_complete":true,"evidence":"all named invariants addressed"}}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusOK {
+		t.Fatalf("status = %s (err=%q), want ok", env.Status, env.Error)
+	}
+	if env.Review.Sufficiency == nil {
+		t.Fatal("Sufficiency should be parsed")
+	}
+	if !env.Review.Sufficiency.IsConfidentComplete {
+		t.Errorf("IsConfidentComplete = false, want true")
+	}
+	if env.Review.Sufficiency.Evidence == "" {
+		t.Errorf("Evidence should be parsed")
+	}
+}
+
+// TestSufficiency_OmittedRemainsNil: absence means no signal — the field
+// stays nil. Don't synthesize a default.
+func TestSufficiency_OmittedRemainsNil(t *testing.T) {
+	body := `{"verdict":"accepted","summary":"clean","issues":[]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusOK {
+		t.Fatalf("status = %s, want ok", env.Status)
+	}
+	if env.Review.Sufficiency != nil {
+		t.Errorf("Sufficiency = %+v, want nil for omitted field", env.Review.Sufficiency)
+	}
+}
+
+// TestSchemaVersion_IsV2 pins the bump. Anyone bumping JSONSchemaVersion
+// should also update the docstring on the constant and notify downstream
+// readers; this test catches accidental reverts.
+func TestSchemaVersion_IsV2(t *testing.T) {
+	if JSONSchemaVersion != 2 {
+		t.Errorf("JSONSchemaVersion = %d, want 2 (Issue.Invariant/Sites + ReviewBody.Sufficiency)", JSONSchemaVersion)
+	}
+}
