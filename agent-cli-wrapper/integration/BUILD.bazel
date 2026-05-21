@@ -2,7 +2,7 @@
 load("@rules_go//go:def.bzl", "go_test")
 
 # Generic, table-driven session-resume integration test that exercises every
-# agent-CLI backend (claude, codex, cursor, ACP/gemini) with the same
+# agent-CLI backend (claude, codex, cursor, agy) with the same
 # secret-recall scenario.
 #
 # "local" disables sandboxing so the test can reach each CLI binary and the
@@ -48,6 +48,7 @@ go_test(
     ],
     deps = [
         "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/agy",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/cursor",
