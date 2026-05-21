@@ -15,10 +15,11 @@ const (
 	ProviderCodex  = "codex"
 	ProviderGemini = "gemini"
 	ProviderCursor = "cursor"
+	ProviderAgy    = "agy"
 )
 
 // AllProviders is the ordered list of known provider names.
-var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor}
+var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor, ProviderAgy}
 
 // providerBinaries maps provider names to their CLI binary names.
 var providerBinaries = map[string]string{
@@ -26,6 +27,7 @@ var providerBinaries = map[string]string{
 	ProviderCodex:  "codex",
 	ProviderGemini: "gemini",
 	ProviderCursor: "agent",
+	ProviderAgy:    "agy",
 }
 
 // ProviderStatus describes the availability of a single provider CLI.

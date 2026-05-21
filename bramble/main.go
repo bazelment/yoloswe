@@ -803,7 +803,7 @@ func init() {
 }
 
 // pickRouterProvider selects the best available provider for the task router.
-// Prefers codex (original default), then claude, then gemini.
+// Prefers codex (original default), then claude, then gemini, then agy.
 // Returns nil if no suitable provider is installed and enabled.
 func pickRouterProvider(availability *agent.ProviderAvailability, enabledProviders []string) agent.Provider {
 	enabled := func(name string) bool {
@@ -829,6 +829,9 @@ func pickRouterProvider(availability *agent.ProviderAvailability, enabledProvide
 	// Fall back to gemini
 	if availability.IsInstalled(agent.ProviderGemini) && enabled(agent.ProviderGemini) {
 		return agent.NewGeminiProvider()
+	}
+	if availability.IsInstalled(agent.ProviderAgy) && enabled(agent.ProviderAgy) {
+		return agent.NewAgyProvider()
 	}
 	return nil
 }

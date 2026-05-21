@@ -271,7 +271,7 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 // Behavior is intentionally asymmetric across providers, mirroring how each
 // upstream CLI honors endpoint config:
 //
-//   - claude / cursor: rebuild the underlying session per Execute, so each
+//   - claude / cursor / agy: rebuild the underlying session per Execute, so each
 //     call may pass a different endpoint.
 //   - codex / gemini:  bind the endpoint at client construction time (the
 //     first Execute call), since `--config` overrides / acp BinaryArgs are
@@ -280,7 +280,7 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 //     rather than silently routing to the originally-bound endpoint. To
 //     switch endpoints on a codex/gemini provider, construct a fresh one.
 //
-// All four providers validate the endpoint at the start of Execute (see
+// All providers validate the endpoint at the start of Execute (see
 // ExecuteConfig.validate), so partial-but-non-zero endpoints fail loudly
 // regardless of which provider you target.
 func WithProviderLLMEndpoint(ep llmendpoint.Endpoint) ExecuteOption {

@@ -24,6 +24,7 @@ func TestModelRegistry_AllInstalled(t *testing.T) {
 		ProviderCodex:  true,
 		ProviderGemini: true,
 		ProviderCursor: true,
+		ProviderAgy:    true,
 	})
 	reg := NewModelRegistry(avail, nil)
 	assert.Len(t, reg.Models(), len(AllModels))
@@ -34,6 +35,8 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  false,
 		ProviderGemini: false,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	reg := NewModelRegistry(avail, nil)
 	for _, m := range reg.Models() {
@@ -49,6 +52,8 @@ func TestModelRegistry_FilteredCycling(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  false,
 		ProviderGemini: true,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	reg := NewModelRegistry(avail, nil)
 
@@ -66,6 +71,8 @@ func TestModelRegistry_NotFoundReturnsFirst(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  false,
 		ProviderGemini: false,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	reg := NewModelRegistry(avail, nil)
 	next := reg.NextModel("nonexistent")
@@ -77,6 +84,8 @@ func TestModelRegistry_EmptyFallback(t *testing.T) {
 		ProviderClaude: false,
 		ProviderCodex:  false,
 		ProviderGemini: false,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	reg := NewModelRegistry(avail, nil)
 	assert.Empty(t, reg.Models())
@@ -100,6 +109,8 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  true,
 		ProviderGemini: true,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 
 	reg := NewModelRegistry(avail, []string{ProviderClaude})
@@ -121,6 +132,8 @@ func TestModelRegistry_InstalledButNotEnabled(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  true,
 		ProviderGemini: true,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	// Only enable gemini
 	reg := NewModelRegistry(avail, []string{ProviderGemini})
@@ -134,6 +147,8 @@ func TestModelRegistry_ModelByID(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  false,
 		ProviderGemini: false,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	reg := NewModelRegistry(avail, nil)
 
@@ -150,6 +165,8 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 		ProviderClaude: true,
 		ProviderCodex:  true,
 		ProviderGemini: false,
+		ProviderCursor: false,
+		ProviderAgy:    false,
 	})
 	reg := NewModelRegistry(avail, nil)
 
@@ -186,6 +203,7 @@ func TestProviderForModelID(t *testing.T) {
 		{"gemini-99-ultra", ProviderGemini, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
+		{"agy-pro", ProviderAgy, true},
 		{"claude-opus-5", ProviderClaude, true},
 		// Non-matching
 		{"foo-bar", "", false},
@@ -216,6 +234,7 @@ func TestProviderByModelPrefix(t *testing.T) {
 		{"gemini-99-ultra", ProviderGemini, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
+		{"agy-pro", ProviderAgy, true},
 		{"claude-opus-5", ProviderClaude, true},
 		// Exact-match IDs still work via prefix
 		{"gpt-5.5", ProviderCodex, true},
@@ -241,4 +260,5 @@ func TestKnownModelPrefixes(t *testing.T) {
 	assert.Contains(t, s, "gpt-")
 	assert.Contains(t, s, "gemini-")
 	assert.Contains(t, s, "claude-")
+	assert.Contains(t, s, "agy-")
 }

@@ -162,6 +162,17 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		if r.permissionMode == "plan" {
 			args = append(args, "--approval-mode", "plan")
 		}
+	case ProviderAgy:
+		if r.yoloMode {
+			args = append(args, "--dangerously-skip-permissions")
+		}
+		if r.permissionMode == "plan" {
+			args = append(args, "--sandbox")
+		}
+		if r.resumeSessionID != "" {
+			args = append(args, "--conversation", r.resumeSessionID)
+		}
+		args = append(args, "--prompt-interactive")
 	default:
 		// Claude-specific flags
 		if r.yoloMode {

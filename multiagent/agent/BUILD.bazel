@@ -4,6 +4,7 @@ go_library(
     name = "agent",
     srcs = [
         "agent.go",
+        "agy_provider.go",
         "bridge.go",
         "claude_provider.go",
         "codex_provider.go",
@@ -24,6 +25,7 @@ go_library(
     deps = [
         "//agent-cli-wrapper/acp",
         "//agent-cli-wrapper/agentstream",
+        "//agent-cli-wrapper/agy",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/cursor",
@@ -37,6 +39,7 @@ go_library(
 go_test(
     name = "agent_test",
     srcs = [
+        "agy_provider_test.go",
         "claude_provider_retry_test.go",
         "codex_provider_test.go",
         "config_test.go",
@@ -54,6 +57,7 @@ go_test(
     embed = [":agent"],
     deps = [
         "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/agy",
         "//agent-cli-wrapper/claude",
         "//agent-cli-wrapper/codex",
         "//agent-cli-wrapper/llmendpoint",
