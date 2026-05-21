@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -31,6 +32,9 @@ func (p *AgyProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Work
 	}
 	if cfg.Effort != "" && cfg.Effort != EffortAuto {
 		return nil, EffortUnsupportedError(p.Name(), cfg.Effort)
+	}
+	if !cfg.LLMEndpoint.IsZero() {
+		return nil, fmt.Errorf("agy: LLMEndpoint is not supported; use claude, codex, or cursor for third-party endpoint routing")
 	}
 
 	fullPrompt := prompt

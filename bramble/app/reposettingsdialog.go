@@ -127,6 +127,7 @@ func (d *RepoSettingsDialog) Show(repoName string, cfg RepoSettings, currentThem
 			}
 		}
 		for _, p := range enabledProviders {
+			p = agent.CanonicalProviderName(p)
 			if installedSet[p] {
 				d.enabledProviders[p] = true
 			}

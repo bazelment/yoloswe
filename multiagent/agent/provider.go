@@ -271,7 +271,7 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 // Behavior is intentionally asymmetric across providers, mirroring how each
 // upstream CLI honors endpoint config:
 //
-//   - claude / cursor / agy: rebuild the underlying session per Execute, so each
+//   - claude / cursor: rebuild the underlying session per Execute, so each
 //     call may pass a different endpoint.
 //   - codex:  binds the endpoint at client construction time (the first
 //     Execute call), since `--config` overrides are passed to the subprocess
@@ -279,6 +279,8 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 //     an equal endpoint; divergent endpoints fail with an explicit error
 //     rather than silently routing to the originally-bound endpoint. To
 //     switch endpoints on a codex provider, construct a fresh one.
+//   - agy:    does not expose a third-party endpoint interface through this
+//     wrapper and rejects non-zero endpoints.
 //
 // All providers validate the endpoint at the start of Execute (see
 // ExecuteConfig.validate), so partial-but-non-zero endpoints fail loudly

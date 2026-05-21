@@ -21,6 +21,18 @@ const (
 // AllProviders is the ordered list of known provider names.
 var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderCursor, ProviderAgy}
 
+// CanonicalProviderName maps retired provider aliases onto their active
+// provider names. Unknown providers are returned unchanged.
+func CanonicalProviderName(provider string) string {
+	normalized := strings.ToLower(strings.TrimSpace(provider))
+	switch normalized {
+	case ProviderGemini:
+		return ProviderAgy
+	default:
+		return normalized
+	}
+}
+
 // providerBinaries maps provider names to their CLI binary names.
 var providerBinaries = map[string]string{
 	ProviderClaude: "claude",

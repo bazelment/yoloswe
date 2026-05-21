@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 // RepoSettings holds per-repository Bramble settings.
@@ -26,7 +28,7 @@ func (s Settings) GetEnabledProviders() []string {
 	if s.EnabledProviders == nil {
 		return nil
 	}
-	return *s.EnabledProviders
+	return normalizeProviderNames(*s.EnabledProviders)
 }
 
 // IsProviderEnabled returns true if the provider is enabled in settings.
@@ -37,7 +39,7 @@ func (s Settings) IsProviderEnabled(provider string) bool {
 		return true // nil means all enabled (default/unset)
 	}
 	for _, p := range *s.EnabledProviders {
-		if p == provider {
+		if agent.CanonicalProviderName(p) == agent.CanonicalProviderName(provider) {
 			return true
 		}
 	}
@@ -52,9 +54,25 @@ func (s *Settings) SetEnabledProviders(providers []string) {
 		s.EnabledProviders = nil
 		return
 	}
-	copied := make([]string, len(providers))
-	copy(copied, providers)
+	copied := normalizeProviderNames(providers)
 	s.EnabledProviders = &copied
+}
+
+func normalizeProviderNames(providers []string) []string {
+	if providers == nil {
+		return nil
+	}
+	out := make([]string, 0, len(providers))
+	seen := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		p = agent.CanonicalProviderName(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // RepoSettingsFor returns settings for one repository.

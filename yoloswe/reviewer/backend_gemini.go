@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
@@ -14,6 +15,8 @@ import (
 // names while running agy's default model under the hood.
 type geminiBackend struct {
 	config Config
+	mu     sync.Mutex
+	hasRun bool
 }
 
 func newGeminiBackend(config Config) *geminiBackend {
@@ -42,9 +45,11 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	if b.config.ResumeSessionID != "" {
 		resumeStatus = ResumeStatusUnverified
 		sessionOpts = append(sessionOpts, agy.WithConversation(b.config.ResumeSessionID))
+	} else if b.hasRunPrompt() {
+		sessionOpts = append(sessionOpts, agy.WithContinue())
 	}
 	if handler != nil {
-		handler.OnSessionInfo(b.config.ResumeSessionID, b.config.Model)
+		handler.OnSessionInfo("", b.config.Model)
 	}
 
 	session := agy.NewSession(prompt, sessionOpts...)
@@ -62,9 +67,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 				handler.OnText(e.Text)
 			}
 		case agy.TurnCompleteEvent:
-			if b.config.ResumeSessionID != "" {
-				resumeStatus = ResumeStatusOK
-			}
+			b.markRunPrompt()
 			if handler != nil {
 				handler.OnTurnComplete(e.Success, e.DurationMs)
 			}
@@ -90,6 +93,18 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		}
 	}
 	return reviewErrorResult(resumeStatus, fmt.Errorf("gemini/agy: session ended without result"))
+}
+
+func (b *geminiBackend) hasRunPrompt() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hasRun
+}
+
+func (b *geminiBackend) markRunPrompt() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.hasRun = true
 }
 
 // filterGeminiEvents re-emits ACP events, dropping infrastructure events

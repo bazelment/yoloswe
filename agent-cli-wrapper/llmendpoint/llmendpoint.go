@@ -68,7 +68,7 @@ type Endpoint struct {
 
 	// Headers carries optional extra HTTP headers to inject on each request.
 	// Wrapper support is partial today — only codex consumes them via
-	// `--config model_providers.<n>.http_headers.*`. claude/cursor/gemini
+	// `--config model_providers.<n>.http_headers.*`. claude/cursor/agy
 	// wrappers ignore Headers, so switching providers on a config that
 	// relies on Headers silently drops them. Validate still runs the same
 	// header-name regex globally, so this map is shape-checked at

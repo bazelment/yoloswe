@@ -40,3 +40,26 @@ func TestBuildCLIArgs_AllOptions(t *testing.T) {
 		"--future-flag",
 	}, pm.BuildCLIArgs())
 }
+
+func TestBuildCLIArgs_Continue(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	WithContinue()(&cfg)
+
+	pm := newProcessManager("hello", cfg)
+
+	assert.Equal(t, []string{"-p", "hello", "--continue"}, pm.BuildCLIArgs())
+}
+
+func TestBuildCLIArgs_ConversationOverridesContinue(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	WithContinue()(&cfg)
+	WithConversation("conv-123")(&cfg)
+
+	pm := newProcessManager("hello", cfg)
+
+	assert.Equal(t, []string{"-p", "hello", "--conversation", "conv-123"}, pm.BuildCLIArgs())
+}

@@ -12,10 +12,11 @@ type SessionConfig struct {
 	LogFile                    string
 	ExtraArgs                  []string
 	AddDirs                    []string
-	PrintTimeout               time.Duration
 	EventBufferSize            int
-	DangerouslySkipPermissions bool
+	PrintTimeout               time.Duration
 	Sandbox                    bool
+	Continue                   bool
+	DangerouslySkipPermissions bool
 }
 
 // SessionOption configures a Session.
@@ -39,6 +40,13 @@ func WithCLIPath(path string) SessionOption {
 func WithConversation(id string) SessionOption {
 	return func(c *SessionConfig) {
 		c.ConversationID = id
+	}
+}
+
+// WithContinue continues the most recent agy conversation.
+func WithContinue() SessionOption {
+	return func(c *SessionConfig) {
+		c.Continue = true
 	}
 }
 

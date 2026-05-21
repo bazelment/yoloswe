@@ -105,7 +105,7 @@ func (r *ModelRegistry) Rebuild(availability *ProviderAvailability, enabledProvi
 	enabledSet := make(map[string]bool, len(enabledProviders))
 	allEnabled := enabledProviders == nil
 	for _, p := range enabledProviders {
-		enabledSet[p] = true
+		enabledSet[CanonicalProviderName(p)] = true
 	}
 
 	var newFiltered []AgentModel

@@ -432,6 +432,9 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 		agent.WithProviderPermissionMode("bypass"),
 	}
 	if !ep.IsZero() {
+		if backend == agent.ProviderAgy || backend == agent.ProviderGemini {
+			return fmt.Errorf("backend %q does not support --llm-endpoint; use claude, codex, or cursor", backend)
+		}
 		opts = append(opts, agent.WithProviderLLMEndpoint(ep))
 	}
 

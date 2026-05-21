@@ -125,6 +125,8 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 }
 
 func TestModelRegistry_InstalledButNotEnabled(t *testing.T) {
+	t.Parallel()
+
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
@@ -137,6 +139,31 @@ func TestModelRegistry_InstalledButNotEnabled(t *testing.T) {
 	assert.False(t, reg.HasProvider(ProviderCodex))
 	assert.False(t, reg.HasProvider(ProviderGemini))
 	assert.True(t, reg.HasProvider(ProviderAgy))
+}
+
+func TestModelRegistry_LegacyGeminiEnabledProviderEnablesAgy(t *testing.T) {
+	t.Parallel()
+
+	avail := newTestAvailability(map[string]bool{
+		ProviderClaude: false,
+		ProviderCodex:  false,
+		ProviderCursor: false,
+		ProviderAgy:    true,
+	})
+
+	reg := NewModelRegistry(avail, []string{ProviderGemini})
+
+	assert.True(t, reg.HasProvider(ProviderAgy))
+	assert.False(t, reg.HasProvider(ProviderGemini))
+}
+
+func TestCanonicalProviderName(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, ProviderAgy, CanonicalProviderName(ProviderGemini))
+	assert.Equal(t, ProviderAgy, CanonicalProviderName("  Gemini  "))
+	assert.Equal(t, ProviderCodex, CanonicalProviderName(ProviderCodex))
+	assert.Equal(t, "unknown", CanonicalProviderName("unknown"))
 }
 
 func TestModelRegistry_ModelByID(t *testing.T) {

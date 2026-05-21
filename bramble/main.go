@@ -811,7 +811,7 @@ func pickRouterProvider(availability *agent.ProviderAvailability, enabledProvide
 			return true // nil means all enabled
 		}
 		for _, p := range enabledProviders {
-			if p == name {
+			if agent.CanonicalProviderName(p) == name {
 				return true
 			}
 		}
