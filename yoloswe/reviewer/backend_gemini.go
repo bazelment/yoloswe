@@ -11,8 +11,7 @@ import (
 )
 
 // geminiBackend is a compatibility alias for agy. The agy CLI does not expose
-// a model-selection flag, so BackendGemini preserves the public backend/model
-// names while running agy's default model under the hood.
+// a model-selection flag, so BackendGemini reports agy's fixed default model.
 type geminiBackend struct {
 	config Config
 	mu     sync.Mutex
@@ -49,7 +48,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 		sessionOpts = append(sessionOpts, agy.WithContinue())
 	}
 	if handler != nil {
-		handler.OnSessionInfo("", b.config.Model)
+		handler.OnSessionInfo("", DefaultGeminiModel)
 	}
 
 	session := agy.NewSession(prompt, sessionOpts...)

@@ -128,6 +128,9 @@ func (a *agyResumeBackend) StartFresh(ctx context.Context, t *testing.T, workdir
 	if !result.Success {
 		return "", result.Text, fmt.Errorf("agy turn failed")
 	}
+	// agy print mode does not expose a durable conversation id. The sentinel
+	// marks that the second phase should exercise the observable --continue
+	// contract for the most recent conversation, not resume-by-id identity.
 	return "latest", result.Text, nil
 }
 
