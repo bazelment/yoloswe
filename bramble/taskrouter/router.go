@@ -3,7 +3,7 @@
 // for a new task - either using an existing worktree or creating a new one.
 //
 // This package uses the multiagent/agent.Provider interface so any backend
-// (Claude, Codex, Gemini) can be plugged in for routing decisions.
+// (Claude, Codex, Gemini, agy) can be plugged in for routing decisions.
 package taskrouter
 
 import (

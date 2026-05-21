@@ -28,6 +28,7 @@ func TestProviderAvailability_Accessors(t *testing.T) {
 			ProviderCodex:  {Provider: ProviderCodex, Installed: false, Error: "not found in PATH"},
 			ProviderGemini: {Provider: ProviderGemini, Installed: true, Version: "2.0.0"},
 			ProviderCursor: {Provider: ProviderCursor, Installed: false, Error: "not found in PATH"},
+			ProviderAgy:    {Provider: ProviderAgy, Installed: false, Error: "not found in PATH"},
 		},
 	}
 
@@ -35,21 +36,23 @@ func TestProviderAvailability_Accessors(t *testing.T) {
 	assert.False(t, pa.IsInstalled(ProviderCodex))
 	assert.True(t, pa.IsInstalled(ProviderGemini))
 	assert.False(t, pa.IsInstalled(ProviderCursor))
+	assert.False(t, pa.IsInstalled(ProviderAgy))
 
 	s := pa.Status(ProviderClaude)
 	assert.Equal(t, "1.0.0", s.Version)
 
 	all := pa.AllStatuses()
-	require.Len(t, all, 4)
+	require.Len(t, all, 5)
 	assert.Equal(t, ProviderClaude, all[0].Provider)
 	assert.Equal(t, ProviderCodex, all[1].Provider)
 	assert.Equal(t, ProviderGemini, all[2].Provider)
 	assert.Equal(t, ProviderCursor, all[3].Provider)
+	assert.Equal(t, ProviderAgy, all[4].Provider)
 
 	installed := pa.InstalledProviders()
 	assert.Equal(t, []string{ProviderClaude, ProviderGemini}, installed)
 }
 
 func TestAllProviders(t *testing.T) {
-	assert.Equal(t, []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor}, AllProviders)
+	assert.Equal(t, []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor, ProviderAgy}, AllProviders)
 }

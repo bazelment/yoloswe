@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
@@ -78,10 +79,10 @@ func TestClaudeEffortLevel_MapsAllLevels(t *testing.T) {
 }
 
 // TestProviderEffortMatrix locks in the support matrix across providers.
-// When a fifth provider is added, this table forces a deliberate choice
+// When a provider is added, this table forces a deliberate choice
 // rather than another silent ignore.
 //
-// Claude and Codex accept all five levels; Cursor and Gemini reject any
+// Claude and Codex accept all five levels; Cursor, Gemini, and agy reject any
 // explicit non-auto effort with ErrEffortUnsupported. EffortAuto and empty
 // effort both mean "use the provider default" and are never rejected.
 // (Invalid string parsing is covered by TestParseEffort_RejectsInvalidLevels
@@ -142,6 +143,16 @@ func TestProviderEffortMatrix(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name: "agy",
+			run: func(t *testing.T, level EffortLevel) error {
+				t.Helper()
+				p := NewAgyProvider(agy.WithCLIPath("missing-agy-effort-test-binary"))
+				defer p.Close()
+				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
+				return err
+			},
+		},
 	}
 
 	for _, prov := range providers {
@@ -159,7 +170,7 @@ func TestProviderEffortMatrix(t *testing.T) {
 				assert.NoError(t, err, "empty effort should be a no-op")
 			}
 
-			noKnobProvider := prov.name == "cursor" || prov.name == "gemini"
+			noKnobProvider := prov.name == "cursor" || prov.name == "gemini" || prov.name == "agy"
 			for _, level := range validLevels {
 				err := prov.run(t, level)
 				// EffortAuto means "use provider default" — a no-knob

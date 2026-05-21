@@ -125,6 +125,12 @@ func TestCheckCodetalkModel(t *testing.T) {
 			errSubstr: "bramble TUI",
 		},
 		{
+			name:      "agy-default is agy — error with TUI hint",
+			modelID:   "agy-default",
+			wantErr:   true,
+			errSubstr: "bramble TUI",
+		},
+		{
 			name:      "gpt- prefix triggers Codex routing — error",
 			modelID:   "gpt-9-future",
 			wantErr:   true,
@@ -135,6 +141,12 @@ func TestCheckCodetalkModel(t *testing.T) {
 			modelID:   "gemini-99",
 			wantErr:   true,
 			errSubstr: "gemini",
+		},
+		{
+			name:      "agy- prefix triggers agy routing — error",
+			modelID:   "agy-future",
+			wantErr:   true,
+			errSubstr: "agy",
 		},
 	}
 

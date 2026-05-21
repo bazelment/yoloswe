@@ -27,6 +27,7 @@ func TestResolveAgentModel_ExactMatchFromRegistry(t *testing.T) {
 		agent.ProviderCodex:  {Provider: agent.ProviderCodex, Installed: false},
 		agent.ProviderGemini: {Provider: agent.ProviderGemini, Installed: false},
 		agent.ProviderCursor: {Provider: agent.ProviderCursor, Installed: false},
+		agent.ProviderAgy:    {Provider: agent.ProviderAgy, Installed: false},
 	})
 	reg := agent.NewModelRegistry(avail, nil)
 
@@ -47,6 +48,7 @@ func TestResolveAgentModel_PrefixFallback(t *testing.T) {
 		{"gemini-99-ultra", agent.ProviderGemini},
 		{"cursor-fast", agent.ProviderCursor},
 		{"composer-3", agent.ProviderCursor},
+		{"agy-pro", agent.ProviderAgy},
 		{"claude-opus-5", agent.ProviderClaude},
 	}
 
@@ -95,6 +97,7 @@ func TestManager_PrefixModelRoutesToCorrectProvider(t *testing.T) {
 		{"gemini-99-ultra", agent.ProviderGemini, agent.ProviderClaude},
 		{"cursor-fast-99", agent.ProviderCursor, agent.ProviderClaude},
 		{"composer-v9", agent.ProviderCursor, agent.ProviderClaude},
+		{"agy-pro", agent.ProviderAgy, agent.ProviderClaude},
 	}
 
 	for _, tc := range cases {
@@ -106,6 +109,7 @@ func TestManager_PrefixModelRoutesToCorrectProvider(t *testing.T) {
 				agent.ProviderCodex:  {Provider: agent.ProviderCodex, Installed: true},
 				agent.ProviderGemini: {Provider: agent.ProviderGemini, Installed: true},
 				agent.ProviderCursor: {Provider: agent.ProviderCursor, Installed: true},
+				agent.ProviderAgy:    {Provider: agent.ProviderAgy, Installed: true},
 			}
 			// Mark the target provider as not installed so runSession rejects it
 			// with a message naming that provider — proving routing chose it.
@@ -147,6 +151,7 @@ func TestManager_UnknownModelLandsInStatusFailed(t *testing.T) {
 		agent.ProviderCodex:  {Provider: agent.ProviderCodex, Installed: true},
 		agent.ProviderGemini: {Provider: agent.ProviderGemini, Installed: true},
 		agent.ProviderCursor: {Provider: agent.ProviderCursor, Installed: true},
+		agent.ProviderAgy:    {Provider: agent.ProviderAgy, Installed: true},
 	})
 	reg := agent.NewModelRegistry(avail, nil)
 

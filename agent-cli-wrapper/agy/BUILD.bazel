@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agy",
+    srcs = [
+        "doc.go",
+        "errors.go",
+        "events.go",
+        "process.go",
+        "session.go",
+        "session_options.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/agent-cli-wrapper/agy",
+    visibility = ["//visibility:public"],
+    deps = ["//agent-cli-wrapper/internal/procattr"],
+)
+
+go_test(
+    name = "agy_test",
+    srcs = ["process_test.go"],
+    embed = [":agy"],
+    deps = ["@com_github_stretchr_testify//assert"],
+)

@@ -8,7 +8,7 @@ import (
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
 	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.3-codex")
-	Provider string // Binary/provider name: "claude", "codex", or "gemini"
+	Provider string // Binary/provider name: "claude", "codex", "gemini", etc.
 	Label    string // Display label for the UI (e.g. "opus (claude)")
 }
 
@@ -28,6 +28,7 @@ var AllModels = []AgentModel{
 	{ID: "gemini-2.5-flash", Provider: ProviderGemini, Label: "gemini-2.5-flash"},
 	{ID: "gemini-2.5-flash-lite", Provider: ProviderGemini, Label: "gemini-2.5-flash-lite"},
 	{ID: "cursor-default", Provider: ProviderCursor, Label: "cursor-default"},
+	{ID: "agy-default", Provider: ProviderAgy, Label: "agy-default"},
 }
 
 // ModelByID returns the AgentModel for the given ID from the full list, or false if not found.
@@ -50,6 +51,7 @@ var modelPrefixRules = []struct {
 	{"gemini-", ProviderGemini},
 	{"cursor-", ProviderCursor},
 	{"composer-", ProviderCursor},
+	{"agy-", ProviderAgy},
 	{"claude-", ProviderClaude},
 }
 

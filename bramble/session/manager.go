@@ -68,7 +68,7 @@ func (r *plannerRunner) RunTurn(ctx context.Context, message string) (*claude.Tu
 }
 
 // providerRunner adapts agent.Provider to the sessionRunner interface.
-// This allows plugging in any provider backend (Claude, Codex, Gemini)
+// This allows plugging in any provider backend (Claude, Codex, Gemini, agy)
 // via the ManagerConfig.Provider field.
 type providerRunner struct { //nolint:govet // fieldalignment: keep related lifecycle fields grouped
 	provider        agent.Provider
@@ -1518,6 +1518,20 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				eventHandler: eventHandler,
 				model:        session.Model,
 				workDir:      session.WorktreePath,
+			}
+		} else if agentModel.Provider == ProviderAgy {
+			// Antigravity provider backend
+			runner = &providerRunner{
+				provider:     agent.NewAgyProvider(),
+				eventHandler: eventHandler,
+				model:        session.Model,
+				permissionMode: func() string {
+					if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
+						return "plan"
+					}
+					return "bypass"
+				}(),
+				workDir: session.WorktreePath,
 			}
 		} else {
 			// Default: use hardcoded planner/builder runners with model from session

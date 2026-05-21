@@ -24,6 +24,8 @@ func NewProviderForModel(m AgentModel) (Provider, error) {
 		return NewCodexProvider(), nil
 	case ProviderCursor:
 		return NewCursorProvider(), nil
+	case ProviderAgy:
+		return NewAgyProvider(), nil
 	default:
 		return nil, fmt.Errorf("unknown provider %q for model %q", m.Provider, m.ID)
 	}
