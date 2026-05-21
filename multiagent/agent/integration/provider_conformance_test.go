@@ -1,7 +1,7 @@
 //go:build integration
 // +build integration
 
-// Provider conformance tests verify that all agent providers (Claude, Codex, Gemini)
+// Provider conformance tests verify that all agent providers (Claude, Codex, agy)
 // are interchangeable when plugged into the same consumer paths. Tests run with real
 // CLI binaries and require network access + valid API keys.
 //
@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/stretchr/testify/assert"
@@ -36,18 +37,17 @@ import (
 // Test Infrastructure
 // ============================================================================
 
-// Note: Gemini tests do NOT use t.Parallel() to avoid API rate limiting.
-// Since shards are separate processes, we can't use a mutex. Instead, we
-// conditionally call t.Parallel() only for non-Gemini providers.
+// Conformance tests run in parallel where possible; shards are separate
+// processes, so shared provider-side rate limits may still apply.
 
 // agentTurnEvents collects events from a single provider execution.
 type agentTurnEvents struct {
-	TextEvents    []agent.TextAgentEvent
+	TextEvents     []agent.TextAgentEvent
 	ThinkingEvents []agent.ThinkingAgentEvent
-	ToolStarts    []agent.ToolStartAgentEvent
-	ToolCompletes []agent.ToolCompleteAgentEvent
-	TurnComplete  *agent.TurnCompleteAgentEvent
-	Errors        []agent.ErrorAgentEvent
+	ToolStarts     []agent.ToolStartAgentEvent
+	ToolCompletes  []agent.ToolCompleteAgentEvent
+	TurnComplete   *agent.TurnCompleteAgentEvent
+	Errors         []agent.ErrorAgentEvent
 }
 
 // collectAgentEvents reads from provider.Events() until TurnCompleteAgentEvent or context timeout.
@@ -82,13 +82,13 @@ func collectAgentEvents(ctx context.Context, events <-chan agent.AgentEvent) (*a
 
 // recordingEventHandler implements agent.EventHandler and records all callbacks.
 type recordingEventHandler struct {
-	mu             sync.Mutex
-	textCalls      []string
-	thinkingCalls  []string
-	toolStarts     []toolStartCall
-	toolCompletes  []toolCompleteCall
-	turnCompletes  []turnCompleteCall
-	errors         []errorCall
+	mu            sync.Mutex
+	textCalls     []string
+	thinkingCalls []string
+	toolStarts    []toolStartCall
+	toolCompletes []toolCompleteCall
+	turnCompletes []turnCompleteCall
+	errors        []errorCall
 }
 
 type toolStartCall struct {
@@ -159,9 +159,9 @@ func (h *recordingEventHandler) OnError(err error, ctx string) {
 
 // providerFactory creates providers for each backend.
 type providerFactory struct {
-	name       string
-	binary     string // binary to check in PATH
-	hasEvents  bool
+	name           string
+	binary         string // binary to check in PATH
+	hasEvents      bool
 	newProvider    func(t *testing.T, tmpDir string) agent.Provider
 	newLongRunning func(t *testing.T, tmpDir string) agent.LongRunningProvider
 }
@@ -197,26 +197,17 @@ func allFactories() []providerFactory {
 			newLongRunning: nil, // Codex doesn't implement LongRunningProvider
 		},
 		{
-			name:      "gemini",
-			binary:    "gemini",
+			name:      "agy",
+			binary:    "agy",
 			hasEvents: true,
 			newProvider: func(t *testing.T, tmpDir string) agent.Provider {
-				return agent.NewGeminiProvider(
-					acp.WithStderrHandler(func(data []byte) {
-						t.Logf("[gemini stderr] %s", string(data))
+				return agent.NewAgyProvider(
+					agy.WithStderrHandler(func(data []byte) {
+						t.Logf("[agy stderr] %s", string(data))
 					}),
 				)
 			},
-			newLongRunning: func(t *testing.T, tmpDir string) agent.LongRunningProvider {
-				return agent.NewGeminiLongRunningProvider(
-					[]acp.ClientOption{
-						acp.WithStderrHandler(func(data []byte) {
-							t.Logf("[gemini stderr] %s", string(data))
-						}),
-					},
-					acp.WithSessionCWD(tmpDir),
-				)
-			},
+			newLongRunning: nil,
 		},
 	}
 }
@@ -229,13 +220,10 @@ func skipIfBinaryMissing(t *testing.T, binary string) {
 	}
 }
 
-// parallelIfNotGemini enables parallel execution for non-Gemini tests.
-// Gemini tests run sequentially to avoid API rate limiting.
+// parallelIfNotGemini enables parallel execution for all current providers.
 func parallelIfNotGemini(t *testing.T, providerName string) {
 	t.Helper()
-	if providerName != "gemini" {
-		t.Parallel()
-	}
+	t.Parallel()
 }
 
 // ============================================================================
@@ -277,11 +265,10 @@ func TestConformance_BasicPrompt(t *testing.T) {
 				// the binary emits token_count events. CostUSD is always 0.
 				t.Logf("Codex usage: input=%d, output=%d", result.Usage.InputTokens, result.Usage.OutputTokens)
 				assert.Equal(t, float64(0), result.Usage.CostUSD, "Codex should not report cost")
-			case "gemini":
-				// ACP does not define token usage; all fields zero
-				assert.Equal(t, 0, result.Usage.InputTokens, "Gemini usage should be zero")
-				assert.Equal(t, 0, result.Usage.OutputTokens, "Gemini usage should be zero")
-				assert.Equal(t, float64(0), result.Usage.CostUSD, "Gemini cost should be zero")
+			case "agy":
+				assert.Equal(t, 0, result.Usage.InputTokens, "agy usage should be zero")
+				assert.Equal(t, 0, result.Usage.OutputTokens, "agy usage should be zero")
+				assert.Equal(t, float64(0), result.Usage.CostUSD, "agy cost should be zero")
 			}
 		})
 	}
@@ -487,35 +474,6 @@ func TestConformance_PermissionCallback(t *testing.T) {
 					}
 				}
 				assert.True(t, hasToolName, "at least one permission request should have a tool name")
-			},
-		},
-		{
-			name:   "gemini",
-			binary: "gemini",
-			newProvider: func(t *testing.T, tmpDir string, _ *[]claude.PermissionRequest, acpHandler *recordingACPPermHandler) agent.Provider {
-				return agent.NewGeminiProvider(
-					acp.WithPermissionHandler(acpHandler),
-				)
-			},
-			verify: func(t *testing.T, _ []claude.PermissionRequest, acpHandler *recordingACPPermHandler) {
-				acpHandler.mu.Lock()
-				defer acpHandler.mu.Unlock()
-				require.Greater(t, len(acpHandler.reqs), 0, "should have received ACP permission requests")
-				hasToolInfo := false
-				for _, req := range acpHandler.reqs {
-					// Gemini puts tool name in ToolCallID (e.g., "write_file-1770849300776"),
-					// not in ToolName. Check both.
-					toolName := req.ToolCall.ToolName
-					if toolName == "" {
-						toolName = extractToolNameFromID(req.ToolCall.ToolCallID)
-					}
-					if toolName != "" {
-						hasToolInfo = true
-						t.Logf("ACP permission: tool=%s, callId=%s, locations=%d",
-							toolName, req.ToolCall.ToolCallID, len(req.ToolCall.Locations))
-					}
-				}
-				assert.True(t, hasToolInfo, "at least one ACP permission request should have tool info")
 			},
 		},
 	}

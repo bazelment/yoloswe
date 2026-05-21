@@ -10,7 +10,7 @@ import (
 )
 
 // ProviderAgentClient dispatches meeting-bot roles to the repo's existing
-// Codex/Claude/Gemini provider abstraction.
+// Codex/Claude/agy provider abstraction.
 type ProviderAgentClient struct{}
 
 func (ProviderAgentClient) Run(ctx context.Context, req AgentRequest) (AgentResponse, error) {

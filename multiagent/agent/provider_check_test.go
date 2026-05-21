@@ -26,33 +26,31 @@ func TestProviderAvailability_Accessors(t *testing.T) {
 		statuses: map[string]ProviderStatus{
 			ProviderClaude: {Provider: ProviderClaude, Installed: true, Version: "1.0.0"},
 			ProviderCodex:  {Provider: ProviderCodex, Installed: false, Error: "not found in PATH"},
-			ProviderGemini: {Provider: ProviderGemini, Installed: true, Version: "2.0.0"},
 			ProviderCursor: {Provider: ProviderCursor, Installed: false, Error: "not found in PATH"},
-			ProviderAgy:    {Provider: ProviderAgy, Installed: false, Error: "not found in PATH"},
+			ProviderAgy:    {Provider: ProviderAgy, Installed: true, Version: "2.0.0"},
 		},
 	}
 
 	assert.True(t, pa.IsInstalled(ProviderClaude))
 	assert.False(t, pa.IsInstalled(ProviderCodex))
-	assert.True(t, pa.IsInstalled(ProviderGemini))
+	assert.False(t, pa.IsInstalled(ProviderGemini))
 	assert.False(t, pa.IsInstalled(ProviderCursor))
-	assert.False(t, pa.IsInstalled(ProviderAgy))
+	assert.True(t, pa.IsInstalled(ProviderAgy))
 
 	s := pa.Status(ProviderClaude)
 	assert.Equal(t, "1.0.0", s.Version)
 
 	all := pa.AllStatuses()
-	require.Len(t, all, 5)
+	require.Len(t, all, 4)
 	assert.Equal(t, ProviderClaude, all[0].Provider)
 	assert.Equal(t, ProviderCodex, all[1].Provider)
-	assert.Equal(t, ProviderGemini, all[2].Provider)
-	assert.Equal(t, ProviderCursor, all[3].Provider)
-	assert.Equal(t, ProviderAgy, all[4].Provider)
+	assert.Equal(t, ProviderCursor, all[2].Provider)
+	assert.Equal(t, ProviderAgy, all[3].Provider)
 
 	installed := pa.InstalledProviders()
-	assert.Equal(t, []string{ProviderClaude, ProviderGemini}, installed)
+	assert.Equal(t, []string{ProviderClaude, ProviderAgy}, installed)
 }
 
 func TestAllProviders(t *testing.T) {
-	assert.Equal(t, []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor, ProviderAgy}, AllProviders)
+	assert.Equal(t, []string{ProviderClaude, ProviderCodex, ProviderCursor, ProviderAgy}, AllProviders)
 }

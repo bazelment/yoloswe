@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/bramble/sessionmodel"
@@ -1475,42 +1474,6 @@ func (m *Manager) runSession(session *Session, prompt string) {
 				}(),
 				workDir: session.WorktreePath,
 			}
-		} else if agentModel.Provider == ProviderGemini {
-			// Gemini provider backend
-			clientOpts := []acp.ClientOption{
-				acp.WithBinaryArgs("--experimental-acp", "--model", session.Model),
-			}
-
-			geminiOpts, geminiLogHint, geminiStderrHint := m.geminiProviderOptions(session.ID)
-			clientOpts = append(clientOpts, geminiOpts...)
-			if geminiLogHint != "" {
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: time.Now(),
-					Type:      OutputTypeStatus,
-					Content:   geminiLogHint,
-				})
-			}
-			if geminiStderrHint != "" {
-				m.addOutput(session.ID, OutputLine{
-					Timestamp: time.Now(),
-					Type:      OutputTypeStatus,
-					Content:   geminiStderrHint,
-				})
-			}
-
-			// Configure permission handler based on session type
-			if session.Type == SessionTypePlanner || session.Type == SessionTypeCodeTalk {
-				// Planner/codetalk sessions should only be able to read, not write
-				clientOpts = append(clientOpts, acp.WithPermissionHandler(&acp.PlanOnlyPermissionHandler{}))
-			}
-			// Builder sessions use the default BypassPermissionHandler (auto-approve all)
-
-			runner = &providerRunner{
-				provider:     agent.NewGeminiLongRunningProvider(clientOpts, acp.WithSessionCWD(session.WorktreePath)),
-				eventHandler: eventHandler,
-				model:        session.Model,
-				workDir:      session.WorktreePath,
-			}
 		} else if agentModel.Provider == ProviderCursor {
 			// Cursor provider backend
 			runner = &providerRunner{
@@ -2646,29 +2609,6 @@ func (m *Manager) codexProviderOptions(sessionID SessionID) ([]codex.ClientOptio
 	return opts,
 		fmt.Sprintf("Codex protocol log: %s", sessionLogPath),
 		fmt.Sprintf("Codex stderr log: %s", stderrLogPath)
-}
-
-func (m *Manager) geminiProviderOptions(sessionID SessionID) ([]acp.ClientOption, string, string) {
-	stderrLogPath, ok := m.protocolLogPath(sessionID, "gemini.stderr.log")
-	if !ok {
-		return nil, "", ""
-	}
-
-	protocolLogPath, _ := m.protocolLogPath(sessionID, "gemini.protocol.jsonl")
-
-	opts := []acp.ClientOption{
-		acp.WithStderrHandler(newFileAppendHandler(stderrLogPath)),
-	}
-
-	var protocolLogHint string
-	if protocolLogPath != "" {
-		opts = append(opts, acp.WithProtocolLogger(newFileAppendWriter(protocolLogPath)))
-		protocolLogHint = fmt.Sprintf("Gemini protocol log: %s", protocolLogPath)
-	}
-
-	return opts,
-		protocolLogHint,
-		fmt.Sprintf("Gemini stderr log: %s", stderrLogPath)
 }
 
 // fileAppendWriter implements io.Writer by appending to a file.

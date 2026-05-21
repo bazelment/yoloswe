@@ -85,7 +85,7 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().StringVar(&args.issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123, owner/repo#42, or https://github.com/owner/repo/issues/42)")
 	cmd.Flags().StringVar(&args.workDir, "work-dir", "", "Working directory (overrides config)")
 	cmd.Flags().StringVar(&args.modelID, "model", "", "Agent model ID (overrides config)")
-	cmd.Flags().StringVar(&args.thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max, auto (overrides config; rejected by providers without an effort knob, e.g. cursor, gemini)")
+	cmd.Flags().StringVar(&args.thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max, auto (overrides config; rejected by providers without an effort knob, e.g. cursor, agy)")
 	cmd.Flags().DurationVar(&args.pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	cmd.Flags().Float64Var(&args.maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
 	cmd.Flags().StringVar(&args.runStep, "run-step", "", "Run a single step and exit (for debugging): plan, build, create_pr, validate, ship")

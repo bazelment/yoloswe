@@ -2,17 +2,15 @@
 load("@rules_go//go:def.bzl", "go_test")
 
 # Provider conformance integration tests.
-# These tests require real CLI binaries (claude, codex, gemini) and network access.
+# These tests require real CLI binaries (claude, codex, agy) and network access.
 # "local" disables sandboxing so tests can access API keys and binaries.
 # "manual" excludes from wildcard builds (bazel test //...).
 # Run with: bazel test //multiagent/agent/integration:integration_test --test_timeout=600
 go_test(
     name = "integration_test",
     srcs = [
+        "agy_session_test.go",
         "claude_provider_bg_test.go",
-        "gemini_session_test.go",
-        # plan_permission_test.go excluded: PlanOnlyPermissionHandler tests need
-        # rework for Gemini (uses FsHandler for reads, not PermissionHandler).
         "provider_conformance_test.go",
     ],
     gotags = ["integration"],
@@ -24,6 +22,7 @@ go_test(
     ],
     deps = [
         "//agent-cli-wrapper/acp",
+        "//agent-cli-wrapper/agy",
         "//agent-cli-wrapper/claude",
         "//multiagent/agent",
         "@com_github_stretchr_testify//assert",

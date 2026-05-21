@@ -3,8 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 )
 
 // QueryResult is the provider-agnostic result of a one-shot query.
@@ -19,7 +17,7 @@ func NewProviderForModel(m AgentModel) (Provider, error) {
 	case ProviderClaude:
 		return NewClaudeProvider(), nil
 	case ProviderGemini:
-		return NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp", "--model", m.ID)), nil
+		return nil, fmt.Errorf("gemini-cli is retired; model %q routes through provider %q", m.ID, ProviderAgy)
 	case ProviderCodex:
 		return NewCodexProvider(), nil
 	case ProviderCursor:

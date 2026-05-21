@@ -2,35 +2,17 @@ package reviewer
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 )
 
-// geminiBackend wraps the Gemini ACP client as a Backend.
-// The ACP client process is started once in Start() and kept alive across
-// RunPrompt calls to amortize startup cost. Each RunPrompt uses one ACP
-// session: it loads ResumeSessionID when configured, falls back to a fresh
-// session when resume is unavailable, otherwise starts fresh. FollowUp has no
-// implicit shared conversation unless the caller supplied ResumeSessionID,
-// unlike the codex backend which can reuse its in-memory thread.
-//
-// # Verified model IDs (tested against live Gemini CLI, 2026-04-21)
-//
-//   - gemini-3.1-flash-lite-preview: ~670ms turn, working
-//   - gemini-2.5-flash: ~1700ms turn, working
-//
-// # Known stderr noise
-//
-// The Gemini CLI emits these lines on every startup; they are harmless:
-//
-//	Loaded cached credentials.
-//	[STARTUP] Phase 'cli_startup' was started but never ended. Skipping metrics.
+// geminiBackend is a compatibility alias for agy. The agy CLI does not expose
+// a model-selection flag, so BackendGemini preserves the public backend/model
+// names while running agy's default model under the hood.
 type geminiBackend struct {
-	client *acp.Client
 	config Config
 }
 
@@ -39,135 +21,75 @@ func newGeminiBackend(config Config) *geminiBackend {
 }
 
 func (b *geminiBackend) Start(ctx context.Context) error {
-	binaryArgs := []string{"--experimental-acp"}
-	if b.config.Model != "" {
-		binaryArgs = append(binaryArgs, "--model", b.config.Model)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	client := acp.NewClient(
-		acp.WithClientName("gemini-review"),
-		acp.WithClientVersion("1.0.0"),
-		acp.WithBinaryArgs(binaryArgs...),
-		acp.WithStderrHandler(stderrPrefixHandler("gemini")),
-	)
-	if err := client.Start(ctx); err != nil {
-		return fmt.Errorf("gemini: failed to start ACP client: %w", err)
-	}
-	b.client = client
 	return nil
 }
 
 func (b *geminiBackend) Stop() error {
-	if b.client != nil {
-		return b.client.Stop()
-	}
 	return nil
 }
 
 func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler EventHandler) (*ReviewResult, error) {
-	if b.client == nil {
-		return nil, fmt.Errorf("gemini: backend not started")
+	sessionOpts := []agy.SessionOption{
+		agy.WithStderrHandler(stderrPrefixHandler("agy")),
 	}
-
-	var sessionOpts []acp.SessionOption
 	if b.config.WorkDir != "" {
-		sessionOpts = append(sessionOpts, acp.WithSessionCWD(b.config.WorkDir))
+		sessionOpts = append(sessionOpts, agy.WithWorkDir(b.config.WorkDir))
 	}
-
 	var resumeStatus ResumeStatus
-	var session *acp.Session
-	var err error
 	if b.config.ResumeSessionID != "" {
-		// Start at Unverified so a bridge crash or non-recognized error
-		// from LoadSession still surfaces "resume was attempted" in the
-		// envelope, instead of letting omitempty erase the signal.
 		resumeStatus = ResumeStatusUnverified
-		session, err = b.client.LoadSession(ctx, b.config.ResumeSessionID, sessionOpts...)
-		if err != nil && errors.Is(err, acp.ErrSessionNotFound) {
-			slog.Warn("gemini resume unavailable; falling back to fresh session", "session_id", b.config.ResumeSessionID, "error", err.Error())
-			resumeStatus = ResumeStatusFallback
-			session, err = b.client.NewSession(ctx, sessionOpts...)
-		} else if err == nil {
-			resumeStatus = ResumeStatusOK
-		}
-	} else {
-		session, err = b.client.NewSession(ctx, sessionOpts...)
+		sessionOpts = append(sessionOpts, agy.WithConversation(b.config.ResumeSessionID))
 	}
-	if err != nil {
-		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: failed to create session: %w", err))
-	}
-	resumeStatus = resumeStatusAfterSessionReady(resumeStatus, b.config.ResumeSessionID, session.ID())
 	if handler != nil {
-		// ACP does not emit a ReadyEvent equivalent with model info; report
-		// what we configured so callers see a stable session start.
-		handler.OnSessionInfo(session.ID(), b.config.Model)
+		handler.OnSessionInfo(b.config.ResumeSessionID, b.config.Model)
 	}
 
-	// Derived context unblocks the filter goroutine's sends on early return.
-	adapterCtx, adapterCancel := context.WithCancel(ctx)
-	defer adapterCancel()
+	session := agy.NewSession(prompt, sessionOpts...)
+	if err := session.Start(ctx); err != nil {
+		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini/agy: failed to start session: %w", err))
+	}
+	defer session.Stop()
 
-	// Prompt blocks until turn complete while events are delivered through
-	// the event channel, so the bridge must drain concurrently.
-	bridged := make(chan *bridgeResult, 1)
-	bridgeErr := make(chan error, 1)
-	go func() {
-		r, err := bridgeStreamEvents(adapterCtx, filterGeminiEvents(adapterCtx, b.client.Events()), handler, "")
-		if err != nil {
-			bridgeErr <- err
-		} else {
-			bridged <- r
+	var response strings.Builder
+	for evt := range session.Events() {
+		switch e := evt.(type) {
+		case agy.TextEvent:
+			response.WriteString(e.Text)
+			if handler != nil {
+				handler.OnText(e.Text)
+			}
+		case agy.TurnCompleteEvent:
+			if b.config.ResumeSessionID != "" {
+				resumeStatus = ResumeStatusOK
+			}
+			if handler != nil {
+				handler.OnTurnComplete(e.Success, e.DurationMs)
+			}
+			result := &ReviewResult{
+				ResponseText: response.String(),
+				Success:      e.Success,
+				DurationMs:   e.DurationMs,
+				ResumeStatus: resumeStatus,
+			}
+			if e.Error != nil {
+				result.ErrorMessage = e.Error.Error()
+				if handler != nil {
+					handler.OnError(e.Error, "turn_complete")
+				}
+				return result, fmt.Errorf("gemini/agy turn failed: %w", e.Error)
+			}
+			return result, nil
+		case agy.ErrorEvent:
+			if handler != nil {
+				handler.OnError(e.Error, e.Context)
+			}
+			return reviewErrorResult(resumeStatus, fmt.Errorf("gemini/agy: %w", e.Error))
 		}
-	}()
-
-	_, promptErr := session.Prompt(ctx, prompt)
-
-	if promptErr != nil {
-		// Cancel the adapter context to unblock the bridge goroutine on the
-		// error path so we can drain any partial output already streamed.
-		adapterCancel()
 	}
-
-	var r *bridgeResult
-	select {
-	case r = <-bridged:
-	case err := <-bridgeErr:
-		if promptErr != nil {
-			return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: prompt failed: %w (bridge: %v)", promptErr, err))
-		}
-		return reviewErrorResult(resumeStatus, fmt.Errorf("gemini: %w", err))
-	case <-ctx.Done():
-		return reviewErrorResult(resumeStatus, ctx.Err())
-	}
-
-	if promptErr != nil {
-		return &ReviewResult{
-			ResponseText: r.responseText,
-			Success:      false,
-			DurationMs:   r.durationMs,
-			ErrorMessage: promptErr.Error(),
-			ResumeStatus: resumeStatus,
-		}, fmt.Errorf("gemini: prompt failed: %w", promptErr)
-	}
-
-	if tc, ok := r.turnEvent.(acp.TurnCompleteEvent); ok && tc.Error != nil {
-		if handler != nil {
-			handler.OnError(tc.Error, "turn_complete")
-		}
-		return &ReviewResult{
-			ResponseText: r.responseText,
-			Success:      false,
-			DurationMs:   r.durationMs,
-			ErrorMessage: tc.Error.Error(),
-			ResumeStatus: resumeStatus,
-		}, fmt.Errorf("gemini turn failed: %w", tc.Error)
-	}
-
-	return &ReviewResult{
-		ResponseText: r.responseText,
-		Success:      r.success,
-		DurationMs:   r.durationMs,
-		ResumeStatus: resumeStatus,
-	}, nil
+	return reviewErrorResult(resumeStatus, fmt.Errorf("gemini/agy: session ended without result"))
 }
 
 // filterGeminiEvents re-emits ACP events, dropping infrastructure events

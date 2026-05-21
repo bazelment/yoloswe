@@ -389,7 +389,7 @@ echo 'Add a REST API with /health and /echo endpoints using separate packages. U
 
 4. **`ToolSearch` tool call** — ~~Fixed.~~ The `--tools ""` flag now disables ALL built-in tools in the delegator session. The delegator only has 3 MCP tools available — no built-in tools at all. ToolSearch is completely unavailable, verified across 3 test runs. The previous `--allowed-tools` approach and `WithAllowedTools(DelegatorAllowedTools...)` have been removed.
 
-5. **Non-Claude child session cost reporting** — ~~Partially addressed.~~ The harness now shows token counts when cost is zero (`Xin/Yout tokens` format), and protocol logs are captured for debugging. However, codex and gemini providers still don't report usage through the `TurnUsage` mechanism, so both cost and token counts remain zero for these providers. The total cost summary underreports when non-Claude children are involved.
+5. **Non-Claude child session cost reporting** — ~~Partially addressed.~~ The harness now shows token counts when cost is zero (`Xin/Yout tokens` format), and protocol logs are captured for debugging. However, codex and agy-backed providers still don't report usage through the `TurnUsage` mechanism, so both cost and token counts remain zero for these providers. The total cost summary underreports when non-Claude children are involved.
 
 6. **Codex read-only workspace** — The codex CLI doesn't write files in the workspace by default. This is a codex CLI configuration issue, not a delegator bug. The delegator correctly self-recovers by spawning a Claude fallback session.
 

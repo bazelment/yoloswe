@@ -8,7 +8,7 @@ import (
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
 	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.3-codex")
-	Provider string // Binary/provider name: "claude", "codex", "gemini", etc.
+	Provider string // Binary/provider name: "claude", "codex", "agy", etc.
 	Label    string // Display label for the UI (e.g. "opus (claude)")
 }
 
@@ -21,12 +21,10 @@ var AllModels = []AgentModel{
 	{ID: "gpt-5.3-codex", Provider: ProviderCodex, Label: "gpt-5.3-codex"},
 	{ID: "gpt-5.2", Provider: ProviderCodex, Label: "gpt-5.2"},
 	{ID: "gpt-5.1-codex-max", Provider: ProviderCodex, Label: "gpt-5.1-codex-max"},
-	{ID: "gemini-3.1-pro-preview", Provider: ProviderGemini, Label: "gemini-3.1-pro-preview"},
-	{ID: "gemini-3-pro-preview", Provider: ProviderGemini, Label: "gemini-3-pro-preview"},
-	{ID: "gemini-3-flash-preview", Provider: ProviderGemini, Label: "gemini-3-flash-preview"},
-	{ID: "gemini-2.5-pro", Provider: ProviderGemini, Label: "gemini-2.5-pro"},
-	{ID: "gemini-2.5-flash", Provider: ProviderGemini, Label: "gemini-2.5-flash"},
-	{ID: "gemini-2.5-flash-lite", Provider: ProviderGemini, Label: "gemini-2.5-flash-lite"},
+	// agy does not expose a model-selection flag. Keep one gemini-family
+	// compatibility ID so existing configs still resolve, but route it to
+	// agy's default model.
+	{ID: "gemini-3.1-flash-lite-preview", Provider: ProviderAgy, Label: "gemini-3.1-flash-lite-preview (agy default)"},
 	{ID: "cursor-default", Provider: ProviderCursor, Label: "cursor-default"},
 	{ID: "agy-default", Provider: ProviderAgy, Label: "agy-default"},
 }
@@ -48,7 +46,7 @@ var modelPrefixRules = []struct {
 	provider string
 }{
 	{"gpt-", ProviderCodex},
-	{"gemini-", ProviderGemini},
+	{"gemini-", ProviderAgy},
 	{"cursor-", ProviderCursor},
 	{"composer-", ProviderCursor},
 	{"agy-", ProviderAgy},

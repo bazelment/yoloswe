@@ -250,7 +250,7 @@ func TestStartSessionWithModelValidation(t *testing.T) {
 	m := NewManagerWithConfig(ManagerConfig{SessionMode: SessionModeTUI})
 	defer m.Close()
 
-	registry := newTestRegistry(agent.ProviderClaude, agent.ProviderGemini)
+	registry := newTestRegistry(agent.ProviderClaude, agent.ProviderAgy)
 
 	handler := NewDelegatorToolHandler(m, t.TempDir(), "", registry)
 
@@ -267,7 +267,7 @@ func TestStartSessionWithModelValidation(t *testing.T) {
 	result, err = handler.handleStartSession(context.Background(), startSessionParams{
 		Type:   "planner",
 		Prompt: "test",
-		Model:  "gemini-2.5-pro",
+		Model:  "gemini-3.1-flash-lite-preview",
 	})
 	require.NoError(t, err)
 	assert.Contains(t, result, "Started planner session:")
@@ -294,13 +294,13 @@ func TestAvailableModelsDescription(t *testing.T) {
 	})
 
 	t.Run("lists models with provider in parens", func(t *testing.T) {
-		registry := newTestRegistry(agent.ProviderClaude, agent.ProviderGemini)
+		registry := newTestRegistry(agent.ProviderClaude, agent.ProviderAgy)
 		handler := NewDelegatorToolHandler(m, t.TempDir(), "", registry)
 		desc := handler.AvailableModelsDescription()
 
 		assert.Contains(t, desc, "opus (claude)")
 		assert.Contains(t, desc, "sonnet (claude)")
 		assert.Contains(t, desc, "haiku (claude)")
-		assert.Contains(t, desc, "gemini-2.5-pro (gemini)")
+		assert.Contains(t, desc, "gemini-3.1-flash-lite-preview (agy)")
 	})
 }

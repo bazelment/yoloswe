@@ -19,13 +19,12 @@ const (
 )
 
 // AllProviders is the ordered list of known provider names.
-var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderGemini, ProviderCursor, ProviderAgy}
+var AllProviders = []string{ProviderClaude, ProviderCodex, ProviderCursor, ProviderAgy}
 
 // providerBinaries maps provider names to their CLI binary names.
 var providerBinaries = map[string]string{
 	ProviderClaude: "claude",
 	ProviderCodex:  "codex",
-	ProviderGemini: "gemini",
 	ProviderCursor: "agent",
 	ProviderAgy:    "agy",
 }
@@ -143,7 +142,7 @@ func getVersion(binaryPath string) string {
 	cmd := exec.CommandContext(ctx, binaryPath, "--version")
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	// Discard stderr — tools like gemini emit Node.js deprecation warnings there.
+	// Discard stderr; provider CLIs may emit non-version diagnostics there.
 	if err := cmd.Run(); err != nil {
 		return ""
 	}

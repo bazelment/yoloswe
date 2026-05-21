@@ -8,7 +8,7 @@ Related: PR #172 (`feature/jiradozer-agent-flags`), `multiagent/agent/provider.g
 
 `cfg.Effort` is plumbed through `ExecuteConfig` and consumed only by
 `ClaudeProvider` (`multiagent/agent/claude_provider.go:205-211`). The other
-three providers — Codex, Cursor, Gemini — silently ignore it, which means
+providers — Codex, Cursor, and agy — silently ignore it, which means
 `jiradozer --thinking-level=high --provider=codex` looks like it works but
 applies no effort. Both PR #172 reviewers (codex+cursor agreeing in r2)
 flagged this as the main follow-up; the flag help text was hedged with
@@ -20,7 +20,7 @@ flagged this as the main follow-up; the flag help text was hedged with
 |---|---|---|---|---|
 | **Codex** | Supported — wire it through | `codex.WithEffort(string)` exists at `agent-cli-wrapper/codex/client_options.go:215`; `TurnConfig.Effort` flows to JSON-RPC `effort` field at `agent-cli-wrapper/codex/jsonrpc.go:104` (note: response field is `reasoningEffort`). SDK passes the string through unvalidated. | `codex_provider.go:104` — add `[]codex.TurnOption` arg to `thread.Ask` (signature already accepts `...TurnOption` at `codex/thread.go:172`). | Codex SDK comment at `client_options.go:188` says "for o-series models" — non-o-series silently ignore. SDK accepts any string; validation is ours. |
 | **Cursor** | Not supported — reject explicitly | Zero effort/reasoning surface in `agent-cli-wrapper/cursor/`. `session_options.go` has no relevant fields; `--thinking-level` is not a Cursor CLI flag. Cursor *streams* `thinking` deltas (`cursor/protocol.go:154`) but provides no input knob. | None. | Returning success while ignoring `cfg.Effort` is the current bug. |
-| **Gemini** | Not supported (today) — reject explicitly | ACP protocol (`agent-cli-wrapper/acp/`) has thinking *output* (`acp/events.go:73` `ThinkingDeltaEvent`) but no reasoning/effort *input* parameter. `acp.SessionOption` and `acp.ClientOption` have no effort field. | None — would require an ACP protocol extension upstream. | Gemini's reasoning is model-implicit (Flash vs Pro); ACP doesn't expose a knob today. |
+| **agy / Gemini-family aliases** | Not supported — reject explicitly | `agent-cli-wrapper/agy/` has no reasoning/effort input parameter, and the `agy` CLI exposes no model-selection or effort flag. | None. | `gemini-*` model IDs are compatibility aliases that route to agy's default model. |
 
 ## Validation architecture
 

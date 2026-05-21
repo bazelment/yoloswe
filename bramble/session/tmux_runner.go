@@ -134,10 +134,13 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 	binary = r.provider
 	if binary == "" {
 		binary = ProviderClaude
+	} else if binary == ProviderGemini {
+		binary = ProviderAgy
 	}
 
-	// Add model flag
-	if r.model != "" {
+	// Add model flag for CLIs that support one. agy has no model-selection
+	// flag; gemini-family IDs routed to agy use agy's default model.
+	if r.model != "" && binary != ProviderAgy {
 		args = append(args, "--model", r.model)
 	}
 
@@ -146,21 +149,6 @@ func (r *tmuxRunner) buildCommand() (binary string, args []string) {
 		// Codex-specific flags
 		if r.yoloMode {
 			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-		}
-	case ProviderGemini:
-		// Gemini-specific flags
-		// Note: Do NOT use --experimental-acp in tmux mode. ACP is for programmatic
-		// JSON-RPC communication (TUI mode), not interactive CLI usage (tmux mode).
-		//
-		// IMPORTANT: Gemini CLI requires folder trust before running commands.
-		// Users must run `gemini` once in the project directory and select
-		// "Trust folder" from the prompt. Trust is saved to ~/.gemini/trustedFolders.json.
-		// Without this, tmux sessions will hang at the trust prompt.
-		if r.yoloMode {
-			args = append(args, "--yolo")
-		}
-		if r.permissionMode == "plan" {
-			args = append(args, "--approval-mode", "plan")
 		}
 	case ProviderAgy:
 		if r.yoloMode {

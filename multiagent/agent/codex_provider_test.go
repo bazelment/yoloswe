@@ -427,7 +427,7 @@ func TestProvider_ValidateGate(t *testing.T) {
 		"claude": func() Provider { return NewClaudeProvider() },
 		"cursor": func() Provider { return NewCursorProvider() },
 		"codex":  func() Provider { return NewCodexProvider() },
-		"gemini": func() Provider { return NewGeminiProvider() },
+		"agy":    func() Provider { return NewAgyProvider() },
 	}
 	for shape, tc := range cases {
 		shape, tc := shape, tc
