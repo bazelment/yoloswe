@@ -35,11 +35,11 @@ JSON per PR so:
   `bramble code-review` apple-to-apple against the same commit and the
   same `--goal` text.
 
-## Per-PR file schema (v1)
+## Per-PR file schema (v2)
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "harvested_at": "<ISO 8601 UTC>",
   "harvester_git_sha": "<sha of yoloswe at harvest time>",
   "pr": {
@@ -53,6 +53,8 @@ JSON per PR so:
     "exit_reason": "converged",
     "total_rounds": 5
   },
+  "pr_comments_attribution_basis": "created_at",  // see "PR comments" below
+  "pr_comments_fetch_error": null,
   "harvested_rounds": [
     {
       "round": 1,
@@ -67,7 +69,7 @@ JSON per PR so:
       "goal_text": "...",                  // what was passed to --goal
       "goal_recoverable": true,
       "scope_hints_present": false,
-      "raw_comment_actions": [ /* this round's comment_actions verbatim */ ],
+      "raw_comment_actions": [ /* see "PR comments" below */ ],
       "review_runs": [
         {
           "backend": "codex",              // codex | cursor | gemini | lint
@@ -164,6 +166,55 @@ Single-round PRs collapse to one entry with `signal_tier="r1_only"`.
 Incomplete loops mark the last round as `signal_tier="final_incomplete"`
 so consumers can filter them out if they want a clean precision signal.
 
+## PR comments
+
+`raw_comment_actions` on each harvested round holds two kinds of rows.
+
+**Reviewer findings** (`source` ∈ `codex / cursor / gemini / lint / sweep /
+consensus / ci`) are the bramble + CI signals pr-polish recorded. They stay
+keyed to the round they were recorded in — unchanged from v1.
+
+**GitHub PR comments** (`source` ∈ `github-inline / github-issue /
+github-review`) are the comments humans and review bots authored on the PR.
+The harvester **fetches these fresh from GitHub** (`gh api` on the three
+comment endpoints) rather than trusting pr-polish state, because:
+
+- pr-polish only fetches PR comments at the *start of each series*, so on a
+  long, many-times-resumed PR they land in scattered middle rounds — and the
+  harvester only emits R1 + final, dropping the rest.
+- pr-polish re-fetches *all* open comments every series, so the same comment
+  recurs across many rounds' `comment_actions` as stale duplicates.
+
+Each fetched github comment is:
+
+1. **Verdict-joined** — matched back to the `comment_actions` row that recorded
+   the engineer's verdict, by `comment_id` (precise), else by the recorded
+   `topic` being a substring of / well-contained in the body. `action` is
+   `null` when GitHub returned a comment pr-polish never triaged — the dataset
+   is a *complete census*, not just the triaged subset.
+2. **Round-attributed** — `attributed_round` is the round whose
+   `[head_before(n), head_before(n+1))` commit-time window contains the
+   comment's `created_at`.
+3. **Folded** onto a harvested round — since only R1 + final are emitted, a
+   comment attributed to a middle round folds onto the nearest harvested round
+   without crossing forward (`attributed_round <= r1.n` → R1, else → final).
+   Every PR comment thus appears exactly once.
+
+GitHub-comment rows carry: `comment_id, source, author, is_bot, path, line,
+body, created_at, original_commit_id, action, reason, comment_actions_source,
+attributed_round`.
+
+`pr.pr_comments_attribution_basis` records how attribution was done:
+
+| value                   | meaning                                                              |
+|-------------------------|----------------------------------------------------------------------|
+| `created_at`            | round-boundary commit times resolved; comments bucketed by timestamp |
+| `unmapped_repo_fallback`| repo not in `--repos-root`; every comment folds onto R1              |
+| `no_timestamp`          | `--skip-pr-comments` or the fetch failed; the state-recorded github `comment_actions` are used instead, attributed to their recorded round |
+
+`pr.pr_comments_fetch_error` is the `gh` error string when the fetch was
+partial or failed, else `null`.
+
 ## Goal text
 
 `--goal` text is **not** persisted on disk (the run log only emits
@@ -186,14 +237,20 @@ python3 .claude/skills/code-review-eval/scripts/harvest.py \
   --repos-root yoloswe=/home/ubuntu/worktrees/yoloswe/main \
   --only kernel-3945 \                                        # optional, repeatable
   --skip-pr-summary \                                         # optional; null R1 goal
+  --skip-pr-comments \                                        # optional; see below
   --dry-run --verbose
 ```
 
 `--repos-root NAME=PATH` is what lets the harvester compute the
-`merge_base_sha`, `files_changed`, and `repo_url` (the URL is read from
-`git config --get remote.origin.url`). Without it, those fields are left
-null / `merge_base_resolved=false` and the dataset still emits — replay
-just becomes harder.
+`merge_base_sha`, `files_changed`, `repo_url` (read from `git config --get
+remote.origin.url`), and the per-round commit times that drive PR-comment
+attribution. Without it, those fields are left null / `merge_base_resolved=
+false`, github comments fall back to `attribution_basis=unmapped_repo_fallback`,
+and the dataset still emits — replay just becomes harder.
+
+`--skip-pr-comments` skips the `gh api` PR-comment fetch. github comments then
+fall back to the state-recorded `comment_actions` set (no `created_at`,
+`attribution_basis=no_timestamp`). Use it for offline runs.
 
 Exit codes: **0** on full success, **1** when some PRs had non-fatal
 issues (e.g. `pr_summary` not fetchable), **2** when nothing harvested.

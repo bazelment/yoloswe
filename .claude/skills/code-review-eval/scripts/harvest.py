@@ -36,14 +36,18 @@ DEFAULT_SOURCE_DIR = Path.home() / ".bramble" / "projects"
 DEFAULT_OUT_DIR = Path.home() / ".bramble" / "code-review-eval" / "dataset"
 
 
+def repo_slug(repo_url: Optional[str]) -> Optional[str]:
+    """Extract ``org/repo`` from a normalized https GitHub URL, or None."""
+    if not repo_url or "github.com/" not in repo_url:
+        return None
+    return repo_url.split("github.com/", 1)[1] or None
+
+
 def fetch_pr_summary(repo_url: Optional[str], pr_number: str) -> Optional[str]:
     """Best-effort `gh pr view` fetch. Returns None on any failure."""
-    if not repo_url or not pr_number:
+    slug = repo_slug(repo_url)
+    if not slug or not pr_number:
         return None
-    # Extract org/repo from https://github.com/org/repo
-    if "github.com/" not in repo_url:
-        return None
-    slug = repo_url.split("github.com/", 1)[1]
     try:
         res = subprocess.run(
             ["gh", "pr", "view", pr_number, "-R", slug, "--json", "title,body"],
@@ -106,6 +110,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Skip `gh pr view` for PR summaries (R1 goal_text will be null).",
     )
     p.add_argument(
+        "--skip-pr-comments",
+        action="store_true",
+        help=(
+            "Skip `gh api` PR-comment fetch. github comments fall back to the "
+            "state-recorded comment_actions set (no created_at; "
+            "attribution_basis=no_timestamp)."
+        ),
+    )
+    p.add_argument(
         "--only",
         action="append",
         default=[],
@@ -152,11 +165,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         _log(args.verbose, f"-> {repo_name}-{pr_number}")
         repo_path = repo_map.lookup(repo_name)
         repo_url = hl.get_repo_url(repo_path)
+        slug = repo_slug(repo_url)
         pr_summary: Optional[str] = None
         if not args.skip_pr_summary:
             pr_summary = fetch_pr_summary(repo_url, pr_number)
             if pr_summary is None:
                 _log(args.verbose, f"   pr_summary unavailable; R1 goal will be null")
+                partial = True
+
+        fetched_comments: Optional[list] = None
+        comments_err: Optional[str] = None
+        fetch_attempted = not args.skip_pr_comments
+        if fetch_attempted:
+            if slug:
+                fetched_comments, comments_err = hl.fetch_pr_comments(
+                    slug, pr_number
+                )
+                if comments_err:
+                    _log(args.verbose, f"   pr-comment fetch issue: {comments_err}")
+                    partial = True
+                else:
+                    _log(
+                        args.verbose,
+                        f"   fetched {len(fetched_comments or [])} PR comment(s)",
+                    )
+            else:
+                comments_err = "no repo slug (repo not in --repos-root)"
+                _log(args.verbose, f"   {comments_err}; github comments fall back")
+                fetch_attempted = False
                 partial = True
 
         try:
@@ -170,6 +206,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 harvested_at=harvested_at,
                 bramble_ops_path=args.bramble_ops_path,
                 include_incomplete=args.include_incomplete,
+                fetched_pr_comments=fetched_comments,
+                pr_comments_fetch_error=comments_err,
+                fetch_attempted=fetch_attempted,
             )
         except Exception as e:
             print(f"error: failed to build record for {state_dir.name}: {e}",

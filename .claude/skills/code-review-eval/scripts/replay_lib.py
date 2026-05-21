@@ -285,11 +285,15 @@ def parse_runlog(text: str) -> ExecutionTrace:
 #   item.commandActions[]  — [{type: read|search|..., path, name}]
 #   item.durationMs / exitCode / status (on item/completed)
 
-# codex commandActions[].type -> our coarse tool kind
+# codex commandActions[].type -> our coarse tool kind. The codex protocol
+# emits both `list` and `listFiles` for directory enumeration depending on
+# the action shape; an `unknown` type (bare git/shell commands) maps to no
+# kind and leaves the call as a generic shell call.
 _CODEX_ACTION_KIND = {
     "read": "read",
     "search": "grep",
     "list": "glob",
+    "listFiles": "glob",
 }
 
 
@@ -373,18 +377,27 @@ def parse_codex_protocol(text: str) -> ExecutionTrace:
 
         if method == "item/started":
             actions = item.get("commandActions") or []
-            # An item can carry several actions; pick the first typed one
-            # for kind/target, but record the raw command as the tool string.
+            # An item can carry several actions (e.g. a `sed` that codex
+            # classifies both as a generic shell op and a typed `read`).
+            # Prefer a `read` action so the file target is recovered for
+            # files coverage; otherwise take the first recognised kind.
             kind = "shell"
             target: Optional[str] = None
+            chosen = None
             for ca in actions:
                 k = _CODEX_ACTION_KIND.get(ca.get("type") or "")
-                if k:
-                    kind = k
-                    p = ca.get("path") or ca.get("name")
-                    if p:
-                        target = p
+                if not k:
+                    continue
+                if k == "read":
+                    chosen = (k, ca)
                     break
+                if chosen is None:
+                    chosen = (k, ca)
+            if chosen is not None:
+                kind, ca = chosen
+                p = ca.get("path") or ca.get("name")
+                if p:
+                    target = p
             tc = ToolCall(
                 kind=kind,
                 tool=(item.get("command") or "?")[:200],
@@ -432,30 +445,55 @@ def parse_codex_protocol(text: str) -> ExecutionTrace:
     return trace
 
 
+def _strip_replay_cwd(path: str) -> str:
+    """Drop the ephemeral replay-checkout prefix from a read target.
+
+    Codex protocol logs record absolute paths inside the throwaway
+    `/tmp/replay-<pr>-<round>-<rand>/` checkout. Strip that prefix so
+    ``files_read`` shows repo-relative paths the judge can act on; paths
+    outside any replay checkout (skill docs, /home/...) are left intact.
+    """
+    m = re.match(r"^/tmp/replay-[^/]+/(.+)$", path)
+    return m.group(1) if m else path
+
+
 def annotate_files_coverage(
     trace: ExecutionTrace, files_changed: list[str]
 ) -> None:
-    """Split files_changed[] into read / not-read based on the trace.
+    """Populate ``files_read`` and ``files_changed_not_read`` on the trace.
 
-    Paths in both trace sources may be partial (klogfmt redacts to
-    `.../<tail>`), so we match on basename: a changed file counts as "read"
-    if any read-tool call's target ends with that file's basename. Mutates
-    ``trace`` in place.
+    ``files_read`` is the full set of distinct paths the reviewer read —
+    *not* a subset of ``files_changed`` (an earlier version incorrectly
+    intersected the two, so a reviewer that read 30+ files showed only the
+    handful that happened to be in the diff). ``files_changed_not_read`` is
+    the diagnostic subset: changed files the reviewer never opened.
+
+    Paths from the klogfmt source may be redacted to `.../<tail>`; codex
+    protocol paths are absolute inside the ephemeral replay checkout. We
+    normalise both and basename-match changed files against the read set.
+    Mutates ``trace`` in place.
     """
     read_targets = [
-        (t.target or "").lower()
-        for t in trace.tool_calls
-        if t.kind == "read" and t.target
+        t.target for t in trace.tool_calls if t.kind == "read" and t.target
     ]
-    read: list[str] = []
+
+    # Full distinct read set, replay-checkout prefix stripped, order-stable.
+    seen: set[str] = set()
+    files_read: list[str] = []
+    for rt in read_targets:
+        norm = _strip_replay_cwd(rt.strip())
+        if norm and norm not in seen:
+            seen.add(norm)
+            files_read.append(norm)
+    trace.files_read = files_read
+
+    # Coverage diagnostic: which changed files were never read.
+    read_basenames = {Path(p).name.lower() for p in files_read}
     not_read: list[str] = []
     for fc in files_changed:
         base = Path(fc).name.lower()
-        if base and any(rt.endswith(base) for rt in read_targets):
-            read.append(fc)
-        else:
+        if base not in read_basenames:
             not_read.append(fc)
-    trace.files_read = read
     trace.files_changed_not_read = not_read
 
     if not trace.parsed:

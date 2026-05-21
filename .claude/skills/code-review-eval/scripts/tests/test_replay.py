@@ -196,7 +196,9 @@ class ParseCodexProtocolTests(unittest.TestCase):
         rl.annotate_files_coverage(
             tr, ["scripts/deploy.py", "scripts/other.py"]
         )
-        self.assertEqual(tr.files_read, ["scripts/deploy.py"])
+        # files_read is the full distinct read set, not a files_changed subset.
+        self.assertEqual(tr.files_read, ["/x/scripts/deploy.py"])
+        # scripts/other.py was never read; scripts/deploy.py matches by basename.
         self.assertEqual(tr.files_changed_not_read, ["scripts/other.py"])
 
     def test_empty_protocol_not_parsed(self):
@@ -260,6 +262,182 @@ class FilesCoverageTests(unittest.TestCase):
         self.assertTrue(
             any("no usable execution log" in n for n in tr.notes)
         )
+
+    def test_files_read_is_full_set_not_diff_subset(self):
+        # A reviewer that read files OUTSIDE the diff must have them all in
+        # files_read — the earlier bug intersected files_read with
+        # files_changed, hiding the reviewer's true investigation breadth.
+        proto = "\n".join(
+            [
+                json.dumps({"format": "codex", "version": "1.0"}),
+                _codex_line(
+                    "received",
+                    "2026-05-21T05:24:42.944Z",
+                    {"method": "turn/started", "params": {}},
+                ),
+                _codex_line(
+                    "received",
+                    "2026-05-21T05:24:43.000Z",
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "item": {
+                                "id": "c1",
+                                "type": "commandExecution",
+                                "command": "sed -n 1,80p Dockerfile",
+                                "commandActions": [
+                                    {
+                                        "type": "read",
+                                        "path": "/tmp/replay-kernel-4024-r1-xx/Dockerfile",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ),
+                _codex_line(
+                    "received",
+                    "2026-05-21T05:24:43.500Z",
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "item": {
+                                "id": "c2",
+                                "type": "commandExecution",
+                                "command": "sed -n 1,80p docs/testing.md",
+                                "commandActions": [
+                                    {
+                                        "type": "read",
+                                        "path": "/tmp/replay-kernel-4024-r1-xx/docs/testing.md",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                ),
+            ]
+        )
+        tr = rl.parse_codex_protocol(proto)
+        rl.annotate_files_coverage(tr, ["Dockerfile", "nitro.config.ts"])
+        # Both reads surface — including docs/testing.md, NOT in the diff.
+        self.assertEqual(
+            tr.files_read, ["Dockerfile", "docs/testing.md"]
+        )
+        # The replay-checkout prefix is stripped to repo-relative paths.
+        self.assertNotIn(
+            "/tmp/replay", "".join(tr.files_read)
+        )
+        # Coverage diagnostic still flags the unread changed file.
+        self.assertEqual(tr.files_changed_not_read, ["nitro.config.ts"])
+
+    def test_files_read_dedups(self):
+        # Same file read twice -> one entry in files_read.
+        proto = "\n".join(
+            [
+                json.dumps({"format": "codex", "version": "1.0"}),
+                _codex_line(
+                    "received",
+                    "2026-05-21T05:24:42.944Z",
+                    {"method": "turn/started", "params": {}},
+                ),
+            ]
+            + [
+                _codex_line(
+                    "received",
+                    f"2026-05-21T05:24:4{i}.000Z",
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "item": {
+                                "id": f"c{i}",
+                                "type": "commandExecution",
+                                "command": "sed -n p a.py",
+                                "commandActions": [
+                                    {"type": "read", "path": "/x/a.py"}
+                                ],
+                            }
+                        },
+                    },
+                )
+                for i in (3, 4)
+            ]
+        )
+        tr = rl.parse_codex_protocol(proto)
+        rl.annotate_files_coverage(tr, [])
+        self.assertEqual(tr.files_read, ["/x/a.py"])
+
+
+class StripReplayCwdTests(unittest.TestCase):
+    def test_strips_replay_checkout_prefix(self):
+        self.assertEqual(
+            rl._strip_replay_cwd("/tmp/replay-kernel-4024-r1-abc/services/x.ts"),
+            "services/x.ts",
+        )
+
+    def test_leaves_non_replay_paths(self):
+        self.assertEqual(
+            rl._strip_replay_cwd("/home/ubuntu/.claude/skills/review/SKILL.md"),
+            "/home/ubuntu/.claude/skills/review/SKILL.md",
+        )
+        self.assertEqual(rl._strip_replay_cwd("scripts/deploy.py"), "scripts/deploy.py")
+
+
+class CodexActionKindTests(unittest.TestCase):
+    def _one_item_proto(self, command_actions: list[dict]) -> str:
+        return "\n".join(
+            [
+                json.dumps({"format": "codex", "version": "1.0"}),
+                _codex_line(
+                    "received",
+                    "2026-05-21T05:24:42.944Z",
+                    {"method": "turn/started", "params": {}},
+                ),
+                _codex_line(
+                    "received",
+                    "2026-05-21T05:24:43.000Z",
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "item": {
+                                "id": "c1",
+                                "type": "commandExecution",
+                                "command": "cmd",
+                                "commandActions": command_actions,
+                            }
+                        },
+                    },
+                ),
+            ]
+        )
+
+    def test_listfiles_maps_to_glob(self):
+        # The codex protocol emits `listFiles` (not `list`) for directory
+        # enumeration; it must map to the glob kind, not fall through to shell.
+        tr = rl.parse_codex_protocol(
+            self._one_item_proto([{"type": "listFiles", "name": "libs/"}])
+        )
+        self.assertEqual(tr.tool_calls[0].kind, "glob")
+
+    def test_read_action_preferred_over_unknown(self):
+        # An item with an `unknown` action listed before a `read` action must
+        # still be classified `read` so the file target is recovered.
+        tr = rl.parse_codex_protocol(
+            self._one_item_proto(
+                [
+                    {"type": "unknown", "path": None},
+                    {"type": "read", "path": "/x/found.py"},
+                ]
+            )
+        )
+        self.assertEqual(tr.tool_calls[0].kind, "read")
+        self.assertEqual(tr.tool_calls[0].target, "/x/found.py")
+
+    def test_unknown_only_stays_shell(self):
+        tr = rl.parse_codex_protocol(
+            self._one_item_proto([{"type": "unknown", "path": None}])
+        )
+        self.assertEqual(tr.tool_calls[0].kind, "shell")
+        self.assertIsNone(tr.tool_calls[0].target)
 
 
 class CollectExecutionTraceTests(unittest.TestCase):

@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 Action = Literal[
     "fixed", "false_positive", "wont_fix", "ack", "stale", "flake", "pre_existing"
@@ -37,19 +37,24 @@ MatchStrategy = Literal[
     "exact", "topic_path_line", "topic_path", "topic_only", "none"
 ]
 EnvelopeStatus = Literal["ok", "error", "missing"]
+AttributionBasis = Literal[
+    "created_at", "unmapped_repo_fallback", "no_timestamp"
+]
 
 # Backends pr-polish runs. ``lint`` writes its findings through the same
 # envelope schema even though it isn't a bramble model backend, so we
 # treat it as a first-class review_run source here.
 BACKENDS = ("codex", "cursor", "gemini", "lint")
 
+# GitHub PR-comment sources. These are the comments authored on the PR by
+# humans and review bots — distinct from bramble's own reviewer findings.
+GITHUB_SOURCES = frozenset({"github-inline", "github-issue", "github-review"})
+
 # Sources in comment_actions that are NOT bramble findings; they're PR
 # comments / CI failures recorded for the audit trail. We don't try to
 # match envelope findings against them, but we keep them in
 # ``raw_comment_actions`` so the dataset is self-describing.
-NON_BACKEND_SOURCES = frozenset(
-    {"github-inline", "github-issue", "github-review", "ci"}
-)
+NON_BACKEND_SOURCES = frozenset(GITHUB_SOURCES | {"ci"})
 
 # Sources that pr-polish uses when consensus-merging findings from
 # multiple backends. Treated as a wildcard backend in Tier 1 matching.
@@ -127,6 +132,8 @@ class PRRecord:
     harvested_at: str
     harvester_git_sha: str
     pr: dict
+    pr_comments_attribution_basis: AttributionBasis
+    pr_comments_fetch_error: Optional[str]
     harvested_rounds: list[HarvestedRound] = field(default_factory=list)
 
 
@@ -275,6 +282,23 @@ def topic_token_overlap(topic: str, message: str) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def topic_token_containment(topic: str, body: str) -> float:
+    """Fraction of the topic's >3-char tokens that appear in ``body``.
+
+    Asymmetric on purpose — unlike :func:`topic_token_overlap`'s Jaccard.
+    A PR comment body is long (severity badges, descriptions, code blocks)
+    while a recorded ``topic`` is a short summary, so a symmetric metric
+    unfairly penalises the body's extra tokens. Containment answers the
+    right question: "is this topic about this comment?".
+    """
+    if not topic or not body:
+        return 0.0
+    a, b = _tokens(topic), _tokens(body)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a)
 
 
 def _topic_substring(topic: str, message: str, *, limit: int = 100) -> bool:
@@ -529,6 +553,437 @@ def harvester_git_sha(repo_path: Path) -> str:
     return res.stdout.strip()
 
 
+def git_commit_time(repo_path: Optional[Path], sha: str) -> Optional[str]:
+    """Committer date of ``sha`` as a strict-ISO8601 UTC string, or None.
+
+    Used to derive per-round time boundaries: pr-polish stores each round's
+    ``head_before``/``head_after`` SHAs but no round timestamps, so the only
+    way to bucket a PR comment's ``created_at`` into a round is to resolve the
+    round-boundary commits to their commit times.
+    """
+    if repo_path is None or not repo_path.exists() or not sha:
+        return None
+    res = _git(repo_path, "show", "-s", "--format=%cI", f"{sha}^{{commit}}")
+    if res.returncode != 0:
+        return None
+    out = res.stdout.strip()
+    return out or None
+
+
+# ---------------------------------------------------------------------------
+# PR-comment fetch + verdict join + round attribution
+# ---------------------------------------------------------------------------
+
+
+def _gh_api(slug: str, endpoint: str) -> tuple[list[dict], Optional[str]]:
+    """Run ``gh api --paginate repos/<slug>/<endpoint>``; best-effort.
+
+    Returns ``(rows, error)``. Any failure (gh missing, network, non-zero
+    exit, bad JSON) returns ``([], <message>)`` — the harvester degrades to
+    the state-recorded comment set rather than crashing.
+    """
+    try:
+        res = subprocess.run(
+            ["gh", "api", "--paginate", f"repos/{slug}/{endpoint}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return [], f"gh api {endpoint} failed: {e}"
+    if res.returncode != 0:
+        return [], f"gh api {endpoint} exit {res.returncode}: {res.stderr.strip()}"
+    out = res.stdout.strip()
+    if not out:
+        return [], None
+    try:
+        obj = json.loads(out)
+    except json.JSONDecodeError as e:
+        return [], f"gh api {endpoint} JSON parse error: {e}"
+    if not isinstance(obj, list):
+        return [], f"gh api {endpoint} did not return a list"
+    return obj, None
+
+
+def fetch_pr_comments(
+    slug: str, pr_number: str
+) -> tuple[list[dict], Optional[str]]:
+    """Fetch all PR comments (inline + issue + review) from GitHub.
+
+    Mirrors the read path of pr-polish's ``pr_ops.fetch-comments``, but
+    standalone — pr-polish is not importable as a package, and the harvester
+    only needs the fetch, not the noise-filtering triage (the eval dataset is
+    a *complete census*: dropping bot-summary noise would discard reference
+    data the judge wants to see).
+
+    Structural drops only: inline replies (the parent carries the signal) and
+    empty / APPROVED / DISMISSED reviews. Returns ``(comments, error)`` where
+    each row is ``{id, source, author, is_bot, path, line, body, created_at,
+    original_commit_id}``. ``error`` is non-None when any endpoint failed; the
+    partial result (if any) is still returned.
+    """
+    if not slug or not pr_number:
+        return [], "missing repo slug or pr number"
+
+    errors: list[str] = []
+    inline, err = _gh_api(slug, f"pulls/{pr_number}/comments")
+    if err:
+        errors.append(err)
+    issues, err = _gh_api(slug, f"issues/{pr_number}/comments")
+    if err:
+        errors.append(err)
+    reviews, err = _gh_api(slug, f"pulls/{pr_number}/reviews")
+    if err:
+        errors.append(err)
+
+    comments: list[dict] = []
+
+    for c in inline:
+        if c.get("in_reply_to_id"):
+            continue  # reply; the parent comment is the one we keep
+        user = c.get("user") or {}
+        comments.append(
+            {
+                "id": c.get("id"),
+                "source": "github-inline",
+                "author": user.get("login"),
+                "is_bot": user.get("type") == "Bot",
+                "path": c.get("path"),
+                "line": c.get("line"),
+                "body": c.get("body") or "",
+                "created_at": c.get("created_at"),
+                "original_commit_id": c.get("original_commit_id"),
+            }
+        )
+
+    for c in issues:
+        user = c.get("user") or {}
+        comments.append(
+            {
+                "id": c.get("id"),
+                "source": "github-issue",
+                "author": user.get("login"),
+                "is_bot": user.get("type") == "Bot",
+                "path": None,
+                "line": None,
+                "body": c.get("body") or "",
+                "created_at": c.get("created_at"),
+                "original_commit_id": None,
+            }
+        )
+
+    for r in reviews:
+        if r.get("state") in {"APPROVED", "DISMISSED"}:
+            continue
+        body = (r.get("body") or "").strip()
+        if not body:
+            continue
+        user = r.get("user") or {}
+        comments.append(
+            {
+                "id": r.get("id"),
+                "source": "github-review",
+                "author": user.get("login"),
+                "is_bot": user.get("type") == "Bot",
+                "path": None,
+                "line": None,
+                "body": body,
+                "created_at": r.get("submitted_at"),
+                "original_commit_id": None,
+            }
+        )
+
+    return comments, ("; ".join(errors) if errors else None)
+
+
+@dataclass
+class CommentVerdictIndex:
+    """Lookup tables for joining fetched PR comments to recorded verdicts.
+
+    ``by_id`` keys on ``comment_id`` — the precise join. ``by_topic`` is the
+    fallback for ``comment_actions`` rows pr-polish recorded with
+    ``comment_id: null`` (older / buggy runs): it keys on
+    ``(source, normalized topic)`` so a fetched comment can still be joined by
+    matching that topic as a substring of its body.
+    """
+
+    by_id: dict[Any, dict] = field(default_factory=dict)
+    by_topic: list[dict] = field(default_factory=list)
+
+
+def index_comment_verdicts(state: dict) -> CommentVerdictIndex:
+    """Index every github ``comment_action`` verdict for later joining.
+
+    pr-polish re-triages every open PR comment on each series start, so a
+    single ``comment_id`` recurs across many rounds' ``comment_actions``. The
+    *first* occurrence (earliest round ``n``) is where the engineer's real
+    verdict was set; later rows are re-fetched echoes. We key by ``comment_id``
+    and keep the earliest, recording the round it was triaged in.
+
+    Rows with ``comment_id: null`` (some older pr-polish runs never recorded
+    the id) cannot be keyed precisely — they go into ``by_topic`` instead so
+    the topic-substring fallback in :func:`build_pr_comments` can recover them.
+    """
+    idx = CommentVerdictIndex()
+    rounds = sorted(
+        (r for r in (state.get("rounds") or []) if r.get("n")),
+        key=lambda r: int(r.get("n") or 0),
+    )
+    for r in rounds:
+        n = int(r.get("n") or 0)
+        for a in r.get("comment_actions") or []:
+            if a.get("source") not in GITHUB_SOURCES:
+                continue
+            row = {
+                "action": a.get("action"),
+                "reason": a.get("reason"),
+                "comment_actions_source": a.get("source"),
+                "commit_sha": a.get("commit_sha"),
+                "triaged_in_round": n,
+            }
+            cid = a.get("comment_id")
+            if cid is not None:
+                if cid not in idx.by_id:
+                    idx.by_id[cid] = row
+                continue
+            topic = (a.get("topic") or "").strip()
+            if topic:
+                idx.by_topic.append({**row, "source": a.get("source"), "topic": topic})
+    return idx
+
+
+# Minimum topic-token containment to accept a null-id verdict join — the
+# fraction of the recorded ``topic``'s tokens that appear in the comment body.
+# Containment (not Jaccard) because the body is long and the topic is a short
+# summary; see :func:`topic_token_containment`.
+_TOPIC_JOIN_CONTAINMENT = 0.6
+
+
+def _join_verdict(
+    comment: dict, idx: CommentVerdictIndex, used_topic_rows: set[int]
+) -> dict:
+    """Look up a fetched comment's verdict.
+
+    Tiers, highest precision first:
+      1. by ``comment_id`` — the precise join.
+      2. recorded ``topic`` is a case-insensitive substring of the body.
+      3. topic-token containment in the body exceeds
+         ``_TOPIC_JOIN_CONTAINMENT`` (the recorded topic is a summary, not a
+         verbatim quote).
+
+    ``used_topic_rows`` holds ``id()`` of by_topic rows already consumed, so a
+    null-id verdict joins to at most one fetched comment. Within tier 3 the
+    best (highest-containment) unused row wins.
+    """
+    cid = comment.get("id")
+    if cid is not None and cid in idx.by_id:
+        return idx.by_id[cid]
+
+    body = comment.get("body") or ""
+    src = comment.get("source")
+    if not body:
+        return {}
+    body_lower = body.lower()
+
+    eligible = [
+        row
+        for row in idx.by_topic
+        if id(row) not in used_topic_rows and row.get("source") == src
+    ]
+
+    # Tier 2 — substring.
+    for row in eligible:
+        if row["topic"].lower() in body_lower:
+            used_topic_rows.add(id(row))
+            return row
+
+    # Tier 3 — token containment; pick the best match above threshold.
+    best_row: Optional[dict] = None
+    best_containment = _TOPIC_JOIN_CONTAINMENT
+    for row in eligible:
+        c = topic_token_containment(row["topic"], body)
+        if c > best_containment:
+            best_containment = c
+            best_row = row
+    if best_row is not None:
+        used_topic_rows.add(id(best_row))
+        return best_row
+    return {}
+
+
+def _round_boundary_times(
+    state: dict, repo_path: Optional[Path]
+) -> tuple[list[tuple[int, Optional[str]]], bool]:
+    """Per-round ``(n, head_before_commit_time)`` plus a ``times_resolved`` flag.
+
+    ``times_resolved`` is True only when every round's ``head_before`` resolved
+    to a commit time — otherwise comment attribution must fall back.
+    """
+    rounds = sorted(
+        (r for r in (state.get("rounds") or []) if r.get("n")),
+        key=lambda r: int(r.get("n") or 0),
+    )
+    out: list[tuple[int, Optional[str]]] = []
+    all_resolved = bool(rounds)
+    for r in rounds:
+        n = int(r.get("n") or 0)
+        t = git_commit_time(repo_path, r.get("head_before") or "")
+        if t is None:
+            all_resolved = False
+        out.append((n, t))
+    return out, all_resolved
+
+
+def attribute_comment_to_round(
+    created_at: Optional[str],
+    round_times: list[tuple[int, Optional[str]]],
+) -> Optional[int]:
+    """Round ``n`` whose ``[head_before(n), head_before(n+1))`` window holds
+    ``created_at``.
+
+    A comment created before round 1's boundary attributes to round 1; one at
+    or after the last round's boundary attributes to the last round. Rounds
+    whose boundary time is None are skipped for window edges but still eligible
+    as the final fallback. Returns None only when ``round_times`` is empty.
+    """
+    usable = [(n, t) for (n, t) in round_times if t]
+    if not round_times:
+        return None
+    if not usable:
+        # No boundary times at all — attribute everything to the last round.
+        return round_times[-1][0]
+    if not created_at:
+        return usable[-1][0]
+    chosen = usable[0][0]
+    for n, t in usable:
+        if created_at >= t:
+            chosen = n
+        else:
+            break
+    return chosen
+
+
+def build_pr_comments(
+    state: dict,
+    fetched: list[dict],
+    repo_path: Optional[Path],
+    *,
+    fetch_attempted: bool,
+) -> tuple[list[dict], AttributionBasis]:
+    """Join fetched PR comments to their verdicts and attribute each to a round.
+
+    Returns ``(comments, attribution_basis)``. Each comment row carries the
+    fetched fields plus ``action`` / ``reason`` / ``comment_actions_source``
+    (joined by ``comment_id``; null when GitHub returned a comment pr-polish
+    never triaged) and ``attributed_round``.
+
+    ``attribution_basis``:
+      * ``created_at``            — round boundary commit times resolved; the
+                                     comment's ``created_at`` was bucketed.
+      * ``unmapped_repo_fallback``— repo not mapped / SHAs unresolvable; every
+                                     comment attributes to round 1.
+      * ``no_timestamp``          — gh fetch was skipped or wholly failed; the
+                                     state-recorded github comment_actions are
+                                     used instead, attributed to their round.
+    """
+    idx = index_comment_verdicts(state)
+
+    if not fetch_attempted or not fetched:
+        # No fresh fetch — reconstruct from the state-recorded comment_actions.
+        # Each is attributed to the round it was first triaged in. Both keyed
+        # and null-id (by_topic) verdict rows are emitted so nothing is lost.
+        rows: list[dict] = []
+        for cid, v in idx.by_id.items():
+            rows.append(
+                {
+                    "comment_id": cid,
+                    "source": v["comment_actions_source"],
+                    "author": None,
+                    "is_bot": None,
+                    "path": None,
+                    "line": None,
+                    "body": None,
+                    "created_at": None,
+                    "original_commit_id": None,
+                    "action": v["action"],
+                    "reason": v["reason"],
+                    "comment_actions_source": v["comment_actions_source"],
+                    "attributed_round": v["triaged_in_round"],
+                }
+            )
+        for v in idx.by_topic:
+            rows.append(
+                {
+                    "comment_id": None,
+                    "source": v["source"],
+                    "author": None,
+                    "is_bot": None,
+                    "path": None,
+                    "line": None,
+                    "body": None,
+                    "created_at": None,
+                    "original_commit_id": None,
+                    "action": v["action"],
+                    "reason": v["reason"],
+                    "comment_actions_source": v["comment_actions_source"],
+                    "attributed_round": v["triaged_in_round"],
+                }
+            )
+        return rows, "no_timestamp"
+
+    round_times, times_resolved = _round_boundary_times(state, repo_path)
+    basis: AttributionBasis = "created_at" if times_resolved else "unmapped_repo_fallback"
+
+    used_topic_rows: set[int] = set()
+    rows = []
+    for c in fetched:
+        v = _join_verdict(c, idx, used_topic_rows)
+        if times_resolved:
+            attributed = attribute_comment_to_round(c.get("created_at"), round_times)
+        else:
+            attributed = round_times[0][0] if round_times else None
+        rows.append(
+            {
+                "comment_id": c.get("id"),
+                "source": c.get("source"),
+                "author": c.get("author"),
+                "is_bot": c.get("is_bot"),
+                "path": c.get("path"),
+                "line": c.get("line"),
+                "body": c.get("body"),
+                "created_at": c.get("created_at"),
+                "original_commit_id": c.get("original_commit_id"),
+                "action": v.get("action"),
+                "reason": v.get("reason"),
+                "comment_actions_source": v.get("comment_actions_source"),
+                "attributed_round": attributed,
+            }
+        )
+    return rows, basis
+
+
+def fold_comment_to_harvested_round(
+    attributed_round: Optional[int], harvested_round_ns: list[int]
+) -> Optional[int]:
+    """Pick which *harvested* round a PR comment is emitted on.
+
+    The harvester only emits R1 + final, so a comment attributed to a middle
+    round must fold onto the nearest harvested round without crossing forward:
+    ``attributed_round <= r1.n`` -> r1, else -> the final harvested round.
+    Returns None only when no rounds were harvested.
+    """
+    if not harvested_round_ns:
+        return None
+    ns = sorted(harvested_round_ns)
+    if attributed_round is None:
+        return ns[-1]
+    first = ns[0]
+    if attributed_round <= first:
+        return first
+    return ns[-1]
+
+
 # ---------------------------------------------------------------------------
 # Goal-text reconstruction
 # ---------------------------------------------------------------------------
@@ -719,8 +1174,17 @@ def build_harvested_round(
     repo_path: Optional[Path],
     pr_summary: Optional[str],
     bramble_ops_path: Path,
+    pr_comments_for_round: list[dict],
     base_branch: str = "origin/main",
 ) -> HarvestedRound:
+    """Assemble one harvested round.
+
+    ``pr_comments_for_round`` is the subset of the PR-global, verdict-joined,
+    round-attributed github comments (see ``build_pr_comments``) that fold onto
+    this harvested round. They replace the github-* rows that used to be copied
+    verbatim from ``comment_actions`` — non-github sources still come straight
+    from this round's ``comment_actions``.
+    """
     round_data = get_round(state, round_n) or {}
     head_before = round_data.get("head_before")
     head_after = round_data.get("head_after")
@@ -752,6 +1216,14 @@ def build_harvested_round(
         if run_ is not None:
             review_runs.append(run_)
 
+    # Non-github comment_actions stay keyed to the round they were recorded in;
+    # github comments are PR-global and folded in by the caller.
+    non_github = [
+        a
+        for a in (round_data.get("comment_actions") or [])
+        if a.get("source") not in GITHUB_SOURCES
+    ]
+
     return HarvestedRound(
         round=round_n,
         signal_tier=signal_tier,
@@ -765,7 +1237,7 @@ def build_harvested_round(
         goal_text=goal_text,
         goal_recoverable=goal_recoverable,
         scope_hints_present=_scope_hints_present(state_dir, round_n),
-        raw_comment_actions=list(round_data.get("comment_actions") or []),
+        raw_comment_actions=non_github + list(pr_comments_for_round),
         review_runs=review_runs,
     )
 
@@ -786,8 +1258,18 @@ def build_pr_record(
     harvested_at: str,
     bramble_ops_path: Path,
     include_incomplete: bool = True,
+    fetched_pr_comments: Optional[list[dict]] = None,
+    pr_comments_fetch_error: Optional[str] = None,
+    fetch_attempted: bool = True,
 ) -> Optional[PRRecord]:
-    """Build a per-PR record. Returns None if the PR should be skipped."""
+    """Build a per-PR record. Returns None if the PR should be skipped.
+
+    ``fetched_pr_comments`` is the result of ``fetch_pr_comments`` (or None
+    when the caller skipped the fetch). PR comments are PR-global: they are
+    verdict-joined + round-attributed once here, then folded onto the harvested
+    rounds. When the fetch was skipped or failed, the github comments recorded
+    in the state's ``comment_actions`` are used as a degraded fallback.
+    """
     state_path = state_dir / "pr-polish-state.json"
     state = parse_state_file(state_path)
 
@@ -803,6 +1285,22 @@ def build_pr_record(
     repo_url = get_repo_url(repo_path)
     pr_url = f"{repo_url}/pull/{pr_number}" if repo_url else None
 
+    pr_comments, attribution_basis = build_pr_comments(
+        state,
+        fetched_pr_comments or [],
+        repo_path,
+        fetch_attempted=fetch_attempted,
+    )
+
+    harvested_ns = [n for n, _ in rounds_to_harvest]
+    comments_by_harvested_round: dict[int, list[dict]] = {n: [] for n in harvested_ns}
+    for c in pr_comments:
+        target = fold_comment_to_harvested_round(
+            c.get("attributed_round"), harvested_ns
+        )
+        if target is not None:
+            comments_by_harvested_round[target].append(c)
+
     harvested_rounds = [
         build_harvested_round(
             state,
@@ -812,6 +1310,7 @@ def build_pr_record(
             repo_path=repo_path,
             pr_summary=pr_summary,
             bramble_ops_path=bramble_ops_path,
+            pr_comments_for_round=comments_by_harvested_round.get(n, []),
         )
         for n, tier in rounds_to_harvest
     ]
@@ -831,6 +1330,8 @@ def build_pr_record(
             "exit_reason": state.get("exit_reason"),
             "total_rounds": len(state.get("rounds") or []),
         },
+        pr_comments_attribution_basis=attribution_basis,
+        pr_comments_fetch_error=pr_comments_fetch_error,
         harvested_rounds=harvested_rounds,
     )
 

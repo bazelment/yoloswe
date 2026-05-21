@@ -329,6 +329,12 @@ near-converged code). Findings are matched back to `comment_actions` and
 labeled with `is_real_issue` (`fixed`/`wont_fix`→true,
 `false_positive`/`stale`→false, `ack`/`flake`/`pre_existing`→null).
 
+GitHub PR comments (human + review-bot) are fetched fresh from GitHub,
+verdict-joined, and attributed to the round their `created_at` falls into —
+so the dataset carries every PR comment exactly once, not just the subset
+that happened to land in a harvested round. See `scripts/README.md` →
+"PR comments".
+
 The dataset is stored **outside the repo** — it is derived from real
 private PRs and must never be committed. The per-PR JSON carries
 `head_before`, `merge_base_sha`, `files_changed`, and the reconstructed
