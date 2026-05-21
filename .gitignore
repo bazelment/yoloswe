@@ -8,6 +8,12 @@ bazel-*
 # Claude Code per-project state
 .claude/scheduled_tasks.lock
 
+# code-review eval dataset / replay results — derived from private PRs,
+# must never be committed. Canonical home is ~/.bramble/code-review-eval/;
+# this guards against an --out-dir that points back inside the repo.
+.claude/skills/code-review-eval/data/dataset/
+.claude/skills/code-review-eval/data/replays/
+
 # Python
 __pycache__/
 *.pyc
