@@ -406,6 +406,8 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 	case agent.ProviderAgy:
 		if model == "" {
 			model = "agy-default"
+		} else if model != "agy-default" {
+			return fmt.Errorf("backend %q does not support --model; agy always uses its default model", backend)
 		}
 		prov = agent.NewAgyProvider()
 	case agent.ProviderCursor:
@@ -424,10 +426,12 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 	}
 
 	opts := []agent.ExecuteOption{
-		agent.WithProviderModel(model),
 		agent.WithProviderWorkDir(workDir),
 		agent.WithProviderSystemPrompt(systemPrompt),
 		agent.WithProviderPermissionMode("bypass"),
+	}
+	if backend != agent.ProviderAgy {
+		opts = append(opts, agent.WithProviderModel(model))
 	}
 	if !ep.IsZero() {
 		if backend == agent.ProviderAgy {
