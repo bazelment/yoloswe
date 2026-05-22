@@ -317,3 +317,20 @@ matters for `/pr-polish`). If turn 3 disagrees with turn 2 in an interesting way
 | Codex backend | `yoloswe/reviewer/backend_codex.go` |
 | Gemini backend | `yoloswe/reviewer/backend_gemini.go` |
 | Run history | `.claude/skills/code-review-eval/data/eval-runs.log` |
+
+## Eval dataset
+
+This skill compares backends on a live branch. To **score a reviewer
+against a ground-truth dataset of past PRs**, use the `/code-review-replay`
+skill instead — it owns the dataset pipeline.
+
+The dataset scripts (`harvest.py`, `collect.py`, `replay.py`) now live under
+`.claude/skills/code-review-replay/scripts/`. `/code-review-replay collect`
+builds a per-PR record from `/pr-polish` history and freezes a judged
+ground truth into it; `/code-review-replay <repo>-<pr>` then scores any
+reviewer config mechanically against that frozen ground truth. The dataset
+is stored **outside the repo** at `~/.bramble/code-review-eval/dataset/` —
+it is derived from real private PRs and must never be committed.
+
+See `.claude/skills/code-review-replay/scripts/README.md` for the full
+schema and the `/code-review-replay` skill for the two-mode workflow.
