@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 func TestNewPromptData(t *testing.T) {
@@ -491,4 +492,39 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	assert.Contains(t, buildPrompt, "# Plan")
 	assert.Contains(t, buildPrompt, "1. Fix widget")
 	assert.Contains(t, buildPrompt, "Approved Plan")
+}
+
+// Cost is reported only by Claude; codex/cursor/gemini/agy emit a structural
+// zero, so a measured cost is never mislabelled "n/a" and a structural zero
+// never reads like a measurement.
+func TestProviderReportsCost(t *testing.T) {
+	assert.True(t, providerReportsCost(agent.ProviderClaude))
+	for _, p := range []string{
+		agent.ProviderCodex, agent.ProviderCursor,
+		agent.ProviderGemini, agent.ProviderAgy,
+	} {
+		assert.False(t, providerReportsCost(p), "%s does not report cost", p)
+	}
+}
+
+// Token counts are reported by Claude and codex (codex populates Usage from
+// its token_count events); cursor/gemini/agy leave Usage zero. This must be
+// distinct from cost reporting — codex reports tokens but not cost, so gating
+// token logging on providerReportsCost would mislabel real codex tokens "n/a".
+func TestProviderReportsTokens(t *testing.T) {
+	assert.True(t, providerReportsTokens(agent.ProviderClaude))
+	assert.True(t, providerReportsTokens(agent.ProviderCodex),
+		"codex reports real token counts even though it reports no cost")
+	for _, p := range []string{
+		agent.ProviderCursor, agent.ProviderGemini, agent.ProviderAgy,
+	} {
+		assert.False(t, providerReportsTokens(p), "%s does not report tokens", p)
+	}
+}
+
+// usageLogAttr emits the measured value when reported is true and the literal
+// "n/a" otherwise.
+func TestUsageLogAttr(t *testing.T) {
+	assert.Equal(t, []any{"input_tokens", 1234}, usageLogAttr(true, "input_tokens", 1234))
+	assert.Equal(t, []any{"input_tokens", "n/a"}, usageLogAttr(false, "input_tokens", 1234))
 }

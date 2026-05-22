@@ -148,20 +148,30 @@ func newLogEventHandler(logger *slog.Logger, step, provider string) *logEventHan
 	}
 }
 
-// providerReportsCost reports whether a provider's turn/result events carry
-// real cost and token measurements. Only the Claude provider does today;
-// codex, cursor, gemini and agy emit a structural zero. Logging that zero as
-// "$0.0000" reads like a measurement, so callers log "n/a" instead.
+// providerReportsCost reports whether a provider's turn/result events carry a
+// real cost measurement. Only the Claude provider does today; codex, cursor,
+// gemini and agy emit a structural zero. Logging that zero as "$0.0000" reads
+// like a measurement, so callers log "n/a" instead.
 func providerReportsCost(provider string) bool {
 	return provider == agent.ProviderClaude
 }
 
-// usageLogAttr returns a single slog key/value pair for a provider's cost or
-// token metric: the measured value when the provider reports it, the literal
-// "n/a" otherwise. Keeping the n/a policy here means the log sites don't each
-// re-branch on providerReportsCost.
-func usageLogAttr(provider, key string, value any) []any {
-	if providerReportsCost(provider) {
+// providerReportsTokens reports whether a provider's result carries real
+// input/output token counts. Claude and codex both do (codex populates
+// AgentResult.Usage from its token_count events); cursor, gemini and agy
+// leave Usage zero. This is intentionally distinct from providerReportsCost:
+// codex reports tokens but not cost, so the two metrics need separate gates.
+func providerReportsTokens(provider string) bool {
+	return provider == agent.ProviderClaude || provider == agent.ProviderCodex
+}
+
+// usageLogAttr returns a single slog key/value pair: the measured value when
+// reported is true, the literal "n/a" otherwise. Callers pick `reported` from
+// providerReportsCost or providerReportsTokens depending on the metric, so a
+// real measurement is never mislabelled "n/a" and a structural zero never
+// reads like a measurement.
+func usageLogAttr(reported bool, key string, value any) []any {
+	if reported {
 		return []any{key, value}
 	}
 	return []any{key, "n/a"}
@@ -244,7 +254,7 @@ func (h *logEventHandler) OnTurnComplete(turnNumber int, success bool, durationM
 		"success", success,
 		"duration", fmt.Sprintf("%.1fs", float64(durationMs)/1000),
 	}
-	attrs = append(attrs, usageLogAttr(h.provider, "cost", fmt.Sprintf("$%.4f", costUSD))...)
+	attrs = append(attrs, usageLogAttr(providerReportsCost(h.provider), "cost", fmt.Sprintf("$%.4f", costUSD))...)
 	h.logger.Debug("turn complete", attrs...)
 }
 
@@ -532,9 +542,10 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		"session_id", result.SessionID,
 		"duration_ms", result.DurationMs,
 	}
-	completedAttrs = append(completedAttrs, usageLogAttr(provider.Name(), "input_tokens", result.Usage.InputTokens)...)
-	completedAttrs = append(completedAttrs, usageLogAttr(provider.Name(), "output_tokens", result.Usage.OutputTokens)...)
-	completedAttrs = append(completedAttrs, usageLogAttr(provider.Name(), "cost_usd", result.Usage.CostUSD)...)
+	reportsTokens := providerReportsTokens(provider.Name())
+	completedAttrs = append(completedAttrs, usageLogAttr(reportsTokens, "input_tokens", result.Usage.InputTokens)...)
+	completedAttrs = append(completedAttrs, usageLogAttr(reportsTokens, "output_tokens", result.Usage.OutputTokens)...)
+	completedAttrs = append(completedAttrs, usageLogAttr(providerReportsCost(provider.Name()), "cost_usd", result.Usage.CostUSD)...)
 	logger.Info("agent completed", completedAttrs...)
 	if result.Text != "" {
 		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
