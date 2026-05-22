@@ -158,6 +158,39 @@ class ValidateJudgeVerdictTests(unittest.TestCase):
                  {"file": "a.py", "line": 46}]}]}
         self.assertIsNone(cl.validate_judge_verdict(v))
 
+    def test_finding_verdict_missing_file_rejected(self):
+        v = {"finding_verdicts": [
+            {"line": 1, "verdict": "true_positive", "severity": "high"}]}
+        self.assertIsNotNone(cl.validate_judge_verdict(v))
+
+    def test_finding_verdict_missing_line_rejected(self):
+        v = {"finding_verdicts": [
+            {"file": "a.py", "verdict": "true_positive", "severity": "high"}]}
+        self.assertIsNotNone(cl.validate_judge_verdict(v))
+
+    def test_unsure_verdict_needs_no_location(self):
+        # `unsure` sets no GT entry, so a missing location is acceptable.
+        v = {"finding_verdicts": [{"verdict": "unsure"}]}
+        self.assertIsNone(cl.validate_judge_verdict(v))
+
+    def test_finding_verdict_file_level_line_none_accepted(self):
+        # A file-level finding carries line=None — present but null is fine.
+        v = {"finding_verdicts": [
+            {"file": "a.py", "line": None, "verdict": "true_positive",
+             "severity": "low"}]}
+        self.assertIsNone(cl.validate_judge_verdict(v))
+
+    def test_census_entry_missing_location_rejected(self):
+        v = {"finding_verdicts": [], "census": [{"topic": "no location"}]}
+        self.assertIsNotNone(cl.validate_judge_verdict(v))
+
+    def test_census_merge_member_missing_location_rejected(self):
+        v = {"finding_verdicts": [],
+             "census_merges": [{"members": [
+                 {"file": "a.py", "line": 8},
+                 {"line": 46}]}]}  # second member has no file
+        self.assertIsNotNone(cl.validate_judge_verdict(v))
+
 
 class MergeJudgeRoundTests(unittest.TestCase):
     def test_routes_tp_and_fp_drops_unsure(self):
@@ -542,7 +575,8 @@ def _demo_dataset(head_before: str, merge_base: str) -> dict:
         "harvested_rounds": [{
             "round": 1, "signal_tier": "r1",
             "head_before": head_before, "head_after": head_before,
-            "merge_base_sha": merge_base, "base_branch": "main",
+            "merge_base_sha": merge_base, "merge_base_resolved": True,
+            "merge_base_error": None, "base_branch": "main",
             "files_changed": ["bug.py"],
             "goal_text": "fix the bug",
             "raw_comment_actions": [],
@@ -615,6 +649,26 @@ class WorktreeTests(unittest.TestCase):
             self.assertEqual(meta["target"], "demo-1")
             self.assertEqual(meta["source_repo"], str(repo))
             collect.remove_worktree(session, repo)
+
+    def test_setup_fails_fast_on_unresolved_merge_base(self):
+        # An unresolved merge base would force head_before..head_before (an
+        # empty diff); collection must abort rather than judge an empty scope.
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "repo"
+            head_before, _ = _make_repo_two_commits(repo)
+            merge_base = _git(repo, "rev-list", "--max-parents=0", "HEAD")
+            ds = _demo_dataset(head_before, merge_base)
+            ds["harvested_rounds"][0]["merge_base_resolved"] = False
+            ds["harvested_rounds"][0]["merge_base_error"] = "no checkout"
+            ds_dir = Path(d) / "ds"
+            ds_dir.mkdir()
+            (ds_dir / "demo-1.json").write_text(json.dumps(ds))
+            repo_map = hl.RepoMap(mapping={"demo": repo})
+            with self.assertRaises(SystemExit) as cm:
+                collect.setup(
+                    target="demo-1", dataset_dir=ds_dir,
+                    session_root=Path(d) / "sessions", repo_map=repo_map)
+            self.assertIn("merge base", str(cm.exception))
 
     def test_build_prompt_points_repo_path_at_pinned_worktree(self):
         with tempfile.TemporaryDirectory() as d:

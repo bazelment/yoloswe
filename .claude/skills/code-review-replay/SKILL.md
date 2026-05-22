@@ -77,7 +77,9 @@ the canonical round's `head_before`. It prints
 `{session, worktree, canonical_round}` — record `session` (every later call
 needs it) and `worktree` (the cwd for bramble re-runs and the judge's
 `repo_path`). `canonical_round` carries `head_before`, `merge_base_sha`,
-`goal_text`, and `files_changed` for the round loop.
+`goal_text`, and `files_changed` for the round loop. `setup` aborts if the
+canonical round has no resolved merge base — collection cannot judge a diff
+it cannot scope; re-harvest with the repo checked out.
 
 ## Step 2 — the ground-truth round loop
 
@@ -191,8 +193,12 @@ judge-prompt path:
 > ```
 >
 > `verdict` ∈ `true_positive`/`false_positive`/`unsure`; `severity` ∈
-> `high`/`medium`/`low`/`nit` on every non-`unsure` verdict. `census_merges`
-> is optional. Judge on the code, not the labels.
+> `high`/`medium`/`low`/`nit` on every non-`unsure` verdict. Every
+> non-`unsure` `finding_verdicts` entry, every `census` entry, and every
+> `census_merges` member must carry `file` (and `line`, which may be `null`
+> for a file-level finding) — an entry with no location is rejected, since
+> it would freeze into the ground truth keyed on an empty location.
+> `census_merges` is optional. Judge on the code, not the labels.
 
 ### 2d — fold the verdict and test convergence
 

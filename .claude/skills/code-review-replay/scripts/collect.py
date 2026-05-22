@@ -373,6 +373,17 @@ def setup(
             f"error: {target}'s canonical round has no head_before — the "
             "dataset is unusable for collection"
         )
+    # The judge censuses a real diff. Without a resolved merge base the only
+    # fallback would be head_before..head_before — an empty diff — so the
+    # judge would freeze a ground truth against the wrong (empty) scope.
+    # Fail fast instead, the same way a missing head_before does.
+    if not rnd.get("merge_base_sha") or not rnd.get("merge_base_resolved"):
+        err = rnd.get("merge_base_error") or "merge base unresolved"
+        raise SystemExit(
+            f"error: {target}'s canonical round has no resolved merge base "
+            f"({err}) — collection cannot establish a diff scope; re-harvest "
+            "with the repo checked out so the merge base resolves"
+        )
     source_repo = repo_map.lookup(repo_name)
     if source_repo is None or not source_repo.is_dir():
         raise SystemExit(
@@ -392,7 +403,7 @@ def setup(
         "canonical_round": {
             "round": rnd.get("round"),
             "head_before": head_before,
-            "merge_base_sha": rnd.get("merge_base_sha") or head_before,
+            "merge_base_sha": rnd.get("merge_base_sha"),
             "base_branch": rnd.get("base_branch"),
             "goal_text": rnd.get("goal_text") or "",
             "files_changed": rnd.get("files_changed") or [],
@@ -446,7 +457,17 @@ def build_prompt(
     pr = dataset.get("pr") or {}
     repo_pr = f"{pr.get('repo_name')}-{pr.get('pr_number')}"
     head_before = rnd.get("head_before")
-    merge_base = rnd.get("merge_base_sha") or head_before
+    # `setup` already fails fast on an unresolved merge base; re-check here
+    # because build-prompt is a separate sub-command. The judge prompt pins
+    # the diff scope, so head_before..head_before (an empty diff) must never
+    # reach it.
+    merge_base = rnd.get("merge_base_sha")
+    if not merge_base or not rnd.get("merge_base_resolved"):
+        err = rnd.get("merge_base_error") or "merge base unresolved"
+        raise SystemExit(
+            f"error: {target}'s canonical round has no resolved merge base "
+            f"({err}) — cannot build a judge prompt without a diff scope"
+        )
     worktree = _worktree_path(session)
 
     # This round's findings: the SKILL's bramble envelopes, plus — every

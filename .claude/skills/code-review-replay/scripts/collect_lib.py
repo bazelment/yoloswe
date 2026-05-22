@@ -261,6 +261,24 @@ def _census_keys(item: dict) -> set[tuple[str, Optional[int]]]:
 # ===========================================================================
 
 
+def _loc_error(item: object, label: str) -> Optional[str]:
+    """Return an error if ``item`` lacks a usable ``file``/``line`` location.
+
+    ``file`` must be a non-empty string and ``line`` must be present (it may
+    be ``None`` — some findings are file-level). A judge entry without a
+    location would be frozen into the ground truth keyed on ``("", None)``,
+    so reject it at the input boundary, matching :func:`validate_dataset`'s
+    output-side check.
+    """
+    if not isinstance(item, dict):
+        return f"{label} is not an object"
+    if not item.get("file") or not isinstance(item.get("file"), str):
+        return f"{label} missing 'file'"
+    if "line" not in item:
+        return f"{label} missing 'line'"
+    return None
+
+
 def validate_judge_verdict(obj: object) -> Optional[str]:
     """Return an error string if ``obj`` is not a well-formed verdict JSON."""
     if not isinstance(obj, dict):
@@ -284,9 +302,20 @@ def validate_judge_verdict(obj: object) -> Optional[str]:
                 f"finding_verdicts[{i}].severity must be one of "
                 f"{sorted(VALID_SEVERITIES)} (the judge sets it)"
             )
+        # A non-unsure verdict is frozen into the GT keyed on file/line;
+        # `unsure` sets no GT so its location is irrelevant.
+        if v.get("verdict") != VERDICT_UNSURE:
+            loc_err = _loc_error(v, f"finding_verdicts[{i}]")
+            if loc_err:
+                return loc_err
     census = obj.get("census")
-    if census is not None and not isinstance(census, list):
-        return "'census' must be a list when present"
+    if census is not None:
+        if not isinstance(census, list):
+            return "'census' must be a list when present"
+        for i, c in enumerate(census):
+            loc_err = _loc_error(c, f"census[{i}]")
+            if loc_err:
+                return loc_err
     merges = obj.get("census_merges")
     if merges is not None:
         if not isinstance(merges, list):
@@ -300,6 +329,10 @@ def validate_judge_verdict(obj: object) -> Optional[str]:
                     f"census_merges[{i}].members must be a list of >=2 "
                     "census locations"
                 )
+            for j, mem in enumerate(members):
+                loc_err = _loc_error(mem, f"census_merges[{i}].members[{j}]")
+                if loc_err:
+                    return loc_err
     return None
 
 
