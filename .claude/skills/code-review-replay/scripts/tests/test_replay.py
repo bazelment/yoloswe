@@ -13,6 +13,8 @@ SCRIPT_DIR = TEST_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import collect_lib as cl  # noqa: E402
+import harvest_lib as hl  # noqa: E402
 import replay  # noqa: E402
 import replay_lib as rl  # noqa: E402
 
@@ -755,6 +757,80 @@ class SelectReplayTargetsTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 replay.select_replay_targets(
                     dataset_dir=Path(d), sample=5)
+
+
+class RunReplayValidationTests(unittest.TestCase):
+    """run_replay must validate the frozen GT before scoring.
+
+    The validation runs before any repo lookup or bramble spawn, so these
+    are fast unit tests with a bogus RepoMap.
+    """
+
+    def _gt_block(self, **over):
+        block = {
+            "schema_version": cl.GROUND_TRUTH_SCHEMA_VERSION,
+            "census_converged": True,
+            "rounds_run": 2,
+            "true_positives": [
+                {"file": "a.py", "line": 10, "severity": "high"}],
+            "false_positives": [],
+            "contested": [],
+            "per_round_diff": [],
+            "dataset_xref": {"comment_action_agreement_rate": 1.0},
+        }
+        block.update(over)
+        return {
+            "schema_version": 2,
+            "pr": {"repo_name": "demo", "pr_number": "1"},
+            "harvested_rounds": [],
+            "ground_truth_v3": block,
+        }
+
+    def _run(self, dataset: dict, *, strict: bool = False):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "demo-1.json"
+            path.write_text(json.dumps(dataset))
+            return replay.run_replay(
+                path,
+                repos_root=hl.RepoMap(mapping={}),
+                configs=[],
+                tier_filter=None,
+                bramble_bin="bramble",
+                goal_source="auto",
+                timeout_seconds=1,
+                log_root=Path(d) / "logs",
+                verbose=False,
+                strict=strict,
+            )
+
+    def test_no_ground_truth_raises(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self._run({"schema_version": 2, "harvested_rounds": []})
+        self.assertIn("ground_truth", str(cm.exception))
+
+    def test_malformed_gt_aborts(self):
+        # Drop a required severity -> validate_dataset reports a structural
+        # error -> run_replay must abort before any scoring.
+        ds = self._gt_block()
+        del ds["ground_truth_v3"]["true_positives"][0]["severity"]
+        with self.assertRaises(RuntimeError) as cm:
+            self._run(ds)
+        self.assertIn("malformed", str(cm.exception))
+
+    def test_quality_warning_does_not_abort_without_strict(self):
+        # An unconverged census is a quality warning, not a structural
+        # error: without --strict it must not abort here. It still fails
+        # later (no repo checkout), but not on the warning.
+        ds = self._gt_block(census_converged=False)
+        with self.assertRaises(RuntimeError) as cm:
+            self._run(ds, strict=False)
+        self.assertIn("no local checkout", str(cm.exception))
+
+    def test_quality_warning_aborts_under_strict(self):
+        ds = self._gt_block(census_converged=False)
+        with self.assertRaises(RuntimeError) as cm:
+            self._run(ds, strict=True)
+        self.assertIn("--strict", str(cm.exception))
 
 
 if __name__ == "__main__":
