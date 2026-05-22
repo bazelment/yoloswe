@@ -664,3 +664,63 @@ func TestSessionDispatchInit_LenientFallbackOnMalformedField(t *testing.T) {
 	require.Equal(t, "/tmp/demo", ready.Info.WorkDir)
 	require.Equal(t, "sess-1", ready.Info.SessionID)
 }
+
+// TestSessionWakeupSafetyTimer_EmitsWakeupTimedOut drives the real
+// completeWakeupSuppressedTurn path — the function the ScheduleWakeup safety
+// timer invokes — and asserts the emitted TurnCompleteEvent carries
+// WakeupTimedOut=true. Consumer-side tests fabricate the flag in memory; this
+// catches a regression where the emitter stops setting it.
+func TestSessionWakeupSafetyTimer_EmitsWakeupTimedOut(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+
+	// Simulate an active ScheduleWakeup suppression: the original turn was
+	// suppressed and the session is waiting for a continuation that will
+	// never arrive. completeWakeupSuppressedTurn is what the safety timer
+	// calls in that case.
+	s.wakeupState.active = true
+	s.wakeupState.suppressedTurnNumber = 1
+
+	s.completeWakeupSuppressedTurn(TurnResult{TurnNumber: 1, Success: true})
+
+	ev := waitForEvent(t, s, func(e Event) bool {
+		_, ok := e.(TurnCompleteEvent)
+		return ok
+	}, time.Second)
+	tc := ev.(TurnCompleteEvent)
+	require.True(t, tc.WakeupTimedOut,
+		"safety-timer completion must emit WakeupTimedOut=true")
+	require.Equal(t, 1, tc.TurnNumber)
+}
+
+// TestSessionWakeupSafetyTimer_NoDoubleCompleteWhenInactive verifies the
+// safety-timer callback is a no-op once the suppression already resolved
+// (active=false) — no spurious TurnCompleteEvent is emitted.
+func TestSessionWakeupSafetyTimer_NoDoubleCompleteWhenInactive(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+
+	// active is already false — the continuation path completed first.
+	s.completeWakeupSuppressedTurn(TurnResult{TurnNumber: 1, Success: true})
+
+	expectNoEvent(t, s, 100*time.Millisecond)
+}
+
+// TestSessionFinalizeTurn_NormalPathNotWakeupTimedOut documents the other
+// side of the contract: the normal handleResult path passes false, so a
+// regular turn's TurnCompleteEvent must not be mislabelled as a safety-timer
+// completion.
+func TestSessionFinalizeTurn_NormalPathNotWakeupTimedOut(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(t)
+
+	s.finalizeTurn(TurnResult{TurnNumber: 1, Success: true}, false)
+
+	ev := waitForEvent(t, s, func(e Event) bool {
+		_, ok := e.(TurnCompleteEvent)
+		return ok
+	}, time.Second)
+	tc := ev.(TurnCompleteEvent)
+	require.False(t, tc.WakeupTimedOut,
+		"a normal turn completion must not carry WakeupTimedOut")
+}

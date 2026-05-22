@@ -290,6 +290,10 @@ func threadStartParamsFromConfig(cfg ThreadConfig) ThreadStartParams {
 func (c *Client) registerThreadResponse(threadResp ThreadStartResponse, cfg ThreadConfig) *Thread {
 	thread := newThread(c, threadResp.Thread.ID, cfg)
 	thread.setInfo(&threadResp.Thread)
+	// Seed the monotonic turn counter from the thread's history so a resumed
+	// thread keeps numbering where it left off. A freshly-started thread has
+	// no turns, so this is a no-op there.
+	thread.seedTurnCount(threadResp.Thread.Turns)
 
 	c.mu.Lock()
 	c.threads[thread.id] = thread

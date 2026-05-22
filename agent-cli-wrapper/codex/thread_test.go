@@ -267,6 +267,55 @@ func TestThread_HandleTurnCompleted_MonotonicTurnIndex(t *testing.T) {
 	}
 }
 
+// A resumed thread seeds turnCount from its history, so the first turn after
+// a resume is numbered after the historical turns rather than restarting at 1.
+func TestThread_SeedTurnCount_ResumeContinuesNumbering(t *testing.T) {
+	client := NewClient()
+	thread := newThread(client, "thread-123", ThreadConfig{})
+
+	// Simulate a resumed thread that already had three completed turns.
+	thread.seedTurnCount([]Turn{
+		{ID: "hist-1", Status: "completed"},
+		{ID: "hist-2", Status: "completed"},
+		{ID: "hist-3", Status: "completed"},
+	})
+	thread.state.SetReady()
+
+	// The next turn after resume must be numbered 4, not 1.
+	thread.state.SetProcessing()
+	thread.handleTurnStarted("0198f2c1-7a3e-7b21-a26a-9671fa590905")
+	_, turnIndex := thread.handleTurnCompleted(
+		"0198f2c1-7a3e-7b21-a26a-9671fa590905", true, nil)
+	if turnIndex != 4 {
+		t.Errorf("first turn after resume: turnIndex = %d, want 4", turnIndex)
+	}
+
+	// And it keeps advancing monotonically from there.
+	thread.state.SetProcessing()
+	thread.handleTurnStarted("0198f2c1-9b4f-7c32-b37b-a782db691426")
+	_, turnIndex = thread.handleTurnCompleted(
+		"0198f2c1-9b4f-7c32-b37b-a782db691426", true, nil)
+	if turnIndex != 5 {
+		t.Errorf("second turn after resume: turnIndex = %d, want 5", turnIndex)
+	}
+}
+
+// A freshly-started thread (no history) seeds to zero, so its first turn is 1.
+func TestThread_SeedTurnCount_FreshThreadStartsAtOne(t *testing.T) {
+	client := NewClient()
+	thread := newThread(client, "thread-123", ThreadConfig{})
+
+	thread.seedTurnCount(nil)
+	thread.state.SetReady()
+
+	thread.state.SetProcessing()
+	thread.handleTurnStarted("turn-1")
+	_, turnIndex := thread.handleTurnCompleted("turn-1", true, nil)
+	if turnIndex != 1 {
+		t.Errorf("fresh thread first turn: turnIndex = %d, want 1", turnIndex)
+	}
+}
+
 func TestThread_HandleTurnCompleted_WithError(t *testing.T) {
 	client := NewClient()
 	thread := newThread(client, "thread-123", ThreadConfig{})

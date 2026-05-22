@@ -70,6 +70,12 @@ const streamTurnGracePeriod = 3 * time.Minute
 // TurnCompleteEvent was observed but the logical turn is still gated on a
 // background tool_use that never terminated. dispatch is invoked for every
 // event so consumers (EventHandler, AgentEvent channel) see the full stream.
+//
+// The grace timer is per completion wave: a continuation wave (a fresh
+// ResultMessageEvent) or an invalidated pair resets it, so a legitimate
+// multi-wave turn is never preempted by a deadline anchored to an earlier
+// wave — only a wave that genuinely stalls on a non-terminating bg tool_use
+// hits the backstop.
 func consumeTurnEvents(
 	ctx context.Context,
 	events <-chan claude.Event,
@@ -78,15 +84,28 @@ func consumeTurnEvents(
 	dispatch func(claude.Event),
 ) (*claude.TurnResult, error) {
 	state := newLogicalTurnState()
-	// While graceCh is nil the select blocks only on ctx/events; it is armed
-	// lazily once a TurnCompleteEvent lands but the turn is still gated.
+	// The grace timer tracks a single completion wave: it is armed while the
+	// current wave has signalled turn completion but is still gated on a
+	// background tool_use, and disarmed the moment that wave is invalidated.
+	// While graceCh is nil the select blocks only on ctx/events.
 	var graceTimer *time.Timer
 	var graceCh <-chan time.Time
-	defer func() {
-		if graceTimer != nil {
-			graceTimer.Stop()
+	disarmGrace := func() {
+		if graceTimer == nil {
+			return
 		}
-	}()
+		if !graceTimer.Stop() {
+			// Drain a deadline that fired before Stop so a stale tick can't
+			// preempt a later wave through the select.
+			select {
+			case <-graceTimer.C:
+			default:
+			}
+		}
+		graceTimer = nil
+		graceCh = nil
+	}
+	defer disarmGrace()
 	for {
 		select {
 		case <-ctx.Done():
@@ -110,13 +129,21 @@ func consumeTurnEvents(
 			if state.LogicalTurnDone() {
 				return state.ToTurnResult(), state.Err()
 			}
-			// The session has signalled turn completion but the logical
-			// turn is still gated on a background tool_use. Arm the grace
-			// timer once so a never-terminating bg tool cannot strand
-			// this loop indefinitely.
-			if graceTimer == nil && state.SawTurnComplete() {
-				graceTimer = time.NewTimer(gracePeriod)
-				graceCh = graceTimer.C
+			// Keep the grace timer pinned to the current completion wave.
+			// SawTurnComplete() reports the live wave only — a continuation
+			// ResultMessageEvent or invalidateForContinuation clears
+			// lastTurnComplete and flips it back to false. Disarm when the
+			// wave is gone so the next gated wave gets a fresh full window
+			// instead of inheriting an earlier wave's deadline; re-arm once
+			// the (possibly next) wave signals completion but is still gated
+			// on a background tool_use that may never terminate.
+			if state.SawTurnComplete() {
+				if graceTimer == nil {
+					graceTimer = time.NewTimer(gracePeriod)
+					graceCh = graceTimer.C
+				}
+			} else {
+				disarmGrace()
 			}
 		}
 	}

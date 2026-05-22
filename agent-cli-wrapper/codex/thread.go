@@ -21,7 +21,8 @@ type Thread struct {
 	// turnCount is a monotonic per-thread counter incremented once per
 	// completed turn. Codex turn IDs are opaque UUIDs, so the display turn
 	// number must be derived from a real counter rather than scraped from
-	// the ID. See handleTurnCompleted / TurnNumberFromID.
+	// the ID. Seeded from the thread's history on resume so numbering
+	// continues across sessions. See handleTurnCompleted / seedTurnCount.
 	turnCount int
 	mu        sync.RWMutex
 }
@@ -230,6 +231,16 @@ func (t *Thread) setInfo(info *ThreadInfo) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.info = info
+}
+
+// seedTurnCount initialises the monotonic turn counter from a resumed
+// thread's history so the first turn after a resume is numbered after the
+// historical turns rather than restarting at 1. A freshly-started thread
+// passes an empty slice, leaving turnCount at 0.
+func (t *Thread) seedTurnCount(turns []Turn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.turnCount = len(turns)
 }
 
 func (t *Thread) handleTurnStarted(turnID string) {
