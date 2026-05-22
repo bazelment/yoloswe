@@ -34,11 +34,8 @@ type logicalTurnState struct {
 
 	turnNumber int
 
-	// forcedDone is set when a terminal TurnCompleteEvent arrives via the
-	// ScheduleWakeup safety-timer path (WakeupTimedOut). The session layer
-	// has given up waiting for the turn, so any still-"live" background
-	// tool_use is stranded and the logical turn must be considered done —
-	// LogicalTurnDone short-circuits on this.
+	// forcedDone latches a terminal TurnCompleteEvent with WakeupTimedOut set;
+	// LogicalTurnDone short-circuits on it.
 	forcedDone bool
 }
 
@@ -148,11 +145,6 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		tc := e
 		s.lastTurnComplete = &tc
 		s.turnNumber = e.TurnNumber
-		// A safety-timer completion is terminal: the session layer has
-		// stopped waiting and no continuation wave will follow. Any
-		// background tool_use still tracked as live (e.g. an agent that
-		// backgrounded an infinite loop) is stranded — force the logical
-		// turn done so streamTurn unblocks instead of looping forever.
 		if e.WakeupTimedOut {
 			s.forcedDone = true
 		}
@@ -170,10 +162,9 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 // ResultMessage) ensures downstream handlers see OnTurnComplete before the
 // consumer loop exits.
 func (s *logicalTurnState) LogicalTurnDone() bool {
-	// A safety-timer TurnCompleteEvent (WakeupTimedOut) is terminal: the
-	// session layer already gave up. Honour it regardless of live bg work
-	// or a missing ResultMessage — otherwise an agent that backgrounded an
-	// unkillable infinite loop strands streamTurn forever.
+	// A safety-timer completion is terminal — honour it regardless of live
+	// bg work or a missing ResultMessage, else a backgrounded infinite loop
+	// strands streamTurn forever.
 	if s.forcedDone {
 		return true
 	}

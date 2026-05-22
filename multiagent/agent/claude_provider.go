@@ -78,9 +78,8 @@ func consumeTurnEvents(
 	dispatch func(claude.Event),
 ) (*claude.TurnResult, error) {
 	state := newLogicalTurnState()
-	// graceTimer is armed once a TurnCompleteEvent has been observed but
-	// LogicalTurnDone() is still false because of live bg work. Until then
-	// graceCh is nil so the select blocks only on ctx/events.
+	// While graceCh is nil the select blocks only on ctx/events; it is armed
+	// lazily once a TurnCompleteEvent lands but the turn is still gated.
 	var graceTimer *time.Timer
 	var graceCh <-chan time.Time
 	defer func() {

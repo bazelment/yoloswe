@@ -153,7 +153,18 @@ func newLogEventHandler(logger *slog.Logger, step, provider string) *logEventHan
 // codex, cursor, gemini and agy emit a structural zero. Logging that zero as
 // "$0.0000" reads like a measurement, so callers log "n/a" instead.
 func providerReportsCost(provider string) bool {
-	return provider == "claude"
+	return provider == agent.ProviderClaude
+}
+
+// usageLogAttr returns a single slog key/value pair for a provider's cost or
+// token metric: the measured value when the provider reports it, the literal
+// "n/a" otherwise. Keeping the n/a policy here means the log sites don't each
+// re-branch on providerReportsCost.
+func usageLogAttr(provider, key string, value any) []any {
+	if providerReportsCost(provider) {
+		return []any{key, value}
+	}
+	return []any{key, "n/a"}
 }
 
 // resetPerAttempt clears state that must not leak between retry attempts.
@@ -233,11 +244,7 @@ func (h *logEventHandler) OnTurnComplete(turnNumber int, success bool, durationM
 		"success", success,
 		"duration", fmt.Sprintf("%.1fs", float64(durationMs)/1000),
 	}
-	if providerReportsCost(h.provider) {
-		attrs = append(attrs, "cost", fmt.Sprintf("$%.4f", costUSD))
-	} else {
-		attrs = append(attrs, "cost", "n/a")
-	}
+	attrs = append(attrs, usageLogAttr(h.provider, "cost", fmt.Sprintf("$%.4f", costUSD))...)
 	h.logger.Debug("turn complete", attrs...)
 }
 
@@ -525,19 +532,9 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		"session_id", result.SessionID,
 		"duration_ms", result.DurationMs,
 	}
-	if providerReportsCost(provider.Name()) {
-		completedAttrs = append(completedAttrs,
-			"input_tokens", result.Usage.InputTokens,
-			"output_tokens", result.Usage.OutputTokens,
-			"cost_usd", result.Usage.CostUSD,
-		)
-	} else {
-		completedAttrs = append(completedAttrs,
-			"input_tokens", "n/a",
-			"output_tokens", "n/a",
-			"cost_usd", "n/a",
-		)
-	}
+	completedAttrs = append(completedAttrs, usageLogAttr(provider.Name(), "input_tokens", result.Usage.InputTokens)...)
+	completedAttrs = append(completedAttrs, usageLogAttr(provider.Name(), "output_tokens", result.Usage.OutputTokens)...)
+	completedAttrs = append(completedAttrs, usageLogAttr(provider.Name(), "cost_usd", result.Usage.CostUSD)...)
 	logger.Info("agent completed", completedAttrs...)
 	if result.Text != "" {
 		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
