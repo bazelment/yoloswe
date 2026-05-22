@@ -612,6 +612,86 @@ func TestTurnState_TerminalTaskUpdatedAfterResultRequiresContinuation(t *testing
 	require.True(t, s.LogicalTurnDone())
 }
 
+// INF-1066 repro: an agent backgrounds an unkillable infinite-loop Bash tool
+// (run_in_background:true), arms a ScheduleWakeup, and ends the turn. The
+// ScheduleWakeup safety timer fires and emits a terminal (WakeupTimedOut)
+// TurnCompleteEvent — but the bg tool_use never terminates, so it is never
+// cancelled and never lands in completedBgToolUseIDs. Without the
+// WakeupTimedOut short-circuit, LogicalTurnDone stays false forever and
+// streamTurn loops indefinitely. The terminal event must force the turn done.
+func TestTurnState_WakeupTimedOutForcesTurnDone(t *testing.T) {
+	s := newLogicalTurnState()
+
+	// Assistant backgrounds an infinite-loop Bash poll.
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{bgBashToolUse("toolu_inf_loop")},
+	})
+	// The CLI emits a ResultMessage immediately (pure-bg turn). No terminal
+	// task event ever follows — the loop never ends.
+	s.Apply(resultMessage(false))
+	require.False(t, s.LogicalTurnDone(),
+		"bg tool_use still uncancelled/uncompleted — turn not done")
+	require.True(t, s.HasLiveTasks())
+
+	// A normal (non-wakeup) TurnCompleteEvent must NOT break the deadlock —
+	// the bg tool_use is still tracked as live.
+	s.Apply(claude.TurnCompleteEvent{TurnNumber: 1, Success: true})
+	require.False(t, s.LogicalTurnDone(),
+		"a normal TurnCompleteEvent must keep gating on the live bg tool_use")
+
+	// The ScheduleWakeup safety timer fires: a terminal TurnCompleteEvent
+	// with WakeupTimedOut set. The session layer has given up — the logical
+	// turn must now be forced done so streamTurn unblocks.
+	s.Apply(claude.TurnCompleteEvent{TurnNumber: 1, Success: true, WakeupTimedOut: true})
+	require.True(t, s.LogicalTurnDone(),
+		"WakeupTimedOut TurnCompleteEvent must force the logical turn done despite the stranded bg tool_use")
+}
+
+// A WakeupTimedOut TurnCompleteEvent must force completion even with a live
+// background *task* (not just a tool_use) outstanding — the safety timer is
+// terminal regardless of what kind of bg work is stranded.
+func TestTurnState_WakeupTimedOutForcesDoneWithLiveTask(t *testing.T) {
+	s := newLogicalTurnState()
+
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg")},
+	})
+	s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg")})
+	s.Apply(resultMessage(false))
+	require.False(t, s.LogicalTurnDone())
+
+	s.Apply(claude.TurnCompleteEvent{TurnNumber: 1, Success: true, WakeupTimedOut: true})
+	require.True(t, s.LogicalTurnDone(),
+		"WakeupTimedOut must force done even with a live bg task")
+}
+
+// SawTurnComplete reports whether the current wave's TurnCompleteEvent is
+// outstanding. streamTurn arms its grace timer on this signal.
+func TestTurnState_SawTurnComplete(t *testing.T) {
+	s := newLogicalTurnState()
+	require.False(t, s.SawTurnComplete(), "no TurnComplete observed yet")
+
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{bgBashToolUse("toolu_bg")},
+	})
+	s.Apply(resultMessage(false))
+	require.False(t, s.SawTurnComplete(), "ResultMessage alone is not a TurnComplete")
+
+	s.Apply(claude.TurnCompleteEvent{TurnNumber: 1, Success: true})
+	require.True(t, s.SawTurnComplete(),
+		"TurnCompleteEvent observed — grace timer may arm")
+
+	// A new ResultMessage starts a fresh wave and clears the stale signal.
+	rm2 := resultMessage(false)
+	rm2.TurnNumber = 2
+	s.Apply(rm2)
+	require.False(t, s.SawTurnComplete(),
+		"a new ResultMessage clears the prior wave's TurnComplete")
+}
+
 // A terminal TaskNotificationEvent that arrives before the corresponding
 // TaskStartedEvent (stream reorder) must not leave the task stuck live when
 // the belated TaskStartedEvent finally shows up.

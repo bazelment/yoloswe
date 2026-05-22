@@ -614,9 +614,10 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 	turnErr := classifyTurnError(notif.ThreadID, notif.Turn.ID, errMsg)
 	fullText := ""
 	var durationMs int64
+	var turnIndex int
 	var usage TurnUsage
 	if ok {
-		durationMs = thread.handleTurnCompleted(notif.Turn.ID, success, turnErr)
+		durationMs, turnIndex = thread.handleTurnCompleted(notif.Turn.ID, success, turnErr)
 		fullText = thread.GetFullText()
 		// Get token usage from the last token_count event
 		if lastUsage := thread.getAndClearLastUsage(); lastUsage != nil {
@@ -637,6 +638,7 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 		Error:      turnErr,
 		FullText:   fullText,
 		DurationMs: durationMs,
+		TurnIndex:  turnIndex,
 		Usage:      usage,
 	})
 }

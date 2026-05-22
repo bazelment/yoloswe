@@ -18,7 +18,12 @@ type Thread struct {
 	turnStartTime time.Time
 	id            string
 	currentTurnID string
-	mu            sync.RWMutex
+	// turnCount is a monotonic per-thread counter incremented once per
+	// completed turn. Codex turn IDs are opaque UUIDs, so the display turn
+	// number must be derived from a real counter rather than scraped from
+	// the ID. See handleTurnCompleted / TurnNumberFromID.
+	turnCount int
+	mu        sync.RWMutex
 }
 
 func newThread(client *Client, id string, config ThreadConfig) *Thread {
@@ -239,12 +244,18 @@ func (t *Thread) handleTextDelta(turnID, itemID, delta string) string {
 	return t.accumulator.handleDelta(turnID, itemID, delta)
 }
 
-// handleTurnCompleted processes a turn completion and returns the calculated duration.
-func (t *Thread) handleTurnCompleted(turnID string, success bool, turnErr error) int64 {
+// handleTurnCompleted processes a turn completion and returns the calculated
+// duration and the 1-based monotonic turn index for this thread.
+func (t *Thread) handleTurnCompleted(turnID string, success bool, turnErr error) (int64, int) {
 	t.mu.Lock()
 
 	// Calculate duration
 	durationMs := time.Since(t.turnStartTime).Milliseconds()
+
+	// Advance the monotonic per-thread turn counter. This is the real turn
+	// number; the opaque UUID turnID cannot yield one reliably.
+	t.turnCount++
+	turnIndex := t.turnCount
 
 	// Build result
 	result := &TurnResult{
@@ -274,7 +285,7 @@ func (t *Thread) handleTurnCompleted(turnID string, success bool, turnErr error)
 	}
 
 	t.mu.Unlock()
-	return durationMs
+	return durationMs, turnIndex
 }
 
 func (t *Thread) setReady() {

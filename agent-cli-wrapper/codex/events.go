@@ -106,11 +106,18 @@ func (e TurnStartedEvent) Type() EventType { return EventTypeTurnStarted }
 // threads it may overstate the per-turn count. Treat Usage as a soft
 // signal for runaway-detection / display, not as accounting.
 type TurnCompletedEvent struct {
-	Error      error
-	ThreadID   string
-	TurnID     string
-	FullText   string
-	Usage      TurnUsage
+	Error    error
+	ThreadID string
+	TurnID   string
+	FullText string
+	Usage    TurnUsage
+	// TurnIndex is the 1-based monotonic turn number for the thread,
+	// maintained by the client. It is the authoritative display turn
+	// number — codex turn IDs are opaque UUIDs from which no number can
+	// reliably be derived. Zero only on events not produced by the client
+	// (e.g. synthetic test events that leave it unset), in which case
+	// StreamTurnNum falls back to TurnNumberFromID.
+	TurnIndex  int
 	DurationMs int64
 	Success    bool
 }
@@ -121,7 +128,12 @@ func (e TurnCompletedEvent) Type() EventType { return EventTypeTurnCompleted }
 func (e TurnCompletedEvent) StreamEventKind() agentstream.EventKind {
 	return agentstream.KindTurnComplete
 }
-func (e TurnCompletedEvent) StreamTurnNum() int    { return TurnNumberFromID(e.TurnID) }
+func (e TurnCompletedEvent) StreamTurnNum() int {
+	if e.TurnIndex > 0 {
+		return e.TurnIndex
+	}
+	return TurnNumberFromID(e.TurnID)
+}
 func (e TurnCompletedEvent) StreamIsSuccess() bool { return e.Success }
 func (e TurnCompletedEvent) StreamDuration() int64 { return e.DurationMs }
 func (e TurnCompletedEvent) StreamCost() float64   { return 0 }

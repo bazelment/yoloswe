@@ -184,9 +184,17 @@ func ParseMappedNotification(method string, params json.RawMessage) (MappedEvent
 	return MappedEvent{}, false
 }
 
-// TurnNumberFromID converts Codex turn IDs to a 1-based display number.
-// Numeric IDs are interpreted as 0-based turn indexes. String IDs like
-// "turn-42" map to the trailing number directly.
+// TurnNumberFromID derives a 1-based display turn number from a Codex turn
+// ID. It is a fallback only — the authoritative number is the client's
+// monotonic per-thread counter carried on TurnCompletedEvent.TurnIndex.
+//
+// Recognised forms:
+//   - a pure non-negative integer, interpreted as a 0-based index ("2" → 3);
+//   - a "turn-N" / "turn_N" shaped string ("turn-42" → 42).
+//
+// Any other shape — notably an opaque UUID — returns 1 rather than scraping
+// trailing digits, which would otherwise mistake a UUID tail (e.g. the
+// "...9926" of "9671fa59a926") for a turn number.
 func TurnNumberFromID(turnID string) int {
 	normalized := strings.TrimSpace(turnID)
 	if normalized == "" {
@@ -197,18 +205,11 @@ func TurnNumberFromID(turnID string) int {
 		return n + 1
 	}
 
-	last := len(normalized)
-	first := last
-	for first > 0 {
-		ch := normalized[first-1]
-		if ch < '0' || ch > '9' {
-			break
-		}
-		first--
-	}
-	if first < last {
-		if n, err := strconv.Atoi(normalized[first:last]); err == nil && n > 0 {
-			return n
+	for _, prefix := range []string{"turn-", "turn_"} {
+		if rest, ok := strings.CutPrefix(normalized, prefix); ok {
+			if n, err := strconv.Atoi(rest); err == nil && n > 0 {
+				return n
+			}
 		}
 	}
 

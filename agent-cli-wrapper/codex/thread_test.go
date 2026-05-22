@@ -244,6 +244,29 @@ func TestThread_HandleTurnCompleted(t *testing.T) {
 	}
 }
 
+// handleTurnCompleted returns a 1-based monotonic turn index that advances
+// once per completed turn, independent of the opaque turn IDs.
+func TestThread_HandleTurnCompleted_MonotonicTurnIndex(t *testing.T) {
+	client := NewClient()
+	thread := newThread(client, "thread-123", ThreadConfig{})
+	thread.state.SetReady()
+
+	// Three turns with opaque UUID-shaped IDs — the index must still be 1,2,3.
+	ids := []string{
+		"0198f2c1-7a3e-7b21-a26a-9671fa590905",
+		"0198f2c1-9b4f-7c32-b37b-a782gb691426",
+		"0198f2c1-ac50-7d43-c48c-b893hc792537",
+	}
+	for i, id := range ids {
+		thread.state.SetProcessing()
+		thread.handleTurnStarted(id)
+		_, turnIndex := thread.handleTurnCompleted(id, true, nil)
+		if turnIndex != i+1 {
+			t.Errorf("turn %d: turnIndex = %d, want %d", i, turnIndex, i+1)
+		}
+	}
+}
+
 func TestThread_HandleTurnCompleted_WithError(t *testing.T) {
 	client := NewClient()
 	thread := newThread(client, "thread-123", ThreadConfig{})

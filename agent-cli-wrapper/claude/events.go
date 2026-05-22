@@ -199,6 +199,14 @@ type TurnCompleteEvent struct {
 	TurnNumber int
 	DurationMs int64
 	Success    bool
+	// WakeupTimedOut is true only when this event was emitted by the
+	// ScheduleWakeup safety timer (completeWakeupSuppressedTurn) rather than
+	// by a real CLI ResultMessage. It is a terminal signal: no continuation
+	// wave will follow it. Consumers that gate on background tool_use
+	// completion (e.g. logicalTurnState) must treat any still-"live"
+	// background tool_use as stranded when this is set — the session layer
+	// has already given up waiting for it.
+	WakeupTimedOut bool
 }
 
 // Type returns the event type.

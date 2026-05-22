@@ -147,9 +147,14 @@ func TestTurnNumberFromID(t *testing.T) {
 	}{
 		{name: "numeric-zero-based", turnID: "2", want: 3},
 		{name: "prefixed", turnID: "turn-456", want: 456},
+		{name: "prefixed-underscore", turnID: "turn_456", want: 456},
 		{name: "prefixed-zero", turnID: "turn-0", want: 1},
 		{name: "invalid", turnID: "n/a", want: 1},
 		{name: "empty", turnID: "", want: 1},
+		// A UUID turn ID must NOT have its trailing digits scraped — that
+		// previously produced garbage display numbers like turn=905.
+		{name: "uuid-with-digit-tail", turnID: "0198f2c1-7a3e-7b21-a26a-9671fa590905", want: 1},
+		{name: "uuid-all-hex-tail", turnID: "0198f2c1-7a3e-7b21-a26a-9671fa59abcd", want: 1},
 	}
 
 	for _, tc := range tests {
