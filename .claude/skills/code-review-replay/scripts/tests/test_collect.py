@@ -51,21 +51,32 @@ class NormalizeFindingPathTests(unittest.TestCase):
             "src/a.py",
         )
 
-    def test_strips_session_review_worktree_prefix(self):
+    def test_strips_session_worktree_prefix(self):
+        # collect.py's _worktree_path pins the session worktree at
+        # <EVAL_ROOT>/collect/<session>/worktree/ — a bare `worktree` dir.
         self.assertEqual(
             cl.normalize_finding_path(
                 "/home/u/.bramble/code-review-eval/collect/"
-                "kernel-1-20260521/review-worktree/src/a.py"
+                "kernel-1-20260521/worktree/src/a.py"
             ),
             "src/a.py",
         )
 
-    def test_strips_session_judge_worktree_prefix(self):
+    def test_strips_session_worktree_prefix_nested_repo_path(self):
         self.assertEqual(
             cl.normalize_finding_path(
-                "/x/session/judge-worktree/services/api/main.py"
+                "/home/u/.bramble/code-review-eval/collect/"
+                "kernel-253-20260522/worktree/services/api/main.py"
             ),
             "services/api/main.py",
+        )
+
+    def test_does_not_strip_bare_worktree_in_repo_path(self):
+        # A genuine repo path that happens to contain a `worktree/` segment
+        # must NOT be stripped — only the anchored session-worktree prefix is.
+        self.assertEqual(
+            cl.normalize_finding_path("pkg/worktree/manager.go"),
+            "pkg/worktree/manager.go",
         )
 
     def test_already_relative_passes_through(self):

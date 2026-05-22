@@ -8,19 +8,20 @@ the dataset.
 
 That is wrong on three counts, and this module exists to fix all three:
 
-  1. The dataset's ``ground_truth`` labels are a **reference**, not truth.
+  1. The harvested dataset's triage labels are a **reference**, not truth.
      They only cover findings the original review surfaced *and* an engineer
-     happened to act on. A better reviewer can catch real bugs the original
-     missed, and the original triage can itself be wrong. So replay now emits
-     a *neutral comparison artifact* and a judge sub-agent assigns the real
-     true/false-positive verdicts by reading the actual diff.
+     happened to act on. The two-mode redesign moves judgment into
+     *collection*: a judge sub-agent reads the real diff and freezes a
+     ``ground_truth_v3`` block (true/false positives, contested rows). Replay
+     never spawns a judge — it scores *mechanically* against that frozen GT,
+     so a replay run is cheap, deterministic, and repeatable.
   2. The ``--goal`` text should be built independently, not lifted from the
      dataset. ``build_goal`` reconstructs it; the dataset goal is kept only
      as a cross-check (``goal_divergence``).
   3. The reviewer's *execution process* was invisible. ``parse_runlog`` turns
      the klogfmt run log ``bramble code-review`` already writes into a
-     structured ``execution_trace`` so the judge can see which files the
-     reviewer read, where it spent time, and what it skipped.
+     structured ``execution_trace`` recording which files the reviewer read,
+     where it spent time, and what it skipped.
 
 The hard parts live here so they can be unit-tested without running bramble:
   * ``parse_runlog`` — klogfmt run log -> execution_trace (cursor / gemini)
@@ -596,6 +597,7 @@ def build_goal(
     state: Optional[dict],
     bramble_ops_path: Path,
     prefer: str = "auto",
+    pr_summary: Optional[str] = None,
 ) -> GoalResult:
     """Build the ``--goal`` text independently of the dataset.
 
@@ -604,6 +606,13 @@ def build_goal(
                       and keep the dataset goal only as a cross-check.
       * ``dataset`` — escape hatch: use the dataset's recorded goal verbatim
                       (reproduces the pre-redesign behaviour for debugging).
+
+    ``pr_summary`` feeds R2+ reconstruction: pr-polish's ``goal_for_round``
+    falls back to the PR summary on a round with no prior-round action history
+    and no files changed, so the harvester records that summary into the R2+
+    goal. The caller passes the dataset's R1 ``goal_text`` (which *is* the PR
+    summary) here so a pristine R2+ round reconstructs the same goal the
+    harvester froze rather than an empty string.
 
     The dataset goal is always loaded into ``dataset_goal`` so the caller can
     surface ``goal_divergence``.
@@ -650,7 +659,7 @@ def build_goal(
                 state,
                 round_n,
                 head_before,
-                None,
+                pr_summary,
                 bramble_ops_path=bramble_ops_path,
                 repo_path=repo_path,
             )

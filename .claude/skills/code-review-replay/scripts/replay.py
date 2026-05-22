@@ -373,12 +373,20 @@ def run_replay(
     timeout_seconds: int,
     log_root: Path,
     verbose: bool,
+    strict: bool = False,
 ) -> tuple[ReplayResult, Path]:
     """Run the reviewer-under-test and score it against the frozen GT.
 
     Requires the dataset JSON to carry a ``ground_truth_v3`` block (built by
     collection mode). Each (round, config) run is scored with
     ``replay_lib.score_against_frozen_gt`` — purely mechanical, no sub-agents.
+
+    The frozen GT is run through ``collect_lib.validate_dataset`` before any
+    scoring: structural ``errors`` always abort (the metrics would be
+    meaningless), and quality ``warnings`` (unconverged census, unresolved
+    contested rows, low harvest agreement) are printed to stderr — under
+    ``strict`` they abort too, so a benchmark never silently reports
+    precision/recall against a weak ground truth.
     """
     dataset = json.loads(dataset_path.read_text())
     gt = cl.load_ground_truth(dataset)
@@ -388,6 +396,22 @@ def run_replay(
             f"collection mode first: /code-review-replay collect "
             f"{dataset_path.stem}"
         )
+
+    errors, warnings = cl.validate_dataset(dataset)
+    if errors:
+        joined = "; ".join(errors)
+        raise RuntimeError(
+            f"{dataset_path.name} frozen ground truth is malformed — "
+            f"scoring would be meaningless: {joined}"
+        )
+    if warnings:
+        for w in warnings:
+            print(f"  warn: {dataset_path.name}: {w}", file=sys.stderr)
+        if strict:
+            raise RuntimeError(
+                f"{dataset_path.name} frozen ground truth has "
+                f"{len(warnings)} quality warning(s) and --strict is set"
+            )
 
     pr = dataset.get("pr") or {}
     repo_name = pr.get("repo_name") or ""
@@ -405,6 +429,18 @@ def run_replay(
         raise RuntimeError(
             f"no rounds match --tier {tier_filter!r} in {dataset_path.name}"
         )
+
+    # Round 1's recorded goal_text is the PR summary; pr-polish's
+    # goal_for_round falls back to it for a pristine R2+ round, so thread it
+    # into build_goal so R2+ reconstruction matches the frozen goal.
+    pr_summary = next(
+        (
+            r.get("goal_text")
+            for r in (dataset.get("harvested_rounds") or [])
+            if int(r.get("round") or 0) == 1 and r.get("goal_text")
+        ),
+        None,
+    )
 
     state = _load_pr_polish_state(repo_pr)
     log_root = log_root / f"{repo_pr}-{hl.run_id_stamp()}"
@@ -426,6 +462,7 @@ def run_replay(
             state=state,
             bramble_ops_path=BRAMBLE_OPS_PATH,
             prefer=goal_source,
+            pr_summary=pr_summary,
         )
         round_n = dr.get("round")
         signal_tier = dr.get("signal_tier")
@@ -795,6 +832,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat frozen-GT quality warnings (unconverged census, "
+        "unresolved contested rows, low harvest agreement) as fatal. "
+        "Structural errors always abort regardless of this flag.",
+    )
+    p.add_argument(
         "--print-markdown",
         action="store_true",
         help="Print a Markdown summary to stdout.",
@@ -855,6 +899,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 timeout_seconds=args.timeout_seconds,
                 log_root=args.log_root,
                 verbose=args.verbose,
+                strict=args.strict,
             )
         except RuntimeError as e:
             print(f"error scoring {target}: {e}", file=sys.stderr)

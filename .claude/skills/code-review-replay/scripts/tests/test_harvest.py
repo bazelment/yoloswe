@@ -216,6 +216,37 @@ class MatchFindingTests(unittest.TestCase):
         self.assertIsNone(match)
         self.assertEqual(strategy, "none")
 
+    def test_fuzzy_tiers_reject_foreign_backend_source(self):
+        # A codex finding must not inherit a cursor action's triage via the
+        # fuzzier topic-based tiers — only same-backend (or wildcard) sources
+        # are eligible.
+        finding = {
+            "file": "x.py",
+            "line": 12,  # ±3 of action.line=10 -> would be topic_path_line
+            "severity": "high",
+            "message": "the preview restore deadline cache is still keyed",
+        }
+        cursor_action = {
+            "source": "cursor",
+            "path": "x.py",
+            "line": 10,
+            "severity": "medium",
+            "topic": "deadline cache is still keyed",
+            "action": "false_positive",
+            "reason": "cursor said so",
+        }
+        match, strategy = hl.match_finding_to_action(
+            finding, "codex", [cursor_action]
+        )
+        self.assertIsNone(match)
+        self.assertEqual(strategy, "none")
+        # Same action, queried as a cursor finding, still matches.
+        match, strategy = hl.match_finding_to_action(
+            finding, "cursor", [cursor_action]
+        )
+        self.assertEqual(strategy, "topic_path_line")
+        self.assertEqual(match["action"], "false_positive")
+
     def test_fixed_preferred_over_false_positive_on_tie(self):
         finding = {
             "file": "x.py",
@@ -549,6 +580,34 @@ class AttributeCommentToRoundTests(unittest.TestCase):
         # All boundary times None -> attribute everything to the last round.
         rt = [(1, None), (2, None), (3, None)]
         self.assertEqual(hl.attribute_comment_to_round("2026-05-07Z", rt), 3)
+
+    def test_mixed_timezone_offsets_compared_chronologically(self):
+        # Boundary times in committer-local offsets (git %cI), comment in
+        # UTC Z (GitHub). Raw string compare would mis-order these; epoch
+        # compare must not. round 1 boundary 2026-05-07T00:00:00-05:00 ==
+        # 05:00Z; round 2 boundary 2026-05-07T10:00:00+02:00 == 08:00Z.
+        rt = [
+            (1, "2026-05-07T00:00:00-05:00"),  # 05:00Z
+            (2, "2026-05-07T10:00:00+02:00"),  # 08:00Z
+        ]
+        # Comment at 06:00Z falls inside round 1's window (05:00Z..08:00Z).
+        self.assertEqual(
+            hl.attribute_comment_to_round("2026-05-07T06:00:00Z", rt), 1
+        )
+        # Comment at 09:00Z is after round 2's boundary.
+        self.assertEqual(
+            hl.attribute_comment_to_round("2026-05-07T09:00:00Z", rt), 2
+        )
+        # Comment at 04:00Z is before round 1's boundary -> round 1.
+        self.assertEqual(
+            hl.attribute_comment_to_round("2026-05-07T04:00:00Z", rt), 1
+        )
+
+    def test_unparseable_created_at_attributes_last(self):
+        self.assertEqual(
+            hl.attribute_comment_to_round("not-a-timestamp", self.ROUND_TIMES),
+            6,
+        )
 
 
 class FoldCommentToHarvestedRoundTests(unittest.TestCase):

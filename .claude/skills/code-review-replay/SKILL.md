@@ -273,6 +273,13 @@ frozen diff's `head_before`, matches each finding to the frozen
 `--tier final`. Replay never spawns judge sub-agents or modifies the
 dataset; if it surfaces a real bug the frozen GT missed, re-run collection.
 
+Before scoring, each dataset's frozen GT is run through the same
+`validate_dataset` gate as `collect.py validate`: a structurally malformed
+GT aborts that PR (the metrics would be meaningless), and quality warnings
+(unconverged census, unresolved contested rows, low harvest agreement) are
+printed to stderr. Pass `--strict` to also abort on quality warnings — use
+it when a benchmark number must not be reported against a weak ground truth.
+
 ## Scoring rubric
 
 All metrics come from matching the reviewer's findings to the **frozen**

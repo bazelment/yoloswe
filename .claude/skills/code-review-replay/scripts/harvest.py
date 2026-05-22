@@ -96,9 +96,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument(
         "--include-incomplete",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Include PRs where the polish loop did not converge (default true).",
+        help="Include PRs where the polish loop did not converge. "
+        "Pass --no-include-incomplete to harvest only converged PRs "
+        "(default: include).",
     )
     p.add_argument(
         "--skip-pr-summary",

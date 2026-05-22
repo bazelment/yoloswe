@@ -162,12 +162,16 @@ class GroundTruthV3:
 #
 # Strip the worktree-root prefix so every path is repo-relative. The
 # patterns below cover replay's `/tmp/replay-*`, the legacy hand-rolled
-# `/tmp/crr-*`, and collection's session worktrees `.../<session>/{judge,
-# review}-worktree/`.
+# `/tmp/crr-*`, and collection's session worktree, which `_worktree_path`
+# in collect.py pins at `<EVAL_ROOT>/collect/<session>/worktree/` — the
+# directory is the bare name `worktree` (no `judge-`/`review-` prefix), so
+# the pattern anchors on the `code-review-eval/collect/.../worktree/`
+# segment rather than a bare `worktree/` (which would also strip a genuine
+# repo path like `pkg/worktree/x.go`).
 _WORKTREE_PREFIX_RES = (
     re.compile(r"^/tmp/replay-[^/]+/(.+)$"),
     re.compile(r"^/tmp/crr-[^/]+/(.+)$"),
-    re.compile(r"^.*/(?:judge|review)-worktree/(.+)$"),
+    re.compile(r"^.*/code-review-eval/collect/[^/]+/worktree/(.+)$"),
 )
 
 

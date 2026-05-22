@@ -406,9 +406,12 @@ def match_finding_to_action(
 ) -> tuple[Optional[dict], MatchStrategy]:
     """Best-match strategy for an envelope finding against this round's actions.
 
+    Every tier first requires the action's ``source`` to be ``backend`` (or a
+    cross-backend wildcard source such as ``sweep``): a finding never inherits
+    the triage of an action recorded by a *different* reviewer.
+
     The 5 tiers (highest to lowest precision):
-      1. ``exact``           — same path + line + severity + (source==backend
-                                or source in wildcard set).
+      1. ``exact``           — same path + line + severity.
       2. ``topic_path_line`` — same normalized path, line within ±3,
                                 topic substring of message[:100].
       3. ``topic_path``      — same normalized path, topic substring of message.
@@ -433,11 +436,19 @@ def match_finding_to_action(
 
         strategy: MatchStrategy = "none"
 
-        # Tier 1 — exact
+        # An envelope finding from backend X may only inherit the triage of a
+        # comment_action recorded by the same backend (or a cross-backend
+        # wildcard source like ``sweep``). Without this gate the fuzzier
+        # tiers below would let a codex finding adopt a cursor row's
+        # ``action`` / ``is_real_issue``. Applies to every tier, not just the
+        # exact one.
         backend_ok = a_src == backend or a_src in WILDCARD_BACKEND_SOURCES
+        if not backend_ok:
+            continue
+
+        # Tier 1 — exact
         if (
-            backend_ok
-            and a_path
+            a_path
             and f_path
             and a_path == f_path
             and a_line is not None
@@ -656,13 +667,39 @@ def harvester_git_sha(repo_path: Path) -> str:
     return res.stdout.strip()
 
 
+def _to_utc_epoch(ts: Optional[str]) -> Optional[float]:
+    """Parse an ISO8601 timestamp (any tz offset, or trailing ``Z``) to a UTC
+    epoch float. Returns None when ``ts`` is falsy or unparseable.
+
+    Both GitHub ``created_at`` (UTC ``Z``) and git ``%cI`` (committer-local
+    offset) reach here, so callers can order them chronologically instead of
+    string-comparing two different timezone representations.
+    """
+    if not ts:
+        return None
+    s = ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt.timestamp()
+
+
 def git_commit_time(repo_path: Optional[Path], sha: str) -> Optional[str]:
-    """Committer date of ``sha`` as a strict-ISO8601 UTC string, or None.
+    """Committer date of ``sha`` as a strict-ISO8601 string, or None.
 
     Used to derive per-round time boundaries: pr-polish stores each round's
     ``head_before``/``head_after`` SHAs but no round timestamps, so the only
     way to bucket a PR comment's ``created_at`` into a round is to resolve the
     round-boundary commits to their commit times.
+
+    ``%cI`` carries the committer's local timezone offset, *not* UTC — so
+    consumers must order these via :func:`_to_utc_epoch`, never raw string
+    comparison against a UTC ``Z`` timestamp.
     """
     if repo_path is None or not repo_path.exists() or not sha:
         return None
@@ -950,17 +987,18 @@ def attribute_comment_to_round(
     whose boundary time is None are skipped for window edges but still eligible
     as the final fallback. Returns None only when ``round_times`` is empty.
     """
-    usable = [(n, t) for (n, t) in round_times if t]
+    usable = [(n, e) for (n, t) in round_times if (e := _to_utc_epoch(t))]
     if not round_times:
         return None
     if not usable:
         # No boundary times at all — attribute everything to the last round.
         return round_times[-1][0]
-    if not created_at:
+    created_epoch = _to_utc_epoch(created_at)
+    if created_epoch is None:
         return usable[-1][0]
     chosen = usable[0][0]
-    for n, t in usable:
-        if created_at >= t:
+    for n, e in usable:
+        if created_epoch >= e:
             chosen = n
         else:
             break
