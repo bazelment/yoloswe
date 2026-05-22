@@ -86,11 +86,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     p.add_argument(
-        "--repos-root",
+        "--repo-root",
         action="append",
         default=[],
         metavar="NAME=PATH",
-        help="Map repo dir name (e.g. kernel) to its local checkout path. Repeatable.",
+        dest="repo_root",
+        help="Override auto-discovery for one repo (NAME=PATH). Repeatable; "
+        "rarely needed — repo checkouts are found automatically.",
     )
     p.add_argument(
         "--bramble-ops-path",
@@ -129,10 +131,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = p.parse_args(argv)
 
     try:
-        repo_map = hl.RepoMap.from_flags(args.repos_root)
+        repo_map = hl.RepoMap.discover(args.repo_root)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    _log(args.verbose,
+         f"discovered repo roots: {sorted(repo_map.mapping)}")
 
     if not args.bramble_ops_path.exists():
         print(
@@ -190,7 +194,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         f"   fetched {len(fetched_comments or [])} PR comment(s)",
                     )
             else:
-                comments_err = "no repo slug (repo not in --repos-root)"
+                comments_err = "no repo slug (repo checkout not discovered)"
                 _log(args.verbose, f"   {comments_err}; github comments fall back")
                 fetch_attempted = False
                 partial = True
@@ -229,7 +233,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if not args.dry_run and records:
         index = hl.build_index(
-            records, generated_at=harvested_at, harvester_sha=harvester_sha
+            records,
+            generated_at=harvested_at,
+            harvester_sha=harvester_sha,
+            out_dir=args.out_dir,
         )
         idx_path = hl.write_index(args.out_dir, index)
         _log(args.verbose, f"wrote {idx_path}")

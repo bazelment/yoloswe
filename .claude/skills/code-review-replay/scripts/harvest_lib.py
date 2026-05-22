@@ -443,6 +443,40 @@ def derive_is_real_issue(action: Optional[str]) -> Optional[bool]:
 # ---------------------------------------------------------------------------
 
 
+# Where local repo checkouts live on this machine. ~/worktrees/<name>/main
+# is the Conductor-worktree convention; ~/g/<name> the plain-clone one.
+_CHECKOUT_GLOBS = ("worktrees/*/main", "g/*")
+
+
+def discover_repo_roots() -> dict[str, Path]:
+    """Find local repo checkouts, keyed by repo name.
+
+    Walks the known checkout locations (``~/worktrees/<name>/main`` and
+    ``~/g/<name>``) and keys each git checkout by its repo name — the same
+    name that appears in a dataset's ``pr.repo_name`` and in the
+    ``~/.bramble/projects/<repo>-<pr>/`` dir names. The ``~/worktrees`` form
+    wins on a name collision (it is the active-development checkout).
+
+    Replaces the old ``--repos-root NAME=PATH`` flags: a caller resolves
+    repo names against this map instead of being told the paths.
+    """
+    home = Path.home()
+    roots: dict[str, Path] = {}
+    for pattern in _CHECKOUT_GLOBS:
+        for path in sorted(home.glob(pattern)):
+            if not path.is_dir() or not (path / ".git").exists():
+                continue
+            # ~/worktrees/<name>/main -> name; ~/g/<name> -> name.
+            name = (
+                path.parent.name
+                if path.name == "main"
+                else path.name
+            )
+            # First match wins; _CHECKOUT_GLOBS lists ~/worktrees first.
+            roots.setdefault(name, path)
+    return roots
+
+
 @dataclass
 class RepoMap:
     """Maps repo name (kernel/yoloswe/nebula) → local checkout path."""
@@ -450,12 +484,24 @@ class RepoMap:
     mapping: dict[str, Path] = field(default_factory=dict)
 
     @classmethod
+    def discover(cls, overrides: Iterable[str] = ()) -> "RepoMap":
+        """Auto-discover repo checkouts; ``overrides`` patch specific names.
+
+        The default constructor — no ``--repos-root`` needed. ``overrides``
+        is an optional list of ``NAME=PATH`` for a repo checked out somewhere
+        :func:`discover_repo_roots` does not look.
+        """
+        mapping = dict(discover_repo_roots())
+        mapping.update(cls.from_flags(overrides).mapping)
+        return cls(mapping=mapping)
+
+    @classmethod
     def from_flags(cls, flags: Iterable[str]) -> "RepoMap":
         mapping: dict[str, Path] = {}
         for f in flags:
             if "=" not in f:
                 raise ValueError(
-                    f"--repos-root expects NAME=PATH, got: {f!r}"
+                    f"--repo-root expects NAME=PATH, got: {f!r}"
                 )
             name, path_s = f.split("=", 1)
             mapping[name.strip()] = Path(path_s.strip()).expanduser()
@@ -1345,37 +1391,97 @@ def record_to_dict(record: PRRecord) -> dict:
     return asdict(record)
 
 
+# The ground_truth_v3 block is written by collection mode AFTER harvest.
+# A re-harvest must NOT destroy it — it is expensive judged data the
+# harvester cannot reproduce. write_pr_record carries it forward from any
+# existing per-PR file.
+_GROUND_TRUTH_KEY = "ground_truth_v3"
+
+
 def write_pr_record(out_dir: Path, record: PRRecord) -> Path:
-    """Atomic write of <repo>-<pr>.json. Returns the final path."""
+    """Atomic write of <repo>-<pr>.json. Returns the final path.
+
+    Preserves an existing ``ground_truth_v3`` block: re-harvesting a PR that
+    was already collected refreshes the harvested fields but keeps the
+    judged ground truth intact (the harvester cannot regenerate it).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     name = f"{record.pr['repo_name']}-{record.pr['pr_number']}.json"
     final = out_dir / name
+    payload = record_to_dict(record)
+    if final.is_file():
+        try:
+            existing = json.loads(final.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if isinstance(existing.get(_GROUND_TRUTH_KEY), dict):
+            payload[_GROUND_TRUTH_KEY] = existing[_GROUND_TRUTH_KEY]
     tmp = final.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(record_to_dict(record), indent=2) + "\n")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
     tmp.replace(final)
     return final
 
 
-def build_index(
-    records: list[PRRecord], *, generated_at: str, harvester_sha: str
-) -> dict:
+def _index_gt_fields(out_dir: Path, file_name: str) -> dict:
+    """Read the per-PR file's collection-quality fields for the index.
+
+    ``ground_truth_collected`` tells a dataset consumer, from the index
+    alone, whether collection has run for a PR; ``census_converged`` whether
+    that collection converged. Both are ``None``/``False`` until
+    ``/code-review-replay collect`` has frozen a ``ground_truth_v3`` block —
+    so a freshly harvested PR shows ``ground_truth_collected: false``.
+    """
+    path = out_dir / file_name
+    if not path.is_file():
+        return {"ground_truth_collected": False, "census_converged": None}
+    try:
+        per_pr = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"ground_truth_collected": False, "census_converged": None}
+    gt = per_pr.get(_GROUND_TRUTH_KEY)
+    if not isinstance(gt, dict):
+        return {"ground_truth_collected": False, "census_converged": None}
     return {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": generated_at,
-        "harvester_git_sha": harvester_sha,
-        "prs": [
+        "ground_truth_collected": True,
+        "census_converged": bool(gt.get("census_converged")),
+    }
+
+
+def build_index(
+    records: list[PRRecord],
+    *,
+    generated_at: str,
+    harvester_sha: str,
+    out_dir: Path,
+) -> dict:
+    """Build ``index.json`` — the dataset-wide manifest.
+
+    ``out_dir`` is read (after :func:`write_pr_record` has written every
+    per-PR file) so each entry can carry ``ground_truth_collected`` /
+    ``census_converged`` — letting a consumer find collected, converged PRs
+    without opening every per-PR file.
+    """
+    prs = []
+    for r in records:
+        file_name = f"{r.pr['repo_name']}-{r.pr['pr_number']}.json"
+        prs.append(
             {
                 "repo_name": r.pr["repo_name"],
                 "repo_url": r.pr["repo_url"],
                 "pr_number": r.pr["pr_number"],
                 "pr_url": r.pr["pr_url"],
-                "file": f"{r.pr['repo_name']}-{r.pr['pr_number']}.json",
+                "file": file_name,
                 "completed": r.pr["completed"],
                 "total_rounds": r.pr["total_rounds"],
                 "harvested_rounds": len(r.harvested_rounds),
+                **_index_gt_fields(out_dir, file_name),
             }
-            for r in records
-        ],
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "harvester_git_sha": harvester_sha,
+        "prs": prs,
     }
 
 

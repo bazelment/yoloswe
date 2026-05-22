@@ -1,331 +1,314 @@
 ---
 name: code-review-replay
-description: "Replay a past /pr-polish'd PR through bramble code-review and judge the result independently. A mechanical phase re-runs the reviewer and captures its execution trace; a judgment phase uses sub-agents to verdict each finding against the real diff — treating the harvested dataset as a reference, not ground truth. Produces precision/recall/F1 plus a dataset-agreement signal and per-reviewer execution analysis."
-argument-hint: "<repo>-<pr> [--tier r1|final] [--config NAME ...]"
+description: "Build and use a ground-truth eval dataset for bramble code-review. Two modes. COLLECTION scans past /pr-polish'd PRs and judges each into a frozen ground truth — multiple rounds of bramble re-review + an independent judge sub-agent per round, until the judge's full-diff bug census saturates. REPLAY runs a reviewer-under-test and scores it mechanically against that frozen ground truth — precision/recall/F1, no sub-agents, cheap and repeatable."
+argument-hint: "collect [<repo>-<pr> ...] | [<repo>-<pr>] [--sample N] [--config NAME ...]"
 ---
 
 # Code Review Replay
 
-`/code-review-replay` measures **how good a code reviewer is** by re-running
-it on a PR we already `/pr-polish`'d, then judging the result.
+`/code-review-replay` builds a **ground-truth eval dataset** for bramble
+code-review and scores reviewers against it. It has two modes.
+
+| Mode | What it does | Cost |
+|------|--------------|------|
+| **collection** (`collect`) | Scan past PRs, judge each into a frozen ground truth | Expensive — bramble + judge sub-agents over several rounds per PR. |
+| **replay** (default) | Run a reviewer-under-test, score it against the frozen ground truth | Cheap — one bramble run per config, mechanical scoring, no sub-agents. |
 
 The companion `/code-review-eval` skill compares backends side-by-side on a
-live branch. This skill instead asks: **"if we re-ran this reviewer on a PR
-we already polished, would it catch the real issues and stay quiet on the
-noise?"**
+**live branch**. This skill instead asks, against **past PRs**: *would this
+reviewer catch the real issues and stay quiet on the noise?*
 
-## Why this skill was redesigned
+## Why two modes
 
-The old replay **trusted the harvested dataset as ground truth**. That was
-wrong on three counts, and the current design fixes all three:
+- **Collection does the judging once.** It runs bramble over a PR's diff
+  several times across backends, and an independent judge sub-agent per
+  round verdicts every finding *and* censuses the real bugs in the diff.
+  When the census **saturates** — no new real bug, every censused bug
+  covered by a reviewer finding, no contested verdict left unresolved — the
+  judged true/false-positive set is frozen as `ground_truth_v3`.
+- **Replay just scores.** With the ground truth frozen, evaluating a
+  reviewer config is one mechanical pass: run it, match findings to the
+  frozen set, compute precision/recall/F1. No sub-agents.
 
-1. **Findings are judged, not looked up.** The dataset only labels findings
-   the *original* review surfaced *and* an engineer acted on. It is
-   incomplete, and the original triage can itself be wrong. So replay no
-   longer reads `is_real_issue` off the dataset to score. A judge sub-agent
-   reads the **actual diff** and decides true-positive / false-positive /
-   unsure on the code's merits. The dataset label is shown to the judge as a
-   *reference* it may disagree with.
-2. **The goal is built independently.** Replay no longer feeds the dataset's
-   recorded `goal_text` into `--goal`. It reconstructs the goal itself (R1
-   from the live PR title/body + diffstat; R2+ deterministically from
-   pr-polish state). The dataset goal is kept only as a cross-check — when
-   the two diverge, the run is flagged `goal_divergence`.
-3. **The reviewer's process is inspected.** Replay captures each reviewer's
-   klogfmt execution trace — which files it read, where it spent time, what
-   it skipped — and the judge sub-agent turns that into concrete
-   improvement notes.
+The harvested `comment_actions` (the original engineer's triage) are kept
+only as an auditable **cross-check** — never the label. The judge's verdict,
+grounded in the actual diff, is the ground truth.
 
-## Two-phase workflow
+## Mode dispatch
 
-```
-Phase A (mechanical, replay.py)     Phase B (judgment, sub-agents + replay.py)
-┌──────────────────────────┐       ┌────────────────────────────────────┐
-│ build independent goal   │       │ 1 judge sub-agent per (round,config)│
-│ run bramble per config   │  ───▶ │ reads real diff, verdicts findings  │
-│ capture execution trace  │       │ censuses missed issues              │
-│ emit NEUTRAL artifact    │       │ analyses execution trace            │
-│ + per-run prompt JSONs   │       │ writes verdict JSON                 │
-└──────────────────────────┘       │ replay.py --fold-verdicts → scored  │
-                                   └────────────────────────────────────┘
-```
+- First argument is `collect` → **collection mode**.
+- Anything else (a `<repo>-<pr>` id, or no argument) → **replay mode**.
 
-Phase A makes **no** true/false-positive judgment and computes **no**
-precision/recall. All judgment happens in Phase B.
+Repo checkouts are auto-discovered (`~/worktrees/<name>/main`, `~/g/<name>`)
+— you never pass repo-root paths.
 
-## How to run
+---
 
-### Step 0 — confirm the dataset exists
+# Collection mode
+
+`/code-review-replay collect [<repo>-<pr> ...]` — build frozen ground truth.
+
+With no PR ids, collection **scans for all uncollected PRs** and processes
+them. Pass specific `<repo>-<pr>` ids to target those, or rely on
+`collect.py --sample N` semantics by collecting a capped random subset.
+`collect.py` is stateless glue — the steps below are the per-PR loop the
+**skill** drives.
+
+## Step 0 — build bramble, see what is collectable
 
 ```bash
-ls ~/.bramble/code-review-eval/dataset/<repo>-<pr>.json
+bazel build //bramble:bramble
+python3 .claude/skills/code-review-replay/scripts/collect.py scan
 ```
 
-If it is missing, see **"If the dataset is missing"** below.
+`scan` prints the collectable PRs (those with `~/.bramble/projects/` history)
+and which are already collected. Collect every uncollected one, or a chosen
+subset. Build produces `bazel-bin/bramble/bramble_/bramble` — note the path.
 
-### Step 1 — build bramble from this repo
+## Step 1 — set up the PR
 
-Always replay against the bazel-built binary, never whatever is on `PATH`
-(a stale `~/bin/bramble` silently changes reviewer behavior).
+```bash
+python3 .claude/skills/code-review-replay/scripts/collect.py setup <repo>-<pr>
+```
+
+`setup` harvests the PR if it has no dataset yet, auto-discovers its repo
+checkout, and creates a session with **one** detached git worktree pinned at
+the canonical round's `head_before`. It prints
+`{session, worktree, canonical_round}` — record `session` (every later call
+needs it) and `worktree` (the cwd for bramble re-runs and the judge's
+`repo_path`). `canonical_round` carries `head_before`, `merge_base_sha`,
+`goal_text`, and `files_changed` for the round loop.
+
+## Step 2 — the ground-truth round loop
+
+Collection establishes ground truth for **one diff** — the PR's original
+fresh-eyes diff. Repeat the loop, `round` starting at 1, until `fold`
+reports `census_converged: true` (or the round budget, default 10, is spent).
+
+### 2a — re-review the diff
+
+Every round re-runs `bramble code-review` once per backend in the session
+`worktree` (already checked out at `head_before`). Arm one **Monitor** per
+backend in the same turn so they run in parallel:
+
+```
+Monitor({
+  description: "bramble codex r<round>",
+  command: "cd <WORKTREE> && \
+    BRAMBLE_RUN_TAG=code-review-replay:<repo>-<pr>:collect:r<round>:codex \
+    WORK_DIR=$(pwd) <BRAMBLE_BIN> code-review \
+    --backend codex --model gpt-5.4-mini --effort medium \
+    --skip-test-execution --verbose --timeout 13m \
+    --goal \"$GOAL\" \
+    --envelope-file /tmp/crr-r<round>/codex-envelope.json \
+    2>/tmp/crr-r<round>/codex-stderr.txt"
+})
+```
+
+`GOAL` is `canonical_round.goal_text` from `setup`. Mirror the Monitor for
+`cursor` (`--backend cursor --model composer-2`) and optionally `gemini`
+(`--backend gemini --model gemini-3.1-flash-lite-preview`). `bramble
+code-review` is read-only, so all backends share the one worktree safely.
+
+### 2b — build the judge prompt
+
+```bash
+python3 .claude/skills/code-review-replay/scripts/collect.py build-prompt \
+  --session <SESSION> --round <round> --include-harvested \
+  --envelope codex=/tmp/crr-r<round>/codex-envelope.json \
+  --envelope cursor=/tmp/crr-r<round>/cursor-envelope.json
+```
+
+Pass each backend's envelope from this round. `--include-harvested` folds
+the original pr-polish review in as an extra data point — pass it every
+round; it is not a special case. The call prints the `judge_prompt` path.
+The prompt carries the *cumulative* union of reviewer findings (this round +
+all prior), the running census, and any contested findings.
+
+### 2c — spawn the judge sub-agent
+
+Spawn one `general-purpose` sub-agent. Use this prompt, substituting the
+judge-prompt path:
+
+> You are an independent code-review judge building a **ground-truth
+> dataset**. A reviewer was run against a real diff; your job is to decide,
+> by inspecting the actual code, which of its findings are real — that
+> verdict becomes the dataset other reviewers are scored against.
+>
+> The prompt-input JSON at `<JUDGE_PROMPT_PATH>` carries: `repo_path` (a git
+> worktree checked out at the diff's `head_before` — its working tree is
+> exactly the post-diff code, so read files there directly), `diff_ref`
+> (the diff scope, with a ready `diff_command`), `reviewer_findings` (the
+> cumulative union of every finding bramble surfaced — verdict each one),
+> `cumulative_census` (real bugs censused in prior rounds — extend it),
+> `contested_findings` (defects prior rounds judged inconsistently — give
+> each a final verdict), and `harvested_comment_actions` (the original
+> triage — reference only, may be wrong).
+>
+> Produce three things:
+>
+> 1. **A verdict on every reviewer finding** — `true_positive`,
+>    `false_positive`, or `unsure`, with a one-line `reason` grounded in the
+>    code. **You assign the `severity`** (`high`/`medium`/`low`/`nit`) on the
+>    defect's real impact — the reviewer's reported severity is only an
+>    input; copy it into `reviewer_severity`. Verify a finding's *premise*,
+>    not just its topic — two false-positive shapes to actively check:
+>    *"missing test"* claims (read the whole test file; reviewers miss a
+>    sibling test that already covers it) and *"unreachable"/"wrong value"*
+>    claims (trace the data flow; confirm the bad value is reachable).
+> 2. **An independent census of the real bugs in the diff** — every real
+>    defect, including ones no reviewer caught. Extend `cumulative_census`.
+>    You are the authority on defect identity: if the census splits one
+>    defect across two locations, declare them merged in `census_merges`.
+> 3. **A final verdict on each `contested_findings` entry** — add it to
+>    `finding_verdicts`; your verdict is binding and resolves the conflict.
+>
+> Write your verdict as JSON to the `verdict_output_path` named in the
+> prompt-input, using exactly this schema:
+>
+> ```json
+> {
+>   "round": 2,
+>   "finding_verdicts": [
+>     {"file": "scripts/deploy.py", "line": 679,
+>      "severity": "high", "reviewer_severity": "medium",
+>      "topic": "off-by-one in rollout index",
+>      "verdict": "true_positive", "reason": "confirmed at deploy.py:679",
+>      "surfaced_by": ["codex", "cursor"]}
+>   ],
+>   "census": [
+>     {"file": "scripts/deploy.py", "line": 679, "severity": "high",
+>      "description": "off-by-one in rollout index"}
+>   ],
+>   "census_merges": [
+>     {"members": [
+>        {"file": "tests/test_x.py", "line": 8},
+>        {"file": "tests/test_x.py", "line": 46}
+>      ],
+>      "reason": "both are the same missing-coverage defect"}
+>   ]
+> }
+> ```
+>
+> `verdict` ∈ `true_positive`/`false_positive`/`unsure`; `severity` ∈
+> `high`/`medium`/`low`/`nit` on every non-`unsure` verdict. `census_merges`
+> is optional. Judge on the code, not the labels.
+
+### 2d — fold the verdict and test convergence
+
+```bash
+python3 .claude/skills/code-review-replay/scripts/collect.py fold \
+  --session <SESSION> --round <round>
+```
+
+(`--round-budget` defaults to 10.) `fold` prints `census_converged`,
+`uncovered_census_items`, `contested`, `unresolved_contested`, and a
+`should_continue` hint. Convergence requires the census stable + covered
+**and** zero `unresolved_contested`. If `should_continue` is `true`,
+increment `round` and loop to **2a**; otherwise go to Step 3.
+
+## Step 3 — freeze the ground truth
+
+```bash
+python3 .claude/skills/code-review-replay/scripts/collect.py freeze \
+  --session <SESSION>
+```
+
+`freeze` writes the `ground_truth_v3` block into the dataset JSON, refreshes
+the PR's `index.json` entry, and tears down the worktree. If
+`census_converged` is `false`, the budget was spent or a contested finding
+was left unresolved — the ground truth is usable but known-incomplete.
+
+## Step 4 — validate
+
+```bash
+python3 .claude/skills/code-review-replay/scripts/collect.py validate <repo>-<pr>
+python3 .claude/skills/code-review-replay/scripts/collect.py validate --all
+```
+
+`validate` runs structural checks (schema, well-formed GT, every entry has
+`file`/`line`/`severity`) and quality gates (not converged, unresolved
+contested, low harvest agreement, budget-forced, empty TP set). Exit 0 =
+clean, 1 = quality warnings, 2 = malformed. `--all` checks every PR in the
+index and prints a tally.
+
+---
+
+# Replay mode
+
+`/code-review-replay [<repo>-<pr>]` — score a reviewer-under-test.
+
+With no PR id, replay **randomly samples** PRs that have a frozen ground
+truth. Pass a `<repo>-<pr>` id to score one specific PR.
+
+## Step 1 — build bramble
 
 ```bash
 bazel build //bramble:bramble
 ```
 
-This produces `bazel-bin/bramble/bramble_/bramble`.
+Always replay against the bazel-built binary, never whatever is on `PATH` (a
+stale `~/bin/bramble` silently changes reviewer behavior).
 
-### Step 2 — Phase A: run the reviewer, emit the neutral artifact
+## Step 2 — run the replay scorer
 
 ```bash
-python3 .claude/skills/code-review-eval/scripts/replay.py <repo>-<pr> \
+# Sample 5 random GT-collected PRs (default):
+python3 .claude/skills/code-review-replay/scripts/replay.py \
   --bramble-bin "$(bazel info bazel-bin)/bramble/bramble_/bramble" \
-  --repos-root kernel=/home/ubuntu/worktrees/kernel/main \
-  --repos-root yoloswe=/home/ubuntu/worktrees/yoloswe/main \
-  --repos-root nebula=/home/ubuntu/worktrees/nebula/main \
-  --verbose --print-markdown
-```
+  --print-markdown
 
-Default configs are `codex-5.4-mini` + `cursor-composer2`. Add gemini with
-`--config gemini-3.1-flash-lite-preview` (repeatable). Filter rounds with
-`--tier r1` or `--tier final`.
-
-Phase A writes:
-- `<log-root>/<repo>-<pr>-<id>/artifact.json` — the neutral artifact.
-- `<log-root>/<repo>-<pr>-<id>/prompts/r<n>-<config>-prompt.json` — one
-  prompt-input per `(round, config)` run.
-- per-config `*-envelope.json`, `*-runlog.log` (klogfmt), and
-  `*-protocol.jsonl` (codex protocol log, copied for codex runs).
-
-The `--print-markdown` output ends with the exact Phase-B commands. Note the
-**artifact path** and the **prompt-input dir**.
-
-### Step 3 — Phase B: spawn one judge sub-agent per prompt-input
-
-For **each** `r<n>-<config>-prompt.json` in the prompt dir, spawn a
-`general-purpose` sub-agent (it needs Bash for `git diff`/`git show` and
-Read). Run them in **batches** so context stays clean. Use this prompt
-template verbatim, substituting the prompt-input path:
-
-> You are an independent code-review judge. Your job is to assess the
-> quality of one `bramble code-review` run by inspecting the **real diff**
-> it reviewed — **not** by trusting any pre-existing labels.
->
-> Read the prompt-input JSON at `<PROMPT_INPUT_PATH>`. It contains:
-> `repo_path`, `diff_ref` (with a ready-to-run `diff_command`),
-> `replay_findings` (what the reviewer reported), `mechanical_match_hints`
-> (token-overlap guesses linking each finding to a dataset finding — a
-> HINT only), `dataset_findings_reference` (the harvested dataset — a
-> REFERENCE only), and `execution_trace` (how the reviewer worked).
->
-> Do the following:
->
-> 1. **Reconstruct the diff.** Run the `diff_command` from `diff_ref`.
->    Restrict your attention to `files_changed`. Read the surrounding code
->    in `repo_path` as needed (the repo is checked out; `git show` any
->    commit).
-> 2. **Judge every replay finding independently.** For each entry in
->    `replay_findings`, read the cited code and decide: `true_positive`
->    (a real defect or a legitimate concern), `false_positive` (wrong,
->    or not an issue), or `unsure` (genuinely cannot tell). Write a
->    one-line `reason` grounded in the code. The `mechanical_match_hints`
->    and `dataset_findings_reference` show what the original triage
->    concluded — **agree only when the code supports it.** When your
->    verdict differs from the dataset label, set `dataset_disagreement:
->    true`.
->
->    **Verify the finding's premise, not just its topic.** A finding is a
->    `false_positive` when its *claim* is wrong even if the area is
->    plausible. Two recurring FP shapes to actively check:
->    - **"Missing test" claims** — read the *whole* test file (or grep the
->      feature/function name across it) before agreeing. Reviewers
->      routinely cite one test and miss a sibling test a few lines below
->      that already provides the coverage.
->    - **"Unreachable" / "wrong value" claims** — trace the data flow.
->      If a finding flags a divergence on a field, confirm the bad value
->      is actually reachable (e.g. a non-nullable column always set to a
->      valid value makes the divergence dead code → `false_positive`).
-> 3. **Census missed real issues.** Scan the diff for real bugs that **no**
->    finding in `replay_findings` caught. List them — this is true recall,
->    not dataset recall.
-> 4. **Analyse the execution trace.** `execution_trace` is parsed from the
->    klogfmt run log for cursor/gemini and from the codex protocol JSONL
->    for codex — so `n_tool_calls`, `tool_kind_counts`, and `files_read`
->    are populated for **all** backends; you should not see a codex run
->    with `n_tool_calls=0`. If you need raw detail, the copied logs are at
->    `runlog_path` (klogfmt) and `protocol_log_path` (codex JSONL); render
->    a protocol JSONL with `bazel run //bramble/cmd/logview -- <file>`.
->    Identify concrete process problems: changed files never read (see
->    `files_changed_not_read`), time sunk in dead-end greps, premature
->    termination (investigation greps landed on a real defect's code path
->    but no finding was reported), redundant work (the same file re-read
->    in many overlapping ranges). Produce actionable improvement notes.
-> 5. **Write your verdict** as JSON to the `verdict_output_path` named in
->    the prompt-input, using exactly this schema:
->
-> ```json
-> {
->   "round": 1,
->   "config": "codex-5.4-mini",
->   "finding_verdicts": [
->     {"index": 0, "verdict": "true_positive",
->      "reason": "off-by-one confirmed at deploy.py:679",
->      "dataset_disagreement": false}
->   ],
->   "missed_real_issues": [
->     {"file": "scripts/deploy.py", "line": 12,
->      "description": "unhandled None from get_rollout()", "severity": "high"}
->   ],
->   "execution_analysis": [
->     {"observation": "never read the changed test file",
->      "improvement": "read all files_changed before verdict",
->      "severity": "medium"}
->   ]
-> }
-> ```
->
-> `index` is the position in `replay_findings`. `verdict` must be one of
-> `true_positive` / `false_positive` / `unsure`. Judge on the code, not
-> the labels.
-
-### Step 4 — fold the verdicts into the scored result
-
-Once every sub-agent has written its verdict JSON:
-
-```bash
-python3 .claude/skills/code-review-eval/scripts/replay.py <repo>-<pr> \
-  --fold-verdicts <PROMPT_INPUT_DIR> \
-  --artifact <ARTIFACT_PATH> \
+# Or score one specific PR:
+python3 .claude/skills/code-review-replay/scripts/replay.py <repo>-<pr> \
+  --bramble-bin "$(bazel info bazel-bin)/bramble/bramble_/bramble" \
   --print-markdown
 ```
 
-This writes `~/.bramble/code-review-eval/replays/<repo>-<pr>-<ts>-scored.json`
-and prints the summary.
+`--sample N` sets how many PRs the no-target form draws (default 5).
+`replay.py` runs `bramble code-review` per config (default `codex-5.4-mini`
++ `cursor-composer2`; add `--config gemini-3.1-flash-lite-preview`) at the
+frozen diff's `head_before`, matches each finding to the frozen
+`ground_truth_v3`, and writes a scored result to
+`~/.bramble/code-review-eval/replays/`. Filter rounds with `--tier r1` or
+`--tier final`. Replay never spawns judge sub-agents or modifies the
+dataset; if it surfaces a real bug the frozen GT missed, re-run collection.
 
 ## Scoring rubric
 
-All metrics come from the **judge's verdicts**, never the dataset:
+All metrics come from matching the reviewer's findings to the **frozen**
+`ground_truth_v3` — purely mechanically:
 
-- **Precision** = `judged_TP / (judged_TP + judged_FP)` — of the reviewer's
-  findings the judge could rule on, how many were real.
-- **Recall** = `judged_TP / (judged_TP + missed_real_issues)` — the
-  denominator is the judge's **independent** census of real issues in the
-  diff, so a reviewer is penalised for bugs the *original* review also
-  missed.
+- **matched_tp** — a finding landed on a `true_positive` (a real bug).
+- **matched_fp** — a finding landed on a `false_positive` (known noise).
+- **unmatched** — a finding matched no GT entry; excluded from precision.
+- **Precision** = `matched_tp / (matched_tp + matched_fp)`.
+- **Recall** = `|distinct true_positives caught| / |true_positives|` —
+  bounded by 1.0.
 - **F1** = harmonic mean.
-- `judged_unsure` findings are excluded from precision (neither TP nor FP).
-- A finding the judge skipped entirely counts as `unsure`, never as TP/FP.
-
-Plus a signal **on the dataset itself**:
-
-- **`dataset_agreement_rate`** = how often the judge's verdict matched the
-  dataset's `is_real_issue` label, over findings where both had an opinion.
-  A low rate means the harvested dataset is unreliable — worth fixing the
-  harvester, or re-triaging the original PR.
-
-And per run:
-
-- **`execution_analysis[]`** — concrete, actionable notes on how the
-  reviewer worked.
-- **`missed_real_issues[]`** — real bugs no reviewer surfaced.
-- **`goal_divergence`** — set when the independently-reconstructed goal
-  materially differed from the dataset's recorded goal.
+- **severity_mismatches** — matched TPs the reviewer reported at the wrong
+  severity (a separate signal; does not move P/R/F1).
+- **missed_true_positives** — GT real bugs no finding caught.
 
 ## How to interpret results
 
-- **Low `dataset_agreement_rate`** — the judge disagreed with the harvested
-  labels often. Investigate: either the harvester's matcher is wrong or the
-  original `/pr-polish` triage was. Do **not** assume the judge is wrong;
-  that is the whole point of judging independently.
-- **`missed_real_issues` non-empty across all configs** — a real bug the
-  reviewers (and likely the original review) all missed. Highest-value
-  output of the skill.
-- **`execution_analysis` recurring across runs** — a systemic reviewer
-  weakness (e.g. "never reads changed test files"). Feed it back into the
-  reviewer prompt or backend.
-- **`goal_divergence: true`** — the score may partly reflect a goal
-  difference, not reviewer skill. Re-run with `--goal-source dataset` to
-  isolate.
-- **`fold_error` on a run** — the sub-agent's verdict JSON was missing or
-  malformed; that run was not scored. Re-spawn the sub-agent for it.
-
-## Independent goal construction
-
-Phase A builds the `--goal` itself:
-
-- **R1** — `gh pr view` for the live title + body, plus a `git diff --stat`.
-- **R2+** — deterministic reconstruction via pr-polish's
-  `bramble_ops.goal_for_round` (the same path the harvester uses).
-- **Fallback** — if `gh` fails or state is unavailable, falls back to the
-  dataset's recorded goal and notes it.
-
-`--goal-source dataset` forces the old behavior (dataset goal verbatim) for
-debugging.
-
-## Picking a PR to replay
-
-Recall is only meaningful when the diff actually contains real bugs. Any PR
-replays fine — a near-clean final round just measures false-positive rate.
-To find datasets where the *original* review found labeled real issues:
-
-```bash
-for f in ~/.bramble/code-review-eval/dataset/*.json; do
-  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); \
-    n=sum(1 for r in d.get('harvested_rounds',[]) \
-      for rr in r.get('review_runs',[]) for fi in rr.get('findings',[]) \
-      if (fi.get('ground_truth') or {}).get('is_real_issue') is True); \
-    print(f'{sys.argv[1].split(\"/\")[-1]}: {n} real')" "$f"
-done
-```
-
-This is only a hint for picking a PR — the judge still censuses real issues
-independently, so a PR with `0 real` here can still surface missed bugs.
-
-## If the dataset is missing
-
-The replay needs `~/.bramble/code-review-eval/dataset/<repo>-<pr>.json`,
-built by the harvester from `/pr-polish` run history.
-
-1. **If `~/.bramble/projects/<repo>-<pr>/` exists** — the PR was polished on
-   this machine but not yet harvested. Harvest it:
-
-   ```bash
-   python3 .claude/skills/code-review-eval/scripts/harvest.py \
-     --only <repo>-<pr> \
-     --repos-root kernel=/home/ubuntu/worktrees/kernel/main \
-     --repos-root yoloswe=/home/ubuntu/worktrees/yoloswe/main \
-     --repos-root nebula=/home/ubuntu/worktrees/nebula/main \
-     --verbose
-   ```
-
-   Auto-detect `--repos-root` paths with
-   `find /home/ubuntu/worktrees -maxdepth 2 -name main -type d`.
-
-2. **If `~/.bramble/projects/<repo>-<pr>/` does NOT exist** — the PR was
-   never polished here; the dataset cannot be regenerated. `replay.py`'s
-   error lists every PR that *can* be harvested. Pick a different PR.
-
-3. **If the dataset is stale** — re-run `harvest.py` with no `--only`; it
-   overwrites every per-PR file.
-
-## What the replay does NOT do
-
-- It does **not** modify the dataset. The judge's verdicts live in the
-  scored result, not the source-of-truth dataset. If you want a judge
-  verdict folded back into the dataset, edit the dataset by hand.
-- It does **not** re-run the original pr-polish loop. One `bramble
-  code-review` per backend per round — no resume, no R2+ follow-ups. We are
-  measuring reviewer-as-classifier quality, not loop convergence.
-- It does **not** auto-fix reviewer prompts. `execution_analysis` is advice
-  for a human (or a follow-up skill).
+- **Low recall, high precision** — conservative reviewer: what it flags is
+  real, but it misses bugs. See `missed_true_positives`.
+- **Low precision** — noisy reviewer: it repeats known false positives.
+- **Many `unmatched` findings** — the reviewer surfaced things the dataset
+  never judged. It may have found real bugs collection missed (re-run
+  collection with more rounds) or be noisy in a new way.
+- **`census_converged: false` in the GT** — the recall denominator may be
+  incomplete; treat recall as a lower bound.
 
 ## Key files
 
 | Area | File |
 |------|------|
-| Replay driver (both phases) | `.claude/skills/code-review-eval/scripts/replay.py` |
-| Parsing / goal / scoring lib | `.claude/skills/code-review-eval/scripts/replay_lib.py` |
-| Dataset records | `~/.bramble/code-review-eval/dataset/` (outside the repo) |
-| Scored results | `~/.bramble/code-review-eval/replays/` (outside the repo) |
-| Dataset harvester | `.claude/skills/code-review-eval/scripts/harvest.py` (sibling skill) |
-| Reviewer run logs | `~/.bramble/logs/code-review/` (klogfmt; replay copies them) |
-| Session JSONL inspector | `bazel run //bramble/cmd/logview -- <file>.jsonl` |
+| Collection: harvester | `.claude/skills/code-review-replay/scripts/harvest.py` |
+| Collection: glue + GT model | `.claude/skills/code-review-replay/scripts/collect.py`, `collect_lib.py` |
+| Replay: scorer | `.claude/skills/code-review-replay/scripts/replay.py` |
+| Parsing / goal / scoring lib | `.claude/skills/code-review-replay/scripts/replay_lib.py` |
+| Dataset schema + CLI reference | `.claude/skills/code-review-replay/scripts/README.md` |
+| Dataset records (frozen GT) | `~/.bramble/code-review-eval/dataset/` (outside the repo) |
+| Scored replay results | `~/.bramble/code-review-eval/replays/` (outside the repo) |
+| Collection session state | `~/.bramble/code-review-eval/collect/` (outside the repo) |

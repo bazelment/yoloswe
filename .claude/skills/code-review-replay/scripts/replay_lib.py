@@ -29,8 +29,9 @@ The hard parts live here so they can be unit-tested without running bramble:
     klogfmt run log is near-empty)
   * ``build_goal`` — independent goal reconstruction (R1 via PR body, R2+
     via pr-polish ``goal_for_round``)
-  * ``fold_verdicts`` / ``score_from_verdicts`` — turn sub-agent verdict
-    JSONs into precision / recall / F1 plus a dataset-agreement signal
+  * ``score_against_frozen_gt`` — mechanically match a run's findings to a
+    frozen ``ground_truth_v3`` block and compute precision / recall / F1
+    (replay mode; no judge sub-agents)
 """
 
 from __future__ import annotations
@@ -46,14 +47,6 @@ from typing import Optional
 import harvest_lib as hl
 
 REPLAY_SCHEMA_VERSION = 2
-
-# Verdict vocabulary the judge sub-agent must use for each replay finding.
-VERDICT_TRUE_POSITIVE = "true_positive"
-VERDICT_FALSE_POSITIVE = "false_positive"
-VERDICT_UNSURE = "unsure"
-VALID_VERDICTS = frozenset(
-    {VERDICT_TRUE_POSITIVE, VERDICT_FALSE_POSITIVE, VERDICT_UNSURE}
-)
 
 
 # ===========================================================================
@@ -724,39 +717,25 @@ def build_goal(
     )
 
 
+def _safe_div(num: float, den: float) -> Optional[float]:
+    return (num / den) if den else None
+
+
 # ===========================================================================
-# Verdict folding — sub-agent judgments -> precision / recall / F1
+# Mechanical scoring against a frozen ground_truth_v3 block (replay mode)
 # ===========================================================================
 #
-# A judge sub-agent inspects the real diff at head_before and returns one
-# verdict JSON per (round, config) run. The schema it must produce:
-#
-#   {
-#     "round": 1,
-#     "config": "codex-5.4-mini",
-#     "finding_verdicts": [
-#       {
-#         "index": 0,                       # index into replay_findings[]
-#         "verdict": "true_positive",       # true_positive|false_positive|unsure
-#         "reason": "off-by-one confirmed at deploy.py:679",
-#         "dataset_disagreement": false     # judge verdict != dataset label
-#       }, ...
-#     ],
-#     "missed_real_issues": [
-#       {"file": "...", "line": 12, "description": "...", "severity": "high"}
-#     ],
-#     "execution_analysis": [
-#       {"observation": "...", "improvement": "...", "severity": "medium"}
-#     ]
-#   }
-#
-# fold_verdicts() validates that shape; score_from_verdicts() turns it into
-# metrics. Recall's denominator is the judge's *independent* census
-# (judged_TP + missed_real_issues), NOT the dataset's count.
+# Replay mode does NOT spawn a judge. It scores the reviewer-under-test
+# purely mechanically against the frozen ground truth that collection mode
+# already established: each finding is matched to the GT's true_positives /
+# false_positives sets by defect location, and precision / recall / F1 fall
+# straight out. This is what makes a replay cheap and repeatable.
 
 
 @dataclass
-class ScoredRunV2:
+class ScoredRunV3:
+    """One config's mechanical score against the frozen ground truth."""
+
     backend: str
     model: str
     config: str
@@ -764,52 +743,29 @@ class ScoredRunV2:
     verdict: Optional[str]
     duration_ms: Optional[int]
     n_findings_replay: int
-    judged_tp: int
-    judged_fp: int
-    judged_unsure: int
-    n_missed_real: int
+    # A finding that matched a GT true_positive — the reviewer caught a real
+    # bug. matched_fp: matched a GT false_positive — the reviewer repeated a
+    # known-bad finding. unmatched: matched no GT entry at all.
+    matched_tp: int
+    matched_fp: int
+    unmatched: int
+    # |true_positives| in the frozen GT — the recall denominator.
+    gt_true_positives: int
+    # GT true_positives no finding in this run matched — real bugs missed.
+    missed_tp: int
+    # Of the matched_tp findings, how many reported a severity that differs
+    # from the GT entry's (judge-set) severity. A separate signal — it does
+    # NOT affect precision/recall/F1.
+    severity_mismatches: int
     precision: Optional[float]
     recall: Optional[float]
     f1: Optional[float]
-    # Quality signal on the DATASET itself: how often the judge agreed with
-    # the dataset's is_real_issue label where both had an opinion.
-    dataset_comparisons: int
-    dataset_agreements: int
-    dataset_agreement_rate: Optional[float]
-    finding_verdicts: list[dict] = field(default_factory=list)
-    missed_real_issues: list[dict] = field(default_factory=list)
-    execution_analysis: list[dict] = field(default_factory=list)
-    fold_error: Optional[str] = None
+    finding_scores: list[dict] = field(default_factory=list)
+    missed_true_positives: list[dict] = field(default_factory=list)
+    score_error: Optional[str] = None
 
 
-def validate_verdict(obj: object) -> Optional[str]:
-    """Return an error string if ``obj`` is not a well-formed verdict JSON."""
-    if not isinstance(obj, dict):
-        return "verdict is not a JSON object"
-    fv = obj.get("finding_verdicts")
-    if not isinstance(fv, list):
-        return "missing 'finding_verdicts' list"
-    for i, v in enumerate(fv):
-        if not isinstance(v, dict):
-            return f"finding_verdicts[{i}] is not an object"
-        if not isinstance(v.get("index"), int):
-            return f"finding_verdicts[{i}] missing integer 'index'"
-        if v.get("verdict") not in VALID_VERDICTS:
-            return (
-                f"finding_verdicts[{i}].verdict must be one of "
-                f"{sorted(VALID_VERDICTS)}"
-            )
-    for key in ("missed_real_issues", "execution_analysis"):
-        if key in obj and not isinstance(obj[key], list):
-            return f"'{key}' must be a list when present"
-    return None
-
-
-def _safe_div(num: float, den: float) -> Optional[float]:
-    return (num / den) if den else None
-
-
-def score_from_verdicts(
+def score_against_frozen_gt(
     *,
     backend: str,
     model: str,
@@ -818,64 +774,126 @@ def score_from_verdicts(
     verdict: Optional[str],
     duration_ms: Optional[int],
     replay_findings: list[dict],
-    mechanical_match: list[dict],
-    judge_verdict: dict,
-) -> ScoredRunV2:
-    """Compute metrics for one run from its judge verdict.
+    ground_truth: dict,
+) -> ScoredRunV3:
+    """Score one run's findings against a frozen ``ground_truth_v3`` block.
 
-    ``mechanical_match`` is the hint join from the artifact: a list aligned
-    with ``replay_findings`` carrying the dataset label the token-overlap
-    matcher *guessed* for each finding (``dataset_is_real_issue``). We use it
-    only to compute ``dataset_agreement_rate`` — never to score.
+    ``ground_truth`` is the block produced by collection mode (see
+    ``collect_lib.GroundTruthV3``). Matching is by defect location only —
+    ``collect_lib.same_defect`` — because the GT is the authority on what is
+    real; a finding either lands on a known defect or it does not.
+
+    - **precision** = ``matched_tp / (matched_tp + matched_fp)`` — of the
+      findings that hit a *judged* GT entry, how many hit a real one. A
+      finding matching no GT entry is excluded from precision (it is neither
+      confirmed real nor confirmed noise).
+    - **recall** = ``|distinct true_positives caught| / |true_positives|`` —
+      of the real bugs collection established exist, how many this run
+      caught. Bounded by 1.0: two findings on one bug still cover one bug.
+    - **f1** = harmonic mean.
+    - **severity_mismatches** — of the matched true positives, how many the
+      reviewer reported at a severity different from the GT entry's
+      judge-set severity. A *separate* accuracy signal; it does not move
+      precision/recall/F1.
     """
-    finding_verdicts = judge_verdict.get("finding_verdicts") or []
-    missed = judge_verdict.get("missed_real_issues") or []
-    exec_analysis = judge_verdict.get("execution_analysis") or []
+    import collect_lib as cl
 
-    by_index: dict[int, dict] = {}
-    for v in finding_verdicts:
-        idx = v.get("index")
-        if isinstance(idx, int):
-            by_index[idx] = v
+    tps = ground_truth.get("true_positives") or []
+    fps = ground_truth.get("false_positives") or []
 
-    tp = fp = unsure = 0
-    ds_cmp = ds_agree = 0
-    for idx, _rf in enumerate(replay_findings):
-        v = by_index.get(idx)
-        if v is None:
-            # Judge skipped a finding — treat as unsure, never as TP/FP.
-            unsure += 1
+    matched_tp_ids: set[int] = set()
+    matched_tp = matched_fp = unmatched = 0
+    severity_mismatches = 0
+    finding_scores: list[dict] = []
+
+    for rf in replay_findings:
+        rf_file = rf.get("file")
+        rf_line = rf.get("line")
+        rf_sev = rf.get("severity")
+        hit_tp = next(
+            (
+                i
+                for i, e in enumerate(tps)
+                if cl.same_defect(
+                    e.get("file"), e.get("line"), rf_file, rf_line
+                )
+            ),
+            None,
+        )
+        if hit_tp is not None:
+            matched_tp += 1
+            matched_tp_ids.add(hit_tp)
+            # Severity check — GT carries the judge's canonical severity.
+            gt_sev = tps[hit_tp].get("severity")
+            sev_match = (
+                rf_sev is not None
+                and gt_sev is not None
+                and str(rf_sev).lower() == str(gt_sev).lower()
+            )
+            if not sev_match:
+                severity_mismatches += 1
+            finding_scores.append(
+                {
+                    "file": rf_file,
+                    "line": rf_line,
+                    "outcome": "matched_tp",
+                    "gt_index": hit_tp,
+                    "gt_severity": gt_sev,
+                    "finding_severity": rf_sev,
+                    "severity_match": sev_match,
+                }
+            )
             continue
-        verdict_kind = v.get("verdict")
-        if verdict_kind == VERDICT_TRUE_POSITIVE:
-            tp += 1
-        elif verdict_kind == VERDICT_FALSE_POSITIVE:
-            fp += 1
-        else:
-            unsure += 1
+        hit_fp = next(
+            (
+                i
+                for i, e in enumerate(fps)
+                if cl.same_defect(
+                    e.get("file"), e.get("line"), rf_file, rf_line
+                )
+            ),
+            None,
+        )
+        if hit_fp is not None:
+            matched_fp += 1
+            finding_scores.append(
+                {
+                    "file": rf_file,
+                    "line": rf_line,
+                    "outcome": "matched_fp",
+                    "gt_index": hit_fp,
+                }
+            )
+            continue
+        unmatched += 1
+        finding_scores.append(
+            {"file": rf_file, "line": rf_line, "outcome": "unmatched"}
+        )
 
-        # Dataset-agreement signal: compare judge verdict to the dataset
-        # label the mechanical matcher attached to this finding.
-        hint = mechanical_match[idx] if idx < len(mechanical_match) else {}
-        ds_label = hint.get("dataset_is_real_issue")
-        if ds_label is not None and verdict_kind in (
-            VERDICT_TRUE_POSITIVE,
-            VERDICT_FALSE_POSITIVE,
-        ):
-            ds_cmp += 1
-            judged_real = verdict_kind == VERDICT_TRUE_POSITIVE
-            if judged_real == bool(ds_label):
-                ds_agree += 1
+    missed = [
+        {
+            "file": e.get("file"),
+            "line": e.get("line"),
+            "severity": e.get("severity"),
+            "topic": e.get("topic"),
+        }
+        for i, e in enumerate(tps)
+        if i not in matched_tp_ids
+    ]
 
-    n_missed = len(missed)
-    precision = _safe_div(tp, tp + fp)
-    recall = _safe_div(tp, tp + n_missed)
+    # Precision counts per-finding hits (a noisy run that fires twice on one
+    # bug is still two findings). Recall counts distinct GT true_positives
+    # *caught* — two findings on one real bug cover one bug, not two — so it
+    # is bounded by |true_positives| and cannot exceed 1.0.
+    distinct_tp_caught = len(matched_tp_ids)
+    precision = _safe_div(matched_tp, matched_tp + matched_fp)
+    recall = _safe_div(distinct_tp_caught, len(tps))
     if precision is not None and recall is not None and (precision + recall) > 0:
         f1: Optional[float] = 2 * precision * recall / (precision + recall)
     else:
         f1 = None
 
-    return ScoredRunV2(
+    return ScoredRunV3(
         backend=backend,
         model=model,
         config=config,
@@ -883,109 +901,19 @@ def score_from_verdicts(
         verdict=verdict,
         duration_ms=duration_ms,
         n_findings_replay=len(replay_findings),
-        judged_tp=tp,
-        judged_fp=fp,
-        judged_unsure=unsure,
-        n_missed_real=n_missed,
+        matched_tp=matched_tp,
+        matched_fp=matched_fp,
+        unmatched=unmatched,
+        gt_true_positives=len(tps),
+        missed_tp=len(missed),
+        severity_mismatches=severity_mismatches,
         precision=precision,
         recall=recall,
         f1=f1,
-        dataset_comparisons=ds_cmp,
-        dataset_agreements=ds_agree,
-        dataset_agreement_rate=_safe_div(ds_agree, ds_cmp),
-        finding_verdicts=finding_verdicts,
-        missed_real_issues=missed,
-        execution_analysis=exec_analysis,
+        finding_scores=finding_scores,
+        missed_true_positives=missed,
     )
 
 
-def fold_verdicts(
-    artifact: dict,
-    verdict_dir: Path,
-) -> list[ScoredRunV2]:
-    """Join Phase-A artifact runs to Phase-B verdict JSONs and score them.
-
-    Verdict files are named ``r{round}-{config}-verdict.json`` in
-    ``verdict_dir`` (the SKILL instructs each sub-agent to write that path).
-    A run with no verdict file becomes a ScoredRunV2 with ``fold_error`` set
-    rather than being silently dropped.
-    """
-    scored: list[ScoredRunV2] = []
-    for rnd in artifact.get("rounds") or []:
-        round_n = rnd.get("round")
-        for run in rnd.get("runs") or []:
-            config = run.get("config") or run.get("backend") or "?"
-            vpath = verdict_dir / f"r{round_n}-{config}-verdict.json"
-            replay_findings = run.get("replay_findings") or []
-            mechanical_match = run.get("mechanical_match") or []
-            base = dict(
-                backend=run.get("backend") or "?",
-                model=run.get("model") or "?",
-                config=config,
-                envelope_status=run.get("envelope_status") or "missing",
-                verdict=run.get("verdict"),
-                duration_ms=run.get("duration_ms"),
-            )
-            if not vpath.exists():
-                scored.append(
-                    ScoredRunV2(
-                        **base,
-                        n_findings_replay=len(replay_findings),
-                        judged_tp=0,
-                        judged_fp=0,
-                        judged_unsure=len(replay_findings),
-                        n_missed_real=0,
-                        precision=None,
-                        recall=None,
-                        f1=None,
-                        dataset_comparisons=0,
-                        dataset_agreements=0,
-                        dataset_agreement_rate=None,
-                        fold_error=f"no verdict file at {vpath}",
-                    )
-                )
-                continue
-            try:
-                judge_verdict = json.loads(vpath.read_text())
-            except (OSError, json.JSONDecodeError) as e:
-                judge_verdict = {}
-                err: Optional[str] = f"verdict JSON unreadable: {e}"
-            else:
-                err = validate_verdict(judge_verdict)
-            if err:
-                scored.append(
-                    ScoredRunV2(
-                        **base,
-                        n_findings_replay=len(replay_findings),
-                        judged_tp=0,
-                        judged_fp=0,
-                        judged_unsure=len(replay_findings),
-                        n_missed_real=0,
-                        precision=None,
-                        recall=None,
-                        f1=None,
-                        dataset_comparisons=0,
-                        dataset_agreements=0,
-                        dataset_agreement_rate=None,
-                        fold_error=err,
-                    )
-                )
-                continue
-            scored.append(
-                score_from_verdicts(
-                    backend=base["backend"],
-                    model=base["model"],
-                    config=config,
-                    envelope_status=base["envelope_status"],
-                    verdict=base["verdict"],
-                    duration_ms=base["duration_ms"],
-                    replay_findings=replay_findings,
-                    mechanical_match=mechanical_match,
-                    judge_verdict=judge_verdict,
-                )
-            )
-    return scored
-
-
-def scored_run_to_dict(s: ScoredRunV2) -> dict:
+def scored_run_v3_to_dict(s: ScoredRunV3) -> dict:
     return asdict(s)

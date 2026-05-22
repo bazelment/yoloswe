@@ -320,32 +320,17 @@ matters for `/pr-polish`). If turn 3 disagrees with turn 2 in an interesting way
 
 ## Eval dataset
 
-`scripts/harvest.py` walks past `/pr-polish` runs in `~/.bramble/projects/`
-and emits one ground-truthed JSON record per PR into
-`~/.bramble/code-review-eval/dataset/`. Each record carries R1 and the
-final round per PR — the highest-signal slices for recall (fresh-eyes
-catch rate on the original diff) and precision (false-positive rate on
-near-converged code). Findings are matched back to `comment_actions` and
-labeled with `is_real_issue` (`fixed`/`wont_fix`→true,
-`false_positive`/`stale`→false, `ack`/`flake`/`pre_existing`→null).
+This skill compares backends on a live branch. To **score a reviewer
+against a ground-truth dataset of past PRs**, use the `/code-review-replay`
+skill instead — it owns the dataset pipeline.
 
-GitHub PR comments (human + review-bot) are fetched fresh from GitHub,
-verdict-joined, and attributed to the round their `created_at` falls into —
-so the dataset carries every PR comment exactly once, not just the subset
-that happened to land in a harvested round. See `scripts/README.md` →
-"PR comments".
+The dataset scripts (`harvest.py`, `collect.py`, `replay.py`) now live under
+`.claude/skills/code-review-replay/scripts/`. `/code-review-replay collect`
+builds a per-PR record from `/pr-polish` history and freezes a judged
+ground truth into it; `/code-review-replay <repo>-<pr>` then scores any
+reviewer config mechanically against that frozen ground truth. The dataset
+is stored **outside the repo** at `~/.bramble/code-review-eval/dataset/` —
+it is derived from real private PRs and must never be committed.
 
-The dataset is stored **outside the repo** — it is derived from real
-private PRs and must never be committed. The per-PR JSON carries
-`head_before`, `merge_base_sha`, `files_changed`, and the reconstructed
-`goal_text` so a future replay driver can re-run `bramble code-review`
-against the exact same diff scope. See `scripts/README.md` for the full
-schema and matching rules, and the `/code-review-replay` skill for
-scoring a reviewer against this dataset.
-
-```bash
-python3 .claude/skills/code-review-eval/scripts/harvest.py \
-  --repos-root kernel=/home/ubuntu/g/kernel \
-  --repos-root yoloswe=/home/ubuntu/worktrees/yoloswe/main \
-  --verbose
-```
+See `.claude/skills/code-review-replay/scripts/README.md` for the full
+schema and the `/code-review-replay` skill for the two-mode workflow.

@@ -538,252 +538,6 @@ class GoalDivergenceTests(unittest.TestCase):
         self.assertFalse(result.goal_divergence)
 
 
-class ValidateVerdictTests(unittest.TestCase):
-    def _ok_verdict(self) -> dict:
-        return {
-            "finding_verdicts": [
-                {"index": 0, "verdict": "true_positive", "reason": "x"},
-                {"index": 1, "verdict": "false_positive", "reason": "y"},
-            ],
-            "missed_real_issues": [],
-            "execution_analysis": [],
-        }
-
-    def test_valid(self):
-        self.assertIsNone(rl.validate_verdict(self._ok_verdict()))
-
-    def test_not_an_object(self):
-        self.assertIsNotNone(rl.validate_verdict([1, 2]))
-
-    def test_missing_finding_verdicts(self):
-        self.assertIsNotNone(rl.validate_verdict({}))
-
-    def test_bad_verdict_value(self):
-        v = self._ok_verdict()
-        v["finding_verdicts"][0]["verdict"] = "maybe"
-        self.assertIsNotNone(rl.validate_verdict(v))
-
-    def test_non_int_index(self):
-        v = self._ok_verdict()
-        v["finding_verdicts"][0]["index"] = "0"
-        self.assertIsNotNone(rl.validate_verdict(v))
-
-
-class ScoreFromVerdictsTests(unittest.TestCase):
-    def test_precision_recall_f1(self):
-        replay_findings = [{"message": "a"}, {"message": "b"}, {"message": "c"}]
-        # mechanical hints: finding 0 the dataset called real, 1 called FP.
-        mech = [
-            {"dataset_is_real_issue": True},
-            {"dataset_is_real_issue": False},
-            {"dataset_is_real_issue": None},
-        ]
-        judge = {
-            "finding_verdicts": [
-                {"index": 0, "verdict": "true_positive"},
-                {"index": 1, "verdict": "false_positive"},
-                {"index": 2, "verdict": "true_positive"},
-            ],
-            "missed_real_issues": [
-                {"file": "x", "line": 1, "description": "missed"}
-            ],
-        }
-        s = rl.score_from_verdicts(
-            backend="codex",
-            model="gpt",
-            config="codex-5.4-mini",
-            envelope_status="ok",
-            verdict="rejected",
-            duration_ms=1000,
-            replay_findings=replay_findings,
-            mechanical_match=mech,
-            judge_verdict=judge,
-        )
-        self.assertEqual(s.judged_tp, 2)
-        self.assertEqual(s.judged_fp, 1)
-        self.assertEqual(s.n_missed_real, 1)
-        # precision = 2/3, recall = 2/(2+1) = 2/3
-        self.assertAlmostEqual(s.precision, 2 / 3)
-        self.assertAlmostEqual(s.recall, 2 / 3)
-        self.assertAlmostEqual(s.f1, 2 / 3)
-
-    def test_dataset_agreement_rate(self):
-        # Judge agrees with the dataset on finding 0 (both real), disagrees
-        # on finding 1 (dataset says FP, judge says TP).
-        replay_findings = [{"message": "a"}, {"message": "b"}]
-        mech = [
-            {"dataset_is_real_issue": True},
-            {"dataset_is_real_issue": False},
-        ]
-        judge = {
-            "finding_verdicts": [
-                {"index": 0, "verdict": "true_positive"},
-                {"index": 1, "verdict": "true_positive"},
-            ]
-        }
-        s = rl.score_from_verdicts(
-            backend="codex",
-            model="gpt",
-            config="c",
-            envelope_status="ok",
-            verdict=None,
-            duration_ms=None,
-            replay_findings=replay_findings,
-            mechanical_match=mech,
-            judge_verdict=judge,
-        )
-        self.assertEqual(s.dataset_comparisons, 2)
-        self.assertEqual(s.dataset_agreements, 1)
-        self.assertAlmostEqual(s.dataset_agreement_rate, 0.5)
-
-    def test_skipped_finding_counts_unsure(self):
-        # Judge only judged finding 0; finding 1 was skipped.
-        s = rl.score_from_verdicts(
-            backend="codex",
-            model="gpt",
-            config="c",
-            envelope_status="ok",
-            verdict=None,
-            duration_ms=None,
-            replay_findings=[{"message": "a"}, {"message": "b"}],
-            mechanical_match=[],
-            judge_verdict={
-                "finding_verdicts": [
-                    {"index": 0, "verdict": "true_positive"}
-                ]
-            },
-        )
-        self.assertEqual(s.judged_tp, 1)
-        self.assertEqual(s.judged_unsure, 1)
-
-    def test_no_findings_metrics_none(self):
-        s = rl.score_from_verdicts(
-            backend="codex",
-            model="gpt",
-            config="c",
-            envelope_status="ok",
-            verdict="accepted",
-            duration_ms=None,
-            replay_findings=[],
-            mechanical_match=[],
-            judge_verdict={"finding_verdicts": [], "missed_real_issues": []},
-        )
-        self.assertIsNone(s.precision)
-        self.assertIsNone(s.recall)
-        self.assertIsNone(s.f1)
-
-
-class FoldVerdictsTests(unittest.TestCase):
-    def _artifact(self) -> dict:
-        return {
-            "rounds": [
-                {
-                    "round": 1,
-                    "signal_tier": "r1",
-                    "runs": [
-                        {
-                            "backend": "codex",
-                            "model": "gpt",
-                            "config": "codex-5.4-mini",
-                            "envelope_status": "ok",
-                            "verdict": "rejected",
-                            "duration_ms": 1000,
-                            "replay_findings": [{"message": "a"}],
-                            "mechanical_match": [
-                                {"dataset_is_real_issue": True}
-                            ],
-                        }
-                    ],
-                }
-            ]
-        }
-
-    def test_fold_with_verdict(self):
-        with tempfile.TemporaryDirectory() as d:
-            vdir = Path(d)
-            (vdir / "r1-codex-5.4-mini-verdict.json").write_text(
-                json.dumps(
-                    {
-                        "finding_verdicts": [
-                            {"index": 0, "verdict": "true_positive"}
-                        ],
-                        "missed_real_issues": [],
-                    }
-                )
-            )
-            scored = rl.fold_verdicts(self._artifact(), vdir)
-            self.assertEqual(len(scored), 1)
-            self.assertEqual(scored[0].judged_tp, 1)
-            self.assertIsNone(scored[0].fold_error)
-
-    def test_fold_missing_verdict_file(self):
-        with tempfile.TemporaryDirectory() as d:
-            scored = rl.fold_verdicts(self._artifact(), Path(d))
-            self.assertEqual(len(scored), 1)
-            self.assertIsNotNone(scored[0].fold_error)
-            self.assertEqual(scored[0].judged_unsure, 1)
-
-    def test_fold_malformed_verdict(self):
-        with tempfile.TemporaryDirectory() as d:
-            vdir = Path(d)
-            (vdir / "r1-codex-5.4-mini-verdict.json").write_text(
-                json.dumps({"finding_verdicts": "not a list"})
-            )
-            scored = rl.fold_verdicts(self._artifact(), vdir)
-            self.assertIsNotNone(scored[0].fold_error)
-
-
-class MechanicalMatchTests(unittest.TestCase):
-    def test_exact_match_hint(self):
-        replay = [
-            {
-                "file": "scripts/deploy.py",
-                "line": 679,
-                "severity": "high",
-                "message": "off-by-one in the rollout index calculation",
-            }
-        ]
-        dataset = [
-            {
-                "file": "scripts/deploy.py",
-                "line": 679,
-                "severity": "high",
-                "message": "off-by-one in the rollout index calculation",
-                "ground_truth": {"is_real_issue": True, "action": "fixed"},
-            }
-        ]
-        from replay import build_mechanical_match
-
-        hints = build_mechanical_match(replay, dataset)
-        self.assertEqual(hints[0]["match_strategy"], "exact")
-        self.assertEqual(hints[0]["dataset_is_real_issue"], True)
-        self.assertEqual(hints[0]["dataset_index"], 0)
-
-    def test_no_match_hint(self):
-        from replay import build_mechanical_match
-
-        replay = [
-            {
-                "file": "totally/different.py",
-                "line": 1,
-                "severity": "low",
-                "message": "an unrelated finding about something else",
-            }
-        ]
-        dataset = [
-            {
-                "file": "scripts/deploy.py",
-                "line": 679,
-                "severity": "high",
-                "message": "off-by-one in the rollout index calculation",
-                "ground_truth": {"is_real_issue": True},
-            }
-        ]
-        hints = build_mechanical_match(replay, dataset)
-        self.assertEqual(hints[0]["match_strategy"], "none")
-        self.assertIsNone(hints[0]["dataset_index"])
-
-
 class SelectDatasetRoundsTests(unittest.TestCase):
     def _dataset(self) -> dict:
         return {
@@ -810,6 +564,197 @@ class SelectDatasetRoundsTests(unittest.TestCase):
         }
         rounds = replay.select_dataset_rounds(ds, "final")
         self.assertEqual([r["round"] for r in rounds], [3])
+
+
+class ScoreAgainstFrozenGtTests(unittest.TestCase):
+    """Replay mode's mechanical scoring against a frozen ground_truth_v3."""
+
+    def _gt(self) -> dict:
+        return {
+            "true_positives": [
+                {"file": "a.py", "line": 10, "severity": "high",
+                 "topic": "off-by-one"},
+                {"file": "c.py", "line": 99, "severity": "high",
+                 "topic": "uncaught real bug"},
+            ],
+            "false_positives": [
+                {"file": "b.py", "line": 5, "severity": "low",
+                 "topic": "noise"},
+            ],
+        }
+
+    def test_matched_tp_fp_unmatched(self):
+        findings = [
+            {"file": "a.py", "line": 11, "severity": "high"},  # TP (±3)
+            {"file": "b.py", "line": 5, "severity": "low"},    # FP
+            {"file": "d.py", "line": 1, "severity": "medium"}, # unmatched
+        ]
+        s = rl.score_against_frozen_gt(
+            backend="codex", model="gpt-5.4-mini", config="codex-5.4-mini",
+            envelope_status="ok", verdict="rejected", duration_ms=1000,
+            replay_findings=findings, ground_truth=self._gt(),
+        )
+        self.assertEqual((s.matched_tp, s.matched_fp, s.unmatched), (1, 1, 1))
+        self.assertEqual(s.precision, 0.5)
+        self.assertEqual(s.recall, 0.5)  # 1 of 2 GT true_positives
+        self.assertEqual(s.f1, 0.5)
+        self.assertEqual(s.missed_tp, 1)
+        self.assertEqual(
+            [m["file"] for m in s.missed_true_positives], ["c.py"]
+        )
+
+    def test_perfect_recall_and_precision(self):
+        findings = [
+            {"file": "a.py", "line": 10, "severity": "high"},
+            {"file": "c.py", "line": 99, "severity": "high"},
+        ]
+        s = rl.score_against_frozen_gt(
+            backend="cursor", model="composer-2", config="cursor-composer2",
+            envelope_status="ok", verdict="rejected", duration_ms=1,
+            replay_findings=findings, ground_truth=self._gt(),
+        )
+        self.assertEqual(s.precision, 1.0)
+        self.assertEqual(s.recall, 1.0)
+        self.assertEqual(s.f1, 1.0)
+        self.assertEqual(s.missed_tp, 0)
+
+    def test_no_findings_zero_recall_none_precision(self):
+        s = rl.score_against_frozen_gt(
+            backend="codex", model="m", config="c",
+            envelope_status="ok", verdict="accepted", duration_ms=1,
+            replay_findings=[], ground_truth=self._gt(),
+        )
+        # No findings -> precision undefined (no TP/FP to rule on),
+        # recall 0 (caught none of 2 real bugs).
+        self.assertIsNone(s.precision)
+        self.assertEqual(s.recall, 0.0)
+        self.assertEqual(s.missed_tp, 2)
+
+    def test_two_findings_near_one_gt_entry(self):
+        gt = {
+            "true_positives": [
+                {"file": "a.py", "line": 10, "severity": "high",
+                 "topic": "bug"},
+            ],
+            "false_positives": [],
+        }
+        findings = [
+            {"file": "a.py", "line": 10, "severity": "high"},
+            {"file": "a.py", "line": 12, "severity": "high"},  # within ±3
+        ]
+        s = rl.score_against_frozen_gt(
+            backend="codex", model="m", config="c",
+            envelope_status="ok", verdict="rejected", duration_ms=1,
+            replay_findings=findings, ground_truth=gt,
+        )
+        # Both findings match the single GT entry; recall caps at 1.0.
+        self.assertEqual(s.matched_tp, 2)
+        self.assertEqual(s.recall, 1.0)
+        self.assertEqual(s.missed_tp, 0)
+
+
+class SeverityScoringTests(unittest.TestCase):
+    """Replay records severity accuracy against the judge-set GT severity.
+
+    The GT entry's `severity` is the judge's canonical verdict; a finding
+    that matched location but reported a different severity is a mismatch —
+    a separate signal that does NOT move precision/recall/F1.
+    """
+
+    def _gt(self):
+        return {
+            "true_positives": [
+                {"file": "a.py", "line": 10, "severity": "high",
+                 "topic": "real bug"},
+                {"file": "b.py", "line": 20, "severity": "low",
+                 "topic": "minor"},
+            ],
+            "false_positives": [],
+        }
+
+    def test_severity_match_and_mismatch_counted(self):
+        findings = [
+            {"file": "a.py", "line": 10, "severity": "high"},   # match
+            {"file": "b.py", "line": 20, "severity": "high"},   # GT says low
+        ]
+        s = rl.score_against_frozen_gt(
+            backend="codex", model="m", config="c",
+            envelope_status="ok", verdict="rejected", duration_ms=1,
+            replay_findings=findings, ground_truth=self._gt(),
+        )
+        self.assertEqual(s.matched_tp, 2)
+        self.assertEqual(s.severity_mismatches, 1)
+        # P/R/F1 unaffected — a severity miss is not a match miss.
+        self.assertEqual(s.precision, 1.0)
+        self.assertEqual(s.recall, 1.0)
+        rows = {r["file"]: r for r in s.finding_scores}
+        self.assertTrue(rows["a.py"]["severity_match"])
+        self.assertEqual(rows["a.py"]["gt_severity"], "high")
+        self.assertFalse(rows["b.py"]["severity_match"])
+        self.assertEqual(rows["b.py"]["gt_severity"], "low")
+        self.assertEqual(rows["b.py"]["finding_severity"], "high")
+
+    def test_all_severities_correct_zero_mismatches(self):
+        findings = [
+            {"file": "a.py", "line": 10, "severity": "high"},
+            {"file": "b.py", "line": 20, "severity": "low"},
+        ]
+        s = rl.score_against_frozen_gt(
+            backend="codex", model="m", config="c",
+            envelope_status="ok", verdict="rejected", duration_ms=1,
+            replay_findings=findings, ground_truth=self._gt(),
+        )
+        self.assertEqual(s.severity_mismatches, 0)
+
+    def test_missing_finding_severity_is_mismatch(self):
+        findings = [{"file": "a.py", "line": 10}]  # no severity
+        s = rl.score_against_frozen_gt(
+            backend="codex", model="m", config="c",
+            envelope_status="ok", verdict="rejected", duration_ms=1,
+            replay_findings=findings, ground_truth=self._gt(),
+        )
+        self.assertEqual(s.matched_tp, 1)
+        self.assertEqual(s.severity_mismatches, 1)
+
+
+class SelectReplayTargetsTests(unittest.TestCase):
+    """Replay's no-target default: sample GT-collected PRs from the index."""
+
+    def _index(self, d: Path) -> Path:
+        (d / "index.json").write_text(json.dumps({
+            "schema_version": 2,
+            "prs": [
+                {"file": "kernel-1.json", "ground_truth_collected": True},
+                {"file": "kernel-2.json", "ground_truth_collected": True},
+                {"file": "kernel-3.json", "ground_truth_collected": False},
+            ],
+        }))
+        return d
+
+    def test_samples_only_gt_collected_prs(self):
+        with tempfile.TemporaryDirectory() as d:
+            ds = self._index(Path(d))
+            picked = replay.select_replay_targets(dataset_dir=ds, sample=5)
+            # kernel-3 has no GT -> excluded; only 1 and 2 are eligible.
+            self.assertEqual(sorted(picked), ["kernel-1", "kernel-2"])
+
+    def test_sample_caps_the_count(self):
+        with tempfile.TemporaryDirectory() as d:
+            ds = self._index(Path(d))
+            picked = replay.select_replay_targets(dataset_dir=ds, sample=1)
+            self.assertEqual(len(picked), 1)
+            self.assertIn(picked[0], ("kernel-1", "kernel-2"))
+
+    def test_no_gt_collected_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "index.json").write_text(json.dumps({
+                "schema_version": 2,
+                "prs": [{"file": "kernel-3.json",
+                         "ground_truth_collected": False}],
+            }))
+            with self.assertRaises(SystemExit):
+                replay.select_replay_targets(
+                    dataset_dir=Path(d), sample=5)
 
 
 if __name__ == "__main__":

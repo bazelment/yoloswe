@@ -929,9 +929,8 @@ class FetchPRCommentsTests(unittest.TestCase):
 
 
 class BuildIndexTests(unittest.TestCase):
-    def test_index_shape(self):
-        # Minimal record to feed the index builder.
-        rec = hl.PRRecord(
+    def _record(self) -> "hl.PRRecord":
+        return hl.PRRecord(
             schema_version=2,
             harvested_at="2026-05-20T00:00:00Z",
             harvester_git_sha="abc",
@@ -950,14 +949,80 @@ class BuildIndexTests(unittest.TestCase):
             pr_comments_fetch_error=None,
             harvested_rounds=[],
         )
-        index = hl.build_index(
-            [rec], generated_at="2026-05-20T00:00:00Z", harvester_sha="abc"
+
+    def test_index_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            index = hl.build_index(
+                [self._record()],
+                generated_at="2026-05-20T00:00:00Z",
+                harvester_sha="abc",
+                out_dir=Path(d),
+            )
+            self.assertEqual(index["schema_version"], 2)
+            self.assertEqual(len(index["prs"]), 1)
+            entry = index["prs"][0]
+            self.assertEqual(entry["pr_number"], "3945")
+            self.assertEqual(entry["file"], "kernel-3945.json")
+            self.assertEqual(entry["harvested_rounds"], 0)
+            # No per-PR file on disk -> GT not collected.
+            self.assertFalse(entry["ground_truth_collected"])
+            self.assertIsNone(entry["census_converged"])
+
+    def test_index_reflects_collected_ground_truth(self):
+        with tempfile.TemporaryDirectory() as d:
+            out_dir = Path(d)
+            (out_dir / "kernel-3945.json").write_text(json.dumps({
+                "schema_version": 2,
+                "ground_truth_v3": {
+                    "schema_version": 4, "census_converged": True,
+                },
+            }))
+            index = hl.build_index(
+                [self._record()],
+                generated_at="2026-05-20T00:00:00Z",
+                harvester_sha="abc",
+                out_dir=out_dir,
+            )
+            entry = index["prs"][0]
+            self.assertTrue(entry["ground_truth_collected"])
+            self.assertTrue(entry["census_converged"])
+
+
+class WritePrRecordTests(unittest.TestCase):
+    """Re-harvesting a PR must not destroy a collected ground_truth_v3."""
+
+    def _record(self):
+        return hl.PRRecord(
+            schema_version=2,
+            harvested_at="2026-05-20T00:00:00Z",
+            harvester_git_sha="abc",
+            pr={"repo_name": "kernel", "repo_url": "u", "pr_number": "1",
+                "pr_url": "u/pull/1", "branch": None, "started_at": "t",
+                "completed": True, "exit_reason": "converged",
+                "total_rounds": 1},
+            pr_comments_attribution_basis="created_at",
+            pr_comments_fetch_error=None,
+            harvested_rounds=[],
         )
-        self.assertEqual(index["schema_version"], 2)
-        self.assertEqual(len(index["prs"]), 1)
-        self.assertEqual(index["prs"][0]["pr_number"], "3945")
-        self.assertEqual(index["prs"][0]["file"], "kernel-3945.json")
-        self.assertEqual(index["prs"][0]["harvested_rounds"], 0)
+
+    def test_reharvest_preserves_ground_truth(self):
+        with tempfile.TemporaryDirectory() as d:
+            out_dir = Path(d)
+            # First harvest.
+            hl.write_pr_record(out_dir, self._record())
+            # Collection freezes a GT block into the file.
+            path = out_dir / "kernel-1.json"
+            data = json.loads(path.read_text())
+            data["ground_truth_v3"] = {"schema_version": 4,
+                                       "census_converged": True}
+            path.write_text(json.dumps(data))
+            # Re-harvest — the GT block must survive.
+            hl.write_pr_record(out_dir, self._record())
+            reloaded = json.loads(path.read_text())
+            self.assertIn("ground_truth_v3", reloaded)
+            self.assertTrue(
+                reloaded["ground_truth_v3"]["census_converged"]
+            )
 
 
 if __name__ == "__main__":
