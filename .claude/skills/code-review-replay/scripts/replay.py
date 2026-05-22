@@ -28,9 +28,9 @@ holds private PR data and must never be committed.
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -44,6 +44,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import collect_lib as cl  # noqa: E402
 import harvest_lib as hl  # noqa: E402
 import replay_lib as rl  # noqa: E402
 
@@ -280,20 +281,9 @@ class TempWorktree:
         self.path.rmdir()
 
     def __enter__(self) -> Path:
-        res = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(self.repo_path),
-                "worktree",
-                "add",
-                "--detach",
-                str(self.path),
-                self.sha,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+        res = hl.git(
+            self.repo_path, "worktree", "add", "--detach",
+            str(self.path), self.sha,
         )
         if res.returncode != 0:
             raise RuntimeError(
@@ -303,19 +293,7 @@ class TempWorktree:
 
     def __exit__(self, *exc):
         # Best-effort cleanup: --force in case bramble left dirty files.
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(self.repo_path),
-                "worktree",
-                "remove",
-                "--force",
-                str(self.path),
-            ],
-            capture_output=True,
-            check=False,
-        )
+        hl.git(self.repo_path, "worktree", "remove", "--force", str(self.path))
         if self.path.exists():
             shutil.rmtree(self.path, ignore_errors=True)
 
@@ -402,8 +380,6 @@ def run_replay(
     collection mode). Each (round, config) run is scored with
     ``replay_lib.score_against_frozen_gt`` — purely mechanical, no sub-agents.
     """
-    import collect_lib as cl
-
     dataset = json.loads(dataset_path.read_text())
     gt = cl.load_ground_truth(dataset)
     if gt is None:
@@ -431,8 +407,7 @@ def run_replay(
         )
 
     state = _load_pr_polish_state(repo_pr)
-    run_id = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    log_root = log_root / f"{repo_pr}-{run_id}"
+    log_root = log_root / f"{repo_pr}-{hl.run_id_stamp()}"
     rounds_out: list[dict] = []
 
     for dr in rounds_to_replay:
@@ -551,9 +526,7 @@ def run_replay(
     result = ReplayResult(
         schema_version=rl.REPLAY_SCHEMA_VERSION,
         phase="replay-scored",
-        generated_at=_dt.datetime.now(_dt.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        generated_at=hl.iso_utc_now(),
         pr=pr,
         dataset_file=dataset_path.name,
         bramble_bin=bramble_bin,
@@ -571,10 +544,7 @@ def run_replay(
 
 
 def write_json(out_dir: Path, name: str, obj: dict) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    final = out_dir / name
-    final.write_text(json.dumps(obj, indent=2) + "\n")
-    return final
+    return hl.atomic_write_json(out_dir / name, obj)
 
 
 
@@ -757,7 +727,6 @@ def select_replay_targets(
             "error: no PR in the dataset has a frozen ground truth — run "
             "`/code-review-replay collect` first"
         )
-    import random
     return sorted(random.sample(pool, min(sample, len(pool))))
 
 
@@ -892,7 +861,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             worst = 2
             continue
         repo_pr = f"{result.pr.get('repo_name')}-{result.pr.get('pr_number')}"
-        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+        stamp = hl.run_id_stamp()
         path = write_json(
             args.out_dir, f"{repo_pr}-{stamp}-scored.json", asdict(result)
         )

@@ -13,7 +13,7 @@ See ``README.md`` for the dataset schema and matching rules.
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -60,8 +60,6 @@ def fetch_pr_summary(repo_url: Optional[str], pr_number: str) -> Optional[str]:
         return None
     if res.returncode != 0:
         return None
-    import json
-
     try:
         obj = json.loads(res.stdout)
     except json.JSONDecodeError:
@@ -70,10 +68,6 @@ def fetch_pr_summary(repo_url: Optional[str], pr_number: str) -> Optional[str]:
     body = obj.get("body") or ""
     text = (title + "\n\n" + body).strip()
     return text or None
-
-
-def _iso_utc_now() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _log(verbose: bool, msg: str) -> None:
@@ -146,7 +140,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     harvester_sha = hl.harvester_git_sha(REPO_ROOT)
-    harvested_at = _iso_utc_now()
+    harvested_at = hl.iso_utc_now()
 
     projects = hl.discover_project_dirs(args.source_dir)
     if args.only:

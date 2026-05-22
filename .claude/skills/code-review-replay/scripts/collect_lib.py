@@ -47,22 +47,20 @@ real bugs in the diff — it may name bugs no reviewer finding caught.
 
 from __future__ import annotations
 
-import datetime as _dt
 import json
-import os
 import re
-import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import harvest_lib as hl
+from harvest_lib import GROUND_TRUTH_KEY
 
 # The block key stays `ground_truth_v3` (replay mode and the index look for
 # it by that name) even though the schema version is now 4 — the v3/v4
 # difference is additive (contested list, verdict_history, judge-set
-# severity), not a rename.
-GROUND_TRUTH_KEY = "ground_truth_v3"
+# severity), not a rename. The key itself lives in harvest_lib so the
+# harvester (which preserves the block) and this module agree.
 GROUND_TRUTH_SCHEMA_VERSION = 4
 # Schema versions a frozen GT block may carry that this code still reads.
 KNOWN_GT_SCHEMA_VERSIONS = frozenset({3, 4})
@@ -712,8 +710,7 @@ def build_ground_truth(
     """Assemble the final :class:`GroundTruthV3` block from the accumulator."""
     xref = comment_action_xref(cumulative, harvested_rounds)
     return GroundTruthV3(
-        frozen_at=frozen_at
-        or _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        frozen_at=frozen_at or hl.iso_utc_now(),
         collector_git_sha=collector_git_sha,
         rounds_run=cumulative.rounds_run,
         census_converged=census_converged(cumulative),
@@ -732,27 +729,12 @@ def ground_truth_to_dict(gt: GroundTruthV3) -> dict:
 def freeze(dataset_path: Path, gt: GroundTruthV3) -> Path:
     """Write the ``ground_truth_v3`` block into the dataset JSON in place.
 
-    Atomic: the updated JSON is written to a temp file in the same directory
-    and renamed over the original, so a crash mid-write cannot corrupt the
-    dataset. The harvested ``harvested_rounds`` / ``pr`` fields are left
-    untouched — collection mode only *adds* the block.
+    The harvested ``harvested_rounds`` / ``pr`` fields are left untouched —
+    collection mode only *adds* the block.
     """
     dataset = json.loads(dataset_path.read_text())
     dataset[GROUND_TRUTH_KEY] = ground_truth_to_dict(gt)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(dataset_path.parent), suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(dataset, indent=2) + "\n")
-        os.replace(tmp_name, dataset_path)
-    except BaseException:
-        # fatal()-style helpers raise SystemExit, which is a BaseException;
-        # clean the temp file on any abnormal exit, then re-raise.
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-        raise
-    return dataset_path
+    return hl.atomic_write_json(dataset_path, dataset)
 
 
 def load_ground_truth(dataset: dict) -> Optional[dict]:
@@ -914,13 +896,4 @@ def refresh_index_entry(out_dir: Path, repo_pr: str) -> Optional[Path]:
             break
     if not patched:
         return None
-    fd, tmp_name = tempfile.mkstemp(dir=str(out_dir), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(index, indent=2) + "\n")
-        os.replace(tmp_name, index_path)
-    except BaseException:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-        raise
-    return index_path
+    return hl.atomic_write_json(index_path, index)

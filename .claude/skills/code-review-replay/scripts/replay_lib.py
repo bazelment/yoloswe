@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import collect_lib as cl
 import harvest_lib as hl
 
 REPLAY_SCHEMA_VERSION = 2
@@ -116,19 +117,24 @@ class ToolCall:
 
 @dataclass
 class ExecutionTrace:
-    """Structured view of one reviewer run, parsed from its klogfmt log."""
+    """Structured view of one reviewer run, parsed from its klogfmt log.
 
-    runlog_path: Optional[str]
-    protocol_log_path: Optional[str]
-    parsed: bool  # False when no usable log was found
-    backend: Optional[str]
-    model: Optional[str]
-    session_started: bool
-    total_duration_ms: Optional[int]
-    first_tool_latency_ms: Optional[int]  # session start -> first tool call
-    n_tool_calls: int
-    tool_kind_counts: dict[str, int]
-    n_tool_errors: int
+    Every field has a default — a fresh trace is the "nothing parsed yet"
+    state. The parsers fill it in; the caller stamps the log paths.
+    """
+
+    parsed: bool = False  # False when no usable log was found
+    backend: Optional[str] = None
+    model: Optional[str] = None
+    session_started: bool = False
+    total_duration_ms: Optional[int] = None
+    first_tool_latency_ms: Optional[int] = None  # session start -> first call
+    n_tool_calls: int = 0
+    tool_kind_counts: dict[str, int] = field(default_factory=dict)
+    n_tool_errors: int = 0
+    # Stamped by the caller (replay.py) after it locates the log files.
+    runlog_path: Optional[str] = None
+    protocol_log_path: Optional[str] = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     # files_changed[] split by whether the reviewer's read calls touched them.
     files_read: list[str] = field(default_factory=list)
@@ -161,6 +167,35 @@ def _tool_target(tool: str) -> Optional[str]:
     return tail or None
 
 
+def _finalize_trace(
+    trace: ExecutionTrace,
+    ordered: list[ToolCall],
+    session_start_ms: Optional[int],
+) -> ExecutionTrace:
+    """Fold the parsed tool calls into the trace's summary fields.
+
+    Shared tail of :func:`parse_runlog` and :func:`parse_codex_protocol`:
+    sets the call list, the per-kind counts, the error count, and the
+    session-start-to-first-tool latency. Mutates and returns ``trace``.
+    """
+    trace.tool_calls = ordered
+    trace.n_tool_calls = len(ordered)
+    trace.n_tool_errors = sum(1 for t in ordered if t.is_error)
+    counts: dict[str, int] = {}
+    for t in ordered:
+        counts[t.kind] = counts.get(t.kind, 0) + 1
+    trace.tool_kind_counts = counts
+
+    if session_start_ms is not None and ordered:
+        first = min(
+            (t.start_ms for t in ordered if t.start_ms is not None),
+            default=None,
+        )
+        if first is not None:
+            trace.first_tool_latency_ms = first - session_start_ms
+    return trace
+
+
 def parse_runlog(text: str) -> ExecutionTrace:
     """Parse a klogfmt code-review run log into an ExecutionTrace.
 
@@ -168,19 +203,7 @@ def parse_runlog(text: str) -> ExecutionTrace:
     corresponding fields ``None``. ``parsed`` is True whenever at least one
     structured line was recognised.
     """
-    trace = ExecutionTrace(
-        runlog_path=None,
-        protocol_log_path=None,
-        parsed=False,
-        backend=None,
-        model=None,
-        session_started=False,
-        total_duration_ms=None,
-        first_tool_latency_ms=None,
-        n_tool_calls=0,
-        tool_kind_counts={},
-        n_tool_errors=0,
-    )
+    trace = ExecutionTrace()
 
     session_start_ms: Optional[int] = None
     pending: dict[str, ToolCall] = {}  # call_id -> open ToolCall
@@ -239,23 +262,7 @@ def parse_runlog(text: str) -> ExecutionTrace:
             if dur and dur.isdigit():
                 trace.total_duration_ms = int(dur)
 
-    trace.tool_calls = ordered
-    trace.n_tool_calls = len(ordered)
-    trace.n_tool_errors = sum(1 for t in ordered if t.is_error)
-    counts: dict[str, int] = {}
-    for t in ordered:
-        counts[t.kind] = counts.get(t.kind, 0) + 1
-    trace.tool_kind_counts = counts
-
-    if session_start_ms is not None and ordered:
-        first = min(
-            (t.start_ms for t in ordered if t.start_ms is not None),
-            default=None,
-        )
-        if first is not None:
-            trace.first_tool_latency_ms = first - session_start_ms
-
-    return trace
+    return _finalize_trace(trace, ordered, session_start_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -312,19 +319,7 @@ def parse_codex_protocol(text: str) -> ExecutionTrace:
     Resilient to partial logs and unknown notification types. ``parsed`` is
     True once the codex header or any structured item is recognised.
     """
-    trace = ExecutionTrace(
-        runlog_path=None,
-        protocol_log_path=None,
-        parsed=False,
-        backend="codex",
-        model=None,
-        session_started=False,
-        total_duration_ms=None,
-        first_tool_latency_ms=None,
-        n_tool_calls=0,
-        tool_kind_counts={},
-        n_tool_errors=0,
-    )
+    trace = ExecutionTrace(backend="codex")
 
     turn_started_ms: Optional[int] = None
     pending: dict[str, ToolCall] = {}  # codex item id -> open ToolCall
@@ -419,23 +414,7 @@ def parse_codex_protocol(text: str) -> ExecutionTrace:
                     or (isinstance(exit_code, int) and exit_code != 0)
                 )
 
-    trace.tool_calls = ordered
-    trace.n_tool_calls = len(ordered)
-    trace.n_tool_errors = sum(1 for t in ordered if t.is_error)
-    counts: dict[str, int] = {}
-    for t in ordered:
-        counts[t.kind] = counts.get(t.kind, 0) + 1
-    trace.tool_kind_counts = counts
-
-    if turn_started_ms is not None and ordered:
-        first = min(
-            (t.start_ms for t in ordered if t.start_ms is not None),
-            default=None,
-        )
-        if first is not None:
-            trace.first_tool_latency_ms = first - turn_started_ms
-
-    return trace
+    return _finalize_trace(trace, ordered, turn_started_ms)
 
 
 def _strip_replay_cwd(path: str) -> str:
@@ -590,12 +569,7 @@ def _diff_stat(
     repo_path: Path, base_sha: str, head_sha: str
 ) -> Optional[str]:
     """`git diff --stat base..head`, or None on failure."""
-    res = subprocess.run(
-        ["git", "-C", str(repo_path), "diff", "--stat", f"{base_sha}..{head_sha}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    res = hl.git(repo_path, "diff", "--stat", f"{base_sha}..{head_sha}")
     if res.returncode != 0:
         return None
     return res.stdout.strip() or None
@@ -796,8 +770,6 @@ def score_against_frozen_gt(
       judge-set severity. A *separate* accuracy signal; it does not move
       precision/recall/F1.
     """
-    import collect_lib as cl
-
     tps = ground_truth.get("true_positives") or []
     fps = ground_truth.get("false_positives") or []
 

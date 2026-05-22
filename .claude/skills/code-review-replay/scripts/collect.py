@@ -25,8 +25,8 @@ lives in a *session directory* the SKILL threads via ``--session``::
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import json
+import random
 import subprocess
 import sys
 from dataclasses import asdict
@@ -84,7 +84,6 @@ def save_cumulative(session: Path, cumulative: cl.CumulativeGT) -> None:
     """Persist the accumulator. ``last_round_census_keys`` is a set of tuples,
     which JSON cannot hold — store it as a list of lists and rebuild on load.
     """
-    session.mkdir(parents=True, exist_ok=True)
     payload = {
         "true_positives": [asdict(e) for e in cumulative.true_positives],
         "false_positives": [asdict(e) for e in cumulative.false_positives],
@@ -96,7 +95,7 @@ def save_cumulative(session: Path, cumulative: cl.CumulativeGT) -> None:
         ],
         "rounds_run": cumulative.rounds_run,
     }
-    _cumulative_path(session).write_text(json.dumps(payload, indent=2) + "\n")
+    hl.atomic_write_json(_cumulative_path(session), payload)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +180,24 @@ def _canonical_round(dataset: dict) -> dict:
     raise SystemExit("error: dataset has no harvested_rounds")
 
 
+def _finding_dict(f: dict, backend: str) -> dict:
+    """One reviewer finding in the judge-prompt shape, tagged ``surfaced_by``.
+
+    The path is run through :func:`collect_lib.normalize_finding_path` —
+    bramble emits paths relative to its WORK_DIR worktree, so the prefix must
+    be stripped for them to match the dataset's repo-relative paths (and each
+    other across rounds).
+    """
+    return {
+        "file": cl.normalize_finding_path(f.get("file")),
+        "line": f.get("line"),
+        "severity": f.get("severity"),
+        "message": f.get("message"),
+        "suggestion": f.get("suggestion"),
+        "surfaced_by": [backend],
+    }
+
+
 def _findings_from_envelope(path: Path, backend: str) -> list[dict]:
     """Extract reviewer findings from a bramble ``--envelope-file`` JSON.
 
@@ -192,25 +209,7 @@ def _findings_from_envelope(path: Path, backend: str) -> list[dict]:
     except (OSError, json.JSONDecodeError) as e:
         print(f"  warning: unreadable envelope {path}: {e}", file=sys.stderr)
         return []
-    review = env.get("review") or {}
-    out: list[dict] = []
-    for f in review.get("issues") or []:
-        if not isinstance(f, dict):
-            continue
-        out.append(
-            {
-                # bramble emits paths relative to its WORK_DIR worktree —
-                # strip the worktree prefix so they match the dataset's
-                # repo-relative paths (and each other across rounds).
-                "file": cl.normalize_finding_path(f.get("file")),
-                "line": f.get("line"),
-                "severity": f.get("severity"),
-                "message": f.get("message"),
-                "suggestion": f.get("suggestion"),
-                "surfaced_by": [backend],
-            }
-        )
-    return out
+    return [_finding_dict(f, backend) for f in hl.envelope_issues(env)]
 
 
 def _findings_from_harvested_round(round_data: dict) -> list[dict]:
@@ -223,16 +222,7 @@ def _findings_from_harvested_round(round_data: dict) -> list[dict]:
     for rr in round_data.get("review_runs") or []:
         backend = rr.get("backend") or "?"
         for f in rr.get("findings") or []:
-            out.append(
-                {
-                    "file": cl.normalize_finding_path(f.get("file")),
-                    "line": f.get("line"),
-                    "severity": f.get("severity"),
-                    "message": f.get("message"),
-                    "suggestion": f.get("suggestion"),
-                    "surfaced_by": [backend],
-                }
-            )
+            out.append(_finding_dict(f, backend))
     return out
 
 
@@ -292,12 +282,9 @@ def save_session_meta(
     ``<repo>-<pr>`` id so ``build-prompt`` / ``freeze`` resolve the dataset
     without re-passing it.
     """
-    session.mkdir(parents=True, exist_ok=True)
-    _meta_path(session).write_text(
-        json.dumps(
-            {"source_repo": str(source_repo), "target": target}, indent=2
-        )
-        + "\n"
+    hl.atomic_write_json(
+        _meta_path(session),
+        {"source_repo": str(source_repo), "target": target},
     )
 
 
@@ -322,19 +309,14 @@ def ensure_worktree(
     """
     wt = _worktree_path(session)
     if wt.exists():
-        head = subprocess.run(
-            ["git", "-C", str(wt), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=False,
-        )
+        head = hl.git(wt, "rev-parse", "HEAD")
         if head.returncode == 0 and head.stdout.strip().startswith(
             head_before[:12]
         ):
             return wt
         remove_worktree(session, source_repo)
-    res = subprocess.run(
-        ["git", "-C", str(source_repo), "worktree", "add", "--detach",
-         str(wt), head_before],
-        capture_output=True, text=True, check=False,
+    res = hl.git(
+        source_repo, "worktree", "add", "--detach", str(wt), head_before
     )
     if res.returncode != 0:
         raise SystemExit(
@@ -349,15 +331,8 @@ def remove_worktree(session: Path, source_repo: Path) -> None:
     wt = _worktree_path(session)
     if not wt.exists():
         return
-    subprocess.run(
-        ["git", "-C", str(source_repo), "worktree", "remove", "--force",
-         str(wt)],
-        capture_output=True, check=False,
-    )
-    subprocess.run(
-        ["git", "-C", str(source_repo), "worktree", "prune"],
-        capture_output=True, check=False,
-    )
+    hl.git(source_repo, "worktree", "remove", "--force", str(wt))
+    hl.git(source_repo, "worktree", "prune")
 
 
 # ---------------------------------------------------------------------------
@@ -532,9 +507,7 @@ def build_prompt(
         "harvested_comment_actions": rnd.get("raw_comment_actions") or [],
         "verdict_output_path": str(round_dir / "judge-verdict.json"),
     }
-    prompt_path = round_dir / "judge-prompt.json"
-    prompt_path.write_text(json.dumps(payload, indent=2) + "\n")
-    return prompt_path
+    return hl.atomic_write_json(round_dir / "judge-prompt.json", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -662,8 +635,7 @@ def _parse_envelope_flags(raw: list[str]) -> list[tuple[str, Path]]:
 
 
 def _new_session(session_root: Path, target: str) -> Path:
-    run_id = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return session_root / f"{target}-{run_id}"
+    return session_root / f"{target}-{hl.run_id_stamp()}"
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +741,6 @@ def select_targets(
     else:
         targets = [c["target"] for c in collectable if not c["collected"]]
         if sample is not None and sample < len(targets):
-            import random
             targets = sorted(random.sample(targets, sample))
     return targets, collectable
 

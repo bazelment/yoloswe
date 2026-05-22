@@ -17,17 +17,63 @@ The hard parts live here:
 
 from __future__ import annotations
 
+import datetime as _dt
+import functools
 import importlib.util
 import json
 import os
 import re
 import subprocess
+import tempfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
 SCHEMA_VERSION = 2
+
+# The judged ground-truth block collection mode adds to a per-PR dataset.
+# Defined here (the lowest layer) so collect_lib and the harvester share one
+# source of truth; the schema key stays `ground_truth_v3` even at schema 4.
+GROUND_TRUTH_KEY = "ground_truth_v3"
+
+
+# ---------------------------------------------------------------------------
+# Shared low-level helpers
+# ---------------------------------------------------------------------------
+
+
+def iso_utc_now() -> str:
+    """Current UTC time as a strict-ISO8601 ``YYYY-MM-DDTHH:MM:SSZ`` string."""
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_id_stamp() -> str:
+    """Current UTC time as a filesystem-safe ``YYYYMMDD-HHMMSS`` run id."""
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def atomic_write_json(path: Path, obj: object) -> Path:
+    """Write ``obj`` as pretty JSON to ``path`` atomically.
+
+    The JSON is written to a temp file in the same directory and renamed over
+    the target, so a crash mid-write cannot leave a half-written file. The
+    parent directory is created if missing.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(obj, indent=2) + "\n")
+        os.replace(tmp_name, path)
+    except BaseException:
+        # fatal()-style helpers raise SystemExit (a BaseException); clean the
+        # temp file on any abnormal exit, then re-raise.
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
+    return path
+
 
 Action = Literal[
     "fixed", "false_positive", "wont_fix", "ack", "stale", "flake", "pre_existing"
@@ -210,6 +256,16 @@ def parse_envelope(path: Path) -> tuple[Optional[dict], Optional[str]]:
     if not isinstance(obj, dict):
         return None, "envelope is not a JSON object"
     return obj, None
+
+
+def envelope_issues(env: dict) -> list[dict]:
+    """The reviewer findings inside a bramble envelope's ``review.issues``.
+
+    Non-dict entries are dropped. Returns ``[]`` for an error envelope or one
+    with no review block.
+    """
+    review = env.get("review") or {}
+    return [f for f in (review.get("issues") or []) if isinstance(f, dict)]
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +567,8 @@ class RepoMap:
         return self.mapping.get(repo_name)
 
 
-def _git(repo_path: Path, *args: str) -> subprocess.CompletedProcess:
+def git(repo_path: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run ``git -C <repo_path> <args>``, capturing output, never raising."""
     return subprocess.run(
         ["git", "-C", str(repo_path), *args],
         capture_output=True,
@@ -547,7 +604,7 @@ def get_repo_url(repo_path: Optional[Path]) -> Optional[str]:
     """Return the normalized origin URL of the local repo, or None."""
     if repo_path is None or not repo_path.exists():
         return None
-    res = _git(repo_path, "config", "--get", "remote.origin.url")
+    res = git(repo_path, "config", "--get", "remote.origin.url")
     if res.returncode != 0:
         return None
     url = res.stdout.strip()
@@ -567,10 +624,10 @@ def compute_merge_base(
     if not repo_path.exists():
         return None, False, f"repo path does not exist: {repo_path}"
     # Verify head_sha is present
-    res = _git(repo_path, "rev-parse", "--verify", f"{head_sha}^{{commit}}")
+    res = git(repo_path, "rev-parse", "--verify", f"{head_sha}^{{commit}}")
     if res.returncode != 0:
         return None, False, "head commit not in local repo"
-    res = _git(repo_path, "merge-base", base_branch, head_sha)
+    res = git(repo_path, "merge-base", base_branch, head_sha)
     if res.returncode != 0:
         return None, False, (res.stderr.strip() or "merge-base failed")
     sha = res.stdout.strip()
@@ -585,7 +642,7 @@ def compute_files_changed(
     """List of repo-relative paths changed between two commits."""
     if repo_path is None or not repo_path.exists():
         return [], "no repo mapping"
-    res = _git(repo_path, "diff", "--name-only", f"{base_sha}..{head_sha}")
+    res = git(repo_path, "diff", "--name-only", f"{base_sha}..{head_sha}")
     if res.returncode != 0:
         return [], (res.stderr.strip() or "git diff failed")
     return [ln.strip() for ln in res.stdout.splitlines() if ln.strip()], None
@@ -593,7 +650,7 @@ def compute_files_changed(
 
 def harvester_git_sha(repo_path: Path) -> str:
     """SHA of the harvester repo at run time (yoloswe). Best-effort."""
-    res = _git(repo_path, "rev-parse", "HEAD")
+    res = git(repo_path, "rev-parse", "HEAD")
     if res.returncode != 0:
         return ""
     return res.stdout.strip()
@@ -609,7 +666,7 @@ def git_commit_time(repo_path: Optional[Path], sha: str) -> Optional[str]:
     """
     if repo_path is None or not repo_path.exists() or not sha:
         return None
-    res = _git(repo_path, "show", "-s", "--format=%cI", f"{sha}^{{commit}}")
+    res = git(repo_path, "show", "-s", "--format=%cI", f"{sha}^{{commit}}")
     if res.returncode != 0:
         return None
     out = res.stdout.strip()
@@ -1035,11 +1092,14 @@ def fold_comment_to_harvested_round(
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=None)
 def _load_bramble_ops(bramble_ops_path: Path):
     """Dynamic import of pr-polish's bramble_ops module.
 
     pr-polish isn't a package, so we import it by file path. Side effect:
     it inserts its own directory onto ``sys.path`` (to resolve ``_common``).
+    Cached per path — the module is identical across every PR in a run, so
+    re-exec'ing it each round is wasted work.
     """
     spec = importlib.util.spec_from_file_location(
         "_bramble_ops_for_harvester", bramble_ops_path
@@ -1184,13 +1244,10 @@ def _build_review_run(
         env_status = "ok" if env.get("review") else "error"
 
     review = env.get("review") or {}
-    raw_findings = review.get("issues") or []
 
     findings: list[Finding] = []
     if env_status == "ok":
-        for raw in raw_findings:
-            if not isinstance(raw, dict):
-                continue
+        for raw in envelope_issues(env):
             findings.append(_build_finding(raw, backend, candidates))
 
     return ReviewRun(
@@ -1391,35 +1448,24 @@ def record_to_dict(record: PRRecord) -> dict:
     return asdict(record)
 
 
-# The ground_truth_v3 block is written by collection mode AFTER harvest.
-# A re-harvest must NOT destroy it — it is expensive judged data the
-# harvester cannot reproduce. write_pr_record carries it forward from any
-# existing per-PR file.
-_GROUND_TRUTH_KEY = "ground_truth_v3"
-
-
 def write_pr_record(out_dir: Path, record: PRRecord) -> Path:
     """Atomic write of <repo>-<pr>.json. Returns the final path.
 
     Preserves an existing ``ground_truth_v3`` block: re-harvesting a PR that
     was already collected refreshes the harvested fields but keeps the
-    judged ground truth intact (the harvester cannot regenerate it).
+    judged ground truth intact (the harvester cannot regenerate it — it is
+    expensive judged data written by collection mode after harvest).
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{record.pr['repo_name']}-{record.pr['pr_number']}.json"
-    final = out_dir / name
+    final = out_dir / f"{record.pr['repo_name']}-{record.pr['pr_number']}.json"
     payload = record_to_dict(record)
     if final.is_file():
         try:
             existing = json.loads(final.read_text())
         except (OSError, json.JSONDecodeError):
             existing = {}
-        if isinstance(existing.get(_GROUND_TRUTH_KEY), dict):
-            payload[_GROUND_TRUTH_KEY] = existing[_GROUND_TRUTH_KEY]
-    tmp = final.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n")
-    tmp.replace(final)
-    return final
+        if isinstance(existing.get(GROUND_TRUTH_KEY), dict):
+            payload[GROUND_TRUTH_KEY] = existing[GROUND_TRUTH_KEY]
+    return atomic_write_json(final, payload)
 
 
 def _index_gt_fields(out_dir: Path, file_name: str) -> dict:
@@ -1438,7 +1484,7 @@ def _index_gt_fields(out_dir: Path, file_name: str) -> dict:
         per_pr = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return {"ground_truth_collected": False, "census_converged": None}
-    gt = per_pr.get(_GROUND_TRUTH_KEY)
+    gt = per_pr.get(GROUND_TRUTH_KEY)
     if not isinstance(gt, dict):
         return {"ground_truth_collected": False, "census_converged": None}
     return {
@@ -1486,9 +1532,4 @@ def build_index(
 
 
 def write_index(out_dir: Path, index: dict) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    final = out_dir / "index.json"
-    tmp = final.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(index, indent=2) + "\n")
-    tmp.replace(final)
-    return final
+    return atomic_write_json(out_dir / "index.json", index)
