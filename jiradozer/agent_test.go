@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
+	"github.com/bazelment/yoloswe/multiagent/agent"
 )
 
 func TestNewPromptData(t *testing.T) {
@@ -241,7 +242,7 @@ func TestResolvePromptForExecution_ResumeWithoutFeedback(t *testing.T) {
 }
 
 func TestLogEventHandler_TracksPlanFile_ExitPlanMode(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Write .md file, then ExitPlanMode confirms it as the plan file.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -255,7 +256,7 @@ func TestLogEventHandler_TracksPlanFile_ExitPlanMode(t *testing.T) {
 }
 
 func TestLogEventHandler_TracksPlanFile_ClaudePlansDir(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Also works with .claude/plans/ paths.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -266,7 +267,7 @@ func TestLogEventHandler_TracksPlanFile_ClaudePlansDir(t *testing.T) {
 }
 
 func TestLogEventHandler_NoExitPlanMode_NoPlanFile(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Write .md without ExitPlanMode — planFilePath stays empty.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -276,7 +277,7 @@ func TestLogEventHandler_NoExitPlanMode_NoPlanFile(t *testing.T) {
 }
 
 func TestLogEventHandler_IgnoresNonMDWrites(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Write to a non-.md path should not be tracked.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -287,7 +288,7 @@ func TestLogEventHandler_IgnoresNonMDWrites(t *testing.T) {
 }
 
 func TestLogEventHandler_IgnoresNonWriteTools(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Non-Write tool should not track .md path.
 	h.OnToolComplete("Read", "tool-1", map[string]interface{}{
@@ -298,7 +299,7 @@ func TestLogEventHandler_IgnoresNonWriteTools(t *testing.T) {
 }
 
 func TestLogEventHandler_IgnoresFailedWrites(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Failed write should not be tracked.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -309,7 +310,7 @@ func TestLogEventHandler_IgnoresFailedWrites(t *testing.T) {
 }
 
 func TestLogEventHandler_LastMDWriteWins(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 
 	// Multiple .md writes — the last one before ExitPlanMode wins.
 	h.OnToolComplete("Write", "tool-1", map[string]interface{}{
@@ -362,7 +363,7 @@ func TestReplay_PlanStepEventSequence(t *testing.T) {
 		{name: "ExitPlanMode", id: "t-10"},
 	}
 
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 	for _, ev := range events {
 		input := ev.input
 		if input == nil {
@@ -392,7 +393,7 @@ func TestReplay_PlanStepNoExitPlanMode(t *testing.T) {
 		// No ExitPlanMode — agent ran out of turns.
 	}
 
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 	for _, ev := range events {
 		input := ev.input
 		if input == nil {
@@ -412,7 +413,7 @@ func TestReplay_PlanStepNoExitPlanMode(t *testing.T) {
 // TestReplay_PlanFileReadFailure verifies graceful fallback when the plan file
 // cannot be read (e.g., deleted between write and read).
 func TestReplay_PlanFileReadFailure(t *testing.T) {
-	h := newLogEventHandler(slog.Default(), "plan")
+	h := newLogEventHandler(slog.Default(), "plan", "claude")
 	h.OnToolComplete("Write", "t-1", map[string]interface{}{
 		"file_path": "/nonexistent/path/plan.md",
 	}, nil, false)
@@ -491,4 +492,39 @@ func TestReplay_PlanContentPostedToTracker(t *testing.T) {
 	assert.Contains(t, buildPrompt, "# Plan")
 	assert.Contains(t, buildPrompt, "1. Fix widget")
 	assert.Contains(t, buildPrompt, "Approved Plan")
+}
+
+// Cost is reported only by Claude; codex/cursor/gemini/agy emit a structural
+// zero, so a measured cost is never mislabelled "n/a" and a structural zero
+// never reads like a measurement.
+func TestProviderReportsCost(t *testing.T) {
+	assert.True(t, providerReportsCost(agent.ProviderClaude))
+	for _, p := range []string{
+		agent.ProviderCodex, agent.ProviderCursor,
+		agent.ProviderGemini, agent.ProviderAgy,
+	} {
+		assert.False(t, providerReportsCost(p), "%s does not report cost", p)
+	}
+}
+
+// Token counts are reported by Claude and codex (codex populates Usage from
+// its token_count events); cursor/gemini/agy leave Usage zero. This must be
+// distinct from cost reporting — codex reports tokens but not cost, so gating
+// token logging on providerReportsCost would mislabel real codex tokens "n/a".
+func TestProviderReportsTokens(t *testing.T) {
+	assert.True(t, providerReportsTokens(agent.ProviderClaude))
+	assert.True(t, providerReportsTokens(agent.ProviderCodex),
+		"codex reports real token counts even though it reports no cost")
+	for _, p := range []string{
+		agent.ProviderCursor, agent.ProviderGemini, agent.ProviderAgy,
+	} {
+		assert.False(t, providerReportsTokens(p), "%s does not report tokens", p)
+	}
+}
+
+// usageLogAttr emits the measured value when reported is true and the literal
+// "n/a" otherwise.
+func TestUsageLogAttr(t *testing.T) {
+	assert.Equal(t, []any{"input_tokens", 1234}, usageLogAttr(true, "input_tokens", 1234))
+	assert.Equal(t, []any{"input_tokens", "n/a"}, usageLogAttr(false, "input_tokens", 1234))
 }

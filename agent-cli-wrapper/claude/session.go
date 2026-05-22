@@ -1315,7 +1315,7 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 		result.Success = false
 	}
 
-	s.finalizeTurn(result)
+	s.finalizeTurn(result, false)
 }
 
 // finalizeTurn records, emits, and completes the turn. Called from the
@@ -1330,18 +1330,21 @@ func (s *Session) handleResult(msg protocol.ResultMessage) {
 // final assistant content lives on a later continuation turn: a consumer
 // could see the event, query completedResults, miss, and fall back to
 // the suppressed turn's stale turnState snapshot.
-func (s *Session) finalizeTurn(result TurnResult) {
+// wakeupTimedOut marks the emitted TurnCompleteEvent as a terminal
+// safety-timer completion; the normal handleResult path passes false.
+func (s *Session) finalizeTurn(result TurnResult, wakeupTimedOut bool) {
 	if s.recorder != nil {
 		s.recorder.CompleteTurn(result.TurnNumber, result)
 	}
 	_ = s.state.Transition(TransitionResultReceived)
 	s.turnManager.CompleteTurn(result)
 	s.emit(TurnCompleteEvent{
-		TurnNumber: result.TurnNumber,
-		Success:    result.Success,
-		DurationMs: result.DurationMs,
-		Usage:      result.Usage,
-		Error:      result.Error,
+		TurnNumber:     result.TurnNumber,
+		Success:        result.Success,
+		DurationMs:     result.DurationMs,
+		Usage:          result.Usage,
+		Error:          result.Error,
+		WakeupTimedOut: wakeupTimedOut,
 	})
 }
 
@@ -1373,7 +1376,7 @@ func (s *Session) completeWakeupSuppressedTurn(result TurnResult) {
 	}
 	s.mu.Unlock()
 
-	s.finalizeTurn(result)
+	s.finalizeTurn(result, true)
 }
 
 // handleControlResponse routes incoming control_response messages to the goroutine

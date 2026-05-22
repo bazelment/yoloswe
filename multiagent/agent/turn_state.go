@@ -33,6 +33,10 @@ type logicalTurnState struct {
 	usage claude.TurnUsage
 
 	turnNumber int
+
+	// forcedDone latches a terminal TurnCompleteEvent with WakeupTimedOut set;
+	// LogicalTurnDone short-circuits on it.
+	forcedDone bool
 }
 
 func newLogicalTurnState() *logicalTurnState {
@@ -141,6 +145,9 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		tc := e
 		s.lastTurnComplete = &tc
 		s.turnNumber = e.TurnNumber
+		if e.WakeupTimedOut {
+			s.forcedDone = true
+		}
 
 	case claude.ErrorEvent:
 		if s.err == nil {
@@ -155,6 +162,12 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 // ResultMessage) ensures downstream handlers see OnTurnComplete before the
 // consumer loop exits.
 func (s *logicalTurnState) LogicalTurnDone() bool {
+	// A safety-timer completion is terminal — honour it regardless of live
+	// bg work or a missing ResultMessage, else a backgrounded infinite loop
+	// strands streamTurn forever.
+	if s.forcedDone {
+		return true
+	}
 	if s.lastResult == nil || s.lastTurnComplete == nil {
 		return false
 	}
@@ -162,6 +175,16 @@ func (s *logicalTurnState) LogicalTurnDone() bool {
 		return false
 	}
 	return !s.hasUncancelledBgToolUse()
+}
+
+// SawTurnComplete reports whether a TurnCompleteEvent for the current
+// completion wave is currently outstanding. streamTurn uses this to arm a
+// grace timer: when a turn-complete has arrived but LogicalTurnDone() is
+// still false (gated on a background tool_use), the loop must not block
+// forever. Note lastTurnComplete is cleared by invalidateForContinuation
+// and on each new ResultMessageEvent, so this only reports the live wave.
+func (s *logicalTurnState) SawTurnComplete() bool {
+	return s.lastTurnComplete != nil
 }
 
 // HasLiveTasks reports whether any bg task or uncancelled bg tool_use is

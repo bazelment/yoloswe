@@ -133,17 +133,48 @@ type logEventHandler struct {
 	logger       *slog.Logger
 	toolStarts   map[string]time.Time
 	step         string
+	provider     string
 	planFilePath string
 	lastWriteMD  string
 	textBuf      strings.Builder
 }
 
-func newLogEventHandler(logger *slog.Logger, step string) *logEventHandler {
+func newLogEventHandler(logger *slog.Logger, step, provider string) *logEventHandler {
 	return &logEventHandler{
 		logger:     logger,
 		step:       step,
+		provider:   provider,
 		toolStarts: make(map[string]time.Time),
 	}
+}
+
+// providerReportsCost reports whether a provider's turn/result events carry a
+// real cost measurement. Only the Claude provider does today; codex, cursor,
+// gemini and agy emit a structural zero. Logging that zero as "$0.0000" reads
+// like a measurement, so callers log "n/a" instead.
+func providerReportsCost(provider string) bool {
+	return provider == agent.ProviderClaude
+}
+
+// providerReportsTokens reports whether a provider's result carries real
+// input/output token counts. Claude and codex both do (codex populates
+// AgentResult.Usage from its token_count events); cursor, gemini and agy
+// leave Usage zero. This is intentionally distinct from providerReportsCost:
+// codex reports tokens but not cost, so the two metrics need separate gates.
+func providerReportsTokens(provider string) bool {
+	return provider == agent.ProviderClaude || provider == agent.ProviderCodex
+}
+
+// usageLogAttr returns a single slog key/value pair: the measured value when
+// reported is true, the literal "n/a" otherwise. Callers pick `reported` from
+// providerReportsCost or providerReportsTokens depending on the metric, so a
+// real measurement is never mislabelled "n/a" and a structural zero never
+// reads like a measurement.
+func usageLogAttr(reported bool, key string, value any) []any {
+	if reported {
+		return []any{key, value}
+	}
+	return []any{key, "n/a"}
 }
 
 // resetPerAttempt clears state that must not leak between retry attempts.
@@ -216,13 +247,15 @@ func (h *logEventHandler) OnToolComplete(name, id string, input map[string]inter
 
 func (h *logEventHandler) OnTurnComplete(turnNumber int, success bool, durationMs int64, costUSD float64) {
 	h.flushText()
-	h.logger.Debug("turn complete",
+	attrs := []any{
 		"step", h.step,
+		"provider", h.provider,
 		"turn", turnNumber,
 		"success", success,
 		"duration", fmt.Sprintf("%.1fs", float64(durationMs)/1000),
-		"cost", fmt.Sprintf("$%.4f", costUSD),
-	)
+	}
+	attrs = append(attrs, usageLogAttr(providerReportsCost(h.provider), "cost", fmt.Sprintf("$%.4f", costUSD))...)
+	h.logger.Debug("turn complete", attrs...)
 }
 
 func (h *logEventHandler) OnError(err error, context string) {
@@ -396,7 +429,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	logger.Info("running agent", logAttrs...)
 	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
 
-	logHandler := newLogEventHandler(logger, stepName)
+	logHandler := newLogEventHandler(logger, stepName, provider.Name())
 	var handler agent.EventHandler = logHandler
 	if renderer != nil {
 		defer renderer.Reset()
@@ -413,7 +446,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	var result *agent.AgentResult
 	for {
 		logHandler.resetPerAttempt()
-		opts, err := buildExecuteOpts(cfg, workDir, handler, currentResume)
+		opts, err := buildExecuteOpts(cfg, workDir, handler, currentResume, logger)
 		if err != nil {
 			return StepAgentResult{}, err
 		}
@@ -503,14 +536,17 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		return failed, fmt.Errorf("agent failed")
 	}
 
-	logger.Info("agent completed",
+	completedAttrs := []any{
 		"step", stepName,
+		"provider", provider.Name(),
 		"session_id", result.SessionID,
-		"input_tokens", result.Usage.InputTokens,
-		"output_tokens", result.Usage.OutputTokens,
-		"cost_usd", result.Usage.CostUSD,
 		"duration_ms", result.DurationMs,
-	)
+	}
+	reportsTokens := providerReportsTokens(provider.Name())
+	completedAttrs = append(completedAttrs, usageLogAttr(reportsTokens, "input_tokens", result.Usage.InputTokens)...)
+	completedAttrs = append(completedAttrs, usageLogAttr(reportsTokens, "output_tokens", result.Usage.OutputTokens)...)
+	completedAttrs = append(completedAttrs, usageLogAttr(providerReportsCost(provider.Name()), "cost_usd", result.Usage.CostUSD)...)
+	logger.Info("agent completed", completedAttrs...)
 	if result.Text != "" {
 		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
 	}
@@ -530,7 +566,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	}, nil
 }
 
-func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler, resumeSessionID string) ([]agent.ExecuteOption, error) {
+func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler, resumeSessionID string, logger *slog.Logger) ([]agent.ExecuteOption, error) {
 	var opts []agent.ExecuteOption
 	opts = append(opts,
 		agent.WithProviderWorkDir(workDir),
@@ -539,6 +575,9 @@ func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler
 		agent.WithProviderKeepUserSettings(),
 		agent.WithProviderEventHandler(handler),
 	)
+	if logger != nil {
+		opts = append(opts, agent.WithProviderLogger(logger))
+	}
 	if cfg.SystemPrompt != "" {
 		opts = append(opts, agent.WithProviderSystemPrompt(cfg.SystemPrompt))
 	}

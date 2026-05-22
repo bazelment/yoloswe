@@ -116,6 +116,32 @@ func TestTurnCompletedEvent(t *testing.T) {
 	}
 }
 
+// StreamTurnNum prefers the client-set monotonic TurnIndex over deriving a
+// number from the opaque TurnID. It falls back to TurnNumberFromID only when
+// TurnIndex is unset (e.g. synthetic test events).
+func TestTurnCompletedEvent_StreamTurnNum(t *testing.T) {
+	tests := []struct {
+		name      string
+		turnID    string
+		turnIndex int
+		want      int
+	}{
+		{name: "uses-turn-index", turnID: "0198f2c1-7a3e-7b21-a26a-9671fa590905", turnIndex: 7, want: 7},
+		{name: "turn-index-wins-over-id", turnID: "turn-456", turnIndex: 3, want: 3},
+		{name: "falls-back-to-id-when-unset", turnID: "turn-456", turnIndex: 0, want: 456},
+		{name: "fallback-uuid-yields-one", turnID: "0198f2c1-7a3e-7b21-a26a-9671fa590905", turnIndex: 0, want: 1},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			e := TurnCompletedEvent{TurnID: tc.turnID, TurnIndex: tc.turnIndex}
+			if got := e.StreamTurnNum(); got != tc.want {
+				t.Fatalf("StreamTurnNum() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTurnCompletedEvent_WithError(t *testing.T) {
 	testErr := errors.New("test error")
 	e := TurnCompletedEvent{

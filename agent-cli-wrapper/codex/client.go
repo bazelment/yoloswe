@@ -290,6 +290,10 @@ func threadStartParamsFromConfig(cfg ThreadConfig) ThreadStartParams {
 func (c *Client) registerThreadResponse(threadResp ThreadStartResponse, cfg ThreadConfig) *Thread {
 	thread := newThread(c, threadResp.Thread.ID, cfg)
 	thread.setInfo(&threadResp.Thread)
+	// Seed the monotonic turn counter from the thread's history so a resumed
+	// thread keeps numbering where it left off. A freshly-started thread has
+	// no turns, so this is a no-op there.
+	thread.seedTurnCount(threadResp.Thread.Turns)
 
 	c.mu.Lock()
 	c.threads[thread.id] = thread
@@ -614,9 +618,10 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 	turnErr := classifyTurnError(notif.ThreadID, notif.Turn.ID, errMsg)
 	fullText := ""
 	var durationMs int64
+	var turnIndex int
 	var usage TurnUsage
 	if ok {
-		durationMs = thread.handleTurnCompleted(notif.Turn.ID, success, turnErr)
+		durationMs, turnIndex = thread.handleTurnCompleted(notif.Turn.ID, success, turnErr)
 		fullText = thread.GetFullText()
 		// Get token usage from the last token_count event
 		if lastUsage := thread.getAndClearLastUsage(); lastUsage != nil {
@@ -637,6 +642,7 @@ func (c *Client) handleTurnCompleted(params json.RawMessage) {
 		Error:      turnErr,
 		FullText:   fullText,
 		DurationMs: durationMs,
+		TurnIndex:  turnIndex,
 		Usage:      usage,
 	})
 }

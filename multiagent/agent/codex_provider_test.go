@@ -179,6 +179,56 @@ func TestBridgeCodexEvents_MapsEventsToHandlerAndChannel(t *testing.T) {
 	}
 }
 
+// Codex turn IDs are opaque UUIDs. The reported turn number must come from
+// the client's monotonic per-thread counter (TurnIndex), not from scraping
+// digits off the UUID — which previously yielded garbage like turn=905.
+func TestBridgeCodexEvents_UUIDTurnIDsReportMonotonicTurnNumbers(t *testing.T) {
+	t.Parallel()
+
+	events := make(chan codex.Event, 10)
+	agentEvents := make(chan AgentEvent, 10)
+	stop := make(chan struct{})
+	handler := &recordingHandler{}
+
+	bridgeDone := make(chan struct{})
+	go func() {
+		bridgeEvents(events, handler, agentEvents, stop, "thread-1", nil)
+		close(bridgeDone)
+	}()
+
+	// Two completed turns on one thread. TurnID is an opaque UUID whose tail
+	// digits ("...905" / "...426") must NOT be mistaken for a turn number.
+	// TurnIndex carries the client's real monotonic counter.
+	events <- codex.TurnCompletedEvent{
+		ThreadID:  "thread-1",
+		TurnID:    "0198f2c1-7a3e-7b21-a26a-9671fa590905",
+		TurnIndex: 1,
+		Success:   true,
+	}
+	events <- codex.TurnCompletedEvent{
+		ThreadID:  "thread-1",
+		TurnID:    "0198f2c1-9b4f-7c32-b37b-a782gb691426",
+		TurnIndex: 2,
+		Success:   true,
+	}
+
+	require.Eventually(t, func() bool {
+		handler.mu.Lock()
+		defer handler.mu.Unlock()
+		return len(handler.turnCompletes) == 2
+	}, time.Second, 5*time.Millisecond, "expected two turn completions")
+
+	close(stop)
+	<-bridgeDone
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	require.Equal(t, 1, handler.turnCompletes[0].turnNumber,
+		"first turn must report turn number 1, not a scraped UUID tail")
+	require.Equal(t, 2, handler.turnCompletes[1].turnNumber,
+		"second turn must report turn number 2, not a scraped UUID tail")
+}
+
 func TestBridgeCodexEvents_FiltersOtherThreads(t *testing.T) {
 	t.Parallel()
 

@@ -40,6 +40,7 @@ go_test(
     name = "agent_test",
     srcs = [
         "agy_provider_test.go",
+        "claude_provider_grace_test.go",
         "claude_provider_retry_test.go",
         "codex_provider_test.go",
         "config_test.go",

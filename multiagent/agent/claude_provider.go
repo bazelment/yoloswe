@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -54,6 +55,99 @@ func AppendUnresolvedToolErrorMarker(text string, e UnresolvedToolError) string 
 }
 
 const minRetryWallClockBudget = 10 * time.Minute
+
+// streamTurnGracePeriod bounds how long streamTurn waits, after a
+// TurnCompleteEvent has been observed, for an outstanding background
+// tool_use to produce a terminal event. On expiry the turn is forced done.
+// This is the backstop for an agent that backgrounds a tool that never
+// terminates (e.g. a `while true` poll loop) without a ScheduleWakeup.
+const streamTurnGracePeriod = 3 * time.Minute
+
+// consumeTurnEvents drives one logical turn by feeding events from the
+// session channel into a logicalTurnState until the turn is done. It
+// returns when LogicalTurnDone() flips, the channel closes, ctx is
+// cancelled, or — the structural backstop — gracePeriod elapses after a
+// TurnCompleteEvent was observed but the logical turn is still gated on a
+// background tool_use that never terminated. dispatch is invoked for every
+// event so consumers (EventHandler, AgentEvent channel) see the full stream.
+//
+// The grace timer is per completion wave: a continuation wave (a fresh
+// ResultMessageEvent) or an invalidated pair resets it, so a legitimate
+// multi-wave turn is never preempted by a deadline anchored to an earlier
+// wave — only a wave that genuinely stalls on a non-terminating bg tool_use
+// hits the backstop.
+func consumeTurnEvents(
+	ctx context.Context,
+	events <-chan claude.Event,
+	gracePeriod time.Duration,
+	logger *slog.Logger,
+	dispatch func(claude.Event),
+) (*claude.TurnResult, error) {
+	state := newLogicalTurnState()
+	// The grace timer tracks a single completion wave: it is armed while the
+	// current wave has signalled turn completion but is still gated on a
+	// background tool_use, and disarmed the moment that wave is invalidated.
+	// While graceCh is nil the select blocks only on ctx/events.
+	var graceTimer *time.Timer
+	var graceCh <-chan time.Time
+	disarmGrace := func() {
+		if graceTimer == nil {
+			return
+		}
+		if !graceTimer.Stop() {
+			// Drain a deadline that fired before Stop so a stale tick can't
+			// preempt a later wave through the select.
+			select {
+			case <-graceTimer.C:
+			default:
+			}
+		}
+		graceTimer = nil
+		graceCh = nil
+	}
+	defer disarmGrace()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-graceCh:
+			lg := logger
+			if lg == nil {
+				lg = slog.Default()
+			}
+			lg.Warn("forcing turn completion: background tool_use never terminated",
+				"grace_period", gracePeriod)
+			return state.ToTurnResult(), state.Err()
+		case ev, ok := <-events:
+			if !ok {
+				return state.ToTurnResult(), state.Err()
+			}
+			state.Apply(ev)
+			if dispatch != nil {
+				dispatch(ev)
+			}
+			if state.LogicalTurnDone() {
+				return state.ToTurnResult(), state.Err()
+			}
+			// Keep the grace timer pinned to the current completion wave.
+			// SawTurnComplete() reports the live wave only — a continuation
+			// ResultMessageEvent or invalidateForContinuation clears
+			// lastTurnComplete and flips it back to false. Disarm when the
+			// wave is gone so the next gated wave gets a fresh full window
+			// instead of inheriting an earlier wave's deadline; re-arm once
+			// the (possibly next) wave signals completion but is still gated
+			// on a background tool_use that may never terminate.
+			if state.SawTurnComplete() {
+				if graceTimer == nil {
+					graceTimer = time.NewTimer(gracePeriod)
+					graceCh = graceTimer.C
+				}
+			} else {
+				disarmGrace()
+			}
+		}
+	}
+}
 
 func computeRetryTimeBudget(cfg ExecuteConfig) time.Duration {
 	turnBudget := time.Duration(cfg.MaxTurns) * time.Minute
@@ -257,22 +351,10 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		if err := session.Query(ctx, prompt); err != nil {
 			return nil, err
 		}
-		state := newLogicalTurnState()
-		for {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case ev, ok := <-session.Events():
-				if !ok {
-					return state.ToTurnResult(), state.Err()
-				}
-				state.Apply(ev)
+		return consumeTurnEvents(ctx, session.Events(), streamTurnGracePeriod, cfg.Logger,
+			func(ev claude.Event) {
 				dispatchClaudeEvent(ev, cfg.EventHandler, p.events)
-				if state.LogicalTurnDone() {
-					return state.ToTurnResult(), state.Err()
-				}
-			}
-		}
+			})
 	}
 
 	result, err := streamTurn(ctx, fullPrompt)

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
@@ -192,6 +193,7 @@ type ExecuteOption func(*ExecuteConfig)
 type ExecuteConfig struct {
 	EventHandler        EventHandler
 	LLMEndpoint         llmendpoint.Endpoint
+	Logger              *slog.Logger
 	Model               string
 	Effort              EffortLevel
 	WorkDir             string
@@ -202,6 +204,14 @@ type ExecuteConfig struct {
 	MaxToolErrorRetries int
 	MaxBudgetUSD        float64
 	KeepUserSettings    bool
+}
+
+// WithProviderLogger sets the structured logger a provider uses for
+// diagnostic warnings (e.g. streamTurn forcing turn completion when a
+// background tool_use never terminates). When unset, providers fall back to
+// slog.Default().
+func WithProviderLogger(logger *slog.Logger) ExecuteOption {
+	return func(c *ExecuteConfig) { c.Logger = logger }
 }
 
 // WithProviderModel sets the model for a provider execution.
