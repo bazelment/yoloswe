@@ -6,7 +6,8 @@ a specific agent binary and emits typed events on a Go channel.
 | Package | Binary | Protocol | Channel type |
 |---------|--------|----------|-------------|
 | `claude` | `claude` CLI | JSON streaming | `<-chan claude.Event` |
-| `acp` | `gemini --experimental-acp` | JSON-RPC over stdio | `<-chan acp.Event` |
+| `agy` | `agy` CLI | print-mode subprocess | `<-chan agy.Event` |
+| `acp` | ACP-compatible CLIs | JSON-RPC over stdio | `<-chan acp.Event` |
 | `codex` | `codex app-server` | JSON-RPC over stdio | `<-chan codex.Event` |
 
 Supporting packages:

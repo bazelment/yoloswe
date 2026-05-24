@@ -6,10 +6,10 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
-// TestWithLLMEndpoint_GoogleShape verifies the Google-shaped env-var wiring
-// that gemini-cli actually honors. The chat/responses Wire field is
-// informational only on this wrapper — gemini-cli speaks GenerateContent
-// regardless — so neither wire value should leak OpenAI-specific config.
+// TestWithLLMEndpoint_GoogleShape verifies the env-var wiring for
+// ACP-compatible CLIs that honor GEMINI_API_KEY and GOOGLE_GEMINI_BASE_URL.
+// The chat/responses Wire field is informational only on this wrapper, so
+// neither wire value should leak OpenAI-specific config.
 func TestWithLLMEndpoint_GoogleShape(t *testing.T) {
 	t.Parallel()
 	cfg := defaultACPClientConfig()
@@ -25,7 +25,7 @@ func TestWithLLMEndpoint_GoogleShape(t *testing.T) {
 	if got := cfg.Env["GOOGLE_GEMINI_BASE_URL"]; got != "https://inference.baseten.co/v1" {
 		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q", got)
 	}
-	// gemini-cli has no OpenAI passthrough; nothing OpenAI-shaped should be set.
+	// ACP endpoint wiring does not set OpenAI-shaped configuration.
 	for _, k := range []string{"OPENAI_API_KEY", "OPENAI_BASE_URL"} {
 		if _, ok := cfg.Env[k]; ok {
 			t.Errorf("unexpected env var %s set: %v", k, cfg.Env)
@@ -59,7 +59,7 @@ func TestWithLLMEndpoint_ResponsesWireAPI(t *testing.T) {
 		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q", got)
 	}
 	if _, ok := cfg.Env["OPENAI_BASE_URL"]; ok {
-		t.Errorf("OPENAI_BASE_URL should never be set on gemini: %v", cfg.Env)
+		t.Errorf("OPENAI_BASE_URL should never be set by ACP endpoint wiring: %v", cfg.Env)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestWithLLMEndpoint_zeroIsNoop(t *testing.T) {
 
 // TestWithBinaryArgs_ReplacesNotAppends pins the documented behavior that
 // WithBinaryArgs replaces BinaryArgs wholesale. WithLLMEndpoint no longer
-// touches BinaryArgs (gemini-cli has no relevant flags), so this is purely
+// touches BinaryArgs, so this is purely
 // a regression-pin on WithBinaryArgs's own contract.
 func TestWithBinaryArgs_ReplacesNotAppends(t *testing.T) {
 	t.Parallel()
@@ -88,10 +88,9 @@ func TestWithBinaryArgs_ReplacesNotAppends(t *testing.T) {
 	}
 }
 
-// TestWithLLMEndpoint_AfterWithEnv_Survives verifies the ordering the
-// gemini provider relies on: WithEnv replaces the env map wholesale, so
-// callers must apply WithLLMEndpoint AFTER WithEnv (or the LLM creds get
-// dropped). The provider does this; this test guards it.
+// TestWithLLMEndpoint_AfterWithEnv_Survives verifies the ordering callers
+// must use: WithEnv replaces the env map wholesale, so callers must apply
+// WithLLMEndpoint AFTER WithEnv (or the LLM creds get dropped).
 func TestWithLLMEndpoint_AfterWithEnv_Survives(t *testing.T) {
 	t.Parallel()
 	cfg := defaultACPClientConfig()
@@ -110,8 +109,7 @@ func TestWithLLMEndpoint_AfterWithEnv_Survives(t *testing.T) {
 }
 
 // Compile-time guard: WithBinaryArgs and WithLLMEndpoint signatures stay
-// stable. Drift here would silently break the gemini provider's option
-// pipeline before any test ran.
+// stable.
 var (
 	_ ClientOption = WithBinaryArgs("--experimental-acp")
 	_ ClientOption = WithLLMEndpoint(llmendpoint.Endpoint{})

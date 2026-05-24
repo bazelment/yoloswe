@@ -291,7 +291,7 @@ These replace `bramble/session/event_handler.go` (`sessionEventHandler`).
 | `ErrorEvent` | `AppendOutput(error)` |
 
 The `FromAgentEvent` function handles the same vocabulary via
-`agent.AgentEvent` types (used by Codex/Gemini providers).
+`agent.AgentEvent` types (used by Codex/agy providers).
 
 ## Integration with Manager
 

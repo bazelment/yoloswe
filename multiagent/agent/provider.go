@@ -281,14 +281,16 @@ func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 // Behavior is intentionally asymmetric across providers, mirroring how each
 // upstream CLI honors endpoint config:
 //
-//   - claude / cursor / agy: rebuild the underlying session per Execute, so each
+//   - claude / cursor: rebuild the underlying session per Execute, so each
 //     call may pass a different endpoint.
-//   - codex / gemini:  bind the endpoint at client construction time (the
-//     first Execute call), since `--config` overrides / acp BinaryArgs are
-//     passed to the subprocess at boot. Subsequent Execute calls must pass
+//   - codex:  binds the endpoint at client construction time (the first
+//     Execute call), since `--config` overrides are passed to the subprocess
+//     at boot. Subsequent Execute calls must pass
 //     an equal endpoint; divergent endpoints fail with an explicit error
 //     rather than silently routing to the originally-bound endpoint. To
-//     switch endpoints on a codex/gemini provider, construct a fresh one.
+//     switch endpoints on a codex provider, construct a fresh one.
+//   - agy:    does not expose a third-party endpoint interface through this
+//     wrapper and rejects non-zero endpoints.
 //
 // All providers validate the endpoint at the start of Execute (see
 // ExecuteConfig.validate), so partial-but-non-zero endpoints fail loudly
@@ -323,7 +325,7 @@ func applyOptions(opts []ExecuteOption) ExecuteConfig {
 
 // validate enforces invariants that every Provider.Execute call relies on,
 // regardless of whether the provider rebuilds the underlying session per
-// call (claude/cursor) or binds the endpoint at first Execute (codex/gemini).
+// call (claude/cursor/agy) or binds the endpoint at first Execute (codex).
 // Currently it only gates on LLMEndpoint, but the seam is intentional: any
 // future cross-provider invariant lands here once instead of in four places.
 func (c ExecuteConfig) validate() error {

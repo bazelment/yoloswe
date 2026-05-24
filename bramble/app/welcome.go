@@ -310,7 +310,7 @@ func renderProviderStatus(availability *agent.ProviderAvailability, enabledProvi
 	allEnabled := enabledProviders == nil
 	enabledSet := make(map[string]bool, len(enabledProviders))
 	for _, p := range enabledProviders {
-		enabledSet[p] = true
+		enabledSet[agent.CanonicalProviderName(p)] = true
 	}
 
 	var parts []string

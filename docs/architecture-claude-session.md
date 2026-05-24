@@ -606,7 +606,7 @@ The improvements can be implemented incrementally without breaking existing code
 ### L4 Provider Abstraction
 - `multiagent/agent/provider.go` — Provider interface, AgentEvent types, EventHandler
 - `multiagent/agent/claude_provider.go` — Claude provider implementations
-- `multiagent/agent/gemini_provider.go` — Gemini provider
+- `multiagent/agent/agy_provider.go` — agy provider; Gemini-family model IDs route here
 - `multiagent/agent/codex_provider.go` — Codex provider
 - `multiagent/agent/session.go` — LongRunningSession, EphemeralSession
 

@@ -9,7 +9,8 @@
 //   - claude:  claude.WithResume(sessionID) on a new Session
 //   - codex:   codex.Client.ResumeThread(ctx, threadID, ...)
 //   - cursor:  cursor.WithResume(sessionID) on a new Query
-//   - acp:     acp.Client.LoadSession(ctx, sessionID, ...) (used by gemini)
+//   - agy:     agy.WithContinue() for the most recent print-mode conversation
+//   - acp:     acp.Client.LoadSession(ctx, sessionID, ...) for ACP backends
 //
 // To keep the contract of "resume actually preserves conversational context"
 // uniform across backends, each implementation conforms to the resumeBackend
@@ -39,6 +40,7 @@ import (
 	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/cursor"
@@ -88,12 +90,7 @@ func TestResume_Backends(t *testing.T) {
 		&claudeResumeBackend{},
 		&codexResumeBackend{},
 		&cursorResumeBackend{},
-		&acpResumeBackend{
-			name:        "gemini",
-			binary:      "gemini",
-			binaryArgs:  []string{"--experimental-acp"},
-			binaryProbe: "gemini",
-		},
+		&agyResumeBackend{},
 	}
 
 	for _, backend := range backends {
@@ -106,6 +103,54 @@ func TestResume_Backends(t *testing.T) {
 			runResumeScenario(t, backend)
 		})
 	}
+}
+
+type agyResumeBackend struct{}
+
+func (a *agyResumeBackend) Name() string { return "agy" }
+
+func (a *agyResumeBackend) Available() (bool, string) {
+	if _, err := exec.LookPath("agy"); err != nil {
+		return false, "agy CLI not found on PATH"
+	}
+	return true, ""
+}
+
+func (a *agyResumeBackend) StartFresh(ctx context.Context, t *testing.T, workdir, prompt string) (string, string, error) {
+	t.Helper()
+	result, err := agy.Query(ctx, prompt,
+		agy.WithWorkDir(workdir),
+		agy.WithDangerouslySkipPermissions(),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("agy start fresh: %w", err)
+	}
+	if !result.Success {
+		return "", result.Text, fmt.Errorf("agy turn failed")
+	}
+	// agy print mode does not expose a durable conversation id. The sentinel
+	// marks that the second phase should exercise the observable --continue
+	// contract for the most recent conversation, not resume-by-id identity.
+	return "latest", result.Text, nil
+}
+
+func (a *agyResumeBackend) Resume(ctx context.Context, t *testing.T, workdir, sessionID, prompt string) (string, string, error) {
+	t.Helper()
+	if sessionID != "latest" {
+		return "", "", fmt.Errorf("agy resume only supports latest conversation sentinel, got %q", sessionID)
+	}
+	result, err := agy.Query(ctx, prompt,
+		agy.WithWorkDir(workdir),
+		agy.WithDangerouslySkipPermissions(),
+		agy.WithContinue(),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("agy continue: %w", err)
+	}
+	if !result.Success {
+		return sessionID, result.Text, fmt.Errorf("agy resumed turn failed")
+	}
+	return sessionID, result.Text, nil
 }
 
 // runResumeScenario is the shared body that proves resume preserves context.

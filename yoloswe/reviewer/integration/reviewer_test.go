@@ -83,8 +83,8 @@ func TestReviewWithResult_Cursor(t *testing.T) {
 }
 
 // TestReviewWithResult_Gemini tests that a simple review round-trip completes
-// within a reasonable time using the gemini backend via ACP.
-// Requires the "gemini" CLI to be installed and authenticated.
+// within a reasonable time using the gemini backend alias through agy.
+// Requires the "agy" CLI to be installed and authenticated.
 func TestReviewWithResult_Gemini(t *testing.T) {
 	config := reviewer.Config{
 		BackendType: reviewer.BackendGemini,

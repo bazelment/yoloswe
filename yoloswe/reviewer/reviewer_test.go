@@ -529,13 +529,13 @@ func TestNew_GeminiBackend(t *testing.T) {
 	}
 }
 
-func TestNew_GeminiBackend_CustomModel(t *testing.T) {
+func TestNew_GeminiBackend_IgnoresCustomModel(t *testing.T) {
 	r := New(Config{
 		BackendType: BackendGemini,
 		Model:       "gemini-2.5-flash",
 	})
-	if r.config.Model != "gemini-2.5-flash" {
-		t.Errorf("expected custom model gemini-2.5-flash, got %s", r.config.Model)
+	if r.config.Model != DefaultGeminiModel {
+		t.Errorf("expected agy fixed model %s, got %s", DefaultGeminiModel, r.config.Model)
 	}
 }
 
@@ -548,8 +548,8 @@ func TestNew_ApprovalPolicyNotOverriddenForGemini(t *testing.T) {
 
 func TestEffectiveModel_GeminiDefault(t *testing.T) {
 	r := New(Config{BackendType: BackendGemini})
-	if got := r.EffectiveModel(); got != "gemini-3.1-flash-lite-preview" {
-		t.Errorf("EffectiveModel() = %q, want gemini-3.1-flash-lite-preview", got)
+	if got := r.EffectiveModel(); got != DefaultGeminiModel {
+		t.Errorf("EffectiveModel() = %q, want %s", got, DefaultGeminiModel)
 	}
 }
 

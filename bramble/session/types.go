@@ -35,6 +35,11 @@ type AgentModel = agent.AgentModel
 // AvailableModels is the full unfiltered model list (alias).
 var AvailableModels = agent.AllModels
 
+// ProviderCanonicalName maps retired provider aliases onto active providers.
+func ProviderCanonicalName(provider string) string {
+	return agent.CanonicalProviderName(provider)
+}
+
 // ModelByID looks up a model by ID from the full list (alias).
 func ModelByID(id string) (AgentModel, bool) {
 	return agent.ModelByID(id)

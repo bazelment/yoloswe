@@ -8,7 +8,7 @@ Bramble is a terminal UI for managing AI-assisted software engineering workflows
 ## Key Features
 
 - **Dual execution modes** — run AI sessions in-process (TUI mode) or in background tmux windows
-- **Multi-provider support** — Claude, Codex, and Gemini backends with auto-detection
+- **Multi-provider support** — Claude, Codex, Cursor, and agy backends with auto-detection
 - **Worktree management** — create, switch, sync, and delete git worktrees from the UI
 - **Parallel sessions** — run planners and builders side-by-side on the same worktree
 - **Multi-repo support** — manage sessions across multiple repositories in a single instance
@@ -165,7 +165,7 @@ Settings are stored in `~/.bramble/settings.json`:
 ```json
 {
   "theme_name": "dark",
-  "enabled_providers": ["claude", "codex", "gemini"],
+  "enabled_providers": ["claude", "codex", "agy"],
   "repos": {
     "my-repo": {
       "on_worktree_create": ["./scripts/setup-worktree.sh"],

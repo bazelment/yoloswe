@@ -40,6 +40,8 @@ func (pm *processManager) BuildCLIArgs() []string {
 	}
 	if pm.config.ConversationID != "" {
 		args = append(args, "--conversation", pm.config.ConversationID)
+	} else if pm.config.Continue {
+		args = append(args, "--continue")
 	}
 	if pm.config.LogFile != "" {
 		args = append(args, "--log-file", pm.config.LogFile)

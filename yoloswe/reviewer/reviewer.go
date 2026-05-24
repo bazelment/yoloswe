@@ -49,9 +49,10 @@ const (
 	BackendCursor BackendType = "cursor"
 	BackendGemini BackendType = "gemini"
 
-	// DefaultGeminiModel is the model used when BackendGemini is selected and
-	// no --model flag is provided.
-	DefaultGeminiModel = "gemini-3.1-flash-lite-preview"
+	// DefaultGeminiModel is the model reported when BackendGemini is selected.
+	// The backend is an agy compatibility path, and agy does not expose a
+	// model-selection flag, so any caller-supplied model is ignored.
+	DefaultGeminiModel = "agy-default"
 
 	// DefaultCodexModel is the model used when BackendCodex is selected and
 	// no --model flag is provided.
@@ -948,11 +949,11 @@ func New(config Config) *Reviewer {
 	if config.BackendType == "" {
 		config.BackendType = BackendCodex
 	}
-	// Apply Gemini-specific defaults.
+	// Apply Gemini-specific defaults. The gemini backend is agy-backed and
+	// agy has no model-selection flag, so keep the effective model honest even
+	// when a caller passes a legacy gemini model string.
 	if config.BackendType == BackendGemini {
-		if config.Model == "" {
-			config.Model = DefaultGeminiModel
-		}
+		config.Model = DefaultGeminiModel
 	}
 
 	// Apply cursor-specific defaults.
@@ -1136,7 +1137,7 @@ func ResolveWorkDir() (string, error) {
 // collisions between concurrent runs. Returns "" if no log dir is configured.
 //
 // Note: protocol session logging is currently only supported by the Codex
-// backend; Cursor and Gemini backends silently ignore SessionLogPath.
+// backend; Cursor and gemini/agy backends silently ignore SessionLogPath.
 func ResolveProtocolLogPath(flagValue string) (string, error) {
 	dir := flagValue
 	if dir == "" {

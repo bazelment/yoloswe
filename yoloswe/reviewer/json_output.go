@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -56,6 +57,36 @@ type IssueSite struct {
 	File string `json:"file"`
 	Note string `json:"note,omitempty"`
 	Line int    `json:"line"`
+}
+
+// UnmarshalJSON accepts the canonical object form and a legacy/model-emitted
+// shorthand "path/to/file.go:123" or "path/to/file.go:123-130".
+func (s *IssueSite) UnmarshalJSON(data []byte) error {
+	type issueSite IssueSite
+	var obj issueSite
+	if err := json.Unmarshal(data, &obj); err == nil {
+		*s = IssueSite(obj)
+		return nil
+	}
+
+	var shorthand string
+	if err := json.Unmarshal(data, &shorthand); err != nil {
+		return err
+	}
+	file, line, ok := strings.Cut(shorthand, ":")
+	if !ok || strings.TrimSpace(file) == "" {
+		return fmt.Errorf("invalid issue site shorthand %q", shorthand)
+	}
+	lineText := strings.TrimSpace(line)
+	if before, _, ok := strings.Cut(lineText, "-"); ok {
+		lineText = before
+	}
+	lineNo, err := strconv.Atoi(lineText)
+	if err != nil || lineNo < 1 {
+		return fmt.Errorf("invalid issue site line in shorthand %q", shorthand)
+	}
+	*s = IssueSite{File: strings.TrimSpace(file), Line: lineNo}
+	return nil
 }
 
 // ReviewBody is the parsed reviewer-level JSON. When the reviewer's response
@@ -428,6 +459,14 @@ func validateReviewBody(body *ReviewBody, mode ReviewMode) error {
 			return fmt.Errorf("issue[%d] missing message", i)
 		}
 		if mode == ReviewModeCode {
+			if len(issue.Sites) > 0 {
+				if issue.File == "" {
+					issue.File = issue.Sites[0].File
+				}
+				if issue.Line < 1 {
+					issue.Line = issue.Sites[0].Line
+				}
+			}
 			if issue.File == "" {
 				return fmt.Errorf("issue[%d] missing file", i)
 			}

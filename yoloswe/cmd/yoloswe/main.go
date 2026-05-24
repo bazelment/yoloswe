@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/cliapp"
@@ -273,10 +272,10 @@ func newCodeTalkCmd() *cobra.Command {
 		Long: `Codetalk runs a single read-only code-understanding turn against the chosen
 backend. The agent has Read/Grep/Glob and read-only Bash; it cannot modify files.
 
-Pass --backend=claude (default), codex, gemini, or cursor to pick the underlying
+Pass --backend=claude (default), codex, agy, cursor, or gemini (agy alias) to pick the underlying
 CLI. The --llm-* flags route inference through a third-party LLM API endpoint
 (e.g. Baseten, OpenRouter, LiteLLM). Note: the claude backend requires an
-Anthropic-shaped endpoint — use codex or gemini for raw OpenAI-compatible
+Anthropic-shaped endpoint — use codex for raw OpenAI-compatible
 endpoints.`,
 		Example: `  yoloswe codetalk "explain agent-cli-wrapper"
   yoloswe codetalk --backend codex --model moonshotai/Kimi-K2.6 \
@@ -289,8 +288,10 @@ endpoints.`,
 			return runCodeTalk(cmd, args, flags)
 		},
 	}
-	cmd.Flags().StringVar(&flags.backend, "backend", agent.ProviderClaude, "Backend CLI: "+strings.Join(agent.AllProviders, ", "))
-	cmd.Flags().StringVar(&flags.model, "model", "", "Model to use (defaults: claude=opus, codex=gpt-5.5, gemini=gemini-2.5-pro)")
+	validBackends := append([]string{}, agent.AllProviders...)
+	validBackends = append(validBackends, agent.ProviderGemini+" (agy alias)")
+	cmd.Flags().StringVar(&flags.backend, "backend", agent.ProviderClaude, "Backend CLI: "+strings.Join(validBackends, ", "))
+	cmd.Flags().StringVar(&flags.model, "model", "", "Model to use (defaults: claude=opus, codex=gpt-5.5, agy=agy-default)")
 	cmd.Flags().StringVar(&flags.workDir, "dir", "", "Working directory (default: current)")
 	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Recording directory (default: ~/.yoloswe)")
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
@@ -354,7 +355,7 @@ func runCodeTalk(cmd *cobra.Command, args []string, flags *codeTalkFlags) error 
 	}
 	app.Logger.Info("codetalk", "backend", flags.backend, "model", flags.model, "endpoint", ep.String())
 
-	backend := strings.ToLower(flags.backend)
+	backend := agent.CanonicalProviderName(flags.backend)
 	if backend == "" {
 		backend = agent.ProviderClaude
 	}
@@ -402,11 +403,13 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 			model = "gpt-5.5"
 		}
 		prov = agent.NewCodexProvider()
-	case agent.ProviderGemini:
+	case agent.ProviderAgy:
 		if model == "" {
-			model = "gemini-2.5-pro"
+			model = "agy-default"
+		} else if model != "agy-default" {
+			return fmt.Errorf("backend %q does not support --model; agy always uses its default model", backend)
 		}
-		prov = agent.NewGeminiProvider(acp.WithBinaryArgs("--experimental-acp"))
+		prov = agent.NewAgyProvider()
 	case agent.ProviderCursor:
 		if model == "" {
 			model = "cursor-default"
@@ -423,12 +426,17 @@ func runCodeTalkProvider(ctx context.Context, backend string, flags *codeTalkFla
 	}
 
 	opts := []agent.ExecuteOption{
-		agent.WithProviderModel(model),
 		agent.WithProviderWorkDir(workDir),
 		agent.WithProviderSystemPrompt(systemPrompt),
 		agent.WithProviderPermissionMode("bypass"),
 	}
+	if backend != agent.ProviderAgy {
+		opts = append(opts, agent.WithProviderModel(model))
+	}
 	if !ep.IsZero() {
+		if backend == agent.ProviderAgy {
+			return fmt.Errorf("backend %q does not support --llm-endpoint; use claude, codex, or cursor", backend)
+		}
 		opts = append(opts, agent.WithProviderLLMEndpoint(ep))
 	}
 

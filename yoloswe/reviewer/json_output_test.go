@@ -746,6 +746,26 @@ func TestValidateInvariantSites_ClassLevelAccepted(t *testing.T) {
 	}
 }
 
+func TestValidateInvariantSites_StringSitesPopulateRepresentativeSite(t *testing.T) {
+	body := `{"verdict":"rejected","issues":[{
+		"severity":"medium",
+		"message":"sibling sites of one rule",
+		"invariant":"manual harnesses mirror production transport",
+		"sites":["a.go:10-12","b.go:20"]
+	}]}`
+	env := BuildEnvelope(&ReviewResult{ResponseText: body, Success: true}, BackendCodex, "m", "", "")
+	if env.Status != StatusOK {
+		t.Fatalf("status = %s (err=%q), want ok for string sites", env.Status, env.Error)
+	}
+	issue := env.Review.Issues[0]
+	if issue.File != "a.go" || issue.Line != 10 {
+		t.Fatalf("representative file/line = %s:%d, want a.go:10", issue.File, issue.Line)
+	}
+	if len(issue.Sites) != 2 || issue.Sites[1].File != "b.go" || issue.Sites[1].Line != 20 {
+		t.Fatalf("sites = %+v, want parsed shorthand sites", issue.Sites)
+	}
+}
+
 // TestValidateInvariantSites_FileLineMustMatchOneSite enforces back-compat
 // with single-site triage: when sites is non-empty, file/line at the top
 // must match one entry so a consumer that ignores sites still sees a

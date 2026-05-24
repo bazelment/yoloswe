@@ -51,7 +51,7 @@ var Cmd = &cobra.Command{
 	Short:        "Run a one-shot code review using an agent backend",
 	Long: `Run a one-shot code review using an agent backend.
 
-Supported backends: cursor, codex, gemini.
+Supported backends: cursor, codex, gemini (agy-backed).
 
 Output:
   Default:         NDJSON progress events on stdout, final envelope also on stdout

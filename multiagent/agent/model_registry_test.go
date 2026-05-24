@@ -22,7 +22,6 @@ func TestModelRegistry_AllInstalled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: true,
 		ProviderAgy:    true,
 	})
@@ -34,7 +33,6 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -45,24 +43,25 @@ func TestModelRegistry_OnlyClaude(t *testing.T) {
 	assert.True(t, reg.HasProvider(ProviderClaude))
 	assert.False(t, reg.HasProvider(ProviderCodex))
 	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_FilteredCycling(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
 	reg := NewModelRegistry(avail, nil)
 
-	// Cycling from last claude model should skip codex and go to gemini
+	// Cycling from last claude model should skip codex and go to the
+	// gemini-family compatibility ID backed by agy.
 	next := reg.NextModel("haiku")
-	assert.Equal(t, "gemini-3.1-pro-preview", next.ID)
+	assert.Equal(t, "gemini-3.1-flash-lite-preview", next.ID)
 
-	// Cycling from last gemini model should wrap to first claude (cursor not installed)
-	next = reg.NextModel("gemini-2.5-flash-lite")
+	// Cycling from last agy-backed model should wrap to first claude (cursor not installed)
+	next = reg.NextModel("agy-default")
 	assert.Equal(t, "opus", next.ID)
 }
 
@@ -70,7 +69,6 @@ func TestModelRegistry_NotFoundReturnsFirst(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -83,7 +81,6 @@ func TestModelRegistry_EmptyFallback(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: false,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -108,9 +105,8 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
 
 	reg := NewModelRegistry(avail, []string{ProviderClaude})
@@ -125,28 +121,55 @@ func TestModelRegistry_RebuildWithEnabled(t *testing.T) {
 	assert.True(t, reg.HasProvider(ProviderClaude))
 	assert.True(t, reg.HasProvider(ProviderCodex))
 	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderAgy))
 }
 
 func TestModelRegistry_InstalledButNotEnabled(t *testing.T) {
+	t.Parallel()
+
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: true,
 		ProviderCursor: false,
-		ProviderAgy:    false,
+		ProviderAgy:    true,
 	})
-	// Only enable gemini
-	reg := NewModelRegistry(avail, []string{ProviderGemini})
+	// Only enable agy.
+	reg := NewModelRegistry(avail, []string{ProviderAgy})
 	assert.False(t, reg.HasProvider(ProviderClaude))
 	assert.False(t, reg.HasProvider(ProviderCodex))
-	assert.True(t, reg.HasProvider(ProviderGemini))
+	assert.False(t, reg.HasProvider(ProviderGemini))
+	assert.True(t, reg.HasProvider(ProviderAgy))
+}
+
+func TestModelRegistry_LegacyGeminiEnabledProviderEnablesAgy(t *testing.T) {
+	t.Parallel()
+
+	avail := newTestAvailability(map[string]bool{
+		ProviderClaude: false,
+		ProviderCodex:  false,
+		ProviderCursor: false,
+		ProviderAgy:    true,
+	})
+
+	reg := NewModelRegistry(avail, []string{ProviderGemini})
+
+	assert.True(t, reg.HasProvider(ProviderAgy))
+	assert.False(t, reg.HasProvider(ProviderGemini))
+}
+
+func TestCanonicalProviderName(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, ProviderAgy, CanonicalProviderName(ProviderGemini))
+	assert.Equal(t, ProviderAgy, CanonicalProviderName("  Gemini  "))
+	assert.Equal(t, ProviderCodex, CanonicalProviderName(ProviderCodex))
+	assert.Equal(t, "unknown", CanonicalProviderName("unknown"))
 }
 
 func TestModelRegistry_ModelByID(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  false,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -164,7 +187,6 @@ func TestModelRegistry_FirstModelForProvider(t *testing.T) {
 	avail := newTestAvailability(map[string]bool{
 		ProviderClaude: true,
 		ProviderCodex:  true,
-		ProviderGemini: false,
 		ProviderCursor: false,
 		ProviderAgy:    false,
 	})
@@ -200,7 +222,7 @@ func TestProviderForModelID(t *testing.T) {
 		{"gpt-5.5", ProviderCodex, true},
 		// Prefix-only matches (forward-compat IDs not in AllModels)
 		{"gpt-future-9000", ProviderCodex, true},
-		{"gemini-99-ultra", ProviderGemini, true},
+		{"gemini-99-ultra", ProviderAgy, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
@@ -231,7 +253,7 @@ func TestProviderByModelPrefix(t *testing.T) {
 		ok       bool
 	}{
 		{"gpt-future-9000", ProviderCodex, true},
-		{"gemini-99-ultra", ProviderGemini, true},
+		{"gemini-99-ultra", ProviderAgy, true},
 		{"cursor-fast", ProviderCursor, true},
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},

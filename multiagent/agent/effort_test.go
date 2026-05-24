@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agy"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
@@ -134,16 +133,6 @@ func TestProviderEffortMatrix(t *testing.T) {
 			},
 		},
 		{
-			name: "gemini",
-			run: func(t *testing.T, level EffortLevel) error {
-				t.Helper()
-				p := NewGeminiProvider(acp.WithBinaryPath("missing-gemini-effort-test-binary"))
-				defer p.Close()
-				_, err := p.Execute(context.Background(), "ignored", nil, WithProviderEffort(level))
-				return err
-			},
-		},
-		{
 			name: "agy",
 			run: func(t *testing.T, level EffortLevel) error {
 				t.Helper()
@@ -161,7 +150,7 @@ func TestProviderEffortMatrix(t *testing.T) {
 			t.Parallel()
 
 			// Empty effort is always a success no-op for the effort path.
-			// (Cursor/Gemini may still fail downstream when the subprocess
+			// (Cursor/agy may still fail downstream when the subprocess
 			// can't start in the test environment — we explicitly skip
 			// those providers' empty-effort case to keep the matrix focused
 			// on effort behavior.)
@@ -170,7 +159,7 @@ func TestProviderEffortMatrix(t *testing.T) {
 				assert.NoError(t, err, "empty effort should be a no-op")
 			}
 
-			noKnobProvider := prov.name == "cursor" || prov.name == "gemini" || prov.name == "agy"
+			noKnobProvider := prov.name == "cursor" || prov.name == "agy"
 			for _, level := range validLevels {
 				err := prov.run(t, level)
 				// EffortAuto means "use provider default" — a no-knob
