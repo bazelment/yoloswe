@@ -394,9 +394,21 @@ If a backend envelope reports a verdict-validation `status: "error"` (cursor ret
 
 **Back-compat note (v2 envelopes).** The bramble code-review wrapper now normalizes common verdict aliases (`approve_with_notes`/`approve`/`lgtm`/`request_changes`/etc.) inside `validateReviewBody` so envelopes emitted by an up-to-date bramble already carry the canonical `accepted`/`rejected` token — `recover-envelope` becomes a no-op there. Keep wrapping `--stream` arguments unconditionally so older envelopes (e.g. when an operator runs an unbuilt bramble) still recover; the cost is one stat() per stream.
 
-**Holding the turn open between Monitor arm and triage (mandatory).** Steps b→c must complete in a single turn — do **not** emit a text-only `end_turn` reply after arming Monitors. After arming, track the set of armed Monitor task ids; each one fires a `<status>completed</status>` task-notification when its stream ends, regardless of exit code or whether it wrote an envelope. The wakeup condition is **every armed Monitor has signalled completion**, not "every envelope file exists" — a crashed or timed-out reviewer never writes its envelope, so gating on file existence deadlocks the round on exactly the failure modes triage is supposed to surface.
+**Wait for the Monitor barrier with one tool call (mandatory).** Steps b→c must complete in a single turn. After arming Monitors, issue ONE `Bash` call with `run_in_background: true` whose body is an `until`-loop that exits when every armed envelope is non-empty OR a bounded timeout elapses. When `--gemini` is off, set `ENVELOPE_GEMINI` to any always-non-empty path (`/etc/hostname` works) so the same four-clause check works for both modes:
 
-When a Monitor task-notification arrives, use a `tool_use` block (a no-op `echo` is fine) to keep the turn open and update your armed-vs-completed tally. Once the tally equals the number of Monitors armed in step b, proceed to step c in the same turn — even if some envelope files are missing or empty. Do not add extra envelope-existence checks here: step c runs `recover-envelope` on each path (idempotent) and `triage` records any missing or unparseable envelope as a `stream-missing` finding rather than silently dropping it. **Never end the turn between Monitor arm and triage.** This rule does not conflict with "do not poll" — polling means sleeping on a timer; here you are reacting to notifications and counting terminal events as each one arrives.
+```bash
+bash -c 'GC="${ENVELOPE_GEMINI:-/etc/hostname}"; end=$((SECONDS+780)); \
+  until [ -s "$ENVELOPE_CODEX" ] && [ -s "$ENVELOPE_CURSOR" ] \
+        && [ -s "$ENVELOPE_LINT" ] && [ -s "$GC" ] \
+        || [ $SECONDS -ge $end ]; \
+  do sleep 2; done'
+```
+
+The harness delivers exactly one completion notification when that command exits. Proceed to step c on that notification — even if the loop hit its timeout and some envelopes are still missing or empty. Step c runs `recover-envelope` (idempotent) and `triage` synthesizes a high-severity `stream-missing` finding for any envelope that is absent or unparseable (`bramble_ops.py:666`), so missing envelopes become findings rather than deadlocks.
+
+**Do not emit intermediate `tool_use` blocks between Monitor arm and the barrier notification.** The single `run_in_background` call IS the wait; an "echo waiting" loop is the polling antipattern this rule exists to prevent. The 780s timeout = bramble's `--timeout 10m` + 3 minutes of slack for envelope flush and harness teardown (Monitors themselves use `timeout_ms: 720000`).
+
+Why the `${ENVELOPE_GEMINI:-/etc/hostname}` shape instead of a conditional inside the loop: `${VAR:+&& [ -s "$VAR" ]}` *looks* idiomatic but the parameter expansion produces one string that `[` parses as positional arguments (`[: too many arguments`), not as shell operators. Pre-resolving the path keeps the test syntax static and predictable.
 
 ### c) Triage
 
