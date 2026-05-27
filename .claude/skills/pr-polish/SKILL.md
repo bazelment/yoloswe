@@ -333,10 +333,6 @@ When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures (prior series' fetc
 ```
 
 ```
-ENVELOPE_CODEX="$LOG_DIR/codex-envelope.json"
-ENVELOPE_CURSOR="$LOG_DIR/cursor-envelope.json"
-ENVELOPE_LINT="$LOG_DIR/lint-envelope.json"
-
 Monitor({
   description: "bramble codex r{ROUND}",
   timeout_ms: 720000,
@@ -346,7 +342,7 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${CODEX_RESUME:+--resume-session-id \"$CODEX_RESUME\"} \
-    --envelope-file \"$ENVELOPE_CODEX\" 2>\"$LOG_DIR/codex-stderr.txt\""
+    --envelope-file \"$LOG_DIR/codex-envelope.json\" 2>\"$LOG_DIR/codex-stderr.txt\""
 })
 
 Monitor({
@@ -358,7 +354,7 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${CURSOR_RESUME:+--resume-session-id \"$CURSOR_RESUME\"} \
-    --envelope-file \"$ENVELOPE_CURSOR\" 2>\"$LOG_DIR/cursor-stderr.txt\""
+    --envelope-file \"$LOG_DIR/cursor-envelope.json\" 2>\"$LOG_DIR/cursor-stderr.txt\""
 })
 
 Monitor({
@@ -371,7 +367,6 @@ Monitor({
 })
 
 // Only when --gemini was passed:
-ENVELOPE_GEMINI="$LOG_DIR/gemini-envelope.json"
 GEMINI_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id gemini {ROUND} \
                 --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
 
@@ -384,9 +379,11 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${GEMINI_RESUME:+--resume-session-id \"$GEMINI_RESUME\"} \
-    --envelope-file \"$ENVELOPE_GEMINI\" 2>\"$LOG_DIR/gemini-stderr.txt\""
+    --envelope-file \"$LOG_DIR/gemini-envelope.json\" 2>\"$LOG_DIR/gemini-stderr.txt\""
 })
 ```
+
+Envelope paths use `$LOG_DIR/<backend>-envelope.json` literally everywhere — Monitor-arm, barrier, triage, finalize. Single convention, no `$ENVELOPE_*` indirection that would silently break if a later Bash call (fresh shell) tried to use it.
 
 Each Monitor runs independently; a crash in one doesn't affect the others. `timeout_ms=720000` is bramble's 10-minute `--timeout` plus two minutes of slack. `--skip-test-execution` defers tests to quality gates.
 
@@ -421,13 +418,15 @@ Why inline absolute paths rather than `$ENVELOPE_*` plus an `export` line: the o
 
 ```
 python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
-    --stream codex=$ENVELOPE_CODEX \
-    --stream cursor=$ENVELOPE_CURSOR \
-    --stream lint=$ENVELOPE_LINT \
+    --stream codex=$LOG_DIR/codex-envelope.json \
+    --stream cursor=$LOG_DIR/cursor-envelope.json \
+    --stream lint=$LOG_DIR/lint-envelope.json \
     $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$LOG_DIR/gemini-envelope.json ) \
     $( [ "$IS_NEW_SERIES" = "1" ] && [ "$PR_NUMBER" != "null" ] && \
        echo --pr-comments $STATE_DIR/pp-comments.json --ci-failures $STATE_DIR/pp-ci.json )
 ```
+
+Envelope paths derive from `$LOG_DIR/<backend>-envelope.json` literally — the same convention as the Monitor barrier and the Monitor-arm step. Do **not** stash them in `$ENVELOPE_CODEX`/`$ENVELOPE_CURSOR`/etc. expecting later Bash calls to inherit them: each Bash tool call is a fresh shell. The same applies to the finalize snippets below.
 
 `triage` reads envelopes, merges series-start PR-comment and CI-failure feeds, and emits:
 
@@ -488,10 +487,10 @@ Write accumulated `comment_actions` to a temp JSON, then:
 ```
 python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-parse HEAD) \
     $STATE_DIR/actions-r$ROUND.json \
-    --envelope codex=$ENVELOPE_CODEX \
-    --envelope cursor=$ENVELOPE_CURSOR \
-    --envelope lint=$ENVELOPE_LINT \
-    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
+    --envelope codex=$LOG_DIR/codex-envelope.json \
+    --envelope cursor=$LOG_DIR/cursor-envelope.json \
+    --envelope lint=$LOG_DIR/lint-envelope.json \
+    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$LOG_DIR/gemini-envelope.json )
 ```
 
 `--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids`, `resume_status`, and `sufficiency_claims` populate for next round's resume plumbing and the final report. Pass `--envelope lint=...` too — it has no session id, but its envelope feeds `lint_findings` into the persisted reviews directory. Backends not passed are skipped (no automatic fallback).
@@ -503,9 +502,9 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-
 ```bash
 python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-parse HEAD) \
     $STATE_DIR/actions-r$ROUND.json \
-    --envelope codex=$ENVELOPE_CODEX --envelope cursor=$ENVELOPE_CURSOR \
-    --envelope lint=$ENVELOPE_LINT \
-    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
+    --envelope codex=$LOG_DIR/codex-envelope.json --envelope cursor=$LOG_DIR/cursor-envelope.json \
+    --envelope lint=$LOG_DIR/lint-envelope.json \
+    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$LOG_DIR/gemini-envelope.json )
 ```
 
 `converged_signal` mirrors the existing convergence rules (low_only_streak ≥ 2, or top_severity ∈ {low, nit, null} with no fix/skip activity). It's a *hint*, not a gate — convergence prose at the top of this file is still authoritative. Sufficiency consensus is purely audit-trail context; do NOT treat it as a new exit rule.
