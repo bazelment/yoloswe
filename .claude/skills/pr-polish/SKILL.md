@@ -285,7 +285,16 @@ Bramble snapshots the working tree at launch — uncommitted changes won't be re
 
 ### b) Launch bramble + lint gate
 
-Create a fresh `$LOG_DIR=$STATE_DIR/r$ROUND/`.
+Create or reuse `$LOG_DIR=$STATE_DIR/r$ROUND/`, then **delete any stale envelope files**:
+
+```bash
+mkdir -p "$LOG_DIR"
+rm -f "$LOG_DIR"/*-envelope.json
+```
+
+On a resumed round (post-compaction, or after an interrupted Monitor) the directory exists and may already contain a non-empty envelope from the prior attempt. The barrier below checks `[ -s … ]`, which is satisfied by a stale file just as readily as a fresh one — without this `rm`, triage would consume the previous attempt's verdict and skip the reviewer that's still actually running.
+
+**A note on `$LOG_DIR` and related orchestrator-state variables.** `$LOG_DIR`, `$STATE_DIR`, `$CTX`, `$ROUND`, `$SKILL_DIR`, `$IS_NEW_SERIES`, `$USE_GEMINI`, `$PR_NUMBER`, `$REPO`, `$SCOPE_HINTS`, `$GOAL`, `$CODEX_RESUME` (etc.) are orchestrator state held in the agent's working memory, not shell environment that persists across Bash tool calls. Every Bash call is a fresh shell with none of these set. When the skill shows a snippet that references one of them, the orchestrator must **substitute the concrete value** into the command string before issuing the Bash call (so `--envelope-file "$LOG_DIR/codex-envelope.json"` becomes `--envelope-file "/home/.../yoloswe-255/r3/codex-envelope.json"`). The `$VAR` notation in this file is a templating placeholder, not a runtime variable.
 
 **First, compute the scope-hints file.** `scope_gate.py` walks the diff, enumerates co-located test files, detects multi-package PRs, and writes `$STATE_DIR/scope-hints.json`. `bramble code-review --scope-hints-file <path>` widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. Run once per round, **before** arming bramble Monitors. Always exits 0.
 
@@ -333,10 +342,6 @@ When `IS_NEW_SERIES=1`, re-fetch PR comments and CI failures (prior series' fetc
 ```
 
 ```
-ENVELOPE_CODEX="$LOG_DIR/codex-envelope.json"
-ENVELOPE_CURSOR="$LOG_DIR/cursor-envelope.json"
-ENVELOPE_LINT="$LOG_DIR/lint-envelope.json"
-
 Monitor({
   description: "bramble codex r{ROUND}",
   timeout_ms: 720000,
@@ -346,7 +351,7 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${CODEX_RESUME:+--resume-session-id \"$CODEX_RESUME\"} \
-    --envelope-file \"$ENVELOPE_CODEX\" 2>\"$LOG_DIR/codex-stderr.txt\""
+    --envelope-file \"$LOG_DIR/codex-envelope.json\" 2>\"$LOG_DIR/codex-stderr.txt\""
 })
 
 Monitor({
@@ -358,7 +363,7 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${CURSOR_RESUME:+--resume-session-id \"$CURSOR_RESUME\"} \
-    --envelope-file \"$ENVELOPE_CURSOR\" 2>\"$LOG_DIR/cursor-stderr.txt\""
+    --envelope-file \"$LOG_DIR/cursor-envelope.json\" 2>\"$LOG_DIR/cursor-stderr.txt\""
 })
 
 Monitor({
@@ -371,7 +376,6 @@ Monitor({
 })
 
 // Only when --gemini was passed:
-ENVELOPE_GEMINI="$LOG_DIR/gemini-envelope.json"
 GEMINI_RESUME=$(python3 $SKILL_DIR/scripts/bramble_ops.py prior-session-id gemini {ROUND} \
                 --state-file "$STATE_FILE" --is-new-series "$IS_NEW_SERIES")
 
@@ -384,9 +388,11 @@ Monitor({
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${GEMINI_RESUME:+--resume-session-id \"$GEMINI_RESUME\"} \
-    --envelope-file \"$ENVELOPE_GEMINI\" 2>\"$LOG_DIR/gemini-stderr.txt\""
+    --envelope-file \"$LOG_DIR/gemini-envelope.json\" 2>\"$LOG_DIR/gemini-stderr.txt\""
 })
 ```
+
+Envelope paths use `$LOG_DIR/<backend>-envelope.json` literally everywhere — Monitor-arm, barrier, triage, finalize. Single convention, no `$ENVELOPE_*` indirection that would silently break if a later Bash call (fresh shell) tried to use it.
 
 Each Monitor runs independently; a crash in one doesn't affect the others. `timeout_ms=720000` is bramble's 10-minute `--timeout` plus two minutes of slack. `--skip-test-execution` defers tests to quality gates.
 
@@ -394,17 +400,42 @@ If a backend envelope reports a verdict-validation `status: "error"` (cursor ret
 
 **Back-compat note (v2 envelopes).** The bramble code-review wrapper now normalizes common verdict aliases (`approve_with_notes`/`approve`/`lgtm`/`request_changes`/etc.) inside `validateReviewBody` so envelopes emitted by an up-to-date bramble already carry the canonical `accepted`/`rejected` token — `recover-envelope` becomes a no-op there. Keep wrapping `--stream` arguments unconditionally so older envelopes (e.g. when an operator runs an unbuilt bramble) still recover; the cost is one stat() per stream.
 
+**Wait for the Monitor barrier with one tool call (mandatory).** Steps b→c must complete in a single turn. After arming Monitors, issue ONE `Bash` call with `run_in_background: true` whose body is an `until`-loop that exits when every armed envelope is non-empty OR a bounded timeout elapses. Each Bash call runs in a fresh shell with no carryover from previous Bash calls, so `ENVELOPE_*` shell variables set elsewhere are not visible inside the barrier — **inline the absolute envelope paths into the barrier command itself**. Use the 3-clause form when `--gemini` is off and the 4-clause form when `--gemini` is on; do not invent a placeholder path:
+
+```bash
+# --gemini off (3 envelopes):
+end=$((SECONDS+780)); until [ -s "$LOG_DIR/codex-envelope.json" ] \
+  && [ -s "$LOG_DIR/cursor-envelope.json" ] \
+  && [ -s "$LOG_DIR/lint-envelope.json" ] \
+  || [ $SECONDS -ge $end ]; do sleep 2; done
+
+# --gemini on (4 envelopes):
+end=$((SECONDS+780)); until [ -s "$LOG_DIR/codex-envelope.json" ] \
+  && [ -s "$LOG_DIR/cursor-envelope.json" ] \
+  && [ -s "$LOG_DIR/lint-envelope.json" ] \
+  && [ -s "$LOG_DIR/gemini-envelope.json" ] \
+  || [ $SECONDS -ge $end ]; do sleep 2; done
+```
+
+Substitute `$LOG_DIR` with its concrete value (e.g. `/home/.../yoloswe-255/r3`) when issuing the Bash call so the resulting command is fully self-contained — no `bash -c '…'` wrapper, no parent-shell env, no `$VAR` indirection. The harness delivers exactly one completion notification when that command exits. Proceed to step c on that notification — even if the loop hit its timeout and some envelopes are still missing or empty. Step c runs `recover-envelope` (idempotent) and `parse_round` (called by `triage`) synthesizes a high-severity `stream-missing` finding for any envelope that is absent or unparseable (`bramble_ops.py` `parse_round`, stream-missing branch near lines 693–710), so missing envelopes become findings rather than deadlocks.
+
+**Do not emit intermediate `tool_use` blocks between Monitor arm and the barrier notification.** The single `run_in_background` call IS the wait; an "echo waiting" loop is the polling antipattern this rule exists to prevent. The 780s timeout = bramble's `--timeout 10m` + 3 minutes of slack for envelope flush and harness teardown (Monitors themselves use `timeout_ms: 720000`).
+
+Why inline absolute paths rather than `$ENVELOPE_*` plus an `export` line: the obvious-looking `export ENVELOPE_CODEX=… ; bash -c 'until [ -s "$ENVELOPE_CODEX" ] …'` would work *within one Bash call*, but the skill steps that compute envelope paths and the step that issues the barrier are separate Bash calls — and each call is a fresh shell. Inlining the concrete paths makes the barrier independent of any prior shell state. The same reasoning rules out `${VAR:-/etc/hostname}` placeholders for the optional gemini envelope: when `ENVELOPE_GEMINI` is intentionally unset (`--gemini` off) the placeholder always-passes, and when it's accidentally unset (`--gemini` on but the export got dropped) the placeholder silently lets the barrier exit before gemini finishes. Two separate snippets selected by mode is unambiguous.
+
 ### c) Triage
 
 ```
 python3 $SKILL_DIR/scripts/bramble_ops.py triage $STATE_FILE \
-    --stream codex=$ENVELOPE_CODEX \
-    --stream cursor=$ENVELOPE_CURSOR \
-    --stream lint=$ENVELOPE_LINT \
+    --stream codex=$LOG_DIR/codex-envelope.json \
+    --stream cursor=$LOG_DIR/cursor-envelope.json \
+    --stream lint=$LOG_DIR/lint-envelope.json \
     $( [ "$USE_GEMINI" = "1" ] && echo --stream gemini=$LOG_DIR/gemini-envelope.json ) \
     $( [ "$IS_NEW_SERIES" = "1" ] && [ "$PR_NUMBER" != "null" ] && \
        echo --pr-comments $STATE_DIR/pp-comments.json --ci-failures $STATE_DIR/pp-ci.json )
 ```
+
+Envelope paths derive from `$LOG_DIR/<backend>-envelope.json` literally — the same convention as the Monitor barrier and the Monitor-arm step. Do **not** stash them in `$ENVELOPE_CODEX`/`$ENVELOPE_CURSOR`/etc. expecting later Bash calls to inherit them: each Bash tool call is a fresh shell. The same applies to the finalize snippets below.
 
 `triage` reads envelopes, merges series-start PR-comment and CI-failure feeds, and emits:
 
@@ -465,10 +496,10 @@ Write accumulated `comment_actions` to a temp JSON, then:
 ```
 python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-parse HEAD) \
     $STATE_DIR/actions-r$ROUND.json \
-    --envelope codex=$ENVELOPE_CODEX \
-    --envelope cursor=$ENVELOPE_CURSOR \
-    --envelope lint=$ENVELOPE_LINT \
-    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
+    --envelope codex=$LOG_DIR/codex-envelope.json \
+    --envelope cursor=$LOG_DIR/cursor-envelope.json \
+    --envelope lint=$LOG_DIR/lint-envelope.json \
+    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$LOG_DIR/gemini-envelope.json )
 ```
 
 `--envelope` flags tell finalize where to read each backend's envelope so `rounds[n].session_ids`, `resume_status`, and `sufficiency_claims` populate for next round's resume plumbing and the final report. Pass `--envelope lint=...` too — it has no session id, but its envelope feeds `lint_findings` into the persisted reviews directory. Backends not passed are skipped (no automatic fallback).
@@ -480,9 +511,9 @@ python3 $SKILL_DIR/scripts/pr_ops.py state-finalize-round $CTX $ROUND $(git rev-
 ```bash
 python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-parse HEAD) \
     $STATE_DIR/actions-r$ROUND.json \
-    --envelope codex=$ENVELOPE_CODEX --envelope cursor=$ENVELOPE_CURSOR \
-    --envelope lint=$ENVELOPE_LINT \
-    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$ENVELOPE_GEMINI )
+    --envelope codex=$LOG_DIR/codex-envelope.json --envelope cursor=$LOG_DIR/cursor-envelope.json \
+    --envelope lint=$LOG_DIR/lint-envelope.json \
+    $( [ "$USE_GEMINI" = "1" ] && echo --envelope gemini=$LOG_DIR/gemini-envelope.json )
 ```
 
 `converged_signal` mirrors the existing convergence rules (low_only_streak ≥ 2, or top_severity ∈ {low, nit, null} with no fix/skip activity). It's a *hint*, not a gate — convergence prose at the top of this file is still authoritative. Sufficiency consensus is purely audit-trail context; do NOT treat it as a new exit rule.
