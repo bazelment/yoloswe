@@ -285,7 +285,16 @@ Bramble snapshots the working tree at launch — uncommitted changes won't be re
 
 ### b) Launch bramble + lint gate
 
-Create a fresh `$LOG_DIR=$STATE_DIR/r$ROUND/`.
+Create or reuse `$LOG_DIR=$STATE_DIR/r$ROUND/`, then **delete any stale envelope files**:
+
+```bash
+mkdir -p "$LOG_DIR"
+rm -f "$LOG_DIR"/*-envelope.json
+```
+
+On a resumed round (post-compaction, or after an interrupted Monitor) the directory exists and may already contain a non-empty envelope from the prior attempt. The barrier below checks `[ -s … ]`, which is satisfied by a stale file just as readily as a fresh one — without this `rm`, triage would consume the previous attempt's verdict and skip the reviewer that's still actually running.
+
+**A note on `$LOG_DIR` and related orchestrator-state variables.** `$LOG_DIR`, `$STATE_DIR`, `$CTX`, `$ROUND`, `$SKILL_DIR`, `$IS_NEW_SERIES`, `$USE_GEMINI`, `$PR_NUMBER`, `$REPO`, `$SCOPE_HINTS`, `$GOAL`, `$CODEX_RESUME` (etc.) are orchestrator state held in the agent's working memory, not shell environment that persists across Bash tool calls. Every Bash call is a fresh shell with none of these set. When the skill shows a snippet that references one of them, the orchestrator must **substitute the concrete value** into the command string before issuing the Bash call (so `--envelope-file "$LOG_DIR/codex-envelope.json"` becomes `--envelope-file "/home/.../yoloswe-255/r3/codex-envelope.json"`). The `$VAR` notation in this file is a templating placeholder, not a runtime variable.
 
 **First, compute the scope-hints file.** `scope_gate.py` walks the diff, enumerates co-located test files, detects multi-package PRs, and writes `$STATE_DIR/scope-hints.json`. `bramble code-review --scope-hints-file <path>` widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. Run once per round, **before** arming bramble Monitors. Always exits 0.
 
