@@ -394,21 +394,28 @@ If a backend envelope reports a verdict-validation `status: "error"` (cursor ret
 
 **Back-compat note (v2 envelopes).** The bramble code-review wrapper now normalizes common verdict aliases (`approve_with_notes`/`approve`/`lgtm`/`request_changes`/etc.) inside `validateReviewBody` so envelopes emitted by an up-to-date bramble already carry the canonical `accepted`/`rejected` token — `recover-envelope` becomes a no-op there. Keep wrapping `--stream` arguments unconditionally so older envelopes (e.g. when an operator runs an unbuilt bramble) still recover; the cost is one stat() per stream.
 
-**Wait for the Monitor barrier with one tool call (mandatory).** Steps b→c must complete in a single turn. After arming Monitors, issue ONE `Bash` call with `run_in_background: true` whose body is an `until`-loop that exits when every armed envelope is non-empty OR a bounded timeout elapses. When `--gemini` is off, set `ENVELOPE_GEMINI` to any always-non-empty path (`/etc/hostname` works) so the same four-clause check works for both modes:
+**Wait for the Monitor barrier with one tool call (mandatory).** Steps b→c must complete in a single turn. After arming Monitors, issue ONE `Bash` call with `run_in_background: true` whose body is an `until`-loop that exits when every armed envelope is non-empty OR a bounded timeout elapses. Each Bash call runs in a fresh shell with no carryover from previous Bash calls, so `ENVELOPE_*` shell variables set elsewhere are not visible inside the barrier — **inline the absolute envelope paths into the barrier command itself**. Use the 3-clause form when `--gemini` is off and the 4-clause form when `--gemini` is on; do not invent a placeholder path:
 
 ```bash
-bash -c 'GC="${ENVELOPE_GEMINI:-/etc/hostname}"; end=$((SECONDS+780)); \
-  until [ -s "$ENVELOPE_CODEX" ] && [ -s "$ENVELOPE_CURSOR" ] \
-        && [ -s "$ENVELOPE_LINT" ] && [ -s "$GC" ] \
-        || [ $SECONDS -ge $end ]; \
-  do sleep 2; done'
+# --gemini off (3 envelopes):
+end=$((SECONDS+780)); until [ -s "$LOG_DIR/codex-envelope.json" ] \
+  && [ -s "$LOG_DIR/cursor-envelope.json" ] \
+  && [ -s "$LOG_DIR/lint-envelope.json" ] \
+  || [ $SECONDS -ge $end ]; do sleep 2; done
+
+# --gemini on (4 envelopes):
+end=$((SECONDS+780)); until [ -s "$LOG_DIR/codex-envelope.json" ] \
+  && [ -s "$LOG_DIR/cursor-envelope.json" ] \
+  && [ -s "$LOG_DIR/lint-envelope.json" ] \
+  && [ -s "$LOG_DIR/gemini-envelope.json" ] \
+  || [ $SECONDS -ge $end ]; do sleep 2; done
 ```
 
-The harness delivers exactly one completion notification when that command exits. Proceed to step c on that notification — even if the loop hit its timeout and some envelopes are still missing or empty. Step c runs `recover-envelope` (idempotent) and `triage` synthesizes a high-severity `stream-missing` finding for any envelope that is absent or unparseable (`bramble_ops.py:666`), so missing envelopes become findings rather than deadlocks.
+Substitute `$LOG_DIR` with its concrete value (e.g. `/home/.../yoloswe-255/r3`) when issuing the Bash call so the resulting command is fully self-contained — no `bash -c '…'` wrapper, no parent-shell env, no `$VAR` indirection. The harness delivers exactly one completion notification when that command exits. Proceed to step c on that notification — even if the loop hit its timeout and some envelopes are still missing or empty. Step c runs `recover-envelope` (idempotent) and `parse_round` (called by `triage`) synthesizes a high-severity `stream-missing` finding for any envelope that is absent or unparseable (`bramble_ops.py` `parse_round`, stream-missing branch near lines 693–710), so missing envelopes become findings rather than deadlocks.
 
 **Do not emit intermediate `tool_use` blocks between Monitor arm and the barrier notification.** The single `run_in_background` call IS the wait; an "echo waiting" loop is the polling antipattern this rule exists to prevent. The 780s timeout = bramble's `--timeout 10m` + 3 minutes of slack for envelope flush and harness teardown (Monitors themselves use `timeout_ms: 720000`).
 
-Why the `${ENVELOPE_GEMINI:-/etc/hostname}` shape instead of a conditional inside the loop: `${VAR:+&& [ -s "$VAR" ]}` *looks* idiomatic but the parameter expansion produces one string that `[` parses as positional arguments (`[: too many arguments`), not as shell operators. Pre-resolving the path keeps the test syntax static and predictable.
+Why inline absolute paths rather than `$ENVELOPE_*` plus an `export` line: the obvious-looking `export ENVELOPE_CODEX=… ; bash -c 'until [ -s "$ENVELOPE_CODEX" ] …'` would work *within one Bash call*, but the skill steps that compute envelope paths and the step that issues the barrier are separate Bash calls — and each call is a fresh shell. Inlining the concrete paths makes the barrier independent of any prior shell state. The same reasoning rules out `${VAR:-/etc/hostname}` placeholders for the optional gemini envelope: when `ENVELOPE_GEMINI` is intentionally unset (`--gemini` off) the placeholder always-passes, and when it's accidentally unset (`--gemini` on but the export got dropped) the placeholder silently lets the barrier exit before gemini finishes. Two separate snippets selected by mode is unambiguous.
 
 ### c) Triage
 
