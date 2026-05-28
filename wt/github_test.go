@@ -190,6 +190,18 @@ func TestListOpenPRsEmpty(t *testing.T) {
 	}
 }
 
+func TestPRListTruncated(t *testing.T) {
+	if PRListTruncated(make([]PRInfo, prListLimit-1)) {
+		t.Errorf("below cap must not be truncated")
+	}
+	if !PRListTruncated(make([]PRInfo, prListLimit)) {
+		t.Errorf("at cap must be reported truncated")
+	}
+	if !PRListTruncated(make([]PRInfo, prListLimit+1)) {
+		t.Errorf("above cap must be reported truncated")
+	}
+}
+
 func TestCreatePRDraft(t *testing.T) {
 	mock := NewMockGHRunner()
 	mock.Results["api repos/{owner}/{repo}/pulls -f title= -f body= -f head=feat -f base=main -F draft=true"] = &CmdResult{

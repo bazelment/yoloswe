@@ -886,8 +886,10 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 
 // Remove removes a worktree by name (directory) or branch name.
 // If deleteBranch is true, the local and remote branch are deleted after the worktree is removed.
-// If force is true, passes --force to git worktree remove, allowing removal of worktrees with
-// modified or untracked files (equivalent to git worktree remove --force).
+// If force is true, passes a single --force to git worktree remove, allowing removal of worktrees
+// with modified or untracked files (equivalent to git worktree remove --force). A single --force
+// still refuses a locked worktree; callers that must remove locked worktrees use removeResolved
+// with forceLocked=true.
 func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool, force bool) error {
 	// First try as directory name
 	worktreePath := filepath.Join(m.RepoDir(), nameOrBranch)
@@ -920,14 +922,17 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 		}
 	}
 
-	return m.removeResolved(ctx, worktreePath, branchName, deleteBranch, force)
+	return m.removeResolved(ctx, worktreePath, branchName, deleteBranch, force, false)
 }
 
 // removeResolved runs post-remove hooks, removes the worktree at worktreePath,
-// and optionally deletes the local/remote branch. force triggers a double
-// --force so that locked worktrees can be removed — git refuses a single
-// --force on a locked worktree.
-func (m *Manager) removeResolved(ctx context.Context, worktreePath, branchName string, deleteBranch, force bool) error {
+// and optionally deletes the local/remote branch. force passes a single --force
+// (removes modified/untracked files but still refuses a locked worktree).
+// forceLocked adds the second --force needed to remove a locked worktree; git
+// refuses a single --force on a locked working tree. Only the stale-lock GC path
+// sets forceLocked, so an intentionally locked worktree is never silently
+// force-removed by the merged-PR path.
+func (m *Manager) removeResolved(ctx context.Context, worktreePath, branchName string, deleteBranch, force, forceLocked bool) error {
 	bareDir := m.BareDir()
 
 	// Run post-remove hooks first
@@ -945,10 +950,13 @@ func (m *Manager) removeResolved(ctx context.Context, worktreePath, branchName s
 
 	m.output.Info(fmt.Sprintf("Removing worktree %s...", branchName))
 	removeArgs := []string{"worktree", "remove"}
-	if force {
-		// Double --force removes locked worktrees; git refuses a single --force
-		// with "cannot remove a locked working tree".
-		removeArgs = append(removeArgs, "--force", "--force")
+	if force || forceLocked {
+		removeArgs = append(removeArgs, "--force")
+	}
+	if forceLocked {
+		// The second --force removes a locked worktree; git refuses a single
+		// --force with "cannot remove a locked working tree".
+		removeArgs = append(removeArgs, "--force")
 	}
 	removeArgs = append(removeArgs, worktreePath)
 	if result, err := m.git.Run(ctx, removeArgs, bareDir); err != nil {
@@ -1383,6 +1391,9 @@ func (m *Manager) findChildBranches(ctx context.Context, parentBranch, dir strin
 	if err != nil {
 		return nil, err
 	}
+	if PRListTruncated(prs) {
+		m.output.Warn(fmt.Sprintf("GitHub returned %d open PRs (limit reached); some child branches may not be detected for rebase", len(prs)))
+	}
 
 	// Get local worktrees
 	worktrees, _ := m.List(ctx)
@@ -1536,8 +1547,8 @@ func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun boo
 		return nil, fmt.Errorf("failed to list merged PRs: %w", err)
 	}
 
-	if len(mergedPRs) >= 1000 {
-		m.output.Warn("GitHub returned 1000 merged PRs (limit reached); older merged-PR worktrees may not be detected")
+	if PRListTruncated(mergedPRs) {
+		m.output.Warn(fmt.Sprintf("GitHub returned %d merged PRs (limit reached); older merged-PR worktrees may not be detected", len(mergedPRs)))
 	}
 
 	mergedByBranch := prsByHeadRef(mergedPRs)
@@ -1607,10 +1618,18 @@ func (m *Manager) pruneStaleLocks(ctx context.Context, bareDir string, remove, d
 	openByBranch := make(map[string]*PRInfo)
 	if remove {
 		openPRs, err := ListOpenPRs(ctx, m.gh, bareDir)
-		if err != nil {
+		switch {
+		case err != nil:
 			m.output.Warn(fmt.Sprintf("Could not list open PRs; skipping stale-lock removal: %v", err))
 			remove = false
-		} else {
+		case PRListTruncated(openPRs):
+			// The open-PR list hit the gh cap, so a branch with an open PR may be
+			// absent. Removing on this partial view could destroy live work, so
+			// degrade to list-only.
+			m.output.Warn(fmt.Sprintf("GitHub returned %d open PRs (limit reached); skipping stale-lock removal to avoid deleting worktrees with live work", len(openPRs)))
+			remove = false
+			openByBranch = prsByHeadRef(openPRs)
+		default:
 			openByBranch = prsByHeadRef(openPRs)
 		}
 	}
@@ -1641,16 +1660,20 @@ func (m *Manager) pruneStaleLocks(ctx context.Context, bareDir string, remove, d
 			info.KeepReason = fmt.Sprintf("PR #%d still OPEN", info.PRNumber)
 			m.output.Warn(fmt.Sprintf("Keeping %s: lock PID %d dead but PR #%d is OPEN (live work)", info.Name, info.LockPID, info.PRNumber))
 		case !remove:
-			info.KeepReason = "listed only; run with --stale-locks to remove"
-			m.output.Info(fmt.Sprintf("Stale-locked (PID %d dead, no open PR): %s — %q", info.LockPID, info.Name, info.LockReason))
+			// Open PRs aren't fetched on the list-only path, so don't assert
+			// whether an open PR exists — that is evaluated only under --stale-locks.
+			info.KeepReason = "listed only; run with --stale-locks to evaluate removal"
+			m.output.Info(fmt.Sprintf("Stale-locked (PID %d dead): %s — %q (open PR not checked; use --stale-locks to evaluate removal)", info.LockPID, info.Name, info.LockReason))
 		case dryRun:
 			info.Removed = true
 			m.output.Info(fmt.Sprintf("[dry-run] Would remove %s (stale lock, PID %d dead, no open PR)", info.Name, info.LockPID))
 		default:
 			m.output.Info(fmt.Sprintf("Removing %s (stale lock, PID %d dead)...", info.Name, info.LockPID))
 			// deleteBranch=false: leave the (possibly unpushed) branch for the
-			// orphaned-branch step / -D to handle.
-			if err := m.removeResolved(ctx, wt.Path, wt.Branch, false, true); err != nil {
+			// orphaned-branch step / -D to handle. forceLocked=true: the worktree
+			// is locked (that is what makes it stale), so the double --force is
+			// required here.
+			if err := m.removeResolved(ctx, wt.Path, wt.Branch, false, false, true); err != nil {
 				info.KeepReason = fmt.Sprintf("removal failed: %v", err)
 				m.output.Error(fmt.Sprintf("Failed to remove %s: %v", info.Name, err))
 			} else {
