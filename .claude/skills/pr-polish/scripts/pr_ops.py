@@ -919,8 +919,9 @@ def state_finalize_round(
 
     ``envelope_overrides`` maps backend name to the on-disk envelope file
     Monitor captured for that backend (canonically
-    ``$STATE_DIR/r<n>/<backend>-envelope.json``). Backends absent from the
-    mapping are skipped — finalize hydrates only what was actually run.
+    ``$STATE_DIR/r<n>/a<attempt>/<backend>-envelope.json`` — the
+    attempt-scoped log dir ``round_bundle`` returns). Backends absent from
+    the mapping are skipped — finalize hydrates only what was actually run.
 
     ``auto_reply`` posts a GitHub inline reply on every github-inline row
     whose action ∈ {fixed, stale, false_positive, wont_fix} and which

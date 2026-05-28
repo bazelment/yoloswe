@@ -14,12 +14,16 @@ a one-line note to stderr and skips it. We never fail the run on a missing
 linter — that would tax users who don't have ruff or golangci-lint installed.
 
 Output:
-    ``<state_dir>/r<round>/lint-envelope.json`` — a bramble-shaped envelope
-    consumed by ``bramble_ops.parse_envelope`` / ``triage`` via
-    ``--stream lint=...``.
+    A bramble-shaped envelope consumed by ``bramble_ops.parse_envelope`` /
+    ``triage`` via ``--stream lint=...``. With ``--log-dir`` (the canonical
+    /pr-polish call) it is written to ``<log_dir>/lint-envelope.json`` — the
+    attempt-scoped ``r<round>/a<attempt>/`` dir the bramble Monitors also use,
+    so the barrier and triage find all envelopes in one place. Without it,
+    falls back to ``<state_dir>/r<round>/lint-envelope.json``.
 
 Usage:
-    python3 lint_gate.py --state-dir <dir> --round <n> [--base BRANCH]
+    python3 lint_gate.py --state-dir <dir> --round <n> \
+        [--log-dir <dir>] [--base BRANCH]
 
 This module never invokes bramble. It's pure subprocess + JSON marshalling.
 """
