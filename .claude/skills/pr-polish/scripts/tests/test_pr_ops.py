@@ -2071,6 +2071,27 @@ class TestRoundBundle(unittest.TestCase):
                 )
             )
 
+    def test_next_attempt_empty_round_is_one(self) -> None:
+        self.assertEqual(pr_ops._next_attempt(self.tmp, 1), 1)
+
+    def test_next_attempt_only_counts_numbered_attempt_dirs(self) -> None:
+        # A non-attempt dir whose name merely starts with `a` must not
+        # bump the index — otherwise the orchestrator skips an attempt
+        # number and a fresh review could land in a dir name that an
+        # unrelated dir already pushed past.
+        round_dir = self.tmp / "r1"
+        (round_dir / "a1").mkdir(parents=True)
+        (round_dir / "archive").mkdir()
+        (round_dir / "aux").mkdir()
+        self.assertEqual(pr_ops._next_attempt(self.tmp, 1), 2)
+
+    def test_next_attempt_uses_max_not_count(self) -> None:
+        # With a gap (a1 deleted, a2 kept) the next index must be a free
+        # one (3), not count+1 (2) which would collide with the live a2.
+        round_dir = self.tmp / "r1"
+        (round_dir / "a2").mkdir(parents=True)
+        self.assertEqual(pr_ops._next_attempt(self.tmp, 1), 3)
+
     def test_returns_goal_text_on_round_two_with_prior_actions(self) -> None:
         pr_ops.state_append_round(99, 1, "sha1", verify_head=False)
         pr_ops.state_finalize_round(

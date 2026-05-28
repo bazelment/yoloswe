@@ -287,10 +287,26 @@ def build_envelope(issues: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def envelope_path_for(state_dir: Path, round_: int) -> Path:
-    """``<state_dir>/r<n>/lint-envelope.json`` — same layout as the LLM-backend
-    envelopes so the orchestrator's ``--stream lint=…`` wiring is symmetrical.
+def envelope_path_for(
+    state_dir: Path, round_: int, *, log_dir: Path | None = None
+) -> Path:
+    """Where the lint envelope is written.
+
+    When ``log_dir`` is given it wins: the envelope lands at
+    ``<log_dir>/lint-envelope.json``. This is the attempt-scoped
+    ``r<n>/a<attempt>`` dir the orchestrator also hands the bramble
+    Monitors via ``--envelope-file`` — keeping lint in the same dir is
+    what lets the Monitor barrier and triage find it. Without it the
+    Monitors read ``r<n>/a<attempt>/lint-envelope.json`` while lint wrote
+    ``r<n>/lint-envelope.json``, and the barrier hangs on a file lint
+    never created there.
+
+    Falling back to ``<state_dir>/r<n>/lint-envelope.json`` (no attempt
+    component) preserves the older call shape for any caller that hasn't
+    adopted attempt dirs.
     """
+    if log_dir is not None:
+        return log_dir / "lint-envelope.json"
     return state_dir / f"r{round_}" / "lint-envelope.json"
 
 
@@ -320,12 +336,21 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="lint_gate")
     p.add_argument("--state-dir", required=True, help="<state_dir> from pr_ops identify")
     p.add_argument("--round", dest="round_", type=int, required=True)
+    p.add_argument(
+        "--log-dir",
+        default=None,
+        help="attempt-scoped log dir (r<n>/a<attempt>) — when given, the "
+        "envelope is written here instead of the round dir, matching the "
+        "path the orchestrator hands the bramble Monitors",
+    )
     p.add_argument("--base", default=None, help="base branch (default: auto-detect)")
     args = p.parse_args(argv)
 
     base = args.base or detect_base_branch()
     state_dir = Path(args.state_dir)
-    out_path = envelope_path_for(state_dir, args.round_)
+    log_dir = Path(args.log_dir) if args.log_dir else None
+    out_path = envelope_path_for(state_dir, args.round_, log_dir=log_dir)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # changed_files uses run(check=False) and returns [] on any git
     # failure — never raises — so no CommandError to catch here.

@@ -386,7 +386,7 @@ Monitor({
   timeout_ms: 120000,
   persistent: false,
   command: "python3 $SKILL_DIR/scripts/lint_gate.py \
-    --state-dir \"$STATE_DIR\" --round {ROUND} \
+    --state-dir \"$STATE_DIR\" --round {ROUND} --log-dir \"$LOG_DIR\" \
     2>\"$LOG_DIR/lint-stderr.txt\""
 })
 

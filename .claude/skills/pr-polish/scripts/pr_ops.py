@@ -1328,21 +1328,30 @@ def preflight() -> dict[str, Any]:
     return out
 
 
+_ATTEMPT_DIR_RE = re.compile(r"a(\d+)$")
+
+
 def _next_attempt(state_dir: Path, n: int) -> int:
     """Next free attempt index for round ``n`` under ``state_dir``.
 
-    Counts the existing ``a*`` subdirs of ``r{n}`` and returns count + 1
-    (so the first attempt is ``1``). A resumed round gets a fresh attempt
-    dir, which is what keeps the Monitor barrier from ever seeing a prior
-    attempt's stale envelope.
+    Returns ``max(existing attempt index) + 1`` (first attempt is ``1``),
+    where an attempt dir is exactly ``a<number>`` — only those count.
+    Matching on the numeric suffix rather than a bare ``a`` prefix keeps
+    unrelated dirs (a manual ``archive/``) from bumping the index, and
+    taking the max rather than a count means a gap (``a1`` deleted, ``a2``
+    kept) still yields a *free* index instead of colliding with ``a2``.
+    A resumed round thus gets a fresh attempt dir, which is what keeps the
+    Monitor barrier from ever seeing a prior attempt's stale envelope.
     """
     round_dir = state_dir / f"r{n}"
     if not round_dir.is_dir():
         return 1
-    existing = sum(
-        1 for p in round_dir.iterdir() if p.is_dir() and p.name.startswith("a")
-    )
-    return existing + 1
+    indices = [
+        int(m.group(1))
+        for p in round_dir.iterdir()
+        if p.is_dir() and (m := _ATTEMPT_DIR_RE.fullmatch(p.name))
+    ]
+    return max(indices, default=0) + 1
 
 
 def round_bundle(ctx: int | str, n: int) -> dict[str, Any]:

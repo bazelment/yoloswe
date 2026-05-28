@@ -487,6 +487,31 @@ class TestEnvelopePathFor(unittest.TestCase):
             Path("/tmp/x/r2/lint-envelope.json"),
         )
 
+    def test_log_dir_override_wins(self) -> None:
+        # When the orchestrator passes the attempt-scoped log dir, the
+        # envelope must land there (next to codex/cursor), not in the
+        # round dir — otherwise the Monitor barrier hangs on a lint
+        # envelope that was written one dir up.
+        sd = Path("/tmp/x")
+        log_dir = Path("/tmp/x/r2/a3")
+        self.assertEqual(
+            lint_gate.envelope_path_for(sd, 2, log_dir=log_dir),
+            Path("/tmp/x/r2/a3/lint-envelope.json"),
+        )
+
+    def test_main_writes_to_log_dir_when_given(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log_dir = Path(td) / "r1" / "a1"
+            with patch.object(lint_gate, "changed_files", return_value=[]):
+                with patch.object(lint_gate, "detect_base_branch", return_value="main"):
+                    rc = lint_gate.main(
+                        ["--state-dir", td, "--round", "1", "--log-dir", str(log_dir)]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertTrue((log_dir / "lint-envelope.json").exists())
+            # Nothing leaks into the round dir.
+            self.assertFalse((Path(td) / "r1" / "lint-envelope.json").exists())
+
 
 class TestMainEndToEnd(unittest.TestCase):
     def test_writes_envelope_even_with_no_findings(self) -> None:
