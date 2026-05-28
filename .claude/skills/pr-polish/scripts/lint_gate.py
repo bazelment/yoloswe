@@ -171,10 +171,12 @@ def run_ruff(paths: list[str]) -> list[dict[str, Any]]:
 
 
 def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
-    """Run ``golangci-lint run --out-format=json`` and normalize.
+    """Run ``golangci-lint run --output.json.path stdout`` and normalize.
 
     golangci-lint targets packages, not files; we pass the directories of the
-    changed Go files so the linter can resolve imports correctly.
+    changed Go files so the linter can resolve imports correctly. The
+    ``--output.json.path stdout`` form is the golangci-lint v2 spelling; the
+    pre-v2 ``--out-format=json`` flag was removed in v2 and errors out.
     """
     paths = _safe_paths(paths)
     if not paths or not _have("golangci-lint"):
@@ -182,14 +184,21 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
     pkgs = _safe_paths(sorted({str(Path(p).parent) or "." for p in paths}))
     if not pkgs:
         return []
-    res = run(["golangci-lint", "run", "--out-format=json", *pkgs], check=False)
+    res = run(
+        ["golangci-lint", "run", "--output.json.path", "stdout", *pkgs],
+        check=False,
+    )
     stderr = (res.stderr or "").strip()
     if not res.stdout.strip():
         if res.returncode != 0 or stderr:
             return [_tooling_failure("golangci-lint", res.returncode, stderr)]
         return []
+    # golangci-lint v2 emits the JSON report followed by a human-readable
+    # summary line (e.g. "0 issues.") on stdout, so json.loads() of the
+    # whole buffer raises "Extra data". raw_decode() reads just the leading
+    # JSON object and ignores the trailing text.
     try:
-        report = json.loads(res.stdout)
+        report, _ = json.JSONDecoder().raw_decode(res.stdout.lstrip())
     except json.JSONDecodeError:
         return [_tooling_failure("golangci-lint", res.returncode, stderr or "non-JSON stdout")]
     if not isinstance(report, dict):

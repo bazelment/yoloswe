@@ -150,10 +150,10 @@ class TestSafePaths(unittest.TestCase):
                 # File at "-evil/foo.go" → package dir "-evil" must
                 # arrive at the subprocess as "./-evil".
                 lint_gate.run_golangci(["pkg/foo.go", "-evil/bar.go"])
-        # golangci args: golangci-lint run --out-format=json <pkg1> <pkg2>
+        # golangci args: golangci-lint run --output.json.path stdout <pkg1> <pkg2>
         cmd = captured[0]
-        # Package dirs come after --out-format=json.
-        pkg_idx = cmd.index("--out-format=json") + 1
+        # Package dirs come after the "--output.json.path stdout" pair.
+        pkg_idx = cmd.index("--output.json.path") + 2
         pkgs = cmd[pkg_idx:]
         # The "-evil" package must be rewritten with "./".
         self.assertIn("./-evil", pkgs)
@@ -278,8 +278,9 @@ class TestRunGolangci(unittest.TestCase):
             with patch.object(lint_gate, "run", side_effect=capture):
                 lint_gate.run_golangci(["pkg/a.go", "pkg/b.go", "pkg2/c.go"])
         self.assertEqual(len(captured), 1)
-        # First three tokens are the binary + flags; trailing tokens are pkgs.
-        pkgs = sorted(captured[0][3:])
+        # Leading tokens: golangci-lint run --output.json.path stdout;
+        # trailing tokens are the package dirs.
+        pkgs = sorted(captured[0][4:])
         self.assertEqual(pkgs, ["pkg", "pkg2"])
 
     def test_known_linters_severity_mapping(self) -> None:
