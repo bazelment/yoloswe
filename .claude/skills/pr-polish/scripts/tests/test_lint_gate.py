@@ -317,6 +317,36 @@ class TestRunGolangci(unittest.TestCase):
         # gofmt → low, unknown → low (conservative default).
         self.assertEqual([g["severity"] for g in got], ["high", "medium", "low", "low"])
 
+    def test_parses_json_with_trailing_summary_line(self) -> None:
+        # golangci-lint v2 prints the JSON report followed by a
+        # human-readable "N issues." line on stdout. json.loads() of the
+        # whole buffer raises "Extra data"; raw_decode() reads the leading
+        # report and ignores the trailer. Without this, a clean run would
+        # be misreported as a tooling failure. Pins the raw_decode fix:
+        # reverting to json.loads() fails this test.
+        gci_out = (
+            json.dumps(
+                {
+                    "Issues": [
+                        {
+                            "FromLinter": "errcheck",
+                            "Text": "unchecked error",
+                            "Pos": {"Filename": "a.go", "Line": 4},
+                        }
+                    ]
+                }
+            )
+            + "\n0 issues.\n"
+        )
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=_stub_run(gci_out)):
+                got = lint_gate.run_golangci(["a.go"])
+        # The trailing summary is ignored; the real issue is parsed and
+        # mapped, not swallowed by a spurious tooling-failure row.
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertNotIn("tooling failure", got[0]["message"])
+
     def test_blank_stdout_nonzero_rc_emits_tooling_failure(self) -> None:
         # Mirrors run_eslint's tooling-failure contract: rc != 0 with
         # blank stdout is a real crash, not a clean run. Emit a
