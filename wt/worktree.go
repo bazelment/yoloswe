@@ -130,6 +130,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -145,13 +146,21 @@ var (
 
 // Worktree represents a Git worktree.
 type Worktree struct {
-	Path       string
-	Branch     string
-	Commit     string
+	Path   string
+	Branch string
+	Commit string
+	// LockReason is the text after "locked " in porcelain output, empty for a
+	// bare "locked" line.
+	LockReason string
+	// LockPID is the PID parsed from a lock reason of the form "(pid <N>)",
+	// 0 when absent or unparseable.
+	LockPID    int
 	IsDetached bool
 	// IsGone is true when git knows about the worktree but its directory no
 	// longer exists on disk (e.g. removed via `rm -rf` or `git worktree remove`).
 	IsGone bool
+	// IsLocked is true when the worktree is locked (git worktree lock).
+	IsLocked bool
 }
 
 // Name returns the worktree name (directory name).
@@ -176,11 +185,14 @@ type WorktreeStatus struct {
 
 // Manager handles worktree operations for a repository.
 type Manager struct {
-	git      GitRunner
-	gh       GHRunner
-	output   *Output
-	root     string
-	repoName string
+	git    GitRunner
+	gh     GHRunner
+	output *Output
+	// processAlive reports whether a PID is currently running. Injectable for
+	// tests; defaults to defaultProcessAlive.
+	processAlive func(pid int) bool
+	root         string
+	repoName     string
 }
 
 // Option configures a Manager.
@@ -201,19 +213,52 @@ func WithOutput(o *Output) Option {
 	return func(m *Manager) { m.output = o }
 }
 
+// WithProcessAlive sets a custom PID-liveness predicate (used in tests).
+func WithProcessAlive(f func(int) bool) Option {
+	return func(m *Manager) { m.processAlive = f }
+}
+
 // NewManager creates a Manager for the given repository.
 func NewManager(root, repoName string, opts ...Option) *Manager {
 	m := &Manager{
-		root:     root,
-		repoName: repoName,
-		git:      &DefaultGitRunner{},
-		gh:       &DefaultGHRunner{},
-		output:   DefaultOutput(),
+		root:         root,
+		repoName:     repoName,
+		git:          &DefaultGitRunner{},
+		gh:           &DefaultGHRunner{},
+		output:       DefaultOutput(),
+		processAlive: defaultProcessAlive,
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
 	return m
+}
+
+// defaultProcessAlive reports whether a process with the given PID is currently
+// running, using signal 0 (delivers no signal; existence/permission check only).
+func defaultProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid) // always succeeds on Unix
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	if err == nil {
+		return true // alive and signalable
+	}
+	return errors.Is(err, os.ErrPermission) // exists but owned by another user
+}
+
+// isStaleLock reports whether a worktree's lock is safe to treat as stale.
+// A lock is stale only when it carries a parseable PID that is not alive.
+// An unparseable PID (LockPID == 0) is treated as live (never removed).
+func (m *Manager) isStaleLock(w Worktree) bool {
+	if !w.IsLocked || w.LockPID == 0 {
+		return false
+	}
+	return !m.processAlive(w.LockPID)
 }
 
 // RepoDir returns the path to the repository root.
@@ -621,6 +666,11 @@ func parseWorktreeList(output string) []Worktree {
 			current["detached"] = "true"
 		} else if line == "prunable" || strings.HasPrefix(line, "prunable ") {
 			current["prunable"] = "true"
+		} else if line == "locked" {
+			current["locked"] = "true"
+		} else if strings.HasPrefix(line, "locked ") {
+			current["locked"] = "true"
+			current["lockreason"] = line[len("locked "):]
 		}
 	}
 	flush()
@@ -645,13 +695,39 @@ func worktreeFromFields(fields map[string]string) (Worktree, bool) {
 	if len(commit) > 8 {
 		commit = commit[:8]
 	}
+	lockReason := fields["lockreason"]
 	return Worktree{
 		Path:       fields["worktree"],
 		Branch:     branch,
 		Commit:     commit,
 		IsDetached: fields["detached"] == "true",
 		IsGone:     fields["prunable"] == "true",
+		IsLocked:   fields["locked"] == "true",
+		LockReason: lockReason,
+		LockPID:    parseLockPID(lockReason),
 	}, true
+}
+
+// parseLockPID extracts the PID embedded in a worktree lock reason of the form
+// "...(pid <N>)". Claude agents write reasons like
+// "claude agent agent-<hash> (pid 3190410)". Returns 0 when no PID is present
+// or parseable, so callers treat such locks conservatively (as live).
+func parseLockPID(reason string) int {
+	const marker = "(pid "
+	i := strings.Index(reason, marker)
+	if i < 0 {
+		return 0
+	}
+	rest := reason[i+len(marker):]
+	j := strings.IndexByte(rest, ')')
+	if j < 0 {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(rest[:j]))
+	if err != nil {
+		return 0
+	}
+	return pid
 }
 
 // GetGitStatus returns local git status for a worktree (no network calls).
@@ -813,8 +889,6 @@ func (m *Manager) GetStatus(ctx context.Context, wt Worktree) (*WorktreeStatus, 
 // If force is true, passes --force to git worktree remove, allowing removal of worktrees with
 // modified or untracked files (equivalent to git worktree remove --force).
 func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch bool, force bool) error {
-	bareDir := m.BareDir()
-
 	// First try as directory name
 	worktreePath := filepath.Join(m.RepoDir(), nameOrBranch)
 	branchName := nameOrBranch
@@ -846,6 +920,31 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 		}
 	}
 
+	return m.removeResolved(ctx, worktreePath, branchName, deleteBranch, force)
+}
+
+// RemoveByPath removes the worktree at the given absolute path without
+// name/branch resolution. Use it for worktrees outside the standard RepoDir
+// layout (e.g. agent worktrees under <bare>/.claude/worktrees), where the
+// directory name and branch name are unreliable lookup keys. The branch name
+// is resolved from the worktree itself for hooks and optional branch deletion.
+func (m *Manager) RemoveByPath(ctx context.Context, worktreePath string, deleteBranch, force bool) error {
+	branchName := filepath.Base(worktreePath)
+	if result, err := m.git.Run(ctx, []string{"branch", "--show-current"}, worktreePath); err == nil {
+		if cur := strings.TrimSpace(result.Stdout); cur != "" {
+			branchName = cur
+		}
+	}
+	return m.removeResolved(ctx, worktreePath, branchName, deleteBranch, force)
+}
+
+// removeResolved runs post-remove hooks, removes the worktree at worktreePath,
+// and optionally deletes the local/remote branch. force triggers a double
+// --force so that locked worktrees (e.g. crashed agent worktrees) can be
+// removed — git refuses a single --force on a locked worktree.
+func (m *Manager) removeResolved(ctx context.Context, worktreePath, branchName string, deleteBranch, force bool) error {
+	bareDir := m.BareDir()
+
 	// Run post-remove hooks first
 	config, err := LoadRepoConfig(worktreePath)
 	if err != nil {
@@ -862,7 +961,10 @@ func (m *Manager) Remove(ctx context.Context, nameOrBranch string, deleteBranch 
 	m.output.Info(fmt.Sprintf("Removing worktree %s...", branchName))
 	removeArgs := []string{"worktree", "remove"}
 	if force {
-		removeArgs = append(removeArgs, "--force")
+		// Double --force lets git remove locked worktrees (e.g. crashed Claude
+		// agent worktrees). A single --force is refused with
+		// "cannot remove a locked working tree".
+		removeArgs = append(removeArgs, "--force", "--force")
 	}
 	removeArgs = append(removeArgs, worktreePath)
 	if result, err := m.git.Run(ctx, removeArgs, bareDir); err != nil {
@@ -1450,8 +1552,8 @@ func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun boo
 		return nil, fmt.Errorf("failed to list merged PRs: %w", err)
 	}
 
-	if len(mergedPRs) >= 200 {
-		m.output.Warn("GitHub returned 200 merged PRs (limit reached); older merged-PR worktrees may not be detected")
+	if len(mergedPRs) >= 1000 {
+		m.output.Warn("GitHub returned 1000 merged PRs (limit reached); older merged-PR worktrees may not be detected")
 	}
 
 	mergedByBranch := make(map[string]*PRInfo, len(mergedPRs))
@@ -1491,23 +1593,118 @@ func (m *Manager) pruneMergedPRs(ctx context.Context, bareDir string, dryRun boo
 	return removed, nil
 }
 
+// StaleLockInfo describes a worktree whose lock references a dead PID.
+type StaleLockInfo struct {
+	Name       string // Worktree directory name
+	Branch     string
+	Path       string
+	LockReason string
+	KeepReason string // Why the worktree was kept; empty when Removed
+	LockPID    int
+	PRNumber   int  // PR number when HasOpenPR
+	HasOpenPR  bool // True when an open PR keeps the worktree alive
+	Removed    bool // True when removed (or would be, in dry-run)
+}
+
+// pruneStaleLocks finds worktrees whose lock references a dead PID and, when
+// remove is true, removes those that are safe to remove. A stale-locked
+// worktree is kept (never removed) when its branch still has an OPEN PR — a
+// stale lock plus an open PR means live work. Protected and detached worktrees
+// are skipped. Every kept worktree records and prints a KeepReason. With
+// remove=false the detected set is returned without any removals (list-only).
+func (m *Manager) pruneStaleLocks(ctx context.Context, bareDir string, remove, dryRun bool) ([]StaleLockInfo, []string, error) {
+	protected := protectedBranches(ctx, m.git, bareDir)
+
+	worktrees, err := m.List(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list worktrees: %w", err)
+	}
+
+	// Determine which branches have an open PR. Fail safe: if we can't tell,
+	// degrade to list-only so we never remove a worktree with live work.
+	openByBranch := make(map[string]*PRInfo)
+	openPRs, err := ListOpenPRs(ctx, m.gh, bareDir)
+	if err != nil {
+		m.output.Warn(fmt.Sprintf("Could not list open PRs; skipping stale-lock removal: %v", err))
+		remove = false
+	} else {
+		for i := range openPRs {
+			openByBranch[openPRs[i].HeadRefName] = &openPRs[i]
+		}
+	}
+
+	var detected []StaleLockInfo
+	var removed []string
+	for _, wt := range worktrees {
+		if wt.IsDetached || protected[wt.Branch] {
+			continue
+		}
+		if !m.isStaleLock(wt) {
+			continue
+		}
+
+		info := StaleLockInfo{
+			Name:       wt.Name(),
+			Branch:     wt.Branch,
+			Path:       wt.Path,
+			LockReason: wt.LockReason,
+			LockPID:    wt.LockPID,
+		}
+		if pr, ok := openByBranch[wt.Branch]; ok {
+			info.HasOpenPR = true
+			info.PRNumber = pr.Number
+		}
+
+		switch {
+		case info.HasOpenPR:
+			info.KeepReason = fmt.Sprintf("PR #%d still OPEN", info.PRNumber)
+			m.output.Warn(fmt.Sprintf("Keeping %s: lock PID %d dead but PR #%d is OPEN (live work)", info.Name, info.LockPID, info.PRNumber))
+		case !remove:
+			info.KeepReason = "listed only; run with --stale-locks to remove"
+			m.output.Info(fmt.Sprintf("Stale-locked (PID %d dead, no open PR): %s — %q", info.LockPID, info.Name, info.LockReason))
+		case dryRun:
+			info.Removed = true
+			removed = append(removed, info.Name)
+			m.output.Info(fmt.Sprintf("[dry-run] Would remove %s (stale lock, PID %d dead, no open PR)", info.Name, info.LockPID))
+		default:
+			m.output.Info(fmt.Sprintf("Removing %s (stale lock, PID %d dead)...", info.Name, info.LockPID))
+			// deleteBranch=false: leave the (possibly unpushed) branch for the
+			// orphaned-branch step / -D to handle.
+			if err := m.RemoveByPath(ctx, wt.Path, false, true); err != nil {
+				info.KeepReason = fmt.Sprintf("removal failed: %v", err)
+				m.output.Error(fmt.Sprintf("Failed to remove %s: %v", info.Name, err))
+			} else {
+				info.Removed = true
+				removed = append(removed, info.Name)
+			}
+		}
+
+		detected = append(detected, info)
+	}
+
+	return detected, removed, nil
+}
+
 // GCOptions configures garbage collection behavior.
 type GCOptions struct {
 	DryRun         bool // Preview only, no changes
 	DeleteBranches bool // Delete orphaned local branches
 	DeleteRemote   bool // Also delete remote branches (requires DeleteBranches)
 	MergedPRs      bool // Also remove worktrees whose GitHub PRs are merged
+	StaleLocks     bool // Remove worktrees with stale (dead-PID) locks and no open PR
 }
 
 // GCResult contains the results of garbage collection.
 type GCResult struct {
-	PrunedWorktrees  []string // Lines from git worktree prune
-	MergedWorktrees  []string // Worktrees removed because their PR was merged
-	OrphanedBranches []string // Local branches with no worktree
-	DeletedBranches  []string // Actually deleted local branches
-	DeletedRemote    []string // Actually deleted remote branches
-	FetchPruned      bool     // Whether fetch --prune ran
-	GCRan            bool     // Whether git gc ran
+	PrunedWorktrees   []string        // Lines from git worktree prune
+	MergedWorktrees   []string        // Worktrees removed because their PR was merged
+	OrphanedBranches  []string        // Local branches with no worktree
+	DeletedBranches   []string        // Actually deleted local branches
+	DeletedRemote     []string        // Actually deleted remote branches
+	StaleLocked       []StaleLockInfo // Detected stale-locked worktrees (with keep/remove reason)
+	RemovedStaleLocks []string        // Stale-locked worktrees removed (or would-be in dry-run)
+	FetchPruned       bool            // Whether fetch --prune ran
+	GCRan             bool            // Whether git gc ran
 }
 
 // GC performs comprehensive garbage collection: prunes stale worktree metadata,
@@ -1533,6 +1730,22 @@ func (m *Manager) GC(ctx context.Context, opts GCOptions) (*GCResult, error) {
 	result.MergedWorktrees = pruned.MergedWorktrees
 	for _, line := range pruned.StaleWorktrees {
 		m.output.Info(fmt.Sprintf("Pruned: %s", line))
+	}
+
+	// Step 1b: stale-lock cleanup (e.g. crashed Claude-agent worktrees). Runs
+	// before orphaned-branch detection so removed worktrees' branches then
+	// surface as orphaned and are deletable with -D.
+	staleLocked, removedLocks, err := m.pruneStaleLocks(ctx, bareDir, opts.StaleLocks, opts.DryRun)
+	if err != nil {
+		m.output.Warn(fmt.Sprintf("Stale-lock check failed: %v", err))
+	} else {
+		result.StaleLocked = staleLocked
+		result.RemovedStaleLocks = removedLocks
+		if len(staleLocked) == 0 {
+			m.output.Success("No stale-locked worktrees found")
+		} else if !opts.StaleLocks {
+			m.output.Info(fmt.Sprintf("Found %d stale-locked worktree(s) (run with --stale-locks to remove)", len(staleLocked)))
+		}
 	}
 
 	// Step 2: git fetch --prune

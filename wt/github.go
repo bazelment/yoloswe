@@ -153,6 +153,9 @@ func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, er
 	if err != nil {
 		return nil, err
 	}
+	if result == nil || result.Stdout == "" {
+		return nil, nil
+	}
 
 	var prs []PRInfo
 	if err := json.Unmarshal([]byte(result.Stdout), &prs); err != nil {
@@ -163,16 +166,20 @@ func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, er
 }
 
 // ListMergedPRs returns recently merged PRs in the repository.
-// Uses --limit 200 to cover typical worktree counts without excessive pagination.
+// Uses --limit 1000 (matching ListOpenPRs) to cover busy repos; the caller
+// still warns if the cap is hit so older merged-PR worktrees aren't silently missed.
 func ListMergedPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, error) {
 	result, err := runner.Run(ctx, []string{
 		"pr", "list",
 		"--json", "number,headRefName,baseRefName,state,url",
 		"--state", "merged",
-		"--limit", "200",
+		"--limit", "1000",
 	}, dir)
 	if err != nil {
 		return nil, err
+	}
+	if result == nil || result.Stdout == "" {
+		return nil, nil
 	}
 
 	var prs []PRInfo

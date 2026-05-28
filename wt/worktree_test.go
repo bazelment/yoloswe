@@ -82,6 +82,62 @@ prunable gitdir file points to non-existent location
 			},
 		},
 		{
+			name: "locked worktree with reason and pid",
+			output: `worktree /path/to/.bare
+bare
+
+worktree /path/to/agent
+HEAD abc1234567890
+branch refs/heads/worktree-agent-x
+locked claude agent agent-x (pid 3190410)
+
+`,
+			expected: []Worktree{
+				{Path: "/path/to/agent", Branch: "worktree-agent-x", Commit: "abc12345", IsLocked: true, LockReason: "claude agent agent-x (pid 3190410)", LockPID: 3190410},
+			},
+		},
+		{
+			name: "bare locked line without reason",
+			output: `worktree /path/to/.bare
+bare
+
+worktree /path/to/held
+HEAD abc1234567890
+branch refs/heads/held
+locked
+
+`,
+			expected: []Worktree{
+				{Path: "/path/to/held", Branch: "held", Commit: "abc12345", IsLocked: true, LockReason: "", LockPID: 0},
+			},
+		},
+		{
+			name: "mixed locked and unlocked",
+			output: `worktree /path/to/.bare
+bare
+
+worktree /path/to/main
+HEAD abc1234567890
+branch refs/heads/main
+
+worktree /path/to/dead
+HEAD def5678901234
+branch refs/heads/dead
+locked claude agent agent-y (pid 999)
+
+worktree /path/to/manual
+HEAD aaa1111222233
+branch refs/heads/manual
+locked manual hold no pid
+
+`,
+			expected: []Worktree{
+				{Path: "/path/to/main", Branch: "main", Commit: "abc12345"},
+				{Path: "/path/to/dead", Branch: "dead", Commit: "def56789", IsLocked: true, LockReason: "claude agent agent-y (pid 999)", LockPID: 999},
+				{Path: "/path/to/manual", Branch: "manual", Commit: "aaa11112", IsLocked: true, LockReason: "manual hold no pid", LockPID: 0},
+			},
+		},
+		{
 			name:     "empty output",
 			output:   "",
 			expected: nil,
@@ -111,6 +167,60 @@ prunable gitdir file points to non-existent location
 				if w.IsGone != exp.IsGone {
 					t.Errorf("worktrees[%d].IsGone = %v, want %v", i, w.IsGone, exp.IsGone)
 				}
+				if w.IsLocked != exp.IsLocked {
+					t.Errorf("worktrees[%d].IsLocked = %v, want %v", i, w.IsLocked, exp.IsLocked)
+				}
+				if w.LockReason != exp.LockReason {
+					t.Errorf("worktrees[%d].LockReason = %q, want %q", i, w.LockReason, exp.LockReason)
+				}
+				if w.LockPID != exp.LockPID {
+					t.Errorf("worktrees[%d].LockPID = %d, want %d", i, w.LockPID, exp.LockPID)
+				}
+			}
+		})
+	}
+}
+
+func TestParseLockPID(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   int
+	}{
+		{"claude agent agent-x (pid 3190410)", 3190410},
+		{"feature lock (pid 3312669) extra text", 3312669},
+		{"no pid here", 0},
+		{"", 0},
+		{"(pid notanumber)", 0},
+		{"(pid )", 0},
+		{"(pid 42", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.reason, func(t *testing.T) {
+			if got := parseLockPID(tt.reason); got != tt.want {
+				t.Errorf("parseLockPID(%q) = %d, want %d", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsStaleLock(t *testing.T) {
+	alive := map[int]bool{999: true}
+	m := NewManager("/tmp", "repo", WithProcessAlive(func(pid int) bool { return alive[pid] }))
+
+	tests := []struct {
+		name string
+		wt   Worktree
+		want bool
+	}{
+		{"stale dead pid", Worktree{IsLocked: true, LockPID: 3190410}, true},
+		{"live pid", Worktree{IsLocked: true, LockPID: 999}, false},
+		{"unparseable pid treated live", Worktree{IsLocked: true, LockPID: 0}, false},
+		{"not locked", Worktree{IsLocked: false, LockPID: 3190410}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := m.isStaleLock(tt.wt); got != tt.want {
+				t.Errorf("isStaleLock() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1783,13 +1893,13 @@ func TestPruneMergedPRs_RemovesWorktrees(t *testing.T) {
 	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
 	// Remove calls
 	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/voice\n"}
-	mockGit.Results["worktree remove --force "+featurePath] = &CmdResult{}
+	mockGit.Results["worktree remove --force --force "+featurePath] = &CmdResult{}
 	mockGit.Results["worktree prune"] = &CmdResult{}
 	mockGit.Results["branch -D feature/voice"] = &CmdResult{}
 	mockGit.Results["push origin --delete feature/voice"] = &CmdResult{}
 
 	mockGH := NewMockGHRunner()
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[{"number":42,"headRefName":"feature/voice","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/42"}]`,
 	}
 
@@ -1820,7 +1930,7 @@ func TestPruneMergedPRs_SkipsProtected(t *testing.T) {
 	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
 
 	mockGH := NewMockGHRunner()
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[{"number":1,"headRefName":"main","state":"MERGED"}]`,
 	}
 
@@ -1854,7 +1964,7 @@ func TestPruneMergedPRs_SkipsNoPR(t *testing.T) {
 
 	mockGH := NewMockGHRunner()
 	// No merged PRs matching feature-x
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[]`,
 	}
 
@@ -1887,7 +1997,7 @@ func TestPruneMergedPRs_DryRun(t *testing.T) {
 	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
 
 	mockGH := NewMockGHRunner()
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[{"number":42,"headRefName":"feature/voice","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/42"}]`,
 	}
 
@@ -1919,7 +2029,7 @@ func TestPruneMergedPRs_GHFailure(t *testing.T) {
 	mockGit.Results["worktree prune"] = &CmdResult{Stdout: ""}
 
 	mockGH := NewMockGHRunner()
-	mockGH.Errors["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = errors.New("auth required")
+	mockGH.Errors["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = errors.New("auth required")
 
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
@@ -1981,14 +2091,15 @@ func TestGCMergedPRsPassthrough(t *testing.T) {
 	mockGit.Results["gc"] = &CmdResult{}
 	// Remove calls for feature/done
 	mockGit.Results["branch --show-current"] = &CmdResult{Stdout: "feature/done\n"}
-	mockGit.Results["worktree remove --force "+featurePath] = &CmdResult{}
+	mockGit.Results["worktree remove --force --force "+featurePath] = &CmdResult{}
 	mockGit.Results["branch -D feature/done"] = &CmdResult{}
 	mockGit.Results["push origin --delete feature/done"] = &CmdResult{}
 
 	mockGH := NewMockGHRunner()
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[{"number":99,"headRefName":"feature/done","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/99"}]`,
 	}
+	mockGH.Results["pr list --json number,headRefName,baseRefName,state,isDraft,reviewDecision,url --state open --limit 1000"] = &CmdResult{Stdout: `[]`}
 
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
@@ -2025,13 +2136,13 @@ func TestRemoveForce(t *testing.T) {
 
 	forceFound := false
 	for _, call := range mockGit.Calls {
-		if len(call) >= 4 && call[0] == "worktree" && call[1] == "remove" && call[2] == "--force" && call[3] == wtPath {
+		if len(call) >= 5 && call[0] == "worktree" && call[1] == "remove" && call[2] == "--force" && call[3] == "--force" && call[4] == wtPath {
 			forceFound = true
 			break
 		}
 	}
 	if !forceFound {
-		t.Fatalf("Expected 'worktree remove --force' call, got calls: %v", mockGit.Calls)
+		t.Fatalf("Expected 'worktree remove --force --force' call, got calls: %v", mockGit.Calls)
 	}
 }
 
@@ -2103,4 +2214,182 @@ func TestRemoveIncludesStderr(t *testing.T) {
 	if !errors.Is(err, injectedErr) {
 		t.Errorf("Expected original error to be wrapped, got: %v", err)
 	}
+}
+
+const openPRListKey = "pr list --json number,headRefName,baseRefName,state,isDraft,reviewDecision,url --state open --limit 1000"
+
+// staleLockTestEnv builds a Manager over a temp repo with four worktrees:
+// an unlocked main, agent-dead (stale lock, no PR), agent-live (live lock),
+// and feature/INF-668 (stale lock but an OPEN PR #3362).
+func staleLockTestEnv(t *testing.T, openPRErr bool) (*Manager, *MockGitRunner, map[string]string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "test-repo")
+	bareDir := filepath.Join(repoDir, ".bare")
+	paths := map[string]string{
+		"main": filepath.Join(repoDir, "main"),
+		"dead": filepath.Join(bareDir, ".claude", "worktrees", "agent-dead"),
+		"live": filepath.Join(bareDir, ".claude", "worktrees", "agent-live"),
+		"inf":  filepath.Join(bareDir, ".claude", "worktrees", "agent-inf668"),
+	}
+	for _, p := range paths {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mockGit := NewMockGitRunner()
+	mockGit.Results["symbolic-ref refs/remotes/origin/HEAD"] = &CmdResult{Stdout: "refs/remotes/origin/main\n"}
+	mockGit.Results["worktree list --porcelain"] = &CmdResult{
+		Stdout: "worktree " + bareDir + "\nbare\n\n" +
+			"worktree " + paths["main"] + "\nHEAD abc123\nbranch refs/heads/main\n\n" +
+			"worktree " + paths["dead"] + "\nHEAD def456\nbranch refs/heads/worktree-agent-dead\nlocked claude agent agent-dead (pid 3190410)\n\n" +
+			"worktree " + paths["live"] + "\nHEAD aaa111\nbranch refs/heads/worktree-agent-live\nlocked claude agent agent-live (pid 999)\n\n" +
+			"worktree " + paths["inf"] + "\nHEAD bbb222\nbranch refs/heads/feature/INF-668-sandbox-bench\nlocked claude agent agent-inf668 (pid 3312669)\n\n",
+	}
+	mockGit.Results["worktree remove --force --force "+paths["dead"]] = &CmdResult{}
+	mockGit.Results["worktree prune"] = &CmdResult{}
+
+	mockGH := NewMockGHRunner()
+	if openPRErr {
+		mockGH.Errors[openPRListKey] = errors.New("auth required")
+	} else {
+		mockGH.Results[openPRListKey] = &CmdResult{
+			Stdout: `[{"number":3362,"headRefName":"feature/INF-668-sandbox-bench","baseRefName":"main","state":"OPEN","url":"https://github.com/org/repo/pull/3362"}]`,
+		}
+	}
+
+	output := NewOutput(&bytes.Buffer{}, false)
+	m := NewManager(tmpDir, "test-repo",
+		WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output),
+		WithProcessAlive(func(pid int) bool { return pid == 999 }), // only agent-live's PID is alive
+	)
+	return m, mockGit, paths
+}
+
+func removeCalled(mockGit *MockGitRunner, path string) bool {
+	for _, call := range mockGit.Calls {
+		if len(call) >= 5 && call[0] == "worktree" && call[1] == "remove" && call[len(call)-1] == path {
+			return true
+		}
+	}
+	return false
+}
+
+func findStaleLock(infos []StaleLockInfo, name string) *StaleLockInfo {
+	for i := range infos {
+		if infos[i].Name == name {
+			return &infos[i]
+		}
+	}
+	return nil
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPruneStaleLocks(t *testing.T) {
+	bareDir := ""
+
+	t.Run("stale no PR removed, open PR kept, live ignored", func(t *testing.T) {
+		m, mockGit, paths := staleLockTestEnv(t, false)
+		detected, removed, err := m.pruneStaleLocks(context.Background(), bareDir, true, false)
+		if err != nil {
+			t.Fatalf("pruneStaleLocks() error = %v", err)
+		}
+
+		// agent-dead: removed, no keep reason, double-force remove issued.
+		dead := findStaleLock(detected, "agent-dead")
+		if dead == nil || !dead.Removed || dead.KeepReason != "" {
+			t.Errorf("agent-dead = %+v, want Removed with empty KeepReason", dead)
+		}
+		if !contains(removed, "agent-dead") {
+			t.Errorf("removed = %v, want to contain agent-dead", removed)
+		}
+		if !removeCalled(mockGit, paths["dead"]) {
+			t.Errorf("expected double-force remove of %s, calls: %v", paths["dead"], mockGit.Calls)
+		}
+
+		// feature/INF-668: kept because PR #3362 is open; reason names the PR.
+		inf := findStaleLock(detected, "agent-inf668")
+		if inf == nil || inf.Removed || !inf.HasOpenPR || inf.PRNumber != 3362 {
+			t.Errorf("agent-inf668 = %+v, want kept with HasOpenPR PR 3362", inf)
+		}
+		if !strings.Contains(inf.KeepReason, "PR #3362") {
+			t.Errorf("agent-inf668 KeepReason = %q, want to mention PR #3362", inf.KeepReason)
+		}
+		if removeCalled(mockGit, paths["inf"]) {
+			t.Errorf("must not remove worktree with open PR")
+		}
+
+		// agent-live: live lock, never detected nor removed.
+		if findStaleLock(detected, "agent-live") != nil {
+			t.Errorf("agent-live (live lock) must not be detected")
+		}
+		if removeCalled(mockGit, paths["live"]) {
+			t.Errorf("must not remove live-locked worktree")
+		}
+
+		// Every kept entry has a reason; every removed entry has none.
+		for _, info := range detected {
+			if info.Removed && info.KeepReason != "" {
+				t.Errorf("%s removed but has KeepReason %q", info.Name, info.KeepReason)
+			}
+			if !info.Removed && info.KeepReason == "" {
+				t.Errorf("%s kept but has empty KeepReason", info.Name)
+			}
+		}
+	})
+
+	t.Run("dry-run records but does not remove", func(t *testing.T) {
+		m, mockGit, paths := staleLockTestEnv(t, false)
+		_, removed, err := m.pruneStaleLocks(context.Background(), bareDir, true, true)
+		if err != nil {
+			t.Fatalf("pruneStaleLocks() error = %v", err)
+		}
+		if !contains(removed, "agent-dead") {
+			t.Errorf("dry-run removed = %v, want to contain agent-dead", removed)
+		}
+		if removeCalled(mockGit, paths["dead"]) {
+			t.Errorf("dry-run must not issue a remove call")
+		}
+	})
+
+	t.Run("list-only detects but does not remove", func(t *testing.T) {
+		m, mockGit, paths := staleLockTestEnv(t, false)
+		detected, removed, err := m.pruneStaleLocks(context.Background(), bareDir, false, false)
+		if err != nil {
+			t.Fatalf("pruneStaleLocks() error = %v", err)
+		}
+		if len(removed) != 0 {
+			t.Errorf("list-only removed = %v, want empty", removed)
+		}
+		dead := findStaleLock(detected, "agent-dead")
+		if dead == nil || dead.Removed || !strings.Contains(dead.KeepReason, "--stale-locks") {
+			t.Errorf("agent-dead = %+v, want kept with --stale-locks hint", dead)
+		}
+		if removeCalled(mockGit, paths["dead"]) {
+			t.Errorf("list-only must not issue a remove call")
+		}
+	})
+
+	t.Run("open-PR lookup failure fails safe", func(t *testing.T) {
+		m, mockGit, paths := staleLockTestEnv(t, true)
+		_, removed, err := m.pruneStaleLocks(context.Background(), bareDir, true, false)
+		if err != nil {
+			t.Fatalf("pruneStaleLocks() error = %v", err)
+		}
+		if len(removed) != 0 {
+			t.Errorf("fail-safe removed = %v, want empty (no removals when open-PR lookup fails)", removed)
+		}
+		if removeCalled(mockGit, paths["dead"]) {
+			t.Errorf("must not remove when open-PR lookup failed")
+		}
+	})
 }

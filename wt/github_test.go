@@ -277,7 +277,7 @@ func TestIsAuthError(t *testing.T) {
 
 func TestListMergedPRs(t *testing.T) {
 	mock := NewMockGHRunner()
-	mock.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mock.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[
 			{"number":10,"headRefName":"feature-a","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/10"},
 			{"number":20,"headRefName":"feature-b","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/20"}
@@ -301,7 +301,7 @@ func TestListMergedPRs(t *testing.T) {
 
 func TestListMergedPRs_Empty(t *testing.T) {
 	mock := NewMockGHRunner()
-	mock.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 200"] = &CmdResult{
+	mock.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[]`,
 	}
 
