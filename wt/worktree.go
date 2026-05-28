@@ -1615,17 +1615,24 @@ func (m *Manager) pruneStaleLocks(ctx context.Context, bareDir string, remove, d
 	// Only the removal path needs open-PR state (to keep worktrees with live
 	// work). List-only detection skips the network call. Fail safe: if we can't
 	// tell, degrade to list-only so we never remove a worktree with live work.
+	// removeRequested records the caller's intent so a safety downgrade reports
+	// "skipped for safety" instead of "run with --stale-locks" (which the user
+	// already did).
+	removeRequested := remove
+	degradedReason := ""
 	openByBranch := make(map[string]*PRInfo)
 	if remove {
 		openPRs, err := ListOpenPRs(ctx, m.gh, bareDir)
 		switch {
 		case err != nil:
+			degradedReason = "open-PR lookup failed; skipped removal for safety"
 			m.output.Warn(fmt.Sprintf("Could not list open PRs; skipping stale-lock removal: %v", err))
 			remove = false
 		case PRListTruncated(openPRs):
 			// The open-PR list hit the gh cap, so a branch with an open PR may be
 			// absent. Removing on this partial view could destroy live work, so
 			// degrade to list-only.
+			degradedReason = fmt.Sprintf("open-PR list capped at %d; skipped removal for safety", len(openPRs))
 			m.output.Warn(fmt.Sprintf("GitHub returned %d open PRs (limit reached); skipping stale-lock removal to avoid deleting worktrees with live work", len(openPRs)))
 			remove = false
 			openByBranch = prsByHeadRef(openPRs)
@@ -1659,9 +1666,15 @@ func (m *Manager) pruneStaleLocks(ctx context.Context, bareDir string, remove, d
 		case info.HasOpenPR:
 			info.KeepReason = fmt.Sprintf("PR #%d still OPEN", info.PRNumber)
 			m.output.Warn(fmt.Sprintf("Keeping %s: lock PID %d dead but PR #%d is OPEN (live work)", info.Name, info.LockPID, info.PRNumber))
+		case !remove && removeRequested:
+			// Removal was requested but downgraded to keep the worktree safe
+			// (truncated/failed open-PR lookup). Report the downgrade rather than
+			// telling the user to pass --stale-locks, which they already did.
+			info.KeepReason = degradedReason
+			m.output.Warn(fmt.Sprintf("Keeping %s (PID %d dead): %s", info.Name, info.LockPID, degradedReason))
 		case !remove:
-			// Open PRs aren't fetched on the list-only path, so don't assert
-			// whether an open PR exists — that is evaluated only under --stale-locks.
+			// List-only path: open PRs aren't fetched, so don't assert whether an
+			// open PR exists — that is evaluated only under --stale-locks.
 			info.KeepReason = "listed only; run with --stale-locks to evaluate removal"
 			m.output.Info(fmt.Sprintf("Stale-locked (PID %d dead): %s — %q (open PR not checked; use --stale-locks to evaluate removal)", info.LockPID, info.Name, info.LockReason))
 		case dryRun:

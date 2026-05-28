@@ -2522,6 +2522,15 @@ func TestPruneStaleLocks(t *testing.T) {
 		if removeCalled(mockGit, paths["dead"]) {
 			t.Errorf("must not remove when open-PR lookup failed")
 		}
+		// Removal was requested (--stale-locks) but degraded for safety: the keep
+		// reason must explain the downgrade, not tell the user to re-pass the flag.
+		dead := findStaleLock(detected, "agent-dead")
+		if dead == nil || !strings.Contains(dead.KeepReason, "open-PR lookup failed") {
+			t.Errorf("agent-dead KeepReason = %+v, want to cite the failed lookup", dead)
+		}
+		if dead != nil && strings.Contains(dead.KeepReason, "--stale-locks") {
+			t.Errorf("degraded keep reason must not tell the user to pass --stale-locks: %q", dead.KeepReason)
+		}
 	})
 
 	t.Run("truncated open-PR list fails closed", func(t *testing.T) {
@@ -2538,6 +2547,15 @@ func TestPruneStaleLocks(t *testing.T) {
 		}
 		if removeCalled(mockGit, paths["dead"]) {
 			t.Errorf("must not remove when open-PR list is truncated")
+		}
+		// Degraded for safety, not list-only: keep reason cites the cap and does
+		// not tell the user to pass the flag they already passed.
+		dead := findStaleLock(detected, "agent-dead")
+		if dead == nil || !strings.Contains(dead.KeepReason, "capped") {
+			t.Errorf("agent-dead KeepReason = %+v, want to cite the open-PR cap", dead)
+		}
+		if dead != nil && strings.Contains(dead.KeepReason, "--stale-locks") {
+			t.Errorf("degraded keep reason must not tell the user to pass --stale-locks: %q", dead.KeepReason)
 		}
 	})
 
