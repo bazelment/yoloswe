@@ -59,7 +59,7 @@ const (
 
 	// DefaultCursorModel is the model used when BackendCursor is selected and
 	// no --model flag is provided.
-	DefaultCursorModel = "composer-2"
+	DefaultCursorModel = "composer-2.5"
 )
 
 // Config holds reviewer configuration.

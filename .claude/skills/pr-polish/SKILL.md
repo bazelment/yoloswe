@@ -162,7 +162,7 @@ Monitor({ description: "bramble codex r{ROUND}", timeout_ms: 720000, persistent:
 
 Monitor({ description: "bramble cursor r{ROUND}", timeout_ms: 720000, persistent: false,
   command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
-    $BRAMBLE_BIN code-review --backend cursor --model composer-2 \
+    $BRAMBLE_BIN code-review --backend cursor --model composer-2.5 \
     --skip-test-execution --verbose --timeout 10m \
     --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
     ${CURSOR_RESUME:+--resume-session-id \"$CURSOR_RESUME\"} \
