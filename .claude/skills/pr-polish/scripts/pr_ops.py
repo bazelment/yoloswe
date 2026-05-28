@@ -1376,11 +1376,12 @@ def round_bundle(ctx: int | str, n: int) -> dict[str, Any]:
     doesn't need to.
 
     The log dir is **attempt-scoped** (``r{n}/a{attempt}``). ``attempt``
-    is the next free integer for the round (count existing ``a*`` subdirs
-    + 1; first attempt is ``a1``). A resumed round therefore gets a fresh
-    attempt dir with no envelopes, so the Monitor barrier can never see a
-    prior attempt's stale envelope — which is why the orchestrator no
-    longer deletes envelopes between attempts.
+    is allocated by ``_next_attempt``: ``max`` of the numeric suffix of
+    existing ``a<number>`` subdirs + 1 (only ``a<number>`` matches;
+    first attempt is ``a1``; gap-safe). A resumed round therefore gets a
+    fresh attempt dir with no envelopes, so the Monitor barrier can never
+    see a prior attempt's stale envelope — which is why the orchestrator
+    no longer deletes envelopes between attempts.
     """
     import bramble_ops  # noqa: PLC0415
 
