@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2099,7 +2100,6 @@ func TestGCMergedPRsPassthrough(t *testing.T) {
 	mockGH.Results["pr list --json number,headRefName,baseRefName,state,url --state merged --limit 1000"] = &CmdResult{
 		Stdout: `[{"number":99,"headRefName":"feature/done","baseRefName":"main","state":"MERGED","url":"https://github.com/org/repo/pull/99"}]`,
 	}
-	mockGH.Results["pr list --json number,headRefName,baseRefName,state,isDraft,reviewDecision,url --state open --limit 1000"] = &CmdResult{Stdout: `[]`}
 
 	output := NewOutput(&bytes.Buffer{}, false)
 	m := NewManager(tmpDir, "test-repo", WithGitRunner(mockGit), WithGHRunner(mockGH), WithOutput(output))
@@ -2285,13 +2285,15 @@ func findStaleLock(infos []StaleLockInfo, name string) *StaleLockInfo {
 	return nil
 }
 
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
+// removedNames returns the names of stale-locked worktrees that were removed.
+func removedNames(infos []StaleLockInfo) []string {
+	var names []string
+	for _, info := range infos {
+		if info.Removed {
+			names = append(names, info.Name)
 		}
 	}
-	return false
+	return names
 }
 
 func TestPruneStaleLocks(t *testing.T) {
@@ -2299,7 +2301,7 @@ func TestPruneStaleLocks(t *testing.T) {
 
 	t.Run("stale no PR removed, open PR kept, live ignored", func(t *testing.T) {
 		m, mockGit, paths := staleLockTestEnv(t, false)
-		detected, removed, err := m.pruneStaleLocks(context.Background(), bareDir, true, false)
+		detected, err := m.pruneStaleLocks(context.Background(), bareDir, true, false)
 		if err != nil {
 			t.Fatalf("pruneStaleLocks() error = %v", err)
 		}
@@ -2309,8 +2311,8 @@ func TestPruneStaleLocks(t *testing.T) {
 		if dead == nil || !dead.Removed || dead.KeepReason != "" {
 			t.Errorf("agent-dead = %+v, want Removed with empty KeepReason", dead)
 		}
-		if !contains(removed, "agent-dead") {
-			t.Errorf("removed = %v, want to contain agent-dead", removed)
+		if !slices.Contains(removedNames(detected), "agent-dead") {
+			t.Errorf("removed = %v, want to contain agent-dead", removedNames(detected))
 		}
 		if !removeCalled(mockGit, paths["dead"]) {
 			t.Errorf("expected double-force remove of %s, calls: %v", paths["dead"], mockGit.Calls)
@@ -2349,12 +2351,12 @@ func TestPruneStaleLocks(t *testing.T) {
 
 	t.Run("dry-run records but does not remove", func(t *testing.T) {
 		m, mockGit, paths := staleLockTestEnv(t, false)
-		_, removed, err := m.pruneStaleLocks(context.Background(), bareDir, true, true)
+		detected, err := m.pruneStaleLocks(context.Background(), bareDir, true, true)
 		if err != nil {
 			t.Fatalf("pruneStaleLocks() error = %v", err)
 		}
-		if !contains(removed, "agent-dead") {
-			t.Errorf("dry-run removed = %v, want to contain agent-dead", removed)
+		if !slices.Contains(removedNames(detected), "agent-dead") {
+			t.Errorf("dry-run removed = %v, want to contain agent-dead", removedNames(detected))
 		}
 		if removeCalled(mockGit, paths["dead"]) {
 			t.Errorf("dry-run must not issue a remove call")
@@ -2363,12 +2365,12 @@ func TestPruneStaleLocks(t *testing.T) {
 
 	t.Run("list-only detects but does not remove", func(t *testing.T) {
 		m, mockGit, paths := staleLockTestEnv(t, false)
-		detected, removed, err := m.pruneStaleLocks(context.Background(), bareDir, false, false)
+		detected, err := m.pruneStaleLocks(context.Background(), bareDir, false, false)
 		if err != nil {
 			t.Fatalf("pruneStaleLocks() error = %v", err)
 		}
-		if len(removed) != 0 {
-			t.Errorf("list-only removed = %v, want empty", removed)
+		if names := removedNames(detected); len(names) != 0 {
+			t.Errorf("list-only removed = %v, want empty", names)
 		}
 		dead := findStaleLock(detected, "agent-dead")
 		if dead == nil || dead.Removed || !strings.Contains(dead.KeepReason, "--stale-locks") {
@@ -2381,12 +2383,12 @@ func TestPruneStaleLocks(t *testing.T) {
 
 	t.Run("open-PR lookup failure fails safe", func(t *testing.T) {
 		m, mockGit, paths := staleLockTestEnv(t, true)
-		_, removed, err := m.pruneStaleLocks(context.Background(), bareDir, true, false)
+		detected, err := m.pruneStaleLocks(context.Background(), bareDir, true, false)
 		if err != nil {
 			t.Fatalf("pruneStaleLocks() error = %v", err)
 		}
-		if len(removed) != 0 {
-			t.Errorf("fail-safe removed = %v, want empty (no removals when open-PR lookup fails)", removed)
+		if names := removedNames(detected); len(names) != 0 {
+			t.Errorf("fail-safe removed = %v, want empty (no removals when open-PR lookup fails)", names)
 		}
 		if removeCalled(mockGit, paths["dead"]) {
 			t.Errorf("must not remove when open-PR lookup failed")
