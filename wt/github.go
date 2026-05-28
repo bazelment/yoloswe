@@ -141,17 +141,34 @@ func GetPRByBranch(ctx context.Context, runner GHRunner, branch, dir string) (*P
 	return &info, nil
 }
 
+// prListLimit caps `gh pr list` results (gh's default is 30). A caller that
+// relies on the list being exhaustive must treat len(prs) >= prListLimit as
+// truncated — see PRListTruncated.
+const prListLimit = 1000
+
+// PRListTruncated reports whether a PR list returned by ListOpenPRs/ListMergedPRs
+// may be incomplete because it hit prListLimit. Callers that make destructive
+// decisions on the list (e.g. "no open PR, safe to delete") must fail closed
+// when this is true rather than act on partial data.
+func PRListTruncated(prs []PRInfo) bool {
+	return len(prs) >= prListLimit
+}
+
 // ListOpenPRs returns all open PRs in the repository with full details.
-// Uses --limit 1000 to avoid gh's default cap of 30 results.
+// Uses --limit prListLimit to avoid gh's default cap of 30 results; callers that
+// need an exhaustive list must check PRListTruncated.
 func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, error) {
 	result, err := runner.Run(ctx, []string{
 		"pr", "list",
 		"--json", "number,headRefName,baseRefName,state,isDraft,reviewDecision,url",
 		"--state", "open",
-		"--limit", "1000",
+		"--limit", strconv.Itoa(prListLimit),
 	}, dir)
 	if err != nil {
 		return nil, err
+	}
+	if result == nil || result.Stdout == "" {
+		return nil, nil
 	}
 
 	var prs []PRInfo
@@ -163,16 +180,20 @@ func ListOpenPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, er
 }
 
 // ListMergedPRs returns recently merged PRs in the repository.
-// Uses --limit 200 to cover typical worktree counts without excessive pagination.
+// Uses --limit prListLimit (matching ListOpenPRs) to cover busy repos; the caller
+// still warns via PRListTruncated so older merged-PR worktrees aren't silently missed.
 func ListMergedPRs(ctx context.Context, runner GHRunner, dir string) ([]PRInfo, error) {
 	result, err := runner.Run(ctx, []string{
 		"pr", "list",
 		"--json", "number,headRefName,baseRefName,state,url",
 		"--state", "merged",
-		"--limit", "200",
+		"--limit", strconv.Itoa(prListLimit),
 	}, dir)
 	if err != nil {
 		return nil, err
+	}
+	if result == nil || result.Stdout == "" {
+		return nil, nil
 	}
 
 	var prs []PRInfo

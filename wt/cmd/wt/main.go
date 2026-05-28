@@ -903,15 +903,19 @@ var gcCmd = &cobra.Command{
 
 1. Prunes stale worktree metadata (git worktree prune)
 2. With --merged, removes worktrees whose GitHub PRs are merged
-3. Fetches and prunes remote tracking refs (git fetch --prune)
-4. Detects orphaned local branches (no corresponding worktree)
-5. Optionally deletes orphaned local branches (-D)
-6. Optionally deletes corresponding remote branches (-D -r)
-7. Garbage collects loose objects (git gc)
+3. With --stale-locks, removes worktrees whose lock references a dead process
+   and which have no open PR (e.g. crashed Claude-agent worktrees)
+4. Fetches and prunes remote tracking refs (git fetch --prune)
+5. Detects orphaned local branches (no corresponding worktree)
+6. Optionally deletes orphaned local branches (-D)
+7. Optionally deletes corresponding remote branches (-D -r)
+8. Garbage collects loose objects (git gc)
 
 Protected branches (main, master, default branch) are never deleted.
 
-Without -D, orphaned branches are listed but not deleted.`,
+Without -D, orphaned branches are listed but not deleted.
+Stale-locked worktrees are listed without --stale-locks; a stale-locked
+worktree whose branch has an OPEN PR is always kept (live work).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := getManager()
 		if err != nil {
@@ -924,12 +928,14 @@ Without -D, orphaned branches are listed but not deleted.`,
 		ctx := context.Background()
 
 		merged, _ := cmd.Flags().GetBool("merged")
+		staleLocks, _ := cmd.Flags().GetBool("stale-locks")
 
 		opts := wt.GCOptions{
 			DryRun:         dryRun,
 			DeleteBranches: deleteBranches,
 			DeleteRemote:   deleteRemote,
 			MergedPRs:      merged,
+			StaleLocks:     staleLocks,
 		}
 
 		_, err = m.GC(ctx, opts)
@@ -942,6 +948,7 @@ func init() {
 	gcCmd.Flags().BoolP("delete-branches", "D", false, "Delete orphaned local branches")
 	gcCmd.Flags().BoolP("remote", "r", false, "Also delete remote branches (requires -D)")
 	gcCmd.Flags().Bool("merged", false, "Also remove worktrees whose GitHub PRs are merged")
+	gcCmd.Flags().Bool("stale-locks", false, "Remove worktrees with stale (dead-PID) locks and no open PR (e.g. crashed agent worktrees)")
 }
 
 // shellenvCmd: wt shellenv
