@@ -301,17 +301,29 @@ Bramble snapshots the working tree at launch — uncommitted changes won't be re
 
 ### b) Launch bramble + lint gate
 
-Define `$LOG_DIR=$STATE_DIR/r$ROUND/a$ATTEMPT/`, where `$ATTEMPT` is the next free attempt index for this round — count the existing `a*` subdirs under `$STATE_DIR/r$ROUND/` and add 1 (so the first attempt is `a1`). Then create it:
+`$LOG_DIR` is **attempt-scoped** (`$STATE_DIR/r$ROUND/a$ATTEMPT/`) and is computed *for you* by `round-bundle` (below) — read it from the bundle's `.log_dir`, do **not** hand-roll the attempt index. `round-bundle` derives the next free attempt by counting existing `a*` subdirs + 1 (first attempt is `a1`) but does **not** create the dir, so the orchestrator `mkdir`s exactly the path the bundle returns. This is the single source of truth for `$LOG_DIR` and its `envelope_paths`; computing the attempt index a second time here would diverge from the bundle (a manual `mkdir r$ROUND/a1` before the bundle call would push the bundle's count to `a2`, and the Monitors would write to one dir while the barrier read another).
+
+**Call `round-bundle` first** — it computes `$LOG_DIR`, the `--goal` text, and per-backend resume ids in one shot. Read `$LOG_DIR` from `.log_dir` (and the per-backend envelope paths from `.envelope_paths`), then `mkdir` it:
 
 ```bash
+BUNDLE=$(python3 $SKILL_DIR/scripts/pr_ops.py round-bundle "$CTX" {ROUND})
+LOG_DIR=$(echo "$BUNDLE" | jq -r .log_dir)
+GOAL=$(echo "$BUNDLE" | jq -r .goal_text)
+CODEX_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.codex')
+CURSOR_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.cursor')
+# round-bundle threads its own PR_SUMMARY-free goal; on round 1 you still
+# want `$PR_SUMMARY` as the goal, so override:
+[ "{ROUND}" = "1" ] && GOAL="$PR_SUMMARY"
 mkdir -p "$LOG_DIR"
 ```
 
-The round dir is **attempt-scoped**, so a resumed round (post-compaction, or after an interrupted Monitor) gets a *fresh* `a$ATTEMPT` dir that contains no envelopes. The barrier below checks `[ -s … ]`; because the fresh dir is empty, the barrier can never see a prior attempt's envelope, so triage can't consume a stale verdict and skip a reviewer that's still actually running. No cleanup step is needed.
+The envelope paths the Monitors write to (and the barrier + triage read) are `$LOG_DIR/<backend>-envelope.json` — identical to `.envelope_paths.<backend>` from the bundle. Use either; they're the same strings.
+
+Because the dir is attempt-scoped, a resumed round (post-compaction, or after an interrupted Monitor) gets a *fresh* `a$ATTEMPT` dir that contains no envelopes. The barrier below checks `[ -s … ]`; because the fresh dir is empty, the barrier can never see a prior attempt's envelope, so triage can't consume a stale verdict and skip a reviewer that's still actually running. No cleanup step is needed.
 
 **A note on `$LOG_DIR` and related orchestrator-state variables.** `$LOG_DIR`, `$STATE_DIR`, `$CTX`, `$ROUND`, `$SKILL_DIR`, `$IS_NEW_SERIES`, `$USE_GEMINI`, `$PR_NUMBER`, `$REPO`, `$SCOPE_HINTS`, `$GOAL`, `$CODEX_RESUME` (etc.) are orchestrator state held in the agent's working memory, not shell environment that persists across Bash tool calls. Every Bash call is a fresh shell with none of these set. When the skill shows a snippet that references one of them, the orchestrator must **substitute the concrete value** into the command string before issuing the Bash call (so `--envelope-file "$LOG_DIR/codex-envelope.json"` becomes `--envelope-file "/home/.../yoloswe-255/r3/a1/codex-envelope.json"`). The `$VAR` notation in this file is a templating placeholder, not a runtime variable.
 
-**First, compute the scope-hints file.** `scope_gate.py` walks the diff, enumerates co-located test files, detects multi-package PRs, and writes `$STATE_DIR/scope-hints.json`. `bramble code-review --scope-hints-file <path>` widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. Run once per round, **before** arming bramble Monitors. Always exits 0.
+**Next, compute the scope-hints file.** `scope_gate.py` walks the diff, enumerates co-located test files, detects multi-package PRs, and writes `$STATE_DIR/scope-hints.json`. `bramble code-review --scope-hints-file <path>` widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. Run once per round, **before** arming bramble Monitors. Always exits 0.
 
 ```bash
 SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
@@ -320,19 +332,7 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py \
 
 Then arm Monitors in the same turn — codex + cursor + lint always, plus gemini when `--gemini`. Bramble Monitors pass `--scope-hints-file "$SCOPE_HINTS"`; lint has its own diff walk.
 
-Compute the round's `--goal` text and per-backend resume id. Either run the helpers individually, or pull everything in one call via `round-bundle` and split with `jq`:
-
-```bash
-BUNDLE=$(python3 $SKILL_DIR/scripts/pr_ops.py round-bundle "$CTX" {ROUND})
-GOAL=$(echo "$BUNDLE" | jq -r .goal_text)
-CODEX_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.codex')
-CURSOR_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.cursor')
-# round-bundle threads its own PR_SUMMARY-free goal; on round 1 you still
-# want `$PR_SUMMARY` as the goal, so override:
-[ "{ROUND}" = "1" ] && GOAL="$PR_SUMMARY"
-```
-
-Or the long form, one helper per piece:
+The long form, if you'd rather run one helper per piece — derive `$LOG_DIR` the same way `round-bundle` does (next free `a*` index under `$STATE_DIR/r$ROUND/`, first attempt `a1`) and `mkdir` it before any snippet writes there:
 
 ```bash
 GOAL=$(python3 $SKILL_DIR/scripts/bramble_ops.py goal {ROUND} \
