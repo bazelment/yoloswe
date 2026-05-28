@@ -150,10 +150,10 @@ class TestSafePaths(unittest.TestCase):
                 # File at "-evil/foo.go" → package dir "-evil" must
                 # arrive at the subprocess as "./-evil".
                 lint_gate.run_golangci(["pkg/foo.go", "-evil/bar.go"])
-        # golangci args: golangci-lint run --out-format=json <pkg1> <pkg2>
+        # golangci args: golangci-lint run --output.json.path stdout <pkg1> <pkg2>
         cmd = captured[0]
-        # Package dirs come after --out-format=json.
-        pkg_idx = cmd.index("--out-format=json") + 1
+        # Package dirs come after the "--output.json.path stdout" pair.
+        pkg_idx = cmd.index("--output.json.path") + 2
         pkgs = cmd[pkg_idx:]
         # The "-evil" package must be rewritten with "./".
         self.assertIn("./-evil", pkgs)
@@ -278,8 +278,9 @@ class TestRunGolangci(unittest.TestCase):
             with patch.object(lint_gate, "run", side_effect=capture):
                 lint_gate.run_golangci(["pkg/a.go", "pkg/b.go", "pkg2/c.go"])
         self.assertEqual(len(captured), 1)
-        # First three tokens are the binary + flags; trailing tokens are pkgs.
-        pkgs = sorted(captured[0][3:])
+        # Leading tokens: golangci-lint run --output.json.path stdout;
+        # trailing tokens are the package dirs.
+        pkgs = sorted(captured[0][4:])
         self.assertEqual(pkgs, ["pkg", "pkg2"])
 
     def test_known_linters_severity_mapping(self) -> None:
@@ -315,6 +316,36 @@ class TestRunGolangci(unittest.TestCase):
         # gosec → high (security scanner), errcheck → medium (bug-finder),
         # gofmt → low, unknown → low (conservative default).
         self.assertEqual([g["severity"] for g in got], ["high", "medium", "low", "low"])
+
+    def test_parses_json_with_trailing_summary_line(self) -> None:
+        # golangci-lint v2 prints the JSON report followed by a
+        # human-readable "N issues." line on stdout. json.loads() of the
+        # whole buffer raises "Extra data"; raw_decode() reads the leading
+        # report and ignores the trailer. Without this, a clean run would
+        # be misreported as a tooling failure. Pins the raw_decode fix:
+        # reverting to json.loads() fails this test.
+        gci_out = (
+            json.dumps(
+                {
+                    "Issues": [
+                        {
+                            "FromLinter": "errcheck",
+                            "Text": "unchecked error",
+                            "Pos": {"Filename": "a.go", "Line": 4},
+                        }
+                    ]
+                }
+            )
+            + "\n0 issues.\n"
+        )
+        with patch.object(lint_gate, "_have", return_value=True):
+            with patch.object(lint_gate, "run", side_effect=_stub_run(gci_out)):
+                got = lint_gate.run_golangci(["a.go"])
+        # The trailing summary is ignored; the real issue is parsed and
+        # mapped, not swallowed by a spurious tooling-failure row.
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["severity"], "medium")
+        self.assertNotIn("tooling failure", got[0]["message"])
 
     def test_blank_stdout_nonzero_rc_emits_tooling_failure(self) -> None:
         # Mirrors run_eslint's tooling-failure contract: rc != 0 with
@@ -486,6 +517,31 @@ class TestEnvelopePathFor(unittest.TestCase):
             lint_gate.envelope_path_for(sd, 2),
             Path("/tmp/x/r2/lint-envelope.json"),
         )
+
+    def test_log_dir_override_wins(self) -> None:
+        # When the orchestrator passes the attempt-scoped log dir, the
+        # envelope must land there (next to codex/cursor), not in the
+        # round dir — otherwise the Monitor barrier hangs on a lint
+        # envelope that was written one dir up.
+        sd = Path("/tmp/x")
+        log_dir = Path("/tmp/x/r2/a3")
+        self.assertEqual(
+            lint_gate.envelope_path_for(sd, 2, log_dir=log_dir),
+            Path("/tmp/x/r2/a3/lint-envelope.json"),
+        )
+
+    def test_main_writes_to_log_dir_when_given(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            log_dir = Path(td) / "r1" / "a1"
+            with patch.object(lint_gate, "changed_files", return_value=[]):
+                with patch.object(lint_gate, "detect_base_branch", return_value="main"):
+                    rc = lint_gate.main(
+                        ["--state-dir", td, "--round", "1", "--log-dir", str(log_dir)]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertTrue((log_dir / "lint-envelope.json").exists())
+            # Nothing leaks into the round dir.
+            self.assertFalse((Path(td) / "r1" / "lint-envelope.json").exists())
 
 
 class TestMainEndToEnd(unittest.TestCase):

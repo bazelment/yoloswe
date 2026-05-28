@@ -2034,13 +2034,63 @@ class TestRoundBundle(unittest.TestCase):
             out = pr_ops.round_bundle(99, 1)
         self.assertIn("state_dir", out)
         self.assertIn("log_dir", out)
-        self.assertTrue(out["log_dir"].endswith("/r1"))
+        # Log dir is attempt-scoped: first attempt of round 1 is r1/a1.
+        self.assertTrue(out["log_dir"].endswith("/r1/a1"))
         self.assertEqual(out["head_before"], "head-sha")
         self.assertIn("envelope_paths", out)
         for backend in ("codex", "cursor", "gemini", "lint"):
             self.assertIn(backend, out["envelope_paths"])
+            # Envelope paths inherit the attempt-scoped log dir.
+            self.assertTrue(
+                out["envelope_paths"][backend].endswith(
+                    f"/r1/a1/{backend}-envelope.json"
+                )
+            )
             # All resume ids empty on a fresh run (no prior state).
             self.assertEqual(out["resume_ids"].get(backend, ""), "")
+
+    def test_attempt_index_increments_on_resumed_round(self) -> None:
+        # Simulate a prior attempt by creating the r1/a1 dir, then confirm
+        # the next round-bundle for the same round lands on a2 (fresh dir,
+        # so the Monitor barrier can't see the prior attempt's envelope).
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return _common.RunResult(stdout="head-sha\n", stderr="", returncode=0)
+            return _common.RunResult(stdout="", stderr="", returncode=1)
+        with patch.object(pr_ops, "run", side_effect=fake_run):
+            out1 = pr_ops.round_bundle(99, 1)
+            self.assertTrue(out1["log_dir"].endswith("/r1/a1"))
+            # Materialize the first attempt dir as the orchestrator would.
+            Path(out1["log_dir"]).mkdir(parents=True, exist_ok=True)
+            out2 = pr_ops.round_bundle(99, 1)
+        self.assertTrue(out2["log_dir"].endswith("/r1/a2"))
+        for backend in ("codex", "cursor", "gemini", "lint"):
+            self.assertTrue(
+                out2["envelope_paths"][backend].endswith(
+                    f"/r1/a2/{backend}-envelope.json"
+                )
+            )
+
+    def test_next_attempt_empty_round_is_one(self) -> None:
+        self.assertEqual(pr_ops._next_attempt(self.tmp, 1), 1)
+
+    def test_next_attempt_only_counts_numbered_attempt_dirs(self) -> None:
+        # A non-attempt dir whose name merely starts with `a` must not
+        # bump the index — otherwise the orchestrator skips an attempt
+        # number and a fresh review could land in a dir name that an
+        # unrelated dir already pushed past.
+        round_dir = self.tmp / "r1"
+        (round_dir / "a1").mkdir(parents=True)
+        (round_dir / "archive").mkdir()
+        (round_dir / "aux").mkdir()
+        self.assertEqual(pr_ops._next_attempt(self.tmp, 1), 2)
+
+    def test_next_attempt_uses_max_not_count(self) -> None:
+        # With a gap (a1 deleted, a2 kept) the next index must be a free
+        # one (3), not count+1 (2) which would collide with the live a2.
+        round_dir = self.tmp / "r1"
+        (round_dir / "a2").mkdir(parents=True)
+        self.assertEqual(pr_ops._next_attempt(self.tmp, 1), 3)
 
     def test_returns_goal_text_on_round_two_with_prior_actions(self) -> None:
         pr_ops.state_append_round(99, 1, "sha1", verify_head=False)

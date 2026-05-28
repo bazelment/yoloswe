@@ -14,12 +14,16 @@ a one-line note to stderr and skips it. We never fail the run on a missing
 linter — that would tax users who don't have ruff or golangci-lint installed.
 
 Output:
-    ``<state_dir>/r<round>/lint-envelope.json`` — a bramble-shaped envelope
-    consumed by ``bramble_ops.parse_envelope`` / ``triage`` via
-    ``--stream lint=...``.
+    A bramble-shaped envelope consumed by ``bramble_ops.parse_envelope`` /
+    ``triage`` via ``--stream lint=...``. With ``--log-dir`` (the canonical
+    /pr-polish call) it is written to ``<log_dir>/lint-envelope.json`` — the
+    attempt-scoped ``r<round>/a<attempt>/`` dir the bramble Monitors also use,
+    so the barrier and triage find all envelopes in one place. Without it,
+    falls back to ``<state_dir>/r<round>/lint-envelope.json``.
 
 Usage:
-    python3 lint_gate.py --state-dir <dir> --round <n> [--base BRANCH]
+    python3 lint_gate.py --state-dir <dir> --round <n> \
+        [--log-dir <dir>] [--base BRANCH]
 
 This module never invokes bramble. It's pure subprocess + JSON marshalling.
 """
@@ -167,10 +171,12 @@ def run_ruff(paths: list[str]) -> list[dict[str, Any]]:
 
 
 def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
-    """Run ``golangci-lint run --out-format=json`` and normalize.
+    """Run ``golangci-lint run --output.json.path stdout`` and normalize.
 
     golangci-lint targets packages, not files; we pass the directories of the
-    changed Go files so the linter can resolve imports correctly.
+    changed Go files so the linter can resolve imports correctly. The
+    ``--output.json.path stdout`` form is the golangci-lint v2 spelling; the
+    pre-v2 ``--out-format=json`` flag was removed in v2 and errors out.
     """
     paths = _safe_paths(paths)
     if not paths or not _have("golangci-lint"):
@@ -178,14 +184,21 @@ def run_golangci(paths: list[str]) -> list[dict[str, Any]]:
     pkgs = _safe_paths(sorted({str(Path(p).parent) or "." for p in paths}))
     if not pkgs:
         return []
-    res = run(["golangci-lint", "run", "--out-format=json", *pkgs], check=False)
+    res = run(
+        ["golangci-lint", "run", "--output.json.path", "stdout", *pkgs],
+        check=False,
+    )
     stderr = (res.stderr or "").strip()
     if not res.stdout.strip():
         if res.returncode != 0 or stderr:
             return [_tooling_failure("golangci-lint", res.returncode, stderr)]
         return []
+    # golangci-lint v2 emits the JSON report followed by a human-readable
+    # summary line (e.g. "0 issues.") on stdout, so json.loads() of the
+    # whole buffer raises "Extra data". raw_decode() reads just the leading
+    # JSON object and ignores the trailing text.
     try:
-        report = json.loads(res.stdout)
+        report, _ = json.JSONDecoder().raw_decode(res.stdout.lstrip())
     except json.JSONDecodeError:
         return [_tooling_failure("golangci-lint", res.returncode, stderr or "non-JSON stdout")]
     if not isinstance(report, dict):
@@ -287,10 +300,26 @@ def build_envelope(issues: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def envelope_path_for(state_dir: Path, round_: int) -> Path:
-    """``<state_dir>/r<n>/lint-envelope.json`` — same layout as the LLM-backend
-    envelopes so the orchestrator's ``--stream lint=…`` wiring is symmetrical.
+def envelope_path_for(
+    state_dir: Path, round_: int, *, log_dir: Path | None = None
+) -> Path:
+    """Where the lint envelope is written.
+
+    When ``log_dir`` is given it wins: the envelope lands at
+    ``<log_dir>/lint-envelope.json``. This is the attempt-scoped
+    ``r<n>/a<attempt>`` dir the orchestrator also hands the bramble
+    Monitors via ``--envelope-file`` — keeping lint in the same dir is
+    what lets the Monitor barrier and triage find it. Without it the
+    Monitors read ``r<n>/a<attempt>/lint-envelope.json`` while lint wrote
+    ``r<n>/lint-envelope.json``, and the barrier hangs on a file lint
+    never created there.
+
+    Falling back to ``<state_dir>/r<n>/lint-envelope.json`` (no attempt
+    component) preserves the older call shape for any caller that hasn't
+    adopted attempt dirs.
     """
+    if log_dir is not None:
+        return log_dir / "lint-envelope.json"
     return state_dir / f"r{round_}" / "lint-envelope.json"
 
 
@@ -320,12 +349,21 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="lint_gate")
     p.add_argument("--state-dir", required=True, help="<state_dir> from pr_ops identify")
     p.add_argument("--round", dest="round_", type=int, required=True)
+    p.add_argument(
+        "--log-dir",
+        default=None,
+        help="attempt-scoped log dir (r<n>/a<attempt>) — when given, the "
+        "envelope is written here instead of the round dir, matching the "
+        "path the orchestrator hands the bramble Monitors",
+    )
     p.add_argument("--base", default=None, help="base branch (default: auto-detect)")
     args = p.parse_args(argv)
 
     base = args.base or detect_base_branch()
     state_dir = Path(args.state_dir)
-    out_path = envelope_path_for(state_dir, args.round_)
+    log_dir = Path(args.log_dir) if args.log_dir else None
+    out_path = envelope_path_for(state_dir, args.round_, log_dir=log_dir)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # changed_files uses run(check=False) and returns [] on any git
     # failure — never raises — so no CommandError to catch here.
