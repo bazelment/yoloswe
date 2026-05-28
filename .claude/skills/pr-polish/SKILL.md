@@ -1,7 +1,7 @@
 ---
 name: pr-polish
 description: Fully autonomous PR polish loop. Runs N rounds of local bramble review (codex + cursor, optionally + gemini), folds in any existing PR comments and CI failures as round-1 input, fixes findings locally, pushes once at the end.
-argument-hint: "[--rounds N] [--gemini]"
+argument-hint: "[--rounds N] [--gemini] [--ask]"
 disable-model-invocation: true
 ---
 
@@ -28,6 +28,7 @@ Shell plumbing lives in Python helpers under `scripts/`. Use `SKILL_DIR=.claude/
 |---|---|---|
 | `--rounds N` | `5` | Run up to N additional rounds from current state. Resuming at `current_round=5` with `--rounds 2` runs rounds 6 and 7. `--rounds 0` is a no-op. The budget is per-invocation: re-invoking with the same `--rounds` after a converged or capped exit gives N fresh rounds. |
 | `--gemini` | off | Also run a third reviewer with `--backend gemini --model gemini-3-flash-preview`. A finding agreed on by ≥2 sources counts as consensus. |
+| `--ask` / `--interactive` | off | Opt the three `AskUserQuestion` gates back in. Without it (the default) the loop is non-interactive and never blocks the human — see "Non-interactive mode". `--interactive` is an accepted alias. |
 
 PR/branch context is auto-detected by `pr_ops.py identify`.
 
@@ -54,15 +55,29 @@ Class-level fixes beyond the cited line are logged in `comment_actions` as `sour
 
 If the last 2 rounds were low-only, treat as converged regardless of remaining `--rounds` budget — the streak rule wins over the budget. The motivation: the reviewer is incentivized to find *something* every round, and one persistent low keeps the loop alive forever otherwise. After two rounds where everything triaged was low/nit, the next round of fixes is rounding error.
 
-**Hard stop after N additional rounds.** When `additional_rounds_run` reaches `--rounds` without convergence, produce Final Summary, then `AskUserQuestion` whether to continue.
+**Hard stop after N additional rounds.** When `additional_rounds_run` reaches `--rounds` without convergence, produce Final Summary, then `AskUserQuestion` whether to continue *(non-interactive default: just stop with `capped-at-max`; see Non-interactive mode)*.
 
 ## Auto-decision rules
 
-Bias for action and your own judgement with research. Only three things pause the loop with `AskUserQuestion`:
+Bias for action and your own judgement with research. Only three things pause the loop with `AskUserQuestion` **— and only when `--ask` is passed** (see "Non-interactive mode" for the default behavior at each gate):
 
 1. **Integrity gate** — stale state file with PR mismatch (Step 0.5).
 2. **Budget gate** — `--rounds N` reached without convergence.
 3. **Regression gate** — **unverified** `spiral_matches` non-empty. Single-source spirals auto-demote to `batch_stale` when *either* of two heuristics fires: (a) the cited evidence is no longer at HEAD within ±10 lines of the cited line, or (b) the cited file:line falls inside a hunk that the **immediately-prior** round modified (read from `head_before..head_after` of round N-1 only — not any ancestor round, which would let a long audit suppress real regressions on any file an early round happened to touch). Both are pure git/state lookups, no judgment. Multi-source spirals (≥2 backends agree) always escalate. The audit row records `action: "stale"` with the demote reason. Cost of being wrong: a real regression that gets mis-demoted will resurface next round, and the heuristic catches it on the second occurrence.
+
+### Non-interactive mode
+
+**This is the DEFAULT.** A human running this autonomous tool is never blocked — not by a question, not by a delete confirmation. The three `AskUserQuestion` gates above only fire when `--ask` (canonical) / `--interactive` (alias) is passed. Without that flag, each gate takes a deterministic action instead of asking. This is the single source of truth; the gate sites below only *point* here.
+
+**Scope:** this changes only the three `AskUserQuestion` gates. The `dirty-tree-preflight` (Step 1) and `sync-conflict` (Step 1) exits already don't ask and are unaffected.
+
+| Gate | Non-interactive action (default) | Exit reason |
+|---|---|---|
+| Integrity (`pr_number` mismatch) | **ABORT.** `state-mark-complete` on the *current* ctx, mutate nothing else, and write a summary citing both `pr_number`s + the state-file path. Do **not** discard or tombstone the foreign state — its contract is "never deleted", and a `pr_number` mismatch is the rarer "internally inconsistent file" signal (the heartbeat-stale path already handles the normal stale-run case silently). Stopping is the only safe unattended action. | `pr-mismatch-abort` |
+| Budget (rounds exhausted) | **STOP.** Run Step 4 push + Step 5 summary, then stop — natural fall-through of `while additional_rounds_run < --rounds`. Re-invoking gives a fresh `--rounds` budget by design. | `capped-at-max` |
+| Regression / spiral | **Re-fix once, escalate on the second recurrence.** First spiral of a `(file, line, topic)` key: re-fix once and log the `comment_actions` row with `action: "fixed"` **plus `spiral_refix: true`**. Second occurrence (the same key returns as a `spiral_match` later AND a prior `comment_actions` row for that key already carries `spiral_refix: true`): STOP and surface the findings in the summary. **Multi-source spirals (≥2 backends) escalate immediately even on the first occurrence** — two reviewers agreeing a fix didn't take is strong thrash signal. | `spiral-escalated` (on the 2nd recurrence, or the 1st if multi-source) |
+
+**Spiral mechanism needs no Python change.** Triage detects a spiral by comparing the new finding's key against the prior round's `fixed` keys (`prior_fixed_keys`). A re-fix logged as `fixed` re-triggers detection next round if the finding recurs. To distinguish a first attempt from a second recurrence, scan the prior `comment_actions` for a same-key row carrying `spiral_refix: true` — existing state, read-only.
 
 ## State tracking
 
@@ -144,6 +159,7 @@ Schema:
   - `stale` — cited code no longer exists.
   - `pre_existing` — `source: "ci"` only. Failure also fails on base branch; `reason` cites `ci-compare-base` output. Counts as skipped.
   - `flake` — `source: "ci"` only. `reason` names the `flake_reason` (ETXTBSY, bazel cache, `ci_deadline`). Counts as skipped.
+- `spiral_refix` (optional, bool): set `true` on a `fixed` row when this fix is the non-interactive re-fix of a spiralling `(file, line, topic)` key (see "Non-interactive mode"). Marks the first re-fix attempt so a same-key recurrence next round escalates instead of re-fixing again. Read-only state — the orchestrator writes it, no Python validation.
 - `invariant` (optional, v2): name of the class-level rule the reviewer claimed when it emitted an `invariant + sites[]` finding. Surfaced verbatim from the envelope. Reviewer-emitted; the orchestrator does not synthesize. Used by the next round's goal-builder to remind the resumed reviewer to fold new sites into the same finding rather than re-flag.
 
 **`sufficiency_claims` (optional, v2)**: per-backend dict capturing each reviewer's self-assessment for this round. Each entry: `{"is_confident_complete": bool, "evidence": "..."}`. Populated by `state-finalize-round` when the envelope's `review.sufficiency` is present. Absence means the reviewer didn't claim either way — do not infer. The orchestrator surfaces consensus claims in round summaries and final reports as audit-trail context; this is NOT a new exit gate, the existing convergence rules still decide.
@@ -198,12 +214,12 @@ IS_NEW_SERIES=$(python3 $SKILL_DIR/scripts/pr_ops.py state-is-new-series $CTX $R
 Compare against `git rev-parse HEAD`:
 
 - **No state file**: fresh run. Proceed.
-- **`pr_number` mismatch**: integrity gate. `AskUserQuestion` whether to discard.
+- **`pr_number` mismatch**: integrity gate. `AskUserQuestion` whether to discard *(non-interactive default: abort with `pr-mismatch-abort`, mutate nothing; see Non-interactive mode)*.
 - **`is_heartbeat_stale: true`** AND `completed: false` (heartbeat older than 2h, or missing): prior run abandoned. Tombstone with `state-mark-abandoned $CTX` and start fresh on current HEAD. Announce in one line; do not ask.
 - **HEAD matches `last_commit_at_round_start`** (heartbeat fresh): prior round interrupted. Resume in-progress round.
 - **HEAD differs from `last_commit_at_round_start`** (heartbeat fresh): prior round committed or user made manual changes. Auto-start next round on current HEAD. Re-invocation is the user's signal that they want another round. The new `state-append-round` clears any stale `completed: true` set by a prior `state-mark-complete`.
 
-Budget tracking is **per-invocation**, not derived from `current_round`. Initialize `additional_rounds_run = 0` at the top of this invocation; increment after every finalized round. The budget gate hard-stops when `additional_rounds_run >= --rounds` and `AskUserQuestion`s to authorize more rounds. State persistence does not record this counter — re-invoking after a converged or capped exit gives a fresh `--rounds` budget by definition.
+Budget tracking is **per-invocation**, not derived from `current_round`. Initialize `additional_rounds_run = 0` at the top of this invocation; increment after every finalized round. The budget gate hard-stops when `additional_rounds_run >= --rounds` and `AskUserQuestion`s to authorize more rounds *(non-interactive default: just stop with `capped-at-max`; see Non-interactive mode)*. State persistence does not record this counter — re-invoking after a converged or capped exit gives a fresh `--rounds` budget by definition.
 
 With a state file present, trust it and apply the rules — heartbeat distinguishes recent compaction from real abandonment. With no state file, start fresh. Do not ask.
 
@@ -285,16 +301,15 @@ Bramble snapshots the working tree at launch — uncommitted changes won't be re
 
 ### b) Launch bramble + lint gate
 
-Create or reuse `$LOG_DIR=$STATE_DIR/r$ROUND/`, then **delete any stale envelope files**:
+Define `$LOG_DIR=$STATE_DIR/r$ROUND/a$ATTEMPT/`, where `$ATTEMPT` is the next free attempt index for this round — count the existing `a*` subdirs under `$STATE_DIR/r$ROUND/` and add 1 (so the first attempt is `a1`). Then create it:
 
 ```bash
 mkdir -p "$LOG_DIR"
-rm -f "$LOG_DIR"/*-envelope.json
 ```
 
-On a resumed round (post-compaction, or after an interrupted Monitor) the directory exists and may already contain a non-empty envelope from the prior attempt. The barrier below checks `[ -s … ]`, which is satisfied by a stale file just as readily as a fresh one — without this `rm`, triage would consume the previous attempt's verdict and skip the reviewer that's still actually running.
+The round dir is **attempt-scoped**, so a resumed round (post-compaction, or after an interrupted Monitor) gets a *fresh* `a$ATTEMPT` dir that contains no envelopes. The barrier below checks `[ -s … ]`; because the fresh dir is empty, the barrier can never see a prior attempt's envelope, so triage can't consume a stale verdict and skip a reviewer that's still actually running. No cleanup step is needed.
 
-**A note on `$LOG_DIR` and related orchestrator-state variables.** `$LOG_DIR`, `$STATE_DIR`, `$CTX`, `$ROUND`, `$SKILL_DIR`, `$IS_NEW_SERIES`, `$USE_GEMINI`, `$PR_NUMBER`, `$REPO`, `$SCOPE_HINTS`, `$GOAL`, `$CODEX_RESUME` (etc.) are orchestrator state held in the agent's working memory, not shell environment that persists across Bash tool calls. Every Bash call is a fresh shell with none of these set. When the skill shows a snippet that references one of them, the orchestrator must **substitute the concrete value** into the command string before issuing the Bash call (so `--envelope-file "$LOG_DIR/codex-envelope.json"` becomes `--envelope-file "/home/.../yoloswe-255/r3/codex-envelope.json"`). The `$VAR` notation in this file is a templating placeholder, not a runtime variable.
+**A note on `$LOG_DIR` and related orchestrator-state variables.** `$LOG_DIR`, `$STATE_DIR`, `$CTX`, `$ROUND`, `$SKILL_DIR`, `$IS_NEW_SERIES`, `$USE_GEMINI`, `$PR_NUMBER`, `$REPO`, `$SCOPE_HINTS`, `$GOAL`, `$CODEX_RESUME` (etc.) are orchestrator state held in the agent's working memory, not shell environment that persists across Bash tool calls. Every Bash call is a fresh shell with none of these set. When the skill shows a snippet that references one of them, the orchestrator must **substitute the concrete value** into the command string before issuing the Bash call (so `--envelope-file "$LOG_DIR/codex-envelope.json"` becomes `--envelope-file "/home/.../yoloswe-255/r3/a1/codex-envelope.json"`). The `$VAR` notation in this file is a templating placeholder, not a runtime variable.
 
 **First, compute the scope-hints file.** `scope_gate.py` walks the diff, enumerates co-located test files, detects multi-package PRs, and writes `$STATE_DIR/scope-hints.json`. `bramble code-review --scope-hints-file <path>` widens its prompt with a test-quality clause and (when triggered) a cross-service contract sweep. Run once per round, **before** arming bramble Monitors. Always exits 0.
 
@@ -417,7 +432,7 @@ end=$((SECONDS+780)); until [ -s "$LOG_DIR/codex-envelope.json" ] \
   || [ $SECONDS -ge $end ]; do sleep 2; done
 ```
 
-Substitute `$LOG_DIR` with its concrete value (e.g. `/home/.../yoloswe-255/r3`) when issuing the Bash call so the resulting command is fully self-contained — no `bash -c '…'` wrapper, no parent-shell env, no `$VAR` indirection. The harness delivers exactly one completion notification when that command exits. Proceed to step c on that notification — even if the loop hit its timeout and some envelopes are still missing or empty. Step c runs `recover-envelope` (idempotent) and `parse_round` (called by `triage`) synthesizes a high-severity `stream-missing` finding for any envelope that is absent or unparseable (`bramble_ops.py` `parse_round`, stream-missing branch near lines 693–710), so missing envelopes become findings rather than deadlocks.
+Substitute `$LOG_DIR` with its concrete value (e.g. `/home/.../yoloswe-255/r3/a1`) when issuing the Bash call so the resulting command is fully self-contained — no `bash -c '…'` wrapper, no parent-shell env, no `$VAR` indirection. The harness delivers exactly one completion notification when that command exits. Proceed to step c on that notification — even if the loop hit its timeout and some envelopes are still missing or empty. Step c runs `recover-envelope` (idempotent) and `parse_round` (called by `triage`) synthesizes a high-severity `stream-missing` finding for any envelope that is absent or unparseable (`bramble_ops.py` `parse_round`, stream-missing branch near lines 693–710), so missing envelopes become findings rather than deadlocks.
 
 **Do not emit intermediate `tool_use` blocks between Monitor arm and the barrier notification.** The single `run_in_background` call IS the wait; an "echo waiting" loop is the polling antipattern this rule exists to prevent. The 780s timeout = bramble's `--timeout 10m` + 3 minutes of slack for envelope flush and harness teardown (Monitors themselves use `timeout_ms: 720000`).
 
@@ -445,7 +460,7 @@ Envelope paths derive from `$LOG_DIR/<backend>-envelope.json` literally — the 
 - `low_acks` — single-source low/nit, or flake CI failure. Route to `batch_ack`.
 - `spiral_matches` — new findings matching a prior-round `fixed` action by `(file, line, topic)` (exact recurrence) or `(file, line)` alone (rewording-resilient). Route to `escalate`.
 
-If `spiral_matches` is non-empty, **don't auto-fix** — `AskUserQuestion` with the spiralling findings.
+If `spiral_matches` is non-empty, **don't auto-fix** — `AskUserQuestion` with the spiralling findings *(non-interactive default: re-fix once and tag the row `spiral_refix: true`, escalate with `spiral-escalated` on the second recurrence or immediately if multi-source; see Non-interactive mode)*.
 
 If the action plan is empty (nothing in `must_fix`/`consider_fix`, only `batch_ack`), exit the loop.
 
@@ -520,7 +535,7 @@ python3 $SKILL_DIR/scripts/pr_ops.py finalize-and-report $CTX $ROUND $(git rev-p
 
 ### g) Convergence check
 
-Apply the convergence rules from the top. If converged, break. If `additional_rounds_run + 1 == --rounds` and not converged, produce Final Summary and `AskUserQuestion`.
+Apply the convergence rules from the top. If converged, break. If `additional_rounds_run + 1 == --rounds` and not converged, produce Final Summary and `AskUserQuestion` *(non-interactive default: just stop with `capped-at-max`; see Non-interactive mode)*.
 
 Track progress concisely:
 
@@ -554,7 +569,7 @@ Branch-only first push: `git push -u origin <branch>` (no prior remote to protec
 python3 $SKILL_DIR/scripts/pr_ops.py state-mark-complete $CTX <reason>
 ```
 
-**Reason values**: `converged`, `all-low`, `false-positive-top`, `trend-down`, `capped-at-max`, `user-paused`, `spiral-escalated`, `sync-conflict`, `abandoned` (set by `state-mark-abandoned`; never passed to `state-mark-complete` directly).
+**Reason values**: `converged`, `all-low`, `false-positive-top`, `trend-down`, `capped-at-max`, `user-paused`, `spiral-escalated`, `pr-mismatch-abort` (non-interactive integrity-gate abort; see "Non-interactive mode"), `sync-conflict`, `abandoned` (set by `state-mark-abandoned`; never passed to `state-mark-complete` directly).
 
 Print a Markdown summary:
 

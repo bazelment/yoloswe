@@ -1328,6 +1328,23 @@ def preflight() -> dict[str, Any]:
     return out
 
 
+def _next_attempt(state_dir: Path, n: int) -> int:
+    """Next free attempt index for round ``n`` under ``state_dir``.
+
+    Counts the existing ``a*`` subdirs of ``r{n}`` and returns count + 1
+    (so the first attempt is ``1``). A resumed round gets a fresh attempt
+    dir, which is what keeps the Monitor barrier from ever seeing a prior
+    attempt's stale envelope.
+    """
+    round_dir = state_dir / f"r{n}"
+    if not round_dir.is_dir():
+        return 1
+    existing = sum(
+        1 for p in round_dir.iterdir() if p.is_dir() and p.name.startswith("a")
+    )
+    return existing + 1
+
+
 def round_bundle(ctx: int | str, n: int) -> dict[str, Any]:
     """Return everything the orchestrator needs to arm Monitors for round ``n``.
 
@@ -1347,12 +1364,19 @@ def round_bundle(ctx: int | str, n: int) -> dict[str, Any]:
     ``head_before`` defaults to ``git rev-parse HEAD`` — the orchestrator
     can override by post-processing the bundle, but the common path
     doesn't need to.
+
+    The log dir is **attempt-scoped** (``r{n}/a{attempt}``). ``attempt``
+    is the next free integer for the round (count existing ``a*`` subdirs
+    + 1; first attempt is ``a1``). A resumed round therefore gets a fresh
+    attempt dir with no envelopes, so the Monitor barrier can never see a
+    prior attempt's stale envelope — which is why the orchestrator no
+    longer deletes envelopes between attempts.
     """
     import bramble_ops  # noqa: PLC0415
 
     pr_number, branch = _resolve_ctx(ctx)
     state_dir, state_file = state_paths(pr_number, branch=branch)
-    log_dir = state_dir / f"r{n}"
+    log_dir = state_dir / f"r{n}" / f"a{_next_attempt(state_dir, n)}"
     state = read_json(state_file, default=None)
     is_new_series = 1 if _is_first_round_of_series(state, n) else 0
 
