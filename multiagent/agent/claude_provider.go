@@ -105,6 +105,22 @@ func consumeTurnEvents(
 		graceTimer = nil
 		graceCh = nil
 	}
+	// rearmGrace enforces the single grace invariant after an event is applied:
+	// the timer is armed iff the current wave has signalled completion but the
+	// logical turn is still gated on a background tool_use. Shared by the main
+	// events case and the grace-branch continuation so neither can leave the
+	// turn without a backstop (or with a stale one) — re-arming only when none
+	// is pinned so an in-flight wave keeps its original deadline.
+	rearmGrace := func() {
+		if state.SawTurnComplete() {
+			if graceTimer == nil {
+				graceTimer = time.NewTimer(gracePeriod)
+				graceCh = graceTimer.C
+			}
+		} else {
+			disarmGrace()
+		}
+	}
 	defer disarmGrace()
 eventLoop:
 	for {
@@ -162,8 +178,14 @@ eventLoop:
 						return state.ToTurnResult(), state.Err()
 					}
 					// The grace timer already fired (its channel is drained but
-					// graceTimer is non-nil); clear it so the re-arm below starts a
-					// fresh window for whatever wave this event belongs to.
+					// graceTimer is still non-nil). Clear it, then fall through to
+					// the SAME re-arm rule the main events case uses below: the
+					// turn must end this branch with a grace timer armed whenever
+					// it is in a completed-but-gated wave, and disarmed otherwise.
+					// (Applying the event here, rather than deferring to the next
+					// loop iteration, is necessary because we already had to
+					// receive it to distinguish a real event from a closed stream
+					// without a destructive peek.)
 					disarmGrace()
 					state.Apply(ev)
 					if dispatch != nil {
@@ -172,10 +194,7 @@ eventLoop:
 					if state.LogicalTurnDone() {
 						return state.ToTurnResult(), state.Err()
 					}
-					if state.SawTurnComplete() {
-						graceTimer = time.NewTimer(gracePeriod)
-						graceCh = graceTimer.C
-					}
+					rearmGrace()
 					continue eventLoop
 				default:
 					return result, &claude.TransientError{
@@ -198,22 +217,12 @@ eventLoop:
 			if state.LogicalTurnDone() {
 				return state.ToTurnResult(), state.Err()
 			}
-			// Keep the grace timer pinned to the current completion wave.
+			// Keep the grace timer pinned to the current completion wave:
 			// SawTurnComplete() reports the live wave only — a continuation
 			// ResultMessageEvent or invalidateForContinuation clears
-			// lastTurnComplete and flips it back to false. Disarm when the
-			// wave is gone so the next gated wave gets a fresh full window
-			// instead of inheriting an earlier wave's deadline; re-arm once
-			// the (possibly next) wave signals completion but is still gated
-			// on a background tool_use that may never terminate.
-			if state.SawTurnComplete() {
-				if graceTimer == nil {
-					graceTimer = time.NewTimer(gracePeriod)
-					graceCh = graceTimer.C
-				}
-			} else {
-				disarmGrace()
-			}
+			// lastTurnComplete and flips it back to false, so a gone wave
+			// disarms and the next gated wave gets a fresh full window.
+			rearmGrace()
 		}
 	}
 }

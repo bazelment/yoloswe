@@ -214,6 +214,46 @@ func TestConsumeTurnEvents_GraceForcedAppliesQueuedContinuation(t *testing.T) {
 	require.True(t, result.Success, "the applied continuation completes the turn successfully")
 }
 
+// Bugbot HIGH (PR #258, commit c445b25): when the grace branch applies a queued
+// event that does NOT complete the turn but leaves the wave still
+// completed-and-gated on live bg work, grace must be RE-ARMED — otherwise the
+// loop would wait on the stream with no backstop and a genuinely stuck turn
+// hangs forever. Here the queued event keeps the turn gated (SawTurnComplete
+// stays true, no continuation Result), then the stream goes silent: grace must
+// fire again and classify the stall transient rather than block indefinitely.
+func TestConsumeTurnEvents_GraceRearmsAfterAppliedNonCompletingEvent(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	gatedNonSuccessEvents(events)
+	// A queued, non-terminal in-scope event is waiting when grace fires: it is
+	// applied (proving the branch consumes it) but does not complete the turn,
+	// which stays gated on toolu_bg2 with TurnComplete already seen. No further
+	// events arrive — grace must re-arm and fire again.
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 2,
+		Blocks:     claude.ContentBlocks{asstTextBlock("still working")},
+	}
+	// channel intentionally left open and silent hereafter.
+
+	grace := 30 * time.Millisecond
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = consumeTurnEvents(context.Background(), events, grace, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeTurnEvents hung: grace was not re-armed after applying a non-completing event")
+	}
+	// The re-armed grace must fire and classify the stall transient (resumable),
+	// not hang and not return success.
+	require.Error(t, err, "a re-stalled turn must surface the grace-forced transient")
+	var transient *claude.TransientError
+	require.ErrorAs(t, err, &transient,
+		"the re-armed grace-forced stop must be transient so the session can be resumed")
+}
+
 // Contention smoke test: cancel ctx mid-flight while the turn is gated on a bg
 // tool_use and the grace timer is the backstop. Depending on scheduling the
 // stop returns either ctx.Err() (ctx.Done won) or a TransientError (grace won
