@@ -3,13 +3,103 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/agentstream"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude/render"
 )
+
+// heartbeatInterval bounds how often bridgeStreamEvents emits a liveness line
+// to heartbeatOut while a review is in progress. A review can sit silent for
+// minutes while a backend "thinks"; without a periodic pulse a healthy long
+// review is indistinguishable from a hung one in the logs. Overridable in
+// tests via a sub-second value. heartbeatOut defaults to os.Stderr so the line
+// lands in the same stream pr-polish captures per backend (…-stderr.txt) and
+// the klogfmt run log; the envelope on stdout/--envelope-file is untouched.
+var (
+	heartbeatInterval           = 20 * time.Second
+	heartbeatOut      io.Writer = os.Stderr
+)
+
+// heartbeatWindow accumulates per-interval activity so each heartbeat reports
+// what the agent actually did since the last tick (tools, streamed text)
+// rather than a bare timer. It is reset every tick; toolsInFlight is tracked
+// separately because it spans windows.
+type heartbeatWindow struct {
+	toolsCompleted []string
+	textChars      int
+	reasoningChars int
+	events         int
+}
+
+// formatHeartbeat renders one liveness line. On a window with activity it
+// summarizes the tools that completed, how many are still in flight, and the
+// volume of streamed text/reasoning; on a silent window it degrades to a bare
+// idle pulse so the reader still sees a pulse without false "progress".
+func formatHeartbeat(elapsed time.Duration, w heartbeatWindow, toolsInFlight int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[code-review] heartbeat %s", elapsed.Round(time.Second))
+	if w.events == 0 {
+		b.WriteString(" · idle (awaiting backend)")
+		if toolsInFlight > 0 {
+			fmt.Fprintf(&b, " · %d tool(s) in flight", toolsInFlight)
+		}
+		return b.String()
+	}
+	if done := summarizeTools(w.toolsCompleted); done != "" {
+		fmt.Fprintf(&b, " · done: %s", done)
+	}
+	if toolsInFlight > 0 {
+		fmt.Fprintf(&b, " · in flight: %d", toolsInFlight)
+	}
+	if chars := formatCharCount(w.textChars); w.textChars > 0 {
+		fmt.Fprintf(&b, " · +%s chars", chars)
+	}
+	if w.reasoningChars > 0 {
+		fmt.Fprintf(&b, " · +%s reasoning", formatCharCount(w.reasoningChars))
+	}
+	return b.String()
+}
+
+// summarizeTools renders completed tool names with per-name counts, e.g.
+// "Read(2),Grep". Names are sorted for deterministic output.
+func summarizeTools(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	counts := make(map[string]int, len(names))
+	order := make([]string, 0, len(names))
+	for _, n := range names {
+		if _, seen := counts[n]; !seen {
+			order = append(order, n)
+		}
+		counts[n]++
+	}
+	sort.Strings(order)
+	parts := make([]string, 0, len(order))
+	for _, n := range order {
+		if counts[n] > 1 {
+			parts = append(parts, fmt.Sprintf("%s(%d)", n, counts[n]))
+		} else {
+			parts = append(parts, n)
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// formatCharCount renders a char tally with a k-suffix above 1000 to keep the
+// heartbeat line short (e.g. 1234 -> "1.2k").
+func formatCharCount(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
 
 // stderrPrefixHandler returns a stderr chunk handler that writes each chunk to
 // os.Stderr tagged with "[prefix stderr] ", ensuring a trailing newline.
@@ -65,10 +155,24 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 
 	var responseText strings.Builder
 
+	// Liveness telemetry: a periodic, event-aware heartbeat written to
+	// heartbeatOut (stderr). window accumulates activity since the last tick;
+	// toolsInFlight spans windows (a tool started in one window may finish in a
+	// later one). This is operator/log telemetry only — it never touches the
+	// handler, the response text, or the envelope.
+	start := time.Now()
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	var window heartbeatWindow
+	toolsInFlight := 0
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-ticker.C:
+			fmt.Fprintln(heartbeatOut, formatHeartbeat(time.Since(start), window, toolsInFlight))
+			window = heartbeatWindow{}
 		case ev, ok := <-events:
 			if !ok {
 				// Channel closed without TurnComplete.
@@ -103,24 +207,36 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 				te := sev.(agentstream.Text)
 				delta := te.StreamDelta()
 				responseText.WriteString(delta)
+				window.textChars += len(delta)
+				window.events++
 				if handler != nil {
 					handler.OnText(delta)
 				}
 
 			case agentstream.KindThinking:
 				te := sev.(agentstream.Text)
+				delta := te.StreamDelta()
+				window.reasoningChars += len(delta)
+				window.events++
 				if handler != nil {
-					handler.OnReasoning(te.StreamDelta())
+					handler.OnReasoning(delta)
 				}
 
 			case agentstream.KindToolStart:
 				ts := sev.(agentstream.ToolStart)
+				toolsInFlight++
+				window.events++
 				if handler != nil {
 					handler.OnToolStart(ts.StreamToolName(), ts.StreamToolCallID(), ts.StreamToolInput())
 				}
 
 			case agentstream.KindToolEnd:
 				te := sev.(agentstream.ToolEnd)
+				if toolsInFlight > 0 {
+					toolsInFlight--
+				}
+				window.toolsCompleted = append(window.toolsCompleted, te.StreamToolName())
+				window.events++
 				if handler != nil {
 					handler.OnToolComplete(
 						te.StreamToolName(),

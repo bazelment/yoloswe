@@ -111,7 +111,7 @@ Triage reads these only when `IS_NEW_SERIES=1`. Still run bramble every round.
 additional_rounds_run = 0
 while additional_rounds_run < --rounds:
   a) WIP commit if dirty
-  b) scope_gate → round-bundle → Monitors (codex+cursor+lint[+gemini]) → barrier
+  b) scope_gate → round-bundle → one bg join: launch reviewers (codex+cursor+lint[+gemini]), wait on exit
   c) triage → action plan
   d) apply fixes
   e) quality gates + local commit if changed (NO push)
@@ -149,54 +149,51 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py --state-dir "$STATE_DIR" 
 }
 ```
 
-Arm Monitors (same turn), then **one** background Bash barrier until all `$LOG_DIR/<backend>-envelope.json` are non-empty or 780s elapsed. Steps b→c in **one turn** — no tool calls between arm and barrier.
+Launch every reviewer **inside one `run_in_background` Bash job** (the "join"): the script starts each `bramble code-review` (and the lint gate) with `&`, records their PIDs, then `wait`s on all of them. `wait` returns when *every* child has **exited** — the true all-done signal — and returns promptly if a reviewer crashes without writing an envelope (no hanging to the ceiling on a dead process). The job streams each reviewer's stderr (tee'd to its `-stderr.txt` and to the job's own stdout, so you see per-reviewer progress, including the periodic `[code-review] heartbeat …` lines), and fires **one** completion notification when the join returns. Wrap the whole join in `timeout 780` so a wedged backend can't exceed the round budget.
 
-**Wait ONLY via that one barrier.** Do not call `ScheduleWakeup`, do not `sleep`-poll in a loop, and do not end the turn with a text-only "standing by / awaiting notification" reply. This skill may run non-interactively (e.g. driven by jiradozer with one bounded agent turn): there is no harness to re-invoke you on a wakeup or task-notification, so a yielded turn strands the round — the reviewers keep running but the turn is force-completed and the whole step is reported as failed. The single `run_in_background` barrier below is the only sanctioned wait: it blocks in one tool call and returns when the envelopes land or the 780s ceiling hits.
+**Wait ONLY for that one join's completion notification — then triage.** The per-reviewer output you see streaming is for visibility only; it is **not** a signal to act. Do not act on any single reviewer finishing, do not Read the envelope/`-stderr.txt` files in a loop, do not `sleep`-poll, do not call `ScheduleWakeup`, and do not end the turn with a text-only "standing by / awaiting notification" reply. You have nothing to do until the join notifies you that every reviewer has exited — acting before then strands the round or spams the log. This skill may run non-interactively (e.g. driven by jiradozer with one bounded agent turn): there is no harness to re-invoke you on a wakeup or task-notification, so a yielded turn strands the round. The single `run_in_background` join is the only sanctioned wait: it blocks in one tool call and returns when all reviewers exit or the 780s ceiling hits.
 
-```
-Monitor({ description: "bramble codex r{ROUND}", timeout_ms: 720000, persistent: false,
-  command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
-    $BRAMBLE_BIN code-review --backend codex --model gpt-5.4-mini \
-    --skip-test-execution --verbose --timeout 10m \
-    --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
-    ${CODEX_RESUME:+--resume-session-id \"$CODEX_RESUME\"} \
-    --envelope-file \"$LOG_DIR/codex-envelope.json\" 2>\"$LOG_DIR/codex-stderr.txt\"" })
+Arm the join in **one** `run_in_background` Bash call (steps b→c in one turn — no tool calls between launch and the completion notification):
 
-Monitor({ description: "bramble cursor r{ROUND}", timeout_ms: 720000, persistent: false,
-  command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
-    $BRAMBLE_BIN code-review --backend cursor --model composer-2.5 \
-    --skip-test-execution --verbose --timeout 10m \
-    --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
-    ${CURSOR_RESUME:+--resume-session-id \"$CURSOR_RESUME\"} \
-    --envelope-file \"$LOG_DIR/cursor-envelope.json\" 2>\"$LOG_DIR/cursor-stderr.txt\"" })
-
-Monitor({ description: "lint gate r{ROUND}", timeout_ms: 120000, persistent: false,
-  command: "python3 $SKILL_DIR/scripts/lint_gate.py \
-    --state-dir \"$STATE_DIR\" --round {ROUND} --log-dir \"$LOG_DIR\" \
-    2>\"$LOG_DIR/lint-stderr.txt\"" })
-
-// --gemini only:
-GEMINI_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.gemini')
-Monitor({ description: "bramble gemini r{ROUND}", timeout_ms: 720000, persistent: false,
-  command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:gemini:r{ROUND} \
-    $BRAMBLE_BIN code-review --backend gemini --model gemini-3-flash-preview \
-    --skip-test-execution --verbose --timeout 10m \
-    --goal \"$GOAL\" --scope-hints-file \"$SCOPE_HINTS\" \
-    ${GEMINI_RESUME:+--resume-session-id \"$GEMINI_RESUME\"} \
-    --envelope-file \"$LOG_DIR/gemini-envelope.json\" 2>\"$LOG_DIR/gemini-stderr.txt\"" })
-```
+Substitute the concrete `$LOG_DIR`/`$GOAL`/`$SCOPE_HINTS`/`$REPO`/`$PR_NUMBER`/resume-id values into this script (orchestrator vars — fresh shell, no persistent `$VAR`), then `run_in_background` the **whole script as one call**. No `bash -c` wrapper, no nested quoting.
 
 ```bash
-# 3 envelopes (no --gemini):
-end=$((SECONDS+780)); until [ -s "$LOG_DIR/codex-envelope.json" ] \
-  && [ -s "$LOG_DIR/cursor-envelope.json" ] \
-  && [ -s "$LOG_DIR/lint-envelope.json" ] \
-  || [ $SECONDS -ge $end ]; do sleep 2; done
+# One background join: launch each reviewer with `&`, then `wait` on all PIDs.
+# Each reviewer's output is tee'd to its -stderr.txt AND to this job's stdout
+# (prefixed) so per-reviewer progress — incl. periodic `[code-review] heartbeat …`
+# lines — streams live; each `timeout 780` bounds the round at the budget.
+( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
+  timeout 780 $BRAMBLE_BIN code-review --backend codex --model gpt-5.4-mini \
+    --skip-test-execution --verbose --timeout 10m \
+    --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" \
+    ${CODEX_RESUME:+--resume-session-id "$CODEX_RESUME"} \
+    --envelope-file "$LOG_DIR/codex-envelope.json" \
+  2>&1 | tee "$LOG_DIR/codex-stderr.txt" | sed 's/^/[codex] /' ) &
+CODEX_PID=$!
 
-# 4 envelopes (--gemini): add && [ -s "$LOG_DIR/gemini-envelope.json" ] before || 
+( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
+  timeout 780 $BRAMBLE_BIN code-review --backend cursor --model composer-2.5 \
+    --skip-test-execution --verbose --timeout 10m \
+    --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" \
+    ${CURSOR_RESUME:+--resume-session-id "$CURSOR_RESUME"} \
+    --envelope-file "$LOG_DIR/cursor-envelope.json" \
+  2>&1 | tee "$LOG_DIR/cursor-stderr.txt" | sed 's/^/[cursor] /' ) &
+CURSOR_PID=$!
+
+( timeout 780 python3 $SKILL_DIR/scripts/lint_gate.py \
+    --state-dir "$STATE_DIR" --round {ROUND} --log-dir "$LOG_DIR" \
+  2>&1 | tee "$LOG_DIR/lint-stderr.txt" | sed 's/^/[lint] /' ) &
+LINT_PID=$!
+
+# --gemini only: launch a 4th reviewer the same way with $GEMINI_RESUME and add
+# its PID to the wait list below.
+
+wait $CODEX_PID $CURSOR_PID $LINT_PID
 ```
 
-Before triage: `recover-envelope` on each stream path (idempotent). Missing envelopes → `stream-missing` findings, not deadlock.
+The single completion notification = every reviewer has exited (each bounded by its own `timeout 780`). The `wait` returns once all PIDs exit, and a crashed reviewer exits immediately, so a dead process never hangs the round.
+
+Before triage: `recover-envelope` on each stream path (idempotent). A reviewer that exited without a valid envelope → `stream-missing` finding, not a deadlock.
 
 ### c) Triage
 
