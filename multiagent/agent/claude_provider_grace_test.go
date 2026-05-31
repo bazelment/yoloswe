@@ -45,6 +45,16 @@ func TestConsumeTurnEvents_NormalTurnReturnsImmediately(t *testing.T) {
 // silent. The bg tool_use never terminates, so LogicalTurnDone never flips on
 // its own. consumeTurnEvents must force completion when the grace period
 // elapses instead of looping forever.
+//
+// Bugbot HIGH (PR #258): reaching the grace branch means LogicalTurnDone() is
+// false, so the turn is NOT actually done even if the last wave's result was
+// successful — a skill that yielded the turn awaiting a long background join
+// keeps lastResult successful for the whole join. Returning that as a final
+// success after the 3-minute grace would tell a non-interactive caller
+// (jiradozer) the step succeeded while the work is still running. So a
+// grace-forced stop gated on a non-terminating bg tool_use is classified
+// transient (resumable), not a bare success — for both Success==true and
+// Success==false waves.
 func TestConsumeTurnEvents_GraceTimerForcesCompletion(t *testing.T) {
 	events := make(chan claude.Event, 8)
 	events <- claude.AssistantMessageEvent{
@@ -72,13 +82,14 @@ func TestConsumeTurnEvents_GraceTimerForcesCompletion(t *testing.T) {
 		t.Fatal("consumeTurnEvents hung: grace timer did not force turn completion")
 	}
 	elapsed := time.Since(start)
-	// This wave carries a successful ResultMessage that is merely still gated
-	// on a lingering bg tool_use — the turn produced a real answer, so the
-	// grace-forced stop returns it as-is with no synthetic error.
-	require.NoError(t, err)
+	// The grace fires while the turn is gated on a non-terminating bg tool_use:
+	// classified transient so the session is resumed rather than reported done.
 	require.NotNil(t, result)
-	require.True(t, result.Success,
-		"a successful result gated on lingering bg work must not be reported as a failure")
+	var transient *claude.TransientError
+	require.ErrorAs(t, err, &transient,
+		"a grace-forced stop gated on a non-terminating bg tool_use must be transient, not a bare success")
+	ok, _ := ClassifyTransient(err)
+	require.True(t, ok, "the grace-forced stop must be retryable")
 	require.GreaterOrEqual(t, elapsed, grace,
 		"must wait at least the grace period before forcing completion")
 	require.Less(t, elapsed, 3*time.Second,
@@ -295,6 +306,45 @@ func TestConsumeTurnEvents_GraceVsCtxCancelTerminates(t *testing.T) {
 	}
 }
 
+// Bugbot HIGH (PR #258, commit 3643300): a grace-forced stop on a SUCCESS-but-
+// still-gated wave must be transient, not a bare success. The /pr-polish flow
+// yields the turn awaiting one long run_in_background join; lastResult stays
+// successful for the whole join, so returning it after the 3-minute grace would
+// report the validate step done to jiradozer while reviewers are still running.
+// No ctx cancel and no queued event here — just a successful gated wave that
+// goes silent; the stop must be classified transient (resumable).
+func TestConsumeTurnEvents_GraceForcedSuccessGatedIsTransient(t *testing.T) {
+	events := make(chan claude.Event, 8)
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	events <- resultMessage(false) // Success=true
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	// bg tool never terminates, stream goes silent — grace is the backstop.
+
+	grace := 100 * time.Millisecond
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, grace, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeTurnEvents hung")
+	}
+	require.NotNil(t, result)
+	var transient *claude.TransientError
+	require.ErrorAs(t, err, &transient,
+		"a successful-but-gated grace-forced stop must be transient, not returned as a final success")
+	ok, _ := ClassifyTransient(err)
+	require.True(t, ok, "the success-gated grace-forced stop must be retryable")
+}
+
 // Bugbot MEDIUM (PR #258, commit 80ee672): the grace branch's SUCCESS path
 // must also propagate ctx cancellation. graceCh can win a select tie with
 // ctx.Done(), so a cancelled run whose result happens to be successful must
@@ -457,8 +507,13 @@ func TestConsumeTurnEvents_GraceResetsAcrossContinuationWave(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("consumeTurnEvents hung: wave-2 grace timer did not fire")
 	}
-	require.NoError(t, err)
 	require.NotNil(t, result)
+	// This test's invariant is the timing one below; the wave-2 grace fires
+	// gated on a non-terminating bg tool_use, so the stop is transient
+	// (resumable) per the bugbot HIGH fix — not a bare success.
+	var transient *claude.TransientError
+	require.ErrorAs(t, err, &transient,
+		"wave-2 grace-forced stop gated on a live bg tool_use must be transient")
 	// Wave 2's grace window must be a full `grace` measured from when wave 2
 	// re-armed the timer — not the leftover slack from wave 1. Total elapsed
 	// is therefore ~ (3/4)*grace (the sleep) + grace (wave 2's full window).
