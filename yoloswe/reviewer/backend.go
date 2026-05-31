@@ -301,9 +301,11 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 			// Before declaring the review stalled, drain every event already
 			// queued: select can pick the ticker over a ready events case, so a
 			// pending event (the wave's continuation, or just proof of life)
-			// must be processed first. Only trip idle when nothing is pending
-			// AND no in-scope event has arrived within idleTimeout.
-			drained := false
+			// must be processed first. Only IN-SCOPE events reset lastEvent, so
+			// the idle decision below depends solely on lastEvent staleness —
+			// NOT on whether the drain saw anything. Draining out-of-scope
+			// multiplex noise must never suppress the idle trip for a stalled
+			// in-scope thread on a shared channel.
 			for {
 				select {
 				case ev, ok := <-events:
@@ -314,13 +316,12 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 					if inScope {
 						lastEvent = time.Now()
 					}
-					drained = true
 					continue
 				default:
 				}
 				break
 			}
-			if !drained && idleTimeout > 0 && time.Since(lastEvent) >= idleTimeout {
+			if idleTimeout > 0 && time.Since(lastEvent) >= idleTimeout {
 				return nil, fmt.Errorf("review idle: no events for %s (stalled backend)", idleTimeout)
 			}
 			// Emit a heartbeat line at most every heartbeatInterval even if the

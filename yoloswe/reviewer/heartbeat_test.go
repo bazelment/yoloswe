@@ -286,39 +286,49 @@ func TestBridgeStreamEvents_IdleDoesNotTripWithPendingEvent(t *testing.T) {
 	}
 }
 
-// Regression (codex PR #258): only IN-SCOPE events reset the idle clock. On a
-// multiplexed channel (scopeID set), an unrelated thread's event must not keep
-// a stalled thread alive — the idle timeout must still trip.
-func TestBridgeStreamEvents_IdleIgnoresOutOfScopeEvents(t *testing.T) {
+// Regression (codex+cursor PR #258, rounds 2-3): only IN-SCOPE events reset the
+// idle clock, and PERPETUAL out-of-scope traffic on a multiplexed channel must
+// not suppress the idle trip for a stalled in-scope thread. This is the
+// production shape: Codex's shared client.Events() carries other threads'
+// events continuously. The sender runs until the function returns, so a
+// regression that (a) reset lastEvent on out-of-scope events, or (b) gated the
+// idle trip on "did we drain anything" rather than lastEvent staleness, would
+// hang here instead of tripping.
+func TestBridgeStreamEvents_IdleIgnoresPerpetualOutOfScopeTraffic(t *testing.T) {
 	withHeartbeat(t, 5*time.Millisecond)
 	withIdleTimeout(t, 40*time.Millisecond)
 
 	ch := make(chan agentstream.Event)
 	handler := &recordingHandler{}
 	done := make(chan struct{})
+	stop := make(chan struct{})
 	var err error
 	go func() {
 		_, err = bridgeStreamEvents(context.Background(), ch, handler, "thread-1")
 		close(done)
 	}()
 
-	// Feed out-of-scope events steadily (every 15ms, faster than the 40ms idle
-	// window). If they reset the idle clock, the timeout never trips and this
-	// hangs; the fix makes them NOT count, so idle trips despite the traffic.
+	// Perpetual out-of-scope noise: keep sending another thread's events the
+	// whole time the bridge runs, never stopping until it returns. If
+	// out-of-scope traffic suppressed the idle trip, this would never finish.
 	go func() {
-		for i := 0; i < 6; i++ {
-			ch <- testScopedTextEvent{testTextEvent: testTextEvent{delta: "other"}, scopeID: "thread-2"}
-			time.Sleep(15 * time.Millisecond)
+		for {
+			select {
+			case <-stop:
+				return
+			case ch <- testScopedTextEvent{testTextEvent: testTextEvent{delta: "other"}, scopeID: "thread-2"}:
+			}
 		}
 	}()
+	defer close(stop)
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("idle timeout never tripped — out-of-scope events wrongly reset the clock")
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle timeout never tripped under perpetual out-of-scope traffic")
 	}
 	if err == nil || !strings.Contains(err.Error(), "review idle") {
-		t.Fatalf("expected idle-timeout despite out-of-scope traffic, got: %v", err)
+		t.Fatalf("expected idle-timeout despite perpetual out-of-scope traffic, got: %v", err)
 	}
 }
 
