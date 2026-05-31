@@ -145,6 +145,93 @@ func TestConsumeTurnEvents_GraceForcedNonSuccessIsTransient(t *testing.T) {
 	require.True(t, ok, "ClassifyTransient must mark the grace-forced stop retryable")
 }
 
+// gatedNonSuccessEvents queues the event shape that leaves the logical turn
+// gated on a live bg tool_use with Success=false / Err()==nil — the state that
+// the grace path classifies transient. Shared by the race regressions below.
+func gatedNonSuccessEvents(ch chan claude.Event) {
+	ch <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	ch <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	ch <- resultMessage(false)
+	ch <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	ch <- claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "completed",
+	}
+	ch <- claude.AssistantMessageEvent{
+		TurnNumber: 2,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg2")},
+	}
+	ch <- claude.TaskStartedEvent{TaskID: "task2", ToolUseID: strPtr("toolu_bg2")}
+	ch <- claude.TurnCompleteEvent{TurnNumber: 2, Success: true}
+}
+
+// The grace branch's terminal re-checks (the fix for the select-tie race where
+// graceCh wins against a simultaneously-ready ctx.Done() or closed stream)
+// hinge on two cheap, deterministic checks: ctx.Err() and streamClosed(). A
+// true simultaneous select tie can't be forced from outside the function, so
+// the two checks are covered directly here, plus a contention smoke test below.
+
+// streamClosed must report a closed channel as closed, an open-but-empty
+// channel as not-closed, and on the rare race where a value is already queued
+// it consumes that one value and reports not-closed (the turn is then
+// classified transient and the resume path replays it — see the doc comment).
+func TestStreamClosed(t *testing.T) {
+	closed := make(chan claude.Event)
+	close(closed)
+	require.True(t, streamClosed(closed), "a closed channel must report closed")
+
+	openEmpty := make(chan claude.Event, 1)
+	require.False(t, streamClosed(openEmpty), "an open empty channel must report not-closed")
+
+	openWithValue := make(chan claude.Event, 1)
+	openWithValue <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	require.False(t, streamClosed(openWithValue), "an open channel with a queued value must report not-closed")
+	require.Len(t, openWithValue, 0, "the queued value must have been consumed by the non-blocking receive")
+}
+
+// Contention smoke test: cancel ctx mid-flight while the turn is gated on a bg
+// tool_use and the grace timer is the backstop. Depending on scheduling the
+// stop returns either ctx.Err() (ctx.Done won) or a TransientError (grace won
+// before cancellation landed) — both are legitimate. The invariant the fix
+// guarantees is the one this asserts: a TransientError is NEVER returned once
+// ctx.Err() is already set when the grace branch runs (verified by the direct
+// re-check in the code: `if ctxErr := ctx.Err(); ctxErr != nil`). Here we only
+// assert the loop always terminates and never hangs under the race.
+func TestConsumeTurnEvents_GraceVsCtxCancelTerminates(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		ch := make(chan claude.Event, 16)
+		gatedNonSuccessEvents(ch)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		grace := 10 * time.Millisecond
+		done := make(chan struct{})
+		var err error
+		go func() {
+			_, err = consumeTurnEvents(ctx, ch, grace, nil, nil)
+			close(done)
+		}()
+		time.Sleep(time.Duration(i%12) * time.Millisecond) // jitter the contention point
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iter %d: consumeTurnEvents hung under ctx-cancel/grace contention", i)
+		}
+		// Whichever path won, the result must be a sane classification: either a
+		// terminal ctx error or a (correct) transient — never a nil error that a
+		// caller would read as bare success.
+		require.Error(t, err, "iter %d: a gated grace-forced stop must return an error", i)
+		if errors.Is(err, context.Canceled) {
+			var transient *claude.TransientError
+			require.False(t, errors.As(err, &transient),
+				"iter %d: a ctx-cancelled stop must not also be transient", i)
+		}
+	}
+}
+
 // A genuine ResultError coinciding with grace expiry must be returned
 // unwrapped — the transient classification must never mask a real error.
 func TestConsumeTurnEvents_GraceForcedRealErrorNotMasked(t *testing.T) {

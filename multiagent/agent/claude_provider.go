@@ -139,6 +139,21 @@ func consumeTurnEvents(
 				return result, err
 			}
 			if !result.Success {
+				// select picks randomly among ready cases, so graceCh can win a
+				// tie with ctx.Done() or a closed events channel. Both are
+				// genuinely terminal — there is no live session left to resume —
+				// so re-check them here before classifying the stop transient.
+				// Otherwise the outer retry loop backs off and re-drives a
+				// session that has already ended.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return result, ctxErr
+				}
+				if streamClosed(events) {
+					// Stream already closed: terminal. Mirror the closed-stream
+					// path below — return the result and state error unwrapped,
+					// never as a retryable TransientError.
+					return state.ToTurnResult(), state.Err()
+				}
 				return result, &claude.TransientError{
 					Message: "stream idle: turn forced complete after grace period gated on background tool_use",
 				}
@@ -175,6 +190,27 @@ func consumeTurnEvents(
 				disarmGrace()
 			}
 		}
+	}
+}
+
+// streamClosed reports whether events is already closed, via a non-blocking
+// receive. It is used only on the grace-expiry path to break a select tie:
+// when graceCh fired at the same instant the stream closed, the closure is the
+// real terminal signal and must win over the transient classification.
+//
+// A closed channel yields (zero, false) immediately → true. An open channel
+// with nothing queued hits the default → false. The rare third case — a real
+// value was queued exactly when graceCh fired — consumes that one event and
+// reports false (not closed): the turn is then classified transient and the
+// resume path re-drives the same live session, which replays from the backend,
+// so the consumed event is not lost. (We never reach here with state.Err() set
+// or a successful result; those are handled before the call.)
+func streamClosed[E any](events <-chan E) bool {
+	select {
+	case _, ok := <-events:
+		return !ok
+	default:
+		return false
 	}
 }
 
