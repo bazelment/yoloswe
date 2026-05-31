@@ -48,6 +48,7 @@ from _common import (  # noqa: E402 — sys.path tweak above
     SOURCE_REVIEW,
     CommandError,
     atomic_write_json,
+    changed_files,
     current_branch,
     detect_base_branch,
     print_json,
@@ -831,6 +832,60 @@ FIXED_ACTIONS = {"fixed"}
 # tables reflect that the orchestrator did look at it.
 SKIPPED_ACTIONS = {"false_positive", "wont_fix", "stale", "pre_existing", "flake", "ack"}
 
+# The full set of recognized action verbs, derived from the two buckets above so
+# there is exactly one source of truth. _validate_actions checks entries against
+# this; _top_severity / counting logic classify via the buckets.
+KNOWN_ACTIONS = FIXED_ACTIONS | SKIPPED_ACTIONS
+# Recognized severities (None/absent is allowed — e.g. a lint advisory row).
+KNOWN_SEVERITIES = {"high", "medium", "low", "nit"}
+
+
+def _validate_actions(actions: list[Any]) -> None:
+    """Validate the per-entry shape of an actions list, failing loudly with the
+    offending index/field rather than silently persisting garbage.
+
+    Only the closed-enum fields are checked (``action``, ``severity``); unknown
+    keys are allowed so forward-compat v2 fields (``invariant``,
+    ``spiral_refix``, …) pass through untouched. ``action``/``severity`` are
+    each optional per entry, but when present must be recognized.
+    """
+    for i, entry in enumerate(actions):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"actions[{i}] must be an object, got {type(entry).__name__}"
+            )
+        action = entry.get("action")
+        if action is not None and action not in KNOWN_ACTIONS:
+            raise ValueError(
+                f"actions[{i}].action={action!r} is not a known action; "
+                f"expected one of {sorted(KNOWN_ACTIONS)}"
+            )
+        severity = entry.get("severity")
+        if severity is not None and severity not in KNOWN_SEVERITIES:
+            raise ValueError(
+                f"actions[{i}].severity={severity!r} is not a known severity; "
+                f"expected one of {sorted(KNOWN_SEVERITIES)} or null"
+            )
+
+
+def _load_actions(path: Path) -> list[dict[str, Any]]:
+    """Read and validate the actions file passed to finalize.
+
+    Accepts either a bare JSON array of action entries, or an object with a
+    ``comment_actions`` array (the shape the SKILL.md "State tracking" section
+    describes — both are now first-class so the two can't drift). Validates
+    inner entries via _validate_actions.
+    """
+    data = json.loads(path.read_text())
+    if isinstance(data, dict) and isinstance(data.get("comment_actions"), list):
+        data = data["comment_actions"]
+    if not isinstance(data, list):
+        raise ValueError(
+            'actions file must be a JSON array or {"comment_actions": [...]}'
+        )
+    _validate_actions(data)
+    return data
+
 
 def _top_severity(actions: list[dict[str, Any]]) -> str | None:
     best = None
@@ -1257,6 +1312,25 @@ def _utc_now() -> str:
 # with the agent.
 
 
+# Path prefixes whose changes mean the review is exercising bramble's OWN
+# review code — so a stale prebuilt bramble would review code that differs from
+# what's running. Kept here (not in _common) since it's preflight-specific.
+_BRAMBLE_SELF_PREFIXES: tuple[str, ...] = (
+    "bramble/",
+    "yoloswe/reviewer/",
+    "agent-cli-wrapper/",
+)
+
+
+def _reviewing_bramble_itself(base: str) -> bool:
+    """True when the branch diff vs origin/<base> touches bramble's own review
+    code. Best-effort: a git failure yields an empty diff → False (no warning),
+    matching changed_files' degrade-gracefully contract.
+    """
+    files = changed_files(base)
+    return any(f.startswith(p) for f in files for p in _BRAMBLE_SELF_PREFIXES)
+
+
 def preflight() -> dict[str, Any]:
     """Resolve the binaries + helper paths the round loop depends on.
 
@@ -1277,12 +1351,32 @@ def preflight() -> dict[str, Any]:
         "git_sync_supports_no_push": False,
         "skill_dir": str(Path(__file__).resolve().parent.parent),
         "errors": [],
+        # Non-fatal advisories (distinct from ``errors``, which abort the run).
+        "warnings": [],
     }
     bin_candidate = Path.cwd() / "bazel-bin/bramble/bramble_/bramble"
-    if bin_candidate.is_file() and os.access(bin_candidate, os.X_OK):
+    used_local_build = bin_candidate.is_file() and os.access(bin_candidate, os.X_OK)
+    if used_local_build:
         out["bramble_bin"] = str(bin_candidate)
     else:
         out["bramble_bin"] = "bramble"
+        # If this PR/branch modifies bramble's own review code but we fell back
+        # to the PATH ``bramble`` (commonly a symlink into a DIFFERENT worktree's
+        # build), the review would run against stale code — not what's under
+        # test. Warn (don't abort): building is slow and the operator may have a
+        # reason, but the missing signal is what bit a hand-driven run.
+        try:
+            if _reviewing_bramble_itself(detect_base_branch()):
+                out["warnings"].append(
+                    "PR modifies bramble review code (bramble/, yoloswe/reviewer/, "
+                    "agent-cli-wrapper/) but bramble_bin resolved to PATH 'bramble' "
+                    "— likely a different worktree's build, so the review may run "
+                    "against stale code. Build from this branch "
+                    "(`bazel build //bramble/...`) and re-run, or export "
+                    "BRAMBLE_BIN=$(pwd)/bazel-bin/bramble/bramble_/bramble."
+                )
+        except Exception:  # noqa: BLE001 — advisory only; never block preflight
+            pass
     try:
         help_res = subprocess.run(
             [out["bramble_bin"], "code-review", "--help"],
@@ -1816,9 +1910,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.cmd == "state-finalize-round":
-            actions = json.loads(Path(args.actions_file).read_text())
-            if not isinstance(actions, list):
-                raise ValueError("actions file must be a JSON array")
+            actions = _load_actions(Path(args.actions_file))
             import bramble_ops  # noqa: PLC0415 — lazy to avoid import cost on other subcommands
             envelope_overrides: dict[str, Path] = {}
             for spec in args.envelope:
@@ -1866,9 +1958,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "round-bundle":
             print_json(round_bundle(args.ctx, args.n))
         elif args.cmd == "finalize-and-report":
-            actions = json.loads(Path(args.actions_file).read_text())
-            if not isinstance(actions, list):
-                raise ValueError("actions file must be a JSON array")
+            actions = _load_actions(Path(args.actions_file))
             import bramble_ops  # noqa: PLC0415
             envelope_overrides: dict[str, Path] = {}
             for spec in args.envelope:

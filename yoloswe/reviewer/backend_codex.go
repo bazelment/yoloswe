@@ -119,7 +119,7 @@ func (b *codexBackend) RunPrompt(ctx context.Context, prompt string, handler Eve
 		return reviewErrorResult(resumeStatus, fmt.Errorf("failed to send message: %w", err))
 	}
 
-	bridged, err := bridgeStreamEvents(ctx, b.client.Events(), handler, b.thread.ID())
+	bridged, err := bridgeStreamEvents(ctx, b.client.Events(), handler, b.thread.ID(), b.config.IdleTimeout)
 	if err != nil {
 		return reviewErrorResult(resumeStatus, fmt.Errorf("codex: %w", err))
 	}

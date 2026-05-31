@@ -123,6 +123,14 @@ type Config struct {
 	// (bazel, go test, etc.). Callers that already run tests in a separate step
 	// (e.g. /pr-polish quality gates) should enable this to avoid duplicate work.
 	SkipTestExecution bool
+	// IdleTimeout bounds how long the event bridge waits with NO in-scope events
+	// before treating the review as stalled and returning an error. It is an
+	// inactivity deadline (every in-scope event resets it), NOT a total-wall cap.
+	// Zero (the default) disables the idle check — so callers that don't opt in
+	// (e.g. the builder-reviewer loop in yoloswe/swe.go) keep their prior
+	// no-inactivity-kill behavior. The code-review CLI sets this from its
+	// --idle-timeout flag.
+	IdleTimeout time.Duration
 }
 
 // ResumeStatus records whether a requested backend resume succeeded.

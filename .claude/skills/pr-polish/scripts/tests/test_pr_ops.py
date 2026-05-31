@@ -372,6 +372,130 @@ class TestStateLifecycle(unittest.TestCase):
         self.assertEqual(state["current_round"], 2)
 
 
+class TestLoadActions(unittest.TestCase):
+    """_load_actions accepts the bare-array form AND the {comment_actions:[...]}
+    form (the shape the SKILL.md State-tracking section implies — a model that
+    builds either must not hit a wasted-turn parse error), and validates the
+    closed-enum fields with a loud, indexed error."""
+
+    def _write(self, obj: object) -> Path:
+        fd, name = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        p = Path(name)
+        self.addCleanup(p.unlink)
+        p.write_text(json.dumps(obj))
+        return p
+
+    def test_accepts_bare_array(self) -> None:
+        got = pr_ops._load_actions(
+            self._write([{"action": "fixed", "severity": "high"}])
+        )
+        self.assertEqual(got, [{"action": "fixed", "severity": "high"}])
+
+    def test_accepts_comment_actions_object(self) -> None:
+        got = pr_ops._load_actions(
+            self._write({"comment_actions": [{"action": "ack", "severity": None}]})
+        )
+        self.assertEqual(got, [{"action": "ack", "severity": None}])
+
+    def test_allows_unknown_optional_keys(self) -> None:
+        # Forward-compat: v2 fields like invariant/spiral_refix must pass through.
+        entry = {"action": "fixed", "invariant": "rule-x", "spiral_refix": True}
+        self.assertEqual(pr_ops._load_actions(self._write([entry])), [entry])
+
+    def test_rejects_scalar_with_clear_message(self) -> None:
+        with self.assertRaises(ValueError) as cm:
+            pr_ops._load_actions(self._write(42))
+        self.assertIn("JSON array", str(cm.exception))
+        self.assertIn("comment_actions", str(cm.exception))
+
+    def test_rejects_object_without_comment_actions(self) -> None:
+        # A dict that ISN'T the comment_actions wrapper is not a valid actions file.
+        with self.assertRaises(ValueError):
+            pr_ops._load_actions(self._write({"rounds": []}))
+
+    def test_rejects_unknown_action_naming_index(self) -> None:
+        with self.assertRaises(ValueError) as cm:
+            pr_ops._load_actions(
+                self._write([{"action": "fixed"}, {"action": "bogus"}])
+            )
+        msg = str(cm.exception)
+        self.assertIn("actions[1].action", msg)
+        self.assertIn("bogus", msg)
+
+    def test_rejects_unknown_severity_naming_index(self) -> None:
+        with self.assertRaises(ValueError) as cm:
+            pr_ops._load_actions(self._write([{"severity": "critical"}]))
+        self.assertIn("actions[0].severity", str(cm.exception))
+
+    def test_rejects_non_dict_entry(self) -> None:
+        with self.assertRaises(ValueError) as cm:
+            pr_ops._load_actions(self._write(["not-an-object"]))
+        self.assertIn("actions[0]", str(cm.exception))
+
+    def test_known_actions_matches_buckets(self) -> None:
+        # KNOWN_ACTIONS must stay the union of the classification buckets so the
+        # validator can't drift from what _top_severity / counting recognize.
+        self.assertEqual(
+            pr_ops.KNOWN_ACTIONS, pr_ops.FIXED_ACTIONS | pr_ops.SKIPPED_ACTIONS
+        )
+
+
+class TestPreflightBrambleWarning(unittest.TestCase):
+    """preflight emits a non-fatal warning when the branch reviews bramble's own
+    code but bramble_bin fell back to the PATH binary (likely a stale build from
+    another worktree)."""
+
+    def test_reviewing_bramble_detects_self_prefixes(self) -> None:
+        with patch.object(
+            pr_ops,
+            "changed_files",
+            return_value=["yoloswe/reviewer/backend.go", "README.md"],
+        ):
+            self.assertTrue(pr_ops._reviewing_bramble_itself("main"))
+        with patch.object(
+            pr_ops, "changed_files", return_value=["bramble/cmd/codereview/x.go"]
+        ):
+            self.assertTrue(pr_ops._reviewing_bramble_itself("main"))
+        with patch.object(pr_ops, "changed_files", return_value=["docs/x.md"]):
+            self.assertFalse(pr_ops._reviewing_bramble_itself("main"))
+        with patch.object(pr_ops, "changed_files", return_value=[]):
+            self.assertFalse(pr_ops._reviewing_bramble_itself("main"))
+
+    def _run_preflight(self, *, cwd: Path, changed: list[str]) -> dict:
+        # Force the PATH fallback by running preflight from a cwd with no
+        # bazel-bin build, and make the resume-support + git-sync probes cheap.
+        with (
+            patch.object(pr_ops.Path, "cwd", return_value=cwd),
+            patch.object(pr_ops, "changed_files", return_value=changed),
+            patch.object(pr_ops, "detect_base_branch", return_value="main"),
+            patch.object(
+                pr_ops.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="--resume-session-id\n", stderr=""
+                ),
+            ),
+        ):
+            return pr_ops.preflight()
+
+    def test_warns_when_reviewing_bramble_on_path_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            out = self._run_preflight(
+                cwd=Path(d), changed=["yoloswe/reviewer/backend.go"]
+            )
+        self.assertEqual(out["bramble_bin"], "bramble")
+        self.assertTrue(
+            any("stale code" in w for w in out["warnings"]),
+            f"expected a stale-bramble warning, got {out['warnings']}",
+        )
+
+    def test_no_warning_when_diff_untouched_by_bramble(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            out = self._run_preflight(cwd=Path(d), changed=["docs/readme.md"])
+        self.assertEqual(out["warnings"], [])
+
+
 class TestLowOnlyStreak(unittest.TestCase):
     """`low_only_streak` powers the streak-based convergence rule and the
     reviewer-pressure goal sentence (B1). Test the increment/reset shape

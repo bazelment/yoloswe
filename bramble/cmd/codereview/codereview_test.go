@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/yoloswe/reviewer"
 )
@@ -930,6 +931,42 @@ func TestCmd_ResumeFlagsAreWired(t *testing.T) {
 	}
 	if resumePromptStyle != "follow-up" {
 		t.Errorf("resumePromptStyle = %q, want follow-up", resumePromptStyle)
+	}
+}
+
+func TestCmd_TimeoutFlagsAreWired(t *testing.T) {
+	// Cobra-level proof that --idle-timeout and --timeout are registered,
+	// carry the new defaults (idle 3m, absolute cap off), and parse into the
+	// globals runCodeReview reads (idle-timeout flows into reviewer.Config.
+	// IdleTimeout; --timeout gates the conditional context.WithTimeout). Guards
+	// the default against a silent regression the reviewer tests can't see.
+	prevTimeout := timeout
+	prevIdle := idleTimeout
+	t.Cleanup(func() {
+		timeout = prevTimeout
+		idleTimeout = prevIdle
+	})
+
+	// Defaults straight from a fresh parse of no timeout flags.
+	if err := Cmd.ParseFlags([]string{}); err != nil {
+		t.Fatalf("ParseFlags (defaults) failed: %v", err)
+	}
+	if idleTimeout != 3*time.Minute {
+		t.Errorf("--idle-timeout default = %s, want 3m (inactivity bound for bare callers)", idleTimeout)
+	}
+	if timeout != 0 {
+		t.Errorf("--timeout default = %s, want 0 (absolute cap off; rely on idle)", timeout)
+	}
+
+	// Explicit values parse into the globals.
+	if err := Cmd.ParseFlags([]string{"--idle-timeout", "90s", "--timeout", "20m"}); err != nil {
+		t.Fatalf("ParseFlags failed: %v", err)
+	}
+	if idleTimeout != 90*time.Second {
+		t.Errorf("idleTimeout = %s, want 90s", idleTimeout)
+	}
+	if timeout != 20*time.Minute {
+		t.Errorf("timeout = %s, want 20m", timeout)
 	}
 }
 

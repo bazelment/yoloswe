@@ -33,6 +33,7 @@ go_test(
         "backend_gemini_test.go",
         "backend_test.go",
         "bridge_test.go",
+        "heartbeat_test.go",
         "json_output_test.go",
         "resume_test.go",
         "reviewer_test.go",

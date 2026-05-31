@@ -105,7 +105,24 @@ func consumeTurnEvents(
 		graceTimer = nil
 		graceCh = nil
 	}
+	// rearmGrace enforces the single grace invariant after an event is applied:
+	// the timer is armed iff the current wave has signalled completion but the
+	// logical turn is still gated on a background tool_use. Shared by the main
+	// events case and the grace-branch continuation so neither can leave the
+	// turn without a backstop (or with a stale one) — re-arming only when none
+	// is pinned so an in-flight wave keeps its original deadline.
+	rearmGrace := func() {
+		if state.SawTurnComplete() {
+			if graceTimer == nil {
+				graceTimer = time.NewTimer(gracePeriod)
+				graceCh = graceTimer.C
+			}
+		} else {
+			disarmGrace()
+		}
+	}
 	defer disarmGrace()
+eventLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -117,9 +134,77 @@ func consumeTurnEvents(
 			}
 			lg.Warn("forcing turn completion: background tool_use never terminated",
 				"grace_period", gracePeriod)
-			return state.ToTurnResult(), state.Err()
+			result := state.ToTurnResult()
+			// A grace-forced stop is a structural deadline, not a real turn
+			// outcome — reaching this branch means LogicalTurnDone() is false, so
+			// the turn is NOT actually complete regardless of result.Success.
+			// Resolve in priority order:
+			//   1. A genuine error (state.Err() != nil) — return it unwrapped;
+			//      never mask a real ResultError that coincides with expiry.
+			//   2. ctx cancelled — terminal; propagate ctx.Err() so a cancelled
+			//      run never reports a (stale) success or a retryable transient.
+			//      (After state.Err() so a real ResultError still wins; before the
+			//      classification below so neither path can mask cancellation.)
+			//   3. Otherwise the turn is still gated on a background tool_use that
+			//      hasn't terminated — whether the last wave's result was success
+			//      or not. A pending stream event takes priority (it may be the
+			//      continuation that completes the turn); if nothing is queued the
+			//      stop is transient so the resume-on-transient path re-drives the
+			//      same session and lets the in-flight background work finish.
+			//      Critically, a Success==true result is NOT returned as-is here:
+			//      a skill (e.g. /pr-polish) that yielded the turn awaiting a long
+			//      run_in_background join keeps lastResult successful for the whole
+			//      join, so returning it after the 3-minute grace would report the
+			//      step as done to a non-interactive caller (jiradozer) while the
+			//      reviewers are still running. Treat it as resumable instead.
+			if err := state.Err(); err != nil {
+				return result, err
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			// graceCh can also win a tie with a ready events case. Give a real
+			// pending event priority over the deadline, without a destructive
+			// peek: a closed stream is terminal; a real pending event is applied
+			// (never dropped — it may be the continuation that completes the
+			// wave) and the loop re-evaluates. Only when nothing is queued do we
+			// classify the stall transient.
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					// Stream closed: terminal. Mirror the closed-stream path
+					// below — never a retryable TransientError.
+					return state.ToTurnResult(), state.Err()
+				}
+				// The grace timer already fired (its channel is drained but
+				// graceTimer is still non-nil). Clear it, then fall through to
+				// the SAME re-arm rule the main events case uses below: the turn
+				// must end this branch with a grace timer armed whenever it is in
+				// a completed-but-gated wave, and disarmed otherwise. (Applying
+				// the event here, rather than deferring to the next loop
+				// iteration, is necessary because we already had to receive it to
+				// distinguish a real event from a closed stream without a
+				// destructive peek.)
+				disarmGrace()
+				state.Apply(ev)
+				if dispatch != nil {
+					dispatch(ev)
+				}
+				if state.LogicalTurnDone() {
+					return state.ToTurnResult(), state.Err()
+				}
+				rearmGrace()
+				continue eventLoop
+			default:
+				return result, &claude.TransientError{
+					Message: "stream idle: turn forced complete after grace period gated on background tool_use",
+				}
+			}
 		case ev, ok := <-events:
 			if !ok {
+				// A closed stream is terminal, not a transient stall: unlike the
+				// grace path above, don't reclassify a Success=false/Err=nil
+				// result as transient — there is no live session left to resume.
 				return state.ToTurnResult(), state.Err()
 			}
 			state.Apply(ev)
@@ -129,22 +214,12 @@ func consumeTurnEvents(
 			if state.LogicalTurnDone() {
 				return state.ToTurnResult(), state.Err()
 			}
-			// Keep the grace timer pinned to the current completion wave.
+			// Keep the grace timer pinned to the current completion wave:
 			// SawTurnComplete() reports the live wave only — a continuation
 			// ResultMessageEvent or invalidateForContinuation clears
-			// lastTurnComplete and flips it back to false. Disarm when the
-			// wave is gone so the next gated wave gets a fresh full window
-			// instead of inheriting an earlier wave's deadline; re-arm once
-			// the (possibly next) wave signals completion but is still gated
-			// on a background tool_use that may never terminate.
-			if state.SawTurnComplete() {
-				if graceTimer == nil {
-					graceTimer = time.NewTimer(gracePeriod)
-					graceCh = graceTimer.C
-				}
-			} else {
-				disarmGrace()
-			}
+			// lastTurnComplete and flips it back to false, so a gone wave
+			// disarms and the next gated wave gets a fresh full window.
+			rearmGrace()
 		}
 	}
 }
