@@ -138,7 +138,7 @@ func consumeTurnEvents(
 			if err := state.Err(); err != nil {
 				return result, err
 			}
-			if result != nil && !result.Success {
+			if !result.Success {
 				return result, &claude.TransientError{
 					Message: "stream idle: turn forced complete after grace period gated on background tool_use",
 				}
@@ -146,6 +146,9 @@ func consumeTurnEvents(
 			return result, nil
 		case ev, ok := <-events:
 			if !ok {
+				// A closed stream is terminal, not a transient stall: unlike the
+				// grace path above, don't reclassify a Success=false/Err=nil
+				// result as transient — there is no live session left to resume.
 				return state.ToTurnResult(), state.Err()
 			}
 			state.Apply(ev)
