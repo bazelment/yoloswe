@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -71,12 +72,112 @@ func TestConsumeTurnEvents_GraceTimerForcesCompletion(t *testing.T) {
 		t.Fatal("consumeTurnEvents hung: grace timer did not force turn completion")
 	}
 	elapsed := time.Since(start)
+	// This wave carries a successful ResultMessage that is merely still gated
+	// on a lingering bg tool_use — the turn produced a real answer, so the
+	// grace-forced stop returns it as-is with no synthetic error.
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.True(t, result.Success,
+		"a successful result gated on lingering bg work must not be reported as a failure")
 	require.GreaterOrEqual(t, elapsed, grace,
 		"must wait at least the grace period before forcing completion")
 	require.Less(t, elapsed, 3*time.Second,
 		"must force completion shortly after the grace period, not hang")
+}
+
+// Production failure repro (jiradozer run 610524, /pr-polish round 3): a wave's
+// ResultMessage is invalidated by a terminal bg-task notification (a bramble
+// reviewer finishing), but no continuation ResultMessage arrives before the
+// grace deadline. A late/duplicate TurnCompleteEvent re-arms the grace timer
+// while lastResult is nil, so the forced stop yields Success=false with no
+// error of its own. Without classification this surfaces as
+// Success=false/Error=nil — which a non-interactive caller's retry loop treats
+// as a hard "agent failed". consumeTurnEvents must instead return a transient
+// error so the resume path re-drives the session.
+func TestConsumeTurnEvents_GraceForcedNonSuccessIsTransient(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	// Wave 1: assistant arms a bg Monitor; CLI fires Result + TurnComplete
+	// while the bg task is still live.
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	events <- resultMessage(false)
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	// The reviewer finishes: a terminal notification invalidates the wave's
+	// Result+TurnComplete pair (lastResult -> nil) and completes the bg tool.
+	events <- claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "completed",
+	}
+	// Another bg tool is still outstanding, and a stray/late TurnComplete
+	// re-arms the grace timer with no continuation Result — lastResult stays
+	// nil, so Success() is false and Err() is nil.
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 2,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg2")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task2", ToolUseID: strPtr("toolu_bg2")}
+	events <- claude.TurnCompleteEvent{TurnNumber: 2, Success: true}
+	// No continuation ResultMessage ever arrives — the grace timer is the backstop.
+
+	grace := 150 * time.Millisecond
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, grace, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeTurnEvents hung: grace timer did not force completion")
+	}
+	require.NotNil(t, result)
+	require.False(t, result.Success, "the forced stop must carry the non-success result")
+	require.Error(t, err)
+	var transient *claude.TransientError
+	require.ErrorAs(t, err, &transient,
+		"a grace-forced non-success stop must be classified transient so it can be resumed")
+	ok, _ := ClassifyTransient(err)
+	require.True(t, ok, "ClassifyTransient must mark the grace-forced stop retryable")
+}
+
+// A genuine ResultError coinciding with grace expiry must be returned
+// unwrapped — the transient classification must never mask a real error.
+func TestConsumeTurnEvents_GraceForcedRealErrorNotMasked(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	// An error ResultMessage sets state.err and Success=false; the bg tool
+	// keeps the turn gated so the grace timer is the backstop.
+	events <- resultMessage(true)
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: false}
+
+	grace := 150 * time.Millisecond
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = consumeTurnEvents(context.Background(), events, grace, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeTurnEvents hung: grace timer did not force completion")
+	}
+	require.Error(t, err)
+	var transient *claude.TransientError
+	require.False(t, errors.As(err, &transient),
+		"a real ResultError must be returned unwrapped, not masked as transient")
+	ok, _ := ClassifyTransient(err)
+	require.False(t, ok, "the real ResultError must not be classified transient")
 }
 
 // A WakeupTimedOut TurnCompleteEvent must unblock the loop immediately —

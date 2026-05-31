@@ -117,7 +117,33 @@ func consumeTurnEvents(
 			}
 			lg.Warn("forcing turn completion: background tool_use never terminated",
 				"grace_period", gracePeriod)
-			return state.ToTurnResult(), state.Err()
+			result := state.ToTurnResult()
+			// A grace-forced stop is a structural deadline, not a real turn
+			// outcome. Three shapes can reach here:
+			//   1. A genuine error (state.Err() != nil) — return it unwrapped;
+			//      never mask a real ResultError that coincides with expiry.
+			//   2. A successful result still gated on a lingering bg tool_use
+			//      (Success && Err()==nil) — the turn produced a real answer,
+			//      so return it as-is; nothing to recover.
+			//   3. Success==false && Err()==nil — e.g. a skill (like /pr-polish)
+			//      that yielded the turn waiting on background reviewers: a
+			//      continuation was invalidated (a barrier finished and nulled
+			//      lastResult) but no follow-up Result arrived before the
+			//      deadline. This otherwise surfaces as Success=false/Error=nil,
+			//      which a non-interactive caller (jiradozer) treats as a hard
+			//      failure even though the work is mid-flight and the session is
+			//      resumable. Classify it transient so the resume-on-transient
+			//      path re-drives the same session and lets the now-finished
+			//      background work complete.
+			if err := state.Err(); err != nil {
+				return result, err
+			}
+			if result != nil && !result.Success {
+				return result, &claude.TransientError{
+					Message: "stream idle: turn forced complete after grace period gated on background tool_use",
+				}
+			}
+			return result, nil
 		case ev, ok := <-events:
 			if !ok {
 				return state.ToTurnResult(), state.Err()

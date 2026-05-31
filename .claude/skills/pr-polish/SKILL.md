@@ -151,6 +151,8 @@ SCOPE_HINTS=$(python3 $SKILL_DIR/scripts/scope_gate.py --state-dir "$STATE_DIR" 
 
 Arm Monitors (same turn), then **one** background Bash barrier until all `$LOG_DIR/<backend>-envelope.json` are non-empty or 780s elapsed. Steps b→c in **one turn** — no tool calls between arm and barrier.
 
+**Wait ONLY via that one barrier.** Do not call `ScheduleWakeup`, do not `sleep`-poll in a loop, and do not end the turn with a text-only "standing by / awaiting notification" reply. This skill may run non-interactively (e.g. driven by jiradozer with one bounded agent turn): there is no harness to re-invoke you on a wakeup or task-notification, so a yielded turn strands the round — the reviewers keep running but the turn is force-completed and the whole step is reported as failed. The single `run_in_background` barrier below is the only sanctioned wait: it blocks in one tool call and returns when the envelopes land or the 780s ceiling hits.
+
 ```
 Monitor({ description: "bramble codex r{ROUND}", timeout_ms: 720000, persistent: false,
   command: "cd $(pwd) && BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
