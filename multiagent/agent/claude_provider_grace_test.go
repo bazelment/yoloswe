@@ -178,13 +178,20 @@ func gatedNonSuccessEvents(ch chan claude.Event) {
 	ch <- claude.TurnCompleteEvent{TurnNumber: 2, Success: true}
 }
 
-// When the grace timer fires but a continuation event is ALREADY queued (the
-// select-tie race where graceCh wins over a ready events case), the grace
-// branch must apply that event — never drop it — because it may be the
-// ResultMessage that completes the wave. Here a queued successful Result +
-// TurnComplete is waiting when grace fires; the turn must complete successfully
-// rather than being force-classified transient with the event discarded.
-func TestConsumeTurnEvents_GraceForcedAppliesQueuedContinuation(t *testing.T) {
+// A wave gated on a bg tool_use that is later followed by a real continuation
+// (fresh Result + TurnComplete) must complete the turn successfully and NOT be
+// classified transient. With a long grace relative to event delivery the
+// continuation is consumed via the normal events path before grace fires; this
+// pins the end-to-end outcome.
+//
+// NOTE (codex PR #258): this does NOT exercise the grace branch's own
+// apply-queued-continuation code — that path only runs on the rare select tie
+// where graceCh wins while a continuation is already queued, which cannot be
+// forced deterministically from outside the function (Go select is random).
+// That branch is covered by inspection + TestConsumeTurnEvents_GraceForced...
+// transient/cancel tests below, which DO reach the grace branch (they stall
+// with no continuation). This test guards the outcome contract, not the branch.
+func TestConsumeTurnEvents_QueuedContinuationCompletesTurn(t *testing.T) {
 	events := make(chan claude.Event, 16)
 	// Wave gated on a bg tool_use with Success=false/Err()==nil — the shape that
 	// would otherwise be classified transient on grace expiry.
@@ -205,7 +212,9 @@ func TestConsumeTurnEvents_GraceForcedAppliesQueuedContinuation(t *testing.T) {
 	events <- rm
 	events <- claude.TurnCompleteEvent{TurnNumber: 2, Success: true}
 
-	grace := 20 * time.Millisecond
+	// Long grace so the continuation is delivered well before any deadline —
+	// the turn completes via the normal path, not a forced stop.
+	grace := time.Hour
 	done := make(chan struct{})
 	var result *claude.TurnResult
 	var err error
@@ -218,27 +227,27 @@ func TestConsumeTurnEvents_GraceForcedAppliesQueuedContinuation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("consumeTurnEvents hung")
 	}
-	// The queued continuation must have been applied, completing the turn — not
-	// dropped in favor of a transient classification.
-	require.NoError(t, err, "a queued continuation must complete the turn, not yield transient")
+	// The continuation must complete the turn — not be dropped or yield transient.
+	require.NoError(t, err, "a continuation must complete the turn, not yield transient")
 	require.NotNil(t, result)
-	require.True(t, result.Success, "the applied continuation completes the turn successfully")
+	require.True(t, result.Success, "the continuation completes the turn successfully")
 }
 
-// Bugbot HIGH (PR #258, commit c445b25): when the grace branch applies a queued
-// event that does NOT complete the turn but leaves the wave still
-// completed-and-gated on live bg work, grace must be RE-ARMED — otherwise the
-// loop would wait on the stream with no backstop and a genuinely stuck turn
-// hangs forever. Here the queued event keeps the turn gated (SawTurnComplete
-// stays true, no continuation Result), then the stream goes silent: grace must
-// fire again and classify the stall transient rather than block indefinitely.
-func TestConsumeTurnEvents_GraceRearmsAfterAppliedNonCompletingEvent(t *testing.T) {
+// A turn left gated on a live bg tool_use (TurnComplete seen, Success=false, no
+// continuation) that then goes silent must trip grace and classify the stall
+// transient — never hang. The events drain via the normal path (which arms
+// grace on the gated wave); then the silent stream lets grace fire. This
+// reaches the grace branch's non-success path for real (nothing is queued when
+// it fires), unlike the queued-continuation outcome test above.
+//
+// (Bugbot HIGH, commit c445b25, motivated the unified rearmGrace so a gated
+// wave always retains a backstop; the trailing non-completing event here keeps
+// the turn gated rather than completing it.)
+func TestConsumeTurnEvents_GraceTripsTransientOnGatedThenSilent(t *testing.T) {
 	events := make(chan claude.Event, 16)
 	gatedNonSuccessEvents(events)
-	// A queued, non-terminal in-scope event is waiting when grace fires: it is
-	// applied (proving the branch consumes it) but does not complete the turn,
-	// which stays gated on toolu_bg2 with TurnComplete already seen. No further
-	// events arrive — grace must re-arm and fire again.
+	// A trailing non-terminal in-scope event that does NOT complete the turn —
+	// it stays gated on toolu_bg2 with TurnComplete seen. Then silence.
 	events <- claude.AssistantMessageEvent{
 		TurnNumber: 2,
 		Blocks:     claude.ContentBlocks{asstTextBlock("still working")},
@@ -255,14 +264,14 @@ func TestConsumeTurnEvents_GraceRearmsAfterAppliedNonCompletingEvent(t *testing.
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("consumeTurnEvents hung: grace was not re-armed after applying a non-completing event")
+		t.Fatal("consumeTurnEvents hung: grace did not fire on a gated-then-silent turn")
 	}
-	// The re-armed grace must fire and classify the stall transient (resumable),
-	// not hang and not return success.
-	require.Error(t, err, "a re-stalled turn must surface the grace-forced transient")
+	// Grace must fire and classify the stall transient (resumable), not hang or
+	// return success.
+	require.Error(t, err, "a gated-then-silent turn must surface the grace-forced transient")
 	var transient *claude.TransientError
 	require.ErrorAs(t, err, &transient,
-		"the re-armed grace-forced stop must be transient so the session can be resumed")
+		"the grace-forced stop must be transient so the session can be resumed")
 }
 
 // Contention smoke test: cancel ctx mid-flight while the turn is gated on a bg

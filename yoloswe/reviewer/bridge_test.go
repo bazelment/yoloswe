@@ -112,7 +112,7 @@ func TestBridgeStreamEvents_HappyPath(t *testing.T) {
 		testTurnCompleteEvent{success: true, durationMs: 100},
 	)
 
-	result, err := bridgeStreamEvents(context.Background(), events, handler, "")
+	result, err := bridgeStreamEvents(context.Background(), events, handler, "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestBridgeStreamEvents_AllEventKinds(t *testing.T) {
 		testTurnCompleteEvent{success: true, durationMs: 50},
 	)
 
-	result, err := bridgeStreamEvents(context.Background(), events, handler, "")
+	result, err := bridgeStreamEvents(context.Background(), events, handler, "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestBridgeStreamEvents_ErrorEvent(t *testing.T) {
 		testErrorEvent{err: testErr, ctx: "test"},
 	)
 
-	_, err := bridgeStreamEvents(context.Background(), events, handler, "")
+	_, err := bridgeStreamEvents(context.Background(), events, handler, "", 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -184,7 +184,7 @@ func TestBridgeStreamEvents_ErrorEvent(t *testing.T) {
 }
 
 func TestBridgeStreamEvents_NilChannel(t *testing.T) {
-	_, err := bridgeStreamEvents[agentstream.Event](context.Background(), nil, nil, "")
+	_, err := bridgeStreamEvents[agentstream.Event](context.Background(), nil, nil, "", 0)
 	if err == nil {
 		t.Fatal("expected error for nil channel")
 	}
@@ -195,7 +195,7 @@ func TestBridgeStreamEvents_ClosedWithoutTurnComplete(t *testing.T) {
 		testTextEvent{delta: "partial response"},
 	)
 
-	_, err := bridgeStreamEvents(context.Background(), events, nil, "")
+	_, err := bridgeStreamEvents(context.Background(), events, nil, "", 0)
 	if err == nil {
 		t.Fatal("expected error when channel closes without TurnComplete")
 	}
@@ -205,7 +205,7 @@ func TestBridgeStreamEvents_EmptyChannelClosed(t *testing.T) {
 	ch := make(chan agentstream.Event)
 	close(ch)
 
-	_, err := bridgeStreamEvents(context.Background(), ch, nil, "")
+	_, err := bridgeStreamEvents(context.Background(), ch, nil, "", 0)
 	if err == nil {
 		t.Fatal("expected error when empty channel closes")
 	}
@@ -218,7 +218,7 @@ func TestBridgeStreamEvents_ContextCancelled(t *testing.T) {
 	// Blocking channel that never sends — ctx.Done() should fire.
 	ch := make(chan agentstream.Event)
 
-	_, err := bridgeStreamEvents(ctx, ch, nil, "")
+	_, err := bridgeStreamEvents(ctx, ch, nil, "", 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestBridgeStreamEvents_ContextTimeout(t *testing.T) {
 
 	ch := make(chan agentstream.Event)
 
-	_, err := bridgeStreamEvents(ctx, ch, nil, "")
+	_, err := bridgeStreamEvents(ctx, ch, nil, "", 0)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected context.DeadlineExceeded, got: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestBridgeStreamEvents_ScopeFiltering(t *testing.T) {
 	ch <- testTurnCompleteEvent{success: true, durationMs: 10}
 	close(ch)
 
-	result, err := bridgeStreamEvents(context.Background(), ch, handler, "thread-1")
+	result, err := bridgeStreamEvents(context.Background(), ch, handler, "thread-1", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestBridgeStreamEvents_UnknownEventsSkipped(t *testing.T) {
 		testTurnCompleteEvent{success: true, durationMs: 5},
 	)
 
-	result, err := bridgeStreamEvents(context.Background(), events, handler, "")
+	result, err := bridgeStreamEvents(context.Background(), events, handler, "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestBridgeStreamEvents_TurnCompleteFailed(t *testing.T) {
 		testTurnCompleteEvent{success: false, durationMs: 42},
 	)
 
-	result, err := bridgeStreamEvents(context.Background(), events, handler, "")
+	result, err := bridgeStreamEvents(context.Background(), events, handler, "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestBridgeStreamEvents_NilHandler(t *testing.T) {
 		testTurnCompleteEvent{success: true, durationMs: 1},
 	)
 
-	result, err := bridgeStreamEvents(context.Background(), events, nil, "")
+	result, err := bridgeStreamEvents(context.Background(), events, nil, "", 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

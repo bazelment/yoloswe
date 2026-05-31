@@ -188,9 +188,16 @@ Substitute the concrete `$LOG_DIR`/`$GOAL`/`$SCOPE_HINTS`/`$REPO`/`$PR_NUMBER`/r
 # (prefixed) so per-reviewer progress — incl. periodic `[code-review] heartbeat …`
 # lines — streams live. --idle-timeout 5m kills a stalled backend; the outer
 # `timeout 1200` is an absolute backstop (lint gets 120s — it's a fast static
-# pass and must not hold the join for 20 minutes). `set -o pipefail` in each
-# subshell makes its exit status (seen by `wait`) the reviewer's real status,
-# not the trailing `sed`'s 0, so a crashed/timed-out reviewer is a non-zero wait.
+# pass and must not hold the join for 20 minutes). `set -o pipefail` keeps each
+# subshell's status the reviewer's real one (not the trailing `sed`'s 0).
+#
+# NOTE: the join exit code is NOT how reviewer failure is detected — `wait` with
+# multiple PIDs returns only the LAST one's status, so a crashed reviewer can be
+# masked by a later success. The join's only job is to block until ALL reviewers
+# have EXITED (one completion notification). Per-reviewer failure is detected
+# AFTER the join, in triage: a crashed/timed-out reviewer leaves no/empty
+# envelope → `recover-envelope` + a `stream-missing` finding. So failures
+# surface via envelopes, not the join's exit status.
 PIDS=()
 
 ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \

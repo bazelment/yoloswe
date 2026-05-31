@@ -26,19 +26,6 @@ var (
 	heartbeatOut      io.Writer = os.Stderr
 )
 
-// idleTimeout bounds how long bridgeStreamEvents will wait with NO events
-// before treating the review as stalled and returning an error. It is an
-// inactivity deadline, not a total-wall one: every event resets the clock, so
-// a review making steady progress runs as long as it needs and only a
-// genuinely hung backend trips. 0 disables the idle check (rely on an absolute
-// cap supplied via ctx instead). Overridable in tests.
-var idleTimeout = 3 * time.Minute
-
-// SetIdleTimeout configures the inactivity deadline applied by
-// bridgeStreamEvents (see idleTimeout). 0 disables the idle check. The
-// code-review command sets this once before a run from the --idle-timeout flag.
-func SetIdleTimeout(d time.Duration) { idleTimeout = d }
-
 // heartbeatWindow accumulates per-interval activity so each heartbeat reports
 // what the agent actually did since the last tick (tools, streamed text)
 // rather than a bare timer. It is reset every tick; toolsInFlight is tracked
@@ -161,7 +148,21 @@ type bridgeResult struct {
 //
 // scopeID enables filtering for multiplexed channels (e.g., codex thread ID).
 // Pass "" to disable scope filtering.
-func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler EventHandler, scopeID string) (*bridgeResult, error) {
+//
+// idleTimeout bounds how long the loop waits with NO in-scope events before
+// returning a "review idle" error — an inactivity deadline (every in-scope
+// event resets it), NOT a total-wall cap. Zero disables the idle check, so a
+// caller that doesn't opt in keeps the prior no-inactivity-kill behavior. It is
+// a per-call parameter (sourced from reviewer.Config.IdleTimeout) rather than a
+// package global so one caller's opt-in (the code-review CLI) can't silently
+// impose a stall policy on every other reviewer caller (e.g. yoloswe/swe.go).
+func bridgeStreamEvents[E any](
+	ctx context.Context,
+	events <-chan E,
+	handler EventHandler,
+	scopeID string,
+	idleTimeout time.Duration,
+) (*bridgeResult, error) {
 	if events == nil {
 		return nil, fmt.Errorf("nil event channel")
 	}

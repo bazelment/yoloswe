@@ -238,6 +238,11 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 		Verbose:           verbose,
 		SkipTestExecution: skipTestExecution,
 		ResumeSessionID:   resumeSessionID,
+		// Idle (inactivity) timeout is the primary stall-killer, enforced inside
+		// the event bridge so a review making steady progress is never cut off.
+		// Scoped to this reviewer instance via Config (not a package global) so
+		// the CLI's opt-in can't impose a stall policy on other reviewer callers.
+		IdleTimeout: idleTimeout,
 	}
 
 	logPath2, err := reviewer.ResolveProtocolLogPath(protocolLogDir)
@@ -258,11 +263,9 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// own default when --model is empty).
 	earlyModel := r.EffectiveModel()
 
-	// Idle (inactivity) timeout is the primary stall-killer, enforced inside
-	// the event bridge so a review making steady progress is never cut off; the
-	// absolute --timeout below is an optional belt-and-suspenders hard cap.
-	reviewer.SetIdleTimeout(idleTimeout)
-
+	// The absolute --timeout below is an optional belt-and-suspenders hard cap;
+	// the primary stall-killer is Config.IdleTimeout (set above), enforced
+	// inside the event bridge so a review making steady progress is never cut off.
 	ctx := cmd.Context()
 	if timeout > 0 {
 		var cancel context.CancelFunc

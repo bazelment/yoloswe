@@ -937,9 +937,9 @@ func TestCmd_ResumeFlagsAreWired(t *testing.T) {
 func TestCmd_TimeoutFlagsAreWired(t *testing.T) {
 	// Cobra-level proof that --idle-timeout and --timeout are registered,
 	// carry the new defaults (idle 3m, absolute cap off), and parse into the
-	// globals runCodeReview reads (SetIdleTimeout + the conditional
-	// context.WithTimeout). Guards the Part-C default change from a silent
-	// regression that the reviewer-package heartbeat tests can't see.
+	// globals runCodeReview reads (idle-timeout flows into reviewer.Config.
+	// IdleTimeout; --timeout gates the conditional context.WithTimeout). Guards
+	// the default against a silent regression the reviewer tests can't see.
 	prevTimeout := timeout
 	prevIdle := idleTimeout
 	t.Cleanup(func() {

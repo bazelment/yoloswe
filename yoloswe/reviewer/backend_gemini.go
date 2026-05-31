@@ -111,7 +111,7 @@ func (b *geminiBackend) RunPrompt(ctx context.Context, prompt string, handler Ev
 	bridged := make(chan *bridgeResult, 1)
 	bridgeErr := make(chan error, 1)
 	go func() {
-		r, err := bridgeStreamEvents(adapterCtx, filterGeminiEvents(adapterCtx, b.client.Events()), handler, "")
+		r, err := bridgeStreamEvents(adapterCtx, filterGeminiEvents(adapterCtx, b.client.Events()), handler, "", b.config.IdleTimeout)
 		if err != nil {
 			bridgeErr <- err
 		} else {

@@ -58,7 +58,7 @@ func TestBridgeStreamEvents_HeartbeatSilentWindow(t *testing.T) {
 	var result *bridgeResult
 	var err error
 	go func() {
-		result, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		result, err = bridgeStreamEvents(context.Background(), ch, handler, "", 0)
 		close(done)
 	}()
 
@@ -103,7 +103,7 @@ func TestBridgeStreamEvents_HeartbeatActiveWindow(t *testing.T) {
 	done := make(chan struct{})
 	var err error
 	go func() {
-		_, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		_, err = bridgeStreamEvents(context.Background(), ch, handler, "", 0)
 		close(done)
 	}()
 
@@ -165,20 +165,11 @@ func TestBridgeStreamEvents_HeartbeatActiveWindow(t *testing.T) {
 	}
 }
 
-// withIdleTimeout overrides the package idle deadline for one test and
-// restores it on cleanup. Tests using it must NOT run in parallel.
-func withIdleTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := idleTimeout
-	idleTimeout = d
-	t.Cleanup(func() { idleTimeout = prev })
-}
-
 // A stream that goes silent past the idle deadline must trip the inactivity
-// timeout and return an error, rather than blocking forever.
+// timeout and return an error, rather than blocking forever. idleTimeout is now
+// a per-call parameter (no package global), so each test passes its own value.
 func TestBridgeStreamEvents_IdleTimeoutTrips(t *testing.T) {
 	withHeartbeat(t, 15*time.Millisecond) // tick faster than the idle window
-	withIdleTimeout(t, 40*time.Millisecond)
 
 	ch := make(chan agentstream.Event)
 	handler := &recordingHandler{}
@@ -186,7 +177,7 @@ func TestBridgeStreamEvents_IdleTimeoutTrips(t *testing.T) {
 	done := make(chan struct{})
 	var err error
 	go func() {
-		_, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		_, err = bridgeStreamEvents(context.Background(), ch, handler, "", 40*time.Millisecond)
 		close(done)
 	}()
 
@@ -203,12 +194,54 @@ func TestBridgeStreamEvents_IdleTimeoutTrips(t *testing.T) {
 	}
 }
 
+// idleTimeout=0 (the default for callers that don't opt in, e.g. yoloswe/swe.go)
+// must DISABLE the idle check entirely: a stream that goes silent forever must
+// NOT be killed — it blocks until a terminal event arrives. Guards the HIGH
+// regression where a package-global default imposed a stall policy on callers
+// that never asked for one.
+func TestBridgeStreamEvents_IdleTimeoutZeroDisables(t *testing.T) {
+	withHeartbeat(t, 10*time.Millisecond)
+
+	ch := make(chan agentstream.Event)
+	handler := &recordingHandler{}
+	done := make(chan struct{})
+	var result *bridgeResult
+	var err error
+	go func() {
+		result, err = bridgeStreamEvents(context.Background(), ch, handler, "", 0)
+		close(done)
+	}()
+
+	// One event, then a long silence well past any plausible idle window. With
+	// idle disabled the loop must keep waiting; the turn only ends when a
+	// terminal event finally arrives.
+	ch <- testTextEvent{delta: "hello"}
+	time.Sleep(120 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("idle=0 must not trip; the loop returned during the silent window")
+	default:
+	}
+	ch <- testTurnCompleteEvent{success: true, durationMs: 1}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridgeStreamEvents did not return after the terminal event")
+	}
+	if err != nil {
+		t.Fatalf("idle=0 must not produce an idle error, got: %v", err)
+	}
+	if result == nil || !result.success {
+		t.Fatal("expected a successful result")
+	}
+}
+
 // A steadily-active stream must NOT trip the idle timeout: each event resets
 // the inactivity clock, so a review longer than the idle window still
 // completes normally as long as events keep arriving.
 func TestBridgeStreamEvents_IdleTimeoutResetsOnActivity(t *testing.T) {
 	withHeartbeat(t, 10*time.Millisecond)
-	withIdleTimeout(t, 50*time.Millisecond)
 
 	ch := make(chan agentstream.Event)
 	handler := &recordingHandler{}
@@ -217,7 +250,7 @@ func TestBridgeStreamEvents_IdleTimeoutResetsOnActivity(t *testing.T) {
 	var result *bridgeResult
 	var err error
 	go func() {
-		result, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		result, err = bridgeStreamEvents(context.Background(), ch, handler, "", 50*time.Millisecond)
 		close(done)
 	}()
 
@@ -246,14 +279,12 @@ func TestBridgeStreamEvents_IdleTimeoutResetsOnActivity(t *testing.T) {
 // event is already queued. select can pick the ticker over a ready events case,
 // so the ticker branch must drain pending events before declaring the stream
 // stalled — otherwise a healthy review with buffered traffic gets a false
-// "review idle" and the queued event is dropped.
+// "review idle" and the queued event is dropped. The pre-sleep makes lastEvent
+// stale on entry, so on the first tick the idle deadline IS already exceeded —
+// the loop must still drain the queued events rather than trip.
 func TestBridgeStreamEvents_IdleDoesNotTripWithPendingEvent(t *testing.T) {
 	withHeartbeat(t, 5*time.Millisecond)
-	withIdleTimeout(t, 10*time.Millisecond)
 
-	// Pre-fill the buffer so events are pending the moment the loop starts, then
-	// idle elapses. The ticker must drain them (completing the turn) rather than
-	// trip idle.
 	ch := make(chan agentstream.Event, 8)
 	ch <- testTextEvent{delta: "alive"}
 	ch <- testTurnCompleteEvent{success: true, durationMs: 1}
@@ -266,7 +297,7 @@ func TestBridgeStreamEvents_IdleDoesNotTripWithPendingEvent(t *testing.T) {
 		// Sleep past the idle window before consuming so lastEvent is "stale",
 		// then the first ticker tick must still drain the queued events.
 		time.Sleep(15 * time.Millisecond)
-		result, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		result, err = bridgeStreamEvents(context.Background(), ch, handler, "", 10*time.Millisecond)
 		close(done)
 	}()
 
@@ -296,7 +327,6 @@ func TestBridgeStreamEvents_IdleDoesNotTripWithPendingEvent(t *testing.T) {
 // hang here instead of tripping.
 func TestBridgeStreamEvents_IdleIgnoresPerpetualOutOfScopeTraffic(t *testing.T) {
 	withHeartbeat(t, 5*time.Millisecond)
-	withIdleTimeout(t, 40*time.Millisecond)
 
 	ch := make(chan agentstream.Event)
 	handler := &recordingHandler{}
@@ -304,7 +334,7 @@ func TestBridgeStreamEvents_IdleIgnoresPerpetualOutOfScopeTraffic(t *testing.T) 
 	stop := make(chan struct{})
 	var err error
 	go func() {
-		_, err = bridgeStreamEvents(context.Background(), ch, handler, "thread-1")
+		_, err = bridgeStreamEvents(context.Background(), ch, handler, "thread-1", 40*time.Millisecond)
 		close(done)
 	}()
 
