@@ -184,7 +184,10 @@ CODEX_PID=$!
   2>&1 | tee "$LOG_DIR/cursor-stderr.txt" | sed 's/^/[cursor] /' ) &
 CURSOR_PID=$!
 
-( set -o pipefail; timeout 1200 python3 $SKILL_DIR/scripts/lint_gate.py \
+# Lint is a fast static pass — keep its original 120s backstop (the bramble
+# reviewers get 1200s because their reviews legitimately run minutes). A wedged
+# lint must not hold the join for 20 minutes.
+( set -o pipefail; timeout 120 python3 $SKILL_DIR/scripts/lint_gate.py \
     --state-dir "$STATE_DIR" --round {ROUND} --log-dir "$LOG_DIR" \
   2>&1 | tee "$LOG_DIR/lint-stderr.txt" | sed 's/^/[lint] /' ) &
 LINT_PID=$!
