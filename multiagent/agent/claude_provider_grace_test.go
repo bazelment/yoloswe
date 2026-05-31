@@ -530,6 +530,28 @@ func TestConsumeTurnEvents_GraceResetsAcrossContinuationWave(t *testing.T) {
 		"wave 2 must get a fresh grace window, not wave 1's leftover slack")
 }
 
+// resolveGracePeriod must honor a positive ExecuteConfig override and fall back
+// to the provider default for the zero value. This is the per-step
+// configurability that lets long-running background work (e.g. bramble
+// reviewers driven by /pr-polish) raise the grace period above the default.
+func TestResolveGracePeriod(t *testing.T) {
+	// Unset (zero) -> provider default.
+	require.Equal(t, streamTurnGracePeriod, resolveGracePeriod(ExecuteConfig{}),
+		"a zero override must fall back to the provider default")
+
+	// Positive override -> used verbatim.
+	override := 25 * time.Minute
+	require.Equal(t, override,
+		resolveGracePeriod(ExecuteConfig{StreamTurnGracePeriod: override}),
+		"a positive override must take precedence over the default")
+
+	// WithProviderStreamTurnGracePeriod must set the field the resolver reads.
+	cfg := ExecuteConfig{}
+	WithProviderStreamTurnGracePeriod(override)(&cfg)
+	require.Equal(t, override, resolveGracePeriod(cfg),
+		"WithProviderStreamTurnGracePeriod must flow through to resolveGracePeriod")
+}
+
 // ctx cancellation must unblock the loop even while a bg tool_use is live.
 func TestConsumeTurnEvents_ContextCancelUnblocks(t *testing.T) {
 	events := make(chan claude.Event, 8)

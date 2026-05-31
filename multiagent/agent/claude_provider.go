@@ -61,7 +61,26 @@ const minRetryWallClockBudget = 10 * time.Minute
 // tool_use to produce a terminal event. On expiry the turn is forced done.
 // This is the backstop for an agent that backgrounds a tool that never
 // terminates (e.g. a `while true` poll loop) without a ScheduleWakeup.
-const streamTurnGracePeriod = 3 * time.Minute
+//
+// The default is generous (10m) because legitimate background work — e.g.
+// bramble code reviewers driven by /pr-polish — routinely runs 3-7+ minutes
+// before producing a terminal event; a tighter bound force-completes the turn
+// and KillGroup tears down those processes, so retries restart from scratch
+// and exhaust the retry budget. Callers that need a different bound set it via
+// ExecuteConfig.StreamTurnGracePeriod (WithProviderStreamTurnGracePeriod).
+const streamTurnGracePeriod = 10 * time.Minute
+
+// resolveGracePeriod returns the per-execution grace period: the caller's
+// override (ExecuteConfig.StreamTurnGracePeriod) when set to a positive value,
+// otherwise the provider default. A zero or negative override means "use the
+// default" — config validation rejects negatives upstream, so this only guards
+// against the zero value reaching the option boundary.
+func resolveGracePeriod(cfg ExecuteConfig) time.Duration {
+	if cfg.StreamTurnGracePeriod > 0 {
+		return cfg.StreamTurnGracePeriod
+	}
+	return streamTurnGracePeriod
+}
 
 // consumeTurnEvents drives one logical turn by feeding events from the
 // session channel into a logicalTurnState until the turn is done. It
@@ -426,7 +445,7 @@ func (p *ClaudeProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.W
 		if err := session.Query(ctx, prompt); err != nil {
 			return nil, err
 		}
-		return consumeTurnEvents(ctx, session.Events(), streamTurnGracePeriod, cfg.Logger,
+		return consumeTurnEvents(ctx, session.Events(), resolveGracePeriod(cfg), cfg.Logger,
 			func(ev claude.Event) {
 				dispatchClaudeEvent(ev, cfg.EventHandler, p.events)
 			})
