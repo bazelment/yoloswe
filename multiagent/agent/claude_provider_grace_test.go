@@ -295,6 +295,45 @@ func TestConsumeTurnEvents_GraceVsCtxCancelTerminates(t *testing.T) {
 	}
 }
 
+// Bugbot MEDIUM (PR #258, commit 80ee672): the grace branch's SUCCESS path
+// must also propagate ctx cancellation. graceCh can win a select tie with
+// ctx.Done(), so a cancelled run whose result happens to be successful must
+// return ctx.Err() — not report a stale success. ctx is cancelled before the
+// run so it is ready throughout; the successful-but-gated wave arms grace, and
+// whichever case wins, the result must be context.Canceled (never nil).
+func TestConsumeTurnEvents_GraceForcedSuccessPropagatesCancel(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ch := make(chan claude.Event, 8)
+		// A successful result still gated on a live bg tool_use: Success=true,
+		// Err()==nil, TurnComplete seen, tool never terminates.
+		ch <- claude.AssistantMessageEvent{
+			TurnNumber: 1,
+			Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+		}
+		ch <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+		ch <- resultMessage(false) // non-error result -> Success=true
+		ch <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // cancelled before the run: ctx.Done() ready throughout
+
+		grace := time.Millisecond
+		done := make(chan struct{})
+		var err error
+		go func() {
+			_, err = consumeTurnEvents(ctx, ch, grace, nil, nil)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iter %d: consumeTurnEvents hung", i)
+		}
+		require.ErrorIs(t, err, context.Canceled,
+			"iter %d: a cancelled run must surface ctx.Err() even when the gated result is successful", i)
+	}
+}
+
 // A genuine ResultError coinciding with grace expiry must be returned
 // unwrapped — the transient classification must never mask a real error.
 func TestConsumeTurnEvents_GraceForcedRealErrorNotMasked(t *testing.T) {

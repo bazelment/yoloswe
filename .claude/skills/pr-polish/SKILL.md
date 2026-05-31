@@ -138,6 +138,7 @@ LOG_DIR=$(echo "$BUNDLE" | jq -r .log_dir)
 GOAL=$(echo "$BUNDLE" | jq -r .goal_text)
 CODEX_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.codex')
 CURSOR_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.cursor')
+GEMINI_RESUME=$(echo "$BUNDLE" | jq -r '.resume_ids.gemini')   # used by the --gemini launch
 [ "{ROUND}" = "1" ] && GOAL="$PR_SUMMARY"
 mkdir -p "$LOG_DIR"
 
@@ -211,7 +212,7 @@ fi
 wait $CODEX_PID $CURSOR_PID $LINT_PID $GEMINI_PID
 ```
 
-The single completion notification = every reviewer has exited (each bounded by `--idle-timeout 5m` for stalls and a `timeout 1200` absolute backstop). The `wait` returns once all PIDs exit, and a crashed reviewer exits immediately, so a dead process never hangs the round. `$GEMINI_RESUME` comes from the same `round-bundle` as the other resume ids (`echo "$BUNDLE" | jq -r '.resume_ids.gemini'`).
+The single completion notification = every reviewer has exited (each bounded by `--idle-timeout 5m` for stalls and a `timeout 1200` absolute backstop; lint by `timeout 120`). The `wait` returns once all PIDs exit, and a crashed reviewer exits immediately, so a dead process never hangs the round. All three resume ids (`CODEX_RESUME`/`CURSOR_RESUME`/`GEMINI_RESUME`) come from the round-prep `round-bundle` block above.
 
 Before triage: `recover-envelope` on each stream path (idempotent). A reviewer that exited without a valid envelope → `stream-missing` finding, not a deadlock.
 

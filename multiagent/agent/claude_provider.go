@@ -155,17 +155,19 @@ eventLoop:
 			if err := state.Err(); err != nil {
 				return result, err
 			}
+			// select picks randomly among ready cases, so graceCh can win a tie
+			// with ctx.Done(). A cancelled context is terminal for BOTH the
+			// success and non-success shapes — re-check it before returning
+			// either, so a cancelled run never reports a (stale) success or a
+			// retryable transient. Checked after state.Err() so a genuine
+			// ResultError still wins, and before the success split so neither
+			// path can mask cancellation.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
 			if !result.Success {
-				// select picks randomly among ready cases, so graceCh can win a
-				// tie with ctx.Done() or a ready events case. Both are genuinely
-				// terminal (or carry a continuation) — re-check before classifying
-				// the stop transient, otherwise the outer retry loop backs off and
-				// re-drives a session that has already ended or whose completing
-				// event we ignored.
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return result, ctxErr
-				}
-				// Give a ready event priority over the deadline, without a
+				// graceCh can also win a tie with a ready events case. Give a
+				// real pending event priority over the deadline, without a
 				// destructive peek: a closed stream is terminal; a real pending
 				// event is applied (never dropped — it may be the continuation
 				// that completes the wave) and the loop re-evaluates. Only when
