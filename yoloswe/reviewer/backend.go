@@ -26,6 +26,19 @@ var (
 	heartbeatOut      io.Writer = os.Stderr
 )
 
+// idleTimeout bounds how long bridgeStreamEvents will wait with NO events
+// before treating the review as stalled and returning an error. It is an
+// inactivity deadline, not a total-wall one: every event resets the clock, so
+// a review making steady progress runs as long as it needs and only a
+// genuinely hung backend trips. 0 disables the idle check (rely on an absolute
+// cap supplied via ctx instead). Overridable in tests.
+var idleTimeout = 3 * time.Minute
+
+// SetIdleTimeout configures the inactivity deadline applied by
+// bridgeStreamEvents (see idleTimeout). 0 disables the idle check. The
+// code-review command sets this once before a run from the --idle-timeout flag.
+func SetIdleTimeout(d time.Duration) { idleTimeout = d }
+
 // heartbeatWindow accumulates per-interval activity so each heartbeat reports
 // what the agent actually did since the last tick (tools, streamed text)
 // rather than a bare timer. It is reset every tick; toolsInFlight is tracked
@@ -161,7 +174,17 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 	// later one). This is operator/log telemetry only — it never touches the
 	// handler, the response text, or the envelope.
 	start := time.Now()
-	ticker := time.NewTicker(heartbeatInterval)
+	lastEvent := start
+	lastHeartbeat := start
+	// One ticker drives both the heartbeat and the idle check. It ticks fast
+	// enough to honor idleTimeout precisely (so a small --idle-timeout behaves
+	// as documented rather than at heartbeat resolution), but a heartbeat LINE
+	// is only emitted every heartbeatInterval.
+	tick := heartbeatInterval
+	if idleTimeout > 0 && idleTimeout < tick {
+		tick = idleTimeout
+	}
+	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	var window heartbeatWindow
 	toolsInFlight := 0
@@ -171,8 +194,19 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			fmt.Fprintln(heartbeatOut, formatHeartbeat(time.Since(start), window, toolsInFlight))
-			window = heartbeatWindow{}
+			// Inactivity deadline: a review silent past idleTimeout is treated
+			// as stalled. The clock resets on every event below, so this only
+			// trips a genuinely hung backend, never a slow-but-progressing one.
+			if idleTimeout > 0 && time.Since(lastEvent) >= idleTimeout {
+				return nil, fmt.Errorf("review idle: no events for %s (stalled backend)", idleTimeout)
+			}
+			// Emit a heartbeat line at most every heartbeatInterval even if the
+			// ticker fires more often for idle-check precision.
+			if time.Since(lastHeartbeat) >= heartbeatInterval {
+				fmt.Fprintln(heartbeatOut, formatHeartbeat(time.Since(start), window, toolsInFlight))
+				window = heartbeatWindow{}
+				lastHeartbeat = time.Now()
+			}
 		case ev, ok := <-events:
 			if !ok {
 				// Channel closed without TurnComplete.
@@ -192,6 +226,8 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 			if kind == agentstream.KindUnknown {
 				continue
 			}
+			// A real event proves the stream is alive — reset the idle clock.
+			lastEvent = time.Now()
 
 			// Scope filtering for multiplexed channels.
 			if scopeID != "" {

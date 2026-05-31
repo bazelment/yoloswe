@@ -165,6 +165,83 @@ func TestBridgeStreamEvents_HeartbeatActiveWindow(t *testing.T) {
 	}
 }
 
+// withIdleTimeout overrides the package idle deadline for one test and
+// restores it on cleanup. Tests using it must NOT run in parallel.
+func withIdleTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := idleTimeout
+	idleTimeout = d
+	t.Cleanup(func() { idleTimeout = prev })
+}
+
+// A stream that goes silent past the idle deadline must trip the inactivity
+// timeout and return an error, rather than blocking forever.
+func TestBridgeStreamEvents_IdleTimeoutTrips(t *testing.T) {
+	withHeartbeat(t, 15*time.Millisecond) // tick faster than the idle window
+	withIdleTimeout(t, 40*time.Millisecond)
+
+	ch := make(chan agentstream.Event)
+	handler := &recordingHandler{}
+
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		close(done)
+	}()
+
+	// One event proves the stream started, then it goes silent forever.
+	ch <- testTextEvent{delta: "hello"}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridgeStreamEvents did not trip the idle timeout")
+	}
+	if err == nil || !strings.Contains(err.Error(), "review idle") {
+		t.Fatalf("expected an idle-timeout error, got: %v", err)
+	}
+}
+
+// A steadily-active stream must NOT trip the idle timeout: each event resets
+// the inactivity clock, so a review longer than the idle window still
+// completes normally as long as events keep arriving.
+func TestBridgeStreamEvents_IdleTimeoutResetsOnActivity(t *testing.T) {
+	withHeartbeat(t, 10*time.Millisecond)
+	withIdleTimeout(t, 50*time.Millisecond)
+
+	ch := make(chan agentstream.Event)
+	handler := &recordingHandler{}
+
+	done := make(chan struct{})
+	var result *bridgeResult
+	var err error
+	go func() {
+		result, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		close(done)
+	}()
+
+	// Send events at ~20ms spacing for ~120ms — well past the 50ms idle window
+	// in aggregate, but never 50ms apart, so the idle clock keeps resetting.
+	for i := 0; i < 6; i++ {
+		ch <- testTextEvent{delta: "x"}
+		time.Sleep(20 * time.Millisecond)
+	}
+	ch <- testTurnCompleteEvent{success: true, durationMs: 1}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridgeStreamEvents did not return on a steadily-active stream")
+	}
+	if err != nil {
+		t.Fatalf("active stream must not trip the idle timeout, got: %v", err)
+	}
+	if result == nil || !result.success {
+		t.Fatal("expected a successful result on a steadily-active stream")
+	}
+}
+
 // Unit coverage for the line formatter independent of timing.
 func TestFormatHeartbeat(t *testing.T) {
 	idle := formatHeartbeat(95*time.Second, heartbeatWindow{}, 1)

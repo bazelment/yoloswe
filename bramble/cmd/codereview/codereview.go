@@ -27,6 +27,7 @@ var (
 	verbose           bool
 	goal              string
 	timeout           time.Duration
+	idleTimeout       time.Duration
 	protocolLogDir    string
 	envelopeFile      string
 	skipTestExecution bool
@@ -78,7 +79,8 @@ func init() {
 	Cmd.Flags().BoolVar(&readOnly, "read-only", true, "Deny file writes via approval handler (Codex only; default true)")
 	Cmd.Flags().BoolVar(&verbose, "verbose", false, "Show tool call details")
 	Cmd.Flags().StringVar(&goal, "goal", "", "Review goal (default: infer from branch)")
-	Cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Review timeout")
+	Cmd.Flags().DurationVar(&timeout, "timeout", 0, "Absolute hard cap on the whole review (0 = none; rely on --idle-timeout). A review making steady progress is bounded only by --idle-timeout.")
+	Cmd.Flags().DurationVar(&idleTimeout, "idle-timeout", 3*time.Minute, "Kill the review after this much inactivity (no stream events). Resets on every event, so it only trips a stalled backend. 0 disables.")
 	Cmd.Flags().StringVar(&protocolLogDir, "protocol-log-dir", "", "Directory for protocol session logs (Codex only; also supports $BRAMBLE_PROTOCOL_LOG_DIR)")
 	Cmd.Flags().StringVar(&envelopeFile, "envelope-file", "", "Write the JSON ResultEnvelope to this file instead of stdout (stdout then carries only progress events)")
 	Cmd.Flags().BoolVar(&skipTestExecution, "skip-test-execution", false, "Instruct the reviewer not to run tests/build commands (caller runs them separately)")
@@ -256,8 +258,17 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	// own default when --model is empty).
 	earlyModel := r.EffectiveModel()
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
-	defer cancel()
+	// Idle (inactivity) timeout is the primary stall-killer, enforced inside
+	// the event bridge so a review making steady progress is never cut off; the
+	// absolute --timeout below is an optional belt-and-suspenders hard cap.
+	reviewer.SetIdleTimeout(idleTimeout)
+
+	ctx := cmd.Context()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
