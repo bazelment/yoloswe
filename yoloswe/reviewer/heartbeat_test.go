@@ -242,6 +242,86 @@ func TestBridgeStreamEvents_IdleTimeoutResetsOnActivity(t *testing.T) {
 	}
 }
 
+// Regression (codex/cursor PR #258): the idle check must not fire while a real
+// event is already queued. select can pick the ticker over a ready events case,
+// so the ticker branch must drain pending events before declaring the stream
+// stalled — otherwise a healthy review with buffered traffic gets a false
+// "review idle" and the queued event is dropped.
+func TestBridgeStreamEvents_IdleDoesNotTripWithPendingEvent(t *testing.T) {
+	withHeartbeat(t, 5*time.Millisecond)
+	withIdleTimeout(t, 10*time.Millisecond)
+
+	// Pre-fill the buffer so events are pending the moment the loop starts, then
+	// idle elapses. The ticker must drain them (completing the turn) rather than
+	// trip idle.
+	ch := make(chan agentstream.Event, 8)
+	ch <- testTextEvent{delta: "alive"}
+	ch <- testTurnCompleteEvent{success: true, durationMs: 1}
+
+	handler := &recordingHandler{}
+	done := make(chan struct{})
+	var result *bridgeResult
+	var err error
+	go func() {
+		// Sleep past the idle window before consuming so lastEvent is "stale",
+		// then the first ticker tick must still drain the queued events.
+		time.Sleep(15 * time.Millisecond)
+		result, err = bridgeStreamEvents(context.Background(), ch, handler, "")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridgeStreamEvents hung")
+	}
+	if err != nil {
+		t.Fatalf("idle must not trip while events are pending, got: %v", err)
+	}
+	if result == nil || !result.success {
+		t.Fatal("expected the queued continuation to complete the turn")
+	}
+	if len(handler.texts) != 1 {
+		t.Errorf("the queued text event must have been processed, got %d", len(handler.texts))
+	}
+}
+
+// Regression (codex PR #258): only IN-SCOPE events reset the idle clock. On a
+// multiplexed channel (scopeID set), an unrelated thread's event must not keep
+// a stalled thread alive — the idle timeout must still trip.
+func TestBridgeStreamEvents_IdleIgnoresOutOfScopeEvents(t *testing.T) {
+	withHeartbeat(t, 5*time.Millisecond)
+	withIdleTimeout(t, 40*time.Millisecond)
+
+	ch := make(chan agentstream.Event)
+	handler := &recordingHandler{}
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = bridgeStreamEvents(context.Background(), ch, handler, "thread-1")
+		close(done)
+	}()
+
+	// Feed out-of-scope events steadily (every 15ms, faster than the 40ms idle
+	// window). If they reset the idle clock, the timeout never trips and this
+	// hangs; the fix makes them NOT count, so idle trips despite the traffic.
+	go func() {
+		for i := 0; i < 6; i++ {
+			ch <- testScopedTextEvent{testTextEvent: testTextEvent{delta: "other"}, scopeID: "thread-2"}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle timeout never tripped — out-of-scope events wrongly reset the clock")
+	}
+	if err == nil || !strings.Contains(err.Error(), "review idle") {
+		t.Fatalf("expected idle-timeout despite out-of-scope traffic, got: %v", err)
+	}
+}
+
 // Unit coverage for the line formatter independent of timing.
 func TestFormatHeartbeat(t *testing.T) {
 	idle := formatHeartbeat(95*time.Second, heartbeatWindow{}, 1)

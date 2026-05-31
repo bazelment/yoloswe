@@ -167,28 +167,51 @@ func gatedNonSuccessEvents(ch chan claude.Event) {
 	ch <- claude.TurnCompleteEvent{TurnNumber: 2, Success: true}
 }
 
-// The grace branch's terminal re-checks (the fix for the select-tie race where
-// graceCh wins against a simultaneously-ready ctx.Done() or closed stream)
-// hinge on two cheap, deterministic checks: ctx.Err() and streamClosed(). A
-// true simultaneous select tie can't be forced from outside the function, so
-// the two checks are covered directly here, plus a contention smoke test below.
+// When the grace timer fires but a continuation event is ALREADY queued (the
+// select-tie race where graceCh wins over a ready events case), the grace
+// branch must apply that event — never drop it — because it may be the
+// ResultMessage that completes the wave. Here a queued successful Result +
+// TurnComplete is waiting when grace fires; the turn must complete successfully
+// rather than being force-classified transient with the event discarded.
+func TestConsumeTurnEvents_GraceForcedAppliesQueuedContinuation(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	// Wave gated on a bg tool_use with Success=false/Err()==nil — the shape that
+	// would otherwise be classified transient on grace expiry.
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	events <- resultMessage(false)
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	events <- claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "completed",
+	}
+	// A real continuation is queued: a fresh successful Result completes the turn.
+	rm := resultMessage(false)
+	rm.TurnNumber = 2
+	events <- claude.AssistantMessageEvent{TurnNumber: 2, Blocks: claude.ContentBlocks{asstTextBlock("done")}}
+	events <- rm
+	events <- claude.TurnCompleteEvent{TurnNumber: 2, Success: true}
 
-// streamClosed must report a closed channel as closed, an open-but-empty
-// channel as not-closed, and on the rare race where a value is already queued
-// it consumes that one value and reports not-closed (the turn is then
-// classified transient and the resume path replays it — see the doc comment).
-func TestStreamClosed(t *testing.T) {
-	closed := make(chan claude.Event)
-	close(closed)
-	require.True(t, streamClosed(closed), "a closed channel must report closed")
-
-	openEmpty := make(chan claude.Event, 1)
-	require.False(t, streamClosed(openEmpty), "an open empty channel must report not-closed")
-
-	openWithValue := make(chan claude.Event, 1)
-	openWithValue <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
-	require.False(t, streamClosed(openWithValue), "an open channel with a queued value must report not-closed")
-	require.Len(t, openWithValue, 0, "the queued value must have been consumed by the non-blocking receive")
+	grace := 20 * time.Millisecond
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, grace, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeTurnEvents hung")
+	}
+	// The queued continuation must have been applied, completing the turn — not
+	// dropped in favor of a transient classification.
+	require.NoError(t, err, "a queued continuation must complete the turn, not yield transient")
+	require.NotNil(t, result)
+	require.True(t, result.Success, "the applied continuation completes the turn successfully")
 }
 
 // Contention smoke test: cancel ctx mid-flight while the turn is gated on a bg

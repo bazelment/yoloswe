@@ -189,15 +189,138 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 	var window heartbeatWindow
 	toolsInFlight := 0
 
+	// applyEvent processes one received event. done reports a terminal result
+	// (TurnComplete/Error or a closed/invalid stream); inScope reports whether
+	// the event counts toward liveness (only in-scope events reset the idle
+	// clock — an unrelated event on a shared multiplexed channel must not keep
+	// a stalled thread alive). It mutates the enclosing accumulators directly.
+	applyEvent := func(ev E, ok bool) (res *bridgeResult, done bool, inScope bool, err error) {
+		if !ok {
+			// Channel closed without TurnComplete.
+			text := responseText.String()
+			if text != "" {
+				return nil, true, false, fmt.Errorf("session ended unexpectedly (partial response: %d chars)", len(text))
+			}
+			return nil, true, false, fmt.Errorf("session ended without result")
+		}
+
+		sev, ok := any(ev).(agentstream.Event)
+		if !ok {
+			return nil, false, false, nil
+		}
+		kind := sev.StreamEventKind()
+		if kind == agentstream.KindUnknown {
+			return nil, false, false, nil
+		}
+
+		// Scope filtering for multiplexed channels: an out-of-scope event is
+		// another thread's traffic and must not reset our idle clock.
+		if scopeID != "" {
+			if scoped, ok := any(ev).(agentstream.Scoped); ok {
+				if id := scoped.ScopeID(); id != "" && id != scopeID {
+					return nil, false, false, nil
+				}
+			}
+		}
+
+		switch kind {
+		case agentstream.KindText:
+			te := sev.(agentstream.Text)
+			delta := te.StreamDelta()
+			responseText.WriteString(delta)
+			window.textChars += len(delta)
+			window.events++
+			if handler != nil {
+				handler.OnText(delta)
+			}
+
+		case agentstream.KindThinking:
+			te := sev.(agentstream.Text)
+			delta := te.StreamDelta()
+			window.reasoningChars += len(delta)
+			window.events++
+			if handler != nil {
+				handler.OnReasoning(delta)
+			}
+
+		case agentstream.KindToolStart:
+			ts := sev.(agentstream.ToolStart)
+			toolsInFlight++
+			window.events++
+			if handler != nil {
+				handler.OnToolStart(ts.StreamToolName(), ts.StreamToolCallID(), ts.StreamToolInput())
+			}
+
+		case agentstream.KindToolEnd:
+			te := sev.(agentstream.ToolEnd)
+			if toolsInFlight > 0 {
+				toolsInFlight--
+			}
+			window.toolsCompleted = append(window.toolsCompleted, te.StreamToolName())
+			window.events++
+			if handler != nil {
+				handler.OnToolComplete(
+					te.StreamToolName(),
+					te.StreamToolCallID(),
+					te.StreamToolInput(),
+					te.StreamToolResult(),
+					te.StreamToolIsError(),
+				)
+			}
+
+		case agentstream.KindTurnComplete:
+			tc := sev.(agentstream.TurnComplete)
+			success := tc.StreamIsSuccess()
+			durationMs := tc.StreamDuration()
+			if handler != nil {
+				handler.OnTurnComplete(success, durationMs)
+			}
+			return &bridgeResult{
+				responseText: responseText.String(),
+				success:      success,
+				durationMs:   durationMs,
+				turnEvent:    tc,
+			}, true, true, nil
+		}
+		// KindError and any in-scope event that isn't terminal: in-scope, alive.
+		if kind == agentstream.KindError {
+			ee := sev.(agentstream.Error)
+			if handler != nil {
+				handler.OnError(ee.StreamErr(), ee.StreamErrorContext())
+			}
+			return nil, true, true, fmt.Errorf("error: %w", ee.StreamErr())
+		}
+		return nil, false, true, nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			// Inactivity deadline: a review silent past idleTimeout is treated
-			// as stalled. The clock resets on every event below, so this only
-			// trips a genuinely hung backend, never a slow-but-progressing one.
-			if idleTimeout > 0 && time.Since(lastEvent) >= idleTimeout {
+			// Before declaring the review stalled, drain every event already
+			// queued: select can pick the ticker over a ready events case, so a
+			// pending event (the wave's continuation, or just proof of life)
+			// must be processed first. Only trip idle when nothing is pending
+			// AND no in-scope event has arrived within idleTimeout.
+			drained := false
+			for {
+				select {
+				case ev, ok := <-events:
+					res, done, inScope, err := applyEvent(ev, ok)
+					if done {
+						return res, err
+					}
+					if inScope {
+						lastEvent = time.Now()
+					}
+					drained = true
+					continue
+				default:
+				}
+				break
+			}
+			if !drained && idleTimeout > 0 && time.Since(lastEvent) >= idleTimeout {
 				return nil, fmt.Errorf("review idle: no events for %s (stalled backend)", idleTimeout)
 			}
 			// Emit a heartbeat line at most every heartbeatInterval even if the
@@ -208,101 +331,13 @@ func bridgeStreamEvents[E any](ctx context.Context, events <-chan E, handler Eve
 				lastHeartbeat = time.Now()
 			}
 		case ev, ok := <-events:
-			if !ok {
-				// Channel closed without TurnComplete.
-				text := responseText.String()
-				if text != "" {
-					return nil, fmt.Errorf("session ended unexpectedly (partial response: %d chars)", len(text))
-				}
-				return nil, fmt.Errorf("session ended without result")
+			res, done, inScope, err := applyEvent(ev, ok)
+			if done {
+				return res, err
 			}
-
-			sev, ok := any(ev).(agentstream.Event)
-			if !ok {
-				continue
-			}
-
-			kind := sev.StreamEventKind()
-			if kind == agentstream.KindUnknown {
-				continue
-			}
-			// A real event proves the stream is alive — reset the idle clock.
-			lastEvent = time.Now()
-
-			// Scope filtering for multiplexed channels.
-			if scopeID != "" {
-				if scoped, ok := any(ev).(agentstream.Scoped); ok {
-					if id := scoped.ScopeID(); id != "" && id != scopeID {
-						continue
-					}
-				}
-			}
-
-			switch kind {
-			case agentstream.KindText:
-				te := sev.(agentstream.Text)
-				delta := te.StreamDelta()
-				responseText.WriteString(delta)
-				window.textChars += len(delta)
-				window.events++
-				if handler != nil {
-					handler.OnText(delta)
-				}
-
-			case agentstream.KindThinking:
-				te := sev.(agentstream.Text)
-				delta := te.StreamDelta()
-				window.reasoningChars += len(delta)
-				window.events++
-				if handler != nil {
-					handler.OnReasoning(delta)
-				}
-
-			case agentstream.KindToolStart:
-				ts := sev.(agentstream.ToolStart)
-				toolsInFlight++
-				window.events++
-				if handler != nil {
-					handler.OnToolStart(ts.StreamToolName(), ts.StreamToolCallID(), ts.StreamToolInput())
-				}
-
-			case agentstream.KindToolEnd:
-				te := sev.(agentstream.ToolEnd)
-				if toolsInFlight > 0 {
-					toolsInFlight--
-				}
-				window.toolsCompleted = append(window.toolsCompleted, te.StreamToolName())
-				window.events++
-				if handler != nil {
-					handler.OnToolComplete(
-						te.StreamToolName(),
-						te.StreamToolCallID(),
-						te.StreamToolInput(),
-						te.StreamToolResult(),
-						te.StreamToolIsError(),
-					)
-				}
-
-			case agentstream.KindTurnComplete:
-				tc := sev.(agentstream.TurnComplete)
-				success := tc.StreamIsSuccess()
-				durationMs := tc.StreamDuration()
-				if handler != nil {
-					handler.OnTurnComplete(success, durationMs)
-				}
-				return &bridgeResult{
-					responseText: responseText.String(),
-					success:      success,
-					durationMs:   durationMs,
-					turnEvent:    tc,
-				}, nil
-
-			case agentstream.KindError:
-				ee := sev.(agentstream.Error)
-				if handler != nil {
-					handler.OnError(ee.StreamErr(), ee.StreamErrorContext())
-				}
-				return nil, fmt.Errorf("error: %w", ee.StreamErr())
+			if inScope {
+				// A real in-scope event proves the stream is alive — reset idle.
+				lastEvent = time.Now()
 			}
 		}
 	}

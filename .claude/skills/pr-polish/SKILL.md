@@ -163,7 +163,10 @@ Substitute the concrete `$LOG_DIR`/`$GOAL`/`$SCOPE_HINTS`/`$REPO`/`$PR_NUMBER`/r
 # (prefixed) so per-reviewer progress — incl. periodic `[code-review] heartbeat …`
 # lines — streams live. --idle-timeout 5m kills a stalled backend; the outer
 # `timeout 1200` is an absolute backstop.
-( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
+# `set -o pipefail` in each subshell makes its exit status (seen by `wait`) the
+# reviewer's real status, not the trailing `sed`'s 0 — so a crashed or
+# timed-out reviewer surfaces as a non-zero wait, not a false success.
+( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:codex:r{ROUND} \
   timeout 1200 $BRAMBLE_BIN code-review --backend codex --model gpt-5.4-mini \
     --skip-test-execution --verbose --idle-timeout 5m \
     --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" \
@@ -172,7 +175,7 @@ Substitute the concrete `$LOG_DIR`/`$GOAL`/`$SCOPE_HINTS`/`$REPO`/`$PR_NUMBER`/r
   2>&1 | tee "$LOG_DIR/codex-stderr.txt" | sed 's/^/[codex] /' ) &
 CODEX_PID=$!
 
-( BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
+( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:cursor:r{ROUND} \
   timeout 1200 $BRAMBLE_BIN code-review --backend cursor --model composer-2.5 \
     --skip-test-execution --verbose --idle-timeout 5m \
     --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" \
@@ -181,18 +184,31 @@ CODEX_PID=$!
   2>&1 | tee "$LOG_DIR/cursor-stderr.txt" | sed 's/^/[cursor] /' ) &
 CURSOR_PID=$!
 
-( timeout 1200 python3 $SKILL_DIR/scripts/lint_gate.py \
+( set -o pipefail; timeout 1200 python3 $SKILL_DIR/scripts/lint_gate.py \
     --state-dir "$STATE_DIR" --round {ROUND} --log-dir "$LOG_DIR" \
   2>&1 | tee "$LOG_DIR/lint-stderr.txt" | sed 's/^/[lint] /' ) &
 LINT_PID=$!
 
-# --gemini only: launch a 4th reviewer the same way with $GEMINI_RESUME and add
-# its PID to the wait list below.
+# --gemini only: launch a 4th reviewer and add its PID to the wait list. When
+# --gemini is off, GEMINI_PID stays empty and drops out of the wait.
+GEMINI_PID=""
+if [ "$USE_GEMINI" = "1" ]; then
+  ( set -o pipefail; BRAMBLE_RUN_TAG=pr-polish:$REPO:$PR_NUMBER:gemini:r{ROUND} \
+    timeout 1200 $BRAMBLE_BIN code-review --backend gemini --model gemini-3-flash-preview \
+      --skip-test-execution --verbose --idle-timeout 5m \
+      --goal "$GOAL" --scope-hints-file "$SCOPE_HINTS" \
+      ${GEMINI_RESUME:+--resume-session-id "$GEMINI_RESUME"} \
+      --envelope-file "$LOG_DIR/gemini-envelope.json" \
+    2>&1 | tee "$LOG_DIR/gemini-stderr.txt" | sed 's/^/[gemini] /' ) &
+  GEMINI_PID=$!
+fi
 
-wait $CODEX_PID $CURSOR_PID $LINT_PID
+# Join on EVERY launched reviewer (gemini included when configured) so triage
+# never starts while a reviewer is still running or has yet to write its envelope.
+wait $CODEX_PID $CURSOR_PID $LINT_PID $GEMINI_PID
 ```
 
-The single completion notification = every reviewer has exited (each bounded by `--idle-timeout 5m` for stalls and a `timeout 1200` absolute backstop). The `wait` returns once all PIDs exit, and a crashed reviewer exits immediately, so a dead process never hangs the round.
+The single completion notification = every reviewer has exited (each bounded by `--idle-timeout 5m` for stalls and a `timeout 1200` absolute backstop). The `wait` returns once all PIDs exit, and a crashed reviewer exits immediately, so a dead process never hangs the round. `$GEMINI_RESUME` comes from the same `round-bundle` as the other resume ids (`echo "$BUNDLE" | jq -r '.resume_ids.gemini'`).
 
 Before triage: `recover-envelope` on each stream path (idempotent). A reviewer that exited without a valid envelope → `stream-missing` finding, not a deadlock.
 

@@ -106,6 +106,7 @@ func consumeTurnEvents(
 		graceCh = nil
 	}
 	defer disarmGrace()
+eventLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,22 +141,46 @@ func consumeTurnEvents(
 			}
 			if !result.Success {
 				// select picks randomly among ready cases, so graceCh can win a
-				// tie with ctx.Done() or a closed events channel. Both are
-				// genuinely terminal — there is no live session left to resume —
-				// so re-check them here before classifying the stop transient.
-				// Otherwise the outer retry loop backs off and re-drives a
-				// session that has already ended.
+				// tie with ctx.Done() or a ready events case. Both are genuinely
+				// terminal (or carry a continuation) — re-check before classifying
+				// the stop transient, otherwise the outer retry loop backs off and
+				// re-drives a session that has already ended or whose completing
+				// event we ignored.
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return result, ctxErr
 				}
-				if streamClosed(events) {
-					// Stream already closed: terminal. Mirror the closed-stream
-					// path below — return the result and state error unwrapped,
-					// never as a retryable TransientError.
-					return state.ToTurnResult(), state.Err()
-				}
-				return result, &claude.TransientError{
-					Message: "stream idle: turn forced complete after grace period gated on background tool_use",
+				// Give a ready event priority over the deadline, without a
+				// destructive peek: a closed stream is terminal; a real pending
+				// event is applied (never dropped — it may be the continuation
+				// that completes the wave) and the loop re-evaluates. Only when
+				// nothing is queued do we classify the stall transient.
+				select {
+				case ev, ok := <-events:
+					if !ok {
+						// Stream closed: terminal. Mirror the closed-stream path
+						// below — never a retryable TransientError.
+						return state.ToTurnResult(), state.Err()
+					}
+					// The grace timer already fired (its channel is drained but
+					// graceTimer is non-nil); clear it so the re-arm below starts a
+					// fresh window for whatever wave this event belongs to.
+					disarmGrace()
+					state.Apply(ev)
+					if dispatch != nil {
+						dispatch(ev)
+					}
+					if state.LogicalTurnDone() {
+						return state.ToTurnResult(), state.Err()
+					}
+					if state.SawTurnComplete() {
+						graceTimer = time.NewTimer(gracePeriod)
+						graceCh = graceTimer.C
+					}
+					continue eventLoop
+				default:
+					return result, &claude.TransientError{
+						Message: "stream idle: turn forced complete after grace period gated on background tool_use",
+					}
 				}
 			}
 			return result, nil
@@ -190,27 +215,6 @@ func consumeTurnEvents(
 				disarmGrace()
 			}
 		}
-	}
-}
-
-// streamClosed reports whether events is already closed, via a non-blocking
-// receive. It is used only on the grace-expiry path to break a select tie:
-// when graceCh fired at the same instant the stream closed, the closure is the
-// real terminal signal and must win over the transient classification.
-//
-// A closed channel yields (zero, false) immediately → true. An open channel
-// with nothing queued hits the default → false. The rare third case — a real
-// value was queued exactly when graceCh fired — consumes that one event and
-// reports false (not closed): the turn is then classified transient and the
-// resume path re-drives the same live session, which replays from the backend,
-// so the consumed event is not lost. (We never reach here with state.Err() set
-// or a successful result; those are handled before the call.)
-func streamClosed[E any](events <-chan E) bool {
-	select {
-	case _, ok := <-events:
-		return !ok
-	default:
-		return false
 	}
 }
 
