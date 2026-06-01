@@ -173,8 +173,8 @@ eventLoop:
 			//      Critically, a Success==true result is NOT returned as-is here:
 			//      a skill (e.g. /pr-polish) that yielded the turn awaiting a long
 			//      run_in_background join keeps lastResult successful for the whole
-			//      join, so returning it after the 3-minute grace would report the
-			//      step as done to a non-interactive caller (jiradozer) while the
+			//      join, so returning it after the grace period elapses would report
+			//      the step as done to a non-interactive caller (jiradozer) while the
 			//      reviewers are still running. Treat it as resumable instead.
 			if err := state.Err(); err != nil {
 				return result, err

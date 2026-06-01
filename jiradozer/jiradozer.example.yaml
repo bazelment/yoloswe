@@ -173,6 +173,11 @@ plan:
     #max_budget_usd: 0
     # Auto-retry when a turn ends with an unresolved tool error.
     #max_tool_error_retries: 0
+    # Grace period a turn waits, after completion, for outstanding background
+    # work (e.g. bramble reviewers a skill backgrounds) to finish before the
+    # turn is force-completed; 0 = provider default (10m). Raise it for steps
+    # that launch long-running background tools.
+    #stream_turn_grace_period: 0
     # Skip the human review gate after this step.
     #auto_approve: false
 
@@ -251,6 +256,11 @@ build:
     #max_budget_usd: 0
     # Auto-retry when a turn ends with an unresolved tool error.
     #max_tool_error_retries: 0
+    # Grace period a turn waits, after completion, for outstanding background
+    # work (e.g. bramble reviewers a skill backgrounds) to finish before the
+    # turn is force-completed; 0 = provider default (10m). Raise it for steps
+    # that launch long-running background tools.
+    #stream_turn_grace_period: 0
     # Skip the human review gate after this step.
     #auto_approve: false
 
@@ -295,6 +305,11 @@ create_pr:
     #max_budget_usd: 0
     # Auto-retry when a turn ends with an unresolved tool error.
     #max_tool_error_retries: 0
+    # Grace period a turn waits, after completion, for outstanding background
+    # work (e.g. bramble reviewers a skill backgrounds) to finish before the
+    # turn is force-completed; 0 = provider default (10m). Raise it for steps
+    # that launch long-running background tools.
+    #stream_turn_grace_period: 0
     # Skip the human review gate after this step.
     #auto_approve: false
 
@@ -360,6 +375,11 @@ validate:
     #max_budget_usd: 0
     # Auto-retry when a turn ends with an unresolved tool error.
     #max_tool_error_retries: 0
+    # Grace period a turn waits, after completion, for outstanding background
+    # work (e.g. bramble reviewers a skill backgrounds) to finish before the
+    # turn is force-completed; 0 = provider default (10m). Raise it for steps
+    # that launch long-running background tools.
+    #stream_turn_grace_period: 0
     # Skip the human review gate after this step.
     #auto_approve: false
 
@@ -431,6 +451,11 @@ ship:
     #max_budget_usd: 0
     # Auto-retry when a turn ends with an unresolved tool error.
     #max_tool_error_retries: 0
+    # Grace period a turn waits, after completion, for outstanding background
+    # work (e.g. bramble reviewers a skill backgrounds) to finish before the
+    # turn is force-completed; 0 = provider default (10m). Raise it for steps
+    # that launch long-running background tools.
+    #stream_turn_grace_period: 0
     # Skip the human review gate after this step.
     #auto_approve: false
 
