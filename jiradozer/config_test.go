@@ -553,14 +553,15 @@ ship:
 
 func TestResolveRound_InheritsFromStep(t *testing.T) {
 	parent := StepConfig{
-		Model:               "sonnet",
-		Effort:              "high",
-		SystemPrompt:        "parent system prompt",
-		PermissionMode:      "bypass",
-		MaxTurns:            10,
-		MaxBudgetUSD:        25.0,
-		TransientRetries:    4,
-		MaxToolErrorRetries: 3,
+		Model:                 "sonnet",
+		Effort:                "high",
+		SystemPrompt:          "parent system prompt",
+		PermissionMode:        "bypass",
+		MaxTurns:              10,
+		MaxBudgetUSD:          25.0,
+		TransientRetries:      4,
+		MaxToolErrorRetries:   3,
+		StreamTurnGracePeriod: 12 * time.Minute,
 	}
 
 	// Round with no overrides — inherits everything.
@@ -575,6 +576,10 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	assert.Equal(t, 25.0, resolved.MaxBudgetUSD)
 	assert.Equal(t, 4, resolved.TransientRetries)
 	assert.Equal(t, 3, resolved.MaxToolErrorRetries)
+	// StreamTurnGracePeriod has no per-round override field, so a round always
+	// inherits the parent's value verbatim (the wiring cursor flagged as
+	// untested in PR #259).
+	assert.Equal(t, 12*time.Minute, resolved.StreamTurnGracePeriod)
 }
 
 // loadConfigFromYAML writes a YAML body to a temp file and loads it. Used by
@@ -915,6 +920,48 @@ ship:
 	_, err := LoadConfig(path)
 	require.Error(t, err, "negative idle_timeout must be rejected")
 	assert.Contains(t, err.Error(), "idle_timeout")
+	assert.Contains(t, err.Error(), "must not be negative")
+}
+
+// TestValidateStepRejectsNegativeStreamTurnGracePeriod mirrors the
+// idle_timeout guard: a typo'd negative stream_turn_grace_period must fail
+// config load loudly rather than be silently coerced to "use the provider
+// default" at the option boundary (buildExecuteOpts only honors >0).
+func TestValidateStepRejectsNegativeStreamTurnGracePeriod(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+tracker:
+  kind: linear
+  api_key: test-key
+agent:
+  model: sonnet
+plan:
+  permission_mode: plan
+  prompt: "Plan {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+  stream_turn_grace_period: -5m
+build:
+  permission_mode: bypass
+  prompt: "Build {{.Identifier}}"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+create_pr:
+  permission_mode: bypass
+  prompt: "PR"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+validate:
+  permission_mode: bypass
+  prompt: "Validate"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+ship:
+  permission_mode: bypass
+  prompt: "Ship"
+  comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+`
+	path := filepath.Join(dir, "cfg.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err, "negative stream_turn_grace_period must be rejected")
+	assert.Contains(t, err.Error(), "stream_turn_grace_period")
 	assert.Contains(t, err.Error(), "must not be negative")
 }
 

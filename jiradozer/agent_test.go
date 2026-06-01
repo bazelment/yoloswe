@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,42 @@ import (
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 )
+
+// applyExecuteOpts collapses the option slice buildExecuteOpts returns into the
+// agent.ExecuteConfig a provider would actually see — each ExecuteOption is a
+// func(*ExecuteConfig), so applying them in order reproduces the provider-side
+// view without standing up a real provider. Mirrors the pattern in
+// agent_retry_test.go.
+func applyExecuteOpts(t *testing.T, cfg StepConfig) agent.ExecuteConfig {
+	t.Helper()
+	opts, err := buildExecuteOpts(cfg, t.TempDir(), nil, "", nil)
+	require.NoError(t, err)
+	var ec agent.ExecuteConfig
+	for _, o := range opts {
+		o(&ec)
+	}
+	return ec
+}
+
+// TestBuildExecuteOpts_StreamTurnGracePeriod pins the config-to-provider
+// handoff for the grace-period knob: a positive StepConfig value must reach
+// ExecuteConfig.StreamTurnGracePeriod, and a zero value must leave it unset so
+// the provider falls back to its own default. Without this, deleting the wiring
+// block in buildExecuteOpts would leave every other test green while YAML
+// overrides silently became no-ops (callers always getting the provider's
+// default).
+func TestBuildExecuteOpts_StreamTurnGracePeriod(t *testing.T) {
+	t.Run("positive value is forwarded", func(t *testing.T) {
+		ec := applyExecuteOpts(t, StepConfig{StreamTurnGracePeriod: 15 * time.Minute})
+		require.Equal(t, 15*time.Minute, ec.StreamTurnGracePeriod)
+	})
+
+	t.Run("zero value is not forwarded (provider default applies)", func(t *testing.T) {
+		ec := applyExecuteOpts(t, StepConfig{})
+		require.Zero(t, ec.StreamTurnGracePeriod,
+			"a zero StepConfig grace period must not emit an option, so the provider default stands")
+	})
+}
 
 func TestNewPromptData(t *testing.T) {
 	desc := "Fix the widget rendering"

@@ -590,6 +590,9 @@ func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler
 	if cfg.MaxBudgetUSD > 0 {
 		opts = append(opts, agent.WithProviderMaxBudgetUSD(cfg.MaxBudgetUSD))
 	}
+	if cfg.StreamTurnGracePeriod > 0 {
+		opts = append(opts, agent.WithProviderStreamTurnGracePeriod(cfg.StreamTurnGracePeriod))
+	}
 	if cfg.Effort != "" {
 		level, err := agent.ParseEffort(cfg.Effort)
 		if err != nil {

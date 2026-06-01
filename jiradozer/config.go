@@ -112,7 +112,12 @@ type StepConfig struct {
 	MaxToolErrorRetries  int                `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
 	TransientRetries     int                `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (2)
 	IdleTimeout          time.Duration      `yaml:"idle_timeout"`           // parent watchdog kills the subprocess if it emits no log line for this long while inside this step; 0 disables
-	AutoApprove          bool               `yaml:"auto_approve"`           // skip human review after this step
+	// StreamTurnGracePeriod overrides how long a turn waits, after completion,
+	// for an outstanding background tool_use to terminate before the turn is
+	// force-completed. Raise it for steps (e.g. /pr-polish) that background
+	// long-running work like bramble reviewers; 0 = provider default.
+	StreamTurnGracePeriod time.Duration `yaml:"stream_turn_grace_period"`
+	AutoApprove           bool          `yaml:"auto_approve"` // skip human review after this step
 }
 
 // RoundConfig configures a single round within a multi-round step.
@@ -343,6 +348,12 @@ func validateStep(name string, step *StepConfig) error {
 	if step.IdleTimeout < 0 {
 		return fmt.Errorf("%s.idle_timeout: must not be negative (got %s); use 0 to disable", name, step.IdleTimeout)
 	}
+	// StreamTurnGracePeriod treats 0 as "use provider default"; a negative
+	// value would be meaningless (and silently coerced away at the option
+	// boundary, which only honors >0). Reject loudly so a typo surfaces.
+	if step.StreamTurnGracePeriod < 0 {
+		return fmt.Errorf("%s.stream_turn_grace_period: must not be negative (got %s); use 0 for the provider default", name, step.StreamTurnGracePeriod)
+	}
 	if name == "create_pr" && len(step.Rounds) > 0 {
 		return fmt.Errorf("create_pr does not support rounds")
 	}
@@ -515,12 +526,13 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		systemPrompt = parent.SystemPrompt
 	}
 	resolved := StepConfig{
-		Prompt:           round.Prompt,
-		SystemPrompt:     systemPrompt,
-		PermissionMode:   parent.PermissionMode,
-		Effort:           parent.Effort,
-		TransientRetries: parent.TransientRetries,
-		LLMEndpoint:      parent.LLMEndpoint,
+		Prompt:                round.Prompt,
+		SystemPrompt:          systemPrompt,
+		PermissionMode:        parent.PermissionMode,
+		Effort:                parent.Effort,
+		TransientRetries:      parent.TransientRetries,
+		StreamTurnGracePeriod: parent.StreamTurnGracePeriod,
+		LLMEndpoint:           parent.LLMEndpoint,
 	}
 	if round.Model != "" {
 		resolved.Model = round.Model

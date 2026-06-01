@@ -597,6 +597,11 @@ func renderStepBlock(s stepBlock) string {
 	b.WriteString("    #max_budget_usd: 0\n")
 	b.WriteString("    # Auto-retry when a turn ends with an unresolved tool error.\n")
 	b.WriteString("    #max_tool_error_retries: 0\n")
+	b.WriteString("    # Grace period a turn waits, after completion, for outstanding background\n")
+	b.WriteString("    # work (e.g. bramble reviewers a skill backgrounds) to finish before the\n")
+	b.WriteString("    # turn is force-completed; 0 = provider default (10m). Raise it for steps\n")
+	b.WriteString("    # that launch long-running background tools.\n")
+	b.WriteString("    #stream_turn_grace_period: 0\n")
 	b.WriteString("    # Skip the human review gate after this step.\n")
 	b.WriteString("    #auto_approve: false\n")
 

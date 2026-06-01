@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 	"github.com/bazelment/yoloswe/wt"
@@ -204,6 +205,12 @@ type ExecuteConfig struct {
 	MaxToolErrorRetries int
 	MaxBudgetUSD        float64
 	KeepUserSettings    bool
+
+	// StreamTurnGracePeriod overrides the provider's default grace period —
+	// how long a turn waits, after completion, for an outstanding background
+	// tool_use to terminate before the turn is force-completed. Zero uses the
+	// provider default.
+	StreamTurnGracePeriod time.Duration
 }
 
 // WithProviderLogger sets the structured logger a provider uses for
@@ -273,6 +280,14 @@ func WithProviderResumeSessionID(id string) ExecuteOption {
 // the feature (the provider returns the errored result without retrying).
 func WithProviderMaxToolErrorRetries(n int) ExecuteOption {
 	return func(c *ExecuteConfig) { c.MaxToolErrorRetries = n }
+}
+
+// WithProviderStreamTurnGracePeriod overrides how long a turn waits, after
+// completion, for an outstanding background tool_use to terminate before the
+// turn is force-completed. Zero (the default) uses the provider's built-in
+// grace period.
+func WithProviderStreamTurnGracePeriod(d time.Duration) ExecuteOption {
+	return func(c *ExecuteConfig) { c.StreamTurnGracePeriod = d }
 }
 
 // WithProviderLLMEndpoint points the underlying CLI at a third-party LLM API
