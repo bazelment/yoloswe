@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "dispatcher.go",
         "proto.go",
+        "server.go",
+        "transport.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/control",
     visibility = ["//visibility:public"],
@@ -16,7 +18,10 @@ go_library(
 
 go_test(
     name = "control_test",
-    srcs = ["dispatcher_test.go"],
+    srcs = [
+        "dispatcher_test.go",
+        "server_test.go",
+    ],
     embed = [":control"],
     deps = [
         "//bramble/session",
