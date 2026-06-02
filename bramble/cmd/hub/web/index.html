@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bramble hub</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0;
+         background: #16181d; color: #e6e6e6; display: flex; height: 100vh; }
+  #sidebar { width: 280px; border-right: 1px solid #2a2d35; padding: 12px;
+             overflow-y: auto; flex-shrink: 0; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  h1 { font-size: 14px; margin: 0 0 12px; color: #8ab4f8; }
+  .machine, .session { padding: 8px; border-radius: 8px; cursor: pointer;
+                       margin-bottom: 4px; background: #1e2128; font-size: 13px; }
+  .session:hover, .machine:hover { background: #262a33; }
+  .session.active { outline: 1px solid #3b82f6; }
+  .session .meta { color: #888; font-size: 11px; }
+  #pane { flex: 1; margin: 0; padding: 12px; overflow-y: auto; white-space: pre-wrap;
+          font-size: 12.5px; line-height: 1.35; background: #0f1115; }
+  #status { padding: 6px 12px; font-size: 11px; color: #9aa0aa;
+            border-bottom: 1px solid #2a2d35; }
+  #composer { display: flex; gap: 6px; padding: 10px; border-top: 1px solid #2a2d35; }
+  #composer textarea { flex: 1; resize: none; background: #1e2128; color: #e6e6e6;
+                       border: 1px solid #2a2d35; border-radius: 8px; padding: 8px;
+                       font-family: inherit; font-size: 13px; }
+  button { background: #3b82f6; color: #fff; border: none; border-radius: 8px;
+           padding: 0 14px; cursor: pointer; font-size: 13px; }
+  button.ghost { background: #2a2d35; }
+  .keys { display: flex; gap: 4px; padding: 0 10px 10px; flex-wrap: wrap; }
+  .keys button { padding: 4px 10px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>bramble hub</h1>
+  <div id="machines"></div>
+  <div id="sessions"></div>
+</div>
+<div id="main">
+  <div id="status">Select a machine.</div>
+  <pre id="pane"></pre>
+  <div class="keys">
+    <button class="ghost" data-key="Enter">Enter</button>
+    <button class="ghost" data-key="Escape">Esc</button>
+    <button class="ghost" data-key="C-c">Ctrl-C</button>
+    <button class="ghost" data-key="Up">↑</button>
+    <button class="ghost" data-key="Down">↓</button>
+    <button class="ghost" data-key="Tab">Tab</button>
+  </div>
+  <div id="composer">
+    <textarea id="input" rows="2" placeholder="Type a follow-up prompt, Enter to send…"></textarea>
+    <button id="send">Send</button>
+  </div>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+let machineID = null, sessionID = null, ws = null, subSeq = 0, curSub = null, reqSeq = 0;
+const pending = {};
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { location.href = "/login"; return null; }
+  return r.json();
+}
+
+async function loadMachines() {
+  const machines = await api("/api/machines");
+  if (!machines) return;
+  const box = $("#machines");
+  box.innerHTML = "<div style='color:#888;font-size:11px;margin-bottom:6px'>MACHINES</div>";
+  machines.forEach((m) => {
+    const el = document.createElement("div");
+    el.className = "machine";
+    el.textContent = m.hostname || m.id;
+    el.onclick = () => selectMachine(m.id);
+    box.appendChild(el);
+  });
+  if (machines.length === 1) selectMachine(machines[0].id);
+}
+
+async function selectMachine(id) {
+  machineID = id;
+  openWS();
+  await loadSessions();
+}
+
+async function loadSessions() {
+  const resp = await control({ type: "session.list" });
+  const box = $("#sessions");
+  box.innerHTML = "<div style='color:#888;font-size:11px;margin:10px 0 6px'>SESSIONS</div>";
+  const sessions = (resp && resp.result && resp.result.sessions) || [];
+  sessions.forEach((s) => {
+    const el = document.createElement("div");
+    el.className = "session" + (s.id === sessionID ? " active" : "");
+    el.innerHTML = `<div>${s.worktree_name || s.id}</div>
+      <div class="meta">${s.type} · ${s.status} · ${s.model || ""}</div>`;
+    el.onclick = () => selectSession(s.id);
+    box.appendChild(el);
+  });
+}
+
+function openWS() {
+  if (ws) ws.close();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/api/stream?machine=${encodeURIComponent(machineID)}`);
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "pane.delta") {
+      renderPane(msg.payload || {});
+    } else if (msg.type === "response" && msg.id && pending[msg.id]) {
+      pending[msg.id](msg); delete pending[msg.id];
+    }
+  };
+}
+
+// Send a request over the browser WS and await its correlated response. The
+// Msg envelope's "payload" is raw JSON (Go json.RawMessage), so we embed the
+// object directly — no string-encoding.
+function control(msgBody) {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState !== 1) { resolve(null); return; }
+    const id = "b" + (++reqSeq);
+    const msg = { type: msgBody.type, id };
+    if (msgBody.payload !== undefined) msg.payload = msgBody.payload;
+    pending[id] = resolve;
+    ws.send(JSON.stringify(msg));
+  });
+}
+
+async function selectSession(id) {
+  sessionID = id;
+  await loadSessions();
+  if (curSub) ws.send(JSON.stringify({ type: "pane.unsubscribe", sub_id: curSub }));
+  curSub = "s" + (++subSeq);
+  ws.send(JSON.stringify({
+    type: "pane.subscribe", id: "sub" + subSeq, sub_id: curSub,
+    payload: { session_id: sessionID, interval_ms: 1000 },
+  }));
+}
+
+function renderPane(d) {
+  $("#pane").textContent = (d.lines || []).join("\n");
+  if (d.status) {
+    const s = d.status;
+    $("#status").textContent =
+      `${s.model || ""}  ctx:${s.context_pct || "?"}  tokens:${s.token_count || "?"}` +
+      `  ${s.is_working ? "● working" : s.is_idle ? "○ idle" : ""}`;
+  }
+  $("#pane").scrollTop = $("#pane").scrollHeight;
+}
+
+$("#send").onclick = () => sendInput(true);
+$("#input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendInput(true); }
+});
+async function sendInput(submit) {
+  if (!sessionID) return;
+  const text = $("#input").value;
+  await control({ type: "session.send_input",
+    payload: { session_id: sessionID, text, submit } });
+  $("#input").value = "";
+}
+document.querySelectorAll(".keys button").forEach((btn) => {
+  btn.onclick = () => {
+    if (!sessionID) return;
+    control({ type: "session.send_key",
+      payload: { session_id: sessionID, key: btn.dataset.key } });
+  };
+});
+
+loadMachines();
+setInterval(loadMachines, 5000);
+</script>
+</body>
+</html>

@@ -232,6 +232,18 @@ func errResponse(id string, err error) *Msg {
 	return &Msg{Type: TypeResponse, ID: id, Payload: payload}
 }
 
+// NewErr builds a failed TypeResponse Msg with the given error message. Used by
+// relays (the hub) that synthesize responses without a Go error value.
+func NewErr(id, message string) *Msg {
+	payload, _ := json.Marshal(Response{Error: message})
+	return &Msg{Type: TypeResponse, ID: id, Payload: payload}
+}
+
+// NewOK builds a successful TypeResponse Msg with an OKResult payload.
+func NewOK(id string) *Msg {
+	return okResponse(id, OKResult{OK: true})
+}
+
 // decode unmarshals a Msg payload into v.
 func (m *Msg) decode(v any) error {
 	if len(m.Payload) == 0 {
