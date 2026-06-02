@@ -49,9 +49,15 @@ func (m *machine) readLoop() {
 			return
 		}
 		switch msg.Type {
-		case control.TypePaneDelta:
+		case control.TypePaneDelta, control.TypePaneError:
+			// Subscription frames are SubID-correlated, not request-correlated.
+			// A TypePaneError is the terminal frame for its subscription, so drop
+			// the sink after forwarding it.
 			m.mu.Lock()
 			sink := m.deltaSub[msg.SubID]
+			if msg.Type == control.TypePaneError {
+				delete(m.deltaSub, msg.SubID)
+			}
 			m.mu.Unlock()
 			if sink != nil {
 				sink(msg)

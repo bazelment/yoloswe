@@ -111,6 +111,59 @@ func TestStreamSubscribeEmitsAndDedups(t *testing.T) {
 	}
 }
 
+// failingController always fails Capture, to drive the terminal-error path.
+type failingController struct {
+	*tmuxctl.FakeController
+}
+
+func (failingController) Capture(_ context.Context, _ string, _ int) ([]string, error) {
+	return nil, assert.AnError
+}
+
+// TestStreamEmitsTerminalErrorFrame verifies that sustained capture failures
+// end the subscription with a TypePaneError frame (SubID-correlated) rather than
+// the poll loop going silently dark.
+func TestStreamEmitsTerminalErrorFrame(t *testing.T) {
+	t.Parallel()
+
+	ctl := failingController{FakeController: tmuxctl.NewFake()}
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@1"}}
+	disp := NewDispatcher(reg, ctl)
+
+	agent, client := pipeConns()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = Serve(ctx, agent, disp) }()
+
+	errFrames := make(chan *Msg, 4)
+	go func() {
+		for {
+			msg, err := client.ReadMsg()
+			if err != nil {
+				return
+			}
+			if msg.Type == TypePaneError {
+				errFrames <- msg
+			}
+		}
+	}()
+
+	sub, err := NewRequest(TypePaneSubscribe, "r1", SubscribeReq{SessionID: "s1", IntervalMS: 250})
+	require.NoError(t, err)
+	sub.SubID = "sub-1"
+	require.NoError(t, client.WriteMsg(sub))
+
+	select {
+	case msg := <-errFrames:
+		assert.Equal(t, "sub-1", msg.SubID, "terminal error must carry the sub id")
+		var pe PaneError
+		require.NoError(t, msg.DecodePayload(&pe))
+		assert.NotEmpty(t, pe.Error)
+	case <-time.After(3 * time.Second):
+		t.Fatal("no terminal error frame after sustained capture failures")
+	}
+}
+
 func TestStreamSubscribeRequiresSubID(t *testing.T) {
 	t.Parallel()
 

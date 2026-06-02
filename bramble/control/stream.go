@@ -126,7 +126,9 @@ func (s *streamer) poll(ctx context.Context, subID, target string, interval time
 			// pane was killed) is reported as a terminal error frame so the client
 			// learns the stream is dead rather than just stops receiving deltas.
 			if consecErrs >= maxStreamCaptureErrs {
-				if msg := errResponse(subID, err); msg != nil {
+				// Terminal error rides the delta path (SubID-correlated) so the hub
+				// routes it to the subscriber rather than the request-reply map.
+				if msg, mkErr := NewRequest(TypePaneError, "", PaneError{Error: err.Error()}); mkErr == nil {
 					msg.SubID = subID
 					_ = s.conn.WriteMsg(msg)
 				}

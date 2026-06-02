@@ -85,7 +85,7 @@ async function loadMachines() {
 
 async function selectMachine(id) {
   machineID = id;
-  openWS();
+  await openWS();        // wait for the socket to reach OPEN before any control()
   await loadSessions();
 }
 
@@ -105,18 +105,33 @@ async function loadSessions() {
   });
 }
 
+// openWS opens the stream socket and resolves once it is OPEN, so callers can
+// await readiness before issuing control() requests (which no-op while the
+// socket is still CONNECTING). curSub is cleared because the new socket carries
+// no subscriptions.
 function openWS() {
   if (ws) ws.close();
+  curSub = null;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/api/stream?machine=${encodeURIComponent(machineID)}`);
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === "pane.delta") {
       renderPane(msg.payload || {});
+    } else if (msg.type === "pane.error") {
+      // Terminal frame for a subscription: surface it and drop the dead sub.
+      const err = (msg.payload && msg.payload.error) || "stream ended";
+      $("#status").textContent = "⚠ stream error: " + err;
+      if (msg.sub_id === curSub) curSub = null;
     } else if (msg.type === "response" && msg.id && pending[msg.id]) {
       pending[msg.id](msg); delete pending[msg.id];
     }
   };
+  return new Promise((resolve) => {
+    if (ws.readyState === 1) { resolve(); return; }
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", () => resolve(), { once: true }); // don't hang the caller
+  });
 }
 
 // Send a request over the browser WS and await its correlated response. The
@@ -133,15 +148,22 @@ function control(msgBody) {
   });
 }
 
+// wsSend writes a frame only when the socket is OPEN, so a subscribe/unsubscribe
+// issued during a reconnect is dropped rather than throwing on a CONNECTING/
+// CLOSED socket.
+function wsSend(frame) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(frame));
+}
+
 async function selectSession(id) {
   sessionID = id;
   await loadSessions();
-  if (curSub) ws.send(JSON.stringify({ type: "pane.unsubscribe", sub_id: curSub }));
+  if (curSub) wsSend({ type: "pane.unsubscribe", sub_id: curSub });
   curSub = "s" + (++subSeq);
-  ws.send(JSON.stringify({
+  wsSend({
     type: "pane.subscribe", id: "sub" + subSeq, sub_id: curSub,
     payload: { session_id: sessionID, interval_ms: 1000 },
-  }));
+  });
 }
 
 function renderPane(d) {

@@ -42,10 +42,14 @@ const (
 	TypePaneKill         MsgType = "pane.kill"
 
 	// Streaming: subscribe to live pane output. The server pushes TypePaneDelta
-	// frames (correlated by SubID) until TypePaneUnsubscribe.
+	// frames (correlated by SubID) until TypePaneUnsubscribe. A terminal
+	// TypePaneError frame (also SubID-correlated) ends a subscription when the
+	// pane can no longer be captured, so a dead stream surfaces as an error
+	// rather than going silently dark.
 	TypePaneSubscribe   MsgType = "pane.subscribe"
 	TypePaneUnsubscribe MsgType = "pane.unsubscribe"
 	TypePaneDelta       MsgType = "pane.delta"
+	TypePaneError       MsgType = "pane.error"
 
 	// Response is the generic reply to a request (Result or Error set).
 	TypeResponse MsgType = "response"
@@ -145,6 +149,13 @@ type NewWindowResult struct {
 type PaneDelta struct {
 	Status *PaneStatusJSON `json:"status,omitempty"`
 	Lines  []string        `json:"lines"`
+}
+
+// PaneError is the terminal frame for a subscription that can no longer be
+// served (e.g. the pane was killed). It is SubID-correlated like PaneDelta so it
+// rides the same delta-routing path to the subscriber.
+type PaneError struct {
+	Error string `json:"error"`
 }
 
 // PaneStatusJSON is the JSON-friendly projection of session.PaneStatus.

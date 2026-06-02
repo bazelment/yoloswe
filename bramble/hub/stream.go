@@ -30,7 +30,7 @@ func (h *Hub) handleStream(w http.ResponseWriter, r *http.Request) {
 	conn := control.NewWSConn(ws)
 	defer conn.Close()
 
-	b := &browserBridge{conn: conn, machine: m, subs: make(map[string]struct{})}
+	b := &browserBridge{conn: conn, machine: m, prefix: m.nextID() + ":", subs: make(map[string]struct{})}
 	defer b.closeSubs()
 
 	for {
@@ -45,41 +45,51 @@ func (h *Hub) handleStream(w http.ResponseWriter, r *http.Request) {
 // browserBridge forwards one browser connection's requests to a machine and
 // routes replies/deltas back. WriteMsg on the browser conn is serialized by the
 // control.wsConn adapter, so concurrent delta sinks and request replies are safe.
+//
+// The machine's deltaSub map is shared across all browser connections, so the
+// browser's tab-local sub_id is prefixed with a per-connection token before it
+// reaches the machine. Two tabs that both pick "s1" thus get distinct
+// machine-side keys and cannot clobber or unsubscribe each other's stream; the
+// prefix is stripped off delta/error frames so the browser still sees its own id.
 type browserBridge struct {
 	conn    control.Conn
 	machine *machine
 	subs    map[string]struct{}
+	prefix  string
 	mu      sync.Mutex
 }
 
 func (b *browserBridge) handle(msg *control.Msg) {
 	switch msg.Type {
 	case control.TypePaneSubscribe:
-		subID := msg.SubID
-		if subID == "" {
+		clientSub := msg.SubID
+		if clientSub == "" {
 			b.reply(control.NewErr(msg.ID, "subscribe requires sub_id"))
 			return
 		}
+		hubSub := b.prefix + clientSub
 		b.mu.Lock()
-		b.subs[subID] = struct{}{}
+		b.subs[hubSub] = struct{}{}
 		b.mu.Unlock()
-		// Route the agent's PaneDelta frames straight to the browser.
-		err := b.machine.subscribe(subID, msg, func(delta *control.Msg) {
-			_ = b.conn.WriteMsg(delta)
+		// Route the agent's pane frames back, restoring the browser's own sub_id.
+		err := b.machine.subscribe(hubSub, msg, func(frame *control.Msg) {
+			frame.SubID = clientSub
+			_ = b.conn.WriteMsg(frame)
 		})
 		if err != nil {
 			b.mu.Lock()
-			delete(b.subs, subID)
+			delete(b.subs, hubSub)
 			b.mu.Unlock()
 			b.reply(control.NewErr(msg.ID, err.Error()))
 			return
 		}
 		b.reply(control.NewOK(msg.ID))
 	case control.TypePaneUnsubscribe:
+		hubSub := b.prefix + msg.SubID
 		b.mu.Lock()
-		delete(b.subs, msg.SubID)
+		delete(b.subs, hubSub)
 		b.mu.Unlock()
-		b.machine.unsubscribe(msg.SubID)
+		b.machine.unsubscribe(hubSub)
 		b.reply(control.NewOK(msg.ID))
 	default:
 		// One-shot request/response: forward and pipe the reply back, preserving
