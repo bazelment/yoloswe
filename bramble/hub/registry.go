@@ -134,7 +134,14 @@ func (m *machine) subscribe(subID string, req *control.Msg, sink func(*control.M
 	m.deltaSub[subID] = sink
 	m.mu.Unlock()
 
-	if _, err := m.request(req); err != nil {
+	resp, err := m.request(req)
+	if err == nil {
+		// A transport-level success can still carry an agent-side rejection in the
+		// response body (e.g. unknown session); treat that as a failed subscribe so
+		// the sink is not left installed for a stream that will never produce.
+		err = resp.DecodeResponse(nil)
+	}
+	if err != nil {
 		m.mu.Lock()
 		delete(m.deltaSub, subID)
 		m.mu.Unlock()

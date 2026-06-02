@@ -57,6 +57,10 @@
 <script>
 const $ = (s) => document.querySelector(s);
 let machineID = null, sessionID = null, ws = null, subSeq = 0, curSub = null, reqSeq = 0;
+// Each socket gets a monotonic generation. pending entries are tagged with the
+// generation they were issued on so a stale socket's onclose only resolves its
+// own in-flight requests, never ones already re-issued on a newer socket.
+let wsGen = 0;
 const pending = {};
 
 async function api(path, opts) {
@@ -112,6 +116,7 @@ async function loadSessions() {
 function openWS() {
   if (ws) ws.close();
   curSub = null;
+  const gen = ++wsGen;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/api/stream?machine=${encodeURIComponent(machineID)}`);
   ws.onmessage = (ev) => {
@@ -124,12 +129,14 @@ function openWS() {
       $("#status").textContent = "⚠ stream error: " + err;
       if (msg.sub_id === curSub) curSub = null;
     } else if (msg.type === "response" && msg.id && pending[msg.id]) {
-      pending[msg.id](msg); delete pending[msg.id];
+      pending[msg.id].resolve(msg); delete pending[msg.id];
     }
   };
-  // A dropped socket must not leave control() callers hanging forever: resolve
-  // every in-flight request with null so awaiters unblock and can react.
-  ws.onclose = () => { flushPending(); };
+  // A dropped socket must not leave its control() callers hanging: resolve the
+  // in-flight requests issued on THIS generation with null. Scoping by gen means
+  // a stale socket's late onclose can't null out requests already re-issued on a
+  // newer socket.
+  ws.onclose = () => { flushPending(gen); };
   return new Promise((resolve) => {
     if (ws.readyState === 1) { resolve(); return; }
     ws.addEventListener("open", () => resolve(), { once: true });
@@ -137,11 +144,12 @@ function openWS() {
   });
 }
 
-// flushPending resolves all in-flight control() promises with null (e.g. on
-// socket close) so awaiters never hang on a reply that will never arrive.
-function flushPending() {
+// flushPending resolves the in-flight control() promises for one socket
+// generation with null so awaiters unblock without a reply that will never come.
+function flushPending(gen) {
   for (const id of Object.keys(pending)) {
-    const cb = pending[id];
+    if (pending[id].gen !== gen) continue;
+    const cb = pending[id].resolve;
     delete pending[id];
     cb(null);
   }
@@ -156,7 +164,7 @@ function control(msgBody) {
     const id = "b" + (++reqSeq);
     const msg = { type: msgBody.type, id };
     if (msgBody.payload !== undefined) msg.payload = msgBody.payload;
-    pending[id] = resolve;
+    pending[id] = { gen: wsGen, resolve }; // tag with the issuing socket's generation
     ws.send(JSON.stringify(msg));
   });
 }
