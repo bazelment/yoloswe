@@ -161,16 +161,21 @@ const maxStreamCaptureErrs = 3
 const paneStreamLines = 200
 
 // streamKey is a cheap change-detection key over the captured content and the
-// parsed idle/working/status. Avoids re-pushing identical frames. Hashing rather
-// than retaining the snapshot string keeps the per-tick idle cost off the heap.
+// parsed status. Avoids re-pushing identical frames. Hashing rather than
+// retaining the snapshot string keeps the per-tick idle cost off the heap. The
+// status is hashed over every field the wire payload carries (via toStatusJSON),
+// so a change to any field the client can render — including Model — produces a
+// fresh key rather than being deduped away.
 func streamKey(lines []string, ps *session.PaneStatus) uint64 {
 	h := fnv.New64a()
 	for _, l := range lines {
 		h.Write([]byte(l))
 		h.Write([]byte{'\n'})
 	}
-	if ps != nil {
-		fmt.Fprintf(h, "|%v|%v|%s|%s|%s", ps.IsIdle, ps.IsWorking, ps.ContextPct, ps.TokenCount, ps.StatusLine)
+	if js := toStatusJSON(ps); js != nil {
+		fmt.Fprintf(h, "|%s|%s|%s|%s|%s|%s|%v|%v",
+			js.Model, js.ContextPct, js.TokenCount, js.Branch,
+			js.StatusLine, js.Permissions, js.IsIdle, js.IsWorking)
 	}
 	return h.Sum64()
 }

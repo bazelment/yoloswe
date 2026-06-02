@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/tmuxctl"
 )
 
@@ -17,8 +18,9 @@ import (
 // to a FakeController for the unused methods and overrides Capture.
 type mutableController struct {
 	*tmuxctl.FakeController
-	lines []string
-	mu    sync.Mutex
+	status *session.PaneStatus
+	lines  []string
+	mu     sync.Mutex
 }
 
 func newMutableController() *mutableController {
@@ -31,10 +33,22 @@ func (m *mutableController) setLines(l []string) {
 	m.mu.Unlock()
 }
 
+func (m *mutableController) setStatus(s *session.PaneStatus) {
+	m.mu.Lock()
+	m.status = s
+	m.mu.Unlock()
+}
+
 func (m *mutableController) Capture(_ context.Context, _ string, _ int) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.lines...), nil
+}
+
+func (m *mutableController) Status(_ context.Context, _ string) (*session.PaneStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.status, nil
 }
 
 // Status uses the embedded FakeController's implementation (returns nil), which
@@ -108,6 +122,62 @@ func TestStreamSubscribeEmitsAndDedups(t *testing.T) {
 	case d := <-deltas:
 		t.Fatalf("unexpected delta after unsubscribe: %+v", d)
 	case <-time.After(700 * time.Millisecond):
+	}
+}
+
+// TestStreamEmitsOnModelOnlyChange pins that a status change with identical pane
+// text (only Model differs) still produces a fresh delta — the change-detection
+// key must hash every rendered status field, not a hand-picked subset.
+func TestStreamEmitsOnModelOnlyChange(t *testing.T) {
+	t.Parallel()
+
+	ctl := newMutableController()
+	ctl.setLines([]string{"steady"})
+	ctl.setStatus(&session.PaneStatus{Model: "opus"})
+	reg := &fakeRegistry{targets: map[string]string{"s1": "@1"}}
+	disp := NewDispatcher(reg, ctl)
+
+	agent, client := pipeConns()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = Serve(ctx, agent, disp) }()
+
+	deltas := make(chan PaneDelta, 16)
+	go func() {
+		for {
+			msg, err := client.ReadMsg()
+			if err != nil {
+				return
+			}
+			if msg.Type == TypePaneDelta {
+				var d PaneDelta
+				_ = msg.DecodePayload(&d)
+				deltas <- d
+			}
+		}
+	}()
+
+	sub, err := NewRequest(TypePaneSubscribe, "r1", SubscribeReq{SessionID: "s1", IntervalMS: 250})
+	require.NoError(t, err)
+	sub.SubID = "sub-1"
+	require.NoError(t, client.WriteMsg(sub))
+
+	select {
+	case d := <-deltas:
+		require.NotNil(t, d.Status)
+		assert.Equal(t, "opus", d.Status.Model)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no initial delta")
+	}
+
+	// Only the model changes — same pane text. A fresh delta must still arrive.
+	ctl.setStatus(&session.PaneStatus{Model: "sonnet"})
+	select {
+	case d := <-deltas:
+		require.NotNil(t, d.Status)
+		assert.Equal(t, "sonnet", d.Status.Model, "model-only change must not be deduped")
+	case <-time.After(2 * time.Second):
+		t.Fatal("model-only status change was deduped away")
 	}
 }
 

@@ -127,11 +127,24 @@ function openWS() {
       pending[msg.id](msg); delete pending[msg.id];
     }
   };
+  // A dropped socket must not leave control() callers hanging forever: resolve
+  // every in-flight request with null so awaiters unblock and can react.
+  ws.onclose = () => { flushPending(); };
   return new Promise((resolve) => {
     if (ws.readyState === 1) { resolve(); return; }
     ws.addEventListener("open", () => resolve(), { once: true });
     ws.addEventListener("error", () => resolve(), { once: true }); // don't hang the caller
   });
+}
+
+// flushPending resolves all in-flight control() promises with null (e.g. on
+// socket close) so awaiters never hang on a reply that will never arrive.
+function flushPending() {
+  for (const id of Object.keys(pending)) {
+    const cb = pending[id];
+    delete pending[id];
+    cb(null);
+  }
 }
 
 // Send a request over the browser WS and await its correlated response. The
@@ -184,9 +197,17 @@ $("#input").addEventListener("keydown", (e) => {
 async function sendInput(submit) {
   if (!sessionID) return;
   const text = $("#input").value;
-  await control({ type: "session.send_input",
+  const resp = await control({ type: "session.send_input",
     payload: { session_id: sessionID, text, submit } });
-  $("#input").value = "";
+  // Only clear the box once the agent acknowledged the input: a null response
+  // (socket dropped / not open) or an error response means the prompt did not
+  // land, so keep the text for a retry rather than silently losing it.
+  const ok = resp && resp.payload && resp.payload.result && resp.payload.result.ok;
+  if (ok) {
+    $("#input").value = "";
+  } else {
+    $("#status").textContent = "⚠ send failed — input kept";
+  }
 }
 document.querySelectorAll(".keys button").forEach((btn) => {
   btn.onclick = () => {
