@@ -65,3 +65,27 @@ func TestMachineRequestDisconnectReturnsError(t *testing.T) {
 	assert.Nil(t, res.msg, "no message should be returned on disconnect")
 	require.Error(t, res.err, "disconnect must surface as an error, not (nil, nil)")
 }
+
+// TestMachineRequestTimesOut verifies a hung agent (reply never arrives) causes
+// request to return a timeout error rather than blocking forever.
+func TestMachineRequestTimesOut(t *testing.T) {
+	t.Parallel()
+
+	orig := requestTimeout
+	requestTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = orig })
+
+	conn := newBlockingConn()
+	t.Cleanup(func() { _ = conn.Close() })
+	m := newMachine("agent-1", "host", conn)
+
+	msg, err := m.request(&control.Msg{Type: control.TypeSessionList})
+	assert.Nil(t, msg, "no message on timeout")
+	require.Error(t, err, "hung agent must surface a timeout error")
+
+	// The timed-out request must not leak its pending entry.
+	m.mu.Lock()
+	n := len(m.pending)
+	m.mu.Unlock()
+	assert.Equal(t, 0, n, "timed-out request should clear its pending channel")
+}

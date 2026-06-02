@@ -77,7 +77,10 @@ async function loadMachines() {
     el.onclick = () => selectMachine(m.id);
     box.appendChild(el);
   });
-  if (machines.length === 1) selectMachine(machines[0].id);
+  // Auto-select the sole machine, but only on first sight: re-selecting an
+  // already-connected machine would call openWS() and tear down the live socket
+  // (and its pane subscriptions) on every 5s poll.
+  if (machines.length === 1 && machineID !== machines[0].id) selectMachine(machines[0].id);
 }
 
 async function selectMachine(id) {
@@ -90,7 +93,8 @@ async function loadSessions() {
   const resp = await control({ type: "session.list" });
   const box = $("#sessions");
   box.innerHTML = "<div style='color:#888;font-size:11px;margin:10px 0 6px'>SESSIONS</div>";
-  const sessions = (resp && resp.result && resp.result.sessions) || [];
+  const result = resp && resp.payload && resp.payload.result;
+  const sessions = (result && result.sessions) || [];
   sessions.forEach((s) => {
     const el = document.createElement("div");
     el.className = "session" + (s.id === sessionID ? " active" : "");

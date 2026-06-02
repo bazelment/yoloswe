@@ -3,9 +3,15 @@ package hub
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/bazelment/yoloswe/bramble/control"
 )
+
+// requestTimeout bounds how long a forwarded request waits for the agent's
+// reply. A hung or non-responsive agent must not pin a browser request (and its
+// HTTP handler goroutine) open indefinitely. Package var so tests can shorten it.
+var requestTimeout = 30 * time.Second
 
 // machine is a connected agent: it owns the agent's control connection, runs a
 // read loop that demultiplexes responses (by request ID) and pushed PaneDelta
@@ -93,11 +99,21 @@ func (m *machine) request(req *control.Msg) (*control.Msg, error) {
 	}
 	// shutdown() closes pending channels on disconnect; a closed channel yields a
 	// nil msg, which callers would dereference. Distinguish it from a real reply.
-	resp, ok := <-ch
-	if !ok {
-		return nil, fmt.Errorf("machine %s disconnected", m.id)
+	// A bounded wait keeps a hung agent from pinning the caller open forever.
+	timer := time.NewTimer(requestTimeout)
+	defer timer.Stop()
+	select {
+	case resp, ok := <-ch:
+		if !ok {
+			return nil, fmt.Errorf("machine %s disconnected", m.id)
+		}
+		return resp, nil
+	case <-timer.C:
+		m.mu.Lock()
+		delete(m.pending, id)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("machine %s request timed out after %s", m.id, requestTimeout)
 	}
-	return resp, nil
 }
 
 // subscribe forwards a subscribe request and routes future PaneDelta frames for

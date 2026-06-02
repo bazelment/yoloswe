@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -70,7 +71,9 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case hello.ProtocolVersion != control.ProtocolVersion:
 		ack = control.HelloAck{OK: false, Error: "protocol version mismatch"}
-	case h.agentToken != "" && hello.Token != h.agentToken:
+	case !h.agentTokenOK(hello.Token):
+		// Fail closed: an empty configured token rejects every agent rather than
+		// admitting any unauthenticated client.
 		ack = control.HelloAck{OK: false, Error: "bad token"}
 	case hello.MachineID == "":
 		ack = control.HelloAck{OK: false, Error: "missing machine_id"}
@@ -89,6 +92,16 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 	m.readLoop() // blocks until disconnect
 	h.reg.remove(m.id, m)
 	slog.Info("hub: agent disconnected", "machine", m.id)
+}
+
+// agentTokenOK reports whether a presented agent token matches the configured
+// one, using a constant-time compare. A hub with no configured token rejects
+// all agents (fail closed) — agent auth is never silently optional.
+func (h *Hub) agentTokenOK(presented string) bool {
+	if h.agentToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(h.agentToken)) == 1
 }
 
 // handleMachines lists connected machines.

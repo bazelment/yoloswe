@@ -83,21 +83,51 @@ func Serve(ctx context.Context, conn Conn, handler *Dispatcher) error {
 	stream := newStreamer(conn, handler)
 	defer stream.closeAll()
 
+	// ReadMsg blocks with no deadline, so a between-reads ctx.Err() check alone
+	// cannot interrupt a wait already in progress. Close the conn on ctx.Done so
+	// the in-flight ReadMsg unblocks and Serve exits promptly on cancellation.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}()
+
+	// Bound in-flight handlers: each may shell out to tmux, so a flooding peer
+	// must not spawn unbounded goroutines/processes. Acquiring on the read loop
+	// also applies backpressure — a saturated agent stops reading new requests.
+	sem := make(chan struct{}, maxInFlightRequests)
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		msg, err := conn.ReadMsg()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err() // closed by the ctx watcher, not a real read error
+			}
 			return err
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 		wg.Add(1)
 		go func(req *Msg) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			conn.WriteMsg(handleOne(ctx, stream, handler, req)) //nolint:errcheck
 		}(msg)
 	}
 }
+
+// maxInFlightRequests caps concurrent request handlers per connection.
+const maxInFlightRequests = 16
 
 // handleOne processes a single request, routing subscription control to the
 // streamer and everything else to the dispatcher. It always returns a response

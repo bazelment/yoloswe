@@ -38,6 +38,9 @@ func main() {
 				return errors.New("BRAMBLE_HUB_SECRET must be set (browser access secret)")
 			}
 			agentToken := os.Getenv("BRAMBLE_HUB_AGENT_TOKEN")
+			if agentToken == "" {
+				return errors.New("BRAMBLE_HUB_AGENT_TOKEN must be set (agent access token)")
+			}
 
 			h := hub.NewHub(agentToken, hub.NewAuthenticator(secret))
 			srv := &http.Server{

@@ -94,36 +94,66 @@ func (s *streamer) poll(ctx context.Context, subID, target string, interval time
 		lastKey uint64
 		sent    bool
 	)
-	emit := func() {
+	// emit captures once and pushes a delta on change. It returns the capture
+	// error (if any) so poll can surface a persistently broken pane instead of
+	// going silently dark.
+	emit := func() error {
 		lines, err := s.disp.ctl.Capture(ctx, target, paneStreamLines)
 		if err != nil {
-			return
+			return err
 		}
 		ps, _ := s.disp.ctl.Status(ctx, target)
 		key := streamKey(lines, ps)
 		if sent && key == lastKey {
-			return // unchanged — suppress to keep an idle pane silent
+			return nil // unchanged — suppress to keep an idle pane silent
 		}
 		lastKey, sent = key, true
 		delta := PaneDelta{Lines: lines, Status: toStatusJSON(ps)}
 		msg, err := NewRequest(TypePaneDelta, "", delta)
 		if err != nil {
-			return
+			return nil // malformed frame — drop this tick, not a pane error
 		}
 		msg.SubID = subID
 		_ = s.conn.WriteMsg(msg)
+		return nil
 	}
 
-	emit() // immediate first frame
+	consecErrs := 0
+	tick := func() bool {
+		if err := emit(); err != nil {
+			consecErrs++
+			// Tolerate transient capture blips, but a sustained failure (e.g. the
+			// pane was killed) is reported as a terminal error frame so the client
+			// learns the stream is dead rather than just stops receiving deltas.
+			if consecErrs >= maxStreamCaptureErrs {
+				if msg := errResponse(subID, err); msg != nil {
+					msg.SubID = subID
+					_ = s.conn.WriteMsg(msg)
+				}
+				return false
+			}
+			return true
+		}
+		consecErrs = 0
+		return true
+	}
+
+	tick() // immediate first frame
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			emit()
+			if !tick() {
+				return
+			}
 		}
 	}
 }
+
+// maxStreamCaptureErrs is how many consecutive capture failures a subscription
+// tolerates before pushing a terminal error frame and ending the poll loop.
+const maxStreamCaptureErrs = 3
 
 // paneStreamLines is how many trailing lines each delta carries.
 const paneStreamLines = 200

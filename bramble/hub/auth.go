@@ -56,6 +56,11 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    tok,
 		Path:     "/",
 		HttpOnly: true,
+		// Secure when the login arrived over TLS (the intended prod posture behind
+		// TLS/Tailscale); left off for plain-HTTP local dev so the cookie is still
+		// sent back. r.TLS is nil behind a terminating proxy, so also honor
+		// X-Forwarded-Proto.
+		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)

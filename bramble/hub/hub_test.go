@@ -130,6 +130,53 @@ func TestBadSecretRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
+// agentHandshake dials /agent on a bare hub (no registered machine) and returns
+// the HelloAck for the given configured/presented tokens.
+func agentHandshake(t *testing.T, configuredToken, presentedToken string) control.HelloAck {
+	t.Helper()
+	hub := NewHub(configuredToken, NewAuthenticator("browser-secret"))
+	srv := httptest.NewServer(hub.Handler())
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/agent"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	conn := control.NewWSConn(ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	hello, _ := control.NewRequest(control.TypeHello, "", control.Hello{
+		ProtocolVersion: control.ProtocolVersion,
+		MachineID:       "m1", Hostname: "host1", Token: presentedToken,
+	})
+	require.NoError(t, conn.WriteMsg(hello))
+	ack, err := conn.ReadMsg()
+	require.NoError(t, err)
+	var ha control.HelloAck
+	require.NoError(t, ack.DecodePayload(&ha))
+	return ha
+}
+
+func TestAgentRejectedWithWrongToken(t *testing.T) {
+	t.Parallel()
+	ha := agentHandshake(t, "right-token", "wrong-token")
+	assert.False(t, ha.OK, "agent with wrong token must be rejected")
+}
+
+// TestAgentRejectedWhenTokenUnset pins the fail-closed posture: a hub configured
+// with no agent token rejects every agent rather than admitting unauthenticated
+// clients.
+func TestAgentRejectedWhenTokenUnset(t *testing.T) {
+	t.Parallel()
+	ha := agentHandshake(t, "", "anything")
+	assert.False(t, ha.OK, "hub with empty agent token must reject all agents")
+}
+
+func TestAgentAcceptedWithCorrectToken(t *testing.T) {
+	t.Parallel()
+	ha := agentHandshake(t, "right-token", "right-token")
+	assert.True(t, ha.OK, "agent with correct token should be accepted")
+}
+
 func TestListMachinesAuthenticated(t *testing.T) {
 	t.Parallel()
 	srv, _ := startTestHub(t, "atok", "browser-secret")
