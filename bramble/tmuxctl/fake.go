@@ -14,7 +14,6 @@ type FakeCall struct {
 	Keys    string
 	Text    string
 	Special SpecialKey
-	Literal bool
 }
 
 // FakeController is an in-memory Controller for testing higher layers (the
@@ -63,11 +62,6 @@ func (f *FakeController) Capture(_ context.Context, target string, _ int) ([]str
 	return f.CaptureLines, f.Err
 }
 
-func (f *FakeController) CaptureFull(_ context.Context, target string) ([]string, int, error) {
-	f.record(FakeCall{Method: "CaptureFull", Target: target})
-	return f.CaptureLines, len(f.CaptureLines), f.Err
-}
-
 func (f *FakeController) Status(_ context.Context, target string) (*session.PaneStatus, error) {
 	f.record(FakeCall{Method: "Status", Target: target})
 	return f.PaneStatus, f.Err
@@ -88,11 +82,6 @@ func (f *FakeController) ListPanes(_ context.Context, target string) ([]TmuxPane
 	return f.Panes, f.Err
 }
 
-func (f *FakeController) SendKeys(_ context.Context, target, keys string, literal bool) error {
-	f.record(FakeCall{Method: "SendKeys", Target: target, Keys: keys, Literal: literal})
-	return f.Err
-}
-
 func (f *FakeController) SendSpecial(_ context.Context, target string, key SpecialKey) error {
 	f.record(FakeCall{Method: "SendSpecial", Target: target, Special: key})
 	return f.Err
@@ -111,11 +100,6 @@ func (f *FakeController) Select(_ context.Context, target string) error {
 func (f *FakeController) NewWindow(_ context.Context, name, cwd, cmd string) (string, error) {
 	f.record(FakeCall{Method: "NewWindow", Keys: name, Text: cmd, Target: cwd})
 	return "@fake", f.Err
-}
-
-func (f *FakeController) Rename(_ context.Context, target, name string) error {
-	f.record(FakeCall{Method: "Rename", Target: target, Keys: name})
-	return f.Err
 }
 
 func (f *FakeController) Kill(_ context.Context, target string) error {

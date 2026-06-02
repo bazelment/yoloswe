@@ -78,20 +78,17 @@ type TmuxPane struct {
 type Controller interface {
 	// Reads.
 	Capture(ctx context.Context, target string, lines int) ([]string, error)
-	CaptureFull(ctx context.Context, target string) (lines []string, cursorY int, err error)
 	Status(ctx context.Context, target string) (*session.PaneStatus, error)
 	ListSessions(ctx context.Context) ([]TmuxSession, error)
 	ListWindows(ctx context.Context, sessionTarget string) ([]TmuxWindow, error)
 	ListPanes(ctx context.Context, windowTarget string) ([]TmuxPane, error)
 
 	// Writes.
-	SendKeys(ctx context.Context, target, keys string, literal bool) error
 	SendSpecial(ctx context.Context, target string, key SpecialKey) error
 	Paste(ctx context.Context, target, text string) error
 
 	// Navigation / lifecycle.
 	Select(ctx context.Context, target string) error
 	NewWindow(ctx context.Context, name, cwd, cmd string) (windowID string, err error)
-	Rename(ctx context.Context, target, name string) error
 	Kill(ctx context.Context, target string) error
 }

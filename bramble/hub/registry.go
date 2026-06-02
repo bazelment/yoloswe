@@ -91,7 +91,13 @@ func (m *machine) request(req *control.Msg) (*control.Msg, error) {
 		m.mu.Unlock()
 		return nil, err
 	}
-	return <-ch, nil
+	// shutdown() closes pending channels on disconnect; a closed channel yields a
+	// nil msg, which callers would dereference. Distinguish it from a real reply.
+	resp, ok := <-ch
+	if !ok {
+		return nil, fmt.Errorf("machine %s disconnected", m.id)
+	}
+	return resp, nil
 }
 
 // subscribe forwards a subscribe request and routes future PaneDelta frames for

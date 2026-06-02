@@ -61,8 +61,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, req *Msg) (any, error) {
 		return d.sessionStop(req)
 
 	case TypeTmuxListSessions:
-		s, err := d.ctl.ListSessions(ctx)
-		return s, err
+		return d.ctl.ListSessions(ctx)
 	case TypeTmuxListWindows:
 		var r TargetRef
 		if err := req.decode(&r); err != nil {

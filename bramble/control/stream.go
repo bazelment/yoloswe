@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -89,7 +90,10 @@ func (s *streamer) poll(ctx context.Context, subID, target string, interval time
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var lastKey string
+	var (
+		lastKey uint64
+		sent    bool
+	)
 	emit := func() {
 		lines, err := s.disp.ctl.Capture(ctx, target, paneStreamLines)
 		if err != nil {
@@ -97,10 +101,10 @@ func (s *streamer) poll(ctx context.Context, subID, target string, interval time
 		}
 		ps, _ := s.disp.ctl.Status(ctx, target)
 		key := streamKey(lines, ps)
-		if key == lastKey {
+		if sent && key == lastKey {
 			return // unchanged — suppress to keep an idle pane silent
 		}
-		lastKey = key
+		lastKey, sent = key, true
 		delta := PaneDelta{Lines: lines, Status: toStatusJSON(ps)}
 		msg, err := NewRequest(TypePaneDelta, "", delta)
 		if err != nil {
@@ -125,15 +129,16 @@ func (s *streamer) poll(ctx context.Context, subID, target string, interval time
 const paneStreamLines = 200
 
 // streamKey is a cheap change-detection key over the captured content and the
-// parsed idle/working/status. Avoids re-pushing identical frames.
-func streamKey(lines []string, ps *session.PaneStatus) string {
-	var b []byte
+// parsed idle/working/status. Avoids re-pushing identical frames. Hashing rather
+// than retaining the snapshot string keeps the per-tick idle cost off the heap.
+func streamKey(lines []string, ps *session.PaneStatus) uint64 {
+	h := fnv.New64a()
 	for _, l := range lines {
-		b = append(b, l...)
-		b = append(b, '\n')
+		h.Write([]byte(l))
+		h.Write([]byte{'\n'})
 	}
 	if ps != nil {
-		b = append(b, fmt.Sprintf("|%v|%v|%s|%s|%s", ps.IsIdle, ps.IsWorking, ps.ContextPct, ps.TokenCount, ps.StatusLine)...)
+		fmt.Fprintf(h, "|%v|%v|%s|%s|%s", ps.IsIdle, ps.IsWorking, ps.ContextPct, ps.TokenCount, ps.StatusLine)
 	}
-	return string(b)
+	return h.Sum64()
 }

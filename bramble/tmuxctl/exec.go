@@ -69,16 +69,6 @@ func execTmux(ctx context.Context, socketPath string, args []string) (string, er
 
 // --- argv builders (pure; unit-tested) --------------------------------------
 
-// sendKeysArgs builds `send-keys -t <target> [-l] <keys>`. With literal=true the
-// -l flag makes tmux send the bytes verbatim rather than interpreting key names.
-func sendKeysArgs(target, keys string, literal bool) []string {
-	args := []string{"send-keys", "-t", target}
-	if literal {
-		args = append(args, "-l")
-	}
-	return append(args, keys)
-}
-
 // sendSpecialArgs builds `send-keys -t <target> <KeyName>` for a named key.
 // Returns an error for an unknown key so unknowns never reach tmux.
 func sendSpecialArgs(target string, key SpecialKey) ([]string, error) {
@@ -113,11 +103,6 @@ func pasteBufferName(target string) string {
 }
 
 // --- Controller: writes ------------------------------------------------------
-
-func (c *execController) SendKeys(ctx context.Context, target, keys string, literal bool) error {
-	_, err := c.exec(ctx, sendKeysArgs(target, keys, literal))
-	return err
-}
 
 func (c *execController) SendSpecial(ctx context.Context, target string, key SpecialKey) error {
 	args, err := sendSpecialArgs(target, key)
@@ -165,11 +150,6 @@ func (c *execController) NewWindow(ctx context.Context, name, cwd, cmd string) (
 	return strings.TrimSpace(out), nil
 }
 
-func (c *execController) Rename(ctx context.Context, target, name string) error {
-	_, err := c.exec(ctx, []string{"rename-window", "-t", target, name})
-	return err
-}
-
 func (c *execController) Kill(ctx context.Context, target string) error {
 	_, err := c.exec(ctx, []string{"kill-window", "-t", target})
 	return err
@@ -195,7 +175,10 @@ func (c *execController) Capture(ctx context.Context, target string, lines int) 
 	return result, nil
 }
 
-func (c *execController) CaptureFull(ctx context.Context, target string) ([]string, int, error) {
+// captureFull captures the pane from line 0 to the cursor row, returning
+// ANSI-stripped lines with positional fidelity plus cursor_y. Used by Status to
+// locate the Claude status bar relative to the cursor.
+func (c *execController) captureFull(ctx context.Context, target string) ([]string, int, error) {
 	cursorOut, err := c.exec(ctx, []string{"display-message", "-t", target, "-p", "#{cursor_y}"})
 	if err != nil {
 		return nil, 0, err
@@ -221,7 +204,7 @@ func (c *execController) CaptureFull(ctx context.Context, target string) ([]stri
 }
 
 func (c *execController) Status(ctx context.Context, target string) (*session.PaneStatus, error) {
-	lines, cursorY, err := c.CaptureFull(ctx, target)
+	lines, cursorY, err := c.captureFull(ctx, target)
 	if err != nil {
 		return nil, err
 	}

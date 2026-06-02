@@ -9,45 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSendKeysArgs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		target  string
-		keys    string
-		want    []string
-		literal bool
-	}{
-		{
-			name:    "literal text",
-			target:  "@3",
-			keys:    "hello world",
-			literal: true,
-			want:    []string{"send-keys", "-t", "@3", "-l", "hello world"},
-		},
-		{
-			name:   "non-literal key name",
-			target: "%5",
-			keys:   "Enter",
-			want:   []string{"send-keys", "-t", "%5", "Enter"},
-		},
-		{
-			name:    "literal text with shell metachars is passed as one arg",
-			target:  "@1",
-			keys:    "$(rm -rf /); echo pwned",
-			literal: true,
-			want:    []string{"send-keys", "-t", "@1", "-l", "$(rm -rf /); echo pwned"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, sendKeysArgs(tt.target, tt.keys, tt.literal))
-		})
-	}
-}
-
 func TestSendSpecialArgs(t *testing.T) {
 	t.Parallel()
 
@@ -113,15 +74,13 @@ func TestExecControllerWritesUseInjectedRunner(t *testing.T) {
 	}}
 	ctx := context.Background()
 
-	require.NoError(t, c.SendKeys(ctx, "@3", "hi", true))
 	require.NoError(t, c.SendSpecial(ctx, "@3", KeyEnter))
 	require.NoError(t, c.Paste(ctx, "@3", "prompt text"))
 
-	require.Len(t, got, 4) // send-keys, send-keys(Enter), set-buffer, paste-buffer
-	assert.Equal(t, []string{"send-keys", "-t", "@3", "-l", "hi"}, got[0])
-	assert.Equal(t, []string{"send-keys", "-t", "@3", "Enter"}, got[1])
-	assert.Equal(t, "set-buffer", got[2][0])
-	assert.Equal(t, "paste-buffer", got[3][0])
+	require.Len(t, got, 3) // send-keys(Enter), set-buffer, paste-buffer
+	assert.Equal(t, []string{"send-keys", "-t", "@3", "Enter"}, got[0])
+	assert.Equal(t, "set-buffer", got[1][0])
+	assert.Equal(t, "paste-buffer", got[2][0])
 }
 
 func TestExecControllerPropagatesError(t *testing.T) {
@@ -131,7 +90,7 @@ func TestExecControllerPropagatesError(t *testing.T) {
 	c := &execController{run: func(_ context.Context, _ []string) (string, error) {
 		return "", want
 	}}
-	err := c.SendKeys(context.Background(), "@3", "hi", true)
+	err := c.SendSpecial(context.Background(), "@3", KeyEnter)
 	assert.ErrorIs(t, err, want)
 }
 
