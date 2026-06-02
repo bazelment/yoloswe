@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tmuxctl",
+    srcs = [
+        "allowlist.go",
+        "controller.go",
+        "exec.go",
+        "fake.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/tmuxctl",
+    visibility = ["//visibility:public"],
+    deps = ["//bramble/session"],
+)
+
+go_test(
+    name = "tmuxctl_test",
+    srcs = ["exec_test.go"],
+    embed = [":tmuxctl"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
