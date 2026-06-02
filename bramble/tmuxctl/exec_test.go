@@ -27,10 +27,15 @@ func TestSendSpecialArgs(t *testing.T) {
 func TestPasteArgs(t *testing.T) {
 	t.Parallel()
 
-	buf := pasteBufferName("@3")
-	assert.Equal(t, "bramble-w3", buf)
-	// Distinct targets get distinct buffer names so concurrent pastes don't race.
-	assert.NotEqual(t, pasteBufferName("@3"), pasteBufferName("%3"))
+	buf := pasteBufferName("@3", 1)
+	assert.Equal(t, "bramble-w3-1", buf)
+	// The trailing seq guarantees uniqueness even when target sanitizing collides:
+	// "@3" and "w3" both sanitize to "w3", so two pastes must still get distinct
+	// buffer names from the seq.
+	assert.NotEqual(t, pasteBufferName("@3", 1), pasteBufferName("w3", 2))
+	// Distinct targets get distinct names; the same target across pastes too.
+	assert.NotEqual(t, pasteBufferName("@3", 1), pasteBufferName("%3", 1))
+	assert.NotEqual(t, pasteBufferName("@3", 1), pasteBufferName("@3", 2))
 
 	assert.Equal(t,
 		[]string{"set-buffer", "-b", buf, "--", "multi\nline\nprompt"},

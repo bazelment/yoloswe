@@ -62,9 +62,13 @@ type browserBridge struct {
 func (b *browserBridge) handle(msg *control.Msg) {
 	switch msg.Type {
 	case control.TypePaneSubscribe:
+		// Snapshot the browser's correlation ID: machine.subscribe forwards msg and
+		// rewrites msg.ID to the agent-side request id, so the ack must reply with
+		// the saved client id or a client awaiting it never matches.
+		clientID := msg.ID
 		clientSub := msg.SubID
 		if clientSub == "" {
-			b.reply(control.NewErr(msg.ID, "subscribe requires sub_id"))
+			b.reply(control.NewErr(clientID, "subscribe requires sub_id"))
 			return
 		}
 		hubSub := b.prefix + clientSub
@@ -80,10 +84,10 @@ func (b *browserBridge) handle(msg *control.Msg) {
 			b.mu.Lock()
 			delete(b.subs, hubSub)
 			b.mu.Unlock()
-			b.reply(control.NewErr(msg.ID, err.Error()))
+			b.reply(control.NewErr(clientID, err.Error()))
 			return
 		}
-		b.reply(control.NewOK(msg.ID))
+		b.reply(control.NewOK(clientID))
 	case control.TypePaneUnsubscribe:
 		hubSub := b.prefix + msg.SubID
 		b.mu.Lock()

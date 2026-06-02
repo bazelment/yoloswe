@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/bazelment/yoloswe/bramble/session"
 )
@@ -20,6 +21,7 @@ type runFunc func(ctx context.Context, args []string) (string, error)
 type execController struct {
 	run        runFunc // executor; defaults to execTmux
 	socketPath string  // optional `-S <path>` for an isolated tmux server (tests)
+	pasteSeq   atomic.Uint64
 }
 
 // New returns a Controller backed by the default tmux server.
@@ -95,11 +97,15 @@ func pasteBufferArgs(target, bufName string) []string {
 	return []string{"paste-buffer", "-d", "-p", "-t", target, "-b", bufName}
 }
 
-// pasteBufferName derives a stable, collision-resistant buffer name from the
-// target so concurrent pastes to distinct panes do not race on one buffer.
-func pasteBufferName(target string) string {
+// pasteBufferName derives a unique buffer name from the target and a per-paste
+// sequence number. The target is sanitized for readability, but the trailing seq
+// is what guarantees uniqueness: the sanitizing replacer is not injective (e.g.
+// "@3" and "w3" both sanitize to "w3"), so without the seq two concurrent pastes
+// to colliding targets could share a buffer and clobber each other between
+// set-buffer and paste-buffer.
+func pasteBufferName(target string, seq uint64) string {
 	repl := strings.NewReplacer("$", "", "@", "w", "%", "p", ".", "_", ":", "_")
-	return "bramble-" + repl.Replace(target)
+	return fmt.Sprintf("bramble-%s-%d", repl.Replace(target), seq)
 }
 
 // --- Controller: writes ------------------------------------------------------
@@ -117,7 +123,7 @@ func (c *execController) SendSpecial(ctx context.Context, target string, key Spe
 // preferred over send-keys for prompt text: no shell escaping, and bracketed
 // paste prevents embedded newlines from being interpreted as submits.
 func (c *execController) Paste(ctx context.Context, target, text string) error {
-	buf := pasteBufferName(target)
+	buf := pasteBufferName(target, c.pasteSeq.Add(1))
 	if _, err := c.exec(ctx, setBufferArgs(buf, text)); err != nil {
 		return err
 	}
