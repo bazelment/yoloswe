@@ -7,12 +7,14 @@ go_library(
         "proto.go",
         "server.go",
         "transport.go",
+        "wsconn.go",
     ],
     importpath = "github.com/bazelment/yoloswe/bramble/control",
     visibility = ["//visibility:public"],
     deps = [
         "//bramble/session",
         "//bramble/tmuxctl",
+        "@com_github_gorilla_websocket//:websocket",
     ],
 )
 

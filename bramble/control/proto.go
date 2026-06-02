@@ -172,6 +172,30 @@ type Response struct {
 	Result json.RawMessage `json:"result,omitempty"`
 }
 
+// Hello is the first frame an agent sends to the hub on connect. The hub
+// authenticates Token, records the machine, and rejects a ProtocolVersion
+// mismatch. It is sent as a TypeHello Msg payload, not over the Msg envelope's
+// request/response fields, because it precedes normal dispatch.
+type Hello struct {
+	MachineID       string `json:"machine_id"`
+	Hostname        string `json:"hostname"`
+	Token           string `json:"token"`
+	ProtocolVersion int    `json:"protocol_version"`
+}
+
+// HelloAck is the hub's reply to a Hello. OK=false with Error set means the hub
+// rejected the connection (bad token, version mismatch).
+type HelloAck struct {
+	Error string `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+}
+
+const (
+	// TypeHello and TypeHelloAck carry the connection handshake.
+	TypeHello    MsgType = "hello"
+	TypeHelloAck MsgType = "hello_ack"
+)
+
 // --- helpers -----------------------------------------------------------------
 
 // NewRequest builds a request Msg of the given type with a JSON-marshaled
@@ -215,6 +239,10 @@ func (m *Msg) decode(v any) error {
 	}
 	return json.Unmarshal(m.Payload, v)
 }
+
+// DecodePayload unmarshals a Msg's raw payload into v. Used for non-Response
+// frames (e.g. the Hello/HelloAck handshake) where there is no Result wrapper.
+func (m *Msg) DecodePayload(v any) error { return m.decode(v) }
 
 // DecodeResponse extracts the Response from a TypeResponse Msg, returning the
 // error if Error is set, otherwise unmarshaling Result into v (v may be nil).

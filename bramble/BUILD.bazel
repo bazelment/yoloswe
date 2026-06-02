@@ -13,6 +13,7 @@ go_library(
         "//bramble/cmd/speak",
         "//bramble/control",
         "//bramble/ipc",
+        "//bramble/remote",
         "//bramble/session",
         "//bramble/taskrouter",
         "//bramble/tmuxctl",

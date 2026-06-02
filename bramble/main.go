@@ -32,6 +32,7 @@ import (
 	"github.com/bazelment/yoloswe/bramble/cmd/speak"
 	"github.com/bazelment/yoloswe/bramble/control"
 	"github.com/bazelment/yoloswe/bramble/ipc"
+	"github.com/bazelment/yoloswe/bramble/remote"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
 	"github.com/bazelment/yoloswe/bramble/tmuxctl"
@@ -258,6 +259,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		os.Setenv(control.SockEnvVar, controlServer.SocketPath())
 	}
 
+	// If a hub is configured, dial out to it so the user can reach this
+	// machine's sessions remotely. The agent client reuses the same dispatcher.
+	if stopRemote := startRemoteAgent(ctx, registry); stopRemote != nil {
+		defer stopRemote()
+	}
+
 	// Query terminal size synchronously so the first View() renders a
 	// properly laid-out UI instead of waiting for the async WindowSizeMsg.
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
@@ -467,6 +474,41 @@ func startControlServer(registry *session.SessionRegistry) *control.UnixServer {
 		return nil
 	}
 	return srv
+}
+
+// startRemoteAgent dials the cloud hub when BRAMBLE_HUB_URL is set, serving
+// control requests it forwards. Returns a stop func, or nil when no hub is
+// configured. Auth and machine identity come from the environment so the TUI
+// flags stay uncluttered:
+//
+//	BRAMBLE_HUB_URL    wss://hub.example/agent
+//	BRAMBLE_HUB_TOKEN  machine auth token
+//	BRAMBLE_MACHINE_ID stable machine id (defaults to hostname)
+func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry) func() {
+	hubURL := os.Getenv("BRAMBLE_HUB_URL")
+	if hubURL == "" {
+		return nil
+	}
+	hostname, _ := os.Hostname()
+	machineID := os.Getenv("BRAMBLE_MACHINE_ID")
+	if machineID == "" {
+		machineID = hostname
+	}
+	disp := control.NewDispatcher(registry, tmuxctl.New())
+	client := remote.New(remote.Config{
+		HubURL:     hubURL,
+		Token:      os.Getenv("BRAMBLE_HUB_TOKEN"),
+		MachineID:  machineID,
+		Hostname:   hostname,
+		Dispatcher: disp,
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		if err := client.Run(runCtx); err != nil && runCtx.Err() == nil {
+			slog.Warn("remote agent client stopped", "err", err)
+		}
+	}()
+	return cancel
 }
 
 func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams) (*ipc.NewSessionResult, error) {
