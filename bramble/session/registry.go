@@ -68,6 +68,18 @@ func (r *SessionRegistry) CapturePaneText(id SessionID, n int) ([]string, error)
 	return mgr.CapturePaneText(id, n)
 }
 
+// ResolveTmuxTarget finds the owning manager and resolves the session's tmux
+// target, applying the manager's runner-type guard.
+func (r *SessionRegistry) ResolveTmuxTarget(id SessionID) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	mgr := r.findManager(id)
+	if mgr == nil {
+		return "", fmt.Errorf("session not found: %s", id)
+	}
+	return mgr.ResolveTmuxTarget(id)
+}
+
 // FindManagerByRepo returns the manager registered for the given repo name.
 func (r *SessionRegistry) FindManagerByRepo(repoName string) (*Manager, bool) {
 	r.mu.RLock()
@@ -78,6 +90,17 @@ func (r *SessionRegistry) FindManagerByRepo(repoName string) (*Manager, bool) {
 		}
 	}
 	return nil, false
+}
+
+// StopSession finds the owning manager and stops the session.
+func (r *SessionRegistry) StopSession(id SessionID) error {
+	r.mu.RLock()
+	mgr := r.findManager(id)
+	r.mu.RUnlock()
+	if mgr == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	return mgr.StopSession(id)
 }
 
 // GetAllSessions returns sessions from all registered managers.
