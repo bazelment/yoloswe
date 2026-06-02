@@ -6,6 +6,7 @@ go_library(
         "dispatcher.go",
         "proto.go",
         "server.go",
+        "stream.go",
         "transport.go",
         "wsconn.go",
     ],
@@ -23,6 +24,7 @@ go_test(
     srcs = [
         "dispatcher_test.go",
         "server_test.go",
+        "stream_test.go",
     ],
     embed = [":control"],
     deps = [

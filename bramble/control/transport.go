@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 )
+
+// errMissingSubID is returned when a subscribe/unsubscribe request omits SubID.
+var errMissingSubID = errors.New("control: subscribe requires a sub_id")
 
 // Conn is a bidirectional, message-framed control connection. Both the local
 // Unix-socket transport and the remote WebSocket transport implement it so the
@@ -68,9 +72,17 @@ func (c *jsonConn) Close() error { return c.rwc.Close() }
 // responses back. It returns when conn hits EOF/error or ctx is cancelled.
 // Each request is handled in its own goroutine so a slow op does not block the
 // read loop or other requests; WriteMsg's mutex serializes the replies.
+//
+// Subscribe/unsubscribe requests are handled by a per-connection streamer that
+// pushes PaneDelta frames asynchronously over the same conn; all subscriptions
+// are torn down when Serve returns.
 func Serve(ctx context.Context, conn Conn, handler *Dispatcher) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
+
+	stream := newStreamer(conn, handler)
+	defer stream.closeAll()
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -82,9 +94,36 @@ func Serve(ctx context.Context, conn Conn, handler *Dispatcher) error {
 		wg.Add(1)
 		go func(req *Msg) {
 			defer wg.Done()
-			resp := handler.Handle(ctx, req)
-			_ = conn.WriteMsg(resp)
+			conn.WriteMsg(handleOne(ctx, stream, handler, req)) //nolint:errcheck
 		}(msg)
+	}
+}
+
+// handleOne processes a single request, routing subscription control to the
+// streamer and everything else to the dispatcher. It always returns a response
+// Msg (the subscribe/unsubscribe ack, or the dispatcher's response).
+func handleOne(ctx context.Context, stream *streamer, handler *Dispatcher, req *Msg) *Msg {
+	switch req.Type {
+	case TypePaneSubscribe:
+		var r SubscribeReq
+		if err := req.decode(&r); err != nil {
+			return errResponse(req.ID, err)
+		}
+		if req.SubID == "" {
+			return errResponse(req.ID, errMissingSubID)
+		}
+		if err := stream.subscribe(ctx, req.SubID, r); err != nil {
+			return errResponse(req.ID, err)
+		}
+		return okResponse(req.ID, OKResult{OK: true})
+	case TypePaneUnsubscribe:
+		if req.SubID == "" {
+			return errResponse(req.ID, errMissingSubID)
+		}
+		stream.unsubscribe(req.SubID)
+		return okResponse(req.ID, OKResult{OK: true})
+	default:
+		return handler.Handle(ctx, req)
 	}
 }
 
