@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bramble hub</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0;
+         background: #16181d; color: #e6e6e6; display: flex; height: 100vh; }
+  #sidebar { width: 280px; border-right: 1px solid #2a2d35; padding: 12px;
+             overflow-y: auto; flex-shrink: 0; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  h1 { font-size: 14px; margin: 0 0 12px; color: #8ab4f8; }
+  .machine, .session { padding: 8px; border-radius: 8px; cursor: pointer;
+                       margin-bottom: 4px; background: #1e2128; font-size: 13px; }
+  .session:hover, .machine:hover { background: #262a33; }
+  .session.active { outline: 1px solid #3b82f6; }
+  .session .meta { color: #888; font-size: 11px; }
+  #pane { flex: 1; margin: 0; padding: 12px; overflow-y: auto; white-space: pre-wrap;
+          font-size: 12.5px; line-height: 1.35; background: #0f1115; }
+  #status { padding: 6px 12px; font-size: 11px; color: #9aa0aa;
+            border-bottom: 1px solid #2a2d35; }
+  #composer { display: flex; gap: 6px; padding: 10px; border-top: 1px solid #2a2d35; }
+  #composer textarea { flex: 1; resize: none; background: #1e2128; color: #e6e6e6;
+                       border: 1px solid #2a2d35; border-radius: 8px; padding: 8px;
+                       font-family: inherit; font-size: 13px; }
+  button { background: #3b82f6; color: #fff; border: none; border-radius: 8px;
+           padding: 0 14px; cursor: pointer; font-size: 13px; }
+  button.ghost { background: #2a2d35; }
+  .keys { display: flex; gap: 4px; padding: 0 10px 10px; flex-wrap: wrap; }
+  .keys button { padding: 4px 10px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>bramble hub</h1>
+  <div id="machines"></div>
+  <div id="sessions"></div>
+</div>
+<div id="main">
+  <div id="status">Select a machine.</div>
+  <pre id="pane"></pre>
+  <div class="keys">
+    <button class="ghost" data-key="Enter">Enter</button>
+    <button class="ghost" data-key="Escape">Esc</button>
+    <button class="ghost" data-key="C-c">Ctrl-C</button>
+    <button class="ghost" data-key="Up">↑</button>
+    <button class="ghost" data-key="Down">↓</button>
+    <button class="ghost" data-key="Tab">Tab</button>
+  </div>
+  <div id="composer">
+    <textarea id="input" rows="2" placeholder="Type a follow-up prompt, Enter to send…"></textarea>
+    <button id="send">Send</button>
+  </div>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+let machineID = null, sessionID = null, ws = null, subSeq = 0, curSub = null, reqSeq = 0;
+// Each socket gets a monotonic generation. pending entries are tagged with the
+// generation they were issued on so a stale socket's onclose only resolves its
+// own in-flight requests, never ones already re-issued on a newer socket.
+let wsGen = 0;
+const pending = {};
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { location.href = "/login"; return null; }
+  return r.json();
+}
+
+async function loadMachines() {
+  const machines = await api("/api/machines");
+  if (!machines) return;
+  const box = $("#machines");
+  box.innerHTML = "<div style='color:#888;font-size:11px;margin-bottom:6px'>MACHINES</div>";
+  machines.forEach((m) => {
+    const el = document.createElement("div");
+    el.className = "machine";
+    el.textContent = m.hostname || m.id;
+    el.onclick = () => selectMachine(m.id);
+    box.appendChild(el);
+  });
+  // Auto-select the sole machine, but only on first sight: re-selecting an
+  // already-connected machine would call openWS() and tear down the live socket
+  // (and its pane subscriptions) on every 5s poll.
+  if (machines.length === 1 && machineID !== machines[0].id) selectMachine(machines[0].id);
+}
+
+async function selectMachine(id) {
+  machineID = id;
+  await openWS();        // wait for the socket to reach OPEN before any control()
+  await loadSessions();
+}
+
+async function loadSessions() {
+  const resp = await control({ type: "session.list" });
+  const box = $("#sessions");
+  box.innerHTML = "<div style='color:#888;font-size:11px;margin:10px 0 6px'>SESSIONS</div>";
+  const result = resp && resp.payload && resp.payload.result;
+  const sessions = (result && result.sessions) || [];
+  sessions.forEach((s) => {
+    const el = document.createElement("div");
+    el.className = "session" + (s.id === sessionID ? " active" : "");
+    el.innerHTML = `<div>${s.worktree_name || s.id}</div>
+      <div class="meta">${s.type} · ${s.status} · ${s.model || ""}</div>`;
+    el.onclick = () => selectSession(s.id);
+    box.appendChild(el);
+  });
+}
+
+// openWS opens the stream socket and resolves once it is OPEN, so callers can
+// await readiness before issuing control() requests (which no-op while the
+// socket is still CONNECTING). curSub is cleared because the new socket carries
+// no subscriptions.
+function openWS() {
+  if (ws) ws.close();
+  curSub = null;
+  const gen = ++wsGen;
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/api/stream?machine=${encodeURIComponent(machineID)}`);
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "pane.delta") {
+      renderPane(msg.payload || {});
+    } else if (msg.type === "pane.error") {
+      // Terminal frame for a subscription: surface it and drop the dead sub.
+      const err = (msg.payload && msg.payload.error) || "stream ended";
+      $("#status").textContent = "⚠ stream error: " + err;
+      if (msg.sub_id === curSub) curSub = null;
+    } else if (msg.type === "response" && msg.id && pending[msg.id]) {
+      pending[msg.id].resolve(msg); delete pending[msg.id];
+    }
+  };
+  // A dropped socket must not leave its control() callers hanging: resolve the
+  // in-flight requests issued on THIS generation with null. Scoping by gen means
+  // a stale socket's late onclose can't null out requests already re-issued on a
+  // newer socket.
+  ws.onclose = () => { flushPending(gen); };
+  return new Promise((resolve) => {
+    if (ws.readyState === 1) { resolve(); return; }
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", () => resolve(), { once: true }); // don't hang the caller
+  });
+}
+
+// flushPending resolves the in-flight control() promises for one socket
+// generation with null so awaiters unblock without a reply that will never come.
+function flushPending(gen) {
+  for (const id of Object.keys(pending)) {
+    if (pending[id].gen !== gen) continue;
+    const cb = pending[id].resolve;
+    delete pending[id];
+    cb(null);
+  }
+}
+
+// Send a request over the browser WS and await its correlated response. The
+// Msg envelope's "payload" is raw JSON (Go json.RawMessage), so we embed the
+// object directly — no string-encoding.
+function control(msgBody) {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState !== 1) { resolve(null); return; }
+    const id = "b" + (++reqSeq);
+    const msg = { type: msgBody.type, id };
+    if (msgBody.payload !== undefined) msg.payload = msgBody.payload;
+    pending[id] = { gen: wsGen, resolve }; // tag with the issuing socket's generation
+    ws.send(JSON.stringify(msg));
+  });
+}
+
+// wsSend writes a frame only when the socket is OPEN, so a subscribe/unsubscribe
+// issued during a reconnect is dropped rather than throwing on a CONNECTING/
+// CLOSED socket.
+function wsSend(frame) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(frame));
+}
+
+async function selectSession(id) {
+  sessionID = id;
+  await loadSessions();
+  if (curSub) wsSend({ type: "pane.unsubscribe", sub_id: curSub });
+  curSub = "s" + (++subSeq);
+  wsSend({
+    type: "pane.subscribe", id: "sub" + subSeq, sub_id: curSub,
+    payload: { session_id: sessionID, interval_ms: 1000 },
+  });
+}
+
+function renderPane(d) {
+  $("#pane").textContent = (d.lines || []).join("\n");
+  if (d.status) {
+    const s = d.status;
+    $("#status").textContent =
+      `${s.model || ""}  ctx:${s.context_pct || "?"}  tokens:${s.token_count || "?"}` +
+      `  ${s.is_working ? "● working" : s.is_idle ? "○ idle" : ""}`;
+  }
+  $("#pane").scrollTop = $("#pane").scrollHeight;
+}
+
+$("#send").onclick = () => sendInput(true);
+$("#input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendInput(true); }
+});
+async function sendInput(submit) {
+  if (!sessionID) return;
+  const text = $("#input").value;
+  const resp = await control({ type: "session.send_input",
+    payload: { session_id: sessionID, text, submit } });
+  // Only clear the box once the agent acknowledged the input: a null response
+  // (socket dropped / not open) or an error response means the prompt did not
+  // land, so keep the text for a retry rather than silently losing it.
+  const ok = resp && resp.payload && resp.payload.result && resp.payload.result.ok;
+  if (ok) {
+    $("#input").value = "";
+  } else {
+    $("#status").textContent = "⚠ send failed — input kept";
+  }
+}
+document.querySelectorAll(".keys button").forEach((btn) => {
+  btn.onclick = () => {
+    if (!sessionID) return;
+    control({ type: "session.send_key",
+      payload: { session_id: sessionID, key: btn.dataset.key } });
+  };
+});
+
+loadMachines();
+setInterval(loadMachines, 5000);
+</script>
+</body>
+</html>

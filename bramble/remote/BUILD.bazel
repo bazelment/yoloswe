@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "remote",
+    srcs = ["client.go"],
+    importpath = "github.com/bazelment/yoloswe/bramble/remote",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bramble/control",
+        "@com_github_gorilla_websocket//:websocket",
+    ],
+)
+
+go_test(
+    name = "remote_test",
+    srcs = ["client_test.go"],
+    embed = [":remote"],
+    deps = [
+        "//bramble/control",
+        "//bramble/session",
+        "//bramble/tmuxctl",
+        "@com_github_gorilla_websocket//:websocket",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

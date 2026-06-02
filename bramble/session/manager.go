@@ -2398,6 +2398,39 @@ func (m *Manager) CapturePaneText(id SessionID, n int) ([]string, error) {
 	return CaptureTmuxPane(target, n)
 }
 
+// ResolveTmuxTarget returns the tmux target (window ID, falling back to window
+// name) for a tmux-backed session, applying the same runner-type guard as
+// CapturePaneText. It is the single resolution point control-plane write ops
+// (send-input, send-key, select) use so a caller addresses a session, never a
+// raw tmux target.
+func (m *Manager) ResolveTmuxTarget(id SessionID) (string, error) {
+	m.mu.RLock()
+	session, ok := m.sessions[id]
+	m.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("session %q not found", id)
+	}
+
+	session.mu.RLock()
+	windowID := session.TmuxWindowID
+	windowName := session.TmuxWindowName
+	runnerType := session.RunnerType
+	session.mu.RUnlock()
+
+	if runnerType != RunnerTypeTmux && runnerType != RunnerTypeTmuxTracked {
+		return "", fmt.Errorf("session %q is not a tmux session (runner type: %s)", id, runnerType)
+	}
+
+	target := windowID
+	if target == "" {
+		target = windowName
+	}
+	if target == "" {
+		return "", fmt.Errorf("session %q has no tmux window target", id)
+	}
+	return target, nil
+}
+
 // CountByStatus returns counts of sessions by status.
 func (m *Manager) CountByStatus() map[SessionStatus]int {
 	m.mu.RLock()

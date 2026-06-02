@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hub",
+    srcs = [
+        "auth.go",
+        "hub.go",
+        "registry.go",
+        "stream.go",
+        "web.go",
+    ],
+    embedsrcs = ["web/index.html"],
+    importpath = "github.com/bazelment/yoloswe/bramble/hub",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bramble/control",
+        "@com_github_gorilla_websocket//:websocket",
+    ],
+)
+
+go_test(
+    name = "hub_test",
+    srcs = [
+        "hub_test.go",
+        "registry_test.go",
+    ],
+    embed = [":hub"],
+    deps = [
+        "//bramble/control",
+        "//bramble/session",
+        "//bramble/tmuxctl",
+        "@com_github_gorilla_websocket//:websocket",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

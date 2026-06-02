@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "control",
+    srcs = [
+        "dispatcher.go",
+        "proto.go",
+        "server.go",
+        "stream.go",
+        "transport.go",
+        "wsconn.go",
+    ],
+    importpath = "github.com/bazelment/yoloswe/bramble/control",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bramble/session",
+        "//bramble/tmuxctl",
+        "@com_github_gorilla_websocket//:websocket",
+    ],
+)
+
+go_test(
+    name = "control_test",
+    srcs = [
+        "dispatcher_test.go",
+        "server_test.go",
+        "stream_test.go",
+    ],
+    embed = [":control"],
+    deps = [
+        "//bramble/session",
+        "//bramble/tmuxctl",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

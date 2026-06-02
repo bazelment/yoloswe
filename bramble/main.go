@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
@@ -29,9 +30,12 @@ import (
 	"github.com/bazelment/yoloswe/bramble/cmd/delegator"
 	"github.com/bazelment/yoloswe/bramble/cmd/meetingbot"
 	"github.com/bazelment/yoloswe/bramble/cmd/speak"
+	"github.com/bazelment/yoloswe/bramble/control"
 	"github.com/bazelment/yoloswe/bramble/ipc"
+	"github.com/bazelment/yoloswe/bramble/remote"
 	"github.com/bazelment/yoloswe/bramble/session"
 	"github.com/bazelment/yoloswe/bramble/taskrouter"
+	"github.com/bazelment/yoloswe/bramble/tmuxctl"
 	"github.com/bazelment/yoloswe/multiagent/agent"
 	"github.com/bazelment/yoloswe/wt"
 	"github.com/bazelment/yoloswe/yoloswe"
@@ -246,6 +250,21 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		sharedManagerConfig.IPCSockPath = ipcSockPath
 	}
 
+	// Start the control server (read+write tmux control plane) on its own Unix
+	// socket. Local CLI subcommands (send-input, send-key) and the remote hub
+	// agent client both drive the same control.Dispatcher.
+	controlServer := startControlServer(registry)
+	if controlServer != nil {
+		defer controlServer.Close()
+		os.Setenv(control.SockEnvVar, controlServer.SocketPath())
+	}
+
+	// If a hub is configured, dial out to it so the user can reach this
+	// machine's sessions remotely. The agent client reuses the same dispatcher.
+	if stopRemote := startRemoteAgent(ctx, registry); stopRemote != nil {
+		defer stopRemote()
+	}
+
 	// Query terminal size synchronously so the first View() renders a
 	// properly laid-out UI instead of waiting for the async WindowSizeMsg.
 	termWidth, termHeight, _ := term.GetSize(int(os.Stdout.Fd()))
@@ -437,6 +456,59 @@ func startIPCServer(registry *session.SessionRegistry, wtRoot, repoName string) 
 	}
 	socketPath := srv.SocketPath()
 	return srv, socketPath
+}
+
+// startControlServer starts the control-protocol Unix server backed by the
+// session registry and a real tmux controller. Returns nil if it fails to
+// start (non-fatal — the TUI still runs, only remote/CLI control is absent).
+func startControlServer(registry *session.SessionRegistry) *control.UnixServer {
+	runDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runDir == "" {
+		runDir = os.TempDir()
+	}
+	sockPath := filepath.Join(runDir, fmt.Sprintf("bramble-control-%d.sock", os.Getpid()))
+	disp := control.NewDispatcher(registry, tmuxctl.New())
+	srv := control.NewUnixServer(sockPath, disp)
+	if err := srv.Start(); err != nil {
+		slog.Warn("control server failed to start", "err", err)
+		return nil
+	}
+	return srv
+}
+
+// startRemoteAgent dials the cloud hub when BRAMBLE_HUB_URL is set, serving
+// control requests it forwards. Returns a stop func, or nil when no hub is
+// configured. Auth and machine identity come from the environment so the TUI
+// flags stay uncluttered:
+//
+//	BRAMBLE_HUB_URL    wss://hub.example/agent
+//	BRAMBLE_HUB_TOKEN  machine auth token
+//	BRAMBLE_MACHINE_ID stable machine id (defaults to hostname)
+func startRemoteAgent(ctx context.Context, registry *session.SessionRegistry) func() {
+	hubURL := os.Getenv("BRAMBLE_HUB_URL")
+	if hubURL == "" {
+		return nil
+	}
+	hostname, _ := os.Hostname()
+	machineID := os.Getenv("BRAMBLE_MACHINE_ID")
+	if machineID == "" {
+		machineID = hostname
+	}
+	disp := control.NewDispatcher(registry, tmuxctl.New())
+	client := remote.New(remote.Config{
+		HubURL:     hubURL,
+		Token:      os.Getenv("BRAMBLE_HUB_TOKEN"),
+		MachineID:  machineID,
+		Hostname:   hostname,
+		Dispatcher: disp,
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		if err := client.Run(runCtx); err != nil && runCtx.Err() == nil {
+			slog.Warn("remote agent client stopped", "err", err)
+		}
+	}()
+	return cancel
 }
 
 func handleNewSession(ctx context.Context, mgr *session.Manager, wtRoot, repoName string, params *ipc.NewSessionParams) (*ipc.NewSessionResult, error) {
@@ -663,6 +735,63 @@ var listSessionsCmd = &cobra.Command{
 	},
 }
 
+// runControl performs a one-shot control request against the running bramble's
+// control socket and decodes the result into v (v may be nil).
+func runControl(typ control.MsgType, payload, v any) error {
+	sock := os.Getenv(control.SockEnvVar)
+	if sock == "" {
+		return fmt.Errorf("$%s is not set — is a bramble TUI running?", control.SockEnvVar)
+	}
+	req, err := control.NewRequest(typ, "cli", payload)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := control.Request(ctx, sock, req)
+	if err != nil {
+		return err
+	}
+	return resp.DecodeResponse(v)
+}
+
+var sendInputCmd = &cobra.Command{
+	Use:   "send-input",
+	Short: "Send prompt text to a session's tmux pane (optionally submit it)",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		sessionID, _ := cmd.Flags().GetString("session-id")
+		target, _ := cmd.Flags().GetString("target")
+		text, _ := cmd.Flags().GetString("text")
+		submit, _ := cmd.Flags().GetBool("submit")
+
+		typ := control.TypeSessionSendInput
+		if sessionID == "" {
+			typ = control.TypePaneSendInput
+		}
+		return runControl(typ, control.SendInputReq{
+			SessionID: sessionID, Target: target, Text: text, Submit: submit,
+		}, nil)
+	},
+}
+
+var sendKeyCmd = &cobra.Command{
+	Use:   "send-key",
+	Short: "Send a single named key (Enter, Escape, C-c, Up, ...) to a session's pane",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		sessionID, _ := cmd.Flags().GetString("session-id")
+		target, _ := cmd.Flags().GetString("target")
+		key, _ := cmd.Flags().GetString("key")
+
+		typ := control.TypeSessionSendKey
+		if sessionID == "" {
+			typ = control.TypePaneSendKey
+		}
+		return runControl(typ, control.SendKeyReq{
+			SessionID: sessionID, Target: target, Key: tmuxctl.SpecialKey(key),
+		}, nil)
+	},
+}
+
 var codetalkCmd = &cobra.Command{
 	Use:   "codetalk [flags] <prompt>",
 	Short: "Start a code understanding session",
@@ -785,6 +914,17 @@ func init() {
 	capturePaneCmd.Flags().Int("lines", 10, "Number of lines to capture")
 	_ = capturePaneCmd.MarkFlagRequired("session-id")
 
+	sendInputCmd.Flags().String("session-id", "", "Target bramble session ID (session-centric)")
+	sendInputCmd.Flags().String("target", "", "Raw tmux target (window/pane id) instead of a session")
+	sendInputCmd.Flags().String("text", "", "Text to deliver to the pane")
+	sendInputCmd.Flags().Bool("submit", false, "Press Enter after delivering the text")
+	_ = sendInputCmd.MarkFlagRequired("text")
+
+	sendKeyCmd.Flags().String("session-id", "", "Target bramble session ID (session-centric)")
+	sendKeyCmd.Flags().String("target", "", "Raw tmux target (window/pane id) instead of a session")
+	sendKeyCmd.Flags().String("key", "", "Named key: Enter, Escape, C-c, C-d, Tab, BSpace, Up, Down, Left, Right")
+	_ = sendKeyCmd.MarkFlagRequired("key")
+
 	codetalkCmd.Flags().StringP("model", "m", "opus", "Model to use (e.g. opus, sonnet)")
 	codetalkCmd.Flags().String("dir", "", "Working directory (defaults to current directory)")
 	codetalkCmd.Flags().String("record", "", "Directory for session recordings (defaults to ~/.yoloswe)")
@@ -796,6 +936,8 @@ func init() {
 	rootCmd.AddCommand(listSessionsCmd)
 	rootCmd.AddCommand(notifyCmd)
 	rootCmd.AddCommand(capturePaneCmd)
+	rootCmd.AddCommand(sendInputCmd)
+	rootCmd.AddCommand(sendKeyCmd)
 	rootCmd.AddCommand(codereview.Cmd)
 	rootCmd.AddCommand(delegator.Cmd)
 	rootCmd.AddCommand(codetalkCmd)
