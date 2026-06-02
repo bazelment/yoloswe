@@ -1,4 +1,4 @@
-package main
+package hub
 
 import (
 	"crypto/rand"
@@ -12,11 +12,11 @@ import (
 
 var errUnknownMachine = errors.New("unknown or disconnected machine")
 
-// authenticator implements simple shared-secret browser auth: POST /login with
+// Authenticator implements simple shared-secret browser auth: POST /login with
 // the secret mints a random session cookie held in memory. This mirrors
 // tmux-mobile's network-boundary + token trust model (intended to run behind
 // Tailscale/TLS), kept deliberately minimal and pluggable.
-type authenticator struct {
+type Authenticator struct {
 	sessions   map[string]time.Time // token -> expiry
 	secret     string
 	cookieName string
@@ -24,8 +24,9 @@ type authenticator struct {
 	mu         sync.Mutex
 }
 
-func newAuthenticator(secret string) *authenticator {
-	return &authenticator{
+// NewAuthenticator creates a shared-secret browser Authenticator.
+func NewAuthenticator(secret string) *Authenticator {
+	return &Authenticator{
 		secret:     secret,
 		cookieName: "bramble_hub_session",
 		sessions:   make(map[string]time.Time),
@@ -35,7 +36,7 @@ func newAuthenticator(secret string) *authenticator {
 
 // handleLogin accepts the shared secret (form field or query "secret") and sets
 // a session cookie. A GET renders a minimal login form.
-func (a *authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
+func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(loginHTML))
@@ -61,7 +62,7 @@ func (a *authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // valid reports whether the request carries a live session cookie.
-func (a *authenticator) valid(r *http.Request) bool {
+func (a *Authenticator) valid(r *http.Request) bool {
 	c, err := r.Cookie(a.cookieName)
 	if err != nil {
 		return false

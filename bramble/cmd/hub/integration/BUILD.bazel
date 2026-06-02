@@ -1,0 +1,21 @@
+# gazelle:ignore
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "integration_test",
+    srcs = ["e2e_test.go"],
+    gotags = ["integration"],
+    tags = [
+        "local",
+        "manual",
+    ],
+    deps = [
+        "//bramble/control",
+        "//bramble/hub",
+        "//bramble/remote",
+        "//bramble/session",
+        "//bramble/tmuxctl",
+        "@com_github_gorilla_websocket//:websocket",
+        "@com_github_stretchr_testify//require",
+    ],
+)

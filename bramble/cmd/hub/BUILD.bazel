@@ -1,21 +1,12 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
 go_library(
     name = "hub_lib",
-    srcs = [
-        "auth.go",
-        "hub.go",
-        "main.go",
-        "registry.go",
-        "stream.go",
-        "web.go",
-    ],
-    embedsrcs = ["web/index.html"],
+    srcs = ["main.go"],
     importpath = "github.com/bazelment/yoloswe/bramble/cmd/hub",
     visibility = ["//visibility:private"],
     deps = [
-        "//bramble/control",
-        "@com_github_gorilla_websocket//:websocket",
+        "//bramble/hub",
         "@com_github_spf13_cobra//:cobra",
     ],
 )
@@ -24,18 +15,4 @@ go_binary(
     name = "hub",
     embed = [":hub_lib"],
     visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "hub_test",
-    srcs = ["hub_test.go"],
-    embed = [":hub_lib"],
-    deps = [
-        "//bramble/control",
-        "//bramble/session",
-        "//bramble/tmuxctl",
-        "@com_github_gorilla_websocket//:websocket",
-        "@com_github_stretchr_testify//assert",
-        "@com_github_stretchr_testify//require",
-    ],
 )

@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/bazelment/yoloswe/bramble/hub"
 )
 
 func main() {
@@ -37,10 +39,10 @@ func main() {
 			}
 			agentToken := os.Getenv("BRAMBLE_HUB_AGENT_TOKEN")
 
-			hub := NewHub(agentToken, newAuthenticator(secret))
+			h := hub.NewHub(agentToken, hub.NewAuthenticator(secret))
 			srv := &http.Server{
 				Addr:              addr,
-				Handler:           hub.Handler(),
+				Handler:           h.Handler(),
 				ReadHeaderTimeout: 10 * time.Second,
 			}
 

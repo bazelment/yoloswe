@@ -1,4 +1,4 @@
-package main
+package hub
 
 import (
 	"bytes"
@@ -56,7 +56,7 @@ func (f *fakeRegistry) StopSession(session.SessionID) error                     
 // uses control.Serve so the full agent dispatch path is exercised.
 func startTestHub(t *testing.T, agentToken, browserSecret string) (*httptest.Server, *tmuxctl.FakeController) {
 	t.Helper()
-	hub := NewHub(agentToken, newAuthenticator(browserSecret))
+	hub := NewHub(agentToken, NewAuthenticator(browserSecret))
 	srv := httptest.NewServer(hub.Handler())
 	t.Cleanup(srv.Close)
 

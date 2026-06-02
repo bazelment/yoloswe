@@ -1,4 +1,4 @@
-package main
+package hub
 
 import (
 	"encoding/json"
@@ -15,14 +15,14 @@ import (
 // and forwards.
 type Hub struct {
 	reg        *registry
-	auth       *authenticator
+	auth       *Authenticator
 	agentToken string // shared token agents present in their Hello
 	upgrader   websocket.Upgrader
 }
 
 // NewHub constructs a hub. agentToken authenticates agents; auth handles the
 // browser side (login → session cookie).
-func NewHub(agentToken string, auth *authenticator) *Hub {
+func NewHub(agentToken string, auth *Authenticator) *Hub {
 	return &Hub{
 		reg:        newRegistry(),
 		auth:       auth,
