@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
@@ -109,9 +110,16 @@ type fakePoster struct { //nolint:govet // fieldalignment: test fixture readabil
 	mu       sync.Mutex
 	comments []string
 	failWith error
+	// blockOnCtx, when true, makes PostComment hang until its context expires
+	// (simulating a slow/wedged tracker) and return the ctx error.
+	blockOnCtx bool
 }
 
-func (f *fakePoster) PostComment(_ context.Context, issueID, body string) (tracker.Comment, error) {
+func (f *fakePoster) PostComment(ctx context.Context, issueID, body string) (tracker.Comment, error) {
+	if f.blockOnCtx {
+		<-ctx.Done()
+		return tracker.Comment{}, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failWith != nil {
@@ -192,6 +200,29 @@ func TestReportFailure(t *testing.T) {
 		if len(poster.comments) != 1 || len(notifier.reports) != 1 {
 			t.Errorf("reporting should detach from cancelled ctx: comments=%d notifications=%d",
 				len(poster.comments), len(notifier.reports))
+		}
+	})
+
+	t.Run("hung tracker does not starve the external alert", func(t *testing.T) {
+		// Not parallel: mutates the package-level sinkTimeout.
+		prev := sinkTimeout
+		sinkTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { sinkTimeout = prev })
+
+		poster := &fakePoster{blockOnCtx: true} // hangs until ITS deadline expires
+		notifier := &captureNotifier{}
+		start := time.Now()
+		ReportFailure(context.Background(), discardLogger(), poster, "issue-id", notifier, report)
+		elapsed := time.Since(start)
+
+		if len(notifier.reports) != 1 {
+			t.Errorf("external alert must fire despite a hung tracker, got %d notifications", len(notifier.reports))
+		}
+		// The notifier must get its own full budget, not the tracker's leftovers:
+		// total time ≈ one sink timeout (tracker hang) + a fast notifier, well
+		// under two full budgets.
+		if elapsed > 2*sinkTimeout {
+			t.Errorf("sinks appear to share a budget: elapsed=%v exceeds 2×sinkTimeout=%v", elapsed, 2*sinkTimeout)
 		}
 	})
 }

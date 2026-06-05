@@ -135,12 +135,16 @@ func (n SlackWebhookNotifier) Notify(ctx context.Context, report FailureReport) 
 // --description runs); notifier delivers the external alert (skipped when nil).
 func ReportFailure(ctx context.Context, logger *slog.Logger, poster CommentPoster, issueID string, notifier Notifier, report FailureReport) {
 	// Detach from a possibly-cancelled run context so the alert still sends
-	// after a ctx-cancellation, but keep a tight bound.
-	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
+	// after a ctx-cancellation. Each sink gets its OWN deadline (derived from
+	// the detached parent) so a slow or hung tracker can't starve the external
+	// alert — losing the tracker comment must not also lose the Slack alert.
+	parent := context.WithoutCancel(ctx)
 
 	if poster != nil && issueID != "" {
-		if _, err := poster.PostComment(notifyCtx, issueID, report.renderFailureText()); err != nil {
+		sinkCtx, cancel := context.WithTimeout(parent, sinkTimeout)
+		_, err := poster.PostComment(sinkCtx, issueID, report.renderFailureText())
+		cancel()
+		if err != nil {
 			logger.Warn("failed to post failure comment to tracker", "issue", issueID, "error", err)
 		} else {
 			logger.Info("posted failure comment to tracker", "issue", issueID)
@@ -148,10 +152,17 @@ func ReportFailure(ctx context.Context, logger *slog.Logger, poster CommentPoste
 	}
 
 	if notifier != nil {
-		if err := notifier.Notify(notifyCtx, report); err != nil {
+		sinkCtx, cancel := context.WithTimeout(parent, sinkTimeout)
+		err := notifier.Notify(sinkCtx, report)
+		cancel()
+		if err != nil {
 			logger.Warn("failed to send failure notification", "error", err)
 		} else {
 			logger.Info("sent failure notification")
 		}
 	}
 }
+
+// sinkTimeout bounds each failure-report sink independently. It is a var (not a
+// const) so tests can shrink it.
+var sinkTimeout = 15 * time.Second
