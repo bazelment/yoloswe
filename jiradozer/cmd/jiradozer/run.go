@@ -102,12 +102,37 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().BoolVar(&args.forceCleanup, "force-cleanup", false, "Team mode only: delete worktrees even for failed or cancelled runs. By default, failed and cancelled worktrees are preserved so in-progress work (including pushed branches / open PRs) is not lost.")
 }
 
-func run(ctx context.Context, app *cliapp.App, args runArgs) error {
+func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 	logger := app.Logger
 	renderer := app.Renderer
 	if renderer != nil {
 		defer renderer.Reset()
 	}
+
+	// Failure reporting: fire once if the run returns an error. The sinks
+	// (tracker comment, external notifier) and target are populated below as
+	// config/tracker are resolved; until then they are nil/empty and reporting
+	// is a no-op. A context cancellation (Ctrl-C / shutdown) is an expected
+	// stop, not a failure, so it is not reported.
+	var (
+		reportTracker  jiradozer.CommentPoster
+		reportNotifier jiradozer.Notifier
+		reportIssueID  string
+		reportTarget   string
+	)
+	defer func() {
+		if runErr == nil || ctx.Err() != nil {
+			return
+		}
+		jiradozer.ReportFailure(ctx, logger, reportTracker, reportIssueID, reportNotifier, jiradozer.FailureReport{
+			Tool:          "jiradozer",
+			Target:        reportTarget,
+			Step:          jiradozer.FailingStepFromError(runErr),
+			Err:           runErr,
+			BuildRevision: app.Build.ShortRevision(),
+			LogPath:       app.LogPath,
+		})
+	}()
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {
@@ -159,20 +184,32 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 		"base_branch", cfg.BaseBranch,
 		"poll_interval", cfg.PollInterval,
 	)
+	if cfg.Notify.SlackWebhook != "" {
+		reportNotifier = jiradozer.SlackWebhookNotifier{WebhookURL: cfg.Notify.SlackWebhook}
+	}
 
 	// Create tracker client.
 	issueTracker, err := createTracker(cfg, args.issueID)
 	if err != nil {
 		return err
 	}
+	reportTracker = issueTracker
 
 	// Local description mode.
 	if args.description != "" {
+		// No tracker issue to comment on in description mode; external
+		// notification still fires. Target is a short description prefix.
+		reportTracker = nil
+		reportTarget = describeTarget(args.description)
 		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, args.postResult, cfg, renderer, logger)
 	}
 
 	// Multi-issue team mode (only when no --issue flag was given).
 	if cfg.Source.HasSource() && args.issueID == "" {
+		// Per-issue failures are isolated and reported by the orchestrator; a
+		// top-level error here is a batch-level failure.
+		reportTracker = nil
+		reportTarget = "batch run"
 		return runMultiIssue(ctx, app, issueTracker, cfg, args)
 	}
 
@@ -183,6 +220,8 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 		return fmt.Errorf("fetch issue: %w", err)
 	}
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
+	reportIssueID = issue.ID
+	reportTarget = issue.Identifier
 
 	if args.runStep != "" {
 		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, issueTracker, args.postResult, renderer, logger)
@@ -192,6 +231,17 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	wf.SetRenderer(renderer)
 	return wf.Run(ctx)
+}
+
+// describeTarget makes a compact, single-line label from a free-form task
+// description for use in failure reports.
+func describeTarget(description string) string {
+	d := strings.TrimSpace(strings.ReplaceAll(description, "\n", " "))
+	const max = 80
+	if len(d) > max {
+		d = d[:max] + "…"
+	}
+	return d
 }
 
 func loadRunConfig(args runArgs) (*jiradozer.Config, error) {

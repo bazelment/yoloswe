@@ -481,6 +481,15 @@ max_budget_usd: 50
 
 # How often to poll the tracker for new comments at review gates.
 poll_interval: 15s
+
+# Failure notification (opt-in). When a run fails after exhausting retries,
+# jiradozer posts a comment on the issue (if any) and can send an external
+# alert. Both are best-effort: a notification failure never changes the run's
+# exit status.
+#notify:
+#    # Slack incoming-webhook URL. Supports "$ENV_VAR" expansion; leave unset
+#    # (or resolving to empty) to disable Slack notification.
+#    slack_webhook: $JIRADOZER_SLACK_WEBHOOK
 `
 
 // roundsExampleBlock is the commented-out multi-round example emitted under

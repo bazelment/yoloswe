@@ -34,8 +34,19 @@ type Config struct {
 	SkipPhases   []string      `yaml:"skip_phases"`
 	MaxBudgetUSD float64       `yaml:"max_budget_usd"`
 	PollInterval time.Duration `yaml:"poll_interval"`
+	Notify       NotifyConfig  `yaml:"notify"`
 
 	skipPhaseSource skipPhaseSource
+}
+
+// NotifyConfig configures where a run reports a hard failure (after retries are
+// exhausted). All sinks are opt-in: an unset field disables that sink, and a
+// notification failure never changes the run's exit path.
+type NotifyConfig struct {
+	// SlackWebhook is a Slack incoming-webhook URL. Supports "$ENV_VAR"
+	// expansion (e.g. "$JIRADOZER_SLACK_WEBHOOK"). Empty disables Slack
+	// notification.
+	SlackWebhook string `yaml:"slack_webhook"`
 }
 
 type skipPhaseSource string
@@ -165,6 +176,13 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("tracker.api_key: %w", err)
 		}
 		cfg.Tracker.APIKey = apiKey
+	}
+
+	// Expand the Slack webhook env var when present. Notification is opt-in and
+	// best-effort, so a "$VAR" that resolves to empty (unset) just disables the
+	// sink rather than failing the load.
+	if strings.HasPrefix(cfg.Notify.SlackWebhook, "$") {
+		cfg.Notify.SlackWebhook = os.Getenv(strings.TrimPrefix(cfg.Notify.SlackWebhook, "$"))
 	}
 
 	// Expand ~ in work_dir.

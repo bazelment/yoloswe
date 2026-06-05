@@ -54,6 +54,13 @@ func TestClassifyText(t *testing.T) {
 			wantOK:     true,
 		},
 		{
+			// Verbatim from jiradozer cron failures (2026-06-04/05 plan step).
+			name:       "socket connection closed unexpectedly",
+			msg:        "API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+			wantReason: ReasonConnectionReset,
+			wantOK:     true,
+		},
+		{
 			name:       "operation timed out",
 			msg:        "context deadline exceeded: operation timed out",
 			wantReason: ReasonTimeout,
