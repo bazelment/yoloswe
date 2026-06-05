@@ -20,3 +20,6 @@ validate:
 ship:
   prompt: "Ship it"
   comment_template: "## {{.Heading}} Complete\n\n{{.Output}}"
+
+notify:
+  slack_webhook: $JIRADOZER_TEST_WEBHOOK

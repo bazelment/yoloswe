@@ -41,6 +41,7 @@ func ClassifyText(msg string) (string, bool) {
 	case strings.Contains(s, "connection reset"),
 		strings.Contains(s, "broken pipe"),
 		strings.Contains(s, "unexpected eof"),
+		strings.Contains(s, "socket connection was closed"),
 		strings.Contains(s, "websocket"):
 		return ReasonConnectionReset, true
 	case strings.Contains(s, "i/o timeout"),

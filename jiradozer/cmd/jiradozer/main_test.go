@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,6 +383,34 @@ func TestRunCommandPostResultFlagReachesSingleStepPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, comments, 1)
 	assert.Equal(t, "## Plan Complete\n\ncli planned output", comments[0].Body)
+}
+
+// TestRunFromDescriptionWiresReportTarget pins that a --description run keeps
+// the created local issue reportable: runFromDescription must populate the
+// report issue ID / target so a failing description run posts a failure comment
+// on that issue instead of going Slack/log-only.
+func TestRunFromDescriptionWiresReportTarget(t *testing.T) {
+	workDir := t.TempDir()
+	cfgPath := writeRunConfig(t, "local", workDir)
+	cfg, err := loadRunConfig(runArgs{configPath: cfgPath, description: "x", workDir: workDir})
+	require.NoError(t, err)
+
+	lt, err := local.NewTracker(filepath.Join(workDir, ".jiradozer", "issues"))
+	require.NoError(t, err)
+
+	prev := runStepAgentDetailed
+	runStepAgentDetailed = func(_ context.Context, _ string, _ jiradozer.PromptData, _ jiradozer.StepConfig, _ string, _ string, _ string, _ *render.Renderer, _ *slog.Logger) (jiradozer.StepAgentResult, error) {
+		return jiradozer.StepAgentResult{}, errors.New("boom")
+	}
+	t.Cleanup(func() { runStepAgentDetailed = prev })
+
+	var reportIssueID, reportTarget string
+	err = runFromDescription(context.Background(), "build a widget", "plan", "", lt, false, cfg, nil, testMainLogger(t), &reportIssueID, &reportTarget)
+	require.Error(t, err)
+
+	// The created local issue must be wired for failure reporting.
+	assert.NotEmpty(t, reportIssueID, "report issue ID should be populated from the created local issue")
+	assert.Equal(t, "LOCAL-1", reportTarget, "report target should be the local issue identifier")
 }
 
 func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
@@ -889,5 +919,46 @@ func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
 			require.NoError(t, cmd.Execute())
 			assert.Contains(t, out.String(), "ok: custom.yaml")
 		})
+	}
+}
+
+// TestShouldReportFailure pins the run() failure-reporting guard: a real step
+// error must alert even when the context was cancelled (the fail-loudly goal),
+// while a bare cancellation/deadline is an expected stop and stays silent.
+func TestShouldReportFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{nil, "nil error", false},
+		{context.Canceled, "bare cancellation", false},
+		{context.DeadlineExceeded, "bare deadline", false},
+		{fmt.Errorf("run-step plan: %w", context.Canceled), "wrapped cancellation", false},
+		{errors.New("plan step: agent execution: API Error"), "real step error", true},
+		{errors.New("validate round 2/3: agent execution: boom"), "real error during cancellation", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldReportFailure(tc.err); got != tc.want {
+				t.Errorf("shouldReportFailure(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDescribeTarget(t *testing.T) {
+	t.Parallel()
+	// Newlines collapse to spaces; over-long input truncates rune-safely.
+	if got := describeTarget("  /sy:forge-prod-health dev\nsecond line  "); got != "/sy:forge-prod-health dev second line" {
+		t.Errorf("describeTarget = %q", got)
+	}
+	long := strings.Repeat("x", 200)
+	got := describeTarget(long)
+	if len([]rune(got)) != 83 { // 80 runes + "..."
+		t.Errorf("describeTarget truncated length = %d runes, want 83", len([]rune(got)))
 	}
 }

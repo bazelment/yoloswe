@@ -22,6 +22,9 @@ func TestIsTransient(t *testing.T) {
 		{name: "wrapped transient", err: fmt.Errorf("agent execution: %w", &codex.TransientError{Message: "429"}), want: true},
 		{name: "raw 429", err: errors.New("429 Too Many Requests"), want: true},
 		{name: "raw connection reset", err: errors.New("read tcp: connection reset by peer"), want: true},
+		// Verbatim from jiradozer cron plan-step failures (2026-06-04/05).
+		{name: "raw socket closed", err: errors.New("API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()"), want: true},
+		{name: "wrapped socket closed", err: fmt.Errorf("agent execution: %w", errors.New("API Error: The socket connection was closed unexpectedly")), want: true},
 		{name: "plain error", err: errors.New("syntax error"), want: false},
 	}
 
@@ -42,6 +45,7 @@ func TestClassifyTransientReason(t *testing.T) {
 	)
 	requireTransientReason(t, &claude.TransientError{Message: "stream idle"}, true, transientmeta.ReasonStreamIdle)
 	requireTransientReason(t, errors.New("503 Service Unavailable"), true, transientmeta.ReasonHTTP5xx)
+	requireTransientReason(t, errors.New("API Error: The socket connection was closed unexpectedly"), true, transientmeta.ReasonConnectionReset)
 	requireTransientReason(t, errors.New("syntax error"), false, transientmeta.ReasonUnknown)
 }
 

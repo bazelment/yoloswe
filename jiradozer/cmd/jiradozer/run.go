@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -102,12 +103,39 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().BoolVar(&args.forceCleanup, "force-cleanup", false, "Team mode only: delete worktrees even for failed or cancelled runs. By default, failed and cancelled worktrees are preserved so in-progress work (including pushed branches / open PRs) is not lost.")
 }
 
-func run(ctx context.Context, app *cliapp.App, args runArgs) error {
+func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 	logger := app.Logger
 	renderer := app.Renderer
 	if renderer != nil {
 		defer renderer.Reset()
 	}
+
+	// Failure reporting: fire once if the run returns an error. The sinks
+	// (tracker comment, external notifier) and target are populated below as
+	// config/tracker are resolved; until then they are nil/empty and reporting
+	// is a no-op. A bare cancellation (Ctrl-C / shutdown) is an expected stop,
+	// not a failure — but a *real* step error must still alert even if the
+	// context was cancelled during or right after it, so suppress only when the
+	// error IS the cancellation, not whenever the context happens to be done.
+	var (
+		reportTracker  jiradozer.CommentPoster
+		reportNotifier jiradozer.Notifier
+		reportIssueID  string
+		reportTarget   string
+	)
+	defer func() {
+		if !shouldReportFailure(runErr) {
+			return
+		}
+		jiradozer.ReportFailure(ctx, logger, reportTracker, reportIssueID, reportNotifier, jiradozer.FailureReport{
+			Tool:          "jiradozer",
+			Target:        reportTarget,
+			Step:          jiradozer.FailingStepFromError(runErr),
+			Err:           runErr,
+			BuildRevision: app.Build.ShortRevision(),
+			LogPath:       app.LogPath,
+		})
+	}()
 
 	// Resolve --description-file into --description.
 	if args.descriptionFile != "" {
@@ -159,20 +187,39 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 		"base_branch", cfg.BaseBranch,
 		"poll_interval", cfg.PollInterval,
 	)
+	if cfg.Notify.SlackWebhook != "" {
+		reportNotifier = jiradozer.SlackWebhookNotifier{WebhookURL: cfg.Notify.SlackWebhook}
+	}
+
+	// Seed the failure target from the issue identifier the CLI already knows,
+	// so a failure in tracker creation or the issue fetch below still produces a
+	// named alert rather than an anonymous one. Overwritten with the resolved
+	// issue.Identifier once the fetch succeeds.
+	if args.issueID != "" {
+		reportTarget = args.issueID
+	}
 
 	// Create tracker client.
 	issueTracker, err := createTracker(cfg, args.issueID)
 	if err != nil {
 		return err
 	}
+	reportTracker = issueTracker
 
-	// Local description mode.
+	// Local description mode. runFromDescription creates a local tracker issue;
+	// keep the tracker wired and let it report the created issue ID/target so a
+	// failure still posts a comment on that local issue (not Slack/log only).
 	if args.description != "" {
-		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, args.postResult, cfg, renderer, logger)
+		reportTarget = describeTarget(args.description)
+		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, args.postResult, cfg, renderer, logger, &reportIssueID, &reportTarget)
 	}
 
 	// Multi-issue team mode (only when no --issue flag was given).
 	if cfg.Source.HasSource() && args.issueID == "" {
+		// Per-issue failures are isolated and reported by the orchestrator; a
+		// top-level error here is a batch-level failure.
+		reportTracker = nil
+		reportTarget = "batch run"
 		return runMultiIssue(ctx, app, issueTracker, cfg, args)
 	}
 
@@ -183,6 +230,8 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 		return fmt.Errorf("fetch issue: %w", err)
 	}
 	logger.Info("found issue", "id", issue.ID, "title", issue.Title, "state", issue.State)
+	reportIssueID = issue.ID
+	reportTarget = issue.Identifier
 
 	if args.runStep != "" {
 		return runSingleStep(ctx, args.runStep, issue, cfg, args.planContent, issueTracker, args.postResult, renderer, logger)
@@ -192,6 +241,23 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) error {
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	wf.SetRenderer(renderer)
 	return wf.Run(ctx)
+}
+
+// shouldReportFailure decides whether a run error warrants a failure alert. A
+// nil error or a bare context cancellation (Ctrl-C / shutdown / deadline) is an
+// expected stop, not a failure. A real step error reports even if the context
+// was also cancelled during or right after it — fail loudly is the whole point.
+func shouldReportFailure(runErr error) bool {
+	if runErr == nil {
+		return false
+	}
+	return !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded)
+}
+
+// describeTarget makes a compact, single-line label from a free-form task
+// description for use in failure reports.
+func describeTarget(description string) string {
+	return jiradozer.Truncate(strings.TrimSpace(strings.ReplaceAll(description, "\n", " ")), 80)
 }
 
 func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
@@ -474,7 +540,12 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	}
 }
 
-func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, postResult bool, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger) error {
+// runFromDescription drives a one-off task described inline (no external
+// tracker). It creates a local tracker issue, then runs the requested step or
+// full workflow against it. reportIssueID/reportTarget, when non-nil, are
+// populated with the created local issue's ID/identifier so a failing run still
+// posts a failure comment on that issue.
+func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, postResult bool, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger, reportIssueID, reportTarget *string) error {
 	lt, ok := issueTracker.(*local.Tracker)
 	if !ok {
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
@@ -488,6 +559,12 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 		return fmt.Errorf("create local issue: %w", err)
 	}
 	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
+	if reportIssueID != nil {
+		*reportIssueID = issue.ID
+	}
+	if reportTarget != nil {
+		*reportTarget = issue.Identifier
+	}
 
 	if runStep != "" {
 		return runSingleStep(ctx, runStep, issue, cfg, planContent, issueTracker, postResult, renderer, logger)
@@ -659,7 +736,10 @@ func readFileOrStdin(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-var allSteps = []string{"plan", "build", "create_pr", "validate", "ship"}
+// allSteps is the canonical step-name list, sourced from the jiradozer package
+// so it can't drift from StepByName. Read-only (never mutated); StepNames()
+// returns a fresh slice, so this snapshot is safe to share.
+var allSteps = jiradozer.StepNames()
 
 func parseAutoApprove(value string) []string {
 	if strings.TrimSpace(value) == "all" {

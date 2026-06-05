@@ -53,12 +53,16 @@ type Options struct { //nolint:govet // fieldalignment: readability over packing
 // App is the runtime handle passed to the user's run function. All fields
 // are non-zero except LogPath (empty if the log file couldn't be opened, in
 // which case slog has been initialized to write to stderr).
-type App struct {
+type App struct { //nolint:govet // fieldalignment: readability over packing
 	Logger    *slog.Logger
 	Renderer  *render.Renderer
 	LogPath   string
 	Verbosity render.Verbosity
 	Color     render.ColorMode
+	// Build is the VCS provenance of the running binary, logged at startup
+	// and available to the run function (e.g. to stamp failure notifications
+	// with the commit that produced this build).
+	Build BuildInfo
 }
 
 // RunFunc is the user's entry point. The returned error determines the exit
@@ -144,12 +148,16 @@ func Run(opts *Options, fn RunFunc) int {
 	}
 
 	cwd, _ := os.Getwd()
+	build := ReadBuildInfo()
 	sensitive := append(append([]string(nil), DefaultSensitiveFlags...), opts.SensitiveFlags...)
 	logger.Info(opts.ToolName+" starting",
 		"args", RedactArgs(os.Args[1:], sensitive),
 		"cwd", cwd,
 		"pid", os.Getpid(),
+		"build_revision", build.ShortRevision(),
+		"build_time", buildTimeString(build.Time),
 	)
+	warnIfStaleBuild(logger, opts.ToolName, build)
 
 	ctx, cancel := notifyContext(context.Background(), func() {
 		fmt.Fprintln(os.Stderr, "Received second signal, forcing exit")
@@ -165,6 +173,7 @@ func Run(opts *Options, fn RunFunc) int {
 		LogPath:   logPath,
 		Verbosity: v,
 		Color:     colorMode,
+		Build:     build,
 	}
 
 	runErr := fn(ctx, app)

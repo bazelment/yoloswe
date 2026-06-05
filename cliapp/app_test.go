@@ -97,6 +97,11 @@ func TestRun_LogFileContainsBanner(t *testing.T) {
 	if !strings.Contains(got, "***") {
 		t.Errorf("log should contain redacted ***; got:\n%s", got)
 	}
+	// Build provenance is stamped into the startup banner so cron logs
+	// self-identify which build ran.
+	if !strings.Contains(got, "build_revision") {
+		t.Errorf("log banner missing build_revision; got:\n%s", got)
+	}
 	if strings.Contains(got, "secret-value") {
 		t.Errorf("log leaked sensitive value secret-value; got:\n%s", got)
 	}
