@@ -191,6 +191,14 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 		reportNotifier = jiradozer.SlackWebhookNotifier{WebhookURL: cfg.Notify.SlackWebhook}
 	}
 
+	// Seed the failure target from the issue identifier the CLI already knows,
+	// so a failure in tracker creation or the issue fetch below still produces a
+	// named alert rather than an anonymous one. Overwritten with the resolved
+	// issue.Identifier once the fetch succeeds.
+	if args.issueID != "" {
+		reportTarget = args.issueID
+	}
+
 	// Create tracker client.
 	issueTracker, err := createTracker(cfg, args.issueID)
 	if err != nil {
