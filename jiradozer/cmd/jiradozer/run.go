@@ -198,13 +198,12 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 	}
 	reportTracker = issueTracker
 
-	// Local description mode.
+	// Local description mode. runFromDescription creates a local tracker issue;
+	// keep the tracker wired and let it report the created issue ID/target so a
+	// failure still posts a comment on that local issue (not Slack/log only).
 	if args.description != "" {
-		// No tracker issue to comment on in description mode; external
-		// notification still fires. Target is a short description prefix.
-		reportTracker = nil
 		reportTarget = describeTarget(args.description)
-		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, args.postResult, cfg, renderer, logger)
+		return runFromDescription(ctx, args.description, args.runStep, args.planContent, issueTracker, args.postResult, cfg, renderer, logger, &reportIssueID, &reportTarget)
 	}
 
 	// Multi-issue team mode (only when no --issue flag was given).
@@ -533,7 +532,12 @@ func createTracker(cfg *jiradozer.Config, issueID string) (tracker.IssueTracker,
 	}
 }
 
-func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, postResult bool, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger) error {
+// runFromDescription drives a one-off task described inline (no external
+// tracker). It creates a local tracker issue, then runs the requested step or
+// full workflow against it. reportIssueID/reportTarget, when non-nil, are
+// populated with the created local issue's ID/identifier so a failing run still
+// posts a failure comment on that issue.
+func runFromDescription(ctx context.Context, description, runStep, planContent string, issueTracker tracker.IssueTracker, postResult bool, cfg *jiradozer.Config, renderer *render.Renderer, logger *slog.Logger, reportIssueID, reportTarget *string) error {
 	lt, ok := issueTracker.(*local.Tracker)
 	if !ok {
 		return fmt.Errorf("--description requires local tracker (got %T)", issueTracker)
@@ -547,6 +551,12 @@ func runFromDescription(ctx context.Context, description, runStep, planContent s
 		return fmt.Errorf("create local issue: %w", err)
 	}
 	logger.Info("created local issue", "identifier", issue.Identifier, "title", issue.Title)
+	if reportIssueID != nil {
+		*reportIssueID = issue.ID
+	}
+	if reportTarget != nil {
+		*reportTarget = issue.Identifier
+	}
 
 	if runStep != "" {
 		return runSingleStep(ctx, runStep, issue, cfg, planContent, issueTracker, postResult, renderer, logger)

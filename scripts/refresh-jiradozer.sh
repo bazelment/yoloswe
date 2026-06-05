@@ -83,8 +83,20 @@ ln -s "${BUILT}" "${TMP_LINK}"
 mv -T "${TMP_LINK}" "${LINK}"
 
 echo ">> ${LINK} -> ${BUILT}"
+
+# Verify provenance for real: invoke the binary so cliapp.Run emits its startup
+# banner (build_revision / build_time) to a fresh log, then surface that line.
+# `validate-config` exits non-zero without a config, but it still runs far
+# enough to write the banner — which is all we need, so its exit status is
+# ignored deliberately.
 echo ">> verifying build provenance:"
-# The startup banner logs build_revision / build_time; surface it once here so
-# a manual refresh confirms the new binary self-reports the expected commit.
-"${LINK}" --help >/dev/null 2>&1 || true
+PROV_HOME="$(mktemp -d)"
+HOME="${PROV_HOME}" "${LINK}" validate-config >/dev/null 2>&1 || true
+PROV_LOG="$(find "${PROV_HOME}/.jiradozer/logs/" -name '*.log' -type f 2>/dev/null | head -1 || true)"
+if [[ -n "${PROV_LOG}" ]] && grep -q "build_revision" "${PROV_LOG}"; then
+  grep -o 'build_revision=[^ ]* build_time=[^ ]*' "${PROV_LOG}" | head -1 | sed 's/^/   /'
+else
+  echo "   warning: could not read build provenance banner from a fresh run" >&2
+fi
+rm -rf "${PROV_HOME}"
 echo ">> done. jiradozer refreshed to ${HEAD_COMMIT}."
