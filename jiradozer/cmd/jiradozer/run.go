@@ -236,12 +236,7 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 // describeTarget makes a compact, single-line label from a free-form task
 // description for use in failure reports.
 func describeTarget(description string) string {
-	d := strings.TrimSpace(strings.ReplaceAll(description, "\n", " "))
-	const max = 80
-	if len(d) > max {
-		d = d[:max] + "…"
-	}
-	return d
+	return jiradozer.Truncate(strings.TrimSpace(strings.ReplaceAll(description, "\n", " ")), 80)
 }
 
 func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
@@ -709,7 +704,9 @@ func readFileOrStdin(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-var allSteps = []string{"plan", "build", "create_pr", "validate", "ship"}
+// allSteps is the canonical step-name list, sourced from the jiradozer package
+// so it can't drift from StepByName. Callers only read it (never mutate).
+var allSteps = jiradozer.StepNames
 
 func parseAutoApprove(value string) []string {
 	if strings.TrimSpace(value) == "all" {

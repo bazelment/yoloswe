@@ -486,6 +486,13 @@ var (
 	}
 )
 
+// StepNames is the canonical ordered set of workflow step names, matching the
+// plan → build → create_pr → validate → ship sequence and the names
+// StepByName accepts. It is the single source of truth for step-name lists;
+// callers that need to iterate, validate, or join step names should use it
+// rather than re-spelling the literal.
+var StepNames = []string{"plan", "build", "create_pr", "validate", "ship"}
+
 // StepByName returns the StepConfig for a named step.
 func (c *Config) StepByName(name string) (StepConfig, bool) {
 	switch name {

@@ -429,7 +429,7 @@ func (w *Workflow) runStepRounds(ctx context.Context, stepName string, stepCfg S
 	// cycle will re-run commands identically.
 	if feedback != "" && !feedbackInjected {
 		w.logger.Warn("feedback not injected: all rounds are command rounds; redo will re-run commands unchanged",
-			"step", stepName, "feedback", truncate(feedback, 200))
+			"step", stepName, "feedback", Truncate(feedback, 200))
 	}
 
 	stepDuration := time.Since(stepStart)

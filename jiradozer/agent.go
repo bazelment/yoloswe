@@ -31,7 +31,9 @@ type PromptData struct {
 	BuildOutput string // build output from the build step
 }
 
-func truncate(s string, maxLen int) string {
+// Truncate shortens s to at most maxLen runes (rune-safe, never splits a
+// multibyte character), appending "..." when truncation occurs.
+func Truncate(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) > maxLen {
 		return string(runes[:maxLen]) + "..."
@@ -84,7 +86,7 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 		return "", fmt.Errorf("render %s command: %w", stepName, err)
 	}
 
-	logger.Info("running command", "step", stepName, "command", truncate(rendered, 200), "work_dir", workDir)
+	logger.Info("running command", "step", stepName, "command", Truncate(rendered, 200), "work_dir", workDir)
 
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", "-c", rendered)
@@ -96,7 +98,7 @@ func RunCommand(ctx context.Context, stepName string, data PromptData, commandTm
 		return output, fmt.Errorf("command failed: %w", err)
 	}
 
-	logger.Info("command completed", "step", stepName, "duration", time.Since(start), "output", truncate(output, 200))
+	logger.Info("command completed", "step", stepName, "duration", time.Since(start), "output", Truncate(output, 200))
 	return output, nil
 }
 
@@ -195,7 +197,7 @@ func (h *logEventHandler) OnSessionInit(sessionID string) {
 // flushText logs accumulated text and resets the buffer.
 func (h *logEventHandler) flushText() {
 	if h.textBuf.Len() > 0 {
-		h.logger.Debug("agent text", "step", h.step, "text", truncate(h.textBuf.String(), 200))
+		h.logger.Debug("agent text", "step", h.step, "text", Truncate(h.textBuf.String(), 200))
 		h.textBuf.Reset()
 	}
 }
@@ -209,7 +211,7 @@ func (h *logEventHandler) OnText(text string) {
 
 func (h *logEventHandler) OnThinking(thinking string) {
 	h.flushText()
-	h.logger.Debug("agent thinking", "step", h.step, "thinking", truncate(thinking, 200))
+	h.logger.Debug("agent thinking", "step", h.step, "thinking", Truncate(thinking, 200))
 }
 
 func (h *logEventHandler) OnToolStart(name, id string, input map[string]interface{}) {
@@ -427,7 +429,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		logAttrs = append(logAttrs, "resume_session_id", resumeSessionID)
 	}
 	logger.Info("running agent", logAttrs...)
-	logger.Debug("agent prompt", "step", stepName, "prompt", truncate(prompt, 500))
+	logger.Debug("agent prompt", "step", stepName, "prompt", Truncate(prompt, 500))
 
 	logHandler := newLogEventHandler(logger, stepName, provider.Name())
 	var handler agent.EventHandler = logHandler
@@ -548,7 +550,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	completedAttrs = append(completedAttrs, usageLogAttr(providerReportsCost(provider.Name()), "cost_usd", result.Usage.CostUSD)...)
 	logger.Info("agent completed", completedAttrs...)
 	if result.Text != "" {
-		logger.Debug("agent response", "step", stepName, "response", truncate(result.Text, 100))
+		logger.Debug("agent response", "step", stepName, "response", Truncate(result.Text, 100))
 	}
 
 	logHandler.flushText()

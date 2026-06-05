@@ -43,7 +43,7 @@ func FailingStepFromError(err error) string {
 	}
 	msg := err.Error()
 	// Try the explicit "<step> step:" / "<step> round N/M:" / "run-step <step>:" shapes.
-	for _, step := range allWorkflowSteps {
+	for _, step := range StepNames {
 		switch {
 		case strings.HasPrefix(msg, "run-step "+step+":"),
 			strings.HasPrefix(msg, step+" step:"),
@@ -53,9 +53,6 @@ func FailingStepFromError(err error) string {
 	}
 	return ""
 }
-
-// allWorkflowSteps is the ordered set of step names a run can fail in.
-var allWorkflowSteps = []string{"plan", "build", "create_pr", "validate", "ship"}
 
 // renderFailureText builds the one-paragraph message shared by the tracker
 // comment and the external notification.
