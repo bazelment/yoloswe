@@ -317,11 +317,8 @@ Rough commands:
 		}
 
 		for _, w := range worktrees {
-			status, _ := m.GetStatus(ctx, w)
-			statusStr := output.Colorize(wt.ColorGreen, "clean")
-			if status.IsDirty {
-				statusStr = output.Colorize(wt.ColorYellow, "dirty")
-			}
+			status, err := m.GetStatus(ctx, w)
+			statusStr := renderStatusColumn(output, status, err)
 
 			// Check if this is the current worktree
 			isCurrent := cwd == w.Path || strings.HasPrefix(cwd, w.Path+string(os.PathSeparator))
@@ -495,30 +492,25 @@ func displayStatus(ctx context.Context, allRepos bool) error {
 		fmt.Println(strings.Repeat("-", 91))
 
 		for _, w := range worktrees {
-			status, _ := m.GetStatus(ctx, w)
+			status, err := m.GetStatus(ctx, w)
+
+			// A single unreadable worktree (git status failure, stale/deleted
+			// directory, cancelled context) must not crash the listing or be
+			// rendered as healthy. Surface it as "unknown" across every column.
+			if err != nil || status == nil {
+				syncStr := output.Colorize(wt.ColorYellow, "unknown")
+				statusStr := output.Colorize(wt.ColorYellow, "unknown")
+				branchStr := output.Colorize(wt.ColorCyan, truncate(w.Branch, 40))
+				fmt.Printf("%s %s %s %s %s\n",
+					wt.Pad(branchStr, 41), wt.Pad(syncStr, 12), wt.Pad(statusStr, 8), wt.Pad("-", 12), "-")
+				continue
+			}
 
 			// Sync status
-			var syncStr string
-			if w.IsDetached {
-				syncStr = output.Colorize(wt.ColorDim, "detached")
-			} else if status.Ahead == 0 && status.Behind == 0 {
-				syncStr = output.Colorize(wt.ColorGreen, "up to date")
-			} else {
-				var parts []string
-				if status.Ahead > 0 {
-					parts = append(parts, output.Colorize(wt.ColorGreen, fmt.Sprintf("↑%d", status.Ahead)))
-				}
-				if status.Behind > 0 {
-					parts = append(parts, output.Colorize(wt.ColorRed, fmt.Sprintf("↓%d", status.Behind)))
-				}
-				syncStr = strings.Join(parts, " ")
-			}
+			syncStr := renderSyncColumn(output, status, w)
 
 			// Status
-			statusStr := output.Colorize(wt.ColorGreen, "clean")
-			if status.IsDirty {
-				statusStr = output.Colorize(wt.ColorYellow, "dirty")
-			}
+			statusStr := renderStatusColumn(output, status, nil)
 
 			// Last commit time
 			var timeStr string
@@ -970,6 +962,41 @@ init, new, open, and cd commands.`,
 			fmt.Print(bashScript)
 		}
 	},
+}
+
+// renderStatusColumn returns the colorized "Status" cell for a worktree row.
+// A non-nil statusErr or a nil status means GetStatus failed for this worktree
+// (e.g. a stale/deleted directory or a git error); rather than dereferencing a
+// nil *WorktreeStatus and crashing the whole listing, the cell degrades to
+// "unknown" so the failure is surfaced instead of read as healthy.
+func renderStatusColumn(output *wt.Output, status *wt.WorktreeStatus, statusErr error) string {
+	if statusErr != nil || status == nil {
+		return output.Colorize(wt.ColorYellow, "unknown")
+	}
+	if status.IsDirty {
+		return output.Colorize(wt.ColorYellow, "dirty")
+	}
+	return output.Colorize(wt.ColorGreen, "clean")
+}
+
+// renderSyncColumn returns the colorized "Sync" cell for a worktree row.
+// Callers must pass a non-nil status; the "unknown" degraded path for a failed
+// GetStatus is handled before this is reached (see displayStatus).
+func renderSyncColumn(output *wt.Output, status *wt.WorktreeStatus, w wt.Worktree) string {
+	if w.IsDetached {
+		return output.Colorize(wt.ColorDim, "detached")
+	}
+	if status.Ahead == 0 && status.Behind == 0 {
+		return output.Colorize(wt.ColorGreen, "up to date")
+	}
+	var parts []string
+	if status.Ahead > 0 {
+		parts = append(parts, output.Colorize(wt.ColorGreen, fmt.Sprintf("↑%d", status.Ahead)))
+	}
+	if status.Behind > 0 {
+		parts = append(parts, output.Colorize(wt.ColorRed, fmt.Sprintf("↓%d", status.Behind)))
+	}
+	return strings.Join(parts, " ")
 }
 
 func truncate(s string, n int) string {

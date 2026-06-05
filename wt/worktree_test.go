@@ -472,6 +472,39 @@ func TestGetAllGitStatusesKeysDetachedWorktreesByPath(t *testing.T) {
 	}
 }
 
+// TestGetStatusReturnsNilOnGitError locks in the contract that GetStatus and
+// GetGitStatus return (nil, err) when the underlying `git status` fails. The
+// `wt ls` / `wt status` render loops in cmd/wt previously swallowed this error
+// and dereferenced the nil *WorktreeStatus, panicking with a nil pointer
+// dereference (SIGSEGV) whenever a single worktree's git status failed (e.g. a
+// stale or deleted worktree directory). Callers must treat a non-nil error as
+// "no status" rather than assuming a usable struct.
+func TestGetStatusReturnsNilOnGitError(t *testing.T) {
+	t.Parallel()
+
+	runner := NewMockGitRunner()
+	runner.Errors["status --porcelain=v2 --branch"] = errors.New("fatal: not a git repository")
+	m := NewManager(t.TempDir(), "test-repo", WithGitRunner(runner))
+
+	w := Worktree{Path: "/tmp/wt-gone", Branch: "feature"}
+
+	gitStatus, err := m.GetGitStatus(context.Background(), w)
+	if err == nil {
+		t.Fatal("GetGitStatus: expected error when git status fails, got nil")
+	}
+	if gitStatus != nil {
+		t.Fatalf("GetGitStatus: expected nil status on error, got %+v", gitStatus)
+	}
+
+	status, err := m.GetStatus(context.Background(), w)
+	if err == nil {
+		t.Fatal("GetStatus: expected error when git status fails, got nil")
+	}
+	if status != nil {
+		t.Fatalf("GetStatus: expected nil status on error, got %+v", status)
+	}
+}
+
 // MockGitRunner implements GitRunner for testing Manager.
 type MockGitRunner struct {
 	Results map[string]*CmdResult
