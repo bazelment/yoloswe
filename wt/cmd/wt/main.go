@@ -317,9 +317,13 @@ Rough commands:
 		}
 
 		for _, w := range worktrees {
-			status, _ := m.GetStatus(ctx, w)
+			status, err := m.GetStatus(ctx, w)
 			statusStr := output.Colorize(wt.ColorGreen, "clean")
-			if status.IsDirty {
+			switch {
+			case err != nil || status == nil:
+				// Don't let one unreadable worktree crash the whole listing.
+				statusStr = output.Colorize(wt.ColorYellow, "unknown")
+			case status.IsDirty:
 				statusStr = output.Colorize(wt.ColorYellow, "dirty")
 			}
 
@@ -495,7 +499,12 @@ func displayStatus(ctx context.Context, allRepos bool) error {
 		fmt.Println(strings.Repeat("-", 91))
 
 		for _, w := range worktrees {
-			status, _ := m.GetStatus(ctx, w)
+			status, err := m.GetStatus(ctx, w)
+			if err != nil || status == nil {
+				// One unreadable worktree shouldn't crash the whole listing;
+				// render the row with zero-value defaults.
+				status = &wt.WorktreeStatus{Worktree: w}
+			}
 
 			// Sync status
 			var syncStr string
