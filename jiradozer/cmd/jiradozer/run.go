@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -112,8 +113,10 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 	// Failure reporting: fire once if the run returns an error. The sinks
 	// (tracker comment, external notifier) and target are populated below as
 	// config/tracker are resolved; until then they are nil/empty and reporting
-	// is a no-op. A context cancellation (Ctrl-C / shutdown) is an expected
-	// stop, not a failure, so it is not reported.
+	// is a no-op. A bare cancellation (Ctrl-C / shutdown) is an expected stop,
+	// not a failure — but a *real* step error must still alert even if the
+	// context was cancelled during or right after it, so suppress only when the
+	// error IS the cancellation, not whenever the context happens to be done.
 	var (
 		reportTracker  jiradozer.CommentPoster
 		reportNotifier jiradozer.Notifier
@@ -121,7 +124,7 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 		reportTarget   string
 	)
 	defer func() {
-		if runErr == nil || ctx.Err() != nil {
+		if !shouldReportFailure(runErr) {
 			return
 		}
 		jiradozer.ReportFailure(ctx, logger, reportTracker, reportIssueID, reportNotifier, jiradozer.FailureReport{
@@ -231,6 +234,17 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 	wf := jiradozer.NewWorkflow(issueTracker, issue, cfg, logger)
 	wf.SetRenderer(renderer)
 	return wf.Run(ctx)
+}
+
+// shouldReportFailure decides whether a run error warrants a failure alert. A
+// nil error or a bare context cancellation (Ctrl-C / shutdown / deadline) is an
+// expected stop, not a failure. A real step error reports even if the context
+// was also cancelled during or right after it — fail loudly is the whole point.
+func shouldReportFailure(runErr error) bool {
+	if runErr == nil {
+		return false
+	}
+	return !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded)
 }
 
 // describeTarget makes a compact, single-line label from a free-form task
@@ -705,8 +719,9 @@ func readFileOrStdin(path string) ([]byte, error) {
 }
 
 // allSteps is the canonical step-name list, sourced from the jiradozer package
-// so it can't drift from StepByName. Callers only read it (never mutate).
-var allSteps = jiradozer.StepNames
+// so it can't drift from StepByName. Read-only (never mutated); StepNames()
+// returns a fresh slice, so this snapshot is safe to share.
+var allSteps = jiradozer.StepNames()
 
 func parseAutoApprove(value string) []string {
 	if strings.TrimSpace(value) == "all" {

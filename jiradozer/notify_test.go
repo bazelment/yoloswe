@@ -23,6 +23,7 @@ func TestFailingStepFromError(t *testing.T) {
 		want string
 	}{
 		{"run-step plan", errors.New("run-step plan: agent execution: API Error: socket closed"), "plan"},
+		{"run-step multi-round", errors.New("run-step validate round 2/3: agent execution: stream idle"), "validate"},
 		{"plan step", errors.New("plan step: agent execution: Internal server error"), "plan"},
 		{"validate round", errors.New("validate round 2/3: agent execution: stream idle"), "validate"},
 		{"build step", errors.New("build step: agent execution: turn error"), "build"},

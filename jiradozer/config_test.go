@@ -62,9 +62,23 @@ func TestLoadConfig_ValidMinimal(t *testing.T) {
 
 func TestLoadConfig_EnvVarExpansion(t *testing.T) {
 	t.Setenv("JIRADOZER_TEST_API_KEY", "expanded-secret-key")
+	t.Setenv("JIRADOZER_TEST_WEBHOOK", "https://hooks.example/abc")
 	cfg, err := LoadConfig("testdata/env_var_api_key.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, "expanded-secret-key", cfg.Tracker.APIKey)
+	assert.Equal(t, "https://hooks.example/abc", cfg.Notify.SlackWebhook)
+}
+
+// Unlike the tracker API key, an unset Slack webhook env var must NOT fail the
+// load — notification is opt-in, so a "$VAR" that resolves to empty just
+// disables the sink.
+func TestLoadConfig_WebhookEnvUnsetDisablesSink(t *testing.T) {
+	t.Setenv("JIRADOZER_TEST_API_KEY", "expanded-secret-key")
+	t.Setenv("JIRADOZER_TEST_WEBHOOK", "")
+	os.Unsetenv("JIRADOZER_TEST_WEBHOOK")
+	cfg, err := LoadConfig("testdata/env_var_api_key.yaml")
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Notify.SlackWebhook)
 }
 
 func TestLoadConfig_EnvVarNotSet(t *testing.T) {
@@ -277,7 +291,7 @@ func TestStepByName(t *testing.T) {
 	cfg, err := LoadConfig("testdata/valid_complete.yaml")
 	require.NoError(t, err)
 
-	for _, name := range StepNames {
+	for _, name := range StepNames() {
 		step, ok := cfg.StepByName(name)
 		assert.True(t, ok, "step %s should exist", name)
 		assert.NotZero(t, step)

@@ -274,7 +274,7 @@ func (o *Orchestrator) idleTimeoutForStep(stepName string) time.Duration {
 // the next configured step in workflow order so this still works for
 // configs that disable plan or use an alternative pipeline shape.
 func (o *Orchestrator) startupIdleTimeout() time.Duration {
-	for _, name := range StepNames {
+	for _, name := range StepNames() {
 		if step, ok := o.config.StepByName(name); ok && step.IdleTimeout > 0 {
 			return step.IdleTimeout
 		}

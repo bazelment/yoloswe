@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -889,5 +891,46 @@ func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
 			require.NoError(t, cmd.Execute())
 			assert.Contains(t, out.String(), "ok: custom.yaml")
 		})
+	}
+}
+
+// TestShouldReportFailure pins the run() failure-reporting guard: a real step
+// error must alert even when the context was cancelled (the fail-loudly goal),
+// while a bare cancellation/deadline is an expected stop and stays silent.
+func TestShouldReportFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{nil, "nil error", false},
+		{context.Canceled, "bare cancellation", false},
+		{context.DeadlineExceeded, "bare deadline", false},
+		{fmt.Errorf("run-step plan: %w", context.Canceled), "wrapped cancellation", false},
+		{errors.New("plan step: agent execution: API Error"), "real step error", true},
+		{errors.New("validate round 2/3: agent execution: boom"), "real error during cancellation", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldReportFailure(tc.err); got != tc.want {
+				t.Errorf("shouldReportFailure(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDescribeTarget(t *testing.T) {
+	t.Parallel()
+	// Newlines collapse to spaces; over-long input truncates rune-safely.
+	if got := describeTarget("  /sy:forge-prod-health dev\nsecond line  "); got != "/sy:forge-prod-health dev second line" {
+		t.Errorf("describeTarget = %q", got)
+	}
+	long := strings.Repeat("x", 200)
+	got := describeTarget(long)
+	if len([]rune(got)) != 83 { // 80 runes + "..."
+		t.Errorf("describeTarget truncated length = %d runes, want 83", len([]rune(got)))
 	}
 }

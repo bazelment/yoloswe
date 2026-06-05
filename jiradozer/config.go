@@ -265,14 +265,7 @@ func (c *Config) validate() error {
 			c.skipPhaseSource = skipPhaseSourceConfig
 		}
 	}
-	namedSteps := []struct {
-		step *StepConfig
-		name string
-	}{
-		{&c.Plan, "plan"}, {&c.Build, "build"}, {&c.CreatePR, "create_pr"},
-		{&c.Validate, "validate"}, {&c.Ship, "ship"},
-	}
-	for _, ns := range namedSteps {
+	for _, ns := range c.orderedSteps() {
 		if err := validateStep(ns.name, ns.step); err != nil {
 			return err
 		}
@@ -486,29 +479,48 @@ var (
 	}
 )
 
-// StepNames is the canonical ordered set of workflow step names, matching the
-// plan → build → create_pr → validate → ship sequence and the names
-// StepByName accepts. It is the single source of truth for step-name lists;
-// callers that need to iterate, validate, or join step names should use it
-// rather than re-spelling the literal.
-var StepNames = []string{"plan", "build", "create_pr", "validate", "ship"}
+// namedStep pairs a step name with a pointer to its StepConfig on a Config.
+type namedStep struct {
+	step *StepConfig
+	name string
+}
+
+// orderedSteps is the single source of truth for the workflow step set: the
+// plan → build → create_pr → validate → ship sequence, each name paired with a
+// pointer to its field on c. Every other step-name list (StepNames, StepByName,
+// validate's iteration) derives from this so a new step can't be added in one
+// place and forgotten in another.
+func (c *Config) orderedSteps() []namedStep {
+	return []namedStep{
+		{&c.Plan, "plan"},
+		{&c.Build, "build"},
+		{&c.CreatePR, "create_pr"},
+		{&c.Validate, "validate"},
+		{&c.Ship, "ship"},
+	}
+}
+
+// StepNames returns the canonical ordered workflow step names (plan → build →
+// create_pr → validate → ship), the names StepByName accepts. It returns a
+// fresh slice each call, so callers can iterate, join, or filter without
+// risking mutation of shared state.
+func StepNames() []string {
+	steps := (&Config{}).orderedSteps()
+	names := make([]string, len(steps))
+	for i, s := range steps {
+		names[i] = s.name
+	}
+	return names
+}
 
 // StepByName returns the StepConfig for a named step.
 func (c *Config) StepByName(name string) (StepConfig, bool) {
-	switch name {
-	case "plan":
-		return c.Plan, true
-	case "build":
-		return c.Build, true
-	case "create_pr":
-		return c.CreatePR, true
-	case "validate":
-		return c.Validate, true
-	case "ship":
-		return c.Ship, true
-	default:
-		return StepConfig{}, false
+	for _, s := range c.orderedSteps() {
+		if s.name == name {
+			return *s.step, true
+		}
 	}
+	return StepConfig{}, false
 }
 
 // ResolveStep fills zero-value fields in a StepConfig from top-level defaults.

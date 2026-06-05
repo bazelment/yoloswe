@@ -42,10 +42,15 @@ func FailingStepFromError(err error) string {
 		return ""
 	}
 	msg := err.Error()
-	// Try the explicit "<step> step:" / "<step> round N/M:" / "run-step <step>:" shapes.
-	for _, step := range StepNames {
+	// Recognized wrappers, all the shapes run.go/workflow.go produce:
+	//   "<step> step:"          (single-step run)
+	//   "<step> round N/M:"     (multi-round step)
+	//   "run-step <step>:"      (--run-step single)
+	//   "run-step <step> round N/M:" (--run-step multi-round)
+	for _, step := range StepNames() {
 		switch {
 		case strings.HasPrefix(msg, "run-step "+step+":"),
+			strings.HasPrefix(msg, "run-step "+step+" round "),
 			strings.HasPrefix(msg, step+" step:"),
 			strings.HasPrefix(msg, step+" round "):
 			return step
