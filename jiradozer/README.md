@@ -52,7 +52,7 @@ tracker:
   api_key: $LINEAR_API_KEY    # environment variable reference
 
 agent:
-  model: sonnet               # or opus, haiku, gpt-5.3-codex, gemini-3.1-pro-preview, cursor-default
+  model: sonnet               # or fable, opus, haiku, gpt-5.5, gemini-3.1-pro-preview, cursor-default
 
 work_dir: .
 base_branch: main
@@ -210,8 +210,8 @@ Jiradozer uses the `multiagent/agent.Provider` interface, so any agent backend t
 
 | Provider | Model IDs |
 |----------|-----------|
-| Claude | `opus`, `sonnet`, `haiku` |
-| Codex | `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.1-codex-max` |
+| Claude | `fable`, `opus`, `sonnet`, `haiku`, `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| Codex | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` |
 | Gemini | `gemini-3.1-pro-preview`, `gemini-3-pro-preview`, `gemini-2.5-pro`, ... |
 | Cursor | `cursor-default` |
 
@@ -305,7 +305,7 @@ jiradozer --issue ENG-123 --run-step plan --post-result
 jiradozer --issue ENG-123 --model opus
 
 # Use Codex instead of Claude
-jiradozer --issue ENG-123 --model gpt-5.3-codex
+jiradozer --issue ENG-123 --model gpt-5.5
 
 # Custom config and working directory
 jiradozer --issue ENG-123 --config ~/myproject/jiradozer.yaml --work-dir ~/myproject

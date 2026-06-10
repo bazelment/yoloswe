@@ -38,7 +38,7 @@ func TestLiveProvider_NonTmuxSessionRendersAgentResponse(t *testing.T) {
 	switch provider {
 	case session.ProviderCodex:
 		if model == "" {
-			model = "gpt-5.3-codex"
+			model = "gpt-5.5"
 		}
 		requireBinary(t, "codex")
 	case session.ProviderGemini:
@@ -108,7 +108,7 @@ func TestLiveProvider_CodexMultiTurnToolConversation(t *testing.T) {
 
 	model := strings.TrimSpace(os.Getenv("BRAMBLE_LIVE_MODEL"))
 	if model == "" {
-		model = "gpt-5.3-codex"
+		model = "gpt-5.5"
 	}
 
 	workDir := t.TempDir()

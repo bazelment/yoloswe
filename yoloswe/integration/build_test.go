@@ -20,7 +20,7 @@ func TestBuildCommand_SuccessfulCompletion(t *testing.T) {
 
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		RecordingDir:   t.TempDir(),
 		MaxBudgetUSD:   5.0,
@@ -65,7 +65,7 @@ func TestBuildCommand_ReviewerFeedbackLoop(t *testing.T) {
 
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		RecordingDir:   t.TempDir(),
 		MaxBudgetUSD:   10.0,
@@ -122,7 +122,7 @@ func TestBuildCommand_MultipleIterations(t *testing.T) {
 
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		RecordingDir:   t.TempDir(),
 		MaxBudgetUSD:   5.0,
@@ -177,7 +177,7 @@ func Divide(a, b int) int {
 
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		RecordingDir:   t.TempDir(),
 		MaxBudgetUSD:   5.0,

@@ -11,7 +11,7 @@ import (
 // This provides early detection of configuration issues before starting the SWE loop.
 //
 // Validation checks:
-//   - Model names: Validates builder model (haiku/sonnet/opus) and warns on unknown reviewer models
+//   - Model names: Validates builder model (Claude aliases, full IDs, or family prefixes) and warns on unknown reviewer models
 //   - Directories: Checks working directory exists and is accessible, validates recording directory parent
 //   - Budget: Rejects negative values, minimum $0.01, warns if > $1000
 //   - Timeout: Rejects negative values, minimum 10s, warns if > 24 hours
@@ -29,18 +29,14 @@ func ValidateConfig(config Config) error {
 	var errors []string
 
 	// Validate builder model
-	validBuilderModels := map[string]bool{
-		"haiku":  true,
-		"sonnet": true,
-		"opus":   true,
-	}
-	if config.BuilderModel != "" && !validBuilderModels[config.BuilderModel] {
-		errors = append(errors, fmt.Sprintf("invalid builder model %q (must be haiku, sonnet, or opus)", config.BuilderModel))
+	if config.BuilderModel != "" && !isValidClaudeBuilderModel(config.BuilderModel) {
+		errors = append(errors, fmt.Sprintf("invalid builder model %q (must be a Claude alias or model ID)", config.BuilderModel))
 	}
 
 	// Validate reviewer model
 	validReviewerModels := map[string]bool{
 		"gpt-5.4-mini": true,
+		"gpt-5.4":      true,
 		"gpt-5.5":      true,
 		"o4-mini":      true,
 		"o4":           true,
@@ -131,6 +127,20 @@ func ValidateConfig(config Config) error {
 	}
 
 	return nil
+}
+
+func isValidClaudeBuilderModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	switch model {
+	case "haiku", "sonnet", "opus", "fable":
+		return true
+	}
+	for _, prefix := range []string{"claude-", "haiku-", "sonnet-", "opus-", "fable-"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidatePrompt validates the user prompt before starting the builder-reviewer loop.

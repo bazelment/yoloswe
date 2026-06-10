@@ -235,11 +235,11 @@ Same prompt as Test Run 2, after fixing planner cost, ToolSearch display, and mo
 - `delegatorSystemPromptWithModels()` appends an "Available models" section to the delegator system prompt
 - `bramble delegator` harness probes installed providers via `NewProviderAvailability()` and passes the registry to `ManagerConfig`
 
-**Test 1: Codex child (gpt-5.3-codex)**
+**Test 1: Codex child (gpt-5.5)**
 ```
-echo 'Create greeting.go with Greet function. Use gpt-5.3-codex model.' | bramble delegator --mode real --model sonnet
+echo 'Create greeting.go with Greet function. Use gpt-5.5 model.' | bramble delegator --mode real --model sonnet
 ```
-- Delegator correctly selected `gpt-5.3-codex` for the builder session
+- Delegator correctly selected `gpt-5.5` for the builder session
 - Codex builder ran but hit a read-only workspace restriction (codex CLI limitation, not our code)
 - Delegator self-recovered: started a second builder using Claude sonnet as fallback
 - File was successfully created by the fallback session
@@ -270,9 +270,9 @@ echo 'Create greeting.go with Greet function. Use gemini-2.5-flash model.' | bra
 - `renderChildStatus` uses `formatProgressDetail()` which shows `Xin/Yout tokens` when cost is zero but tokens are available
 - Progress ticker and final summary both include token counts
 
-**Test 1: Codex builder (gpt-5.3-codex) — REST API server**
+**Test 1: Codex builder (gpt-5.5) — REST API server**
 ```
-echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gpt-5.3-codex model.' | bramble delegator --mode real --model sonnet --log-dir /tmp/dt-logs-codex
+echo 'Add a REST API with /health and /echo endpoints using separate packages. Use gpt-5.5 model.' | bramble delegator --mode real --model sonnet --log-dir /tmp/dt-logs-codex
 ```
 - Protocol log created: `test-project-codex-builder-cd0f263e-codex.protocol.jsonl` ✅
 - Planner (Claude sonnet) completed with cost: `$0.3491` and tokens: `28in/5605out`
@@ -542,7 +542,7 @@ python3 scripts/delegator-eval.py \
   --questions-file scripts/delegator-eval-questions.txt \
   --work-dir /path/to/repo \
   --log-dir /tmp/eval-codex \
-  --child-model gpt-5.3-codex
+  --child-model gpt-5.5
 ```
 
 ### Results (11 questions, 15-minute timeout)

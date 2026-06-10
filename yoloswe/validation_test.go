@@ -27,13 +27,21 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid full config",
 			config: Config{
-				BuilderModel:   "sonnet",
+				BuilderModel:   "fable",
 				ReviewerModel:  "gpt-5.4-mini",
 				BuilderWorkDir: tmpDir,
 				RecordingDir:   tmpDir,
 				MaxBudgetUSD:   5.0,
 				MaxTimeSeconds: 600,
 				MaxIterations:  10,
+			},
+			wantError: false,
+		},
+		{
+			name: "valid full claude builder model",
+			config: Config{
+				BuilderModel:   "claude-fable-5",
+				BuilderWorkDir: tmpDir,
 			},
 			wantError: false,
 		},

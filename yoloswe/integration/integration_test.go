@@ -18,7 +18,7 @@ func TestIntegrationBuilderReviewerLoop(t *testing.T) {
 	testutil.InitGitRepo(t, workDir)
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   1.0,
 		MaxTimeSeconds: 120,
@@ -51,7 +51,7 @@ func TestIntegrationBudgetLimit(t *testing.T) {
 	testutil.InitGitRepo(t, workDir)
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   0.01, // Very low budget
 		MaxTimeSeconds: 60,
@@ -79,7 +79,7 @@ func TestIntegrationTimeoutLimit(t *testing.T) {
 	testutil.InitGitRepo(t, workDir)
 	config := yoloswe.Config{
 		BuilderModel:   "sonnet",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   10.0,
 		MaxTimeSeconds: 5, // Very short timeout
@@ -108,7 +108,7 @@ func TestIntegrationContextCancellation(t *testing.T) {
 	testutil.InitGitRepo(t, workDir)
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   5.0,
 		MaxTimeSeconds: 600,
@@ -139,7 +139,7 @@ func TestIntegrationMaxIterations(t *testing.T) {
 	testutil.InitGitRepo(t, workDir)
 	config := yoloswe.Config{
 		BuilderModel:   "haiku",
-		ReviewerModel:  "gpt-5.2-codex",
+		ReviewerModel:  "gpt-5.4-mini",
 		BuilderWorkDir: workDir,
 		MaxBudgetUSD:   10.0,
 		MaxTimeSeconds: 600,

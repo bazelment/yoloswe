@@ -60,8 +60,8 @@ func TestBuildBackgroundUsesLayeredResearchAgents(t *testing.T) {
 	cfg.MaxResearchTopics = 1
 	cfg.ResearchScopes = []ResearchScope{ScopeInternal, ScopeCodebase, ScopeWeb}
 	cfg.ResearchModel = "sonnet"
-	cfg.CodeResearchModel = "gpt-5.3-codex"
-	cfg.WebResearchModel = "gpt-5.2"
+	cfg.CodeResearchModel = "gpt-5.4"
+	cfg.WebResearchModel = "gpt-5.4-mini"
 
 	bot := New(client, cfg)
 	require.NoError(t, bot.IngestTranscript(context.Background(), sampleEvents()))
@@ -74,9 +74,9 @@ func TestBuildBackgroundUsesLayeredResearchAgents(t *testing.T) {
 		byRole[req.Role] = req
 	}
 	require.Equal(t, "sonnet", byRole[RoleInternalResearch].Model)
-	require.Equal(t, "gpt-5.3-codex", byRole[RoleCodebaseResearch].Model)
+	require.Equal(t, "gpt-5.4", byRole[RoleCodebaseResearch].Model)
 	require.Equal(t, "plan", byRole[RoleCodebaseResearch].PermissionMode)
-	require.Equal(t, "gpt-5.2", byRole[RoleWebResearch].Model)
+	require.Equal(t, "gpt-5.4-mini", byRole[RoleWebResearch].Model)
 	require.Len(t, bot.Evidence(), 3)
 }
 
@@ -174,7 +174,7 @@ func TestAnswerQuestionStreamsFastOpeningBeforeSlowAgent(t *testing.T) {
 	client := &recordingClient{delay: 25 * time.Millisecond}
 	cfg := DefaultConfig()
 	cfg.AutoResearch = false
-	cfg.FastAnswerModel = "gpt-5.3-codex"
+	cfg.FastAnswerModel = "gpt-5.4-mini"
 	cfg.FastAnswerEffort = agent.EffortLow
 	cfg.FastAnswerTimeout = time.Second
 
@@ -196,7 +196,7 @@ func TestAnswerQuestionStreamsFastOpeningBeforeSlowAgent(t *testing.T) {
 	require.Len(t, requests, 1)
 	require.Equal(t, RoleFastAnswer, requests[0].Role)
 	require.Equal(t, agent.EffortLow, requests[0].Effort)
-	require.Equal(t, "gpt-5.3-codex", requests[0].Model)
+	require.Equal(t, "gpt-5.4-mini", requests[0].Model)
 }
 
 func TestAnswerQuestionStreamEmitsOpeningBeforeFinal(t *testing.T) {

@@ -58,7 +58,7 @@ func TestModelRegistry_FilteredCycling(t *testing.T) {
 	reg := NewModelRegistry(avail, nil)
 
 	// Cycling from last claude model should skip codex and go to gemini
-	next := reg.NextModel("haiku")
+	next := reg.NextModel("claude-haiku-4-5")
 	assert.Equal(t, "gemini-3.1-pro-preview", next.ID)
 
 	// Cycling from last gemini model should wrap to first claude (cursor not installed)
@@ -156,7 +156,7 @@ func TestModelRegistry_ModelByID(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "opus", m.ID)
 
-	_, ok = reg.ModelByID("gpt-5.3-codex")
+	_, ok = reg.ModelByID("gpt-5.4")
 	assert.False(t, ok, "codex model should not be in filtered list")
 }
 
@@ -183,6 +183,14 @@ func TestModelByID_Global(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, ProviderClaude, m.Provider)
 
+	m, ok = ModelByID("claude-opus-4-8")
+	require.True(t, ok)
+	assert.Equal(t, ProviderClaude, m.Provider)
+
+	m, ok = ModelByID("claude-fable-5")
+	require.True(t, ok)
+	assert.Equal(t, ProviderClaude, m.Provider)
+
 	_, ok = ModelByID("nonexistent")
 	assert.False(t, ok)
 }
@@ -197,6 +205,7 @@ func TestProviderForModelID(t *testing.T) {
 	}{
 		// Exact match wins over prefix
 		{"opus", ProviderClaude, true},
+		{"fable", ProviderClaude, true},
 		{"gpt-5.5", ProviderCodex, true},
 		// Prefix-only matches (forward-compat IDs not in AllModels)
 		{"gpt-future-9000", ProviderCodex, true},
@@ -205,6 +214,10 @@ func TestProviderForModelID(t *testing.T) {
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
 		{"claude-opus-5", ProviderClaude, true},
+		{"fable-5", ProviderClaude, true},
+		{"opus-4-8", ProviderClaude, true},
+		{"sonnet-4-6", ProviderClaude, true},
+		{"haiku-4-5", ProviderClaude, true},
 		// Non-matching
 		{"foo-bar", "", false},
 		{"", "", false},
@@ -236,12 +249,17 @@ func TestProviderByModelPrefix(t *testing.T) {
 		{"composer-3", ProviderCursor, true},
 		{"agy-pro", ProviderAgy, true},
 		{"claude-opus-5", ProviderClaude, true},
+		{"fable-5", ProviderClaude, true},
+		{"opus-4-8", ProviderClaude, true},
+		{"sonnet-4-6", ProviderClaude, true},
+		{"haiku-4-5", ProviderClaude, true},
 		// Exact-match IDs still work via prefix
 		{"gpt-5.5", ProviderCodex, true},
 		// Non-matching
 		{"foo-bar", "", false},
 		{"", "", false},
 		{"opus", "", false}, // no prefix match for bare IDs
+		{"fable", "", false},
 	}
 
 	for _, tc := range cases {

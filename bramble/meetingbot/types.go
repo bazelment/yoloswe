@@ -156,10 +156,10 @@ func DefaultConfig() Config {
 	return Config{
 		WorkDir:              ".",
 		Profile:              ProfileDefault,
-		FastAnswerModel:      "gpt-5.3-codex",
+		FastAnswerModel:      "gpt-5.4-mini",
 		ResearchModel:        "sonnet",
-		CodeResearchModel:    "gpt-5.3-codex",
-		WebResearchModel:     "gpt-5.3-codex",
+		CodeResearchModel:    "gpt-5.4",
+		WebResearchModel:     "gpt-5.4",
 		SummaryModel:         "gpt-5.5",
 		FastAnswerEffort:     agent.EffortLow,
 		ResearchEffort:       agent.EffortMedium,
