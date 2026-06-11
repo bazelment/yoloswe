@@ -50,6 +50,7 @@ func TestResolveAgentModel_PrefixFallback(t *testing.T) {
 		{"composer-3", agent.ProviderCursor},
 		{"agy-pro", agent.ProviderAgy},
 		{"claude-opus-5", agent.ProviderClaude},
+		{"fable-5", agent.ProviderClaude},
 	}
 
 	for _, tc := range cases {
@@ -98,6 +99,7 @@ func TestManager_PrefixModelRoutesToCorrectProvider(t *testing.T) {
 		{"cursor-fast-99", agent.ProviderCursor, agent.ProviderClaude},
 		{"composer-v9", agent.ProviderCursor, agent.ProviderClaude},
 		{"agy-pro", agent.ProviderAgy, agent.ProviderClaude},
+		{"fable-5", agent.ProviderClaude, agent.ProviderCodex},
 	}
 
 	for _, tc := range cases {

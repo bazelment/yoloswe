@@ -77,7 +77,7 @@ The AI will explore the codebase, consider approaches, and produce a detailed pl
 		},
 	}
 
-	cmd.Flags().StringVar(&flags.model, "model", "opus", "Model to use for planning: haiku, sonnet, opus")
+	cmd.Flags().StringVar(&flags.model, "model", "opus", "Planning model: haiku, sonnet, opus, fable, or full Claude model ID")
 	cmd.Flags().StringVar(&flags.workDir, "dir", "", "Working directory (defaults to current directory)")
 	cmd.Flags().StringVar(&flags.recordDir, "record", "", "Directory for session recordings (defaults to ~/.yoloswe)")
 	cmd.Flags().StringVar(&flags.systemPrompt, "system", "", "Custom system prompt")
@@ -180,7 +180,7 @@ The loop continues until the reviewer accepts or limits are reached.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&flags.builderModel, "builder-model", "sonnet", "Builder model: haiku, sonnet, opus")
+	cmd.Flags().StringVar(&flags.builderModel, "builder-model", "sonnet", "Builder model: haiku, sonnet, opus, fable, or full Claude model ID")
 	cmd.Flags().StringVar(&flags.reviewerModel, "reviewer-model", "", "Reviewer model (default: gpt-5.4-mini)")
 	cmd.Flags().StringVar(&flags.dir, "dir", "", "Working directory (default: current)")
 	cmd.Flags().Float64Var(&flags.budget, "budget", 100.0, "Max USD for builder session")

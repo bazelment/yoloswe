@@ -80,7 +80,7 @@ func (p *CodexProvider) Execute(ctx context.Context, prompt string, wtCtx *wt.Wo
 
 	// Build thread options.
 	// Only pass an explicit model if the caller overrode the default;
-	// Claude-specific aliases (haiku, sonnet, opus) are not valid for codex
+	// Claude-specific aliases (haiku, sonnet, opus, fable) are not valid for codex
 	// and should not be forwarded — let codex use its own configured default.
 	var threadOpts []codex.ThreadOption
 	if cfg.Model != "" && !isClaudeModelAlias(cfg.Model) {
@@ -252,10 +252,10 @@ func endpointsEqual(a, b llmendpoint.Endpoint) bool {
 }
 
 // isClaudeModelAlias returns true for model names that are Claude-specific
-// shorthand (haiku, sonnet, opus) and not valid for non-Claude providers.
+// shorthand (haiku, sonnet, opus, fable) and not valid for non-Claude providers.
 func isClaudeModelAlias(model string) bool {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "haiku", "sonnet", "opus":
+	case "haiku", "sonnet", "opus", "fable":
 		return true
 	default:
 		return false

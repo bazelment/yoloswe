@@ -64,14 +64,14 @@ func TestBuildShellCommandCodex(t *testing.T) {
 		{
 			name: "codex with model",
 			cmd:  "codex",
-			args: []string{"--model", "gpt-5.3-codex", "fix the bug"},
-			want: "codex '--model' 'gpt-5.3-codex' 'fix the bug'",
+			args: []string{"--model", "gpt-5.5", "fix the bug"},
+			want: "codex '--model' 'gpt-5.5' 'fix the bug'",
 		},
 		{
 			name: "codex with yolo",
 			cmd:  "codex",
-			args: []string{"--model", "gpt-5.2", "--dangerously-bypass-approvals-and-sandbox", "build feature"},
-			want: "codex '--model' 'gpt-5.2' '--dangerously-bypass-approvals-and-sandbox' 'build feature'",
+			args: []string{"--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox", "build feature"},
+			want: "codex '--model' 'gpt-5.4' '--dangerously-bypass-approvals-and-sandbox' 'build feature'",
 		},
 		{
 			name: "claude with model flag",
@@ -111,23 +111,23 @@ func TestTmuxRunnerBuildCommand(t *testing.T) {
 		{
 			name: "codex builder",
 			runner: tmuxRunner{
-				model:    "gpt-5.3-codex",
+				model:    "gpt-5.5",
 				provider: ProviderCodex,
 				prompt:   "build it",
 			},
 			wantBin:  "codex",
-			wantArgs: []string{"--model", "gpt-5.3-codex", "build it"},
+			wantArgs: []string{"--model", "gpt-5.5", "build it"},
 		},
 		{
 			name: "codex with yolo",
 			runner: tmuxRunner{
-				model:    "gpt-5.2",
+				model:    "gpt-5.4",
 				provider: ProviderCodex,
 				prompt:   "build it",
 				yoloMode: true,
 			},
 			wantBin:  "codex",
-			wantArgs: []string{"--model", "gpt-5.2", "--dangerously-bypass-approvals-and-sandbox", "build it"},
+			wantArgs: []string{"--model", "gpt-5.4", "--dangerously-bypass-approvals-and-sandbox", "build it"},
 		},
 		{
 			name: "claude with yolo",
@@ -202,9 +202,9 @@ func TestModelByID(t *testing.T) {
 	assert.Equal(t, "opus", m.ID)
 	assert.Equal(t, ProviderClaude, m.Provider)
 
-	m, ok = ModelByID("gpt-5.3-codex")
+	m, ok = ModelByID("gpt-5.5")
 	assert.True(t, ok)
-	assert.Equal(t, "gpt-5.3-codex", m.ID)
+	assert.Equal(t, "gpt-5.5", m.ID)
 	assert.Equal(t, ProviderCodex, m.Provider)
 
 	_, ok = ModelByID("nonexistent")

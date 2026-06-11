@@ -301,6 +301,8 @@ func TestAvailableModelsDescription(t *testing.T) {
 		assert.Contains(t, desc, "opus (claude)")
 		assert.Contains(t, desc, "sonnet (claude)")
 		assert.Contains(t, desc, "haiku (claude)")
+		assert.Contains(t, desc, "fable (claude)")
+		assert.Contains(t, desc, "claude-fable-5 (claude)")
 		assert.Contains(t, desc, "gemini-2.5-pro (gemini)")
 	})
 }

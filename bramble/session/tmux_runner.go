@@ -16,7 +16,7 @@ type tmuxRunner struct {
 	windowName      string // tmux window name (e.g., "happy-tiger")
 	workDir         string // working directory for the window
 	prompt          string // initial prompt
-	model           string // model ID (e.g. "opus", "gpt-5.3-codex")
+	model           string // model ID (e.g. "opus", "gpt-5.5")
 	provider        string // binary name: "claude" or "codex"
 	permissionMode  string // permission mode: "" (default) or "plan" (claude only)
 	resumeSessionID string // CLI session ID to resume (empty for new sessions)

@@ -74,7 +74,7 @@ type providerRunner struct { //nolint:govet // fieldalignment: keep related life
 	provider        agent.Provider
 	eventHandler    *sessionEventHandler
 	eventBridgeDone chan struct{}
-	model           string // model ID for provider (e.g. "gpt-5.3-codex")
+	model           string // model ID for provider (e.g. "gpt-5.5")
 	permissionMode  string // execution permissions (e.g. "bypass", "plan")
 	workDir         string // working directory for provider
 	eventBridgeWg   sync.WaitGroup
@@ -837,7 +837,7 @@ func generateTitle(prompt string, maxLen int) string {
 }
 
 // StartSession creates and starts a new session of the given type.
-// model is the AgentModel ID (e.g. "opus", "gpt-5.3-codex"). If empty,
+// model is the AgentModel ID (e.g. "opus", "gpt-5.5"). If empty,
 // defaults to "opus" for planners and "sonnet" for builders.
 func (m *Manager) StartSession(sessionType SessionType, worktreePath, prompt, model string) (SessionID, error) {
 	worktreeName := filepath.Base(worktreePath)

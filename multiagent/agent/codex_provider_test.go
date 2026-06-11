@@ -12,6 +12,16 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/llmendpoint"
 )
 
+func TestIsClaudeModelAlias(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"haiku", "sonnet", "opus", "fable", " FABLE "} {
+		assert.True(t, isClaudeModelAlias(model), model)
+	}
+	assert.False(t, isClaudeModelAlias("gpt-5.5"))
+	assert.False(t, isClaudeModelAlias("claude-fable-5"))
+}
+
 type recordingHandler struct { //nolint:govet // fieldalignment: test fixture readability
 	mu            sync.Mutex
 	textCalls     []string

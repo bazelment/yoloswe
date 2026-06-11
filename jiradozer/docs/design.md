@@ -303,7 +303,7 @@ jiradozer --issue ENG-123 [--config jiradozer.yaml] [--work-dir .]
               [--run-step plan] [--verbose]
 ```
 
-`--model` accepts any model ID from `agent.AllModels` (opus, sonnet, haiku, gpt-5.3-codex, gemini-3.1-pro-preview, cursor-default, etc.). Provider is auto-detected.
+`--model` accepts any model ID from `agent.AllModels` (fable, opus, sonnet, haiku, gpt-5.5, gemini-3.1-pro-preview, cursor-default, etc.). Provider is auto-detected.
 
 `--run-step` runs a single step and exits without tracker interaction — useful for debugging prompts and agent behavior.
 

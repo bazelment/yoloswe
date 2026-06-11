@@ -24,7 +24,7 @@ func TestNewProviderForModel_Gemini(t *testing.T) {
 }
 
 func TestNewProviderForModel_Codex(t *testing.T) {
-	m := AgentModel{ID: "gpt-5.3-codex", Provider: ProviderCodex}
+	m := AgentModel{ID: "gpt-5.5", Provider: ProviderCodex}
 	p, err := NewProviderForModel(m)
 	require.NoError(t, err)
 	defer p.Close()

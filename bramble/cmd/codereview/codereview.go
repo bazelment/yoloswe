@@ -57,7 +57,7 @@ Supported backends: cursor, codex, gemini.
 Output:
   Default:         NDJSON progress events on stdout, final envelope also on stdout
                    (last line with "schema_version"). Diagnostics on stderr.
-  --envelope-file: Write the final ResultEnvelope to a file instead of stdout.
+ --envelope-file: Write the final ResultEnvelope to a file instead of stdout.
                    stdout then carries only progress events — ideal for the
                    Monitor tool, which streams stdout line-by-line.
 
@@ -65,7 +65,7 @@ Every run also writes a structured klogfmt log to
 ~/.bramble/logs/code-review/code-review-{timestamp}-{pid}.log for later
 analysis. Set $BRAMBLE_RUN_TAG to tag the log with an external run id.`,
 	Example: `  bramble code-review --backend cursor
-  bramble code-review --backend codex --model gpt-5.2-codex --effort medium
+  bramble code-review --backend codex --model gpt-5.4-mini --effort medium
   bramble code-review --backend codex --envelope-file /tmp/envelope.json --skip-test-execution --goal "review auth changes"`,
 	Args: cobra.NoArgs,
 	RunE: runCodeReview,

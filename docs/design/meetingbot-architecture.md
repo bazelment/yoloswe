@@ -115,10 +115,10 @@ Key CLI knobs:
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--fast-model` | `gpt-5.3-codex` | Live question answering |
+| `--fast-model` | `gpt-5.4-mini` | Live question answering |
 | `--research-model` | `sonnet` | Internal-context research |
-| `--code-model` | `gpt-5.3-codex` | Codebase research |
-| `--web-model` | `gpt-5.3-codex` | Public-web research |
+| `--code-model` | `gpt-5.4` | Codebase research |
+| `--web-model` | `gpt-5.4` | Public-web research |
 | `--summary-model` | `gpt-5.5` | Final summary synthesis |
 | `--latency-budget` | `10s` | Target opening-readiness latency |
 | `--answer-timeout` | `45s` | Timeout for full fast-answer model synthesis |
@@ -276,8 +276,8 @@ research for each topic across configured scopes:
 | Scope | Role | Default model | Permission posture |
 |-------|------|---------------|--------------------|
 | `internal` | `RoleInternalResearch` | `sonnet` | transcript-only reasoning |
-| `codebase` | `RoleCodebaseResearch` | `gpt-5.3-codex` | plan/read-only |
-| `web` | `RoleWebResearch` | `gpt-5.3-codex` | provider/tool dependent |
+| `codebase` | `RoleCodebaseResearch` | `gpt-5.4` | plan/read-only |
+| `web` | `RoleWebResearch` | `gpt-5.4` | provider/tool dependent |
 
 Each result is stored as `Evidence` with scope, topic, text, timestamp, and
 source anchors. Failed research is cached as an explicit miss instead of being

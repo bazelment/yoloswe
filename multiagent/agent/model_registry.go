@@ -7,7 +7,7 @@ import (
 
 // AgentModel describes a model available for session execution.
 type AgentModel struct {
-	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.3-codex")
+	ID       string // Model identifier passed to --model flag (e.g. "opus", "gpt-5.5")
 	Provider string // Binary/provider name: "claude", "codex", "gemini", etc.
 	Label    string // Display label for the UI (e.g. "opus (claude)")
 }
@@ -17,10 +17,14 @@ var AllModels = []AgentModel{
 	{ID: "opus", Provider: ProviderClaude, Label: "opus"},
 	{ID: "sonnet", Provider: ProviderClaude, Label: "sonnet"},
 	{ID: "haiku", Provider: ProviderClaude, Label: "haiku"},
+	{ID: "fable", Provider: ProviderClaude, Label: "fable"},
+	{ID: "claude-fable-5", Provider: ProviderClaude, Label: "claude-fable-5"},
+	{ID: "claude-opus-4-8", Provider: ProviderClaude, Label: "claude-opus-4-8"},
+	{ID: "claude-sonnet-4-6", Provider: ProviderClaude, Label: "claude-sonnet-4-6"},
+	{ID: "claude-haiku-4-5", Provider: ProviderClaude, Label: "claude-haiku-4-5"},
 	{ID: "gpt-5.5", Provider: ProviderCodex, Label: "gpt-5.5"},
-	{ID: "gpt-5.3-codex", Provider: ProviderCodex, Label: "gpt-5.3-codex"},
-	{ID: "gpt-5.2", Provider: ProviderCodex, Label: "gpt-5.2"},
-	{ID: "gpt-5.1-codex-max", Provider: ProviderCodex, Label: "gpt-5.1-codex-max"},
+	{ID: "gpt-5.4", Provider: ProviderCodex, Label: "gpt-5.4"},
+	{ID: "gpt-5.4-mini", Provider: ProviderCodex, Label: "gpt-5.4-mini"},
 	{ID: "gemini-3.1-pro-preview", Provider: ProviderGemini, Label: "gemini-3.1-pro-preview"},
 	{ID: "gemini-3-pro-preview", Provider: ProviderGemini, Label: "gemini-3-pro-preview"},
 	{ID: "gemini-3-flash-preview", Provider: ProviderGemini, Label: "gemini-3-flash-preview"},
@@ -53,6 +57,10 @@ var modelPrefixRules = []struct {
 	{"composer-", ProviderCursor},
 	{"agy-", ProviderAgy},
 	{"claude-", ProviderClaude},
+	{"fable-", ProviderClaude},
+	{"opus-", ProviderClaude},
+	{"sonnet-", ProviderClaude},
+	{"haiku-", ProviderClaude},
 }
 
 // ProviderForModelID resolves the provider for a model ID via exact match then

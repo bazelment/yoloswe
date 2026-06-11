@@ -73,7 +73,7 @@ states:
 
 # Default agent backend; per-step overrides win when set.
 agent:
-    # Model ID from agent.AllModels (e.g. "sonnet", "opus", "gpt-5.3-codex",
+    # Model ID from agent.AllModels (e.g. "sonnet", "opus", "fable", "gpt-5.5",
     # "gemini-3.1-pro-preview", "cursor-default").
     model: sonnet
     # Reasoning effort: low, medium, high, max, auto. Empty = provider default.

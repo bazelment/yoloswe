@@ -18,7 +18,7 @@ var geminiModel = flag.String("gemini-model", reviewer.DefaultGeminiModel, "Gemi
 func TestReviewWithResult_Codex(t *testing.T) {
 	config := reviewer.Config{
 		BackendType: reviewer.BackendCodex,
-		Model:       "gpt-5.2-codex",
+		Model:       "gpt-5.4-mini",
 		WorkDir:     t.TempDir(),
 		Verbose:     true,
 	}

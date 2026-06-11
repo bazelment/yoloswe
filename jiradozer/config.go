@@ -68,7 +68,7 @@ type TrackerConfig struct {
 //
 //nolint:govet // fieldalignment: keep YAML fields in config-file order.
 type AgentConfig struct {
-	Model       string             `yaml:"model"`        // model ID from agent.AllModels (e.g. "sonnet", "gpt-5.3-codex")
+	Model       string             `yaml:"model"`        // model ID from agent.AllModels (e.g. "fable", "gpt-5.5")
 	Effort      string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
 	LLMEndpoint *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
 }
