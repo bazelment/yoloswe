@@ -104,6 +104,7 @@ func (o *Orchestrator) tailSubprocessLog(mw *managedWorkflow, logPath string, st
 		if line != "" {
 			offset += int64(len(line))
 			mw.lastOutputAt.Store(time.Now().UnixNano())
+			mw.appendTail(line)
 			if o.maybeEmitTransition(mw, line, !emittedPRURL) {
 				emittedPRURL = true
 			}

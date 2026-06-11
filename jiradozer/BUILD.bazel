@@ -39,6 +39,7 @@ go_test(
         "config_test.go",
         "discovery_test.go",
         "notify_test.go",
+        "orchestrator_failure_report_test.go",
         "orchestrator_logtail_test.go",
         "orchestrator_test.go",
         "poller_test.go",

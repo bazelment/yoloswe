@@ -65,6 +65,14 @@ func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, repoName, app.Logger)
 	orch.SetSubprocessMode(selfPath, childArgs, logDir)
 	orch.SetForceCleanup(args.forceCleanup)
+	// Per-issue subprocess failures are reported by the orchestrator (the
+	// single reporter; children suppress their own alert). The tracker-comment
+	// sink uses issueTracker; the optional Slack sink mirrors single-issue mode.
+	var notifier jiradozer.Notifier
+	if cfg.Notify.SlackWebhook != "" {
+		notifier = jiradozer.SlackWebhookNotifier{WebhookURL: cfg.Notify.SlackWebhook}
+	}
+	orch.SetFailureReporting(notifier, app.Build.ShortRevision())
 
 	return &teamSupervisor{
 		app:       app,

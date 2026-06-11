@@ -127,6 +127,14 @@ func run(ctx context.Context, app *cliapp.App, args runArgs) (runErr error) {
 		if !shouldReportFailure(runErr) {
 			return
 		}
+		// When launched under an orchestrator parent, the orchestrator is the
+		// single failure reporter (it always observes the death — including
+		// watchdog/SIGINT kills this child can't reach this defer for — and it
+		// carries the child log path + tail). Suppress the child's own report
+		// to avoid a duplicate tracker comment.
+		if os.Getenv(jiradozer.OrchestratedEnvVar) != "" {
+			return
+		}
 		jiradozer.ReportFailure(ctx, logger, reportTracker, reportIssueID, reportNotifier, jiradozer.FailureReport{
 			Tool:          "jiradozer",
 			Target:        reportTarget,

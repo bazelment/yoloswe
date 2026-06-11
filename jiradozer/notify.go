@@ -32,6 +32,11 @@ type FailureReport struct {
 	BuildRevision string
 	// LogPath is the absolute path to the run's log file.
 	LogPath string
+	// LogTail is the last few lines of the run's log, in chronological
+	// order, surfaced inline so an on-call human can triage without opening
+	// the log. Optional: single-issue runs leave it nil. Rendered as a fenced
+	// block when present.
+	LogTail []string
 }
 
 // FailingStepFromError extracts the workflow step name from a wrapped run
@@ -77,6 +82,14 @@ func (r FailureReport) renderFailureText() string {
 	}
 	if r.LogPath != "" {
 		fmt.Fprintf(&b, "Log: %s\n", r.LogPath)
+	}
+	if len(r.LogTail) > 0 {
+		b.WriteString("Last log lines:\n```\n")
+		for _, line := range r.LogTail {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+		b.WriteString("```\n")
 	}
 	return b.String()
 }

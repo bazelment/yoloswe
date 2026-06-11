@@ -25,6 +25,7 @@ type ManagedWorkflowSnapshot struct {
 	StartedAt    time.Time      `json:"started_at"`
 	WorktreePath string         `json:"worktree_path"`
 	Branch       string         `json:"branch"`
+	LogPath      string         `json:"log_path"`
 	PID          int            `json:"pid"`
 }
 
