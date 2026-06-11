@@ -333,6 +333,11 @@ func (o *Orchestrator) runWatchdog(mw *managedWorkflow, tickInterval time.Durati
 				"idle_for", gap.Round(time.Second),
 				"idle_timeout", timeout,
 			)
+			// Mark hung before cancelling so the cmd.Wait goroutine reports
+			// this as a failure (stuck agent) rather than an expected
+			// cancellation. Set before cancel() to avoid a race where Wait
+			// returns and inspects the flag before we write it.
+			mw.hung.Store(true)
 			if mw.cancel != nil {
 				mw.cancel()
 			}

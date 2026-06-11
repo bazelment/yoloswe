@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -199,4 +201,131 @@ func TestReportSubprocessFailure_StepFromError(t *testing.T) {
 	defer notifier.mu.Unlock()
 	require.Len(t, notifier.reports, 1)
 	require.Equal(t, "plan", notifier.reports[0].Step, "step from error must win over currentStep")
+}
+
+// TestReportSubprocessFailure_TailFromFile verifies the file fallback: when the
+// in-memory ring is empty (exec-restored or fast-exit child), the tail is read
+// from the log file at mw.logPath so restored/quick failures still surface
+// their final lines.
+func TestReportSubprocessFailure_TailFromFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "INF-9.log")
+	require.NoError(t, os.WriteFile(logPath, []byte("starting\nstep: build\nE0610 build failed: 401\n"), 0o600))
+
+	notifier := &captureNotifier{}
+	o := &Orchestrator{
+		tracker:  &commentCapturingTracker{},
+		logger:   discardLogger(),
+		config:   testOrchestratorConfig(),
+		notifier: notifier,
+	}
+	// No appendTail calls: the in-memory ring is empty, as it is for a
+	// restored workflow whose tailer was never re-attached.
+	mw := &managedWorkflow{
+		issue:   &tracker.Issue{ID: "i9", Identifier: "INF-9"},
+		logPath: logPath,
+	}
+	o.reportSubprocessFailure(mw, errors.New("exit status 1"))
+
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	require.Len(t, notifier.reports, 1)
+	require.Equal(t, []string{"starting", "step: build", "E0610 build failed: 401"}, notifier.reports[0].LogTail,
+		"empty ring must fall back to reading the log file")
+}
+
+// TestReportSubprocessFailure_RingBeatsFile confirms the live ring is preferred
+// over the file when both are available.
+func TestReportSubprocessFailure_RingBeatsFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "INF-10.log")
+	require.NoError(t, os.WriteFile(logPath, []byte("file line\n"), 0o600))
+
+	notifier := &captureNotifier{}
+	o := &Orchestrator{
+		tracker:  &commentCapturingTracker{},
+		logger:   discardLogger(),
+		config:   testOrchestratorConfig(),
+		notifier: notifier,
+	}
+	mw := &managedWorkflow{issue: &tracker.Issue{ID: "i10", Identifier: "INF-10"}, logPath: logPath}
+	mw.appendTail("ring line\n")
+
+	o.reportSubprocessFailure(mw, errors.New("boom"))
+
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	require.Equal(t, []string{"ring line"}, notifier.reports[0].LogTail)
+}
+
+func TestReadLogTail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing file returns nil", func(t *testing.T) {
+		t.Parallel()
+		require.Nil(t, readLogTail(filepath.Join(t.TempDir(), "nope.log"), 5))
+	})
+
+	t.Run("returns last n lines", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "a.log")
+		var sb strings.Builder
+		for i := 0; i < 50; i++ {
+			fmt.Fprintf(&sb, "line %d\n", i)
+		}
+		require.NoError(t, os.WriteFile(p, []byte(sb.String()), 0o600))
+		got := readLogTail(p, 5)
+		require.Equal(t, []string{"line 45", "line 46", "line 47", "line 48", "line 49"}, got)
+	})
+
+	t.Run("fewer lines than n returns all", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "b.log")
+		require.NoError(t, os.WriteFile(p, []byte("only\ntwo\n"), 0o600))
+		require.Equal(t, []string{"only", "two"}, readLogTail(p, 20))
+	})
+
+	t.Run("empty file returns nil", func(t *testing.T) {
+		t.Parallel()
+		p := filepath.Join(t.TempDir(), "c.log")
+		require.NoError(t, os.WriteFile(p, nil, 0o600))
+		require.Nil(t, readLogTail(p, 5))
+	})
+}
+
+// TestWatchdogHungReporting verifies the watchdog marks a stalled workflow as
+// hung and that a hung workflow is reported as a failure (not silently
+// classified as a cancellation). The cmd.Wait branch keys off mw.hung; here we
+// assert the flag plumbs through to a failure report.
+func TestWatchdogHungReporting(t *testing.T) {
+	t.Parallel()
+
+	notifier := &captureNotifier{}
+	o := &Orchestrator{
+		tracker:  &commentCapturingTracker{},
+		logger:   discardLogger(),
+		config:   testOrchestratorConfig(),
+		notifier: notifier,
+	}
+	mw := &managedWorkflow{
+		issue:       &tracker.Issue{ID: "ih", Identifier: "INF-HUNG"},
+		currentStep: "validate",
+	}
+	mw.hung.Store(true)
+	require.True(t, mw.hung.Load())
+
+	// The cmd.Wait goroutine reports a hung workflow via reportSubprocessFailure
+	// with a watchdog-wrapped error; assert that path produces an alert naming
+	// the stuck step.
+	o.reportSubprocessFailure(mw, fmt.Errorf("subprocess hung and was cancelled by watchdog: %w", errors.New("signal: interrupt")))
+
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	require.Len(t, notifier.reports, 1, "a hung (watchdog-killed) subprocess must alert")
+	require.Equal(t, "validate", notifier.reports[0].Step)
+	require.Contains(t, notifier.reports[0].Err.Error(), "hung")
 }

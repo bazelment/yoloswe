@@ -1,6 +1,7 @@
 package jiradozer
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -141,25 +142,43 @@ type managedWorkflow struct {
 	// idle check during this window — otherwise a long human review
 	// would be killed by the prior step's timeout.
 	inReview atomic.Bool
+	// hung is set by runWatchdog just before it cancels a stalled workflow.
+	// It lets the cmd.Wait goroutine distinguish a watchdog-initiated kill (a
+	// genuine failure worth alerting — the agent was stuck) from a user/
+	// shutdown cancellation (an expected stop). Without it, a hung child would
+	// be silently classified as cancelled and no failure alert would fire,
+	// even though detecting stuck agents is the whole point of the watchdog.
+	hung atomic.Bool
 }
 
-// appendTail records one subprocess log line in the bounded ring buffer.
-// The trailing newline is stripped and over-long lines are truncated so a
-// runaway child can't grow memory. Safe for concurrent use.
-func (mw *managedWorkflow) appendTail(line string) {
+// capTailLine strips a line's trailing newline and truncates it to tailLineMax
+// bytes on a rune boundary so a retained tail line stays valid UTF-8 (a split
+// multibyte rune renders as garbage in a tracker comment). Shared by the live
+// ring buffer (appendTail) and the file-sourced fallback (readLogTail) so both
+// retain lines identically. Returns "" for an empty/blank line.
+func capTailLine(line string) string {
 	line = strings.TrimRight(line, "\n")
 	if line == "" {
-		return
+		return ""
 	}
 	if len(line) > tailLineMax {
-		// Truncate on a rune boundary so the retained line stays valid UTF-8
-		// (a tracker comment with a split multibyte rune renders as garbage).
 		// Back up from the byte cap to the start of the rune it lands in.
 		cut := tailLineMax
 		for cut > 0 && !utf8.RuneStart(line[cut]) {
 			cut--
 		}
 		line = line[:cut] + "…"
+	}
+	return line
+}
+
+// appendTail records one subprocess log line in the bounded ring buffer.
+// The trailing newline is stripped and over-long lines are truncated so a
+// runaway child can't grow memory. Safe for concurrent use.
+func (mw *managedWorkflow) appendTail(line string) {
+	line = capTailLine(line)
+	if line == "" {
+		return
 	}
 	mw.tailMu.Lock()
 	defer mw.tailMu.Unlock()
@@ -228,6 +247,15 @@ func (o *Orchestrator) SetFailureReporting(notifier Notifier, buildRevision stri
 	defer o.mu.Unlock()
 	o.notifier = notifier
 	o.buildRevision = buildRevision
+}
+
+// FailureNotifier returns the currently-configured external failure notifier
+// (nil when none is set). Exposed so callers/tests can verify the sink after a
+// config reload re-applies SetFailureReporting.
+func (o *Orchestrator) FailureNotifier() Notifier {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.notifier
 }
 
 // SetForceCleanup controls whether worktrees are deleted when workflows are
@@ -547,10 +575,22 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		err := cmd.Wait()
 		switch {
 		case wfCtx.Err() != nil:
-			// Context was cancelled (user pressed Ctrl+C). Check this first:
-			// a child that traps SIGINT and exits 0 would otherwise be
-			// misclassified as StepDone.
-			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
+			// Context was cancelled. Check this first: a child that traps
+			// SIGINT and exits 0 would otherwise be misclassified as StepDone.
+			// A watchdog-initiated kill (mw.hung) is a real failure — the
+			// agent was stuck — so it must still alert, even though the child
+			// suppressed its own report under orchestration. A user/shutdown
+			// cancellation is an expected stop and stays quiet.
+			if mw.hung.Load() {
+				o.logger.Error("subprocess hung — reporting failure",
+					"issue", issue.Identifier,
+					"error", err,
+					"log", mw.logPath,
+				)
+				o.reportSubprocessFailure(mw, fmt.Errorf("subprocess hung and was cancelled by watchdog: %w", err))
+			} else {
+				o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
+			}
 			o.emitStatus(mw, StepCancelled, wfCtx.Err())
 			o.cleanup(context.Background(), mw, StepCancelled)
 		case err == nil:
@@ -948,6 +988,15 @@ func (o *Orchestrator) reportSubprocessFailure(mw *managedWorkflow, err error) {
 		mw.stepMu.Unlock()
 	}
 
+	// Prefer the live in-memory ring; fall back to reading the log file when
+	// it's empty. The ring is empty for exec-restored workflows (no tailer is
+	// re-attached after a restart) and for children that exit so fast the
+	// tailer never ran — exactly the cases where a human most needs the tail.
+	tail := mw.tailLines()
+	if len(tail) == 0 && mw.logPath != "" {
+		tail = readLogTail(mw.logPath, tailRingMax)
+	}
+
 	report := FailureReport{
 		Tool:          "jiradozer",
 		Target:        mw.issue.Identifier,
@@ -955,9 +1004,60 @@ func (o *Orchestrator) reportSubprocessFailure(mw *managedWorkflow, err error) {
 		Err:           err,
 		BuildRevision: buildRevision,
 		LogPath:       mw.logPath,
-		LogTail:       mw.tailLines(),
+		LogTail:       tail,
 	}
 	ReportFailure(context.Background(), o.logger, o.tracker, mw.issue.ID, notifier, report)
+}
+
+// readLogTail returns the last n lines of the file at path, each trimmed and
+// length-capped the same way the live ring buffer is, so a file-sourced tail
+// is indistinguishable from an in-memory one. Best-effort: returns nil on any
+// read error — a missing tail must never block the failure report itself.
+func readLogTail(path string, n int) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	// Bound the read so a multi-GB child log can't be slurped into memory: the
+	// tail lives in the last chunk. tailRingMax short lines fit comfortably in
+	// 64 KiB; seek to the tail and scan forward.
+	const tailReadBytes = 64 * 1024
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil
+	}
+	start := size - tailReadBytes
+	if start < 0 {
+		start = 0
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return nil
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), tailLineMax*2)
+	ring := make([]string, 0, n)
+	first := start > 0 // dropped a partial first line by seeking mid-file
+	for scanner.Scan() {
+		if first {
+			first = false // discard the partial line at the seek boundary
+			continue
+		}
+		line := capTailLine(scanner.Text())
+		if line == "" {
+			continue
+		}
+		ring = append(ring, line)
+		if len(ring) > n {
+			ring = ring[1:]
+		}
+	}
+	if err := scanner.Err(); err != nil || len(ring) == 0 {
+		return nil
+	}
+	return ring
 }
 
 func (o *Orchestrator) wasCancelled(mw *managedWorkflow) bool {

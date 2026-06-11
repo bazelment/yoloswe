@@ -65,16 +65,8 @@ func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, repoName, app.Logger)
 	orch.SetSubprocessMode(selfPath, childArgs, logDir)
 	orch.SetForceCleanup(args.forceCleanup)
-	// Per-issue subprocess failures are reported by the orchestrator (the
-	// single reporter; children suppress their own alert). The tracker-comment
-	// sink uses issueTracker; the optional Slack sink mirrors single-issue mode.
-	var notifier jiradozer.Notifier
-	if cfg.Notify.SlackWebhook != "" {
-		notifier = jiradozer.SlackWebhookNotifier{WebhookURL: cfg.Notify.SlackWebhook}
-	}
-	orch.SetFailureReporting(notifier, app.Build.ShortRevision())
 
-	return &teamSupervisor{
+	s := &teamSupervisor{
 		app:       app,
 		cfg:       cfg,
 		args:      args,
@@ -84,7 +76,31 @@ func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *
 		selfPath:  selfPath,
 		absConfig: absConfig,
 		logDir:    logDir,
-	}, nil
+	}
+	// Per-issue subprocess failures are reported by the orchestrator (the
+	// single reporter; children suppress their own alert). Applied here and
+	// re-applied on reload so a live notify.slack_webhook change takes effect.
+	s.applyFailureReporting()
+	return s, nil
+}
+
+// applyFailureReporting (re)configures the orchestrator's per-issue failure
+// sinks from the current config. The tracker-comment sink uses the orchestrator's
+// tracker; the optional Slack sink mirrors single-issue mode. Called at startup
+// and on every config reload so a changed webhook propagates without a restart.
+func (s *teamSupervisor) applyFailureReporting() {
+	var notifier jiradozer.Notifier
+	if s.cfg.Notify.SlackWebhook != "" {
+		notifier = jiradozer.SlackWebhookNotifier{WebhookURL: s.cfg.Notify.SlackWebhook}
+	}
+	// Build revision is optional (FailureReport omits an empty one). Guard
+	// against a nil app so the supervisor is usable in tests that construct it
+	// directly without a cliapp.App.
+	var buildRevision string
+	if s.app != nil {
+		buildRevision = s.app.Build.ShortRevision()
+	}
+	s.orch.SetFailureReporting(notifier, buildRevision)
 }
 
 func (s *teamSupervisor) Run(ctx context.Context) error {
@@ -132,6 +148,9 @@ func (s *teamSupervisor) reload() {
 
 	s.cfg = next
 	s.orch.UpdateConfig(next)
+	// Re-apply failure-reporting sinks so a changed notify.slack_webhook takes
+	// effect on the next subprocess failure instead of waiting for a restart.
+	s.applyFailureReporting()
 	s.disc.Update(next.Source.ToFilter(), next.PollInterval)
 	s.logger.Info("config reloaded",
 		"path", s.absConfig,
