@@ -574,23 +574,28 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		defer close(stop)
 		err := cmd.Wait()
 		switch {
+		case wfCtx.Err() != nil && mw.hung.Load():
+			// A watchdog-initiated kill is a real failure — the agent was stuck
+			// — so it must be reported AND classified as StepFailed end to end:
+			// the alert, the supervisor status, and the preserved-worktree
+			// summary must all agree it failed. (Checked before the plain
+			// cancellation case below; a hung run is not an expected stop.)
+			hungErr := fmt.Errorf("subprocess hung and was cancelled by watchdog: %w", err)
+			o.logger.Error("subprocess hung — reporting failure",
+				"issue", issue.Identifier,
+				"error", err,
+				"log", mw.logPath,
+				"tail", strings.Join(mw.tailLines(), " ⏎ "),
+			)
+			o.reportSubprocessFailure(mw, hungErr)
+			o.emitStatus(mw, StepFailed, hungErr)
+			o.cleanup(context.Background(), mw, StepFailed)
 		case wfCtx.Err() != nil:
-			// Context was cancelled. Check this first: a child that traps
-			// SIGINT and exits 0 would otherwise be misclassified as StepDone.
-			// A watchdog-initiated kill (mw.hung) is a real failure — the
-			// agent was stuck — so it must still alert, even though the child
-			// suppressed its own report under orchestration. A user/shutdown
-			// cancellation is an expected stop and stays quiet.
-			if mw.hung.Load() {
-				o.logger.Error("subprocess hung — reporting failure",
-					"issue", issue.Identifier,
-					"error", err,
-					"log", mw.logPath,
-				)
-				o.reportSubprocessFailure(mw, fmt.Errorf("subprocess hung and was cancelled by watchdog: %w", err))
-			} else {
-				o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
-			}
+			// Context was cancelled by the user / shutdown. Check before the
+			// success case: a child that traps SIGINT and exits 0 would
+			// otherwise be misclassified as StepDone. An expected stop — the
+			// child suppressed its own report and we stay quiet here too.
+			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
 			o.emitStatus(mw, StepCancelled, wfCtx.Err())
 			o.cleanup(context.Background(), mw, StepCancelled)
 		case err == nil:

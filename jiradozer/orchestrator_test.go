@@ -605,6 +605,58 @@ func TestOrchestrator_CancelWithCleanExit(t *testing.T) {
 	require.Empty(t, removed, "cancelled worktree should not be removed")
 }
 
+// TestOrchestrator_HungIsFailedNotCancelled verifies that a watchdog-killed
+// (hung) subprocess is classified as StepFailed end to end — the emitted
+// status AND the preserved-worktree summary — not StepCancelled, so the alert,
+// the supervisor UI, and the summary all agree the run failed.
+//
+// Not t.Parallel(): same ETXTBSY fork/exec race as the other Cancel* tests.
+func TestOrchestrator_HungIsFailedNotCancelled(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	// Child traps SIGINT and exits non-zero, as a stuck agent killed by the
+	// watchdog's mw.cancel() (SIGINT) would.
+	script := writeTestScript(t, "trap 'exit 1' INT; sleep 60")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	require.NoError(t, orch.Start(ctx, issue))
+
+	// Drain StepInit.
+	select {
+	case <-orch.StatusUpdates():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StepInit")
+	}
+
+	// Simulate the watchdog's decision: mark the live workflow hung, then
+	// cancel (the watchdog sets mw.hung before calling mw.cancel()).
+	orch.mu.RLock()
+	mw := orch.active[issue.ID]
+	orch.mu.RUnlock()
+	require.NotNil(t, mw, "workflow should be active")
+	mw.hung.Store(true)
+	cancel()
+
+	// A hung run must surface as StepFailed, not StepCancelled.
+	select {
+	case status := <-orch.StatusUpdates():
+		require.Equal(t, StepFailed, status.Step, "hung run must be StepFailed, not StepCancelled")
+		require.Error(t, status.Error)
+		require.Contains(t, status.Error.Error(), "hung")
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for StepFailed")
+	}
+
+	orch.Wait()
+
+	// Preserved (default), and recorded as StepFailed — not StepCancelled.
+	preserved := orch.PreservedWorktrees()
+	require.Len(t, preserved, 1)
+	require.Equal(t, StepFailed, preserved[0].Step, "preserved summary must label a hung run as failed")
+}
+
 // TestOrchestrator_FailedWorktreePreservedByDefault asserts that a StepFailed
 // workflow preserves its worktree and branches by default. Failing steps
 // often fire mid-workflow after real work exists (pushed branch, open PR);
