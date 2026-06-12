@@ -59,6 +59,25 @@ func TestRenderFailureText(t *testing.T) {
 			t.Errorf("rendered text missing %q\ngot:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "```") {
+		t.Errorf("nil LogTail should not render a fenced block\ngot:\n%s", got)
+	}
+}
+
+func TestRenderFailureText_LogTail(t *testing.T) {
+	t.Parallel()
+	r := FailureReport{
+		Tool:    "jiradozer",
+		Target:  "INF-703",
+		Err:     errors.New("exit status 1"),
+		LogTail: []string{"E0610 build.go:42] codex auth error", "build step failed"},
+	}
+	got := r.renderFailureText()
+	for _, want := range []string{"Last log lines:", "```", "codex auth error", "build step failed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered text missing %q\ngot:\n%s", want, got)
+		}
+	}
 }
 
 func TestSlackWebhookNotifier(t *testing.T) {

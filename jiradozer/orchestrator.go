@@ -1,6 +1,7 @@
 package jiradozer
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelment/yoloswe/jiradozer/tracker"
 )
@@ -28,6 +30,21 @@ var errConcurrencyLimit = errors.New("concurrency limit reached")
 // another process polls a different state set, the label signals that the
 // issue is already being handled.
 const LockLabel = "jiradozer-active"
+
+// OrchestratedEnvVar is set in each child subprocess's environment so the
+// child knows it runs under an orchestrator parent and must not post its own
+// failure report — the orchestrator is the single reporter for per-issue
+// failures. Read by the child CLI (cmd/jiradozer) to suppress its own alert.
+const OrchestratedEnvVar = "JIRADOZER_ORCHESTRATED"
+
+// tailRingMax bounds the per-issue tail ring buffer: the last N subprocess
+// log lines retained for surfacing on failure. Small on purpose — enough
+// context for a human to triage, not a full transcript.
+const tailRingMax = 20
+
+// tailLineMax caps the length of any single retained tail line so a child
+// printing a huge line (e.g. a base64 blob) can't blow up the ring buffer.
+const tailLineMax = 2000
 
 // WorktreeManager is the interface for creating and removing git worktrees.
 type WorktreeManager interface {
@@ -63,23 +80,29 @@ type PreservedWorktree struct {
 //
 //nolint:govet // fieldalignment: sync types at the end require padding
 type Orchestrator struct {
-	tracker      tracker.IssueTracker
-	wtManager    WorktreeManager
-	out          io.Writer
-	config       *Config
-	logger       *slog.Logger
-	active       map[string]*managedWorkflow
-	statusChan   chan IssueStatus
-	slotFreed    chan struct{}
-	done         chan struct{}
-	childArgs    []string
-	repoName     string
-	selfPath     string
-	logDir       string
-	mu           sync.RWMutex
-	wg           sync.WaitGroup
-	forceCleanup bool
-	preserved    []PreservedWorktree
+	tracker    tracker.IssueTracker
+	wtManager  WorktreeManager
+	out        io.Writer
+	config     *Config
+	logger     *slog.Logger
+	active     map[string]*managedWorkflow
+	statusChan chan IssueStatus
+	slotFreed  chan struct{}
+	done       chan struct{}
+	childArgs  []string
+	repoName   string
+	selfPath   string
+	logDir     string
+	// notifier delivers the external failure alert (e.g. Slack) for per-issue
+	// subprocess failures. Nil disables the external sink; the tracker-comment
+	// sink (o.tracker) is always available. buildRevision is stamped into the
+	// failure report so a stale-deploy failure is obvious from the alert.
+	notifier      Notifier
+	buildRevision string
+	mu            sync.RWMutex
+	wg            sync.WaitGroup
+	forceCleanup  bool
+	preserved     []PreservedWorktree
 }
 
 //nolint:govet // fieldalignment: grouping by purpose (lifecycle vs watchdog) is more readable than tighter packing
@@ -88,6 +111,7 @@ type managedWorkflow struct {
 	issue        *tracker.Issue
 	cmd          *exec.Cmd
 	logFile      *os.File
+	logPath      string
 	cancel       context.CancelFunc
 	worktreePath string
 	branch       string
@@ -95,6 +119,13 @@ type managedWorkflow struct {
 	cancelled    bool
 	currentStep  string
 	stepMu       sync.Mutex
+	// tailRing is a bounded ring buffer of the most recent subprocess log
+	// lines, appended by tailSubprocessLog and read by the failure path so
+	// an on-call human sees what the child printed before it died without
+	// opening the per-issue log file. Guarded by tailMu. tailLines() returns
+	// a snapshot in chronological order.
+	tailMu   sync.Mutex
+	tailRing []string
 	// lastOutputAt is unix-nanos of the most recent log line from the
 	// subprocess. Written by tailSubprocessLog, read by runWatchdog to
 	// detect idle gaps.
@@ -111,6 +142,63 @@ type managedWorkflow struct {
 	// idle check during this window — otherwise a long human review
 	// would be killed by the prior step's timeout.
 	inReview atomic.Bool
+	// hung is set by runWatchdog just before it cancels a stalled workflow.
+	// It lets the cmd.Wait goroutine distinguish a watchdog-initiated kill (a
+	// genuine failure worth alerting — the agent was stuck) from a user/
+	// shutdown cancellation (an expected stop). Without it, a hung child would
+	// be silently classified as cancelled and no failure alert would fire,
+	// even though detecting stuck agents is the whole point of the watchdog.
+	hung atomic.Bool
+}
+
+// capTailLine strips a line's trailing newline and truncates it to tailLineMax
+// bytes on a rune boundary so a retained tail line stays valid UTF-8 (a split
+// multibyte rune renders as garbage in a tracker comment). Shared by the live
+// ring buffer (appendTail) and the file-sourced fallback (readLogTail) so both
+// retain lines identically. Returns "" for an empty/blank line.
+func capTailLine(line string) string {
+	line = strings.TrimRight(line, "\n")
+	if line == "" {
+		return ""
+	}
+	if len(line) > tailLineMax {
+		// Back up from the byte cap to the start of the rune it lands in.
+		cut := tailLineMax
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut] + "…"
+	}
+	return line
+}
+
+// appendTail records one subprocess log line in the bounded ring buffer.
+// The trailing newline is stripped and over-long lines are truncated so a
+// runaway child can't grow memory. Safe for concurrent use.
+func (mw *managedWorkflow) appendTail(line string) {
+	line = capTailLine(line)
+	if line == "" {
+		return
+	}
+	mw.tailMu.Lock()
+	defer mw.tailMu.Unlock()
+	mw.tailRing = append(mw.tailRing, line)
+	if len(mw.tailRing) > tailRingMax {
+		// Drop the oldest lines, keeping the last tailRingMax. Re-slice into
+		// a fresh backing array so the dropped lines can be garbage-collected
+		// instead of being pinned by a growing underlying array.
+		mw.tailRing = append([]string(nil), mw.tailRing[len(mw.tailRing)-tailRingMax:]...)
+	}
+}
+
+// tailLines returns a chronological snapshot of the retained tail lines.
+func (mw *managedWorkflow) tailLines() []string {
+	mw.tailMu.Lock()
+	defer mw.tailMu.Unlock()
+	if len(mw.tailRing) == 0 {
+		return nil
+	}
+	return append([]string(nil), mw.tailRing...)
 }
 
 // NewOrchestrator creates a new multi-issue orchestrator.
@@ -147,6 +235,27 @@ func (o *Orchestrator) SetSubprocessMode(selfPath string, childArgs []string, lo
 	o.selfPath = selfPath
 	o.childArgs = append([]string(nil), childArgs...)
 	o.logDir = logDir
+}
+
+// SetFailureReporting configures per-issue subprocess-failure alerting. The
+// tracker comment sink always uses o.tracker; notifier is the optional
+// external sink (e.g. Slack), and buildRevision is stamped into each report.
+// Both arguments are optional: a nil notifier and empty revision degrade
+// gracefully (ReportFailure is nil-safe; FailureReport omits empty fields).
+func (o *Orchestrator) SetFailureReporting(notifier Notifier, buildRevision string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.notifier = notifier
+	o.buildRevision = buildRevision
+}
+
+// FailureNotifier returns the currently-configured external failure notifier
+// (nil when none is set). Exposed so callers/tests can verify the sink after a
+// config reload re-applies SetFailureReporting.
+func (o *Orchestrator) FailureNotifier() Notifier {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.notifier
 }
 
 // SetForceCleanup controls whether worktrees are deleted when workflows are
@@ -211,6 +320,7 @@ func (o *Orchestrator) ActiveWorkflowSnapshots() []ManagedWorkflowSnapshot {
 			PID:          mw.pid,
 			Branch:       mw.branch,
 			WorktreePath: mw.worktreePath,
+			LogPath:      mw.logPath,
 			StartedAt:    mw.startedAt,
 		})
 	}
@@ -358,6 +468,12 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 
 	cmd := exec.CommandContext(wfCtx, selfPath, args...)
 	cmd.Dir = worktreePath
+	// Mark the child as orchestrated so it suppresses its own failure
+	// report: the orchestrator is the single source of truth for per-issue
+	// failures (it always observes the death, including watchdog/SIGINT
+	// kills the child can't self-report), and it carries the log path + tail
+	// the child's self-report lacks. Inherit the rest of the environment.
+	cmd.Env = append(os.Environ(), OrchestratedEnvVar+"=1")
 	// Graceful shutdown: send SIGINT so the child can clean up, then
 	// force-kill after WaitDelay if it hasn't exited.
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
@@ -421,6 +537,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		startedAt:    time.Now(),
 		cmd:          cmd,
 		logFile:      logFile,
+		logPath:      logPath,
 		pid:          cmd.Process.Pid,
 	}
 
@@ -457,10 +574,27 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 		defer close(stop)
 		err := cmd.Wait()
 		switch {
+		case wfCtx.Err() != nil && mw.hung.Load():
+			// A watchdog-initiated kill is a real failure — the agent was stuck
+			// — so it must be reported AND classified as StepFailed end to end:
+			// the alert, the supervisor status, and the preserved-worktree
+			// summary must all agree it failed. (Checked before the plain
+			// cancellation case below; a hung run is not an expected stop.)
+			hungErr := fmt.Errorf("subprocess hung and was cancelled by watchdog: %w", err)
+			o.logger.Error("subprocess hung — reporting failure",
+				"issue", issue.Identifier,
+				"error", err,
+				"log", mw.logPath,
+				"tail", strings.Join(mw.tailLines(), " ⏎ "),
+			)
+			o.reportSubprocessFailure(mw, hungErr)
+			o.emitStatus(mw, StepFailed, hungErr)
+			o.cleanup(context.Background(), mw, StepFailed)
 		case wfCtx.Err() != nil:
-			// Context was cancelled (user pressed Ctrl+C). Check this first:
-			// a child that traps SIGINT and exits 0 would otherwise be
-			// misclassified as StepDone.
+			// Context was cancelled by the user / shutdown. Check before the
+			// success case: a child that traps SIGINT and exits 0 would
+			// otherwise be misclassified as StepDone. An expected stop — the
+			// child suppressed its own report and we stay quiet here too.
 			o.logger.Warn("subprocess cancelled", "issue", issue.Identifier, "error", err)
 			o.emitStatus(mw, StepCancelled, wfCtx.Err())
 			o.cleanup(context.Background(), mw, StepCancelled)
@@ -469,7 +603,13 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 			o.emitStatus(mw, StepDone, nil)
 			o.cleanup(context.Background(), mw, StepDone)
 		default:
-			o.logger.Error("subprocess failed", "issue", issue.Identifier, "error", err)
+			o.logger.Error("subprocess failed",
+				"issue", issue.Identifier,
+				"error", err,
+				"log", mw.logPath,
+				"tail", strings.Join(mw.tailLines(), " ⏎ "),
+			)
+			o.reportSubprocessFailure(mw, err)
 			o.emitStatus(mw, StepFailed, err)
 			o.cleanup(context.Background(), mw, StepFailed)
 		}
@@ -782,6 +922,7 @@ func (o *Orchestrator) RestoreActive(snapshots []ManagedWorkflowSnapshot) []stri
 			startedAt:    snap.StartedAt,
 			worktreePath: snap.WorktreePath,
 			branch:       snap.Branch,
+			logPath:      snap.LogPath,
 			pid:          snap.PID,
 		}
 		o.mu.Lock()
@@ -806,7 +947,8 @@ func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
 	_, err := syscall.Wait4(mw.pid, &status, 0, &usage)
 	switch {
 	case err != nil:
-		o.logger.Error("restored subprocess wait failed", "issue", mw.issue.Identifier, "pid", mw.pid, "error", err)
+		o.logger.Error("restored subprocess wait failed", "issue", mw.issue.Identifier, "pid", mw.pid, "error", err, "log", mw.logPath)
+		o.reportSubprocessFailure(mw, err)
 		o.emitStatus(mw, StepFailed, err)
 		o.cleanup(context.Background(), mw, StepFailed)
 	case status.Exited() && status.ExitStatus() == 0:
@@ -819,10 +961,108 @@ func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
 		o.cleanup(context.Background(), mw, StepCancelled)
 	default:
 		err := fmt.Errorf("subprocess pid %d exited with wait status %d", mw.pid, status)
-		o.logger.Error("restored subprocess failed", "issue", mw.issue.Identifier, "pid", mw.pid, "status", int(status))
+		o.logger.Error("restored subprocess failed", "issue", mw.issue.Identifier, "pid", mw.pid, "status", int(status), "log", mw.logPath)
+		o.reportSubprocessFailure(mw, err)
 		o.emitStatus(mw, StepFailed, err)
 		o.cleanup(context.Background(), mw, StepFailed)
 	}
+}
+
+// reportSubprocessFailure fans a per-issue subprocess failure out to the
+// configured sinks (tracker comment + optional notifier), carrying the child
+// log path and a tail of its final output so an on-call human can triage
+// without grepping the log directory. Best-effort: ReportFailure never errors
+// and a nil notifier / unavailable tracker simply skips that sink.
+//
+// The orchestrator is the single reporter for per-issue failures — children
+// launched under it suppress their own report (see OrchestratedEnvVar) — so a
+// cleanly-failing child does not double-comment.
+func (o *Orchestrator) reportSubprocessFailure(mw *managedWorkflow, err error) {
+	o.mu.RLock()
+	notifier := o.notifier
+	buildRevision := o.buildRevision
+	o.mu.RUnlock()
+
+	step := FailingStepFromError(err)
+	if step == "" {
+		// The child error from the orchestrator's vantage point is a bare
+		// "exit status N" with no step prefix, so fall back to the last step
+		// the tailer observed.
+		mw.stepMu.Lock()
+		step = mw.currentStep
+		mw.stepMu.Unlock()
+	}
+
+	// Prefer the live in-memory ring; fall back to reading the log file when
+	// it's empty. The ring is empty for exec-restored workflows (no tailer is
+	// re-attached after a restart) and for children that exit so fast the
+	// tailer never ran — exactly the cases where a human most needs the tail.
+	tail := mw.tailLines()
+	if len(tail) == 0 && mw.logPath != "" {
+		tail = readLogTail(mw.logPath, tailRingMax)
+	}
+
+	report := FailureReport{
+		Tool:          "jiradozer",
+		Target:        mw.issue.Identifier,
+		Step:          step,
+		Err:           err,
+		BuildRevision: buildRevision,
+		LogPath:       mw.logPath,
+		LogTail:       tail,
+	}
+	ReportFailure(context.Background(), o.logger, o.tracker, mw.issue.ID, notifier, report)
+}
+
+// readLogTail returns the last n lines of the file at path, each trimmed and
+// length-capped the same way the live ring buffer is, so a file-sourced tail
+// is indistinguishable from an in-memory one. Best-effort: returns nil on any
+// read error — a missing tail must never block the failure report itself.
+func readLogTail(path string, n int) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	// Bound the read so a multi-GB child log can't be slurped into memory: the
+	// tail lives in the last chunk. tailRingMax short lines fit comfortably in
+	// 64 KiB; seek to the tail and scan forward.
+	const tailReadBytes = 64 * 1024
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil
+	}
+	start := size - tailReadBytes
+	if start < 0 {
+		start = 0
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return nil
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), tailLineMax*2)
+	ring := make([]string, 0, n)
+	first := start > 0 // dropped a partial first line by seeking mid-file
+	for scanner.Scan() {
+		if first {
+			first = false // discard the partial line at the seek boundary
+			continue
+		}
+		line := capTailLine(scanner.Text())
+		if line == "" {
+			continue
+		}
+		ring = append(ring, line)
+		if len(ring) > n {
+			ring = ring[1:]
+		}
+	}
+	if err := scanner.Err(); err != nil || len(ring) == 0 {
+		return nil
+	}
+	return ring
 }
 
 func (o *Orchestrator) wasCancelled(mw *managedWorkflow) bool {

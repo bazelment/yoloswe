@@ -653,6 +653,11 @@ func TestTeamSupervisorReloadUpdatesConfigAndOrchestrator(t *testing.T) {
 		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
 	}
 
+	// Apply failure reporting once up front (as newTeamSupervisor does) so we
+	// can assert that reload re-applies it when the webhook changes.
+	s.applyFailureReporting()
+	require.Nil(t, s.orch.FailureNotifier(), "no webhook configured initially")
+
 	content, err := os.ReadFile(cfgPath)
 	require.NoError(t, err)
 	content = bytes.Replace(content, []byte("poll_interval: 15s"), []byte("poll_interval: 1s"), 1)
@@ -661,6 +666,8 @@ source:
     filters:
         team: ENG
     max_concurrent: 2
+notify:
+    slack_webhook: https://hooks.example.com/abc
 `)...)
 	require.NoError(t, os.WriteFile(cfgPath, content, 0o600))
 
@@ -669,6 +676,7 @@ source:
 	require.Equal(t, 2, s.cfg.Source.MaxConcurrent)
 	require.Equal(t, time.Second, s.cfg.PollInterval)
 	require.Equal(t, 2, s.orch.ConfigSnapshot().Source.MaxConcurrent)
+	require.NotNil(t, s.orch.FailureNotifier(), "reload must re-apply the failure notifier when slack_webhook changes")
 }
 
 // TestDryRunFlagPlacement verifies --dry-run is honored regardless of where
