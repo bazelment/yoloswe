@@ -1,0 +1,16 @@
+{
+  "principle": {
+    "substance": [
+      "The author wants the doc grilled — your job is to surface systemic issues, not nits. Focus on the substance of the design, not on prose style or markdown formatting.",
+      "Prioritize systemic problems over local ones. A finding that says \"the milestone strategy doesn't frontload risk\" is more useful than five findings flagging individual late-milestone risks. Bundle related observations into one finding tagged with the rubric question they jointly point at."
+    ]
+  },
+  "expertise": {
+    "citation": [
+      "When you flag an issue, cite the section heading the issue lives under (e.g. \"section\": \"Milestone 2: Multi-tenant rollout\"). Do not invent line numbers — the doc may be edited between rounds and section headings are the durable address. If the issue is doc-wide rather than section-specific, set \"section\" to \"(whole document)\"."
+    ],
+    "scope": [
+      "Do not modify the document. The orchestrator applies fixes between rounds — your job is feedback only."
+    ]
+  }
+}

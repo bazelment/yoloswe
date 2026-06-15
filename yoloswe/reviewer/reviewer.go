@@ -265,28 +265,16 @@ func buildBasePrompt(goal string, opts PromptOptions) string {
 	}
 }
 
-// buildCodeBasePrompt is the legacy code-review persona + focus list. The
-// body must stay byte-equivalent to the prior buildBasePrompt output so
-// existing snapshot tests and prompt-shape callers see no change.
+// buildCodeBasePrompt is the code-review persona plus the guidance section.
+// The persona and goal line are fixed scaffolding; the guidance ("focus
+// areas") is assembled from the prompts/prompts.json registry, grouped by the
+// type and topic keys (see assembleGuidance). Editing the registry changes the
+// guidance without touching this function.
 func buildCodeBasePrompt(goal string, skipTestExecution bool) string {
-	base := fmt.Sprintf(`You are experienced software engineer, with bias toward code quality and correctness.
-%s
-
-Focus on these areas:
-- Is the implementation correct? Is there any gap that should be addressed.
-- Does it provide sufficient test coverage about the code path it touched.
-- maintainability. also look at code around it, is there any code duplication that can be avoided.
-- developer experience.
-- performance.
-- security.
-
-When you find N >= 2 sibling sites of the same underlying rule violation (same invariant, different lines), emit ONE issue with a named "invariant" and a "sites" array. Do NOT emit N separate single-site issues. The invariant name describes the rule being violated (e.g. "ambient env vars shadow explicit proxy keys"), not the symptom. A single finding that names the producer-side invariant beats N findings that patch consumer sites — see the Class-level findings section of the output format for the exact shape.
-
-Prioritize systemic problems over local ones. If after scanning the diff and adjacent code you find no structural issues, return an empty issues array with verdict "accepted". Finding nothing on a clean diff is the right call; do not strain to find something to flag.
-
-When you flag an issue, provide a short, direct explanation and cite the affected file and line range.
-Prioritize severe issues and avoid nit-level comments unless they block understanding of the diff.
-Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected.`, buildGoalText(goal))
+	base := "You are experienced software engineer, with bias toward code quality and correctness.\n" +
+		buildGoalText(goal) + "\n\n" +
+		"Please grade the code on the following topics: " + strings.Join(reviewTopics, ", ") + ".\n\n" +
+		reviewGuidance
 	if skipTestExecution {
 		base += skipTestExecutionSuffix
 	}
@@ -332,18 +320,15 @@ func buildDesignDocBasePrompt(goal string, opts PromptOptions) string {
 	for i, q := range rubric {
 		fmt.Fprintf(&rubricLines, "%d. %s\n", i+1, q)
 	}
-	return fmt.Sprintf(`You are a staff engineer reviewing a software design document. The author wants the doc grilled — your job is to surface systemic issues, not nits. Focus on the substance of the design, not on prose style or markdown formatting.
-
-%s
-
-Grill the document on the following questions. Each issue you raise must be tagged with the question it answers (e.g. "dimension": "q1") so the orchestrator can group findings by axis:
-
-%s
-When you flag an issue, cite the section heading the issue lives under (e.g. "section": "Milestone 2: Multi-tenant rollout"). Do not invent line numbers — the doc may be edited between rounds and section headings are the durable address. If the issue is doc-wide rather than section-specific, set "section" to "(whole document)".
-
-Prioritize systemic problems over local ones. A finding that says "the milestone strategy doesn't frontload risk" is more useful than five findings flagging individual late-milestone risks. Bundle related observations into one finding tagged with the rubric question they jointly point at.
-
-Do not modify the document. The orchestrator applies fixes between rounds — your job is feedback only.`, buildDesignDocGoalText(goal), strings.TrimRight(rubricLines.String(), "\n"))
+	// Persona + goal + rubric intro are fixed scaffolding around the dynamic
+	// rubric; the substance/citation/scope guidance is assembled from the
+	// prompts/design_doc.json registry (see designDocGuidance).
+	return "You are a staff engineer reviewing a software design document.\n" +
+		buildDesignDocGoalText(goal) + "\n\n" +
+		"Please grade the document on the following topics: " + strings.Join(designDocTopics, ", ") + ".\n\n" +
+		"Grill the document on the following questions. Each issue you raise must be tagged with the question it answers (e.g. \"dimension\": \"q1\") so the orchestrator can group findings by axis:\n\n" +
+		strings.TrimRight(rubricLines.String(), "\n") + "\n\n" +
+		designDocGuidance
 }
 
 // buildDesignDocGoalText is the design-doc analogue of buildGoalText. Empty
@@ -822,7 +807,31 @@ func jsonOutputRules(mode ReviewMode) string {
 	if mode == ReviewModeDesignDoc {
 		return designDocJSONOutputRules
 	}
-	return codeJSONOutputRules
+	return codeJSONOutputRules + codeTopicGradesRules
+}
+
+// codeTopicGradesRules instructs the reviewer to score each code-review topic.
+// It is built from reviewTopics so the graded topics track the registry: add a
+// topic to prompts/code_base.json and it appears here automatically.
+var codeTopicGradesRules = buildTopicGradesRules(reviewTopics)
+
+func buildTopicGradesRules(topics []string) string {
+	if len(topics) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n## Topic grades\n")
+	b.WriteString(`In the same JSON object, also include a top-level "grades" object scoring each review topic from 1 (poor) to 5 (excellent), each with a one-line rationale. Grade every topic listed:` + "\n")
+	b.WriteString("{\n  \"grades\": {\n")
+	for i, t := range topics {
+		comma := ","
+		if i == len(topics)-1 {
+			comma = ""
+		}
+		fmt.Fprintf(&b, "    %q: {\"score\": 1-5, \"rationale\": \"...\"}%s\n", t, comma)
+	}
+	b.WriteString("  }\n}")
+	return b.String()
 }
 
 const codeJSONOutputRules = `

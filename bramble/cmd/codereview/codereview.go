@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -36,6 +37,7 @@ var (
 	resumePromptStyle string
 	reviewMode        string
 	rubricFile        string
+	printPrompt       bool
 )
 
 type promptStyle string
@@ -89,6 +91,7 @@ func init() {
 	Cmd.Flags().StringVar(&resumePromptStyle, "resume-prompt-style", "fresh", "Prompt style when resuming: follow-up or fresh. Auto-promotes to follow-up when --resume-session-id is set without an explicit style.")
 	Cmd.Flags().StringVar(&reviewMode, "review-mode", "code", "Review mode: code (default; reviewer.ReviewModeCode) or design-doc (reviewer.ReviewModeDesignDoc).")
 	Cmd.Flags().StringVar(&rubricFile, "review-rubric-file", "", "Path to a rubric file (one grilling question per non-blank line). Required for --review-mode design-doc; rejected for --review-mode code.")
+	Cmd.Flags().BoolVar(&printPrompt, "print-prompt", false, "Assemble and print the review prompt (including the per-topic grading schema) to stdout, then exit. Makes no backend call.")
 }
 
 func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
@@ -286,6 +289,10 @@ func runCodeReview(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return emitEarlyFailure(err, r.EffectiveModel(), mode, emitEnvelope)
 	}
+	if printPrompt {
+		fmt.Fprintln(os.Stdout, prompt)
+		return nil
+	}
 	result, err := r.ReviewWithResult(ctx, prompt)
 	if err != nil {
 		slog.Error("review failed", "error", err.Error())
@@ -365,8 +372,31 @@ func emitVerdictLine(env reviewer.ResultEnvelope) {
 	}
 	if env.Status == reviewer.StatusOK {
 		fmt.Fprintf(os.Stdout, "verdict: %s (%d issues)%s\n", env.Review.Verdict, len(env.Review.Issues), resumeSuffix)
+		emitTopicGrades(env.Review.Grades)
 	} else {
 		fmt.Fprintf(os.Stdout, "error: %s%s\n", env.Error, resumeSuffix)
+	}
+}
+
+// emitTopicGrades prints one line per topic grade, sorted by topic for
+// deterministic output. No-op when the reviewer returned no grades, so
+// grade-free envelopes (e.g. design-doc mode) print exactly as before.
+func emitTopicGrades(grades map[string]reviewer.TopicGrade) {
+	if len(grades) == 0 {
+		return
+	}
+	topics := make([]string, 0, len(grades))
+	for t := range grades {
+		topics = append(topics, t)
+	}
+	sort.Strings(topics)
+	for _, t := range topics {
+		g := grades[t]
+		if g.Rationale != "" {
+			fmt.Fprintf(os.Stdout, "grade[%s]: %d/5 — %s\n", t, g.Score, g.Rationale)
+		} else {
+			fmt.Fprintf(os.Stdout, "grade[%s]: %d/5\n", t, g.Score)
+		}
 	}
 }
 

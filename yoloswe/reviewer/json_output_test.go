@@ -839,11 +839,11 @@ func TestSufficiency_OmittedRemainsNil(t *testing.T) {
 	}
 }
 
-// TestSchemaVersion_IsV2 pins the bump. Anyone bumping JSONSchemaVersion
+// TestSchemaVersion_IsV3 pins the bump. Anyone bumping JSONSchemaVersion
 // should also update the docstring on the constant and notify downstream
 // readers; this test catches accidental reverts.
-func TestSchemaVersion_IsV2(t *testing.T) {
-	if JSONSchemaVersion != 2 {
-		t.Errorf("JSONSchemaVersion = %d, want 2 (Issue.Invariant/Sites + ReviewBody.Sufficiency)", JSONSchemaVersion)
+func TestSchemaVersion_IsV3(t *testing.T) {
+	if JSONSchemaVersion != 3 {
+		t.Errorf("JSONSchemaVersion = %d, want 3 (adds ReviewBody.Grades)", JSONSchemaVersion)
 	}
 }
