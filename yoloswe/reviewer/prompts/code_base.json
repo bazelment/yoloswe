@@ -1,0 +1,44 @@
+{
+  "principle": {
+    "design": [
+      "Prefer the simplest design that satisfies the requirements.",
+      "Flag unnecessary abstraction, premature generalization, or indirection that adds structure without a clear payoff.",
+      "How does the format look like?",
+      "Does the file need refactoring?",
+      "Do we need some level of abstraction?",
+      "Maintainability — also look at the code around the change; is there duplication that can be avoided?"
+    ],
+    "functionality": [
+      "Is the implementation correct? Is there any gap that should be addressed?",
+      "Prioritize systemic problems over local ones. If after scanning the diff and adjacent code you find no structural issues, return an empty issues array with verdict \"accepted\". Finding nothing on a clean diff is the right call; do not strain to find something to flag.",
+      "When you find N >= 2 sibling sites of the same underlying rule violation (same invariant, different lines), emit ONE issue with a named \"invariant\" and a \"sites\" array. Do NOT emit N separate single-site issues. The invariant name describes the rule being violated (e.g. \"ambient env vars shadow explicit proxy keys\"), not the symptom. A single finding that names the producer-side invariant beats N findings that patch consumer sites — see the Class-level findings section of the output format for the exact shape.",
+      "security."
+    ],
+    "test": [
+      "Does it provide sufficient test coverage about the code path it touched?"
+    ],
+    "performance": [
+      "Is it compute bound and using multi-processing?",
+      "Is it IO bound and using multi-threading or asyncio or coroutine?",
+      "Is it memory bound and using memory efficiently?"
+    ]
+  },
+  "expertise": {
+    "design": [      
+      "Prioritize severe issues and avoid nit-level comments unless they block understanding of the diff.",
+      "Check code duplication that can be avoided.",
+      "Check doc string", 
+      "Check long file and long function"
+  ],
+    "functionality": [
+      "When you flag an issue, provide a short, direct explanation and cite the affected file and line range. Ensure that file citations and line numbers are exactly correct using the tools available; if they are incorrect your comments will be rejected."
+    ],
+    "performance": [
+      "Minimize usages of heap",
+      "Avoid recursion leading to stack overflow",
+      "Pass by const reference rather than value in C++",
+      "Use smart pointer rather than raw pointer", 
+      "Try to use asyncio?"
+    ]
+  }
+}

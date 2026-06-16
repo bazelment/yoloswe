@@ -14,7 +14,11 @@ import (
 // Issue.Sites) and reviewer self-assessment (ReviewBody.Sufficiency). Older
 // readers that don't know v2 ignore the new fields and continue to parse
 // v2 envelopes — the additions are strictly additive on the consumer side.
-const JSONSchemaVersion = 2
+//
+// v3 adds the optional code-mode ReviewBody.Grades map (per-topic 1-5 scores).
+// Like v2 it is strictly additive: readers that don't know it ignore the field
+// and continue to parse the envelope.
+const JSONSchemaVersion = 3
 
 // ReviewIssue mirrors the per-issue shape requested by BuildJSONPrompt.
 //
@@ -65,14 +69,27 @@ type IssueSite struct {
 // *float64 so the field can be distinguished between "not provided" and
 // "explicitly zero", same as ReviewIssue.Confidence. Code-mode envelopes
 // don't emit it; design-doc-mode envelopes require it.
-// Field order: pointers + slices first, then strings, per fieldalignment.
+// Grades holds optional code-mode per-topic scores keyed by topic (the topics
+// the prompt asked the reviewer to grade, e.g. design/functionality/test).
+// Code-mode envelopes populate it when the reviewer returns grades; design-doc
+// mode leaves it empty. omitempty keeps it off the wire when absent.
+// Field order: pointers + maps + slices first, then strings, per fieldalignment.
 type ReviewBody struct {
-	Confidence  *float64      `json:"confidence,omitempty"`
-	Sufficiency *Sufficiency  `json:"sufficiency,omitempty"`
-	Verdict     string        `json:"verdict,omitempty"`
-	Summary     string        `json:"summary,omitempty"`
-	RawText     string        `json:"raw_text,omitempty"`
-	Issues      []ReviewIssue `json:"issues,omitempty"`
+	Confidence  *float64              `json:"confidence,omitempty"`
+	Sufficiency *Sufficiency          `json:"sufficiency,omitempty"`
+	Grades      map[string]TopicGrade `json:"grades,omitempty"`
+	Verdict     string                `json:"verdict,omitempty"`
+	Summary     string                `json:"summary,omitempty"`
+	RawText     string                `json:"raw_text,omitempty"`
+	Issues      []ReviewIssue         `json:"issues,omitempty"`
+}
+
+// TopicGrade is a per-topic score the reviewer assigns in code mode: Score is
+// 1 (poor) to 5 (excellent), Rationale a one-line justification. Field order:
+// string before int per fieldalignment.
+type TopicGrade struct {
+	Rationale string `json:"rationale,omitempty"`
+	Score     int    `json:"score"`
 }
 
 // Sufficiency lets the reviewer claim "I think I've found all sites of

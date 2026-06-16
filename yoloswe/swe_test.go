@@ -435,7 +435,9 @@ func TestBuildInitialReviewPrompt(t *testing.T) {
 				t.Errorf("expected prompt to contain %q, got: %q", tt.shouldMatch, prompt)
 			}
 
-			// Check for key review areas
+			// Check for key review areas. These mirror topics/fragments in
+			// reviewer/prompts/code_base.json; update this list when editing
+			// that registry.
 			expectedSections := []string{
 				"correct",
 				"test coverage",
