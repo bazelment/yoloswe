@@ -14,6 +14,16 @@ type logicalTurnState struct {
 	lastResult       *claude.ResultMessageEvent
 	lastTurnComplete *claude.TurnCompleteEvent
 
+	// lastSuccessfulResult records the most recent non-error ResultMessageEvent
+	// of the logical turn. Unlike lastResult, it is NOT cleared by
+	// invalidateForContinuation, so it survives a continuation wave that was
+	// armed but never re-resulted before the stream closed. This is the only
+	// evidence that the turn ever succeeded once invalidation has nilled
+	// lastResult; the terminal-EOF resolution path consults it so a clean CLI
+	// exit after a successful wave is reported as success, not a silent
+	// Success=false. See claude_provider.go's closed-stream branches.
+	lastSuccessfulResult *claude.ResultMessageEvent
+
 	err error
 
 	liveTaskIDs           map[string]struct{}
@@ -37,6 +47,15 @@ type logicalTurnState struct {
 	// forcedDone latches a terminal TurnCompleteEvent with WakeupTimedOut set;
 	// LogicalTurnDone short-circuits on it.
 	forcedDone bool
+
+	// sawFailedBgTask latches when any background task reached a non-success
+	// terminal status (failed/killed/timeout). The terminal-EOF resolution
+	// must NOT report success when a bg task failed: a turn can emit a
+	// successful end-of-turn result while a Monitor is still live, then have
+	// that Monitor fail and the CLI exit without a continuation result. Without
+	// this gate, lastSuccessfulResult alone would mask the failed bg work as
+	// success. Consulted only by TurnSucceededTerminally.
+	sawFailedBgTask bool
 }
 
 func newLogicalTurnState() *logicalTurnState {
@@ -97,6 +116,9 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		// set — completed, failed, killed, timeout all count as "done".
 		s.terminalTaskIDs[e.TaskID] = struct{}{}
 		delete(s.liveTaskIDs, e.TaskID)
+		if isFailedTaskStatus(e.Status) {
+			s.sawFailedBgTask = true
+		}
 		toolUseID := ""
 		if e.ToolUseID != nil {
 			toolUseID = *e.ToolUseID
@@ -117,6 +139,9 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 				delete(s.liveTaskIDs, e.TaskID)
 				if tuid := s.taskToToolUse[e.TaskID]; tuid != "" {
 					s.completedBgToolUseIDs[tuid] = struct{}{}
+				}
+				if isFailedTaskStatus(*e.Status) {
+					s.sawFailedBgTask = true
 				}
 				s.invalidateForContinuation()
 			}
@@ -139,6 +164,10 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 			s.err = e.Error
 		} else {
 			s.err = nil
+			// Record the last non-error completion. This sticks across
+			// invalidateForContinuation so a clean stream close after a
+			// successful wave can still be resolved as success.
+			s.lastSuccessfulResult = &result
 		}
 
 	case claude.TurnCompleteEvent:
@@ -239,6 +268,16 @@ func (s *logicalTurnState) Success() bool {
 	return s.lastResult != nil && !s.lastResult.IsError
 }
 
+// TurnSucceededTerminally reports whether the logical turn ever produced a
+// successful completion that should hold at a clean stream close, even if the
+// last wave was invalidated for a continuation that never re-resulted. It is
+// only meaningful when no error is outstanding — a real error always wins —
+// and never holds when a background task reached a failed/killed/timeout
+// terminal status, which the absent continuation result would otherwise mask.
+func (s *logicalTurnState) TurnSucceededTerminally() bool {
+	return s.err == nil && !s.sawFailedBgTask && s.lastSuccessfulResult != nil
+}
+
 func (s *logicalTurnState) DurationMs() int64 {
 	if s.lastResult == nil {
 		return 0
@@ -256,6 +295,37 @@ func (s *logicalTurnState) ToTurnResult() *claude.TurnResult {
 		Thinking:      s.Thinking(),
 		ContentBlocks: s.blocks,
 		Error:         s.err,
+	}
+}
+
+// ToTerminalTurnResult resolves the turn at a clean stream close (EOF with no
+// error). It differs from ToTurnResult only in the success determination: when
+// the live wave was invalidated for a continuation that never arrived
+// (lastResult == nil) but an earlier wave succeeded (TurnSucceededTerminally),
+// the turn is reported as success. A real error or a turn that closed before
+// any successful result still reports Success=false via the normal path.
+func (s *logicalTurnState) ToTerminalTurnResult() *claude.TurnResult {
+	result := s.ToTurnResult()
+	if !result.Success && s.TurnSucceededTerminally() {
+		result.Success = true
+		// Surface the last successful wave's duration (ToTurnResult derived 0
+		// from the nilled lastResult); usage/text/blocks already accumulate
+		// across waves and survive invalidation. TurnSucceededTerminally
+		// guarantees lastSuccessfulResult is non-nil here.
+		result.DurationMs = s.lastSuccessfulResult.DurationMs
+	}
+	return result
+}
+
+// isFailedTaskStatus reports whether a terminal background-task status is a
+// failure rather than a clean completion. "completed" is the only success;
+// failed/killed/timeout all indicate the bg work did not succeed.
+func isFailedTaskStatus(status string) bool {
+	switch status {
+	case "failed", "killed", "timeout":
+		return true
+	default:
+		return false
 	}
 }
 

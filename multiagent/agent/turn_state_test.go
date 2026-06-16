@@ -692,6 +692,150 @@ func TestTurnState_SawTurnComplete(t *testing.T) {
 		"a new ResultMessage clears the prior wave's TurnComplete")
 }
 
+// INF-1400 state-machine repro: a successful wave's ResultMessage is recorded
+// as lastSuccessfulResult, and a terminal bg-task event then invalidates the
+// live wave (lastResult -> nil) awaiting a continuation that never arrives.
+// TurnSucceededTerminally must still report true so a clean stream close can
+// resolve the turn as success, and ToTerminalTurnResult must flip Success to
+// true even though the live-path Success()/ToTurnResult() report false.
+func TestTurnState_SuccessfulWaveSurvivesInvalidation(t *testing.T) {
+	s := newLogicalTurnState()
+
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	})
+	s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")})
+	endOfCLITurn(s, false) // successful wave -> lastSuccessfulResult recorded
+
+	require.True(t, s.Success(), "live wave is successful before invalidation")
+	require.True(t, s.TurnSucceededTerminally())
+
+	// Terminal bg event invalidates the wave: lastResult -> nil, so the live
+	// path now reports failure while awaiting a continuation.
+	s.Apply(claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "completed",
+	})
+	require.False(t, s.Success(),
+		"after invalidation the live path reports Success=false (lastResult nil)")
+	require.False(t, s.ToTurnResult().Success,
+		"live-path ToTurnResult mirrors Success() — still gating")
+	require.True(t, s.TurnSucceededTerminally(),
+		"the successful wave must survive invalidation")
+
+	// Terminal-EOF resolution recovers the success — including the duration
+	// from the last successful wave (ToTurnResult derived 0 from the nilled
+	// lastResult). resultMessage(false) sets DurationMs=100.
+	terminal := s.ToTerminalTurnResult()
+	require.True(t, terminal.Success,
+		"ToTerminalTurnResult must resolve a clean EOF after a successful wave as success")
+	require.NoError(t, terminal.Error)
+	require.Equal(t, int64(100), terminal.DurationMs,
+		"terminal resolution must restore the successful wave's duration, not fall back to 0")
+}
+
+// A background task that reaches a failed/killed/timeout terminal status must
+// suppress terminal success: the CLI can emit a successful end-of-turn result
+// while a Monitor is still live, then have that Monitor fail and exit without a
+// continuation result. Resolving such an EOF as success would mask the failed
+// bg work. Covers both terminal event shapes.
+func TestTurnState_FailedBgTaskSuppressesTerminalSuccess(t *testing.T) {
+	failureCases := []struct {
+		name   string
+		status string
+	}{
+		{"failed", "failed"},
+		{"killed", "killed"},
+		{"timeout", "timeout"},
+	}
+	for _, tc := range failureCases {
+		t.Run("notification/"+tc.name, func(t *testing.T) {
+			s := newLogicalTurnState()
+			s.Apply(claude.AssistantMessageEvent{
+				TurnNumber: 1,
+				Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+			})
+			s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")})
+			endOfCLITurn(s, false) // successful end-of-turn while bg still live
+			require.True(t, s.TurnSucceededTerminally())
+
+			s.Apply(claude.TaskNotificationEvent{
+				TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: tc.status,
+			})
+			require.False(t, s.TurnSucceededTerminally(),
+				"a %s bg task must suppress terminal success", tc.status)
+			require.False(t, s.ToTerminalTurnResult().Success,
+				"the failed bg task must not be reported as a terminal success")
+		})
+
+		t.Run("updated/"+tc.name, func(t *testing.T) {
+			s := newLogicalTurnState()
+			s.Apply(claude.AssistantMessageEvent{
+				TurnNumber: 1,
+				Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+			})
+			s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")})
+			endOfCLITurn(s, false)
+			require.True(t, s.TurnSucceededTerminally())
+
+			status := tc.status
+			s.Apply(claude.TaskUpdatedEvent{TaskID: "task1", Status: &status})
+			require.False(t, s.TurnSucceededTerminally(),
+				"a %s bg task (via TaskUpdatedEvent) must suppress terminal success", tc.status)
+			require.False(t, s.ToTerminalTurnResult().Success)
+		})
+	}
+}
+
+// TurnSucceededTerminally / ToTerminalTurnResult must NOT manufacture success
+// when no successful ResultMessage was ever seen, nor mask a real error.
+func TestTurnState_TerminalResolutionRespectsFailures(t *testing.T) {
+	t.Run("no result ever", func(t *testing.T) {
+		s := newLogicalTurnState()
+		s.Apply(claude.AssistantMessageEvent{
+			TurnNumber: 1,
+			Blocks:     claude.ContentBlocks{asstTextBlock("starting")},
+		})
+		require.False(t, s.TurnSucceededTerminally())
+		require.False(t, s.ToTerminalTurnResult().Success,
+			"a turn with no successful result must not be resolved as success")
+	})
+
+	t.Run("error result", func(t *testing.T) {
+		s := newLogicalTurnState()
+		s.Apply(claude.AssistantMessageEvent{
+			TurnNumber: 1,
+			Blocks:     claude.ContentBlocks{asstTextBlock("oops")},
+		})
+		endOfCLITurn(s, true) // error wave -> state.err set
+		require.False(t, s.TurnSucceededTerminally(),
+			"an outstanding error must suppress terminal success")
+		terminal := s.ToTerminalTurnResult()
+		require.False(t, terminal.Success)
+		require.Error(t, terminal.Error, "a real error must be preserved, not masked")
+	})
+
+	t.Run("success then later error", func(t *testing.T) {
+		s := newLogicalTurnState()
+		// A successful wave, then a continuation that errors: the live error
+		// must win over the earlier success.
+		s.Apply(claude.AssistantMessageEvent{
+			TurnNumber: 1,
+			Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+		})
+		s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")})
+		endOfCLITurn(s, false)
+		s.Apply(claude.TaskNotificationEvent{
+			TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "completed",
+		})
+		s.Apply(resultMessage(true)) // continuation errors -> state.err set
+		require.False(t, s.TurnSucceededTerminally(),
+			"a later error must override an earlier successful wave")
+		require.False(t, s.ToTerminalTurnResult().Success)
+		require.Error(t, s.ToTerminalTurnResult().Error)
+	})
+}
+
 // A terminal TaskNotificationEvent that arrives before the corresponding
 // TaskStartedEvent (stream reorder) must not leave the task stuck live when
 // the belated TaskStartedEvent finally shows up.
