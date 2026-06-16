@@ -577,6 +577,47 @@ func TestConsumeTurnEvents_ClosedStreamAfterInvalidatedSuccessIsSuccess(t *testi
 	require.NotNil(t, result)
 	require.True(t, result.Success,
 		"a clean stream close after a successful-then-invalidated wave must resolve as success")
+	require.Equal(t, int64(100), result.DurationMs,
+		"terminal resolution must restore the successful wave's duration (resultMessage sets 100)")
+}
+
+// A failed/killed/timeout bg task at a clean stream close must NOT be reported
+// as success: the successful end-of-turn result fired while the Monitor was
+// still live, the Monitor then failed, and the CLI exited without a
+// continuation. Without the failed-task gate this would mask the failure as a
+// terminal success.
+func TestConsumeTurnEvents_ClosedStreamAfterFailedBgTaskIsFailure(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	events <- resultMessage(false) // successful end-of-turn while bg still live
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	// The Monitor FAILS: terminal notification invalidates the wave and marks
+	// the bg work failed.
+	events <- claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "failed",
+	}
+	close(events) // CLI exits without a continuation ResultMessage
+
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, time.Hour, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeTurnEvents hung on a closed stream")
+	}
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success,
+		"a clean stream close after a FAILED bg task must not be reported as success")
 }
 
 // Negative case: a stream that closes before ANY successful ResultMessage is a

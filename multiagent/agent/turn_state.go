@@ -47,6 +47,15 @@ type logicalTurnState struct {
 	// forcedDone latches a terminal TurnCompleteEvent with WakeupTimedOut set;
 	// LogicalTurnDone short-circuits on it.
 	forcedDone bool
+
+	// sawFailedBgTask latches when any background task reached a non-success
+	// terminal status (failed/killed/timeout). The terminal-EOF resolution
+	// must NOT report success when a bg task failed: a turn can emit a
+	// successful end-of-turn result while a Monitor is still live, then have
+	// that Monitor fail and the CLI exit without a continuation result. Without
+	// this gate, lastSuccessfulResult alone would mask the failed bg work as
+	// success. Consulted only by TurnSucceededTerminally.
+	sawFailedBgTask bool
 }
 
 func newLogicalTurnState() *logicalTurnState {
@@ -107,6 +116,9 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 		// set — completed, failed, killed, timeout all count as "done".
 		s.terminalTaskIDs[e.TaskID] = struct{}{}
 		delete(s.liveTaskIDs, e.TaskID)
+		if isFailedTaskStatus(e.Status) {
+			s.sawFailedBgTask = true
+		}
 		toolUseID := ""
 		if e.ToolUseID != nil {
 			toolUseID = *e.ToolUseID
@@ -127,6 +139,9 @@ func (s *logicalTurnState) Apply(ev claude.Event) {
 				delete(s.liveTaskIDs, e.TaskID)
 				if tuid := s.taskToToolUse[e.TaskID]; tuid != "" {
 					s.completedBgToolUseIDs[tuid] = struct{}{}
+				}
+				if isFailedTaskStatus(*e.Status) {
+					s.sawFailedBgTask = true
 				}
 				s.invalidateForContinuation()
 			}
@@ -256,9 +271,11 @@ func (s *logicalTurnState) Success() bool {
 // TurnSucceededTerminally reports whether the logical turn ever produced a
 // successful completion that should hold at a clean stream close, even if the
 // last wave was invalidated for a continuation that never re-resulted. It is
-// only meaningful when no error is outstanding — a real error always wins.
+// only meaningful when no error is outstanding — a real error always wins —
+// and never holds when a background task reached a failed/killed/timeout
+// terminal status, which the absent continuation result would otherwise mask.
 func (s *logicalTurnState) TurnSucceededTerminally() bool {
-	return s.err == nil && s.lastSuccessfulResult != nil
+	return s.err == nil && !s.sawFailedBgTask && s.lastSuccessfulResult != nil
 }
 
 func (s *logicalTurnState) DurationMs() int64 {
@@ -298,6 +315,18 @@ func (s *logicalTurnState) ToTerminalTurnResult() *claude.TurnResult {
 		result.DurationMs = s.lastSuccessfulResult.DurationMs
 	}
 	return result
+}
+
+// isFailedTaskStatus reports whether a terminal background-task status is a
+// failure rather than a clean completion. "completed" is the only success;
+// failed/killed/timeout all indicate the bg work did not succeed.
+func isFailedTaskStatus(status string) bool {
+	switch status {
+	case "failed", "killed", "timeout":
+		return true
+	default:
+		return false
+	}
 }
 
 // backgroundToolNames lists tool names the CLI treats as background even

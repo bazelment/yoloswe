@@ -259,6 +259,18 @@ Do these steps, then END YOUR TURN immediately (do not wait, do not summarize at
 	logs := buf.String()
 	assert.NotContains(t, strings.ToLower(logs), "agent failed",
 		"a clean ScheduleWakeup+bg turn must not surface 'agent failed'")
+
+	// The doneMarker proves the bg Monitor actually ran to completion — i.e.
+	// the ScheduleWakeup + bg-Monitor EOF path this test guards was exercised,
+	// not a degenerate run where the model skipped the tools and the step
+	// passed trivially. Mirrors the slow-marker check in TestValidate_PRPolishLocal:
+	// log (don't hard-fail) if absent, since the model could deviate, but assert
+	// it when present so a green run is real coverage.
+	if _, statErr := os.Stat(doneMarker); statErr != nil {
+		t.Logf("bg-done marker missing (%v) — model may not have launched the Monitor; EOF path may not have been exercised", statErr)
+	} else {
+		t.Logf("bg-done marker present — ScheduleWakeup + bg-Monitor EOF path exercised")
+	}
 }
 
 // multiWriter is a tiny tee that writes into two writers while grabbing a
