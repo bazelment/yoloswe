@@ -192,8 +192,10 @@ eventLoop:
 			case ev, ok := <-events:
 				if !ok {
 					// Stream closed: terminal. Mirror the closed-stream path
-					// below — never a retryable TransientError.
-					return state.ToTurnResult(), state.Err()
+					// below — never a retryable TransientError. Resolve via the
+					// terminal path so a clean EOF after a successful wave that
+					// was invalidated for an absent continuation reports success.
+					return state.ToTerminalTurnResult(), state.Err()
 				}
 				// The grace timer already fired (its channel is drained but
 				// graceTimer is still non-nil). Clear it, then fall through to
@@ -224,7 +226,12 @@ eventLoop:
 				// A closed stream is terminal, not a transient stall: unlike the
 				// grace path above, don't reclassify a Success=false/Err=nil
 				// result as transient — there is no live session left to resume.
-				return state.ToTurnResult(), state.Err()
+				// Resolve via the terminal path: a clean EOF after a successful
+				// wave that was invalidated for a continuation which never
+				// re-resulted (e.g. a turn that ended on ScheduleWakeup + a
+				// completed background Monitor) is a success, not a silent
+				// Success=false/Error=nil that callers read as "agent failed".
+				return state.ToTerminalTurnResult(), state.Err()
 			}
 			state.Apply(ev)
 			if dispatch != nil {

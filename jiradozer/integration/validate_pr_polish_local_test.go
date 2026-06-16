@@ -193,6 +193,89 @@ After BOTH settle, report their terminal statuses. Do not edit any files.`,
 		"post-refactor logs must not reference the removed guard")
 }
 
+// TestValidate_ScheduleWakeupWithBgMonitor — end-to-end regression for the
+// INF-1400 false failure (jiradozer run 1781627251447569146): a validate round
+// that ends its turn on a ScheduleWakeup plus a background Monitor that
+// completes. The terminal task notification invalidates the live wave and the
+// CLI then exits — the stream closes before any continuation ResultMessage.
+// Before the fix the multiagent provider returned Success=false/Error=nil for
+// this clean exit, which jiradozer's agent runner reported as the bare
+// "validate round N/N: agent failed" seen in the log. The Validate step must
+// instead complete successfully.
+func TestValidate_ScheduleWakeupWithBgMonitor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	workDir := t.TempDir()
+	binDir := t.TempDir()
+	writeFakeBramble(t, binDir)
+
+	origPath := os.Getenv("PATH")
+	require.NoError(t, os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath))
+	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
+
+	buf := &captureLogBuffer{}
+	logger := slog.New(slog.NewTextHandler(
+		multiWriter(os.Stderr, &buf.b, &buf.mu),
+		&slog.HandlerOptions{Level: slog.LevelInfo},
+	))
+
+	issue := e2eIssue()
+	ft := NewFakeTracker(e2eWorkflowStates())
+	ft.AddIssue(*issue)
+
+	cfg := e2eConfig(t, workDir)
+	doneMarker := filepath.Join(workDir, "inf1400_bg_done.txt")
+	cfg.Validate = jiradozer.StepConfig{
+		Model:           "haiku",
+		PermissionMode:  "bypass",
+		MaxTurns:        6,
+		MaxBudgetUSD:    2.0,
+		AutoApprove:     true,
+		CommentTemplate: e2eCompleteCommentTemplate,
+		Prompt: `Issue: {{.Identifier}} — {{.Title}}
+
+Do these steps, then END YOUR TURN immediately (do not wait, do not summarize at length):
+
+1. Launch a Monitor tool running ` + "`bramble code-review --backend cursor --goal fake && echo INF1400_BG_DONE > " + doneMarker + "`" + ` — this completes in ~12s.
+2. Call the ScheduleWakeup tool with delaySeconds 60 and a short reason like "checking background work".
+3. End your turn. Do not edit any files.`,
+	}
+
+	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
+	var transitions []jiradozer.WorkflowStep
+	var mu sync.Mutex
+	wf.OnTransition = func(step jiradozer.WorkflowStep) {
+		mu.Lock()
+		transitions = append(transitions, step)
+		mu.Unlock()
+		t.Logf("transition → %s", step)
+	}
+
+	err := wf.Run(ctx)
+	require.NoError(t, err, "workflow must not surface a false 'agent failed' for a ScheduleWakeup+bg-Monitor turn")
+
+	mu.Lock()
+	got := append([]jiradozer.WorkflowStep(nil), transitions...)
+	mu.Unlock()
+	sawValidateReview := false
+	for _, step := range got {
+		if step == jiradozer.StepValidateReview {
+			sawValidateReview = true
+			break
+		}
+	}
+	assert.True(t, sawValidateReview, "Validate step should have transitioned to ValidateReview")
+
+	logs := buf.String()
+	assert.NotContains(t, strings.ToLower(logs), "agent failed",
+		"a clean ScheduleWakeup+bg turn must not surface 'agent failed'")
+}
+
 // multiWriter is a tiny tee that writes into two writers while grabbing a
 // mutex on the second (since bytes.Buffer is not concurrency-safe and the
 // slog handler writes from multiple goroutines).

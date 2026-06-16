@@ -530,6 +530,114 @@ func TestConsumeTurnEvents_GraceResetsAcrossContinuationWave(t *testing.T) {
 		"wave 2 must get a fresh grace window, not wave 1's leftover slack")
 }
 
+// INF-1400 repro at the streamTurn layer (jiradozer run 1781627251447569146,
+// /pr-polish-style validate round 3): the agent ends its turn on a
+// ScheduleWakeup plus a background Monitor that *completes*; a terminal task
+// notification invalidates the wave's Result+TurnComplete pair (lastResult ->
+// nil), and the CLI then exits cleanly — the event stream CLOSES before any
+// continuation ResultMessage arrives. This is distinct from the grace path
+// (TestConsumeTurnEvents_GraceForcedNonSuccessIsTransient): there the stream
+// stays open and silent with a live bg tool, so the stall is transient. Here
+// the stream is closed — the CLI process is gone, there is nothing to resume —
+// so a turn that produced a successful wave must resolve as a terminal success,
+// NOT the silent Success=false/Error=nil that a caller (jiradozer) reads as a
+// bare "agent failed".
+func TestConsumeTurnEvents_ClosedStreamAfterInvalidatedSuccessIsSuccess(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	// Wave 1: assistant ends on a bg Monitor; CLI fires a successful Result +
+	// TurnComplete while the bg task is still live.
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{monitorToolUse("toolu_bg1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_bg1")}
+	events <- resultMessage(false) // Success=true; recorded as lastSuccessfulResult
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	// The bg work completes: a terminal notification invalidates the wave's
+	// Result+TurnComplete pair (lastResult -> nil) and the bg tool finishes.
+	events <- claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_bg1"), Status: "completed",
+	}
+	// The CLI exits cleanly — no continuation ResultMessage arrives.
+	close(events)
+
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, time.Hour, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeTurnEvents hung on a closed stream")
+	}
+	require.NoError(t, err, "a clean EOF must not synthesize an error")
+	require.NotNil(t, result)
+	require.True(t, result.Success,
+		"a clean stream close after a successful-then-invalidated wave must resolve as success")
+}
+
+// Negative case: a stream that closes before ANY successful ResultMessage is a
+// real failure — the terminal-EOF resolution must NOT manufacture success.
+func TestConsumeTurnEvents_ClosedStreamBeforeAnyResultIsFailure(t *testing.T) {
+	events := make(chan claude.Event, 8)
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{asstTextBlock("starting")},
+	}
+	// No ResultMessage ever arrives; the stream just closes.
+	close(events)
+
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, time.Hour, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeTurnEvents hung on a closed stream")
+	}
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success,
+		"a stream that closes before any successful result must report Success=false")
+}
+
+// Negative case: a stream that closes after an ERROR result must surface the
+// error unchanged — the terminal-EOF resolution must never mask a real error,
+// even though no live bg tool keeps the turn gated.
+func TestConsumeTurnEvents_ClosedStreamAfterErrorPreservesError(t *testing.T) {
+	events := make(chan claude.Event, 8)
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{asstTextBlock("oops")},
+	}
+	events <- resultMessage(true) // error result -> state.err set, Success=false
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: false}
+	close(events)
+
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, time.Hour, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeTurnEvents hung on a closed stream")
+	}
+	require.Error(t, err, "a closed stream after an error result must surface the error")
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+}
+
 // resolveGracePeriod must honor a positive ExecuteConfig override and fall back
 // to the provider default for the zero value. This is the per-step
 // configurability that lets long-running background work (e.g. bramble
