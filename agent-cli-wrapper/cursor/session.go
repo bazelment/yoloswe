@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -178,14 +179,24 @@ func (s *Session) stderrLoop() {
 	}
 }
 
-// handleLine processes a single NDJSON line. Lines that fail to parse are
-// skipped rather than aborting the session: the cursor-agent protocol drifts
-// (new shapes for known frames), and one bad frame must not discard a session
-// that is otherwise streaming useful frames. Process read errors stay fatal and
-// are surfaced as ErrorEvents by readLoop.
+// handleLine processes a single NDJSON line.
+//
+// A malformed non-terminal frame (assistant, tool_call, system) is skipped, not
+// fatal: the cursor-agent protocol drifts (new shapes for known frames), and one
+// bad frame must not discard a session that is otherwise streaming useful
+// frames. The terminal "result" frame is the exception — losing it would leave
+// the caller with no TurnCompleteEvent (truncated output, or a QueryStream that
+// blocks until EOF), so a malformed result frame stays a fatal ErrorEvent.
 func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 	msg, err := ParseMessage(line)
 	if err != nil {
+		if isTerminalFrame(line) {
+			s.emit(ErrorEvent{
+				Error:   &ProtocolError{Message: "failed to parse message", Line: string(line), Cause: err},
+				Context: "parse_message",
+			})
+			return
+		}
 		slog.Debug("cursor: skipping unparseable frame", "error", err, "line", string(line))
 		return
 	}
@@ -204,6 +215,18 @@ func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 	case *ResultMessage:
 		s.handleResult(m)
 	}
+}
+
+// isTerminalFrame reports whether the raw line is a "result" frame — the one
+// frame whose loss breaks the caller contract (no TurnCompleteEvent). A line
+// whose type can't even be read is not treated as terminal: that's the
+// shape-drift case handleLine deliberately tolerates.
+func isTerminalFrame(line []byte) bool {
+	var raw RawMessage
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return false
+	}
+	return raw.Type == "result"
 }
 
 func (s *Session) handleSystemInit(msg *SystemInitMessage) {

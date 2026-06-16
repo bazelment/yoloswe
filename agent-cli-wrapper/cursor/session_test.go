@@ -118,9 +118,8 @@ func TestSession_ErrorResult(t *testing.T) {
 	assert.False(t, turnComplete.Success)
 }
 
-// A malformed line is skipped, not surfaced as a (fatal) ErrorEvent. Parse-time
-// failures must never abort the session — only process read errors (handled in
-// readLoop) are fatal.
+// A malformed line whose type can't be read is skipped, not surfaced as a
+// (fatal) ErrorEvent — it's indistinguishable from the shape-drift case.
 func TestSession_MalformedLine(t *testing.T) {
 	lines := []string{
 		`{bad json}`,
@@ -128,6 +127,35 @@ func TestSession_MalformedLine(t *testing.T) {
 
 	events := fakeSession(t, lines)
 	assert.Empty(t, events, "a malformed line should be skipped, producing no events")
+}
+
+// A malformed terminal "result" frame stays fatal: losing it would leave the
+// caller with no TurnCompleteEvent (truncated output / a stream that blocks
+// until EOF), so it must surface as an ErrorEvent rather than being skipped.
+func TestSession_MalformedResultFrameIsFatal(t *testing.T) {
+	lines := []string{
+		// Valid type discriminator, but duration_ms is a string where an int64
+		// is expected — the result body fails to unmarshal.
+		`{"type":"result","subtype":"success","duration_ms":"oops","session_id":"s1"}`,
+	}
+
+	events := fakeSession(t, lines)
+	require.Len(t, events, 1)
+
+	errEvt, ok := events[0].(ErrorEvent)
+	require.True(t, ok, "a malformed result frame must surface as an ErrorEvent")
+	assert.Equal(t, "parse_message", errEvt.Context)
+}
+
+// A malformed non-terminal frame (here, assistant) is skipped — only the result
+// frame is fatal. Losing one assistant delta is better than aborting the run.
+func TestSession_MalformedAssistantFrameIsSkipped(t *testing.T) {
+	lines := []string{
+		`{"type":"assistant","message":{"role":"assistant","content":"not-an-array"},"session_id":"s1"}`,
+	}
+
+	events := fakeSession(t, lines)
+	assert.Empty(t, events, "a malformed non-terminal frame should be skipped")
 }
 
 // A malformed or unrecognized frame mid-stream must not abort the session:
