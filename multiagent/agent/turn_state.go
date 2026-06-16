@@ -291,11 +291,11 @@ func (s *logicalTurnState) ToTerminalTurnResult() *claude.TurnResult {
 	result := s.ToTurnResult()
 	if !result.Success && s.TurnSucceededTerminally() {
 		result.Success = true
-		// Surface the last successful wave's duration; usage/text/blocks
-		// already accumulate across waves and survive invalidation.
-		if s.lastSuccessfulResult != nil {
-			result.DurationMs = s.lastSuccessfulResult.DurationMs
-		}
+		// Surface the last successful wave's duration (ToTurnResult derived 0
+		// from the nilled lastResult); usage/text/blocks already accumulate
+		// across waves and survive invalidation. TurnSucceededTerminally
+		// guarantees lastSuccessfulResult is non-nil here.
+		result.DurationMs = s.lastSuccessfulResult.DurationMs
 	}
 	return result
 }

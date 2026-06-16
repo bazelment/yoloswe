@@ -97,6 +97,60 @@ func (c *captureLogBuffer) String() string {
 	return c.b.String()
 }
 
+// setupValidateWorkflow wires the shared fake-bramble integration harness: a
+// fake `bramble` on PATH, a log-capturing logger, a FakeTracker seeded with the
+// e2e issue, and a Workflow whose OnTransition records every step. It returns
+// the workflow plus the capture buffer and a thread-safe accessor for the
+// recorded transitions. Callers supply the already-customised cfg (typically
+// with a per-test cfg.Validate prompt).
+func setupValidateWorkflow(t *testing.T, binDir string, cfg *jiradozer.Config) (*jiradozer.Workflow, *captureLogBuffer, func() []jiradozer.WorkflowStep) {
+	t.Helper()
+	writeFakeBramble(t, binDir)
+
+	// Prepend fake binDir to PATH so the agent's Bash/Monitor tools pick it up
+	// instead of any real bramble binary.
+	origPath := os.Getenv("PATH")
+	require.NoError(t, os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath))
+	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
+
+	buf := &captureLogBuffer{}
+	logger := slog.New(slog.NewTextHandler(
+		multiWriter(os.Stderr, &buf.b, &buf.mu),
+		&slog.HandlerOptions{Level: slog.LevelInfo},
+	))
+
+	issue := e2eIssue()
+	ft := NewFakeTracker(e2eWorkflowStates())
+	ft.AddIssue(*issue)
+
+	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
+	var transitions []jiradozer.WorkflowStep
+	var mu sync.Mutex
+	wf.OnTransition = func(step jiradozer.WorkflowStep) {
+		mu.Lock()
+		transitions = append(transitions, step)
+		mu.Unlock()
+		t.Logf("transition → %s", step)
+	}
+
+	snapshot := func() []jiradozer.WorkflowStep {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]jiradozer.WorkflowStep(nil), transitions...)
+	}
+	return wf, buf, snapshot
+}
+
+// sawStep reports whether want appears in the recorded transitions.
+func sawStep(steps []jiradozer.WorkflowStep, want jiradozer.WorkflowStep) bool {
+	for _, step := range steps {
+		if step == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestValidate_PRPolishLocal (C14) — the post-refactor regression for the
 // INF-401 workflow failure. See file comment for invariants.
 func TestValidate_PRPolishLocal(t *testing.T) {
@@ -108,25 +162,6 @@ func TestValidate_PRPolishLocal(t *testing.T) {
 	defer cancel()
 
 	workDir := t.TempDir()
-	binDir := t.TempDir()
-	writeFakeBramble(t, binDir)
-
-	// Prepend fake binDir to PATH so the agent's Bash/Monitor tools pick
-	// it up instead of any real bramble binary.
-	origPath := os.Getenv("PATH")
-	require.NoError(t, os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath))
-	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
-
-	// Capture logs so we can assert removed signals absent.
-	buf := &captureLogBuffer{}
-	logger := slog.New(slog.NewTextHandler(
-		multiWriter(os.Stderr, &buf.b, &buf.mu),
-		&slog.HandlerOptions{Level: slog.LevelInfo},
-	))
-
-	issue := e2eIssue()
-	ft := NewFakeTracker(e2eWorkflowStates())
-	ft.AddIssue(*issue)
 
 	cfg := e2eConfig(t, workDir)
 	// Redirect Validate to the pr-polish-style prompt. We write out the
@@ -150,15 +185,7 @@ You MUST launch TWO bg tool_uses in the SAME turn (do both before waiting):
 After BOTH settle, report their terminal statuses. Do not edit any files.`,
 	}
 
-	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
-	var transitions []jiradozer.WorkflowStep
-	var mu sync.Mutex
-	wf.OnTransition = func(step jiradozer.WorkflowStep) {
-		mu.Lock()
-		transitions = append(transitions, step)
-		mu.Unlock()
-		t.Logf("transition → %s", step)
-	}
+	wf, buf, transitions := setupValidateWorkflow(t, t.TempDir(), cfg)
 
 	start := time.Now()
 	err := wf.Run(ctx)
@@ -166,17 +193,8 @@ After BOTH settle, report their terminal statuses. Do not edit any files.`,
 	require.NoError(t, err, "workflow should not error")
 
 	// Invariant 1: Validate step transitioned past review (not refused).
-	mu.Lock()
-	got := append([]jiradozer.WorkflowStep(nil), transitions...)
-	mu.Unlock()
-	sawValidateReview := false
-	for _, step := range got {
-		if step == jiradozer.StepValidateReview {
-			sawValidateReview = true
-			break
-		}
-	}
-	assert.True(t, sawValidateReview, "Validate step should have transitioned to ValidateReview")
+	assert.True(t, sawStep(transitions(), jiradozer.StepValidateReview),
+		"Validate step should have transitioned to ValidateReview")
 
 	// Invariant 2: elapsed >= 12s (the slow Monitor ran to completion).
 	if _, statErr := os.Stat(slowMarker); statErr != nil {
@@ -211,22 +229,6 @@ func TestValidate_ScheduleWakeupWithBgMonitor(t *testing.T) {
 	defer cancel()
 
 	workDir := t.TempDir()
-	binDir := t.TempDir()
-	writeFakeBramble(t, binDir)
-
-	origPath := os.Getenv("PATH")
-	require.NoError(t, os.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath))
-	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
-
-	buf := &captureLogBuffer{}
-	logger := slog.New(slog.NewTextHandler(
-		multiWriter(os.Stderr, &buf.b, &buf.mu),
-		&slog.HandlerOptions{Level: slog.LevelInfo},
-	))
-
-	issue := e2eIssue()
-	ft := NewFakeTracker(e2eWorkflowStates())
-	ft.AddIssue(*issue)
 
 	cfg := e2eConfig(t, workDir)
 	doneMarker := filepath.Join(workDir, "inf1400_bg_done.txt")
@@ -246,30 +248,13 @@ Do these steps, then END YOUR TURN immediately (do not wait, do not summarize at
 3. End your turn. Do not edit any files.`,
 	}
 
-	wf := jiradozer.NewWorkflow(ft, issue, cfg, logger)
-	var transitions []jiradozer.WorkflowStep
-	var mu sync.Mutex
-	wf.OnTransition = func(step jiradozer.WorkflowStep) {
-		mu.Lock()
-		transitions = append(transitions, step)
-		mu.Unlock()
-		t.Logf("transition → %s", step)
-	}
+	wf, buf, transitions := setupValidateWorkflow(t, t.TempDir(), cfg)
 
 	err := wf.Run(ctx)
 	require.NoError(t, err, "workflow must not surface a false 'agent failed' for a ScheduleWakeup+bg-Monitor turn")
 
-	mu.Lock()
-	got := append([]jiradozer.WorkflowStep(nil), transitions...)
-	mu.Unlock()
-	sawValidateReview := false
-	for _, step := range got {
-		if step == jiradozer.StepValidateReview {
-			sawValidateReview = true
-			break
-		}
-	}
-	assert.True(t, sawValidateReview, "Validate step should have transitioned to ValidateReview")
+	assert.True(t, sawStep(transitions(), jiradozer.StepValidateReview),
+		"Validate step should have transitioned to ValidateReview")
 
 	logs := buf.String()
 	assert.NotContains(t, strings.ToLower(logs), "agent failed",
