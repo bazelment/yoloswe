@@ -12,16 +12,22 @@ import (
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/internal/ndjson"
 )
 
-// fakeSession simulates a cursor session by writing NDJSON lines to a pipe
-// and reading events from the session's handleLine method.
+// fakeSession drives the real Session.handleLine dispatch over a set of NDJSON
+// lines and collects the events it emits. It exercises production parsing code
+// directly rather than reimplementing it, so the test stays in lockstep with
+// session.go (e.g. parse/skip behavior) instead of drifting from it.
 func fakeSession(t *testing.T, lines []string) []Event {
 	t.Helper()
+
+	s := &Session{
+		events: make(chan Event, 100),
+		done:   make(chan struct{}),
+	}
 
 	pr, pw := io.Pipe()
 	go func() {
 		w := ndjson.NewWriter(pw)
 		for _, line := range lines {
-			// Write raw JSON lines
 			if err := w.WriteRaw([]byte(line)); err != nil {
 				t.Logf("write error: %v", err)
 			}
@@ -30,58 +36,18 @@ func fakeSession(t *testing.T, lines []string) []Event {
 	}()
 
 	reader := ndjson.NewReader(pr)
-	events := make(chan Event, 100)
-
-	go func() {
-		defer close(events)
-		var textBuilder strings.Builder
-		for {
-			line, err := reader.ReadLine()
-			if err != nil {
-				return
-			}
-
-			msg, err := ParseMessage(line)
-			if err != nil {
-				events <- ErrorEvent{Error: err, Context: "parse"}
-				continue
-			}
-			if msg == nil {
-				// Unknown but valid message type — skip (mirrors session.go behavior).
-				continue
-			}
-
-			// Simulate session's handleLine dispatch
-			switch m := msg.(type) {
-			case *SystemInitMessage:
-				events <- ReadyEvent{SessionID: m.SessionID, Model: m.Model}
-			case *AssistantMessage:
-				for _, block := range m.Message.Content {
-					if block.Type == "text" && block.Text != "" {
-						textBuilder.WriteString(block.Text)
-						events <- TextEvent{Text: block.Text, FullText: textBuilder.String()}
-					}
-				}
-			case *ToolCallMessage:
-				detail, err := ParseToolCallDetail(m)
-				if err != nil {
-					events <- ErrorEvent{Error: err, Context: "tool_call"}
-					continue
-				}
-				switch m.Subtype {
-				case "started":
-					events <- ToolStartEvent{ID: m.CallID, Name: detail.Name, Input: detail.Args}
-				case "completed":
-					events <- ToolCompleteEvent{ID: m.CallID, Name: detail.Name, Input: detail.Args, Result: detail.Result}
-				}
-			case *ResultMessage:
-				events <- TurnCompleteEvent{Success: !m.IsError, DurationMs: m.DurationMs, DurationAPIMs: m.DurationAPIMs}
-			}
+	var textBuilder strings.Builder
+	for {
+		line, err := reader.ReadLine()
+		if err != nil {
+			break
 		}
-	}()
+		s.handleLine(line, &textBuilder)
+	}
+	close(s.events)
 
 	var collected []Event
-	for evt := range events {
+	for evt := range s.events {
 		collected = append(collected, evt)
 	}
 	return collected
@@ -152,17 +118,55 @@ func TestSession_ErrorResult(t *testing.T) {
 	assert.False(t, turnComplete.Success)
 }
 
+// A malformed line is skipped, not surfaced as a (fatal) ErrorEvent. Parse-time
+// failures must never abort the session — only process read errors (handled in
+// readLoop) are fatal.
 func TestSession_MalformedLine(t *testing.T) {
 	lines := []string{
 		`{bad json}`,
 	}
 
 	events := fakeSession(t, lines)
-	require.Len(t, events, 1)
+	assert.Empty(t, events, "a malformed line should be skipped, producing no events")
+}
 
-	errEvt, ok := events[0].(ErrorEvent)
+// A malformed or unrecognized frame in the middle of a stream must not abort the
+// session: frames before and after it are still delivered. This is the core
+// regression guard — historically one array-shaped tool_call frame killed an
+// entire code-review run.
+func TestSession_SkipsBadFrameAndContinues(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"s1","model":"cursor-fast","cwd":"/tmp","permissionMode":"auto","apiKeySource":"env"}`,
+		`{bad json}`, // malformed — skipped
+		`{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":"unparseable-detail","session_id":"s1"}`,                             // bad detail — skipped
+		`{"type":"tool_call","subtype":"started","call_id":"c2","tool_call":[{"readToolCall":{"args":{"path":"/tmp/x.go"}}}],"session_id":"s1"}`, // array shape — delivered
+		`{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"result":"done","session_id":"s1"}`,
+	}
+
+	events := fakeSession(t, lines)
+
+	// No ErrorEvents — nothing here is fatal.
+	for _, evt := range events {
+		_, isErr := evt.(ErrorEvent)
+		assert.False(t, isErr, "no frame in this stream should produce a fatal ErrorEvent")
+	}
+
+	// Ready, the array-shaped tool start, and the terminal result all survive.
+	require.Len(t, events, 3)
+
+	ready, ok := events[0].(ReadyEvent)
 	require.True(t, ok)
-	assert.Equal(t, "parse", errEvt.Context)
+	assert.Equal(t, "s1", ready.SessionID)
+
+	toolStart, ok := events[1].(ToolStartEvent)
+	require.True(t, ok)
+	assert.Equal(t, "c2", toolStart.ID)
+	assert.Equal(t, "readToolCall", toolStart.Name)
+	assert.Equal(t, "/tmp/x.go", toolStart.Input["path"])
+
+	turn, ok := events[2].(TurnCompleteEvent)
+	require.True(t, ok)
+	assert.True(t, turn.Success)
 }
 
 func TestNewSession_DefaultConfig(t *testing.T) {

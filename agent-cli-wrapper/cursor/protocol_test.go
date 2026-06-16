@@ -74,6 +74,66 @@ func TestParseMessage_ToolCallCompleted(t *testing.T) {
 	assert.Equal(t, "file contents here", detail.Result)
 }
 
+// The cursor-agent CLI sometimes emits the tool_call field as a one-element
+// array instead of a bare object. Previously this failed to unmarshal and
+// aborted the entire session; now it must parse identically to the object shape.
+func TestParseMessage_ToolCallArrayShapeStarted(t *testing.T) {
+	line := []byte(`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":[{"readToolCall":{"args":{"path":"/tmp/test.go"}}}],"session_id":"sess-123"}`)
+
+	msg, err := ParseMessage(line)
+	require.NoError(t, err, "array-shaped tool_call must not fail to parse")
+
+	tcMsg, ok := msg.(*ToolCallMessage)
+	require.True(t, ok)
+	assert.Equal(t, "started", tcMsg.Subtype)
+	assert.Equal(t, "call-1", tcMsg.CallID)
+
+	detail, err := ParseToolCallDetail(tcMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "readToolCall", detail.Name)
+	assert.Equal(t, "/tmp/test.go", detail.Args["path"])
+	assert.Nil(t, detail.Result)
+}
+
+func TestParseMessage_ToolCallArrayShapeCompleted(t *testing.T) {
+	line := []byte(`{"type":"tool_call","subtype":"completed","call_id":"call-1","tool_call":[{"readToolCall":{"args":{"path":"/tmp/test.go"},"result":"file contents here"}}],"session_id":"sess-123"}`)
+
+	msg, err := ParseMessage(line)
+	require.NoError(t, err)
+
+	tcMsg, ok := msg.(*ToolCallMessage)
+	require.True(t, ok)
+	assert.Equal(t, "completed", tcMsg.Subtype)
+
+	detail, err := ParseToolCallDetail(tcMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "readToolCall", detail.Name)
+	assert.Equal(t, "/tmp/test.go", detail.Args["path"])
+	assert.Equal(t, "file contents here", detail.Result)
+}
+
+// A tool_call frame whose detail can't be interpreted still parses as a frame
+// (ParseMessage succeeds) — the session skips it rather than aborting. Only
+// ParseToolCallDetail surfaces the unusable shape, as an error the caller drops.
+func TestParseMessage_ToolCallUnrecognizedShapeIsNonFatal(t *testing.T) {
+	line := []byte(`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":"unexpected-string","session_id":"sess-123"}`)
+
+	msg, err := ParseMessage(line)
+	require.NoError(t, err, "the frame itself must parse; only detail extraction may fail")
+
+	tcMsg, ok := msg.(*ToolCallMessage)
+	require.True(t, ok)
+
+	_, err = ParseToolCallDetail(tcMsg)
+	require.Error(t, err, "an unrecognized tool_call shape yields a detail error, not a panic")
+}
+
+func TestParseToolCallDetail_EmptyArray(t *testing.T) {
+	msg := &ToolCallMessage{ToolCall: []byte(`[]`)}
+	_, err := ParseToolCallDetail(msg)
+	require.Error(t, err)
+}
+
 func TestParseMessage_ResultSuccess(t *testing.T) {
 	line := []byte(`{"type":"result","subtype":"success","duration_ms":1234,"duration_api_ms":1000,"is_error":false,"result":"All done","session_id":"sess-123"}`)
 

@@ -44,15 +44,24 @@ type AssistantMessage struct {
 }
 
 // ToolCallMessage represents a tool call event (started or completed).
-// The tool_call field is a map with a single key (the tool name) mapping to the tool call detail.
+//
+// The tool_call field carries a single tool call but the cursor-agent CLI emits
+// it in more than one JSON shape, so it is held as a raw message and decoded by
+// ParseToolCallDetail rather than typed directly (a typed field made the whole
+// frame — and therefore the whole session — fail when the shape drifted).
+//
+// Observed shapes:
+//   - object (documented): {"readToolCall":{"args":{...},"result":...}}
+//   - array:               [{"readToolCall":{"args":{...}}}]
+//
 // Example: {"type":"tool_call","subtype":"started","call_id":"...","tool_call":{"readToolCall":{"args":{"path":"..."}}},"session_id":"..."}
 // Example: {"type":"tool_call","subtype":"completed","call_id":"...","tool_call":{"readToolCall":{"args":{"path":"..."},"result":"..."}},"session_id":"..."}
 type ToolCallMessage struct {
-	Type      string                            `json:"type"`
-	Subtype   string                            `json:"subtype"`
-	CallID    string                            `json:"call_id"`
-	ToolCall  map[string]map[string]interface{} `json:"tool_call"`
-	SessionID string                            `json:"session_id"`
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype"`
+	CallID    string          `json:"call_id"`
+	SessionID string          `json:"session_id"`
+	ToolCall  json.RawMessage `json:"tool_call"`
 }
 
 // ToolCallDetail holds the extracted name, args, and optional result from a tool call.
@@ -62,14 +71,24 @@ type ToolCallDetail struct {
 	Name   string
 }
 
+// toolCallEntry is the {tool_name → {args, result?}} mapping that appears either
+// directly as the tool_call object or as the elements of the tool_call array.
+type toolCallEntry map[string]map[string]interface{}
+
 // ParseToolCallDetail extracts the tool call detail from a ToolCallMessage.
-// The tool_call field is a map with a single key (tool name) → {args, result?}.
+// The tool_call field is a single-key map (tool name) → {args, result?}, which
+// the CLI emits either bare (object shape) or wrapped in a one-element array.
 func ParseToolCallDetail(msg *ToolCallMessage) (*ToolCallDetail, error) {
 	if msg == nil || len(msg.ToolCall) == 0 {
 		return nil, fmt.Errorf("empty tool_call field")
 	}
 
-	for name, detail := range msg.ToolCall {
+	entry, err := decodeToolCallEntry(msg.ToolCall)
+	if err != nil {
+		return nil, err
+	}
+
+	for name, detail := range entry {
 		d := &ToolCallDetail{Name: name}
 
 		if args, ok := detail["args"]; ok {
@@ -86,6 +105,52 @@ func ParseToolCallDetail(msg *ToolCallMessage) (*ToolCallDetail, error) {
 	}
 
 	return nil, fmt.Errorf("no tool call entries found")
+}
+
+// decodeToolCallEntry decodes the raw tool_call field into a single
+// {tool_name → detail} entry, tolerating both the object and array shapes the
+// cursor-agent CLI emits.
+func decodeToolCallEntry(raw json.RawMessage) (toolCallEntry, error) {
+	trimmed := skipJSONSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty tool_call field")
+	}
+
+	switch trimmed[0] {
+	case '{':
+		var entry toolCallEntry
+		if err := json.Unmarshal(trimmed, &entry); err != nil {
+			return nil, fmt.Errorf("decode tool_call object: %w", err)
+		}
+		return entry, nil
+	case '[':
+		var entries []toolCallEntry
+		if err := json.Unmarshal(trimmed, &entries); err != nil {
+			return nil, fmt.Errorf("decode tool_call array: %w", err)
+		}
+		for _, entry := range entries {
+			if len(entry) > 0 {
+				return entry, nil
+			}
+		}
+		return nil, fmt.Errorf("no tool call entries found")
+	default:
+		return nil, fmt.Errorf("unexpected tool_call shape: %s", string(trimmed[:1]))
+	}
+}
+
+// skipJSONSpace trims leading JSON whitespace so the first meaningful byte can
+// be inspected to discriminate object vs array shape.
+func skipJSONSpace(b []byte) []byte {
+	for len(b) > 0 {
+		switch b[0] {
+		case ' ', '\t', '\r', '\n':
+			b = b[1:]
+		default:
+			return b
+		}
+	}
+	return b
 }
 
 // ResultMessage represents the final result of a session.

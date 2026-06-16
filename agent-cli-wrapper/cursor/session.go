@@ -178,17 +178,19 @@ func (s *Session) stderrLoop() {
 }
 
 // handleLine processes a single NDJSON line.
+//
+// A line that fails to parse is skipped, not treated as fatal. The cursor-agent
+// protocol drifts (new fields, new shapes for known frames), and a single
+// unparseable line must not abort a session that is otherwise streaming useful
+// frames — historically one array-shaped tool_call frame would kill an entire
+// code-review run. Skipping mirrors how unknown-but-valid message types are
+// already dropped below. Genuinely fatal conditions (process read errors) are
+// surfaced as ErrorEvents by readLoop, not here.
 func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 	msg, err := ParseMessage(line)
 	if err != nil {
-		s.emit(ErrorEvent{
-			Error: &ProtocolError{
-				Message: "failed to parse message",
-				Line:    string(line),
-				Cause:   err,
-			},
-			Context: "parse_message",
-		})
+		// Unparseable frame (e.g. an unrecognized shape of a known type) —
+		// skip it rather than failing the whole session.
 		return
 	}
 	if msg == nil {
@@ -238,10 +240,9 @@ func (s *Session) handleAssistant(msg *AssistantMessage, textBuilder *strings.Bu
 func (s *Session) handleToolCall(msg *ToolCallMessage) {
 	detail, err := ParseToolCallDetail(msg)
 	if err != nil {
-		s.emit(ErrorEvent{
-			Error:   &ProtocolError{Message: "failed to parse tool call detail", Cause: err},
-			Context: "parse_tool_call",
-		})
+		// Tool call frames are informational (they drive display only). If the
+		// detail can't be extracted — e.g. an unrecognized tool_call shape —
+		// skip this one frame rather than aborting the whole session.
 		return
 	}
 
