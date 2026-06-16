@@ -147,6 +147,24 @@ func TestSession_MalformedResultFrameIsFatal(t *testing.T) {
 	assert.Equal(t, "parse_message", errEvt.Context)
 }
 
+// A truncated (syntactically invalid) result frame must still be fatal —
+// truncation is the corruption most likely to hit the final line, and the raw
+// "type":"result" discriminator must trip the fatal path even when the line
+// can't be decoded.
+func TestSession_TruncatedResultFrameIsFatal(t *testing.T) {
+	lines := []string{
+		// Valid up to the type discriminator, then cut off mid-frame.
+		`{"type":"result","subtype":"success","duration_ms":12`,
+	}
+
+	events := fakeSession(t, lines)
+	require.Len(t, events, 1)
+
+	errEvt, ok := events[0].(ErrorEvent)
+	require.True(t, ok, "a truncated result frame must surface as an ErrorEvent")
+	assert.Equal(t, "parse_message", errEvt.Context)
+}
+
 // A malformed non-terminal frame (here, assistant) is skipped — only the result
 // frame is fatal. Losing one assistant delta is better than aborting the run.
 func TestSession_MalformedAssistantFrameIsSkipped(t *testing.T) {

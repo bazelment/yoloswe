@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -218,15 +219,35 @@ func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 }
 
 // isTerminalFrame reports whether the raw line is a "result" frame — the one
-// frame whose loss breaks the caller contract (no TurnCompleteEvent). A line
-// whose type can't even be read is not treated as terminal: that's the
-// shape-drift case handleLine deliberately tolerates.
+// frame whose loss breaks the caller contract (no TurnCompleteEvent).
+//
+// It must catch a result frame even when the line is *not* valid JSON: a
+// truncated final line is exactly the corruption most likely to hit the
+// terminal frame, and skipping it would drop the only completion signal. So a
+// clean decode is tried first, then a byte-level fallback that recognizes the
+// "type":"result" discriminator without requiring the whole line to parse.
 func isTerminalFrame(line []byte) bool {
 	var raw RawMessage
-	if err := json.Unmarshal(line, &raw); err != nil {
+	if err := json.Unmarshal(line, &raw); err == nil {
+		return raw.Type == "result"
+	}
+	return hasResultTypeDiscriminator(line)
+}
+
+// hasResultTypeDiscriminator scans raw bytes for a `"type":"result"` field,
+// tolerating insignificant whitespace around the colon, so a truncated or
+// otherwise invalid result frame is still recognized as terminal.
+func hasResultTypeDiscriminator(line []byte) bool {
+	idx := bytes.Index(line, []byte(`"type"`))
+	if idx < 0 {
 		return false
 	}
-	return raw.Type == "result"
+	rest := bytes.TrimLeft(line[idx+len(`"type"`):], " \t\r\n")
+	if len(rest) == 0 || rest[0] != ':' {
+		return false
+	}
+	rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+	return bytes.HasPrefix(rest, []byte(`"result"`))
 }
 
 func (s *Session) handleSystemInit(msg *SystemInitMessage) {
