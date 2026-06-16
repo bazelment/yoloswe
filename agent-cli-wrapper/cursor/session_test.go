@@ -130,10 +130,8 @@ func TestSession_MalformedLine(t *testing.T) {
 	assert.Empty(t, events, "a malformed line should be skipped, producing no events")
 }
 
-// A malformed or unrecognized frame in the middle of a stream must not abort the
-// session: frames before and after it are still delivered. This is the core
-// regression guard — historically one array-shaped tool_call frame killed an
-// entire code-review run.
+// A malformed or unrecognized frame mid-stream must not abort the session:
+// frames before and after it are still delivered.
 func TestSession_SkipsBadFrameAndContinues(t *testing.T) {
 	lines := []string{
 		`{"type":"system","subtype":"init","session_id":"s1","model":"cursor-fast","cwd":"/tmp","permissionMode":"auto","apiKeySource":"env"}`,

@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -45,17 +46,10 @@ type AssistantMessage struct {
 
 // ToolCallMessage represents a tool call event (started or completed).
 //
-// The tool_call field carries a single tool call but the cursor-agent CLI emits
-// it in more than one JSON shape, so it is held as a raw message and decoded by
-// ParseToolCallDetail rather than typed directly (a typed field made the whole
-// frame — and therefore the whole session — fail when the shape drifted).
-//
-// Observed shapes:
+// tool_call is held raw and decoded by ParseToolCallDetail because the
+// cursor-agent CLI emits it in more than one shape:
 //   - object (documented): {"readToolCall":{"args":{...},"result":...}}
 //   - array:               [{"readToolCall":{"args":{...}}}]
-//
-// Example: {"type":"tool_call","subtype":"started","call_id":"...","tool_call":{"readToolCall":{"args":{"path":"..."}}},"session_id":"..."}
-// Example: {"type":"tool_call","subtype":"completed","call_id":"...","tool_call":{"readToolCall":{"args":{"path":"..."},"result":"..."}},"session_id":"..."}
 type ToolCallMessage struct {
 	Type      string          `json:"type"`
 	Subtype   string          `json:"subtype"`
@@ -111,7 +105,7 @@ func ParseToolCallDetail(msg *ToolCallMessage) (*ToolCallDetail, error) {
 // {tool_name → detail} entry, tolerating both the object and array shapes the
 // cursor-agent CLI emits.
 func decodeToolCallEntry(raw json.RawMessage) (toolCallEntry, error) {
-	trimmed := skipJSONSpace(raw)
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("empty tool_call field")
 	}
@@ -135,22 +129,8 @@ func decodeToolCallEntry(raw json.RawMessage) (toolCallEntry, error) {
 		}
 		return nil, fmt.Errorf("no tool call entries found")
 	default:
-		return nil, fmt.Errorf("unexpected tool_call shape: %s", string(trimmed[:1]))
+		return nil, fmt.Errorf("unexpected tool_call shape: %q", trimmed[0])
 	}
-}
-
-// skipJSONSpace trims leading JSON whitespace so the first meaningful byte can
-// be inspected to discriminate object vs array shape.
-func skipJSONSpace(b []byte) []byte {
-	for len(b) > 0 {
-		switch b[0] {
-		case ' ', '\t', '\r', '\n':
-			b = b[1:]
-		default:
-			return b
-		}
-	}
-	return b
 }
 
 // ResultMessage represents the final result of a session.

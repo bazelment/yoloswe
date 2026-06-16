@@ -74,9 +74,8 @@ func TestParseMessage_ToolCallCompleted(t *testing.T) {
 	assert.Equal(t, "file contents here", detail.Result)
 }
 
-// The cursor-agent CLI sometimes emits the tool_call field as a one-element
-// array instead of a bare object. Previously this failed to unmarshal and
-// aborted the entire session; now it must parse identically to the object shape.
+// The cursor-agent CLI sometimes emits tool_call as a one-element array instead
+// of a bare object; both shapes must parse identically.
 func TestParseMessage_ToolCallArrayShapeStarted(t *testing.T) {
 	line := []byte(`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":[{"readToolCall":{"args":{"path":"/tmp/test.go"}}}],"session_id":"sess-123"}`)
 
