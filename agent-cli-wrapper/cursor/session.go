@@ -1,9 +1,12 @@
 package cursor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 )
@@ -178,17 +181,24 @@ func (s *Session) stderrLoop() {
 }
 
 // handleLine processes a single NDJSON line.
+//
+// A malformed non-terminal frame (assistant, tool_call, system) is skipped, not
+// fatal: the cursor-agent protocol drifts (new shapes for known frames), and one
+// bad frame must not discard a session that is otherwise streaming useful
+// frames. The terminal "result" frame is the exception — losing it would leave
+// the caller with no TurnCompleteEvent (truncated output, or a QueryStream that
+// blocks until EOF), so a malformed result frame stays a fatal ErrorEvent.
 func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 	msg, err := ParseMessage(line)
 	if err != nil {
-		s.emit(ErrorEvent{
-			Error: &ProtocolError{
-				Message: "failed to parse message",
-				Line:    string(line),
-				Cause:   err,
-			},
-			Context: "parse_message",
-		})
+		if isTerminalFrame(line) {
+			s.emit(ErrorEvent{
+				Error:   &ProtocolError{Message: "failed to parse message", Line: string(line), Cause: err},
+				Context: "parse_message",
+			})
+			return
+		}
+		slog.Debug("cursor: skipping unparseable frame", "error", err, "line", string(line))
 		return
 	}
 	if msg == nil {
@@ -206,6 +216,38 @@ func (s *Session) handleLine(line []byte, textBuilder *strings.Builder) {
 	case *ResultMessage:
 		s.handleResult(m)
 	}
+}
+
+// isTerminalFrame reports whether the raw line is a "result" frame — the one
+// frame whose loss breaks the caller contract (no TurnCompleteEvent).
+//
+// It must catch a result frame even when the line is *not* valid JSON: a
+// truncated final line is exactly the corruption most likely to hit the
+// terminal frame, and skipping it would drop the only completion signal. So a
+// clean decode is tried first, then a byte-level fallback that recognizes the
+// "type":"result" discriminator without requiring the whole line to parse.
+func isTerminalFrame(line []byte) bool {
+	var raw RawMessage
+	if err := json.Unmarshal(line, &raw); err == nil {
+		return raw.Type == "result"
+	}
+	return hasResultTypeDiscriminator(line)
+}
+
+// hasResultTypeDiscriminator scans raw bytes for a `"type":"result"` field,
+// tolerating insignificant whitespace around the colon, so a truncated or
+// otherwise invalid result frame is still recognized as terminal.
+func hasResultTypeDiscriminator(line []byte) bool {
+	idx := bytes.Index(line, []byte(`"type"`))
+	if idx < 0 {
+		return false
+	}
+	rest := bytes.TrimLeft(line[idx+len(`"type"`):], " \t\r\n")
+	if len(rest) == 0 || rest[0] != ':' {
+		return false
+	}
+	rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+	return bytes.HasPrefix(rest, []byte(`"result"`))
 }
 
 func (s *Session) handleSystemInit(msg *SystemInitMessage) {
@@ -238,10 +280,9 @@ func (s *Session) handleAssistant(msg *AssistantMessage, textBuilder *strings.Bu
 func (s *Session) handleToolCall(msg *ToolCallMessage) {
 	detail, err := ParseToolCallDetail(msg)
 	if err != nil {
-		s.emit(ErrorEvent{
-			Error:   &ProtocolError{Message: "failed to parse tool call detail", Cause: err},
-			Context: "parse_tool_call",
-		})
+		// Tool call frames drive display only; skip a frame whose detail can't
+		// be extracted rather than aborting the session.
+		slog.Debug("cursor: skipping tool_call with unreadable detail", "error", err, "call_id", msg.CallID)
 		return
 	}
 
