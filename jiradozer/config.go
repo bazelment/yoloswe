@@ -258,9 +258,6 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent.effort: %w", err)
 		}
 	}
-	if err := ValidateFallbackModels("agent.fallback_models", c.Agent.Model, c.Agent.FallbackModels); err != nil {
-		return err
-	}
 	if err := c.Agent.LLMEndpoint.ToEndpoint().Validate(); err != nil {
 		return fmt.Errorf("agent.llm_endpoint: %w", err)
 	}
@@ -278,13 +275,30 @@ func (c *Config) validate() error {
 		if err := validateStep(ns.name, ns.step); err != nil {
 			return err
 		}
-		// Validate fallback models against the step's *effective* primary and
-		// *effective* fallback list — i.e. after the same step<-agent
-		// inheritance ResolveStep applies at runtime. A step can override the
-		// model while inheriting the agent's fallback list (or vice versa), so a
-		// fallback equal to the effective primary (e.g. agent.model=sonnet +
-		// fallback=[opus] with plan.model=opus → [opus, opus]) must be rejected
-		// even though the step set neither field explicitly.
+	}
+	if err := c.ValidateEffectiveFallbacks(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateEffectiveFallbacks checks the fallback list of every agent run — step
+// and round — against the primary model it will actually run with, after the
+// step<-agent / round<-step inheritance that ResolveStep/ResolveRound apply at
+// runtime. A fallback equal to the effective primary (e.g. agent.model=sonnet +
+// fallback=[opus] with plan.model=opus → [opus, opus]) is a useless failover
+// slot and must be rejected even when the step/round set neither field
+// explicitly.
+//
+// It is exported and validates effective (post-inheritance) values precisely so
+// the CLI can re-run it after --model/--fallback-models overrides: LoadConfig's
+// validate() ran before those overrides, and an agent-level-only re-check would
+// miss a step/round whose model override collides with the new fallback list.
+func (c *Config) ValidateEffectiveFallbacks() error {
+	if err := ValidateFallbackModels("agent.fallback_models", c.Agent.Model, c.Agent.FallbackModels); err != nil {
+		return err
+	}
+	for _, ns := range c.orderedSteps() {
 		primary := ns.step.Model
 		if primary == "" {
 			primary = c.Agent.Model
@@ -293,16 +307,15 @@ func (c *Config) validate() error {
 		if fallbacks == nil {
 			fallbacks = c.Agent.FallbackModels
 		}
-		if len(fallbacks) > 0 {
-			if err := ValidateFallbackModels(ns.name+".fallback_models", primary, fallbacks); err != nil {
-				return err
-			}
+		if len(fallbacks) == 0 {
+			continue
 		}
-		// Same invariant one resolve layer deeper: an agent round can override
-		// the model (ResolveRound: round.Model → step → agent) while inheriting
-		// the step's fallback list, so a round model equal to an inherited
-		// fallback would also produce a useless [opus, opus] failover sequence.
-		// Command rounds run no agent, so they're exempt.
+		if err := ValidateFallbackModels(ns.name+".fallback_models", primary, fallbacks); err != nil {
+			return err
+		}
+		// One resolve layer deeper: an agent round can override the model
+		// (ResolveRound: round.Model → step → agent) while inheriting the step's
+		// fallback list. Command rounds run no agent, so they're exempt.
 		for ri, round := range ns.step.Rounds {
 			if round.IsCommand() {
 				continue
@@ -311,11 +324,9 @@ func (c *Config) validate() error {
 			if roundPrimary == "" {
 				roundPrimary = primary
 			}
-			if len(fallbacks) > 0 {
-				label := fmt.Sprintf("%s.rounds[%d].fallback_models", ns.name, ri)
-				if err := ValidateFallbackModels(label, roundPrimary, fallbacks); err != nil {
-					return err
-				}
+			label := fmt.Sprintf("%s.rounds[%d].fallback_models", ns.name, ri)
+			if err := ValidateFallbackModels(label, roundPrimary, fallbacks); err != nil {
+				return err
 			}
 		}
 	}

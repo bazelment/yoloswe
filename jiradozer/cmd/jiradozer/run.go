@@ -408,9 +408,11 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 		return nil, fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
 	}
 	// Re-validate fallback models after CLI overrides — LoadConfig's validate()
-	// ran before --model/--fallback-models were applied, so a bad CLI value
-	// would otherwise slip through to runtime.
-	if err := jiradozer.ValidateFallbackModels("agent.fallback_models", cfg.Agent.Model, cfg.Agent.FallbackModels); err != nil {
+	// ran before --model/--fallback-models were applied. Use the effective
+	// (post-inheritance) check so a step/round model override that collides with
+	// the CLI-supplied fallback list (e.g. plan.model=opus + --fallback-models
+	// opus → [opus, opus]) is rejected, not just the agent-level pair.
+	if err := cfg.ValidateEffectiveFallbacks(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
