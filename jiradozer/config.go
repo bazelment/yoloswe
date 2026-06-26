@@ -298,6 +298,26 @@ func (c *Config) validate() error {
 				return err
 			}
 		}
+		// Same invariant one resolve layer deeper: an agent round can override
+		// the model (ResolveRound: round.Model → step → agent) while inheriting
+		// the step's fallback list, so a round model equal to an inherited
+		// fallback would also produce a useless [opus, opus] failover sequence.
+		// Command rounds run no agent, so they're exempt.
+		for ri, round := range ns.step.Rounds {
+			if round.IsCommand() {
+				continue
+			}
+			roundPrimary := round.Model
+			if roundPrimary == "" {
+				roundPrimary = primary
+			}
+			if len(fallbacks) > 0 {
+				label := fmt.Sprintf("%s.rounds[%d].fallback_models", ns.name, ri)
+				if err := ValidateFallbackModels(label, roundPrimary, fallbacks); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }

@@ -306,6 +306,24 @@ func TestLoadConfig_FallbackModels_RejectsInheritedFallbackEqualToOverriddenPrim
 	assert.Contains(t, err.Error(), "must differ from the primary model")
 }
 
+func TestLoadConfig_FallbackModels_RejectsRoundModelEqualToInheritedFallback(t *testing.T) {
+	// agent.fallback_models=[opus] is inherited by the build step, and an agent
+	// round overrides its model to opus. At runtime ResolveRound yields
+	// Model=opus + FallbackModels=[opus] → a useless [opus, opus] failover, so
+	// validate() must reject it even though neither the step nor the agent set
+	// model=opus directly.
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  fallback_models: [opus]\n" +
+		"plan:\n  prompt: \"p\"\n  comment_template: \"c\"\n" +
+		"build:\n  comment_template: \"c\"\n  round_comment_template: \"## {{.Heading}} {{.Round}}/{{.TotalRounds}}\"\n  rounds:\n    - prompt: \"r1\"\n      model: opus\n" +
+		"create_pr:\n  prompt: \"pr\"\n  comment_template: \"c\"\nvalidate:\n  prompt: \"v\"\n  comment_template: \"c\"\nship:\n  prompt: \"s\"\n  comment_template: \"c\"\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "build.rounds[0].fallback_models")
+	assert.Contains(t, err.Error(), "must differ from the primary model")
+}
+
 func TestLoadConfig_InvalidEffort(t *testing.T) {
 	cases := []struct {
 		name string
