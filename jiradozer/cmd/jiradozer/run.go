@@ -407,16 +407,11 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
 		return nil, fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
 	}
-	// Validate fallback models after CLI overrides — LoadConfig's validate()
+	// Re-validate fallback models after CLI overrides — LoadConfig's validate()
 	// ran before --model/--fallback-models were applied, so a bad CLI value
 	// would otherwise slip through to runtime.
-	for _, m := range cfg.Agent.FallbackModels {
-		if _, ok := agent.ModelByID(m); !ok {
-			return nil, fmt.Errorf("unknown fallback model %q — available models: %s", m, availableModels())
-		}
-		if m == cfg.Agent.Model {
-			return nil, fmt.Errorf("fallback model %q must differ from the primary model", m)
-		}
+	if err := jiradozer.ValidateFallbackModels("agent.fallback_models", cfg.Agent.Model, cfg.Agent.FallbackModels); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }

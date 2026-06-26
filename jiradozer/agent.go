@@ -593,8 +593,11 @@ func (r agentRunner) runAgentForModel(ctx context.Context, stepName, prompt stri
 		failed := StepAgentResult{
 			SessionID: result.SessionID,
 		}
+		// Not out-of-credits: any such error already returned early from the
+		// retry loop above (the only way here is a non-transient break, which
+		// the out-of-credits check precedes).
 		if result.Error != nil {
-			return failed, agent.IsOutOfCredits(result.Error), fmt.Errorf("agent execution: %w", result.Error)
+			return failed, false, fmt.Errorf("agent execution: %w", result.Error)
 		}
 		return failed, false, fmt.Errorf("agent failed")
 	}

@@ -258,7 +258,7 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent.effort: %w", err)
 		}
 	}
-	if err := validateFallbackModels("agent.fallback_models", c.Agent.Model, c.Agent.FallbackModels); err != nil {
+	if err := ValidateFallbackModels("agent.fallback_models", c.Agent.Model, c.Agent.FallbackModels); err != nil {
 		return err
 	}
 	if err := c.Agent.LLMEndpoint.ToEndpoint().Validate(); err != nil {
@@ -288,7 +288,7 @@ func (c *Config) validate() error {
 			if primary == "" {
 				primary = c.Agent.Model
 			}
-			if err := validateFallbackModels(ns.name+".fallback_models", primary, ns.step.FallbackModels); err != nil {
+			if err := ValidateFallbackModels(ns.name+".fallback_models", primary, ns.step.FallbackModels); err != nil {
 				return err
 			}
 		}
@@ -296,11 +296,12 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateFallbackModels checks that each fallback model ID resolves via
+// ValidateFallbackModels checks that each fallback model ID resolves via
 // agent.ModelByID and that none duplicates the primary model (a fallback equal
 // to the primary can never help). label names the config field for error
-// messages (e.g. "agent.fallback_models").
-func validateFallbackModels(label, primary string, fallbacks []string) error {
+// messages (e.g. "agent.fallback_models"). Exported so the CLI can reuse it for
+// flag overrides applied after LoadConfig's validate() has already run.
+func ValidateFallbackModels(label, primary string, fallbacks []string) error {
 	for _, m := range fallbacks {
 		if m == "" {
 			return fmt.Errorf("%s: fallback model must not be empty", label)
