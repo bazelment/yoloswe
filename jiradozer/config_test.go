@@ -291,6 +291,21 @@ func TestLoadConfig_FallbackModels_RejectsStepFallbackEqualToInheritedPrimary(t 
 	assert.Contains(t, err.Error(), "build.fallback_models")
 }
 
+func TestLoadConfig_FallbackModels_RejectsInheritedFallbackEqualToOverriddenPrimary(t *testing.T) {
+	// agent.fallback_models=[opus] is inherited by plan, but plan overrides the
+	// model to opus — so plan would run [opus, opus] at runtime. validate() must
+	// reject this even though plan sets no fallback_models of its own.
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  fallback_models: [opus]\n" +
+		"plan:\n  prompt: \"p\"\n  comment_template: \"c\"\n  model: opus\n" +
+		"build:\n  prompt: \"b\"\n  comment_template: \"c\"\ncreate_pr:\n  prompt: \"pr\"\n  comment_template: \"c\"\nvalidate:\n  prompt: \"v\"\n  comment_template: \"c\"\nship:\n  prompt: \"s\"\n  comment_template: \"c\"\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan.fallback_models")
+	assert.Contains(t, err.Error(), "must differ from the primary model")
+}
+
 func TestLoadConfig_InvalidEffort(t *testing.T) {
 	cases := []struct {
 		name string
@@ -614,6 +629,7 @@ ship:
 func TestResolveRound_InheritsFromStep(t *testing.T) {
 	parent := StepConfig{
 		Model:                 "sonnet",
+		FallbackModels:        []string{"opus", "gpt-5.5"},
 		Effort:                "high",
 		SystemPrompt:          "parent system prompt",
 		PermissionMode:        "bypass",
@@ -640,6 +656,10 @@ func TestResolveRound_InheritsFromStep(t *testing.T) {
 	// inherits the parent's value verbatim (the wiring cursor flagged as
 	// untested in PR #259).
 	assert.Equal(t, 12*time.Minute, resolved.StreamTurnGracePeriod)
+	// FallbackModels has no per-round override field either; a round must
+	// inherit the parent's list verbatim so out-of-credits failover still
+	// triggers inside multi-round steps.
+	assert.Equal(t, []string{"opus", "gpt-5.5"}, resolved.FallbackModels)
 }
 
 // loadConfigFromYAML writes a YAML body to a temp file and loads it. Used by

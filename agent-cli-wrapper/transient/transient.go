@@ -57,10 +57,11 @@ func ClassifyText(msg string) (string, bool) {
 		strings.Contains(s, "broken pipe"),
 		strings.Contains(s, "unexpected eof"),
 		strings.Contains(s, "socket connection was closed"),
-		// e.g. "API Error: Connection closed mid-response. The response above
-		// may be incomplete." — seen in jiradozer cron failures.
+		// "API Error: Connection closed mid-response. The response above may be
+		// incomplete." — seen in jiradozer cron failures. "connection closed"
+		// matches it; we don't also match a bare "mid-response" because that
+		// substring appears in unrelated, non-retryable messages.
 		strings.Contains(s, "connection closed"),
-		strings.Contains(s, "mid-response"),
 		strings.Contains(s, "websocket"):
 		return ReasonConnectionReset, true
 	case strings.Contains(s, "i/o timeout"),

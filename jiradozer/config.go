@@ -127,7 +127,7 @@ type StepConfig struct {
 	MaxBudgetUSD         float64            `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
 	MaxTurns             int                `yaml:"max_turns"`
 	MaxToolErrorRetries  int                `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
-	TransientRetries     int                `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (2)
+	TransientRetries     int                `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (4)
 	IdleTimeout          time.Duration      `yaml:"idle_timeout"`           // parent watchdog kills the subprocess if it emits no log line for this long while inside this step; 0 disables
 	// StreamTurnGracePeriod overrides how long a turn waits, after completion,
 	// for an outstanding background tool_use to terminate before the turn is
@@ -278,17 +278,23 @@ func (c *Config) validate() error {
 		if err := validateStep(ns.name, ns.step); err != nil {
 			return err
 		}
-		// Validate fallback models against the step's *resolved* primary model
-		// (a step with its own model: override and an inherited fallback list,
-		// or vice versa, must not name a fallback equal to its effective
-		// primary). Only validate when the step actually sets fallbacks; an
-		// inherited list is already validated at the agent level above.
-		if len(ns.step.FallbackModels) > 0 {
-			primary := ns.step.Model
-			if primary == "" {
-				primary = c.Agent.Model
-			}
-			if err := ValidateFallbackModels(ns.name+".fallback_models", primary, ns.step.FallbackModels); err != nil {
+		// Validate fallback models against the step's *effective* primary and
+		// *effective* fallback list — i.e. after the same step<-agent
+		// inheritance ResolveStep applies at runtime. A step can override the
+		// model while inheriting the agent's fallback list (or vice versa), so a
+		// fallback equal to the effective primary (e.g. agent.model=sonnet +
+		// fallback=[opus] with plan.model=opus → [opus, opus]) must be rejected
+		// even though the step set neither field explicitly.
+		primary := ns.step.Model
+		if primary == "" {
+			primary = c.Agent.Model
+		}
+		fallbacks := ns.step.FallbackModels
+		if fallbacks == nil {
+			fallbacks = c.Agent.FallbackModels
+		}
+		if len(fallbacks) > 0 {
+			if err := ValidateFallbackModels(ns.name+".fallback_models", primary, fallbacks); err != nil {
 				return err
 			}
 		}
@@ -613,6 +619,7 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		SystemPrompt:          systemPrompt,
 		PermissionMode:        parent.PermissionMode,
 		Effort:                parent.Effort,
+		FallbackModels:        parent.FallbackModels,
 		TransientRetries:      parent.TransientRetries,
 		StreamTurnGracePeriod: parent.StreamTurnGracePeriod,
 		LLMEndpoint:           parent.LLMEndpoint,

@@ -260,6 +260,39 @@ func TestRunAgent_OutOfCredits_FallsBackToNextModel(t *testing.T) {
 	require.Empty(t, fallback.resumeSession[0], "fallback must start a fresh session")
 }
 
+// TestRunAgent_OutOfCredits_ExecuteErrorPath_FallsBack covers the second
+// out-of-credits detection site: when the provider surfaces the failure as
+// Execute's returned error (not a result.Error). A regression removing the
+// err-path IsOutOfCredits branch in runAgentForModel would otherwise go
+// uncaught — the existing fallback tests only drive the result.Error path.
+func TestRunAgent_OutOfCredits_ExecuteErrorPath_FallsBack(t *testing.T) {
+	primary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{nil},
+		errs:    []error{&codex.TurnError{Message: "Your workspace is out of credits. Ask your workspace owner to refill."}},
+	}
+	fallback := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{
+			{Success: true, SessionID: "sess-fallback", Text: "done on fallback"},
+		},
+		errs: []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"gpt-5.5": primary,
+		"opus":    fallback,
+	})
+	runner := agentRunner{newProviderForModel: newProvider, retryBackoffs: []time.Duration{0}}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "gpt-5.5",
+		FallbackModels:   []string{"opus"},
+		TransientRetries: 2,
+	}, t.TempDir(), "resume-orig", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "done on fallback", got.Output)
+	require.Equal(t, []string{"gpt-5.5", "opus"}, *order, "both models tried in order")
+	require.Empty(t, fallback.resumeSession[0], "fallback must start a fresh session")
+}
+
 func TestRunAgent_OutOfCredits_NoFallbackConfigured_Fails(t *testing.T) {
 	primary := &fakeRetryProvider{
 		results: []*agentpkg.AgentResult{
