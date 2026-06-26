@@ -437,6 +437,31 @@ func TestLoadRunConfigAppliesCLIOverrides(t *testing.T) {
 	require.Equal(t, []string{"plan", "validate"}, cfg.SkipPhases)
 }
 
+// TestLoadRunConfigRejectsCLIFallbackCollidingWithStepModel pins that the
+// --fallback-models CLI override is re-validated against effective (post-
+// inheritance) step/round primaries, not just the agent-level pair. A config
+// whose plan step overrides model: opus must reject `--fallback-models opus`
+// because ResolveStep would run [opus, opus] at runtime — even though the YAML
+// itself sets no fallback list and so passed LoadConfig.
+func TestLoadRunConfigRejectsCLIFallbackCollidingWithStepModel(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "test-key")
+	yaml := "tracker:\n  kind: linear\n  api_key: $LINEAR_API_KEY\nagent:\n  model: sonnet\n" +
+		"plan:\n  prompt: \"p\"\n  comment_template: \"c\"\n  model: opus\n" +
+		"build:\n  prompt: \"b\"\n  comment_template: \"c\"\ncreate_pr:\n  prompt: \"pr\"\n  comment_template: \"c\"\n" +
+		"validate:\n  prompt: \"v\"\n  comment_template: \"c\"\nship:\n  prompt: \"s\"\n  comment_template: \"c\"\n"
+	cfgPath := filepath.Join(t.TempDir(), "jiradozer.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(yaml), 0o600))
+
+	_, err := loadRunConfig(runArgs{
+		configPath:     cfgPath,
+		issueID:        "ENG-1",
+		fallbackModels: []string{"opus"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "plan.fallback_models")
+	require.Contains(t, err.Error(), "must differ from the primary model")
+}
+
 func TestLoadRunConfigSkipPhasesCLIBeatsConfig(t *testing.T) {
 	cfgPath := writeRunConfig(t, "linear", t.TempDir())
 	content, err := os.ReadFile(cfgPath)

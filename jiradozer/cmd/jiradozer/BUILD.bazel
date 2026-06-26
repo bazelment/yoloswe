@@ -31,6 +31,10 @@ go_binary(
     name = "jiradozer",
     embed = [":jiradozer_lib"],
     visibility = ["//visibility:public"],
+    x_defs = {
+        "github.com/bazelment/yoloswe/cliapp.stampedRevision": "{STABLE_GIT_REVISION}",
+        "github.com/bazelment/yoloswe/cliapp.stampedTime": "{STABLE_GIT_TIME}",
+    },
 )
 
 go_test(

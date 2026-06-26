@@ -2,11 +2,27 @@ package agent
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/codex"
 	transientmeta "github.com/bazelment/yoloswe/agent-cli-wrapper/transient"
 )
+
+// IsOutOfCredits reports whether err is a workspace-wide out-of-credits failure.
+// This is distinct from a transient error: a same-model retry can't refill the
+// workspace, so callers use it to trigger a fallback to a different provider's
+// model rather than to retry. It is text-based and provider-agnostic — both
+// claude.TurnError and codex.TurnError render the upstream message into
+// Error(), so matching the rendered string works across providers.
+func IsOutOfCredits(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "out of credits") ||
+		strings.Contains(s, "workspace owner to refill")
+}
 
 // IsTransient reports whether err originates from a known retryable provider
 // failure, such as stream-idle, rate limiting, or a temporary network break.

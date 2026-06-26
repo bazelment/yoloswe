@@ -307,30 +307,34 @@ func bootstrapYAML(workDir string, baseBranchOverride ...string) ([]byte, error)
 		IdleTimeoutComment:   "create_pr is short — gh + git push only — so a tight timeout catches gh hangs quickly.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
-		Key:                  "validate",
-		Heading:              "validate — run tests/linters and fix failures",
-		Description:          "Agent runs the project's tests and linters in the PR branch and fixes anything it broke before handing back to the reviewer.",
-		Prompt:               jiradozer.BootstrapValidatePrompt,
-		CommentTemplate:      jiradozer.BootstrapCompleteCommentTemplate,
-		PermissionMode:       "bypass",
-		MaxTurns:             10,
-		RoundsCapable:        true,
-		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
-		IdleTimeout:          20 * time.Minute,
-		IdleTimeoutComment:   "Validate runs tests + linters (potentially long); the gap-based watchdog only trips when output truly stops.",
+		Key:                   "validate",
+		Heading:               "validate — run tests/linters and fix failures",
+		Description:           "Agent runs the project's tests and linters in the PR branch and fixes anything it broke before handing back to the reviewer.",
+		Prompt:                jiradozer.BootstrapValidatePrompt,
+		CommentTemplate:       jiradozer.BootstrapCompleteCommentTemplate,
+		PermissionMode:        "bypass",
+		MaxTurns:              10,
+		RoundsCapable:         true,
+		RoundCommentTemplate:  jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:           20 * time.Minute,
+		IdleTimeoutComment:    "Validate runs tests + linters (potentially long); the gap-based watchdog only trips when output truly stops.",
+		StreamTurnGracePeriod: 3 * time.Minute,
+		GracePeriodComment:    "validate is poll-heavy (it babysits a background Monitor loop). Cap the grace at 3m so a wedged tool_use is cut off fast and the turn is force-completed + retried rather than burning the full 10m default.",
 	}))
 	b.WriteString(renderStepBlock(stepBlock{
-		Key:                  "ship",
-		Heading:              "ship — final PR readiness pass",
-		Description:          "Agent makes sure the PR exists, has a good title/body, and is ready for review. Jiradozer does not merge for you — it stops at the ShipReview gate.",
-		Prompt:               jiradozer.BootstrapShipPrompt,
-		CommentTemplate:      jiradozer.BootstrapCompleteCommentTemplate,
-		PermissionMode:       "bypass",
-		MaxTurns:             10,
-		RoundsCapable:        true,
-		RoundCommentTemplate: jiradozer.BootstrapRoundCommentTemplate,
-		IdleTimeout:          5 * time.Minute,
-		IdleTimeoutComment:   "Ship is short — gh PR-update only — so a tight timeout catches gh hangs quickly.",
+		Key:                   "ship",
+		Heading:               "ship — final PR readiness pass",
+		Description:           "Agent makes sure the PR exists, has a good title/body, and is ready for review. Jiradozer does not merge for you — it stops at the ShipReview gate.",
+		Prompt:                jiradozer.BootstrapShipPrompt,
+		CommentTemplate:       jiradozer.BootstrapCompleteCommentTemplate,
+		PermissionMode:        "bypass",
+		MaxTurns:              10,
+		RoundsCapable:         true,
+		RoundCommentTemplate:  jiradozer.BootstrapRoundCommentTemplate,
+		IdleTimeout:           5 * time.Minute,
+		IdleTimeoutComment:    "Ship is short — gh PR-update only — so a tight timeout catches gh hangs quickly.",
+		StreamTurnGracePeriod: 3 * time.Minute,
+		GracePeriodComment:    "ship is poll-heavy (it babysits PR readiness via a background Monitor loop). Cap the grace at 3m so a wedged tool_use is cut off fast and the turn is force-completed + retried rather than hanging for the full 10m.",
 	}))
 
 	b.WriteString(bootstrapTopLevelTail)
@@ -432,6 +436,12 @@ agent:
     # Model ID from agent.AllModels (e.g. "sonnet", "opus", "fable", "gpt-5.5",
     # "gemini-3.1-pro-preview", "cursor-default").
     model: sonnet
+    # Models to fall back to (in order) when the primary model fails with a
+    # workspace-wide "out of credits" error. A same-provider swap can't escape
+    # an out-of-credits workspace, so name a model on a *different* provider.
+    # Failover starts a fresh session (cross-provider resume is unreliable).
+    # Empty = no fallback. Per-step ` + "`fallback_models:`" + ` overrides this.
+    #fallback_models: [opus]
     # Reasoning effort: low, medium, high, max, auto. Empty = provider default.
     #effort: ""
     # Optional: route inference through a third-party LLM API endpoint
@@ -533,9 +543,14 @@ type stepBlock struct {
 	PermissionMode       string        // step default permission mode
 	RoundCommentTemplate string        // canonical round comment template (only used when RoundsCapable)
 	IdleTimeoutComment   string        // step-specific blurb describing why this timeout (rendered in YAML comment); only emitted when IdleTimeout > 0
+	GracePeriodComment   string        // step-specific blurb explaining why this step tightens the grace period; only emitted when StreamTurnGracePeriod > 0
 	MaxTurns             int           // step default max turns
 	IdleTimeout          time.Duration // step default idle timeout; 0 = omit from rendered YAML
-	RoundsCapable        bool          // whether bootstrap should seed round_comment_template uncommented
+	// StreamTurnGracePeriod, when > 0, renders an uncommented
+	// stream_turn_grace_period for this step (a tighter cap for poll-heavy steps
+	// that babysit a background Monitor loop); 0 = render the commented default.
+	StreamTurnGracePeriod time.Duration
+	RoundsCapable         bool // whether bootstrap should seed round_comment_template uncommented
 }
 
 // renderStepBlock emits one step's YAML with field-level comments. Optional
@@ -610,7 +625,14 @@ func renderStepBlock(s stepBlock) string {
 	b.WriteString("    # work (e.g. bramble reviewers a skill backgrounds) to finish before the\n")
 	b.WriteString("    # turn is force-completed; 0 = provider default (10m). Raise it for steps\n")
 	b.WriteString("    # that launch long-running background tools.\n")
-	b.WriteString("    #stream_turn_grace_period: 0\n")
+	if s.StreamTurnGracePeriod > 0 {
+		b.WriteString("    #\n")
+		const firstLinePrefix = "    # "
+		fmt.Fprintf(&b, "%s%s\n", firstLinePrefix, wrapComment(s.GracePeriodComment, 76-len(firstLinePrefix), firstLinePrefix))
+		fmt.Fprintf(&b, "    stream_turn_grace_period: %s\n", formatDurationShort(s.StreamTurnGracePeriod))
+	} else {
+		b.WriteString("    #stream_turn_grace_period: 0\n")
+	}
 	b.WriteString("    # Skip the human review gate after this step.\n")
 	b.WriteString("    #auto_approve: false\n")
 

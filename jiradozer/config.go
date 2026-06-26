@@ -68,9 +68,14 @@ type TrackerConfig struct {
 //
 //nolint:govet // fieldalignment: keep YAML fields in config-file order.
 type AgentConfig struct {
-	Model       string             `yaml:"model"`        // model ID from agent.AllModels (e.g. "fable", "gpt-5.5")
-	Effort      string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
-	LLMEndpoint *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
+	Model string `yaml:"model"` // model ID from agent.AllModels (e.g. "fable", "gpt-5.5")
+	// FallbackModels are tried, in order, when the primary model fails with a
+	// workspace-wide out-of-credits error. Each should name a model on a
+	// *different* provider (a same-provider swap can't escape an out-of-credits
+	// workspace). Failover starts a fresh session. Empty = no fallback.
+	FallbackModels []string           `yaml:"fallback_models"`
+	Effort         string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
+	LLMEndpoint    *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
 }
 
 // LLMEndpointConfig points the underlying CLI at a third-party LLM endpoint
@@ -112,6 +117,7 @@ type StepConfig struct {
 	Prompt               string             `yaml:"prompt"`                 // Go text/template; required unless rounds is set. No built-in default — run `jiradozer bootstrap` to scaffold.
 	SystemPrompt         string             `yaml:"system_prompt"`          // optional system prompt passed to the agent
 	Model                string             `yaml:"model"`                  // override agent.model; empty = inherit
+	FallbackModels       []string           `yaml:"fallback_models"`        // override agent.fallback_models; nil = inherit. See AgentConfig.FallbackModels.
 	Effort               string             `yaml:"effort"`                 // override agent.effort; empty = inherit
 	PermissionMode       string             `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
 	CommentTemplate      string             `yaml:"comment_template"`       // text/template rendered with CommentData; required for single-shot steps (rounds-only steps may omit it)
@@ -121,7 +127,7 @@ type StepConfig struct {
 	MaxBudgetUSD         float64            `yaml:"max_budget_usd"`         // override top-level; 0 = inherit
 	MaxTurns             int                `yaml:"max_turns"`
 	MaxToolErrorRetries  int                `yaml:"max_tool_error_retries"` // retries when a turn ends with an unresolved tool error; 0 = disabled
-	TransientRetries     int                `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (2)
+	TransientRetries     int                `yaml:"transient_retries"`      // retries when provider execution fails with a transient error; 0 = default (4)
 	IdleTimeout          time.Duration      `yaml:"idle_timeout"`           // parent watchdog kills the subprocess if it emits no log line for this long while inside this step; 0 disables
 	// StreamTurnGracePeriod overrides how long a turn waits, after completion,
 	// for an outstanding background tool_use to terminate before the turn is
@@ -268,6 +274,80 @@ func (c *Config) validate() error {
 	for _, ns := range c.orderedSteps() {
 		if err := validateStep(ns.name, ns.step); err != nil {
 			return err
+		}
+	}
+	if err := c.ValidateEffectiveFallbacks(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateEffectiveFallbacks checks the fallback list of every agent run — step
+// and round — against the primary model it will actually run with, after the
+// step<-agent / round<-step inheritance that ResolveStep/ResolveRound apply at
+// runtime. A fallback equal to the effective primary (e.g. agent.model=sonnet +
+// fallback=[opus] with plan.model=opus → [opus, opus]) is a useless failover
+// slot and must be rejected even when the step/round set neither field
+// explicitly.
+//
+// It is exported and validates effective (post-inheritance) values precisely so
+// the CLI can re-run it after --model/--fallback-models overrides: LoadConfig's
+// validate() ran before those overrides, and an agent-level-only re-check would
+// miss a step/round whose model override collides with the new fallback list.
+func (c *Config) ValidateEffectiveFallbacks() error {
+	if err := ValidateFallbackModels("agent.fallback_models", c.Agent.Model, c.Agent.FallbackModels); err != nil {
+		return err
+	}
+	for _, ns := range c.orderedSteps() {
+		primary := ns.step.Model
+		if primary == "" {
+			primary = c.Agent.Model
+		}
+		fallbacks := ns.step.FallbackModels
+		if fallbacks == nil {
+			fallbacks = c.Agent.FallbackModels
+		}
+		if len(fallbacks) == 0 {
+			continue
+		}
+		if err := ValidateFallbackModels(ns.name+".fallback_models", primary, fallbacks); err != nil {
+			return err
+		}
+		// One resolve layer deeper: an agent round can override the model
+		// (ResolveRound: round.Model → step → agent) while inheriting the step's
+		// fallback list. Command rounds run no agent, so they're exempt.
+		for ri, round := range ns.step.Rounds {
+			if round.IsCommand() {
+				continue
+			}
+			roundPrimary := round.Model
+			if roundPrimary == "" {
+				roundPrimary = primary
+			}
+			label := fmt.Sprintf("%s.rounds[%d].fallback_models", ns.name, ri)
+			if err := ValidateFallbackModels(label, roundPrimary, fallbacks); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateFallbackModels checks that each fallback model ID resolves via
+// agent.ModelByID and that none duplicates the primary model (a fallback equal
+// to the primary can never help). label names the config field for error
+// messages (e.g. "agent.fallback_models"). Exported so the CLI can reuse it for
+// flag overrides applied after LoadConfig's validate() has already run.
+func ValidateFallbackModels(label, primary string, fallbacks []string) error {
+	for _, m := range fallbacks {
+		if m == "" {
+			return fmt.Errorf("%s: fallback model must not be empty", label)
+		}
+		if _, ok := agent.ModelByID(m); !ok {
+			return fmt.Errorf("%s: unknown model %q", label, m)
+		}
+		if m == primary {
+			return fmt.Errorf("%s: fallback model %q must differ from the primary model", label, m)
 		}
 	}
 	return nil
@@ -528,6 +608,9 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 	if step.Model == "" {
 		step.Model = c.Agent.Model
 	}
+	if step.FallbackModels == nil {
+		step.FallbackModels = c.Agent.FallbackModels
+	}
 	if step.Effort == "" {
 		step.Effort = c.Agent.Effort
 	}
@@ -567,6 +650,7 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		SystemPrompt:          systemPrompt,
 		PermissionMode:        parent.PermissionMode,
 		Effort:                parent.Effort,
+		FallbackModels:        parent.FallbackModels,
 		TransientRetries:      parent.TransientRetries,
 		StreamTurnGracePeriod: parent.StreamTurnGracePeriod,
 		LLMEndpoint:           parent.LLMEndpoint,

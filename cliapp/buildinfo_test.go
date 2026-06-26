@@ -31,6 +31,15 @@ func buildInfoWith(settings ...debug.BuildSetting) *debug.BuildInfo {
 	return &debug.BuildInfo{Settings: settings}
 }
 
+// withStampedBuild pins the linker-stamped revision/time package vars for a
+// test and restores them afterward.
+func withStampedBuild(t *testing.T, rev, ts string) {
+	t.Helper()
+	prevRev, prevTime := stampedRevision, stampedTime
+	stampedRevision, stampedTime = rev, ts
+	t.Cleanup(func() { stampedRevision, stampedTime = prevRev, prevTime })
+}
+
 func TestReadBuildInfo(t *testing.T) {
 	t.Run("populated", func(t *testing.T) {
 		withStubbedBuildInfo(t, buildInfoWith(
@@ -91,6 +100,58 @@ func TestReadBuildInfo(t *testing.T) {
 		got := ReadBuildInfo()
 		if !got.Time.Equal(want) {
 			t.Errorf("Time = %v, want executable mtime %v", got.Time, want)
+		}
+	})
+
+	t.Run("bazel stamp overrides revision and time", func(t *testing.T) {
+		// No debug build info (sandboxed Bazel build), but the linker stamped
+		// the revision and time via x_defs.
+		withStubbedBuildInfo(t, nil, false)
+		stubMissingExecutable(t)
+		withStampedBuild(t, "deadbeefcafe0000", "2026-06-20T08:00:00Z")
+
+		got := ReadBuildInfo()
+		if got.Revision != "deadbeefcafe0000" {
+			t.Errorf("Revision = %q, want stamped revision", got.Revision)
+		}
+		want, _ := time.Parse(time.RFC3339, "2026-06-20T08:00:00Z")
+		if !got.Time.Equal(want) {
+			t.Errorf("Time = %v, want stamped time %v", got.Time, want)
+		}
+		if got.ShortRevision() != "deadbeefcafe" {
+			t.Errorf("ShortRevision = %q", got.ShortRevision())
+		}
+	})
+
+	t.Run("stamp takes precedence over vcs settings", func(t *testing.T) {
+		withStubbedBuildInfo(t, buildInfoWith(
+			debug.BuildSetting{Key: "vcs.revision", Value: "0000000000000000"},
+			debug.BuildSetting{Key: "vcs.time", Value: "2020-01-01T00:00:00Z"},
+		), true)
+		withStampedBuild(t, "feedface12345678", "2026-06-21T09:30:00Z")
+
+		got := ReadBuildInfo()
+		if got.Revision != "feedface12345678" {
+			t.Errorf("Revision = %q, want stamped revision", got.Revision)
+		}
+		want, _ := time.Parse(time.RFC3339, "2026-06-21T09:30:00Z")
+		if !got.Time.Equal(want) {
+			t.Errorf("Time = %v, want stamped time", got.Time)
+		}
+	})
+
+	t.Run("empty and placeholder stamps are ignored", func(t *testing.T) {
+		withStubbedBuildInfo(t, buildInfoWith(
+			debug.BuildSetting{Key: "vcs.revision", Value: "abcdef0123456789"},
+		), true)
+		stubMissingExecutable(t)
+		// Unstamped build: empty, the git-less "unknown" sentinel, or an
+		// unsubstituted placeholder must all fall back to vcs.revision.
+		for _, sentinel := range []string{"", "unknown", "{STABLE_GIT_REVISION}"} {
+			withStampedBuild(t, sentinel, "")
+			if got := ReadBuildInfo().Revision; got != "abcdef0123456789" {
+				t.Errorf("stamp %q: Revision = %q, want vcs.revision fallback", sentinel, got)
+			}
 		}
 	})
 

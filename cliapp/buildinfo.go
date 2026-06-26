@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,18 @@ var (
 	executablePath = os.Executable
 )
 
+// stampedRevision and stampedTime are set at link time via Bazel x_defs (see
+// jiradozer/cmd/jiradozer/BUILD.bazel + tools/workspace_status.sh) when a build
+// runs with --config=stamp. They are the most reliable provenance source for
+// Bazel binaries, which build sandboxed away from .git and so carry no
+// debug.ReadBuildInfo vcs.* settings. Empty when unstamped (normal dev builds,
+// `go run`, non-Bazel builds), in which case ReadBuildInfo falls back to the
+// debug build info and then the executable mtime. stampedTime is RFC3339.
+var (
+	stampedRevision string
+	stampedTime     string
+)
+
 // ReadBuildInfo extracts the VCS settings from the embedded build info. It
 // never fails: when build info or a VCS setting is missing, the corresponding
 // field stays at its zero value (Revision defaults to "unknown").
@@ -66,10 +79,37 @@ func ReadBuildInfo() BuildInfo {
 			}
 		}
 	}
+	// Prefer the Bazel stamp when present — it is the only reliable source for
+	// Bazel builds, which sandbox away from .git. An unstamped build leaves
+	// these empty (or as the literal placeholder when stamping is off but the
+	// key was substituted to empty), so guard against both.
+	if rev := stampValue(stampedRevision); rev != "" {
+		bi.Revision = rev
+	}
+	if ts := stampValue(stampedTime); ts != "" {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			bi.Time = t
+		}
+	}
 	if bi.Time.IsZero() {
 		bi.Time = executableModTime()
 	}
 	return bi
+}
+
+// stampValue normalizes a linker-stamped x_def value: it returns "" for an
+// unset stamp, the literal "unknown" sentinel emitted by workspace_status.sh
+// when not in a git tree, or an unsubstituted "{STABLE_...}" placeholder (which
+// rules_go can leave verbatim on an unstamped build). A real value passes
+// through unchanged.
+func stampValue(v string) string {
+	if v == "" || v == "unknown" {
+		return ""
+	}
+	if strings.HasPrefix(v, "{") && strings.HasSuffix(v, "}") {
+		return ""
+	}
+	return v
 }
 
 // executableModTime returns the running binary's modification time, or the zero

@@ -32,6 +32,7 @@ type runArgs struct {
 	modelID         string
 	thinkingLevel   string
 	runStep         string
+	fallbackModels  []string
 	autoApprove     string
 	skipPhases      string
 	branchPrefix    string
@@ -86,6 +87,7 @@ func registerRunFlags(cmd *cobra.Command, args *runArgs) {
 	cmd.Flags().StringVar(&args.issueID, "issue", "", "Issue identifier for single-issue mode (e.g. ENG-123, owner/repo#42, or https://github.com/owner/repo/issues/42)")
 	cmd.Flags().StringVar(&args.workDir, "work-dir", "", "Working directory (overrides config)")
 	cmd.Flags().StringVar(&args.modelID, "model", "", "Agent model ID (overrides config)")
+	cmd.Flags().StringSliceVar(&args.fallbackModels, "fallback-models", nil, "Comma-separated model IDs to fall back to (in order) when the primary model is out of credits; each should be on a different provider (overrides config)")
 	cmd.Flags().StringVar(&args.thinkingLevel, "thinking-level", "", "Agent reasoning effort level: low, medium, high, max, auto (overrides config; rejected by providers without an effort knob, e.g. cursor, gemini)")
 	cmd.Flags().DurationVar(&args.pollInterval, "poll-interval", 0, "Comment polling interval (overrides config)")
 	cmd.Flags().Float64Var(&args.maxBudget, "max-budget", 0, "Max budget in USD (overrides config)")
@@ -299,6 +301,9 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 	if args.modelID != "" {
 		cfg.Agent.Model = args.modelID
 	}
+	if len(args.fallbackModels) > 0 {
+		cfg.Agent.FallbackModels = args.fallbackModels
+	}
 	if args.thinkingLevel != "" {
 		if _, err := agent.ParseEffort(args.thinkingLevel); err != nil {
 			return nil, fmt.Errorf("--thinking-level: %w", err)
@@ -401,6 +406,14 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 	// Validate agent model.
 	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
 		return nil, fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
+	}
+	// Re-validate fallback models after CLI overrides — LoadConfig's validate()
+	// ran before --model/--fallback-models were applied. Use the effective
+	// (post-inheritance) check so a step/round model override that collides with
+	// the CLI-supplied fallback list (e.g. plan.model=opus + --fallback-models
+	// opus → [opus, opus]) is rejected, not just the agent-level pair.
+	if err := cfg.ValidateEffectiveFallbacks(); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
