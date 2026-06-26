@@ -37,6 +37,45 @@ func TestIsTransient(t *testing.T) {
 	}
 }
 
+func TestIsOutOfCredits(t *testing.T) {
+	tests := []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{
+			name: "claude turn error out of credits",
+			err:  &claude.TurnError{Message: "Your workspace is out of credits. Ask your workspace owner to refill."},
+			want: true,
+		},
+		{
+			name: "codex turn error out of credits",
+			err:  &codex.TurnError{Message: "request failed: out of credits"},
+			want: true,
+		},
+		{
+			name: "wrapped out of credits",
+			err:  fmt.Errorf("agent execution: %w", &codex.TurnError{Message: "please ask your Workspace Owner to refill"}),
+			want: true,
+		},
+		{
+			name: "transient stream idle is not out of credits",
+			err:  &claude.TransientError{Message: "stream idle"},
+			want: false,
+		},
+		{name: "plain error", err: errors.New("syntax error"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsOutOfCredits(tt.err); got != tt.want {
+				t.Fatalf("IsOutOfCredits() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyTransientReason(t *testing.T) {
 	requireTransientReason(t,
 		&codex.TransientError{Message: "turn never reached turn/completed", Reason: transientmeta.ReasonCodexIncomplete},

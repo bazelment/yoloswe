@@ -245,6 +245,52 @@ func TestResolveStep_InheritsFromTopLevel(t *testing.T) {
 	assert.Equal(t, 50.0, build.MaxBudgetUSD)
 }
 
+func TestLoadConfig_FallbackModels_ParseAndInherit(t *testing.T) {
+	cfg, err := LoadConfig("testdata/with_fallback_models.yaml")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"opus", "sonnet"}, cfg.Agent.FallbackModels)
+
+	// plan sets its own fallback list — must NOT inherit the agent list.
+	plan := cfg.ResolveStep(cfg.Plan)
+	assert.Equal(t, []string{"haiku"}, plan.FallbackModels)
+
+	// ship leaves fallback_models empty — must inherit the agent list.
+	ship := cfg.ResolveStep(cfg.Ship)
+	assert.Equal(t, []string{"opus", "sonnet"}, ship.FallbackModels)
+}
+
+func TestLoadConfig_FallbackModels_RejectsUnknownModel(t *testing.T) {
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  fallback_models: [not-a-real-model]\n" + minimalSteps()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fallback_models")
+	assert.Contains(t, err.Error(), "not-a-real-model")
+}
+
+func TestLoadConfig_FallbackModels_RejectsDuplicateOfPrimary(t *testing.T) {
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  fallback_models: [sonnet]\n" + minimalSteps()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must differ from the primary model")
+}
+
+func TestLoadConfig_FallbackModels_RejectsStepFallbackEqualToInheritedPrimary(t *testing.T) {
+	// build inherits the agent primary (gpt-5.5) but names it as a step-level
+	// fallback — that can never help, so it must be rejected.
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: gpt-5.5\nbuild:\n  prompt: \"b\"\n  comment_template: \"c\"\n  fallback_models: [gpt-5.5]\n" +
+		"plan:\n  prompt: \"p\"\n  comment_template: \"c\"\ncreate_pr:\n  prompt: \"pr\"\n  comment_template: \"c\"\nvalidate:\n  prompt: \"v\"\n  comment_template: \"c\"\nship:\n  prompt: \"s\"\n  comment_template: \"c\"\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "build.fallback_models")
+}
+
 func TestLoadConfig_InvalidEffort(t *testing.T) {
 	cases := []struct {
 		name string

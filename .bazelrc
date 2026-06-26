@@ -13,6 +13,17 @@ common --repository_cache=~/.cache/bazel-repo-cache
 # This allows multiple bazel commands to run concurrently (each gets its own server)
 startup --noblock_for_lock
 
+# Embed git revision/time into stamped binaries (see tools/workspace_status.sh).
+# The workspace status command itself is cheap and runs on every build, but it
+# only feeds x_defs when --stamp is set; without --stamp the STABLE_* keys are
+# ignored, so normal builds stay cacheable.
+build --workspace_status_command=tools/workspace_status.sh
+
+# Opt-in stamping for release/cron builds: `bazel build --config=stamp ...`.
+# Kept off the default build because --stamp busts the action cache whenever the
+# commit changes.
+build:stamp --stamp
+
 # Python configuration
 build --python_version=PY3
 

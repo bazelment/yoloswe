@@ -68,9 +68,14 @@ type TrackerConfig struct {
 //
 //nolint:govet // fieldalignment: keep YAML fields in config-file order.
 type AgentConfig struct {
-	Model       string             `yaml:"model"`        // model ID from agent.AllModels (e.g. "fable", "gpt-5.5")
-	Effort      string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
-	LLMEndpoint *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
+	Model string `yaml:"model"` // model ID from agent.AllModels (e.g. "fable", "gpt-5.5")
+	// FallbackModels are tried, in order, when the primary model fails with a
+	// workspace-wide out-of-credits error. Each should name a model on a
+	// *different* provider (a same-provider swap can't escape an out-of-credits
+	// workspace). Failover starts a fresh session. Empty = no fallback.
+	FallbackModels []string           `yaml:"fallback_models"`
+	Effort         string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
+	LLMEndpoint    *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
 }
 
 // LLMEndpointConfig points the underlying CLI at a third-party LLM endpoint
@@ -112,6 +117,7 @@ type StepConfig struct {
 	Prompt               string             `yaml:"prompt"`                 // Go text/template; required unless rounds is set. No built-in default — run `jiradozer bootstrap` to scaffold.
 	SystemPrompt         string             `yaml:"system_prompt"`          // optional system prompt passed to the agent
 	Model                string             `yaml:"model"`                  // override agent.model; empty = inherit
+	FallbackModels       []string           `yaml:"fallback_models"`        // override agent.fallback_models; nil = inherit. See AgentConfig.FallbackModels.
 	Effort               string             `yaml:"effort"`                 // override agent.effort; empty = inherit
 	PermissionMode       string             `yaml:"permission_mode"`        // "plan", "bypass", etc.; empty = step default
 	CommentTemplate      string             `yaml:"comment_template"`       // text/template rendered with CommentData; required for single-shot steps (rounds-only steps may omit it)
@@ -252,6 +258,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("agent.effort: %w", err)
 		}
 	}
+	if err := validateFallbackModels("agent.fallback_models", c.Agent.Model, c.Agent.FallbackModels); err != nil {
+		return err
+	}
 	if err := c.Agent.LLMEndpoint.ToEndpoint().Validate(); err != nil {
 		return fmt.Errorf("agent.llm_endpoint: %w", err)
 	}
@@ -268,6 +277,39 @@ func (c *Config) validate() error {
 	for _, ns := range c.orderedSteps() {
 		if err := validateStep(ns.name, ns.step); err != nil {
 			return err
+		}
+		// Validate fallback models against the step's *resolved* primary model
+		// (a step with its own model: override and an inherited fallback list,
+		// or vice versa, must not name a fallback equal to its effective
+		// primary). Only validate when the step actually sets fallbacks; an
+		// inherited list is already validated at the agent level above.
+		if len(ns.step.FallbackModels) > 0 {
+			primary := ns.step.Model
+			if primary == "" {
+				primary = c.Agent.Model
+			}
+			if err := validateFallbackModels(ns.name+".fallback_models", primary, ns.step.FallbackModels); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateFallbackModels checks that each fallback model ID resolves via
+// agent.ModelByID and that none duplicates the primary model (a fallback equal
+// to the primary can never help). label names the config field for error
+// messages (e.g. "agent.fallback_models").
+func validateFallbackModels(label, primary string, fallbacks []string) error {
+	for _, m := range fallbacks {
+		if m == "" {
+			return fmt.Errorf("%s: fallback model must not be empty", label)
+		}
+		if _, ok := agent.ModelByID(m); !ok {
+			return fmt.Errorf("%s: unknown model %q", label, m)
+		}
+		if m == primary {
+			return fmt.Errorf("%s: fallback model %q must differ from the primary model", label, m)
 		}
 	}
 	return nil
@@ -527,6 +569,9 @@ func (c *Config) StepByName(name string) (StepConfig, bool) {
 func (c *Config) ResolveStep(step StepConfig) StepConfig {
 	if step.Model == "" {
 		step.Model = c.Agent.Model
+	}
+	if step.FallbackModels == nil {
+		step.FallbackModels = c.Agent.FallbackModels
 	}
 	if step.Effort == "" {
 		step.Effort = c.Agent.Effort

@@ -53,7 +53,10 @@ type agentRunner struct {
 
 var defaultAgentRunner = agentRunner{
 	newProviderForModel: agent.NewProviderForModel,
-	retryBackoffs:       []time.Duration{30 * time.Second, 90 * time.Second},
+	// A single shared schedule. Overload/5xx and other transients reuse the
+	// last entry once attempts exceed the slice (see retryBackoff), so a longer
+	// tail gives genuine cool-down for sustained provider overload (#273).
+	retryBackoffs: []time.Duration{30 * time.Second, 90 * time.Second, 3 * time.Minute, 5 * time.Minute},
 }
 
 // RunStepAgent runs an agent session for the given workflow step and returns
@@ -409,14 +412,65 @@ func (c *compositeEventHandler) OnRetryAbort(reason, tool, excerpt string) {
 // If renderer is non-nil, agent events are rendered to the terminal in addition
 // to being logged to the log file.
 func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, error) {
+	if renderer != nil {
+		defer renderer.Reset()
+	}
+
+	// Outer loop: the primary model followed by any configured fallbacks. A
+	// model is advanced only on a workspace-wide out-of-credits failure (a
+	// same-model retry can't refill it). Failover starts a fresh session —
+	// cross-provider resume is not reliable — so currentResume is reset.
+	models := append([]string{cfg.Model}, cfg.FallbackModels...)
+	currentResume := resumeSessionID
+	var lastErr error
+	var lastResult StepAgentResult
+	for mi, modelID := range models {
+		activeCfg := cfg
+		activeCfg.Model = modelID
+
+		res, outOfCredits, err := r.runAgentForModel(ctx, stepName, prompt, activeCfg, workDir, currentResume, renderer, logger)
+		if err == nil {
+			return res, nil
+		}
+		// A bare context cancellation is terminal regardless of model — don't
+		// burn the fallback budget on a shutdown.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return res, err
+		}
+		lastErr, lastResult = err, res
+		if outOfCredits && mi < len(models)-1 {
+			next := models[mi+1]
+			logger.Warn("model out of credits; falling back",
+				"step", stepName,
+				"from", modelID,
+				"to", next,
+			)
+			if renderer != nil {
+				renderer.Status(fmt.Sprintf("%s out of credits; falling back to %s", modelID, next))
+			}
+			// Fresh session on the next provider.
+			currentResume = ""
+			continue
+		}
+		return res, err
+	}
+	return lastResult, lastErr
+}
+
+// runAgentForModel runs the transient-retry loop for a single model. It returns
+// the step result, whether the terminal error was a workspace out-of-credits
+// failure (so the caller can decide to fall back to a different model), and a
+// terminal error (nil on success).
+func (r agentRunner) runAgentForModel(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, bool, error) {
 	model, ok := agent.ModelByID(cfg.Model)
 	if !ok {
-		return StepAgentResult{}, fmt.Errorf("unknown model: %q", cfg.Model)
+		return StepAgentResult{}, false, fmt.Errorf("unknown model: %q", cfg.Model)
 	}
 	provider, err := r.newProviderForModel(model)
 	if err != nil {
-		return StepAgentResult{}, fmt.Errorf("create provider: %w", err)
+		return StepAgentResult{}, false, fmt.Errorf("create provider: %w", err)
 	}
+	// Close this model's provider before returning so a fallback doesn't leak it.
 	defer provider.Close()
 
 	logAttrs := []any{
@@ -434,13 +488,12 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	logHandler := newLogEventHandler(logger, stepName, provider.Name())
 	var handler agent.EventHandler = logHandler
 	if renderer != nil {
-		defer renderer.Reset()
 		handler = &compositeEventHandler{handlers: []agent.EventHandler{logHandler, &rendererEventHandler{r: renderer}}}
 	}
 
 	maxRetries := cfg.TransientRetries
 	if maxRetries == 0 {
-		maxRetries = 2
+		maxRetries = 4
 	}
 
 	currentResume := resumeSessionID
@@ -450,7 +503,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		logHandler.resetPerAttempt()
 		opts, err := buildExecuteOpts(cfg, workDir, handler, currentResume, logger)
 		if err != nil {
-			return StepAgentResult{}, err
+			return StepAgentResult{}, false, err
 		}
 		result, err = provider.Execute(ctx, prompt, nil, opts...)
 		if err == nil {
@@ -459,6 +512,10 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 			}
 			if result.SessionID != "" {
 				currentResume = result.SessionID
+			}
+			if agent.IsOutOfCredits(result.Error) {
+				logHandler.flushText()
+				return StepAgentResult{SessionID: currentResume}, true, fmt.Errorf("agent execution: %w", result.Error)
 			}
 			transient, reason := agent.ClassifyTransient(result.Error)
 			if !transient || attempt >= maxRetries {
@@ -484,7 +541,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 					<-timer.C
 				}
 				logHandler.flushText()
-				return StepAgentResult{SessionID: currentResume}, ctx.Err()
+				return StepAgentResult{SessionID: currentResume}, false, ctx.Err()
 			case <-timer.C:
 			}
 			continue
@@ -492,10 +549,14 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		if result != nil && result.SessionID != "" {
 			currentResume = result.SessionID
 		}
+		if agent.IsOutOfCredits(err) {
+			logHandler.flushText()
+			return StepAgentResult{SessionID: currentResume}, true, fmt.Errorf("agent execution: %w", err)
+		}
 		transient, reason := agent.ClassifyTransient(err)
 		if !transient || attempt >= maxRetries {
 			logHandler.flushText()
-			return StepAgentResult{SessionID: currentResume}, fmt.Errorf("agent execution: %w", err)
+			return StepAgentResult{SessionID: currentResume}, false, fmt.Errorf("agent execution: %w", err)
 		}
 		attempt++
 		backoff := r.retryBackoff(attempt)
@@ -517,14 +578,14 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 				<-timer.C
 			}
 			logHandler.flushText()
-			return StepAgentResult{SessionID: currentResume}, ctx.Err()
+			return StepAgentResult{SessionID: currentResume}, false, ctx.Err()
 		case <-timer.C:
 		}
 	}
 
 	if result == nil {
 		logHandler.flushText()
-		return StepAgentResult{SessionID: currentResume}, fmt.Errorf("agent execution: provider returned no result")
+		return StepAgentResult{SessionID: currentResume}, false, fmt.Errorf("agent execution: provider returned no result")
 	}
 
 	if !result.Success {
@@ -533,9 +594,9 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 			SessionID: result.SessionID,
 		}
 		if result.Error != nil {
-			return failed, fmt.Errorf("agent execution: %w", result.Error)
+			return failed, agent.IsOutOfCredits(result.Error), fmt.Errorf("agent execution: %w", result.Error)
 		}
-		return failed, fmt.Errorf("agent failed")
+		return failed, false, fmt.Errorf("agent failed")
 	}
 
 	completedAttrs := []any{
@@ -565,7 +626,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	return StepAgentResult{
 		Output:    output,
 		SessionID: result.SessionID,
-	}, nil
+	}, false, nil
 }
 
 func buildExecuteOpts(cfg StepConfig, workDir string, handler agent.EventHandler, resumeSessionID string, logger *slog.Logger) ([]agent.ExecuteOption, error) {

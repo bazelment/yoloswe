@@ -42,6 +42,28 @@ func TestClassifyText(t *testing.T) {
 			wantOK:     true,
 		},
 		{
+			// 529 (Anthropic overload) must classify as a retryable 5xx (#273).
+			name:       "http 529 overloaded",
+			msg:        "API Error: 529 {\"type\":\"overloaded_error\"}",
+			wantReason: ReasonHTTP5xx,
+			wantOK:     true,
+		},
+		{
+			// Verbatim from jiradozer cron failures (#272).
+			name:       "connection closed mid-response",
+			msg:        "API Error: Connection closed mid-response. The response above may be incomplete.",
+			wantReason: ReasonConnectionReset,
+			wantOK:     true,
+		},
+		{
+			// Grace-period force-complete must classify distinctly (#270) while
+			// staying retryable.
+			name:       "turn forced complete after grace period",
+			msg:        "stream idle: turn forced complete after grace period gated on background tool_use",
+			wantReason: ReasonGraceForced,
+			wantOK:     true,
+		},
+		{
 			name:       "connection reset",
 			msg:        "read tcp: connection reset by peer",
 			wantReason: ReasonConnectionReset,
