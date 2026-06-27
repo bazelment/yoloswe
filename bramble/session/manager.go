@@ -1326,11 +1326,8 @@ func resolveAgentModel(modelID string, registry *agent.ModelRegistry) (agent.Age
 			return m, nil
 		}
 	}
-	if m, ok := agent.ModelByID(modelID); ok {
+	if m, ok := agent.ResolveModel(modelID); ok {
 		return m, nil
-	}
-	if provider, ok := agent.ProviderByModelPrefix(modelID); ok {
-		return agent.AgentModel{ID: modelID, Provider: provider, Label: modelID}, nil
 	}
 	return agent.AgentModel{}, fmt.Errorf("unknown model %q: no curated entry and no recognized prefix (%s)", modelID, agent.KnownModelPrefixes())
 }

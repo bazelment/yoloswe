@@ -280,3 +280,34 @@ func TestKnownModelPrefixes(t *testing.T) {
 	assert.Contains(t, s, "claude-")
 	assert.Contains(t, s, "agy-")
 }
+
+func TestResolveModel(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		id       string
+		provider string
+		ok       bool
+	}{
+		// Curated exact match wins.
+		{"opus", ProviderClaude, true},
+		// Prefix-only match synthesizes an AgentModel (not curated in AllModels).
+		{"composer-2.5", ProviderCursor, true},
+		// Unknown — neither curated nor prefix-recognized.
+		{"totally-bogus", "", false},
+		{"", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			t.Parallel()
+			m, ok := ResolveModel(tc.id)
+			assert.Equal(t, tc.ok, ok)
+			if tc.ok {
+				assert.Equal(t, tc.id, m.ID)
+				assert.Equal(t, tc.provider, m.Provider)
+				assert.Equal(t, tc.id, m.Label)
+			}
+		})
+	}
+}

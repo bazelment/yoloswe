@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "bootstrap.go",
         "main.go",
+        "models.go",
         "run.go",
         "team_signals_other.go",
         "team_signals_unix.go",
