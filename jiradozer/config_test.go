@@ -270,6 +270,27 @@ func TestLoadConfig_FallbackModels_RejectsUnknownModel(t *testing.T) {
 	assert.Contains(t, err.Error(), "not-a-real-model")
 }
 
+func TestLoadConfig_FallbackModels_AcceptsCursorPrefixModel(t *testing.T) {
+	// composer-2.5 is recognized by prefix though not curated in AllModels;
+	// both the primary and fallback slots must accept such IDs.
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: composer-2.5\n  fallback_models: [opus]\n" + minimalSteps()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "composer-2.5", cfg.Agent.Model)
+	assert.Equal(t, []string{"opus"}, cfg.Agent.FallbackModels)
+}
+
+func TestLoadConfig_FallbackModels_AcceptsCursorPrefixFallback(t *testing.T) {
+	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  fallback_models: [composer-2.5]\n" + minimalSteps()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"composer-2.5"}, cfg.Agent.FallbackModels)
+}
+
 func TestLoadConfig_FallbackModels_RejectsDuplicateOfPrimary(t *testing.T) {
 	yaml := "tracker:\n  kind: linear\n  api_key: k\nagent:\n  model: sonnet\n  fallback_models: [sonnet]\n" + minimalSteps()
 	path := filepath.Join(t.TempDir(), "config.yaml")

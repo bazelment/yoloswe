@@ -35,12 +35,34 @@ var AllModels = []AgentModel{
 	{ID: "agy-default", Provider: ProviderAgy, Label: "agy-default"},
 }
 
+// AllModelIDs returns the IDs of every curated model, in AllModels order.
+func AllModelIDs() []string {
+	ids := make([]string, len(AllModels))
+	for i, m := range AllModels {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
 // ModelByID returns the AgentModel for the given ID from the full list, or false if not found.
 func ModelByID(id string) (AgentModel, bool) {
 	for _, m := range AllModels {
 		if m.ID == id {
 			return m, true
 		}
+	}
+	return AgentModel{}, false
+}
+
+// ResolveModel resolves a model ID via exact match against AllModels, then a
+// prefix rule (e.g. "composer-2.5" → ProviderCursor) so not-yet-curated IDs
+// still work. Returns false only when neither matches.
+func ResolveModel(id string) (AgentModel, bool) {
+	if m, ok := ModelByID(id); ok {
+		return m, true
+	}
+	if provider, ok := ProviderByModelPrefix(id); ok {
+		return AgentModel{ID: id, Provider: provider, Label: id}, true
 	}
 	return AgentModel{}, false
 }

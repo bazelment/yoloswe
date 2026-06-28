@@ -403,9 +403,10 @@ func loadRunConfig(args runArgs) (*jiradozer.Config, error) {
 		return nil, err
 	}
 
-	// Validate agent model.
-	if _, ok := agent.ModelByID(cfg.Agent.Model); !ok {
-		return nil, fmt.Errorf("unknown model %q — available models: %s", cfg.Agent.Model, availableModels())
+	// Validate agent model. ResolveModel accepts curated IDs and any ID matching
+	// a known provider prefix (e.g. "composer-2.5" → cursor); see `jiradozer models`.
+	if _, ok := agent.ResolveModel(cfg.Agent.Model); !ok {
+		return nil, fmt.Errorf("unknown model %q — %s", cfg.Agent.Model, supportedModelsHelp())
 	}
 	// Re-validate fallback models after CLI overrides — LoadConfig's validate()
 	// ran before --model/--fallback-models were applied. Use the effective
@@ -767,14 +768,6 @@ func parseAutoApprove(value string) []string {
 		return allSteps
 	}
 	return tracker.SplitCSV(value)
-}
-
-func availableModels() string {
-	var names []string
-	for _, m := range agent.AllModels {
-		names = append(names, m.ID)
-	}
-	return fmt.Sprintf("[%s]", strings.Join(names, ", "))
 }
 
 // rendererStatus is a nil-safe wrapper around renderer.Status.

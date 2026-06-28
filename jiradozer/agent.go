@@ -462,7 +462,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 // failure (so the caller can decide to fall back to a different model), and a
 // terminal error (nil on success).
 func (r agentRunner) runAgentForModel(ctx context.Context, stepName, prompt string, cfg StepConfig, workDir string, resumeSessionID string, renderer *render.Renderer, logger *slog.Logger) (StepAgentResult, bool, error) {
-	model, ok := agent.ModelByID(cfg.Model)
+	model, ok := agent.ResolveModel(cfg.Model)
 	if !ok {
 		return StepAgentResult{}, false, fmt.Errorf("unknown model: %q", cfg.Model)
 	}

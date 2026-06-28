@@ -25,13 +25,9 @@ func (ProviderAgentClient) Run(ctx context.Context, req AgentRequest) (AgentResp
 	if modelID == "" {
 		return AgentResponse{}, fmt.Errorf("missing model for %s", req.Role)
 	}
-	m, ok := agent.ModelByID(modelID)
+	m, ok := agent.ResolveModel(modelID)
 	if !ok {
-		provider, found := agent.ProviderByModelPrefix(modelID)
-		if !found {
-			return AgentResponse{}, fmt.Errorf("unknown model %q; expected one of registered models or prefixes %s", modelID, agent.KnownModelPrefixes())
-		}
-		m = agent.AgentModel{ID: modelID, Provider: provider, Label: modelID}
+		return AgentResponse{}, fmt.Errorf("unknown model %q; expected one of registered models or prefixes %s", modelID, agent.KnownModelPrefixes())
 	}
 
 	provider, err := agent.NewProviderForModel(m)

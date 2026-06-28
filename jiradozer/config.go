@@ -334,7 +334,8 @@ func (c *Config) ValidateEffectiveFallbacks() error {
 }
 
 // ValidateFallbackModels checks that each fallback model ID resolves via
-// agent.ModelByID and that none duplicates the primary model (a fallback equal
+// agent.ResolveModel (curated entry or recognized provider prefix, e.g.
+// "composer-2.5") and that none duplicates the primary model (a fallback equal
 // to the primary can never help). label names the config field for error
 // messages (e.g. "agent.fallback_models"). Exported so the CLI can reuse it for
 // flag overrides applied after LoadConfig's validate() has already run.
@@ -343,7 +344,7 @@ func ValidateFallbackModels(label, primary string, fallbacks []string) error {
 		if m == "" {
 			return fmt.Errorf("%s: fallback model must not be empty", label)
 		}
-		if _, ok := agent.ModelByID(m); !ok {
+		if _, ok := agent.ResolveModel(m); !ok {
 			return fmt.Errorf("%s: unknown model %q", label, m)
 		}
 		if m == primary {

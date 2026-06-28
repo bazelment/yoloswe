@@ -75,6 +75,31 @@ func TestRunAgentRetryTransientThenSuccess(t *testing.T) {
 	require.Equal(t, "sess-1", provider.resumeSession[1])
 }
 
+func TestRunAgentResolvesCursorPrefixModel(t *testing.T) {
+	// A prefix-only model (not curated in AllModels) must resolve to its
+	// provider and flow into newProviderForModel, not be rejected as unknown.
+	provider := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-1", Text: "done"}},
+		errs:    []error{nil},
+	}
+	var gotModel agentpkg.AgentModel
+	runner := agentRunner{
+		newProviderForModel: func(m agentpkg.AgentModel) (agentpkg.Provider, error) {
+			gotModel = m
+			return provider, nil
+		},
+		retryBackoffs: []time.Duration{0},
+	}
+
+	got, err := runner.runAgent(context.Background(), "build", "prompt", StepConfig{
+		Model: "composer-2.5",
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "done", got.Output)
+	require.Equal(t, "composer-2.5", gotModel.ID)
+	require.Equal(t, agentpkg.ProviderCursor, gotModel.Provider)
+}
+
 func TestRunAgentRetryTransientResultErrorThenSuccess(t *testing.T) {
 	provider := &fakeRetryProvider{
 		results: []*agentpkg.AgentResult{

@@ -955,6 +955,21 @@ func TestValidateConfigUsesConfigPathFromRoot(t *testing.T) {
 	}
 }
 
+func TestModelsCommand(t *testing.T) {
+	t.Parallel()
+
+	cmd := newRootCommand(&cliapp.Options{ToolName: "jiradozer"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"models"})
+	require.NoError(t, cmd.Execute())
+
+	got := out.String()
+	assert.Contains(t, got, "Supported models by backend:")
+	assert.Contains(t, got, "cursor: cursor-default")
+	assert.Contains(t, got, "composer-")
+}
+
 // TestShouldReportFailure pins the run() failure-reporting guard: a real step
 // error must alert even when the context was cancelled (the fail-loudly goal),
 // while a bare cancellation/deadline is an expected stop and stays silent.
