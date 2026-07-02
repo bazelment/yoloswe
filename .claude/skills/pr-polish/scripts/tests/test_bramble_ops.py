@@ -255,10 +255,12 @@ class TestActionHistoryGoal(unittest.TestCase):
         self.assertIn("a.go:10 — null check missing", out)
         self.assertIn("Skipped:", out)
         # Reason wins when present (the orchestrator's decision is what
-        # the model needs to know to avoid re-arguing the skip).
-        self.assertIn("b.py:42 wont_fix: design tradeoff", out)
+        # the model needs to know to avoid re-arguing the skip). Deferral-class
+        # verbs carry the "(deferred, not fixed)" gloss so the resumed reviewer
+        # reads the finding as still open.
+        self.assertIn("b.py:42 wont_fix (deferred, not fixed): design tradeoff", out)
         # Topic-only fallback when no reason was recorded.
-        self.assertIn("d.go:8 ack: rename helper", out)
+        self.assertIn("d.go:8 ack (deferred, not fixed): rename helper", out)
         # Stale entries are deliberately excluded from the goal channel.
         self.assertNotIn("c.go:5", out)
         self.assertNotIn("stale", out)
@@ -279,8 +281,8 @@ class TestActionHistoryGoal(unittest.TestCase):
         ])
         out = bramble_ops.action_history_goal(state, 2)
         self.assertIn("Skipped:", out)
-        self.assertIn("222 pre_existing:", out)
-        self.assertIn("333 flake:", out)
+        self.assertIn("222 pre_existing (deferred, not fixed):", out)
+        self.assertIn("333 flake (deferred, not fixed):", out)
 
     def test_stale_actions_excluded_from_goal(self) -> None:
         # Even a round that's *only* stale acks should not bloat the
@@ -2293,6 +2295,25 @@ class TestActionLabelsModeAware(unittest.TestCase):
         got = bramble_ops._skipped_label(action, "wont_fix")
         self.assertIn("(whole document)", got)
         self.assertIn("needs author input", got)
+
+    def test_skipped_label_deferred_verbs_glossed(self):
+        # Deferral-class verbs carry a "(deferred, not fixed)" gloss so a
+        # resumed reviewer reads the finding as still open rather than
+        # resolved. Covers the label with and without a reason.
+        action = {"path": "a.go", "line": 10, "reason": "later"}
+        for verb in ("ack", "wont_fix", "pre_existing", "flake"):
+            got = bramble_ops._skipped_label(action, verb)
+            self.assertIn(f"{verb} (deferred, not fixed): later", got)
+        bare = bramble_ops._skipped_label({"path": "a.go", "line": 10}, "ack")
+        self.assertEqual(bare, "a.go:10 ack (deferred, not fixed)")
+
+    def test_skipped_label_false_positive_not_glossed(self):
+        # false_positive genuinely removes the item from scope, so it must
+        # NOT get the "still open" gloss.
+        action = {"path": "a.go", "line": 10, "reason": "misread the call"}
+        got = bramble_ops._skipped_label(action, "false_positive")
+        self.assertEqual(got, "a.go:10 false_positive: misread the call")
+        self.assertNotIn("deferred", got)
 
 
 class TestRecoverEnvelope(unittest.TestCase):

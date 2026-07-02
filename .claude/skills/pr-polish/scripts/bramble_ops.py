@@ -156,8 +156,8 @@ def action_history_goal(
 
         Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE;
         b.py:42 — race in cache invalidation.
-        Skipped: c.go:8 wont_fix: caller already validates;
-        d.go:5 ack: rename helper.
+        Skipped: c.go:8 wont_fix (deferred, not fixed): caller already validates;
+        d.go:5 ack (deferred, not fixed): rename helper.
         Files changed since round 5: a.go, b.py.
 
     Bramble's BuildFollowUpJSONPromptWithScope embeds this as
@@ -275,6 +275,14 @@ def _action_label(action: dict[str, Any]) -> str:
     return base
 
 
+# Deferral-class verbs mean "the author has NOT fixed this" — the finding is
+# still open in the code. We annotate them in the goal text so a resumed
+# reviewer doesn't read the bare verb (``ack``) as "resolved" and drop the
+# finding. ``false_positive`` is deliberately absent: it genuinely removes the
+# item from scope, so it needs no "still open" gloss.
+_DEFERRED_VERBS = frozenset({"ack", "wont_fix", "pre_existing", "flake"})
+
+
 def _skipped_label(action: dict[str, Any], verb: str) -> str:
     """Format a skipped action: ``<address> verb: <description>``.
 
@@ -284,14 +292,20 @@ def _skipped_label(action: dict[str, Any], verb: str) -> str:
     the skip. The whole description is capped at _TOPIC_CHAR_CAP so
     a long reason can't bloat the goal text. Address shape matches
     ``_action_label``.
+
+    Deferral-class verbs (see ``_DEFERRED_VERBS``) get a ``(deferred, not
+    fixed)`` gloss so the resumed reviewer reads them as still-open rather
+    than resolved — this is the orchestrator-side half of the "acknowledged
+    is not resolved" rule (the reviewer prompt carries the other half).
     """
     base = _action_address(action)
     if not base:
         return ""
+    label_verb = f"{verb} (deferred, not fixed)" if verb in _DEFERRED_VERBS else verb
     description = (action.get("reason") or action.get("topic") or "").strip()
     if description:
-        return f"{base} {verb}: {_truncate(description)}"
-    return f"{base} {verb}"
+        return f"{base} {label_verb}: {_truncate(description)}"
+    return f"{base} {label_verb}"
 
 
 # Streak threshold above which the goal channel injects a one-sentence
