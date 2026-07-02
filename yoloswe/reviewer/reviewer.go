@@ -882,10 +882,9 @@ On round 2+, you MAY emit a top-level "sufficiency" object:
 This is a hint to the orchestrator, not a new gate — the verdict +
 issues array remain authoritative. Omit on first-pass reviews.
 
-"sufficiency" and "summary" are not places to record findings. Only the
-verdict and the "issues" array are read as findings. Any problem you can
-describe — especially a high/critical one — MUST appear as an entry in
-"issues" with its severity, and set the verdict accordingly. If you catch
+"sufficiency" and "summary" are not places to record findings. Any problem
+you can describe — especially a high/critical one — MUST appear as an entry
+in "issues" with its severity, and set the verdict accordingly. If you catch
 yourself explaining a real defect in "sufficiency", "evidence", or the
 summary instead of emitting it as an issue, that is the finding trying to
 escape the verdict: promote it into "issues" and reject.

@@ -43,6 +43,10 @@ if str(SCRIPT_DIR) not in sys.path:
 from datetime import UTC
 
 from _common import (  # noqa: E402 — sys.path tweak above
+    FIXED_ACTIONS,
+    KNOWN_ACTIONS,
+    KNOWN_SEVERITIES,
+    SKIPPED_ACTIONS,
     SOURCE_INLINE,
     SOURCE_ISSUE,
     SOURCE_REVIEW,
@@ -824,20 +828,10 @@ def state_append_round(
     return state
 
 
-FIXED_ACTIONS = {"fixed"}
-# ``pre_existing`` and ``flake`` are CI-only skip reasons: pre_existing
-# means the test also fails on the base branch; flake means the failure
-# matched a known infrastructure marker (ETXTBSY, bazel-cache, network).
-# ``ack`` is a batch-acknowledged low/nit — counts as skipped so summary
-# tables reflect that the orchestrator did look at it.
-SKIPPED_ACTIONS = {"false_positive", "wont_fix", "stale", "pre_existing", "flake", "ack"}
-
-# The full set of recognized action verbs, derived from the two buckets above so
-# there is exactly one source of truth. _validate_actions checks entries against
-# this; _top_severity / counting logic classify via the buckets.
-KNOWN_ACTIONS = FIXED_ACTIONS | SKIPPED_ACTIONS
-# Recognized severities (None/absent is allowed — e.g. a lint advisory row).
-KNOWN_SEVERITIES = {"high", "medium", "low", "nit"}
+# Action-verb and severity vocabularies live in _common (shared with bramble_ops
+# so both derive from one source of truth). Imported at the top of this module;
+# _validate_actions checks entries against KNOWN_ACTIONS, and _top_severity /
+# counting logic classify via the FIXED_ACTIONS / SKIPPED_ACTIONS buckets.
 
 
 def _validate_actions(actions: list[Any]) -> None:

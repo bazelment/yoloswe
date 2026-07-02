@@ -254,3 +254,16 @@ def severity_rank(sev: str | None) -> int:
     return SEVERITY_ORDER.get(sev or "", -1)
 
 
+# The recognized comment-action verbs, split into the two buckets that
+# classification keys on. Shared here (not in pr_ops) so pr_ops.recompute_counts
+# and bramble_ops's goal-channel labelling derive from one source of truth.
+# ``pre_existing``/``flake`` are CI-only skip reasons (test fails on base, or the
+# failure matched a known infra marker); ``ack`` is a batch-acknowledged low/nit
+# — all count as skipped so summary tables reflect that the orchestrator looked.
+FIXED_ACTIONS = {"fixed"}
+SKIPPED_ACTIONS = {"false_positive", "wont_fix", "stale", "pre_existing", "flake", "ack"}
+KNOWN_ACTIONS = FIXED_ACTIONS | SKIPPED_ACTIONS
+# Recognized severities (None/absent is allowed — e.g. a lint advisory row).
+KNOWN_SEVERITIES = {"high", "medium", "low", "nit"}
+
+
