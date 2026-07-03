@@ -282,6 +282,8 @@ Focus on these areas:
 
 When you find N >= 2 sibling sites of the same underlying rule violation (same invariant, different lines), emit ONE issue with a named "invariant" and a "sites" array. Do NOT emit N separate single-site issues. The invariant name describes the rule being violated (e.g. "ambient env vars shadow explicit proxy keys"), not the symptom. A single finding that names the producer-side invariant beats N findings that patch consumer sites — see the Class-level findings section of the output format for the exact shape.
 
+When one value — a flag, config entry, constant, URL, or shared parameter — is consumed in more than one place, do not assume a single value satisfies every consumer. Trace it to each use and ask what that consumer actually requires. Consumers can have incompatible requirements even when the code compiles and the tests pass; a comment asserting two consumers want "the same" thing is a claim to check against the code, not to take on faith. When the requirements conflict, that is a defect: emit it as one issue with an "invariant" naming the conflict and a "sites" array for the consumers.
+
 Prioritize systemic problems over local ones. If after scanning the diff and adjacent code you find no structural issues, return an empty issues array with verdict "accepted". Finding nothing on a clean diff is the right call; do not strain to find something to flag.
 
 When you flag an issue, provide a short, direct explanation and cite the affected file and line range.
@@ -731,7 +733,9 @@ Re-review the full diff with fresh eyes. Pay particular attention to:
 3. Anything you skipped or dismissed before that, on a second look, warrants flagging.
 4. New sites of an invariant you already named in a prior turn — fold them into the existing invariant's "sites" array via a single issue. Do NOT re-flag the same invariant as separate per-site findings; the orchestrator will treat that as a spiral and waste a round chasing your symptom list.
 
-If the prior turn's fixes addressed the structural issues you raised and you find nothing new at this scope, return an empty issues array with verdict "accepted". A clean second pass is a legitimate outcome — better than re-surfacing nits to justify the turn. On resumed sessions you MAY emit a top-level "sufficiency" object signalling whether you believe the prior turn's fixes addressed every invariant you can find; see the output format spec for the shape.
+A prior finding that was only acknowledged or deferred — not actually fixed in the code — is still open. Re-emit it at its original severity; do not read prior acknowledgement as resolution. Only a finding whose fix is present in the current diff, or that you now judge a false positive, leaves scope.
+
+If the prior turn's fixes are actually present in the code and you find nothing new at this scope, return an empty issues array with verdict "accepted". A clean second pass is a legitimate outcome — but only when nothing remains open, not merely because the turn feels done: an unresolved high/critical finding is never a reason to accept. On resumed sessions you MAY emit a top-level "sufficiency" object signalling whether you believe the prior turn's fixes addressed every invariant you can find; see the output format spec for the shape.
 
 Apply the same severity rubric and JSON output format as the prior turn.`
 	// Append the scope suffix and skip-test-execution suffix here, even
@@ -877,6 +881,13 @@ On round 2+, you MAY emit a top-level "sufficiency" object:
 - "evidence": 1-2 sentences explaining why. Optional.
 This is a hint to the orchestrator, not a new gate — the verdict +
 issues array remain authoritative. Omit on first-pass reviews.
+
+"sufficiency" and "summary" are not places to record findings. Any problem
+you can describe — especially a high/critical one — MUST appear as an entry
+in "issues" with its severity, and set the verdict accordingly. If you catch
+yourself explaining a real defect in "sufficiency", "evidence", or the
+summary instead of emitting it as an issue, that is the finding trying to
+escape the verdict: promote it into "issues" and reject.
 
 ## Rules
 - verdict MUST be exactly "accepted" or "rejected". Aliases like

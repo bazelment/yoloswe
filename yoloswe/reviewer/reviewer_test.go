@@ -191,6 +191,13 @@ func TestBuildJSONPrompt(t *testing.T) {
 				"high",
 				"medium",
 				"low",
+				// Config-consistency principle (INF-1711): a value shared
+				// across consumers isn't guaranteed compatible; pin the
+				// principle phrase so a future edit can't silently drop it.
+				"do not assume a single value satisfies every consumer",
+				// Detection→emission principle: findings must not be parked
+				// in sufficiency/summary — they belong in issues[].
+				"are not places to record findings",
 			},
 		},
 		{
@@ -270,6 +277,12 @@ func TestBuildFollowUpJSONPromptWithScope_KeepsBiasGuardAndDropsRedundantBlocks(
 					// Sufficiency is the v2 audit-trail channel; the model
 					// must be told it MAY emit it on resumed sessions.
 					"sufficiency",
+					// Resume de-bias principle (INF-1711): a prior finding
+					// only acknowledged/deferred is still open — the reviewer
+					// must not read acknowledgement as resolution. Pin the
+					// phrase so a future edit can't reintroduce the false-
+					// accept bias.
+					"only acknowledged or deferred",
 				}
 				for _, want := range required {
 					if !strings.Contains(prompt, want) {

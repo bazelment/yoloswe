@@ -2299,6 +2299,144 @@ class TestFinalizeAndReport(unittest.TestCase):
         self.assertIsNone(out["converged_signal"])
         self.assertIsNone(out["exit_reason_hint"])
 
+    def test_prior_round_bare_ack_high_blocks_converged_signal(self) -> None:
+        # SKILL.md Step 3.g: a high/critical finding bare-ack'd in a prior
+        # round is still open and must keep the loop running, even when the
+        # current + subsequent rounds are low-only and low_only_streak >= 2
+        # would otherwise fire. Without the deferred-high guard the
+        # orchestrator would follow a False converged hint and exit early.
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "ack", "severity": "high"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{"comment_id": 2, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 3, "sha3f",
+            [{"comment_id": 3, "action": "ack", "severity": "low"}],
+        )
+        # low_only_streak reached 2, but the round-1 deferred high suppresses it.
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertIsNone(out["converged_signal"])
+        self.assertIsNone(out["exit_reason_hint"])
+
+    def test_wont_fix_high_with_reason_does_not_block_converged(self) -> None:
+        # A wont_fix carrying a real rationale is a resolution, not a
+        # deferral — it must NOT keep the loop open. Contrast with a bare
+        # ack, which does (test above). The high wont_fix lands in round 1
+        # (so it isn't the current round's top severity), then two low-only
+        # rounds bring low_only_streak to 2; convergence must fire.
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f",
+            [{"comment_id": 1, "action": "wont_fix", "severity": "high",
+              "reason": "intentional: perf tradeoff documented in ADR-7"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{"comment_id": 2, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 3, "sha3f",
+            [{"comment_id": 3, "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertEqual(out["converged_signal"], True)
+        self.assertEqual(out["exit_reason_hint"], "converged")
+
+    def test_bare_ack_high_then_fixed_allows_converged(self) -> None:
+        # Recovery path: a high finding bare-ack'd in round 1 but FIXED on the
+        # same comment_id in round 2 is resolved — the deferral guard resolves
+        # each finding to its latest action, so it must NOT block convergence
+        # forever. Round 2's top severity is still high (the fix action), so the
+        # low-only streak starts after it: rounds 3-4 low-only reach streak 2.
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f",
+            [{"comment_id": 7, "action": "ack", "severity": "high"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{"comment_id": 7, "action": "fixed", "severity": "high",
+              "commit_sha": "sha2f"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 3, "sha3f",
+            [{"comment_id": 8, "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 4, "sha3f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 4, "sha4f",
+            [{"comment_id": 9, "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertEqual(out["converged_signal"], True)
+        self.assertEqual(out["exit_reason_hint"], "converged")
+
+    def test_bare_ack_high_then_fixed_via_kpl_key_allows_converged(self) -> None:
+        # Same recovery path as above but for findings WITHOUT a comment_id:
+        # _action_key falls back to (source, path, line, topic). Round-1 acks
+        # and round-2 fixes the SAME kpl identity, so latest-action resolution
+        # must clear the deferral and let convergence fire.
+        kpl = {"source": "cursor", "path": "a.py", "line": 5, "topic": "leak"}
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f", [{**kpl, "action": "ack", "severity": "high"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{**kpl, "action": "fixed", "severity": "high", "commit_sha": "sha2f"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 3, "sha3f",
+            [{"source": "cursor", "path": "b.py", "line": 1, "topic": "nit",
+              "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 4, "sha3f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 4, "sha4f",
+            [{"source": "cursor", "path": "c.py", "line": 1, "topic": "nit2",
+              "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertEqual(out["converged_signal"], True)
+        self.assertEqual(out["exit_reason_hint"], "converged")
+
+    def test_bare_ack_high_via_kpl_key_blocks_converged(self) -> None:
+        # Negative kpl counterpart: a high finding bare-ack'd via the kpl key
+        # and never fixed keeps the loop open across a low-only streak.
+        kpl = {"source": "cursor", "path": "a.py", "line": 5, "topic": "leak"}
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f", [{**kpl, "action": "ack", "severity": "high"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{"source": "cursor", "path": "b.py", "line": 1, "topic": "nit",
+              "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 3, "sha3f",
+            [{"source": "cursor", "path": "c.py", "line": 1, "topic": "nit2",
+              "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertIsNone(out["converged_signal"])
+        self.assertIsNone(out["exit_reason_hint"])
+
     def test_sufficiency_consensus_when_both_backends_agree(self) -> None:
         cx = self._write_envelope(
             "codex",

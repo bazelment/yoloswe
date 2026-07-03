@@ -296,6 +296,11 @@ Stop when any:
 - `low_only_streak >= 2` (every low fixed or `ack`/`wont_fix` with reason)
 - Top finding documented false positive + prior round had no `must_fix`
 
+**Acknowledged ≠ resolved.** None of the above fire while a high/critical finding (this
+round or a prior one) is still only `ack`'d/`wont_fix`'d without a cited reason — a deferred
+high issue keeps the loop open. A `wont_fix`/`false_positive` with a real rationale is a
+resolution and does not block convergence; a bare `ack` on a high/critical does.
+
 Budget exhausted → Final Summary; `--ask` to continue, else `capped-at-max`.
 
 | Gate | `--ask` | Default |

@@ -36,6 +36,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _common import (  # noqa: E402
+    SKIPPED_ACTIONS,
     print_json,
     read_json,
     severity_rank,
@@ -156,8 +157,8 @@ def action_history_goal(
 
         Round 6. Prior round fixed: a.go:10 — null check missing on BUILDER_LITE;
         b.py:42 — race in cache invalidation.
-        Skipped: c.go:8 wont_fix: caller already validates;
-        d.go:5 ack: rename helper.
+        Skipped: c.go:8 wont_fix (deferred, not fixed): caller already validates;
+        d.go:5 ack (deferred, not fixed): rename helper.
         Files changed since round 5: a.go, b.py.
 
     Bramble's BuildFollowUpJSONPromptWithScope embeds this as
@@ -191,13 +192,12 @@ def action_history_goal(
             label = _action_label(action)
             if label:
                 fixed.append(label)
-        elif verb in ("false_positive", "wont_fix", "ack", "pre_existing", "flake"):
-            # Note: ``stale`` is deliberately excluded. Stale entries are
-            # bot comments anchored to superseded code that the resumed
-            # model doesn't see in its worktree snapshot anyway —
-            # surfacing them adds N×80 chars of bot-comment body without
-            # changing model behavior. The orchestrator still records
-            # them in comment_actions for the audit trail and posts
+        elif verb in _HISTORY_SKIP_VERBS:
+            # _HISTORY_SKIP_VERBS excludes ``stale``: stale entries are bot
+            # comments anchored to superseded code the resumed model doesn't
+            # see in its worktree snapshot, so surfacing them adds bot-comment
+            # body without changing model behavior. The orchestrator still
+            # records them in comment_actions for the audit trail and posts
             # auto-replies; they just don't enter the goal channel.
             label = _skipped_label(action, verb)
             if label:
@@ -275,6 +275,20 @@ def _action_label(action: dict[str, Any]) -> str:
     return base
 
 
+# Skip verbs that reach the goal channel: every skip verb except ``stale``,
+# which is excluded because its cited code isn't in the resumed model's
+# worktree snapshot (see the comment in action_history_goal). Derived from
+# the shared SKIPPED_ACTIONS so a new skip verb propagates here automatically.
+_HISTORY_SKIP_VERBS = SKIPPED_ACTIONS - {"stale"}
+
+# Deferral-class verbs mean "the author has NOT fixed this" — the finding is
+# still open in the code. We annotate them in the goal text so a resumed
+# reviewer doesn't read the bare verb (``ack``) as "resolved" and drop the
+# finding. ``false_positive`` is deliberately excluded: it genuinely removes
+# the item from scope, so it needs no "still open" gloss.
+_DEFERRED_VERBS = _HISTORY_SKIP_VERBS - {"false_positive"}
+
+
 def _skipped_label(action: dict[str, Any], verb: str) -> str:
     """Format a skipped action: ``<address> verb: <description>``.
 
@@ -284,14 +298,20 @@ def _skipped_label(action: dict[str, Any], verb: str) -> str:
     the skip. The whole description is capped at _TOPIC_CHAR_CAP so
     a long reason can't bloat the goal text. Address shape matches
     ``_action_label``.
+
+    Deferral-class verbs (see ``_DEFERRED_VERBS``) get a ``(deferred, not
+    fixed)`` gloss so the resumed reviewer reads them as still-open rather
+    than resolved — this is the orchestrator-side half of the "acknowledged
+    is not resolved" rule (the reviewer prompt carries the other half).
     """
     base = _action_address(action)
     if not base:
         return ""
+    label_verb = f"{verb} (deferred, not fixed)" if verb in _DEFERRED_VERBS else verb
     description = (action.get("reason") or action.get("topic") or "").strip()
     if description:
-        return f"{base} {verb}: {_truncate(description)}"
-    return f"{base} {verb}"
+        return f"{base} {label_verb}: {_truncate(description)}"
+    return f"{base} {label_verb}"
 
 
 # Streak threshold above which the goal channel injects a one-sentence

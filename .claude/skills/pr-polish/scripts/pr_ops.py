@@ -43,6 +43,10 @@ if str(SCRIPT_DIR) not in sys.path:
 from datetime import UTC
 
 from _common import (  # noqa: E402 — sys.path tweak above
+    FIXED_ACTIONS,
+    KNOWN_ACTIONS,
+    KNOWN_SEVERITIES,
+    SKIPPED_ACTIONS,
     SOURCE_INLINE,
     SOURCE_ISSUE,
     SOURCE_REVIEW,
@@ -824,20 +828,10 @@ def state_append_round(
     return state
 
 
-FIXED_ACTIONS = {"fixed"}
-# ``pre_existing`` and ``flake`` are CI-only skip reasons: pre_existing
-# means the test also fails on the base branch; flake means the failure
-# matched a known infrastructure marker (ETXTBSY, bazel-cache, network).
-# ``ack`` is a batch-acknowledged low/nit — counts as skipped so summary
-# tables reflect that the orchestrator did look at it.
-SKIPPED_ACTIONS = {"false_positive", "wont_fix", "stale", "pre_existing", "flake", "ack"}
-
-# The full set of recognized action verbs, derived from the two buckets above so
-# there is exactly one source of truth. _validate_actions checks entries against
-# this; _top_severity / counting logic classify via the buckets.
-KNOWN_ACTIONS = FIXED_ACTIONS | SKIPPED_ACTIONS
-# Recognized severities (None/absent is allowed — e.g. a lint advisory row).
-KNOWN_SEVERITIES = {"high", "medium", "low", "nit"}
+# Action-verb and severity vocabularies live in _common (shared with bramble_ops
+# so both derive from one source of truth). Imported at the top of this module;
+# _validate_actions checks entries against KNOWN_ACTIONS, and _top_severity /
+# counting logic classify via the FIXED_ACTIONS / SKIPPED_ACTIONS buckets.
 
 
 def _validate_actions(actions: list[Any]) -> None:
@@ -907,6 +901,51 @@ def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
         "skipped_count": skipped,
         "top_severity": _top_severity(actions),
     }
+
+
+# Deferral verbs that can leave a finding open. ``ack`` is a bare
+# acknowledgement (open regardless of reason); ``wont_fix`` is a decision that
+# counts as a resolution only when it carries a rationale. ``false_positive``/
+# ``stale`` genuinely remove the finding from scope, so they are not deferrals.
+# ``pre_existing``/``flake`` are CI-only skips, not code findings the reviewer
+# would re-raise, so they don't gate convergence here.
+_DEFERRAL_VERBS = {"ack", "wont_fix"}
+
+
+def _action_is_open_deferral(action: dict[str, Any]) -> bool:
+    """True if this action leaves its finding open: a bare ``ack`` (any reason)
+    or a ``wont_fix`` with no non-empty reason. A ``wont_fix`` with a real
+    rationale is a resolution.
+    """
+    verb = action.get("action")
+    if verb not in _DEFERRAL_VERBS:
+        return False
+    if verb == "wont_fix":
+        return not (action.get("reason") or "").strip()
+    return True  # bare ack
+
+
+def _has_unresolved_high_deferral(rounds: list[dict[str, Any]]) -> bool:
+    """True if any high/critical finding's *latest* action across all rounds is
+    an open deferral (bare ack, or wont_fix without a cited reason). Such a
+    finding is still open and suppresses the automated convergence hint.
+
+    Resolves each finding to its terminal action before deciding: a round-1
+    bare ack that a later round records as ``fixed`` (or a reasoned
+    ``wont_fix``) on the same finding is resolved and must NOT block. We key on
+    _action_key (comment_id, else source/path/line/topic) — the same identity
+    _merge_actions dedupes on — and let the highest-round write win.
+    """
+    latest: dict[tuple, dict[str, Any]] = {}
+    for rnd in sorted(rounds, key=lambda r: r.get("n") or 0):
+        for a in rnd.get("comment_actions") or []:
+            latest[_action_key(a)] = a
+    for a in latest.values():
+        if severity_rank(a.get("severity")) < severity_rank("high"):
+            continue
+        if _action_is_open_deferral(a):
+            return True
+    return False
 
 
 def _backfill_low_only_streak(prior_rounds: list[dict[str, Any]]) -> int:
@@ -1592,7 +1631,19 @@ def finalize_and_report(
     converged: bool | None
     exit_reason_hint: str | None
     low_top = top_sev in (None, "low", "nit")
-    if streak >= 2 and low_top:
+    # A high/critical finding that was only acknowledged/deferred (bare ack or
+    # wont_fix with no cited reason) in THIS or any prior round keeps the loop
+    # open, even when the current round's severity/streak would otherwise
+    # signal convergence. This mirrors SKILL.md Step 3.g's "acknowledged !=
+    # resolved" guard on the automated hint (memory: the INF-1711 lesson —
+    # a deferred high must not read as resolved). We scan persisted
+    # comment_actions rather than the current round's `actions` arg so a high
+    # ack'd several rounds ago still blocks.
+    deferred_high = _has_unresolved_high_deferral(rounds)
+    if deferred_high:
+        converged = None
+        exit_reason_hint = None
+    elif streak >= 2 and low_top:
         converged = True
         exit_reason_hint = "converged"
     elif top_sev in (None, "low", "nit") and fixed == 0 and skipped == 0:
