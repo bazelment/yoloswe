@@ -903,31 +903,48 @@ def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-# Deferral verbs that leave a finding open when applied without a cited reason.
-# ``ack`` is a bare acknowledgement; ``wont_fix`` is a decision that only counts
-# as a resolution when it carries a rationale (see _has_unresolved_high_deferral).
-# ``false_positive``/``stale`` genuinely remove the finding from scope, so they
-# are not deferrals. ``pre_existing``/``flake`` are CI-only skips, not code
-# findings the reviewer would re-raise, so they don't gate convergence here.
+# Deferral verbs that can leave a finding open. ``ack`` is a bare
+# acknowledgement (open regardless of reason); ``wont_fix`` is a decision that
+# counts as a resolution only when it carries a rationale. ``false_positive``/
+# ``stale`` genuinely remove the finding from scope, so they are not deferrals.
+# ``pre_existing``/``flake`` are CI-only skips, not code findings the reviewer
+# would re-raise, so they don't gate convergence here.
 _DEFERRAL_VERBS = {"ack", "wont_fix"}
 
 
-def _has_unresolved_high_deferral(rounds: list[dict[str, Any]]) -> bool:
-    """True if any round has a high/critical finding that was deferred without
-    a cited reason — a bare ``ack`` (any reason) or a ``wont_fix`` with no
-    non-empty reason. Such a finding is still open and must keep the loop
-    running, so it suppresses the automated convergence hint. A ``wont_fix``
-    with a real rationale is a resolution and does NOT block.
+def _action_is_open_deferral(action: dict[str, Any]) -> bool:
+    """True if this action leaves its finding open: a bare ``ack`` (any reason)
+    or a ``wont_fix`` with no non-empty reason. A ``wont_fix`` with a real
+    rationale is a resolution.
     """
-    for rnd in rounds:
+    verb = action.get("action")
+    if verb not in _DEFERRAL_VERBS:
+        return False
+    if verb == "wont_fix":
+        return not (action.get("reason") or "").strip()
+    return True  # bare ack
+
+
+def _has_unresolved_high_deferral(rounds: list[dict[str, Any]]) -> bool:
+    """True if any high/critical finding's *latest* action across all rounds is
+    an open deferral (bare ack, or wont_fix without a cited reason). Such a
+    finding is still open and suppresses the automated convergence hint.
+
+    Resolves each finding to its terminal action before deciding: a round-1
+    bare ack that a later round records as ``fixed`` (or a reasoned
+    ``wont_fix``) on the same finding is resolved and must NOT block. We key on
+    _action_key (comment_id, else source/path/line/topic) — the same identity
+    _merge_actions dedupes on — and let the highest-round write win.
+    """
+    latest: dict[tuple, dict[str, Any]] = {}
+    for rnd in sorted(rounds, key=lambda r: r.get("n") or 0):
         for a in rnd.get("comment_actions") or []:
-            if severity_rank(a.get("severity")) < severity_rank("high"):
-                continue
-            verb = a.get("action")
-            if verb == "ack":
-                return True
-            if verb == "wont_fix" and not (a.get("reason") or "").strip():
-                return True
+            latest[_action_key(a)] = a
+    for a in latest.values():
+        if severity_rank(a.get("severity")) < severity_rank("high"):
+            continue
+        if _action_is_open_deferral(a):
+            return True
     return False
 
 
