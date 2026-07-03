@@ -2382,6 +2382,61 @@ class TestFinalizeAndReport(unittest.TestCase):
         self.assertEqual(out["converged_signal"], True)
         self.assertEqual(out["exit_reason_hint"], "converged")
 
+    def test_bare_ack_high_then_fixed_via_kpl_key_allows_converged(self) -> None:
+        # Same recovery path as above but for findings WITHOUT a comment_id:
+        # _action_key falls back to (source, path, line, topic). Round-1 acks
+        # and round-2 fixes the SAME kpl identity, so latest-action resolution
+        # must clear the deferral and let convergence fire.
+        kpl = {"source": "cursor", "path": "a.py", "line": 5, "topic": "leak"}
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f", [{**kpl, "action": "ack", "severity": "high"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{**kpl, "action": "fixed", "severity": "high", "commit_sha": "sha2f"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 3, "sha3f",
+            [{"source": "cursor", "path": "b.py", "line": 1, "topic": "nit",
+              "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 4, "sha3f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 4, "sha4f",
+            [{"source": "cursor", "path": "c.py", "line": 1, "topic": "nit2",
+              "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertEqual(out["converged_signal"], True)
+        self.assertEqual(out["exit_reason_hint"], "converged")
+
+    def test_bare_ack_high_via_kpl_key_blocks_converged(self) -> None:
+        # Negative kpl counterpart: a high finding bare-ack'd via the kpl key
+        # and never fixed keeps the loop open across a low-only streak.
+        kpl = {"source": "cursor", "path": "a.py", "line": 5, "topic": "leak"}
+        pr_ops.state_append_round(99, 1, "sha", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 1, "sha1f", [{**kpl, "action": "ack", "severity": "high"}],
+        )
+        pr_ops.state_append_round(99, 2, "sha1f", verify_head=False)
+        pr_ops.state_finalize_round(
+            99, 2, "sha2f",
+            [{"source": "cursor", "path": "b.py", "line": 1, "topic": "nit",
+              "action": "ack", "severity": "low"}],
+        )
+        pr_ops.state_append_round(99, 3, "sha2f", verify_head=False)
+        out = pr_ops.finalize_and_report(
+            99, 3, "sha3f",
+            [{"source": "cursor", "path": "c.py", "line": 1, "topic": "nit2",
+              "action": "ack", "severity": "low"}],
+        )
+        self.assertEqual(out["low_only_streak"], 2)
+        self.assertIsNone(out["converged_signal"])
+        self.assertIsNone(out["exit_reason_hint"])
+
     def test_sufficiency_consensus_when_both_backends_agree(self) -> None:
         cx = self._write_envelope(
             "codex",
