@@ -903,6 +903,34 @@ def recompute_counts(actions: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# Deferral verbs that leave a finding open when applied without a cited reason.
+# ``ack`` is a bare acknowledgement; ``wont_fix`` is a decision that only counts
+# as a resolution when it carries a rationale (see _has_unresolved_high_deferral).
+# ``false_positive``/``stale`` genuinely remove the finding from scope, so they
+# are not deferrals. ``pre_existing``/``flake`` are CI-only skips, not code
+# findings the reviewer would re-raise, so they don't gate convergence here.
+_DEFERRAL_VERBS = {"ack", "wont_fix"}
+
+
+def _has_unresolved_high_deferral(rounds: list[dict[str, Any]]) -> bool:
+    """True if any round has a high/critical finding that was deferred without
+    a cited reason — a bare ``ack`` (any reason) or a ``wont_fix`` with no
+    non-empty reason. Such a finding is still open and must keep the loop
+    running, so it suppresses the automated convergence hint. A ``wont_fix``
+    with a real rationale is a resolution and does NOT block.
+    """
+    for rnd in rounds:
+        for a in rnd.get("comment_actions") or []:
+            if severity_rank(a.get("severity")) < severity_rank("high"):
+                continue
+            verb = a.get("action")
+            if verb == "ack":
+                return True
+            if verb == "wont_fix" and not (a.get("reason") or "").strip():
+                return True
+    return False
+
+
 def _backfill_low_only_streak(prior_rounds: list[dict[str, Any]]) -> int:
     """Reconstruct the streak ending at the most recent prior round when
     its ``low_only_streak`` field is missing (state file from before the
@@ -1586,7 +1614,19 @@ def finalize_and_report(
     converged: bool | None
     exit_reason_hint: str | None
     low_top = top_sev in (None, "low", "nit")
-    if streak >= 2 and low_top:
+    # A high/critical finding that was only acknowledged/deferred (bare ack or
+    # wont_fix with no cited reason) in THIS or any prior round keeps the loop
+    # open, even when the current round's severity/streak would otherwise
+    # signal convergence. This mirrors SKILL.md Step 3.g's "acknowledged !=
+    # resolved" guard on the automated hint (memory: the INF-1711 lesson —
+    # a deferred high must not read as resolved). We scan persisted
+    # comment_actions rather than the current round's `actions` arg so a high
+    # ack'd several rounds ago still blocks.
+    deferred_high = _has_unresolved_high_deferral(rounds)
+    if deferred_high:
+        converged = None
+        exit_reason_hint = None
+    elif streak >= 2 and low_top:
         converged = True
         exit_reason_hint = "converged"
     elif top_sev in (None, "low", "nit") and fixed == 0 and skipped == 0:
