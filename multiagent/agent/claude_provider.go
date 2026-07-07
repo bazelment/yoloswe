@@ -82,6 +82,15 @@ func resolveGracePeriod(cfg ExecuteConfig) time.Duration {
 	return streamTurnGracePeriod
 }
 
+// terminalReturn resolves a closed-stream (EOF) turn. It returns result.Error
+// rather than state.Err(): ToTerminalTurnResult may attach an error (e.g. a
+// failed background task) that state.Err() does not carry, so this keeps the
+// tuple's error in lockstep with result.Success.
+func terminalReturn(state *logicalTurnState) (*claude.TurnResult, error) {
+	result := state.ToTerminalTurnResult()
+	return result, result.Error
+}
+
 // consumeTurnEvents drives one logical turn by feeding events from the
 // session channel into a logicalTurnState until the turn is done. It
 // returns when LogicalTurnDone() flips, the channel closes, ctx is
@@ -195,7 +204,7 @@ eventLoop:
 					// below — never a retryable TransientError. Resolve via the
 					// terminal path so a clean EOF after a successful wave that
 					// was invalidated for an absent continuation reports success.
-					return state.ToTerminalTurnResult(), state.Err()
+					return terminalReturn(state)
 				}
 				// The grace timer already fired (its channel is drained but
 				// graceTimer is still non-nil). Clear it, then fall through to
@@ -231,7 +240,7 @@ eventLoop:
 				// re-resulted (e.g. a turn that ended on ScheduleWakeup + a
 				// completed background Monitor) is a success, not a silent
 				// Success=false/Error=nil that callers read as "agent failed".
-				return state.ToTerminalTurnResult(), state.Err()
+				return terminalReturn(state)
 			}
 			state.Apply(ev)
 			if dispatch != nil {

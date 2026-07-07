@@ -17,6 +17,9 @@ var (
 	ErrPermissionDenied = errors.New("permission denied")
 	ErrBudgetExceeded   = errors.New("budget limit exceeded")
 	ErrMaxTurnsExceeded = errors.New("max turns exceeded")
+	// ErrBackgroundTaskFailed marks a turn that closed while a background task
+	// (sub-agent or Monitor) was in a failed/killed/timeout terminal state.
+	ErrBackgroundTaskFailed = errors.New("turn ended with a background task in a failed state")
 )
 
 // ProtocolError represents a protocol-level error.

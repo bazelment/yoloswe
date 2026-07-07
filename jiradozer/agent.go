@@ -665,7 +665,11 @@ func (r agentRunner) runAgentForModel(ctx context.Context, stepName, prompt stri
 		if result.Error != nil {
 			return failed, false, fmt.Errorf("agent execution: %w", result.Error)
 		}
-		return failed, false, fmt.Errorf("agent failed")
+		// Success=false with no error: emit a diagnosable message rather than a
+		// bare "agent failed". Known causes (e.g. an interrupted background
+		// sub-agent) are classified upstream into a real error handled above.
+		return failed, false, fmt.Errorf(
+			"agent returned unsuccessful result with no error (likely an interrupted background sub-agent or premature turn close)")
 	}
 
 	completedAttrs := []any{

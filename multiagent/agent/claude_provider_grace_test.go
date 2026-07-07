@@ -614,10 +614,62 @@ func TestConsumeTurnEvents_ClosedStreamAfterFailedBgTaskIsFailure(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("consumeTurnEvents hung on a closed stream")
 	}
-	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.Success,
 		"a clean stream close after a FAILED bg task must not be reported as success")
+	// The failed bg task must surface a real, classifiable error rather than the
+	// silent Success=false/Error=nil that callers (jiradozer) read as a bare
+	// "agent failed". This is the INF-1871 fix: a torn-down sub-agent reported
+	// killed must not vanish into an opaque failure.
+	require.ErrorIs(t, err, claude.ErrBackgroundTaskFailed,
+		"a FAILED bg task at close must carry claude.ErrBackgroundTaskFailed, not a nil error")
+}
+
+// INF-1871 end-to-end repro at the consumeTurnEvents layer. Mirrors the exact
+// 17:35 timeline: the plan-step agent's final action spawns a sub-agent via the
+// Agent tool; the CLI fires a successful Result + TurnComplete while the
+// sub-agent is still working; jiradozer resolves the turn and its deferred
+// session.Stop() tears the CLI down, so the CLI reports the sub-agent KILLED and
+// the stream closes with no continuation. Before the fix this produced a silent
+// Success=false/Error=nil that jiradozer logged as "plan step: agent failed".
+// The turn must now (a) keep the Agent tool_use gating LogicalTurnDone (via
+// backgroundToolNames) and (b) surface claude.ErrBackgroundTaskFailed on the
+// killed sub-agent — never a nil error.
+func TestConsumeTurnEvents_INF1871_InterruptedSubAgentSurfacesError(t *testing.T) {
+	events := make(chan claude.Event, 16)
+	// Final action of the turn: spawn a sub-agent via the Agent tool. The input
+	// has no run_in_background flag — background-ness comes from the tool name.
+	events <- claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{agentToolUse("toolu_agent1")},
+	}
+	events <- claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_agent1")}
+	events <- resultMessage(false) // successful end-of-turn while the sub-agent is still live
+	events <- claude.TurnCompleteEvent{TurnNumber: 1, Success: true}
+	// Session torn down mid-flight: the CLI reports the sub-agent killed and the
+	// stream closes with no continuation ResultMessage.
+	events <- claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_agent1"), Status: "killed",
+	}
+	close(events)
+
+	done := make(chan struct{})
+	var result *claude.TurnResult
+	var err error
+	go func() {
+		result, err = consumeTurnEvents(context.Background(), events, time.Hour, nil, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeTurnEvents hung on the interrupted-sub-agent stream")
+	}
+	require.NotNil(t, result)
+	require.False(t, result.Success,
+		"an interrupted (killed) sub-agent must not resolve as a terminal success")
+	require.ErrorIs(t, err, claude.ErrBackgroundTaskFailed,
+		"a killed sub-agent must surface claude.ErrBackgroundTaskFailed, never a silent Success=false/Error=nil")
 }
 
 // Negative case: a stream that closes before ANY successful ResultMessage is a

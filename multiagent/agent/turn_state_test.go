@@ -41,6 +41,17 @@ func bgBashToolUse(id string) claude.ContentBlock {
 	})
 }
 
+// agentToolUse builds an Agent (sub-agent) tool_use block. The CLI dispatches
+// it asynchronously and reports on it via TaskStarted/TaskNotification — the
+// input carries no run_in_background flag, so background-ness must be inferred
+// from the tool name (see backgroundToolNames).
+func agentToolUse(id string) claude.ContentBlock {
+	return toolUseBlock(id, "Agent", map[string]interface{}{
+		"description": "sub-agent work",
+		"prompt":      "do the thing",
+	})
+}
+
 func toolResult(id string, isError bool) claude.ContentBlock {
 	return claude.ToolResultBlock{
 		Type:      claude.ContentBlockTypeToolResult,
@@ -863,4 +874,103 @@ func TestTurnState_TerminalBeforeTaskStartedStillCompletes(t *testing.T) {
 	require.False(t, s.HasLiveTasks(),
 		"belated TaskStartedEvent must not re-add a task that already reached terminal")
 	require.True(t, s.LogicalTurnDone())
+}
+
+// Regression for the INF-1871 "plan step: agent failed" bug. A turn whose final
+// action spawns a sub-agent via the Agent tool must be treated as background:
+// the tool_use input has no run_in_background flag, so background-ness comes
+// from the tool name alone.
+func TestTurnState_LiveAgentSubAgentGatesTurn(t *testing.T) {
+	s := newLogicalTurnState()
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{agentToolUse("toolu_agent1")},
+	})
+	s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_agent1")})
+	// The turn's own wave completes while the sub-agent is still working.
+	endOfCLITurn(s, false)
+
+	require.True(t, s.HasLiveTasks(),
+		"a live Agent sub-agent must keep the turn's background work outstanding")
+	require.False(t, s.LogicalTurnDone(),
+		"LogicalTurnDone must stay false while an Agent sub-agent is still live")
+
+	// Sub-agent completes -> continuation wave -> turn is done and successful.
+	s.Apply(claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_agent1"), Status: "completed",
+	})
+	endOfCLITurn(s, false)
+
+	require.False(t, s.HasLiveTasks())
+	require.True(t, s.LogicalTurnDone())
+	require.True(t, s.ToTurnResult().Success)
+}
+
+// Even before any TaskStartedEvent lands, an Agent tool_use block in the turn's
+// content must gate LogicalTurnDone via hasUncancelledBgToolUse — the same
+// protection Monitor blocks get. This mirrors the real failure, where the turn
+// resolved before the sub-agent's terminal notification arrived.
+func TestTurnState_AgentToolUseGatesBeforeTaskStarted(t *testing.T) {
+	s := newLogicalTurnState()
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{agentToolUse("toolu_agent1")},
+	})
+	endOfCLITurn(s, false)
+
+	require.False(t, s.LogicalTurnDone(),
+		"an uncancelled Agent tool_use must gate the turn even before TaskStarted")
+	require.True(t, s.HasLiveTasks())
+}
+
+// The core INF-1871 regression: the turn had a successful wave, the sub-agent
+// was still live, then the session was torn down and the CLI reported the
+// sub-agent killed. The terminal resolution must NOT be the silent
+// Success=false/Error=nil that callers translate into a bare "agent failed" —
+// it must carry claude.ErrBackgroundTaskFailed.
+func TestTurnState_InterruptedAgentSubAgentNotSilentFailure(t *testing.T) {
+	for _, status := range []string{"failed", "killed", "timeout"} {
+		t.Run(status, func(t *testing.T) {
+			s := newLogicalTurnState()
+			s.Apply(claude.AssistantMessageEvent{
+				TurnNumber: 1,
+				Blocks:     claude.ContentBlocks{agentToolUse("toolu_agent1")},
+			})
+			s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_agent1")})
+			endOfCLITurn(s, false) // successful wave while sub-agent still live
+
+			// Session torn down mid-flight: the sub-agent's terminal status is a
+			// failure, and no continuation ResultMessage ever arrives.
+			s.Apply(claude.TaskNotificationEvent{
+				TaskID: "task1", ToolUseID: strPtr("toolu_agent1"), Status: status,
+			})
+
+			terminal := s.ToTerminalTurnResult()
+			require.False(t, terminal.Success,
+				"a %s sub-agent must not resolve as terminal success", status)
+			require.ErrorIs(t, terminal.Error, claude.ErrBackgroundTaskFailed,
+				"a %s sub-agent must surface a real error, never a silent Success=false/Error=nil", status)
+		})
+	}
+}
+
+// A genuine ResultMessage error must still win over ErrBackgroundTaskFailed —
+// the sentinel is only a backstop for the no-error case.
+func TestTurnState_RealErrorWinsOverBackgroundTaskFailed(t *testing.T) {
+	s := newLogicalTurnState()
+	s.Apply(claude.AssistantMessageEvent{
+		TurnNumber: 1,
+		Blocks:     claude.ContentBlocks{agentToolUse("toolu_agent1")},
+	})
+	s.Apply(claude.TaskStartedEvent{TaskID: "task1", ToolUseID: strPtr("toolu_agent1")})
+	endOfCLITurn(s, true) // the turn's own wave errored -> state.err set
+	s.Apply(claude.TaskNotificationEvent{
+		TaskID: "task1", ToolUseID: strPtr("toolu_agent1"), Status: "killed",
+	})
+
+	terminal := s.ToTerminalTurnResult()
+	require.False(t, terminal.Success)
+	require.Error(t, terminal.Error)
+	require.NotErrorIs(t, terminal.Error, claude.ErrBackgroundTaskFailed,
+		"a real ResultMessage error must not be replaced by the bg-task sentinel")
 }

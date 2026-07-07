@@ -314,6 +314,12 @@ func (s *logicalTurnState) ToTerminalTurnResult() *claude.TurnResult {
 		// guarantees lastSuccessfulResult is non-nil here.
 		result.DurationMs = s.lastSuccessfulResult.DurationMs
 	}
+	// A failed/killed/timeout background task never sets s.err, so a non-success
+	// close caused by one would otherwise carry no error. Attach a classifiable
+	// one; a genuine ResultMessage error (result.Error != nil) still wins.
+	if !result.Success && result.Error == nil && s.sawFailedBgTask {
+		result.Error = claude.ErrBackgroundTaskFailed
+	}
 	return result
 }
 
@@ -331,8 +337,16 @@ func isFailedTaskStatus(status string) bool {
 
 // backgroundToolNames lists tool names the CLI treats as background even
 // without run_in_background:true in the tool_use input.
+//
+// Monitor streams a blocking command. Task/Agent spawn a sub-agent that the CLI
+// dispatches asynchronously and reports on via TaskStarted/TaskNotification
+// events — the tool_use input carries no run_in_background flag, so it must be
+// recognized by name to keep hasUncancelledBgToolUse (hence LogicalTurnDone)
+// gated until the sub-agent's terminal notification lands.
 var backgroundToolNames = map[string]bool{
 	"Monitor": true,
+	"Task":    true,
+	"Agent":   true,
 }
 
 func isBackgroundToolUse(block claude.ToolUseBlock) bool {
