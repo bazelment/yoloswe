@@ -551,10 +551,17 @@ func TestValidateReloadCompatibleRejectsRepoNameChanges(t *testing.T) {
 	require.ErrorContains(t, validateReloadCompatible(oldCfg, newCfg), "team/repository filter change")
 }
 
-func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
+// TestRestoreFromEnvSuppressesActiveRestoredIssues verifies that a restored
+// child is suppressed from rediscovery while it is still running — not via a
+// manual MarkSeen re-seed (removed), but because RestoreActive puts it back in
+// the orchestrator's active set and discovery's reconcile provider keys off
+// that set. A long-running child keeps the issue active for the duration.
+func TestRestoreFromEnvSuppressesActiveRestoredIssues(t *testing.T) {
 	issue := &tracker.Issue{ID: "issue-1", Identifier: "ENG-1", Title: "Restored"}
-	cmd := exec.Command("sh", "-c", "exit 0")
+	// Long-running child so the restored workflow stays active across the poll.
+	cmd := exec.Command("sh", "-c", "sleep 30")
 	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	require.NoError(t, jiradozer.WriteRuntimeStateAtomically(statePath, jiradozer.RuntimeState{
@@ -568,11 +575,14 @@ func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 	issueTracker := &restoreDiscoveryTracker{listed: listed, issues: []*tracker.Issue{issue}}
 	cfg := &jiradozer.Config{Source: jiradozer.SourceConfig{MaxConcurrent: 1}}
 	disc := jiradozer.NewDiscovery(issueTracker, tracker.IssueFilter{}, time.Hour, testMainLogger(t))
+	orch := jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t))
+	// Wire the reconcile providers exactly as newTeamSupervisor does.
+	disc.SetReconcileProviders(orch.ActiveIssueIDs, orch.DrainReleasedForRetry)
 	s := &teamSupervisor{
 		cfg:    cfg,
 		logger: testMainLogger(t),
 		disc:   disc,
-		orch:   jiradozer.NewOrchestrator(issueTracker, cfg, restoreWTManager{}, "", testMainLogger(t)),
+		orch:   orch,
 	}
 
 	require.NoError(t, s.restoreFromEnv())
@@ -583,15 +593,8 @@ func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for restored StepInit")
 	}
-	s.orch.Wait()
-	select {
-	case status := <-s.orch.StatusUpdates():
-		require.True(t, status.IsDone())
-		require.Equal(t, issue.Identifier, status.Issue.Identifier)
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for restored terminal status")
-	}
-	s.orch.Shutdown()
+	// The restored child is in the active set now.
+	require.Contains(t, orch.ActiveIssueIDs(), issue.ID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -607,7 +610,7 @@ func TestRestoreFromEnvMarksRestoredIssuesSeen(t *testing.T) {
 
 	select {
 	case got := <-ch:
-		t.Fatalf("restored issue was rediscovered: %s", got.Identifier)
+		t.Fatalf("active restored issue was rediscovered: %s", got.Identifier)
 	case <-time.After(20 * time.Millisecond):
 	}
 	cancel()

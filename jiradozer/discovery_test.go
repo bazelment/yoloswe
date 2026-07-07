@@ -88,33 +88,6 @@ func TestDiscovery_DeduplicatesIssues(t *testing.T) {
 	require.Equal(t, "ENG-2", received[1].Identifier)
 }
 
-func TestDiscovery_MarkSeen(t *testing.T) {
-	issueA := &tracker.Issue{ID: "a", Identifier: "ENG-1", Title: "Issue A"}
-	issueB := &tracker.Issue{ID: "b", Identifier: "ENG-2", Title: "Issue B"}
-
-	mt := &mockDiscoveryTracker{
-		results: [][]*tracker.Issue{
-			{issueA, issueB},
-		},
-	}
-
-	d := NewDiscovery(mt, tracker.IssueFilter{}, 10*time.Millisecond, testLogger(t))
-	d.MarkSeen("a") // Pre-seed: A already known
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	ch := d.Run(ctx)
-
-	var received []*tracker.Issue
-	for issue := range ch {
-		received = append(received, issue)
-	}
-
-	require.Len(t, received, 1)
-	require.Equal(t, "ENG-2", received[0].Identifier)
-}
-
 func TestDiscovery_PassesFilter(t *testing.T) {
 	mt := &mockDiscoveryTracker{
 		results: [][]*tracker.Issue{{}},
@@ -202,6 +175,112 @@ func TestDiscovery_UpdateAppliesFilterAndInterval(t *testing.T) {
 		defer mt.mu.Unlock()
 		return len(mt.callArgs) >= 2 && mt.callArgs[len(mt.callArgs)-1].Filters[tracker.FilterTeam] == "INF"
 	}, time.Second, 10*time.Millisecond)
+}
+
+// collectPoll runs a single poll() against a channel drained concurrently and
+// returns the identifiers emitted during that poll. It drives poll() directly
+// (rather than through Run's timer) so the active set can be mutated
+// deterministically between polls.
+func collectPoll(t *testing.T, d *Discovery) []string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := make(chan *tracker.Issue)
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.poll(ctx, ch)
+		close(ch)
+	}()
+	for issue := range ch {
+		got = append(got, issue.Identifier)
+	}
+	<-done
+	return got
+}
+
+// TestDiscovery_ReconcilesAgainstActiveSet exercises the INF-1808 lifecycle: an
+// issue is discovered once, suppressed while actively worked, and re-emitted
+// once it returns to the filter state and is no longer active.
+func TestDiscovery_ReconcilesAgainstActiveSet(t *testing.T) {
+	t.Parallel()
+	issue := &tracker.Issue{ID: "a", Identifier: "INF-1808", Title: "Reservation lifecycle"}
+
+	// The filter always returns the issue (it's back in Gate Approved after the
+	// runtime failure and re-queue).
+	mt := &mockDiscoveryTracker{results: [][]*tracker.Issue{
+		{issue}, {issue}, {issue}, {issue}, {issue},
+	}}
+
+	var active map[string]bool
+	var released []string // drained (and cleared) on each poll
+	d := NewDiscovery(mt, tracker.IssueFilter{}, time.Hour, testLogger(t))
+	d.SetReconcileProviders(
+		func() map[string]bool { return active },
+		func() []string { r := released; released = nil; return r },
+	)
+
+	// Poll 1: not active → emitted once.
+	require.Equal(t, []string{"INF-1808"}, collectPoll(t, d))
+
+	// Poll 2: now active (claimed and running) → suppressed.
+	active = map[string]bool{"a": true}
+	require.Empty(t, collectPoll(t, d))
+
+	// Poll 3: still active → still suppressed (no double-claim).
+	require.Empty(t, collectPoll(t, d))
+
+	// Runtime-failed and re-queued: orchestrator drops it from active AND
+	// releases it for re-pickup (the claim+fail may have happened between polls).
+	// Poll 4: released is drained → re-emitted once.
+	active = nil
+	released = []string{"a"}
+	require.Equal(t, []string{"INF-1808"}, collectPoll(t, d))
+
+	// Poll 5: still returned, still not active, released already drained →
+	// suppressed. The re-admission must fire exactly once, not every poll.
+	require.Empty(t, collectPoll(t, d))
+}
+
+// TestDiscovery_ClaimWindowNeverDoubleEmits verifies that an issue held in the
+// active set across consecutive polls (e.g. a placeholder during the claim
+// window before the In Progress transition lands) is never emitted twice.
+func TestDiscovery_ClaimWindowNeverDoubleEmits(t *testing.T) {
+	t.Parallel()
+	issue := &tracker.Issue{ID: "a", Identifier: "ENG-1", Title: "Claiming"}
+	mt := &mockDiscoveryTracker{results: [][]*tracker.Issue{
+		{issue}, {issue}, {issue},
+	}}
+
+	// Active from the very first poll (placeholder inserted before this poll saw
+	// the issue) and stays active — filter still returns it because the state
+	// transition is deferred.
+	d := NewDiscovery(mt, tracker.IssueFilter{}, time.Hour, testLogger(t))
+	d.SetReconcileProviders(
+		func() map[string]bool { return map[string]bool{"a": true} },
+		func() []string { return nil },
+	)
+
+	require.Empty(t, collectPoll(t, d))
+	require.Empty(t, collectPoll(t, d))
+	require.Empty(t, collectPoll(t, d))
+}
+
+// TestDiscovery_NilActiveProvider verifies that with no provider wired the
+// active set is treated as empty: every filter issue emits exactly once and
+// stays suppressed while the filter keeps returning it.
+func TestDiscovery_NilActiveProvider(t *testing.T) {
+	t.Parallel()
+	issue := &tracker.Issue{ID: "a", Identifier: "ENG-1", Title: "Solo"}
+	mt := &mockDiscoveryTracker{results: [][]*tracker.Issue{
+		{issue}, {issue},
+	}}
+	d := NewDiscovery(mt, tracker.IssueFilter{}, time.Hour, testLogger(t))
+	// No SetReconcileProviders call — activeIDs is nil.
+
+	require.Equal(t, []string{"ENG-1"}, collectPoll(t, d))
+	require.Empty(t, collectPoll(t, d)) // still returned, still seen → no re-emit
 }
 
 func TestDiscovery_ContextCancellation(t *testing.T) {

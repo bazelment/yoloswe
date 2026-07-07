@@ -99,10 +99,23 @@ type Orchestrator struct {
 	// failure report so a stale-deploy failure is obvious from the alert.
 	notifier      Notifier
 	buildRevision string
-	mu            sync.RWMutex
-	wg            sync.WaitGroup
-	forceCleanup  bool
-	preserved     []PreservedWorktree
+	// runtimeFailures counts consecutive runtime (post-launch) subprocess
+	// failures per issue ID. Since discovery re-admits a re-queued issue, one
+	// that fails instantly on every attempt would storm; once its count reaches
+	// maxRuntimeFailures it is folded into ActiveIssueIDs (the suppression set)
+	// until a StepDone or a process restart clears the counter. Guarded by mu.
+	runtimeFailures map[string]int
+	// releasedForRetry accumulates issue IDs that failed or were cancelled since
+	// discovery last drained it, so discovery clears each from its seen set and
+	// re-emits the re-queued issue — even when the whole claim+fail happened
+	// between two polls, which the active set alone cannot expose (INF-1808). IDs
+	// over the runtime-failure cap are NOT added — they stay suppressed via
+	// ActiveIssueIDs instead. Guarded by mu.
+	releasedForRetry map[string]bool
+	mu               sync.RWMutex
+	wg               sync.WaitGroup
+	forceCleanup     bool
+	preserved        []PreservedWorktree
 }
 
 //nolint:govet // fieldalignment: grouping by purpose (lifecycle vs watchdog) is more readable than tighter packing
@@ -206,16 +219,18 @@ func (mw *managedWorkflow) tailLines() []string {
 // pass an empty string in non-dry-run paths and it will be ignored.
 func NewOrchestrator(t tracker.IssueTracker, cfg *Config, wtMgr WorktreeManager, repoName string, logger *slog.Logger) *Orchestrator {
 	return &Orchestrator{
-		tracker:    t,
-		config:     cloneConfig(cfg),
-		logger:     logger,
-		wtManager:  wtMgr,
-		active:     make(map[string]*managedWorkflow),
-		statusChan: make(chan IssueStatus, 64),
-		slotFreed:  make(chan struct{}, 1),
-		done:       make(chan struct{}),
-		repoName:   repoName,
-		out:        os.Stdout,
+		tracker:          t,
+		config:           cloneConfig(cfg),
+		logger:           logger,
+		wtManager:        wtMgr,
+		active:           make(map[string]*managedWorkflow),
+		runtimeFailures:  make(map[string]int),
+		releasedForRetry: make(map[string]bool),
+		statusChan:       make(chan IssueStatus, 64),
+		slotFreed:        make(chan struct{}, 1),
+		done:             make(chan struct{}),
+		repoName:         repoName,
+		out:              os.Stdout,
 	}
 }
 
@@ -332,6 +347,51 @@ func (o *Orchestrator) ActiveCount() int {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.activeCountLocked()
+}
+
+// maxRuntimeFailures is the number of consecutive runtime (post-launch)
+// subprocess failures allowed for a single issue before it is suppressed
+// from rediscovery (folded into ActiveIssueIDs). A StepDone or a process
+// restart resets the counter, so this only pins genuinely flapping issues —
+// the normal "fix and re-queue" flow, which succeeds on retry, is unaffected.
+const maxRuntimeFailures = 3
+
+// ActiveIssueIDs returns the set of issue IDs discovery must keep suppressed:
+// every issue the orchestrator is actively working (placeholders included, so
+// the claim window between slot reservation and the In Progress transition is
+// protected), plus any issue over the runtime-failure cap. Returns a fresh map
+// safe for the caller to retain.
+func (o *Orchestrator) ActiveIssueIDs() map[string]bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	ids := make(map[string]bool, len(o.active)+len(o.runtimeFailures))
+	for id := range o.active {
+		ids[id] = true
+	}
+	for id, n := range o.runtimeFailures {
+		if n >= maxRuntimeFailures {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// DrainReleasedForRetry returns the issue IDs released for re-pickup
+// (failed/cancelled) since the last call and clears the set, so each is
+// reported exactly once. Discovery calls this every poll to un-suppress
+// re-queued issues. Returns nil when nothing is pending.
+func (o *Orchestrator) DrainReleasedForRetry() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.releasedForRetry) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(o.releasedForRetry))
+	for id := range o.releasedForRetry {
+		ids = append(ids, id)
+	}
+	o.releasedForRetry = make(map[string]bool)
+	return ids
 }
 
 func (o *Orchestrator) maxConcurrent() int {
@@ -588,6 +648,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 				"tail", strings.Join(mw.tailLines(), " ⏎ "),
 			)
 			o.reportSubprocessFailure(mw, hungErr)
+			o.recordRuntimeFailure(issue)
 			o.emitStatus(mw, StepFailed, hungErr)
 			o.cleanup(context.Background(), mw, StepFailed)
 		case wfCtx.Err() != nil:
@@ -600,6 +661,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 			o.cleanup(context.Background(), mw, StepCancelled)
 		case err == nil:
 			o.logger.Info("subprocess completed", "issue", issue.Identifier)
+			o.recordSuccess(issue.ID)
 			o.emitStatus(mw, StepDone, nil)
 			o.cleanup(context.Background(), mw, StepDone)
 		default:
@@ -610,6 +672,7 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 				"tail", strings.Join(mw.tailLines(), " ⏎ "),
 			)
 			o.reportSubprocessFailure(mw, err)
+			o.recordRuntimeFailure(issue)
 			o.emitStatus(mw, StepFailed, err)
 			o.cleanup(context.Background(), mw, StepFailed)
 		}
@@ -622,6 +685,33 @@ func (o *Orchestrator) Start(ctx context.Context, issue *tracker.Issue) error {
 // Caller must hold o.mu.
 func (o *Orchestrator) activeCountLocked() int {
 	return len(o.active)
+}
+
+// recordRuntimeFailure increments the consecutive runtime-failure counter for
+// an issue (see runtimeFailures) and logs a give-up line the first time it
+// crosses maxRuntimeFailures, mirroring the Start-failure give-up in
+// RunWithDiscovery.
+func (o *Orchestrator) recordRuntimeFailure(issue *tracker.Issue) {
+	o.mu.Lock()
+	o.runtimeFailures[issue.ID]++
+	n := o.runtimeFailures[issue.ID]
+	o.mu.Unlock()
+	if n == maxRuntimeFailures {
+		o.logger.Error("giving up after repeated runtime failures — suppressing rediscovery",
+			"issue", issue.Identifier,
+			"failures", n,
+		)
+	}
+}
+
+// recordSuccess clears the runtime-failure counter and any pending re-pickup
+// release for an issue after a clean completion, so a shipped issue is not
+// re-admitted and a later re-queue of the same issue is admitted normally.
+func (o *Orchestrator) recordSuccess(issueID string) {
+	o.mu.Lock()
+	delete(o.runtimeFailures, issueID)
+	delete(o.releasedForRetry, issueID)
+	o.mu.Unlock()
 }
 
 // unreserveSlot removes a placeholder reservation and signals that
@@ -899,6 +989,14 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 	}
 	o.mu.Lock()
 	delete(o.active, mw.issue.ID)
+	// Release failed/cancelled issues for re-pickup (see releasedForRetry), but
+	// not a StepDone (it shipped a PR) or an issue over the runtime-failure cap
+	// (it stays suppressed via ActiveIssueIDs).
+	if step == StepFailed || step == StepCancelled {
+		if o.runtimeFailures[mw.issue.ID] < maxRuntimeFailures {
+			o.releasedForRetry[mw.issue.ID] = true
+		}
+	}
 	o.mu.Unlock()
 	// Non-blocking signal to RunWithDiscovery so it can drain the pending queue
 	// without waiting for the next discovery poll.
@@ -949,10 +1047,12 @@ func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
 	case err != nil:
 		o.logger.Error("restored subprocess wait failed", "issue", mw.issue.Identifier, "pid", mw.pid, "error", err, "log", mw.logPath)
 		o.reportSubprocessFailure(mw, err)
+		o.recordRuntimeFailure(mw.issue)
 		o.emitStatus(mw, StepFailed, err)
 		o.cleanup(context.Background(), mw, StepFailed)
 	case status.Exited() && status.ExitStatus() == 0:
 		o.logger.Info("restored subprocess completed", "issue", mw.issue.Identifier, "pid", mw.pid)
+		o.recordSuccess(mw.issue.ID)
 		o.emitStatus(mw, StepDone, nil)
 		o.cleanup(context.Background(), mw, StepDone)
 	case o.wasCancelled(mw) || (status.Signaled() && status.Signal() == syscall.SIGINT):
@@ -963,6 +1063,7 @@ func (o *Orchestrator) waitRestored(mw *managedWorkflow) {
 		err := fmt.Errorf("subprocess pid %d exited with wait status %d", mw.pid, status)
 		o.logger.Error("restored subprocess failed", "issue", mw.issue.Identifier, "pid", mw.pid, "status", int(status), "log", mw.logPath)
 		o.reportSubprocessFailure(mw, err)
+		o.recordRuntimeFailure(mw.issue)
 		o.emitStatus(mw, StepFailed, err)
 		o.cleanup(context.Background(), mw, StepFailed)
 	}
