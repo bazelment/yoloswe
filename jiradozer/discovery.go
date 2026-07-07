@@ -118,33 +118,13 @@ func (d *Discovery) Update(filter tracker.IssueFilter, interval time.Duration) {
 	}
 }
 
-// SetReconcileProviders wires discovery to the orchestrator's runtime state so
-// its seen set self-reconciles instead of growing monotonically:
-//
-//   - activeIDs: issues the orchestrator is working (never re-emitted — this
-//     protects the claim window between slot reservation and the In Progress
-//     transition) plus issues over the runtime-failure cap.
-//   - drainReleased: issues the orchestrator released for re-pickup since the
-//     last poll (failed/cancelled). Each is cleared from seen so it re-emits
-//     once — this is what re-admits a runtime-failed, re-queued issue even when
-//     the whole claim+fail happened between two polls (INF-1808).
-//
-// Either may be nil (tolerated by poll()). Set before Run to take effect on the
-// first poll.
+// SetReconcileProviders wires the orchestrator's activeIDs and drainReleased
+// accessors (see the struct fields for their semantics) so poll() can
+// self-reconcile the seen set. Either may be nil. Set before Run.
 func (d *Discovery) SetReconcileProviders(activeIDs func() map[string]bool, drainReleased func() []string) {
 	d.mu.Lock()
 	d.activeIDs = activeIDs
 	d.drainReleased = drainReleased
-	d.mu.Unlock()
-}
-
-// MarkSeen marks an issue ID as already seen, preventing it from being
-// emitted on the next poll. No longer load-bearing for crash/restart recovery
-// (poll() self-reconciles seen against the active set), but retained for
-// callers that want to pre-seed before the first poll.
-func (d *Discovery) MarkSeen(issueID string) {
-	d.mu.Lock()
-	d.seen[issueID] = true
 	d.mu.Unlock()
 }
 
@@ -170,34 +150,22 @@ func (d *Discovery) poll(ctx context.Context, ch chan<- *tracker.Issue) {
 	if d.activeIDs != nil {
 		active = d.activeIDs()
 	}
-	// Re-admission: clear from seen every issue the orchestrator released for
-	// re-pickup since the last poll. This un-suppresses a failed/cancelled issue
-	// even when its entire claim+fail happened between two polls — the case the
-	// active set alone cannot expose (INF-1808).
+	// Clear released issues from seen so they re-emit once (see drainReleased).
 	if d.drainReleased != nil {
 		for _, id := range d.drainReleased() {
 			delete(d.seen, id)
 		}
 	}
-	// seen tracks "already emitted, not re-admittable". Suppress an issue when it
-	// is active (in-flight or over the runtime-failure cap) or already seen;
-	// otherwise emit it once and mark it seen. seen is rebuilt each poll from
-	// only the currently-returned issues so an issue that leaves the filter for
-	// good is not pinned in memory forever — and if it later returns it is
-	// treated as new. A never-claimed issue that stays in the filter carries its
-	// seen bit forward here, so it emits exactly once, not every poll.
+	// Rebuild seen from only the currently-returned issues (so a departed issue
+	// isn't pinned forever): suppress an issue that is active or already seen,
+	// otherwise emit it once and carry its seen bit forward.
 	next := make(map[string]bool, len(issues))
 	var newIssues []*tracker.Issue
 	suppressed := 0
 	for _, issue := range issues {
 		id := issue.ID
 		switch {
-		case active[id]:
-			// In-flight (placeholder, running, or over the runtime-failure cap):
-			// never re-emitted — protects the claim window.
-			next[id] = true
-			suppressed++
-		case d.seen[id]:
+		case active[id], d.seen[id]:
 			next[id] = true
 			suppressed++
 		default:
@@ -208,10 +176,8 @@ func (d *Discovery) poll(ctx context.Context, ch chan<- *tracker.Issue) {
 	d.seen = next
 	d.mu.Unlock()
 
-	// Operability heartbeat: when the filter is non-empty but nothing is newly
-	// discovered, emit a debug line so a long steady-state (e.g. every issue is
-	// active or suppressed) is not indistinguishable from a dead poller. Debug
-	// level keeps it out of normal logs; enable debug to diagnose silence.
+	// Heartbeat: a non-empty filter with nothing new logs a debug line so a
+	// steady state is distinguishable from a dead poller when diagnosing silence.
 	if len(issues) > 0 && len(newIssues) == 0 {
 		d.logger.Debug("poll: no new issues",
 			"in_filter", len(issues),

@@ -100,20 +100,17 @@ type Orchestrator struct {
 	notifier      Notifier
 	buildRevision string
 	// runtimeFailures counts consecutive runtime (post-launch) subprocess
-	// failures per issue ID. Discovery reconciles its seen set against the
-	// active set every poll, so an issue that fails at runtime and is
-	// re-queued to the filter state is re-emitted and re-claimed. An issue
-	// that fails instantly on every attempt would therefore storm; once its
-	// count reaches maxRuntimeFailures it is folded into ActiveIssueIDs (the
-	// suppression set) so reconciliation keeps it seen until a StepDone or a
-	// process restart clears the counter. Guarded by mu.
+	// failures per issue ID. Since discovery re-admits a re-queued issue, one
+	// that fails instantly on every attempt would storm; once its count reaches
+	// maxRuntimeFailures it is folded into ActiveIssueIDs (the suppression set)
+	// until a StepDone or a process restart clears the counter. Guarded by mu.
 	runtimeFailures map[string]int
-	// releasedForRetry accumulates issue IDs that ended in a re-pickup-eligible
-	// way (failed or cancelled) since discovery last drained it. Discovery clears
-	// each from its seen set on the next poll so a re-queued issue is re-emitted
-	// — even when the whole claim+fail happened between two polls. IDs over the
-	// runtime-failure cap are deliberately NOT added (they belong in the
-	// suppression set, ActiveIssueIDs, instead). Guarded by mu.
+	// releasedForRetry accumulates issue IDs that failed or were cancelled since
+	// discovery last drained it, so discovery clears each from its seen set and
+	// re-emits the re-queued issue — even when the whole claim+fail happened
+	// between two polls, which the active set alone cannot expose (INF-1808). IDs
+	// over the runtime-failure cap are NOT added — they stay suppressed via
+	// ActiveIssueIDs instead. Guarded by mu.
 	releasedForRetry map[string]bool
 	mu               sync.RWMutex
 	wg               sync.WaitGroup
@@ -360,13 +357,10 @@ func (o *Orchestrator) ActiveCount() int {
 const maxRuntimeFailures = 3
 
 // ActiveIssueIDs returns the set of issue IDs discovery must keep suppressed:
-// every issue the orchestrator is actively working (placeholders included —
-// they must count as active to protect the claim window between slot
-// reservation and the In Progress transition), plus any issue currently over
-// the runtime-failure cap (to stop an instant-fail storm). Discovery
-// reconciles its seen set against this set on every poll, so anything the
-// filter still returns that is NOT in this set is, by definition, re-emittable.
-// Returns a fresh map safe for the caller to retain.
+// every issue the orchestrator is actively working (placeholders included, so
+// the claim window between slot reservation and the In Progress transition is
+// protected), plus any issue over the runtime-failure cap. Returns a fresh map
+// safe for the caller to retain.
 func (o *Orchestrator) ActiveIssueIDs() map[string]bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -694,10 +688,9 @@ func (o *Orchestrator) activeCountLocked() int {
 }
 
 // recordRuntimeFailure increments the consecutive runtime-failure counter for
-// an issue and logs a give-up line the first time it crosses maxRuntimeFailures
-// — mirroring the Start-failure give-up in RunWithDiscovery. Once over the cap
-// the issue is folded into ActiveIssueIDs, so discovery keeps it suppressed
-// until recordSuccess (StepDone) or a process restart clears the counter.
+// an issue (see runtimeFailures) and logs a give-up line the first time it
+// crosses maxRuntimeFailures, mirroring the Start-failure give-up in
+// RunWithDiscovery.
 func (o *Orchestrator) recordRuntimeFailure(issue *tracker.Issue) {
 	o.mu.Lock()
 	o.runtimeFailures[issue.ID]++
@@ -996,11 +989,9 @@ func (o *Orchestrator) cleanup(ctx context.Context, mw *managedWorkflow, step Wo
 	}
 	o.mu.Lock()
 	delete(o.active, mw.issue.ID)
-	// Mark failed/cancelled issues for re-pickup so discovery un-suppresses them
-	// on the next poll (they may be back in the filter state). A StepDone issue
-	// is intentionally not released — it shipped a PR and must not be re-worked.
-	// An issue over the runtime-failure cap is not released either: it belongs in
-	// the suppression set (ActiveIssueIDs) to stop an instant-fail storm.
+	// Release failed/cancelled issues for re-pickup (see releasedForRetry), but
+	// not a StepDone (it shipped a PR) or an issue over the runtime-failure cap
+	// (it stays suppressed via ActiveIssueIDs).
 	if step == StepFailed || step == StepCancelled {
 		if o.runtimeFailures[mw.issue.ID] < maxRuntimeFailures {
 			o.releasedForRetry[mw.issue.ID] = true

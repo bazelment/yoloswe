@@ -88,33 +88,6 @@ func TestDiscovery_DeduplicatesIssues(t *testing.T) {
 	require.Equal(t, "ENG-2", received[1].Identifier)
 }
 
-func TestDiscovery_MarkSeen(t *testing.T) {
-	issueA := &tracker.Issue{ID: "a", Identifier: "ENG-1", Title: "Issue A"}
-	issueB := &tracker.Issue{ID: "b", Identifier: "ENG-2", Title: "Issue B"}
-
-	mt := &mockDiscoveryTracker{
-		results: [][]*tracker.Issue{
-			{issueA, issueB},
-		},
-	}
-
-	d := NewDiscovery(mt, tracker.IssueFilter{}, 10*time.Millisecond, testLogger(t))
-	d.MarkSeen("a") // Pre-seed: A already known
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	ch := d.Run(ctx)
-
-	var received []*tracker.Issue
-	for issue := range ch {
-		received = append(received, issue)
-	}
-
-	require.Len(t, received, 1)
-	require.Equal(t, "ENG-2", received[0].Identifier)
-}
-
 func TestDiscovery_PassesFilter(t *testing.T) {
 	mt := &mockDiscoveryTracker{
 		results: [][]*tracker.Issue{{}},
@@ -304,7 +277,7 @@ func TestDiscovery_NilActiveProvider(t *testing.T) {
 		{issue}, {issue},
 	}}
 	d := NewDiscovery(mt, tracker.IssueFilter{}, time.Hour, testLogger(t))
-	// No SetActiveProvider call — activeIDs is nil.
+	// No SetReconcileProviders call — activeIDs is nil.
 
 	require.Equal(t, []string{"ENG-1"}, collectPoll(t, d))
 	require.Empty(t, collectPoll(t, d)) // still returned, still seen → no re-emit
