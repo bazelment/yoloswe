@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/bazelment/yoloswe/agent-cli-wrapper/acp"
+	"github.com/bazelment/yoloswe/agent-cli-wrapper/claude"
 )
 
 // QueryResult is the provider-agnostic result of a one-shot query.
@@ -29,6 +30,26 @@ func NewProviderForModel(m AgentModel) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("unknown provider %q for model %q", m.Provider, m.ID)
 	}
+}
+
+// ClaudeSessionUtilization returns the maximum active plan-limit utilization
+// (0–100) for the Claude account backing model. It owns claude.Session
+// construction so callers (e.g. jiradozer) don't import the claude package
+// directly. ok is false for non-Claude providers and whenever usage can't be
+// read — the caller MUST fail open on !ok (never block a run on a best-effort
+// pre-flight). No CLI subprocess is started: Usage reads stored OAuth
+// credentials from disk and performs a single HTTP GET, so an unstarted session
+// is sufficient.
+func ClaudeSessionUtilization(ctx context.Context, model AgentModel, opts ...claude.SessionOption) (pct float64, ok bool) {
+	if model.Provider != ProviderClaude {
+		return 0, false
+	}
+	session := claude.NewSession(opts...)
+	usage, err := session.Usage(ctx)
+	if err != nil || usage == nil {
+		return 0, false
+	}
+	return usage.MaxActiveUtilization()
 }
 
 // Query sends a one-shot prompt using the provider determined by modelID

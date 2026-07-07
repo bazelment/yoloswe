@@ -224,6 +224,119 @@ func TestPlanUsageReportEmpty(t *testing.T) {
 	require.Equal(t, "/usage is only available for subscription plans.", PlanUsage{}.Report())
 }
 
+func TestMaxActiveUtilizationPrefersLimitsArray(t *testing.T) {
+	t.Parallel()
+	// limits[] present: a 99% weekly bucket while the 5-hour window is idle at
+	// 5% must yield 99 — proving it is not five-hour-only.
+	active := true
+	usage := PlanUsage{
+		FiveHour: &UsageRateLimit{Utilization: float64Ptr(5)},
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(5), IsActive: &active},
+			{Kind: "weekly_all", Percent: float64Ptr(99), IsActive: &active},
+		},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 99.0, pct)
+}
+
+func TestMaxActiveUtilizationSkipsInactiveBuckets(t *testing.T) {
+	t.Parallel()
+	active, inactive := true, false
+	usage := PlanUsage{
+		Limits: []PlanLimit{
+			{Kind: "weekly_scoped", Percent: float64Ptr(100), IsActive: &inactive},
+			{Kind: "session", Percent: float64Ptr(40), IsActive: &active},
+		},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 40.0, pct)
+}
+
+func TestMaxActiveUtilizationUsesUtilizationWhenPercentAbsent(t *testing.T) {
+	t.Parallel()
+	usage := PlanUsage{
+		Limits: []PlanLimit{{Kind: "session", Utilization: float64Ptr(77)}},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 77.0, pct)
+}
+
+func TestMaxActiveUtilizationFallsBackToNamedFields(t *testing.T) {
+	t.Parallel()
+	// Legacy payload with no limits[]: use the named windows and return the max.
+	usage := PlanUsage{
+		FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+		SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(88)},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 88.0, pct)
+}
+
+func TestMaxActiveUtilizationEmptyIsNotOK(t *testing.T) {
+	t.Parallel()
+	_, ok := PlanUsage{}.MaxActiveUtilization()
+	require.False(t, ok)
+}
+
+func TestPlanUsageReportSurfacesLimitsOnlyPayload(t *testing.T) {
+	t.Parallel()
+	// Forward-compat payload: no named FiveHour/SevenDay* fields, only limits[].
+	// HasData and Report must still surface the buckets, not look empty.
+	active := true
+	reset := "2026-07-07T21:00:00Z"
+	usage := PlanUsage{
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(42), ResetsAt: &reset, IsActive: &active},
+			{Kind: "weekly_all", Percent: float64Ptr(88), IsActive: &active},
+		},
+	}
+	require.True(t, usage.HasData(), "limits-only payload must count as data")
+
+	report := usage.Report()
+	require.NotEqual(t, "/usage is only available for subscription plans.", report)
+	require.Contains(t, report, "Current session: 42% used")
+	require.Contains(t, report, "Current week (all models): 88% used")
+}
+
+func TestPlanUsageReportSurfacesLimitsAlongsideExtraUsage(t *testing.T) {
+	t.Parallel()
+	// Mixed forward-compat payload: no named plan windows, but extra_usage IS
+	// present. The extra-usage row must not suppress the plan-limit buckets —
+	// both appear, with the limit rows first.
+	active := true
+	usage := PlanUsage{
+		SubscriptionType: "max",
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(55), IsActive: &active},
+		},
+		ExtraUsage: &ExtraUsage{IsEnabled: true, MonthlyLimit: float64Ptr(1000), UsedCredits: float64Ptr(100)},
+	}
+	lines := usage.ReportLines()
+	require.Len(t, lines, 2)
+	require.Equal(t, "Current session", lines[0].Title, "plan-limit row must come first")
+	require.Equal(t, "Extra usage", lines[1].Title)
+	require.Contains(t, usage.Report(), "Current session: 55% used")
+}
+
+func TestPlanUsageReportPrefersNamedFieldsOverLimits(t *testing.T) {
+	t.Parallel()
+	// When named windows are present, they drive the report and the limits[]
+	// fallback stays dormant — no duplicate rows.
+	usage := PlanUsage{
+		FiveHour: &UsageRateLimit{Utilization: float64Ptr(30)},
+		Limits:   []PlanLimit{{Kind: "session", Percent: float64Ptr(99)}},
+	}
+	lines := usage.ReportLines()
+	require.Len(t, lines, 1)
+	require.Equal(t, "Current session", lines[0].Title)
+	require.Contains(t, usage.Report(), "30% used")
+}
+
 func TestUsageReturnsEmptyWithoutProfileScope(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)

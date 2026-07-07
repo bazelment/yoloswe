@@ -364,6 +364,135 @@ func TestRunAgent_OutOfCredits_AllModelsExhausted(t *testing.T) {
 	require.Equal(t, []string{"gpt-5.5", "opus", "sonnet"}, *order, "all models tried in order before failing")
 }
 
+// TestRunAgent_PreflightSkip_ClaudeNearLimit_SkipsToFallback pins Part B: when
+// the Claude primary is already at/over the plan limit, the pre-flight skips it
+// WITHOUT invoking its provider Execute and runs the Cursor fallback instead.
+func TestRunAgent_PreflightSkip_ClaudeNearLimit_SkipsToFallback(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "should not run"}},
+		errs:    []error{nil},
+	}
+	cursorFallback := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-cursor", Text: "done on cursor"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"sonnet":       claudePrimary,
+		"composer-2.5": cursorFallback,
+	})
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		// Claude primary reports 99% utilization (>= threshold); the Cursor
+		// fallback is non-Claude so utilization returns ok=false and it runs.
+		claudeUtilization: func(_ context.Context, m agentpkg.AgentModel) (float64, bool) {
+			if m.Provider == agentpkg.ProviderClaude {
+				return 99.0, true
+			}
+			return 0, false
+		},
+	}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "sonnet",
+		FallbackModels:   []string{"composer-2.5"},
+		TransientRetries: 2,
+	}, t.TempDir(), "resume-orig", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "done on cursor", got.Output)
+	require.Equal(t, "sess-cursor", got.SessionID)
+	// Only the fallback provider was ever constructed; the exhausted Claude
+	// primary was skipped before its provider ran.
+	require.Equal(t, []string{"composer-2.5"}, *order, "claude primary skipped, only fallback provider built")
+	require.Empty(t, claudePrimary.resumeSession, "claude primary Execute must never be called")
+	require.Empty(t, cursorFallback.resumeSession[0], "fallback must start a fresh session")
+}
+
+// TestRunAgent_PreflightSkip_LastModelNeverSkipped ensures the pre-flight never
+// skips the final model — even at 99% there is nothing to fall back to, so the
+// run must still be attempted rather than failing with no attempt at all.
+func TestRunAgent_PreflightSkip_LastModelNeverSkipped(t *testing.T) {
+	claudeOnly := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "ran anyway"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{"sonnet": claudeOnly})
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization: func(_ context.Context, _ agentpkg.AgentModel) (float64, bool) {
+			return 99.0, true
+		},
+	}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "sonnet",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "ran anyway", got.Output)
+	require.Equal(t, []string{"sonnet"}, *order, "sole model must still run despite being over limit")
+}
+
+// TestRunAgent_PreflightFailsOpen_UnavailableUsage runs the Claude primary
+// normally when utilization is unavailable (ok=false) — a best-effort
+// pre-flight must never block a run.
+func TestRunAgent_PreflightFailsOpen_UnavailableUsage(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "ran"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{"sonnet": claudePrimary})
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization: func(_ context.Context, _ agentpkg.AgentModel) (float64, bool) {
+			return 0, false // usage unavailable
+		},
+	}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "sonnet",
+		FallbackModels:   []string{"composer-2.5"},
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "ran", got.Output)
+	require.Equal(t, []string{"sonnet"}, *order, "primary must run when usage is unavailable")
+}
+
+// TestRunAgent_PreflightSkip_CustomEndpoint_NotSkipped pins the endpoint-scope
+// invariant: a Claude model ID redirected at a third-party llm_endpoint does not
+// spend Claude.ai plan credits, so the pre-flight must NOT skip it on the default
+// account's utilization — it runs the model even at 99%.
+func TestRunAgent_PreflightSkip_CustomEndpoint_NotSkipped(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "ran on endpoint"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{"sonnet": claudePrimary})
+	utilCalls := 0
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization: func(_ context.Context, _ agentpkg.AgentModel) (float64, bool) {
+			utilCalls++
+			return 99.0, true
+		},
+	}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "sonnet",
+		FallbackModels:   []string{"composer-2.5"},
+		TransientRetries: 2,
+		LLMEndpoint:      &LLMEndpointConfig{BaseURL: "https://inference.baseten.co/v1", APIKeyEnv: "BASETEN_API_KEY"},
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "ran on endpoint", got.Output)
+	require.Equal(t, []string{"sonnet"}, *order, "custom-endpoint model must run, not skip on default-account usage")
+	require.Zero(t, utilCalls, "usage must not even be fetched for a redirected endpoint")
+}
+
 // TestRunAgent_ConnectionClosed_NowRetried pins #272: a "connection closed
 // mid-response" error is now transient and retried rather than terminal.
 func TestRunAgent_ConnectionClosed_NowRetried(t *testing.T) {

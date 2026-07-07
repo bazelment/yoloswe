@@ -46,13 +46,26 @@ type StepAgentResult struct {
 	SessionID string
 }
 
+// sessionLimitSkipPct is the plan-utilization threshold (0–100) at or above
+// which a Claude model is treated as exhausted during pre-flight and skipped in
+// favor of the next fallback. Set just below 100 so a model that is effectively
+// out — but not yet erroring — is bypassed before launching a long run.
+const sessionLimitSkipPct = 98.0
+
 type agentRunner struct {
 	newProviderForModel func(agent.AgentModel) (agent.Provider, error)
-	retryBackoffs       []time.Duration
+	// claudeUtilization reads the max active plan-limit utilization (0–100) for
+	// a Claude model, returning ok=false for non-Claude models or when usage is
+	// unavailable. Injectable so tests can drive the pre-flight without network.
+	claudeUtilization func(context.Context, agent.AgentModel) (float64, bool)
+	retryBackoffs     []time.Duration
 }
 
 var defaultAgentRunner = agentRunner{
 	newProviderForModel: agent.NewProviderForModel,
+	claudeUtilization: func(ctx context.Context, m agent.AgentModel) (float64, bool) {
+		return agent.ClaudeSessionUtilization(ctx, m)
+	},
 	// A single shared schedule. Overload/5xx and other transients reuse the
 	// last entry once attempts exceed the slice (see retryBackoff), so a longer
 	// tail gives genuine cool-down for sustained provider overload (#273).
@@ -428,6 +441,26 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		activeCfg := cfg
 		activeCfg.Model = modelID
 
+		// Pre-flight: if this is a Claude model whose plan is already at/over the
+		// limit, don't burn a 40–50 min run that dies at the last step — skip
+		// straight to the next fallback with a fresh session. Fails open: any
+		// error or non-Claude model leaves claudeNearLimit false. The last model
+		// is never skipped (nothing to fall back to).
+		if mi < len(models)-1 && r.claudeNearLimit(ctx, activeCfg, stepName, logger) {
+			next := models[mi+1]
+			logger.Warn("claude plan near limit; skipping to fallback",
+				"step", stepName,
+				"from", modelID,
+				"to", next,
+				"threshold", sessionLimitSkipPct,
+			)
+			if renderer != nil {
+				renderer.Status(fmt.Sprintf("%s near plan limit; skipping to %s", modelID, next))
+			}
+			currentResume = ""
+			continue
+		}
+
 		res, outOfCredits, err := r.runAgentForModel(ctx, stepName, prompt, activeCfg, workDir, currentResume, renderer, logger)
 		if err == nil {
 			return res, nil
@@ -455,6 +488,39 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		return res, err
 	}
 	return lastResult, lastErr
+}
+
+// claudeNearLimit reports whether cfg.Model is a Claude model whose plan is at
+// or above the skip threshold, so the caller should pre-emptively fall back
+// rather than launch a run that will die on the limit. It fails open: a
+// non-Claude provider, an unresolvable model, or unavailable usage all return
+// false so a best-effort pre-flight never becomes a new failure mode.
+//
+// A custom llm_endpoint also fails open: when the step redirects the Claude CLI
+// at a third-party endpoint (Baseten, OpenRouter, …), the turn does not spend
+// Claude.ai plan credits, so the default account's /api/oauth/usage says nothing
+// about that endpoint and must not gate the run. The real turn reads the same
+// endpoint config (buildExecuteOpts), keeping pre-flight and execution scoped to
+// the same target.
+func (r agentRunner) claudeNearLimit(ctx context.Context, cfg StepConfig, stepName string, logger *slog.Logger) bool {
+	model, ok := agent.ResolveModel(cfg.Model)
+	if !ok || model.Provider != agent.ProviderClaude || r.claudeUtilization == nil {
+		return false
+	}
+	if !cfg.LLMEndpoint.ToEndpoint().IsZero() {
+		logger.Debug("custom llm_endpoint set; skipping claude plan pre-flight",
+			"step", stepName, "model", cfg.Model)
+		return false
+	}
+	pct, ok := r.claudeUtilization(ctx, model)
+	if !ok {
+		logger.Debug("claude plan usage unavailable; proceeding without pre-flight skip",
+			"step", stepName, "model", cfg.Model)
+		return false
+	}
+	logger.Debug("claude plan pre-flight",
+		"step", stepName, "model", cfg.Model, "utilization", pct, "threshold", sessionLimitSkipPct)
+	return pct >= sessionLimitSkipPct
 }
 
 // runAgentForModel runs the transient-retry loop for a single model. It returns

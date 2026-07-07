@@ -21,6 +21,9 @@ func TestIsTransient(t *testing.T) {
 		{name: "codex transient", err: &codex.TransientError{Message: "connection reset"}, want: true},
 		{name: "wrapped transient", err: fmt.Errorf("agent execution: %w", &codex.TransientError{Message: "429"}), want: true},
 		{name: "raw 429", err: errors.New("429 Too Many Requests"), want: true},
+		// Guards the IsOutOfCredits rate-limit exclusion: a rate limit that
+		// mentions a reset time must still classify as a same-model transient.
+		{name: "rate limit with reset stays transient", err: errors.New("429 rate limit exceeded, resets at 12:00 UTC"), want: true},
 		{name: "raw connection reset", err: errors.New("read tcp: connection reset by peer"), want: true},
 		// Verbatim from jiradozer cron plan-step failures (2026-06-04/05).
 		{name: "raw socket closed", err: errors.New("API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()"), want: true},
@@ -65,6 +68,69 @@ func TestIsOutOfCredits(t *testing.T) {
 			want: false,
 		},
 		{name: "plain error", err: errors.New("syntax error"), want: false},
+		// Claude.ai plan limit windows. Wording varies by which window tripped,
+		// but each carries a "· resets … (UTC)" clause. See INF-1807/1854/etc.
+		{
+			name: "claude session limit",
+			err:  errors.New("You've hit your session limit · resets 9:30am (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude session limit varying reset time",
+			err:  errors.New("You've hit your session limit · resets 4:10pm (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude general/weekly limit",
+			err:  errors.New("You've hit your limit · resets May 16, 5pm (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude usage limit defensive",
+			err:  errors.New("You've hit your usage limit · resets 1am (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude session limit wrapped in typed turn error",
+			err:  fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "You've hit your session limit · resets 9:30am (UTC)"}),
+			want: true,
+		},
+		// Phrasing-inverted form emitted by some CLI versions (claude-code#8926):
+		// "... limit reached · resets ..." carries no "hit your" prefix.
+		{
+			name: "claude session limit reached phrasing",
+			err:  errors.New("Session limit reached · resets 9pm (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude usage limit reached phrasing wrapped",
+			err:  fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "Usage limit reached · resets 11:00pm (UTC)"}),
+			want: true,
+		},
+		// Singular "will reset at" / "reset at" family (claude-code#9236) — no
+		// trailing "s" on "reset", so a "resets"-only match would miss it.
+		{
+			name: "claude limit will reset at phrasing",
+			err:  &claude.TurnError{Message: "You've reached your usage limit. It will reset at 9pm (UTC)."},
+			want: true,
+		},
+		{
+			name: "claude limit reset at phrasing wrapped",
+			err:  fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "Session limit reached. Reset at 5:00am (UTC)."}),
+			want: true,
+		},
+		{
+			name: "org membership limit is not out of credits",
+			err:  errors.New("reached your limit of 5 organization memberships"),
+			want: false,
+		},
+		// A retryable rate limit can also carry "limit" + "reset", but it is a
+		// same-model transient, not a plan exhaustion — must not route to fallback.
+		{
+			name: "http rate limit with reset is not out of credits",
+			err:  errors.New("429 rate limit exceeded, resets at 12:00 UTC"),
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -73,6 +139,25 @@ func TestIsOutOfCredits(t *testing.T) {
 				t.Fatalf("IsOutOfCredits() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestClaudePlanLimitIsNotTransient guards the routing invariant: a plan-limit
+// error must route to model fallback (IsOutOfCredits), never to a same-model
+// transient retry — a retry can neither refill credits nor reset the window.
+func TestClaudePlanLimitIsNotTransient(t *testing.T) {
+	planLimitErrs := []error{
+		errors.New("You've hit your session limit · resets 9:30am (UTC)"),
+		errors.New("You've hit your limit · resets May 16, 5pm (UTC)"),
+		errors.New("You've hit your usage limit · resets 1am (UTC)"),
+		errors.New("Session limit reached · resets 9pm (UTC)"),
+		&claude.TurnError{Message: "You've reached your usage limit. It will reset at 9pm (UTC)."},
+		fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "You've hit your session limit · resets 9:30am (UTC)"}),
+	}
+	for _, err := range planLimitErrs {
+		if IsTransient(err) {
+			t.Fatalf("IsTransient(%q) = true, want false (plan limit must not same-model retry)", err)
+		}
 	}
 }
 

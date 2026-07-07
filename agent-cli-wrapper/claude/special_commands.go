@@ -104,6 +104,56 @@ type UsageRateLimit struct {
 	ResetsAt    *string  `json:"resets_at"`
 }
 
+// PlanLimit is one entry of the generic limits[] array in /api/oauth/usage.
+// It is forward-compatible: new window kinds (session, weekly_all,
+// weekly_scoped, …) surface here without a schema change. Either percent or
+// utilization may carry the 0–100 utilization figure depending on payload
+// version; utilizationPct prefers whichever is present.
+type PlanLimit struct {
+	Percent     *float64 `json:"percent"`
+	Utilization *float64 `json:"utilization"`
+	ResetsAt    *string  `json:"resets_at"`
+	IsActive    *bool    `json:"is_active"`
+	Kind        string   `json:"kind"`
+}
+
+// title returns a human-readable label for the bucket's window kind, used when
+// the payload carries only the generic limits[] array (no named FiveHour/
+// SevenDay* fields). Unknown kinds fall back to the raw kind string.
+func (l PlanLimit) title() string {
+	switch l.Kind {
+	case "session", "five_hour":
+		return "Current session"
+	case "weekly_all", "seven_day":
+		return "Current week (all models)"
+	case "weekly_scoped", "seven_day_scoped":
+		return "Current week (scoped)"
+	case "":
+		return "Plan limit"
+	default:
+		return l.Kind
+	}
+}
+
+// active reports whether the limit is an active window. is_active is treated as
+// true when the field is absent (older payloads omit it), so a bucket is only
+// excluded when the server explicitly marks it inactive.
+func (l PlanLimit) active() bool {
+	return l.IsActive == nil || *l.IsActive
+}
+
+// utilizationPct returns the bucket's utilization (0–100) and whether a value
+// was present, preferring percent over utilization.
+func (l PlanLimit) utilizationPct() (float64, bool) {
+	if l.Percent != nil {
+		return *l.Percent, true
+	}
+	if l.Utilization != nil {
+		return *l.Utilization, true
+	}
+	return 0, false
+}
+
 // ExtraUsage describes Claude.ai extra usage state.
 type ExtraUsage struct {
 	MonthlyLimit *float64 `json:"monthly_limit"`
@@ -120,6 +170,7 @@ type PlanUsage struct {
 	SevenDayOpus     *UsageRateLimit `json:"seven_day_opus,omitempty"`
 	SevenDaySonnet   *UsageRateLimit `json:"seven_day_sonnet,omitempty"`
 	ExtraUsage       *ExtraUsage     `json:"extra_usage,omitempty"`
+	Limits           []PlanLimit     `json:"limits,omitempty"`
 	SubscriptionType string          `json:"-"`
 	RateLimitTier    string          `json:"-"`
 	Raw              json.RawMessage `json:"-"`
@@ -134,13 +185,56 @@ type UsageReportLine struct {
 }
 
 // HasData reports whether the usage response includes any visible usage field.
+// The generic limits[] array counts: a forward-compatible payload that carries
+// only limits[] (no named FiveHour/SevenDay* fields) still has real data.
 func (u PlanUsage) HasData() bool {
 	return u.FiveHour != nil ||
 		u.SevenDay != nil ||
 		u.SevenDayOAuthApp != nil ||
 		u.SevenDayOpus != nil ||
 		u.SevenDaySonnet != nil ||
-		u.ExtraUsage != nil
+		u.ExtraUsage != nil ||
+		len(u.Limits) > 0
+}
+
+// MaxActiveUtilization returns the highest utilization (0–100) across all
+// active plan-limit windows. It prefers the generic limits[] array — covering
+// the session, weekly-all, weekly-scoped, and any future window kind — so a
+// weekly or per-model exhaustion is caught even when the 5-hour window is idle.
+// When limits[] is absent (older payloads), it falls back to the named
+// FiveHour/SevenDay* fields. ok is false when no usable bucket is present, and
+// callers must fail open (not block) on !ok.
+//
+// This deliberately collapses all windows into one scalar and does NOT filter
+// by the target model. For the pre-flight skip that means a model-scoped window
+// (e.g. a Sonnet-only weekly cap) can trip the skip for a different Claude model
+// that still has headroom — a conservative over-skip that routes to a fallback
+// provider one turn early. That is the safe direction: the alternative (a
+// model→scope map) risks under-skipping and re-introducing the very last-step
+// failure this guards against, and we have no stable scoped-window→model-id
+// mapping to rely on. The fallback still runs, so no work is lost.
+func (u PlanUsage) MaxActiveUtilization() (pct float64, ok bool) {
+	for _, l := range u.Limits {
+		if !l.active() {
+			continue
+		}
+		if v, has := l.utilizationPct(); has && (!ok || v > pct) {
+			pct, ok = v, true
+		}
+	}
+	if ok {
+		return pct, true
+	}
+	// Legacy payloads without limits[]: consider the named windows.
+	for _, l := range []*UsageRateLimit{u.FiveHour, u.SevenDay, u.SevenDayOpus, u.SevenDaySonnet, u.SevenDayOAuthApp} {
+		if l == nil || l.Utilization == nil {
+			continue
+		}
+		if v := *l.Utilization; !ok || v > pct {
+			pct, ok = v, true
+		}
+	}
+	return pct, ok
 }
 
 // ReportLines returns the meaningful rows displayed by Claude Code's /usage.
@@ -161,6 +255,29 @@ func (u PlanUsage) ReportLines() []UsageReportLine {
 	appendLimit("Current week (all models)", u.SevenDay)
 	if u.SubscriptionType == "" || u.SubscriptionType == "max" || u.SubscriptionType == "team" {
 		appendLimit("Current week (Sonnet only)", u.SevenDaySonnet)
+	}
+
+	// Forward-compat fallback: if the payload carried only the generic limits[]
+	// array (no named plan windows produced rows), surface those buckets so
+	// Report() isn't blank when the API drops the legacy FiveHour/SevenDay*
+	// fields. Emitted before Extra usage — an extra-usage row must not suppress
+	// the plan-limit rows (they answer different questions), so the fallback is
+	// gated on the plan-window count, not total len(lines).
+	if len(lines) == 0 {
+		for _, l := range u.Limits {
+			if !l.active() {
+				continue
+			}
+			var util *float64
+			if v, has := l.utilizationPct(); has {
+				util = &v
+			}
+			lines = append(lines, UsageReportLine{
+				Utilization: util,
+				ResetsAt:    l.ResetsAt,
+				Title:       l.title(),
+			})
+		}
 	}
 
 	if u.ExtraUsage != nil && (u.SubscriptionType == "pro" || u.SubscriptionType == "max") {
