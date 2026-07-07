@@ -108,15 +108,12 @@ type UsageRateLimit struct {
 // It is forward-compatible: new window kinds (session, weekly_all,
 // weekly_scoped, …) surface here without a schema change. Either percent or
 // utilization may carry the 0–100 utilization figure depending on payload
-// version; UtilizationPct prefers whichever is present.
+// version; utilizationPct prefers whichever is present.
 type PlanLimit struct {
 	Percent     *float64 `json:"percent"`
 	Utilization *float64 `json:"utilization"`
-	ResetsAt    *string  `json:"resets_at"`
 	IsActive    *bool    `json:"is_active"`
 	Kind        string   `json:"kind"`
-	Group       string   `json:"group"`
-	Severity    string   `json:"severity"`
 }
 
 // active reports whether the limit is an active window. is_active is treated as
@@ -126,9 +123,9 @@ func (l PlanLimit) active() bool {
 	return l.IsActive == nil || *l.IsActive
 }
 
-// UtilizationPct returns the bucket's utilization (0–100) and whether a value
+// utilizationPct returns the bucket's utilization (0–100) and whether a value
 // was present, preferring percent over utilization.
-func (l PlanLimit) UtilizationPct() (float64, bool) {
+func (l PlanLimit) utilizationPct() (float64, bool) {
 	if l.Percent != nil {
 		return *l.Percent, true
 	}
@@ -190,7 +187,7 @@ func (u PlanUsage) MaxActiveUtilization() (pct float64, ok bool) {
 		if !l.active() {
 			continue
 		}
-		if v, has := l.UtilizationPct(); has && (!ok || v > pct) {
+		if v, has := l.utilizationPct(); has && (!ok || v > pct) {
 			pct, ok = v, true
 		}
 	}
