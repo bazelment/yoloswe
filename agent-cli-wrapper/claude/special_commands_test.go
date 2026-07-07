@@ -303,6 +303,26 @@ func TestPlanUsageReportSurfacesLimitsOnlyPayload(t *testing.T) {
 	require.Contains(t, report, "Current week (all models): 88% used")
 }
 
+func TestPlanUsageReportSurfacesLimitsAlongsideExtraUsage(t *testing.T) {
+	t.Parallel()
+	// Mixed forward-compat payload: no named plan windows, but extra_usage IS
+	// present. The extra-usage row must not suppress the plan-limit buckets —
+	// both appear, with the limit rows first.
+	active := true
+	usage := PlanUsage{
+		SubscriptionType: "max",
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(55), IsActive: &active},
+		},
+		ExtraUsage: &ExtraUsage{IsEnabled: true, MonthlyLimit: float64Ptr(1000), UsedCredits: float64Ptr(100)},
+	}
+	lines := usage.ReportLines()
+	require.Len(t, lines, 2)
+	require.Equal(t, "Current session", lines[0].Title, "plan-limit row must come first")
+	require.Equal(t, "Extra usage", lines[1].Title)
+	require.Contains(t, usage.Report(), "Current session: 55% used")
+}
+
 func TestPlanUsageReportPrefersNamedFieldsOverLimits(t *testing.T) {
 	t.Parallel()
 	// When named windows are present, they drive the report and the limits[]

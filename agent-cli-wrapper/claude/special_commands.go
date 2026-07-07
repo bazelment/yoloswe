@@ -204,6 +204,15 @@ func (u PlanUsage) HasData() bool {
 // When limits[] is absent (older payloads), it falls back to the named
 // FiveHour/SevenDay* fields. ok is false when no usable bucket is present, and
 // callers must fail open (not block) on !ok.
+//
+// This deliberately collapses all windows into one scalar and does NOT filter
+// by the target model. For the pre-flight skip that means a model-scoped window
+// (e.g. a Sonnet-only weekly cap) can trip the skip for a different Claude model
+// that still has headroom — a conservative over-skip that routes to a fallback
+// provider one turn early. That is the safe direction: the alternative (a
+// model→scope map) risks under-skipping and re-introducing the very last-step
+// failure this guards against, and we have no stable scoped-window→model-id
+// mapping to rely on. The fallback still runs, so no work is lost.
 func (u PlanUsage) MaxActiveUtilization() (pct float64, ok bool) {
 	for _, l := range u.Limits {
 		if !l.active() {
@@ -248,6 +257,29 @@ func (u PlanUsage) ReportLines() []UsageReportLine {
 		appendLimit("Current week (Sonnet only)", u.SevenDaySonnet)
 	}
 
+	// Forward-compat fallback: if the payload carried only the generic limits[]
+	// array (no named plan windows produced rows), surface those buckets so
+	// Report() isn't blank when the API drops the legacy FiveHour/SevenDay*
+	// fields. Emitted before Extra usage — an extra-usage row must not suppress
+	// the plan-limit rows (they answer different questions), so the fallback is
+	// gated on the plan-window count, not total len(lines).
+	if len(lines) == 0 {
+		for _, l := range u.Limits {
+			if !l.active() {
+				continue
+			}
+			var util *float64
+			if v, has := l.utilizationPct(); has {
+				util = &v
+			}
+			lines = append(lines, UsageReportLine{
+				Utilization: util,
+				ResetsAt:    l.ResetsAt,
+				Title:       l.title(),
+			})
+		}
+	}
+
 	if u.ExtraUsage != nil && (u.SubscriptionType == "pro" || u.SubscriptionType == "max") {
 		line := UsageReportLine{
 			Utilization: u.ExtraUsage.Utilization,
@@ -264,26 +296,6 @@ func (u PlanUsage) ReportLines() []UsageReportLine {
 				formatUsageCostCents(*u.ExtraUsage.MonthlyLimit))
 		}
 		lines = append(lines, line)
-	}
-
-	// Forward-compat fallback: if the payload carried only the generic limits[]
-	// array (no named windows produced rows), surface those buckets so Report()
-	// isn't blank when the API drops the legacy FiveHour/SevenDay* fields.
-	if len(lines) == 0 {
-		for _, l := range u.Limits {
-			if !l.active() {
-				continue
-			}
-			var util *float64
-			if v, has := l.utilizationPct(); has {
-				util = &v
-			}
-			lines = append(lines, UsageReportLine{
-				Utilization: util,
-				ResetsAt:    l.ResetsAt,
-				Title:       l.title(),
-			})
-		}
 	}
 
 	return lines
