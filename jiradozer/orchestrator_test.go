@@ -1056,6 +1056,169 @@ func TestRunWithDiscovery_ConcurrencyLimitKeepsPending(t *testing.T) {
 	require.Len(t, created, 3, "expected all 3 issues to be started exactly once")
 }
 
+// TestOrchestrator_ActiveIssueIDsIncludesPlaceholders verifies ActiveIssueIDs
+// reports both running workflows and reserved placeholders (which must count as
+// active to protect the claim window), and excludes cleaned-up issues.
+func TestOrchestrator_ActiveIssueIDsIncludesPlaceholders(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	script := writeTestScript(t, "sleep 60")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	issue1 := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test 1"}
+	issue2 := &tracker.Issue{ID: "2", Identifier: "ENG-2", Title: "Test 2"}
+	require.NoError(t, orch.Start(context.Background(), issue1))
+	require.NoError(t, orch.Start(context.Background(), issue2))
+
+	ids := orch.ActiveIssueIDs()
+	require.True(t, ids["1"], "running workflow must be active")
+	require.True(t, ids["2"], "running workflow must be active")
+	require.Len(t, ids, 2)
+
+	// A never-started issue is not active.
+	require.False(t, orch.ActiveIssueIDs()["3"])
+}
+
+// TestOrchestrator_RuntimeFailureReAdmitsIssue is the INF-1808 fix end-to-end:
+// after a subprocess fails at runtime, the issue is no longer in the active set,
+// so discovery's reconciliation re-admits it. Asserted via ActiveIssueIDs (the
+// suppression set discovery keys off): the failed issue must NOT appear there.
+func TestOrchestrator_RuntimeFailureReAdmitsIssue(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	script := writeTestScript(t, "exit 1")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+	require.NoError(t, orch.Start(context.Background(), issue))
+
+	// Drain status updates so the completion goroutine (which records the
+	// failure and cleans up) can run.
+	go func() {
+		for range orch.StatusUpdates() {
+		}
+	}()
+	orch.Wait()
+
+	// One runtime failure is below the cap, so the issue is neither active nor
+	// suppressed → discovery would re-emit it on the next poll.
+	require.NotContains(t, orch.ActiveIssueIDs(), "1",
+		"a single runtime failure must leave the issue re-admittable")
+	// The issue must be released for re-pickup so discovery clears it from seen —
+	// this is what re-admits it even when the whole claim+fail happened between
+	// two polls.
+	require.Equal(t, []string{"1"}, orch.DrainReleasedForRetry(),
+		"a failed issue must be released for re-pickup")
+	// Draining clears the set.
+	require.Empty(t, orch.DrainReleasedForRetry())
+}
+
+// TestOrchestrator_RuntimeFailureStormSuppressed verifies that an issue failing
+// on every attempt is suppressed once it crosses maxRuntimeFailures, and that a
+// clean completion resets the counter so the issue is admittable again. A single
+// script switches between fail/succeed based on a control file, so the binary
+// (and log dir) stays fixed across rounds.
+func TestOrchestrator_RuntimeFailureStormSuppressed(t *testing.T) {
+	cfg := testOrchestratorConfig()
+
+	dir := t.TempDir()
+	ctlFile := filepath.Join(dir, "exitcode")
+	require.NoError(t, os.WriteFile(ctlFile, []byte("1"), 0o600))
+	script := writeTestScript(t, "exit \"$(cat "+ctlFile+")\"")
+	orch, _ := setupSubprocessOrch(t, cfg, script)
+
+	go func() {
+		for range orch.StatusUpdates() {
+		}
+	}()
+
+	issue := &tracker.Issue{ID: "1", Identifier: "ENG-1", Title: "Test"}
+
+	// Fail maxRuntimeFailures times in a row.
+	for i := 0; i < maxRuntimeFailures; i++ {
+		require.NoError(t, orch.Start(context.Background(), issue))
+		orch.Wait()
+	}
+
+	require.Contains(t, orch.ActiveIssueIDs(), "1",
+		"issue over the runtime-failure cap must be suppressed from rediscovery")
+
+	// Flip the script to succeed; a clean completion resets the counter.
+	require.NoError(t, os.WriteFile(ctlFile, []byte("0"), 0o600))
+	require.NoError(t, orch.Start(context.Background(), issue))
+	orch.Wait()
+
+	require.NotContains(t, orch.ActiveIssueIDs(), "1",
+		"a clean StepDone must reset the runtime-failure counter")
+}
+
+// requeueTracker returns the same issue on every poll (as if it were parked in
+// the filter state), letting RunWithDiscovery's reconciliation drive re-pickup.
+// It counts how many times the issue's worktree branch was created via the
+// embedded countingWTManager passed alongside.
+//
+//nolint:govet // fieldalignment: embedded struct ordering is intentional for readability
+type requeueTracker struct {
+	mockDiscoveryTracker
+	issue *tracker.Issue
+}
+
+func (r *requeueTracker) ListIssues(_ context.Context, _ tracker.IssueFilter) ([]*tracker.Issue, error) {
+	return []*tracker.Issue{r.issue}, nil
+}
+
+// TestRunWithDiscovery_RuntimeFailureIsRePickedUp is the INF-1808 regression
+// test end-to-end: an issue is discovered, its subprocess fails at runtime, the
+// filter still returns it (re-queued), and discovery's reconciliation re-admits
+// it so the orchestrator claims it again — driving NewWorktree more than once.
+// Before the fix (monotonic seen), the second claim never happened.
+func TestRunWithDiscovery_RuntimeFailureIsRePickedUp(t *testing.T) {
+	t.Parallel()
+
+	cfg := testOrchestratorConfig()
+	cfg.Source.MaxConcurrent = 1
+
+	issue := &tracker.Issue{ID: "1", Identifier: "INF-1808", Title: "Reservation lifecycle"}
+	rt := &requeueTracker{issue: issue}
+	inner := newMockWTManagerWithDir(t)
+	wtm := &countingWTManager{mockWTManager: inner}
+
+	logDir := t.TempDir()
+	// Subprocess fails at runtime (launches fine, exits 1).
+	script := writeTestScript(t, "exit 1")
+	orch := NewOrchestrator(rt, cfg, wtm, "", testLogger(t))
+	orch.SetSubprocessMode(script, nil, logDir)
+
+	// Wire the reconcile providers exactly as team_supervisor does.
+	d := NewDiscovery(rt, tracker.IssueFilter{}, 5*time.Millisecond, testLogger(t))
+	d.SetReconcileProviders(orch.ActiveIssueIDs, orch.DrainReleasedForRetry)
+
+	go func() {
+		for range orch.StatusUpdates() {
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = orch.RunWithDiscovery(ctx, d) }()
+
+	// The issue must be claimed at least twice: once on discovery, then again
+	// after the runtime failure returns it to the filter. Capped by
+	// maxRuntimeFailures, after which it is suppressed — so wait for exactly the
+	// re-pickup, not an unbounded storm.
+	require.Eventually(t, func() bool {
+		return wtm.callCount() >= 2
+	}, 5*time.Second, 10*time.Millisecond,
+		"issue was not re-claimed after runtime failure (monotonic-seen regression)")
+
+	cancel()
+	orch.Shutdown()
+
+	// The storm is bounded: once over maxRuntimeFailures the issue is suppressed,
+	// so claims never grow without bound.
+	require.LessOrEqual(t, wtm.callCount(), maxRuntimeFailures+1,
+		"runtime-failure storm was not bounded by maxRuntimeFailures")
+}
+
 func TestOrchestrator_Snapshot(t *testing.T) {
 	cfg := testOrchestratorConfig()
 

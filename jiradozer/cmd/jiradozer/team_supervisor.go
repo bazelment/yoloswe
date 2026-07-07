@@ -65,6 +65,13 @@ func newTeamSupervisor(app *cliapp.App, issueTracker tracker.IssueTracker, cfg *
 	orch := jiradozer.NewOrchestrator(issueTracker, cfg, wtMgr, repoName, app.Logger)
 	orch.SetSubprocessMode(selfPath, childArgs, logDir)
 	orch.SetForceCleanup(args.forceCleanup)
+	// Discovery reconciles its seen set against the orchestrator's runtime state
+	// on every poll: the active set protects the claim window and pins
+	// runtime-failure-capped issues, while the released set un-suppresses
+	// failed/cancelled issues so a re-queued issue is re-emitted without any exit
+	// path clearing seen. Restored children (in the active set) are suppressed
+	// without a manual MarkSeen re-seed.
+	disc.SetReconcileProviders(orch.ActiveIssueIDs, orch.DrainReleasedForRetry)
 
 	s := &teamSupervisor{
 		app:       app,
@@ -210,9 +217,10 @@ func (s *teamSupervisor) restoreFromEnv() error {
 	if err != nil {
 		return fmt.Errorf("restore runtime state: %w", err)
 	}
-	for _, issueID := range s.orch.RestoreActive(state.ActiveWorkflow) {
-		s.disc.MarkSeen(issueID)
-	}
+	// RestoreActive re-adds the restored children to the orchestrator's active
+	// set; discovery's per-poll reconciliation (SetReconcileProviders) then keeps
+	// them suppressed automatically, so no MarkSeen re-seed is needed here.
+	s.orch.RestoreActive(state.ActiveWorkflow)
 	s.orch.RestorePreservedWorktrees(state.PreservedWorktree)
 	s.logger.Info("restored team-mode runtime state",
 		"state", statePath,
