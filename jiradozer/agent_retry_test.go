@@ -461,6 +461,38 @@ func TestRunAgent_PreflightFailsOpen_UnavailableUsage(t *testing.T) {
 	require.Equal(t, []string{"sonnet"}, *order, "primary must run when usage is unavailable")
 }
 
+// TestRunAgent_PreflightSkip_CustomEndpoint_NotSkipped pins the endpoint-scope
+// invariant: a Claude model ID redirected at a third-party llm_endpoint does not
+// spend Claude.ai plan credits, so the pre-flight must NOT skip it on the default
+// account's utilization — it runs the model even at 99%.
+func TestRunAgent_PreflightSkip_CustomEndpoint_NotSkipped(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "ran on endpoint"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{"sonnet": claudePrimary})
+	utilCalls := 0
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization: func(_ context.Context, _ agentpkg.AgentModel) (float64, bool) {
+			utilCalls++
+			return 99.0, true
+		},
+	}
+
+	got, err := runner.runAgent(context.Background(), "ship", "prompt", StepConfig{
+		Model:            "sonnet",
+		FallbackModels:   []string{"composer-2.5"},
+		TransientRetries: 2,
+		LLMEndpoint:      &LLMEndpointConfig{BaseURL: "https://inference.baseten.co/v1", APIKeyEnv: "BASETEN_API_KEY"},
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "ran on endpoint", got.Output)
+	require.Equal(t, []string{"sonnet"}, *order, "custom-endpoint model must run, not skip on default-account usage")
+	require.Zero(t, utilCalls, "usage must not even be fetched for a redirected endpoint")
+}
+
 // TestRunAgent_ConnectionClosed_NowRetried pins #272: a "connection closed
 // mid-response" error is now transient and retried rather than terminal.
 func TestRunAgent_ConnectionClosed_NowRetried(t *testing.T) {

@@ -446,7 +446,7 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		// straight to the next fallback with a fresh session. Fails open: any
 		// error or non-Claude model leaves claudeNearLimit false. The last model
 		// is never skipped (nothing to fall back to).
-		if mi < len(models)-1 && r.claudeNearLimit(ctx, modelID, stepName, logger) {
+		if mi < len(models)-1 && r.claudeNearLimit(ctx, activeCfg, stepName, logger) {
 			next := models[mi+1]
 			logger.Warn("claude plan near limit; skipping to fallback",
 				"step", stepName,
@@ -490,24 +490,36 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 	return lastResult, lastErr
 }
 
-// claudeNearLimit reports whether modelID is a Claude model whose plan is at or
-// above the skip threshold, so the caller should pre-emptively fall back rather
-// than launch a run that will die on the limit. It fails open: a non-Claude
-// provider, an unresolvable model, or unavailable usage all return false so a
-// best-effort pre-flight never becomes a new failure mode.
-func (r agentRunner) claudeNearLimit(ctx context.Context, modelID, stepName string, logger *slog.Logger) bool {
-	model, ok := agent.ResolveModel(modelID)
+// claudeNearLimit reports whether cfg.Model is a Claude model whose plan is at
+// or above the skip threshold, so the caller should pre-emptively fall back
+// rather than launch a run that will die on the limit. It fails open: a
+// non-Claude provider, an unresolvable model, or unavailable usage all return
+// false so a best-effort pre-flight never becomes a new failure mode.
+//
+// A custom llm_endpoint also fails open: when the step redirects the Claude CLI
+// at a third-party endpoint (Baseten, OpenRouter, …), the turn does not spend
+// Claude.ai plan credits, so the default account's /api/oauth/usage says nothing
+// about that endpoint and must not gate the run. The real turn reads the same
+// endpoint config (buildExecuteOpts), keeping pre-flight and execution scoped to
+// the same target.
+func (r agentRunner) claudeNearLimit(ctx context.Context, cfg StepConfig, stepName string, logger *slog.Logger) bool {
+	model, ok := agent.ResolveModel(cfg.Model)
 	if !ok || model.Provider != agent.ProviderClaude || r.claudeUtilization == nil {
+		return false
+	}
+	if !cfg.LLMEndpoint.ToEndpoint().IsZero() {
+		logger.Debug("custom llm_endpoint set; skipping claude plan pre-flight",
+			"step", stepName, "model", cfg.Model)
 		return false
 	}
 	pct, ok := r.claudeUtilization(ctx, model)
 	if !ok {
 		logger.Debug("claude plan usage unavailable; proceeding without pre-flight skip",
-			"step", stepName, "model", modelID)
+			"step", stepName, "model", cfg.Model)
 		return false
 	}
 	logger.Debug("claude plan pre-flight",
-		"step", stepName, "model", modelID, "utilization", pct, "threshold", sessionLimitSkipPct)
+		"step", stepName, "model", cfg.Model, "utilization", pct, "threshold", sessionLimitSkipPct)
 	return pct >= sessionLimitSkipPct
 }
 
