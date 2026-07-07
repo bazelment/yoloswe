@@ -575,3 +575,28 @@ func TestRunAgentRetryTransientResultErrorExhaustsBudget(t *testing.T) {
 	var codexTransient *codex.TransientError
 	require.True(t, errors.As(err, &codexTransient), "final error should preserve typed transient cause")
 }
+
+// Backstop for the INF-1871 silent-failure shape: a Success=false result with a
+// nil error must not surface the old bare "agent failed". The wrapper now
+// attaches a real error (claude.ErrBackgroundTaskFailed) for the known cause, so
+// reaching this sink means an unclassified unsuccessful result — jiradozer must
+// still emit a descriptive, diagnosable message.
+func TestRunAgent_UnsuccessfulResultNoError_DescriptiveMessage(t *testing.T) {
+	provider := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{SessionID: "sess-1"}}, // Success:false, Error:nil
+		errs:    []error{nil},
+	}
+	runner := agentRunner{
+		newProviderForModel: func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil },
+		retryBackoffs:       []time.Duration{0},
+	}
+
+	_, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
+		Model: "gpt-5.5",
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.Error(t, err)
+	require.NotEqual(t, "agent failed", err.Error(),
+		"the bare opaque 'agent failed' message must not be surfaced")
+	require.Contains(t, err.Error(), "unsuccessful result with no error",
+		"the sink must emit a descriptive, diagnosable message")
+}
