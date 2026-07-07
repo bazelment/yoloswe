@@ -17,12 +17,8 @@ var (
 	ErrPermissionDenied = errors.New("permission denied")
 	ErrBudgetExceeded   = errors.New("budget limit exceeded")
 	ErrMaxTurnsExceeded = errors.New("max turns exceeded")
-	// ErrBackgroundTaskFailed marks a turn that closed with a background task
-	// (sub-agent or Monitor) in a non-success terminal state
-	// (failed/killed/timeout) — e.g. the session was torn down while a spawned
-	// sub-agent was still live and the CLI reported it killed. It carries a real
-	// error so the outcome is never a silent Success=false/Error=nil that
-	// downstream callers read as an opaque "agent failed".
+	// ErrBackgroundTaskFailed marks a turn that closed while a background task
+	// (sub-agent or Monitor) was in a failed/killed/timeout terminal state.
 	ErrBackgroundTaskFailed = errors.New("turn ended with a background task in a failed state")
 )
 

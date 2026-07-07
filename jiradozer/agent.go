@@ -665,12 +665,9 @@ func (r agentRunner) runAgentForModel(ctx context.Context, stepName, prompt stri
 		if result.Error != nil {
 			return failed, false, fmt.Errorf("agent execution: %w", result.Error)
 		}
-		// A Success=false result with no error is the silent failure shape a turn
-		// used to take when it ended while a spawned background sub-agent
-		// (Agent/Task) was still live and got torn down. The wrapper now surfaces
-		// a real error for that case (claude.ErrBackgroundTaskFailed), so reaching
-		// here means an unclassified provider-side unsuccessful result. Emit a
-		// descriptive, diagnosable message rather than a bare "agent failed".
+		// Success=false with no error: emit a diagnosable message rather than a
+		// bare "agent failed". Known causes (e.g. an interrupted background
+		// sub-agent) are classified upstream into a real error handled above.
 		return failed, false, fmt.Errorf(
 			"agent returned unsuccessful result with no error (likely an interrupted background sub-agent or premature turn close)")
 	}

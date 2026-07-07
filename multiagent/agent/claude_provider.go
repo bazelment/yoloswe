@@ -82,14 +82,10 @@ func resolveGracePeriod(cfg ExecuteConfig) time.Duration {
 	return streamTurnGracePeriod
 }
 
-// terminalReturn resolves a closed-stream (EOF) turn. It returns the terminal
-// TurnResult and, as the tuple error, that result's own Error — not a bare
-// state.Err(). ToTerminalTurnResult upgrades an invalidated-but-successful wave
-// to success (Error stays nil) and, for a turn closed on a failed/killed/timeout
-// background task, attaches claude.ErrBackgroundTaskFailed. Returning
-// result.Error keeps the tuple's error in lockstep with result.Success, so a
-// non-success terminal outcome never leaks out as a silent Success=false/nil-err
-// pair that a caller (jiradozer) reads as an opaque "agent failed".
+// terminalReturn resolves a closed-stream (EOF) turn. It returns result.Error
+// rather than state.Err(): ToTerminalTurnResult may attach an error (e.g. a
+// failed background task) that state.Err() does not carry, so this keeps the
+// tuple's error in lockstep with result.Success.
 func terminalReturn(state *logicalTurnState) (*claude.TurnResult, error) {
 	result := state.ToTerminalTurnResult()
 	return result, result.Error
