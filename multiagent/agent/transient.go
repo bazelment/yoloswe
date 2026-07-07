@@ -9,19 +9,41 @@ import (
 	transientmeta "github.com/bazelment/yoloswe/agent-cli-wrapper/transient"
 )
 
-// IsOutOfCredits reports whether err is a workspace-wide out-of-credits failure.
-// This is distinct from a transient error: a same-model retry can't refill the
-// workspace, so callers use it to trigger a fallback to a different provider's
-// model rather than to retry. It is text-based and provider-agnostic — both
-// claude.TurnError and codex.TurnError render the upstream message into
-// Error(), so matching the rendered string works across providers.
+// IsOutOfCredits reports whether err is a hard usage-exhaustion failure that a
+// same-model retry cannot clear — either a codex/cursor workspace running out
+// of credits or a Claude.ai plan hitting one of its limit windows. It is
+// distinct from a transient error: refilling the workspace or waiting for the
+// window to reset is not something a retry can do, so callers use it to trigger
+// a fallback to a different provider's model rather than to retry. It is
+// text-based and provider-agnostic — both claude.TurnError and codex.TurnError
+// render the upstream message into Error(), so matching the rendered string
+// works across providers.
+//
+// The Claude.ai plan limit surfaces across several concurrent windows (the
+// 5-hour session window, the weekly all-models window, and per-model weekly
+// scoped windows). The wording varies by which window tripped — "hit your
+// session limit", "hit your limit", "hit your usage limit" — but every variant
+// carries a "· resets … (UTC)" reset clause. We match the invariant shape ("hit
+// your … limit" co-occurring with a "resets" clause) rather than enumerating
+// each window, so a new window kind is covered without a code change. The reset
+// time is deliberately not parsed: per product decision we fall back to another
+// model immediately rather than waiting for the window to reset. The "resets"
+// requirement also excludes unrelated text such as "reached your limit of 5
+// organization memberships", which is not a usage-exhaustion failure.
 func IsOutOfCredits(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "out of credits") ||
-		strings.Contains(s, "workspace owner to refill")
+	if strings.Contains(s, "out of credits") ||
+		strings.Contains(s, "workspace owner to refill") {
+		return true
+	}
+	if strings.Contains(s, "hit your") && strings.Contains(s, "limit") &&
+		strings.Contains(s, "resets") {
+		return true
+	}
+	return false
 }
 
 // IsTransient reports whether err originates from a known retryable provider

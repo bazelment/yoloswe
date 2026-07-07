@@ -224,6 +224,65 @@ func TestPlanUsageReportEmpty(t *testing.T) {
 	require.Equal(t, "/usage is only available for subscription plans.", PlanUsage{}.Report())
 }
 
+func TestMaxActiveUtilizationPrefersLimitsArray(t *testing.T) {
+	t.Parallel()
+	// limits[] present: a 99% weekly bucket while the 5-hour window is idle at
+	// 5% must yield 99 — proving it is not five-hour-only.
+	active := true
+	usage := PlanUsage{
+		FiveHour: &UsageRateLimit{Utilization: float64Ptr(5)},
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(5), IsActive: &active},
+			{Kind: "weekly_all", Percent: float64Ptr(99), IsActive: &active},
+		},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 99.0, pct)
+}
+
+func TestMaxActiveUtilizationSkipsInactiveBuckets(t *testing.T) {
+	t.Parallel()
+	active, inactive := true, false
+	usage := PlanUsage{
+		Limits: []PlanLimit{
+			{Kind: "weekly_scoped", Percent: float64Ptr(100), IsActive: &inactive},
+			{Kind: "session", Percent: float64Ptr(40), IsActive: &active},
+		},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 40.0, pct)
+}
+
+func TestMaxActiveUtilizationUsesUtilizationWhenPercentAbsent(t *testing.T) {
+	t.Parallel()
+	usage := PlanUsage{
+		Limits: []PlanLimit{{Kind: "session", Utilization: float64Ptr(77)}},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 77.0, pct)
+}
+
+func TestMaxActiveUtilizationFallsBackToNamedFields(t *testing.T) {
+	t.Parallel()
+	// Legacy payload with no limits[]: use the named windows and return the max.
+	usage := PlanUsage{
+		FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+		SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(88)},
+	}
+	pct, ok := usage.MaxActiveUtilization()
+	require.True(t, ok)
+	require.Equal(t, 88.0, pct)
+}
+
+func TestMaxActiveUtilizationEmptyIsNotOK(t *testing.T) {
+	t.Parallel()
+	_, ok := PlanUsage{}.MaxActiveUtilization()
+	require.False(t, ok)
+}
+
 func TestUsageReturnsEmptyWithoutProfileScope(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)

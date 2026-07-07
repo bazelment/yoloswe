@@ -104,6 +104,40 @@ type UsageRateLimit struct {
 	ResetsAt    *string  `json:"resets_at"`
 }
 
+// PlanLimit is one entry of the generic limits[] array in /api/oauth/usage.
+// It is forward-compatible: new window kinds (session, weekly_all,
+// weekly_scoped, …) surface here without a schema change. Either percent or
+// utilization may carry the 0–100 utilization figure depending on payload
+// version; UtilizationPct prefers whichever is present.
+type PlanLimit struct {
+	Percent     *float64 `json:"percent"`
+	Utilization *float64 `json:"utilization"`
+	ResetsAt    *string  `json:"resets_at"`
+	IsActive    *bool    `json:"is_active"`
+	Kind        string   `json:"kind"`
+	Group       string   `json:"group"`
+	Severity    string   `json:"severity"`
+}
+
+// active reports whether the limit is an active window. is_active is treated as
+// true when the field is absent (older payloads omit it), so a bucket is only
+// excluded when the server explicitly marks it inactive.
+func (l PlanLimit) active() bool {
+	return l.IsActive == nil || *l.IsActive
+}
+
+// UtilizationPct returns the bucket's utilization (0–100) and whether a value
+// was present, preferring percent over utilization.
+func (l PlanLimit) UtilizationPct() (float64, bool) {
+	if l.Percent != nil {
+		return *l.Percent, true
+	}
+	if l.Utilization != nil {
+		return *l.Utilization, true
+	}
+	return 0, false
+}
+
 // ExtraUsage describes Claude.ai extra usage state.
 type ExtraUsage struct {
 	MonthlyLimit *float64 `json:"monthly_limit"`
@@ -120,6 +154,7 @@ type PlanUsage struct {
 	SevenDayOpus     *UsageRateLimit `json:"seven_day_opus,omitempty"`
 	SevenDaySonnet   *UsageRateLimit `json:"seven_day_sonnet,omitempty"`
 	ExtraUsage       *ExtraUsage     `json:"extra_usage,omitempty"`
+	Limits           []PlanLimit     `json:"limits,omitempty"`
 	SubscriptionType string          `json:"-"`
 	RateLimitTier    string          `json:"-"`
 	Raw              json.RawMessage `json:"-"`
@@ -141,6 +176,37 @@ func (u PlanUsage) HasData() bool {
 		u.SevenDayOpus != nil ||
 		u.SevenDaySonnet != nil ||
 		u.ExtraUsage != nil
+}
+
+// MaxActiveUtilization returns the highest utilization (0–100) across all
+// active plan-limit windows. It prefers the generic limits[] array — covering
+// the session, weekly-all, weekly-scoped, and any future window kind — so a
+// weekly or per-model exhaustion is caught even when the 5-hour window is idle.
+// When limits[] is absent (older payloads), it falls back to the named
+// FiveHour/SevenDay* fields. ok is false when no usable bucket is present, and
+// callers must fail open (not block) on !ok.
+func (u PlanUsage) MaxActiveUtilization() (pct float64, ok bool) {
+	for _, l := range u.Limits {
+		if !l.active() {
+			continue
+		}
+		if v, has := l.UtilizationPct(); has && (!ok || v > pct) {
+			pct, ok = v, true
+		}
+	}
+	if ok {
+		return pct, true
+	}
+	// Legacy payloads without limits[]: consider the named windows.
+	for _, l := range []*UsageRateLimit{u.FiveHour, u.SevenDay, u.SevenDayOpus, u.SevenDaySonnet, u.SevenDayOAuthApp} {
+		if l == nil || l.Utilization == nil {
+			continue
+		}
+		if v := *l.Utilization; !ok || v > pct {
+			pct, ok = v, true
+		}
+	}
+	return pct, ok
 }
 
 // ReportLines returns the meaningful rows displayed by Claude Code's /usage.

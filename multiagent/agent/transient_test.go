@@ -65,6 +65,38 @@ func TestIsOutOfCredits(t *testing.T) {
 			want: false,
 		},
 		{name: "plain error", err: errors.New("syntax error"), want: false},
+		// Claude.ai plan limit windows. Wording varies by which window tripped,
+		// but each carries a "· resets … (UTC)" clause. See INF-1807/1854/etc.
+		{
+			name: "claude session limit",
+			err:  errors.New("You've hit your session limit · resets 9:30am (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude session limit varying reset time",
+			err:  errors.New("You've hit your session limit · resets 4:10pm (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude general/weekly limit",
+			err:  errors.New("You've hit your limit · resets May 16, 5pm (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude usage limit defensive",
+			err:  errors.New("You've hit your usage limit · resets 1am (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude session limit wrapped in typed turn error",
+			err:  fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "You've hit your session limit · resets 9:30am (UTC)"}),
+			want: true,
+		},
+		{
+			name: "org membership limit is not out of credits",
+			err:  errors.New("reached your limit of 5 organization memberships"),
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -73,6 +105,23 @@ func TestIsOutOfCredits(t *testing.T) {
 				t.Fatalf("IsOutOfCredits() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestClaudePlanLimitIsNotTransient guards the routing invariant: a plan-limit
+// error must route to model fallback (IsOutOfCredits), never to a same-model
+// transient retry — a retry can neither refill credits nor reset the window.
+func TestClaudePlanLimitIsNotTransient(t *testing.T) {
+	planLimitErrs := []error{
+		errors.New("You've hit your session limit · resets 9:30am (UTC)"),
+		errors.New("You've hit your limit · resets May 16, 5pm (UTC)"),
+		errors.New("You've hit your usage limit · resets 1am (UTC)"),
+		fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "You've hit your session limit · resets 9:30am (UTC)"}),
+	}
+	for _, err := range planLimitErrs {
+		if IsTransient(err) {
+			t.Fatalf("IsTransient(%q) = true, want false (plan limit must not same-model retry)", err)
+		}
 	}
 }
 
