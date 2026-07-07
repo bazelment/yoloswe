@@ -92,6 +92,18 @@ func TestIsOutOfCredits(t *testing.T) {
 			err:  fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "You've hit your session limit · resets 9:30am (UTC)"}),
 			want: true,
 		},
+		// Phrasing-inverted form emitted by some CLI versions (claude-code#8926):
+		// "... limit reached · resets ..." carries no "hit your" prefix.
+		{
+			name: "claude session limit reached phrasing",
+			err:  errors.New("Session limit reached · resets 9pm (UTC)"),
+			want: true,
+		},
+		{
+			name: "claude usage limit reached phrasing wrapped",
+			err:  fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "Usage limit reached · resets 11:00pm (UTC)"}),
+			want: true,
+		},
 		{
 			name: "org membership limit is not out of credits",
 			err:  errors.New("reached your limit of 5 organization memberships"),
@@ -116,6 +128,7 @@ func TestClaudePlanLimitIsNotTransient(t *testing.T) {
 		errors.New("You've hit your session limit · resets 9:30am (UTC)"),
 		errors.New("You've hit your limit · resets May 16, 5pm (UTC)"),
 		errors.New("You've hit your usage limit · resets 1am (UTC)"),
+		errors.New("Session limit reached · resets 9pm (UTC)"),
 		fmt.Errorf("agent execution: %w", &claude.TurnError{Message: "You've hit your session limit · resets 9:30am (UTC)"}),
 	}
 	for _, err := range planLimitErrs {

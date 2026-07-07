@@ -21,15 +21,18 @@ import (
 //
 // The Claude.ai plan limit surfaces across several concurrent windows (the
 // 5-hour session window, the weekly all-models window, and per-model weekly
-// scoped windows). The wording varies by which window tripped — "hit your
-// session limit", "hit your limit", "hit your usage limit" — but every variant
-// carries a "· resets … (UTC)" reset clause. We match the invariant shape ("hit
-// your … limit" co-occurring with a "resets" clause) rather than enumerating
-// each window, so a new window kind is covered without a code change. The reset
-// time is deliberately not parsed: per product decision we fall back to another
-// model immediately rather than waiting for the window to reset. The "resets"
-// requirement also excludes unrelated text such as "reached your limit of 5
-// organization memberships", which is not a usage-exhaustion failure.
+// scoped windows) and the wording varies by which window tripped and by CLI
+// version — "You've hit your session limit · resets …", "You've hit your limit
+// · resets …", "You've hit your usage limit · resets …", and the phrasing-
+// inverted "Session limit reached · resets …" (claude-code#8926). The invariant
+// across every variant is a "limit" clause co-occurring with a "· resets …
+// (UTC)" reset clause, so we match that shape rather than enumerating each
+// window/phrasing — a new window kind or reworded message is covered without a
+// code change. The reset time is deliberately not parsed: per product decision
+// we fall back to another model immediately rather than waiting for the window
+// to reset. Requiring the "resets" clause excludes unrelated text such as
+// "reached your limit of 5 organization memberships", which has no reset clause
+// and is not a usage-exhaustion failure.
 func IsOutOfCredits(err error) bool {
 	if err == nil {
 		return false
@@ -39,8 +42,7 @@ func IsOutOfCredits(err error) bool {
 		strings.Contains(s, "workspace owner to refill") {
 		return true
 	}
-	if strings.Contains(s, "hit your") && strings.Contains(s, "limit") &&
-		strings.Contains(s, "resets") {
+	if strings.Contains(s, "limit") && strings.Contains(s, "resets") {
 		return true
 	}
 	return false

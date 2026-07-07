@@ -112,8 +112,27 @@ type UsageRateLimit struct {
 type PlanLimit struct {
 	Percent     *float64 `json:"percent"`
 	Utilization *float64 `json:"utilization"`
+	ResetsAt    *string  `json:"resets_at"`
 	IsActive    *bool    `json:"is_active"`
 	Kind        string   `json:"kind"`
+}
+
+// title returns a human-readable label for the bucket's window kind, used when
+// the payload carries only the generic limits[] array (no named FiveHour/
+// SevenDay* fields). Unknown kinds fall back to the raw kind string.
+func (l PlanLimit) title() string {
+	switch l.Kind {
+	case "session", "five_hour":
+		return "Current session"
+	case "weekly_all", "seven_day":
+		return "Current week (all models)"
+	case "weekly_scoped", "seven_day_scoped":
+		return "Current week (scoped)"
+	case "":
+		return "Plan limit"
+	default:
+		return l.Kind
+	}
 }
 
 // active reports whether the limit is an active window. is_active is treated as
@@ -166,13 +185,16 @@ type UsageReportLine struct {
 }
 
 // HasData reports whether the usage response includes any visible usage field.
+// The generic limits[] array counts: a forward-compatible payload that carries
+// only limits[] (no named FiveHour/SevenDay* fields) still has real data.
 func (u PlanUsage) HasData() bool {
 	return u.FiveHour != nil ||
 		u.SevenDay != nil ||
 		u.SevenDayOAuthApp != nil ||
 		u.SevenDayOpus != nil ||
 		u.SevenDaySonnet != nil ||
-		u.ExtraUsage != nil
+		u.ExtraUsage != nil ||
+		len(u.Limits) > 0
 }
 
 // MaxActiveUtilization returns the highest utilization (0–100) across all
@@ -242,6 +264,26 @@ func (u PlanUsage) ReportLines() []UsageReportLine {
 				formatUsageCostCents(*u.ExtraUsage.MonthlyLimit))
 		}
 		lines = append(lines, line)
+	}
+
+	// Forward-compat fallback: if the payload carried only the generic limits[]
+	// array (no named windows produced rows), surface those buckets so Report()
+	// isn't blank when the API drops the legacy FiveHour/SevenDay* fields.
+	if len(lines) == 0 {
+		for _, l := range u.Limits {
+			if !l.active() {
+				continue
+			}
+			var util *float64
+			if v, has := l.utilizationPct(); has {
+				util = &v
+			}
+			lines = append(lines, UsageReportLine{
+				Utilization: util,
+				ResetsAt:    l.ResetsAt,
+				Title:       l.title(),
+			})
+		}
 	}
 
 	return lines
