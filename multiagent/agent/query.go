@@ -49,7 +49,9 @@ func ClaudeSessionUtilization(ctx context.Context, model AgentModel, opts ...cla
 	if err != nil || usage == nil {
 		return 0, false
 	}
-	return usage.MaxActiveUtilization()
+	// Model-aware: a weekly-scoped cap on a different model (e.g. Fable at 100%)
+	// must not gate this model. Account-wide windows still count.
+	return usage.MaxActiveUtilizationForModel(model.ID, model.Label)
 }
 
 // Query sends a one-shot prompt using the provider determined by modelID

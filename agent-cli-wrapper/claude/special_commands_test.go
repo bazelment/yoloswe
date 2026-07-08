@@ -283,6 +283,168 @@ func TestMaxActiveUtilizationEmptyIsNotOK(t *testing.T) {
 	require.False(t, ok)
 }
 
+// scopedLimit builds an active weekly_scoped bucket for a given model display
+// name (id left empty, matching the real /api/oauth/usage payload).
+func scopedLimit(pct float64, displayName string) PlanLimit {
+	active := true
+	return PlanLimit{
+		Kind:     "weekly_scoped",
+		Percent:  float64Ptr(pct),
+		IsActive: &active,
+		Scope:    &PlanLimitScope{Model: &ScopedModel{DisplayName: displayName}},
+	}
+}
+
+func TestMaxActiveUtilizationForModel(t *testing.T) {
+	t.Parallel()
+	active, inactive := true, false
+
+	// An idle (inactive) session window plus a Fable-scoped weekly cap at 100%:
+	// the shape that must not gate a non-Fable model.
+	incident := PlanUsage{
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(20), IsActive: &inactive},
+			scopedLimit(100, "Fable"),
+		},
+	}
+
+	tests := []struct {
+		name     string
+		modelID  string
+		modelLbl string
+		usage    PlanUsage
+		wantPct  float64
+		wantOK   bool
+	}{
+		{
+			name:     "fable cap does not gate opus",
+			usage:    incident,
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantOK:   false, // session bucket is inactive; Fable cap excluded
+		},
+		{
+			name:     "fable cap gates fable (case-insensitive)",
+			usage:    incident,
+			modelID:  "fable",
+			modelLbl: "fable",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "unscoped weekly_all counts for any model",
+			usage: PlanUsage{Limits: []PlanLimit{
+				{Kind: "weekly_all", Percent: float64Ptr(90), IsActive: &active},
+				scopedLimit(100, "Fable"),
+			}},
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantPct:  90, // Fable's 100 excluded, weekly_all's 90 kept
+			wantOK:   true,
+		},
+		{
+			name: "scope matched by id when present",
+			usage: PlanUsage{Limits: []PlanLimit{func() PlanLimit {
+				l := scopedLimit(100, "Sonnet display")
+				l.Scope.Model.ID = "sonnet"
+				return l
+			}()}},
+			modelID:  "sonnet",
+			modelLbl: "sonnet",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "scope with no model identifier applies to all",
+			usage: PlanUsage{Limits: []PlanLimit{func() PlanLimit {
+				l := scopedLimit(100, "")
+				l.Scope.Model.DisplayName = ""
+				return l
+			}()}},
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "legacy account-wide window applies to every model",
+			usage: PlanUsage{
+				FiveHour: &UsageRateLimit{Utilization: float64Ptr(55)},
+			},
+			modelID:  "sonnet",
+			modelLbl: "sonnet",
+			wantPct:  55,
+			wantOK:   true,
+		},
+		{
+			name: "legacy opus-scoped window gates opus",
+			usage: PlanUsage{
+				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
+			},
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantPct:  70,
+			wantOK:   true,
+		},
+		{
+			name: "legacy opus-scoped window does NOT gate sonnet",
+			usage: PlanUsage{
+				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
+			},
+			modelID:  "sonnet",
+			modelLbl: "sonnet",
+			wantPct:  10, // opus's 70 excluded; only the account-wide 5h window counts
+			wantOK:   true,
+		},
+		{
+			name: "scoped cap gates a versioned Claude id by family",
+			usage: PlanUsage{Limits: []PlanLimit{
+				{Kind: "session", Percent: float64Ptr(20), IsActive: &inactive},
+				scopedLimit(100, "Opus"), // API reports the bare family display name
+			}},
+			modelID:  "claude-opus-4-8",
+			modelLbl: "claude-opus-4-8",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "legacy opus window gates a versioned Claude id by family",
+			usage: PlanUsage{
+				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
+			},
+			modelID:  "claude-opus-4-8",
+			modelLbl: "claude-opus-4-8",
+			wantPct:  70,
+			wantOK:   true,
+		},
+		{
+			name: "opus-family scope does NOT gate a versioned sonnet id",
+			usage: PlanUsage{Limits: []PlanLimit{
+				{Kind: "session", Percent: float64Ptr(15), IsActive: &active},
+				scopedLimit(100, "Opus"),
+			}},
+			modelID:  "claude-sonnet-4-6",
+			modelLbl: "claude-sonnet-4-6",
+			wantPct:  15, // opus cap excluded; only the active account-wide session counts
+			wantOK:   true,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pct, ok := tc.usage.MaxActiveUtilizationForModel(tc.modelID, tc.modelLbl)
+			require.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				require.Equal(t, tc.wantPct, pct)
+			}
+		})
+	}
+}
+
 func TestPlanUsageReportSurfacesLimitsOnlyPayload(t *testing.T) {
 	t.Parallel()
 	// Forward-compat payload: no named FiveHour/SevenDay* fields, only limits[].

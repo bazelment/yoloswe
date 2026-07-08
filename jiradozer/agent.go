@@ -441,12 +441,28 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		activeCfg := cfg
 		activeCfg.Model = modelID
 
+		// Effort is config-scoped, not per-model, so the inherited level rides
+		// onto a fallback model. A provider with no effort knob (Cursor, Gemini,
+		// Agy) hard-fails on any non-auto level, which would turn a rescue
+		// fallback into a terminal error — drop it for those providers. Only on
+		// failover (mi > 0): a directly-configured primary with an unsupported
+		// effort must still surface the unsupported-effort error, not be silently
+		// downgraded (matches the --thinking-level contract in run flags).
+		if mi > 0 && activeCfg.Effort != "" && activeCfg.Effort != string(agent.EffortAuto) {
+			if model, ok := agent.ResolveModel(modelID); ok && !agent.ProviderSupportsEffort(model.Provider) {
+				logger.Debug("dropping effort for provider without effort support",
+					"step", stepName, "model", modelID, "provider", model.Provider, "effort", activeCfg.Effort)
+				activeCfg.Effort = ""
+			}
+		}
+
 		// Pre-flight: if this is a Claude model whose plan is already at/over the
 		// limit, don't burn a 40–50 min run that dies at the last step — skip
 		// straight to the next fallback with a fresh session. Fails open: any
 		// error or non-Claude model leaves claudeNearLimit false. The last model
-		// is never skipped (nothing to fall back to).
-		if mi < len(models)-1 && r.claudeNearLimit(ctx, activeCfg, stepName, logger) {
+		// is never skipped (nothing to fall back to). Disabled entirely when the
+		// config opts out, leaving only the reactive out-of-credits fallback.
+		if !cfg.DisableLimitPreflight && mi < len(models)-1 && r.claudeNearLimit(ctx, activeCfg, stepName, logger) {
 			next := models[mi+1]
 			logger.Warn("claude plan near limit; skipping to fallback",
 				"step", stepName,

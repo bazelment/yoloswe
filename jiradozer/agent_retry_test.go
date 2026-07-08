@@ -21,6 +21,7 @@ type fakeRetryProvider struct {
 	results       []*agentpkg.AgentResult
 	errs          []error
 	resumeSession []string
+	effortSeen    []agentpkg.EffortLevel
 }
 
 func (p *fakeRetryProvider) Name() string { return "fake" }
@@ -31,6 +32,7 @@ func (p *fakeRetryProvider) Execute(ctx context.Context, prompt string, wtCtx *w
 		opt(&cfg)
 	}
 	p.resumeSession = append(p.resumeSession, cfg.ResumeSessionID)
+	p.effortSeen = append(p.effortSeen, cfg.Effort)
 
 	idx := len(p.resumeSession) - 1
 	var result *agentpkg.AgentResult
@@ -406,6 +408,144 @@ func TestRunAgent_PreflightSkip_ClaudeNearLimit_SkipsToFallback(t *testing.T) {
 	require.Equal(t, []string{"composer-2.5"}, *order, "claude primary skipped, only fallback provider built")
 	require.Empty(t, claudePrimary.resumeSession, "claude primary Execute must never be called")
 	require.Empty(t, cursorFallback.resumeSession[0], "fallback must start a fresh session")
+}
+
+// claudeAtLimit reports Claude models as fully utilized (100%) and every other
+// provider as unavailable, forcing the pre-flight to skip a Claude primary onto
+// its fallback.
+func claudeAtLimit(_ context.Context, m agentpkg.AgentModel) (float64, bool) {
+	if m.Provider == agentpkg.ProviderClaude {
+		return 100.0, true
+	}
+	return 0, false
+}
+
+// A Claude→Cursor fallback must NOT forward effort=high to the Cursor model
+// (no effort knob, hard-fails on any non-auto level) — it runs with effort
+// cleared.
+func TestRunAgent_Fallback_DropsEffortForCursorProvider(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "should skip"}},
+		errs:    []error{nil},
+	}
+	cursorFallback := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-cursor", Text: "done on cursor"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"opus":         claudePrimary,
+		"composer-2.5": cursorFallback,
+	})
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization:   claudeAtLimit,
+	}
+
+	got, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
+		Model:            "opus",
+		FallbackModels:   []string{"composer-2.5"},
+		Effort:           "high",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "done on cursor", got.Output)
+	require.Equal(t, []string{"composer-2.5"}, *order)
+	require.Len(t, cursorFallback.effortSeen, 1)
+	require.Empty(t, string(cursorFallback.effortSeen[0]),
+		"cursor fallback must run with effort cleared, not the inherited high")
+}
+
+// Negative control: a fallback provider that DOES support effort (codex) keeps
+// the configured effort, not indiscriminately dropped.
+func TestRunAgent_Fallback_KeepsEffortForCodexProvider(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "should skip"}},
+		errs:    []error{nil},
+	}
+	codexFallback := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-codex", Text: "done on codex"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"opus":    claudePrimary,
+		"gpt-5.5": codexFallback,
+	})
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization:   claudeAtLimit,
+	}
+
+	_, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
+		Model:            "opus",
+		FallbackModels:   []string{"gpt-5.5"},
+		Effort:           "high",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, []string{"gpt-5.5"}, *order)
+	require.Len(t, codexFallback.effortSeen, 1)
+	require.Equal(t, agentpkg.EffortHigh, codexFallback.effortSeen[0],
+		"codex fallback supports effort — high must be preserved")
+}
+
+// A directly-configured primary on a provider without an effort knob must still
+// receive its configured effort (so the provider surfaces the unsupported-effort
+// error) — the drop is failover-only, never a silent downgrade of the primary.
+func TestRunAgent_Primary_KeepsEffortForUnsupportedProvider(t *testing.T) {
+	cursorPrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-cursor", Text: "ran on cursor"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"composer-2.5": cursorPrimary,
+	})
+	runner := agentRunner{newProviderForModel: newProvider, retryBackoffs: []time.Duration{0}}
+
+	_, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
+		Model:            "composer-2.5",
+		Effort:           "high",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, []string{"composer-2.5"}, *order)
+	require.Len(t, cursorPrimary.effortSeen, 1)
+	require.Equal(t, agentpkg.EffortHigh, cursorPrimary.effortSeen[0],
+		"primary must keep configured effort so the provider can reject it, not be silently downgraded")
+}
+
+// With the pre-flight disabled, a Claude primary at 100% utilization is NOT
+// skipped — the run proceeds on the primary and utilization is never queried.
+func TestRunAgent_DisableLimitPreflight_SkipsPreflight(t *testing.T) {
+	claudePrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "ran on primary"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"opus":         claudePrimary,
+		"composer-2.5": {results: []*agentpkg.AgentResult{{Success: true, Text: "unused"}}, errs: []error{nil}},
+	})
+	utilCalls := 0
+	runner := agentRunner{
+		newProviderForModel: newProvider,
+		retryBackoffs:       []time.Duration{0},
+		claudeUtilization: func(_ context.Context, _ agentpkg.AgentModel) (float64, bool) {
+			utilCalls++
+			return 100.0, true
+		},
+	}
+
+	got, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
+		Model:                 "opus",
+		FallbackModels:        []string{"composer-2.5"},
+		TransientRetries:      2,
+		DisableLimitPreflight: true,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "ran on primary", got.Output)
+	require.Equal(t, []string{"opus"}, *order, "primary must run; pre-flight disabled")
+	require.Zero(t, utilCalls, "utilization must not be queried when pre-flight is disabled")
 }
 
 // TestRunAgent_PreflightSkip_LastModelNeverSkipped ensures the pre-flight never
