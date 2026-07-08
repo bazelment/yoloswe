@@ -139,9 +139,7 @@ type StepConfig struct {
 	// long-running work like bramble reviewers; 0 = provider default.
 	StreamTurnGracePeriod time.Duration `yaml:"stream_turn_grace_period"`
 	AutoApprove           bool          `yaml:"auto_approve"` // skip human review after this step
-	// DisableLimitPreflight is resolved from AgentConfig (not a per-step YAML
-	// key); it disables the proactive plan-limit pre-flight for this step's run.
-	DisableLimitPreflight bool `yaml:"-"`
+	DisableLimitPreflight bool          `yaml:"-"`            // resolved from AgentConfig; see there
 }
 
 // RoundConfig configures a single round within a multi-round step.
@@ -628,9 +626,8 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 	if step.LLMEndpoint == nil {
 		step.LLMEndpoint = c.Agent.LLMEndpoint
 	}
-	// Global plan-limit pre-flight switch — always taken from AgentConfig (no
-	// per-step YAML key), so a step never re-enables a pre-flight the operator
-	// disabled account-wide.
+	// Global switch — no per-step override, so a step can't re-enable a
+	// pre-flight the operator disabled account-wide.
 	step.DisableLimitPreflight = c.Agent.DisableLimitPreflight
 	return step
 }

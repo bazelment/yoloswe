@@ -119,22 +119,22 @@ type PlanLimit struct {
 }
 
 // PlanLimitScope narrows a plan-limit bucket to a specific model (a
-// weekly_scoped window). When Model is nil the bucket is account-wide and
-// applies to every model. The API sometimes leaves Model.ID empty and carries
-// only DisplayName (e.g. "Fable"), so matchesModel compares both.
+// weekly_scoped window). A nil Model means the bucket is account-wide.
 type PlanLimitScope struct {
-	Model *struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"display_name"`
-	} `json:"model"`
+	Model *ScopedModel `json:"model"`
+}
+
+// ScopedModel identifies the model a scoped plan-limit applies to. The API
+// sometimes leaves ID empty and carries only DisplayName (e.g. "Fable").
+type ScopedModel struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
 }
 
 // appliesToModel reports whether this limit bucket counts toward the given
-// model. Unscoped buckets (no scope, or a scope with no model) always apply. A
-// model-scoped bucket applies only when its scope matches modelID or modelLabel
-// (case-insensitive, on either the scope model id or display name). A scoped
-// bucket carrying no usable model identifier at all is treated as applying, to
-// preserve the conservative pre-scope behavior.
+// model. A scoped bucket applies only when its model matches modelID or
+// modelLabel (case-insensitive on either id or display name). An unscoped
+// bucket — or a scoped one with no usable identifier — applies to every model.
 func (l PlanLimit) appliesToModel(modelID, modelLabel string) bool {
 	if l.Scope == nil || l.Scope.Model == nil {
 		return true
@@ -245,27 +245,19 @@ func (u PlanUsage) HasData() bool {
 // FiveHour/SevenDay* fields. ok is false when no usable bucket is present, and
 // callers must fail open (not block) on !ok.
 //
-// This deliberately collapses all windows into one scalar and does NOT filter
-// by the target model, so a model-scoped window (e.g. a Fable-only weekly cap)
-// contributes to the max even for a different model. Callers that gate a
-// specific model on utilization (e.g. the plan-limit pre-flight) must use
-// MaxActiveUtilizationForModel instead, or a scoped cap on one model will
-// wrongly block another. This model-blind view is retained for account-wide
-// reporting where a single "how full is the plan" number is what's wanted.
+// This model-blind view does NOT filter by model, so a model-scoped window
+// contributes to the max even for a different model. Callers gating a specific
+// model on utilization must use MaxActiveUtilizationForModel; this variant is
+// for account-wide "how full is the plan" reporting.
 func (u PlanUsage) MaxActiveUtilization() (pct float64, ok bool) {
 	return u.maxActiveUtilization(func(PlanLimit) bool { return true })
 }
 
 // MaxActiveUtilizationForModel is the model-aware variant of
-// MaxActiveUtilization: it counts an active bucket only when the bucket applies
-// to the given model. Account-wide buckets (session, weekly-all, or a scoped
-// bucket with no usable model identifier) always apply; a model-scoped bucket
-// applies only when its scope matches modelID or modelLabel (case-insensitive).
-//
-// This is what the pre-flight skip must use — otherwise a weekly-scoped cap on
-// one model (e.g. Fable at 100%) trips the skip for a different Claude model
-// (e.g. Opus) that still has plenty of headroom. The named-field fallback path
-// (legacy payloads without limits[]) is unscoped and applies to every model.
+// MaxActiveUtilization: an active bucket counts only when it applies to the
+// given model (see appliesToModel). The pre-flight skip must use this —
+// otherwise a weekly-scoped cap on one model (e.g. Fable at 100%) trips the
+// skip for a different model (e.g. Opus) that still has headroom.
 func (u PlanUsage) MaxActiveUtilizationForModel(modelID, modelLabel string) (pct float64, ok bool) {
 	return u.maxActiveUtilization(func(l PlanLimit) bool {
 		return l.appliesToModel(modelID, modelLabel)

@@ -287,21 +287,20 @@ func TestMaxActiveUtilizationEmptyIsNotOK(t *testing.T) {
 // name (id left empty, matching the real /api/oauth/usage payload).
 func scopedLimit(pct float64, displayName string) PlanLimit {
 	active := true
-	l := PlanLimit{Kind: "weekly_scoped", Percent: float64Ptr(pct), IsActive: &active}
-	l.Scope = &PlanLimitScope{}
-	l.Scope.Model = &struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"display_name"`
-	}{DisplayName: displayName}
-	return l
+	return PlanLimit{
+		Kind:     "weekly_scoped",
+		Percent:  float64Ptr(pct),
+		IsActive: &active,
+		Scope:    &PlanLimitScope{Model: &ScopedModel{DisplayName: displayName}},
+	}
 }
 
 func TestMaxActiveUtilizationForModel(t *testing.T) {
 	t.Parallel()
 	active, inactive := true, false
 
-	// The exact failing payload from the 2026-07-08 incident: an idle session
-	// window (inactive) plus a Fable-scoped weekly cap at 100%.
+	// An idle (inactive) session window plus a Fable-scoped weekly cap at 100%:
+	// the shape that must not gate a non-Fable model.
 	incident := PlanUsage{
 		Limits: []PlanLimit{
 			{Kind: "session", Percent: float64Ptr(20), IsActive: &inactive},

@@ -441,13 +441,10 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		activeCfg := cfg
 		activeCfg.Model = modelID
 
-		// Reasoning effort is config-scoped, not per-model: the inherited
-		// effort (e.g. "high") is chosen for the primary Claude model but rides
-		// along to whatever model this iteration runs. A provider with no effort
-		// knob (Cursor, Gemini, Agy) hard-fails on any non-auto level, which
-		// would turn a rescue fallback into a terminal error. Drop effort for
-		// those providers so the model uses its own default. EffortAuto is a
-		// valid pass-through for every provider, so leave it alone.
+		// Effort is config-scoped, not per-model, so the inherited level rides
+		// onto the fallback model. A provider with no effort knob (Cursor,
+		// Gemini, Agy) hard-fails on any non-auto level, which would turn a
+		// rescue fallback into a terminal error — drop it for those providers.
 		if activeCfg.Effort != "" && activeCfg.Effort != string(agent.EffortAuto) {
 			if model, ok := agent.ResolveModel(modelID); ok && !agent.ProviderSupportsEffort(model.Provider) {
 				logger.Debug("dropping effort for provider without effort support",

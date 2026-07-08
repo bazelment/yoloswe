@@ -410,10 +410,18 @@ func TestRunAgent_PreflightSkip_ClaudeNearLimit_SkipsToFallback(t *testing.T) {
 	require.Empty(t, cursorFallback.resumeSession[0], "fallback must start a fresh session")
 }
 
-// TestRunAgent_Fallback_DropsEffortForCursorProvider pins the effort-carryover
-// fix: a Claude→Cursor fallback must NOT forward the Claude-oriented effort=high
-// to the Cursor model (which has no effort knob and hard-fails on any non-auto
-// level). The primary keeps its effort; the Cursor fallback runs with effort
+// claudeAtLimit reports Claude models as fully utilized (100%) and every other
+// provider as unavailable, forcing the pre-flight to skip a Claude primary onto
+// its fallback.
+func claudeAtLimit(_ context.Context, m agentpkg.AgentModel) (float64, bool) {
+	if m.Provider == agentpkg.ProviderClaude {
+		return 100.0, true
+	}
+	return 0, false
+}
+
+// A Claude→Cursor fallback must NOT forward effort=high to the Cursor model
+// (no effort knob, hard-fails on any non-auto level) — it runs with effort
 // cleared.
 func TestRunAgent_Fallback_DropsEffortForCursorProvider(t *testing.T) {
 	claudePrimary := &fakeRetryProvider{
@@ -431,13 +439,7 @@ func TestRunAgent_Fallback_DropsEffortForCursorProvider(t *testing.T) {
 	runner := agentRunner{
 		newProviderForModel: newProvider,
 		retryBackoffs:       []time.Duration{0},
-		// Force the pre-flight to skip the Claude primary so the Cursor fallback runs.
-		claudeUtilization: func(_ context.Context, m agentpkg.AgentModel) (float64, bool) {
-			if m.Provider == agentpkg.ProviderClaude {
-				return 100.0, true
-			}
-			return 0, false
-		},
+		claudeUtilization:   claudeAtLimit,
 	}
 
 	got, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
@@ -454,9 +456,8 @@ func TestRunAgent_Fallback_DropsEffortForCursorProvider(t *testing.T) {
 		"cursor fallback must run with effort cleared, not the inherited high")
 }
 
-// TestRunAgent_Fallback_KeepsEffortForCodexProvider is the negative control:
-// when the fallback provider DOES support effort (codex), the configured effort
-// must be preserved, not indiscriminately dropped.
+// Negative control: a fallback provider that DOES support effort (codex) keeps
+// the configured effort, not indiscriminately dropped.
 func TestRunAgent_Fallback_KeepsEffortForCodexProvider(t *testing.T) {
 	claudePrimary := &fakeRetryProvider{
 		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "should skip"}},
@@ -473,12 +474,7 @@ func TestRunAgent_Fallback_KeepsEffortForCodexProvider(t *testing.T) {
 	runner := agentRunner{
 		newProviderForModel: newProvider,
 		retryBackoffs:       []time.Duration{0},
-		claudeUtilization: func(_ context.Context, m agentpkg.AgentModel) (float64, bool) {
-			if m.Provider == agentpkg.ProviderClaude {
-				return 100.0, true
-			}
-			return 0, false
-		},
+		claudeUtilization:   claudeAtLimit,
 	}
 
 	_, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
@@ -494,9 +490,8 @@ func TestRunAgent_Fallback_KeepsEffortForCodexProvider(t *testing.T) {
 		"codex fallback supports effort — high must be preserved")
 }
 
-// TestRunAgent_DisableLimitPreflight_SkipsPreflight pins Fix 3: with the pre-flight
-// disabled, a Claude primary at 100% utilization is NOT skipped — the run proceeds
-// on the primary and utilization is never even queried.
+// With the pre-flight disabled, a Claude primary at 100% utilization is NOT
+// skipped — the run proceeds on the primary and utilization is never queried.
 func TestRunAgent_DisableLimitPreflight_SkipsPreflight(t *testing.T) {
 	claudePrimary := &fakeRetryProvider{
 		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-claude", Text: "ran on primary"}},
