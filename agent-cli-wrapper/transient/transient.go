@@ -51,7 +51,14 @@ func ClassifyText(msg string) (string, bool) {
 		strings.Contains(s, "rate limit"),
 		strings.Contains(s, "rate limited"):
 		return ReasonHTTP429, true
-	case httpStatusPattern.MatchString(s):
+	case httpStatusPattern.MatchString(s),
+		// "API Error: Server error mid-response. The response above may be
+		// incomplete." — seen in jiradozer cron failures (build step,
+		// 2026-07-07). A worded 5xx carries no status digit, so
+		// httpStatusPattern misses it; "server error" is an inherently
+		// server-side, retryable signal. Matched standalone (not only with
+		// "mid-response") to cover the whole worded-5xx family.
+		strings.Contains(s, "server error"):
 		return ReasonHTTP5xx, true
 	case strings.Contains(s, "connection reset"),
 		strings.Contains(s, "broken pipe"),

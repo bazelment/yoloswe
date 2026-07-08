@@ -56,6 +56,15 @@ func TestClassifyText(t *testing.T) {
 			wantOK:     true,
 		},
 		{
+			// Verbatim from jiradozer cron failure (build step, 2026-07-07).
+			// A worded 5xx with no status digit — httpStatusPattern misses it,
+			// so it must be caught by the "server error" text case.
+			name:       "server error mid-response",
+			msg:        "API Error: Server error mid-response. The response above may be incomplete.",
+			wantReason: ReasonHTTP5xx,
+			wantOK:     true,
+		},
+		{
 			// Grace-period force-complete must classify distinctly (#270) while
 			// staying retryable.
 			name:       "turn forced complete after grace period",
@@ -101,6 +110,25 @@ func TestClassifyText(t *testing.T) {
 		{
 			name:   "embedded status-like digits",
 			msg:    "processed 1500 records on port :5004",
+			wantOK: false,
+		},
+		{
+			// Accepted-breadth guard: the "server error" match is standalone
+			// (2026-07-07), so any message carrying that phrase is retried as a
+			// 5xx — a deliberate, tested choice. No wrapper currently emits a
+			// non-retryable "server error" string; if one ever does, tighten
+			// the classifier to require "mid-response" too.
+			name:       "worded server error without status digit",
+			msg:        "upstream returned an internal server error",
+			wantReason: ReasonHTTP5xx,
+			wantOK:     true,
+		},
+		{
+			// Near-miss: no "server error" phrase and no status digit — must
+			// stay non-transient so the standalone match doesn't over-broaden
+			// to any message merely mentioning a "server".
+			name:   "server mentioned but not an error",
+			msg:    "connecting to build server at host:port",
 			wantOK: false,
 		},
 	}

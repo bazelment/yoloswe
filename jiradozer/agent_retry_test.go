@@ -520,6 +520,34 @@ func TestRunAgent_ConnectionClosed_NowRetried(t *testing.T) {
 	require.Len(t, provider.resumeSession, 2, "connection-closed error must be retried")
 }
 
+// TestRunAgent_ServerError_NowRetried pins the 2026-07-07 build-step failure: a
+// "Server error mid-response" error (a worded 5xx with no status digit) is now
+// transient and retried rather than terminal.
+func TestRunAgent_ServerError_NowRetried(t *testing.T) {
+	// Verbatim provider error string — must stay capitalized to exercise the
+	// case-insensitive classifier match.
+	serverErr := errors.New("API Error: Server error mid-response. The response above may be incomplete.") //nolint:revive // verbatim provider error
+	provider := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{
+			{SessionID: "sess-1"},
+			{Success: true, SessionID: "sess-1", Text: "recovered"},
+		},
+		errs: []error{serverErr, nil},
+	}
+	runner := agentRunner{
+		newProviderForModel: func(agentpkg.AgentModel) (agentpkg.Provider, error) { return provider, nil },
+		retryBackoffs:       []time.Duration{0},
+	}
+
+	got, err := runner.runAgent(context.Background(), "build", "prompt", StepConfig{
+		Model:            "gpt-5.5",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, "recovered", got.Output)
+	require.Len(t, provider.resumeSession, 2, "server-error mid-response must be retried")
+}
+
 // TestRunAgent_DefaultMaxRetriesIsFour pins #272/#273: with no TransientRetries
 // override, the default budget is 4 — a run that fails transiently 3 times then
 // succeeds must NOT exhaust the budget.
