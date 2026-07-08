@@ -398,6 +398,39 @@ func TestMaxActiveUtilizationForModel(t *testing.T) {
 			wantPct:  10, // opus's 70 excluded; only the account-wide 5h window counts
 			wantOK:   true,
 		},
+		{
+			name: "scoped cap gates a versioned Claude id by family",
+			usage: PlanUsage{Limits: []PlanLimit{
+				{Kind: "session", Percent: float64Ptr(20), IsActive: &inactive},
+				scopedLimit(100, "Opus"), // API reports the bare family display name
+			}},
+			modelID:  "claude-opus-4-8",
+			modelLbl: "claude-opus-4-8",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "legacy opus window gates a versioned Claude id by family",
+			usage: PlanUsage{
+				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
+			},
+			modelID:  "claude-opus-4-8",
+			modelLbl: "claude-opus-4-8",
+			wantPct:  70,
+			wantOK:   true,
+		},
+		{
+			name: "opus-family scope does NOT gate a versioned sonnet id",
+			usage: PlanUsage{Limits: []PlanLimit{
+				{Kind: "session", Percent: float64Ptr(15), IsActive: &active},
+				scopedLimit(100, "Opus"),
+			}},
+			modelID:  "claude-sonnet-4-6",
+			modelLbl: "claude-sonnet-4-6",
+			wantPct:  15, // opus cap excluded; only the active account-wide session counts
+			wantOK:   true,
+		},
 	}
 	for _, tc := range tests {
 		tc := tc

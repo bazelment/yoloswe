@@ -147,14 +147,36 @@ func (l PlanLimit) appliesToModel(modelID, modelLabel string) bool {
 		scopeIDMatches(m.DisplayName, modelID, modelLabel)
 }
 
-// scopeIDMatches reports whether a scope identifier (id or display name) equals
-// either the target model id or label, case-insensitively. Empty scope
-// identifiers never match.
+// scopeIDMatches reports whether a scope identifier (id or display name) refers
+// to the same model as modelID/modelLabel. It matches case-insensitively on the
+// raw strings and, for Claude, on the model *family* — so a scope reported as
+// the bare family ("Opus") matches a versioned config ("claude-opus-4-8") and
+// vice versa. Empty scope identifiers never match.
 func scopeIDMatches(scopeID, modelID, modelLabel string) bool {
 	if scopeID == "" {
 		return false
 	}
-	return strings.EqualFold(scopeID, modelID) || strings.EqualFold(scopeID, modelLabel)
+	if strings.EqualFold(scopeID, modelID) || strings.EqualFold(scopeID, modelLabel) {
+		return true
+	}
+	fam := claudeModelFamily(scopeID)
+	return fam != "" &&
+		(fam == claudeModelFamily(modelID) || fam == claudeModelFamily(modelLabel))
+}
+
+// claudeModelFamily maps a Claude model id, label, or plan-scope display name to
+// its lowercase family ("opus", "sonnet", "haiku", "fable"). It handles bare
+// aliases ("opus"), versioned ids ("claude-opus-4-8"), and API display names
+// ("Opus") by substring match on the family token. Non-Claude or unrecognized
+// ids return "" (no family), so they only ever match on the exact-string path.
+func claudeModelFamily(id string) string {
+	s := strings.ToLower(id)
+	for _, fam := range []string{"opus", "sonnet", "haiku", "fable"} {
+		if strings.Contains(s, fam) {
+			return fam
+		}
+	}
+	return ""
 }
 
 // title returns a human-readable label for the bucket's window kind, used when
