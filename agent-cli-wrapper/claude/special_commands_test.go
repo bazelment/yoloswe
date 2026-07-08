@@ -283,6 +283,115 @@ func TestMaxActiveUtilizationEmptyIsNotOK(t *testing.T) {
 	require.False(t, ok)
 }
 
+// scopedLimit builds an active weekly_scoped bucket for a given model display
+// name (id left empty, matching the real /api/oauth/usage payload).
+func scopedLimit(pct float64, displayName string) PlanLimit {
+	active := true
+	l := PlanLimit{Kind: "weekly_scoped", Percent: float64Ptr(pct), IsActive: &active}
+	l.Scope = &PlanLimitScope{}
+	l.Scope.Model = &struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+	}{DisplayName: displayName}
+	return l
+}
+
+func TestMaxActiveUtilizationForModel(t *testing.T) {
+	t.Parallel()
+	active, inactive := true, false
+
+	// The exact failing payload from the 2026-07-08 incident: an idle session
+	// window (inactive) plus a Fable-scoped weekly cap at 100%.
+	incident := PlanUsage{
+		Limits: []PlanLimit{
+			{Kind: "session", Percent: float64Ptr(20), IsActive: &inactive},
+			scopedLimit(100, "Fable"),
+		},
+	}
+
+	tests := []struct {
+		name     string
+		modelID  string
+		modelLbl string
+		usage    PlanUsage
+		wantPct  float64
+		wantOK   bool
+	}{
+		{
+			name:     "fable cap does not gate opus",
+			usage:    incident,
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantOK:   false, // session bucket is inactive; Fable cap excluded
+		},
+		{
+			name:     "fable cap gates fable (case-insensitive)",
+			usage:    incident,
+			modelID:  "fable",
+			modelLbl: "fable",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "unscoped weekly_all counts for any model",
+			usage: PlanUsage{Limits: []PlanLimit{
+				{Kind: "weekly_all", Percent: float64Ptr(90), IsActive: &active},
+				scopedLimit(100, "Fable"),
+			}},
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantPct:  90, // Fable's 100 excluded, weekly_all's 90 kept
+			wantOK:   true,
+		},
+		{
+			name: "scope matched by id when present",
+			usage: PlanUsage{Limits: []PlanLimit{func() PlanLimit {
+				l := scopedLimit(100, "Sonnet display")
+				l.Scope.Model.ID = "sonnet"
+				return l
+			}()}},
+			modelID:  "sonnet",
+			modelLbl: "sonnet",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "scope with no model identifier applies to all",
+			usage: PlanUsage{Limits: []PlanLimit{func() PlanLimit {
+				l := scopedLimit(100, "")
+				l.Scope.Model.DisplayName = ""
+				return l
+			}()}},
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantPct:  100,
+			wantOK:   true,
+		},
+		{
+			name: "legacy named windows apply to every model",
+			usage: PlanUsage{
+				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
+			},
+			modelID:  "sonnet",
+			modelLbl: "sonnet",
+			wantPct:  70,
+			wantOK:   true,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pct, ok := tc.usage.MaxActiveUtilizationForModel(tc.modelID, tc.modelLbl)
+			require.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				require.Equal(t, tc.wantPct, pct)
+			}
+		})
+	}
+}
+
 func TestPlanUsageReportSurfacesLimitsOnlyPayload(t *testing.T) {
 	t.Parallel()
 	// Forward-compat payload: no named FiveHour/SevenDay* fields, only limits[].

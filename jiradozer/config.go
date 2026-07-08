@@ -76,6 +76,10 @@ type AgentConfig struct {
 	FallbackModels []string           `yaml:"fallback_models"`
 	Effort         string             `yaml:"effort"`       // reasoning effort; see agent.EffortLevel constants (low, medium, high, max, auto)
 	LLMEndpoint    *LLMEndpointConfig `yaml:"llm_endpoint"` // optional third-party LLM API endpoint
+	// DisableLimitPreflight turns off the proactive /api/oauth/usage plan-limit
+	// pre-flight. When true, jiradozer only falls back reactively after a real
+	// out-of-credits error, never pre-emptively on utilization. Default false.
+	DisableLimitPreflight bool `yaml:"disable_limit_preflight"`
 }
 
 // LLMEndpointConfig points the underlying CLI at a third-party LLM endpoint
@@ -135,6 +139,9 @@ type StepConfig struct {
 	// long-running work like bramble reviewers; 0 = provider default.
 	StreamTurnGracePeriod time.Duration `yaml:"stream_turn_grace_period"`
 	AutoApprove           bool          `yaml:"auto_approve"` // skip human review after this step
+	// DisableLimitPreflight is resolved from AgentConfig (not a per-step YAML
+	// key); it disables the proactive plan-limit pre-flight for this step's run.
+	DisableLimitPreflight bool `yaml:"-"`
 }
 
 // RoundConfig configures a single round within a multi-round step.
@@ -621,6 +628,10 @@ func (c *Config) ResolveStep(step StepConfig) StepConfig {
 	if step.LLMEndpoint == nil {
 		step.LLMEndpoint = c.Agent.LLMEndpoint
 	}
+	// Global plan-limit pre-flight switch — always taken from AgentConfig (no
+	// per-step YAML key), so a step never re-enables a pre-flight the operator
+	// disabled account-wide.
+	step.DisableLimitPreflight = c.Agent.DisableLimitPreflight
 	return step
 }
 
@@ -655,6 +666,7 @@ func ResolveRound(round RoundConfig, parent StepConfig) StepConfig {
 		TransientRetries:      parent.TransientRetries,
 		StreamTurnGracePeriod: parent.StreamTurnGracePeriod,
 		LLMEndpoint:           parent.LLMEndpoint,
+		DisableLimitPreflight: parent.DisableLimitPreflight,
 	}
 	if round.Model != "" {
 		resolved.Model = round.Model

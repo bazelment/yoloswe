@@ -219,3 +219,25 @@ func TestErrEffortUnsupported_NotConfusedWithErrInvalidEffort(t *testing.T) {
 	assert.False(t, errors.Is(invalid, ErrEffortUnsupported),
 		"invalid error must not look like an unsupported error")
 }
+
+func TestProviderSupportsEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		provider string
+		want     bool
+	}{
+		{ProviderClaude, true},
+		{ProviderCodex, true},
+		{ProviderCursor, false},
+		{ProviderGemini, false},
+		{ProviderAgy, false},
+		{"unknown-provider", false},
+	} {
+		tc := tc
+		t.Run(tc.provider, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, ProviderSupportsEffort(tc.provider))
+		})
+	}
+}

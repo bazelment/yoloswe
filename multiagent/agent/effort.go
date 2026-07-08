@@ -41,6 +41,22 @@ func ParseEffort(s string) (EffortLevel, error) {
 	return "", fmt.Errorf("%w: %q (valid: low, medium, high, max, auto)", ErrInvalidEffort, s)
 }
 
+// ProviderSupportsEffort reports whether a provider honors an explicit non-auto
+// reasoning-effort level. Claude and Codex do; Cursor, Gemini, and Agy have no
+// effort knob and return ErrEffortUnsupported for any non-auto level (see the
+// respective *_provider.go Execute guards). This is the single source of truth
+// callers should consult before handing a model an effort level — e.g. a model
+// fallback must drop effort when routing from a Claude model to a Cursor model.
+// Unknown providers are assumed not to support effort (safe: caller drops it).
+func ProviderSupportsEffort(provider string) bool {
+	switch provider {
+	case ProviderClaude, ProviderCodex:
+		return true
+	default:
+		return false
+	}
+}
+
 // EffortUnsupportedError builds the canonical ErrEffortUnsupported wrap with
 // the provider name and the level that was rejected. Providers should call
 // this when cfg.Effort is an explicit non-auto level and they have no way to

@@ -83,7 +83,14 @@ agent:
     # Empty = no fallback. Per-step `fallback_models:` overrides this.
     #fallback_models: [opus]
     # Reasoning effort: low, medium, high, max, auto. Empty = provider default.
+    # Note: when a fallback model's provider has no effort knob (cursor, gemini,
+    # agy), the effort is dropped automatically for that model's run.
     #effort: ""
+    # Proactively read Claude plan usage (/api/oauth/usage) before each Claude
+    # run and skip to the next fallback when this model's utilization is at the
+    # limit. Set true to disable — then jiradozer only falls back reactively
+    # after a real out-of-credits error. Default false.
+    #disable_limit_preflight: false
     # Optional: route inference through a third-party LLM API endpoint
     # (Baseten, OpenRouter, LiteLLM, etc.). The claude backend requires an
     # Anthropic-shaped endpoint; codex/gemini accept OpenAI-compatible.
