@@ -442,10 +442,13 @@ func (r agentRunner) runAgent(ctx context.Context, stepName, prompt string, cfg 
 		activeCfg.Model = modelID
 
 		// Effort is config-scoped, not per-model, so the inherited level rides
-		// onto the fallback model. A provider with no effort knob (Cursor,
-		// Gemini, Agy) hard-fails on any non-auto level, which would turn a
-		// rescue fallback into a terminal error — drop it for those providers.
-		if activeCfg.Effort != "" && activeCfg.Effort != string(agent.EffortAuto) {
+		// onto a fallback model. A provider with no effort knob (Cursor, Gemini,
+		// Agy) hard-fails on any non-auto level, which would turn a rescue
+		// fallback into a terminal error — drop it for those providers. Only on
+		// failover (mi > 0): a directly-configured primary with an unsupported
+		// effort must still surface the unsupported-effort error, not be silently
+		// downgraded (matches the --thinking-level contract in run flags).
+		if mi > 0 && activeCfg.Effort != "" && activeCfg.Effort != string(agent.EffortAuto) {
 			if model, ok := agent.ResolveModel(modelID); ok && !agent.ProviderSupportsEffort(model.Provider) {
 				logger.Debug("dropping effort for provider without effort support",
 					"step", stepName, "model", modelID, "provider", model.Provider, "effort", activeCfg.Effort)

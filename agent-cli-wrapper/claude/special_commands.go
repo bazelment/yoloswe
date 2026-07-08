@@ -250,24 +250,36 @@ func (u PlanUsage) HasData() bool {
 // model on utilization must use MaxActiveUtilizationForModel; this variant is
 // for account-wide "how full is the plan" reporting.
 func (u PlanUsage) MaxActiveUtilization() (pct float64, ok bool) {
-	return u.maxActiveUtilization(func(PlanLimit) bool { return true })
+	return u.maxActiveUtilization(
+		func(PlanLimit) bool { return true },
+		func(string) bool { return true },
+	)
 }
 
 // MaxActiveUtilizationForModel is the model-aware variant of
 // MaxActiveUtilization: an active bucket counts only when it applies to the
-// given model (see appliesToModel). The pre-flight skip must use this —
-// otherwise a weekly-scoped cap on one model (e.g. Fable at 100%) trips the
-// skip for a different model (e.g. Opus) that still has headroom.
+// given model. The pre-flight skip must use this — otherwise a scoped cap on
+// one model (e.g. Fable at 100%) trips the skip for a different model (e.g.
+// Opus) that still has headroom. Model-awareness covers both schemas: the
+// generic limits[] buckets (via appliesToModel) and the legacy named windows
+// (SevenDayOpus / SevenDaySonnet are model-scoped, so they gate only their
+// own model).
 func (u PlanUsage) MaxActiveUtilizationForModel(modelID, modelLabel string) (pct float64, ok bool) {
-	return u.maxActiveUtilization(func(l PlanLimit) bool {
-		return l.appliesToModel(modelID, modelLabel)
-	})
+	namedApplies := func(scopeModel string) bool {
+		// An empty scopeModel is an account-wide window; it applies to every model.
+		return scopeModel == "" || scopeIDMatches(scopeModel, modelID, modelLabel)
+	}
+	return u.maxActiveUtilization(
+		func(l PlanLimit) bool { return l.appliesToModel(modelID, modelLabel) },
+		namedApplies,
+	)
 }
 
-// maxActiveUtilization returns the highest utilization across active limits[]
-// buckets accepted by applies, falling back to the (unscoped) named windows
-// when limits[] carries nothing usable.
-func (u PlanUsage) maxActiveUtilization(applies func(PlanLimit) bool) (pct float64, ok bool) {
+// maxActiveUtilization returns the highest utilization across active buckets.
+// applies gates the generic limits[] entries; namedApplies gates the legacy
+// named windows by their implied model (empty means account-wide, always counted).
+// The named windows are only consulted when limits[] carries nothing usable.
+func (u PlanUsage) maxActiveUtilization(applies func(PlanLimit) bool, namedApplies func(scopeModel string) bool) (pct float64, ok bool) {
 	for _, l := range u.Limits {
 		if !l.active() || !applies(l) {
 			continue
@@ -279,13 +291,24 @@ func (u PlanUsage) maxActiveUtilization(applies func(PlanLimit) bool) (pct float
 	if ok {
 		return pct, true
 	}
-	// Legacy payloads without limits[]: consider the named windows. These are
-	// account-wide (unscoped), so they apply to every model.
-	for _, l := range []*UsageRateLimit{u.FiveHour, u.SevenDay, u.SevenDayOpus, u.SevenDaySonnet, u.SevenDayOAuthApp} {
-		if l == nil || l.Utilization == nil {
+	// Legacy payloads without limits[]: consider the named windows. FiveHour,
+	// SevenDay, and SevenDayOAuthApp are account-wide; SevenDayOpus and
+	// SevenDaySonnet are model-scoped and must gate only their own model.
+	named := []struct {
+		limit *UsageRateLimit
+		model string // empty means account-wide (applies to every model)
+	}{
+		{u.FiveHour, ""},
+		{u.SevenDay, ""},
+		{u.SevenDayOAuthApp, ""},
+		{u.SevenDayOpus, "opus"},
+		{u.SevenDaySonnet, "sonnet"},
+	}
+	for _, n := range named {
+		if n.limit == nil || n.limit.Utilization == nil || !namedApplies(n.model) {
 			continue
 		}
-		if v := *l.Utilization; !ok || v > pct {
+		if v := *n.limit.Utilization; !ok || v > pct {
 			pct, ok = v, true
 		}
 	}

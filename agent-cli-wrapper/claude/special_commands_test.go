@@ -367,14 +367,35 @@ func TestMaxActiveUtilizationForModel(t *testing.T) {
 			wantOK:   true,
 		},
 		{
-			name: "legacy named windows apply to every model",
+			name: "legacy account-wide window applies to every model",
+			usage: PlanUsage{
+				FiveHour: &UsageRateLimit{Utilization: float64Ptr(55)},
+			},
+			modelID:  "sonnet",
+			modelLbl: "sonnet",
+			wantPct:  55,
+			wantOK:   true,
+		},
+		{
+			name: "legacy opus-scoped window gates opus",
+			usage: PlanUsage{
+				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
+				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
+			},
+			modelID:  "opus",
+			modelLbl: "opus",
+			wantPct:  70,
+			wantOK:   true,
+		},
+		{
+			name: "legacy opus-scoped window does NOT gate sonnet",
 			usage: PlanUsage{
 				FiveHour:     &UsageRateLimit{Utilization: float64Ptr(10)},
 				SevenDayOpus: &UsageRateLimit{Utilization: float64Ptr(70)},
 			},
 			modelID:  "sonnet",
 			modelLbl: "sonnet",
-			wantPct:  70,
+			wantPct:  10, // opus's 70 excluded; only the account-wide 5h window counts
 			wantOK:   true,
 		},
 	}

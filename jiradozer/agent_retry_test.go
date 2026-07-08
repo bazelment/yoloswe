@@ -490,6 +490,31 @@ func TestRunAgent_Fallback_KeepsEffortForCodexProvider(t *testing.T) {
 		"codex fallback supports effort — high must be preserved")
 }
 
+// A directly-configured primary on a provider without an effort knob must still
+// receive its configured effort (so the provider surfaces the unsupported-effort
+// error) — the drop is failover-only, never a silent downgrade of the primary.
+func TestRunAgent_Primary_KeepsEffortForUnsupportedProvider(t *testing.T) {
+	cursorPrimary := &fakeRetryProvider{
+		results: []*agentpkg.AgentResult{{Success: true, SessionID: "sess-cursor", Text: "ran on cursor"}},
+		errs:    []error{nil},
+	}
+	newProvider, order := providersByModel(t, map[string]*fakeRetryProvider{
+		"composer-2.5": cursorPrimary,
+	})
+	runner := agentRunner{newProviderForModel: newProvider, retryBackoffs: []time.Duration{0}}
+
+	_, err := runner.runAgent(context.Background(), "plan", "prompt", StepConfig{
+		Model:            "composer-2.5",
+		Effort:           "high",
+		TransientRetries: 2,
+	}, t.TempDir(), "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	require.Equal(t, []string{"composer-2.5"}, *order)
+	require.Len(t, cursorPrimary.effortSeen, 1)
+	require.Equal(t, agentpkg.EffortHigh, cursorPrimary.effortSeen[0],
+		"primary must keep configured effort so the provider can reject it, not be silently downgraded")
+}
+
 // With the pre-flight disabled, a Claude primary at 100% utilization is NOT
 // skipped — the run proceeds on the primary and utilization is never queried.
 func TestRunAgent_DisableLimitPreflight_SkipsPreflight(t *testing.T) {
