@@ -8,6 +8,8 @@ import (
 )
 
 // streamAccumulator accumulates streaming events into complete content blocks.
+// It maintains a map of block indices to their current state, allowing proper
+// reconstruction of text, thinking, and tool use blocks from delta events.
 type streamAccumulator struct {
 	session *Session
 
