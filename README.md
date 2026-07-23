@@ -231,6 +231,9 @@ bazel run //bramble -- --session-mode tui
 
 # Run tests
 bazel test //...
+
+# Run linter
+scripts/lint.sh
 ```
 
 ## Architecture
