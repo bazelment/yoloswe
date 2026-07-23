@@ -2,6 +2,8 @@
 
 Bramble is a terminal UI for managing AI-assisted software engineering workflows. It orchestrates multiple parallel AI sessions across git worktrees, supporting both an interactive TUI and background tmux execution modes.
 
+Testing nebula feasibility spike.
+
 ![Bramble overview](docs/screenshots/bramble-overview.png)
 <!-- TODO: Add screenshot of main TUI view showing worktree list and session output -->
 
@@ -231,6 +233,9 @@ bazel run //bramble -- --session-mode tui
 
 # Run tests
 bazel test //...
+
+# Run linter
+scripts/lint.sh
 ```
 
 ## Architecture
