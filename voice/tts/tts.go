@@ -8,6 +8,7 @@ package tts
 import "context"
 
 // TextToSpeech synthesizes speech from text.
+// Implementations must handle context cancellation gracefully.
 type TextToSpeech interface {
 	Synthesize(ctx context.Context, text string, opts SynthOpts) (*Audio, error)
 }
