@@ -233,6 +233,8 @@ bazel run //bramble -- --session-mode tui
 bazel test //...
 ```
 
+*Note: capstone dev-test via Nebula managed session, 2026-07-24*
+
 ## Architecture
 
 Bramble follows an MVC architecture:
