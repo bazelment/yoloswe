@@ -383,10 +383,24 @@ func (x *execRun) run(ctx context.Context) (runErr error) {
 // another box: `jiradozer fleet runs` reads meta.json over ssh and can see
 // neither this host's log nor its terminal. Best-effort — a run must not die
 // because a status write failed.
+//
+// It also appends to the trail, because meta.Phase is a snapshot: it is
+// OVERWRITTEN on every transition, so the sequence of steps a run passed
+// through — and how long each took — survives nowhere else. A run that planned,
+// built and then failed in ship is indistinguishable in meta.json from one that
+// failed in ship immediately.
+//
+// The step's NAME, not the WorkflowStep itself: it is an int, and marshalling
+// it raw would put a number in the trail that means nothing to a reader and
+// silently shifts if the enum is ever reordered.
 func (x *execRun) recordPhase(step jiradozer.WorkflowStep) {
+	if x.rl == nil {
+		return
+	}
 	if err := x.rl.UpdateMeta(func(m *jiradozer.RunMeta) { m.Phase = step.String() }); err != nil {
 		x.logger.Warn("failed to record workflow phase", "step", step, "error", err)
 	}
+	x.event("phase", step.String(), map[string]any{"step": step.String()})
 }
 
 // checkNotClaimed turns the lock label into an actual check.
@@ -467,6 +481,7 @@ func (x *execRun) createWorktree(ctx context.Context) error {
 		}
 	}
 	x.logger.Info("worktree created", "branch", x.branch, "path", path)
+	x.event("worktree_created", path, map[string]any{"branch": x.branch, "path": path})
 	return nil
 }
 
@@ -508,7 +523,32 @@ func (x *execRun) startRunLog() error {
 	}
 	x.rl = rl
 	x.logger.Info("run started", "run_id", x.runID, "run_dir", rl.Dir(), "target", meta.Target())
+	x.event("run_started", "", map[string]any{
+		"run_id": x.runID,
+		"target": meta.Target(),
+		"branch": x.branch,
+		"repo":   x.args.repo,
+	})
 	return nil
+}
+
+// event appends one line to the run's audit trail.
+//
+// Best-effort, for the same reason recordPhase is: the trail is a record of a
+// run, never a dependency of one, and a run that died because a log write
+// failed would be strictly worse than a run with a gap in its log.
+//
+// The nil check is load-bearing, not defensive padding. finish() and claim()
+// both run on paths that never reached startRunLog — a failed claim, or the
+// direct claim() call in the --description label test — and Append on a nil
+// RunLog panics, taking the run down over a log line.
+func (x *execRun) event(kind, detail string, fields map[string]any) {
+	if x.rl == nil {
+		return
+	}
+	if err := x.rl.Append(kind, detail, fields); err != nil {
+		x.logger.Warn("failed to append run event", "kind", kind, "error", err)
+	}
 }
 
 // createLocalIssue builds the --description mode issue.
@@ -646,6 +686,20 @@ func (x *execRun) finish(runErr error) {
 	if err := x.rl.Finish(state, "", runErr); err != nil {
 		x.logger.Warn("failed to write terminal run meta", "error", err)
 	}
+
+	// Closes the trail, and does it here rather than at the end of finish():
+	// everything below is a tracker round trip that can hang or fail, and a
+	// trail whose last line is missing cannot be told apart from a run that was
+	// killed mid-flight. The error string goes in the fields so a reader
+	// replaying the trail sees why a run ended without opening meta.json.
+	finishFields := map[string]any{"state": string(state)}
+	if runErr != nil {
+		finishFields["error"] = jiradozer.Truncate(runErr.Error(), 2000)
+	}
+	if m := x.rl.Meta(); m.PRURL != "" {
+		finishFields["pr_url"] = m.PRURL
+	}
+	x.event("run_finished", string(state), finishFields)
 
 	if x.tracker != nil && x.issue != nil {
 		x.postEndComment(ctx, state, runErr)
