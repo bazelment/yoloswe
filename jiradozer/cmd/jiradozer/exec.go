@@ -178,27 +178,38 @@ func runExec(ctx context.Context, app *cliapp.App, args execArgs) (runErr error)
 	}
 
 	// exec owns its own failure reporting, for the same reason it refuses to run
-	// under an orchestrator: nothing else is watching.
-	//
-	// The recover is in THIS defer rather than one of its own, and that is the
-	// point: a panic leaves runErr nil, so the report is skipped on the one
-	// failure least likely to be noticed without an alert. Splitting "name the
-	// panic" and "send the report" across two defers would make the alert
-	// depend on their relative order — a constraint nothing in the file states
-	// and any later edit could silently swap. Here both branches call the same
-	// reporter, so there is no order to get wrong.
-	//
-	// Re-raised afterwards, matching run()'s own recover: reporting a bug is
-	// not the same as surviving it. The lease release below still runs.
-	defer func() {
-		if p := recover(); p != nil {
-			x.reportFailure(ctx, fmt.Errorf("panic: %v", p))
-			panic(p)
-		}
-		x.reportFailure(ctx, runErr)
-	}()
+	// under an orchestrator: nothing else is watching. The lease release
+	// deferred above still runs after this one.
+	defer x.reportExit(ctx, &runErr)
 
 	return x.run(ctx)
+}
+
+// reportExit is runExec's exit hook: it must be deferred, never called, because
+// its recover only fires from a deferred frame.
+//
+// The recover lives HERE, in the same defer that reports the ordinary error,
+// and that is the point: a panic leaves runErr nil, so the report is skipped on
+// the one failure least likely to be noticed without an alert. Splitting "name
+// the panic" and "send the report" across two defers would make the alert
+// depend on their relative order — a constraint nothing in the file states and
+// any later edit could silently swap. Here both branches call the same
+// reporter, so there is no order to get wrong.
+//
+// runErr is taken by pointer because a deferred call's arguments are evaluated
+// at defer time: by value it would always report the nil the named return
+// started as, never the error the function is exiting with.
+//
+// The panic is re-raised, matching run()'s own recover: reporting a bug is not
+// the same as surviving it.
+//
+//nolint:gocritic // ptrToRefParam: see above, the pointer is load-bearing.
+func (x *execRun) reportExit(ctx context.Context, runErr *error) {
+	if p := recover(); p != nil {
+		x.reportFailure(ctx, fmt.Errorf("panic: %v", p))
+		panic(p)
+	}
+	x.reportFailure(ctx, *runErr)
 }
 
 // reportFailure sends this run's EXTERNAL failure alert, or nothing.

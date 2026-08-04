@@ -810,41 +810,13 @@ func TestAPanickingRunIsRecordedAsAFailureNotASuccess(t *testing.T) {
 // recovers and reports on the panic branch, using the same reporter as the
 // ordinary branch so no ordering between two defers can drop the alert.
 //
-// Asserted on reportFailure rather than through runExec: what the defer
-// contributes is calling this with a non-nil error, which its single-defer
-// shape makes unconditional. What has logic — which errors are worth waking
-// somebody for — is here.
+// This test covers which errors are worth waking somebody for.
+// TestACrashedRunAlertsOnItsWayOut covers the deferred wiring that supplies
+// them; neither is sufficient alone.
 func TestAPanicIsWorthAnAlertButACancellationIsNot(t *testing.T) {
 	t.Parallel()
 
-	var mu sync.Mutex
-	var posted []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		body, _ := io.ReadAll(req.Body)
-		var payload map[string]string
-		_ = json.Unmarshal(body, &payload)
-		mu.Lock()
-		posted = append(posted, payload["text"])
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	newRun := func() *execRun {
-		cfg := &jiradozer.Config{}
-		cfg.Notify.SlackWebhook = srv.URL
-		return &execRun{
-			app:    execTestApp(t),
-			logger: testMainLogger(t),
-			cfg:    cfg,
-			args:   execArgs{issueID: "INF-1"},
-		}
-	}
-	sent := func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), posted...)
-	}
+	newRun, sent := alertingExecRun(t)
 
 	// The exact shape runExec's recover branch builds.
 	newRun().reportFailure(context.Background(), fmt.Errorf("panic: %v", "assignment to entry in nil map"))
@@ -857,6 +829,86 @@ func TestAPanicIsWorthAnAlertButACancellationIsNot(t *testing.T) {
 	newRun().reportFailure(context.Background(), nil)
 	newRun().reportFailure(context.Background(), fmt.Errorf("build step: %w", context.Canceled))
 	assert.Len(t, sent(), 1, "only the crash was worth an alert")
+}
+
+// alertingExecRun returns a factory for execRuns whose Slack webhook points at
+// a recording test server, plus a reader for the alert texts it received.
+func alertingExecRun(t *testing.T) (newRun func() *execRun, sent func() []string) {
+	t.Helper()
+
+	var mu sync.Mutex
+	var posted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		var payload map[string]string
+		_ = json.Unmarshal(body, &payload)
+		mu.Lock()
+		posted = append(posted, payload["text"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	newRun = func() *execRun {
+		cfg := &jiradozer.Config{}
+		cfg.Notify.SlackWebhook = srv.URL
+		return &execRun{
+			app:    execTestApp(t),
+			logger: testMainLogger(t),
+			cfg:    cfg,
+			args:   execArgs{issueID: "INF-1"},
+		}
+	}
+	sent = func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), posted...)
+	}
+	return newRun, sent
+}
+
+// Deleting reportExit's recover must break a test.
+//
+// TestAPanicIsWorthAnAlertButACancellationIsNot pins which errors alert, but it
+// calls reportFailure directly — so it would still pass with the recover gone,
+// and the crash case is exactly the one that reaches the operator through the
+// alert or not at all. This drives the hook the way runExec does, deferred, and
+// asserts the two things only that shape provides: the panic is turned into an
+// alert on its way out, and it is still re-raised afterwards.
+func TestACrashedRunAlertsOnItsWayOut(t *testing.T) {
+	t.Parallel()
+
+	newRun, sent := alertingExecRun(t)
+
+	// Deferred, never called: reportExit's recover only fires from a deferred
+	// frame. This is runExec's exit path with its body replaced by a panic.
+	crash := func(x *execRun) (runErr error) {
+		defer x.reportExit(context.Background(), &runErr)
+		panic("assignment to entry in nil map")
+	}
+	assert.PanicsWithValue(t, "assignment to entry in nil map", func() { _ = crash(newRun()) },
+		"reporting a crash is not the same as surviving it")
+	require.Len(t, sent(), 1, "a crash nobody is told about is a crash nobody fixes")
+	assert.Contains(t, sent()[0], "nil map", "the alert has to say what happened")
+
+	// The ordinary branch: the error the function returns is the one reported,
+	// which is why runErr is read at exit rather than captured at defer time.
+	failed := func(x *execRun) (runErr error) {
+		defer x.reportExit(context.Background(), &runErr)
+		runErr = errors.New("workflow step failed")
+		return runErr
+	}
+	require.Error(t, failed(newRun()))
+	require.Len(t, sent(), 2, "an ordinary failure alerts too")
+	assert.Contains(t, sent()[1], "workflow step failed")
+
+	// A clean exit is not news.
+	clean := func(x *execRun) (runErr error) {
+		defer x.reportExit(context.Background(), &runErr)
+		return nil
+	}
+	require.NoError(t, clean(newRun()))
+	assert.Len(t, sent(), 2, "a run that worked has nothing to report")
 }
 
 // These are methods on a half-built execRun, and Append on a nil RunLog panics
