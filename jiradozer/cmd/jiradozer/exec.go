@@ -178,29 +178,52 @@ func runExec(ctx context.Context, app *cliapp.App, args execArgs) (runErr error)
 	}
 
 	// exec owns its own failure reporting, for the same reason it refuses to run
-	// under an orchestrator: nothing else is watching. The EXTERNAL sink is the
-	// one that matters here — finish() already writes the error to the run-log
-	// and posts it as the end comment, so passing a tracker poster as well would
-	// duplicate that comment on every failure.
+	// under an orchestrator: nothing else is watching.
+	//
+	// The recover is in THIS defer rather than one of its own, and that is the
+	// point: a panic leaves runErr nil, so the report is skipped on the one
+	// failure least likely to be noticed without an alert. Splitting "name the
+	// panic" and "send the report" across two defers would make the alert
+	// depend on their relative order — a constraint nothing in the file states
+	// and any later edit could silently swap. Here both branches call the same
+	// reporter, so there is no order to get wrong.
+	//
+	// Re-raised afterwards, matching run()'s own recover: reporting a bug is
+	// not the same as surviving it. The lease release below still runs.
 	defer func() {
-		if !shouldReportFailure(runErr) {
-			return
+		if p := recover(); p != nil {
+			x.reportFailure(ctx, fmt.Errorf("panic: %v", p))
+			panic(p)
 		}
-		var notifier jiradozer.Notifier
-		if cfg.Notify.SlackWebhook != "" {
-			notifier = jiradozer.SlackWebhookNotifier{WebhookURL: cfg.Notify.SlackWebhook}
-		}
-		jiradozer.ReportFailure(ctx, logger, nil, "", notifier, jiradozer.FailureReport{
-			Tool:          "jiradozer",
-			Target:        x.reportTarget(),
-			Step:          jiradozer.FailingStepFromError(runErr),
-			Err:           runErr,
-			BuildRevision: app.Build.ShortRevision(),
-			LogPath:       app.LogPath,
-		})
+		x.reportFailure(ctx, runErr)
 	}()
 
 	return x.run(ctx)
+}
+
+// reportFailure sends this run's EXTERNAL failure alert, or nothing.
+//
+// The external sink is the one that matters: finish() already writes the error
+// to the run-log and posts it as the end comment, so passing a tracker poster
+// here as well would duplicate that comment on every failure. A cancellation is
+// a stop rather than a failure and is filtered out by shouldReportFailure —
+// which also makes nil the no-op, so the caller needs no branch of its own.
+func (x *execRun) reportFailure(ctx context.Context, runErr error) {
+	if !shouldReportFailure(runErr) {
+		return
+	}
+	var notifier jiradozer.Notifier
+	if x.cfg.Notify.SlackWebhook != "" {
+		notifier = jiradozer.SlackWebhookNotifier{WebhookURL: x.cfg.Notify.SlackWebhook}
+	}
+	jiradozer.ReportFailure(ctx, x.logger, nil, "", notifier, jiradozer.FailureReport{
+		Tool:          "jiradozer",
+		Target:        x.reportTarget(),
+		Step:          jiradozer.FailingStepFromError(runErr),
+		Err:           runErr,
+		BuildRevision: x.app.Build.ShortRevision(),
+		LogPath:       x.app.LogPath,
+	})
 }
 
 // execRun holds one task execution's resolved dependencies.

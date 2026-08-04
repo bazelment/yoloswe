@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -795,6 +799,64 @@ func TestAPanickingRunIsRecordedAsAFailureNotASuccess(t *testing.T) {
 	// or the disagreement is the bug.
 	assert.Equal(t, jiradozer.RunStateFailed, x.rl.Meta().State,
 		"meta.json and the trail must tell the same story")
+}
+
+// A crash must reach the ALERT, not just the local run-log.
+//
+// exec owns its failure reporting because nothing else is watching, and that
+// report is gated on runErr — which a panic leaves nil. Settling the run-log
+// fixed the record on this box and did nothing for the operator, who learns
+// about a fleet worker from the alert or not at all. runExec's defer therefore
+// recovers and reports on the panic branch, using the same reporter as the
+// ordinary branch so no ordering between two defers can drop the alert.
+//
+// Asserted on reportFailure rather than through runExec: what the defer
+// contributes is calling this with a non-nil error, which its single-defer
+// shape makes unconditional. What has logic — which errors are worth waking
+// somebody for — is here.
+func TestAPanicIsWorthAnAlertButACancellationIsNot(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var posted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		var payload map[string]string
+		_ = json.Unmarshal(body, &payload)
+		mu.Lock()
+		posted = append(posted, payload["text"])
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	newRun := func() *execRun {
+		cfg := &jiradozer.Config{}
+		cfg.Notify.SlackWebhook = srv.URL
+		return &execRun{
+			app:    execTestApp(t),
+			logger: testMainLogger(t),
+			cfg:    cfg,
+			args:   execArgs{issueID: "INF-1"},
+		}
+	}
+	sent := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), posted...)
+	}
+
+	// The exact shape runExec's recover branch builds.
+	newRun().reportFailure(context.Background(), fmt.Errorf("panic: %v", "assignment to entry in nil map"))
+	require.Len(t, sent(), 1, "a crash is the failure least likely to be noticed without an alert")
+	assert.Contains(t, sent()[0], "nil map", "the alert has to say what happened")
+	assert.Contains(t, sent()[0], "INF-1", "an anonymous alert cannot be acted on")
+
+	// A clean run and a Ctrl-C are both non-events. Alerting on them is how a
+	// channel becomes one nobody reads, which costs the case above.
+	newRun().reportFailure(context.Background(), nil)
+	newRun().reportFailure(context.Background(), fmt.Errorf("build step: %w", context.Canceled))
+	assert.Len(t, sent(), 1, "only the crash was worth an alert")
 }
 
 // These are methods on a half-built execRun, and Append on a nil RunLog panics
