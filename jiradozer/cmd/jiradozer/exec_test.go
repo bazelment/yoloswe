@@ -376,6 +376,18 @@ func TestFinishRecordsThePRSoGCCanReclaimTheWorktree(t *testing.T) {
 	onDisk, err := jiradozer.LoadRunMeta(x.rl.Dir())
 	require.NoError(t, err)
 	assert.Equal(t, "https://github.com/o/r/pull/42", onDisk.PRURL)
+
+	// The trail carries it too. Asserted here rather than in a fixture of its
+	// own because this is the only test that makes lookupPR succeed — every
+	// other trail fixture forces it to fail, so a producer that stopped writing
+	// pr_url on the one path that has a PR would go unnoticed. A replay reads
+	// events.jsonl, not meta.json, and the PR URL is what joins a run to its
+	// review.
+	events, err := jiradozer.LoadEvents(x.rl.Dir())
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	finished := firstEventOfKind(t, events, jiradozer.EventRunFinished)
+	assert.Equal(t, "https://github.com/o/r/pull/42", finished.Fields["pr_url"])
 }
 
 // A run that failed before create_pr legitimately has no PR. That must settle
@@ -395,6 +407,15 @@ func TestFinishToleratesARunWithNoPR(t *testing.T) {
 	assert.Equal(t, jiradozer.RunStateFailed, m.State)
 	assert.Contains(t, m.Error, "agent exited 1")
 	assert.True(t, m.WorktreeKept, "a failed run keeps its worktree; the work exists nowhere else")
+
+	// The ABSENCE of the field is what keeps the assertion above meaningful: a
+	// producer that stamped every terminal event with a pr_url — empty string
+	// included — would satisfy the positive case and tell a reader a run has a
+	// PR when it has none.
+	events, err := jiradozer.LoadEvents(x.rl.Dir())
+	require.NoError(t, err)
+	finished := firstEventOfKind(t, events, jiradozer.EventRunFinished)
+	assert.NotContains(t, finished.Fields, "pr_url", "a run with no PR must not claim one")
 }
 
 // work_dir is the configured BASE directory, and LoadConfig defaults it to
@@ -712,6 +733,53 @@ func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
 	// cannot tell a run that finished from one that was killed mid-flight.
 	require.NotNil(t, finished, "the trail must record how the run ended")
 	assert.Equal(t, string(jiradozer.RunStateDone), finished.Detail)
+}
+
+// The one exit path that returns no error at all: a panic.
+//
+// A panic unwinding through run() leaves the named return nil, so the terminal
+// defer settled the log as if the run had succeeded — meta.json `done` and a
+// `run_finished` event whose detail read `done` — while the process was in the
+// middle of crashing. Those two records are all a dispatcher on another box
+// gets, so a crashed run was indistinguishable from one that shipped: exactly
+// the "a run that stops without recording why" case finish() exists to prevent,
+// arrived at through the door nobody checked.
+//
+// Driven through run() rather than by calling finish() directly, because the
+// defect is in the defer's wiring, not in finish(): finish(err) was always
+// correct, it was simply never handed the error. A finish()-level test passes
+// with the recover deleted.
+func TestAPanickingRunIsRecordedAsAFailureNotASuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	trk := &claimRecordingTracker{issue: &tracker.Issue{ID: "id-1", Identifier: "INF-1"}}
+	// Panics from inside claim(), which run() reaches just after startRunLog and
+	// the terminal defer — so the run-log exists and the window is the real one.
+	trk.onAddLabel = func() { panic("agent exploded") }
+	x := execRunForClaimOrdering(t, trk)
+
+	// Re-raised, not swallowed: recovering settles the record, it does not turn
+	// a bug into a merely-failed run. A test that only checked the trail would
+	// stay green on a version that ate the panic.
+	require.PanicsWithValue(t, "agent exploded", func() {
+		_ = x.run(context.Background())
+	}, "the panic is recorded and then re-raised")
+
+	require.NotNil(t, x.rl, "claim() runs after startRunLog, so the log exists")
+	events, err := jiradozer.LoadEvents(x.rl.Dir())
+	require.NoError(t, err)
+	require.NotEmpty(t, events, "a crashing run still owes a reader a terminal event")
+
+	finished := firstEventOfKind(t, events, jiradozer.EventRunFinished)
+	assert.Equal(t, string(jiradozer.RunStateFailed), finished.Detail,
+		"a run that crashed must not leave a trail that reads as done")
+	assert.Contains(t, finished.Fields["error"], "agent exploded",
+		"the trail names what killed the run, or the crash is only in a log nobody fetches")
+	// The snapshot and the trail are read by different callers — `jiradozer
+	// runs` opens meta.json, a replay reads events.jsonl — so both have to agree
+	// or the disagreement is the bug.
+	assert.Equal(t, jiradozer.RunStateFailed, x.rl.Meta().State,
+		"meta.json and the trail must tell the same story")
 }
 
 // These are methods on a half-built execRun, and Append on a nil RunLog panics

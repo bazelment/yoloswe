@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -298,8 +299,31 @@ func (x *execRun) run(ctx context.Context) (runErr error) {
 		return err
 	}
 
-	// From here the run is recorded, so every exit path settles the run-log.
-	defer func() { x.finish(runErr) }()
+	// From here the run is recorded, so every exit path settles the run-log —
+	// including the one that returns nothing. A panic unwinding through here
+	// leaves the named return nil, so a plain finish(runErr) settles meta.json
+	// as `done` and writes a `run_finished` event whose detail says the run
+	// succeeded, while the process is in the middle of crashing. A dispatcher
+	// on another box reads only those two records, and cannot tell that run
+	// apart from one that actually shipped.
+	defer func() {
+		p := recover()
+		if p == nil {
+			x.finish(runErr)
+			return
+		}
+		// The stack goes to the log, not into the error: the error text also
+		// becomes meta.json's failure reason and the issue's end comment, and
+		// neither is improved by a hundred frames. Captured inside the deferred
+		// call, where the panicking frames are still on the stack.
+		x.logger.Error("run panicked", "run_id", x.runID, "panic", p, "stack", string(debug.Stack()))
+		x.finish(fmt.Errorf("panic: %v", p))
+		// Re-raised, never swallowed. A panic is a bug, and a run that quietly
+		// downgraded one to a failed status would hide it from everything above
+		// — the point of recovering here is only to settle the record first, so
+		// the crash stops being silent, not to survive it.
+		panic(p)
+	}()
 
 	// Claim after the run-log and before the worktree.
 	//
