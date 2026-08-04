@@ -571,6 +571,69 @@ func TestACompletedRunWritesItsEventTrail(t *testing.T) {
 	assert.Equal(t, jiradozer.EventRunFinished, kinds[len(kinds)-1])
 }
 
+// firstEventOfKind returns the first event of a kind, failing the test when the
+// trail has none — a missing kind is the failure these payload assertions are
+// for, and ranging over an absent event would pass vacuously instead.
+func firstEventOfKind(t *testing.T, events []jiradozer.Event, kind string) jiradozer.Event {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Kind == kind {
+			return ev
+		}
+	}
+	require.FailNowf(t, "kind missing from trail", "no %s event", kind)
+	return jiradozer.Event{}
+}
+
+// The kinds alone are not the format. A reader on another box keys off the
+// PAYLOAD — which run, which branch, which checkout — so an event that kept its
+// kind and dropped its fields still breaks every consumer, while an assertion
+// that only counts kinds stays green through it.
+func TestTheEventTrailCarriesThePayloadReadersKeyOff(t *testing.T) {
+	events := runToCompletionAndLoadTrail(t)
+
+	started := firstEventOfKind(t, events, jiradozer.EventRunStarted)
+	// Detail is Target(): the identifier a dispatcher correlates a run by.
+	assert.Equal(t, "INF-1", started.Detail)
+	assert.Equal(t, "r1", started.Fields["run_id"])
+	assert.Equal(t, "kernel", started.Fields["repo"])
+	assert.NotEmpty(t, started.Fields["branch"], "a trail that cannot name the branch cannot find the work")
+
+	created := firstEventOfKind(t, events, jiradozer.EventWorktreeCreated)
+	// Detail is the checkout path — the one field that survives the worktree
+	// itself being reclaimed, so it has to be recorded, not re-derived.
+	assert.NotEmpty(t, created.Detail, "the trail records where the checkout was")
+	assert.Equal(t, started.Fields["branch"], created.Fields["branch"],
+		"both events name the same branch, or they cannot be joined")
+
+	finished := firstEventOfKind(t, events, jiradozer.EventRunFinished)
+	assert.Equal(t, string(jiradozer.RunStateDone), finished.Detail)
+	// A run that ended cleanly carries no error. Asserting its ABSENCE is what
+	// keeps the failure case below meaningful: without this, a producer that
+	// stamped every run with an error would still pass both tests.
+	assert.NotContains(t, finished.Fields, "error", "a run that succeeded must not record one")
+}
+
+// The failure path is the one a reader most needs the trail for — a run that
+// died has no PR and a Phase frozen wherever it stopped, so the terminal event
+// is the only record of WHY. It is also the payload most easily lost: nothing
+// in the success path exercises it.
+func TestTheTerminalEventRecordsWhyAFailedRunEnded(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	x := newFinishTestRun(t)
+	x.finish(errors.New("create worktree for jiradozer/INF-1: not a git repository"))
+
+	events, err := jiradozer.LoadEvents(x.rl.Dir())
+	require.NoError(t, err)
+	require.NotEmpty(t, events, "a failed run still owes a reader a terminal event")
+
+	finished := firstEventOfKind(t, events, jiradozer.EventRunFinished)
+	assert.Equal(t, string(jiradozer.RunStateFailed), finished.Detail)
+	assert.Contains(t, finished.Fields["error"], "not a git repository",
+		"the reason belongs in the trail, or a reader must open meta.json to learn it")
+}
+
 func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
 	events := runToCompletionAndLoadTrail(t)
 
