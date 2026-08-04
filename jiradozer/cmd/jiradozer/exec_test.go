@@ -524,7 +524,11 @@ func (stubGH) Run(context.Context, []string, string) (*wt.CmdResult, error) {
 // Skipping all four phases is the way around that: skipCompletedOrConfigured-
 // Phases walks plan→build→validate→ship, finds each one skipped, and
 // forceTransitions straight to StepDone without ever invoking an agent.
-func runToCompletionAndLoadTrail(t *testing.T) []jiradozer.Event {
+//
+// Returns the run alongside the trail so a caller can compare a recorded value
+// against what the fixture independently says it should be, rather than only
+// against another field of the same trail.
+func runToCompletionAndLoadTrail(t *testing.T) (*execRun, []jiradozer.Event) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
@@ -567,14 +571,14 @@ func runToCompletionAndLoadTrail(t *testing.T) []jiradozer.Event {
 	// missing file, so every assertion that merely ranges over events passes
 	// vacuously on a run that wrote nothing at all.
 	require.NotEmpty(t, events, "a completed run must leave an event trail, not an empty directory")
-	return events
+	return x, events
 }
 
 // meta.json cannot substitute for the trail: it is a SNAPSHOT — Phase is
 // overwritten on every transition and State on every settle — so the sequence
 // of what happened, and when, survives nowhere else.
 func TestACompletedRunWritesItsEventTrail(t *testing.T) {
-	events := runToCompletionAndLoadTrail(t)
+	_, events := runToCompletionAndLoadTrail(t)
 
 	kinds := make([]string, 0, len(events))
 	for _, ev := range events {
@@ -611,19 +615,30 @@ func firstEventOfKind(t *testing.T, events []jiradozer.Event, kind string) jirad
 // kind and dropped its fields still breaks every consumer, while an assertion
 // that only counts kinds stays green through it.
 func TestTheEventTrailCarriesThePayloadReadersKeyOff(t *testing.T) {
-	events := runToCompletionAndLoadTrail(t)
+	x, events := runToCompletionAndLoadTrail(t)
 
 	started := firstEventOfKind(t, events, jiradozer.EventRunStarted)
 	// Detail is Target(): the identifier a dispatcher correlates a run by.
 	assert.Equal(t, "INF-1", started.Detail)
 	assert.Equal(t, "r1", started.Fields["run_id"])
 	assert.Equal(t, "kernel", started.Fields["repo"])
-	assert.NotEmpty(t, started.Fields["branch"], "a trail that cannot name the branch cannot find the work")
+	// The exact branch, not merely a non-empty one. These fields are what a
+	// reader USES — a human runs `git checkout` on the branch, gc reclaims the
+	// path — so a writer that recorded a plausible-looking wrong value is the
+	// failure, and NotEmpty cannot see it. Spelled out rather than read back off
+	// x.branch, which would only assert the trail agrees with the field it was
+	// copied from.
+	assert.Equal(t, "jiradozer/INF-1", started.Fields["branch"],
+		"the branch is derived from the issue this run claimed")
 
 	created := firstEventOfKind(t, events, jiradozer.EventWorktreeCreated)
 	// Detail is the checkout path — the one field that survives the worktree
-	// itself being reclaimed, so it has to be recorded, not re-derived.
-	assert.NotEmpty(t, created.Detail, "the trail records where the checkout was")
+	// itself being reclaimed, so it has to be recorded, not re-derived. Pinned
+	// against wt's own derivation (repo dir joined with the branch) rather than
+	// against x.worktreePath, so a run that recorded a path pointing somewhere
+	// nobody will look fails here instead of agreeing with itself.
+	assert.Equal(t, filepath.Join(x.wtMgr.RepoDir(), "jiradozer/INF-1"), created.Detail,
+		"the recorded checkout is where wt actually put it")
 	assert.Equal(t, started.Fields["branch"], created.Fields["branch"],
 		"both events name the same branch, or they cannot be joined")
 
@@ -699,7 +714,7 @@ func TestTheTerminalEventTellsACancelledRunFromAFailedOne(t *testing.T) {
 }
 
 func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
-	events := runToCompletionAndLoadTrail(t)
+	_, events := runToCompletionAndLoadTrail(t)
 
 	var phases []string
 	var finished *jiradozer.Event
