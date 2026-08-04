@@ -399,12 +399,28 @@ func (r *RunLog) Finish(state RunState, note string, runErr error) error {
 }
 
 // Event is one line of the append-only audit trail.
+//
+// The trail is what meta.json cannot be: meta is a snapshot, its Phase
+// overwritten on every transition and its State on every settle, so the
+// sequence a run passed through — and how long each step took — survives
+// nowhere else. A run that planned, built and then failed in ship is
+// indistinguishable in meta.json from one that failed in ship immediately.
 type Event struct {
 	At     time.Time      `json:"at"`
 	Fields map[string]any `json:"fields,omitempty"`
 	Kind   string         `json:"kind"`
 	Detail string         `json:"detail,omitempty"`
 }
+
+// The event kinds a run writes. A reader on another box filters on these
+// strings, so they are part of the on-disk format: renaming one silently
+// breaks every consumer rather than failing a build.
+const (
+	EventRunStarted      = "run_started"
+	EventWorktreeCreated = "worktree_created"
+	EventPhase           = "phase"
+	EventRunFinished     = "run_finished"
+)
 
 // Append writes one event to events.jsonl.
 func (r *RunLog) Append(kind, detail string, fields map[string]any) error {

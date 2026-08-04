@@ -495,16 +495,18 @@ func (stubGH) Run(context.Context, []string, string) (*wt.CmdResult, error) {
 	return &wt.CmdResult{}, nil
 }
 
-// execRunForCompletedRun wires a run that reaches wf.Run and RETURNS NIL —
-// the only exec fixture that observes a whole successful lifecycle.
+// runToCompletionAndLoadTrail drives a whole successful lifecycle and reads
+// the trail back off disk, the way a dispatcher on another box does.
 //
-// Every other exec test deliberately fails the checkout, because runStepAgent
-// is unexported and a package main test cannot fake the agent. Skipping all
-// four phases is the way around that: skipCompletedOrConfiguredPhases walks
-// plan→build→validate→ship, finds each one skipped, and forceTransitions
-// straight to StepDone without ever invoking an agent.
-func execRunForCompletedRun(t *testing.T, trk *claimRecordingTracker) *execRun {
+// Every other exec fixture deliberately fails the checkout, because
+// runStepAgent is unexported and a package main test cannot fake the agent.
+// Skipping all four phases is the way around that: skipCompletedOrConfigured-
+// Phases walks plan→build→validate→ship, finds each one skipped, and
+// forceTransitions straight to StepDone without ever invoking an agent.
+func runToCompletionAndLoadTrail(t *testing.T) []jiradozer.Event {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+
 	root := t.TempDir()
 	repo := "kernel"
 	require.NoError(t, os.MkdirAll(filepath.Join(root, repo, ".bare"), 0o755))
@@ -519,7 +521,8 @@ func execRunForCompletedRun(t *testing.T, trk *claimRecordingTracker) *execRun {
 	// StepDone with no agent.
 	cfg.SkipPhases = []string{"plan", "build", "validate", "ship"}
 
-	return &execRun{
+	trk := &claimRecordingTracker{issue: &tracker.Issue{ID: "id-1", Identifier: "INF-1"}}
+	x := &execRun{
 		app:    execTestApp(t),
 		logger: testMainLogger(t),
 		cfg:    cfg,
@@ -533,33 +536,24 @@ func execRunForCompletedRun(t *testing.T, trk *claimRecordingTracker) *execRun {
 			return nil, errors.New("no pull requests found for branch")
 		},
 	}
-}
-
-// events.jsonl is the run's append-only audit trail, and until now nothing
-// wrote it: Append and LoadEvents were both fully built and tested, but no
-// production code path called Append, so runlog.go's own doc comment ("owns
-// one run's directory: meta.json and the append-only events.jsonl") and the
-// exported LoadEvents both promised a file that never existed.
-//
-// meta.json cannot substitute. It is a SNAPSHOT — Phase is overwritten on
-// every transition and State on every settle — so the sequence of what
-// happened, and when, survives nowhere. A run that planned, built, and failed
-// in ship looks identical on disk to one that failed in ship immediately.
-func TestACompletedRunWritesItsEventTrail(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	trk := &claimRecordingTracker{issue: &tracker.Issue{ID: "id-1", Identifier: "INF-1"}}
-	x := execRunForCompletedRun(t, trk)
 
 	require.NoError(t, x.run(context.Background()),
 		"all four phases are skipped, so the workflow runs to StepDone with no agent")
 
 	events, err := jiradozer.LoadEvents(x.rl.Dir())
 	require.NoError(t, err)
-	// NotEmpty before any loop, and deliberately: LoadEvents returns (nil, nil)
-	// for a missing file, so every assertion that merely ranges over events
-	// passes vacuously on a run that wrote nothing at all.
+	// NotEmpty here, and deliberately: LoadEvents returns (nil, nil) for a
+	// missing file, so every assertion that merely ranges over events passes
+	// vacuously on a run that wrote nothing at all.
 	require.NotEmpty(t, events, "a completed run must leave an event trail, not an empty directory")
+	return events
+}
+
+// meta.json cannot substitute for the trail: it is a SNAPSHOT — Phase is
+// overwritten on every transition and State on every settle — so the sequence
+// of what happened, and when, survives nowhere else.
+func TestACompletedRunWritesItsEventTrail(t *testing.T) {
+	events := runToCompletionAndLoadTrail(t)
 
 	kinds := make([]string, 0, len(events))
 	for _, ev := range events {
@@ -568,40 +562,27 @@ func TestACompletedRunWritesItsEventTrail(t *testing.T) {
 		kinds = append(kinds, ev.Kind)
 	}
 
-	assert.Contains(t, kinds, "run_started")
-	assert.Contains(t, kinds, "worktree_created")
-	assert.Contains(t, kinds, "phase")
-	assert.Contains(t, kinds, "run_finished")
+	assert.Contains(t, kinds, jiradozer.EventWorktreeCreated)
+	assert.Contains(t, kinds, jiradozer.EventPhase)
 
 	// The trail is ordered and bracketed: a reader replaying it has to see the
 	// run open before it closes, whatever happened in between.
-	assert.Equal(t, "run_started", kinds[0])
-	assert.Equal(t, "run_finished", kinds[len(kinds)-1])
+	assert.Equal(t, jiradozer.EventRunStarted, kinds[0])
+	assert.Equal(t, jiradozer.EventRunFinished, kinds[len(kinds)-1])
 }
 
-// The trail's whole purpose is surviving the process, so the assertions that
-// matter read it back off disk the way a dispatcher on another box does.
 func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	trk := &claimRecordingTracker{issue: &tracker.Issue{ID: "id-1", Identifier: "INF-1"}}
-	x := execRunForCompletedRun(t, trk)
-
-	require.NoError(t, x.run(context.Background()))
-
-	events, err := jiradozer.LoadEvents(x.rl.Dir())
-	require.NoError(t, err)
-	require.NotEmpty(t, events)
+	events := runToCompletionAndLoadTrail(t)
 
 	var phases []string
+	var finished *jiradozer.Event
 	for _, ev := range events {
-		if ev.Kind != "phase" {
-			continue
+		switch ev.Kind {
+		case jiradozer.EventPhase:
+			phases = append(phases, ev.Detail)
+		case jiradozer.EventRunFinished:
+			finished = &ev
 		}
-		require.NotNil(t, ev.Fields, "a phase event with no step names nothing")
-		step, ok := ev.Fields["step"].(string)
-		require.True(t, ok, "step must be the phase's NAME: a WorkflowStep is an int, and a plain conversion writes an unprintable rune")
-		phases = append(phases, step)
 	}
 
 	// meta.Phase holds only the LAST of these. The sequence is exactly what the
@@ -609,24 +590,18 @@ func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
 	require.NotEmpty(t, phases)
 	assert.Contains(t, phases, jiradozer.StepDone.String(),
 		"the run reached StepDone, so the trail has to say so")
+	// The phase's NAME, not its numeric value: a WorkflowStep is an int, so a
+	// plain conversion would write an unprintable rune into the trail.
 	assert.Equal(t, jiradozer.StepDone.String(), phases[len(phases)-1])
 
 	// The terminal state belongs in the trail too, or a reader replaying it
 	// cannot tell a run that finished from one that was killed mid-flight.
-	var finished jiradozer.Event
-	for _, ev := range events {
-		if ev.Kind == "run_finished" {
-			finished = ev
-		}
-	}
-	require.NotNil(t, finished.Fields)
-	assert.Equal(t, string(jiradozer.RunStateDone), finished.Fields["state"])
+	require.NotNil(t, finished, "the trail must record how the run ended")
+	assert.Equal(t, string(jiradozer.RunStateDone), finished.Detail)
 }
 
-// A run-log is not guaranteed to exist when a helper fires. finish() and
-// claim() both run on paths that never reached startRunLog — and claim() is
-// called directly, with no run-log at all, by the --description label test
-// below. An unguarded Append would panic there and take the run with it.
+// These are methods on a half-built execRun, and Append on a nil RunLog panics
+// — which would take a run down over a log line.
 func TestEventAppendsAreSkippedWhenNoRunLogExists(t *testing.T) {
 	trk := &claimRecordingTracker{issue: &tracker.Issue{ID: "id-1", Identifier: "local-1"}}
 	x := &execRun{logger: testMainLogger(t), tracker: trk, issue: trk.issue}
