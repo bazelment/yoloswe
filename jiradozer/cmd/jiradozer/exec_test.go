@@ -648,14 +648,22 @@ func TestTheEventTrailRecordsEveryPhaseTheRunPassedThrough(t *testing.T) {
 		}
 	}
 
-	// meta.Phase holds only the LAST of these. The sequence is exactly what the
-	// trail adds over the snapshot, so pin more than one.
-	require.NotEmpty(t, phases)
-	assert.Contains(t, phases, jiradozer.StepDone.String(),
-		"the run reached StepDone, so the trail has to say so")
-	// The phase's NAME, not its numeric value: a WorkflowStep is an int, so a
-	// plain conversion would write an unprintable rune into the trail.
-	assert.Equal(t, jiradozer.StepDone.String(), phases[len(phases)-1])
+	// meta.Phase holds only the LAST of these, so the SEQUENCE is exactly what
+	// the trail adds over the snapshot — and asserting only that `done` is in
+	// there, or only that it comes last, still passes on a producer that
+	// dropped every intermediate transition. Pin the whole ordered walk: this
+	// fixture skips all four phases, so the run steps through the start of each
+	// one before jumping to StepDone.
+	//
+	// The phases' NAMES, not their numeric values: a WorkflowStep is an int, so
+	// a plain conversion would write unprintable runes into the trail.
+	assert.Equal(t, []string{
+		jiradozer.StepPlanning.String(),
+		jiradozer.StepBuilding.String(),
+		jiradozer.StepValidating.String(),
+		jiradozer.StepShipping.String(),
+		jiradozer.StepDone.String(),
+	}, phases, "the trail records every transition the run passed through, in order")
 
 	// The terminal state belongs in the trail too, or a reader replaying it
 	// cannot tell a run that finished from one that was killed mid-flight.
